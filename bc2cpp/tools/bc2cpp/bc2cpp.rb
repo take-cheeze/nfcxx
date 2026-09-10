@@ -48,6 +48,7 @@
 # not attempted here; see README.md).
 
 require 'shellwords'
+require 'set'
 
 # Callers that need this closed-world analysis to see a whole game's worth
 # of mrblib (not just the class being compiled -- see build_registry's own
@@ -59,7 +60,7 @@ require 'shellwords'
 # (host/wio/desktop/...) is invoking this script.
 MRBC = ENV['MRBC'] || 'mrbc'
 
-Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, keyword_init: true)
+Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file, keyword_init: true)
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
 MethodDef = Struct.new(:name, :owner, :irep, :visibility, keyword_init: true)
 
@@ -185,32 +186,46 @@ end
 # ---------------------------------------------------------------------------
 def parse_disasm_blocks(text)
   blocks = []
+  # Parallel to `blocks` -- each irep block's own `file: path/to/x.rb`
+  # line (mrbc echoes back exactly the path it was given on the command
+  # line), needed by Annotations.extract to find a magic comment's real
+  # source line. Kept separate from Insn/Irep's existing per-instruction
+  # `lineno` (already real, 1-indexed source line numbers within that
+  # file) rather than repeating it on every instruction.
+  block_files = []
   current = nil
   text.each_line do |line|
     if line =~ /^irep 0x[0-9a-f]+ /
       blocks << current if current
       current = []
+      block_files << nil # overwritten by this block's own `file:` line below, if any.
       next
     end
     next unless current
+    if line =~ /^file: (.+)$/
+      block_files[-1] = Regexp.last_match(1)
+      next
+    end
     if line =~ /^\s*(\d+)\s+(\d+)\s+([A-Z][A-Z0-9_]*)\s*(.*)$/
       lineno, addr, op, rest = Regexp.last_match.captures
       current << Insn.new(lineno: lineno.to_i, addr: addr.to_i, op: op, args: rest.strip, raw: line.rstrip)
     end
   end
   blocks << current if current
-  blocks
+  [blocks, block_files]
 end
 
 # ---------------------------------------------------------------------------
 # Step 5: merge -- zip DFS label order against disassembly block order, and
 # attach each block's instructions onto its Irep.
 # ---------------------------------------------------------------------------
-def merge!(ireps, order, blocks)
+def merge!(ireps, order, blocks, block_files = [])
   raise "irep count mismatch: #{order.size} (C dump) vs #{blocks.size} (disasm)" unless order.size == blocks.size
 
   order.each_with_index do |label, i|
-    ireps.fetch(label).instructions = blocks[i]
+    irep = ireps.fetch(label)
+    irep.instructions = blocks[i]
+    irep.file = block_files[i]
   end
 end
 
@@ -312,6 +327,44 @@ def build_registry(ireps, root_label)
 end
 
 # ---------------------------------------------------------------------------
+# Step 5b: native (C/C++-defined) method name extraction -- RGSS's own
+# mrb_define_method/mrb_define_class_method/mrb_define_module_function call
+# sites in mruby-rgss/src (and any other C-extension gem) are invisible to
+# mrbc -- there's no .rb source for them, so build_registry above never sees
+# them at all. A method name real bytecode defines exactly once still looks
+# MONO to that registry even when a *different* class registers a same-named
+# method natively -- dispatch is by name only, so the registry's MONO
+# assumption is unsound wherever that collision happens (the exact shape of
+# the earlier-caught Game::Shop#name bug: Class#name/Symbol#name are
+# C-defined core methods this registry can't see either).
+#
+# This only extracts the flat set of names these call sites register -- not
+# an owner class, not a callable C++ symbol. Neither is needed to make
+# MONO/POLY accounting sound again (that only cares whether a name might
+# resolve somewhere this registry can't see), and a real direct call into
+# one of these methods needs the VM's own call-info frame
+# (`mrb->c->ci`) populated first the way `mrb_funcall`'s own
+# `cipush`/`funcall_args_capture` does -- calling the raw function pointer
+# directly would leave any `mrb_get_args` inside it reading a stale frame,
+# a real correctness bug, not just a missed optimization. So this
+# deliberately stays a registry-soundness fix only; see monomorphic_target's
+# own comment for where the MONO decision this feeds actually lives.
+# ---------------------------------------------------------------------------
+def extract_native_method_names(src_paths)
+  names = Set.new
+  Array(src_paths).each do |path|
+    src = File.read(path, encoding: 'UTF-8')
+    # Handles both single-line and the far more common multi-line call shape
+    # (`mrb_define_method(\n M, rect, "initialize",\n ...);`) -- the regex
+    # just doesn't care where the newlines fall between arguments.
+    src.scan(/mrb_define_(?:method|class_method|module_function)\s*\(\s*\w+\s*,\s*\w+\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
+      names << unescape_c_string(name.first)
+    end
+  end
+  names
+end
+
+# ---------------------------------------------------------------------------
 # Step 6b: ivar-embedding analysis -- which instance variables can be lifted
 # out of the dynamic ivar table (`iv_tbl`) and stored as real typed C struct
 # fields on an RData payload instead.
@@ -339,10 +392,28 @@ end
 class IvarLayout
   UNKNOWN = :unknown
 
-  def self.analyze(ireps, registry)
+  # `arg_types`: method_name -> array of (:fixnum or nil) per mandatory-arg
+  # position, from ArgTypes.analyze below -- optional (defaults to none),
+  # since ArgTypes is itself built out of this same trace_type, and the two
+  # combined only make ivar embedding *more* permissive, never less: an
+  # ivar that was already embeddable without argument inference stays
+  # embeddable either way. `annotations`: irep label -> Annotations::
+  # Annotation, from Annotations.extract -- same "only ever adds" property,
+  # and (unlike arg_types) reaches `#initialize` too, see Annotations'
+  # own comment.
+  def self.analyze(ireps, registry, arg_types = {}, annotations = {})
     # class_name -> irep labels of every leaf method owned by that class.
+    # `d.irep` is nil for a synthetic native MethodDef (extract_native_
+    # method_names's own merge into the registry) -- no bytecode body
+    # exists to walk for one of those, so it's excluded here rather than
+    # left to blow up the very next `ireps.fetch` below.
     methods_of = Hash.new { |h, k| h[k] = [] }
-    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep } }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+    # irep label -> its own MethodDef, so a SETIV site's trace can look up
+    # *its own* method's name/arity when it bottoms out at an incoming
+    # argument register (see trace_type's own final fallback).
+    def_of_irep = {}
+    registry.each_value { |defs| defs.each { |d| def_of_irep[d.irep] = d if d.irep } }
 
     types = Hash.new { |h, k| h[k] = {} } # class_name -> {ivar_name => type or UNKNOWN}
 
@@ -351,6 +422,9 @@ class IvarLayout
       methods_of.each do |klass, irep_labels|
         irep_labels.each do |label|
           irep = ireps.fetch(label)
+          d = def_of_irep[label]
+          enter = irep.instructions.find { |i| i.op == 'ENTER' }
+          mand = enter ? enter.args.split(':').first.to_i : 0
           irep.instructions.each_with_index do |insn, idx|
             next unless insn.op == 'SETIV'
             ivar = insn.args[/@(\w+)/, 1]
@@ -363,7 +437,7 @@ class IvarLayout
             # against actual game source; the toy example's own SETIV sites
             # never happened to have a trailing comment.
             src_reg = insn.args[/R(\d+)/, 1]
-            inferred = trace_type(irep, idx, src_reg, types[klass])
+            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations)
             before = types[klass][ivar]
             merged = join(before, inferred)
             if merged != before
@@ -397,7 +471,7 @@ class IvarLayout
   # last wrote `reg`, following MOVE chains, until a type-determining
   # opcode (or the top of this straight-line method body, in which case
   # `reg` is an opaque incoming argument -- unknown).
-  def self.trace_type(irep, idx, reg, known_ivar_types)
+  def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil)
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       case insn.op
@@ -446,8 +520,262 @@ class IvarLayout
         return UNKNOWN if d == reg
       end
     end
-    UNKNOWN # reg was never written in this block -- an incoming argument.
+    # reg was never written in this block -- an incoming argument. Register
+    # N (1-indexed) is argument N for N <= mand, the same convention
+    # CodeGen#compile_method itself uses (`r#{i + 1} = #{a}`) -- if
+    # whole-program call-site inference (ArgTypes, below) found every real
+    # caller of *this* method passes the same primitive type there, use
+    # it; otherwise this is a genuinely opaque incoming value (the
+    # `Animal#@name` case: no caller-side inference possible without
+    # knowing every caller passes a String, which ArgTypes only proves for
+    # Fixnum-typed positions).
+    pos = reg.to_i
+    if pos.between?(1, mand)
+      # A magic-comment annotation is per-*definition* (keyed by this exact
+      # irep, not pooled by name the way ArgTypes below is), so it's
+      # authoritative and safe to trust regardless of whether `method_name`
+      # is MONO or POLY -- tried first for exactly that reason.
+      t = annotations && annotations[irep.label]&.args&.[](pos - 1)
+      return t if t
+
+      t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
+      return t if t
+    end
+    UNKNOWN
   end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6c: whole-program call-site argument-type inference -- "cheap type
+# annotating" without any actual annotation: for a method name with
+# exactly one real definition (MONO -- the same registry IvarLayout and
+# devirtualization both already trust), every SEND/SSEND anywhere in the
+# program that sends that name can only ever be calling this one
+# definition (dispatch is by name, not signature, so a POLY name's call
+# sites could each be targeting a *different* real method -- pooling their
+# arguments together would silently conflate unrelated calling
+# conventions, so this deliberately only ever looks at MONO names).
+#
+# For each of its mandatory argument positions, this walks every such call
+# site's own argument register backward with IvarLayout's own trace_type
+# (exactly the same machinery SETIV sites already use, just re-pointed at
+# a SEND's argument registers instead) -- if every real caller's value for
+# that position traces to Fixnum, the position is Fixnum everywhere calls
+# reach it from. This directly feeds IvarLayout's own "opaque incoming
+# argument" fallback above: `Animal#@name`-shaped ivars (a SETIV whose
+# only source is a plain method parameter) can now embed whenever every
+# real call site happens to pass a Fixnum there, without needing a real
+# type annotation anywhere in the source.
+class ArgTypes
+  def self.analyze(ireps, registry)
+    types = {}
+
+    registry.each do |name, defs|
+      next unless defs.size == 1 # MONO names only -- see this class's own comment.
+      next unless defs.first.irep # native-only definition -- no bytecode body to walk.
+
+      irep = ireps.fetch(defs.first.irep)
+      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      mand = enter ? enter.args.split(':').first.to_i : 0
+      next if mand.zero?
+
+      arg_types = Array.new(mand)
+      ireps.each_value do |caller_irep|
+        caller_irep.instructions.each_with_index do |insn, idx|
+          next unless %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+          next unless insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1] == name
+
+          d = insn.args[/^R(\d+)/, 1].to_i
+          n = insn.args[/n=(\d+)/, 1].to_i
+          next unless n == mand # a real call site to a MONO name always matches its one definition's arity.
+
+          (1..mand).each do |k|
+            # No `known_ivar_types` context here (a caller's own ivars
+            # aren't tracked at this point) -- a GETIV-sourced argument
+            # value traces to UNKNOWN, a safe under-approximation (never
+            # wrongly infers Fixnum), not a wrong one.
+            t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {})
+            arg_types[k - 1] = IvarLayout.join(arg_types[k - 1], t)
+          end
+        end
+      end
+
+      types[name] = arg_types.map { |t| t == IvarLayout::UNKNOWN ? nil : t }
+    end
+
+    types
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6d: magic-comment argument-type annotations -- a cheap, explicit
+# escape hatch for exactly the gap ArgTypes documents as structurally
+# unreachable: `#initialize`'s own arguments. `X.new(args)` always compiles
+# to `SEND :new` (a C-defined core method), never a real bytecode `SEND
+# :initialize`, so ArgTypes' call-site scan can never see what a real
+# `Foo.new(1, 2)` call site actually passes -- and `#initialize` is where
+# nearly every real ivar-from-argument pattern in this codebase lives.
+#
+# Unlike ArgTypes (which pools call *sites* under a name, so it only stays
+# sound for MONO names -- a POLY name's call sites could each be targeting a
+# genuinely different method), a magic comment sits directly on one real
+# `def`, naming its own irep by construction -- safe for *any* method
+# regardless of how many other classes define the same name, `#initialize`
+# (about as POLY a name as they come) very much included.
+#
+# Syntax: a comment matching `# bc2cpp: (T1, T2, ...) -> T3` on the line
+# immediately above (blank lines skipped) a `def` -- e.g.:
+#   # bc2cpp: (fixnum, fixnum) -> fixnum
+#   def initialize(x, y)
+# `mrbc` never sees comments at all (stripped at parse time, long before
+# any bytecode exists), so this has *zero* effect on the interpreted path
+# -- the exact same "opt-in, invisible when unused" property every other
+# bc2cpp feature in this file has. A wrong annotation can't silently
+# corrupt anything either: IvarLayout's own SETIV-embedding codegen already
+# guards every embedded write with a real `mrb_integer_p` check + `mrb_raise`
+# regardless of how the type was established (a literal, ArgTypes
+# inference, or this) -- lying in a comment just means a real TypeError at
+# runtime instead of a wrong build, never silent corruption.
+#
+# Only a `fixnum`/`Fixnum`/`Integer` type token means anything today --
+# matching the one primitive type IvarLayout/ArgTypes themselves model;
+# anything else is simply not recognized (never an error -- an unsupported
+# token just means this one annotation contributes nothing, same as
+# omitting it).
+class Annotations
+  TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum }.freeze
+  COMMENT_RE = /^\s*#\s*bc2cpp:\s*\(([^)]*)\)(?:\s*->\s*(\S+))?\s*$/
+
+  Annotation = Struct.new(:args, :ret, keyword_init: true)
+
+  # irep label -> Annotation, for every real `def` (any registry entry with
+  # a bytecode body -- a native MethodDef's `irep` is nil, nothing to
+  # annotate) whose immediately-preceding source line matches COMMENT_RE.
+  def self.extract(ireps, registry)
+    result = {}
+    file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
+
+    registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.irep
+
+        irep = ireps.fetch(d.irep)
+        next unless irep.file
+
+        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        next unless enter
+
+        lines = file_lines[irep.file]
+        # `enter.lineno` is 1-indexed and lands on the real `def` line
+        # itself (confirmed against mrbc -v's own per-instruction line
+        # numbers) -- the immediately preceding line, skipping blanks, is
+        # where the annotation comment goes.
+        idx = enter.lineno - 2
+        idx -= 1 while idx >= 0 && lines[idx].strip.empty?
+        next if idx < 0
+
+        m = COMMENT_RE.match(lines[idx])
+        next unless m
+
+        arg_types = m[1].split(',').map { |t| TYPES[t.strip] }
+        ret_type = m[2] && TYPES[m[2]]
+        result[irep.label] = Annotation.new(args: arg_types, ret: ret_type)
+      end
+    end
+
+    result
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6e: annotation-candidate report -- diagnostic only, never consulted by
+# codegen. Finds every SETIV site whose source register, tracing back
+# through MOVE chains, was *never* written by anything in this method body
+# (a true opaque incoming argument in a mandatory-arg position) and isn't
+# already resolved by ArgTypes or an existing annotation -- exactly the set
+# a magic comment could unlock, and nothing else can (this deliberately
+# doesn't try to guess whether the argument really is always a Fixnum in
+# practice; it only finds where annotating one, if true, would matter).
+# ---------------------------------------------------------------------------
+
+# Like IvarLayout.trace_type's own backward scan, but stops (returns nil) at
+# *any* writer instead of type-classifying it -- a non-nil result means
+# `reg` (after following MOVE chains) was never written before `idx`: a bare
+# incoming argument, not a value already known some other way.
+def opaque_argument_position(irep, idx, reg, mand)
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    if insn.op == 'MOVE'
+      d, s = insn.args.scan(/R(\d+)/).flatten
+      next unless d == reg
+
+      reg = s
+    else
+      d = insn.args[/^R(\d+)/, 1]
+      return nil if d == reg
+    end
+  end
+  pos = reg.to_i
+  pos.between?(1, mand) ? pos : nil
+end
+
+# This prototype's whole calling convention (a typed _impl taking each
+# mandatory arg as its own mrb_value parameter) only models plain
+# mandatory arguments. ENTER's full aspec is
+# mandatory1:optional:rest:mandatory2:keyword:kwrest:block -- a method
+# with anything nonzero past the first field (`def foo(n = 0)`, `*args`,
+# keywords, an explicit `&block`) doesn't fit that shape. Found by
+# running against real code: Game::State#timer(n = 0) compiled as
+# 0-argument (only the mandatory-count field was ever read), so a real
+# call site passing the optional explicitly (`timer(0)`) generated a
+# direct call with one argument too many -- a real arity mismatch, not
+# just an unsupported-opcode gap. Top-level (not just a CodeGen method) so
+# report_annotation_candidates below can share the exact same rule
+# drop_unsafe_embeddings itself uses, rather than silently overcounting
+# candidates a real build would refuse to embed anyway.
+def pure_mandatory_arity?(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields[1..].all?(&:zero?)
+end
+
+def report_annotation_candidates(ireps, registry, arg_types, annotations)
+  candidates = []
+  registry.each_value do |defs|
+    defs.each do |d|
+      next unless d.irep
+
+      # Mirrors drop_unsafe_embeddings' own gate: no ivar on this class can
+      # ever embed unless its #initialize is compilable at all (found in
+      # the registry) *and* purely mandatory-arity -- annotating an opaque
+      # argument elsewhere in the class is pointless if that gate already
+      # vetoes the whole class regardless.
+      init = registry.fetch('initialize', []).find { |md| md.owner == d.owner }
+      next unless init&.irep && pure_mandatory_arity?(ireps.fetch(init.irep))
+
+      irep = ireps.fetch(d.irep)
+      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      mand = enter ? enter.args.split(':').first.to_i : 0
+      next if mand.zero?
+
+      irep.instructions.each_with_index do |insn, idx|
+        next unless insn.op == 'SETIV'
+
+        src_reg = insn.args[/R(\d+)/, 1]
+        pos = opaque_argument_position(irep, idx, src_reg, mand)
+        next unless pos
+
+        already = annotations[irep.label]&.args&.[](pos - 1) || arg_types[d.name]&.[](pos - 1)
+        next if already
+
+        ivar = insn.args[/@(\w+)/, 1]
+        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand }
+      end
+    end
+  end
+  candidates
 end
 
 # ---------------------------------------------------------------------------
@@ -471,10 +799,13 @@ class CodeGen
   def initialize(ireps, registry, ivar_layout)
     @ireps = ireps
     @registry = registry
-    # irep label -> {owner:, name:} for every leaf method body.
+    # irep label -> {owner:, name:} for every leaf method body. A native
+    # MethodDef (irep nil) has no body to compile, so it's excluded here --
+    # it only ever exists to make monomorphic_target's own size check see
+    # more than one definition.
     @owner_of = {}
     registry.each_value do |defs|
-      defs.each { |d| @owner_of[d.irep] = d }
+      defs.each { |d| @owner_of[d.irep] = d if d.irep }
     end
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     @only_owners = nil # set by compile_all -- see its own comment.
@@ -503,25 +834,6 @@ class CodeGen
     end
   end
 
-  # This prototype's whole calling convention (a typed _impl taking each
-  # mandatory arg as its own mrb_value parameter) only models plain
-  # mandatory arguments. ENTER's full aspec is
-  # mandatory1:optional:rest:mandatory2:keyword:kwrest:block -- a method
-  # with anything nonzero past the first field (`def foo(n = 0)`, `*args`,
-  # keywords, an explicit `&block`) doesn't fit that shape. Found by
-  # running against real code: Game::State#timer(n = 0) compiled as
-  # 0-argument (only the mandatory-count field was ever read), so a real
-  # call site passing the optional explicitly (`timer(0)`) generated a
-  # direct call with one argument too many -- a real arity mismatch, not
-  # just an unsupported-opcode gap.
-  def pure_mandatory_arity?(irep)
-    enter = irep.instructions.find { |i| i.op == 'ENTER' }
-    return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
-
-    fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
-    fields[1..].all?(&:zero?)
-  end
-
   def cpp_name(owner, name)
     sanitize("#{owner}_#{name}")
   end
@@ -536,9 +848,21 @@ class CodeGen
 
   # Every method name with exactly one definition anywhere in the whole
   # program -- the actual "static method resolution" this prototype does.
+  #
+  # A name whose one and only definition is a synthetic native MethodDef
+  # (extract_native_method_names's own merge -- irep nil, no bytecode body
+  # anywhere) never becomes a target here either: there's no compiled C++
+  # function to call into, and calling the real RGSS C++ method's raw
+  # function pointer directly (bypassing mrb_funcall) would leave any
+  # mrb_get_args inside it reading a stale mrb->c->ci call-info frame -- a
+  # real correctness bug, not just a missed optimization (verified against
+  # 3rd/mruby/src/vm.c's own mrb_funcall_with_block). So a name that's
+  # *only* natively defined just falls back to ordinary dynamic dispatch,
+  # same as any other unresolvable call site.
   def monomorphic_target(name)
     defs = @registry[name]
     return nil unless defs && defs.size == 1
+    return nil unless defs.first.irep
 
     defs.first
   end
@@ -600,8 +924,15 @@ class CodeGen
   # program (this particular call site -- Database#maker's `self.rpg2003?`
   # -- happens to be safe either way, since `self` here is always a
   # Database, but the registry itself would have been wrong).
-  def compile_all(only_owners: nil)
+  # `other_owners`: classes this run doesn't compile itself but trusts
+  # *some other* translation unit in the same final link to define --
+  # see monomorphic_target's own comment and this file's cross-TU decls
+  # header (emit_decls_header) for why a devirtualized call to one of
+  # these is safe to emit here at all (an external, non-static _impl
+  # declared via #include, resolved by the linker at final link time).
+  def compile_all(only_owners: nil, other_owners: nil)
     @only_owners = only_owners
+    @other_owners = other_owners
     leaves = @owner_of.keys
     leaves = leaves.select { |l| only_owners.include?(@owner_of.fetch(l).owner) } if only_owners
     leaves.map { |label| compile_method(label) }
@@ -618,12 +949,39 @@ class CodeGen
   def emit_forward_decls(compiled)
     out = String.new
     compiled.each do |m|
-      impl_params = (['mrb_state*'] + ['mrb_value'] * (m[:arity] + 1)).join(', ')
-      out << "static mrb_value #{m[:impl]}(#{impl_params});\n"
+      out << "#{decl_line(m)};\n"
+      # The entry wrapper (mrb_get_args marshaling) stays static/file-local
+      # -- unlike _impl, nothing outside this one gem's own registration
+      # code ever calls it, so it never needs cross-TU visibility.
       out << "static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
     end
     out << "\n"
     out
+  end
+
+  # A standalone, `#pragma once`-guarded header of the same declarations
+  # emit_forward_decls puts inline in the generated .cpp -- the actual
+  # cross-TU artifact. `_impl`/entry functions are no longer `static` (see
+  # compile_method) specifically so a *different* gem's own generated .cpp
+  # can declare them via this header (OTHER_DECLS_HEADER, wired in
+  # mrbgem.rake) and the linker can resolve a devirtualized call across
+  # gem boundaries at final link time -- previously impossible: every
+  # `_impl` was file-local (`static`), so `monomorphic_target`'s own
+  # @only_owners guard had to refuse any cross-gem target outright (see
+  # compile_send's own comment on the real LCF.write_ber/LCF.binstr bug
+  # this guard was originally added for).
+  def emit_decls_header(compiled)
+    out = String.new
+    out << "#pragma once\n"
+    out << "#include <mruby.h>\n\n"
+    compiled.each { |m| out << "#{decl_line(m)};\n" }
+    out << "\n"
+    out
+  end
+
+  def decl_line(m)
+    impl_params = (['mrb_state*'] + ['mrb_value'] * (m[:arity] + 1)).join(', ')
+    "mrb_value #{m[:impl]}(#{impl_params})"
   end
 
   def compile_method(label)
@@ -650,7 +1008,11 @@ class CodeGen
 
     out = String.new
     out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n"
-    out << "static mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_names.map { |a| "mrb_value #{a}" }).join(', ')}) {\n"
+    # Not `static`: a devirtualized call from a *different* gem's own
+    # generated .cpp (OTHER_OWNERS/OTHER_DECLS_HEADER, see mrbgem.rake) can
+    # only resolve this at final link time if it's an ordinary externally-
+    # linked symbol -- see emit_decls_header's own comment.
+    out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_names.map { |a| "mrb_value #{a}" }).join(', ')}) {\n"
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     if embedded_ivars && d.name == 'initialize'
@@ -966,8 +1328,14 @@ class CodeGen
     # functions this run would never define, an undefined-reference link
     # failure waiting to happen. Falling back to ordinary dynamic dispatch
     # here is always safe (just slower) -- the same fallback an unmodeled
-    # opcode or a bad arity already gets.
-    target = nil if target && @only_owners && !@only_owners.include?(target.owner)
+    # opcode or a bad arity already gets. `@other_owners` is the one
+    # exception: an owner this run explicitly trusts *another* gem's own
+    # run to compile and expose non-static (see emit_decls_header) -- a
+    # real, externally-linked function the final link will resolve, not a
+    # guess.
+    if target && @only_owners && !@only_owners.include?(target.owner)
+      target = nil unless @other_owners&.include?(target.owner)
+    end
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
@@ -998,14 +1366,30 @@ if $PROGRAM_NAME == __FILE__
 
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
-  require 'set'
 
   c_src, disasm_text = run_mrbc(srcs, symbol, out_dir)
   ireps, root_label = parse_c_dump(c_src, symbol)
   order = dfs_order(ireps, root_label)
-  blocks = parse_disasm_blocks(disasm_text)
-  merge!(ireps, order, blocks)
+  blocks, block_files = parse_disasm_blocks(disasm_text)
+  merge!(ireps, order, blocks, block_files)
   registry = build_registry(ireps, root_label)
+
+  # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
+  # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
+  # see extract_native_method_names's own comment. Optional: omitting it
+  # just means the registry stays exactly as unsound as it always was with
+  # respect to that native gem, same as before this existed.
+  if ENV['NATIVE_SRCS']
+    native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
+    native_names = extract_native_method_names(native_paths)
+    flipped = native_names.select { |n| registry.key?(n) && registry[n].size == 1 }
+    native_names.each do |name|
+      registry[name] << MethodDef.new(name: name, owner: '<native>', irep: nil, visibility: :public)
+    end
+    warn "== native method names (#{native_names.size} from NATIVE_SRCS, #{flipped.size} flipped a MONO name to POLY) =="
+    flipped.sort.each { |n| warn "  FLIP :#{n}" }
+    warn ''
+  end
 
   warn '== whole-program method registry =='
   registry.sort.each do |name, defs|
@@ -1014,7 +1398,34 @@ if $PROGRAM_NAME == __FILE__
     warn "  #{mono ? 'MONO' : 'POLY'}  :#{name}  (#{defs.size} def#{'s' unless defs.size == 1}: #{owners})"
   end
 
-  ivar_layout = IvarLayout.analyze(ireps, registry)
+  arg_types = ArgTypes.analyze(ireps, registry)
+  warn ''
+  warn '== call-site argument-type inference (MONO names only) =='
+  inferred_any = false
+  arg_types.each do |name, types|
+    types.each_with_index do |t, i|
+      next unless t
+
+      inferred_any = true
+      warn "  ARG  :#{name}, position #{i + 1}  (#{t})"
+    end
+  end
+  warn '  (none inferred)' unless inferred_any
+
+  annotations = Annotations.extract(ireps, registry)
+  warn ''
+  warn '== magic-comment annotations (# bc2cpp: (T, ...) -> T) =='
+  if annotations.empty?
+    warn '  (none found)'
+  else
+    annotations.each do |label, ann|
+      d = registry.values.flatten.find { |md| md.irep == label }
+      name = d ? "#{d.owner}##{d.name}" : label
+      warn "  ANNOTATED  #{name}  (#{ann.args.inspect} -> #{ann.ret.inspect})"
+    end
+  end
+
+  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations)
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?
@@ -1025,6 +1436,17 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
+  warn ''
+  warn '== annotation candidates (opaque incoming argument, unresolved) =='
+  if candidates.empty?
+    warn '  (none)'
+  else
+    candidates.each do |c|
+      warn "  CANDIDATE  #{c[:owner]}##{c[:name]}, arg #{c[:pos]}/#{c[:mand]} -> @#{c[:ivar]}"
+    end
+  end
+
   gen = CodeGen.new(ireps, registry, ivar_layout)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
@@ -1032,7 +1454,12 @@ if $PROGRAM_NAME == __FILE__
   # least everything that could define a colliding method name); see
   # compile_all's own comment for why that distinction is load-bearing.
   only_owners = ENV['ONLY_OWNERS']&.split(',')
-  compiled = gen.compile_all(only_owners: only_owners)
+  # OTHER_OWNERS: classes this run trusts *another* gem's own bc2cpp run to
+  # compile and expose (paired with OTHER_DECLS_HEADER below) -- see
+  # compile_send's own comment on why a devirtualized call to one of these
+  # is safe to emit despite not being compiled in this run at all.
+  other_owners = ENV['OTHER_OWNERS']&.split(',')
+  compiled = gen.compile_all(only_owners: only_owners, other_owners: other_owners)
 
   # SKIP_UNSUPPORTED=1 drops any method whose body contains a `#error`
   # marker (an unmodeled opcode, or an arity this calling convention can't
@@ -1058,10 +1485,25 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
+  # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
+  # another gem's own *_decls.h, written by this same OUT_DIR mechanism
+  # below) to #include so a devirtualized call to an OTHER_OWNERS target
+  # has a real declaration in scope -- paired with OTHER_OWNERS above.
+  if ENV['OTHER_DECLS_HEADER']
+    Shellwords.split(ENV['OTHER_DECLS_HEADER']).each { |path| puts "#include \"#{path}\"" }
+  end
   puts ''
   print gen.emit_structs
   print gen.emit_forward_decls(compiled)
   compiled.each { |m| print m[:code] }
+
+  # Write this run's own cross-TU declarations header, so a *different*
+  # gem's own bc2cpp run can point its own OTHER_DECLS_HEADER at this file
+  # and devirtualize into these entries -- see emit_decls_header's own
+  # comment. Written unconditionally (cheap, and this run doesn't know in
+  # advance whether anything will ever want it); only meaningful once some
+  # other run actually references it via OTHER_DECLS_HEADER/OTHER_OWNERS.
+  File.write(File.join(out_dir, "#{symbol}_decls.h"), gen.emit_decls_header(compiled))
 
   warn ''
   warn '== compiled entry points =='
