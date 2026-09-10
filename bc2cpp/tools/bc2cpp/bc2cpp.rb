@@ -60,7 +60,7 @@ require 'set'
 # (host/wio/desktop/...) is invoking this script.
 MRBC = ENV['MRBC'] || 'mrbc'
 
-Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, keyword_init: true)
+Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file, keyword_init: true)
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
 MethodDef = Struct.new(:name, :owner, :irep, :visibility, keyword_init: true)
 
@@ -186,32 +186,46 @@ end
 # ---------------------------------------------------------------------------
 def parse_disasm_blocks(text)
   blocks = []
+  # Parallel to `blocks` -- each irep block's own `file: path/to/x.rb`
+  # line (mrbc echoes back exactly the path it was given on the command
+  # line), needed by Annotations.extract to find a magic comment's real
+  # source line. Kept separate from Insn/Irep's existing per-instruction
+  # `lineno` (already real, 1-indexed source line numbers within that
+  # file) rather than repeating it on every instruction.
+  block_files = []
   current = nil
   text.each_line do |line|
     if line =~ /^irep 0x[0-9a-f]+ /
       blocks << current if current
       current = []
+      block_files << nil # overwritten by this block's own `file:` line below, if any.
       next
     end
     next unless current
+    if line =~ /^file: (.+)$/
+      block_files[-1] = Regexp.last_match(1)
+      next
+    end
     if line =~ /^\s*(\d+)\s+(\d+)\s+([A-Z][A-Z0-9_]*)\s*(.*)$/
       lineno, addr, op, rest = Regexp.last_match.captures
       current << Insn.new(lineno: lineno.to_i, addr: addr.to_i, op: op, args: rest.strip, raw: line.rstrip)
     end
   end
   blocks << current if current
-  blocks
+  [blocks, block_files]
 end
 
 # ---------------------------------------------------------------------------
 # Step 5: merge -- zip DFS label order against disassembly block order, and
 # attach each block's instructions onto its Irep.
 # ---------------------------------------------------------------------------
-def merge!(ireps, order, blocks)
+def merge!(ireps, order, blocks, block_files = [])
   raise "irep count mismatch: #{order.size} (C dump) vs #{blocks.size} (disasm)" unless order.size == blocks.size
 
   order.each_with_index do |label, i|
-    ireps.fetch(label).instructions = blocks[i]
+    irep = ireps.fetch(label)
+    irep.instructions = blocks[i]
+    irep.file = block_files[i]
   end
 end
 
@@ -383,8 +397,11 @@ class IvarLayout
   # since ArgTypes is itself built out of this same trace_type, and the two
   # combined only make ivar embedding *more* permissive, never less: an
   # ivar that was already embeddable without argument inference stays
-  # embeddable either way.
-  def self.analyze(ireps, registry, arg_types = {})
+  # embeddable either way. `annotations`: irep label -> Annotations::
+  # Annotation, from Annotations.extract -- same "only ever adds" property,
+  # and (unlike arg_types) reaches `#initialize` too, see Annotations'
+  # own comment.
+  def self.analyze(ireps, registry, arg_types = {}, annotations = {})
     # class_name -> irep labels of every leaf method owned by that class.
     # `d.irep` is nil for a synthetic native MethodDef (extract_native_
     # method_names's own merge into the registry) -- no bytecode body
@@ -420,7 +437,7 @@ class IvarLayout
             # against actual game source; the toy example's own SETIV sites
             # never happened to have a trailing comment.
             src_reg = insn.args[/R(\d+)/, 1]
-            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name)
+            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations)
             before = types[klass][ivar]
             merged = join(before, inferred)
             if merged != before
@@ -454,7 +471,7 @@ class IvarLayout
   # last wrote `reg`, following MOVE chains, until a type-determining
   # opcode (or the top of this straight-line method body, in which case
   # `reg` is an opaque incoming argument -- unknown).
-  def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil)
+  def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil)
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       case insn.op
@@ -513,8 +530,15 @@ class IvarLayout
     # knowing every caller passes a String, which ArgTypes only proves for
     # Fixnum-typed positions).
     pos = reg.to_i
-    if arg_types && method_name && pos.between?(1, mand)
-      t = arg_types[method_name]&.[](pos - 1)
+    if pos.between?(1, mand)
+      # A magic-comment annotation is per-*definition* (keyed by this exact
+      # irep, not pooled by name the way ArgTypes below is), so it's
+      # authoritative and safe to trust regardless of whether `method_name`
+      # is MONO or POLY -- tried first for exactly that reason.
+      t = annotations && annotations[irep.label]&.args&.[](pos - 1)
+      return t if t
+
+      t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
       return t if t
     end
     UNKNOWN
@@ -584,6 +608,177 @@ class ArgTypes
 end
 
 # ---------------------------------------------------------------------------
+# Step 6d: magic-comment argument-type annotations -- a cheap, explicit
+# escape hatch for exactly the gap ArgTypes documents as structurally
+# unreachable: `#initialize`'s own arguments. `X.new(args)` always compiles
+# to `SEND :new` (a C-defined core method), never a real bytecode `SEND
+# :initialize`, so ArgTypes' call-site scan can never see what a real
+# `Foo.new(1, 2)` call site actually passes -- and `#initialize` is where
+# nearly every real ivar-from-argument pattern in this codebase lives.
+#
+# Unlike ArgTypes (which pools call *sites* under a name, so it only stays
+# sound for MONO names -- a POLY name's call sites could each be targeting a
+# genuinely different method), a magic comment sits directly on one real
+# `def`, naming its own irep by construction -- safe for *any* method
+# regardless of how many other classes define the same name, `#initialize`
+# (about as POLY a name as they come) very much included.
+#
+# Syntax: a comment matching `# bc2cpp: (T1, T2, ...) -> T3` on the line
+# immediately above (blank lines skipped) a `def` -- e.g.:
+#   # bc2cpp: (fixnum, fixnum) -> fixnum
+#   def initialize(x, y)
+# `mrbc` never sees comments at all (stripped at parse time, long before
+# any bytecode exists), so this has *zero* effect on the interpreted path
+# -- the exact same "opt-in, invisible when unused" property every other
+# bc2cpp feature in this file has. A wrong annotation can't silently
+# corrupt anything either: IvarLayout's own SETIV-embedding codegen already
+# guards every embedded write with a real `mrb_integer_p` check + `mrb_raise`
+# regardless of how the type was established (a literal, ArgTypes
+# inference, or this) -- lying in a comment just means a real TypeError at
+# runtime instead of a wrong build, never silent corruption.
+#
+# Only a `fixnum`/`Fixnum`/`Integer` type token means anything today --
+# matching the one primitive type IvarLayout/ArgTypes themselves model;
+# anything else is simply not recognized (never an error -- an unsupported
+# token just means this one annotation contributes nothing, same as
+# omitting it).
+class Annotations
+  TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum }.freeze
+  COMMENT_RE = /^\s*#\s*bc2cpp:\s*\(([^)]*)\)(?:\s*->\s*(\S+))?\s*$/
+
+  Annotation = Struct.new(:args, :ret, keyword_init: true)
+
+  # irep label -> Annotation, for every real `def` (any registry entry with
+  # a bytecode body -- a native MethodDef's `irep` is nil, nothing to
+  # annotate) whose immediately-preceding source line matches COMMENT_RE.
+  def self.extract(ireps, registry)
+    result = {}
+    file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
+
+    registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.irep
+
+        irep = ireps.fetch(d.irep)
+        next unless irep.file
+
+        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        next unless enter
+
+        lines = file_lines[irep.file]
+        # `enter.lineno` is 1-indexed and lands on the real `def` line
+        # itself (confirmed against mrbc -v's own per-instruction line
+        # numbers) -- the immediately preceding line, skipping blanks, is
+        # where the annotation comment goes.
+        idx = enter.lineno - 2
+        idx -= 1 while idx >= 0 && lines[idx].strip.empty?
+        next if idx < 0
+
+        m = COMMENT_RE.match(lines[idx])
+        next unless m
+
+        arg_types = m[1].split(',').map { |t| TYPES[t.strip] }
+        ret_type = m[2] && TYPES[m[2]]
+        result[irep.label] = Annotation.new(args: arg_types, ret: ret_type)
+      end
+    end
+
+    result
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6e: annotation-candidate report -- diagnostic only, never consulted by
+# codegen. Finds every SETIV site whose source register, tracing back
+# through MOVE chains, was *never* written by anything in this method body
+# (a true opaque incoming argument in a mandatory-arg position) and isn't
+# already resolved by ArgTypes or an existing annotation -- exactly the set
+# a magic comment could unlock, and nothing else can (this deliberately
+# doesn't try to guess whether the argument really is always a Fixnum in
+# practice; it only finds where annotating one, if true, would matter).
+# ---------------------------------------------------------------------------
+
+# Like IvarLayout.trace_type's own backward scan, but stops (returns nil) at
+# *any* writer instead of type-classifying it -- a non-nil result means
+# `reg` (after following MOVE chains) was never written before `idx`: a bare
+# incoming argument, not a value already known some other way.
+def opaque_argument_position(irep, idx, reg, mand)
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    if insn.op == 'MOVE'
+      d, s = insn.args.scan(/R(\d+)/).flatten
+      next unless d == reg
+
+      reg = s
+    else
+      d = insn.args[/^R(\d+)/, 1]
+      return nil if d == reg
+    end
+  end
+  pos = reg.to_i
+  pos.between?(1, mand) ? pos : nil
+end
+
+# This prototype's whole calling convention (a typed _impl taking each
+# mandatory arg as its own mrb_value parameter) only models plain
+# mandatory arguments. ENTER's full aspec is
+# mandatory1:optional:rest:mandatory2:keyword:kwrest:block -- a method
+# with anything nonzero past the first field (`def foo(n = 0)`, `*args`,
+# keywords, an explicit `&block`) doesn't fit that shape. Found by
+# running against real code: Game::State#timer(n = 0) compiled as
+# 0-argument (only the mandatory-count field was ever read), so a real
+# call site passing the optional explicitly (`timer(0)`) generated a
+# direct call with one argument too many -- a real arity mismatch, not
+# just an unsupported-opcode gap. Top-level (not just a CodeGen method) so
+# report_annotation_candidates below can share the exact same rule
+# drop_unsafe_embeddings itself uses, rather than silently overcounting
+# candidates a real build would refuse to embed anyway.
+def pure_mandatory_arity?(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields[1..].all?(&:zero?)
+end
+
+def report_annotation_candidates(ireps, registry, arg_types, annotations)
+  candidates = []
+  registry.each_value do |defs|
+    defs.each do |d|
+      next unless d.irep
+
+      # Mirrors drop_unsafe_embeddings' own gate: no ivar on this class can
+      # ever embed unless its #initialize is compilable at all (found in
+      # the registry) *and* purely mandatory-arity -- annotating an opaque
+      # argument elsewhere in the class is pointless if that gate already
+      # vetoes the whole class regardless.
+      init = registry.fetch('initialize', []).find { |md| md.owner == d.owner }
+      next unless init&.irep && pure_mandatory_arity?(ireps.fetch(init.irep))
+
+      irep = ireps.fetch(d.irep)
+      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      mand = enter ? enter.args.split(':').first.to_i : 0
+      next if mand.zero?
+
+      irep.instructions.each_with_index do |insn, idx|
+        next unless insn.op == 'SETIV'
+
+        src_reg = insn.args[/R(\d+)/, 1]
+        pos = opaque_argument_position(irep, idx, src_reg, mand)
+        next unless pos
+
+        already = annotations[irep.label]&.args&.[](pos - 1) || arg_types[d.name]&.[](pos - 1)
+        next if already
+
+        ivar = insn.args[/@(\w+)/, 1]
+        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand }
+      end
+    end
+  end
+  candidates
+end
+
+# ---------------------------------------------------------------------------
 # Step 7: codegen -- one C++ function pair per leaf method-body irep.
 #
 # Each compiled method gets two C++ functions:
@@ -637,25 +832,6 @@ class CodeGen
       init = @registry['initialize']&.find { |d| d.owner == owner }
       init && pure_mandatory_arity?(@ireps.fetch(init.irep))
     end
-  end
-
-  # This prototype's whole calling convention (a typed _impl taking each
-  # mandatory arg as its own mrb_value parameter) only models plain
-  # mandatory arguments. ENTER's full aspec is
-  # mandatory1:optional:rest:mandatory2:keyword:kwrest:block -- a method
-  # with anything nonzero past the first field (`def foo(n = 0)`, `*args`,
-  # keywords, an explicit `&block`) doesn't fit that shape. Found by
-  # running against real code: Game::State#timer(n = 0) compiled as
-  # 0-argument (only the mandatory-count field was ever read), so a real
-  # call site passing the optional explicitly (`timer(0)`) generated a
-  # direct call with one argument too many -- a real arity mismatch, not
-  # just an unsupported-opcode gap.
-  def pure_mandatory_arity?(irep)
-    enter = irep.instructions.find { |i| i.op == 'ENTER' }
-    return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
-
-    fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
-    fields[1..].all?(&:zero?)
   end
 
   def cpp_name(owner, name)
@@ -1150,8 +1326,8 @@ if $PROGRAM_NAME == __FILE__
   c_src, disasm_text = run_mrbc(srcs, symbol, out_dir)
   ireps, root_label = parse_c_dump(c_src, symbol)
   order = dfs_order(ireps, root_label)
-  blocks = parse_disasm_blocks(disasm_text)
-  merge!(ireps, order, blocks)
+  blocks, block_files = parse_disasm_blocks(disasm_text)
+  merge!(ireps, order, blocks, block_files)
   registry = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
@@ -1192,7 +1368,20 @@ if $PROGRAM_NAME == __FILE__
   end
   warn '  (none inferred)' unless inferred_any
 
-  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types)
+  annotations = Annotations.extract(ireps, registry)
+  warn ''
+  warn '== magic-comment annotations (# bc2cpp: (T, ...) -> T) =='
+  if annotations.empty?
+    warn '  (none found)'
+  else
+    annotations.each do |label, ann|
+      d = registry.values.flatten.find { |md| md.irep == label }
+      name = d ? "#{d.owner}##{d.name}" : label
+      warn "  ANNOTATED  #{name}  (#{ann.args.inspect} -> #{ann.ret.inspect})"
+    end
+  end
+
+  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations)
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?
@@ -1200,6 +1389,17 @@ if $PROGRAM_NAME == __FILE__
   else
     ivar_layout.each do |klass, ivars|
       ivars.each { |name, type| warn "  EMBED  #{klass}#@#{name}  (#{type})" }
+    end
+  end
+
+  candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
+  warn ''
+  warn '== annotation candidates (opaque incoming argument, unresolved) =='
+  if candidates.empty?
+    warn '  (none)'
+  else
+    candidates.each do |c|
+      warn "  CANDIDATE  #{c[:owner]}##{c[:name]}, arg #{c[:pos]}/#{c[:mand]} -> @#{c[:ivar]}"
     end
   end
 
