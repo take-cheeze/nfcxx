@@ -48,6 +48,7 @@
 # not attempted here; see README.md).
 
 require 'shellwords'
+require 'set'
 
 # Callers that need this closed-world analysis to see a whole game's worth
 # of mrblib (not just the class being compiled -- see build_registry's own
@@ -312,6 +313,44 @@ def build_registry(ireps, root_label)
 end
 
 # ---------------------------------------------------------------------------
+# Step 5b: native (C/C++-defined) method name extraction -- RGSS's own
+# mrb_define_method/mrb_define_class_method/mrb_define_module_function call
+# sites in mruby-rgss/src (and any other C-extension gem) are invisible to
+# mrbc -- there's no .rb source for them, so build_registry above never sees
+# them at all. A method name real bytecode defines exactly once still looks
+# MONO to that registry even when a *different* class registers a same-named
+# method natively -- dispatch is by name only, so the registry's MONO
+# assumption is unsound wherever that collision happens (the exact shape of
+# the earlier-caught Game::Shop#name bug: Class#name/Symbol#name are
+# C-defined core methods this registry can't see either).
+#
+# This only extracts the flat set of names these call sites register -- not
+# an owner class, not a callable C++ symbol. Neither is needed to make
+# MONO/POLY accounting sound again (that only cares whether a name might
+# resolve somewhere this registry can't see), and a real direct call into
+# one of these methods needs the VM's own call-info frame
+# (`mrb->c->ci`) populated first the way `mrb_funcall`'s own
+# `cipush`/`funcall_args_capture` does -- calling the raw function pointer
+# directly would leave any `mrb_get_args` inside it reading a stale frame,
+# a real correctness bug, not just a missed optimization. So this
+# deliberately stays a registry-soundness fix only; see monomorphic_target's
+# own comment for where the MONO decision this feeds actually lives.
+# ---------------------------------------------------------------------------
+def extract_native_method_names(src_paths)
+  names = Set.new
+  Array(src_paths).each do |path|
+    src = File.read(path, encoding: 'UTF-8')
+    # Handles both single-line and the far more common multi-line call shape
+    # (`mrb_define_method(\n M, rect, "initialize",\n ...);`) -- the regex
+    # just doesn't care where the newlines fall between arguments.
+    src.scan(/mrb_define_(?:method|class_method|module_function)\s*\(\s*\w+\s*,\s*\w+\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
+      names << unescape_c_string(name.first)
+    end
+  end
+  names
+end
+
+# ---------------------------------------------------------------------------
 # Step 6b: ivar-embedding analysis -- which instance variables can be lifted
 # out of the dynamic ivar table (`iv_tbl`) and stored as real typed C struct
 # fields on an RData payload instead.
@@ -347,13 +386,17 @@ class IvarLayout
   # embeddable either way.
   def self.analyze(ireps, registry, arg_types = {})
     # class_name -> irep labels of every leaf method owned by that class.
+    # `d.irep` is nil for a synthetic native MethodDef (extract_native_
+    # method_names's own merge into the registry) -- no bytecode body
+    # exists to walk for one of those, so it's excluded here rather than
+    # left to blow up the very next `ireps.fetch` below.
     methods_of = Hash.new { |h, k| h[k] = [] }
-    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep } }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     # irep label -> its own MethodDef, so a SETIV site's trace can look up
     # *its own* method's name/arity when it bottoms out at an incoming
     # argument register (see trace_type's own final fallback).
     def_of_irep = {}
-    registry.each_value { |defs| defs.each { |d| def_of_irep[d.irep] = d } }
+    registry.each_value { |defs| defs.each { |d| def_of_irep[d.irep] = d if d.irep } }
 
     types = Hash.new { |h, k| h[k] = {} } # class_name -> {ivar_name => type or UNKNOWN}
 
@@ -505,6 +548,7 @@ class ArgTypes
 
     registry.each do |name, defs|
       next unless defs.size == 1 # MONO names only -- see this class's own comment.
+      next unless defs.first.irep # native-only definition -- no bytecode body to walk.
 
       irep = ireps.fetch(defs.first.irep)
       enter = irep.instructions.find { |i| i.op == 'ENTER' }
@@ -560,10 +604,13 @@ class CodeGen
   def initialize(ireps, registry, ivar_layout)
     @ireps = ireps
     @registry = registry
-    # irep label -> {owner:, name:} for every leaf method body.
+    # irep label -> {owner:, name:} for every leaf method body. A native
+    # MethodDef (irep nil) has no body to compile, so it's excluded here --
+    # it only ever exists to make monomorphic_target's own size check see
+    # more than one definition.
     @owner_of = {}
     registry.each_value do |defs|
-      defs.each { |d| @owner_of[d.irep] = d }
+      defs.each { |d| @owner_of[d.irep] = d if d.irep }
     end
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     @only_owners = nil # set by compile_all -- see its own comment.
@@ -625,9 +672,21 @@ class CodeGen
 
   # Every method name with exactly one definition anywhere in the whole
   # program -- the actual "static method resolution" this prototype does.
+  #
+  # A name whose one and only definition is a synthetic native MethodDef
+  # (extract_native_method_names's own merge -- irep nil, no bytecode body
+  # anywhere) never becomes a target here either: there's no compiled C++
+  # function to call into, and calling the real RGSS C++ method's raw
+  # function pointer directly (bypassing mrb_funcall) would leave any
+  # mrb_get_args inside it reading a stale mrb->c->ci call-info frame -- a
+  # real correctness bug, not just a missed optimization (verified against
+  # 3rd/mruby/src/vm.c's own mrb_funcall_with_block). So a name that's
+  # *only* natively defined just falls back to ordinary dynamic dispatch,
+  # same as any other unresolvable call site.
   def monomorphic_target(name)
     defs = @registry[name]
     return nil unless defs && defs.size == 1
+    return nil unless defs.first.irep
 
     defs.first
   end
@@ -1087,7 +1146,6 @@ if $PROGRAM_NAME == __FILE__
 
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
-  require 'set'
 
   c_src, disasm_text = run_mrbc(srcs, symbol, out_dir)
   ireps, root_label = parse_c_dump(c_src, symbol)
@@ -1095,6 +1153,23 @@ if $PROGRAM_NAME == __FILE__
   blocks = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks)
   registry = build_registry(ireps, root_label)
+
+  # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
+  # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
+  # see extract_native_method_names's own comment. Optional: omitting it
+  # just means the registry stays exactly as unsound as it always was with
+  # respect to that native gem, same as before this existed.
+  if ENV['NATIVE_SRCS']
+    native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
+    native_names = extract_native_method_names(native_paths)
+    flipped = native_names.select { |n| registry.key?(n) && registry[n].size == 1 }
+    native_names.each do |name|
+      registry[name] << MethodDef.new(name: name, owner: '<native>', irep: nil, visibility: :public)
+    end
+    warn "== native method names (#{native_names.size} from NATIVE_SRCS, #{flipped.size} flipped a MONO name to POLY) =="
+    flipped.sort.each { |n| warn "  FLIP :#{n}" }
+    warn ''
+  end
 
   warn '== whole-program method registry =='
   registry.sort.each do |name, defs|
