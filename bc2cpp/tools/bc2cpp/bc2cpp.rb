@@ -350,8 +350,48 @@ end
 # deliberately stays a registry-soundness fix only; see monomorphic_target's
 # own comment for where the MONO decision this feeds actually lives.
 # ---------------------------------------------------------------------------
+# mruby's own presym operator-name table (3rd/mruby/lib/mruby/presym.rb's
+# own OPERATORS hash, inverted) -- MRB_OPSYM(cmp) is how mruby-core's own
+# C source spells the method `<=>`, never the operator text itself. A
+# small, closed, finite table (mruby's own presym generator has no other
+# source of truth for this mapping either), so hardcoding the inverse here
+# is exactly as authoritative as reading it out of that file at runtime,
+# without a real dependency on `3rd/mruby/lib` being on the load path.
+OPSYM_TO_RUBY = {
+  'not' => '!', 'mod' => '%', 'and' => '&', 'mul' => '*', 'add' => '+',
+  'sub' => '-', 'div' => '/', 'lt' => '<', 'gt' => '>', 'xor' => '^',
+  'tick' => '`', 'or' => '|', 'neg' => '~', 'neq' => '!=', 'nmatch' => '!~',
+  'andand' => '&&', 'pow' => '**', 'plus' => '+@', 'minus' => '-@',
+  'lshift' => '<<', 'le' => '<=', 'eq' => '==', 'match' => '=~',
+  'ge' => '>=', 'rshift' => '>>', 'aref' => '[]', 'oror' => '||',
+  'cmp' => '<=>', 'eqq' => '===', 'aset' => '[]=',
+}.freeze
+
+# RGSS's own C++ sources (mruby-rgss/src/lib.cxx) register every method
+# with a literal string name (`mrb_define_method(M, rect, "x", ...)`), but
+# mruby's *own* core (3rd/mruby/src/*.c) and its bundled C mrbgems mostly
+# don't -- mruby 4.0 registers most of its own core methods through a
+# declarative ROM method-table macro instead (confirmed against real
+# source, e.g. 3rd/mruby/src/symbol.c's own `symbol_rom_entries`):
+#   static const mrb_mt_entry symbol_rom_entries[] = {
+#     MRB_MT_ENTRY(sym_name, MRB_SYM(name), MRB_ARGS_NONE()),
+#     MRB_MT_ENTRY(sym_cmp,  MRB_OPSYM(cmp), MRB_ARGS_REQ(1)),   // <=>
+#     ...
+#   };
+#   MRB_MT_INIT_ROM(mrb, sym, symbol_rom_entries);
+# -- a real, distinct native-registration idiom the RGSS-only literal-
+# string regex below cannot see at all. This is exactly the shape of the
+# earlier-caught Game::Shop#name bug (Symbol#name/Class#name are two of
+# the names this exact table form registers) -- so scanning mruby's own
+# core C sources via NATIVE_SRCS only closes that gap if this second
+# pattern is recognized too. A few core mrbgems (e.g. mruby-task) still
+# call `mrb_define_method_id(mrb, klass, MRB_SYM(name), func, aspec)`
+# directly instead of a ROM table -- same MRB_SYM/MRB_OPSYM symbol
+# spelling, different call shape, covered by the same second regex below.
 def extract_native_method_names(src_paths)
   names = Set.new
+  sym_or_opsym = /MRB_(?:SYM|OPSYM)\((\w+)\)/
+
   Array(src_paths).each do |path|
     src = File.read(path, encoding: 'UTF-8')
     # Handles both single-line and the far more common multi-line call shape
@@ -359,6 +399,17 @@ def extract_native_method_names(src_paths)
     # just doesn't care where the newlines fall between arguments.
     src.scan(/mrb_define_(?:method|class_method|module_function)\s*\(\s*\w+\s*,\s*\w+\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
       names << unescape_c_string(name.first)
+    end
+
+    # MRB_MT_ENTRY(fn, MRB_SYM(name), flags) / MRB_MT_ENTRY(fn, MRB_OPSYM(op), flags)
+    # -- mruby core's own ROM method-table idiom.
+    src.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{sym_or_opsym}/) { |tok| names << (OPSYM_TO_RUBY[tok.first] || tok.first) }
+
+    # mrb_define_method_id(mrb, klass, MRB_SYM(name)/MRB_OPSYM(op), func, aspec)
+    # (and the _class_method_id/_module_function_id siblings) -- the direct-call
+    # form some core mrbgems (mruby-task, ...) use instead of a ROM table.
+    src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{sym_or_opsym}/) do |tok|
+      names << (OPSYM_TO_RUBY[tok.first] || tok.first)
     end
   end
   names
