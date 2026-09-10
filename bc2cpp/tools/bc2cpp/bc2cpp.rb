@@ -924,8 +924,15 @@ class CodeGen
   # program (this particular call site -- Database#maker's `self.rpg2003?`
   # -- happens to be safe either way, since `self` here is always a
   # Database, but the registry itself would have been wrong).
-  def compile_all(only_owners: nil)
+  # `other_owners`: classes this run doesn't compile itself but trusts
+  # *some other* translation unit in the same final link to define --
+  # see monomorphic_target's own comment and this file's cross-TU decls
+  # header (emit_decls_header) for why a devirtualized call to one of
+  # these is safe to emit here at all (an external, non-static _impl
+  # declared via #include, resolved by the linker at final link time).
+  def compile_all(only_owners: nil, other_owners: nil)
     @only_owners = only_owners
+    @other_owners = other_owners
     leaves = @owner_of.keys
     leaves = leaves.select { |l| only_owners.include?(@owner_of.fetch(l).owner) } if only_owners
     leaves.map { |label| compile_method(label) }
@@ -942,12 +949,39 @@ class CodeGen
   def emit_forward_decls(compiled)
     out = String.new
     compiled.each do |m|
-      impl_params = (['mrb_state*'] + ['mrb_value'] * (m[:arity] + 1)).join(', ')
-      out << "static mrb_value #{m[:impl]}(#{impl_params});\n"
+      out << "#{decl_line(m)};\n"
+      # The entry wrapper (mrb_get_args marshaling) stays static/file-local
+      # -- unlike _impl, nothing outside this one gem's own registration
+      # code ever calls it, so it never needs cross-TU visibility.
       out << "static mrb_value #{m[:entry]}(mrb_state*, mrb_value);\n"
     end
     out << "\n"
     out
+  end
+
+  # A standalone, `#pragma once`-guarded header of the same declarations
+  # emit_forward_decls puts inline in the generated .cpp -- the actual
+  # cross-TU artifact. `_impl`/entry functions are no longer `static` (see
+  # compile_method) specifically so a *different* gem's own generated .cpp
+  # can declare them via this header (OTHER_DECLS_HEADER, wired in
+  # mrbgem.rake) and the linker can resolve a devirtualized call across
+  # gem boundaries at final link time -- previously impossible: every
+  # `_impl` was file-local (`static`), so `monomorphic_target`'s own
+  # @only_owners guard had to refuse any cross-gem target outright (see
+  # compile_send's own comment on the real LCF.write_ber/LCF.binstr bug
+  # this guard was originally added for).
+  def emit_decls_header(compiled)
+    out = String.new
+    out << "#pragma once\n"
+    out << "#include <mruby.h>\n\n"
+    compiled.each { |m| out << "#{decl_line(m)};\n" }
+    out << "\n"
+    out
+  end
+
+  def decl_line(m)
+    impl_params = (['mrb_state*'] + ['mrb_value'] * (m[:arity] + 1)).join(', ')
+    "mrb_value #{m[:impl]}(#{impl_params})"
   end
 
   def compile_method(label)
@@ -974,7 +1008,11 @@ class CodeGen
 
     out = String.new
     out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n"
-    out << "static mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_names.map { |a| "mrb_value #{a}" }).join(', ')}) {\n"
+    # Not `static`: a devirtualized call from a *different* gem's own
+    # generated .cpp (OTHER_OWNERS/OTHER_DECLS_HEADER, see mrbgem.rake) can
+    # only resolve this at final link time if it's an ordinary externally-
+    # linked symbol -- see emit_decls_header's own comment.
+    out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_names.map { |a| "mrb_value #{a}" }).join(', ')}) {\n"
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     if embedded_ivars && d.name == 'initialize'
@@ -1290,8 +1328,14 @@ class CodeGen
     # functions this run would never define, an undefined-reference link
     # failure waiting to happen. Falling back to ordinary dynamic dispatch
     # here is always safe (just slower) -- the same fallback an unmodeled
-    # opcode or a bad arity already gets.
-    target = nil if target && @only_owners && !@only_owners.include?(target.owner)
+    # opcode or a bad arity already gets. `@other_owners` is the one
+    # exception: an owner this run explicitly trusts *another* gem's own
+    # run to compile and expose non-static (see emit_decls_header) -- a
+    # real, externally-linked function the final link will resolve, not a
+    # guess.
+    if target && @only_owners && !@only_owners.include?(target.owner)
+      target = nil unless @other_owners&.include?(target.owner)
+    end
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
@@ -1410,7 +1454,12 @@ if $PROGRAM_NAME == __FILE__
   # least everything that could define a colliding method name); see
   # compile_all's own comment for why that distinction is load-bearing.
   only_owners = ENV['ONLY_OWNERS']&.split(',')
-  compiled = gen.compile_all(only_owners: only_owners)
+  # OTHER_OWNERS: classes this run trusts *another* gem's own bc2cpp run to
+  # compile and expose (paired with OTHER_DECLS_HEADER below) -- see
+  # compile_send's own comment on why a devirtualized call to one of these
+  # is safe to emit despite not being compiled in this run at all.
+  other_owners = ENV['OTHER_OWNERS']&.split(',')
+  compiled = gen.compile_all(only_owners: only_owners, other_owners: other_owners)
 
   # SKIP_UNSUPPORTED=1 drops any method whose body contains a `#error`
   # marker (an unmodeled opcode, or an arity this calling convention can't
@@ -1436,10 +1485,25 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
+  # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
+  # another gem's own *_decls.h, written by this same OUT_DIR mechanism
+  # below) to #include so a devirtualized call to an OTHER_OWNERS target
+  # has a real declaration in scope -- paired with OTHER_OWNERS above.
+  if ENV['OTHER_DECLS_HEADER']
+    Shellwords.split(ENV['OTHER_DECLS_HEADER']).each { |path| puts "#include \"#{path}\"" }
+  end
   puts ''
   print gen.emit_structs
   print gen.emit_forward_decls(compiled)
   compiled.each { |m| print m[:code] }
+
+  # Write this run's own cross-TU declarations header, so a *different*
+  # gem's own bc2cpp run can point its own OTHER_DECLS_HEADER at this file
+  # and devirtualize into these entries -- see emit_decls_header's own
+  # comment. Written unconditionally (cheap, and this run doesn't know in
+  # advance whether anything will ever want it); only meaningful once some
+  # other run actually references it via OTHER_DECLS_HEADER/OTHER_OWNERS.
+  File.write(File.join(out_dir, "#{symbol}_decls.h"), gen.emit_decls_header(compiled))
 
   warn ''
   warn '== compiled entry points =='
