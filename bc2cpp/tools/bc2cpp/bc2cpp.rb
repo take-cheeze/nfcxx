@@ -61,7 +61,7 @@ MRBC = ENV['MRBC'] || 'mrbc'
 
 Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, keyword_init: true)
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
-MethodDef = Struct.new(:name, :owner, :irep, keyword_init: true)
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, keyword_init: true)
 
 # ---------------------------------------------------------------------------
 # Step 1: run mrbc's two debug dumps on the same input(s). mrbc accepts
@@ -231,8 +231,27 @@ def build_registry(ireps, root_label)
     # for every `class X ... end` / `module X ... end`.
     pending_reg = nil
     pending_name = nil
+    # Ruby's own `private`/`protected`/`public` visibility tracking, scoped
+    # to this one class/module body (resets on every fresh `walk` call, the
+    # same way a real visibility section never crosses a `class`/`module`
+    # boundary). Two real, distinct forms, both plain self-implicit sends
+    # to Kernel#private/#protected/#public (SSEND0/SSEND, register args
+    # "R1\t:private"): a bare call (n=0) is a *mode switch* -- every `def`
+    # from here to the end of this body defaults to that visibility; a call
+    # with Symbol arguments (n>=1, e.g. `private :step, :finish_move`)
+    # retroactively marks those *already-defined* methods, without
+    # changing the mode for whatever comes after. Caught building the first
+    # real second target (Game::Picture, docs/adr/0139's own follow-up):
+    # #step/#finish_move are both private in the real interpreted source
+    # (a bare `private` right before them) -- bc2cpp itself doesn't care
+    # (a private method can only ever be legitimately reached via a
+    # self-implicit call, which stays correct either way), but a hand-
+    # written mrb_define_method registration that doesn't know this would
+    # silently make a private method callable from outside, a real
+    # observable behavior change never caught by any #error check.
+    default_visibility = :public
 
-    irep.instructions.each do |insn|
+    irep.instructions.each_with_index do |insn, idx|
       case insn.op
       when 'CLASS', 'MODULE'
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
@@ -244,19 +263,46 @@ def build_registry(ireps, root_label)
         pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
       when 'EXEC'
         reg, irep_ref = insn.args.split(/\s+/, 2)
-        idx = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx]
+        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
+        child_label = irep.reps[idx2]
         walk.call(child_label, pending_name) if reg == pending_reg && pending_name
         pending_reg = nil
         pending_name = nil
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
         _reg, name, irep_ref = insn.args.split(/\s+/, 3)
-        idx = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx]
+        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
+        child_label = irep.reps[idx2]
         method_name = name.sub(/^:/, '')
         owner = namespace || 'Object' # a top-level `def` lands on Object.
-        registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label)
+        registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
+                                                visibility: default_visibility)
+      when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
+        name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
+        next unless %w[private protected public].include?(name)
+
+        n = insn.args[/n=(\d+)/, 1].to_i
+        if n.zero?
+          default_visibility = name.to_sym
+        else
+          # `private :a, :b, ...` -- the n Symbol arguments are LOADSYM'd
+          # into consecutive registers immediately before this send (real
+          # code always emits them right before, no interleaving
+          # instructions of any other kind); walk backward collecting them.
+          names = []
+          (idx - 1).downto(0) do |i|
+            break if names.size >= n
+
+            prev = irep.instructions[i]
+            break unless prev.op == 'LOADSYM'
+
+            names.unshift(prev.args[/:(\S+)/, 1])
+          end
+          names.each do |mname|
+            def_ = registry[mname]&.find { |d| d.owner == namespace }
+            def_.visibility = name.to_sym if def_
+          end
+        end
       end
     end
   end
@@ -425,13 +471,36 @@ class CodeGen
   def initialize(ireps, registry, ivar_layout)
     @ireps = ireps
     @registry = registry
-    @ivar_layout = ivar_layout # class_name -> {ivar_name => :fixnum}
     # irep label -> {owner:, name:} for every leaf method body.
     @owner_of = {}
     registry.each_value do |defs|
       defs.each { |d| @owner_of[d.irep] = d }
     end
+    @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     @only_owners = nil # set by compile_all -- see its own comment.
+  end
+
+  # Embedding an ivar as a real struct field only works if the struct is
+  # actually *allocated* first -- compile_method's own mrb_data_init call,
+  # emitted only for a compiled `#initialize`. A class whose own
+  # `#initialize` this compiler can't compile (optional/rest/keyword args,
+  # same constraint as pure_mandatory_arity? everywhere else, or no
+  # `#initialize` of its own at all -- relying on an ancestor's) never gets
+  # that allocation, so any *other* compiled method's GETIV/SETIV for that
+  # class would read/write DATA_PTR(self) on an object that's still a plain
+  # MRB_TT_OBJECT -- garbage or a crash, not just a missed optimization.
+  # Caught wiring up a second real target (Game::Picture, docs/adr/0139's
+  # own follow-up): its 11 real embeddable ivars are all correctly inferred
+  # by IvarLayout, but #initialize takes optional arguments and was never
+  # going to compile -- embedding them anyway would have been a real,
+  # silent memory-safety bug the very first time a compiled #step or
+  # #update ran against a real (interpreter-allocated, MRB_TT_OBJECT)
+  # Game::Picture instance.
+  def drop_unsafe_embeddings(ivar_layout)
+    ivar_layout.select do |owner, _|
+      init = @registry['initialize']&.find { |d| d.owner == owner }
+      init && pure_mandatory_arity?(@ireps.fetch(init.irep))
+    end
   end
 
   # This prototype's whole calling convention (a typed _impl taking each
@@ -576,7 +645,7 @@ class CodeGen
       code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
              "#error #{d.owner}##{d.name} has non-mandatory arguments (optional/rest/keyword/block) -- not in this prototype's supported subset\n\n"
       return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-               arity: arg_names.size, code: code, unsupported: true }
+               arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
     end
 
     out = String.new
@@ -622,7 +691,7 @@ class CodeGen
     end
     out << "}\n\n"
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-      arity: arg_names.size, code: out }
+      arity: arg_names.size, code: out, visibility: d.visibility }
   end
 
   # Every bytecode address any JMP/JMPNOT/JMPIF in this irep can land on --
@@ -652,6 +721,16 @@ class CodeGen
     when 'LOADNIL'
       d, = regs(a, 1)
       "  r#{d} = mrb_nil_value();\n"
+    when 'LOADFALSE'
+      d, = regs(a, 1)
+      "  r#{d} = mrb_false_value();\n"
+    when 'LOADTRUE'
+      d, = regs(a, 1)
+      "  r#{d} = mrb_true_value();\n"
+    when 'LOADSYM'
+      d = a[/^R(\d+)/, 1]
+      name = a[/:(\S+)/, 1]
+      "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
     when /^LOADI/
       d = a[/^R(\d+)/, 1]
       # The small-immediate variants (LOADI_0..7, LOADI__1, plain LOADI)
@@ -725,6 +804,39 @@ class CodeGen
           r#{d} = mrb_funcall(M, r#{d}, "+", 1, r#{s});
         }
       CPP
+    when 'SUBI'
+      d = a[/^R(\d+)/, 1]
+      lit = a.split(/\s+/).last
+      <<~CPP
+        if (mrb_integer_p(r#{d})) {
+          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+        }
+      CPP
+    when 'SUB'
+      d = a[/^R(\d+)/, 1]
+      s = a[/\(R(\d+)\)/, 1]
+      <<~CPP
+        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "-", 1, r#{s});
+        }
+      CPP
+    when 'DIV'
+      # No fixnum/fixnum fastpath here (unlike ADD/SUB): real Ruby integer
+      # division (`Fixnum#/`) floors toward negative infinity, not C's own
+      # truncating `/` -- getting that right means duplicating mruby's own
+      # `mrb_div_int` rounding, not worth it for this prototype's scope, so
+      # this always goes through the real method (`mrb_funcall`), which
+      # calls the same C-implemented `Integer#/` the interpreter itself
+      # would -- always correct, just without OP_DIV's own in-VM fast path.
+      d = a[/^R(\d+)/, 1]
+      s = a[/\(R(\d+)\)/, 1]
+      "  r#{d} = mrb_funcall(M, r#{d}, \"/\", 1, r#{s});\n"
+    when 'EQ', 'LT', 'LE', 'GT', 'GE'
+      compile_cmp(insn.op, a)
     when 'SEND0', 'SEND'
       compile_send(a, self_implicit: false)
     when 'SSEND0', 'SSEND'
@@ -732,6 +844,8 @@ class CodeGen
     when 'RETURN'
       r = a.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
+    when 'RETNIL'
+      "  return mrb_nil_value();\n"
     when 'RETFALSE'
       "  return mrb_false_value();\n"
     when 'RETTRUE'
@@ -776,11 +890,50 @@ class CodeGen
       d = a[/^R(\d+)/, 1]
       name = a[/::(\w+)\s*$/, 1]
       "  r#{d} = mrb_const_get(M, r#{d}, mrb_intern_cstr(M, \"#{name}\"));\n"
+    when 'HASH'
+      # "HASH R2 22" -- build a Hash from N key/value pairs held in 2N
+      # consecutive registers starting at Rd (Rd,Rd+1)=(k0,v0),
+      # (Rd+2,Rd+3)=(k1,v1), ...; the result overwrites Rd itself (real
+      # OP_HASH semantics, src/vm.c). Every pair register still holds its
+      # original value at this point (nothing here writes r<d> until the
+      # very end), so reading them all before the final assignment is safe.
+      d = a[/^R(\d+)/, 1].to_i
+      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      out = String.new
+      out << "  {\n"
+      out << "    mrb_value h = mrb_hash_new_capa(M, #{n});\n"
+      n.times { |i| out << "    mrb_hash_set(M, h, r#{d + 2 * i}, r#{d + 2 * i + 1});\n" }
+      out << "    r#{d} = h;\n"
+      out << "  }\n"
+      out
     when 'STOP'
       ''
     else
       "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
     end
+  end
+
+  # EQ/LT/LE/GT/GE all share OP_CMP's own real shape (src/vm.c): a fixnum-
+  # fixnum fast path compares directly and produces a real C++ bool
+  # converted to mrb_value; anything else falls back to the actual method
+  # (`mrb_funcall` with the operator's own name), which reaches the exact
+  # same method resolution the interpreter's own fallback SEND would -- a
+  # deliberate simplification for EQ specifically (the real VM short-
+  # circuits object identity and a Symbol-vs-anything-else compare before
+  # ever reaching this fallback), but never *unsound*: mrb_funcall("==")
+  # against an unoverridden class already falls back to identity equality
+  # on its own, so the observable result is identical either way.
+  def compile_cmp(op, args)
+    sym = { 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.fetch(op)
+    d = args[/^R(\d+)/, 1]
+    s = args[/\(R(\d+)\)/, 1]
+    <<~CPP
+      if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+        r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));
+      } else {
+        r#{d} = mrb_funcall(M, r#{d}, "#{sym}", 1, r#{s});
+      }
+    CPP
   end
 
   def compile_send(args, self_implicit:)
@@ -904,6 +1057,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/string.h>'
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
+  puts '#include <mruby/hash.h>'
   puts ''
   print gen.emit_structs
   print gen.emit_forward_decls(compiled)
@@ -911,7 +1065,20 @@ if $PROGRAM_NAME == __FILE__
 
   warn ''
   warn '== compiled entry points =='
-  compiled.each { |m| warn "  #{m[:entry]} / #{m[:impl]}  (#{m[:owner]}##{m[:name]}, arity #{m[:arity]})" }
+  compiled.each do |m|
+    # A hand-written register.cxx that just mrb_define_method's every entry
+    # here would silently make a private/protected method public -- flagged
+    # loudly (not just left to a code comment) since the whole point of
+    # this listing is what a real registration needs to get right.
+    vis =
+      case m[:visibility]
+      when :public then ''
+      when :private then '  [private -- use mrb_define_private_method, not mrb_define_method]'
+      when :protected then '  [protected -- mruby has no mrb_define_protected_method; ' \
+                            'registering this with mrb_define_method makes it public, a real behavior change]'
+      end
+    warn "  #{m[:entry]} / #{m[:impl]}  (#{m[:owner]}##{m[:name]}, arity #{m[:arity]})#{vis}"
+  end
 
   warn ''
   warn '== classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA) =='
