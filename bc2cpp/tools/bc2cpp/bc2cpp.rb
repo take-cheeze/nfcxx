@@ -339,10 +339,21 @@ end
 class IvarLayout
   UNKNOWN = :unknown
 
-  def self.analyze(ireps, registry)
+  # `arg_types`: method_name -> array of (:fixnum or nil) per mandatory-arg
+  # position, from ArgTypes.analyze below -- optional (defaults to none),
+  # since ArgTypes is itself built out of this same trace_type, and the two
+  # combined only make ivar embedding *more* permissive, never less: an
+  # ivar that was already embeddable without argument inference stays
+  # embeddable either way.
+  def self.analyze(ireps, registry, arg_types = {})
     # class_name -> irep labels of every leaf method owned by that class.
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep } }
+    # irep label -> its own MethodDef, so a SETIV site's trace can look up
+    # *its own* method's name/arity when it bottoms out at an incoming
+    # argument register (see trace_type's own final fallback).
+    def_of_irep = {}
+    registry.each_value { |defs| defs.each { |d| def_of_irep[d.irep] = d } }
 
     types = Hash.new { |h, k| h[k] = {} } # class_name -> {ivar_name => type or UNKNOWN}
 
@@ -351,6 +362,9 @@ class IvarLayout
       methods_of.each do |klass, irep_labels|
         irep_labels.each do |label|
           irep = ireps.fetch(label)
+          d = def_of_irep[label]
+          enter = irep.instructions.find { |i| i.op == 'ENTER' }
+          mand = enter ? enter.args.split(':').first.to_i : 0
           irep.instructions.each_with_index do |insn, idx|
             next unless insn.op == 'SETIV'
             ivar = insn.args[/@(\w+)/, 1]
@@ -363,7 +377,7 @@ class IvarLayout
             # against actual game source; the toy example's own SETIV sites
             # never happened to have a trailing comment.
             src_reg = insn.args[/R(\d+)/, 1]
-            inferred = trace_type(irep, idx, src_reg, types[klass])
+            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name)
             before = types[klass][ivar]
             merged = join(before, inferred)
             if merged != before
@@ -397,7 +411,7 @@ class IvarLayout
   # last wrote `reg`, following MOVE chains, until a type-determining
   # opcode (or the top of this straight-line method body, in which case
   # `reg` is an opaque incoming argument -- unknown).
-  def self.trace_type(irep, idx, reg, known_ivar_types)
+  def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil)
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       case insn.op
@@ -446,7 +460,82 @@ class IvarLayout
         return UNKNOWN if d == reg
       end
     end
-    UNKNOWN # reg was never written in this block -- an incoming argument.
+    # reg was never written in this block -- an incoming argument. Register
+    # N (1-indexed) is argument N for N <= mand, the same convention
+    # CodeGen#compile_method itself uses (`r#{i + 1} = #{a}`) -- if
+    # whole-program call-site inference (ArgTypes, below) found every real
+    # caller of *this* method passes the same primitive type there, use
+    # it; otherwise this is a genuinely opaque incoming value (the
+    # `Animal#@name` case: no caller-side inference possible without
+    # knowing every caller passes a String, which ArgTypes only proves for
+    # Fixnum-typed positions).
+    pos = reg.to_i
+    if arg_types && method_name && pos.between?(1, mand)
+      t = arg_types[method_name]&.[](pos - 1)
+      return t if t
+    end
+    UNKNOWN
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6c: whole-program call-site argument-type inference -- "cheap type
+# annotating" without any actual annotation: for a method name with
+# exactly one real definition (MONO -- the same registry IvarLayout and
+# devirtualization both already trust), every SEND/SSEND anywhere in the
+# program that sends that name can only ever be calling this one
+# definition (dispatch is by name, not signature, so a POLY name's call
+# sites could each be targeting a *different* real method -- pooling their
+# arguments together would silently conflate unrelated calling
+# conventions, so this deliberately only ever looks at MONO names).
+#
+# For each of its mandatory argument positions, this walks every such call
+# site's own argument register backward with IvarLayout's own trace_type
+# (exactly the same machinery SETIV sites already use, just re-pointed at
+# a SEND's argument registers instead) -- if every real caller's value for
+# that position traces to Fixnum, the position is Fixnum everywhere calls
+# reach it from. This directly feeds IvarLayout's own "opaque incoming
+# argument" fallback above: `Animal#@name`-shaped ivars (a SETIV whose
+# only source is a plain method parameter) can now embed whenever every
+# real call site happens to pass a Fixnum there, without needing a real
+# type annotation anywhere in the source.
+class ArgTypes
+  def self.analyze(ireps, registry)
+    types = {}
+
+    registry.each do |name, defs|
+      next unless defs.size == 1 # MONO names only -- see this class's own comment.
+
+      irep = ireps.fetch(defs.first.irep)
+      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      mand = enter ? enter.args.split(':').first.to_i : 0
+      next if mand.zero?
+
+      arg_types = Array.new(mand)
+      ireps.each_value do |caller_irep|
+        caller_irep.instructions.each_with_index do |insn, idx|
+          next unless %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+          next unless insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1] == name
+
+          d = insn.args[/^R(\d+)/, 1].to_i
+          n = insn.args[/n=(\d+)/, 1].to_i
+          next unless n == mand # a real call site to a MONO name always matches its one definition's arity.
+
+          (1..mand).each do |k|
+            # No `known_ivar_types` context here (a caller's own ivars
+            # aren't tracked at this point) -- a GETIV-sourced argument
+            # value traces to UNKNOWN, a safe under-approximation (never
+            # wrongly infers Fixnum), not a wrong one.
+            t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {})
+            arg_types[k - 1] = IvarLayout.join(arg_types[k - 1], t)
+          end
+        end
+      end
+
+      types[name] = arg_types.map { |t| t == IvarLayout::UNKNOWN ? nil : t }
+    end
+
+    types
   end
 end
 
@@ -1014,7 +1103,21 @@ if $PROGRAM_NAME == __FILE__
     warn "  #{mono ? 'MONO' : 'POLY'}  :#{name}  (#{defs.size} def#{'s' unless defs.size == 1}: #{owners})"
   end
 
-  ivar_layout = IvarLayout.analyze(ireps, registry)
+  arg_types = ArgTypes.analyze(ireps, registry)
+  warn ''
+  warn '== call-site argument-type inference (MONO names only) =='
+  inferred_any = false
+  arg_types.each do |name, types|
+    types.each_with_index do |t, i|
+      next unless t
+
+      inferred_any = true
+      warn "  ARG  :#{name}, position #{i + 1}  (#{t})"
+    end
+  end
+  warn '  (none inferred)' unless inferred_any
+
+  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types)
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?
