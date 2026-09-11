@@ -930,6 +930,41 @@ BC2CPP_COMPILED_GEMS = {
     # #initialize itself is forced private by mruby's own interpreter
     # regardless of source, the same always-private special case as every
     # other compiled #initialize in this file.
+    #
+    # A twenty-seventh, independent round adds Game::Rng (mruby-rpg2k/
+    # mrblib/game.rb) -- the engine's own seeded linear-congruential PRNG
+    # (used wherever the original RPG_RT's own randomness needs to match,
+    # e.g. enemy encounter rolls), needing no new opcode work at all. 3 of
+    # its own 4 real bytecode-defined methods compile clean: #next_int
+    # (`@state = (@state * 75 + 74) % PERIOD`, a real GETCONST plus
+    # MUL/ADDI fastpaths and a POLY `%` send that correctly stays ordinary
+    # mrb_funcall dispatch -- `%` has other real definitions project-wide)
+    # and #random/#scaled, each a MONO self-call straight into
+    # Game__Rng_next_int_impl (no mrb_funcall at all -- :next_int has
+    # exactly one real bytecode definition anywhere in the closed world;
+    # :random itself is POLY, 3 defs -- Game::Rng, RPG2k::Scene::MapWorld,
+    # RPG2k::Scene::VehicleWorld -- which has no bearing on registering
+    # Rng's own #random, only on whether some *other* call site could
+    # devirtualize into it). #scaled's own `next_int * scale / PERIOD`
+    # additionally exercises a real DIV, which correctly stays ordinary
+    # mrb_funcall dispatch too, per this compiler's own established
+    # no-fastpath-for-DIV rule (real Ruby integer division floors toward
+    # negative infinity, not C's truncating `/`). #initialize
+    # (`initialize(seed = 1)`, one optional argument) has the same
+    # established non-mandatory-arity gap as every other unembedded target
+    # above, so drop_unsafe_embeddings correctly refuses to embed this
+    # class's own one real ivar (@state, provably Fixnum) -- confirmed
+    # directly against the real generated output: Game::Rng does not
+    # appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic. No bare `private`/`protected`/`public` anywhere in the
+    # real source, so all three compiled methods are plain
+    # `mrb_define_method`; #initialize itself is forced private by mruby's
+    # own interpreter regardless of source. Zero bc2cpp.rb changes needed
+    # -- every opcode this class's own method bodies use (GETCONST, MUL,
+    # ADDI, DIV, a MONO self-send, a POLY `%` send) was already supported
+    # by prior rounds' own opcode work; re-confirmed directly against the
+    # real generated output that no empty-name `mrb_funcall(M, <reg>, "",
+    # ` shape appears anywhere in it.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -942,7 +977,8 @@ BC2CPP_COMPILED_GEMS = {
                Game::Timer Game::Switches Game::Variables
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
-               Game::NumberInput RPG2k::Scene::GameOver Game::Actors],
+               Game::NumberInput RPG2k::Scene::GameOver Game::Actors
+               Game::Rng],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
