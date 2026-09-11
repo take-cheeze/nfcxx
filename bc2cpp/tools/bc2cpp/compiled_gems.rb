@@ -1700,7 +1700,116 @@ BC2CPP_COMPILED_GEMS = {
     # @color pick up a CLASS_HINT (Tone/Color) from their own `||=`
     # construction, but a CLASS_HINT alone never embeds without a
     # compiling constructor either.
-    owners: %w[RGSS::Sprite RGSS::Plane],
+    #
+    # RGSS::Tilemap (same mrblib/lib.rb, right above Window) joins as the
+    # gem's third owner -- an even smaller target than Plane: only one
+    # real bytecode-defined method, `#autotiles`
+    # (`@autotiles ||= Array.new(7)`, RGSS's own fixed 7-slot autotile
+    # table). `attr_reader :tileset, :map_data, :ox, :oy, :viewport,
+    # :priorities, :flags` and `attr_accessor :flash_data` all stay
+    # native/uncompiled, as always -- confirmed directly against the real
+    # `== compiled entry points ==` listing, which adds exactly one new
+    # line (`RGSS__Tilemap_autotiles`, arity 0) and touches nothing
+    # already shipped.
+    #
+    # `#autotiles`'s own `||=` needs no new opcode work -- same
+    # GETIV/JMPIF-guarded-GETCONST+SEND+SETIV lowering already verified
+    # for Sprite's/Plane's own `@tone ||=`/`@color ||=`. But the GETCONST
+    # target here is different in a way worth checking rather than
+    # assuming identical: `Tone`/`Color` are RGSS-namespaced classes that
+    # the owner-scope-first chain finds at the *RGSS* scope (the first
+    # `bc2cpp_const_try`), while `Array` is a bare core class living
+    # directly on Object -- confirmed directly against the real
+    # regenerated body that the chain still resolves it correctly, just
+    # by falling through both protected `bc2cpp_const_try` attempts
+    # (RGSS::Tilemap, then RGSS -- neither defines its own `Array`) to
+    # the chain's final, unprotected `mrb_const_get` against
+    # `M->object_class`, exactly the "top-level fallback" case
+    # GETCONST's own codegen comment already documents, just reached via
+    # the multi-scope path instead of the single-scope one. Same
+    # resulting `Array.new(7)` semantics either way.
+    #
+    # Embedding: none, confirmed directly against the real diagnostic --
+    # RGSS::Tilemap never appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" listing. Tilemap has no #initialize of its own
+    # at all (same as Plane), so drop_unsafe_embeddings's own class-level
+    # gate excludes it from consideration outright, independent of ivar
+    # type -- @autotiles picks up a CLASS_HINT (Array) from its own `||=`
+    # construction, exactly like Plane's @tone/@color, but a CLASS_HINT
+    # alone never embeds without a compiling constructor either.
+    #
+    # RGSS::Window (docs/adr/0139's own follow-up, this gem's third owner,
+    # mruby-rgss/mrblib/lib.rb) joins for 12 of its own real bytecode-
+    # defined methods: #opacity/#back_opacity/#active/#pause/#stretch/
+    # #openness (the same nil-guarded-default reader shape as Sprite/
+    # Plane above), #cursor_rect (`@cursor_rect ||= Rect.new(0, 0, 0,
+    # 0)`, the same `||=` + owner-scope-first-GETCONST shape already
+    # proven by Sprite's own `@tone ||=`/`@color ||=`), #padding/
+    # #arrows_visible (the same nil-guarded-default shape again), and
+    # #open?/#close?/#padding_bottom -- each a same-class self-implicit
+    # call to another already-compiled RGSS::Window reader (#openness,
+    # #openness, #padding respectively). Confirmed directly against the
+    # real generated output (not merely inferred from other MONO self-
+    # calls elsewhere): each compiles to a `// MONO :openness ->
+    # RGSS::Window#openness, direct C++ call (no mrb_funcall)` /
+    # `// MONO :padding -> RGSS::Window#padding, direct C++ call` comment
+    # followed by a direct `RGSS__Window_openness_impl(M, self)` /
+    # `RGSS__Window_padding_impl(M, self)` call -- the identical
+    # devirtualization already exercised for every other same-owner self-
+    # call in this whole program, not a new mechanism. `x`/`y`/`width`/
+    # `height`/`ox`/`oy`/`z`/`viewport`/`windowskin`/`contents`/
+    # `contents_opacity` (`attr_reader`) stay native/uncompiled, as
+    # always.
+    #
+    # #initialize does NOT compile. It has 4 real optional arguments
+    # (`x = nil, y = nil, width = nil, height = nil`), hitting bc2cpp's
+    # own pure_mandatory_arity? gate: confirmed directly against the real
+    # generated output before SKIP_UNSUPPORTED=1 drops it, `#error
+    # RGSS::Window#initialize has non-mandatory arguments (optional/rest/
+    # keyword/block) -- not in this prototype's supported subset`, the
+    # exact same gap every other optional-argument #initialize in this
+    # codebase already hits. This class's own real source also runs
+    # `alias_method :_rgss1_initialize, :initialize` immediately before
+    # this new #initialize, to keep the RGSS1 (XP) native initializer
+    # reachable from inside the RGSS2/3 (VX/VX Ace) override -- a
+    # genuinely new shape for this ADR, checked directly rather than
+    # assumed: `alias_method` is a plain self-implicit `SSEND
+    # :alias_method` call (confirmed via `mrbc -v -S` disassembly of an
+    # isolated repro), not the `alias` *keyword*'s own dedicated
+    # `OP_ALIAS` bytecode instruction, so it creates no TDEF/DEF pair for
+    # `_rgss1_initialize` at all. build_registry only ever populates its
+    # name registry by walking TDEF/DEF pairs, so `_rgss1_initialize`
+    # never enters it under any name whatsoever -- confirmed directly:
+    # grepping the full registry dump and the generated output for
+    # `_rgss1_initialize`/`rgss1` finds zero matches anywhere in this
+    # closed world. This is a *third*, structurally distinct cause of
+    # registry-invisibility alongside the two this ADR already documents
+    # (a native method is scraped back in from NATIVE_SRCS by a separate
+    # regex pass; a `class << self`/`def self.x` singleton method gets
+    # its own real DEF under a synthesized `.singleton` pseudo-owner) --
+    # `alias_method` has no equivalent backfill mechanism at all, so an
+    # aliased name isn't merely mis-attributed the way a singleton method
+    # once was, it is entirely absent from the registry, with no owner
+    # under any name. Not currently exploitable: the only real call site
+    # for `_rgss1_initialize` is #initialize's own body, and that body's
+    # own SEND instructions are never even inspected -- the non-
+    # mandatory-arity #error fires first, before compile_send ever runs
+    # on this method at all. Flagged here as a real, general registry
+    # gap for whoever next adds an `alias_method`-defined name with a
+    # live call site elsewhere in the program: such a call would silently
+    # fall back to ordinary dynamic dispatch (never devirtualized, since
+    # the registry has zero defs for that name) -- always safe by this
+    # prototype's own under-compile-is-safe rule, just a missed
+    # optimization, never a correctness risk.
+    #
+    # Embedding: none. drop_unsafe_embeddings's own class-level gate
+    # requires a *compiling* #initialize with pure mandatory arity before
+    # embedding anything on a class at all; #initialize doesn't compile
+    # here, so nothing on RGSS::Window is ever even proposed as an
+    # embedding candidate -- confirmed directly against the real
+    # diagnostic: RGSS::Window never appears in bc2cpp's own "classes
+    # needing MRB_SET_INSTANCE_TT" listing.
+    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window],
     out_symbol: 'rgss_compiled',
   },
 }.freeze
