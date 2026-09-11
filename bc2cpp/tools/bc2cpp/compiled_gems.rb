@@ -1067,6 +1067,104 @@ BC2CPP_COMPILED_GEMS = {
     # codebase is. No bare `private`/`protected`/`public` anywhere in the
     # real source, so both compiled methods below are plain
     # `mrb_define_method`.
+    #
+    # A thirtieth, independent round adds Game::Enemy (mruby-rpg2k/mrblib/
+    # game/battle_support.rb) -- a single database-backed enemy combatant
+    # built for a battle. 3 of its own 4 real bytecode-defined methods
+    # compile clean, needing zero bc2cpp.rb changes: #attack_hit_rate
+    # (`@miss ? 70 : 90`, a plain GETIV plus JMPIF ternary), #dead?
+    # (`@hp <= 0`, the fixnum-fastpath LE this compiler already has), and
+    # #reseed_rewards (`@exp = into.exp; @gold = into.gold; @drop_id =
+    # into.drop_id; @drop_prob = into.drop_prob`, four plain SETIVs fed by
+    # real POLY sends that correctly stay ordinary mrb_funcall dispatch --
+    # confirmed directly against the real generated output). #initialize
+    # (`db, id, x = 0, y = 0, hidden = false`, three optional arguments)
+    # is the one gap -- the same established non-mandatory-arity shape as
+    # every other unembedded target above, so drop_unsafe_embeddings
+    # correctly refuses to embed any of this class's own thirteen
+    # provably-Fixnum ivars -- confirmed directly against the real
+    # generated output: Game::Enemy does not appear in bc2cpp's own
+    # "classes needing MRB_SET_INSTANCE_TT" diagnostic.
+    #
+    # A real, confirmed-but-not-currently-live registry gap was found
+    # cross-checking #reseed_rewards's own four POLY sends one by one
+    # against the real registry dump (not just trusting the summary
+    # count): Game::Enemy's own big `attr_reader :id, :name,
+    # :battler_name, :max_hp, :max_sp, :atk, :def, :spi, :agi, :exp,
+    # :gold, :x, :y, :drop_id, :drop_prob` (15 Symbol arguments in one
+    # call, mrblib/game/battle_support.rb:1043-1044) compiles to `SSEND
+    # R1 :attr_reader n=*` -- mrbc's own CALL_MAXARGS/splat encoding for a
+    # call whose direct-encodable arg-count nibble maxes out at 14,
+    # confirmed directly against the real disassembly and against the one
+    # other attr_reader call project-wide that lands exactly on the
+    # boundary (Game::Interpreter#initialize's own 14-Symbol attr_reader,
+    # `n=14`, encodes fine). `build_registry`'s own attr_reader/writer/
+    # accessor fix (two rounds ago) parses this same call site's own `n=`
+    # value with `insn.args[/n=(\d+)/, 1].to_i` -- `nil.to_i` on the
+    # non-numeric `*` silently returns 0, so `collect_loadsym_names`
+    # collects zero names and none of these 15 real Enemy accessor names
+    # -- including :battler_name, :spi, and :gold, which do collide with
+    # other real definitions elsewhere (Game::Battle::Combatant's own
+    # Struct members, Game::Party's own attr_reader) -- ever gets a
+    # synthetic registry entry for Game::Enemy at all. Checked each of
+    # the 15 names individually against the real registry dump before
+    # concluding this is safe today, not assumed: every one of the three
+    # that shows a colliding single ("MONO") definition elsewhere
+    # (:battler_name/:spi -> Game::Battle::Combatant, a Struct member;
+    # :gold -> Game::Party, itself only an attr_reader) is *also*
+    # synthetic (`irep: nil`) on that other side, and
+    # `monomorphic_target` already refuses to devirtualize into any
+    # target whose own `irep` is nil regardless of `defs.size` -- so this
+    # gap can only ever turn an already-safe POLY-by-construction call
+    # into a differently-labeled-but-still-safe one, never an actual
+    # wrong direct call, for every real name this specific 15-argument
+    # call installs. Not fixed here to avoid scope creep on this pass
+    # (Game::Enemy's own three target methods above compile fully clean
+    # without it) -- left as a real, confirmed-safe-for-now structural
+    # gap for a future round, the same "found, not currently exploitable"
+    # bucket as this ADR's own unfused-SDEF-at-large-class-body finding.
+    # attr_accessor :hp, :sp, :hidden and the smaller single/few-name
+    # attr_reader calls (:actions; :crit_chance, :attribute_ranks,
+    # :state_ranks; :levitate; :transparent; :battler_hue) and
+    # attr_accessor :flying_phase all register correctly (well under the
+    # 14-name boundary), confirmed live in the registry (e.g. :crit_chance
+    # shows POLY, 3 defs: Game::Battle::Combatant, Game::Enemy,
+    # Game::Actor). No bare `private`/`protected`/`public` anywhere in the
+    # real source, so all three compiled methods below are plain
+    # `mrb_define_method`.
+    #
+    # The same round also adds RPG2k3::Scene::Battle (mruby-rpg2k/mrblib/
+    # scene/battle_rpg2k3.rb) -- the real subclass (`class Battle <
+    # RPG2k::Scene::Battle`, a distinct top-level namespace from RPG2k
+    # itself, NOT the base UI battle scene, which is not a compiled owner)
+    # adding RPG2003's active-time-battle (ATB) gauge behavior on top. 7 of
+    # its own 15 real bytecode-defined methods compile clean, needing no
+    # new opcode work at all: #active_atb?, #atb_accumulating? (a Hash#[]
+    # GETIDX read, a MONO self-call into #active_atb?, and a POLY
+    # `Array#include?` send against the frozen ATB_MENU_PHASES
+    # class-constant array literal), #gauge_battle?, #drive_battle_atb
+    # (MONO self-calls into #controllable?/#start_gauge_action),
+    # #start_gauge_action, #enter_atb_phase (a MONO self-call into
+    # #drive_battle_atb), and #controllable?. The other 8 -- #update,
+    # #drive_battle_command, #enter_command_phase, #open_battle_options,
+    # #advance_actor, #prev_commandable_actor_index -- each end in (or, for
+    # #update, has one branch reach) a bare `super`, OP_SUPER, out of this
+    # compiler's opcode scope (the same established gap RPG2k::Scene::
+    # ItemMenu's/DebugMenu's own #initialize already documents);
+    # #finish_round_animation also calls `super` on top of several genuine
+    # Ruby blocks (`select(&:defending)`, `select(&:dead?)`,
+    # `.uniq { |a| ... }`, `.each { |ally| ... }`); #interrupting_ready_
+    # combatant ends in one more real block (`ready_combatants.find { |c|
+    # ... }`) -- the same established BLOCK/SENDB out-of-scope shape every
+    # other block-using method in this file already documents. Has no
+    # #initialize of its own (inherits the base class's), so there is no
+    # non-mandatory-arity gap to worry about, but also nothing to embed:
+    # confirmed directly against the real generated output, this class
+    # never appears in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic (every @ui/@state access in its compiled methods is a
+    # Hash #[]/#[]= read/write, never a direct SETIV). No bare `private`/
+    # `protected`/`public` anywhere in the real source, so all 7 compiled
+    # methods below are plain `mrb_define_method`.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1080,7 +1178,8 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
-               Game::Rng Game::Weather Game::Troop Game::Vehicle],
+               Game::Rng Game::Weather Game::Troop Game::Vehicle
+               Game::Enemy RPG2k3::Scene::Battle],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
