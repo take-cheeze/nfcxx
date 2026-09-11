@@ -1069,6 +1069,19 @@ def pure_mandatory_arity?(irep)
   fields[1..].all?(&:zero?)
 end
 
+# The real mandatory-argument count an ENTER instruction declares (the same
+# `fields[0]` pure_mandatory_arity? already parses out, just returned
+# instead of only checked) -- used by compile_send's own MONO devirtualization
+# guard to refuse a direct call whose call-site argument count doesn't match
+# the target's real arity (see that guard's own comment for the real
+# Input.repeat?/Game::MoveRoute#repeat? name-collision bug this catches).
+def mandatory_arity(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return 0 unless enter
+
+  enter.args.split(':').first.to_i
+end
+
 def report_annotation_candidates(ireps, registry, arg_types, annotations)
   candidates = []
   registry.each_value do |defs|
@@ -1108,7 +1121,7 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
 
       # A second, purely diagnostic pass: an opaque mandatory argument
       # consumed directly by a fixnum-fastpath arithmetic/comparison op
-      # (ADD/SUB/EQ/LT/LE/GT/GE and their *I immediate forms) is real
+      # (ADD/SUB/MUL/EQ/LT/LE/GT/GE and their *I immediate forms) is real
       # evidence worth surfacing too, even though -- unlike a SETIV site --
       # annotating one of these can never change compiled output:
       # IvarLayout.trace_type (the only consumer of arg_types/annotations)
@@ -1119,7 +1132,7 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       # unlock -- see the "go on annotating rpg2k for readability" follow-up.
       irep.instructions.each_with_index do |insn, idx|
         regs = case insn.op
-               when 'ADD', 'SUB', 'EQ', 'LT', 'LE', 'GT', 'GE'
+               when 'ADD', 'SUB', 'MUL', 'EQ', 'LT', 'LE', 'GT', 'GE'
                  [insn.args[/^R(\d+)/, 1], insn.args[/\(R(\d+)\)/, 1]]
                when 'ADDI', 'SUBI'
                  [insn.args[/^R(\d+)/, 1]]
@@ -1192,6 +1205,8 @@ class CodeGen
     # dependency) never appears in a generated file that has no real use
     # for it.
     @const_lookup_helper_used = false
+    @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
+    @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
   end
 
   def const_lookup_helper_used?
@@ -1250,8 +1265,49 @@ class CodeGen
     defs = @registry[name]
     return nil unless defs && defs.size == 1
     return nil unless defs.first.irep
+    return nil unless compiles_clean?(defs.first.irep)
 
     defs.first
+  end
+
+  # Does compile_method(label) actually come out #error-free? A MONO name
+  # whose one real definition has pure-mandatory arity still isn't safe to
+  # devirtualize into if that definition's own body hits some OTHER
+  # unsupported opcode -- real bug, caught building Game::Screen's own
+  # compiled target (docs/adr/0139): #update calls #update_shake/
+  # #update_flash by (MONO) name, but both bodies use a plain `MUL`, an
+  # opcode this compiler has no compile_insn case for at all, so
+  # SKIP_UNSUPPORTED correctly drops them from what's actually emitted --
+  # except #update's own devirtualized call still referenced their _impl
+  # functions directly, an undefined-reference link failure the two
+  # previously-shipped targets never happened to hit (this is exactly the
+  # pre-existing, "flagged for whoever next touches compile_send's own MONO
+  # path" gap this same ADR already named, from the ONLY_OWNERS-only guard
+  # a few lines below this method's own caller).
+  #
+  # Actually compiling the candidate (not just re-deriving compile_insn's
+  # own opcode-support list by hand a second time, which would drift) is
+  # the only way to answer this without duplicating that logic -- so this
+  # memoizes a real compile_method(label) call and checks its own result
+  # for a `#error` marker, the exact same test SKIP_UNSUPPORTED itself uses.
+  #
+  # Guarded against recursion (two MONO methods calling each other by
+  # name): a label already being probed reports itself as "not (yet) known
+  # clean" instead of recursing forever -- always the SAFE direction. A
+  # real mutually-recursive MONO pair simply loses this one optimization
+  # for each other (falls back to ordinary mrb_funcall dispatch), never an
+  # unsound direct call to a function this run might not actually emit.
+  def compiles_clean?(label)
+    return @clean_cache[label] if @clean_cache.key?(label)
+    return false if @probing.include?(label)
+
+    @probing << label
+    begin
+      result = compile_method(label)
+      @clean_cache[label] = !result[:code].include?('#error')
+    ensure
+      @probing.delete(label)
+    end
   end
 
   def embed_type(owner, ivar)
@@ -1517,6 +1573,18 @@ class CodeGen
     when 'LOADTRUE'
       d, = regs(a, 1)
       "  r#{d} = mrb_true_value();\n"
+    when 'LOADSELF'
+      # "LOADSELF R2 (R0)" -- R[a] = self (src/vm.c's OP_LOADSELF). Real
+      # code hits this from an explicit-receiver self-send that mrbc
+      # doesn't fold into SSEND (`self.foo = ...`, a plain local-variable-
+      # looking assignment on an attr writer, compiles to LOADSELF + SEND
+      # rather than SSEND -- confirmed against a toy `self.baz = 1` case).
+      # r0 is already wired to `self` at the top of every generated
+      # function body (CodeGen#compile_method's own `mrb_value r0 = self;`
+      # declaration), so this is exactly as trivial as LOADNIL/LOADFALSE/
+      # LOADTRUE's own bare-assignment shape above.
+      d, = regs(a, 1)
+      "  r#{d} = self;\n"
     when 'LOADSYM'
       d = a[/^R(\d+)/, 1]
       name = a[/:(\S+)/, 1]
@@ -1640,6 +1708,23 @@ class CodeGen
           r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
         } else {
           r#{d} = mrb_funcall(M, r#{d}, "-", 1, r#{s});
+        }
+      CPP
+    when 'MUL'
+      # ADD/SUB's own fixnum-fastpath-else-mrb_funcall shape exactly:
+      # src/vm.c's OP_ADD/OP_SUB/OP_MUL all expand from the identical
+      # OP_MATH(op_name) macro (confirmed reading vm.c directly), so MUL's
+      # real VM semantics differ from ADD/SUB only in which C operator and
+      # which method name the slow path calls -- no separate design
+      # question to answer here (unlike DIV, which deliberately skips the
+      # fastpath for its own real rounding-direction reason, see below).
+      d = a[/^R(\d+)/, 1]
+      s = a[/\(R(\d+)\)/, 1]
+      <<~CPP
+        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "*", 1, r#{s});
         }
       CPP
     when 'DIV'
@@ -1797,6 +1882,58 @@ class CodeGen
       out << "    r#{d} = h;\n"
       out << "  }\n"
       out
+    when 'ARRAY'
+      # "ARRAY R3 2" -- build an Array from N consecutive registers starting
+      # at Rd (Rd, Rd+1, ..., Rd+N-1), the result overwriting Rd itself
+      # (real OP_ARRAY semantics, src/vm.c: `ary_new_from_regs(mrb, b, a)`
+      # is `mrb_ary_new_from_values(mrb, b, &regs[a])`). Every source
+      # register still holds its original value at this point (nothing
+      # here writes r<d> until the final assignment), so copying them all
+      # into a temporary contiguous C array before it is safe -- the same
+      # "read everything before the final overwrite" reasoning HASH's own
+      # codegen above already relies on. `r<d>..r<d+N-1>` are separate C++
+      # locals here (this codegen's registers are never actually
+      # contiguous in memory the way the real VM's register file is), so
+      # they have to be copied into a real array rather than pointed at
+      # directly the way the interpreter's own `&regs[idx]` does.
+      #
+      # Only the plain literal-array shape mrbc's own codegen.c emits for
+      # `[e0, e1, ..., eN-1]` with no splat is modeled (confirmed against
+      # codegen_array's own `else` branch, the no-splat path: `pop_n(n);
+      # genop_2(s, OP_ARRAY, cursp(), n)`); mrbc emits an *unrelated*
+      # 3-operand ARRAY2 (`R[a] = ary_new(R[b]..R[b+c])`, a peephole variant
+      # for `local = [literal]`, MOVE-then-ARRAY collapsed into one op) and
+      # separate ARYCAT/ARYPUSH/ARYSPLAT ops for a splat (`[*a, b]`) --
+      # none of those are in this prototype's real scope, so this opcode's
+      # own 2-operand disassembly shape (`ARRAY Rd N`) is the only one
+      # handled; anything else (a 3-operand ARRAY2, or ARYCAT/ARYPUSH/
+      # ARYSPLAT themselves) falls through to the generic #error below,
+      # exactly LOADL's own established narrow-scope precedent for an
+      # out-of-model opcode variant.
+      d = a[/^R(\d+)/, 1].to_i
+      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      if n.zero?
+        "  r#{d} = mrb_ary_new(M);\n"
+      else
+        out = String.new
+        out << "  {\n"
+        out << "    mrb_value elems[] = { #{(0...n).map { |i| "r#{d + i}" }.join(', ')} };\n"
+        out << "    r#{d} = mrb_ary_new_from_values(M, #{n}, elems);\n"
+        out << "  }\n"
+        out
+      end
+    when 'AREF'
+      # "AREF R2 R6 0 ; R2:x" -- R[a] = R[b][c], c a plain immediate index,
+      # never a register (real OP_AREF semantics, src/vm.c): when R[b]
+      # isn't an Array, index 0 yields R[b] itself (a bare non-Array value
+      # is treated as a one-element pseudo-array) and any other index
+      # yields nil; when it is an Array, mrb_ary_ref does the real bounds-
+      # checked lookup. This is exactly the destructuring assignment shape
+      # `x, y, w, h = some_call(...)` compiles to -- one AREF per
+      # destructured local, all reading the same call-result register.
+      d, s = regs(a, 2)
+      c = a[/^R\d+\s+R\d+\s+(\d+)/, 1]
+      "  r#{d} = mrb_array_p(r#{s}) ? mrb_ary_ref(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
     when 'STOP'
       ''
     else
@@ -1848,6 +1985,30 @@ class CodeGen
     # convention -- see pure_mandatory_arity?'s own comment (a real bug,
     # caught by running against real code, not a hypothetical).
     target = nil if target && !pure_mandatory_arity?(@ireps.fetch(target.irep))
+    # ...and if the call site's own argument count actually matches that
+    # target's real mandatory arity. Real, pre-existing bug (present before
+    # this round's own changes too, confirmed against a true before/after):
+    # a bytecode-only registry has no visibility into a same-named NATIVE
+    # method (see extract_native_method_names's own comment) -- run this
+    # diagnostic without NATIVE_SRCS (as this project's own established
+    # 421-error baseline measurement always has) and `:repeat?` looks MONO
+    # (only Game::MoveRoute#repeat?, a real 0-arg getter, is bytecode-
+    # visible), even though `Input.repeat?(key)` -- a real native 1-arg
+    # method on a different class entirely -- sends the very same bare name
+    # with 1 argument all over mruby-rpg2k/mrblib's own scene code. Every
+    # one of those call sites used to devirtualize straight into
+    # `Game__MoveRoute_repeat__impl(M, recv, key)`, a real arity mismatch
+    # against that function's own 0-argument signature -- a g++ compile
+    # error, not a hypothetical (120 real occurrences in this project's own
+    # unrestricted, no-NATIVE_SRCS diagnostic output). Real gem builds
+    # always pass NATIVE_SRCS (mrbgem.rake), which already flips a true
+    # collision like this to POLY and avoids the bug that way -- but the
+    # arg-count check here is a strictly cheaper, always-correct second
+    # line of defense that needs no NATIVE_SRCS input at all: a call site's
+    # own argument count is real, load-bearing data already sitting right
+    # here, and simply never matches a genuinely different method's real
+    # arity by construction, whatever its name happens to collide with.
+    target = nil if target && n != mandatory_arity(@ireps.fetch(target.irep))
     # Name-based devirtualization failed (still POLY by name) -- try a
     # call-site-specific fallback: THIS receiver, traced backward through
     # the same straight-line method body, might still be provably a fresh
@@ -1881,7 +2042,16 @@ class CodeGen
       known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes)
       if known_class
         candidate = @registry[name].find { |md| md.owner == known_class }
-        if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep))
+        # Same two guards as the MONO path above (its own comments have the
+        # real bugs both catch, e.g. Game::State#set_parallax/
+        # #set_screen_transition/#show_picture/#erase_picture -- all four
+        # real TYPED-path arity mismatches this exact check fixed, caught
+        # building Game::Screen's own compiled target): a class-exact
+        # candidate still isn't safe to call directly unless its own body
+        # actually compiles AND the call site's argument count matches its
+        # real mandatory arity.
+        if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep)) &&
+           compiles_clean?(candidate.irep) && n == mandatory_arity(@ireps.fetch(candidate.irep))
           target = candidate
           typed = true
         end
@@ -2108,6 +2278,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
+  puts '#include <mruby/array.h>'
   puts '#include <mruby/class.h>'
   # mrb_protect_error -- GETCONST's own owner-scope-first lookup (see its
   # own comment above) needs this to safely try a scope and fall back to
