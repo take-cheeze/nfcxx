@@ -1936,7 +1936,10 @@ class CodeGen
       # "<name>="  (a writer) -- checked directly here, the same way
       # monomorphic_target already treats an irep-nil MethodDef as "native,
       # no compiled body", rather than assumed safe by construction.
-      safe = ivars.reject { |name, _| natively_exposed?(owner, name) || natively_exposed?(owner, "#{name}=") }
+      safe = ivars.reject do |name, _|
+        natively_exposed?(owner, name) || natively_exposed?(owner, "#{name}=") ||
+          !every_accessor_compiles?(owner, name)
+      end
       out[owner] = safe unless safe.empty?
     end
   end
@@ -1950,6 +1953,107 @@ class CodeGen
   # whenever some other real accessor would silently miss it.
   def natively_exposed?(owner, name)
     (@registry[name] || []).any? { |d| d.owner == owner && d.irep.nil? }
+  end
+
+  # A real, previously-undiscovered gap in this same "safe to embed" gate,
+  # found and fixed building Game::Interpreter (docs/adr/0139's own
+  # follow-up): #initialize compiling clean (the check immediately above)
+  # is necessary but not sufficient. `struct RData` (3rd/mruby/include/
+  # mruby/data.h) carries its own, separate `struct iv_tbl *iv` field,
+  # completely independent of the `void *data` pointer bc2cpp's own
+  # embedded struct lives behind (`DATA_PTR`) -- confirmed directly against
+  # the real struct definition, not assumed. So ANY method that stays on
+  # the interpreter for any of this file's own already-established reasons
+  # (an unsupported opcode, non-mandatory arity, a genuine Ruby block/
+  # rescue) still runs its own ordinary SETIV/GETIV bytecode against that
+  # same `iv_tbl` the moment it touches this exact ivar -- a completely
+  # different storage location from the one every *compiled* sibling
+  # method's own GETIV/SETIV codegen reads and writes via DATA_PTR(self)
+  # once the ivar is embedded. Two real, independent storage locations
+  # silently diverging for the same ivar name on the same object: real,
+  # live data corruption (an interpreted accessor reading nil/stale from an
+  # `iv_tbl` entry a compiled sibling never writes to, while every compiled
+  # accessor's own writes vanish into a struct field the interpreter never
+  # reads) every time the still-interpreted method runs, not merely a
+  # missed optimization -- the identical severity class as the
+  # #initialize-never-compiles half of this same bug, just triggered by a
+  # DIFFERENT method than #initialize touching the same ivar. Confirmed
+  # real, not hypothetical, on Game::Interpreter's own @frame_steps: both
+  # #initialize and #reset_frame_steps compile clean and would embed it as
+  # a real Fixnum struct field, but #update -- which also reads and
+  # increments this exact ivar (`break if @frame_steps >= MAX_STEPS`,
+  # `@frame_steps += step_cost(cmd.code)`) -- hits a real, unmodeled JMPUW
+  # opcode (an `until`/modifier-`while` loop's own jump-out-of-loop shape)
+  # and stays on the interpreter; without this guard, every real #update
+  # call after the first #initialize would read a permanently-nil
+  # `iv_tbl["@frame_steps"]` (never written, since the compiled
+  # #initialize wrote the real value into the embedded struct field
+  # instead) rather than the value #initialize actually set, immediately
+  # raising inside `nil >= MAX_STEPS` the first time any interpreter ran.
+  def every_accessor_compiles?(owner, ivar_name)
+    # `@registry` is a `Hash.new { |h, k| h[k] = [] }` -- even a plain read
+    # of a not-yet-present key (e.g. `natively_exposed?`'s own `@registry
+    # [name]`, reached transitively the moment `compiles_clean?` below
+    # actually compiles a method body that sends a name never seen before)
+    # auto-vivifies a new empty-array entry as a side effect, mutating the
+    # very hash this method is enumerating. `.values` snapshots the current
+    # arrays into a plain, disconnected Array *before* any such nested
+    # mutation can happen, so the actual enumeration below never touches
+    # `@registry` itself -- `each_value` here raised a real, reproduced
+    # "can't add a new key into hash during iteration" RuntimeError the
+    # first time this method ran against the whole closed world (every
+    # other `@registry.each_value` walk in this file only ever reads
+    # `d.owner`/`d.irep` off already-built MethodDefs, never triggers a
+    # nested compile, so this collision was never reachable there).
+    @registry.values.each do |defs|
+      defs.each do |d|
+        next unless d.owner == owner && d.irep
+
+        touches = irep_subtree_touches_ivar?(d.irep, ivar_name)
+        return false if touches && !compiles_clean?(d.irep)
+      end
+    end
+    true
+  end
+
+  # Recursively checks a method's own top-level irep *and every irep nested
+  # inside it* (a block literal's own separate body -- `irep.reps[idx]`,
+  # the same child-irep array BLOCK/OCLASS/SCLASS/SDEF instructions already
+  # index into elsewhere in this file) for a SETIV/GETIV of this exact
+  # ivar. Needed because mrbc compiles a block literal's own body into a
+  # completely separate child irep, invisible to a plain scan of the
+  # enclosing method's own top-level `irep.instructions` alone -- confirmed
+  # real reading Game::Transition#clip's own generated output while fixing
+  # this same method's own #initialize-only blind spot (docs/adr/0139's own
+  # Game::Interpreter follow-up): #clip's own top-level irep is only 6
+  # instructions (build the Array, MOVE the argument, `#error unhandled
+  # opcode BLOCK`) and never itself mentions `@width`/`@height` at all --
+  # both live only inside its own `rects.each do |x, y, w, h| ... end`
+  # block's separate child irep, entirely missed by the first version of
+  # this fix (which only scanned `d.irep.instructions` directly and so
+  # still let `@width` embed even though `#clip` -- permanently
+  # uncompiled, BLOCK is not in this prototype's supported subset --
+  # reads it). Whether #clip's own top-level irep *itself* mentions the
+  # ivar is irrelevant to whether the method as a whole touches it: mruby's
+  # own VM runs a still-interpreted method's nested block bodies exactly
+  # like any other bytecode once that method is reached at all, no
+  # special-casing for "this part would have compiled in isolation" -- so
+  # every reachable descendant irep has to be checked, not just the
+  # method's own. `seen` guards against revisiting a shared child irep more
+  # than once (mrbc can and does share an irep across more than one call
+  # site); it is not a cycle guard `reps` could ever need one for (a block
+  # literal's own child irep is a strict subtree, never back-references an
+  # ancestor), but costs nothing to keep.
+  def irep_subtree_touches_ivar?(label, ivar_name, seen = Set.new)
+    return false if seen.include?(label)
+
+    seen << label
+    irep = @ireps.fetch(label)
+    return true if irep.instructions.any? do |insn|
+      (insn.op == 'SETIV' || insn.op == 'GETIV') && insn.args[/@(\w+)/, 1] == ivar_name
+    end
+
+    irep.reps.any? { |child| irep_subtree_touches_ivar?(child, ivar_name, seen) }
   end
 
   def cpp_name(owner, name)
