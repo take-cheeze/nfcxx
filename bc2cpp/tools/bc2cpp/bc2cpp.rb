@@ -561,10 +561,35 @@ class IvarLayout
   end
 
   # Two contributions for the same ivar must agree, or it's poisoned to
-  # UNKNOWN permanently (a real type mismatch, e.g. nil vs. String).
+  # UNKNOWN permanently (a real type mismatch, e.g. nil vs. String) --
+  # `b == UNKNOWN` is itself a disagreement (this new site's own type could
+  # not be determined at all) and has to poison exactly the same way a
+  # concrete-but-different type does, not be silently discarded in favor of
+  # whatever type an earlier site already established. A real, demonstrated
+  # bug caught building Game::Character: `#move_diagonal`'s own
+  # `@last_move_direction = [horizontal, vertical]` (a real Array literal,
+  # ARRAY opcode, correctly traced to UNKNOWN by trace_type's own generic
+  # fallback) used to have its UNKNOWN contribution silently dropped by the
+  # `return a if b == UNKNOWN` branch below whenever an earlier-processed
+  # site (here, `#initialize`'s own `@last_move_direction = direction`) had
+  # already joined in a concrete `:fixnum` for the same ivar name -- the
+  # 10-pass fixed-point sweep above has no fixed processing order across
+  # methods, so which site's contribution lands first in `types[klass]` is
+  # incidental, not something call sites can rely on to "arrive UNKNOWN
+  # first." The fix makes `UNKNOWN` join to `UNKNOWN` unconditionally,
+  # regardless of which side of the pair already held a concrete type or
+  # which order the two contributions were processed in -- the same
+  # commutative, order-independent join a sound fixed-point analysis needs.
+  # This closed a real, live unsoundness already affecting two shipped,
+  # embedding classes (docs/adr/0139's own Game::Character follow-up has
+  # the full before/after diagnostic diff and severity writeup):
+  # Game::Screen and Game::State each had ivars wrongly embedded as
+  # provably-Fixnum before this fix, when a later-processed real
+  # non-Fixnum-typed assignment site for the same ivar name should have
+  # poisoned them to UNKNOWN (dynamic iv_tbl) instead.
   def self.join(a, b)
     return b if a.nil?
-    return a if b == UNKNOWN || b.nil?
+    return UNKNOWN if b == UNKNOWN || b.nil?
     return UNKNOWN if a != b
 
     a
