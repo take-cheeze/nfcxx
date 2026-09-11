@@ -801,6 +801,61 @@ BC2CPP_COMPILED_GEMS = {
     # so every method below is `mrb_define_method`; #initialize itself
     # stays entirely interpreted (it never compiles), so it needs no
     # registration line at all.
+    #
+    # A twenty-fourth, independent round adds two more small targets, both
+    # needing zero new opcode work and finding zero live bc2cpp.rb bugs.
+    #
+    # RPG2k::Scene::EventResolver (mruby-rpg2k/mrblib/scene/base.rb, same
+    # file, right below MapWorld/VehicleWorld) -- the small helper that
+    # resolves a Call Event's own command list, by common-event id
+    # (#common_event_commands) or by map-event id/page
+    # (#map_event_commands). 2 of its own 3 real bytecode-defined methods
+    # compile clean: #initialize (`initialize common_by_id, map_events`,
+    # pure mandatory arity, no super, no block) and #common_event_commands
+    # (a Hash#[] read/memoizing Hash#[]= write via GETIDX/SETIDX, plus one
+    # real POLY `.event` send that correctly stays ordinary mrb_funcall
+    # dispatch, never devirtualized, since :event has other real
+    # definitions elsewhere in the closed world). #map_event_commands is
+    # the one gap -- its own body ends in a real `rescue StandardError`
+    # clause (RESCUE/RAISEIF/EXCEPT), the same already-established
+    # out-of-scope shape as MapWorld's/VehicleWorld's own #play_sound.
+    # Neither of this class's own two ivars (@common, @map_events) ever
+    # gets embedded: both are real Hashes, a type bc2cpp's embedding
+    # lattice only ever models for Fixnum/Symbol -- confirmed directly
+    # against the real generated output, this class does not appear in
+    # bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" diagnostic. No
+    # bare `private`/`protected` anywhere in the class body, so
+    # #common_event_commands is `mrb_define_method`; #initialize itself is
+    # forced private by mruby's own interpreter regardless of source.
+    #
+    # Game::NumberInput (mruby-rpg2k/mrblib/game.rb) -- the digit-cursor
+    # input model backing the Input Number event command (a fixed count
+    # of 0..9 digit cells, a movable cursor, per-cell increment/decrement,
+    # and the entered base-10 integer). 6 of its own 7 real
+    # bytecode-defined methods compile clean: #initialize, #digit, #inc,
+    # #dec, #left, #right (#digits/#cursor are attr_reader-generated,
+    # native, invisible to bc2cpp the same way every other attr_reader in
+    # this codebase is). #value is the one gap -- its own body ends in a
+    # real `@values.each { |d| v = v * 10 + d }` block (BLOCK/SENDB), the
+    # same established out-of-scope shape every other block-using method
+    # above already documents. Despite #initialize having pure mandatory
+    # arity, neither of this class's own two Fixnum-shaped ivars
+    # (@digits, @cursor) actually gets embedded: both are clamped/derived
+    # through a real conditional (`d = 1 if d < 1; d = MAX_DIGITS if d >
+    # MAX_DIGITS`), and bc2cpp's own straight-line backward ivar-type scan
+    # resolves the last write ahead of each SETIV to the `d = MAX_DIGITS`
+    # branch's own GETCONST (a constant lookup, never traced as a literal
+    # fixnum value regardless of what MAX_DIGITS actually resolves to),
+    # so both conservatively resolve to UNKNOWN and stay on the ordinary
+    # dynamic iv_tbl -- confirmed directly against the real generated
+    # output, this class does not appear in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" diagnostic either. Safe (a missed embedding
+    # opportunity, never an unsound one). @values (a real Array) gets a
+    # devirtualization-only CLASS_HINT, never a struct-field candidate.
+    # No bare `private`/`protected`/`public` anywhere in the real source,
+    # so every method below is `mrb_define_method` except #initialize
+    # itself, forced private by mruby's own interpreter regardless of
+    # source.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -812,7 +867,8 @@ BC2CPP_COMPILED_GEMS = {
                Game::Shop Game::Map Game::EnemyAi Game::ChipSet
                Game::Timer Game::Switches Game::Variables
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
-               RPG2k::Scene::VehicleWorld],
+               RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
+               Game::NumberInput],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
