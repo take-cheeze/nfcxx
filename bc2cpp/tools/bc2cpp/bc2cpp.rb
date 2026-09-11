@@ -240,12 +240,37 @@ def build_registry(ireps, root_label)
 
   walk = lambda do |label, namespace|
     irep = ireps.fetch(label)
-    # Track which register currently holds "the class/module most recently
-    # opened by CLASS/MODULE/SCLASS", so a same-register EXEC right after
-    # it can be matched up -- exactly the shape mrbc's own codegen emits
-    # for every `class X ... end` / `module X ... end`.
+    # Track which register currently holds "the class/module/singleton-class
+    # most recently opened by CLASS/MODULE/SCLASS", so a same-register EXEC
+    # right after it can be matched up -- exactly the shape mrbc's own
+    # codegen emits for every `class X ... end` / `module X ... end` /
+    # `class << X ... end`. pending_idx additionally pins the *exact*
+    # instruction index the matching EXEC has to land on (idx immediately
+    # after the CLASS/MODULE/SCLASS that set it) -- not just "whatever
+    # comes along later on this register" -- to close a real, confirmed-live
+    # bug: an empty `class`/`module` body (e.g. `class Timeout <
+    # StandardError; end`, mruby-rgss/mrblib/lib.rb) emits no EXEC at all
+    # for its own (empty) body, since mrbc doesn't bother emitting a
+    # trivial always-empty child-irep call in that case. Before pending_idx
+    # existed, that left pending_reg/pending_name sitting stale until
+    # *whatever* later EXEC happened to reuse the same register -- possibly
+    # many instructions and several unrelated constructs away -- which then
+    # got wrongly treated as that empty class/module's own body. Confirmed
+    # live against the real generated registry: RGSS::Timeout (empty) is
+    # immediately followed by `class << self; attr_accessor
+    # :asset_archive; end` reusing the very same register for its own
+    # SCLASS+EXEC, so RGSS.asset_archive/asset_archive= were registered
+    # under owner "RGSS::Timeout" instead of the real receiver. Real mrbc
+    # codegen (verified directly against every CLASS/MODULE/SCLASS+EXEC
+    # pair in this closed world's own disassembly) always emits the
+    # matching EXEC as the *literal next instruction* -- nothing legitimate
+    # is ever emitted in between -- so requiring exact index adjacency
+    # matches every real, intended pairing while making a stale leak
+    # structurally impossible, however far away the next same-register EXEC
+    # actually is.
     pending_reg = nil
     pending_name = nil
+    pending_idx = nil
     # Ruby's own `private`/`protected`/`public` visibility tracking, scoped
     # to this one class/module body (resets on every fresh `walk` call, the
     # same way a real visibility section never crosses a `class`/`module`
@@ -272,17 +297,83 @@ def build_registry(ireps, root_label)
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
         reg, name = insn.args.split(/\s+/, 2)
         pending_reg = reg
+        pending_idx = idx
         # Real Ruby constant nesting (Game::CharSet, not just "CharSet") --
         # matters so two same-named classes nested under different
         # modules aren't conflated into one registry entry.
         pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
+      when 'SCLASS'
+        # "SCLASS R1" -- OP_SCLASS's own real shape (src/codedump.c:
+        # `SCLASS\tR%d`), R[a] = R[a].singleton_class. A real `class <<
+        # self ... end` (or `class << SomeConst ... end`) opens the
+        # receiver's own singleton class as a body of its own, containing
+        # ordinary TDEFs -- exactly like CLASS/MODULE's own child body,
+        # just reached via this distinct opcode and with no symbol operand
+        # naming it directly (the name comes from the receiver register's
+        # own last write instead, walked backward the same cautious way
+        # the Struct.new fix already does for its own receiver check).
+        # Previously invisible to this walk entirely: nothing recursed into
+        # an SCLASS-opened body the way EXEC already does for a
+        # CLASS/MODULE-opened one, so every real `def` inside one (e.g.
+        # RGSS::Bitmap's own `class << self; attr_writer :extensions; def
+        # extensions; @extensions || EXTENSIONS; end; end`) was completely
+        # unregistered -- confirmed directly against the real registry
+        # dump (:extensions had zero entries, not even a synthetic one).
+        # Unlike SDEF's own single fused def (irep: nil is enough there --
+        # there is no separate body to recurse into), an SCLASS body can
+        # hold arbitrarily many real defs (RGSS::Audio's own class << self
+        # alone defines over twenty), so real soundness needs the same
+        # genuine recursion CLASS/MODULE already gets, registering each
+        # inner TDEF as an ordinary, walkable MethodDef with a real irep --
+        # reusing the exact same EXEC-matching code below rather than a
+        # bespoke synthetic-only path.
+        #
+        # Only two receiver shapes are trusted, both walked backward from
+        # this SCLASS to the register's own last write (mirrors
+        # trace_new_target's/the Struct.new fix's own "only a real,
+        # statically-certain fact counts" discipline): a bare LOADSELF
+        # (`class << self`, self at this point is always the innermost
+        # enclosing namespace -- the same fact SDEF's own fix already
+        # relies on) or a GETCONST naming a specific constant (`class <<
+        # SomeConst`, e.g. `class << Graphics`, seen for real in this
+        # closed world but only ever nested inside an ordinary runtime
+        # method body that this walk never descends into anyway). Anything
+        # else (a computed or otherwise-aliased receiver) is simply not
+        # recognized -- always safe, just a missed case, exactly like every
+        # other backward-scan guard in this file.
+        reg = insn.args[/^(R\d+)/, 1]
+        recv = nil
+        (idx - 1).downto(0) do |i|
+          prev = irep.instructions[i]
+          pd = prev.args[/^(R\d+)/, 1]
+          next unless pd == reg
+
+          case prev.op
+          when 'LOADSELF'
+            recv = namespace || 'Object'
+          when 'GETCONST'
+            const_name = prev.args[/^R\d+\s+(\S+)/, 1]
+            recv = namespace ? "#{namespace}::#{const_name}" : const_name
+          end
+          break
+        end
+        pending_reg = reg
+        pending_idx = idx
+        # A distinct pseudo-owner ("X.singleton", the same suffix SDEF's own
+        # fix already uses) -- never a real Ruby constant path, so it can
+        # never collide with (or be selected by) ONLY_OWNERS, which only
+        # ever names real classes/modules. nil (unrecognized receiver)
+        # leaves pending_name nil, so the EXEC case below's own `&&
+        # pending_name` guard correctly never recurses into it.
+        pending_name = recv ? "#{recv}.singleton" : nil
       when 'EXEC'
         reg, irep_ref = insn.args.split(/\s+/, 2)
         idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
         child_label = irep.reps[idx2]
-        walk.call(child_label, pending_name) if reg == pending_reg && pending_name
+        walk.call(child_label, pending_name) if reg == pending_reg && pending_name && idx == pending_idx + 1
         pending_reg = nil
         pending_name = nil
+        pending_idx = nil
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
         _reg, name, irep_ref = insn.args.split(/\s+/, 3)

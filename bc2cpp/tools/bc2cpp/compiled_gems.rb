@@ -1029,6 +1029,44 @@ BC2CPP_COMPILED_GEMS = {
     # already-established out-of-scope shape (non-mandatory arity, or
     # BLOCK/SENDB reached either via a real block literal or the
     # `&:symbol` shorthand).
+    #
+    # A twenty-ninth, independent round adds Game::Vehicle (mruby-rpg2k/
+    # mrblib/game.rb) -- a boat/ship/airship's saved location (map id,
+    # position, facing, on-map graphic), plain data rather than a
+    # Game::Character. 4 of its own 5 real bytecode-defined methods
+    # compile clean, needing zero bc2cpp.rb changes: #placed? (a plain
+    # `@map_id > 0`, the fixnum-fastpath `>` this compiler already has),
+    # #to_h (a real Hash literal, the same mrb_hash_new_capa/mrb_hash_set
+    # shape Game::Picture's/Game::Timer's/Game::Weather's own #to_h
+    # already ship), #load_h (a Hash#[] GETIDX read plus a `||` default
+    # per field, the same shape Game::Screen's/Game::Timer's/
+    # Game::Weather's own #load_h already compile clean against), and
+    # #load_movable (same GETIDX/`||`-default shape as #load_h, plus one
+    # real `EventGraphic.numpad_direction(m[:direction])` call). :numpad_
+    # direction is MONO in the whole-program registry (Game::EventGraphic's
+    # own real `def self.numpad_direction`, an SDEF singleton method with
+    # owner "Game::EventGraphic.singleton") but correctly stays ordinary
+    # `mrb_funcall` dispatch in the generated body regardless: that
+    # synthetic ".singleton"-suffixed owner name never matches this run's
+    # own ONLY_OWNERS/OTHER_OWNERS (plain class names), so compile_send's
+    # existing owner-not-emitted guard correctly falls back rather than
+    # referencing a function this run never emits. #initialize(type,
+    # map_id = 0, x = 0, y = 0, direction = 2) is the one gap -- four
+    # optional arguments, the same established non-mandatory-arity shape
+    # as every other unembedded target above. #initialize never compiling
+    # means drop_unsafe_embeddings correctly refuses to embed any of this
+    # class's own four provably-Fixnum ivars (@map_id, @x, @y,
+    # @charset_index) despite the raw IvarLayout analysis reporting all
+    # four as EMBED-eligible -- confirmed directly against the real
+    # generated output: Game::Vehicle does not appear in bc2cpp's own
+    # "classes needing MRB_SET_INSTANCE_TT" diagnostic, and every compiled
+    # method here uses plain mrb_iv_get/mrb_iv_set, never DATA_PTR(self).
+    # attr_accessor :map_id, :x, :y, :direction, :charset_name,
+    # :charset_index and attr_reader :type are all native, invisible to
+    # bc2cpp the same way every other attr_reader/writer/accessor in this
+    # codebase is. No bare `private`/`protected`/`public` anywhere in the
+    # real source, so both compiled methods below are plain
+    # `mrb_define_method`.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1042,7 +1080,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
-               Game::Rng Game::Weather Game::Troop],
+               Game::Rng Game::Weather Game::Troop Game::Vehicle],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
