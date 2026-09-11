@@ -422,6 +422,63 @@ BC2CPP_COMPILED_GEMS = {
     # Picture's/Window's/Actor's, so its own two provably-Fixnum ivars
     # (@gold, @revision) stay unembedded too.
     #
+    # A dedicated later round re-checked mruby-rpg2k/mrblib/game/
+    # battle_support.rb's own separate reopening of both Game::Actor and
+    # Game::Party (docs/adr/0139's own Game::Actor/Game::Party
+    # battle_support.rb-coverage follow-up) against the real diagnostic,
+    # not just against what register.cxx's own comments already claimed.
+    # Conclusion up front: zero registration changes -- every method that
+    # reopening defines and this compiler can actually compile was already
+    # registered; what this round found and fixed were two real, confirmed
+    # documentation gaps in register.cxx's own comments (see that file's
+    # own Game::Actor/Game::Party comment blocks for the corrected text):
+    #
+    #   - battle_support.rb's own `class Actor` reopening defines 13 real
+    #     methods, not the 9 an earlier round's own comment named -- the
+    #     other 4 (#states=, #prevents_critical?, #state_resist_mul,
+    #     #physical_evasion_up?) were never registered (correctly -- each
+    #     ends in a genuine Ruby block, confirmed against its own real
+    #     `#error unhandled opcode BLOCK`/`SENDB` marker with
+    #     SKIP_UNSUPPORTED=0), but that earlier comment never said so, as
+    #     if the reopening had nothing left over at all.
+    #   - battle_support.rb's own `class Party` reopening's own comment
+    #     mistakenly filed `#stat_mode` under "the battle_support.rb
+    #     reopening's own" block-using methods -- it is not part of that
+    #     reopening at all; it is `Game::Party#stat_mode` in game.rb's own
+    #     main ~2,300-line class body (`def stat_mode`, game.rb line
+    #     5716), which also ends in a genuine Ruby block and so also stays
+    #     interpreted, just for an unrelated reason having nothing to do
+    #     with this second reopening. `#battle_skill_command` (this
+    #     reopening's own real, keyword-argument-blocked method, `free:
+    #     false`) was already correctly named elsewhere in that same
+    #     comment, in the non-mandatory-arity group where its own real
+    #     `#error ... has non-mandatory arguments` marker puts it -- not a
+    #     second gap, despite looking related at a glance.
+    #
+    # Re-ran the real `bc2cpp.rb` diagnostic end to end for this
+    # (`ONLY_OWNERS`/`OTHER_OWNERS`/`NATIVE_SRCS`/`SKIP_UNSUPPORTED`
+    # computed exactly the way this gem's own mrbgem.rake does, against a
+    # real host `mrbc` built fresh in the checking worktree, the same
+    # `git submodule update --init` + `scripts/apply_mruby_patch.bash` +
+    # `HOST_CXX=c++ rake` sequence this ADR's own prior follow-ups already
+    # document): the real `== compiled entry points ==` listing shows
+    # exactly 74 `Game::Actor#...`/`Game__Actor_..._impl` lines and exactly
+    # 85 `Game::Party#...`/`Game__Party_..._impl` lines, matching
+    # register.cxx's own `grep -c 'M, actor,'`/`grep -c 'M, party,'` counts
+    # exactly -- confirming every one of the 4 Actor gaps and the 8 real
+    # Party battle_support.rb gaps (`#hit_modifier`,
+    # `#do_nothing_restricted?`, `#skill_helps_troop?`, `#battle_skills`,
+    # `#skill_attributes`, `#skill_stat_mod_keys`, `#battle_items`,
+    # `#battle_skill_command`) was already correctly left unregistered, not
+    # merely assumed so from the (partly wrong) comment text. Also
+    # re-confirmed the real `== classes needing MRB_SET_INSTANCE_TT(...,
+    # MRB_TT_DATA) ==` listing is unchanged (`Game::Transition`,
+    # `Game::Screen`, `Game::Interpreter`, `RPG2k::Scene::VehicleWorld`,
+    # `RPG2k::Scene::Map::LRUBitmapCache` -- neither `Game::Actor` nor
+    # `Game::Party`, same as before this round), and grepped the real
+    # regenerated file for the broken empty-name
+    # `mrb_funcall(M, <reg>, "", ` shape: zero matches.
+    #
     # RPG2k::Scene::MapViewer (docs/adr/0139's own GETIDX0 opcode
     # follow-up) is the F9 debug-menu map overview/editor scene,
     # mruby-rpg2k/mrblib/scene/map_viewer.rb -- 34 of its own 42 real
