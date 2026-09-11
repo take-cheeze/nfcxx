@@ -784,6 +784,63 @@ end
 # report_annotation_candidates below can share the exact same rule
 # drop_unsafe_embeddings itself uses, rather than silently overcounting
 # candidates a real build would refuse to embed anyway.
+# Call-site-specific devirtualization: unlike monomorphic_target (a name
+# with exactly one definition anywhere in the whole program), this asks a
+# narrower question about ONE specific SEND -- "is THIS receiver provably a
+# freshly constructed instance of one exact, statically known class" --
+# which can still resolve a POLY-named call site to a direct C++ call.
+#
+# Walk backward from `idx` (a SEND's own position) looking for whatever
+# last wrote `reg` (following MOVE chains, exactly like IvarLayout.
+# trace_type), until hitting a `SomeClass.new(...)` SEND on that same
+# register, then keep tracing the *same* register one step further back
+# through a GETMCNST*/GETCONST constant-path chain (mirrors GETMCNST's own
+# codegen comment: it reads a constant off of r<d> and overwrites r<d> in
+# place, so each segment's base is still findable on the same register)
+# to recover the class's own fully-qualified name (e.g. "Game::Picture"),
+# built the same left-to-right, `::`-joined, no-leading-colon way
+# build_registry's own CLASS/MODULE walk builds every MethodDef#owner --
+# so it can be matched directly against one.
+#
+# Deliberately never asks "which class might this receiver be" the way a
+# real type system (or a superclass/MRO walk) would -- only "is this
+# receiver POSITIVELY, EXACTLY this one class". A bare `ClassName.new`
+# always allocates the literal receiver class it's sent to, never a
+# subclass in disguise, so this needs no inheritance model at all to stay
+# sound: an inherited method this can't see (no matching owner in the
+# registry) just stays a safe miss, never a wrong answer. Bails to nil
+# (ordinary dynamic dispatch, always safe) on anything else -- a computed
+# or aliased class reference (`x.class.new`, `superclass.new`), a receiver
+# reused from an opaque argument, or any other write to `reg` this
+# doesn't recognize.
+def trace_new_target(irep, idx, reg)
+  path = []
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'SEND0', 'SEND'
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
+      return nil unless path.empty? && name == 'new'
+    # Same register, still tracing further back for the class object that
+    # was `.new`'s own receiver -- SEND overwrites its receiver register
+    # with the result, in place.
+    when 'GETMCNST'
+      path.unshift(insn.args[/::(\w+)\s*$/, 1])
+    when 'GETCONST'
+      path.unshift(insn.args.split(/\s+/, 2)[1])
+      return path.join('::')
+    else
+      return nil
+    end
+  end
+  nil
+end
+
 def pure_mandatory_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
@@ -1085,9 +1142,9 @@ class CodeGen
     # plain mrb_value locals above, before any label, so C++'s "goto must not
     # jump over a variable's initialization" rule can never be violated here.
     targets = jump_targets(irep)
-    irep.instructions.each do |insn|
+    irep.instructions.each_with_index do |insn, idx|
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      out << compile_insn(insn, irep, d)
+      out << compile_insn(insn, irep, d, idx)
     end
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     out << "}\n\n"
@@ -1123,7 +1180,7 @@ class CodeGen
     targets
   end
 
-  def compile_insn(insn, irep, owner_def)
+  def compile_insn(insn, irep, owner_def, idx = nil)
     a = insn.args
     case insn.op
     when 'ENTER'
@@ -1251,7 +1308,7 @@ class CodeGen
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
       compile_cmp(insn.op, a)
     when 'SEND0', 'SEND'
-      compile_send(a, self_implicit: false)
+      compile_send(a, self_implicit: false, irep: irep, idx: idx)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true)
     when 'RETURN'
@@ -1349,7 +1406,7 @@ class CodeGen
     CPP
   end
 
-  def compile_send(args, self_implicit:)
+  def compile_send(args, self_implicit:, irep: nil, idx: nil)
     d = args[/^R(\d+)/, 1]
     # Real bug, caught by running against real code: this charset omitted
     # `?` -- every predicate-style method name (`rpg2003?`, `key?`, `eof?`,
@@ -1370,6 +1427,24 @@ class CodeGen
     # convention -- see pure_mandatory_arity?'s own comment (a real bug,
     # caught by running against real code, not a hypothetical).
     target = nil if target && !pure_mandatory_arity?(@ireps.fetch(target.irep))
+    # Name-based devirtualization failed (still POLY by name) -- try a
+    # call-site-specific fallback: THIS receiver, traced backward through
+    # the same straight-line method body, might still be provably a fresh
+    # instance of one exact class (trace_new_target's own comment). Never a
+    # superclass/MRO walk -- an exact owner match only, so a method this
+    # class inherits rather than defines itself still safely misses here
+    # and falls through to ordinary dynamic dispatch, same as today.
+    typed = false
+    if target.nil? && !self_implicit && irep && idx
+      known_class = trace_new_target(irep, idx, d)
+      if known_class
+        candidate = @registry[name].find { |md| md.owner == known_class }
+        if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep))
+          target = candidate
+          typed = true
+        end
+      end
+    end
     # A monomorphic target whose *owner* is being filtered out of this run's
     # emitted output (ONLY_OWNERS) has no _impl function in the generated
     # file at all -- a real bug, caught wiring up the first real caller
@@ -1390,7 +1465,12 @@ class CodeGen
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
-      note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+      note = if typed
+               "  // TYPED :#{name} -> #{target.owner}##{target.name} (receiver traced to a fresh " \
+                 "#{target.owner}.new), direct C++ call (no mrb_funcall)\n"
+             else
+               "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+             end
       "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
     else
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
