@@ -85,9 +85,45 @@ BC2CPP_COMPILED_GEMS = {
     # (a real `super parent` call -- SUPER, out of this compiler's opcode
     # scope), so its own provably-Fixnum/Symbol ivars stay unembedded too,
     # same shape as Picture's/Window's/Actor's.
+    #
+    # RPG2k::Scene::SkillMenu (mruby-rpg2k/mrblib/scene/skill_menu.rb) is
+    # the field/battle skill-use menu -- 39 of its own 46 real
+    # bytecode-defined methods, needing no new opcode work at all. Its own
+    # #initialize (`actor_index = 0`, one optional argument) doesn't
+    # compile, so -- same unembedded shape as Picture/Window/Actor/Party/
+    # MapViewer above -- drop_unsafe_embeddings refuses to embed any of its
+    # 6 real provably-Fixnum ivars (@caster_index, @skill_index, @top_row,
+    # @arrow_anim, @target_index, @teleport_index). The 7 methods that stay
+    # interpreted are all genuinely out of this prototype's scope, not a
+    # missing opcode: #load_face_bitmap/#play_skill_sound_effect each have
+    # a real `rescue` clause (RESCUE/RAISEIF/EXCEPT), and
+    # #draw_skill_rows/#build_target_window/#teleport_targets/
+    # #build_teleport_window each use a real Ruby block (BLOCK/SENDB).
+    #
+    # RPG2k::Scene::MapViewer's own sibling, RPG2k::Scene::DebugMenu
+    # (mruby-rpg2k/mrblib/scene/debug_menu.rb) -- the F9 debug menu itself
+    # (switch/variable block-and-row editing, plus the Map/Chipset/
+    # Animation tool pages). 33 of its own 39 real bytecode-defined
+    # methods compile clean, needing no new opcode work at all.
+    # #initialize (`super parent` as its own first statement, then two
+    # purely-mandatory arguments) is the first target whose own
+    # #initialize is blocked by a real `super` call (OP_SUPER) rather than
+    # non-mandatory arity, a Ruby block, or an exception clause -- a
+    # genuine class-hierarchy method-dispatch feature, not a narrow
+    # single-opcode mechanical translation, so it stays out of scope the
+    # same way BLOCK/SENDB and RESCUE/RAISEIF/EXCEPT already do;
+    # drop_unsafe_embeddings correctly refuses to embed any of this
+    # class's own provably-typed ivars as a result. 5 more stay
+    # interpreted for the same established out-of-scope shapes: #max_id
+    # and #refresh_switch_or_variable each use two real Ruby blocks
+    # (Enumerable#each, BLOCK/SENDB); #digits_of uses one
+    # (Integer#downto); #editor_value uses one (Enumerable#reduce); and
+    # #open_map_viewer has a real `begin ... rescue StandardError => e
+    # ... end` (RESCUE/RAISEIF/EXCEPT).
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
-               RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu],
+               RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
+               RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
