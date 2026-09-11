@@ -60,9 +60,34 @@ BC2CPP_COMPILED_GEMS = {
     # mruby-rpg2k/mrblib/scene/map_viewer.rb -- 34 of its own 42 real
     # methods, the same unembedded shape as Picture/Window/Actor (its own
     # #initialize takes only optional keyword args).
+    #
+    # Game::Battle (docs/adr/0139's own Game::Battle follow-up,
+    # mruby-rpg2k/mrblib/game/battle.rb) -- the headless turn-based/gauge
+    # combat-resolution engine (turn order, command resolution, hit/damage/
+    # state-infliction formulas, enemy AI action selection). 75 of its own
+    # 141 real bytecode-defined methods compile clean, needing no new
+    # opcode work at all -- every gap here is either #initialize's own
+    # (and 14 other real methods') non-mandatory arguments (the same
+    # calling-convention gap as Picture's/Window's/Actor's/Party's/
+    # MapViewer's own #initialize) or a genuine Ruby block (BLOCK/SENDB/
+    # SSENDB), the same established out-of-scope shape those classes'
+    # own block-using methods already document. Its own #initialize stays
+    # interpreted, so its two provably-Fixnum ivars (@battle_type,
+    # @rounds) stay unembedded too, same shape as every other
+    # non-embedding target above.
+    #
+    # RPG2k::Scene::ItemMenu (docs/adr/0139's own RANGE_INC/RANGE_EXC
+    # opcode follow-up, mruby-rpg2k/mrblib/scene/item_menu.rb -- this class
+    # lives in mruby-rpg2k's own mrblib, same closed_world_srcs glob as
+    # every other owner in this gem, so it belongs here rather than a new
+    # gem) -- the field/battle item-use menu. 41 of its own 47 real
+    # bytecode-defined methods compile clean; #initialize stays interpreted
+    # (a real `super parent` call -- SUPER, out of this compiler's opcode
+    # scope), so its own provably-Fixnum/Symbol ivars stay unembedded too,
+    # same shape as Picture's/Window's/Actor's.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
-               RPG2k::Scene::MapViewer],
+               RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
