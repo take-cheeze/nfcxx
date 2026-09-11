@@ -541,6 +541,77 @@ BC2CPP_COMPILED_GEMS = {
     # after its own def) are both `private`; every other method is public,
     # confirmed directly against the real source (no other `private`/
     # `public` mode-switch anywhere in the class body).
+    #
+    # An eighteenth, independent round adds Game::Timer (mruby-rpg2k/mrblib/
+    # game.rb) -- the RPG2000 Timer/Timer2 countdown backing model (both are
+    # real instances of this one class, held as Game::State's own @timers
+    # array -- there is no separate Timer2 class anywhere in the closed
+    # world). 7 of its own 10 real bytecode-defined methods compile clean,
+    # needing no new opcode work at all. #start/#tick/#drawn? each have one
+    # non-mandatory optional argument, the same established out-of-scope
+    # shape as every other unembedded target above. #initialize compiles
+    # clean (zero arguments, pure mandatory arity), but the whole-program
+    # EMBED diagnostic proposes nothing for this class: @running/@visible/
+    # @in_battle are booleans (not modeled), and @frames -- despite a
+    # literal-Fixnum source in #initialize/#set -- is poisoned back to
+    # UNKNOWN by #load_h's own opaque `h[:frames] || 0` Hash#[] read, so no
+    # MRB_SET_INSTANCE_TT call belongs in its own registration block. See
+    # register.cxx's own top comment for the full writeup, including the
+    # real full-sweep synergy this unlocks in already-shipped Game::State
+    # (#timer_seconds/#timer2_seconds/#timer_display_text now devirtualize
+    # straight into Game::Timer#seconds/#display_text, both MONO names).
+    #
+    # A nineteenth, independent round adds Game::Switches and
+    # Game::Variables (both mruby-rpg2k/mrblib/game.rb) -- the 1-indexed
+    # boolean/integer flag stores an event page's conditions read, each
+    # backed by a plain Hash (`@data = {}`), not any real bit-array.
+    # Re-checked both new classes specifically for the operator-regex bug
+    # shape above -- neither one's own method bodies use a bitwise/modulo
+    # operator at all (`Switches#flip`'s own `!self[id]` is a real SEND
+    # too, to `!`, but that character was already in the charset before
+    # that fix). Re-confirmed by grepping the freshly regenerated output
+    # for the exact empty-name `mrb_funcall(M, <reg>, "", ` shape
+    # project-wide: zero matches, same as every full-sweep re-check since
+    # that fix landed.
+    #
+    # ALL 7 of Game::Switches's own real bytecode-defined methods compile
+    # clean, needing no new opcode work at all: #initialize, #[], #[]=,
+    # #flip, #to_h, #replace, #clear_dirty (#revision/#dirty are
+    # attr_reader-generated, native, invisible to bc2cpp the same way every
+    # other attr_reader/attr_writer in this codebase is). #initialize
+    # (`initialize; @data = {}; @revision = 0; @dirty = {}; end`) compiles
+    # clean -- zero arguments, no super, no block -- so its own provably-
+    # Fixnum @revision (a literal `0`, then only ever `+= 1`) gets real
+    # RData struct embedding, the sixth target after Game::Screen/
+    # Game::Transition/Game::State/Game::Map/Game::ChipSet above. Checked
+    # directly against the exact Game::Actor-shaped embedding bug several
+    # follow-ups up, not assumed safe by analogy: grepping the whole closed
+    # world for `Switches.new`/`Game::Switches.new`/`.allocate`/a subclass
+    # finds exactly two real construction sites (mruby-rpg2k/mrblib/
+    # game.rb's own Game::State#initialize, `@switches = Switches.new`, and
+    # this project's own scripts/export_nano7_map.rb harness), both plain
+    # zero-argument `.new` calls, no bypass and no subclass anywhere, so
+    # every real instance always goes through the compiled #initialize.
+    # @data and @dirty (each a Hash literal) stay UNKNOWN and remain on the
+    # ordinary dynamic iv_tbl, mixed safely with the one embedded field.
+    #
+    # Game::Variables (same file, immediately below Switches) has 6 real
+    # bytecode-defined methods, but #initialize (`initialize(rpg2003 =
+    # false)`) has one non-mandatory optional argument -- the same
+    # established out-of-scope shape every other unembedded target above
+    # documents -- so drop_unsafe_embeddings correctly refuses to embed
+    # this class's own provably-Fixnum @revision too (confirmed directly
+    # against the real generated output: Game::Variables does not appear
+    # in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" diagnostic).
+    # The other 5 methods (#[], #[]=, #to_h, #replace, #clear_dirty)
+    # compile clean, needing no new opcode work at all -- #[]= additionally
+    # clamps its own argument against @max/@min (opaque ivars set from
+    # #initialize's own ternary), a plain pair of `>`/`<` comparisons
+    # already covered by the existing EQ/LT/LE/GT/GE opcode work, no gap
+    # here either. No bare `private`/`protected`/`public` anywhere in
+    # either class body other than the interpreter's own unconditional
+    # #initialize special case, so every other method in both classes is
+    # public.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -549,7 +620,8 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::StatusMenu Game::MoveRoute
                RPG2k::Scene::ChipsetEditor RPG2k::Scene::Base
                Game::Character RPG2k::Scene::SaveLoad RPG2k::Scene::Order
-               Game::Shop Game::Map Game::EnemyAi Game::ChipSet],
+               Game::Shop Game::Map Game::EnemyAi Game::ChipSet
+               Game::Timer Game::Switches Game::Variables],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
