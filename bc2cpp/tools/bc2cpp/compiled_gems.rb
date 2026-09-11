@@ -120,10 +120,42 @@ BC2CPP_COMPILED_GEMS = {
     # (Integer#downto); #editor_value uses one (Enumerable#reduce); and
     # #open_map_viewer has a real `begin ... rescue StandardError => e
     # ... end` (RESCUE/RAISEIF/EXCEPT).
+    #
+    # RPG2k::Scene::EquipMenu (docs/adr/0139's own follow-up,
+    # mruby-rpg2k/mrblib/scene/equip_menu.rb) -- the field equip screen:
+    # weapon/armor/accessory slot selection, a two-column bag-item
+    # candidate grid, per-stat before/after deltas. 29 of its own 36 real
+    # bytecode-defined methods compile clean, needing no new opcode work at
+    # all (every gap here is #initialize's own non-mandatory
+    # `actor_index = 0` argument, or a genuine Ruby block -- each_with_index/
+    # reduce/Integer#times -- confirmed against each one's own generated
+    # #error line, not assumed). #initialize stays interpreted, so its own
+    # provably-Fixnum/Symbol ivars (@actor_index/@slot_index/@cand_index/
+    # @cand_top/@arrow_anim/@mode) stay unembedded too, same shape as
+    # Picture's/Window's/Actor's/ItemMenu's.
+    #
+    # RPG2k::Scene::Menu (docs/adr/0139's own follow-up,
+    # mruby-rpg2k/mrblib/scene/menu.rb) -- the field main menu (top-level
+    # party navigation hub: Item/Skill/Equip/Status/Save/Quit). 28 of its
+    # own 35 real bytecode-defined methods compile clean, needing no new
+    # opcode work: #initialize (`super parent`, SUPER) and
+    # #load_face_bitmap (a real `rescue StandardError` clause) match
+    # ItemMenu's own pair of gaps exactly (both classes share the
+    # #load_face_bitmap name -- POLY, never MONO, at any call site);
+    # #build_commands/#build_windows/#draw_command_labels/
+    # #build_end_game_confirm_windows all end in a genuine Ruby block
+    # (BLOCK/SENDB); #draw_status_row's own `line = ->(n) { ... }` hits a
+    # LAMBDA opcode (checked, not assumed) but is the same permanently-
+    # out-of-scope closure-creation gap as a block, just different
+    # syntax, so it was left interpreted rather than chased. Its own
+    # #initialize never compiles, so its provably-typed ivars stay
+    # unembedded too, same shape as Picture's/Window's/Actor's/Battle's/
+    # ItemMenu's.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
-               RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu],
+               RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu
+               RPG2k::Scene::EquipMenu RPG2k::Scene::Menu],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
