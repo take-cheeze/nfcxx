@@ -234,13 +234,84 @@ BC2CPP_COMPILED_GEMS = {
     # never compiles, so its own provably-typed ivars (@chipset_id/@idx,
     # Fixnum; @tab, Symbol) stay unembedded too, same shape as Picture's/
     # Window's/Actor's/Battle's/ItemMenu's/EquipMenu's/Menu's.
+    #
+    # RPG2k::Scene::Base (docs/adr/0139's own follow-up, mruby-rpg2k/
+    # mrblib/scene/base.rb, reopened by mruby-rpg2k/mrblib/scene/
+    # battle_support.rb) -- the common superclass every other
+    # RPG2k::Scene::* class inherits from. 17 of its own 29 real
+    # bytecode-defined methods compile clean, needing no new opcode work
+    # at all. #initialize (`def initialize parent`) compiles clean -- pure
+    # mandatory arity, and (being the root of the hierarchy) no `super`
+    # call to block it, unlike every subclass built on top of it; its own
+    # 3 ivars are all opaque object references, never provably Fixnum, so
+    # it does not appear in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" diagnostic and stays a plain, non-embedding
+    # registration. The 12 other methods that stay interpreted are all
+    # genuinely out of this prototype's scope, not a missing opcode: 4
+    # have a real `rescue` clause, 3 have a non-mandatory argument, 4 call
+    # a real Ruby block, and 1 (#play_animation_se) combines a block with
+    # its own `rescue StandardError` clause -- see register.cxx's own
+    # comment for the full per-method breakdown. Notably, since
+    # RPG2k::Scene::ItemMenu, RPG2k::Scene::DebugMenu and
+    # RPG2k::Scene::Menu's own #initialize are each blocked purely by
+    # their own `super parent` call into this now-clean-compiling
+    # #initialize (no other non-mandatory arguments), real SUPER opcode
+    # support could unlock all three in a future round -- out of scope
+    # here (whole-program coordination across every already-shipped
+    # scene class's own registration block), but flagged for later.
+    #
+    # Game::Character (docs/adr/0139's own follow-up, mruby-rpg2k/mrblib/
+    # game.rb) -- the shared moving-on-map-entity state/movement protocol
+    # Game::Vehicle and the player/event drivers build on (position,
+    # facing, move-speed/frequency, jump/diagonal-move geometry, the
+    # move-route Face/Turn sub-command helpers). Not itself subclassed
+    # anywhere in this codebase -- Game::Vehicle is deliberately plain
+    # data, not a Character -- and every real construction site goes
+    # through the plain constructor. 14 of its own 16 real
+    # bytecode-defined methods compile clean, needing no new opcode work
+    # at all. The 2 gaps are both the same established non-mandatory-
+    # arity shape as every other non-embedding target above: #initialize
+    # (`x = 0, y = 0, direction = 2`, three optional arguments) and
+    # #front_tile (`dir = @direction`, one optional argument reading an
+    # ivar as its own default). #initialize never compiling means this
+    # class's own provably-typed ivars stay unembedded too -- including
+    # @last_move_direction, whose own #move_diagonal site
+    # (`@last_move_direction = [horizontal, vertical]`) writes a real
+    # Array, not a Fixnum, so even the raw per-ivar EMBED analysis (before
+    # this class-level gate) never actually reaches codegen here.
+    #
+    # This same round also found and fixed a real, live bug in
+    # bc2cpp.rb's own IvarLayout.join, the fixed-point per-ivar type-join
+    # the whole embedding analysis is built on: a SETIV site whose own
+    # value traced to UNKNOWN used to have that contribution silently
+    # discarded whenever an earlier-processed site for the same ivar name
+    # had already joined in a concrete type, instead of poisoning to
+    # UNKNOWN the way a sound join has to. Caught building Game::Character
+    # (#move_diagonal's own Array-typed @last_move_direction write was
+    # getting silently masked by #initialize's own earlier :fixnum join)
+    # but confirmed live and already-shipped elsewhere too: a fresh
+    # whole-program diagnostic taken before and after the fix shows
+    # Game::Screen losing 11 of its own previously-"embeddable" ivars and
+    # Game::State losing one (@map_id) -- both still keep several
+    # genuinely-sound embedded ivars each, so neither drops out of
+    # "classes needing MRB_SET_INSTANCE_TT" entirely. Every embedded-field
+    # SETIV this codegen emits already carries its own runtime
+    # `mrb_integer_p` guard (a real TypeError on a non-Integer write,
+    # never silent corruption), so this was never the Game::Actor-shaped
+    # undefined-behavior class of bug -- it was an over-permissive
+    # embedding decision that would have turned a legitimate non-Integer
+    # assignment (one the plain interpreter handles fine) into a crash
+    # the first time a real game session hit it. See register.cxx's own
+    # top comment and docs/adr/0139's own Game::Character follow-up for
+    # the full writeup.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
                RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu
                RPG2k::Scene::EquipMenu RPG2k::Scene::Menu Game::State
                RPG2k::Scene::StatusMenu Game::MoveRoute
-               RPG2k::Scene::ChipsetEditor],
+               RPG2k::Scene::ChipsetEditor RPG2k::Scene::Base
+               Game::Character],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
