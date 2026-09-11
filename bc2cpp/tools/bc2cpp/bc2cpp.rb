@@ -1832,10 +1832,47 @@ class CodeGen
   # closed for call sites two follow-ups up in docs/adr/0139; this is the
   # identical fix applied to the embedding gate instead.
   def drop_unsafe_embeddings(ivar_layout)
-    ivar_layout.select do |owner, _|
+    ivar_layout.each_with_object({}) do |(owner, ivars), out|
       init = @registry['initialize']&.find { |d| d.owner == owner }
-      init && pure_mandatory_arity?(@ireps.fetch(init.irep)) && compiles_clean?(init.irep)
+      next unless init && pure_mandatory_arity?(@ireps.fetch(init.irep)) && compiles_clean?(init.irep)
+
+      # A per-owner #initialize gate alone isn't enough: an ivar only
+      # embeds safely if *every* read/write of it goes through this
+      # compiler's own GETIV/SETIV codegen. A plain `attr_reader`/
+      # `attr_writer`/`attr_accessor` for that exact same name is a real,
+      # live counterexample -- its native C implementation
+      # (3rd/mruby/src/class.c's own `attr_reader`/`attr_writer`) is a
+      # bare `mrb_iv_get`/`mrb_iv_set` against the ordinary dynamic
+      # `iv_tbl`, with no way to know this class's own SETIV codegen wrote
+      # the value into an `RData` struct field instead -- so the native
+      # getter always returns nil (or the setter's write is simply
+      # invisible to every compiled GETIV reader) regardless of what
+      # #initialize did. Caught for real on LCF::EventCommand's own
+      # `attr_reader :code, :indent, :string, :parameters` -- @code/
+      # @indent are exactly the two ivars #initialize's own annotation
+      # marks embeddable, and a minimal toy repro (a class embedding one
+      # ivar via #initialize, with a plain `attr_reader` for it installed
+      # the ordinary way) confirms `Foo.new(42).x` returns `nil`, not
+      # `42`, once embedded: build_registry's own attr_reader/writer/
+      # accessor case already registers a synthetic (irep: nil) MethodDef
+      # under this exact owner for the bare name (a reader) and/or
+      # "<name>="  (a writer) -- checked directly here, the same way
+      # monomorphic_target already treats an irep-nil MethodDef as "native,
+      # no compiled body", rather than assumed safe by construction.
+      safe = ivars.reject { |name, _| natively_exposed?(owner, name) || natively_exposed?(owner, "#{name}=") }
+      out[owner] = safe unless safe.empty?
     end
+  end
+
+  # Does some OTHER, native (non-bytecode) definition already expose this
+  # exact method name under this exact owner -- an attr_reader/writer/
+  # accessor-installed accessor (build_registry's own synthetic
+  # MethodDef, irep: nil) that reads/writes the ordinary dynamic iv_tbl
+  # directly, bypassing any embedded RData struct entirely. Used by
+  # drop_unsafe_embeddings above to keep an ivar off the embedded struct
+  # whenever some other real accessor would silently miss it.
+  def natively_exposed?(owner, name)
+    (@registry[name] || []).any? { |d| d.owner == owner && d.irep.nil? }
   end
 
   def cpp_name(owner, name)

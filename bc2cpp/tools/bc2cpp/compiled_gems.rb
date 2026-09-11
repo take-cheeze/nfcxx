@@ -16,7 +16,73 @@
 # already exist, which mrbgem.rake wires as a `file` dependency, not this).
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
-    owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData],
+    # LCF::MoveCommand (docs/adr/0139's own follow-up, mruby-lcf/mrblib/
+    # lcf.rb) -- one decoded RPG2000 move-route command (a command id plus
+    # optional string/integer parameters). Its own #initialize is the
+    # ONLY real bytecode-defined method on this class at all (attr_reader
+    # :command_id, :parameter_string, :parameter_a, :parameter_b,
+    # :parameter_c stays native/uncompiled, as always) and it compiles
+    # clean: 5 purely mandatory arguments, no super, no block, needing
+    # zero new bc2cpp.rb opcode work and finding zero live bc2cpp.rb bugs.
+    # It already carried a real `# bc2cpp: (fixnum, , fixnum, fixnum,
+    # fixnum)` magic-comment annotation before this round (added several
+    # follow-ups up, alongside LCF::EventCommand's own, neither wired up
+    # as a compiled owner until now) -- confirmed for real against the
+    # actual diagnostic, not just trusted from the comment: the real
+    # `== compiled entry points ==` listing shows
+    # `LCF__MoveCommand_initialize / LCF__MoveCommand_initialize_impl
+    # (LCF::MoveCommand#initialize, arity 5) [private -- use
+    # mrb_define_private_method, not mrb_define_method]`, and the real
+    # generated #initialize body calls mrb_data_init before any other
+    # statement. @command_id/@parameter_a/@parameter_b/@parameter_c (all
+    # provably Fixnum) are real fields on a new LCF__MoveCommand_ivars
+    # RData struct -- confirmed directly against the real generated
+    # output: LCF::MoveCommand appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" diagnostic. @parameter_string (a String, never
+    # Fixnum/Symbol) correctly stays off that struct, on the ordinary
+    # dynamic iv_tbl via a plain mrb_iv_set -- confirmed directly against
+    # the generated code, not assumed from its type. :command_id/
+    # :parameter_a/:parameter_b/:parameter_c/:parameter_string are all
+    # POLY in the whole-program registry (2 defs each: this class and the
+    # real, separate Game::MoveCommand, mruby-rpg2k/mrblib/game.rb) --
+    # correctly has no bearing on registering this class's own methods,
+    # only on whether some *other* call site could devirtualize into one
+    # of them. #initialize is forced private by mruby's own interpreter
+    # regardless of source, so it needs mrb_define_private_method, not
+    # mrb_define_method -- confirmed directly against the real
+    # diagnostic's own listing above, which flags it accordingly.
+    #
+    # LCF::EventCommand (docs/adr/0139) joins the original LCF::File-family
+    # targets -- one decoded RPG2000 event-page/common-event/move-route
+    # command (code, indent, string, integer parameters). Its own
+    # #initialize already carried a real `# bc2cpp: (fixnum, fixnum, , )`
+    # annotation (mruby-lcf/mrblib/lcf.rb) from an earlier round's dynamic
+    # profiling pass, but was never actually added as a compiled owner
+    # until now. #initialize is pure mandatory-arity (4 required args, no
+    # super, no block) and compiles clean, and both #initialize and #param
+    # are registered below -- but checked directly against the real
+    # generated output rather than trusted from the annotation alone,
+    # this class does NOT actually get any real RData embedding, despite
+    # @code/@indent both being provably Fixnum (per the annotation and the
+    # whole-program EMBED diagnostic): this class's own `attr_reader
+    # :code, :indent, :string, :parameters` (mruby-lcf/mrblib/lcf.rb)
+    # covers the exact same two ivars, and this round's own dedicated
+    # bug-hunt (see this file's own top comment / mruby-rpg2k-compiled/
+    # src/register.cxx's own top comment for the full writeup) found that
+    # a plain `attr_reader` for an embedded ivar's own bare name is a
+    # real, live correctness bug -- its native `mrb_iv_get` implementation
+    # never sees a value this class's own SETIV codegen wrote into an
+    # embedded RData struct field instead, so `.code`/`.indent` would
+    # silently return `nil` on every real compiled instance. bc2cpp.rb's
+    # drop_unsafe_embeddings now refuses to embed any ivar that collides
+    # this way, so `LCF::EventCommand` does not appear in bc2cpp's own
+    # "classes needing MRB_SET_INSTANCE_TT" diagnostic, no
+    # `LCF__EventCommand_ivars` struct is generated, and #initialize's own
+    # compiled body writes @code/@indent/@string/@parameters via plain
+    # `mrb_iv_set`, exactly like every other (non-embedding) compiled
+    # #initialize in this gem.
+    owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
+               LCF::MoveCommand LCF::EventCommand],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -161,10 +227,16 @@ BC2CPP_COMPILED_GEMS = {
     # #initialize takes 4 purely mandatory arguments -- the third target
     # after Game::Screen/Game::Transition above whose own #initialize
     # compiles, and by far the largest: 13 of its own ivars (all provably
-    # Fixnum) get real RData struct embedding. See register.cxx's own top
-    # comment for the full gap breakdown of the other 9 (3 non-mandatory
-    # arity, 4 genuine Ruby blocks, 2 that combine a block with a real
-    # `rescue StandardError` clause).
+    # Fixnum) were, at the time this round landed, believed to get real
+    # RData struct embedding -- corrected several rounds later (see
+    # register.cxx's own top comment): 3 of those 13 (@x, @y, @direction)
+    # are a real, live attr_reader/embedded-ivar collision with this
+    # class's own `attr_accessor :map, :x, :y, :direction`, so none of
+    # this class's own ivars embed anymore at all (no `Game__State_ivars`
+    # struct is generated). See register.cxx's own top comment for the
+    # full gap breakdown of the other 9 (3 non-mandatory arity, 4 genuine
+    # Ruby blocks, 2 that combine a block with a real `rescue
+    # StandardError` clause).
     #
     # RPG2k::Scene::StatusMenu (mruby-rpg2k/mrblib/scene/status_menu.rb) --
     # the field per-character status detail screen (stats, equipped gear,
@@ -412,16 +484,22 @@ BC2CPP_COMPILED_GEMS = {
     # mruby-rpg2k/mrblib/main.rb's own #load_map) always goes through it --
     # confirmed by grepping the whole closed world for `Game::Map.new`/
     # `.allocate`/a subclass, finding exactly that one plain `.new` call, no
-    # bypass. 2 of its own ivars are real, provably-Fixnum fields on a new
-    # `Game__Map_ivars` RData struct: @id (the annotated-fixnum first
-    # argument) and @revision (a literal `0` in #initialize, then only ever
-    # `+= 1`). @width/@height/@chipset_id (each `unit.<method>`, a method
+    # bypass. @id (the annotated-fixnum first argument) and @revision (a
+    # literal `0` in #initialize, then only ever `+= 1`) were, at the time
+    # this round landed, believed to be real, provably-Fixnum fields on a
+    # new `Game__Map_ivars` RData struct -- corrected several rounds later
+    # (see mruby-rpg2k-compiled/src/register.cxx's own top comment): this
+    # class's own `attr_reader :id, ..., :revision` is a real, live
+    # attr_reader/embedded-ivar collision (its native `mrb_iv_get`
+    # implementation silently missed both while they were embedded), so
+    # bc2cpp.rb's drop_unsafe_embeddings now keeps neither ivar embedded,
+    # and no `Game__Map_ivars` struct is generated at all anymore.
+    # @width/@height/@chipset_id (each `unit.<method>`, a method
     # call's return value -- this compiler never traces through an
     # arbitrary call's own return type) and @lower/@upper/@substitutions
     # (Array/Hash literals) all stay UNKNOWN, so they stay on the ordinary
-    # dynamic iv_tbl, mixed safely with the two embedded fields on the same
-    # object, the same mixed-embedding shape Game::Screen/Game::Transition/
-    # Game::State already established. #set_tile/#tile are `private` (a
+    # dynamic iv_tbl regardless, now alongside @id/@revision above.
+    # #set_tile/#tile are `private` (a
     # bare `private` mid-class-body in game.rb, in effect through the end
     # of that reopening); #initialize is forced private by mruby's own
     # interpreter (mrb_define_method_raw's own special case for the name,
@@ -526,16 +604,20 @@ BC2CPP_COMPILED_GEMS = {
     # own scripts/*_check.rb harnesses) and no subclass anywhere, so every
     # real instance always goes through the compiled #initialize.
     # @animation_type and @animation_speed (each `c.animation_type || 0`/
-    # `c.animation_speed || 0`, both real, provably-Fixnum) are real fields
-    # on a new `Game__ChipSet_ivars` RData struct. The other 5 ivars
+    # `c.animation_speed || 0`, both real, provably-Fixnum) were, at the
+    # time this round landed, believed to be real fields on a new
+    # `Game__ChipSet_ivars` RData struct -- corrected several rounds later
+    # (see mruby-rpg2k-compiled/src/register.cxx's own top comment): this
+    # class's own `attr_reader :name, :graphic, :animation_type,
+    # :animation_speed` is a real, live attr_reader/embedded-ivar
+    # collision, so neither ivar embeds anymore and no `Game__ChipSet_ivars`
+    # struct is generated at all. The other 5 ivars
     # (@name/@graphic -- `c.name`/`c.chipset_name`, a method call's own
     # return value, never traced by this compiler's Fixnum-literal-only
     # inference, and both actually String-valued regardless; @passable_lower
     # /@passable_upper/@terrain -- each `c.<method>`, the schema's own
     # Array-typed passability/terrain tables) all stay UNKNOWN, so they stay
-    # on the ordinary dynamic iv_tbl, mixed safely with the two embedded
-    # fields on the same object, the same mixed-embedding shape Game::Screen/
-    # Game::Transition/Game::State/Game::Map already established.
+    # on the ordinary dynamic iv_tbl regardless.
     #
     # #initialize and #upper_flags (a bare `private :upper_flags` right
     # after its own def) are both `private`; every other method is public,
@@ -581,9 +663,14 @@ BC2CPP_COMPILED_GEMS = {
     # other attr_reader/attr_writer in this codebase is). #initialize
     # (`initialize; @data = {}; @revision = 0; @dirty = {}; end`) compiles
     # clean -- zero arguments, no super, no block -- so its own provably-
-    # Fixnum @revision (a literal `0`, then only ever `+= 1`) gets real
-    # RData struct embedding, the sixth target after Game::Screen/
-    # Game::Transition/Game::State/Game::Map/Game::ChipSet above. Checked
+    # Fixnum @revision (a literal `0`, then only ever `+= 1`) was, at the
+    # time this round landed, believed to get real RData struct embedding,
+    # the sixth target after Game::Screen/Game::Transition/Game::State/
+    # Game::Map/Game::ChipSet above -- corrected several rounds later (see
+    # mruby-rpg2k-compiled/src/register.cxx's own top comment): this
+    # class's own `attr_reader :revision` a few lines up is a real, live
+    # attr_reader/embedded-ivar collision, so @revision no longer embeds
+    # and no `Game__Switches_ivars` struct is generated at all. Checked
     # directly against the exact Game::Actor-shaped embedding bug several
     # follow-ups up, not assumed safe by analogy: grepping the whole closed
     # world for `Switches.new`/`Game::Switches.new`/`.allocate`/a subclass
@@ -593,7 +680,7 @@ BC2CPP_COMPILED_GEMS = {
     # zero-argument `.new` calls, no bypass and no subclass anywhere, so
     # every real instance always goes through the compiled #initialize.
     # @data and @dirty (each a Hash literal) stay UNKNOWN and remain on the
-    # ordinary dynamic iv_tbl, mixed safely with the one embedded field.
+    # ordinary dynamic iv_tbl regardless.
     #
     # Game::Variables (same file, immediately below Switches) has 6 real
     # bytecode-defined methods, but #initialize (`initialize(rpg2003 =
