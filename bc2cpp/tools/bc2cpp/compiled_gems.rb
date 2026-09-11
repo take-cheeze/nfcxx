@@ -1864,6 +1864,51 @@ BC2CPP_COMPILED_GEMS = {
     # devirtualize into a direct C++ call now instead of the ordinary
     # interpreter, the intended payoff of adding a new owner, not a
     # functional change.
+    #
+    # A round 30 follow-up (docs/adr/0139's own ".singleton owner support"
+    # follow-up's own "what was deferred" section named these as known-
+    # good, unexplored candidates) adds this gem's first `.singleton`-owned
+    # entries: `Game::States.singleton` (13 of 16 real methods -- #row/
+    # #significant/#prune stay interpreted, a real `rescue StandardError`
+    # and two real Array#each block bodies), `Game::States::BattleText.
+    # singleton` (all 13 -- this project's first `.singleton` owner nested
+    # two levels deep, `Game::States::BattleText`; the existing owner-
+    # scope-chain fix handles it with zero further changes, confirmed
+    # directly against the real generated code: a bare `FAILURE_TERMS`
+    # reference inside `#skill_failure` resolves through a real
+    # `Game -> States -> BattleText` scope chain, never a literal
+    # "BattleText.singleton" segment), `Game::ChipsetLayout.singleton` (10
+    # of 14 -- #quads/#quads_from_quarters/#water_quads/#terrain_quads stay
+    # interpreted, real Array#each/#map block bodies), and
+    # `Game::EventGraphic.singleton` (all 9) -- 45 methods, all re-verified
+    # compiling clean in a real `ONLY_OWNERS` run (not just the
+    # unrestricted whole-program diagnostic that first found them), zero
+    # surprises. A cheaper "already-owned class, add its own `.singleton`
+    # half too" pass then adds 8 more classes' own `.singleton` entries in
+    # the same round -- `Game::Battle.singleton` (11), `Game::Transition.
+    # singleton` (6), `Game::State.singleton` (2), `Game::Party.singleton`
+    # (2), `Game::Picture.singleton`, `Game::Character.singleton`,
+    # `Game::ChipSet.singleton`, `RPG2k::Scene::Map.singleton` (1 each) --
+    # 25 more methods, each needing no new class lookup in register.cxx
+    # since that class's own `RClass*` was already declared there for its
+    # instance side. None of these 12 classes is a `MRB_SET_INSTANCE_TT`
+    # candidate (the four priority ones are plain, never-instantiated
+    # `module`s; the other 8 are classes whose existing instance-side
+    # embedding decision this round never touches) -- confirmed by diff,
+    # not inspection: the "== ivar embedding ==" and "classes needing
+    # MRB_SET_INSTANCE_TT" sections are byte-identical before and after.
+    # No bare `private`/`private_class_method`/`protected` anywhere near
+    # any of the 12 classes' own real source, so all 70 new registrations
+    # are plain, public `mrb_define_class_method` calls. Real,
+    # already-compiled call sites elsewhere in this gem (RPG2k::Scene::
+    # Battle's own battle-log lines, RPG2k::Scene::Map's own event/chipset
+    # rendering, Game::Battle's/Game::Transition's own internal cross-calls)
+    # devirtualize from POLY/mrb_funcall straight into several of these new
+    # owners, confirmed directly in the real regenerated output -- see
+    # mruby-rpg2k-compiled/src/register.cxx's own registration blocks and
+    # docs/adr/0139's own round 30 follow-up for the full breakdown and the
+    # complete before/after regression-safety verification across all
+    # three compiled gems.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1879,7 +1924,13 @@ BC2CPP_COMPILED_GEMS = {
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
                Game::Rng Game::Weather Game::Troop Game::Vehicle
                Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig
-               Game::Interpreter RPG2k::Scene::Map RPG2k::Scene::Battle],
+               Game::Interpreter RPG2k::Scene::Map RPG2k::Scene::Battle
+               Game::States.singleton Game::States::BattleText.singleton
+               Game::ChipsetLayout.singleton Game::EventGraphic.singleton
+               Game::Battle.singleton Game::Transition.singleton
+               Game::State.singleton Game::Party.singleton
+               Game::Picture.singleton Game::Character.singleton
+               Game::ChipSet.singleton RPG2k::Scene::Map.singleton],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
@@ -2185,7 +2236,179 @@ BC2CPP_COMPILED_GEMS = {
     # closed world, with zero risk to anything else. See this ADR's own
     # ".singleton owner support" follow-up for the real, live diagnostic
     # transcript (compiled vs. skipped) from the actual run.
-    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap RGSS::Bitmap.singleton],
+    #
+    # Follow-up (docs/adr/0139: "RGSS .singleton coverage cluster") --
+    # RGSS.singleton/RGSS::Audio.singleton/RGSS::Input.singleton/
+    # RGSS::ErrorReport.singleton/RGSS::Graphics.singleton (all five in
+    # mruby-rgss/mrblib/lib.rb, ErrorReport in its own mrblib/
+    # error_report.rb) join RGSS::Bitmap.singleton as this gem's second
+    # through sixth `.singleton`-suffixed owners: -- five more real classes
+    # whose `def self.x`/`class << self`-defined methods are now
+    # individually compilable, made possible by the same ".singleton owner
+    # support" SDEF-irep fix, zero further bc2cpp.rb work needed. Confirmed
+    # against the real, unrestricted (no ONLY_OWNERS) whole-closed-world
+    # diagnostic before adding any of the five to ONLY_OWNERS, then
+    # re-confirmed against the real per-gem ONLY_OWNERS-restricted
+    # diagnostic once they were -- both runs agree on the same 39 total
+    # compiled entries, split as below.
+    #
+    # RGSS::Audio.singleton (`class << self ... private ... end`, mirroring
+    # RGSS::Bitmap.singleton's own `class << self` shape rather than a bare
+    # `def self.x`): 13 of its own real methods compile --
+    # bgm_volume/bgm_pan/bgm_stop/bgm_fade/bgm_pos, bgs_stop/bgs_fade/
+    # bgs_pos, me_stop/me_fade, se_stop, midi_available?/setup_midi -- every
+    # one a plain 0/1-argument delegator straight to a native `_bgm_stop`-
+    # style primitive (mruby-rgss/src/audio.cxx), or (setup_midi) a bare
+    # `unless midi_available?` guard around a same-owner self-implicit call
+    # plus a cross-owner `RGSS.warn_once(...)` call into the new
+    # `RGSS.singleton` owner below -- MONO-devirtualized the same way
+    # RGSS::Bitmap.singleton#failure_reason's own same-owner call into
+    # #extensions already is, confirmed directly in the real generated
+    # output (see mruby-rgss-compiled/src/register.cxx's own comment).
+    # `bgm_play`/`bgs_play`/`me_play`/`se_play` (each resolves a filename
+    # then falls back to `play_packed`) and all 8 of this class's own
+    # `private` helpers (`play_packed`/`find_encrypted_loose`/
+    # `try_encrypted_ext`/`decrypt_mv_asset`/`find_packed`/`resolve`/
+    # `search_for`/`exist_with_ext`) hit real, already-documented gaps --
+    # blocks (`dirs.each do |dir| ... end`, `EXTS.each do |e| ... end`-style
+    # iteration inside several of them), `rescue StandardError => e` clauses
+    # (find_encrypted_loose/find_packed), and native-file-IO/archive calls
+    # threaded through those same blocks -- confirmed directly against the
+    # real diagnostic's own "skipped (unsupported)" listing, not assumed.
+    # `attr_accessor :encryption_key`'s own `encryption_key`/
+    # `encryption_key=` stay native (Module#attr_accessor-installed, no
+    # bytecode DEF), same as every other attr_accessor in this codebase.
+    # Every one of the 13 compiled methods is a genuinely public method (no
+    # `private` marker precedes any of them in the real source, and the
+    # diagnostic's own per-entry visibility tag agrees -- none are flagged
+    # `[private]`), so all 13 register via plain `mrb_define_class_method`.
+    #
+    # RGSS::Input.singleton (bare `def self.x`, the same SDEF-fused shape
+    # RGSS::Bitmap.singleton#failure_reason already proved, no `class <<
+    # self`/`private` anywhere in this module at all): 11 of its own 12 real
+    # methods compile -- key_index, press/release/press?/trigger?/repeat?,
+    # dir4/dir8, mouse_x/mouse_y/mouse_pressed? -- key_index has a real,
+    # live GETCONST reference to `SYMBOL_KEYS` (a Hash literal frozen at
+    # this same `RGSS::Input` scope) plus a cross-owner call into
+    # `RGSS.warn_stub`; dir4/dir8 each reference the plain Integer key
+    # constants (`UP`/`DOWN`/`LEFT`/`RIGHT`) at that same scope, and dir8
+    # additionally falls through to a same-owner self-implicit call to
+    # dir4 -- both GETCONST shapes (a Hash constant, four Integer
+    # constants) and the same-owner self-call all confirmed resolving
+    # correctly in the real generated output (see register.cxx's own
+    # comment for the exact codegen). `update` is the one method this class
+    # does not compile: its own `@triggered.each_index do |i| ... end` /
+    # `@pressed.each_index do |i| ... end` blocks hit the same, already-
+    # documented BLOCK/SENDB gap RGSS::Bitmap#init_from_archive's own
+    # `.each do |ext| ... end` already hits, confirmed directly against the
+    # real diagnostic. All 11 compiled methods are genuinely public (no
+    # `private` anywhere in this module, diagnostic agrees), so all 11
+    # register via plain `mrb_define_class_method`.
+    #
+    # RGSS::ErrorReport.singleton (mruby-rgss/mrblib/error_report.rb, a bare
+    # `def self.x` module the same shape as RGSS::Input's, not RGSS::
+    # Audio's/RGSS::Graphics's `class << self`): 6 of its own 9 real methods
+    # compile -- push, installed?, record, clear, probe!, probe_raise.
+    # `push` has a real, live GETCONST reference to `MAX_LINE_CHARS`
+    # (frozen at this same `RGSS::ErrorReport` scope) plus a cross-owner
+    # `RGSS.respond_to?(...)` call; `probe!` makes a same-owner
+    # self-implicit call to `probe_raise`, both confirmed correctly
+    # resolving/devirtualizing in the real generated output. `install`
+    # (assigns the global `$stderr`, an unsupported SETGV-adjacent shape),
+    # `puts_text` (a `args.each do |a| ... end` block with a recursive
+    # same-name self-call inside it), and `log_tail` (`tail[-limit, limit]`
+    # Array#[] with two arguments plus an Array `+` concatenation this
+    # prototype's own supported-opcode set does not reach) all hit real,
+    # already-documented gaps, confirmed against the real diagnostic's own
+    # "skipped" listing. `RGSS::ErrorReport::Tee`'s own 6 instance methods
+    # (`write`/`print`/`puts`/`<<`/`method_missing`/`respond_to_missing?`)
+    # live under the wholly distinct `RGSS::ErrorReport::Tee` owner --
+    # never reachable from `RGSS::ErrorReport.singleton` in `ONLY_OWNERS`
+    # regardless, confirmed skipped in the diagnostic for the same
+    # `*args`/block-argument reasons `RGSS::Bitmap#init_from_archive` hits,
+    # not investigated further this round (out of scope: a distinct,
+    # ordinary-instance-method owner, not a `.singleton` one). All 6
+    # compiled methods are genuinely public (no `private_class_method`
+    # anywhere in this file, diagnostic agrees), so all 6 register via
+    # plain `mrb_define_class_method`.
+    #
+    # RGSS.singleton (mruby-rgss/mrblib/lib.rb's own top-level `module
+    # RGSS`, bare `def self.x`, the module this whole gem's classes all
+    # live under): 5 of its own 11 real methods compile --
+    # warn_once/warn_stub (warn_stub makes a same-owner self-implicit call
+    # into warn_once, MONO-devirtualized, confirmed in the real output) and
+    # three of its own debug/measurement probes with no block or rescue in
+    # their own bodies: transition_shape_probe, window_probe,
+    # tilemap_above_layer_probe. `frame_mean`/`effect_probe`/
+    # `windowskin_rect_probe`/`probe_wav`/`audio_probe`/`wait_for_bgm_pos`
+    # all hit real, already-documented block/rescue gaps in their own
+    # pixel-sampling loops or native probe plumbing, confirmed against the
+    # real diagnostic's own "skipped" listing (not merely assumed similar
+    # to the three that do compile). `class << self; attr_accessor
+    # :asset_archive; end`'s own accessor pair stays native, same as every
+    # other attr_accessor in this codebase. All 5 compiled methods are
+    # genuinely public (bare `def self.x`, no `private_class_method`
+    # anywhere in this module), so all 5 register via plain
+    # `mrb_define_class_method`.
+    #
+    # RGSS::Graphics.singleton (`class << self ... private ... end`,
+    # mirroring RGSS::Audio's/RGSS::Bitmap's own `class << self` shape): 4
+    # of its own 10 real methods compile -- resize_screen, brightness=,
+    # freeze, and its own private `brightness_sprite` helper.
+    # `brightness_sprite` has real, live GETCONST references to `Bitmap`,
+    # `Color`, and `Sprite` -- all three resolve at the *enclosing* `RGSS`
+    # scope, not at `RGSS::Graphics` itself, the identical owner-scope-first
+    # GETCONST shape RGSS::Sprite's own `tone`/`color`/`src_rect` and
+    # RGSS::Bitmap's own `font` already established -- confirmed correctly
+    # resolving in the real generated output. `brightness=` makes a
+    # same-owner self-implicit call into `brightness_sprite`, MONO-
+    # devirtualized into a direct C++ call, confirmed in the real generated
+    # output. `render_fps` (a bare `rescue StandardError` with no explicit
+    # begin), `wait`/`fadeout`/`fadein` (each a `duration.times do |i| ...
+    # end` block), and `_transition_map` (two `rescue ... => e` clauses) all
+    # hit real, already-documented gaps, confirmed against the real
+    # diagnostic's own "skipped" listing. `transition` (this class's own
+    # largest method: blocks *and* a rescue-free call into `_transition_map`
+    # itself) is skipped for the same block reason. `attr_accessor
+    # :frame_count, :frame_rate` / `attr_reader :width, :height, :brightness`
+    # stay native, as always.
+    #
+    # `brightness_sprite` is a real, confirmed-compiling entry -- but the
+    # real source marks it `private` (the `class << self ... private ...
+    # def brightness_sprite; ... end; end` shape), and unlike the SDEF/
+    # unfused-DEF backward-scan case this ADR's own ".singleton owner
+    # support" follow-up already documents as *unconditionally* public
+    # (never modeling `private_class_method` at all), an SCLASS-*opened
+    # body* recurses through this file's own ordinary per-body
+    # `resolve_def_visibility` walk -- the same mechanism that already
+    # tracks `private`/`protected` inside an ordinary class body -- so this
+    # one genuinely is flagged `[private]` in the real diagnostic, not
+    # merely assumed private from reading the source. mruby's own public API
+    # has `mrb_define_private_method`/`_id` for an ordinary instance-method
+    # table but no equivalent "private class method" entry point at all
+    # (confirmed by reading 3rd/mruby/include/mruby.h and mruby/class.h in
+    # full: `mrb_define_class_method`/`_id` take no visibility flag, and no
+    # sibling function exists) -- so `brightness_sprite` is compiled (its
+    # real `_impl` ships in the generated file, exactly as the diagnostic's
+    # `RGSS__Graphics_singleton_brightness_sprite_impl` entry shows) but
+    # deliberately left OUT of register.cxx's own `mrb_define_class_method`
+    # calls below: it is reachable only via `brightness=`'s own already-
+    # compiled, already-devirtualized same-owner call, never as a real
+    # `Graphics.brightness_sprite` entry point a script could call, which is
+    # exactly what its own real Ruby-level `private` already promises and
+    # what this gem's task explicitly asked to preserve rather than
+    # silently widen. So only 3 of these 4 compiled methods (resize_screen,
+    # brightness=, freeze) register via `mrb_define_class_method`; the
+    # fourth stays compiled-but-unregistered.
+    #
+    # Total across this round's own five new owners: 13 + 11 + 6 + 5 + 4 =
+    # 39 real compiled entries (matching the task's own unrestricted-
+    # diagnostic upper bound exactly), of which 38 are registered as real
+    # `Class.method_name` entry points and 1 (Graphics.singleton#
+    # brightness_sprite) is compiled-but-intentionally-unregistered.
+    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap RGSS::Bitmap.singleton
+               RGSS.singleton RGSS::Audio.singleton RGSS::Input.singleton RGSS::ErrorReport.singleton
+               RGSS::Graphics.singleton],
     out_symbol: 'rgss_compiled',
   },
 }.freeze
