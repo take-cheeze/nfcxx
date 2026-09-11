@@ -751,6 +751,143 @@ class Annotations
 end
 
 # ---------------------------------------------------------------------------
+# Step 6f: class-name argument annotations -- the exact same magic-comment
+# syntax Annotations reads (`# bc2cpp: (...)`), but a completely separate
+# reader with a completely different claim: "this mandatory argument
+# position is always exactly this one real class" rather than a
+# primitive type. Deliberately never shares Annotations' own TYPES/
+# Annotation -- a class name must never reach IvarLayout's embedding
+# lattice (there's no struct field to unbox a general object reference
+# into; C_TYPE.fetch would raise a real KeyError at codegen time the
+# first time one did). Both readers can freely look at the very same
+# comment line (`# bc2cpp: (Game::State, fixnum)` -- position 1 a class
+# hint, position 2 a primitive hint) without stepping on each other:
+# Annotations::TYPES already silently no-ops on a class-shaped token
+# (an "unsupported token" per its own comment), and this silently no-ops
+# on any token that isn't a real, already-known class name.
+class ClassAnnotations
+  Annotation = Struct.new(:args, keyword_init: true)
+
+  # `known_owners`: every real class name this closed-world registry
+  # actually has (`registry.values.flatten.map(&:owner).uniq`) -- gates a
+  # token being treated as a class hint on it actually being a class
+  # bc2cpp knows about, not just any capitalized word that happens to
+  # appear in a comment.
+  def self.extract(ireps, registry, known_owners)
+    result = {}
+    file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
+
+    registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.irep
+
+        irep = ireps.fetch(d.irep)
+        next unless irep.file
+
+        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        next unless enter
+
+        lines = file_lines[irep.file]
+        idx = enter.lineno - 2
+        idx -= 1 while idx >= 0 && lines[idx].strip.empty?
+        next if idx < 0
+
+        m = Annotations::COMMENT_RE.match(lines[idx])
+        next unless m
+
+        args = m[1].split(',').map { |t| t.strip if known_owners.include?(t.strip) }
+        next if args.all?(&:nil?)
+
+        result[irep.label] = Annotation.new(args: args)
+      end
+    end
+
+    result
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6g: whole-program "this ivar always holds an instance of exactly
+# this real class" analysis -- the object-reference analogue of
+# IvarLayout, but deliberately never merged into it: a known object
+# class is never a struct-field embedding candidate (still a real
+# mrb_value pointing to a real heap object, nothing to unbox into a
+# smaller C type) -- it only ever feeds compile_send's own
+# devirtualization decision, which guards every use of a fact from here
+# with a real runtime mrb_obj_class check (see compile_send's own
+# comment) rather than trusting it unconditionally the way a purely
+# static, Ruby-semantics-guaranteed fact (a fresh same-body `X.new`)
+# safely can.
+#
+# Fixed-point for the same reason IvarLayout's own analysis is: one
+# ivar's known class can depend on another already being known (an ivar
+# set from `@other.some_getter`, where `some_getter` itself returns
+# `@another_ivar`, would need a real return-type inference this
+# prototype doesn't have -- out of scope here, see trace_new_target's own
+# GETIV case, which only ever looks at *this* class's own ivars).
+class ClassLayout
+  UNKNOWN = :unknown
+
+  def self.analyze(ireps, registry, class_annotations = {})
+    methods_of = Hash.new { |h, k| h[k] = [] }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+
+    classes = Hash.new { |h, k| h[k] = {} } # owner -> {ivar_name => class_name or UNKNOWN}
+
+    10.times do
+      changed = false
+      methods_of.each do |owner, irep_labels|
+        irep_labels.each do |label|
+          irep = ireps.fetch(label)
+          enter = irep.instructions.find { |i| i.op == 'ENTER' }
+          mand = enter ? enter.args.split(':').first.to_i : 0
+          arg_classes = class_annotations[label]&.args
+
+          irep.instructions.each_with_index do |insn, idx|
+            next unless insn.op == 'SETIV'
+
+            ivar = insn.args[/@(\w+)/, 1]
+            src_reg = insn.args[/R(\d+)/, 1]
+            # Never hand a poisoned (UNKNOWN) entry to trace_new_target's
+            # own GETIV lookup -- it has no idea about this sentinel, and
+            # would otherwise hand back the symbol :unknown as if it
+            # were a real class name (harmless downstream -- no real
+            # owner is ever literally that -- but sloppy to let through).
+            known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }
+            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes) || UNKNOWN
+
+            before = classes[owner][ivar]
+            # Two real sites disagreeing on the exact class permanently
+            # poisons it to UNKNOWN -- never guess which one is right,
+            # same "one bad site poisons the whole name" join IvarLayout
+            # itself uses, and just as sticky across fixed-point passes
+            # (UNKNOWN, once reached, is never overwritten by a later,
+            # differently-ordered pass finding one real site again).
+            merged = if before.nil?
+                       found
+                     elsif before == UNKNOWN || found == UNKNOWN || before != found
+                       UNKNOWN
+                     else
+                       before
+                     end
+            if merged != before
+              classes[owner][ivar] = merged
+              changed = true
+            end
+          end
+        end
+      end
+      break unless changed
+    end
+
+    classes.each_with_object({}) do |(owner, ivars), out|
+      known = ivars.reject { |_, c| c == UNKNOWN }
+      out[owner] = known unless known.empty?
+    end
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Step 6e: annotation-candidate report -- diagnostic only, never consulted by
 # codegen. Finds every SETIV site whose source register, tracing back
 # through MOVE chains, was *never* written by anything in this method body
@@ -825,8 +962,29 @@ end
 # or aliased class reference (`x.class.new`, `superclass.new`), a receiver
 # reused from an opaque argument, or any other write to `reg` this
 # doesn't recognize.
-def trace_new_target(irep, idx, reg)
+# `ivar_classes` (owner -> {ivar_name => class_name}, from ClassLayout)
+# and `arg_classes` (per-mandatory-position class name, from
+# ClassAnnotations) are both optional, additional terminal sources this
+# same backward scan can bottom out at, alongside the original fresh-
+# `.new` chain: a GETIV of an ivar ClassLayout already proved always
+# holds one exact class (`@state.foo`), or an opaque incoming argument a
+# real magic-comment class annotation names (`def foo(state); state.foo;
+# end`). Every caller of this function still gets the exact same
+# fresh-`.new` behavior it always had when these are omitted (both
+# default to nil, and `next unless ...` bails cleanly on a nil lookup).
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil)
   path = []
+  # GETCONST/GETMCNST are only ever valid class-name evidence *while
+  # resolving a `.new` call's own receiver* -- never on their own. A bare
+  # `@position = POS_BOTTOM` (a plain Integer constant, no `.new` in
+  # sight anywhere) must never be mistaken for "@position always holds
+  # an instance of a class named POS_BOTTOM": real bug, caught running
+  # this against real game source (`Game::MessageConfig#@position`,
+  # `Game::NumberInput#@digits`, ... all Integer-valued constants, none
+  # of them classes). `resolving_new` only ever becomes true right after
+  # a `SEND :new` is found (with nothing already peeled off `path`),
+  # gating GETMCNST/GETCONST on having actually seen one first.
+  resolving_new = false
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
     d = insn.args[/^R(\d+)/, 1]
@@ -836,20 +994,52 @@ def trace_new_target(irep, idx, reg)
     when 'MOVE'
       reg = insn.args.scan(/R(\d+)/).flatten[1]
     when 'SEND0', 'SEND'
+      return nil if resolving_new || !path.empty?
+
       name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
-      return nil unless path.empty? && name == 'new'
+      return nil unless name == 'new'
+
+      resolving_new = true
     # Same register, still tracing further back for the class object that
     # was `.new`'s own receiver -- SEND overwrites its receiver register
     # with the result, in place.
+    when 'GETIV'
+      return nil if resolving_new || !path.empty?
+
+      ivar = insn.args[/@(\w+)/, 1]
+      return ivar_classes && ivar_classes[ivar]
     when 'GETMCNST'
-      path.unshift(insn.args[/::(\w+)\s*$/, 1])
+      return nil unless resolving_new
+
+      # Not `$`-anchored on purpose -- a trailing "; R6:name" local-
+      # variable comment (real code, same shape as SETIV's own) would
+      # otherwise land inside the captured segment.
+      path.unshift(insn.args[/::(\w+)/, 1])
     when 'GETCONST'
-      path.unshift(insn.args.split(/\s+/, 2)[1])
+      return nil unless resolving_new
+
+      # "GETCONST R4 Integer" or, with a named-local destination
+      # register, "GETCONST R3 MAX_DIGITS\t; R3:d" -- \S+ (not the rest
+      # of the line) stops at the first whitespace/tab, same fix as
+      # compile_insn's own GETCONST codegen needed for the identical bug.
+      path.unshift(insn.args[/^R\d+\s+(\S+)/, 1])
       return path.join('::')
     else
       return nil
     end
   end
+  # `reg` was never written in this straight-line body -- an opaque
+  # incoming argument (same convention as IvarLayout.trace_type's own
+  # final fallback: register N, 1-indexed, is argument N for N <= mand).
+  # A magic-comment class annotation is the only source for this (there's
+  # no whole-program call-site pooling for object-class arguments the way
+  # ArgTypes does for Fixnum -- a POLY name's call sites could each be a
+  # genuinely different real method, so pooling them would be unsound;
+  # ClassAnnotations sits on one real irep by construction instead, same
+  # reasoning as Annotations' own comment).
+  pos = reg.to_i
+  return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
+
   nil
 end
 
@@ -962,7 +1152,7 @@ class CodeGen
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
   }.freeze
 
-  def initialize(ireps, registry, ivar_layout)
+  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {})
     @ireps = ireps
     @registry = registry
     # irep label -> {owner:, name:} for every leaf method body. A native
@@ -974,6 +1164,8 @@ class CodeGen
       defs.each { |d| @owner_of[d.irep] = d if d.irep }
     end
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
+    @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
+    @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.
   end
 
@@ -1368,7 +1560,7 @@ class CodeGen
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
       compile_cmp(insn.op, a)
     when 'SEND0', 'SEND'
-      compile_send(a, self_implicit: false, irep: irep, idx: idx)
+      compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true)
     when 'RETURN'
@@ -1408,8 +1600,17 @@ class CodeGen
       # actually seen compiled (see README.md's caveats) -- not sound in
       # general for a constant redefined inside a deeper lexical scope, but
       # every real case here is a genuine top-level class/module name.
+      #
+      # Real bug, caught by running against real code: a `\s+/, 2` split
+      # captured a trailing "; R3:name" local-variable-name comment too
+      # whenever the destination register is a named local (real shape,
+      # e.g. "GETCONST R3 MAX_DIGITS\t; R3:d") -- interning a garbage
+      # symbol name and raising a real NameError at runtime, never caught
+      # by a #error check (this compiles and links fine). \S+ stops at
+      # the first whitespace/tab instead of swallowing the rest of the
+      # line -- same fix trace_new_target's own GETCONST case needed.
       d = a[/^R(\d+)/, 1]
-      name = a.split(/\s+/, 2)[1]
+      name = a[/^R\d+\s+(\S+)/, 1]
       "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'GETMCNST'
       # "GETMCNST R6 (R6)::Sections" -- module-qualified lookup: r<d> already
@@ -1466,7 +1667,7 @@ class CodeGen
     CPP
   end
 
-  def compile_send(args, self_implicit:, irep: nil, idx: nil)
+  def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
     d = args[/^R(\d+)/, 1]
     # Real bug, caught by running against real code: this charset omitted
     # `?` -- every predicate-style method name (`rpg2003?`, `key?`, `eof?`,
@@ -1494,9 +1695,30 @@ class CodeGen
     # superclass/MRO walk -- an exact owner match only, so a method this
     # class inherits rather than defines itself still safely misses here
     # and falls through to ordinary dynamic dispatch, same as today.
+    #
+    # Three real sources feed the same trace now, not just a fresh
+    # same-body `.new`: a GETIV of an ivar ClassLayout already proved
+    # always holds one exact class (`@state.foo`), or an opaque incoming
+    # argument a real ClassAnnotations comment names. The first is a hard
+    # Ruby-semantics guarantee (`.new` never allocates a subclass in
+    # disguise); the other two are real whole-program facts but not a
+    # *proof* the same way -- an ivar this run never sees written from
+    # outside the compiled set, or an annotation that's simply wrong. So
+    # every hit through this path (not just the two newer ones) gets a
+    # real runtime `mrb_obj_class` check before the direct call, falling
+    # back to ordinary `mrb_funcall` if it doesn't match -- strictly
+    # *safer* than the name-only MONO path above, which trusts the
+    # registry with no runtime check at all. A guard on the fresh-`.new`
+    # case too costs nothing (it's simply always true there) and means
+    # every future extension to trace_new_target's own reach inherits the
+    # same safety net for free.
     typed = false
     if target.nil? && !self_implicit && irep && idx
-      known_class = trace_new_target(irep, idx, d)
+      cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
+      cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
+      ivar_classes = owner_def && @class_layout[owner_def.owner]
+      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes)
       if known_class
         candidate = @registry[name].find { |md| md.owner == known_class }
         if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep))
@@ -1525,20 +1747,44 @@ class CodeGen
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
-      note = if typed
-               "  // TYPED :#{name} -> #{target.owner}##{target.name} (receiver traced to a fresh " \
-                 "#{target.owner}.new), direct C++ call (no mrb_funcall)\n"
-             else
-               "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
-             end
-      "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
+      if typed
+        check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
+        note = "  // TYPED :#{name} -> #{target.owner}##{target.name} (receiver traced to #{target.owner}), " \
+               "runtime-class-checked direct C++ call, mrb_funcall fallback\n"
+        "#{note}  if (#{check}) {\n" \
+          "    r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n" \
+          "  } else {\n" \
+          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "  }\n"
+      else
+        note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+        "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
+      end
     else
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      if argv.empty?
-        "#{note}  r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
-      else
-        "#{note}  r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", #{argv.size}, #{argv.join(', ')});\n"
-      end
+      "#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
+    end
+  end
+
+  # `Owner::Path` -> a real, chained `mrb_const_get` mrb_value expression
+  # for that class object -- the exact same per-segment lookup GETCONST/
+  # GETMCNST codegen already does (mrb_class_get_under has no built-in
+  # "::"-path parsing of its own to delegate to instead), just built as
+  # one C++ expression rather than emitted as its own sequence of
+  # instructions. Only ever used inside a runtime guard condition, so
+  # re-resolving the constant on every call (no caching) is the same
+  # already-accepted tradeoff GETCONST's own codegen makes.
+  def const_chain_value_expr(owner)
+    owner.split('::').reduce('mrb_obj_value(M->object_class)') do |expr, seg|
+      "mrb_const_get(M, #{expr}, mrb_intern_cstr(M, \"#{seg}\"))"
+    end
+  end
+
+  def dynamic_dispatch_line(d, recv, name, argv)
+    if argv.empty?
+      "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
+    else
+      "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", #{argv.size}, #{argv.join(', ')});\n"
     end
   end
 
@@ -1627,6 +1873,31 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  known_owners = registry.values.flatten.map(&:owner).uniq
+  class_annotations = ClassAnnotations.extract(ireps, registry, known_owners)
+  warn ''
+  warn '== magic-comment class annotations (# bc2cpp: (ClassName, ...)) =='
+  if class_annotations.empty?
+    warn '  (none found)'
+  else
+    class_annotations.each do |label, ann|
+      d = registry.values.flatten.find { |md| md.irep == label }
+      name = d ? "#{d.owner}##{d.name}" : label
+      warn "  CLASS_ANNOTATED  #{name}  (#{ann.args.inspect})"
+    end
+  end
+
+  class_layout = ClassLayout.analyze(ireps, registry, class_annotations)
+  warn ''
+  warn '== known-ivar-class hints (devirtualization only, never embedded) =='
+  if class_layout.empty?
+    warn '  (none)'
+  else
+    class_layout.each do |klass, ivars|
+      ivars.each { |name, cls| warn "  CLASS_HINT  #{klass}#@#{name}  (#{cls})" }
+    end
+  end
+
   candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
   warn ''
   warn '== annotation candidates (opaque incoming argument, unresolved) =='
@@ -1639,7 +1910,7 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  gen = CodeGen.new(ireps, registry, ivar_layout)
+  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
@@ -1677,6 +1948,7 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
+  puts '#include <mruby/class.h>'
   # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
   # another gem's own *_decls.h, written by this same OUT_DIR mechanism
   # below) to #include so a devirtualized call to an OTHER_OWNERS target

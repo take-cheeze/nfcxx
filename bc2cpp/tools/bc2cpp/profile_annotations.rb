@@ -270,9 +270,11 @@ def report(candidates, merged)
   # confirmed printed a comment claiming positions 1, 3 and 4 were also
   # fixnum -- never observed at all. Caught before this file was
   # integrated, not shipped.
+  class_resolvable = 0
   candidates.group_by { |c| [c[:owner], c[:name]] }.each do |(owner, name), method_candidates|
     mand = method_candidates.first[:mand]
     confirmed = {} # pos -> true once real evidence confirms it Integer-only.
+    confirmed_class = {} # pos -> real class name once real evidence confirms exactly one, non-primitive class.
 
     method_candidates.each do |c|
       key = "#{c[:owner]}\x00#{c[:name]}\x00#{c[:pos]}"
@@ -290,10 +292,25 @@ def report(candidates, merged)
       calls = rec['calls']
       harnesses = rec['harnesses'].uniq.join(', ')
 
+      # `classes.size == 1` is the same "every real call agreed" bar
+      # either claim needs -- Integer means the existing fixnum
+      # annotation (feeds bc2cpp's own ivar-embedding lattice); any other
+      # single real class name is the *class* annotation this same
+      # profiled evidence already carries for free (see this file's own
+      # header comment on why that was previously discarded). Left to
+      # ClassAnnotations' own known_owners gate, when the suggested
+      # comment is actually applied and re-read, to quietly ignore a
+      # test-fixture stand-in (OpenStruct, FakeActorDB, ...) that isn't a
+      # real class in this closed world at all -- this report doesn't
+      # need bc2cpp's own registry just to print what was observed.
       if classes.size == 1 && classes.key?('Integer')
         confirmed[c[:pos]] = true
         puts "  #{label}"
         puts "      fixnum (#{calls} real call#{'s' unless calls == 1} observed, all Integer -- via #{harnesses})"
+      elsif classes.size == 1 && classes.keys.first =~ /\A[A-Z]\w*(::[A-Z]\w*)*\z/
+        confirmed_class[c[:pos]] = classes.keys.first
+        puts "  #{label}"
+        puts "      #{classes.keys.first} (#{calls} real call#{'s' unless calls == 1} observed, always this one class -- via #{harnesses})"
       else
         types = classes.sort_by { |_k, n| -n }.map { |cls, n| "#{cls}:#{n}" }.join(', ')
         puts "  #{label}"
@@ -301,24 +318,38 @@ def report(candidates, merged)
       end
     end
 
-    next if confirmed.empty?
+    if confirmed.any?
+      resolvable += confirmed.size
+      # Only positions this run actually confirmed get a `fixnum` token; every
+      # other mandatory position (no evidence here, or genuinely not
+      # Fixnum-shaped) is left blank -- a real, already-supported partial
+      # annotation (Annotations::TYPES[''] parses to nil, the same "no claim"
+      # an unrecognized token already gets -- see bc2cpp.rb's own Annotations
+      # class), never a position this run has zero evidence for. No `-> T`
+      # either: this tool only ever observes incoming *arguments* (a
+      # TracePoint(:call) probe), never a method's own return value, so
+      # claiming a return type here would be pure guesswork.
+      sig = (1..mand).map { |pos| confirmed[pos] ? 'fixnum' : '' }.join(', ')
+      puts "  ==> #{owner}##{name}:  # bc2cpp: (#{sig})"
+    end
 
-    resolvable += confirmed.size
-    # Only positions this run actually confirmed get a `fixnum` token; every
-    # other mandatory position (no evidence here, or genuinely not
-    # Fixnum-shaped) is left blank -- a real, already-supported partial
-    # annotation (Annotations::TYPES[''] parses to nil, the same "no claim"
-    # an unrecognized token already gets -- see bc2cpp.rb's own Annotations
-    # class), never a position this run has zero evidence for. No `-> T`
-    # either: this tool only ever observes incoming *arguments* (a
-    # TracePoint(:call) probe), never a method's own return value, so
-    # claiming a return type here would be pure guesswork.
-    sig = (1..mand).map { |pos| confirmed[pos] ? 'fixnum' : '' }.join(', ')
-    puts "  ==> #{owner}##{name}:  # bc2cpp: (#{sig})"
+    next if confirmed_class.empty?
+
+    class_resolvable += confirmed_class.size
+    # A separate comment line, never merged with the fixnum one above --
+    # ClassAnnotations and Annotations are two independent readers of the
+    # exact same `# bc2cpp: (...)` syntax (see bc2cpp.rb's own comment),
+    # so one real position could in principle carry either claim, but
+    # never both at once here (Integer and "always one other real
+    # class" are mutually exclusive outcomes of the very same `classes`
+    # check above).
+    class_sig = (1..mand).map { |pos| confirmed_class[pos] || '' }.join(', ')
+    puts "  ==> #{owner}##{name}:  # bc2cpp: (#{class_sig})"
   end
 
   puts ''
-  puts "== summary: #{resolvable} of #{candidates.size} candidate position(s) confidently resolvable to fixnum from real evidence =="
+  puts "== summary: #{resolvable} of #{candidates.size} candidate position(s) confidently resolvable to fixnum, " \
+       "#{class_resolvable} to a known class, from real evidence =="
 end
 
 if $PROGRAM_NAME == __FILE__
