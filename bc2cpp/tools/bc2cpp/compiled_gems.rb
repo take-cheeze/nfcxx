@@ -989,6 +989,46 @@ BC2CPP_COMPILED_GEMS = {
     # the attr_reader registry fix from two rounds ago covers this class
     # too). No bare `private`/`protected`/`public` anywhere in the real
     # source, so all four compiled methods are plain `mrb_define_method`.
+    #
+    # A twenty-ninth, independent round adds Game::Troop (mruby-rpg2k/
+    # mrblib/game/battle_support.rb) -- the enemy-party container for a
+    # battle (a group of Game::Enemy instances built from a database
+    # Troop row), needing no new opcode work at all. Only 1 of its own 7
+    # real bytecode-defined methods compiles clean: #member (`def
+    # member(db, m); Enemy.new(db, m.enemy_id, m.x, m.y, m.invisible);
+    # end`, a plain 4-argument constructor call). #initialize (`db, id,
+    # rng = nil`, one optional argument) has the same established
+    # non-mandatory-arity gap as every other unembedded target above.
+    # #total_exp/#total_gold (`live_members.reduce(0) { |s, e| s +
+    # e.exp/e.gold }`) and #drops (`live_members.each_with_object([]) do
+    # |e, out| ... end`) each end in a genuine Ruby block (BLOCK/SENDB).
+    # #live_members (`@members.reject(&:hidden)`) was specifically
+    # checked for whether the `&:symbol` block-pass shorthand might be a
+    # distinct, narrower shape this compiler could already handle -- it
+    # is not: confirmed directly against the real mrbc -v disassembly,
+    # `&:hidden` compiles to a bare `LOADSYM R3 :hidden` feeding `SENDB
+    # R2 :reject n=0` with no preceding BLOCK opcode at all (no closure
+    # is created for a Symbol-to-proc block-pass, unlike a real `{ }`/
+    # `do...end` block literal), but it is still the same unmodeled
+    # SENDB opcode this compiler has never had a compile_insn case for --
+    # confirmed against the real generated #error line
+    # (`#error unhandled opcode SENDB`), not assumed. #apply_appear_randomly
+    # ends in two more real blocks (`@members.count { |m| ... }`,
+    # `@members.each do |m| ... end`). #initialize never compiling means
+    # drop_unsafe_embeddings correctly refuses to embed any of this
+    # class's own ivars (@id/@name/@members/@pages) -- confirmed directly
+    # against the real generated output: Game::Troop does not appear in
+    # bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" diagnostic.
+    # #member is `private` (a bare `private` mid-class-body, in effect
+    # through the end of the class), so it needs
+    # `mrb_define_private_method`, not `mrb_define_method` -- confirmed
+    # directly against the real diagnostic's own `== compiled entry
+    # points ==` listing, which flags it
+    # `[private -- use mrb_define_private_method, not mrb_define_method]`.
+    # Zero bc2cpp.rb changes needed -- every gap here is an
+    # already-established out-of-scope shape (non-mandatory arity, or
+    # BLOCK/SENDB reached either via a real block literal or the
+    # `&:symbol` shorthand).
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1002,7 +1042,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
-               Game::Rng Game::Weather],
+               Game::Rng Game::Weather Game::Troop],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
