@@ -304,6 +304,66 @@ BC2CPP_COMPILED_GEMS = {
     # the first time a real game session hit it. See register.cxx's own
     # top comment and docs/adr/0139's own Game::Character follow-up for
     # the full writeup.
+    #
+    # RPG2k::Scene::SaveLoad (mruby-rpg2k/mrblib/scene/save_load.rb) -- the
+    # file-select screen shared by Scene::Menu's own Save command and
+    # Scene::Title's Continue entry. 12 of its own 22 real bytecode-defined
+    # methods compile clean, needing no new opcode work at all. #initialize
+    # (`initialize parent, state, mode`) has a real `super parent` call
+    # (SUPER) into RPG2k::Scene::Base, matching ItemMenu's/DebugMenu's/
+    # Menu's/ChipsetEditor's own gap, plus its own `(1..SLOT_COUNT).map {
+    # |slot| ... }` block (BLOCK/SENDB); #dispose/#update each have their
+    # own `&:symbol`-block-pass call (`@slot_windows.each(&:dispose)`/
+    # `(&:update)`, SENDB); #draw_arrow_fallback, #initial_index,
+    # #build_slot_windows, #refresh_slot_windows and #draw_slot_faces each
+    # end in a genuine Ruby block (BLOCK/SENDB); #load_face_bitmap and
+    # #slot_timestamp each have a real `rescue` clause (RESCUE/RAISEIF/
+    # EXCEPT), the same established gap as ItemMenu's own
+    # #load_face_bitmap/ChipsetEditor's own #save_to_disk. #initialize
+    # never compiles, so its own provably-typed ivars (@mode, Symbol;
+    # @arrow_anim, Fixnum) stay unembedded too, same shape as every other
+    # non-embedding target above.
+    #
+    # RPG2k::Scene::Order (mruby-rpg2k/mrblib/scene/order.rb) -- the field
+    # Order screen (RPG2003 main menu -> Order): a pick-and-place party
+    # reorder UI, a left (remaining)/right (picked) column pair plus a
+    # Confirm/Redo prompt once every member is picked. 12 of its own 16 real
+    # bytecode-defined methods compile clean, needing no new opcode work at
+    # all. #initialize (`super parent`, SUPER) matches DebugMenu's/Menu's/
+    # ChipsetEditor's/SaveLoad's own SUPER gap exactly; the other 3
+    # (#build_windows, #refresh_left_window, #refresh_right_window) each use
+    # a genuine Ruby block (`each_with_index`, BLOCK/SENDB). #initialize
+    # never compiles, so its own provably-typed ivars (@counter/
+    # @cursor_index/@confirm_index, Fixnum; @focus, Symbol) stay unembedded
+    # too, same shape as every other SUPER-blocked target above.
+    #
+    # This same round's own adversarial bug hunt across every already-shipped
+    # class (not new-class coverage) found a second real, live bug in
+    # bc2cpp.rb's own compile_send: a bare `/n=(\d+)/` regex parsing a SEND/
+    # SSEND call site's own argument count silently misparsed two other real
+    # disassembly shapes instead of rejecting them -- a keyword-argument call
+    # site ("n=3|nk=1") had its whole keyword-Hash argument silently dropped,
+    # and a splat call site ("n=*") fell through `nil.to_i` to a silently-wrong
+    # zero-argument call. Confirmed live in six already-shipped methods:
+    # Game::Battle#enemy_basic_action/#enemy_fallback_attack's own
+    # `deal_attack(..., charged: charged)` silently dropped `charged:`;
+    # Game::Actor#knock_out!/Game::Battle#inflict_state's own
+    # `Game::States.prune(ids, table, keep: permanent_states)` silently
+    # dropped `keep:`, so a real permanently-protected state could be pruned
+    # as if no exemption list existed; Game::Actor#restore_class's own
+    # `set_level(@level, preserve_mod: false)` silently called with
+    # `preserve_mod: true` instead (a real, load-bearing inversion); and
+    # RPG2k::Scene::DebugMenu#play_animation's own call into three real
+    # MANDATORY keyword arguments used to silently compile a call that would
+    # raise a real ArgumentError at runtime. Unlike this same round's
+    # IvarLayout.join fix (caught by a runtime type guard before it could
+    # corrupt anything), this bug produced genuinely wrong behavior with no
+    # safety net -- the generated C++ compiled and linked clean either way.
+    # Fixed at the root: compile_send now recognizes both shapes and refuses
+    # to compile either (the established #error-marker fallback every other
+    # unmodeled shape already gets). All six affected methods are no longer
+    # registered in register.cxx -- see docs/adr/0139's own follow-up for the
+    # full writeup and real build/nm -C verification.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -311,7 +371,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::EquipMenu RPG2k::Scene::Menu Game::State
                RPG2k::Scene::StatusMenu Game::MoveRoute
                RPG2k::Scene::ChipsetEditor RPG2k::Scene::Base
-               Game::Character],
+               Game::Character RPG2k::Scene::SaveLoad RPG2k::Scene::Order],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
