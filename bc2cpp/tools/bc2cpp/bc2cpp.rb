@@ -311,7 +311,12 @@ def build_registry(ireps, root_label)
         registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
                                                 visibility: visibility)
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
+        # Same charset as compile_send's own name extraction below (see its
+        # own comment for the real bug this fixes) -- kept in sync here too,
+        # even though :private/:protected/:public never collide with an
+        # operator name, so a future reader never has to wonder why the two
+        # differ.
+        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
         next unless %w[private protected public].include?(name)
 
         n = insn.args[/n=(\d+)/, 1].to_i
@@ -722,7 +727,16 @@ class ArgTypes
       ireps.each_value do |caller_irep|
         caller_irep.instructions.each_with_index do |insn, idx|
           next unless %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-          next unless insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1] == name
+          # Same charset as compile_send's own name extraction (see its own
+          # comment) -- before this fix, a MONO name that happened to be an
+          # operator (e.g. `&`) could never match here (the old class
+          # matched nothing after the colon), so a real call site to it
+          # silently never got its argument type inferred. A safe
+          # under-approximation either way (never wrongly infers Fixnum),
+          # not the correctness bug compile_send's own copy of this regex
+          # had -- fixed anyway, for the same soundness this whole pass
+          # already aims for.
+          next unless insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == name
 
           d = insn.args[/^R(\d+)/, 1].to_i
           n = insn.args[/n=(\d+)/, 1].to_i
@@ -1073,7 +1087,11 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     when 'SEND0', 'SEND'
       return nil if resolving_new || !path.empty?
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
+      # Same charset as compile_send's own name extraction (see its own
+      # comment) -- kept in sync for consistency, though `name == 'new'`
+      # below can never be affected by the operator characters that fix
+      # covers.
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       return nil unless name == 'new'
 
       resolving_new = true
@@ -2288,7 +2306,62 @@ class CodeGen
     # (the generated C++ itself compiles and links fine -- it just calls the
     # wrong Ruby method). `!`-suffixed names (`empty!`, ...) were already
     # covered; `?` needed the same treatment.
-    name = args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
+    #
+    # A second, materially worse real bug in this same charset, caught
+    # building Game::ChipSet and confirmed independently against the real
+    # generated output for every already-shipped class, not just the
+    # triggering one: this charset also omitted every bitwise/unary
+    # operator character (`&`, `|`, `^`, `~`, `%`, and the unary-method
+    # suffix `@` for `-@`/`+@`). A call site sending one of those names
+    # (`flags & DIR_BIT[dir]`, a real Integer#& send; mrbc's own
+    # disassembly prints "R6\t:&\tn=1", exactly the same shape as any
+    # other operator SEND) matched *nothing* after the colon, so `name`
+    # came back `nil` -- silently interpolated as `""` a few lines below
+    # into `mrb_funcall(M, r6, "", 1, r7)`, an empty-string method name no
+    # real Ruby method ever has. That compiles and links clean (the same
+    # class of bug as the `?`-omission above -- a `#error`-marker check
+    # can never catch it) but raises a real NoMethodError the first time
+    # it actually runs.
+    #
+    # Confirmed LIVE in already-shipped, already-building code, and far
+    # more widespread than the one triggering case: a direct grep of the
+    # real generated `rpg2k_compiled_gen.cpp` for this exact broken
+    # `mrb_funcall(M, <reg>, "", ...)` shape found 41 call sites across 33
+    # distinct already-registered compiled methods spanning a dozen
+    # classes, not just RPG2k::Scene::ChipsetEditor's own #toggled_byte/
+    # #cell_color_for -- the single most common shape by far is `%` used
+    # for cursor-wraparound arithmetic (`(index + delta) % list.size`),
+    # hit by RPG2k::Scene::Order#move_cursor, RPG2k::Scene::EquipMenu#
+    # move_slot_cursor/#update_slots/#refresh_cand_cursor/#tick_arrows,
+    # RPG2k::Scene::ItemMenu#refresh_item_cursor/#refresh_teleport_cursor/
+    # #tick_arrows/#update_target/#draw_target_face, RPG2k::Scene::
+    # SkillMenu's own equivalent five, RPG2k::Scene::Menu#update_command/
+    # #update_actor_selection/#draw_actor_face, RPG2k::Scene::StatusMenu#
+    # draw_actor_face, RPG2k::Scene::DebugMenu#cycle_mode/#move_block/
+    # #move_row/#update_editor, RPG2k::Scene::SaveLoad#tick_arrows/
+    # #build_face_cell, RPG2k::Scene::Base#advance_list_arrow_anim,
+    # RPG2k::Window#update, Game::Screen#update_shake (a `% 256` phase
+    # wrap), Game::Transition#block_shuffle_rank (`% total`), and
+    # RPG2k::Scene::ChipsetEditor#draw_cursor/#move_cursor (`@idx % COLS`)
+    # -- i.e. every already-shipped menu's own scrolling-cursor/blink-arrow
+    # logic, plus this same `%`-for-wraparound idiom wherever else it
+    # appears. The remaining two sites are `&`/`|`/`~` bitwise flag work
+    # (ChipsetEditor's own #toggled_byte/#cell_color_for). Every one of
+    # these methods
+    # was silently generating a guaranteed-NoMethodError call the moment a
+    # player actually scrolled a list, moved an equip-menu cursor, or used
+    # the F9 chipset editor -- this compiler's single highest-impact bug
+    # so far, precisely because the affected pattern (modulo-based cursor
+    # wraparound) is the single most common idiom across every menu class
+    # already shipped, not an edge case. Fixed at the root (this one
+    # character class, reused by every SEND-name extraction site in this
+    # file, kept in sync at each of its own three other copies above); the
+    # very next regen of every already-shipped class's own generated
+    # output picks up the fix automatically, the same "no hand-edit
+    # needed" shape this file's own IvarLayout.join fix already
+    # established. See docs/adr/0139's own follow-up for the full
+    # before/after verification.
+    name = args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
     # Real, live bug, caught running against real code (Game::Battle#
     # enemy_basic_action's own `deal_attack(b, target, 0, charged: charged)`):
     # a bare `/n=(\d+)/` only recognizes a call site's real disassembly
