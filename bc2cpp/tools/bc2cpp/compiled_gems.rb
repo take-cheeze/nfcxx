@@ -29,7 +29,17 @@ BC2CPP_COMPILED_GEMS = {
     # target whose ivars actually get embedded into a real RData struct
     # (see register.cxx's own MRB_SET_INSTANCE_TT comment); Window's own
     # #initialize stays interpreted (optional args), same as Picture's.
-    owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window],
+    # Game::Transition (docs/adr/0139's own follow-up) is the second real
+    # target with an embedding #initialize -- purely mandatory-arity (5
+    # required args, no opts), the same shape as Screen's. Game::Actor
+    # (docs/adr/0139's own GETIDX/SETIDX/GETGV opcode follow-up) is the
+    # biggest real target yet -- 75 of its own real bytecode-defined
+    # methods across mruby-rpg2k/mrblib/game.rb and game/battle_support.rb's
+    # own reopening of the class; its own #initialize stays interpreted
+    # (BLOCK/SENDB/GETIDX), same shape as Picture's/Window's, so its own
+    # provably-Fixnum ivars stay unembedded too.
+    owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
+               Game::Transition Game::Actor],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
