@@ -536,6 +536,17 @@ class IvarLayout
         next unless d == reg
 
         return :fixnum
+      when 'LOADSYM'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+        # A literal Symbol source (`@x = :foo`) -- see CodeGen::TYPE_OPS's
+        # own comment for why this is just as safe to embed as Fixnum: a
+        # real `mrb_sym` (a plain uint32_t interned id, never itself a
+        # GC-tracked heap object -- 3rd/mruby/src/symbol.c's own symbol
+        # table is only ever freed in bulk at mrb_close, never per-symbol
+        # during an ordinary GC sweep), not an mrb_value needing to stay
+        # reachable for the GC to keep it alive.
+        return :symbol
       when 'LOADNIL'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
@@ -688,13 +699,14 @@ end
 # inference, or this) -- lying in a comment just means a real TypeError at
 # runtime instead of a wrong build, never silent corruption.
 #
-# Only a `fixnum`/`Fixnum`/`Integer` type token means anything today --
-# matching the one primitive type IvarLayout/ArgTypes themselves model;
-# anything else is simply not recognized (never an error -- an unsupported
-# token just means this one annotation contributes nothing, same as
-# omitting it).
+# Only a `fixnum`/`Fixnum`/`Integer` or `symbol`/`Symbol` type token means
+# anything today -- matching the two primitive types IvarLayout/ArgTypes
+# themselves model; anything else is simply not recognized (never an
+# error -- an unsupported token just means this one annotation
+# contributes nothing, same as omitting it).
 class Annotations
-  TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum }.freeze
+  TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum,
+            'symbol' => :symbol, 'Symbol' => :symbol }.freeze
   COMMENT_RE = /^\s*#\s*bc2cpp:\s*\(([^)]*)\)(?:\s*->\s*(\S+))?\s*$/
 
   Annotation = Struct.new(:args, :ret, keyword_init: true)
@@ -936,7 +948,19 @@ end
 #     could not prove monomorphic.
 # ---------------------------------------------------------------------------
 class CodeGen
-  C_TYPE = { fixnum: 'mrb_int' }.freeze
+  C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym' }.freeze
+
+  # box/check/unbox/err for each embeddable primitive type's GETIV/SETIV
+  # codegen (see IvarLayout.trace_type's own LOADSYM comment for why a raw
+  # `mrb_sym` -- not an `mrb_value`-boxed one -- is just as safe to embed
+  # as `mrb_int` already is: mruby's own symbol table
+  # (3rd/mruby/src/symbol.c) is never swept per-symbol, only freed in bulk
+  # at mrb_close, so a `mrb_sym` field needs no GC-reachability keep-alive
+  # any more than a plain integer does).
+  TYPE_OPS = {
+    fixnum: { box: 'mrb_fixnum_value', check: 'mrb_integer_p', unbox: 'mrb_integer', err: 'Integer' },
+    symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
+  }.freeze
 
   def initialize(ireps, registry, ivar_layout)
     @ireps = ireps
@@ -1264,8 +1288,9 @@ class CodeGen
       ivar = a[/@(\w+)/, 1]
       if (type = embed_type(owner_def.owner, ivar))
         sname = struct_name(owner_def.owner)
+        box = TYPE_OPS.fetch(type)[:box]
         note = "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n"
-        "#{note}  r#{d} = mrb_fixnum_value(((#{sname}*)DATA_PTR(self))->#{ivar});\n"
+        "#{note}  r#{d} = #{box}(((#{sname}*)DATA_PTR(self))->#{ivar});\n"
       else
         "  r#{d} = mrb_iv_get(M, self, mrb_intern_cstr(M, \"@#{ivar}\"));\n"
       end
@@ -1276,6 +1301,7 @@ class CodeGen
       s = a[/R(\d+)/, 1]
       if (type = embed_type(owner_def.owner, ivar))
         sname = struct_name(owner_def.owner)
+        ops = TYPE_OPS.fetch(type)
         note = "  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n"
         # Optimistic but guarded: the whole-program analysis proved every
         # *compiled* write site is this type, but it can't see writes from
@@ -1283,8 +1309,8 @@ class CodeGen
         # so this checks rather than blindly trusting its own analysis.
         # Not E_TYPE_ERROR: that macro hardcodes the identifier `mrb`, and
         # every generated function here names its mrb_state* parameter `M`.
-        "#{note}  if (!mrb_integer_p(r#{s})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected Integer\");\n" \
-          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = mrb_integer(r#{s});\n"
+        "#{note}  if (!#{ops[:check]}(r#{s})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(r#{s});\n"
       else
         "  mrb_iv_set(M, self, mrb_intern_cstr(M, \"@#{ivar}\"), r#{s});\n"
       end
