@@ -310,6 +310,61 @@ def build_registry(ireps, root_label)
                          respond_to_missing?].include?(method_name) ? :private : default_visibility
         registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
                                                 visibility: visibility)
+      when 'SDEF'
+        # "SDEF R1 :clamp I[5]" -- OP_SDEF's own real shape (src/codedump.c:
+        # `SDEF\t\tR%d\t:%s\tI[%d]\n`, identical layout to TDEF's own, just a
+        # different opcode). `def self.foo` (or `def SomeConst.foo`) never
+        # compiles to TDEF at all -- codegen_sdef (mrbgems/mruby-compiler/
+        # core/codegen.c) fuses SCLASS+METHOD+DEF into this one opcode
+        # whenever the child irep's own index fits a byte (always true in
+        # practice: the index is scoped to *this* class/module body's own
+        # child-irep list, never the whole program's, so no real class body
+        # here comes close to the 256 needed to miss the fusion), installing
+        # Irep[c] onto R[a]'s *singleton* class -- a real, separate method
+        # table from TDEF's own target_class, invisible to this registry
+        # before this case existed. build_registry's TDEF-only walk had no
+        # way to see any `def self.x` method at all -- a real, live gap,
+        # same "invisible to the bytecode-only registry" shape as the
+        # already-fixed attr_reader/Struct.new findings, just a third,
+        # distinct mechanism (a real bytecode opcode this walk never
+        # switched on, not a native method or a Struct.new-installed one).
+        #
+        # Confirmed LIVE, not hypothetical, in already-shipped, already-
+        # compiled code: `RPG2k::Scene::MapViewer#clamp(v, lo, hi)` (a
+        # private 3-arg helper) was the *only* bytecode-visible `:clamp`
+        # definition anywhere in the whole program before this fix --
+        # `Game.clamp(v, lo, hi)` (mruby-rpg2k/mrblib/game.rb, `def
+        # self.clamp`) is real, used at dozens of already-compiled call
+        # sites across Game::Actor/Screen/Party/Battle/Transition/etc. --
+        # so every one of those compiled to a direct call straight into
+        # `RPG2k__Scene__MapViewer_clamp_impl`, passing the `Game` module
+        # object itself as `self`. Not a crash *today* only because both
+        # real `#clamp` bodies happen to be pure functions of their three
+        # arguments that never touch `self` (confirmed directly against the
+        # generated `rpg2k_compiled_gen.cpp`: `RPG2k__Scene__MapViewer_
+        # clamp_impl`'s own `self` parameter is copied into `r0` and never
+        # read again) -- a real, live devirtualization-soundness violation
+        # all the same, one call away from wrong behavior the moment either
+        # side's body changes, or the next `def self.x`/instance-method
+        # name collision isn't this lucky (e.g. `Game::Interpreter#
+        # trans_to_opacity`, itself only `Game.trans_to_opacity(top_trans)`,
+        # would have compiled to a literal unconditional self-call --
+        # infinite recursion -- had `Game::Interpreter` ever joined
+        # ONLY_OWNERS; caught here only because it hasn't yet).
+        #
+        # Fixed the same way the attr_reader/native-method gaps already
+        # are: register a synthetic MethodDef (irep: nil -- there is no
+        # leaf method body here for this compiler to ever compile into) so
+        # a real bytecode instance-method definition of the same bare name
+        # elsewhere correctly counts this as a second definition and flips
+        # MONO to POLY, never silently staying MONO. This can only ever
+        # turn an unsound MONO into a correctly cautious POLY, never remove
+        # a genuinely sound one, the same guarantee every other synthetic-
+        # MethodDef fix in this file already carries.
+        _reg, sname, _irep_ref = insn.args.split(/\s+/, 3)
+        sdef_name = sname.sub(/^:/, '')
+        registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{namespace || 'Object'}.singleton",
+                                              irep: nil, visibility: :public)
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
         # Same charset as compile_send's own name extraction below (see its
         # own comment for the real bug this fixes) -- kept in sync here too,
