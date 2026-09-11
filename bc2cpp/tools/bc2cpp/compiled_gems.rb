@@ -22,8 +22,14 @@ BC2CPP_COMPILED_GEMS = {
   'mruby-rpg2k-compiled' => {
     # Game::EnemyAction (docs/adr/0139) added alongside the original
     # Game::Picture target -- both real mruby-rpg2k classes, so both live
-    # in this one gem rather than a separate one per class.
-    owners: %w[Game::Picture Game::EnemyAction],
+    # in this one gem rather than a separate one per class. Game::Screen
+    # and RPG2k::Window (docs/adr/0139's own array-literal/LOADSELF/MUL/
+    # AREF opcode follow-up) join them here too. Screen's own #initialize
+    # takes zero arguments and compiles clean, so it's the first shipped
+    # target whose ivars actually get embedded into a real RData struct
+    # (see register.cxx's own MRB_SET_INSTANCE_TT comment); Window's own
+    # #initialize stays interpreted (optional args), same as Picture's.
+    owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
