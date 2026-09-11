@@ -1132,6 +1132,39 @@ BC2CPP_COMPILED_GEMS = {
     # Game::Actor). No bare `private`/`protected`/`public` anywhere in the
     # real source, so all three compiled methods below are plain
     # `mrb_define_method`.
+    #
+    # The same round also adds RPG2k3::Scene::Battle (mruby-rpg2k/mrblib/
+    # scene/battle_rpg2k3.rb) -- the real subclass (`class Battle <
+    # RPG2k::Scene::Battle`, a distinct top-level namespace from RPG2k
+    # itself, NOT the base UI battle scene, which is not a compiled owner)
+    # adding RPG2003's active-time-battle (ATB) gauge behavior on top. 7 of
+    # its own 15 real bytecode-defined methods compile clean, needing no
+    # new opcode work at all: #active_atb?, #atb_accumulating? (a Hash#[]
+    # GETIDX read, a MONO self-call into #active_atb?, and a POLY
+    # `Array#include?` send against the frozen ATB_MENU_PHASES
+    # class-constant array literal), #gauge_battle?, #drive_battle_atb
+    # (MONO self-calls into #controllable?/#start_gauge_action),
+    # #start_gauge_action, #enter_atb_phase (a MONO self-call into
+    # #drive_battle_atb), and #controllable?. The other 8 -- #update,
+    # #drive_battle_command, #enter_command_phase, #open_battle_options,
+    # #advance_actor, #prev_commandable_actor_index -- each end in (or, for
+    # #update, has one branch reach) a bare `super`, OP_SUPER, out of this
+    # compiler's opcode scope (the same established gap RPG2k::Scene::
+    # ItemMenu's/DebugMenu's own #initialize already documents);
+    # #finish_round_animation also calls `super` on top of several genuine
+    # Ruby blocks (`select(&:defending)`, `select(&:dead?)`,
+    # `.uniq { |a| ... }`, `.each { |ally| ... }`); #interrupting_ready_
+    # combatant ends in one more real block (`ready_combatants.find { |c|
+    # ... }`) -- the same established BLOCK/SENDB out-of-scope shape every
+    # other block-using method in this file already documents. Has no
+    # #initialize of its own (inherits the base class's), so there is no
+    # non-mandatory-arity gap to worry about, but also nothing to embed:
+    # confirmed directly against the real generated output, this class
+    # never appears in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic (every @ui/@state access in its compiled methods is a
+    # Hash #[]/#[]= read/write, never a direct SETIV). No bare `private`/
+    # `protected`/`public` anywhere in the real source, so all 7 compiled
+    # methods below are plain `mrb_define_method`.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1146,7 +1179,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
                Game::Rng Game::Weather Game::Troop Game::Vehicle
-               Game::Enemy],
+               Game::Enemy RPG2k3::Scene::Battle],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {

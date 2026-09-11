@@ -291,6 +291,70 @@ def build_registry(ireps, root_label)
     # observable behavior change never caught by any #error check.
     default_visibility = :public
 
+    # Shared by the SCLASS-opened-body case below and the unfused
+    # TCLASS/SCLASS+METHOD+DEF DEF case further down: resolve a
+    # singleton receiver's own name by walking backward from
+    # `before_idx` to `reg`'s own last write. Only two shapes are
+    # trusted (mirrors trace_new_target's/the Struct.new fix's own
+    # "only a real, statically-certain fact counts" discipline): a bare
+    # LOADSELF (`self`, always the innermost enclosing namespace at this
+    # point) or a GETCONST naming a specific constant (`SomeConst`).
+    # Anything else (a computed or otherwise-aliased receiver) is simply
+    # not recognized -- always safe, just a missed case, exactly like
+    # every other backward-scan guard in this file.
+    resolve_singleton_receiver = lambda do |reg, before_idx|
+      recv = nil
+      (before_idx - 1).downto(0) do |i|
+        prev = irep.instructions[i]
+        pd = prev.args[/^(R\d+)/, 1]
+        next unless pd == reg
+
+        case prev.op
+        when 'LOADSELF'
+          recv = namespace || 'Object'
+        when 'GETCONST'
+          const_name = prev.args[/^R\d+\s+(\S+)/, 1]
+          recv = namespace ? "#{namespace}::#{const_name}" : const_name
+        end
+        break
+      end
+      recv
+    end
+
+    # Shared by the TDEF case below and the unfused TCLASS+METHOD+DEF
+    # branch of the new DEF case further down -- both register an
+    # ordinary instance method the same way, so both need the exact
+    # same builtin-private-name special case (see the TDEF case's own
+    # comment for why #initialize/#initialize_copy/#respond_to_missing?
+    # can never simply follow default_visibility).
+    resolve_def_visibility = lambda do |method_name|
+      %w[initialize initialize_copy
+         respond_to_missing?].include?(method_name) ? :private : default_visibility
+    end
+
+    # Real mrbc disassembly can interpose an OP_EXT1/EXT2/EXT3 pseudo-
+    # instruction (src/codedump.c: each widens the *immediately
+    # following* real instruction's own operand width, printed as its
+    # own numbered disassembly line with no args of its own -- e.g.
+    # "10884 5571 EXT2" then "10884 5572 METHOD R2 I[379]") between two
+    # instructions codegen.c emits back-to-back with no logical gap.
+    # Every other adjacency-based backward scan in this file has gotten
+    # away with a plain idx-1/idx-2 check so far only because none of
+    # their own real, closed-world instances happened to need one -- but
+    # the unfused TCLASS/SCLASS+METHOD+DEF DEF case below can't: its own
+    # METHOD operand is a child-irep index guaranteed > 0xff (that's
+    # exactly why this path was taken instead of TDEF/SDEF), which
+    # always needs one of these before it, confirmed directly in the
+    # real RPG2k::Scene::Map disassembly this fix targets. skip_ext_back
+    # walks back past any number of EXT1/EXT2/EXT3 entries and returns
+    # the index of the first real opcode underneath (-1 if it runs off
+    # the start of this block).
+    skip_ext_back = lambda do |from_idx|
+      i = from_idx
+      i -= 1 while i >= 0 && %w[EXT1 EXT2 EXT3].include?(irep.instructions[i]&.op)
+      i
+    end
+
     irep.instructions.each_with_index do |insn, idx|
       case insn.op
       when 'CLASS', 'MODULE'
@@ -340,23 +404,12 @@ def build_registry(ireps, root_label)
         # method body that this walk never descends into anyway). Anything
         # else (a computed or otherwise-aliased receiver) is simply not
         # recognized -- always safe, just a missed case, exactly like every
-        # other backward-scan guard in this file.
+        # other backward-scan guard in this file. resolve_singleton_receiver
+        # (defined once, above) is reused as-is by the unfused
+        # TCLASS/SCLASS+METHOD+DEF DEF case further down -- same receiver
+        # shape, same guard, no separate copy.
         reg = insn.args[/^(R\d+)/, 1]
-        recv = nil
-        (idx - 1).downto(0) do |i|
-          prev = irep.instructions[i]
-          pd = prev.args[/^(R\d+)/, 1]
-          next unless pd == reg
-
-          case prev.op
-          when 'LOADSELF'
-            recv = namespace || 'Object'
-          when 'GETCONST'
-            const_name = prev.args[/^R\d+\s+(\S+)/, 1]
-            recv = namespace ? "#{namespace}::#{const_name}" : const_name
-          end
-          break
-        end
+        recv = resolve_singleton_receiver.call(reg, idx)
         pending_reg = reg
         pending_idx = idx
         # A distinct pseudo-owner ("X.singleton", the same suffix SDEF's own
@@ -397,8 +450,10 @@ def build_registry(ireps, root_label)
         # behavior change, same shape as this file's own Game::Picture#
         # step/#finish_move finding, just never hit until a compiled
         # target's own method set happened to include one of these names.
-        visibility = %w[initialize initialize_copy
-                         respond_to_missing?].include?(method_name) ? :private : default_visibility
+        # resolve_def_visibility (defined once, above) is reused as-is by
+        # the unfused TCLASS+METHOD+DEF branch of the DEF case further
+        # down -- same builtin-private-name special case, no separate copy.
+        visibility = resolve_def_visibility.call(method_name)
         registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
                                                 visibility: visibility)
       when 'SDEF'
@@ -456,6 +511,104 @@ def build_registry(ireps, root_label)
         sdef_name = sname.sub(/^:/, '')
         registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{namespace || 'Object'}.singleton",
                                               irep: nil, visibility: :public)
+      when 'DEF'
+        # "DEF R1 :toned? (R2)" -- OP_DEF's own real shape (src/codedump.c:
+        # `DEF\t\tR%d\t:%s\t(R%d)\n`). codegen_def/codegen_sdef
+        # (mrbgems/mruby-compiler/core/codegen.c) only fuse
+        # TCLASS+METHOD+DEF / SCLASS+METHOD+DEF into the single TDEF/SDEF
+        # opcode the two cases above already recognize when the def's own
+        # child-irep index fits a byte (idx <= 0xff); once a class/module
+        # body's own child-irep count exceeds 255, both fall back to this
+        # literal, unfused three-opcode sequence instead -- invisible to a
+        # walk that (before this case existed) only ever switched on
+        # TDEF/SDEF. Confirmed real, not hypothetical, in already-shipped
+        # source: RPG2k::Scene::Map (mruby-rpg2k/mrblib/scene/map.rb) is
+        # large enough that both `def toned?` and `def self.tone_channel`
+        # land past the fusion threshold -- real `mrbc -v` disassembly
+        # confirmed directly:
+        #   TCLASS  R1
+        #   EXT2
+        #   METHOD  R2      I[380]
+        #   EXT2
+        #   DEF     R1      :toned?   (R2)
+        # and, for the SCLASS (`def self.x`) shape:
+        #   LOADSELF R1     (R0)
+        #   SCLASS   R1
+        #   EXT2
+        #   METHOD   R2     I[379]
+        #   EXT2
+        #   DEF      R1     :tone_channel  (R2)
+        # (`RPG2k::Scene::Map` is not currently a compiled owner, so this
+        # was NOT exploitable at the time it was found -- but the gap is
+        # real and general, not specific to this one class, so it's
+        # closed here rather than left for whenever that changes.)
+        #
+        # skip_ext_back (defined once, above) walks back past the real
+        # EXT1/EXT2/EXT3 pseudo-instructions mrbc's own disassembler
+        # interposes here (widening METHOD's own I[idx] operand, always
+        # > 0xff by construction of reaching this unfused path at all,
+        # and, in this real class's own large symbol pool, DEF's own
+        # symbol-table operand too) before checking the real opcode
+        # underneath -- a plain idx-1/idx-2 check would miss this real
+        # shape entirely.
+        reg, name, recv_arg = insn.args.split(/\s+/, 3)
+        method_idx = skip_ext_back.call(idx - 1)
+        method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
+        next unless method_insn && method_insn.op == 'METHOD'
+
+        method_reg, irep_ref = method_insn.args.split(/\s+/, 2)
+        # Registers must line up exactly the way codegen_def's/
+        # codegen_sdef's own unfused branch always emits them (opener at
+        # R<n>, METHOD at R<n+1>, DEF back at R<n> referencing (R<n+1>))
+        # -- never trusted by adjacency alone, the same "only a real,
+        # statically-certain fact counts" discipline every other
+        # backward-scan guard in this file already follows.
+        next unless recv_arg == "(#{method_reg})"
+
+        opener_idx = skip_ext_back.call(method_idx - 1)
+        opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
+        next unless opener_insn && %w[TCLASS SCLASS].include?(opener_insn.op)
+
+        opener_reg = opener_insn.args[/^(R\d+)/, 1]
+        next unless opener_reg == reg
+
+        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
+        child_label = irep.reps[idx2]
+        def_name = name.sub(/^:/, '')
+
+        if opener_insn.op == 'TCLASS'
+          # Ordinary instance method (`def foo`'s own unfused shape) --
+          # registered exactly the way the TDEF case above registers a
+          # fused `def`, just reached via this three-opcode sequence
+          # instead. A real, walkable MethodDef (a genuine irep, not a
+          # synthetic placeholder): this owner's normal instance method
+          # table, exactly as compilable as any TDEF-registered method
+          # should this class ever join a future round's ONLY_OWNERS.
+          owner = namespace || 'Object' # a top-level `def` lands on Object.
+          visibility = resolve_def_visibility.call(def_name)
+          registry[def_name] << MethodDef.new(name: def_name, owner: owner, irep: child_label,
+                                               visibility: visibility)
+        else
+          # `def self.foo` (or `def SomeConst.foo`)'s own unfused shape --
+          # the same "X.singleton" pseudo-owner the SDEF case above uses,
+          # except this time there IS a real child irep to compile, so
+          # it's registered as an ordinary walkable MethodDef instead of
+          # a synthetic irep:-nil placeholder. Receiver resolved by the
+          # exact same cautious backward scan the SCLASS-opened-body case
+          # above already uses (resolve_singleton_receiver) -- an
+          # unrecognized receiver just isn't registered at all, always
+          # safe, same as every other backward-scan guard in this file.
+          # Visibility unconditionally :public, matching the SDEF case's
+          # own synthetic entries -- this file doesn't model
+          # `private_class_method`/singleton-method privacy at all,
+          # consistently, for either the fused or unfused shape.
+          recv = resolve_singleton_receiver.call(opener_reg, opener_idx)
+          if recv
+            owner = "#{recv}.singleton"
+            registry[def_name] << MethodDef.new(name: def_name, owner: owner, irep: child_label,
+                                                 visibility: :public)
+          end
+        end
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
         # Same charset as compile_send's own name extraction below (see its
         # own comment for the real bug this fixes) -- kept in sync here too,
