@@ -264,9 +264,120 @@ BC2CPP_COMPILED_GEMS = {
     # LCF::MoveCommand's own attr_readers above if @schema were ever a
     # Fixnum/Symbol embedding candidate -- it isn't, so `natively_exposed?`
     # never even needs to act on this class.
+    # LCF::Array2D (mruby-lcf/mrblib/lcf.rb, right below LCF::Array1D) -- the
+    # id-keyed table of rows every LCF::File-family object's own project-map
+    # tree / database item/actor/skill/... list actually decodes through:
+    # each row is itself an Array1D chunk stream, and this class only tracks
+    # where each row's raw byte span sits until something actually reads it.
+    # A genuinely different method shape from Array1D right above it (not
+    # its structural twin, despite both being schema-driven, chunk-id-keyed
+    # containers) -- confirmed directly by reading the real source rather
+    # than assumed: 6 real bytecode-defined methods, not 11, and neither
+    # #method_missing nor #respond_to_missing? exists on this class at all
+    # (Array2D is indexed purely by integer row id, with no per-field
+    # symbolic accessor to dispatch through -- unlike Array1D's own
+    # per-chunk-id + schema-driven symbolic-field lookup).
+    #
+    # 2 of its own 6 real bytecode-defined methods compile clean, needing
+    # zero new bc2cpp.rb opcode work, confirmed directly against the real
+    # `== compiled entry points ==` listing:
+    #   LCF__Array2D___         (LCF::Array2D#[],  arity 1)
+    #   LCF__Array2D____        (LCF::Array2D#[]=, arity 2)
+    # Both public, pure mandatory arity, no super, no block. #[] lazily
+    # decodes (and in-place caches) a row's raw byte span into a real
+    # Array1D on first access (`Array1D.new(entry, @schema)`, an ordinary
+    # POLY `:new` send into a sibling compiled class plus a plain
+    # `@data[idx] =` SETIDX) and returns the row unchanged when it is
+    # already decoded (or absent); #[]= is a bare `@data[idx] = entry`
+    # SETIDX with no schema/elsif logic at all (simpler than Array1D's own
+    # #[]=, which does have one).
+    #
+    # 4 more real methods stay interpreted, each confirmed against its own
+    # real `#error` marker with SKIP_UNSUPPORTED=0 (not guessed from the
+    # Ruby source shape):
+    #   - #initialize(s, schema): NOT the same on-disk decode shape as
+    #     Array1D#initialize's own id/len/bytes `loop`, confirmed directly
+    #     by reading the source -- Array2D's own header is a single
+    #     BER-encoded row count, then one BER row-id per entry, each
+    #     followed by one *undelimited* Array1D-shaped chunk stream (a
+    #     nested id/len/bytes run terminated by chunk-id 0, scanned but not
+    #     decoded -- see #read_row_bytes below). The count is consumed via
+    #     `(0...LCF.read_ber(s)).each do ... end`, a `Range#each` method
+    #     call taking a block -- the exact same BLOCK/SENDB opcode pair
+    #     Array1D#initialize's own `loop` (a `Kernel#loop` method call
+    #     taking a block) hits, just a different block-taking method
+    #     producing it: `#error unhandled opcode BLOCK` / `#error unhandled
+    #     opcode SENDB` are the only two errors in an otherwise-compiling
+    #     body (the StringIO-conversion guard, the early `return if
+    #     s.eof?`, and both @data/@schema SETIVs above the loop all compile
+    #     fine on their own).
+    #   - #each: no arguments (unlike Array1D, which has no #each at all),
+    #     but `@data.size.times do |i| ... end` is a third block-taking
+    #     method call hitting the exact same `#error unhandled opcode
+    #     BLOCK` / `#error unhandled opcode SENDB` pair -- confirmed
+    #     directly against its own real generated body, not assumed from
+    #     the `.times do` shape alone. `include Enumerable` (a class-body
+    #     level call, not a per-instance bytecode method) is unaffected
+    #     either way.
+    #   - #to_lcf: no arguments at all (unlike Array1D#to_lcf's own single
+    #     optional `terminate` argument, which fails on arity before its
+    #     own block is ever reached) -- confirmed via its own real body,
+    #     which hits the BLOCK/SENDB pair TWICE, independently, once for
+    #     `@data.each_with_index { |v, i| ... }` (collecting defined row
+    #     ids) and again for `ids.each do |i| ... end` (writing each row).
+    #   - #read_row_bytes (private): a real `loop do ... end`, the
+    #     identical shape (and identical `#error unhandled opcode BLOCK` /
+    #     `#error unhandled opcode SSENDB` pair) as Array1D#initialize's
+    #     own loop and Array1D#sym2idx's own `.each` -- confirmed directly
+    #     against its own real generated body, not inferred from the
+    #     doc comment above it describing the scan.
+    #
+    # Embedding: NONE, confirmed directly against the real diagnostic --
+    # `LCF::Array2D` never appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" listing, so no MRB_SET_INSTANCE_TT call belongs
+    # in this class's own registration block. @data (built as `@data[idx]
+    # = read_row_bytes(s)` inside #initialize's own uncompiled loop -- an
+    # Array of Strings, later replaced element-by-element with Array1D
+    # instances by #[]'s own lazy-decode SETIDX) and @schema (the
+    # constructor's own second argument, a Hash) are never Fixnum/Symbol,
+    # so IvarLayout correctly infers nothing embeddable here, independent
+    # of #initialize itself never compiling (same mandatory
+    # drop_unsafe_embeddings gate every other non-compiling-#initialize
+    # target in this ADR already documents: embedding only ever happens
+    # through a compiling constructor's own SETIV codegen). This class
+    # carries no `attr_reader`/`attr_writer`/`attr_accessor` at all
+    # (unlike Array1D's own `attr_reader :schema`), so there is no native-
+    # accessor/embedded-ivar collision surface here for
+    # `natively_exposed?` to even need to act on -- confirmed by this
+    # class's own absence from the real diagnostic's `report_
+    # annotation_candidates` EMBED-proposal output, not merely inferred
+    # from the lack of an attr_reader.
+    #
+    # LCF::File#[]/#[]= (mruby-lcf/mrblib/lcf_file.rb): the LCF::Array1D
+    # entry above's own writeup flagged, in passing, that these two already
+    # compile clean today (real `LCF__File___`/`LCF__File____` entry points
+    # in the diagnostic) despite this file's own top comment and
+    # mruby-lcf-compiled/mrbgem.rake's comment both still claiming the whole
+    # LCF::File-family `#[]`/`#[]=` stays interpreted -- an open question a
+    # later round resolved by re-checking directly against the real
+    # diagnostic rather than trusting either stale comment. Confirmed real,
+    # not stale documentation of a genuine limitation: both compile to the
+    # same generic Array/Hash-fastpath-plus-POLY-`mrb_funcall`-fallback
+    # shape LCF::Array1D's/LCF::Sections's own already-registered `#[]`/
+    # `#[]=` use, dispatched against `@root` (LCF::File#initialize always
+    # sets it to an LCF::Sections or an LCF.const_get(schema[:type])
+    # instance, never a real Array/Hash, so the fallback branch always
+    # fires and correctly dispatches dynamically to whichever class @root
+    # actually is at runtime -- no devirtualization of `@root` itself is
+    # involved, so subclass identity, Database vs. MapTree vs. MapUnit vs.
+    # SaveData, never matters here). Now registered in
+    # mruby-lcf-compiled/src/register.cxx (see that file's own comment for
+    # the full writeup); this was a real, previously-missed coverage
+    # opportunity, not a case where the tool ever produced something
+    # unsafe.
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
                LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
-               LCF::Array1D],
+               LCF::Array1D LCF::Array2D],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -1550,7 +1661,46 @@ BC2CPP_COMPILED_GEMS = {
     # ADR added gets all 17 of its real bytecode-defined accessor methods
     # (mruby-rgss/mrblib/lib.rb's own reopening of the natively-defined
     # Sprite class) to 100% clean compilation.
-    owners: %w[RGSS::Sprite],
+    #
+    # RGSS::Plane (docs/adr/0139's own follow-up, same mrblib/lib.rb, right
+    # above Sprite) joins as the gem's second owner. Unlike Sprite, this
+    # class has no #initialize of its own at all -- `attr_reader :bitmap,
+    # :ox, :oy, :z, :viewport` stays native/uncompiled as always, and the
+    # six remaining real bytecode-defined methods (opacity/zoom_x/zoom_y/
+    # blend_type/tone/color) are plain Ruby readers that answer RGSS
+    # defaults for ivars only the native #initialize (mruby-rgss/src/
+    # lib.cxx) ever sets -- this class's own source comment says so
+    # directly ("native #initialize does not set these ivars, so they fall
+    # back to RGSS defaults here"), and it's the exact same shape as
+    # Sprite's own already-shipped opacity/zoom_x/zoom_y/blend_type/tone/
+    # color. All 6 compile clean, confirmed directly against the real `==
+    # compiled entry points ==` listing (RGSS__Plane_opacity/_zoom_x/
+    # _zoom_y/_blend_type/_tone/_color, all arity 0): `@opacity.nil? ? 255
+    # : @opacity` and `@blend_type || 0` use this ADR's own established
+    # JMPNIL/ternary and `||` support; `@tone ||= Tone.new(...)`/`@color
+    # ||= Color.new(...)` need no dedicated "OP_ASGN" opcode at all --
+    # mrbc lowers `||=` to a plain GETIV/JMPIF-guarded-GETCONST+SEND+SETIV
+    # sequence, the exact shape already verified for Sprite's own
+    # identical `@tone ||=`/`@color ||=` methods (confirmed here by the
+    # regenerated Plane bodies reusing the same owner-scope-first GETCONST
+    # codegen fix, not merely inferred from Sprite's prior success).
+    #
+    # Embedding: none, confirmed directly against the real diagnostic --
+    # RGSS::Plane never appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" listing. drop_unsafe_embeddings's own
+    # class-level gate requires a *compiling* #initialize with pure
+    # mandatory arity before embedding anything on a class at all; Plane
+    # has no #initialize (compiling or otherwise), so nothing on it is
+    # ever even considered as an embedding candidate, independent of
+    # natively_exposed? (this ADR's own eighth-severe-bug fix) -- which
+    # never needs to act on this class as a result. @opacity/@zoom_x/
+    # @zoom_y/@blend_type are read only via .nil?/||, never Fixnum-literal
+    # -assigned anywhere in this class's own bytecode (only native C++
+    # code sets them), so IvarLayout doesn't even propose them; @tone/
+    # @color pick up a CLASS_HINT (Tone/Color) from their own `||=`
+    # construction, but a CLASS_HINT alone never embeds without a
+    # compiling constructor either.
+    owners: %w[RGSS::Sprite RGSS::Plane],
     out_symbol: 'rgss_compiled',
   },
 }.freeze
