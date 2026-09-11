@@ -190,12 +190,57 @@ BC2CPP_COMPILED_GEMS = {
     # `rescue StandardError => e` clause (RESCUE/RAISEIF/EXCEPT), the same
     # established shape SkillMenu's own #load_face_bitmap already
     # documents above.
+    #
+    # Game::MoveRoute (docs/adr/0139's own follow-up, mruby-rpg2k/mrblib/
+    # game.rb) -- the RPG2000 "Set Move Route" event-command engine: a
+    # character's programmed queue of move/turn/wait/jump/effect
+    # sub-commands, plus its repeat/skip-if-blocked flags. 18 of its own 19
+    # real bytecode-defined methods compile clean, needing no new opcode
+    # work at all. #initialize (`commands, repeat: true, skippable: false`)
+    # stays interpreted -- real keyword arguments, the same non-mandatory-
+    # arguments gap as every other unembedded target above, just via
+    # keyword syntax rather than optional positional args this time
+    # (confirmed against its own generated #error line). Two more real
+    # methods, .from_page and .same_route?, are singleton (`def self.`)
+    # methods, structurally invisible to bc2cpp's own build_registry (its
+    # CLASS/MODULE/TDEF walk never recognizes an SCLASS-opened body the way
+    # it does a CLASS/MODULE one, so a `def self.foo` method's own TDEF is
+    # never reached at all) -- an existing, program-wide gap, not new here,
+    # just the first target whose own singleton methods carry real logic
+    # worth naming. #initialize never compiles, so its one provably-Fixnum
+    # ivar (@index) stays unembedded too, same shape as every other
+    # non-embedding target above.
+    #
+    # This round's own full-sweep re-check also caught and fixed a real,
+    # live correctness bug in bc2cpp.rb itself, not this gem's own owners:
+    # extract_native_method_names was missing mruby core's own
+    # MRB_SYM_Q/MRB_SYM_B/MRB_SYM_E macros ("name?"/"name!"/"name="),
+    # leaving ~75 real native predicate/bang/setter names invisible to the
+    # whole-program registry -- surfaced as Game::MoveRoute#empty? getting
+    # wrongly devirtualized into calling itself. See bc2cpp.rb's own
+    # comment and register.cxx's own top comment for the full story.
+    #
+    # RPG2k::Scene::ChipsetEditor (docs/adr/0139's own follow-up,
+    # mruby-rpg2k/mrblib/scene/chipset_editor.rb) -- the F9 debug menu's
+    # Chipset page: a Lower/Upper tile-passability grid editor. 17 of its
+    # own 20 real bytecode-defined methods compile clean, needing no new
+    # opcode work at all. #initialize (a `quit_on_close:` keyword argument
+    # plus a real `super parent` call) matches ItemMenu's/DebugMenu's/
+    # Menu's own SUPER gap, just paired with non-mandatory arity too;
+    # #save_to_disk has a real `rescue StandardError => e` clause
+    # (RESCUE/RAISEIF/EXCEPT), the same established gap as ItemMenu's own
+    # #load_face_bitmap; #draw_grid ends in a genuine Ruby block
+    # (`(0...cell_count).each do |i| ... end`, BLOCK/SENDB). #initialize
+    # never compiles, so its own provably-typed ivars (@chipset_id/@idx,
+    # Fixnum; @tab, Symbol) stay unembedded too, same shape as Picture's/
+    # Window's/Actor's/Battle's/ItemMenu's/EquipMenu's/Menu's.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
                RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu
                RPG2k::Scene::EquipMenu RPG2k::Scene::Menu Game::State
-               RPG2k::Scene::StatusMenu],
+               RPG2k::Scene::StatusMenu Game::MoveRoute
+               RPG2k::Scene::ChipsetEditor],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
