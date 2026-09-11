@@ -350,8 +350,48 @@ end
 # deliberately stays a registry-soundness fix only; see monomorphic_target's
 # own comment for where the MONO decision this feeds actually lives.
 # ---------------------------------------------------------------------------
+# mruby's own presym operator-name table (3rd/mruby/lib/mruby/presym.rb's
+# own OPERATORS hash, inverted) -- MRB_OPSYM(cmp) is how mruby-core's own
+# C source spells the method `<=>`, never the operator text itself. A
+# small, closed, finite table (mruby's own presym generator has no other
+# source of truth for this mapping either), so hardcoding the inverse here
+# is exactly as authoritative as reading it out of that file at runtime,
+# without a real dependency on `3rd/mruby/lib` being on the load path.
+OPSYM_TO_RUBY = {
+  'not' => '!', 'mod' => '%', 'and' => '&', 'mul' => '*', 'add' => '+',
+  'sub' => '-', 'div' => '/', 'lt' => '<', 'gt' => '>', 'xor' => '^',
+  'tick' => '`', 'or' => '|', 'neg' => '~', 'neq' => '!=', 'nmatch' => '!~',
+  'andand' => '&&', 'pow' => '**', 'plus' => '+@', 'minus' => '-@',
+  'lshift' => '<<', 'le' => '<=', 'eq' => '==', 'match' => '=~',
+  'ge' => '>=', 'rshift' => '>>', 'aref' => '[]', 'oror' => '||',
+  'cmp' => '<=>', 'eqq' => '===', 'aset' => '[]=',
+}.freeze
+
+# RGSS's own C++ sources (mruby-rgss/src/lib.cxx) register every method
+# with a literal string name (`mrb_define_method(M, rect, "x", ...)`), but
+# mruby's *own* core (3rd/mruby/src/*.c) and its bundled C mrbgems mostly
+# don't -- mruby 4.0 registers most of its own core methods through a
+# declarative ROM method-table macro instead (confirmed against real
+# source, e.g. 3rd/mruby/src/symbol.c's own `symbol_rom_entries`):
+#   static const mrb_mt_entry symbol_rom_entries[] = {
+#     MRB_MT_ENTRY(sym_name, MRB_SYM(name), MRB_ARGS_NONE()),
+#     MRB_MT_ENTRY(sym_cmp,  MRB_OPSYM(cmp), MRB_ARGS_REQ(1)),   // <=>
+#     ...
+#   };
+#   MRB_MT_INIT_ROM(mrb, sym, symbol_rom_entries);
+# -- a real, distinct native-registration idiom the RGSS-only literal-
+# string regex below cannot see at all. This is exactly the shape of the
+# earlier-caught Game::Shop#name bug (Symbol#name/Class#name are two of
+# the names this exact table form registers) -- so scanning mruby's own
+# core C sources via NATIVE_SRCS only closes that gap if this second
+# pattern is recognized too. A few core mrbgems (e.g. mruby-task) still
+# call `mrb_define_method_id(mrb, klass, MRB_SYM(name), func, aspec)`
+# directly instead of a ROM table -- same MRB_SYM/MRB_OPSYM symbol
+# spelling, different call shape, covered by the same second regex below.
 def extract_native_method_names(src_paths)
   names = Set.new
+  sym_or_opsym = /MRB_(?:SYM|OPSYM)\((\w+)\)/
+
   Array(src_paths).each do |path|
     src = File.read(path, encoding: 'UTF-8')
     # Handles both single-line and the far more common multi-line call shape
@@ -359,6 +399,17 @@ def extract_native_method_names(src_paths)
     # just doesn't care where the newlines fall between arguments.
     src.scan(/mrb_define_(?:method|class_method|module_function)\s*\(\s*\w+\s*,\s*\w+\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
       names << unescape_c_string(name.first)
+    end
+
+    # MRB_MT_ENTRY(fn, MRB_SYM(name), flags) / MRB_MT_ENTRY(fn, MRB_OPSYM(op), flags)
+    # -- mruby core's own ROM method-table idiom.
+    src.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{sym_or_opsym}/) { |tok| names << (OPSYM_TO_RUBY[tok.first] || tok.first) }
+
+    # mrb_define_method_id(mrb, klass, MRB_SYM(name)/MRB_OPSYM(op), func, aspec)
+    # (and the _class_method_id/_module_function_id siblings) -- the direct-call
+    # form some core mrbgems (mruby-task, ...) use instead of a ROM table.
+    src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{sym_or_opsym}/) do |tok|
+      names << (OPSYM_TO_RUBY[tok.first] || tok.first)
     end
   end
   names
@@ -485,6 +536,17 @@ class IvarLayout
         next unless d == reg
 
         return :fixnum
+      when 'LOADSYM'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+        # A literal Symbol source (`@x = :foo`) -- see CodeGen::TYPE_OPS's
+        # own comment for why this is just as safe to embed as Fixnum: a
+        # real `mrb_sym` (a plain uint32_t interned id, never itself a
+        # GC-tracked heap object -- 3rd/mruby/src/symbol.c's own symbol
+        # table is only ever freed in bulk at mrb_close, never per-symbol
+        # during an ordinary GC sweep), not an mrb_value needing to stay
+        # reachable for the GC to keep it alive.
+        return :symbol
       when 'LOADNIL'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
@@ -637,13 +699,14 @@ end
 # inference, or this) -- lying in a comment just means a real TypeError at
 # runtime instead of a wrong build, never silent corruption.
 #
-# Only a `fixnum`/`Fixnum`/`Integer` type token means anything today --
-# matching the one primitive type IvarLayout/ArgTypes themselves model;
-# anything else is simply not recognized (never an error -- an unsupported
-# token just means this one annotation contributes nothing, same as
-# omitting it).
+# Only a `fixnum`/`Fixnum`/`Integer` or `symbol`/`Symbol` type token means
+# anything today -- matching the two primitive types IvarLayout/ArgTypes
+# themselves model; anything else is simply not recognized (never an
+# error -- an unsupported token just means this one annotation
+# contributes nothing, same as omitting it).
 class Annotations
-  TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum }.freeze
+  TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum,
+            'symbol' => :symbol, 'Symbol' => :symbol }.freeze
   COMMENT_RE = /^\s*#\s*bc2cpp:\s*\(([^)]*)\)(?:\s*->\s*(\S+))?\s*$/
 
   Annotation = Struct.new(:args, :ret, keyword_init: true)
@@ -733,6 +796,63 @@ end
 # report_annotation_candidates below can share the exact same rule
 # drop_unsafe_embeddings itself uses, rather than silently overcounting
 # candidates a real build would refuse to embed anyway.
+# Call-site-specific devirtualization: unlike monomorphic_target (a name
+# with exactly one definition anywhere in the whole program), this asks a
+# narrower question about ONE specific SEND -- "is THIS receiver provably a
+# freshly constructed instance of one exact, statically known class" --
+# which can still resolve a POLY-named call site to a direct C++ call.
+#
+# Walk backward from `idx` (a SEND's own position) looking for whatever
+# last wrote `reg` (following MOVE chains, exactly like IvarLayout.
+# trace_type), until hitting a `SomeClass.new(...)` SEND on that same
+# register, then keep tracing the *same* register one step further back
+# through a GETMCNST*/GETCONST constant-path chain (mirrors GETMCNST's own
+# codegen comment: it reads a constant off of r<d> and overwrites r<d> in
+# place, so each segment's base is still findable on the same register)
+# to recover the class's own fully-qualified name (e.g. "Game::Picture"),
+# built the same left-to-right, `::`-joined, no-leading-colon way
+# build_registry's own CLASS/MODULE walk builds every MethodDef#owner --
+# so it can be matched directly against one.
+#
+# Deliberately never asks "which class might this receiver be" the way a
+# real type system (or a superclass/MRO walk) would -- only "is this
+# receiver POSITIVELY, EXACTLY this one class". A bare `ClassName.new`
+# always allocates the literal receiver class it's sent to, never a
+# subclass in disguise, so this needs no inheritance model at all to stay
+# sound: an inherited method this can't see (no matching owner in the
+# registry) just stays a safe miss, never a wrong answer. Bails to nil
+# (ordinary dynamic dispatch, always safe) on anything else -- a computed
+# or aliased class reference (`x.class.new`, `superclass.new`), a receiver
+# reused from an opaque argument, or any other write to `reg` this
+# doesn't recognize.
+def trace_new_target(irep, idx, reg)
+  path = []
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'SEND0', 'SEND'
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
+      return nil unless path.empty? && name == 'new'
+    # Same register, still tracing further back for the class object that
+    # was `.new`'s own receiver -- SEND overwrites its receiver register
+    # with the result, in place.
+    when 'GETMCNST'
+      path.unshift(insn.args[/::(\w+)\s*$/, 1])
+    when 'GETCONST'
+      path.unshift(insn.args.split(/\s+/, 2)[1])
+      return path.join('::')
+    else
+      return nil
+    end
+  end
+  nil
+end
+
 def pure_mandatory_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
@@ -760,18 +880,52 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       mand = enter ? enter.args.split(':').first.to_i : 0
       next if mand.zero?
 
+      already_at = lambda do |pos|
+        annotations[irep.label]&.args&.[](pos - 1) || arg_types[d.name]&.[](pos - 1)
+      end
+      seen_pos = Set.new
+
       irep.instructions.each_with_index do |insn, idx|
         next unless insn.op == 'SETIV'
 
         src_reg = insn.args[/R(\d+)/, 1]
         pos = opaque_argument_position(irep, idx, src_reg, mand)
         next unless pos
-
-        already = annotations[irep.label]&.args&.[](pos - 1) || arg_types[d.name]&.[](pos - 1)
-        next if already
+        next if already_at.call(pos)
 
         ivar = insn.args[/@(\w+)/, 1]
-        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand }
+        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand, via: 'SETIV' }
+        seen_pos << pos
+      end
+
+      # A second, purely diagnostic pass: an opaque mandatory argument
+      # consumed directly by a fixnum-fastpath arithmetic/comparison op
+      # (ADD/SUB/EQ/LT/LE/GT/GE and their *I immediate forms) is real
+      # evidence worth surfacing too, even though -- unlike a SETIV site --
+      # annotating one of these can never change compiled output:
+      # IvarLayout.trace_type (the only consumer of arg_types/annotations)
+      # only ever reaches its "incoming argument" fallback from a SETIV
+      # trace, never from here. Purely a documentation aid: a magic-comment
+      # annotation doubles as "this argument is always an Integer in
+      # practice" for a human reading the `def` line, not just a codegen
+      # unlock -- see the "go on annotating rpg2k for readability" follow-up.
+      irep.instructions.each_with_index do |insn, idx|
+        regs = case insn.op
+               when 'ADD', 'SUB', 'EQ', 'LT', 'LE', 'GT', 'GE'
+                 [insn.args[/^R(\d+)/, 1], insn.args[/\(R(\d+)\)/, 1]]
+               when 'ADDI', 'SUBI'
+                 [insn.args[/^R(\d+)/, 1]]
+               else
+                 []
+               end
+        regs.compact.each do |reg|
+          pos = opaque_argument_position(irep, idx, reg, mand)
+          next unless pos
+          next if seen_pos.include?(pos) || already_at.call(pos)
+
+          candidates << { owner: d.owner, name: d.name, ivar: nil, pos: pos, mand: mand, via: insn.op }
+          seen_pos << pos
+        end
       end
     end
   end
@@ -794,7 +948,19 @@ end
 #     could not prove monomorphic.
 # ---------------------------------------------------------------------------
 class CodeGen
-  C_TYPE = { fixnum: 'mrb_int' }.freeze
+  C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym' }.freeze
+
+  # box/check/unbox/err for each embeddable primitive type's GETIV/SETIV
+  # codegen (see IvarLayout.trace_type's own LOADSYM comment for why a raw
+  # `mrb_sym` -- not an `mrb_value`-boxed one -- is just as safe to embed
+  # as `mrb_int` already is: mruby's own symbol table
+  # (3rd/mruby/src/symbol.c) is never swept per-symbol, only freed in bulk
+  # at mrb_close, so a `mrb_sym` field needs no GC-reachability keep-alive
+  # any more than a plain integer does).
+  TYPE_OPS = {
+    fixnum: { box: 'mrb_fixnum_value', check: 'mrb_integer_p', unbox: 'mrb_integer', err: 'Integer' },
+    symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
+  }.freeze
 
   def initialize(ireps, registry, ivar_layout)
     @ireps = ireps
@@ -1034,9 +1200,9 @@ class CodeGen
     # plain mrb_value locals above, before any label, so C++'s "goto must not
     # jump over a variable's initialization" rule can never be violated here.
     targets = jump_targets(irep)
-    irep.instructions.each do |insn|
+    irep.instructions.each_with_index do |insn, idx|
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      out << compile_insn(insn, irep, d)
+      out << compile_insn(insn, irep, d, idx)
     end
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     out << "}\n\n"
@@ -1072,7 +1238,7 @@ class CodeGen
     targets
   end
 
-  def compile_insn(insn, irep, owner_def)
+  def compile_insn(insn, irep, owner_def, idx = nil)
     a = insn.args
     case insn.op
     when 'ENTER'
@@ -1122,8 +1288,9 @@ class CodeGen
       ivar = a[/@(\w+)/, 1]
       if (type = embed_type(owner_def.owner, ivar))
         sname = struct_name(owner_def.owner)
+        box = TYPE_OPS.fetch(type)[:box]
         note = "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n"
-        "#{note}  r#{d} = mrb_fixnum_value(((#{sname}*)DATA_PTR(self))->#{ivar});\n"
+        "#{note}  r#{d} = #{box}(((#{sname}*)DATA_PTR(self))->#{ivar});\n"
       else
         "  r#{d} = mrb_iv_get(M, self, mrb_intern_cstr(M, \"@#{ivar}\"));\n"
       end
@@ -1134,6 +1301,7 @@ class CodeGen
       s = a[/R(\d+)/, 1]
       if (type = embed_type(owner_def.owner, ivar))
         sname = struct_name(owner_def.owner)
+        ops = TYPE_OPS.fetch(type)
         note = "  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n"
         # Optimistic but guarded: the whole-program analysis proved every
         # *compiled* write site is this type, but it can't see writes from
@@ -1141,8 +1309,8 @@ class CodeGen
         # so this checks rather than blindly trusting its own analysis.
         # Not E_TYPE_ERROR: that macro hardcodes the identifier `mrb`, and
         # every generated function here names its mrb_state* parameter `M`.
-        "#{note}  if (!mrb_integer_p(r#{s})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected Integer\");\n" \
-          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = mrb_integer(r#{s});\n"
+        "#{note}  if (!#{ops[:check]}(r#{s})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(r#{s});\n"
       else
         "  mrb_iv_set(M, self, mrb_intern_cstr(M, \"@#{ivar}\"), r#{s});\n"
       end
@@ -1200,7 +1368,7 @@ class CodeGen
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
       compile_cmp(insn.op, a)
     when 'SEND0', 'SEND'
-      compile_send(a, self_implicit: false)
+      compile_send(a, self_implicit: false, irep: irep, idx: idx)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true)
     when 'RETURN'
@@ -1298,7 +1466,7 @@ class CodeGen
     CPP
   end
 
-  def compile_send(args, self_implicit:)
+  def compile_send(args, self_implicit:, irep: nil, idx: nil)
     d = args[/^R(\d+)/, 1]
     # Real bug, caught by running against real code: this charset omitted
     # `?` -- every predicate-style method name (`rpg2003?`, `key?`, `eof?`,
@@ -1319,6 +1487,24 @@ class CodeGen
     # convention -- see pure_mandatory_arity?'s own comment (a real bug,
     # caught by running against real code, not a hypothetical).
     target = nil if target && !pure_mandatory_arity?(@ireps.fetch(target.irep))
+    # Name-based devirtualization failed (still POLY by name) -- try a
+    # call-site-specific fallback: THIS receiver, traced backward through
+    # the same straight-line method body, might still be provably a fresh
+    # instance of one exact class (trace_new_target's own comment). Never a
+    # superclass/MRO walk -- an exact owner match only, so a method this
+    # class inherits rather than defines itself still safely misses here
+    # and falls through to ordinary dynamic dispatch, same as today.
+    typed = false
+    if target.nil? && !self_implicit && irep && idx
+      known_class = trace_new_target(irep, idx, d)
+      if known_class
+        candidate = @registry[name].find { |md| md.owner == known_class }
+        if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep))
+          target = candidate
+          typed = true
+        end
+      end
+    end
     # A monomorphic target whose *owner* is being filtered out of this run's
     # emitted output (ONLY_OWNERS) has no _impl function in the generated
     # file at all -- a real bug, caught wiring up the first real caller
@@ -1339,7 +1525,12 @@ class CodeGen
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
-      note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+      note = if typed
+               "  // TYPED :#{name} -> #{target.owner}##{target.name} (receiver traced to a fresh " \
+                 "#{target.owner}.new), direct C++ call (no mrb_funcall)\n"
+             else
+               "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
+             end
       "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
     else
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
@@ -1443,7 +1634,8 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     candidates.each do |c|
-      warn "  CANDIDATE  #{c[:owner]}##{c[:name]}, arg #{c[:pos]}/#{c[:mand]} -> @#{c[:ivar]}"
+      target = c[:ivar] ? "-> @#{c[:ivar]}" : "-> (used in #{c[:via]})"
+      warn "  CANDIDATE  #{c[:owner]}##{c[:name]}, arg #{c[:pos]}/#{c[:mand]} #{target}"
     end
   end
 
