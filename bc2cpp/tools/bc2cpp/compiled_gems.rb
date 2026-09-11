@@ -151,11 +151,51 @@ BC2CPP_COMPILED_GEMS = {
     # #initialize never compiles, so its provably-typed ivars stay
     # unembedded too, same shape as Picture's/Window's/Actor's/Battle's/
     # ItemMenu's.
+    #
+    # Game::State (mruby-rpg2k/mrblib/game.rb, reopened by mruby-rpg2k/
+    # mrblib/game/lsd_io.rb) -- the whole-program root save/session object
+    # (party, switches, variables, map position, pictures, both timers, the
+    # message window config, screen-transition defaults, vehicle placement,
+    # and the Marshal/`.lsd` (de)serialisers). 23 of its own 32 real
+    # bytecode-defined methods compile clean, needing no new opcode work.
+    # #initialize takes 4 purely mandatory arguments -- the third target
+    # after Game::Screen/Game::Transition above whose own #initialize
+    # compiles, and by far the largest: 13 of its own ivars (all provably
+    # Fixnum) get real RData struct embedding. See register.cxx's own top
+    # comment for the full gap breakdown of the other 9 (3 non-mandatory
+    # arity, 4 genuine Ruby blocks, 2 that combine a block with a real
+    # `rescue StandardError` clause).
+    #
+    # RPG2k::Scene::StatusMenu (mruby-rpg2k/mrblib/scene/status_menu.rb) --
+    # the field per-character status detail screen (stats, equipped gear,
+    # and EXP progress for one selected party member, drawn across five
+    # windows). 13 of its own 21 real bytecode-defined methods compile
+    # clean, needing no new opcode work at all. #initialize
+    # (`actor_index = 0`, one optional argument, plus a `super parent`
+    # call) stays interpreted, the
+    # same non-mandatory-arity gap as Picture/Window/Actor/Party/MapViewer/
+    # SkillMenu's own #initialize above, so drop_unsafe_embeddings refuses
+    # to embed this class's own one real provably-Fixnum ivar (@actor_index)
+    # -- confirmed directly against the real generated output: StatusMenu
+    # does not appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic. The 7 other methods that stay interpreted are all
+    # genuinely out of this prototype's scope, not a missing opcode,
+    # confirmed against each one's own real generated #error marker:
+    # #update and #dispose each call `windows.each { |w| ... }` (a real
+    # Ruby block, BLOCK/SENDB); #draw_actor_panel, #draw_params and
+    # #draw_equipment each use `.each_with_index do |...| ... end` (also
+    # BLOCK/SENDB); #draw_value_row has one optional argument
+    # (`can_knockout = nil`, the same non-mandatory-arity gap as
+    # #initialize); and #load_face_bitmap has a real
+    # `rescue StandardError => e` clause (RESCUE/RAISEIF/EXCEPT), the same
+    # established shape SkillMenu's own #load_face_bitmap already
+    # documents above.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
                RPG2k::Scene::SkillMenu RPG2k::Scene::DebugMenu
-               RPG2k::Scene::EquipMenu RPG2k::Scene::Menu],
+               RPG2k::Scene::EquipMenu RPG2k::Scene::Menu Game::State
+               RPG2k::Scene::StatusMenu],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
