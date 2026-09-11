@@ -616,7 +616,8 @@ def build_registry(ireps, root_label)
         # operator name, so a future reader never has to wonder why the two
         # differ.
         name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-        next unless %w[private protected public attr_reader attr_writer attr_accessor].include?(name)
+        next unless %w[private protected public attr_reader attr_writer attr_accessor
+                       module_function].include?(name)
 
         n = insn.args[/n=(\d+)/, 1].to_i
         # `private :a, :b, ...` / `attr_reader :a, :b, ...` -- the n Symbol
@@ -647,6 +648,82 @@ def build_registry(ireps, root_label)
               def_ = registry[mname]&.find { |d| d.owner == namespace }
               def_.visibility = name.to_sym if def_
             end
+          end
+        elsif name == 'module_function'
+          # `module_function :a, :b, ...` -- a fourth, distinct "invisible to
+          # a plain TDEF/DEF bytecode walk" installation mechanism, alongside
+          # attr_reader/writer/accessor and Struct.new above and SDEF/SCLASS
+          # elsewhere in this file: a bare SEND (like attr_reader), not a
+          # dedicated opcode. Real, live use in this closed world: mruby-lcf/
+          # mrblib/lcf.rb's own `module_function :read_ber, :write_ber,
+          # :to_rb, ..., :elements_of` (16 names) and `module_function
+          # :var_max, :var_min, ..., :exp_default` (6 names), both the
+          # retroactive (n >= 1) form only -- the bare mode-switch form
+          # (n.zero?, which would need to start tagging every subsequent
+          # `def` in this body, not just retroactively mark ones already
+          # seen) has zero real occurrences anywhere in the whole closed
+          # world (confirmed by grep), so it's simply left unhandled here,
+          # same as every other narrow, no-real-instance gap in this file --
+          # always safe, just a missed case. The 16-name call site itself
+          # hits a real, already-documented, pre-existing limit this same
+          # collect_loadsym_names helper shares with attr_reader's own
+          # 15-argument Game::Enemy call site (see that finding's own
+          # comment, several rounds up): confirmed directly against the real
+          # disassembly, 16 Symbol arguments is enough to tip mrbc's own
+          # argument-count encoding from a literal `n=16` into the `n=*`
+          # CALL_MAXARGS splat sentinel (`SSEND R1 :module_function n=*`,
+          # vs. the 6-name call site's own plain `n=6`) -- outside
+          # collect_loadsym_names' own `n=(\d+)`-only counting, so this fix
+          # silently registers nothing for that one call site's own 16
+          # names, the exact same safe-under-approximation shape (never
+          # wrongly narrows, just misses a registration) the attr_reader
+          # finding already established, not a new gap this fix introduces.
+          # Not worth generalizing collect_loadsym_names to the `n=*` shape
+          # here either, for the same reason already given there: real,
+          # separate work, and neither call site is exploitable today
+          # regardless (see the owner-not-emitted check below).
+          #
+          # Real mruby semantics confirmed by reading 3rd/mruby/src/class.c's
+          # own mrb_mod_module_function directly, not assumed from CRuby's
+          # (different) behavior: unlike CRuby, mruby's own implementation
+          # does NOT make the original instance method private (the "set
+          # PRIVATE method visibility if implemented" call right above the
+          # real loop is commented-out dead code) -- it only looks up each
+          # already-defined instance method and installs a copy of it,
+          # marked public, onto the module's own singleton class. So the
+          # already-registered instance-level MethodDef (owner `namespace`,
+          # whatever visibility it already has) needs no correction here,
+          # unlike `private`'s own retroactive-marking case just above --
+          # what's missing is a registry entry for the NEW singleton-class
+          # copy itself (e.g. `LCF.write_ber`, called from lazy schema
+          # defaults and LCF::File#to_lcf), a real, distinct method
+          # definition this registry never modeled at all. Registered the
+          # same additive-only way as every other synthetic-MethodDef fix in
+          # this file: under the distinct "Owner.singleton" pseudo-owner
+          # (resolve_singleton_receiver's own suffix, shared with SDEF/
+          # SCLASS) -- can never collide with or be selected by ONLY_OWNERS,
+          # which only ever names real Ruby constant paths -- with irep: nil
+          # (the singleton copy shares the exact same real body as the
+          # instance one, but this registry has no representation for "two
+          # owners, one shared irep", and irep: nil is always safe regardless
+          # of that: it can only ever prevent an unsound direct call into the
+          # wrong owner's own _impl, never enable one, the same guarantee
+          # every other native/synthetic MethodDef here already carries).
+          # Checked live: "LCF" (the bare module, as opposed to LCF::File/
+          # Database/MapTree/MapUnit/SaveData/...) is never itself a
+          # compiled owner in any of the three real gems (confirmed against
+          # BC2CPP_COMPILED_GEMS directly), so compile_send's own
+          # owner-not-emitted guard already falls back to ordinary
+          # mrb_funcall for every real module_function call site in this
+          # closed world today regardless of this fix -- not currently
+          # exploitable, but the same class of gap the attr_reader/
+          # Struct.new/SDEF/SCLASS fixes above already close for other
+          # installation mechanisms, closed here too rather than left open
+          # for whichever future round adds a bare module as a compiled
+          # owner.
+          collect_loadsym_names.call.each do |mname|
+            registry[mname] << MethodDef.new(name: mname, owner: "#{namespace || 'Object'}.singleton",
+                                              irep: nil, visibility: :public)
           end
         else
           # attr_reader/attr_writer/attr_accessor -- Module#attr_* itself is
