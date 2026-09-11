@@ -612,6 +612,99 @@ BC2CPP_COMPILED_GEMS = {
     # either class body other than the interpreter's own unconditional
     # #initialize special case, so every other method in both classes is
     # public.
+    #
+    # A twentieth, independent round adds RPG2k::Scene::Title
+    # (mruby-rpg2k/mrblib/scene/title.rb) -- the title screen's New Game/
+    # Continue/Exit menu. Only 6 of its own 20 real bytecode-defined methods
+    # compile clean, needing no new opcode work at all: #update/#dispose
+    # (both public) plus 4 private methods (#refresh_cursor,
+    # #move_selection, #auto_select?, #auto_new_game?). #move_selection's
+    # own real `# bc2cpp: (fixnum)` annotation (already present in the real
+    # source) lets its `% @menu_items.length` wraparound arithmetic compile
+    # to a real, non-empty `mrb_funcall(M, r3, "%", 1, r4)` -- re-checked
+    # directly against the real generated output given this exact
+    # operator-name-extraction shape is this file's own most severe
+    # previously-found bug. #auto_select?'s own real string-interpolated
+    # `$stderr.puts` calls needed no new opcode either -- STRING/STRCAT
+    # support already existed from an earlier round.
+    #
+    # The other 14 real methods split into the two already-established
+    # out-of-scope shapes: 13 (#hide_title?, #preview_map_id,
+    # #preview_animation_id, #load_windowskin, #new_game_flag?,
+    # #auto_continue?, #battle_troop, #map_editor_flag?,
+    # #chipset_editor_flag?, #continue_available?, #load_title_picture,
+    # #play_cursor_se, #play_title_bgm) each have a real `rescue
+    # StandardError` clause (RESCUE/RAISEIF/EXCEPT); #initialize itself hits
+    # two separate gaps in the same body -- a real `super parent` call
+    # (SUPER, the same gap ItemMenu/DebugMenu/Menu/ChipsetEditor/SaveLoad/
+    # Order's own #initialize already document) and a real
+    # `@menu_items.each_with_index do |item, index| ... end` block
+    # (BLOCK/SENDB) later on -- confirmed directly against the real
+    # generated output showing both #error markers in the same (unemitted)
+    # body. #initialize never compiling means drop_unsafe_embeddings
+    # correctly refuses to embed any of this class's own ivars -- confirmed
+    # directly against the real generated output: RPG2k::Scene::Title does
+    # not appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic, so no MRB_SET_INSTANCE_TT call belongs in its own
+    # registration block (its own @title/@window ivars each get a
+    # devirtualization-only CLASS_HINT, Sprite/Window respectively, never
+    # embedded).
+    #
+    # A twenty-first, independent round adds RPG2k::Scene::MapWorld
+    # (mruby-rpg2k/mrblib/scene/base.rb) -- the small adapter Scene::Map's
+    # own #initialize builds (`@world = MapWorld.new(self, @rng)`) to
+    # bridge Game::MoveRoute/Game::MoveType's own small `world` protocol
+    # (passability, hero position, switch/sound side effects, randomness)
+    # onto the owning scene and its Game::State. 7 of its own 8 real
+    # bytecode-defined methods compile clean, needing no new opcode work at
+    # all: #initialize, #passable?, #can_land?, #hero_position (an Array
+    # literal off two chained sends), #in_sight?, #set_switch (SETIDX's own
+    # real `mrb_funcall(..., "[]=", ...)` fallback, since the real receiver
+    # -- Game::Switches -- is never a raw Array/Hash), and #random. The one
+    # gap, #play_sound, has a real `rescue StandardError` clause -- the same
+    # established out-of-scope shape every other rescue-using method in
+    # this file already documents; confirmed directly against the real
+    # whole-program diagnostic (SKIP_UNSUPPORTED=1 lists it under "skipped
+    # (unsupported, left on the interpreter)", no generated entry point at
+    # all). It already carries a real `# bc2cpp: (String, , , )` magic-
+    # comment annotation in the source (predating this round), which
+    # resolves to no actual type claim since this compiler's annotation
+    # parser only recognizes fixnum/symbol tokens, never String -- moot
+    # either way, since the rescue clause alone keeps this method
+    # interpreted regardless of any annotation.
+    #
+    # #initialize (`initialize scene, rng`) compiles clean -- pure
+    # mandatory arity, no super, no block -- but neither of this class's
+    # own two ivars (@scene, @rng) ever gets embedded: both are opaque
+    # object references (a RPG2k::Scene::Map and a Game::Rng instance
+    # respectively), never provably Fixnum/Symbol. Confirmed directly
+    # against the real generated output: RPG2k::Scene::MapWorld does not
+    # appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic, so no MRB_SET_INSTANCE_TT call belongs in its own
+    # registration block. Every real construction site in the whole closed
+    # world goes through a plain `MapWorld.new(scene, rng)` call --
+    # mruby-rpg2k/mrblib/scene/map.rb's own `@world = MapWorld.new(self,
+    # @rng)`, plus one in this project's own scripts/rpg2k_scene_check.rb
+    # CRuby test harness (`RPG2k::Scene::MapWorld.new(nil, nil)`,
+    # exercising #play_sound only) -- confirmed by grepping the whole
+    # closed world for `MapWorld.new`/`.allocate`/a subclass and finding no
+    # bypass and no subclass anywhere.
+    #
+    # Every one of #passable?/#can_land?/#hero_position/#play_sound/
+    # #random/#set_switch is a genuinely POLY name in the whole-program
+    # registry -- RPG2k::Scene::VehicleWorld (the same file, "the same
+    # `world` protocol... for a Move Event/Set Move Route driving a
+    # vehicle") defines every one of them too, plus #passable? also
+    # collides with Game::ChipSet, #random with Game::Rng, and #set_switch
+    # with Game::Interpreter/Game::EnemyAi -- none of which blocks
+    # registering MapWorld's own methods (POLY only affects whether some
+    # *other* compiled call site devirtualizes into one of these, never
+    # whether a class's own methods can be registered). No bare
+    # `private`/`protected` anywhere in the class body, so every method is
+    # `mrb_define_method` except #initialize itself, forced private by
+    # mruby's own interpreter regardless of source. A real lead for a
+    # future round: RPG2k::Scene::VehicleWorld's own identical protocol
+    # shape.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -621,7 +714,8 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::ChipsetEditor RPG2k::Scene::Base
                Game::Character RPG2k::Scene::SaveLoad RPG2k::Scene::Order
                Game::Shop Game::Map Game::EnemyAi Game::ChipSet
-               Game::Timer Game::Switches Game::Variables],
+               Game::Timer Game::Switches Game::Variables
+               RPG2k::Scene::Title RPG2k::Scene::MapWorld],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
