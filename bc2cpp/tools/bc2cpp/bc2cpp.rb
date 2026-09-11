@@ -499,18 +499,77 @@ def build_registry(ireps, root_label)
         # ONLY_OWNERS; caught here only because it hasn't yet).
         #
         # Fixed the same way the attr_reader/native-method gaps already
-        # are: register a synthetic MethodDef (irep: nil -- there is no
-        # leaf method body here for this compiler to ever compile into) so
-        # a real bytecode instance-method definition of the same bare name
-        # elsewhere correctly counts this as a second definition and flips
-        # MONO to POLY, never silently staying MONO. This can only ever
-        # turn an unsound MONO into a correctly cautious POLY, never remove
-        # a genuinely sound one, the same guarantee every other synthetic-
-        # MethodDef fix in this file already carries.
-        _reg, sname, _irep_ref = insn.args.split(/\s+/, 3)
+        # are: register a MethodDef under the same "Owner.singleton"
+        # pseudo-owner suffix so a real bytecode instance-method definition
+        # of the same bare name elsewhere correctly counts this as a second
+        # definition and flips MONO to POLY, never silently staying MONO --
+        # necessary for MONO/POLY soundness regardless of what happens
+        # below. This can only ever turn an unsound MONO into a correctly
+        # cautious POLY, never remove a genuinely sound one, the same
+        # guarantee every other synthetic-MethodDef fix in this file
+        # already carries.
+        #
+        # Follow-up (docs/adr/0139): `irep:` here used to be hardcoded
+        # `nil` unconditionally, on the theory that "there is no separate
+        # body to recurse into" for this fused opcode -- true for the
+        # *registry walk* (unlike SCLASS, nothing here needs recursing
+        # into), but wrong about the irep itself: I[c] (captured below as
+        # `irep_ref`, previously read and immediately discarded as
+        # `_irep_ref`) names a real child irep index, scoped to this class/
+        # module body's own child-irep list exactly the way TDEF's own I[c]
+        # is (see the TDEF case above) -- mrbc genuinely compiled a real
+        # body into it, identical in kind to any TDEF/SCLASS-opened body's
+        # own child irep, just reached through a fused instruction instead
+        # of an unfused one. Discarding it meant a `def self.x` method was
+        # not merely left uncompiled the way an arity/opcode gap leaves a
+        # method uncompiled (those still produce a #error-marked stub
+        # `compile_method` actually attempted) -- with irep: nil,
+        # `@owner_of[d.irep] = d if d.irep` (this file's own leaf-worklist
+        # builder) never inserted an entry for it at all, so it was
+        # invisible to `compile_all` regardless of ONLY_OWNERS, structurally
+        # incapable of ever becoming a compile target (confirmed live on
+        # RGSS::Bitmap.failure_reason, docs/adr/0139's own follow-up).
+        #
+        # Resolving `irep_ref` into a real `child_label` here, the exact
+        # same way TDEF resolves its own I[c] operand two cases up, closes
+        # that gap: this MethodDef now behaves exactly like the unfused
+        # `TCLASS/SCLASS+METHOD+DEF` DEF case's own singleton branch further
+        # down (`recv`/`"#{recv}.singleton"`/`irep: child_label`) already
+        # does for the same shape reached via a different, unfused
+        # instruction sequence -- the two singleton-method registration
+        # paths in this file are now consistent with each other. A real
+        # irep here can only ever ADD emission eligibility (via
+        # `compile_all`'s `only_owners` filter actually naming this
+        # `"X.singleton"` pseudo-owner, see compiled_gems.rb) -- it changes
+        # nothing about MONO/POLY resolution itself (still exactly one
+        # MethodDef registered under this owner+name, same as before) and
+        # nothing about ordinary dynamic dispatch for every call site that
+        # doesn't devirtualize into it.
+        #
+        # Checked every other place in this file that reads `d.irep`/
+        # `d.irep.nil?` for an implicit "synthetic/native, no real body"
+        # assumption, in case any of them silently depended on every
+        # `.singleton`-owned MethodDef being irep-less: `natively_exposed?`
+        # (`d.owner == owner && d.irep.nil?`) is the one real such check,
+        # used only by `drop_unsafe_embeddings` to keep an *instance* ivar
+        # off the embedded struct when some native accessor already exposes
+        # it under that ivar's own owning class -- `owner` there always
+        # comes from `ivar_layout`'s own keys, themselves always a real
+        # instance-class owner (`#initialize`'s own class), never a
+        # `.singleton`-suffixed string, so a `.singleton`-owned MethodDef's
+        # `d.owner` can never equal it regardless of its own `irep`
+        # nil-ness -- unaffected. Every other `d.irep`/`.irep.nil?` site
+        # (`monomorphic_target`, `compile_all`'s leaf worklist, embedding's
+        # own `#initialize`-compiles-clean gate, `compiles_clean?`) already
+        # treats "has a real irep" as "is a real, potentially-compilable
+        # leaf" -- exactly the correct treatment for a real SDEF-captured
+        # body too, not a special case needing its own guard.
+        _reg, sname, irep_ref = insn.args.split(/\s+/, 3)
         sdef_name = sname.sub(/^:/, '')
+        sdef_idx = irep_ref[/I\[(\d+)\]/, 1].to_i
+        sdef_child_label = irep.reps[sdef_idx]
         registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{namespace || 'Object'}.singleton",
-                                              irep: nil, visibility: :public)
+                                              irep: sdef_child_label, visibility: :public)
       when 'DEF'
         # "DEF R1 :toned? (R2)" -- OP_DEF's own real shape (src/codedump.c:
         # `DEF\t\tR%d\t:%s\t(R%d)\n`). codegen_def/codegen_sdef
@@ -591,17 +650,19 @@ def build_registry(ireps, root_label)
         else
           # `def self.foo` (or `def SomeConst.foo`)'s own unfused shape --
           # the same "X.singleton" pseudo-owner the SDEF case above uses,
-          # except this time there IS a real child irep to compile, so
-          # it's registered as an ordinary walkable MethodDef instead of
-          # a synthetic irep:-nil placeholder. Receiver resolved by the
-          # exact same cautious backward scan the SCLASS-opened-body case
-          # above already uses (resolve_singleton_receiver) -- an
-          # unrecognized receiver just isn't registered at all, always
-          # safe, same as every other backward-scan guard in this file.
-          # Visibility unconditionally :public, matching the SDEF case's
-          # own synthetic entries -- this file doesn't model
-          # `private_class_method`/singleton-method privacy at all,
-          # consistently, for either the fused or unfused shape.
+          # registered the same way: an ordinary walkable MethodDef with a
+          # real child irep (this branch has always done this; the SDEF
+          # case's own follow-up, docs/adr/0139, later brought its fused
+          # sibling in line with this same "real irep" treatment, having
+          # started out wrongly discarding its own I[c] operand as
+          # irep: nil). Receiver resolved by the exact same cautious
+          # backward scan the SCLASS-opened-body case above already uses
+          # (resolve_singleton_receiver) -- an unrecognized receiver just
+          # isn't registered at all, always safe, same as every other
+          # backward-scan guard in this file. Visibility unconditionally
+          # :public, matching the SDEF case's own entries -- this file
+          # doesn't model `private_class_method`/singleton-method privacy
+          # at all, consistently, for either the fused or unfused shape.
           recv = resolve_singleton_receiver.call(opener_reg, opener_idx)
           if recv
             owner = "#{recv}.singleton"
@@ -2068,6 +2129,62 @@ class CodeGen
     s.gsub(/[^a-zA-Z0-9_]/, '_')
   end
 
+  # Follow-up (docs/adr/0139: ".singleton owner support"): the real
+  # `Module.nesting`-style lexical scope a `def`'s own body sees for a bare
+  # constant reference, split into "::"-separated segments innermost-last
+  # -- what GETCONST's owner-scope-first codegen (below) and
+  # const_chain_value_expr (this file's own TYPED-path helper) both need,
+  # factored out here once both call it instead of each doing its own
+  # `owner.split('::')`.
+  #
+  # A REAL, LIVE BUG this factoring fixes, caught empirically the first
+  # time this project ever actually compiled a `.singleton`-owned method
+  # (RGSS::Bitmap.singleton#extensions/#failure_reason, this same
+  # follow-up): `owner_def.owner` for one of these is the synthetic
+  # "Owner.singleton" pseudo-owner string (SDEF/SCLASS/the unfused-DEF
+  # singleton branch, see build_registry above) -- a bookkeeping label for
+  # MONO/POLY registry purposes ONLY, never a real, nested Ruby constant
+  # path. Before this fix, GETCONST's own `owner_path = owner_def.owner.
+  # split('::')` split "RGSS::Bitmap.singleton" into ["RGSS",
+  # "Bitmap.singleton"] and then literally tried
+  # `mrb_const_get(M, scope_RGSS, mrb_intern_cstr(M, "Bitmap.singleton"))`
+  # -- looking up a constant *named* "Bitmap.singleton" (a symbol with a
+  # literal dot in it, never a real constant anywhere) as this loop's own
+  # FIRST, UNPROTECTED scope-chain segment (only the final, innermost
+  # lookup of the *target* constant name is wrapped in
+  # bc2cpp_const_try/mrb_protect_error -- see GETCONST's own comment;
+  # building the scope chain itself was never guarded, on the reasonable-
+  # until-now assumption that every segment of a real owner path is by
+  # construction a real, already-existing constant). Confirmed live: every
+  # bare constant reference inside either method's own body (EXTENSIONS/
+  # GAME_DIR/RTP_DIR/RGSS) compiled to exactly this broken shape in the
+  # real generated output before this fix -- a guaranteed real NameError
+  # ("uninitialized constant RGSS::Bitmap.singleton") the very first time
+  # either compiled function actually ran, never caught by g++ (a valid,
+  # if wrong, runtime call) and never caught by this file's own
+  # SKIP_UNSUPPORTED/`#error` mechanism (compile_insn's own GETCONST case
+  # has no way to know a segment it's about to look up isn't real).
+  #
+  # The real fix: a `def self.x`/`class << self ... end` method's own
+  # lexical nesting is exactly its ENCLOSING class/module's nesting --
+  # real Ruby's `Module.nesting` for code textually written inside `class
+  # Bitmap; def self.foo; end; end` is `[RGSS::Bitmap, RGSS]`, the pseudo-
+  # owner suffix carries no lexical-scope meaning of its own (it exists
+  # purely so build_registry's own MONO/POLY table can tell a class
+  # method apart from a same-named instance method) -- so stripping a
+  # trailing ".singleton" before splitting on "::" recovers exactly the
+  # real scope chain a bare constant reference in this body should search,
+  # innermost first: RGSS::Bitmap, then RGSS, then (GETCONST's own
+  # existing unconditional final fallback) Object. This can only ever
+  # affect a `.singleton`-suffixed owner -- every real Ruby constant path
+  # already has no such suffix to strip (`sub` is then a no-op), so no
+  # already-shipped owner's own GETCONST codegen changes at all (confirmed
+  # in this same follow-up's own full-sweep byte-identical regression
+  # diff).
+  def lexical_scope_path(owner)
+    owner.sub(/\.singleton\z/, '').split('::')
+  end
+
   # Every method name with exactly one definition anywhere in the whole
   # program -- the actual "static method resolution" this prototype does.
   #
@@ -2234,6 +2351,42 @@ class CodeGen
   # header (emit_decls_header) for why a devirtualized call to one of
   # these is safe to emit here at all (an external, non-static _impl
   # declared via #include, resolved by the linker at final link time).
+  #
+  # Follow-up (docs/adr/0139): `only_owners.include?(...)` below is (and
+  # has always been) a plain string-membership check against whatever
+  # `@owner_of.fetch(l).owner` happens to be -- it was never the thing
+  # standing between a `"ClassName.singleton"` pseudo-owner (SDEF/SCLASS/
+  # the unfused-DEF singleton branch's own owner string, see build_registry
+  # above) and being selected here. Two OTHER facts were: every real
+  # `owners:` entry ever written in compiled_gems.rb has, by convention,
+  # named only a real Ruby constant path (never a `.singleton`-suffixed
+  # string, so `only_owners` itself never contained one to match against);
+  # and, until this same follow-up, SDEF's own fused `def self.x` shape
+  # registered its MethodDef with `irep: nil`, so `@owner_of[d.irep] = d if
+  # d.irep` (this file's own leaf-worklist builder, see its own comment)
+  # never even inserted an entry for it into `@owner_of` in the first
+  # place -- invisible to `leaves = @owner_of.keys` before this line ever
+  # ran, regardless of what `only_owners` contained. A `.singleton`-owned
+  # MethodDef reached via SCLASS or the unfused-DEF singleton branch
+  # already had a real irep and was therefore already a real key in
+  # `@owner_of` -- already selectable here, in principle, the moment some
+  # `owners:` list ever named its pseudo-owner string (confirmed directly:
+  # docs/adr/0139's own RGSS::Font/RGSS::Bitmap follow-ups added
+  # `RGSS::Bitmap.singleton`/`RGSS::Font.singleton` to `ONLY_OWNERS` in
+  # isolated diagnostic-only runs and got real registry hits for
+  # `self.extensions`/`self.exist?` back). So no change to this method's
+  # own filtering logic was needed to "accept" a `.singleton` owner -- the
+  # real, load-bearing fix is the SDEF-irep one above (closing the last gap
+  # that kept a `def self.x`-shaped MethodDef out of `@owner_of` at all)
+  # plus `compiled_gems.rb` actually choosing to write one into a real
+  # `owners:` list for the first time (see that file's own RGSS::Bitmap
+  # follow-up). Kept this comment here, not just there, so a future reader
+  # checking "does compile_all's own filter need to change for this"
+  # finds the answer at the filter itself, not just at the one call site
+  # that happens to exercise it. The identical plain-string-membership
+  # `@only_owners.include?(target.owner)` guard in compile_send (this
+  # file's own call-site devirtualization, searched separately) needs the
+  # same answer for the same reason -- also unmodified.
   def compile_all(only_owners: nil, other_owners: nil)
     @only_owners = only_owners
     @other_owners = other_owners
@@ -2653,7 +2806,7 @@ class CodeGen
       # never caught by any #error check (this compiles and links fine).
       d = a[/^R(\d+)/, 1]
       name = a[/^R\d+\s+(\S+)/, 1]
-      owner_path = owner_def.owner.split('::')
+      owner_path = lexical_scope_path(owner_def.owner)
       if owner_path == ['Object']
         "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
       else
@@ -3252,8 +3405,20 @@ class CodeGen
   # instructions. Only ever used inside a runtime guard condition, so
   # re-resolving the constant on every call (no caching) is the same
   # already-accepted tradeoff GETCONST's own codegen makes.
+  #
+  # Follow-up (docs/adr/0139: ".singleton owner support"): uses
+  # lexical_scope_path (not a bare `owner.split('::')`) for the same reason
+  # GETCONST's own owner-scope-first codegen does -- see that helper's own
+  # comment for the real bug this avoids. Not currently reachable with a
+  # `.singleton`-suffixed `owner` in practice (this is only ever called
+  # with a TYPED-path `target.owner`, and `target.owner` here can only come
+  # from `trace_new_target`'s own `known_class` -- a fresh `.new`, an ivar
+  # ClassLayout hint, or a ClassAnnotations comment, none of which ever
+  # name a `.singleton` pseudo-owner, confirmed by this same follow-up's
+  # own registry audit), but hardened here anyway rather than left relying
+  # on that invariant holding forever elsewhere.
   def const_chain_value_expr(owner)
-    owner.split('::').reduce('mrb_obj_value(M->object_class)') do |expr, seg|
+    lexical_scope_path(owner).reduce('mrb_obj_value(M->object_class)') do |expr, seg|
       "mrb_const_get(M, #{expr}, mrb_intern_cstr(M, \"#{seg}\"))"
     end
   end
@@ -3474,7 +3639,27 @@ if $PROGRAM_NAME == __FILE__
       when :protected then '  [protected -- mruby has no mrb_define_protected_method; ' \
                             'registering this with mrb_define_method makes it public, a real behavior change]'
       end
-    warn "  #{m[:entry]} / #{m[:impl]}  (#{m[:owner]}##{m[:name]}, arity #{m[:arity]})#{vis}"
+    # Follow-up (docs/adr/0139): an owner ending in ".singleton" is the
+    # SDEF/SCLASS/unfused-DEF-singleton pseudo-owner build_registry writes
+    # for a real `def self.x`/`class << self; def x; end; end` method (see
+    # build_registry's own SDEF/SCLASS cases above) -- `self` at the real
+    # call site is the CLASS object, not an instance, so registering one of
+    # these with plain mrb_define_method (which installs onto the
+    # receiver's own *instance* method table) would define it in the wrong
+    # place entirely, reachable only as `SomeInstance.name` rather than
+    # `ClassName.name`. mrb_define_class_method (3rd/mruby/include/
+    # mruby.h -- installs onto the receiver's own singleton class instead,
+    # exactly where SDEF/SCLASS put the real method) is the correct call;
+    # unconditional, independent of the `visibility` switch above, since
+    # this file never models `private_class_method`/singleton-method
+    # privacy at all (every ".singleton"-owned MethodDef's own `visibility`
+    # is always :public, see build_registry's own comment) -- a
+    # `.singleton` owner and a private/protected instance method are
+    # mutually exclusive on any one entry, so appending rather than
+    # branching on `vis` is safe.
+    singleton_note = m[:owner].end_with?('.singleton') ? '  [class method -- use mrb_define_class_method, ' \
+                                                          'not mrb_define_method]' : ''
+    warn "  #{m[:entry]} / #{m[:impl]}  (#{m[:owner]}##{m[:name]}, arity #{m[:arity]})#{vis}#{singleton_note}"
   end
 
   warn ''
