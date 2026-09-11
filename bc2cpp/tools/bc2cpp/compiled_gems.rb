@@ -965,6 +965,30 @@ BC2CPP_COMPILED_GEMS = {
     # by prior rounds' own opcode work; re-confirmed directly against the
     # real generated output that no empty-name `mrb_funcall(M, <reg>, "",
     # ` shape appears anywhere in it.
+    #
+    # A twenty-eighth, independent round adds Game::Weather (the current
+    # screen-weather effect state -- rain/snow/fog/... type plus a 0-10
+    # strength): #set/#none?/#to_h/#load_h compile clean with zero
+    # bc2cpp.rb changes. #to_h is a real Hash literal, checked directly
+    # against the generated C++ (mrb_hash_new_capa + two mrb_hash_set
+    # calls), the same shape Game::Picture's/Game::Timer's own #to_h
+    # already ships; #load_h is a Hash#[] GETIDX read plus a `||`
+    # default, the same shape Game::Screen's/Game::Timer's own #load_h
+    # already compiles clean against. #initialize (two optional
+    # arguments) stays entirely interpreted, the same established
+    # non-mandatory-arity gap as Game::Picture's/RPG2k::Window's own
+    # #initialize above -- #initialize never compiling means
+    # drop_unsafe_embeddings correctly refuses to embed either of this
+    # class's own two provably-Fixnum ivars (@type, @strength), confirmed
+    # directly against the real generated output: Game::Weather does not
+    # appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic. attr_reader :type, :strength are both native
+    # (Module#attr_reader), invisible to bc2cpp the same way every other
+    # attr_reader in this codebase is (confirmed live in the registry:
+    # :type shows POLY, 2 defs -- Game::Weather, Game::Vehicle -- proving
+    # the attr_reader registry fix from two rounds ago covers this class
+    # too). No bare `private`/`protected`/`public` anywhere in the real
+    # source, so all four compiled methods are plain `mrb_define_method`.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -978,7 +1002,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
-               Game::Rng],
+               Game::Rng Game::Weather],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
