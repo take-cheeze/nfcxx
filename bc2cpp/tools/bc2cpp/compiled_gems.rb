@@ -613,6 +613,47 @@ BC2CPP_COMPILED_GEMS = {
     # Ruby blocks, 2 that combine a block with a real `rescue
     # StandardError` clause).
     #
+    # A dedicated round (docs/adr/0139's own "Game::State (lsd_io.rb
+    # save/load) coverage investigation" follow-up) re-read
+    # mruby-rpg2k/mrblib/game/lsd_io.rb's own reopening end to end and
+    # confirmed the "32" total above already fully accounts for every one
+    # of that file's own *instance* methods (`#to_lsd`, one of the 9 gaps
+    # named just above; `#bgm_chunk`/`#se_chunk`, both already registered
+    # and compiling clean, part of the 23). What that round found
+    # genuinely missing from every prior round's own writeup: the same
+    # file also defines 9 real `def self.foo` class methods
+    # (`.tile_replacement_bytes`, `.tile_replacement_hash`,
+    # `.build_event_exec_state`, `.read_event_exec_frames`, `.from_lsd`,
+    # `.restore_pictures`, `.ole_now`, `.bgm_from_chunk`,
+    # `.se_from_chunk`) that never appear in the "32" count at all --
+    # not a missed gap in that count, but structurally outside what it
+    # even measures: the real whole-program registry dump lists all 9
+    # under the `"Game::State.singleton"` pseudo-owner (e.g. `MONO
+    # :from_lsd (1 def: Game::State.singleton)`), the same synthetic
+    # bucket this ADR's own `RGSS::Bitmap`/`RGSS::Font` follow-ups already
+    # established is real for MONO/POLY devirtualization soundness but
+    # cannot itself ever be an emission target. Re-confirmed directly for
+    # this class, not just by analogy: adding `Game::State.singleton` to
+    # `ONLY_OWNERS` (alongside every real owner) with
+    # `SKIP_UNSUPPORTED=0` still produces zero `Game__State_*` output for
+    # any of the 9 names anywhere in the generated file -- no declaration,
+    # no `#error` stub, nothing, the same "structurally incapable of ever
+    # emitting a real singleton-method entry point" finding the
+    # `RGSS::Font` follow-up already named, now directly re-verified
+    # rather than assumed. Independently of that structural gate, most of
+    # the 9 would fail for an ordinary reason too: `.tile_replacement_bytes`/
+    # `.tile_replacement_hash`/`.build_event_exec_state`/`.restore_pictures`
+    # each end in a real Ruby block (`.each`/`.each_with_index`), and
+    # `.read_event_exec_frames`/`.ole_now` each have a real `rescue
+    # StandardError` clause -- but `.bgm_from_chunk` and `.se_from_chunk`
+    # are both straight-line (a hash-field read, a couple of `||`
+    # defaults, one early-return guard, no block/rescue/super), the same
+    # shape `#bgm_chunk`/`#se_chunk` already compile with, and would very
+    # likely compile too if this compiler ever gained a way to emit a
+    # `.singleton`-owned method at all. Zero registration changes this
+    # round -- the class's own coverage was already complete and correct
+    # before it started; this was a documentation-only fix.
+    #
     # RPG2k::Scene::StatusMenu (mruby-rpg2k/mrblib/scene/status_menu.rb) --
     # the field per-character status detail screen (stats, equipped gear,
     # and EXP progress for one selected party member, drawn across five
@@ -1719,6 +1760,25 @@ BC2CPP_COMPILED_GEMS = {
     # `private`/`protected`/`public` anywhere in the real source beyond
     # #initialize's own implicit privacy, so the 3 registered non-
     # `#initialize` methods below are plain `mrb_define_method`.
+    #
+    # A later round adds Game::Interpreter (docs/adr/0139's own follow-up)
+    # -- already registry-visible for MONO/POLY soundness via this same
+    # closed-world scan long before it was ever an emission owner here, and
+    # called out repeatedly elsewhere in this file as "too large to fully
+    # cover in one round." 173 of its own 207 real bytecode-defined methods
+    # (mruby-rpg2k/mrblib/interpreter.rb, plus a 4-method reopening in
+    # mruby-rpg2k/mrblib/game/battle_support.rb) compile clean; the other
+    # 34 stay interpreted for five distinct, individually confirmed real
+    # gaps (a Ruby block, a rescue clause, a still-unmodeled JMPUW opcode --
+    # a break/return that unwinds through an ensure/catch region -- a
+    # keyword-heavy call, or a non-mandatory #initialize-style argument).
+    # #initialize compiles clean but ends up with zero embedded ivars: the
+    # one real candidate, @frame_steps, is also touched by #update, which
+    # never compiles -- see mruby-rpg2k-compiled/src/register.cxx's own
+    # registration block for the full writeup, including the real,
+    # previously-shipped Game::Transition severe bug this same round's own
+    # generalized `drop_unsafe_embeddings` fix found and closed along the
+    # way.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1733,7 +1793,8 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
                Game::Rng Game::Weather Game::Troop Game::Vehicle
-               Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig],
+               Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig
+               Game::Interpreter],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
