@@ -2,7 +2,13 @@
 # owners and OUT_SYMBOL -- both mruby-lcf-compiled/mrbgem.rake and
 # mruby-rpg2k-compiled/mrbgem.rake `require` this instead of hardcoding
 # each other's owner list (real drift risk otherwise) or `target_owners`
-# duplicated between files.
+# duplicated between files. `closed_world_mrblib_srcs` below (mirroring
+# `core_native_srcs`) is the same fix applied to the whole-program mrblib
+# source set every compiled gem's own registry-building bc2cpp.rb
+# invocation feeds in -- see its own comment for why this one was a real,
+# checked structural-soundness question in its own right (docs/adr/0139's
+# own cross-gem-devirtualization-soundness follow-up), not just a style
+# nit.
 #
 # Also what makes cross-gem devirtualization (docs/adr/0139's own
 # follow-up) possible at all: each mrbgem.rake computes its own
@@ -479,8 +485,25 @@ BC2CPP_COMPILED_GEMS = {
     # and #refresh_switch_or_variable each use two real Ruby blocks
     # (Enumerable#each, BLOCK/SENDB); #digits_of uses one
     # (Integer#downto); #editor_value uses one (Enumerable#reduce); and
-    # #open_map_viewer has a real `begin ... rescue StandardError => e
-    # ... end` (RESCUE/RAISEIF/EXCEPT).
+    # #open_map_viewer has TWO independent gaps, one per branch of its own
+    # `if @state.map && ... / ... else ... end` -- caught re-checking every
+    # "rescue" comment in this file against its own real generated #error
+    # marker (a dedicated cross-gem-devirtualization-soundness sweep's own
+    # documentation-accuracy angle, docs/adr/0139's own follow-up): the
+    # previous version of this comment named only the `else` branch's
+    # `map = begin ... rescue StandardError => e ... end` (RESCUE/RAISEIF/
+    # EXCEPT), real but incomplete -- the `if` branch's own
+    # `Scene::MapViewer.new(@parent, @state, map: @state.map)` hits a
+    # completely different, unrelated gap first, a keyword-argument call
+    # site (the same shape this ADR's own third-severe-bug follow-up
+    # already fixed at the root: `#error SEND/SSEND :new has a splat
+    # and/or keyword argument list`). Confirmed directly against the real
+    # generated output: both `#error` markers are present, in program
+    # order, before either `RESCUE`/`RAISEIF`/`EXCEPT` marker. Both are
+    # independently already-established, permanently-out-of-scope shapes;
+    # naming only one matters because a future round adding real RESCUE/
+    # RAISEIF/EXCEPT support would still find this method blocked by the
+    # unrelated keyword-argument gap in its own untaken branch.
     #
     # RPG2k::Scene::EquipMenu (docs/adr/0139's own follow-up,
     # mruby-rpg2k/mrblib/scene/equip_menu.rb) -- the field equip screen:
@@ -1809,7 +1832,106 @@ BC2CPP_COMPILED_GEMS = {
     # embedding candidate -- confirmed directly against the real
     # diagnostic: RGSS::Window never appears in bc2cpp's own "classes
     # needing MRB_SET_INSTANCE_TT" listing.
-    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window],
+    #
+    # RGSS::Bitmap (mruby-rgss/mrblib/lib.rb, docs/adr/0139's own
+    # follow-up) joins as this gem's fifth owner -- a genuinely larger,
+    # more varied target than any of the four above: a nested `LoadError`
+    # exception class, a real `#initialize` with a `.each`-with-block
+    # loop past its own optional-argument gate, a `def self.x` singleton
+    # method, and a private helper ending in `rescue`. Only 2 of its own
+    # real bytecode-defined methods compile clean: `#font`
+    # (`@font ||= Font.new`, the same `||=` + owner-scope-first-GETCONST
+    # memoizing-reader shape as Sprite's/Window's own `@tone ||=`/
+    # `@cursor_rect ||=`) and `#font=` (`@font = f`, a plain one-argument
+    # setter).
+    #
+    # `#initialize(f, s = nil)` has one real optional argument, hitting
+    # the same pure_mandatory_arity? gate RGSS::Window's own #initialize
+    # already hits above (`#error RGSS::Bitmap#initialize has
+    # non-mandatory arguments (optional/rest/keyword/block) -- not in
+    # this prototype's supported subset`), confirmed directly against the
+    # real generated output before SKIP_UNSUPPORTED=1 drops it.
+    #
+    # The private `#init_from_archive(f, s)` has pure mandatory arity (2
+    # args) but hits three distinct unsupported opcodes in its own real
+    # body, confirmed via the real markers rather than assumed to be just
+    # the already-documented rescue gap: `Bitmap.extensions.each do |ext|
+    # ... end` emits `#error unhandled opcode BLOCK` immediately followed
+    # by `#error unhandled opcode SENDB` -- both fire *before* codegen
+    # ever reaches this method's own trailing `rescue StandardError => e
+    # ... end`, which separately emits `#error unhandled opcode EXCEPT`
+    # then `#error unhandled opcode RESCUE`. The `.each` block, not the
+    # rescue clause, is the first real gap this method hits.
+    #
+    # The nested `RGSS::Bitmap::LoadError#initialize(path, reason)` has
+    # pure mandatory arity and its own `#{path}`/`#{reason}` string
+    # interpolation compiles clean (STRING/STRCAT), but its trailing
+    # `super("Failed to init bitmap: #{path} (#{reason})")` call hits
+    # `#error unhandled opcode SUPER` -- the same already-documented SUPER
+    # gap every other #initialize-calling-super in this codebase hits,
+    # confirmed here via this method's own real marker. `RGSS::Bitmap::
+    # LoadError`'s own owner string is `RGSS::Bitmap::LoadError`, distinct
+    # from `RGSS::Bitmap`, so with only `RGSS::Bitmap` in owners: this
+    # method is never even emitted -- the SUPER marker above was
+    # confirmed by adding `RGSS::Bitmap::LoadError` to ONLY_OWNERS in a
+    # separate, isolated diagnostic run, not assumed from the shape alone.
+    #
+    # `class << self; attr_writer :extensions; def extensions;
+    # @extensions || EXTENSIONS; end; end` and `def self.failure_reason
+    # (f)` both live under the distinct pseudo-owner
+    # `RGSS::Bitmap.singleton` (SCLASS/SDEF), never under `RGSS::Bitmap`
+    # itself, so neither is reachable with only `RGSS::Bitmap` in
+    # owners: -- and neither is added here: no owners: list in this
+    # project has ever named a `.singleton` pseudo-owner (every prior
+    # follow-up's own full-sweep verification confirms "no pseudo-owner
+    # symbol ever linked anywhere"). This round's own task explicitly
+    # called for checking `self.failure_reason` against the real
+    # diagnostic rather than assuming the established SDEF registry fix
+    # makes it compilable -- checked, and it does not compile, for a
+    # deeper reason than its own body's opcodes (`if`/early `return`/
+    # array `<<`/`.join`/string interpolation are all otherwise-supported
+    # shapes on their own): `def self.x` outside any `class << self`
+    # block always compiles to a single fused SDEF instruction (confirmed
+    # directly via `mrbc -v` disassembly: `SDEF R1 :failure_reason I[3]`),
+    # and bc2cpp.rb's own SDEF case registers that as a synthetic
+    # MethodDef with `irep: nil` unconditionally, by design ("there is no
+    # separate body to recurse into", bc2cpp.rb's own comment) -- so
+    # compile_all's @owner_of never gains a real entry for it at all. It
+    # is therefore not merely left uncompiled the way an arity/opcode gap
+    # leaves a method uncompiled (those still leave a #error-marked stub
+    # that survives into the "skipped (unsupported)" summary) --
+    # self.failure_reason is invisible to compile_all's own leaf worklist
+    # from the start: it appears in neither the "skipped" list nor the
+    # generated file at all (confirmed: zero matches for `failure_reason`
+    # anywhere in the real generated rgss_compiled_gen.cpp, with or
+    # without SKIP_UNSUPPORTED), and would stay that way regardless of
+    # what its own body did. `self.extensions`, by contrast, is defined
+    # inside the real `class << self ... end` block -- an SCLASS-opened
+    # body that *does* recurse (this ADR's own established fix) -- so it
+    # is a real, individually compilable leaf with its own irep
+    # (confirmed: it appears in the real generated output,
+    # `RGSS__Bitmap_singleton_extensions_impl`, once
+    # `RGSS::Bitmap.singleton` is added to ONLY_OWNERS in an isolated
+    # check), but is left out of this round's owners: for the same
+    # never-a-`.singleton`-owner precedent self.failure_reason is.
+    # `attr_writer :extensions`'s own `extensions=` is
+    # Module#attr_writer's native/C-installed setter (no bytecode DEF at
+    # all, same as every other attr_writer/attr_accessor-defined method
+    # elsewhere in this codebase), invisible to bc2cpp regardless of
+    # owner scoping.
+    #
+    # Embedding: none, confirmed directly against the real diagnostic --
+    # RGSS::Bitmap never appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" listing. drop_unsafe_embeddings's own
+    # class-level gate requires a *compiling* #initialize with pure
+    # mandatory arity before embedding anything on a class at all;
+    # RGSS::Bitmap#initialize doesn't compile (non-mandatory arity, the
+    # same gate RGSS::Window's own #initialize hits above), so nothing on
+    # this class is ever even proposed as an embedding candidate. @font
+    # is a Font object reference (never Fixnum/Symbol) and would not be a
+    # FixnumEmbed/SymbolEmbed candidate regardless of that gate either
+    # way.
+    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap],
     out_symbol: 'rgss_compiled',
   },
 }.freeze
@@ -1846,4 +1968,39 @@ def core_native_srcs(mruby_root)
   Dir["#{mruby_root}/src/*.c"] +
     Dir["#{mruby_root}/mrbgems/mruby-{array-ext,hash-ext,enum-ext,io,dir," \
         "numeric-ext,range-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint}/**/*.c"]
+end
+
+# The whole-program mrblib source set (every gem's own real Ruby source,
+# not just this compiled gem's own owners) that every one of
+# mruby-lcf-compiled's/mruby-rpg2k-compiled's/mruby-rgss-compiled's own
+# mrbgem.rake calls feed into bc2cpp.rb as `closed_world_srcs`, so
+# `build_registry`'s own MONO/POLY resolution sees every gem that could
+# define a colliding method name -- see mruby-lcf-compiled/mrbgem.rake's
+# own comment for the full reasoning (`LCF::Database#rpg2003?` looking
+# MONO in isolation when the real whole program also defines
+# `Game::Actor`/`Party`/`Battle#rpg2003?`).
+#
+# Extracted here, rather than left as the three byte-identical
+# `Dir[...] + Dir[...] + Dir[...]` literals each mrbgem.rake used to carry
+# on its own (confirmed byte-identical across all three files, not
+# assumed, by a dedicated bug-hunt round's own cross-gem-devirtualization-
+# soundness audit -- see docs/adr/0139's own follow-up), for the exact
+# same drift-risk reason `BC2CPP_COMPILED_GEMS` above and
+# `core_native_srcs` were already centralized: nothing forces three
+# hand-duplicated literals to stay in sync. Unlike a stale owners list or
+# a stale `NATIVE_SRCS` (both already fixed to read from one shared
+# place), a drifted closed-world mrblib set would fail *silently* -- Rake
+# has no way to notice that gem A's own registry now sees a different
+# whole program than gem B's, so two compiled gems could reach genuinely
+# different MONO/POLY conclusions for the same method name with no build
+# error at all, reintroducing exactly the soundness gap this whole
+# mechanism (OTHER_OWNERS/OTHER_DECLS_HEADER) exists to close. Not a live
+# bug today -- the three literals were confirmed identical before this
+# change -- but a real, previously-unenforced invariant, now enforced by
+# construction instead of by three separate authors each copying the
+# other two correctly forever.
+def closed_world_mrblib_srcs(gems_root)
+  Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
+    Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
+    Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]
 end
