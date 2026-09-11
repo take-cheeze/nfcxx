@@ -23,28 +23,44 @@ BC2CPP_COMPILED_GEMS = {
     # :command_id, :parameter_string, :parameter_a, :parameter_b,
     # :parameter_c stays native/uncompiled, as always) and it compiles
     # clean: 5 purely mandatory arguments, no super, no block, needing
-    # zero new bc2cpp.rb opcode work and finding zero live bc2cpp.rb bugs.
-    # It already carried a real `# bc2cpp: (fixnum, , fixnum, fixnum,
-    # fixnum)` magic-comment annotation before this round (added several
-    # follow-ups up, alongside LCF::EventCommand's own, neither wired up
-    # as a compiled owner until now) -- confirmed for real against the
-    # actual diagnostic, not just trusted from the comment: the real
-    # `== compiled entry points ==` listing shows
+    # zero new bc2cpp.rb opcode work. Confirmed for real against the
+    # actual diagnostic, not just trusted from its own pre-existing
+    # `# bc2cpp: (fixnum, , fixnum, fixnum, fixnum)` magic-comment
+    # annotation: the real `== compiled entry points ==` listing shows
     # `LCF__MoveCommand_initialize / LCF__MoveCommand_initialize_impl
     # (LCF::MoveCommand#initialize, arity 5) [private -- use
-    # mrb_define_private_method, not mrb_define_method]`, and the real
-    # generated #initialize body calls mrb_data_init before any other
-    # statement. @command_id/@parameter_a/@parameter_b/@parameter_c (all
-    # provably Fixnum) are real fields on a new LCF__MoveCommand_ivars
-    # RData struct -- confirmed directly against the real generated
-    # output: LCF::MoveCommand appears in bc2cpp's own "classes needing
-    # MRB_SET_INSTANCE_TT" diagnostic. @parameter_string (a String, never
-    # Fixnum/Symbol) correctly stays off that struct, on the ordinary
-    # dynamic iv_tbl via a plain mrb_iv_set -- confirmed directly against
-    # the generated code, not assumed from its type. :command_id/
-    # :parameter_a/:parameter_b/:parameter_c/:parameter_string are all
-    # POLY in the whole-program registry (2 defs each: this class and the
-    # real, separate Game::MoveCommand, mruby-rpg2k/mrblib/game.rb) --
+    # mrb_define_private_method, not mrb_define_method]`.
+    #
+    # Does NOT get any real RData embedding, despite @command_id/
+    # @parameter_a/@parameter_b/@parameter_c all being provably Fixnum --
+    # a later-found-and-fixed drift this round's own dedicated bug-hunt
+    # sweep caught: this class's own bare `attr_reader :command_id, ...,
+    # :parameter_a, :parameter_b, :parameter_c` is the exact same
+    # native-accessor/embedded-ivar collision shape as LCF::EventCommand's
+    # own (below) and the four already-shipped Game:: classes
+    # bc2cpp.rb's `natively_exposed?`/`drop_unsafe_embeddings` fix exists
+    # to catch (docs/adr/0139's own eighth-severe-bug follow-up) -- but
+    # that round's own fix never got re-checked against this class, even
+    # though MoveCommand was already a shipped embedding target sitting
+    # in the very same file the round touched. Re-running the real
+    # whole-program diagnostic against the *current* bc2cpp.rb (this
+    # round's own sweep) confirms LCF::MoveCommand no longer appears in
+    # bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" diagnostic at
+    # all, and the regenerated #initialize body writes every one of its
+    # five ivars via a plain mrb_iv_set, same as every other
+    # (non-embedding) compiled #initialize in this gem -- confirmed
+    # directly against the real generated lcf_compiled_gen.cpp.
+    # mruby-lcf-compiled/src/register.cxx's own hand-written
+    # `MRB_SET_INSTANCE_TT(move_command, ...)` call (and this comment,
+    # both describing the pre-fix behavior) were stale as a result --
+    # fixed to match by removing the call and correcting the comment; see
+    # that file's own MoveCommand comment for the full writeup, including
+    # why the drift was confirmed harmless at the mruby-core level (no
+    # compiled code ever touched the never-allocated RData payload) rather
+    # than a second live embedding bug. :command_id/:parameter_a/
+    # :parameter_b/:parameter_c/:parameter_string are all POLY in the
+    # whole-program registry (2 defs each: this class and the real,
+    # separate Game::MoveCommand, mruby-rpg2k/mrblib/game.rb) --
     # correctly has no bearing on registering this class's own methods,
     # only on whether some *other* call site could devirtualize into one
     # of them. #initialize is forced private by mruby's own interpreter
@@ -81,8 +97,86 @@ BC2CPP_COMPILED_GEMS = {
     # compiled body writes @code/@indent/@string/@parameters via plain
     # `mrb_iv_set`, exactly like every other (non-embedding) compiled
     # #initialize in this gem.
+    #
+    # LCF::Tree (mruby-lcf/mrblib/lcf.rb, right above LCF::EventCommand) --
+    # one decoded map-tree section: which map is currently selected plus the
+    # flat list of every map id in tree order (LCF::MapTree's own `:tree`
+    # section, read by both #read_section's `:Tree` case and #to_rb's own
+    # `:Tree` schema-type branch). #initialize is the ONLY real
+    # bytecode-defined method on this class (`attr_reader :selected_id,
+    # :maps` stays native/uncompiled, as always) and it compiles clean: 2
+    # purely mandatory arguments, no super, no block -- confirmed directly
+    # against the real `== compiled entry points ==` listing:
+    # `LCF__Tree_initialize / LCF__Tree_initialize_impl (LCF::Tree#initialize,
+    # arity 2) [private -- use mrb_define_private_method, not
+    # mrb_define_method]`.
+    #
+    # Unlike LCF::EventCommand right above, this class carries no `# bc2cpp:`
+    # type annotation at all, and neither @selected_id nor @maps is ever
+    # traceable to a literal or an annotated argument -- both show up only
+    # in the real diagnostic's own `report_annotation_candidates` list
+    # (`CANDIDATE LCF::Tree#initialize, arg 1/2 -> @selected_id` / `arg 2/2
+    # -> @maps`), never as an EMBED proposal, so neither ivar is even a
+    # candidate for RData embedding today, independent of the
+    # `attr_reader`/embedded-ivar collision this round's own sibling
+    # LCF::EventCommand target found and fixed. Checked one step further
+    # anyway, per this project's own established discipline of confirming
+    # rather than assuming: temporarily annotating this class's own
+    # #initialize `# bc2cpp: (fixnum, )` (matching @selected_id's real,
+    # always-Fixnum construction sites -- LCF.read_section's own `:Tree`
+    # case and LCF#to_rb's own `:Tree` branch both pass a `read_ber` result)
+    # and re-running the real diagnostic confirms `LCF::Tree` still does NOT
+    # appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" list, and
+    # the regenerated `LCF__Tree_initialize_impl` still writes `@selected_id`
+    # via plain `mrb_iv_set`, never `mrb_data_init` -- i.e. this class's own
+    # `attr_reader :selected_id` WOULD have collided exactly the same way
+    # LCF::EventCommand's `attr_reader :code, :indent` did, and
+    # `natively_exposed?` correctly suppresses it. That experimental
+    # annotation was reverted before this commit; the real, shipped
+    # `mruby-lcf/mrblib/lcf.rb` carries no annotation on this class, so the
+    # point is moot today for a second, independent reason (no type
+    # information reaches the embedding pass at all), but confirmed live
+    # rather than assumed regardless. @maps (an Array, from a schema-decoded
+    # id list, never Fixnum/Symbol) was never going to embed either way.
+    #
+    # LCF::Sections (docs/adr/0139's own follow-up, mruby-lcf/mrblib/
+    # lcf.rb) -- holds the sequential sections of a multi-section file
+    # (currently only LCF::MapTree's own Array-shaped schema: a
+    # map-properties table plus the tree order and initial party/vehicle
+    # positions), constructed exactly once, in LCF::File#initialize
+    # (mruby-lcf/mrblib/lcf_file.rb) -- confirmed no subclass and no other
+    # construction site exist anywhere in this codebase (grepped the
+    # whole tree), the same construction-site-safety check this project's
+    # own established discipline already applies to every embedding
+    # candidate. All 4 of its own real bytecode-defined methods compile
+    # clean, needing zero new bc2cpp.rb opcode work: #initialize (2 plain
+    # Hash/Array literal SETIVs, no arguments at all), #add (a Hash
+    # `[]=`/Array `#push` pair), #key? (a POLY `@by_name.key?` forward,
+    # `mrb_funcall`), and #[] -- confirmed directly against the real
+    # generated output (`== compiled entry points ==` lists all four:
+    # `LCF__Sections_initialize`/`_key_`/`___`/`_add`), not assumed from
+    # the class's small size. #[]'s own `idx.is_a? Symbol` guard needed no
+    # new opcode work either: it's an ordinary POLY SEND into the native
+    # (non-bytecode) `is_a?`, compiling to the exact same generic
+    # `mrb_funcall(M, r3, "is_a?", 1, r4)` fallback every other already-
+    # shipped `x.is_a? Foo` guard in this codebase already takes (a GETCONST
+    # scope-chain lookup for `Symbol` followed by the call), and the
+    # `if (!mrb_test(r3)) goto L28;` that follows it is the same already-
+    # supported JMPNOT branch shape every other compiled guard clause here
+    # already uses -- not a conditional/branch opcode this compiler needed
+    # to special-case at all. #method_missing/#respond_to_missing? are out
+    # of scope, same as every other method_missing-using class in this
+    # codebase (confirmed in the real diagnostic's own `== skipped
+    # (unsupported, left on the interpreter) ==` list, not assumed from
+    # the name alone). @by_name/@list are a Hash and an Array respectively --
+    # never Fixnum/Symbol -- so IvarLayout correctly infers nothing
+    # embeddable here at all; confirmed directly, this class never
+    # appears in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic (no attr_reader/writer/accessor on this class either, so
+    # there is nothing for drop_unsafe_embeddings to have to reject even
+    # if there were something to embed).
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
-               LCF::MoveCommand LCF::EventCommand],
+               LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
