@@ -175,8 +175,98 @@ BC2CPP_COMPILED_GEMS = {
     # diagnostic (no attr_reader/writer/accessor on this class either, so
     # there is nothing for drop_unsafe_embeddings to have to reject even
     # if there were something to embed).
+    # LCF::Array1D (mruby-lcf/mrblib/lcf.rb, right above LCF::Array2D) -- the
+    # sequential chunk-id -> raw-bytes record every LCF::File-family object
+    # (Database, MapTree/MapUnit's own sub-records, SaveData's own actors/
+    # party/etc.) actually decodes through: an id-keyed list of on-disk
+    # chunks read off a real .lmt/.lmu/.ldb/.lsd stream, plus the schema that
+    # gives each chunk id a type/name. A genuinely more complex class than
+    # LCF::Tree/LCF::Sections above -- 11 real bytecode-defined methods, not
+    # 1-4 -- so this entry documents each one instead of the class as a
+    # whole, matching this project's own established per-method rigor
+    # wherever a class is a mix of compiling and non-compiling methods.
+    #
+    # 5 of its own 11 real bytecode-defined methods compile clean, needing
+    # zero new bc2cpp.rb opcode work, confirmed directly against the real
+    # `== compiled entry points ==` listing rather than assumed from arity
+    # alone:
+    #   LCF__Array1D___         (LCF::Array1D#[],            arity 1)
+    #   LCF__Array1D_key_       (LCF::Array1D#key?,          arity 1)
+    #   LCF__Array1D_int16_values (LCF::Array1D#int16_values, arity 1)
+    #   LCF__Array1D_delete     (LCF::Array1D#delete,        arity 1)
+    #   LCF__Array1D____        (LCF::Array1D#[]=,           arity 2)
+    # All five are public, pure mandatory arity, no super, no block --
+    # #[] resolves a Symbol key via #sym2idx then does a Hash/Array-shaped
+    # GETIDX plus a decoded-value cache lookup (`@decoded`); #key?/#delete
+    # are plain @data GETIDX/nil-check/SETIDX; #int16_values is a single
+    # `#unpack('s<*')` POLY send; #[]= is an elem-lookup plus an `elsif`
+    # chain, all already-supported shapes.
+    #
+    # 6 more real methods stay interpreted, each confirmed against its own
+    # real `#error` marker (a plain SKIP_UNSUPPORTED=1 run only lists a
+    # method as skipped; re-running with SKIP_UNSUPPORTED=0 was needed to
+    # see *why*, one call this round's own brief specifically required
+    # rather than guessing from the Ruby source shape alone):
+    #   - #initialize(s, schema): a real `loop do ... end` (reading chunks
+    #     off the StringIO one BER-id/BER-len/read(len) triple at a time
+    #     until EOF or a 0 id). This is NOT the already-supported JMP/
+    #     JMPNOT back-edge shape a plain `while`/`until` keyword loop
+    #     compiles to elsewhere in this codebase (checked directly, not
+    #     assumed from the source shape -- this project's own brief
+    #     specifically asked this be confirmed rather than guessed):
+    #     `loop` is an ordinary Kernel#loop *method call* taking a block,
+    #     so mrbc emits it as BLOCK+SSENDB, and the real generated body
+    #     confirms it: `#error unhandled opcode BLOCK` / `#error unhandled
+    #     opcode SSENDB` are the only two errors in an otherwise-compiling
+    #     body (the StringIO-conversion guard and both @data/@schema SETIVs
+    #     above the loop all compile fine on their own). Same established
+    #     out-of-scope shape as every other genuine-Ruby-block method this
+    #     ADR already documents elsewhere, not a new gap.
+    #   - #to_lcf(terminate = true): non-mandatory arity (one optional
+    #     argument), the same established gap as every other optional-arg
+    #     method in this codebase -- confirmed via its own real `#error
+    #     LCF::Array1D#to_lcf has non-mandatory arguments` marker. (Its own
+    #     `@data.each_with_index do |v, idx| ... end` body would have hit a
+    #     second, independent BLOCK/SENDB gap even past the arity one, the
+    #     same shape #initialize's own loop hits above, but the arity check
+    #     runs first and is reported as the reason.)
+    #   - #method_missing(sym, *args): non-mandatory arity (a rest
+    #     argument) -- confirmed via its own `#error ... has non-mandatory
+    #     arguments` marker, same as every other method_missing on a class
+    #     in this codebase.
+    #   - #respond_to_missing?(sym, include_private = false): non-mandatory
+    #     arity (one optional argument) -- confirmed via its own `#error
+    #     ... has non-mandatory arguments` marker, same shape as #to_lcf.
+    #   - #sym2idx (private): confirmed via its own real generated body,
+    #     not just assumed from the doc comment above it mentioning
+    #     `.each` -- `LCF.elements_of(@schema).each { |k, e| ... }` compiles
+    #     everything around it fine (the @sym2idx memoization checks, the
+    #     schema Array/Hash/POLY-fallback GETIDX, the final @sym2idx
+    #     SETIDX) but hits the exact same `#error unhandled opcode BLOCK` /
+    #     `#error unhandled opcode SENDB` pair #initialize's own loop does,
+    #     confirmed directly against its own real generated function body.
+    #   - `attr_reader :schema` stays native/uncompiled, as always -- not a
+    #     real bytecode-defined method at all.
+    #
+    # Embedding: NONE, confirmed directly against the real diagnostic --
+    # `LCF::Array1D` never appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" listing, so no MRB_SET_INSTANCE_TT call belongs
+    # in this class's own registration block. `@data` (built via `@data[idx]
+    # = s.read(len)` inside #initialize's own uncompiled loop -- an Array of
+    # Strings) and `@schema` (the constructor's own second argument, a Hash
+    # per its pre-existing `# bc2cpp: (, Hash)` annotation) are never
+    # Fixnum/Symbol, so IvarLayout correctly infers nothing embeddable here
+    # regardless of #initialize itself never compiling (a real, mandatory
+    # `drop_unsafe_embeddings` gate this class's own uncompiled #initialize
+    # would fail anyway, since embedding only ever happens through a
+    # compiling constructor's own SETIV codegen). `attr_reader :schema`
+    # would matter here the same way it did for LCF::EventCommand/
+    # LCF::MoveCommand's own attr_readers above if @schema were ever a
+    # Fixnum/Symbol embedding candidate -- it isn't, so `natively_exposed?`
+    # never even needs to act on this class.
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
-               LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections],
+               LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
+               LCF::Array1D],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -1346,6 +1436,98 @@ BC2CPP_COMPILED_GEMS = {
     # Hash #[]/#[]= read/write, never a direct SETIV). No bare `private`/
     # `protected`/`public` anywhere in the real source, so all 7 compiled
     # methods below are plain `mrb_define_method`.
+    #
+    # A further round adds Game::MessageConfig (mruby-rpg2k/mrblib/game.rb)
+    # -- the small Message Options settings object (window transparency,
+    # text position, face-graphic selection) `Game::State#message_config`
+    # holds one of (see this class's own `CLASS_HINT` entry in the real
+    # diagnostic: `Game::State#@message_config (MessageConfig)`, a
+    # devirtualization-only hint, never an embedding one). A deliberate,
+    # direct stress-test of the eighth severe bug's own fix
+    # (`natively_exposed?`) and its ninth-round follow-up (the stale
+    # `LCF::MoveCommand` `MRB_SET_INSTANCE_TT` tag): every one of this
+    # class's own 8 ivars (@transparent, @position, @position_fixed,
+    # @continue_events, @face_name, @face_index, @face_right, @face_flipped)
+    # is covered by a plain `attr_accessor` (two calls, 4 names each) --
+    # exactly the shape that bug was about.
+    #
+    # #initialize (arity 0, all eight ivars set unconditionally, the last
+    # four via a self-call into #clear_face) compiles clean, so this is a
+    # real embedding *attempt*, not moot-by-non-mandatory-arity like most
+    # of this file's other attr_accessor-heavy classes. Checked each of the
+    # 8 ivars' own provable type directly rather than assumed from the
+    # `attr_accessor` line alone:
+    #   - @transparent, @position_fixed, @continue_events, @face_right,
+    #     @face_flipped: always `true`/`false` (a `cond ? true : false`
+    #     ternary in #initialize/#clear_face/#load_h) -- boolean-shaped,
+    #     and this compiler's IvarLayout only ever classifies `:fixnum`/
+    #     `:symbol` in the first place, so these were never embedding
+    #     candidates on type grounds alone, `attr_accessor` aside.
+    #   - @face_name: always a String (`''` literal) -- not fixnum/symbol
+    #     either, same reasoning.
+    #   - @face_index: provably Fixnum -- `clear_face` sets it via a plain
+    #     `LOADI_0`-fed SETIV, and #initialize reaches it only through a
+    #     self-call into #clear_face. Confirmed live in the real
+    #     diagnostic's own `== ivar embedding ==` section: `EMBED
+    #     Game::MessageConfig#@face_index (fixnum)` -- IvarLayout genuinely
+    #     proposes it. But `attr_accessor :face_index` installs a synthetic,
+    #     `irep: nil` native reader/writer under this exact owner and name,
+    #     so `natively_exposed?` correctly vetoes it: confirmed directly
+    #     against the real regenerated output, `Game::MessageConfig` does
+    #     **not** appear in bc2cpp's own "classes needing
+    #     MRB_SET_INSTANCE_TT(..., MRB_TT_DATA)" diagnostic, and the
+    #     regenerated `Game__MessageConfig_initialize_impl`/
+    #     `Game__MessageConfig_clear_face_impl` write `@face_index` via
+    #     plain `mrb_iv_set`, never `mrb_data_init`/a `_ivars` struct. This
+    #     is the live, real re-confirmation the eighth bug's fix was meant
+    #     to cover -- not a hypothetical.
+    #   - @position: assigned `@position = POS_BOTTOM` in #initialize, a
+    #     `GETCONST`-fed value, not a literal -- IvarLayout's own
+    #     fixnum-classification only fires on `LOADI`/fixnum-fastpath-
+    #     arithmetic-fed SETIVs (see this file's own `LCF::Tree` follow-up
+    #     writeup for the identical shape), never on a constant lookup, so
+    #     @position is **not even proposed** as an embedding candidate in
+    #     the first place -- confirmed: no `EMBED
+    #     Game::MessageConfig#@position` line anywhere in the real
+    #     diagnostic. A distinct, independent reason from @face_index's
+    #     (never reaches the embedding pass at all, vs. reaching it and
+    #     then being correctly vetoed) -- the same two-reasons-at-once shape
+    #     `LCF::Tree`'s own writeup already documents, not assumed identical
+    #     to it without checking. Since it is never proposed, the
+    #     `attr_accessor` collision guard is never actually exercised for
+    #     this specific ivar; nothing here relies on that gap staying safe
+    #     by luck, though -- @face_index alone already gives this class a
+    #     real, live positive test of the guard.
+    #
+    # 4 of its own 5 real bytecode-defined methods compile clean:
+    # #initialize (private, like every other embedding-attempted
+    # #initialize above), #face? (`!@face_name.nil? && !@face_name.empty?`),
+    # #clear_face (four plain SETIVs), and #to_h (a literal Hash of all 8
+    # ivars). #load_h is the one gap, and a genuinely new
+    # one: its early-exit `return self unless h` and its own trailing bare
+    # `self` both disassemble to `RETSELF` (mrbc's own dedicated opcode for
+    # returning `self` specifically, distinct from `RETURN`/`RETNIL`/
+    # `RETFALSE`/`RETTRUE`), and `compile_insn` has no `when 'RETSELF'` case
+    # at all -- confirmed by grepping this file for it (zero hits) and by
+    # disassembling this exact method with the real host `mrbc -v`. Safe by
+    # this compiler's own established discipline either way (an unsupported
+    # opcode just means the interpreter keeps handling the whole method,
+    # `SKIP_UNSUPPORTED=1`), and confirmed it does not regress the other
+    # four classes that share the `:load_h` name (`Game::Screen`,
+    # `Game::Weather`, `Game::Vehicle`, `Game::Timer` all use a bare `return
+    # unless h` with no explicit value -- `RETNIL`, not `RETSELF` -- so all
+    # four still compile; the real diagnostic's own `== compiled entry
+    # points ==` listing shows exactly those four `_load_h_impl` symbols,
+    # not this class's). Left unfixed (no new bc2cpp.rb opcode work) since
+    # nothing here needs it to ship. attr_accessor's own two calls (8 names
+    # total) are both well under the 14-name POLY-registration boundary
+    # this file's own `Game::Enemy`/`Game::Battle::Combatant` writeups
+    # already document, confirmed live in the registry (`:face_index` shows
+    # POLY, 2 defs: Game::MessageConfig, Game::Actor; `:transparent` shows
+    # POLY, 3 defs: Game::MessageConfig, Game::Actor, Game::Enemy). No bare
+    # `private`/`protected`/`public` anywhere in the real source beyond
+    # #initialize's own implicit privacy, so the 3 registered non-
+    # `#initialize` methods below are plain `mrb_define_method`.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1360,7 +1542,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
                Game::Rng Game::Weather Game::Troop Game::Vehicle
-               Game::Enemy RPG2k3::Scene::Battle],
+               Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
