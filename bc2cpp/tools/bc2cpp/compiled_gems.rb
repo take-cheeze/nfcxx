@@ -429,6 +429,118 @@ BC2CPP_COMPILED_GEMS = {
     # #sync_layers_to_unit, defined in the *separate* `class Map` reopening
     # in battle_support.rb, which starts its own fresh, default-public
     # visibility scope -- is public.
+    #
+    # Game::EnemyAi (mruby-rpg2k/mrblib/game/battle_support.rb) -- the
+    # outside-world collaborator Game::Battle's own enemy action-pattern
+    # logic reads through: skill-table/database lookups, casting-
+    # eligibility/effectiveness formulas reused from Game::Party, switch
+    # read/write, and the party's own average level. Never a database or
+    # game-state owner itself -- every accessor tolerates a partial/absent
+    # source. 9 of its own 10 real bytecode-defined methods compile clean,
+    # needing no new opcode work at all, including #initialize itself (2
+    # purely mandatory arguments, `db, state`, no super, no block). The one
+    # gap, #party_level, ends in a real `actors.each { |a| ... }` block
+    # (BLOCK/SENDB), the same established out-of-scope shape every other
+    # block-using method above already documents -- confirmed directly
+    # against the real whole-program diagnostic (SKIP_UNSUPPORTED=1
+    # silently drops it, no generated entry point at all).
+    #
+    # Unlike every other #initialize-compiling target above, neither of
+    # this class's own two ivars (@db, @state) ever gets embedded: both
+    # are opaque object references (a database table and a Game::State
+    # instance respectively), never provably Fixnum/Symbol. #initialize's
+    # own real `# bc2cpp: (, Game::State)` class annotation (added several
+    # follow-ups up, already present in the real source before this round)
+    # confirms @state's real class for devirtualization purposes only --
+    # ClassLayout/ClassAnnotations deliberately never feed IvarLayout's own
+    # struct-field lattice, which models only Fixnum/Symbol primitives.
+    # Confirmed directly against the real generated output: Game::EnemyAi
+    # does not appear in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" diagnostic, so no MRB_SET_INSTANCE_TT call
+    # belongs in its own registration block.
+    #
+    # Every real construction site in the whole closed world goes through
+    # a plain `Game::EnemyAi.new(db, state)` call -- mruby-rpg2k/mrblib/
+    # scene/battle.rb's own Scene::Battle#initialize, plus 7 in scripts/
+    # rpg2k_logic_check.rb's own CRuby test harness -- confirmed by
+    # grepping the whole closed world for `Game::EnemyAi.new`/`.allocate`/
+    # a subclass and finding no bypass and no subclass anywhere. Moot for
+    # memory safety here specifically since nothing ends up embedded
+    # either way, but checked anyway, the same construction-site
+    # discipline every other embedding-candidate target above follows.
+    #
+    # A seventeenth, independent round adds Game::ChipSet (mruby-rpg2k/
+    # mrblib/game.rb) -- one loaded chipset's own tile graphic name plus the
+    # lower/upper passability tables, terrain table, and water-animation
+    # parameters (chipset chunks 11/12), keyed by the tile-id-to-chip-index
+    # math the RPG2000 BlockA/B/C/D chipset layout uses. ALL 9 of its own
+    # real bytecode-defined instance methods compile clean, needing no new
+    # opcode work at all: #initialize, #upper_flags (private), #elevated?,
+    # #passable?, #landable?, #counter?, #passable_tile?, #landable_tile?,
+    # #terrain. `.lower_index` is a real singleton (`def self.lower_index`)
+    # -- the same pre-existing, program-wide structural gap Game::MoveRoute's
+    # own class methods already documented (build_registry's CLASS/MODULE/
+    # TDEF walk never recognizes an SCLASS-opened body), so it stays
+    # interpreted regardless; every compiled method that calls it correctly
+    # falls back to ordinary `mrb_funcall` rather than being devirtualized.
+    #
+    # Building this class's own #passable_tile?/#landable_tile? -- both do a
+    # real `flags & DIR_BIT[dir]`/`flags & ALL_DIRS`/`flags & ABOVE_BIT`,
+    # ordinary `Integer#&` sends -- surfaced a second real, live bug beyond
+    # this file's own SUBILV/native-name-collision findings: compile_send's
+    # (and three sibling copies') SEND-name-extraction charset omitted the
+    # bitwise/modulo operator characters (`&|^~%`) and the unary-method
+    # suffix `@`, so any operator SEND using one of them matched no method
+    # name at all and silently compiled to `mrb_funcall(M, recv, "", ...)`
+    # -- an empty-string method name, always a NoMethodError at runtime,
+    # never caught by any #error-marker check. Confirmed LIVE in
+    # already-shipped code, and far more widespread than this one new
+    # target: a direct grep of the real generated `rpg2k_compiled_gen.cpp`
+    # found 41 call sites across 32 already-registered compiled methods
+    # spanning a dozen classes (RPG2k::Scene::ChipsetEditor's own
+    # #toggled_byte/#cell_color_for, plus the `%`-for-cursor-wraparound
+    # idiom shared by nearly every already-shipped menu's own scrolling-
+    # cursor/blink-arrow logic -- RPG2k::Scene::Order/EquipMenu/ItemMenu/
+    # SkillMenu/Menu/StatusMenu/DebugMenu/SaveLoad/Base, RPG2k::Window,
+    # Game::Screen, Game::Transition). See bc2cpp.rb's own comment on
+    # compile_send's own name-extraction line for the full accounting and
+    # docs/adr/0139's own follow-up for the real before/after build and
+    # runtime verification. Fixed at the root (one character class, reused
+    # by every SEND-name extraction site in that file) -- every affected
+    # class's own generated output regenerates correctly with the fix in
+    # place, no hand-edit to any registration block needed beyond
+    # ChipSet's own new one below, the same "fix bc2cpp.rb once, every
+    # affected class regenerates automatically" shape this file's own
+    # IvarLayout.join fix (Game::Character's own follow-up) already
+    # established.
+    #
+    # #initialize (`initialize db, id`) compiles clean -- pure mandatory
+    # arity (2 required arguments, no super, no block), the fifth target
+    # after Game::Screen/Game::Transition/Game::State/Game::Map above whose
+    # own ivars get real RData struct embedding. Checked directly against
+    # the exact Game::Actor-shaped embedding bug several follow-ups up, not
+    # assumed safe by analogy: grepping the whole closed world for
+    # `ChipSet.new`/`Game::ChipSet.new`/`.allocate`/a subclass finds only
+    # plain two-argument `.new(db, id)` call sites (mruby-rpg2k/mrblib/
+    # scene/map.rb, scene/map_viewer.rb, game/lsd_io.rb, plus this project's
+    # own scripts/*_check.rb harnesses) and no subclass anywhere, so every
+    # real instance always goes through the compiled #initialize.
+    # @animation_type and @animation_speed (each `c.animation_type || 0`/
+    # `c.animation_speed || 0`, both real, provably-Fixnum) are real fields
+    # on a new `Game__ChipSet_ivars` RData struct. The other 5 ivars
+    # (@name/@graphic -- `c.name`/`c.chipset_name`, a method call's own
+    # return value, never traced by this compiler's Fixnum-literal-only
+    # inference, and both actually String-valued regardless; @passable_lower
+    # /@passable_upper/@terrain -- each `c.<method>`, the schema's own
+    # Array-typed passability/terrain tables) all stay UNKNOWN, so they stay
+    # on the ordinary dynamic iv_tbl, mixed safely with the two embedded
+    # fields on the same object, the same mixed-embedding shape Game::Screen/
+    # Game::Transition/Game::State/Game::Map already established.
+    #
+    # #initialize and #upper_flags (a bare `private :upper_flags` right
+    # after its own def) are both `private`; every other method is public,
+    # confirmed directly against the real source (no other `private`/
+    # `public` mode-switch anywhere in the class body).
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -437,7 +549,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::StatusMenu Game::MoveRoute
                RPG2k::Scene::ChipsetEditor RPG2k::Scene::Base
                Game::Character RPG2k::Scene::SaveLoad RPG2k::Scene::Order
-               Game::Shop Game::Map],
+               Game::Shop Game::Map Game::EnemyAi Game::ChipSet],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
