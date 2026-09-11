@@ -124,10 +124,16 @@ def live_candidates
 
   candidates = []
   stderr.each_line do |line|
-    m = /^\s*CANDIDATE\s+([^#]+)#(.+), arg (\d+)\/(\d+) -> @(.+)$/.match(line)
+    # Every group must be named, not just :ivar/:via -- Ruby treats *all*
+    # plain groups in a pattern as non-capturing the moment any one named
+    # group is present, so a mix (as this briefly, wrongly, was) silently
+    # renumbers `owner`/`name`/`pos`/`mand` out from under m[1..4]. Caught
+    # by running this against real output, not assumed.
+    m = /^\s*CANDIDATE\s+(?<owner>[^#]+)#(?<name>.+), arg (?<pos>\d+)\/(?<mand>\d+) -> (?:@(?<ivar>\S+)|\((?<via>[^)]+)\))$/.match(line)
     next unless m
 
-    candidates << { owner: m[1], name: m[2], pos: m[3].to_i, mand: m[4].to_i, ivar: m[5].strip }
+    candidates << { owner: m[:owner], name: m[:name], pos: m[:pos].to_i, mand: m[:mand].to_i,
+                     ivar: m[:ivar], via: m[:via] }
   end
   raise 'bc2cpp.rb ran but reported no "== annotation candidates ==" section at all -- ' \
         'did tools/bc2cpp/bc2cpp.rb change shape?' if candidates.empty? && !stderr.include?('annotation candidates')
@@ -271,7 +277,8 @@ def report(candidates, merged)
     method_candidates.each do |c|
       key = "#{c[:owner]}\x00#{c[:name]}\x00#{c[:pos]}"
       rec = merged[key]
-      label = "#{owner}##{name}, arg #{c[:pos]}/#{mand} -> @#{c[:ivar]}"
+      target = c[:ivar] ? "@#{c[:ivar]}" : "(#{c[:via]})"
+      label = "#{owner}##{name}, arg #{c[:pos]}/#{mand} -> #{target}"
 
       if rec.nil? || rec['calls'].zero?
         puts "  #{label}"

@@ -868,18 +868,52 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       mand = enter ? enter.args.split(':').first.to_i : 0
       next if mand.zero?
 
+      already_at = lambda do |pos|
+        annotations[irep.label]&.args&.[](pos - 1) || arg_types[d.name]&.[](pos - 1)
+      end
+      seen_pos = Set.new
+
       irep.instructions.each_with_index do |insn, idx|
         next unless insn.op == 'SETIV'
 
         src_reg = insn.args[/R(\d+)/, 1]
         pos = opaque_argument_position(irep, idx, src_reg, mand)
         next unless pos
-
-        already = annotations[irep.label]&.args&.[](pos - 1) || arg_types[d.name]&.[](pos - 1)
-        next if already
+        next if already_at.call(pos)
 
         ivar = insn.args[/@(\w+)/, 1]
-        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand }
+        candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand, via: 'SETIV' }
+        seen_pos << pos
+      end
+
+      # A second, purely diagnostic pass: an opaque mandatory argument
+      # consumed directly by a fixnum-fastpath arithmetic/comparison op
+      # (ADD/SUB/EQ/LT/LE/GT/GE and their *I immediate forms) is real
+      # evidence worth surfacing too, even though -- unlike a SETIV site --
+      # annotating one of these can never change compiled output:
+      # IvarLayout.trace_type (the only consumer of arg_types/annotations)
+      # only ever reaches its "incoming argument" fallback from a SETIV
+      # trace, never from here. Purely a documentation aid: a magic-comment
+      # annotation doubles as "this argument is always an Integer in
+      # practice" for a human reading the `def` line, not just a codegen
+      # unlock -- see the "go on annotating rpg2k for readability" follow-up.
+      irep.instructions.each_with_index do |insn, idx|
+        regs = case insn.op
+               when 'ADD', 'SUB', 'EQ', 'LT', 'LE', 'GT', 'GE'
+                 [insn.args[/^R(\d+)/, 1], insn.args[/\(R(\d+)\)/, 1]]
+               when 'ADDI', 'SUBI'
+                 [insn.args[/^R(\d+)/, 1]]
+               else
+                 []
+               end
+        regs.compact.each do |reg|
+          pos = opaque_argument_position(irep, idx, reg, mand)
+          next unless pos
+          next if seen_pos.include?(pos) || already_at.call(pos)
+
+          candidates << { owner: d.owner, name: d.name, ivar: nil, pos: pos, mand: mand, via: insn.op }
+          seen_pos << pos
+        end
       end
     end
   end
@@ -1574,7 +1608,8 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     candidates.each do |c|
-      warn "  CANDIDATE  #{c[:owner]}##{c[:name]}, arg #{c[:pos]}/#{c[:mand]} -> @#{c[:ivar]}"
+      target = c[:ivar] ? "-> @#{c[:ivar]}" : "-> (used in #{c[:via]})"
+      warn "  CANDIDATE  #{c[:owner]}##{c[:name]}, arg #{c[:pos]}/#{c[:mand]} #{target}"
     end
   end
 
