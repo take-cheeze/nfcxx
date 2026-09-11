@@ -396,6 +396,128 @@ def build_registry(ireps, root_label)
             end
           end
         end
+      when 'SENDB'
+        # `SomeConst = Struct.new(:a, :b, ...) do ... end` -- an explicit-
+        # receiver send-with-block, invisible to this walk in TWO distinct
+        # ways at once: no CLASS/MODULE opcode ever fires for a Struct.new
+        # call (nothing above would recurse into the block's own body at
+        # all), and the plain member names themselves are real reader+
+        # writer methods Struct.new installs natively (mruby's own
+        # struct.c), never a bytecode TDEF either -- the same native-
+        # accessor blind spot attr_reader/writer/accessor above closes,
+        # just for a different installation mechanism.
+        #
+        # Real, live instance, not hypothetical, found hunting for exactly
+        # this shape of bug: Game::Battle::Combatant (mruby-rpg2k/mrblib/
+        # game/battle.rb) is `Struct.new(:name, ..., :crit_chance, ...) do
+        # ... def state?(id); (states || []).include?(id); end ... end` --
+        # both Combatant#state? (defined inside this block) and the real,
+        # ordinary bytecode Game::Actor#state? are real definitions of
+        # :state?, but only the latter was ever visible to the registry
+        # before this case existed, so it looked MONO. Game::Battle#
+        # cure_state's own `target.state?(sid)` (target a real Combatant
+        # on every real call site) devirtualized straight into
+        # Game__Actor_state__impl(M, target, sid) regardless of target's
+        # real class -- that function's own body reads
+        # `mrb_iv_get(M, self, "@states")`, which returns nil on a real
+        # Struct instance (Struct stores its members positionally, never
+        # via iv_tbl), so `nil.include?(sid)` raises a real NoMethodError
+        # the moment any state is cured in battle -- a build that compiled
+        # and linked clean with zero warnings. Confirmed directly against
+        # the real generated output (a real `rake`-driven bc2cpp run),
+        # not just reasoned about. Game::Battle#combatant_permanent_states'
+        # own `target.actor` (target the same real Combatant) has the
+        # identical shape: Combatant's own plain `actor` member reader,
+        # invisible the same way, collided with RPG2k::Scene::EquipMenu's
+        # own real bytecode `def actor` -- 19 real call sites devirtualized
+        # into the wrong class's own compiled body before this fix.
+        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        next unless name == 'new'
+
+        d = insn.args[/^R(\d+)/, 1]
+        # Only trust a bare `Struct.new` -- the receiver register's own
+        # last write, walked backward, has to be a plain GETCONST naming
+        # it exactly (mirrors trace_new_target's own "only a real,
+        # statically-certain fact counts" discipline; a computed or
+        # aliased Struct-like receiver just isn't recognized here rather
+        # than guessed at -- always safe, just a missed case).
+        struct_recv = false
+        (idx - 1).downto(0) do |i|
+          prev = irep.instructions[i]
+          pd = prev.args[/^R(\d+)/, 1]
+          next unless pd == d
+
+          struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
+          break
+        end
+        next unless struct_recv
+
+        # The block operand: the nearest preceding BLOCK instruction (real
+        # code always emits it immediately before the SENDB that consumes
+        # it, no interleaving instructions of any other kind -- the same
+        # adjacency assumption the private/attr_reader LOADSYM scan above
+        # already relies on).
+        block_insn = irep.instructions[idx - 1]
+        next unless block_insn && block_insn.op == 'BLOCK'
+
+        block_idx = block_insn.args[/I\[(\d+)\]/, 1]
+        next unless block_idx
+
+        block_label = irep.reps[block_idx.to_i]
+        next unless block_label
+
+        # This Struct's own name: a SETCONST right after the SENDB, on the
+        # same register, is how `Combatant = Struct.new(...) do ... end`
+        # assigns the result -- the same real constant-naming shape
+        # CLASS/MODULE already uses elsewhere in this file, just via a
+        # plain assignment instead of opening a class body. A Struct.new
+        # whose result isn't immediately named this way (passed straight
+        # into something else, a genuinely anonymous Struct) has no real
+        # owner name to register under -- registry soundness only needs
+        # *a* distinct owner (not necessarily the *correct* one) to make
+        # monomorphic_target's own `defs.size == 1` check see more than
+        # one real definition, so a synthetic placeholder is still safe
+        # here, just less informative in a diagnostic dump.
+        next_insn = irep.instructions[idx + 1]
+        struct_name = if next_insn && next_insn.op == 'SETCONST'
+                         sc_name, sc_reg = next_insn.args.split(/\s+/, 2)
+                         sc_name if sc_reg == "R#{d}"
+                       end
+        owner = struct_name ? (namespace ? "#{namespace}::#{struct_name}" : struct_name) : "<struct:#{label}:#{idx}>"
+
+        # Every member name Struct.new was given -- LOADSYM'd into
+        # consecutive registers immediately before the ARRAY that packs
+        # them into the splat argument (same adjacency assumption as
+        # every other LOADSYM backward-scan in this file). Struct
+        # installs both a reader and a writer for each member (real
+        # runtime behavior, mruby's own struct.c) -- same shape as
+        # attr_accessor above, so registered the same way.
+        array_insn = irep.instructions[idx - 2]
+        if array_insn && array_insn.op == 'ARRAY'
+          n = array_insn.args[/^R\d+\s+(\d+)/, 1].to_i
+          members = []
+          (idx - 3).downto(0) do |i|
+            break if members.size >= n
+
+            prev = irep.instructions[i]
+            break unless prev.op == 'LOADSYM'
+
+            members.unshift(prev.args[/:(\S+)/, 1])
+          end
+          members.each do |m|
+            registry[m] << MethodDef.new(name: m, owner: owner, irep: nil, visibility: :public)
+            registry["#{m}="] << MethodDef.new(name: "#{m}=", owner: owner, irep: nil, visibility: :public)
+          end
+        end
+
+        # Every real `def` (and any nested private/attr_reader/etc.
+        # sub-pattern) inside the block body -- reuse this exact same walk,
+        # just rooted at the block's own child irep instead of a
+        # CLASS/MODULE-opened one, so a real def like Combatant#state?
+        # above is registered as an ordinary MethodDef with a real irep
+        # (walkable/compilable like any other, even though no current
+        # ONLY_OWNERS run ever targets a Struct-generated class).
+        walk.call(block_label, owner)
       end
     end
   end

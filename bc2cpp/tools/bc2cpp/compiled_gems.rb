@@ -856,6 +856,80 @@ BC2CPP_COMPILED_GEMS = {
     # so every method below is `mrb_define_method` except #initialize
     # itself, forced private by mruby's own interpreter regardless of
     # source.
+    #
+    # A twenty-fifth, independent round adds RPG2k::Scene::GameOver
+    # (mruby-rpg2k/mrblib/scene/game_over.rb) -- the RPG2000 Game Over
+    # screen (database `GameOver/<name>` picture, `gameover_music`,
+    # dismissed by Decision/Cancel back to the title). Real source has 7
+    # bytecode-defined methods, not the 3 a first read of just its public
+    # API (#initialize/#update/#dispose) suggests -- #gameover_bitmap,
+    # #play_gameover_bgm, #gameover_bgm_override and #database_gameover_bgm
+    # are all real, private, bytecode-defined helpers too. 4 of the 7
+    # compile clean, needing no new opcode work at all: #update (a plain
+    # `Input.trigger?(C) || Input.trigger?(B)` guard, then a POLY
+    # `parent.return_to_title` call) and #dispose (`@picture.dispose if
+    # @picture`, a plain conditional, no block), plus two private helpers,
+    # #gameover_bgm_override (a Hash#[] GETIDX read off `@game_state.
+    # system_bgm[...]`) and #database_gameover_bgm (an ARRAY literal off
+    # five POLY reads on `db.system.gameover_music`). #initialize
+    # (`initialize(parent, state = nil)`, one optional argument) has the
+    # same established non-mandatory-arity gap as every other unembedded
+    # target above; #gameover_bitmap and #play_gameover_bgm each end in a
+    # real `rescue StandardError => e` clause (RESCUE/RAISEIF/EXCEPT).
+    # #initialize never compiling means drop_unsafe_embeddings correctly
+    # refuses to embed any of this class's own ivars -- confirmed directly
+    # against the real generated output: RPG2k::Scene::GameOver does not
+    # appear in bc2cpp's own "classes needing MRB_SET_INSTANCE_TT"
+    # diagnostic, so no MRB_SET_INSTANCE_TT call belongs in its own
+    # registration block (its own @picture ivar gets a
+    # devirtualization-only CLASS_HINT, Sprite, from #initialize's own
+    # fresh `Sprite.new`, never embedded). #update/#dispose are
+    # `mrb_define_method`; #gameover_bgm_override/#database_gameover_bgm
+    # are both `private` (a bare `private` mid-class-body, in effect
+    # through the end of the class), so both need
+    # `mrb_define_private_method`. Zero bc2cpp.rb changes needed -- every
+    # gap here is an already-established out-of-scope shape.
+    #
+    # A twenty-sixth, independent round adds Game::Actors (mruby-rpg2k/
+    # mrblib/game.rb) -- the actor-cache/lookup container (plural, not
+    # Game::Actor itself, already a compiled owner above): lazily builds
+    # and caches Game::Actor instances by database id. 3 of its own 6 real
+    # bytecode-defined methods compile clean, needing no new opcode work
+    # at all: #initialize (`initialize db`, pure mandatory arity, no
+    # super, no block), #existing (`id.nil? ? nil : @all[id]`, a ternary
+    # plus one Hash#[] GETIDX read), and #known_invalid? (a chain of
+    # Hash#[] GETIDX reads/one write plus one real POLY `@db.player` send
+    # that correctly stays ordinary mrb_funcall dispatch, since :player
+    # has other real definitions elsewhere in the closed world). #[] ends
+    # in a real `rescue RuntimeError => e` clause (RESCUE/RAISEIF/EXCEPT),
+    # the same already-established out-of-scope shape every other
+    # rescue-using method above already documents. #all ends in a genuine
+    # Ruby block (`@all.keys.sort.map { |i| ... }`, BLOCK/SENDB), the same
+    # established out-of-scope shape too. #each (`def each(&blk);
+    # all.each(&blk); end`) is a distinct gap from either of those: an
+    # explicit `&blk` block PARAMETER (not a `do...end`/`{}` block literal
+    # at the call site) trips this compiler's own ENTER-arity check
+    # ("non-mandatory arguments (optional/rest/keyword/block)") before the
+    # body is looked at at all -- the same calling-convention gap every
+    # non-mandatory-argument target elsewhere in this file already
+    # documents, just via a block parameter instead of an optional/
+    # keyword/rest one -- confirmed directly against the real generated
+    # #error line, not assumed.
+    #
+    # #initialize compiles clean -- pure mandatory arity -- but none of
+    # this class's own three ivars (@db, @all, @missing) ever gets
+    # embedded: @db is an opaque LCF::Database reference, and @all/
+    # @missing are both real Hash literals, a type bc2cpp's embedding
+    # lattice only ever models for Fixnum/Symbol. Confirmed directly
+    # against the real generated output: Game::Actors does not appear in
+    # bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" diagnostic, so no
+    # MRB_SET_INSTANCE_TT call belongs in its own registration block, and
+    # no DATA_PTR(self) access appears in any of its own compiled methods.
+    # No bare `private`/`protected`/`public` anywhere in the real source,
+    # so #existing and #known_invalid? are both `mrb_define_method`;
+    # #initialize itself is forced private by mruby's own interpreter
+    # regardless of source, the same always-private special case as every
+    # other compiled #initialize in this file.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -868,7 +942,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::Timer Game::Switches Game::Variables
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
-               Game::NumberInput],
+               Game::NumberInput RPG2k::Scene::GameOver Game::Actors],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
