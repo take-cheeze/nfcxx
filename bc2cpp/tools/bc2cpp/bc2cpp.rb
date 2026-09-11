@@ -408,7 +408,41 @@ OPSYM_TO_RUBY = {
 # spelling, different call shape, covered by the same second regex below.
 def extract_native_method_names(src_paths)
   names = Set.new
-  sym_or_opsym = /MRB_(?:SYM|OPSYM)\((\w+)\)/
+  # MRB_SYM(name) spells the bare method name; MRB_OPSYM(op) spells an
+  # operator method by its presym-table key (OPSYM_TO_RUBY above).
+  # 3rd/mruby/include/mruby/presym.h also defines three more real, distinct
+  # sibling macros this used to miss entirely: MRB_SYM_Q(name) -> "name?",
+  # MRB_SYM_B(name) -> "name!", MRB_SYM_E(name) -> "name=" (e.g.
+  # `#define MRB_SYM_Q(name) MRB_SYM_Q__##name`, the presym-tagged token for
+  # "name?"). mruby core reaches for these constantly -- Array#empty?,
+  # Kernel#nil?/#frozen?/#respond_to?, Numeric#zero?/#even?/#odd?,
+  # Hash#key?/#has_key?, Range#cover?, String#chomp!/#downcase!, IO#sync=,
+  # ... -- so missing them left every one of those names invisible to this
+  # registry, a real, live bug caught building Game::MoveRoute
+  # (docs/adr/0139's own follow-up): array.c's own ROM table spells
+  # Array#empty? as `MRB_MT_ENTRY(mrb_ary_empty_p, MRB_SYM_Q(empty), ...)`,
+  # which the old `MRB_(?:SYM|OPSYM)\(...\)` regex simply never matched, so
+  # bc2cpp's registry saw only Game::MoveRoute#empty?'s own bytecode
+  # definition for the name `:empty?` and reported it MONO -- compile_send
+  # then devirtualized `@commands.empty?` (a plain Array) straight into
+  # Game__MoveRoute_empty__impl calling itself, real infinite recursion,
+  # caught only because g++'s own -Winfinite-recursion happened to flag a
+  # literal self-call; the exact same collision against any OTHER class's
+  # own same-named method would have compiled clean and silently
+  # misresolved instead, invisible to any compiler warning. The longer
+  # SYM_Q/SYM_B/SYM_E alternatives must be tried before the bare SYM one
+  # below (regex alternation order) or "MRB_SYM_Q(empty)" would match SYM
+  # against "SYM" alone and then fail on the unconsumed "_Q(empty)".
+  sym_or_opsym = /MRB_(SYM_Q|SYM_B|SYM_E|SYM|OPSYM)\((\w+)\)/
+  resolve_sym = lambda do |macro, name|
+    case macro
+    when 'SYM_Q' then "#{name}?"
+    when 'SYM_B' then "#{name}!"
+    when 'SYM_E' then "#{name}="
+    when 'OPSYM' then OPSYM_TO_RUBY[name] || name
+    else name # bare MRB_SYM(name)
+    end
+  end
 
   Array(src_paths).each do |path|
     src = File.read(path, encoding: 'UTF-8')
@@ -421,13 +455,13 @@ def extract_native_method_names(src_paths)
 
     # MRB_MT_ENTRY(fn, MRB_SYM(name), flags) / MRB_MT_ENTRY(fn, MRB_OPSYM(op), flags)
     # -- mruby core's own ROM method-table idiom.
-    src.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{sym_or_opsym}/) { |tok| names << (OPSYM_TO_RUBY[tok.first] || tok.first) }
+    src.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{sym_or_opsym}/) { |tok| names << resolve_sym.call(tok[0], tok[1]) }
 
     # mrb_define_method_id(mrb, klass, MRB_SYM(name)/MRB_OPSYM(op), func, aspec)
     # (and the _class_method_id/_module_function_id siblings) -- the direct-call
     # form some core mrbgems (mruby-task, ...) use instead of a ROM table.
     src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{sym_or_opsym}/) do |tok|
-      names << (OPSYM_TO_RUBY[tok.first] || tok.first)
+      names << resolve_sym.call(tok[0], tok[1])
     end
   end
   names
