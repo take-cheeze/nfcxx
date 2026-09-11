@@ -33,13 +33,36 @@ BC2CPP_COMPILED_GEMS = {
     # target with an embedding #initialize -- purely mandatory-arity (5
     # required args, no opts), the same shape as Screen's. Game::Actor
     # (docs/adr/0139's own GETIDX/SETIDX/GETGV opcode follow-up) is the
-    # biggest real target yet -- 75 of its own real bytecode-defined
-    # methods across mruby-rpg2k/mrblib/game.rb and game/battle_support.rb's
-    # own reopening of the class; its own #initialize stays interpreted
-    # (BLOCK/SENDB/GETIDX), same shape as Picture's/Window's, so its own
-    # provably-Fixnum ivars stay unembedded too.
+    # biggest real target at that time -- 76 of its own real bytecode-
+    # defined methods (up from 75 -- #set_exp, unblocked by SUBILV, a
+    # Game::Party-round opcode, see below) across mruby-rpg2k/mrblib/
+    # game.rb and game/battle_support.rb's own reopening of the class; its
+    # own #initialize stays interpreted (BLOCK/SENDB/GETIDX), same shape as
+    # Picture's/Window's, so its own provably-Fixnum ivars stay unembedded
+    # too -- confirmed for real after fixing a real, live memory-safety bug
+    # in bc2cpp.rb's own drop_unsafe_embeddings (arity-only, not compile-
+    # clean-checked, had let them through anyway; see register.cxx's own
+    # top comment for the real fix and its own confirmed-safe
+    # re-verification).
+    #
+    # Game::Party (docs/adr/0139's own Game::Party follow-up) -- party-wide
+    # item/skill usability rules, equip/swap logic, skill damage formulas,
+    # state/status application, battle placement. 85 of its own 128 real
+    # bytecode-defined methods, needing six more new opcodes (NOP, ADDILV/
+    # SUBILV, RANGE_INC/RANGE_EXC, RETURN_BLK -- see bc2cpp.rb's own
+    # compile_insn comments on each). Its own #initialize stays interpreted
+    # (two optional arguments, `ids = nil, roster = nil`), same shape as
+    # Picture's/Window's/Actor's, so its own two provably-Fixnum ivars
+    # (@gold, @revision) stay unembedded too.
+    #
+    # RPG2k::Scene::MapViewer (docs/adr/0139's own GETIDX0 opcode
+    # follow-up) is the F9 debug-menu map overview/editor scene,
+    # mruby-rpg2k/mrblib/scene/map_viewer.rb -- 34 of its own 42 real
+    # methods, the same unembedded shape as Picture/Window/Actor (its own
+    # #initialize takes only optional keyword args).
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
-               Game::Transition Game::Actor],
+               Game::Transition Game::Actor Game::Party
+               RPG2k::Scene::MapViewer],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {

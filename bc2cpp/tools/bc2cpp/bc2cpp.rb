@@ -1194,7 +1194,6 @@ class CodeGen
     registry.each_value do |defs|
       defs.each { |d| @owner_of[d.irep] = d if d.irep }
     end
-    @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.
@@ -1207,6 +1206,16 @@ class CodeGen
     @const_lookup_helper_used = false
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
+    # @clean_cache/@probing (above) and @ivar_layout (below, temporarily the
+    # RAW layout) both have to exist before drop_unsafe_embeddings runs --
+    # it calls compiles_clean?, which calls compile_method, which reads
+    # @ivar_layout[d.owner] for its OWN embedding decision (irrelevant to
+    # whether #error appears -- the embedded-struct init block never itself
+    # contains #error text -- but a nil @ivar_layout would still raise
+    # NoMethodError on `[]` before ever reaching that check). Reassigned to
+    # the real, filtered result immediately after.
+    @ivar_layout = ivar_layout
+    @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
   end
 
   def const_lookup_helper_used?
@@ -1229,10 +1238,50 @@ class CodeGen
   # silent memory-safety bug the very first time a compiled #step or
   # #update ran against a real (interpreter-allocated, MRB_TT_OBJECT)
   # Game::Picture instance.
+  #
+  # pure_mandatory_arity? alone is NOT enough, a real gap this guard's
+  # own arity-only check missed -- caught building Game::Party (this
+  # round): `Game::Actor#initialize` genuinely has pure mandatory arity
+  # (2 required args, no opts -- confirmed against real disassembly, `ENTER
+  # 2:0:0:0:0:0:0:0`), so the old check let 7 real provably-Fixnum
+  # Game::Actor ivars (@id, @exp, @level, @class_id, @faceset_index,
+  # @face_index, @battler_animation_override) straight through -- but the
+  # method's own body still ends in a real `@equipment.each { |eq| ... }`
+  # (BLOCK/SENDB), an opcode this compiler has never modeled, so it can
+  # never actually compile and never runs its own mrb_data_init call
+  # either way. The already-shipped mruby-rpg2k-compiled/src/register.cxx
+  # (docs/adr/0139's own Game::Actor follow-up) confirms this was REAL,
+  # not hypothetical: replaying its own exact bc2cpp invocation (whole
+  # closed world, ONLY_OWNERS including Game::Actor, no other change) shows
+  # 16 real, already-registered methods (`faceset_index`, `set_faceset`,
+  # `restore_class`, `set_class_id`, `curve_row`, `gain_exp`,
+  # `exp_to_next`, `next_level_exp`, `change_level_by`, `change_param`,
+  # `battler_animation_id`, `class_battle_commands`, `double_hand?`,
+  # `equipment_fixed?`, `force_ai?`, `strong_defence?`) whose own GETIV/
+  # SETIV codegen -- built from the very same (unfiltered) ivar_layout this
+  # method is supposed to be the *only* gate on -- dereferences
+  # `DATA_PTR(self)` for one of the 7 ivars above, yet
+  # `mruby-rpg2k-compiled/src/register.cxx` never calls
+  # `MRB_SET_INSTANCE_TT(actor, MRB_TT_DATA)` (confirmed: no such call
+  # exists anywhere in that file's own Game::Actor registration block,
+  # since nothing there ever suspected embedding was live for this class).
+  # So every real `Game::Actor.new(...)` stays a plain `MRB_TT_OBJECT`, and
+  # any of those 16 real, already-registered methods reading
+  # `faceset_index`/`class_id`/`exp`/`level`/etc. off `self` would
+  # dereference an `RData` payload that was never allocated: real
+  # undefined behavior (garbage or a segfault, not a diagnostic), live in
+  # the actual merged build today, every time one of them runs.
+  # compiles_clean? -- a real compile_method(label) call, checked for a
+  # #error marker, the exact same test SKIP_UNSUPPORTED itself uses (see
+  # its own comment) -- is the only way to answer "does #initialize's own
+  # body actually finish compiling", the same real gap
+  # compiles_clean?/compile_send's own MONO-devirtualization fix already
+  # closed for call sites two follow-ups up in docs/adr/0139; this is the
+  # identical fix applied to the embedding gate instead.
   def drop_unsafe_embeddings(ivar_layout)
     ivar_layout.select do |owner, _|
       init = @registry['initialize']&.find { |d| d.owner == owner }
-      init && pure_mandatory_arity?(@ireps.fetch(init.irep))
+      init && pure_mandatory_arity?(@ireps.fetch(init.irep)) && compiles_clean?(init.irep)
     end
   end
 
@@ -1962,6 +2011,30 @@ class CodeGen
           r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
         }
       CPP
+    when 'GETIDX0'
+      # "GETIDX0 R7 R4[0]" -- R[a] = R[b][0] (real OP_GETIDX0 semantics,
+      # src/vm.c): mrbc's own peephole for the common literal `x[0]` index
+      # shape (e.g. `ev[0]` off a computed local) -- distinct instruction
+      # from GETIDX above, with its own separate dest/src register pair
+      # (`BB` operand shape) rather than GETIDX's in-place a/a+1 pair, and
+      # no index register at all since the index is always the literal 0.
+      # Same Array/Hash fast paths as GETIDX (mrb_ary_ref -- same public,
+      # bounds-checked API, an empty array correctly yielding nil; a Hash
+      # via mrb_hash_get with a literal Fixnum(0) key), falling back to a
+      # real `[]` send with a literal 0 argument for anything else --
+      # mirrors vm.c's own `getidx0_fallback` label exactly (regs[a]=recv,
+      # regs[a+1]=Fixnum(0), then real :[] dispatch through the ordinary
+      # SEND path).
+      d, s = regs(a, 2)
+      <<~CPP
+        if (mrb_array_p(r#{s})) {
+          r#{d} = mrb_ary_ref(M, r#{s}, 0);
+        } else if (mrb_hash_p(r#{s})) {
+          r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+        } else {
+          r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+        }
+      CPP
     when 'SETIDX'
       # "SETIDX R4 (R5) (R6)" -- R[a][R[a+1]] = R[a+2], then R[a] = R[a+2]
       # too (real OP_SETIDX semantics, src/vm.c: the fast Array/Hash paths
@@ -2000,6 +2073,123 @@ class CodeGen
       "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'STOP'
       ''
+    when 'NOP'
+      # "NOP" -- OP_NOP's own real semantics (src/vm.c): `/* do nothing */
+      # NEXT;`, no operands, no register read or write at all. Real code
+      # hits this from a `while` loop's own condition-check jump target
+      # (confirmed against real disassembly, Game::Party#include_actor?/
+      # #any_alive?/#actor_by_id: mrbc's own codegen places a bare NOP
+      # right after the loop-entry JMPNOT, before the loop body proper --
+      # a label placeholder with nothing to actually execute). Translating
+      # to a real, empty C++ statement is exactly as safe as the real
+      # opcode's own do-nothing behavior -- nothing to get wrong here.
+      ''
+    when 'ADDILV'
+      # "ADDILV Rd Rb N ; Rd:name" -- OP_ADDILV's own real shape (src/vm.c,
+      # OP_MATHILV(add) macro): `a=local, b=working space, c=immediate` per
+      # that macro's own comment, but the macro body itself never reads or
+      # writes regs[b] at all -- only regs[a] (in place: regs[a] += c on the
+      # Integer fast path, falling to a real `mrb_funcall(mid=:+, ...)` for
+      # anything else, mirroring ADDI's own established fixnum-fastpath-
+      # else-mrb_funcall shape exactly). `b` is confirmed dead for codegen
+      # purposes by reading that macro directly -- real code hits this from
+      # a `while` loop's own `i += 1`-shaped increment (confirmed against
+      # real disassembly: Game::Party#include_actor?/#any_alive?/
+      # #actor_by_id/#insert_item_in_bag all have one, always immediately
+      # before the loop's own back-edge JMP). The one real difference from
+      # ADDI's own codegen -- a real Integer-overflow bignum promotion
+      # (OP_MATH_OVERFLOW_INT) instead of falling through to mrb_funcall --
+      # is the same simplification ADDI's own codegen already accepts (see
+      # its own comment): not worth duplicating mruby's own bignum-overflow
+      # path for this prototype's scope, and C's own wraparound on overflow
+      # is no worse a divergence here than ADDI's plain C `+` already is.
+      # Immediate extraction is its own real, third-operand regex (`^R\d+
+      # \s+R\d+\s+(-?\d+)`), NOT ADDI's own established `a.split(/\s+/).last`
+      # -- a real bug, caught building this: unlike ADDI's own destination
+      # register (never observed carrying a trailing named-local comment in
+      # this codebase's real disassembly), ADDILV's own `a` register is BY
+      # DEFINITION a real named local (the whole point of the *LV opcode
+      # variant), so its trailing "; Rd:name" comment (the same shape SETIV/
+      # GETCONST's own already-documented not-`$`-anchored bugs guard
+      # against) is the common case, not a rare one -- `.split.last` would
+      # grab "Rd:name" itself as the literal here, a C++ syntax error caught
+      # immediately trying to compile this round's own toy harness (`R4:i`
+      # is not valid C++), never a silently-wrong translation.
+      d = a[/^R(\d+)/, 1]
+      lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
+      <<~CPP
+        if (mrb_integer_p(r#{d})) {
+          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+        }
+      CPP
+    when 'SUBILV'
+      # OP_SUBILV -- ADDILV's own OP_MATHILV(sub) sibling, identical shape
+      # (see ADDILV's own comment above for the real b-register-is-dead
+      # confirmation and the accepted overflow simplification). Real code
+      # hits this from a `while` loop's own countdown decrement (confirmed
+      # against real disassembly, Game::Actor#set_exp's own `new_level -= 1
+      # while ...` post-condition-loop shape). Same real trailing-comment
+      # extraction fix as ADDILV above, same reason.
+      d = a[/^R(\d+)/, 1]
+      lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
+      <<~CPP
+        if (mrb_integer_p(r#{d})) {
+          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+        }
+      CPP
+    when 'RANGE_INC'
+      # "RANGE_INC Ra" -- R[a] = Range.new(R[a], R[a+1], exclude_end=false)
+      # (real OP_RANGE_INC semantics, src/vm.c: `mrb_range_new(mrb, regs[a],
+      # regs[a+1], FALSE)`, the result overwriting r<a> itself). A plain,
+      # narrow, mechanical two-register-read-then-overwrite translation via
+      # the real public mrb_range_new API (mruby/range.h) -- the same "read
+      # both operands before the final overwrite" safety ARRAY/HASH/AREF/
+      # GETIDX's own codegen above already relies on (nothing here writes
+      # r<a> until the very last step). Real code hits this from an
+      # inclusive Range literal (`a..b`), e.g. Game::Party#skill_invoking_item?
+      # /#use_special_switch_item's own identical `(1..5).cover?(it.type)`
+      # check (both real, independent call sites of the same shape --
+      # `mruby-rpg2k/mrblib/game/battle_support.rb`/`game.rb`).
+      d = a[/^R(\d+)/, 1].to_i
+      "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, FALSE);\n"
+    when 'RANGE_EXC'
+      # OP_RANGE_EXC -- RANGE_INC's own exclude_end=TRUE sibling (real
+      # OP_RANGE_EXC semantics, src/vm.c), the exact real shape a `a...b`
+      # (exclusive) Range literal compiles to. Added alongside RANGE_INC
+      # even though no Game::Party method itself needs it (both share the
+      # identical real VM shape, differing only in the one literal exclude
+      # flag -- the natural mirrored pair, matching this file's own
+      # established RETFALSE/RETTRUE and LOADFALSE/LOADTRUE precedent for
+      # never shipping just one half of a real opcode pair without reason).
+      d = a[/^R(\d+)/, 1].to_i
+      "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, TRUE);\n"
+    when 'RETURN_BLK'
+      # "RETURN_BLK Ra" -- looks block-specific by name, but its own real
+      # VM semantics (src/vm.c, OP_RETURN_BLK) start with:
+      # `if (!MRB_PROC_ENV_P(ci->proc) || MRB_PROC_STRICT_P(ci->proc)) goto
+      # NORMAL_RETURN;` -- i.e. falls through to the exact same bare-value
+      # return OP_RETURN itself uses, whenever the executing proc is an
+      # ordinary (non-block) method. Every leaf irep this compiler ever
+      # translates *is* exactly that: a real `def`-compiled method body
+      # (mrb_proc_new_irep tags it MRB_PROC_SCOPE|MRB_PROC_STRICT --
+      # confirmed reading 3rd/mruby/src/vm.c's own OP_METHOD/OP_L_METHOD
+      # lambda-creation path), never a block/proc irep (those are separate
+      # child ireps this whole-program TDEF-only registry never registers
+      # as a leaf method body in the first place -- see build_registry's
+      # own comment). So for every real call site this opcode's own
+      # MRB_PROC_STRICT_P branch is unconditionally taken here -- safe to
+      # translate identically to a plain RETURN. Real code hits this from a
+      # `return` that isn't the method's own last statement (confirmed
+      # against real disassembly: Game::Party#include_actor?/#any_alive?/
+      # #actor_by_id's own early `return true`/`return a` inside a `while`
+      # loop body, mrbc's own codegen choice for a non-tail-position
+      # `return`, not a real block boundary).
+      r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
+      "  return r#{r};\n"
     else
       "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
     end
@@ -2344,6 +2534,11 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/hash.h>'
   puts '#include <mruby/array.h>'
   puts '#include <mruby/class.h>'
+  # mrb_range_new -- RANGE_INC/RANGE_EXC's own codegen (see compile_insn's
+  # own comment on both), same "declared by a header nothing else here
+  # already pulls in" gap HASH's own mruby/hash.h addition closed for
+  # mrb_hash_new_capa/mrb_hash_set.
+  puts '#include <mruby/range.h>'
   # mrb_protect_error -- GETCONST's own owner-scope-first lookup (see its
   # own comment above) needs this to safely try a scope and fall back to
   # Object without letting a genuinely-missing-there NameError propagate
