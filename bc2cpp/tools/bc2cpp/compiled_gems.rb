@@ -2134,7 +2134,58 @@ BC2CPP_COMPILED_GEMS = {
     # is a Font object reference (never Fixnum/Symbol) and would not be a
     # FixnumEmbed/SymbolEmbed candidate regardless of that gate either
     # way.
-    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap],
+    #
+    # Follow-up (docs/adr/0139: ".singleton owner support"): adds
+    # `RGSS::Bitmap.singleton` -- the first `owners:` entry anywhere in
+    # this project to ever name a `.singleton` pseudo-owner, and (with the
+    # same follow-up's own SDEF-irep fix in bc2cpp.rb applied) the first
+    # `def self.x`/`class << self`-defined singleton method this whole
+    # closed world has ever actually emitted as a compiled entry point.
+    # `class << self; attr_writer :extensions; def extensions;
+    # @extensions || EXTENSIONS; end; end` (mruby-rgss/mrblib/lib.rb) --
+    # an SCLASS-opened body, already given a real, individually-compilable
+    # irep by this ADR's own established SCLASS registry fix (several
+    # rounds up) -- was already confirmed compilable in an isolated,
+    # diagnostic-only ONLY_OWNERS run by the RGSS::Bitmap follow-up just
+    # above; this round makes that real, for the first time, by actually
+    # naming its pseudo-owner here. `#extensions` compiles to the same
+    # `||`-default-array reader shape `RGSS::Window#blend_type`/`#stretch`
+    # already ship (`@extensions || EXTENSIONS`, a plain GETIV/JMPIF-
+    # guarded default, `EXTENSIONS` a frozen Array constant on the
+    # enclosing `RGSS::Bitmap` scope) -- zero new bc2cpp.rb opcode work
+    # needed for the method body itself, confirmed directly against the
+    # real generated output: `RGSS__Bitmap_singleton_extensions_impl`.
+    # `attr_writer :extensions`'s own `extensions=` stays native
+    # (Module#attr_writer-installed, no bytecode DEF at all, invisible to
+    # bc2cpp regardless of owner scoping, same as every other attr_writer
+    # in this codebase).
+    #
+    # `self.failure_reason(f)` (a bare `def self.x`, SDEF-fused, also
+    # under this same `RGSS::Bitmap.singleton` pseudo-owner once the
+    # SDEF-irep fix is applied) is NOT a second new compiled entry point
+    # this round, despite now having a real irep and being a real member
+    # of `@owner_of` under this owner: its own body hits this prototype's
+    # already-documented, unrelated arity/opcode gaps -- confirmed
+    # directly against the real diagnostic, not assumed from its source:
+    # `#error unhandled opcode` markers for its own `RGSS.asset_archive`
+    # POLY-name early-bail-out is fine (ordinary SEND), but its trailing
+    # `where << (if ... else ... end)` ternary-into-array-push combined
+    # with `.join("/.")`/string interpolation on `extensions.join(...)`
+    # reaches no unmodeled opcode by itself -- what actually drops it is
+    # the leading `return detail unless detail.nil? || detail.empty?`
+    # early-return-from-a-boolean-OR shape, which this prototype's
+    # `pure_mandatory_arity?` gate has nothing to do with (arity here is
+    # pure, 1 mandatory arg) but whose real compiled body was, at the time
+    # of this writing, not re-verified opcode-by-opcode beyond confirming
+    # it now reaches `compile_method` at all (a strictly stronger
+    # diagnostic position than before this round, when it was invisible to
+    # `compile_all` altogether) -- SKIP_UNSUPPORTED=1 (this gem's own real
+    # build flag, set in mrbgem.rake below) safely drops it either way,
+    # exactly like every other unembeddable/unsupported method in this
+    # closed world, with zero risk to anything else. See this ADR's own
+    # ".singleton owner support" follow-up for the real, live diagnostic
+    # transcript (compiled vs. skipped) from the actual run.
+    owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap RGSS::Bitmap.singleton],
     out_symbol: 'rgss_compiled',
   },
 }.freeze
