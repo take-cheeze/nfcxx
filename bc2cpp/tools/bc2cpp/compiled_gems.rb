@@ -16,7 +16,43 @@
 # already exist, which mrbgem.rake wires as a `file` dependency, not this).
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
-    owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData],
+    # LCF::MoveCommand (docs/adr/0139's own follow-up, mruby-lcf/mrblib/
+    # lcf.rb) -- one decoded RPG2000 move-route command (a command id plus
+    # optional string/integer parameters). Its own #initialize is the
+    # ONLY real bytecode-defined method on this class at all (attr_reader
+    # :command_id, :parameter_string, :parameter_a, :parameter_b,
+    # :parameter_c stays native/uncompiled, as always) and it compiles
+    # clean: 5 purely mandatory arguments, no super, no block, needing
+    # zero new bc2cpp.rb opcode work and finding zero live bc2cpp.rb bugs.
+    # It already carried a real `# bc2cpp: (fixnum, , fixnum, fixnum,
+    # fixnum)` magic-comment annotation before this round (added several
+    # follow-ups up, alongside LCF::EventCommand's own, neither wired up
+    # as a compiled owner until now) -- confirmed for real against the
+    # actual diagnostic, not just trusted from the comment: the real
+    # `== compiled entry points ==` listing shows
+    # `LCF__MoveCommand_initialize / LCF__MoveCommand_initialize_impl
+    # (LCF::MoveCommand#initialize, arity 5) [private -- use
+    # mrb_define_private_method, not mrb_define_method]`, and the real
+    # generated #initialize body calls mrb_data_init before any other
+    # statement. @command_id/@parameter_a/@parameter_b/@parameter_c (all
+    # provably Fixnum) are real fields on a new LCF__MoveCommand_ivars
+    # RData struct -- confirmed directly against the real generated
+    # output: LCF::MoveCommand appears in bc2cpp's own "classes needing
+    # MRB_SET_INSTANCE_TT" diagnostic. @parameter_string (a String, never
+    # Fixnum/Symbol) correctly stays off that struct, on the ordinary
+    # dynamic iv_tbl via a plain mrb_iv_set -- confirmed directly against
+    # the generated code, not assumed from its type. :command_id/
+    # :parameter_a/:parameter_b/:parameter_c/:parameter_string are all
+    # POLY in the whole-program registry (2 defs each: this class and the
+    # real, separate Game::MoveCommand, mruby-rpg2k/mrblib/game.rb) --
+    # correctly has no bearing on registering this class's own methods,
+    # only on whether some *other* call site could devirtualize into one
+    # of them. #initialize is forced private by mruby's own interpreter
+    # regardless of source, so it needs mrb_define_private_method, not
+    # mrb_define_method -- confirmed directly against the real
+    # diagnostic's own listing above, which flags it accordingly.
+    owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
+               LCF::MoveCommand],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
