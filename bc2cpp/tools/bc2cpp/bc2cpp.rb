@@ -290,8 +290,26 @@ def build_registry(ireps, root_label)
         child_label = irep.reps[idx2]
         method_name = name.sub(/^:/, '')
         owner = namespace || 'Object' # a top-level `def` lands on Object.
+        # #initialize/#initialize_copy/#respond_to_missing? are always
+        # private, unconditionally -- not a convention, an actual special
+        # case the real interpreter enforces at `def`-definition time
+        # itself (3rd/mruby/src/class.c's own define_method_vm-family
+        # code: `if (mid == MRB_SYM(initialize) || ... ) MRB_SET_
+        # VISIBILITY_FLAGS(flags, MRB_METHOD_PRIVATE_FL);`, unconditional,
+        # regardless of whatever `private`/`public` mode is currently in
+        # effect). default_visibility only tracks an explicit self-send
+        # (see the SEND0/SEND/SSEND0/SSEND case below) -- it has no way to
+        # see this builtin rule on its own, so a real `def initialize`
+        # with no preceding `private` call would otherwise be reported
+        # (and, worse, registered by a hand-written register.cxx via
+        # plain mrb_define_method) as public -- a real, observable
+        # behavior change, same shape as this file's own Game::Picture#
+        # step/#finish_move finding, just never hit until a compiled
+        # target's own method set happened to include one of these names.
+        visibility = %w[initialize initialize_copy
+                         respond_to_missing?].include?(method_name) ? :private : default_visibility
         registry[method_name] << MethodDef.new(name: method_name, owner: owner, irep: child_label,
-                                                visibility: default_visibility)
+                                                visibility: visibility)
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
         name = insn.args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
         next unless %w[private protected public].include?(name)
@@ -1167,6 +1185,17 @@ class CodeGen
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.
+    # Set by GETCONST's own owner-scope-first codegen (see its comment)
+    # whenever at least one compiled method actually needs the shared
+    # bc2cpp_const_get_or_object helper -- emit_const_lookup_helper reads
+    # this after compile_all runs, so the helper (and its mruby/error.h
+    # dependency) never appears in a generated file that has no real use
+    # for it.
+    @const_lookup_helper_used = false
+  end
+
+  def const_lookup_helper_used?
+    @const_lookup_helper_used
   end
 
   # Embedding an ivar as a real struct field only works if the struct is
@@ -1266,6 +1295,47 @@ class CodeGen
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
     end
     out
+  end
+
+  # The shared helper GETCONST's own owner-scope-first codegen calls
+  # (compile_insn's own comment has the full story on why a bare
+  # `mrb_const_get` can't just be tried-then-polled with mrb_check_error --
+  # it raises via a real longjmp, never returning to let the caller check
+  # anything). `mrb_protect_error` (mruby/error.h) is the real, always-
+  # available core primitive for "run this and tell me if it raised,
+  # without letting the raise itself unwind past me": it takes a plain C
+  # function pointer plus a void* payload, so the actual lookup has to be
+  # a real top-level static function (LookupCtx/lookup_body below) rather
+  # than a lambda or inline call -- C, not C++ closures, is what this API
+  # takes. Emitted once per generated file (not once per call site), and
+  # only when at least one compiled method actually needs it
+  # (const_lookup_helper_used?, set by compile_insn while compiling).
+  def emit_const_lookup_helper
+    return '' unless const_lookup_helper_used?
+
+    <<~CPP
+      // Shared by every GETCONST site whose owner isn't Object -- tries one
+      // scope in the owner's own real lexical nesting chain and reports
+      // success via *ok rather than choosing a fallback itself, so the call
+      // site (compile_insn's own GETCONST case) can walk the whole chain,
+      // innermost scope first, the way real Ruby constant lookup does. See
+      // that comment for why this has to be mrb_protect_error-based rather
+      // than a simpler try/poll (a raw mrb_const_get failure longjmps
+      // straight past any code that would poll mrb->exc afterward).
+      struct Bc2cppConstLookupCtx { mrb_value scope; mrb_sym name; };
+      static mrb_value bc2cpp_const_lookup_body(mrb_state* M, void* ud) {
+        Bc2cppConstLookupCtx* ctx = (Bc2cppConstLookupCtx*)ud;
+        return mrb_const_get(M, ctx->scope, ctx->name);
+      }
+      static mrb_value bc2cpp_const_try(mrb_state* M, mrb_value scope, mrb_sym name, mrb_bool* ok) {
+        Bc2cppConstLookupCtx ctx{scope, name};
+        mrb_bool err = FALSE;
+        mrb_value result = mrb_protect_error(M, bc2cpp_const_lookup_body, &ctx, &err);
+        *ok = !err;
+        return result;
+      }
+
+    CPP
   end
 
   # `only_owners`, when given, restricts which classes' methods actually get
@@ -1423,7 +1493,7 @@ class CodeGen
       case insn.op
       when 'JMP'
         targets << insn.args.strip[/\d+/].to_i
-      when 'JMPNOT', 'JMPIF'
+      when 'JMPNOT', 'JMPIF', 'JMPNIL'
         targets << insn.args[/(\d+)\s*$/, 1].to_i
       end
     end
@@ -1460,6 +1530,32 @@ class CodeGen
       # were all small enough to only ever exercise the parenthesized form.
       lit = a[/\(([^)]+)\)/, 1] || a[/^R\d+\s+(-?\d+)/, 1]
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
+    when 'LOADL'
+      # "LOADL R5 L[0]" -- a numeric literal too wide for LOADI's own
+      # immediate operand (src/vm.c's OP_LOADL: pool[k].tt is INT32/INT64/
+      # BIGINT/FLOAT). Only FLOAT is modeled here -- parse_c_dump's own
+      # pool scan already tags a non-string entry as {type:, raw:} (the
+      # same mixed-type-pool handling STRING's own #error fallback above
+      # relies on), and every real FLOAT entry seen in this codebase's own
+      # pools (mrbc's C dump, a %.17g-shaped literal, e.g. ".f=0.330000000
+      # 00000002") is already a valid, directly-reusable C double literal
+      # -- no reformatting needed. INT32/INT64/BIGINT pool entries never
+      # showed up under LOADL in real code (mrb_int literals wide enough
+      # to need LOADL instead of LOADI/LOADI8/16/32 are bignums here,
+      # IREP_TT_BIGINT -- a real big-endian sign+exponent encoded string
+      # this prototype doesn't decode); left as an honest #error, the same
+      # "loud gap, not a silent wrong translation" every other unmodeled
+      # shape here gets, rather than guessed at.
+      d = a[/^R(\d+)/, 1]
+      pidx = a[/L\[(\d+)\]/, 1].to_i
+      entry = irep.pool.fetch(pidx)
+      if entry.is_a?(Hash) && entry[:type] == :float
+        lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
+        "  r#{d} = mrb_float_value(M, #{lit});\n"
+      else
+        kind = entry.is_a?(Hash) ? entry[:type] : :string
+        "  #error LOADL references a non-float pool entry (#{kind}) -- not in this prototype's supported subset\n"
+      end
     when 'STRING'
       d = a[/^R(\d+)/, 1]
       idx = a[/L\[(\d+)\]/, 1].to_i
@@ -1589,29 +1685,93 @@ class CodeGen
       reg = a[/^R(\d+)/, 1]
       target = a[/(\d+)\s*$/, 1].to_i
       "  if (mrb_test(r#{reg})) goto L#{target};\n"
+    when 'JMPNIL'
+      # "JMPNIL R3 024" -- OP_JMPNIL's own real shape (src/vm.c): jump if
+      # r<d> is exactly nil (not merely falsy -- mrb_test/JMPNOT/JMPIF
+      # already cover the falsy case; this is the dedicated opcode mrbc
+      # emits for `x.nil? ? a : b` / `x || y`-shaped nil-specific tests,
+      # e.g. `@opacity.nil? ? 255 : @opacity`).
+      reg = a[/^R(\d+)/, 1]
+      target = a[/(\d+)\s*$/, 1].to_i
+      "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
     when 'GETCONST'
       # "GETCONST R4 Integer" -- a bare top-level/lexical constant lookup.
       # The real VM (OP_GETCONST, vm.c) resolves this against the *current
       # lexical scope chain* (mrb_vm_const_get, which walks the call info
       # stack's target classes) -- info this AOT-compiled function doesn't
-      # have at codegen time. Simplification: look it up starting from
-      # Object, same as a real top-level `Integer`/`StringIO` reference
-      # would resolve to in practice for every constant this prototype has
-      # actually seen compiled (see README.md's caveats) -- not sound in
-      # general for a constant redefined inside a deeper lexical scope, but
-      # every real case here is a genuine top-level class/module name.
+      # have at codegen time.
       #
-      # Real bug, caught by running against real code: a `\s+/, 2` split
-      # captured a trailing "; R3:name" local-variable-name comment too
-      # whenever the destination register is a named local (real shape,
-      # e.g. "GETCONST R3 MAX_DIGITS\t; R3:d") -- interning a garbage
-      # symbol name and raising a real NameError at runtime, never caught
-      # by a #error check (this compiles and links fine). \S+ stops at
-      # the first whitespace/tab instead of swallowing the rest of the
-      # line -- same fix trace_new_target's own GETCONST case needed.
+      # Real bug, caught running against real code (Game::EnemyAction/
+      # RGSS::Sprite): the original single-scope-from-Object codegen
+      # compiled clean but raised a real runtime NameError for a same-
+      # class constant (`KIND_SKILL` inside `Game::EnemyAction#skill?`,
+      # really `Game::EnemyAction::KIND_SKILL`) and an enclosing-module
+      # one (`Tone`/`Color`/`Rect` inside `RGSS::Sprite#tone`/`#color`/
+      # `#src_rect`, really `RGSS::Tone`/`RGSS::Color`/`RGSS::Rect`) --
+      # confirmed empirically against a real built mruby: mrb_const_get's
+      # own const_get_nohook (src/variable.c) stops walking the ancestor
+      # chain *before* ever checking Object's own table unless the search
+      # started AT Object, so a class-body or enclosing-module constant is
+      # invisible to a bare from-Object lookup no matter how "top-level-
+      # looking" the #error-free compile made it look. Fix: try every
+      # scope in the owner's own real lexical nesting chain, innermost
+      # first (owner "RGSS::Sprite" -> [RGSS::Sprite, RGSS]), before
+      # falling back to Object -- mirroring real Ruby's own Module.nesting
+      # -based resolution for the plain "def is textually nested exactly
+      # where its owner name says" shape every real case here has (no
+      # `class Foo << self` reopening tricks). A bare `mrb_const_get`
+      # can't just be tried-then-polled with mrb_check_error to walk this
+      # chain -- a failing lookup raises via a real setjmp/longjmp,
+      # jumping straight past any code that would poll mrb->exc
+      # afterward (confirmed by instrumenting a debug build: a printf
+      # placed right after the failing call never ran).
+      # `mrb_protect_error` (mruby/error.h, a real always-available core
+      # API, not gated behind the mruby-error gem) is what actually lets
+      # this poll: emit_const_lookup_helper's own bc2cpp_const_try wraps
+      # one scope attempt and reports success via an out-param instead of
+      # choosing the fallback itself, so this call site can walk the
+      # whole chain. The very last attempt, against Object, stays
+      # unprotected -- a constant this chain still can't find is a real
+      # bug in the SOURCE, not something to paper over (this compiler's
+      # own "never silently wrong, loud is fine" philosophy).
+      #
+      # A top-level `def` (owner "Object") needs none of this -- the
+      # original single lookup already searches exactly the right scope.
+      #
+      # Name extraction: `\S+` (stops at the first whitespace/tab), not a
+      # `split(/\s+/, 2)` that swallows the rest of the line -- a real
+      # bug, caught running against real code: a trailing "; R3:name"
+      # local-variable-name comment (real shape whenever the destination
+      # register is a named local, e.g. "GETCONST R3 MAX_DIGITS\t;
+      # R3:d") would otherwise get interned as part of the constant name,
+      # a garbage symbol lookup raising a real NameError at runtime,
+      # never caught by any #error check (this compiles and links fine).
       d = a[/^R(\d+)/, 1]
       name = a[/^R\d+\s+(\S+)/, 1]
-      "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+      owner_path = owner_def.owner.split('::')
+      if owner_path == ['Object']
+        "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+      else
+        @const_lookup_helper_used = true
+        out = String.new
+        out << "  {\n"
+        scope_vars = []
+        current = 'mrb_obj_value(M->object_class)'
+        owner_path.each_with_index do |seg, i|
+          out << "    mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
+          scope_vars << "scope#{i}"
+          current = "scope#{i}"
+        end
+        out << "    mrb_bool ok = FALSE;\n"
+        out << "    mrb_value r#{d}_tmp = mrb_nil_value();\n"
+        scope_vars.reverse_each do |sv|
+          out << "    if (!ok) r#{d}_tmp = bc2cpp_const_try(M, #{sv}, mrb_intern_cstr(M, \"#{name}\"), &ok);\n"
+        end
+        out << "    if (!ok) r#{d}_tmp = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+        out << "    r#{d} = r#{d}_tmp;\n"
+        out << "  }\n"
+        out
+      end
     when 'GETMCNST'
       # "GETMCNST R6 (R6)::Sections" -- module-qualified lookup: r<d> already
       # holds the owning module/class (from a prior GETCONST/GETMCNST in the
@@ -1949,6 +2109,12 @@ if $PROGRAM_NAME == __FILE__
   puts '#include <mruby/data.h>'
   puts '#include <mruby/hash.h>'
   puts '#include <mruby/class.h>'
+  # mrb_protect_error -- GETCONST's own owner-scope-first lookup (see its
+  # own comment above) needs this to safely try a scope and fall back to
+  # Object without letting a genuinely-missing-there NameError propagate
+  # out of the wrong branch. A real core API (always available, not gated
+  # behind the mruby-error gem the way mrb_protect/mrb_rescue are).
+  puts '#include <mruby/error.h>'
   # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
   # another gem's own *_decls.h, written by this same OUT_DIR mechanism
   # below) to #include so a devirtualized call to an OTHER_OWNERS target
@@ -1958,6 +2124,7 @@ if $PROGRAM_NAME == __FILE__
   end
   puts ''
   print gen.emit_structs
+  print gen.emit_const_lookup_helper
   print gen.emit_forward_decls(compiled)
   compiled.each { |m| print m[:code] }
 

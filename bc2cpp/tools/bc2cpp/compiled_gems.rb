@@ -20,8 +20,19 @@ BC2CPP_COMPILED_GEMS = {
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
-    owners: %w[Game::Picture],
+    # Game::EnemyAction (docs/adr/0139) added alongside the original
+    # Game::Picture target -- both real mruby-rpg2k classes, so both live
+    # in this one gem rather than a separate one per class.
+    owners: %w[Game::Picture Game::EnemyAction],
     out_symbol: 'rpg2k_compiled',
+  },
+  'mruby-rgss-compiled' => {
+    # RGSS::Sprite (docs/adr/0139): the JMPNIL/LOADL opcode work this same
+    # ADR added gets all 17 of its real bytecode-defined accessor methods
+    # (mruby-rgss/mrblib/lib.rb's own reopening of the natively-defined
+    # Sprite class) to 100% clean compilation.
+    owners: %w[RGSS::Sprite],
+    out_symbol: 'rgss_compiled',
   },
 }.freeze
 
