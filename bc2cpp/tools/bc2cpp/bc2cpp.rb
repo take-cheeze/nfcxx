@@ -2289,7 +2289,75 @@ class CodeGen
     # wrong Ruby method). `!`-suffixed names (`empty!`, ...) were already
     # covered; `?` needed the same treatment.
     name = args[/:([\w+\-*\/<>=!?\[\]]+)/, 1]
-    n = args[/n=(\d+)/, 1].to_i
+    # Real, live bug, caught running against real code (Game::Battle#
+    # enemy_basic_action's own `deal_attack(b, target, 0, charged: charged)`):
+    # a bare `/n=(\d+)/` only recognizes a call site's real disassembly
+    # shape when it passes a small fixed count of plain positional arguments
+    # ("n=3"). Two other real shapes exist in mrbc's own print_args (src/
+    # codedump.c) and were silently misparsed by that narrow regex instead of
+    # being rejected outright:
+    #   - A keyword-argument call site ("n=3|nk=1", one Symbol/value register
+    #     pair per keyword) -- src/vm.c's own OP_SEND packs those nk pairs
+    #     into a real Hash (hash_new_from_regs) *at runtime*, a step this
+    #     codegen never replicated at all.
+    #   - A splat call site ("n=*", mrbc's own CALL_MAXARGS sentinel) -- a
+    #     genuinely variable argument count this codegen has no fixed
+    #     register list for.
+    # Neither shape matches `/n=(\d+)/` (no digits right after "n=" for a
+    # splat; the keyword pair registers are simply never looked at for a
+    # keyword call), and `nil.to_i` silently evaluates to 0 -- so a splat
+    # call site (`move_to(*args)`, `Class.new(*args)`, ...) used to compile
+    # to a real ZERO-argument mrb_funcall, silently dropping every splatted
+    # argument, and a keyword call site compiled with only its real
+    # positional args, silently dropping the keyword hash entirely. Confirmed
+    # live, not hypothetical, in already-shipped compiled classes: `Game::
+    # Battle#enemy_basic_action`/`#enemy_fallback_attack`'s own `deal_attack(
+    # ..., charged: charged)` compiled to `mrb_funcall(M, self, "deal_attack",
+    # 3, r10, r11, r12)` with the `:charged`/`charged` register pair computed
+    # and then silently discarded -- every charged enemy attack routed
+    # through either method called the real #deal_attack with its own
+    # `charged: nil` default instead of the caller's real charged state.
+    # `Game::Actor#knock_out!`/`Game::Battle#inflict_state`'s own `Game::
+    # States.prune(ids, table, keep: permanent_states)` silently dropped
+    # `keep:`, so a real permanently-protected state (`keep.include?(id)`,
+    # e.g. an innate racial trait modeled as a state) could be pruned away
+    # as if no exemption list existed at all. `Game::Actor#restore_class`'s
+    # own `set_level(@level, preserve_mod: false)` (a real, load-bearing
+    # `false` -- the very next source line's own comment explains it's
+    # deliberately different from #set_level's own default of `true`)
+    # silently called with `preserve_mod: true` instead, incorrectly
+    # carrying stat modifiers across a class restore. `RPG2k::Scene::
+    # DebugMenu#play_animation`'s own `scene.anim_target(x, y, height: nil,
+    # index: nil, flash_target: nil)` is a real MANDATORY-keyword call
+    # (`RPG2k::Scene::Map#anim_target(tx, ty, height:, index:,
+    # flash_target:)`, no defaults at all) -- silently dropping those three
+    # used to compile a call that would raise a real ArgumentError (missing
+    # keyword) at runtime, not just pass a wrong value. All six of these
+    # (`Game::Actor#change_class` shares #restore_class's own `set_level`
+    # bug shape too, but was already excluded from compilation for an
+    # unrelated reason -- a real `.each` block later in the same method
+    # body, so it never actually shipped with this bug either way) were
+    # removed from `mruby-rpg2k-compiled/src/register.cxx`'s own
+    # registration list as part of this fix; see that file's own comments at
+    # each removed line. None of this shape is in this
+    # prototype's modeled subset (the top-of-file comment already excludes
+    # "keyword ... params" -- this is that same exclusion, just for a CALL
+    # SITE rather than a method definition), so it gets the same treatment
+    # every other unmodeled shape here does: a loud #error instead of a
+    # silently wrong translation, leaving the method on the interpreter
+    # (SKIP_UNSUPPORTED's own established fallback) rather than shipping a
+    # call that quietly drops real arguments. SEND0/SSEND0's own
+    # disassembly never prints "n=" at all (mrbc's own codedump.c, and
+    # src/vm.c's OP_SEND0 hardcodes c=0) -- a real, always-0-argument call,
+    # not a shape to reject, so a nil match here still means n=0, exactly
+    # the same fallback value `nil.to_i` used to compute (now explicit
+    # instead of incidental).
+    n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
+    if n_match && (n_match[1] == '*' || n_match[2])
+      return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{n_match[0]}) -- not in this prototype's supported subset\n"
+    end
+
+    n = n_match ? n_match[1].to_i : 0
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{d.to_i + k}" }
     target = monomorphic_target(name)
