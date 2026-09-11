@@ -1779,6 +1779,91 @@ BC2CPP_COMPILED_GEMS = {
     # previously-shipped Game::Transition severe bug this same round's own
     # generalized `drop_unsafe_embeddings` fix found and closed along the
     # way.
+    #
+    # A round 29 follow-up adds RPG2k::Scene::Map (mruby-rpg2k/mrblib/
+    # scene/map.rb) as a real emission owner for the first time --
+    # previously registry-visible only, and repeatedly called out elsewhere
+    # in this file (e.g. the Game::Party/RPG2k::Scene::MapViewer follow-up)
+    # as "legitimately too large to fully cover in one round," the exact
+    # same shape Game::Interpreter was in before its own round. 222 of its
+    # own 406 real instance bytecode-defined methods (its nested
+    # LRUBitmapCache class's own 6 methods and its own single `def
+    # self.tone_channel` singleton method are separate, out of scope here)
+    # compile clean and are registered below; the other 186 stay
+    # interpreted for the same already-established real gaps this file's
+    # own prior rounds already document (a Ruby block, a rescue clause, a
+    # keyword/splat-argument call, a non-mandatory-arity #initialize, plus
+    # two methods that also hit the already-known-but-previously-unused-
+    # here ARYCAT splat-array-literal opcode gap, both already blocked by
+    # their own keyword argument regardless) -- see mruby-rpg2k-compiled/
+    # src/register.cxx's own registration block for the full per-category
+    # method listing. Ends up with ZERO real embedded ivars, confirmed two
+    # independent ways: #initialize itself has a keyword argument
+    # (`apply_access: true`) and so never has pure mandatory arity, which
+    # means `drop_unsafe_embeddings`'s own per-owner gate (`init &&
+    # pure_mandatory_arity?(init.irep) && compiles_clean?(init.irep)`)
+    # refuses this class before ever reaching the `every_accessor_
+    # compiles?` ivar-by-ivar check -- confirmed directly by reading that
+    # gate, not merely inferred. This round's own real diagnostic still
+    # prints 5 raw `EMBED RPG2k::Scene::Map#@...` candidates (`
+    # @anim_frame`/`@encounter_idx`/`@par_sx`/`@par_sy`/`@charset_index`,
+    # all fixnum) -- worth flagging explicitly since it looks like a live
+    # embedding at a glance: that section prints `IvarLayout.analyze`'s own
+    # RAW, pre-`drop_unsafe_embeddings` proposal (the same distinction the
+    # Game::Interpreter follow-up's own "raw IvarLayout analysis" phrasing
+    # already draws), not the actual post-safety-filtered set CodeGen uses.
+    # The real, final "classes needing MRB_SET_INSTANCE_TT" diagnostic
+    # section independently confirms RPG2k::Scene::Map is absent from it,
+    # and the real generated output never DATA_PTR-embeds any of these 5
+    # names for this class -- see register.cxx's own writeup for the full
+    # verification.
+    #
+    # A round 29 follow-up adds RPG2k::Scene::Battle (mruby-rpg2k/mrblib/
+    # scene/battle.rb) -- the RPG2000 turn-based fight scene itself, the
+    # shared base class `RPG2k3::Scene::Battle` above (`class Battle <
+    # RPG2k::Scene::Battle`) already extends. Already registry-visible for
+    # MONO/POLY soundness since the very first round (closed_world_mrblib_
+    # srcs above always covers every gem's whole mrblib, this file's own
+    # source included, regardless of any single gem's own `owners:` list),
+    # but never an emission owner until now -- this project's 62nd owner
+    # overall (11 mruby-lcf-compiled + 45 mruby-rpg2k-compiled, Game::
+    # Interpreter included, + 5 mruby-rgss-compiled = 61 before this round).
+    # 110 of its own 174 real bytecode-defined methods compile clean; the
+    # other 64 stay interpreted, for six distinct, individually confirmed
+    # gaps, none guessed from a shared shape:
+    #   - #initialize itself (`super map.parent`), a real SUPER call, the
+    #     same established gap as every other unembedded target's own
+    #     #initialize in this file.
+    #   - 48 end in (or, for #start/#dispose, have a branch reach) a genuine
+    #     Ruby block (BLOCK/SENDB) -- the same already-established
+    #     out-of-scope shape as every other BLOCK/SENDB gap in this file.
+    #   - #cached_bitmap uses an implicit block via `yield` (`cache[key] =
+    #     yield`), disassembling to BLKPUSH/BLKCALL -- a genuinely new
+    #     opcode pair for this compiler, left as a real, confirmed-safe
+    #     structural gap for a future round.
+    #   - 7 send a real keyword-argument-heavy call this compiler's own
+    #     `compile_send` already refuses on sight.
+    #   - #battle_item_body/#battle_skill_body each end in a real `rescue
+    #     StandardError => ex` clause.
+    #   - 5 have a non-mandatory argument this calling convention can't
+    #     express.
+    # See mruby-rpg2k-compiled/src/register.cxx's own registration block
+    # for the full per-method breakdown.
+    #
+    # #initialize never compiling means drop_unsafe_embeddings correctly
+    # refuses to embed any ivar for this class outright -- confirmed
+    # directly against the real diagnostic: RPG2k::Scene::Battle appears in
+    # neither its "== ivar embedding ==" section nor its "classes needing
+    # MRB_SET_INSTANCE_TT" listing. No bare `private`/`protected` in the
+    # real source (one no-op `public :on_battle_party_changed` directive
+    # appears), so all 110 registered methods are plain `mrb_define_method`.
+    #
+    # RPG2k3::Scene::Battle's own already-shipped 7 registered entry points
+    # are byte-for-byte unaffected by this round; a few of its own POLY
+    # calls into base-class methods this round newly compiles simply
+    # devirtualize into a direct C++ call now instead of the ordinary
+    # interpreter, the intended payoff of adding a new owner, not a
+    # functional change.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1794,7 +1879,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
                Game::Rng Game::Weather Game::Troop Game::Vehicle
                Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig
-               Game::Interpreter],
+               Game::Interpreter RPG2k::Scene::Map RPG2k::Scene::Battle],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
@@ -2075,8 +2160,59 @@ BC2CPP_COMPILED_GEMS = {
 # Hash#delete, exactly the same unsoundness class, just against mruby's
 # own standard library instead of RGSS.
 #
-# The core mrbgem list mirrors build_config.rb's own `conf.gem core:
-# 'mruby-xxx'` calls exactly -- keep it in sync if that list changes.
+# The core mrbgem list mirrors every core mrbgem this project's own
+# real, whole-program closed world actually loads at runtime -- NOT just
+# build_config.rb's own *explicit* `conf.gem core: 'mruby-xxx'` calls, a
+# real, previously-undiscovered under-approximation this adversarial
+# sweep found and fixed (docs/adr/0139's own round-29 follow-up): a core
+# mrbgem pulled in only *transitively*, via some other active gem's own
+# `add_dependency`, is exactly as real and exactly as much a native-name
+# collision risk as one `build_config.rb` names directly -- the whole
+# point of this list is soundness against the real running mrb_state,
+# which has no notion of "declared directly" vs. "pulled in as a
+# dependency". Confirmed each of the 8 gems below is genuinely active in
+# this project's real host build by reading every real `add_dependency`
+# chain directly (not assumed from a gem's name alone): `mruby-lcf`'s own
+# `mrbgem.rake` directly depends on `mruby-pack`/`mruby-string-ext`;
+# `mruby-rgss`'s own depends on `mruby-pack`; `mruby-marshal`'s own
+# (`3rd/mruby-marshal/mrbgem.rake`, an explicit top-level gem in
+# `build_config.rb`'s own `explicit_shared_names`) depends on
+# `mruby-struct`/`mruby-string-ext`/`mruby-metaprog`; and
+# `mruby-rpgxp`'s own -- one of `rpg_maker_gem_dispatch`'s own
+# `maker_gem_names`, always active in this project's real desktop/host
+# build -- depends on `mruby-eval` (which itself depends on
+# `mruby-binding`) and directly on `mruby-pack`/`mruby-fiber`/etc.,
+# with `build_config.rb`'s own comment on `rpg_maker_gem_dispatch`
+# separately confirming "the Binding/Method/Proc-ext trio mruby-rpgxp's
+# own eval dependency pulls in". Scanning the real, current closed world
+# with these 8 added (on top of the already-covered 15 direct `core:`
+# gems) found exactly 4 more real MONO->POLY flips (`:members`, `:owner`,
+# `:parameters`, `:string`) -- confirmed by hand each one is a real
+# bytecode owner's own `attr_reader`-installed accessor (an `irep: nil`
+# synthetic `MethodDef`, `RPG2k::Scene::Battle#owner`/`LCF::EventCommand#
+# parameters`/`#string`/`Game::Troop#members`), so `monomorphic_target`'s
+# own `return nil unless defs.first.irep` guard already refused to treat
+# any of them as a direct-call target regardless of this fix -- real,
+# verified-sound, zero *live* effect today, the same "confirmed not
+# currently exploitable" bucket this file's own many prior native-
+# registry fixes already document, not a live bug found by this one.
+# `mruby-compiler`/`mruby-enumerator` were checked too (both genuinely
+# active) and correctly excluded: `mruby-compiler` defines zero runtime
+# methods at all (it's the parser/codegen, confirmed by grepping its own
+# `src/*.c` for `mrb_define_method`/`MRB_MT_ENTRY`/`mrb_define_method_id`
+# -- zero matches), and `mruby-enumerator` defines its own methods
+# entirely in Ruby (`mrbgems/mruby-enumerator/mrblib/enumerator.rb`, no
+# `src/*.c` at all) -- a real, different-shaped gap (bytecode-defined
+# core stdlib invisible to the registry from *either* direction, not a
+# native-method one `core_native_srcs` can close), the same already-
+# documented, deliberately-left-open "Enumerable bytecode-stdlib
+# registry blind spot" this file's own round-27 follow-up already names
+# and re-checks, just one gem wider than previously spelled out.
+#
+# The core mrbgem list mirrors every core mrbgem actually active in this
+# project's own real build (both direct `conf.gem core:` calls and every
+# gem reachable from them or from `mruby-marshal`'s/`mruby-rpgxp`'s own
+# `add_dependency` chains) -- keep it in sync if either changes.
 # `mruby-fiber`'s Fiber#resume/#start don't collide with either compiled
 # gem's own current target classes, but a class outside today's two
 # compiled gems already collided with them (RPG2k::Scene::Menu/Battle),
@@ -2085,7 +2221,31 @@ BC2CPP_COMPILED_GEMS = {
 def core_native_srcs(mruby_root)
   Dir["#{mruby_root}/src/*.c"] +
     Dir["#{mruby_root}/mrbgems/mruby-{array-ext,hash-ext,enum-ext,io,dir," \
-        "numeric-ext,range-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint}/**/*.c"]
+        'numeric-ext,range-ext,fiber,exit,sprintf,kernel-ext,random,math,time,bigint,' \
+        "binding,eval,metaprog,method,pack,proc-ext,string-ext,struct}/**/*.c"]
+end
+
+# The three external (non-`3rd/mruby/mrbgems`) mrbgems this project always
+# loads -- `mruby-marshal`/`mruby-onig-regexp` are explicit, always-active
+# top-level gems in `build_config.rb`'s own `explicit_shared_names`, and
+# `mruby-stringio` is a real dependency of `mruby-wolf` (one of
+# `rpg_maker_gem_dispatch`'s own `maker_gem_names`, always compiled into
+# this project's real desktop/host build). Each lives in its own separate
+# submodule under this repo's own `3rd/`, outside `mruby_root`
+# (`3rd/mruby`) entirely, so `core_native_srcs` above can never reach them
+# regardless of its own gem list -- the same real native-registry-
+# soundness gap as every core mrbgem `core_native_srcs` itself exists to
+# close, just one directory level further out. `mruby-marshal`'s own
+# source is `.cpp`, not `.c` (this project's own C++ port, `src/
+# marshal.cpp`), unlike the other two. Found and fixed alongside
+# `core_native_srcs`'s own round-29 fix (see its comment for the full
+# writeup and the real, confirmed-not-live flip this uncovered:
+# `LCF::EventCommand#string` colliding with `StringIO#string`/`IO`-family
+# methods this scan adds).
+def external_gem_native_srcs(gems_root)
+  Dir["#{gems_root}/3rd/mruby-marshal/src/*.cpp"] +
+    Dir["#{gems_root}/3rd/mruby-onig-regexp/src/*.c"] +
+    Dir["#{gems_root}/3rd/mruby-stringio/src/*.c"]
 end
 
 # The whole-program mrblib source set (every gem's own real Ruby source,
