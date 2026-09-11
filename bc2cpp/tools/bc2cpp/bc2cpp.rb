@@ -317,16 +317,15 @@ def build_registry(ireps, root_label)
         # operator name, so a future reader never has to wonder why the two
         # differ.
         name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-        next unless %w[private protected public].include?(name)
+        next unless %w[private protected public attr_reader attr_writer attr_accessor].include?(name)
 
         n = insn.args[/n=(\d+)/, 1].to_i
-        if n.zero?
-          default_visibility = name.to_sym
-        else
-          # `private :a, :b, ...` -- the n Symbol arguments are LOADSYM'd
-          # into consecutive registers immediately before this send (real
-          # code always emits them right before, no interleaving
-          # instructions of any other kind); walk backward collecting them.
+        # `private :a, :b, ...` / `attr_reader :a, :b, ...` -- the n Symbol
+        # arguments are LOADSYM'd into consecutive registers immediately
+        # before this send (real code always emits them right before, no
+        # interleaving instructions of any other kind); walk backward
+        # collecting them. Shared by both branches below.
+        collect_loadsym_names = lambda do
           names = []
           (idx - 1).downto(0) do |i|
             break if names.size >= n
@@ -336,9 +335,65 @@ def build_registry(ireps, root_label)
 
             names.unshift(prev.args[/:(\S+)/, 1])
           end
-          names.each do |mname|
-            def_ = registry[mname]&.find { |d| d.owner == namespace }
-            def_.visibility = name.to_sym if def_
+          names
+        end
+
+        if %w[private protected public].include?(name)
+          if n.zero?
+            default_visibility = name.to_sym
+          else
+            # `private :a, :b, ...` -- retroactively marks already-defined
+            # methods, without changing the mode for whatever comes after.
+            collect_loadsym_names.call.each do |mname|
+              def_ = registry[mname]&.find { |d| d.owner == namespace }
+              def_.visibility = name.to_sym if def_
+            end
+          end
+        else
+          # attr_reader/attr_writer/attr_accessor -- Module#attr_* itself is
+          # a native (C-implemented) method, so the getter/setter it defines
+          # never gets a TDEF of its own: build_registry's walk has no other
+          # way to see these names at all, the exact same "invisible to the
+          # bytecode-only registry" gap extract_native_method_names exists
+          # to close for mrb_define_method-family call sites -- except here
+          # the defined name isn't a fixed literal in any C source; it's
+          # whatever Symbol argument *this* call site happens to pass, so no
+          # amount of scanning NATIVE_SRCS could ever find it. Before this
+          # fix, a name any class attr_reader/writer/accessor's (e.g.
+          # `Game::Enemy#crit_chance`) that happens to *also* have exactly
+          # one real bytecode `def` elsewhere in the whole program (e.g.
+          # `Game::Actor#crit_chance`) looked MONO to monomorphic_target --
+          # unsound, since a call site whose receiver is actually the
+          # attr_reader-only class would still devirtualize straight into
+          # the bytecode class's own _impl. Confirmed LIVE, not
+          # hypothetical: `Game::Battle#critical?(b)`'s own real `b.
+          # crit_chance` (`b` a battler that can be either a Game::Actor or
+          # a Game::Enemy -- the source's own comment says so explicitly,
+          # "most enemies... silently desynced") used to compile straight
+          # into `Game__Actor_crit_chance_impl`, which calls Actor-only
+          # `#weapon_crit_bonus` on `self` -- a real NoMethodError the
+          # moment `b` is actually a Game::Enemy (which has no such method),
+          # crashing every enemy attack's own crit roll in a build that
+          # compiles and links clean with zero warnings. Fixed by
+          # registering each attr_reader/writer/accessor name as a
+          # synthetic MethodDef here too (irep: nil, same shape
+          # extract_native_method_names's own merge already uses for a
+          # native method with no bytecode body to devirtualize into) --
+          # this can only ever turn an unsound MONO into a correctly
+          # cautious POLY, never remove a genuinely sound one, since it
+          # only adds an entry for a name that really does have another
+          # real definition somewhere in the closed world.
+          getter_flag = %w[attr_reader attr_accessor].include?(name)
+          setter_flag = %w[attr_writer attr_accessor].include?(name)
+          collect_loadsym_names.call.each do |mname|
+            owner = namespace || 'Object'
+            if getter_flag
+              registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public)
+            end
+            if setter_flag
+              registry["#{mname}="] << MethodDef.new(name: "#{mname}=", owner: owner, irep: nil,
+                                                       visibility: :public)
+            end
           end
         end
       end
