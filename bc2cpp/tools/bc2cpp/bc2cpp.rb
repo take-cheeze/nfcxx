@@ -1934,6 +1934,70 @@ class CodeGen
       d, s = regs(a, 2)
       c = a[/^R\d+\s+R\d+\s+(\d+)/, 1]
       "  r#{d} = mrb_array_p(r#{s}) ? mrb_ary_ref(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
+    when 'GETIDX'
+      # "GETIDX R2 (R3)" -- R[a] = R[a][R[a+1]] (real OP_GETIDX semantics,
+      # src/vm.c): unlike AREF above, the index here is itself a *register*
+      # (a computed/variable value), not a compile-time immediate -- the
+      # real shape `recv[idx]` compiles to whenever `idx` isn't a literal
+      # mrbc's own peephole can fold into AREF (e.g. `@equipment[WEAPON_SLOT]`,
+      # a class constant resolved at runtime via GETCONST first, so its
+      # value only exists in a register by the time this opcode runs).
+      # Mirrors vm.c's own fast paths: Array with an Integer index
+      # (mrb_ary_ref -- bounds-checked, negative-index-normalizing, same
+      # public API AREF's own codegen above already uses) and Hash
+      # (mrb_hash_get, the same public API HASH's own codegen above already
+      # uses); anything else (String/Range #[], or a class overriding #[])
+      # falls back to the real method the interpreter itself would call --
+      # never unsound, just without the in-VM fast path. `r<d>` (the
+      # receiver) is read by every branch before any of them writes it, the
+      # same "read before overwrite" safety AREF/HASH/ARRAY's own codegen
+      # already relies on.
+      d, s = regs(a, 2)
+      <<~CPP
+        if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
+          r#{d} = mrb_ary_ref(M, r#{d}, mrb_integer(r#{s}));
+        } else if (mrb_hash_p(r#{d})) {
+          r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+        }
+      CPP
+    when 'SETIDX'
+      # "SETIDX R4 (R5) (R6)" -- R[a][R[a+1]] = R[a+2], then R[a] = R[a+2]
+      # too (real OP_SETIDX semantics, src/vm.c: the fast Array/Hash paths
+      # explicitly overwrite regs[a] with the assigned value afterward --
+      # `arr[i] = v` is always `v` as a Ruby expression, regardless of what
+      # the underlying method itself returns). Same Array/Hash fast paths as
+      # GETIDX above (mrb_ary_set/mrb_hash_set, the same public APIs ARRAY/
+      # HASH's own codegen already uses), falling back to a real `[]=` send
+      # for anything else -- there the assigned-back value is whatever that
+      # real method returns, matching the interpreter's own SENDB-based
+      # fallback exactly (no explicit regs[a]=vc override on that path
+      # either, confirmed reading vm.c's own setidx_fallback).
+      d, idx, val = regs(a, 3)
+      <<~CPP
+        if (mrb_array_p(r#{d}) && mrb_integer_p(r#{idx})) {
+          mrb_ary_set(M, r#{d}, mrb_integer(r#{idx}), r#{val});
+          r#{d} = r#{val};
+        } else if (mrb_hash_p(r#{d})) {
+          mrb_hash_set(M, r#{d}, r#{idx}, r#{val});
+          r#{d} = r#{val};
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx}, r#{val});
+        }
+      CPP
+    when 'GETGV'
+      # "GETGV R4 $stderr" -- R[a] = mrb_gv_get(M, sym) (real OP_GETGV
+      # semantics, src/vm.c). A global variable's own symbol name already
+      # spells the leading `$` (mrbc's own disassembly prints it that way,
+      # matching how the real compiler interns it -- confirmed reading
+      # vm.c's own mrb_gv_get(mrb, irep->syms[b]) call, no separate sigil
+      # stripping/reattaching anywhere in that path), so this is exactly as
+      # mechanical as GETCONST's own bare mrb_const_get call, just against
+      # the flat global table instead of a lexical scope chain.
+      d = a[/^R(\d+)/, 1]
+      name = a[/(\$\S+)/, 1]
+      "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'STOP'
       ''
     else
