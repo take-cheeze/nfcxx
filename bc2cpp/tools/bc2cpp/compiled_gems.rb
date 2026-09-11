@@ -989,6 +989,84 @@ BC2CPP_COMPILED_GEMS = {
     # the attr_reader registry fix from two rounds ago covers this class
     # too). No bare `private`/`protected`/`public` anywhere in the real
     # source, so all four compiled methods are plain `mrb_define_method`.
+    #
+    # A twenty-ninth, independent round adds Game::Troop (mruby-rpg2k/
+    # mrblib/game/battle_support.rb) -- the enemy-party container for a
+    # battle (a group of Game::Enemy instances built from a database
+    # Troop row), needing no new opcode work at all. Only 1 of its own 7
+    # real bytecode-defined methods compiles clean: #member (`def
+    # member(db, m); Enemy.new(db, m.enemy_id, m.x, m.y, m.invisible);
+    # end`, a plain 4-argument constructor call). #initialize (`db, id,
+    # rng = nil`, one optional argument) has the same established
+    # non-mandatory-arity gap as every other unembedded target above.
+    # #total_exp/#total_gold (`live_members.reduce(0) { |s, e| s +
+    # e.exp/e.gold }`) and #drops (`live_members.each_with_object([]) do
+    # |e, out| ... end`) each end in a genuine Ruby block (BLOCK/SENDB).
+    # #live_members (`@members.reject(&:hidden)`) was specifically
+    # checked for whether the `&:symbol` block-pass shorthand might be a
+    # distinct, narrower shape this compiler could already handle -- it
+    # is not: confirmed directly against the real mrbc -v disassembly,
+    # `&:hidden` compiles to a bare `LOADSYM R3 :hidden` feeding `SENDB
+    # R2 :reject n=0` with no preceding BLOCK opcode at all (no closure
+    # is created for a Symbol-to-proc block-pass, unlike a real `{ }`/
+    # `do...end` block literal), but it is still the same unmodeled
+    # SENDB opcode this compiler has never had a compile_insn case for --
+    # confirmed against the real generated #error line
+    # (`#error unhandled opcode SENDB`), not assumed. #apply_appear_randomly
+    # ends in two more real blocks (`@members.count { |m| ... }`,
+    # `@members.each do |m| ... end`). #initialize never compiling means
+    # drop_unsafe_embeddings correctly refuses to embed any of this
+    # class's own ivars (@id/@name/@members/@pages) -- confirmed directly
+    # against the real generated output: Game::Troop does not appear in
+    # bc2cpp's own "classes needing MRB_SET_INSTANCE_TT" diagnostic.
+    # #member is `private` (a bare `private` mid-class-body, in effect
+    # through the end of the class), so it needs
+    # `mrb_define_private_method`, not `mrb_define_method` -- confirmed
+    # directly against the real diagnostic's own `== compiled entry
+    # points ==` listing, which flags it
+    # `[private -- use mrb_define_private_method, not mrb_define_method]`.
+    # Zero bc2cpp.rb changes needed -- every gap here is an
+    # already-established out-of-scope shape (non-mandatory arity, or
+    # BLOCK/SENDB reached either via a real block literal or the
+    # `&:symbol` shorthand).
+    #
+    # A twenty-ninth, independent round adds Game::Vehicle (mruby-rpg2k/
+    # mrblib/game.rb) -- a boat/ship/airship's saved location (map id,
+    # position, facing, on-map graphic), plain data rather than a
+    # Game::Character. 4 of its own 5 real bytecode-defined methods
+    # compile clean, needing zero bc2cpp.rb changes: #placed? (a plain
+    # `@map_id > 0`, the fixnum-fastpath `>` this compiler already has),
+    # #to_h (a real Hash literal, the same mrb_hash_new_capa/mrb_hash_set
+    # shape Game::Picture's/Game::Timer's/Game::Weather's own #to_h
+    # already ship), #load_h (a Hash#[] GETIDX read plus a `||` default
+    # per field, the same shape Game::Screen's/Game::Timer's/
+    # Game::Weather's own #load_h already compile clean against), and
+    # #load_movable (same GETIDX/`||`-default shape as #load_h, plus one
+    # real `EventGraphic.numpad_direction(m[:direction])` call). :numpad_
+    # direction is MONO in the whole-program registry (Game::EventGraphic's
+    # own real `def self.numpad_direction`, an SDEF singleton method with
+    # owner "Game::EventGraphic.singleton") but correctly stays ordinary
+    # `mrb_funcall` dispatch in the generated body regardless: that
+    # synthetic ".singleton"-suffixed owner name never matches this run's
+    # own ONLY_OWNERS/OTHER_OWNERS (plain class names), so compile_send's
+    # existing owner-not-emitted guard correctly falls back rather than
+    # referencing a function this run never emits. #initialize(type,
+    # map_id = 0, x = 0, y = 0, direction = 2) is the one gap -- four
+    # optional arguments, the same established non-mandatory-arity shape
+    # as every other unembedded target above. #initialize never compiling
+    # means drop_unsafe_embeddings correctly refuses to embed any of this
+    # class's own four provably-Fixnum ivars (@map_id, @x, @y,
+    # @charset_index) despite the raw IvarLayout analysis reporting all
+    # four as EMBED-eligible -- confirmed directly against the real
+    # generated output: Game::Vehicle does not appear in bc2cpp's own
+    # "classes needing MRB_SET_INSTANCE_TT" diagnostic, and every compiled
+    # method here uses plain mrb_iv_get/mrb_iv_set, never DATA_PTR(self).
+    # attr_accessor :map_id, :x, :y, :direction, :charset_name,
+    # :charset_index and attr_reader :type are all native, invisible to
+    # bc2cpp the same way every other attr_reader/writer/accessor in this
+    # codebase is. No bare `private`/`protected`/`public` anywhere in the
+    # real source, so both compiled methods below are plain
+    # `mrb_define_method`.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1002,7 +1080,7 @@ BC2CPP_COMPILED_GEMS = {
                RPG2k::Scene::Title RPG2k::Scene::MapWorld Game::TextReveal
                RPG2k::Scene::VehicleWorld RPG2k::Scene::EventResolver
                Game::NumberInput RPG2k::Scene::GameOver Game::Actors
-               Game::Rng Game::Weather],
+               Game::Rng Game::Weather Game::Troop Game::Vehicle],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
