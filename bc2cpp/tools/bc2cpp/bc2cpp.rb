@@ -1878,6 +1878,113 @@ NATIVE_CONSTRUCT_TARGETS = {
 # is caught automatically, not silently missed.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map].freeze
 
+# NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
+# gates a THIRD, separate, additive calling-convention mechanism -- moving
+# an ordinary compiled method's own mandatory argument off mrb_value and
+# onto a real native C++ type (mrb_int/mrb_sym), the same way the
+# just-merged Rect/Color/Tone round already did for three hand-written
+# NATIVE_CONSTRUCT_TARGETS entry points, generalized here to ordinary
+# bc2cpp-compiled `_impl` functions instead of a native constructor.
+#
+# The trigger is deliberately narrow and explicit, mirroring this file's
+# own two other "opt-in table, never the analysis result trusted wholesale"
+# precedents (NATIVE_CONSTRUCT_TARGETS/DIRECT_CONSTRUCT_TARGETS just
+# above): a position only ever gets a native type when BOTH (a) this exact
+# "Owner#name" string is listed here AND (b) Annotations.extract's own
+# result -- a real, human-authored `# bc2cpp: (fixnum, ...)` magic comment
+# sitting directly on that one `def`, never ArgTypes' own passive,
+# call-site-inferred typing -- names a recognized type (`fixnum`/`symbol`)
+# at that position. Annotations alone would already be sound in principle
+# (see this file's own Annotations class comment: a wrong one only ever
+# produces a real TypeError, never silent corruption, the same accepted
+# precedent IvarLayout's ivar-embedding already relies on) -- but this
+# round deliberately stays conservative about SCALE, not soundness: this
+# whole codebase carries roughly a hundred real `# bc2cpp: (fixnum...)`
+# annotations (mostly in mruby-rpg2k/mrblib), and trusting every one of
+# them for a stricter calling convention in one pass, sight unseen, is a
+# very different risk profile than the "handful, each individually traced
+# through every real call site" this round actually did. This table is
+# that trace's own record -- every entry below was individually checked
+# against the real, regenerated `rpg2k_compiled_gen.cpp` (RPGMAKER_BC2CPP=1
+# build in this same round) for: every MONO/TYPED devirtualized call site
+# into it (grepped directly, not just reasoned about the Ruby source), AND
+# -- the harder, easy-to-miss half, found by actually reading the fixnum
+# annotation against the body -- whether the method's OWN compiled body
+# already contains a defensive `<arg>.nil?` guard on that exact position
+# (a real signal the original author expected a legitimate nil there too,
+# which the annotation's own "fixnum" claim doesn't capture and a native
+# mrb_int parameter cannot represent at all: mrb_get_args("i")/mrb_as_int
+# both raise TypeError for nil, same as every other "i" callsite in this
+# codebase, but here that would be a real, novel crash on an input the
+# interpreted/mrb_value path handles gracefully today).
+#
+# Two real, concrete methods (Game::Actor#knows_skill?(skill_id),
+# Game::Actor#learn_skill(skill_id)) were seriously considered from the
+# same batch and DELIBERATELY EXCLUDED for exactly this reason: both
+# compile clean, are genuinely devirtualized (MONO) at real call sites, and
+# carry a real `# bc2cpp: (fixnum)` annotation on their one mandatory
+# argument -- but both bodies open with `skill_id.nil?` (returning
+# false/nil gracefully) before ever touching the value as a number, and one
+# real call site of :knows_skill? (`Game::Party#can_cast?`'s own `sid`,
+# guarded only by `!db_skill(sid).nil?` -- a check on a DIFFERENT value,
+# not on `sid` itself) could not be proven, without a much deeper trace
+# into LCF::Array1D#[]'s own behavior on a nil index, to always exclude a
+# genuinely nil `sid` reaching the call. (Read closely, that one path likely
+# already raises a TypeError today from inside Array1D#[] for a nil id --
+# array indexing with `nil` needs an implicit Integer conversion mruby
+# itself doesn't grant nil -- meaning this specific miss may not even be a
+# real regression; but "likely already raises, following the schema
+# metadata's own storage shape two calls deep" is exactly the kind of
+# not-fully-provable chain this round declined to force through, per its
+# own "skip and document, don't guess" mandate. Any real call site actually
+# reaching these two methods with a nil argument today is handled
+# gracefully by the interpreted path regardless of this reasoning, so both
+# stay off this list.) Every one of the 9 entries actually below was
+# confirmed to have NO such nil-guard in its own compiled body -- every
+# real use of the annotated register is a direct arithmetic/comparison
+# opcode (ADD/ADDI's own fixnum-fastpath, `<`/`<=`/`>=`/`==`'s own
+# fixnum-fastpath, or a GETCONST-chain comparison), never preceded by a
+# `nil?`/`respond_to?`-style guard -- and every real caller in the whole
+# closed world (mruby-rpg2k/mrblib, scripts/rpg2k_logic_check.rb) was
+# individually traced back to a source that is always a real Integer
+# (an event command's own `cmd.param(i) || 0`, a `Game::Variables#[]`
+# read -- `@data[id] || 0`, never nil -- or another already-verified
+# Integer-typed expression), not merely assumed from the annotation alone.
+#
+# `Game::Actor#gain_exp`/`#change_level_by`/`#free_two_handed_slot` have
+# ZERO devirtualized (MONO/TYPED) call sites in the real regenerated
+# output at all -- reachable only through ordinary dynamic dispatch, so
+# only this table's own entry-wrapper/impl-signature change (compile_method)
+# applies to them; compile_send's own call-site-unboxing code path is
+# exercised by nothing for these three, confirmed by grepping the whole
+# regenerated file for their own `_impl` name and finding just the decl,
+# definition, and entry wrapper -- the simplest, lowest-risk shape in this
+# batch. `#change_mp`/`#exp_for_level`/`#slot_cursed?`/`#base_param_limit`/
+# `Game::Interpreter#character_ref`/`#trunc_div` each have one or more real
+# MONO devirtualized call sites (`#exp_for_level` five, all self-implicit
+# recursive-ish calls from other Game::Actor methods; `#character_ref`
+# three, self-implicit; `#change_mp`'s own single call site's argument is
+# itself the *result* of a dynamic-dispatch expression (`-weapon_sp_cost`),
+# not a bare register -- confirmed the generic call-site fix in
+# compile_send wraps whatever expression is already there, not just a
+# literal `r<n>` token) -- these exercise the real call-site-unboxing path.
+# `Game::Interpreter#trunc_div(n, d)` is the one 2-mandatory-argument entry
+# in this batch, with BOTH positions annotated and native-typed -- checked
+# that its own two real call sites (self-implicit, from `#apply`) pass two
+# independently-verified-Integer registers, not a mix of one safe and one
+# unsafe position.
+NATIVE_ARG_TARGETS = Set[
+  'Game::Actor#gain_exp',
+  'Game::Actor#change_level_by',
+  'Game::Actor#change_mp',
+  'Game::Actor#exp_for_level',
+  'Game::Actor#free_two_handed_slot',
+  'Game::Actor#slot_cursed?',
+  'Game::Actor#base_param_limit',
+  'Game::Interpreter#character_ref',
+  'Game::Interpreter#trunc_div',
+].freeze
+
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
 # with exactly one definition anywhere in the whole program), this asks a
 # narrower question about ONE specific SEND -- "is THIS receiver provably a
@@ -2128,9 +2235,20 @@ class CodeGen
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
   }.freeze
 
-  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {})
+  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {})
     @ireps = ireps
     @registry = registry
+    # irep label -> Annotations::Annotation (Annotations.extract's own
+    # result) -- previously computed at the top level only to feed
+    # IvarLayout.analyze's own opaque-argument fallback, never threaded
+    # into CodeGen at all. Now also the sole trigger for NATIVE_ARG_TARGETS'
+    # own native-argument calling convention (see that constant's own
+    # comment for why an annotation, and never ArgTypes' own passive
+    # inference, is the only safe trigger for changing a method's own C++
+    # signature) -- consulted by native_arg_types below, shared by
+    # compile_method (a target method's own entry/impl signature) and
+    # compile_send (a devirtualized call site's own argument unboxing).
+    @annotations = annotations
     # irep label -> {owner:, name:} for every leaf method body. A native
     # MethodDef (irep nil) has no body to compile, so it's excluded here --
     # it only ever exists to make monomorphic_target's own size check see
@@ -2382,6 +2500,40 @@ class CodeGen
 
   def cpp_name(owner, name)
     sanitize("#{owner}_#{name}")
+  end
+
+  # NATIVE_ARG_TARGETS' own per-position type lookup -- shared verbatim by
+  # compile_method (a target method's own entry-wrapper/`_impl` signature)
+  # and compile_send (a devirtualized call site's own argument unboxing),
+  # so the two can never disagree about which mandatory positions of a
+  # given MethodDef are native-typed: returns an array of size `mand`,
+  # each slot either `:fixnum`/`:symbol` (Annotations::TYPES' own two
+  # recognized tokens) or `nil` (stays plain `mrb_value`, exactly like
+  # today, for a MethodDef this round's own NATIVE_ARG_TARGETS table
+  # doesn't name, OR one it names but whose real annotation doesn't cover
+  # that exact position -- see Annotations' own comment on `# bc2cpp:
+  # (fixnum, )`'s own per-position meaning).
+  #
+  # Gated on BOTH `d.irep` (a native/synthetic MethodDef has no `_impl` of
+  # its own to retype at all) and NATIVE_ARG_TARGETS' own explicit
+  # "Owner#name" membership -- an annotation alone is never enough, by
+  # design (see that constant's own comment for why trusting every real
+  # annotation in this codebase wholesale is a scale decision this round
+  # deliberately declined, not a soundness one).
+  def native_arg_types(d, mand)
+    return Array.new(mand) unless d.irep && NATIVE_ARG_TARGETS.include?("#{d.owner}##{d.name}")
+
+    ann = @annotations[d.irep]
+    return Array.new(mand) unless ann
+
+    Array.new(mand) { |i| ann.args[i] }
+  end
+
+  # The native C++ parameter type for one `native_arg_types` slot --
+  # `C_TYPE.fetch(t)` (`mrb_int`/`mrb_sym`) when native-typed, plain
+  # `mrb_value` (today's own uniform type, unchanged) otherwise.
+  def native_c_type(t)
+    t ? C_TYPE.fetch(t) : 'mrb_value'
   end
 
   # Owner class names are real Ruby constant paths ("Game::Actor",
@@ -2847,8 +2999,19 @@ class CodeGen
     out
   end
 
+  # `m[:arg_c_types]` (set by compile_method below) is each mandatory
+  # position's own real C++ parameter type -- `mrb_value` uniformly for
+  # every method NATIVE_ARG_TARGETS doesn't name (today's own established
+  # shape, unchanged), or a mix of `mrb_value`/`mrb_int`/`mrb_sym` for one
+  # it does. `self` is never native-typed (NATIVE_ARG_TARGETS only ever
+  # retypes a method's own mandatory *arguments*, never its receiver), so
+  # it stays the one hardcoded `mrb_value` here regardless. Falls back to
+  # an all-`mrb_value` array when absent (the `#error`-stub early-return
+  # branch of compile_method never sets this key) -- identical to this
+  # method's own pre-existing behavior in that case.
   def decl_line(m)
-    impl_params = (['mrb_state*'] + ['mrb_value'] * (m[:arity] + 1)).join(', ')
+    arg_c_types = m[:arg_c_types] || Array.new(m[:arity], 'mrb_value')
+    impl_params = (['mrb_state*', 'mrb_value'] + arg_c_types).join(', ')
     "mrb_value #{m[:impl]}(#{impl_params})"
   end
 
@@ -2858,6 +3021,12 @@ class CodeGen
     enter = irep.instructions.find { |i| i.op == 'ENTER' }
     mand = enter ? enter.args.split(':').first.to_i : 0
     arg_names = irep.lv.first(mand).each_with_index.map { |n, i| n || "arg#{i + 1}" }
+    # NATIVE_ARG_TARGETS' own per-position native type, size == mand -- see
+    # native_arg_types' own comment. All-nil (every position stays plain
+    # `mrb_value`, today's own uniform shape) unless this exact
+    # "Owner#name" is explicitly listed there AND a real annotation names a
+    # recognized type at that position.
+    arg_native_types = native_arg_types(d, mand)
 
     impl_name = "#{cpp_name(d.owner, d.name)}_impl"
     entry_name = cpp_name(d.owner, d.name)
@@ -2880,9 +3049,30 @@ class CodeGen
     # generated .cpp (OTHER_OWNERS/OTHER_DECLS_HEADER, see mrbgem.rake) can
     # only resolve this at final link time if it's an ordinary externally-
     # linked symbol -- see emit_decls_header's own comment.
-    out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_names.map { |a| "mrb_value #{a}" }).join(', ')}) {\n"
+    #
+    # Each mandatory parameter's own C++ type comes from arg_native_types
+    # (native_c_type(nil) is plain `mrb_value`, unchanged from before this
+    # mechanism existed) -- `self` is never affected, only ever
+    # NATIVE_ARG_TARGETS' own explicitly-listed arguments.
+    arg_params = arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
+    out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
-    arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
+    # A native-typed argument's own register still holds a plain mrb_value
+    # like every other VM register in this whole function (see this file's
+    # own top comment: NATIVE_ARG_TARGETS only moves the FFI boundary's own
+    # coercion earlier -- it is NOT full register-level type specialization)
+    # -- so its very first assignment has to *box* the native value back
+    # into one, via the same TYPE_OPS[:box] call IvarLayout's own embedded-
+    # ivar SETIV codegen already uses for the identical purpose. A plain
+    # `mrb_value` argument keeps today's own bare identity assignment.
+    arg_names.each_with_index do |a, i|
+      t = arg_native_types[i]
+      out << if t
+                "  r#{i + 1} = #{TYPE_OPS.fetch(t)[:box]}(#{a});\n"
+              else
+                "  r#{i + 1} = #{a};\n"
+              end
+    end
     if embedded_ivars && d.name == 'initialize'
       # self is a bare, freshly allocated MRB_TT_DATA shell (data == NULL)
       # at the start of #initialize -- allocate the real struct once, here,
@@ -2913,15 +3103,39 @@ class CodeGen
     if arg_names.empty?
       out << "  return #{impl_name}(M, self);\n"
     else
-      out << "  mrb_value #{arg_names.join(', ')};\n"
-      fmt = 'o' * arg_names.size
+      # Each local's own declared type has to match what mrb_get_args'
+      # own format character below writes into it -- 'o' (no coercion at
+      # all, today's own established default) wants a plain mrb_value
+      # out-param; 'i'/'n' (NATIVE_ARG_TARGETS' own fixnum/symbol
+      # positions) want a real mrb_int*/mrb_sym* instead, mirroring
+      # 3rd/mruby/src/class.c's own mrb_get_args format table exactly (its
+      # own `case 'i':`/`case 'n':` read a `mrb_int*`/`mrb_sym*` via
+      # GET_ARG, never an mrb_value* -- confirmed by reading that switch
+      # directly, not assumed from the format letter alone). One
+      # declaration per argument (rather than the previous single combined
+      # `mrb_value a, b, c;` line) since a mixed-type argument list can no
+      # longer share one declaration statement.
+      arg_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      # 'i' is mrb_as_int under the hood (mrb_ensure_int_type + a bigint
+      # unwrap), 'n' is mrb_obj_to_sym -- the exact same two coercions
+      # compile_send's own call-site unboxing (below) uses when it moves
+      # this identical coercion to a devirtualized direct-call site
+      # instead of through this entry wrapper; see that call site's own
+      # comment for why the two have to stay in lockstep.
+      fmt = arg_native_types.map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
       ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       out << "  return #{impl_name}(M, self, #{arg_names.join(', ')});\n"
     end
     out << "}\n\n"
+    # arg_c_types: this method's own real per-position C++ parameter type
+    # list (decl_line's own forward-declaration/cross-TU-header codegen
+    # reads it, so a devirtualized caller -- same gem or, via
+    # OTHER_DECLS_HEADER, a different one -- declares this `_impl` with
+    # exactly the signature it was actually emitted with).
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-      arity: arg_names.size, code: out, visibility: d.visibility }
+      arity: arg_names.size, arg_c_types: arg_names.each_index.map { |i| native_c_type(arg_native_types[i]) },
+      code: out, visibility: d.visibility }
   end
 
   # Every bytecode address any JMP/JMPNOT/JMPIF in this irep can land on --
@@ -3913,18 +4127,57 @@ class CodeGen
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
+      # NATIVE_ARG_TARGETS' own call-site half: `impl`'s own real signature
+      # (compile_method, above) already boxes any native-typed parameter
+      # right back into an mrb_value as its first statement, so passing an
+      # already-boxed mrb_value straight through here as before would be a
+      # real type mismatch (a g++ compile error, since C++ has no implicit
+      # mrb_value -> mrb_int/mrb_sym conversion) the moment `target` is one
+      # of these methods. `call_argv` unboxes each position that needs it
+      # right here at the call site instead -- the exact same relocation
+      # (callee's own internal coercion moved to the caller) the just-
+      # merged Rect/Color/Tone round already established for
+      # NATIVE_CONSTRUCT_TARGETS' own direct-construct path, just generalized
+      # from a hardcoded native constructor to an ordinary devirtualized
+      # `_impl` call. `mrb_as_int`/`mrb_obj_to_sym` are the exact same
+      # coercions `mrb_get_args`'s own "i"/"n" format characters use
+      # internally (see compile_method's own entry-wrapper comment) --
+      # identical TypeError-raising for a genuinely wrong-typed argument,
+      # `mrb_state* M` has no notion of a calling-frame boundary to cross,
+      # so this changes nothing observable versus reaching the same
+      # coercion through an ordinary mrb_funcall-dispatched call into
+      # `target`'s own entry wrapper. Wraps whatever expression `argv`
+      # already holds at this position (a bare register, or itself the
+      # result of another expression -- e.g. Game::Actor#change_mp's own
+      # real `-weapon_sp_cost` call site), never assumes a bare register
+      # name. `target.irep`'s own mandatory arity already equals `argv.size`
+      # here (checked above, both for the MONO and TYPED paths), so
+      # `native_arg_types` is asked for exactly that many positions.
+      call_types = native_arg_types(target, argv.size)
+      call_argv = argv.each_with_index.map do |a, i|
+        case call_types[i]
+        when :fixnum then "mrb_as_int(M, #{a})"
+        when :symbol then "mrb_obj_to_sym(M, #{a})"
+        else a
+        end
+      end
+      native_positions = call_types.each_index.select { |i| call_types[i] }.map { |i| i + 1 }
+      native_note = native_positions.empty? ? '' : " (position#{'s' unless native_positions.one?} " \
+                                                    "#{native_positions.join(', ')} unboxed here to match " \
+                                                    "#{impl}'s own native argument type)"
       if typed
         check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
         note = "  // TYPED :#{name} -> #{target.owner}##{target.name} (receiver traced to #{target.owner}), " \
-               "runtime-class-checked direct C++ call, mrb_funcall fallback\n"
+               "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         "#{note}  if (#{check}) {\n" \
-          "    r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n" \
+          "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
       else
-        note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n"
-        "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
+        note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
+               "#{native_note}\n"
+        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     else
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
@@ -4088,7 +4341,10 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations)
+  # `annotations` (computed above, previously fed only to IvarLayout.analyze)
+  # also now drives NATIVE_ARG_TARGETS' own native-argument calling
+  # convention -- see that constant's own comment.
+  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
