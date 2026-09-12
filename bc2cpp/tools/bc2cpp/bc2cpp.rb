@@ -2427,6 +2427,174 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
 # own callers was needed. Checked directly against the real regenerated
 # output: already has a real MONO/TYPED devirtualized call site today.
 #
+# Round 46: re-checked every remaining `# bc2cpp: (fixnum/symbol...)`
+# annotation this file's own registry can see -- the whole-program
+# `Annotations.extract` result, not a fresh grep -- against this table's own
+# two-part bar, restricted to the non-`scene/battle.rb` remainder round 41's
+# own follow-up above explicitly left open (`scene/battle.rb`'s own dense
+# ~25-annotation cluster stays deliberately out of scope again this round,
+# for the exact same "its own dedicated round, not a follow-up item" reason;
+# `scene/battle_support.rb`'s own one annotation, `Scene::Base#
+# sticky_list_top`, is NOT part of that cluster -- it lives in a small,
+# separate reopen-`Base` file most of whose own real caller is a single
+# `scene/battle.rb` call site, cleanly traced below -- so it IS covered this
+# round, closing that specific one-line gap round 41 also named). Six real
+# entries below, every one independently traced AND confirmed against a
+# real, un-`SKIP_UNSUPPORTED`-hidden regenerated build to actually produce a
+# real `_impl` at all (a lesson this round only learned the hard way -- see
+# `RPG2k::Scene::SaveLoad#initialize`/`#draw_slot_faces` below: a `#error
+# unhandled opcode BLOCK/SENDB/SUPER` line, unlike the "has non-mandatory
+# arguments" one, carries no owner/method name of its own, so grepping for
+# the candidate's own name past it, as this round's own first pass did,
+# silently walks right by it). Seven real, seriously-considered candidates
+# from the same sweep were found unsound (three) or structurally moot
+# (four: two non-mandatory-arity misses caught before adding, two genuine
+# BLOCK/SENDB/SUPER misses caught only by this real compile, all four
+# detailed below) and DELIBERATELY EXCLUDED:
+#
+# `Game::EnemyAi#enemy(id)` and `Game::EnemyAi#set_switch(id, on)` (both
+# `game/battle_support.rb`) each open with the exact `id.nil?`-style guard
+# this table's own top comment already excludes `Game::Actor#knows_skill?`/
+# `#learn_skill` for (`return nil unless ... id && id > 0` /
+# `sw[id] = on if sw && id && id > 0`) -- both already tolerate a genuine nil
+# `id` today by no-oping gracefully, so a native `mrb_get_args("i", ...)`
+# raising TypeError there instead would be a real, novel crash. `Game::
+# Interpreter#resume_battle(result)` looked promising (a bare `result ==
+# :escape`/`BATTLE_HANDLERS[result]` lookup, no explicit guard at all) but
+# traced into a real, structurally deeper problem than a simple guard: its
+# one real non-literal caller is `Scene::Battle#finish_battle`'s own
+# `owner.resume_battle(result)`, whose own `result` is `battle.result`
+# (Game::Battle's own `attr_reader`, `@result` -- nil until a round actually
+# settles it). Two of `finish_battle`'s three real call sites call `battle.
+# end_round` immediately beforehand, which this round proved always leaves
+# `@result` non-nil once `finished?` is true (`@escaped` implies `@result =
+# :escaped` was already set at the very same `attempt_escape` call that set
+# `@escaped`, per that method's own body; otherwise `end_round`'s own
+# `@result = ... if finished? && !@escaped` sets it fresh) -- but the third,
+# `Scene::Battle#leave_battle_event_phase`, reads `battle.finished?`/
+# `battle.result` directly, with NO intervening `end_round` call of its own
+# for that round, after a chain of battle-event-page processing
+# (`run_battle_events`/`leave_battle_event_phase` calling each other) that
+# could in principle flip `finished?` true mid-round (an event's own effect
+# wiping a side) without `end_round` ever having run for THIS round yet --
+# meaning `@result` could still be nil at that exact read, on a real path
+# this round could not fully rule out without separately proving every
+# battle-event command that can affect `alive?(@allies)`/`enemy_active?
+# (@enemies)` mid-round never does so before `end_round` next runs. The same
+# "can't fully verify, so don't guess" call this table's own `Game::
+# Interpreter#apply`/`Game::State#initialize` write-ups already model --
+# left off this round's own additions rather than assumed safe.
+#
+# `RPG2k::Scene::Base#build_list_arrow_sprite(skin, src_y, x, y, z = 450)`
+# and `RPG2k::Scene::Base#draw_system_text(bmp, x, y, w, h, text, skin,
+# idx = 0, align = 0)` both looked like strong candidates on the annotated
+# position's own soundness (`build_list_arrow_sprite`'s `src_y` is traceable
+# through its only 4 real call sites -- `Scene::SkillMenu#build_arrow_
+# sprite`/`Scene::ItemMenu#build_arrow_sprite`'s own forwarding wrappers,
+# fed from `UP_ARROW_SRC_Y = 8`/`DOWN_ARROW_SRC_Y = Window::ARROW_SRC_Y`
+# (`= 16`) literals, and `Scene::Battle`'s own two direct calls passing the
+# identical `Scene::Base`-local `LIST_UP_ARROW_SRC_Y`/`LIST_DOWN_ARROW_
+# SRC_Y` literals -- to a literal-derived Integer every time; `draw_system_
+# text`'s own `x`/`y` are the ordinary "crashes already" shape, handed
+# straight to a native `RGSS::Bitmap` call or a `+` op with no guard) --
+# but BOTH turn out structurally moot regardless: each carries its own
+# trailing optional argument (`z = 450`, `idx = 0`/`align = 0`), and a real,
+# no-`SKIP_UNSUPPORTED`-hiding regenerated build shows both landing in this
+# file's own "does not compile clean at all" exclusion category already
+# established for `Game::Actor#set_level`/`#add_state`/`#equip_item`/
+# `#change_hp` above (`#error ... has non-mandatory arguments (optional/
+# rest/keyword/block) -- not in this prototype's supported subset`) --
+# there is no real `_impl` for either one to retype in the first place, so
+# adding either "Owner#name" here would be a pure no-op, never a soundness
+# problem but never a real win either. Left off this round's own additions
+# for that reason, not a nil-safety finding about either method's own body.
+#
+# `RPG2k::Scene::Base#draw_stat_segment(c, x, y, w, h, label, cur, max,
+# can_knockout, skin)` (mand=10) DOES compile clean (confirmed against the
+# same real regenerated output): its own `x`/`w` positions are the
+# identical "crashes already" shape (`w - x` at the very top of the body,
+# unguarded); its own `cur`/`max` positions are NOT annotated (only 2 and 4
+# -- `x`/`w` -- carry a `fixnum` token in the real annotation, matching
+# `value_font_color`'s own already-excluded `max` staying untouched here
+# too). `RPG2k::Scene::Base#sticky_list_top(top, sel_row, row_count,
+# visible_rows)` (`scene/battle_support.rb`, see above) has its own
+# `sel_row`/`row_count`/
+# `visible_rows` positions (2/3/4; `top` stays untyped) each used in a bare
+# arithmetic/comparison expression (`[row_count - visible_rows, 0].max`,
+# `sel_row < top`, `sel_row - visible_rows + 1`) with no guard anywhere --
+# crashes already on any of the three -- and its one real caller (`Scene::
+# Battle#battle_list_window`'s own `sticky_list_top(..., sel_row, row_count,
+# rows)`) passes `row_count` built purely from `labels.length`/an integer
+# `.ceil`/`.max` expression, `rows` the literal `BATTLE_VISIBLE_ROWS = 4`,
+# and `sel_row = sel / column_max` -- itself already crashing on a
+# non-Integer `sel` before ever reaching this call, so no deeper trace into
+# `battle_list_window`'s own callers was needed for that third position
+# either.
+#
+# `RPG2k::Scene::SaveLoad#build_arrow_sprite(src_y)` is the exact same
+# shape and same trace as `Scene::Base#build_list_arrow_sprite` above (its
+# own near-duplicate, pre-dating the shared helper), but WITHOUT that one's
+# own disqualifying optional trailing argument -- `build_arrow_sprite` takes
+# just the one mandatory `src_y`, confirmed compiling clean for real. Its
+# two real callers (`#build_arrow_sprites`) pass `UP_ARROW_SRC_Y = 8`/
+# `DOWN_ARROW_SRC_Y = Window::ARROW_SRC_Y`, both literal-derived Integers.
+#
+# `RPG2k::Scene::SaveLoad#draw_slot_faces(c, inner_w, state)`'s own
+# `inner_w` position looked sound on the same "crashes already" bar
+# `#draw_slot_label` (`slot_index`, via the same `#draw_slot_box` caller)
+# already established (`start_x = inner_w - (...)`, unguarded, and
+# `#draw_slot_box` itself already uses the same `inner_w` unguarded one line
+# earlier via `Bitmap.new(inner_w, ...)`) -- but the method's own body
+# separately contains `pairs.first(MAX_SLOT_FACES).each_with_index do
+# |(name, index), i| ... end`, a real block/`SENDB` this prototype's own
+# opcode subset does not support, confirmed by a real, un-`SKIP_UNSUPPORTED`
+# regenerated build showing `#error unhandled opcode BLOCK`/`SENDB` inside
+# its own `_impl` body and, independently, by the real "skipped
+# (unsupported, left on the interpreter)" list itself naming this method --
+# no `_impl` exists at all regardless of `inner_w`'s own soundness, the same
+# "does not compile clean" exclusion category `Game::Actor#initialize`
+# already established. `RPG2k::Scene::SaveLoad#initialize(parent, state,
+# mode)`'s own `mode` position (`@mode = mode # :save or :load`, assign-
+# only, every real in-game construction site passing a literal `:save`/
+# `:load`) looked equally sound in isolation, but the same real regenerated
+# build shows the same class of failure one line earlier in this
+# constructor's own body -- `super parent` (`#error unhandled opcode
+# SUPER`) and `@slots = (1..SLOT_COUNT).map { |slot| ... }` (`#error
+# unhandled opcode BLOCK`/`SENDB` again) -- so this one has no real `_impl`
+# either, for reasons entirely unconnected to `mode`'s own soundness. Both
+# left off this round's own additions for that "no `_impl` to retype"
+# reason, not a nil-safety finding about either method's own annotated
+# position.
+#
+# `RPG2k::Scene::Menu#wait_term_for(key, term_name)`'s own `key` position
+# (only `key`, not `term_name`, carries the annotation) is nil-tolerant on
+# its own (`key == :wait`, a bare `==`) -- traced instead: its one real
+# caller, `#build_commands`'s own `keys.map { |key, term_name| [key,
+# wait_term_for(key, term_name)] }`, destructures `keys`, which is always
+# either the literal `RPG2K_COMMAND_KEYS` array (five literal `[:symbol,
+# :symbol]` pairs) or `RPG2K3_COMMAND_IDS` (an eight-entry literal Hash of
+# the same shape) filtered through `filter_map` (which only keeps a real
+# hit) plus one more literal pair appended -- every element either branch
+# can ever produce is a real, literal `Symbol`, never nil. `RPG2k::Scene::
+# Menu#enter_actor_selection(key)` is even more directly provable: its own
+# body is assign-only (`@pending_key = key`), and its one real caller,
+# `#select_command`'s own `case key when :skill, :equip, :status, :row ...
+# enter_actor_selection(key)`, only ever reaches that call from inside a
+# `when` branch Ruby's own `===` dispatch has already matched against those
+# four literal symbols -- `key` is PROVABLY one of them by the time
+# `enter_actor_selection` is called at all, structurally, regardless of
+# anything upstream of `@commands`/`@index`.
+#
+# `RPG2k::Scene::VehicleWorld#initialize(scene, rng, type)` (`scene/
+# base.rb`; positions 1/2 carry a *class*-name annotation, `ClassAnnotations`
+# territory, not this table's own concern) has its own `type` position
+# (position 3, `Symbol`) assign-only (`@type = type`) -- traced instead: its
+# one real construction site, `Scene::Map`'s own `Game::Vehicle::TYPES.
+# each_with_object({}) { |type, h| h[type] = VehicleWorld.new(self, @rng,
+# type) }`, iterates the literal `Game::Vehicle::TYPES = [:boat, :ship,
+# :airship].freeze` -- every `type` this ever constructs with is a real,
+# literal Symbol.
+#
 # Explicitly considered and left OFF this round's own additions, for the
 # same "found and correctly excluded" reasons this table's own precedents
 # already establish: `RPG2k::Scene::Base#value_font_color(have, max,
@@ -2511,6 +2679,14 @@ NATIVE_ARG_TARGETS = Set[
   'RPG2k::Scene::Order#move_cursor',
   'RPG2k::Scene::Map::LRUBitmapCache#initialize',
   'RPG2k::Scene::SaveLoad#draw_slot_label',
+  # Round 46 additions -- see this constant's own top comment for the full
+  # per-entry trace.
+  'RPG2k::Scene::Base#draw_stat_segment',
+  'RPG2k::Scene::Base#sticky_list_top',
+  'RPG2k::Scene::SaveLoad#build_arrow_sprite',
+  'RPG2k::Scene::Menu#wait_term_for',
+  'RPG2k::Scene::Menu#enter_actor_selection',
+  'RPG2k::Scene::VehicleWorld#initialize',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
