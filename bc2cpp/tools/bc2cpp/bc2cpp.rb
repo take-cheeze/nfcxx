@@ -1638,6 +1638,45 @@ end
 # report_annotation_candidates below can share the exact same rule
 # drop_unsafe_embeddings itself uses, rather than silently overcounting
 # candidates a real build would refuse to embed anyway.
+
+# Native, closed-world RGSS classes backed by mruby-rgss/src/lib.cxx's own
+# DataType<T> template that a `SEND :new` call site can be devirtualized
+# straight into (compile_send's own "MONO :new -> direct native construct"
+# path, below) when trace_new_target proves the receiver is exactly one of
+# these -- bypassing Class#new's own allocate+initialize dispatch chain
+# entirely in favor of a hand-written lib.cxx entry point (`fn`) that
+# builds the T directly from already-known argument registers, guarded at
+# runtime by a class-identity check against `class_fn` (see compile_send's
+# own comment on why that guard exists and what it does/doesn't protect
+# against).
+#
+# Checked before hand-listing these: neither bc2cpp.rb nor
+# compiled_gems.rb has any existing registry of "classes needing
+# MRB_SET_INSTANCE_TT(..., MRB_TT_DATA)" that covers Rect/Color/Tone --
+# the one such listing that exists (report_native_tt_candidates' own
+# `== classes needing ... ==` diagnostic) is about a completely different
+# thing: bc2cpp's own ivar-embedding decision for classes IT compiles a
+# body for from Ruby bytecode (Game::Actor, RPG2k::Scene::Map, ...).
+# Rect/Color/Tone are hand-written native C++ classes bc2cpp never
+# compiles a body for at all (their #initialize is native, invisible to
+# this compiler the same way every other native method is), so there is
+# no existing mechanism to reuse -- this table is the first one.
+#
+# `arity` is each class's own real positional-constructor shape as used by
+# the one real, concrete call site this covers (`Tone.new(0, 0, 0, 0)`/
+# `Color.new(0, 0, 0, 0)`/`Rect.new(0, 0, 0, 0)`, RGSS::Sprite#tone/#color/
+# #src_rect's own `@ivar ||= Klass.new(...)` memoizing readers) --
+# deliberately exact-match only (no optional-argument default-filling
+# modeled here), so a call site passing a different argument count (e.g.
+# a bare `Tone.new` relying on all-default 0s) just misses this path and
+# falls back to ordinary dynamic dispatch, same as any other unmodeled
+# shape in this file.
+NATIVE_CONSTRUCT_TARGETS = {
+  'Tone' => { fn: 'rgss_tone_new_direct', class_fn: 'rgss_native_tone_class', arity: 4 },
+  'Color' => { fn: 'rgss_color_new_direct', class_fn: 'rgss_native_color_class', arity: 4 },
+  'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4 },
+}.freeze
+
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
 # with exactly one definition anywhere in the whole program), this asks a
 # narrower question about ONE specific SEND -- "is THIS receiver provably a
@@ -1677,7 +1716,21 @@ end
 # end`). Every caller of this function still gets the exact same
 # fresh-`.new` behavior it always had when these are omitted (both
 # default to nil, and `next unless ...` bails cleanly on a nil lookup).
-def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil)
+#
+# `resolving_new:` (default false, every existing caller's own behavior
+# unchanged) lets a caller start the walk already "inside" the SEND :new
+# case below -- i.e. resolve *this exact* `.new` call's own receiver
+# instead of chasing an object's origin through a later call on it. Used
+# by compile_send's own native-construction devirtualization (the
+# NATIVE_CONSTRUCT_TARGETS path): called with `idx`/`reg` pointing at the
+# `SEND :new` instruction itself being compiled right now, so the very
+# first thing this walk looks for is the GETCONST/GETMCNST chain that fed
+# *that* call its own receiver, with the same conservative bail-to-nil on
+# anything else (a GETIV, another SEND, ...) the ordinary chase already
+# has -- deliberately narrower than the ivar-hint/argument-annotation
+# terminal sources above, which don't apply to a `.new` call's own
+# receiver at all.
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -1687,9 +1740,9 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   # this against real game source (`Game::MessageConfig#@position`,
   # `Game::NumberInput#@digits`, ... all Integer-valued constants, none
   # of them classes). `resolving_new` only ever becomes true right after
-  # a `SEND :new` is found (with nothing already peeled off `path`),
-  # gating GETMCNST/GETCONST on having actually seen one first.
-  resolving_new = false
+  # a `SEND :new` is found (with nothing already peeled off `path`) --
+  # or starts true already, for the `resolving_new:` keyword-arg caller
+  # described above -- gating GETMCNST/GETCONST on one of those two.
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
     d = insn.args[/^R(\d+)/, 1]
@@ -1895,6 +1948,11 @@ class CodeGen
     # dependency) never appears in a generated file that has no real use
     # for it.
     @const_lookup_helper_used = false
+    # Set of NATIVE_CONSTRUCT_TARGETS keys (e.g. "Tone") at least one
+    # compiled `.new` call site actually devirtualized into -- same
+    # "only emit what's used" shape as @const_lookup_helper_used, read by
+    # emit_native_construct_decls after compile_all runs.
+    @native_construct_used = Set.new
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
     # @clean_cache/@probing (above) and @ivar_layout (below, temporarily the
@@ -2329,6 +2387,45 @@ class CodeGen
       }
 
     CPP
+  end
+
+  # Forward declarations for the lib.cxx entry points NATIVE_CONSTRUCT_
+  # TARGETS names -- emitted once per generated file, and only for the
+  # entries at least one compiled `.new` call site actually used (same
+  # "declare only what's needed" shape as emit_const_lookup_helper).
+  # These are real, hand-written C++ functions defined in mruby-rgss/
+  # src/lib.cxx (not generated), so -- unlike emit_forward_decls' own
+  # `_impl` declarations -- this only ever declares them, never defines
+  # them; the definitions reach this translation unit at link time the
+  # same way any other cross-file C++ call in this project's native gems
+  # already does. `extern "C"`, matching lib.cxx's own definitions exactly
+  # (see that file's own comment on why: each one sits inside lib.cxx's
+  # top-level anonymous namespace, and only an `extern "C"` declaration
+  # escapes that namespace's own internal linkage) -- a plain C++-linkage
+  # declaration here would silently mangle a different symbol name than
+  # the real (extern "C") one lib.cxx defines and fail to link; caught
+  # exactly this way building the very first real caller (RGSS::Sprite's
+  # own #tone/#color/#src_rect).
+  def emit_native_construct_decls
+    return '' unless @native_construct_used.any?
+
+    out = String.new
+    out << "// mruby-rgss/src/lib.cxx's own devirtualized-construction entry\n"
+    out << "// points (see that file's own DataType<T> comment) -- called\n"
+    out << "// directly in place of Class#new's own allocate+initialize\n"
+    out << "// dispatch when a `.new` call site's receiver is provably one of\n"
+    out << "// these native DataType<T>-backed classes (compile_send's own\n"
+    out << "// \"MONO :new -> direct native construct\" path).\n"
+    out << "extern \"C\" {\n"
+    @native_construct_used.sort.each do |known|
+      native = NATIVE_CONSTRUCT_TARGETS.fetch(known)
+      out << "RClass* #{native[:class_fn]}(void);\n"
+      params = (['mrb_state*'] + ['mrb_value'] * (native[:arity] + 1)).join(', ')
+      out << "mrb_value #{native[:fn]}(#{params});\n"
+    end
+    out << "}\n"
+    out << "\n"
+    out
   end
 
   # `only_owners`, when given, restricts which classes' methods actually get
@@ -3280,6 +3377,46 @@ class CodeGen
     n = n_match ? n_match[1].to_i : 0
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{d.to_i + k}" }
+
+    # Devirtualize a `SEND :new` whose receiver is provably (GETCONST-
+    # traced, right here at this exact call site -- not the ivar/argument
+    # terminal sources trace_new_target also supports) one of
+    # NATIVE_CONSTRUCT_TARGETS' own native DataType<T>-backed classes.
+    # `self.new`/implicit-receiver `new` (self_implicit) is never this
+    # shape (these three classes' own `.new` is always sent to an explicit
+    # constant receiver in every real call site this covers) so it's
+    # excluded outright, same as monomorphic_target's own MONO path
+    # implicitly is by never matching a bare `new` name against anything
+    # meaningful for self_implicit sends. `irep`/`idx` are nil exactly
+    # when self_implicit is true (see this method's own two call sites),
+    # so checking them here is redundant with checking self_implicit, but
+    # kept explicit since trace_new_target needs both regardless.
+    if name == 'new' && !self_implicit && irep && idx
+      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true)
+      native = known && NATIVE_CONSTRUCT_TARGETS[known]
+      # Exact-arity-only (see NATIVE_CONSTRUCT_TARGETS' own comment) -- a
+      # call site passing a different argument count just isn't this
+      # shape, falls through to ordinary POLY dynamic dispatch below like
+      # any other unmodeled variant.
+      if native && n == native[:arity]
+        @native_construct_used << known
+        note = "  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own " \
+               "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n" \
+               "  // Runtime-guarded: #{known} could have been reassigned at the constant level (e.g. " \
+               "`RGSS::#{known} = SomeOtherClass`) since #{native[:class_fn]}'s own class was registered " \
+               "-- #{recv} is whatever this method's own existing GETCONST resolution chain above just " \
+               "produced, so a reassignment there is already reflected in it; falls back to ordinary " \
+               "mrb_funcall (whatever #{recv} now actually is) rather than misconstruct if it doesn't " \
+               "match the real native class.\n"
+        return "#{note}" \
+               "  if (mrb_class_ptr(#{recv}) == #{native[:class_fn]}()) {\n" \
+               "    r#{d} = #{native[:fn]}(M, #{([recv] + argv).join(', ')});\n" \
+               "  } else {\n" \
+               "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+               "  }\n"
+      end
+    end
+
     target = monomorphic_target(name)
     # A monomorphic *name* is still only safe to devirtualize if its one
     # real definition fits this prototype's pure-mandatory-args calling
@@ -3614,6 +3751,7 @@ if $PROGRAM_NAME == __FILE__
   puts ''
   print gen.emit_structs
   print gen.emit_const_lookup_helper
+  print gen.emit_native_construct_decls
   print gen.emit_forward_decls(compiled)
   compiled.each { |m| print m[:code] }
 
