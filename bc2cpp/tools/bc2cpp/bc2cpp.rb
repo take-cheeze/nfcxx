@@ -1973,6 +1973,224 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map].freeze
 # that its own two real call sites (self-implicit, from `#apply`) pass two
 # independently-verified-Integer registers, not a mix of one safe and one
 # unsafe position.
+#
+# A later round re-checked every remaining `# bc2cpp: (fixnum/symbol...)`
+# annotation in mruby-rpg2k/mrblib (game.rb, interpreter.rb) and
+# mruby-lcf/mrblib/lcf.rb against the exact same two-part bar (no nil-guard
+# on the annotated position, every real caller's argument provably
+# Integer/Symbol) and against `compiled_gems.rb`'s own owners lists (an
+# annotation on a method whose class is not actually compiled, or whose own
+# body does not itself compile clean, is moot regardless of the annotation).
+# mruby-rgss/mrblib carries zero `fixnum`/`symbol` annotations at all --
+# confirmed by grep, not assumed -- so it contributes nothing this round.
+#
+# Excluded for a `nil`-guard on the exact annotated position, the same
+# knows_skill?/learn_skill shape the prior round already found and documented
+# above: `Game::ChipSet#upper_flags` (`upper_tile_id.nil?`), `Game::Actor#
+# state?`/`#equipped?`/`#two_handed?`/`#cursed_armor_state_ids` (each opens
+# with `<id>.nil? || <id> == 0`), `Game::Actor#change_battle_commands`
+# (`id.nil?`), `Game::Actors#[]`/`#known_invalid?` (`id.nil? || id <= 0`),
+# `Game::State#show_picture` (`id && id > 0 && ...`), `Game::Interpreter#
+# start_at` (`index && index > 0 && ...`), `#simulated_attack_variance`
+# (`var && var > 0 && ...`) and `#teleport_facing` (`param && param >= 1 &&
+# ...`) -- every one of these already tolerates a genuine `nil` at the
+# annotated position today, by returning/no-opping gracefully, so a native
+# `mrb_get_args("i"/"n", ...)` raising TypeError there instead would be a
+# real, novel crash on an input the interpreted path currently handles fine.
+#
+# Excluded because the method itself does not compile clean at all (a real
+# `#error` in the regenerated output regardless of this table), so there is
+# no `_impl` signature to retype in the first place: `Game::Actor#initialize`
+# (BLOCK/SENDB/GETIDX, per `compiled_gems.rb`'s own Game::Actor writeup),
+# `#set_level`/`#add_state` (a trailing keyword argument with a default --
+# `preserve_mod:`/`allow_battle_states:` -- makes both non-mandatory arity
+# even though the *positional* argument the annotation names is itself
+# mandatory), and `#equip_item`/`#change_hp` (`slot = nil`/`allow_death =
+# true`, an optional positional argument, same non-mandatory-arity gap).
+#
+# Excluded for a structural reason specific to this mechanism, not a
+# soundness finding about the method's own body: `Game::Transition#
+# initialize` and `Game::Map#initialize` both carry a real, clean-compiling,
+# purely-mandatory-arity `# bc2cpp: (fixnum, ...)` annotation and would
+# otherwise be textbook candidates -- but both classes are also listed in
+# `DIRECT_CONSTRUCT_TARGETS` (just above), whose own `SEND :new` codegen
+# (this round left untouched, per its own brief) calls `#{init_impl}(M,
+# recv, argv...)` passing every argument straight through as a plain
+# `mrb_value`, with no `native_arg_types`-aware unboxing of its own. Adding
+# either class's `#initialize` here would silently desync that call from a
+# retyped `_impl` signature expecting `mrb_int` -- a real compile error (or
+# worse, a signature mismatch masked by implicit conversion) in a codegen
+# path this round was explicitly told not to touch, so both stay off this
+# list for exactly that reason, independent of anything about their own
+# annotated arguments.
+#
+# `Game::State#initialize` is the one case this round traced all the way
+# through a real save-data schema and still excluded, the same honest
+# "can't fully verify, so don't guess" call the prior round's own
+# Game::Party#can_cast? writeup models: its real, only real construction
+# site is `Game::State.from_lsd`'s own `new(party, hero[:map_id], hero[:x],
+# hero[:y])` (mruby-rpg2k/mrblib/game/lsd_io.rb), and unlike the SAVE_SCREEN
+# tint fields `Game::Screen#restore_tint` relies on below, `LCF::Schema::
+# SAVE_MOVABLE`'s own `:map_id`/`:x`/`:y` entries (fields 11-13) carry no
+# `default:` key at all -- `LCF.to_rb`'s own `unless d; dv = s[:default];
+# ...; end` branch returns a bare `nil` for an absent field with no declared
+# default, not a real Integer. `#initialize`'s own body only ever plain-
+# assigns these three (`@map_id = map_id`, etc.), never touching them
+# arithmetically, so a save chunk 104 genuinely missing one of these fields
+# is tolerated silently today (a `nil` ivar) and would become a new,
+# hard TypeError crash on `Continue` for exactly that malformed-but-loadable
+# save shape -- excluded rather than assumed safe.
+#
+# `Game::Interpreter#apply(op, cur, val)` is the other explicitly-considered-
+# and-declined case, for the same "can't fully verify" reason, even though
+# its own two annotated positions (`cur`, `val`) are BOTH used arithmetically
+# in four of `apply`'s five real branches (`cur + val`, `cur - val`, ...),
+# which would ordinarily be the strong, crashes-already-today signal this
+# round otherwise relies on. The gap is `when 0 then val` (Control Variables'
+# "Set" operation): `cur` is never even read there, and `val` is returned
+# completely unguarded -- so whatever `operand_value(cmd)` produces reaches
+# `apply`'s own caller as-is, with no arithmetic op along the way to already
+# raise on a bad value the way every other branch's `+`/`-`/`*` would. Tracing
+# `operand_value` far enough to rule out a `nil` result would mean separately
+# proving `actor_operand`/`enemy_operand`/`event_operand`/`item_operand`/
+# `random_operand` each never return one (e.g. `enemy_operand`'s own `foe.hp`/
+# `foe.max_hp`, read with no `|| 0` fallback unlike its sibling `foe.mp || 0`/
+# `foe.max_mp || 0` two lines below) -- exactly the "much deeper trace into
+# [an unrelated class']'s own behavior" shape the prior round's own
+# Game::Party#can_cast? writeup already declined to force through, so this
+# round declines it too rather than guess. (`Game::Interpreter#trunc_mod`,
+# below, sidesteps this entirely: only its own `n` position is annotated,
+# and `n` is always a `Game::Variables#[]` read -- `@data[id] || 0` --
+# regardless of what `apply`'s own `val`/`d` might be.)
+#
+# Every survivor below was checked against BOTH halves this table's own top
+# comment requires -- no nil-guard on the annotated position (or, in the four
+# cases marked "assign-only", a real trace of every actual caller, since a
+# plain `@ivar = arg` body never itself raises on `nil` regardless): `Game::
+# Actor#unequip` (`slot == .../ slot >= 0 && slot < ...`, both real callers --
+# `#change_class`'s own `EQUIP_ORDER.size` literal and `Party#unequip_to_bag`'s
+# own already-range-checked `slot` -- traced); `#base_stats` (`level >
+# levels`, every real caller passes `@level`/`actor.level`, always seeded by
+# `#set_level`'s own `level && level >= 1 ? level : 1`, or the literal `1`
+# Change Class's `CLASS_PARAM_RESET_LV1` branch passes); `#change_param`
+# (`type >= 0 && ...`/arithmetic on `delta`, its one real caller `Interpreter#
+# do_change_params` builds both from `cmd.param(i)`/`Game::Variables#[]`, both
+# already-established-safe shapes, and `Party#use_seed`'s own `seed_boosts`
+# array is built entirely from `it.*_points* || 0`); `#change_class`'s own
+# `class_id` position only (`class_id > 0`, its one real caller `Interpreter#
+# do_change_class` passes `cmd.param(2)` directly -- the other three
+# positions stay untyped, not annotated). `#battle_row=` is "assign-only"
+# (`@row = row == ROW_BACK ? ROW_BACK : ROW_FRONT` never raises on a bad
+# `row` on its own) -- every real caller was traced instead: two pass a
+# literal `Actor::ROW_*` constant, one passes `Combatant#row`'s own `self[:row]
+# || ROW_FRONT`, one is guarded by its own caller's `if m[:row]`, and
+# `Game::State.from_lsd`'s own restore passes `sa[:row]`, whose schema entry
+# (`SAVE_PARTY_ACTOR` field 0x5B) carries a real `default: 0` -- unlike
+# `SAVE_MOVABLE`'s `:map_id`/`:x`/`:y` above, `LCF.to_rb` never returns a bare
+# `nil` for this one.
+#
+# `Game::Map#in_bounds?(x, y)` (`x >= 0 && y >= 0 && x < @width && y <
+# @height`) has by far the widest real fan-in of any entry in this table --
+# a dozen-plus call sites across `RPG2k::Scene::Map`/`RPG2k::Scene::
+# MapViewer`/`game/lsd_io.rb` -- but every one already crashes on a non-
+# Integer `x`/`y` today via that same unconditional `>=`/`<` (a plain
+# NoMethodError, not a graceful nil-tolerant path), so retyping only changes
+# which exception class an already-broken call raises, the same accepted
+# reasoning `#half`/`#block_count_through`/`#approach`/`#tint_to`/`#shake`
+# below all share -- individual per-call-site tracing was not needed for any
+# of them, only confirming the annotated position is used this way with no
+# guard in front of it (spot-checked test.rb's own `m.in_bounds?(0, 0)`/
+# `m.in_bounds?(4, 0)` against the real compiled entry point regardless).
+# `Game::Map#substitute_tile`'s own `layer` position (`layer == 0 ? 0 : 1`,
+# a bare `==`, not itself a crash on `nil`) was traced instead: its one real
+# caller (`Interpreter#do_tile_substitution`, i.e. `map.substitute_tile
+# (cmd.param(0), ...)`) always passes a `cmd.param` result. `#set_tile`/
+# `#tile` (both private) only type their own `x`
+# position, which each forwards straight into that same already-crashes-
+# on-nil `#in_bounds?(x, y)` before doing anything else with it -- their
+# public callers (`#set_lower`/`#set_upper`/`#lower`/`#upper`) were not
+# separately traced, since any bad `x` reaching them already raises via
+# `#in_bounds?` regardless of which side of the call boxes it.
+#
+# `Game::Transition#half(total)` (`total / 2`) and `#block_count_through
+# (frame)` (`frame < 0`) both already crash on a non-Integer argument via
+# their own unconditional arithmetic/comparison; their few self-implicit
+# callers (`half(@height)`/`half(@width)`, `block_count_through(@frame -
+# 1)`/`(@frame)`) all read ivars `#initialize`/`#advance` only ever set to
+# real Integers regardless. `Game::Screen#approach(cur, target, step)`'s own
+# `target` position (`(target - cur).abs <= step`) is the same shape, called
+# only as `approach(@pan_x, @pan_tx, ...)`/`approach(@pan_y, @pan_ty, ...)`,
+# both ivars seeded from a literal `0` or an `h[:pan_tx] || 0`-style
+# fallback everywhere they're set.
+#
+# `Game::Screen#tint_to`'s own `frames` position (`frames <= 0`) and
+# `#shake`'s own (same shape) are both the crashes-already case too, each
+# with exactly one real caller (`Interpreter#do_tint_screen`/
+# `#do_shake_screen`), both building `frames` from `cmd.param(i) *
+# FRAMES_PER_TENTH`. `#restore_tint`'s own `frames` position, by contrast,
+# is "assign-only" (`@frames = frames`, no arithmetic) -- traced instead:
+# its one real caller is `Game::State.from_lsd`'s own restore, passing
+# `scr[:tint_time_left]`, whose `SAVE_SCREEN` schema entry (field 15)
+# carries a real `default: 0`, so `LCF.to_rb` never returns `nil` for it
+# even when the chunk's own byte for this field is absent. `#flash`'s own
+# five positions (`r, g, b, power` all "assign-only"; `frames` crashes-
+# already via its own `frames <= 0`) were all traced: every real call site
+# (`Interpreter#do_flash_screen`'s `cmd.param(i) * FLASH_SCALE`,
+# `Scene::Map#fire_animation_flashes`'s `(t.flash_red || 0) * 8`-style
+# reads, `Scene::Map`'s own literal `STEP_DAMAGE_FLASH`/`(0, 0, 0, 0, 0)`
+# calls, scripts/rpg2k_logic_check.rb's literals) already guards or
+# defaults every one of the four "assign-only" positions -- the `spr.flash
+# (Color.new(...), ...)` calls elsewhere in `scene/map.rb`/`scene/battle.rb`
+# are a same-named but unrelated 2-argument method on the vehicle/target
+# sprite class, never this `Game::Screen#flash`, so they do not bear on this
+# entry at all.
+#
+# `Game::State#set_screen_transition`'s own `which` position (`which >= 0 &&
+# which < SCREEN_TRANSITION_SLOTS`) crashes already on a bad value; its one
+# real caller (`Interpreter#execute`'s own `Cmd::CHANGE_TRANSITION` branch)
+# passes `cmd.param(0)`.
+#
+# `Game::Interpreter#skip_to`'s own `indent` position (`c.indent == indent`,
+# a bare `==`) was traced: every real caller passes `cmd.indent`, an
+# `LCF::EventCommand` reader whose value is always `read_ber`'s own result
+# (`parse_event_commands`) -- `read_ber` either returns a real Integer or
+# raises `'truncated BER integer'` outright, never `nil`. `#find_choice_
+# option`'s own `index` (`c.param(0) == index`, same bare-`==` shape) has
+# one real caller, `#choose(index)`, itself called only with a literal (`it.
+# choose(0)`) or `@choice_index` (an Integer ivar only ever `+=`/`-=`/`%=`d).
+# `#do_control_vars_range_variable`'s own `a`/`b` positions (`src >= a && src
+# <= b`, `(a..b)`, ...) crash already on a bad Range endpoint; its one real
+# caller (`#do_control_vars`) builds both from `#range(cmd)`'s own `r.begin`/
+# `r.end`, which that method's own body only ever assigns from `cmd.param`/
+# `Game::Variables#[]` reads or the literal `1..0`/`a..b`, all real Integers.
+# `#vehicle_operand`'s own `ref` position (`ref - CHAR_BOAT`) crashes already;
+# its one real caller (`#event_operand`) only reaches it after its own `ref.
+# nil?`/`ref >= CHAR_BOAT && ref <= CHAR_AIRSHIP` guard already passed, which
+# a non-Integer `ref` could never do. `#screen_operand`'s own `attr` position
+# (`attr == 4 ? ... : ...`, bare `==`) was traced instead of `ref` (which
+# *is* nil-guarded here, but is not the annotated position): its one real
+# caller passes `cmd.param(6)` directly. `#queue_level_up_messages`'s own
+# `old_level`/`new_level` positions (`new_level > old_level`) crash already;
+# both real callers (`#do_change_exp`/`#do_change_level`) pass `a.level`
+# (before and after the change) for both. `#trunc_mod`'s own `n` position
+# (`n - d * trunc_div(n, d)`) crashes already; its one real caller (`#apply`'s
+# own `when 5` branch) passes `cur`, always a `Game::Variables#[]` read --
+# `d`/`val` stays untyped here regardless of `#apply` itself being excluded
+# above, since only position 1 is annotated on `#trunc_mod`.
+#
+# `LCF::EventCommand#initialize`'s own `code`/`indent` positions and `LCF::
+# MoveCommand#initialize`'s own `command_id`/`a`/`b`/`c` positions are both
+# "assign-only" bodies (`@code = code`, etc., no arithmetic at all) -- traced
+# instead of assumed: both classes' sole real construction sites
+# (`LCF.parse_event_commands`/`.parse_move_commands`) build every one of
+# these from `read_ber`, which -- as above -- never returns `nil`, only a
+# real Integer or a raised error; `Interpreter#start_death_handler`'s own
+# extra `LCF::EventCommand.new(Cmd::TELEPORT, 0, '', tp)` call passes a
+# constant and a literal. (Every other `EventCommand.new`/`MoveCommand.new`
+# call site in this codebase -- scripts/*.rb, mruby-*/test/*.rb -- either
+# runs under plain CRuby, never touching the compiled entry point at all, or
+# passes literal integers when it does run under the real mruby VM via
+# `mrbtest`, so neither needed separate tracing.)
 NATIVE_ARG_TARGETS = Set[
   'Game::Actor#gain_exp',
   'Game::Actor#change_level_by',
@@ -1981,8 +2199,34 @@ NATIVE_ARG_TARGETS = Set[
   'Game::Actor#free_two_handed_slot',
   'Game::Actor#slot_cursed?',
   'Game::Actor#base_param_limit',
+  'Game::Actor#unequip',
+  'Game::Actor#base_stats',
+  'Game::Actor#change_param',
+  'Game::Actor#change_class',
+  'Game::Actor#battle_row=',
+  'Game::Map#in_bounds?',
+  'Game::Map#substitute_tile',
+  'Game::Map#set_tile',
+  'Game::Map#tile',
+  'Game::Transition#half',
+  'Game::Transition#block_count_through',
+  'Game::Screen#tint_to',
+  'Game::Screen#restore_tint',
+  'Game::Screen#shake',
+  'Game::Screen#flash',
+  'Game::Screen#approach',
+  'Game::State#set_screen_transition',
   'Game::Interpreter#character_ref',
   'Game::Interpreter#trunc_div',
+  'Game::Interpreter#skip_to',
+  'Game::Interpreter#find_choice_option',
+  'Game::Interpreter#do_control_vars_range_variable',
+  'Game::Interpreter#vehicle_operand',
+  'Game::Interpreter#screen_operand',
+  'Game::Interpreter#queue_level_up_messages',
+  'Game::Interpreter#trunc_mod',
+  'LCF::EventCommand#initialize',
+  'LCF::MoveCommand#initialize',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
