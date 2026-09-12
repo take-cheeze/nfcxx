@@ -260,6 +260,15 @@ end
 # ---------------------------------------------------------------------------
 def build_registry(ireps, root_label)
   registry = Hash.new { |h, k| h[k] = [] }
+  # SUPER_SUPPORT: real class name -> its own real declared superclass
+  # name (a String), :none (no explicit superclass written -- real Ruby
+  # default is Object, and OP_SUPER's own real semantics, vm.c, start the
+  # method search one level above the CURRENT class either way, so :none
+  # is a real, useful fact, not just "unknown"), or simply absent from
+  # this Hash (a computed/unrecognized superclass expression -- see
+  # resolve_superclass_ref's own comment; never guessed). MODULE has no
+  # superclass at all, so only ever populated from a real CLASS opcode.
+  superclass_of = {}
 
   walk = lambda do |label, namespace|
     irep = ireps.fetch(label)
@@ -389,6 +398,19 @@ def build_registry(ireps, root_label)
         # matters so two same-named classes nested under different
         # modules aren't conflated into one registry entry.
         pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
+        # SUPER_SUPPORT: OP_CLASS's own real shape (3rd/mruby/include/
+        # mruby/ops.h: `R[a] = newclass(R[a], Syms[b], R[a+1])`, vm.c's
+        # own CASE(OP_CLASS)) puts the real superclass value in the very
+        # next register -- whatever wrote it is always the instruction
+        # immediately preceding this one in program order (real Ruby
+        # evaluates `class X < SUPER_EXPR`'s own SUPER_EXPR right before
+        # opening the class), so resolve_superclass_ref's own backward
+        # walk starts here, at this CLASS instruction's own index.
+        if insn.op == 'CLASS'
+          superclass_reg = (reg[/\d+/].to_i + 1).to_s
+          resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
+          superclass_of[pending_name] = resolved if resolved
+        end
       when 'SCLASS'
         # "SCLASS R1" -- OP_SCLASS's own real shape (src/codedump.c:
         # `SCLASS\tR%d`), R[a] = R[a].singleton_class. A real `class <<
@@ -1033,7 +1055,48 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
-  registry
+  [registry, superclass_of]
+end
+
+# SUPER_SUPPORT: resolve a real `class X < SUPER_EXPR`'s own SUPER_EXPR to
+# a real class name, walking backward from `before_idx` (the CLASS
+# instruction's own index) the same cautious, real-instruction-only way
+# trace_new_target's own GETMCNST/GETCONST chain walk does for a `.new`
+# call's receiver -- but general-purpose rather than gated on a pre-vetted
+# table, since the caller here (build_registry) is always actively
+# walking the exact real lexical namespace (`namespace`) a bare
+# superclass reference would resolve against, the same "real by
+# construction" guarantee resolve_singleton_receiver already relies on
+# for an identical bare-GETCONST case (only one level of nesting is ever
+# checked, matching that helper -- a real Module.nesting fallback search
+# through OUTER namespaces has no real case here to justify the extra
+# complexity, see this file's own top-level survey). A `MOVE` keeps
+# tracing through the same real register-aliasing every other backward
+# scan in this file already tolerates; anything else unrecognized
+# (a computed superclass expression, never seen in this closed world)
+# returns nil -- absent from superclass_of, never a wrong guess.
+def resolve_superclass_ref(irep, before_idx, reg, namespace)
+  path = []
+  (before_idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'LOADNIL'
+      return :none # no explicit superclass written -- real Ruby default is Object.
+    when 'GETMCNST'
+      path.unshift(insn.args[/::(\w+)/, 1])
+    when 'GETCONST'
+      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
+    else
+      return nil
+    end
+  end
+  nil
 end
 
 # ---------------------------------------------------------------------------
@@ -2858,6 +2921,76 @@ NATIVE_ARG_TARGETS = Set[
   'RPG2k::Scene::Battle#refresh_battle_list_arrows',
 ].freeze
 
+# SUPER_SUPPORT: an explicit, human-vetted "Owner#name" allowlist gating
+# real `super`/`super(...)` compilation -- the same NATIVE_ARG_TARGETS/
+# DIRECT_CONSTRUCT_TARGETS-style table this file already uses whenever a
+# mechanism's own soundness depends on a whole-program fact compile_insn
+# itself has no way to re-verify locally at codegen time (here: that no
+# real call site anywhere in the program ever passes an actual block
+# literal into the ENCLOSING method -- see below).
+#
+# A real closed-world survey (every real #error unhandled opcode SUPER
+# across the whole program, mirroring docs/adr/0145's own RESCUE survey)
+# found 11 methods blocked ONLY by SUPER, 10 of them inside owners this
+# project's own three *-compiled gems already cover -- those 10 fall into
+# exactly two real shapes (see compile_insn's own SUPER case for the
+# shapes themselves): `RPG2k::Scene::Battle#initialize`/`DebugMenu#
+# initialize`/`ItemMenu#initialize`/`Menu#initialize` (`super parent`,
+# explicit single arg, into `RPG2k::Scene::Base#initialize`), and
+# `RPG2k3::Scene::Battle#update`/`#drive_battle_command`/
+# `#enter_command_phase`/`#open_battle_options`/`#advance_actor`/
+# `#prev_commandable_actor_index` (bare `super`, zero mandatory args, into
+# `RPG2k::Scene::Battle`'s own same-named methods). The 11th
+# (`RGSS::Bitmap::LoadError#initialize`, into native `RuntimeError#
+# initialize`) isn't a covered owner at all and reaches a native
+# superclass regardless -- explicitly never a target here, same as any
+# other native-reaching call site this file's own devirtualization always
+# stays out of.
+#
+# Every real `super`/`super(...)` (mrbc's own codegen, `codegen_super`/
+# `codegen_zsuper`) unconditionally forwards whatever block was passed
+# into the CURRENT method, whether or not that method ever otherwise
+# touches its own block -- but a bc2cpp-compiled `_impl` function has no
+# block parameter in its own C++ signature at all (every register besides
+# self/mandatory-args is unconditionally nil-initialized, see
+# compile_method's own preamble), so this forwarded value is always nil
+# here, correct only if no real caller of the CURRENT (super-calling)
+# method ever actually supplies a block. Checked directly, not assumed,
+# for every one of these 10 entries: grepped every real call site of
+# `Battle.new`/`DebugMenu.new`/`ItemMenu.new`/`Menu.new` and of
+# `.update`/`.drive_battle_command`/`.enter_command_phase`/
+# `.open_battle_options`/`.advance_actor`/`.prev_commandable_actor_index`
+# across the whole closed world -- none pass a block literal. This is a
+# real, narrow soundness fact about THIS PROGRAM's own call sites, not a
+# permanent language guarantee, so it belongs in this same human-vetted
+# table rather than assumed automatically the way RESCUE/RAISEIF's own
+# always-safe translation could be (see compile_insn's own RESCUE
+# comment) -- adding a future entry here means re-checking this exact
+# fact for it, not just checking arity/cleanliness.
+#
+# Also checked, not assumed: neither `RPG2k::Scene::Base` (the first
+# group's own target) nor `RPG2k::Scene::Battle` (the second's) has any
+# `include`/`prepend` between it and its own caller class -- a real
+# `super` walks the actual C ancestor chain, which a naive "jump straight
+# to the registered superclass" skips a same-named module override on;
+# the whole closed world has exactly one real `include` anywhere
+# (`Enumerable`, an unrelated `mruby-lcf/mrblib/lcf.rb` class), so this
+# holds for every entry below, but -- same as the block-forwarding check
+# above -- is a fact about this program today, re-checked per future
+# entry, never a standing assumption.
+SUPER_TARGETS = Set[
+  'RPG2k::Scene::Battle#initialize',
+  'RPG2k::Scene::DebugMenu#initialize',
+  'RPG2k::Scene::ItemMenu#initialize',
+  'RPG2k::Scene::Menu#initialize',
+  'RPG2k3::Scene::Battle#update',
+  'RPG2k3::Scene::Battle#drive_battle_command',
+  'RPG2k3::Scene::Battle#enter_command_phase',
+  'RPG2k3::Scene::Battle#open_battle_options',
+  'RPG2k3::Scene::Battle#advance_actor',
+  'RPG2k3::Scene::Battle#prev_commandable_actor_index',
+].freeze
+
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
 # with exactly one definition anywhere in the whole program), this asks a
 # narrower question about ONE specific SEND -- "is THIS receiver provably a
@@ -3168,9 +3301,15 @@ class CodeGen
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
   }.freeze
 
-  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {})
+  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {}, superclass_of = {})
     @ireps = ireps
     @registry = registry
+    # SUPER_SUPPORT: real class name -> its own declared superclass name
+    # (String), :none (no explicit superclass -- real Object), or absent
+    # (unrecognized/computed expression) -- build_registry's own
+    # resolve_superclass_ref result, see that function's comment. The
+    # only real consumer is compile_insn's own SUPER case.
+    @superclass_of = superclass_of
     # irep label -> Annotations::Annotation (Annotations.extract's own
     # result) -- previously computed at the top level only to feed
     # IvarLayout.analyze's own opaque-argument fallback, never threaded
@@ -3553,6 +3692,33 @@ class CodeGen
     return nil unless compiles_clean?(defs.first.irep)
 
     defs.first
+  end
+
+  # SUPER_SUPPORT: the real target a `super`/`super(...)` inside
+  # `owner_def`'s own method reaches -- the same-named MethodDef on
+  # `owner_def.owner`'s own registered superclass -- but ONLY when
+  # `owner_def`'s own "Owner#name" is in the SUPER_TARGETS allowlist
+  # (see that constant's own top comment for the whole-program facts
+  # this gates on that this function alone can't re-verify: no real
+  # caller of THIS method ever passes a block, and no `include`/
+  # `prepend` sits between `owner_def.owner` and its own superclass).
+  # Unlike monomorphic_target (name-based, any owner), this is always
+  # relative to one exact owner's own declared superclass -- never a
+  # whole-program name search -- so a target here can be POLY by name
+  # (several unrelated classes defining the same method) and still
+  # resolve correctly, exactly the way real `super` dispatch always
+  # ignores every OTHER same-named definition in the program.
+  def super_target(owner_def)
+    return nil unless SUPER_TARGETS.include?("#{owner_def.owner}##{owner_def.name}")
+
+    superclass = @superclass_of[owner_def.owner]
+    return nil unless superclass.is_a?(String)
+
+    target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
+    return nil unless target_def && target_def.irep
+    return nil unless compiles_clean?(target_def.irep)
+
+    target_def
   end
 
   # Does compile_method(label) actually come out #error-free? A MONO name
@@ -5013,6 +5179,32 @@ class CodeGen
       # object here.
       ra = a[/^R(\d+)/, 1]
       "  if (!mrb_nil_p(r#{ra})) { mrb_exc_raise(M, r#{ra}); }\n"
+    when 'SUPER'
+      # "SUPER Ra n=N" -- OP_SUPER's own real body (vm.c) looks up this
+      # method's own name (`ci->mid`) starting one level above the
+      # CURRENT class, using `self` as receiver and N explicit args
+      # already sitting in R(a+1)..R(a+N) (mrbc's own codegen_super/
+      # codegen_zsuper -- confirmed directly against real disassembly,
+      # mruby-rpg2k/mrblib/scene/battle.rb's own `super parent` and
+      # RPG2k3::Scene::Battle's own bare `super`), always followed by one
+      # further register forwarding the CURRENT method's own block
+      # parameter -- never read here: a compiled `_impl` function has no
+      # block parameter of its own to forward in the first place (see
+      # SUPER_TARGETS' own comment), and every real target this ever
+      # fires for was independently checked to need none. `super_target`
+      # itself is gated on the SUPER_TARGETS allowlist -- see its own
+      # comment for the whole-program facts this depends on that this
+      # opcode alone has no way to re-verify at codegen time.
+      target_def = super_target(owner_def)
+      dest, nstr = a.split(/\s+/, 2)
+      d_reg = dest[/^R(\d+)/, 1]
+      n = nstr && nstr[/^n=(\d+)$/, 1]
+      if target_def && d_reg && n
+        args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+        "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
+      else
+        "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
+      end
     else
       "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
     end
@@ -5514,7 +5706,7 @@ if $PROGRAM_NAME == __FILE__
   order = dfs_order(ireps, root_label)
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
-  registry = build_registry(ireps, root_label)
+  registry, superclass_of = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
   # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
@@ -5618,7 +5810,7 @@ if $PROGRAM_NAME == __FILE__
   # `annotations` (computed above, previously fed only to IvarLayout.analyze)
   # also now drives NATIVE_ARG_TARGETS' own native-argument calling
   # convention -- see that constant's own comment.
-  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations)
+  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
