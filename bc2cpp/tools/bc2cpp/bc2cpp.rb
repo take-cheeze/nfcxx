@@ -564,12 +564,62 @@ def build_registry(ireps, root_label)
         # treats "has a real irep" as "is a real, potentially-compilable
         # leaf" -- exactly the correct treatment for a real SDEF-captured
         # body too, not a special case needing its own guard.
-        _reg, sname, irep_ref = insn.args.split(/\s+/, 3)
+        #
+        # Round 41 follow-up: this case used to hardcode owner as
+        # `"#{namespace || 'Object'}.singleton"` unconditionally, on the
+        # unstated assumption that SDEF's own receiver is always `self`. It
+        # isn't, structurally: codegen_sdef (mrbgems/mruby-compiler/core/
+        # codegen.c) runs `codegen(s, recv, VAL)` for SDEF's own receiver
+        # node -- an arbitrary expression, not just `self` -- onto the exact
+        # register OP_SDEF's own `a` operand later names, and the real VM
+        # (src/vm.c's OP_SDEF case) takes the singleton class of *whatever
+        # value that register holds at runtime* (`mrb_singleton_class(mrb,
+        # regs[a])`), just like OP_SCLASS does. This file's own top comment
+        # for this very case already says so in words ("def self.foo (or def
+        # SomeConst.foo)"), and the unfused sibling shape (TCLASS/SCLASS+
+        # METHOD+DEF, the DEF case below) and the SCLASS-opened-body case
+        # above both correctly resolve their own receiver via
+        # resolve_singleton_receiver instead of assuming `self` -- this SDEF
+        # case was the one place in the file that still assumed it. Blindly
+        # trusting `namespace` for a real `def SomeConst.foo` that fuses to
+        # SDEF (reachable exactly like today's own `def self.foo` SDEF
+        # targets, whenever the child irep index still fits a byte) would
+        # register the method under the WRONG owner -- the enclosing
+        # namespace's own singleton, not SomeConst's -- a real
+        # devirtualization-soundness violation of the same shape this SDEF
+        # case's own comment already documents SDEF closing (the `Game.
+        # clamp`-vs-`RPG2k::Scene::MapViewer#clamp` collision) if `SomeConst`
+        # and the enclosing namespace ever collide by name elsewhere. Not
+        # currently exploitable (confirmed: no `def SomeConst.foo` shape --
+        # only `def self.foo` -- appears anywhere in this project's own real
+        # `.rb` sources today, grepped directly), but the same "close it
+        # regardless, it's real and general" discipline every other
+        # SDEF/SCLASS/DEF fix in this file already follows. Reusing
+        # resolve_singleton_receiver (defined once, above) here is exactly
+        # behavior-preserving for every real target today: a `def self.foo`
+        # always resolves via its own LOADSELF, to the identical
+        # `namespace || 'Object'` this case already computed by hand: the
+        # receiver's own codegen (`codegen(s, recv, VAL)` then `pop()`,
+        # codegen_sdef above) writes LOADSELF/GETCONST into the exact same
+        # register OP_SDEF's own `a` operand later names, with only
+        # EXT1/EXT2/EXT3 pseudo-instructions possibly interposed --
+        # resolve_singleton_receiver's own backward scan already tolerates
+        # those (an EXT line's `args` carries no `R\d+` prefix of its own, so
+        # the `next unless pd == reg` guard skips straight past it). An
+        # unrecognized receiver (anything besides LOADSELF/GETCONST) now
+        # simply isn't registered at all -- always safe, the same "missed
+        # case, never a wrong one" guarantee every other backward-scan guard
+        # in this file already carries -- rather than silently mis-attributed
+        # to `namespace`.
+        reg, sname, irep_ref = insn.args.split(/\s+/, 3)
         sdef_name = sname.sub(/^:/, '')
         sdef_idx = irep_ref[/I\[(\d+)\]/, 1].to_i
         sdef_child_label = irep.reps[sdef_idx]
-        registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{namespace || 'Object'}.singleton",
-                                              irep: sdef_child_label, visibility: :public)
+        recv = resolve_singleton_receiver.call(reg, idx)
+        if recv
+          registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{recv}.singleton",
+                                                irep: sdef_child_label, visibility: :public)
+        end
       when 'DEF'
         # "DEF R1 :toned? (R2)" -- OP_DEF's own real shape (src/codedump.c:
         # `DEF\t\tR%d\t:%s\t(R%d)\n`). codegen_def/codegen_sdef
@@ -1876,6 +1926,48 @@ NATIVE_CONSTRUCT_TARGETS = {
 # re-checks this same fact live against `@registry` rather than trusting
 # this comment, so a future edit to either class's own source that adds one
 # is caught automatically, not silently missed.
+# Round 41 follow-up (a dedicated adversarial correctness sweep of this
+# mechanism, not a new motivating case): re-checked every real `owners:`
+# entry across all three `*-compiled` gems against this table's own 4-part
+# soundness bar, specifically looking for a class this table's own top
+# comment's "three ruled-out ones" section doesn't already name. Found
+# three MORE real classes hitting the exact same "bare-reference gap"
+# already documented above for `Game::Screen` (trace_new_target's own
+# GETCONST case -- `path.unshift(insn.args[/^R\d+\s+(\S+)/, 1]); return
+# path.join('::')`, this file's own `trace_new_target` -- returns only the
+# bare token a plain, lexically-scoped `GETCONST` opcode names, e.g.
+# `"Switches"`, never resolving it through the enclosing namespace the way
+# GETCONST's own real runtime lookup chain would, so it can never equal a
+# fully-qualified `"Game::Switches"` string this table stores): `Game::
+# Switches.new`/`Game::Timer.new` (x2)/`Game::MessageConfig.new`, every one
+# of them a bare, unqualified `Switches.new`/`Timer.new`/`MessageConfig.new`
+# reference inside `Game::State#initialize` (mruby-rpg2k/mrblib/game.rb) --
+# the identical shape as `Game::Screen`'s own already-documented miss, one
+# `Game::State#initialize` body over. All three otherwise clear the real
+# 4-part bar cleanly (checked directly, not assumed): zero `def self.new`/
+# `def self.allocate`/`class << self` anywhere in `mruby-rpg2k/mrblib/
+# game.rb` at all (confirmed by grep), all three `#initialize`s are 0-arg
+# (trivially `pure_mandatory_arity?`, matching each real call site's own
+# `n=0`), and all three already compile clean today (their own `_impl`
+# functions already exist in the real generated output, confirmed
+# directly). Verified empirically, not just reasoned about: temporarily
+# adding all four names (`Game::Switches`/`Game::Timer`/`Game::
+# MessageConfig`/`Game::Screen`) to this table and regenerating the real
+# `rpg2k_compiled_gen.cpp` produces a byte-for-byte IDENTICAL file to the
+# unmodified table -- confirming the bare-reference gap, not some other
+# unmet condition, is the actual and complete blocker for all four, exactly
+# as this table's own top comment already predicts for `Game::Screen`
+# alone. Left OFF this table (adding any of the four today is a proven
+# no-op, not a soundness risk, so there's nothing unsafe about leaving them
+# out) -- unlocking any of them needs the same real, general fix this
+# table's own top comment already calls out and defers ("making
+# trace_new_target's own GETCONST case lexical-scope-aware, mirroring
+# GETCONST's own ordinary codegen"): a change to a widely-shared helper
+# (also used by `NATIVE_CONSTRUCT_TARGETS`' own devirtualization and the
+# `ivar_classes`/`arg_classes` terminal sources) this round's own narrower
+# adversarial-sweep brief did not attempt, rather than guess at a fix for a
+# mechanism several other real call sites also depend on staying exactly as
+# conservative as it is today.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
@@ -2191,6 +2283,120 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map].freeze
 # runs under plain CRuby, never touching the compiled entry point at all, or
 # passes literal integers when it does run under the real mruby VM via
 # `mrbtest`, so neither needed separate tracing.)
+#
+# Round 41 follow-up (a dedicated adversarial correctness sweep of this
+# mechanism, not a new motivating case): every prior round's own "later
+# round re-checked every remaining annotation" sentence above only ever
+# named `mruby-rpg2k/mrblib` (`game.rb`/`interpreter.rb`) and
+# `mruby-lcf/mrblib/lcf.rb` -- `mruby-rpg2k/mrblib/scene/*.rb` and
+# `mruby-rpg2k/mrblib/game/battle_support.rb`, despite carrying real
+# `# bc2cpp: (fixnum...)`/`(symbol...)` annotations of their own on classes
+# already in `compiled_gems.rb`'s own `owners:` list (`RPG2k::Scene::
+# SaveLoad`/`Title`/`ItemMenu`/`Order`/`Base`/`Map`/`Battle`/`Menu`/
+# `DebugMenu`, `RPG2k::Scene::Map::LRUBitmapCache`), were never actually
+# swept against this table's own two-part bar at all -- confirmed directly
+# by grepping every `# bc2cpp:` annotation in the whole closed world and
+# checking which files the prior rounds' own comments ever named. This
+# round closes that specific audit gap for the small, easily-traced subset
+# below (single- or few-mandatory-argument methods with a short, fully
+# enumerable real call-site list); the remainder of `scene/battle.rb`'s own
+# ~25 annotations and `scene/battle_support.rb`'s own 1 are NOT covered by
+# this round (deliberately left for a future round, not silently skipped:
+# `battle.rb` is this codebase's largest, most call-site-dense file, and a
+# real per-entry trace to this table's own bar for every one of those would
+# be its own dedicated round, not a follow-up item of this one).
+#
+# `RPG2k::Scene::SaveLoad#move_selection(delta)`/`RPG2k::Scene::Title#
+# move_selection(delta)`/`RPG2k::Scene::ItemMenu#move_item_cursor(delta)`/
+# `RPG2k::Scene::ItemMenu#move_teleport_cursor(delta)`/`RPG2k::Scene::
+# Order#move_cursor(delta)`: five distinct methods (two different classes
+# share the `move_selection` name, three different classes share
+# `move_cursor`/`move_teleport_cursor` -- each entry below is independently
+# gated by its own exact "Owner#name" string, so this has no bearing on
+# soundness) all sharing one shape -- a single mandatory `delta`, used only
+# in a plain `@index + delta`/`(a + delta) % b`-style arithmetic expression
+# with NO nil-guard of any kind anywhere in the body -- and, checked
+# directly against the real regenerated `rpg2k_compiled_gen.cpp` (this
+# round's own diagnostic build), all five already have a real MONO/TYPED
+# devirtualized call site today (a direct `..._impl(...)` call, not a
+# `mrb_funcall`), so retyping actually removes a real `mrb_value` unboxing
+# step at each, not merely a no-op signature change. Every real caller of
+# all five, in the whole closed world, was individually grepped (not
+# assumed): each one passes a literal Integer (`1`, `-1`,
+# `ItemMenu::COLUMN_MAX` -- itself a literal `= 2`, or `-COLUMN_MAX`) --
+# there is no other call site of any of these five methods anywhere in this
+# project's own real source.
+#
+# `RPG2k::Scene::Map::LRUBitmapCache#initialize(capacity_bytes)` is
+# "assign-only" (`@capacity_bytes = capacity_bytes`, no arithmetic) --
+# traced instead: its only real construction sites are seven `LRUBitmapCache
+# .new(constrained_scale(SOME_LITERAL_BYTES))` calls in `scene/map.rb`
+# itself, and `#constrained_scale` (a private helper on the very same
+# enclosing `RPG2k::Scene::Map`, not `LRUBitmapCache`) always returns a real
+# Integer -- either its own literal `base` argument unchanged (the `fps >=
+# 60` early return, or its own `rescue StandardError` fallback), or a plain
+# arithmetic expression built from that same `base` (`base * fps / 60`, `base
+# / CONSTRAINED_SCALE_FLOOR_DIVISOR`) -- never `nil` on any path. Unlike
+# `Game::Transition#initialize`/`Game::Map#initialize` above,
+# `LRUBitmapCache` is not itself in `DIRECT_CONSTRUCT_TARGETS` (ordinary
+# `Class#new` dispatch, never `SEND :new`-devirtualized), so that exclusion
+# reason doesn't apply here; it has zero real devirtualized call sites of
+# its own today for the ordinary reason every un-direct-constructed
+# `#initialize` does (`compile_send`'s call-site-unboxing path is never
+# exercised by a plain `.new`), the same lowest-risk "entry-wrapper/impl-
+# signature only" shape `Game::Actor#gain_exp`/`#change_level_by`/
+# `#free_two_handed_slot` above already established as still worth adding.
+#
+# `RPG2k::Scene::SaveLoad#draw_slot_label(c, slot_index, color)`'s own
+# `slot_index` position (`(slot_index + 1).to_s`, direct arithmetic, no
+# guard) has one real caller, `#draw_slot_box(win, inner_w, slot_index)`,
+# which itself indexes `@slots[slot_index]` on the very same value BEFORE
+# ever calling `draw_slot_label` -- a non-Integer `slot_index` already
+# raises there first (`Array#[]` needs an implicit Integer conversion mruby
+# never grants a non-Integer), the same "crashes already" shape `Game::Map#
+# in_bounds?` above relies on, so no deeper trace into `#draw_slot_box`'s
+# own callers was needed. Checked directly against the real regenerated
+# output: already has a real MONO/TYPED devirtualized call site today.
+#
+# Explicitly considered and left OFF this round's own additions, for the
+# same "found and correctly excluded" reasons this table's own precedents
+# already establish: `RPG2k::Scene::Base#value_font_color(have, max,
+# can_knockout)` carries a real `(fixnum, fixnum, )` annotation on BOTH
+# `have` and `max`, but `max`'s own use (`max && max > 0 && have <= max /
+# 4`) is itself a defensive truthiness guard on the exact annotated
+# position -- the identical `knows_skill?`/`learn_skill` shape this table's
+# own top comment already declines to retype, so the whole entry stays off
+# rather than only partially applying an annotation this mechanism has no
+# way to split mid-tuple. `RPG2k::Scene::ItemMenu#prompt_item_target(id)`
+# (`@pending_item = id`, assign-only, no guard) was NOT added despite
+# looking identical in shape to the five `move_*` entries above: unlike
+# those, its own `id` traces back through `#choose_item`'s own internal
+# `id`/`it`/`sk` locals (never a bare parameter), which would need the same
+# "much deeper trace into an unrelated method's own control flow" this
+# table's own `Game::Party#can_cast?`/`Game::Interpreter#apply` write-ups
+# already decline to force through -- left for whichever future round
+# actually completes `scene/item_menu.rb`'s own sweep.
+# `RPG2k::Scene::Base#clip_text_to_width(c, text, w)`'s own `w` position
+# (`return '' if w <= 0`, crashes-already, no guard) is real and sound by
+# the same bar as every other entry here, but has ZERO real call sites of
+# any kind that devirtualize to it today -- checked directly against the
+# real regenerated output: its own one real call site (`RPG2k::Scene::
+# Map#draw_message_run`'s `clip_text_to_width(c, seg[:text], w)`) is a
+# genuine self-implicit call whose receiver's *static* owner (`RPG2k::
+# Scene::Map`) differs from the method's own defining owner (`RPG2k::
+# Scene::Base`, `Map`'s real superclass) -- this file's own MONO/TYPED
+# devirtualization never does inheritance-aware/superclass resolution (see
+# `monomorphic_target`'s own comment elsewhere in this file), so this call
+# site compiles to plain `mrb_funcall`, tagged `// POLY` in the real output,
+# regardless of `:clip_text_to_width` being MONO by name (exactly one real
+# bytecode def anywhere). Left off this round's own additions: unlike
+# `LRUBitmapCache#initialize` above (still worth adding despite zero call
+# sites, since a constructor's own entry wrapper still unboxes real incoming
+# arguments), a same-shaped but non-constructor method with zero call sites
+# and no real prospect of ever gaining one (the cross-owner shape above is
+# structural, not incidental) was judged not worth the added surface for
+# strictly zero measured benefit -- a judgment call, not a soundness finding,
+# so a future round is free to disagree and add it.
 NATIVE_ARG_TARGETS = Set[
   'Game::Actor#gain_exp',
   'Game::Actor#change_level_by',
@@ -2227,6 +2433,15 @@ NATIVE_ARG_TARGETS = Set[
   'Game::Interpreter#trunc_mod',
   'LCF::EventCommand#initialize',
   'LCF::MoveCommand#initialize',
+  # Round 41 additions -- see this constant's own top comment for the full
+  # per-entry trace.
+  'RPG2k::Scene::SaveLoad#move_selection',
+  'RPG2k::Scene::Title#move_selection',
+  'RPG2k::Scene::ItemMenu#move_item_cursor',
+  'RPG2k::Scene::ItemMenu#move_teleport_cursor',
+  'RPG2k::Scene::Order#move_cursor',
+  'RPG2k::Scene::Map::LRUBitmapCache#initialize',
+  'RPG2k::Scene::SaveLoad#draw_slot_label',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
