@@ -1812,11 +1812,11 @@ BC2CPP_COMPILED_GEMS = {
     # previously registry-visible only, and repeatedly called out elsewhere
     # in this file (e.g. the Game::Party/RPG2k::Scene::MapViewer follow-up)
     # as "legitimately too large to fully cover in one round," the exact
-    # same shape Game::Interpreter was in before its own round. 222 of its
+    # same shape Game::Interpreter was in before its own round. 223 of its
     # own 406 real instance bytecode-defined methods (its nested
     # LRUBitmapCache class's own 6 methods and its own single `def
     # self.tone_channel` singleton method are separate, out of scope here)
-    # compile clean and are registered below; the other 186 stay
+    # compile clean and are registered below; the other 185 stay
     # interpreted for the same already-established real gaps this file's
     # own prior rounds already document (a Ruby block, a rescue clause, a
     # keyword/splat-argument call, a non-mandatory-arity #initialize, plus
@@ -1844,6 +1844,34 @@ BC2CPP_COMPILED_GEMS = {
     # and the real generated output never DATA_PTR-embeds any of these 5
     # names for this class -- see register.cxx's own writeup for the full
     # verification.
+    #
+    # This round's own bug-hunt sweep found and fixed one real, live
+    # registration gap for this class, confirmed by diffing the real
+    # whole-program `== compiled entry points ==` listing's own entry-point
+    # names against every name actually referenced (as a bare C identifier)
+    # anywhere across all three compiled gems' own register.cxx: exactly
+    # two non-`LCF`-owned names were missing, and this one -- #active_battle
+    # (a bare `@battle` reader, `public :active_battle` right after its own
+    # `def`) -- was a genuine oversight, never counted in register.cxx's own
+    # top-comment gap breakdown as either "compiles clean" or any of its
+    # named gap categories. Now registered (mruby-rpg2k-compiled/
+    # src/register.cxx's own comment on that one line has the full writeup,
+    # including why its one real call site -- `scene.active_battle` in
+    # mruby-rpg2k/mrblib/main.rb, guarded by a preceding
+    # `scene.respond_to?(:active_battle)` check -- was already safe either
+    # way, since `active_battle` is MONO and that call site already
+    # devirtualized straight into the real `_impl` regardless of whether
+    # this entry point was ever registered; this fix only affects
+    # *non*-devirtualized dispatch to this method, which stayed on the
+    # interpreter until now). The other missing name this same diff found,
+    # `RGSS::Graphics.singleton#brightness_sprite`, is NOT a gap -- see
+    # mruby-rgss-compiled/src/register.cxx's own pre-existing comment right
+    # where its sibling `resize_screen`/`brightness=`/`freeze` are
+    # registered: it is genuinely `private`, mruby's public API has no
+    # "private class method" registration entry point at all, and its one
+    # real call site (inside `brightness=`, self-implicit) already
+    # MONO-devirtualizes into its `_impl` directly -- deliberately left
+    # unregistered, not missed.
     #
     # A round 29 follow-up adds RPG2k::Scene::Battle (mruby-rpg2k/mrblib/
     # scene/battle.rb) -- the RPG2000 turn-based fight scene itself, the
