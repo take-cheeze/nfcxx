@@ -1671,10 +1671,25 @@ end
 # a bare `Tone.new` relying on all-default 0s) just misses this path and
 # falls back to ordinary dynamic dispatch, same as any other unmodeled
 # shape in this file.
+#
+# `arg_type` (:int/:float, uniform across all of one class's own arguments
+# -- Rect's own fields are all mrb_int, Color/Tone's own are all mrb_float,
+# confirmed directly against each one's own lib.cxx struct definition)
+# says how this codegen unboxes each argument register BEFORE calling
+# `fn` -- `fn`'s own real C++ signature takes native mrb_int/mrb_float
+# parameters now, not mrb_value (mruby-rgss/src/lib.cxx's own comment on
+# these three functions has the full reasoning: a deliberately incremental
+# first step away from mrb_value at bc2cpp's own generated call sites,
+# starting here since these three already assumed one fixed native type
+# per field long before this). `mrb_as_int`/`mrb_as_float` are the exact
+# same unboxing calls that used to live inside `fn` itself -- relocating
+# them to the call site changes nothing observable (same TypeError-raising
+# for a bad argument, mrb_state* M has no notion of a calling-frame
+# boundary to cross), only which side of the call spells them out.
 NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss_tone_new_direct', class_fn: 'rgss_native_tone_class', arity: 4 },
-  'Color' => { fn: 'rgss_color_new_direct', class_fn: 'rgss_native_color_class', arity: 4 },
-  'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4 },
+  'Tone' => { fn: 'rgss_tone_new_direct', class_fn: 'rgss_native_tone_class', arity: 4, arg_type: :float },
+  'Color' => { fn: 'rgss_color_new_direct', class_fn: 'rgss_native_color_class', arity: 4, arg_type: :float },
+  'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4, arg_type: :int },
 }.freeze
 
 # Generalizes NATIVE_CONSTRUCT_TARGETS' own "MONO :new -> direct native
@@ -2596,6 +2611,12 @@ class CodeGen
   # the real (extern "C") one lib.cxx defines and fail to link; caught
   # exactly this way building the very first real caller (RGSS::Sprite's
   # own #tone/#color/#src_rect).
+  #
+  # Parameter types have to match lib.cxx's own real (native, not
+  # mrb_value) signature exactly, one real C++ overload-resolution/linkage
+  # concern, not just documentation -- see that file's own comment on
+  # these three functions for why `klass` is `RClass*` and every other
+  # parameter is `arg_type`'s own native C++ type (`mrb_int`/`mrb_float`).
   def emit_native_construct_decls
     return '' unless @native_construct_used.any?
 
@@ -2610,7 +2631,8 @@ class CodeGen
     @native_construct_used.sort.each do |known|
       native = NATIVE_CONSTRUCT_TARGETS.fetch(known)
       out << "RClass* #{native[:class_fn]}(void);\n"
-      params = (['mrb_state*'] + ['mrb_value'] * (native[:arity] + 1)).join(', ')
+      native_type = native[:arg_type] == :int ? 'mrb_int' : 'mrb_float'
+      params = (['mrb_state*', 'RClass*'] + [native_type] * native[:arity]).join(', ')
       out << "mrb_value #{native[:fn]}(#{params});\n"
     end
     out << "}\n"
@@ -3692,6 +3714,16 @@ class CodeGen
       # any other unmodeled variant.
       if native && n == native[:arity]
         @native_construct_used << known
+        # `fn`'s own real C++ signature takes native mrb_int/mrb_float
+        # parameters, not mrb_value (mruby-rgss/src/lib.cxx's own comment
+        # on these three functions has the full reasoning) -- unboxed
+        # right here, at the call site, with the exact same mrb_as_int/
+        # mrb_as_float calls that function used to make internally before
+        # this change; moving them here changes nothing observable (same
+        # TypeError-raising for a bad argument), it only changes which
+        # side of the call spells them out.
+        unbox = native[:arg_type] == :int ? 'mrb_as_int' : 'mrb_as_float'
+        unboxed_argv = argv.map { |a| "#{unbox}(M, #{a})" }
         note = "  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own " \
                "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n" \
                "  // Runtime-guarded: #{known} could have been reassigned at the constant level (e.g. " \
@@ -3699,10 +3731,14 @@ class CodeGen
                "-- #{recv} is whatever this method's own existing GETCONST resolution chain above just " \
                "produced, so a reassignment there is already reflected in it; falls back to ordinary " \
                "mrb_funcall (whatever #{recv} now actually is) rather than misconstruct if it doesn't " \
-               "match the real native class.\n"
+               "match the real native class. #{native[:fn]}'s own parameters are native mrb_int/" \
+               "mrb_float, not mrb_value, so this call site unboxes each argument register with the " \
+               "same #{unbox} that function used to call internally, and passes mrb_class_ptr(#{recv}) " \
+               "straight through (already computed for the guard just above -- no second, redundant " \
+               "mrb_class_ptr call needed).\n"
         return "#{note}" \
                "  if (mrb_class_ptr(#{recv}) == #{native[:class_fn]}()) {\n" \
-               "    r#{d} = #{native[:fn]}(M, #{([recv] + argv).join(', ')});\n" \
+               "    r#{d} = #{native[:fn]}(M, mrb_class_ptr(#{recv}), #{unboxed_argv.join(', ')});\n" \
                "  } else {\n" \
                "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
                "  }\n"
