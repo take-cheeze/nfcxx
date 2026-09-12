@@ -381,9 +381,36 @@ BC2CPP_COMPILED_GEMS = {
     # the full writeup); this was a real, previously-missed coverage
     # opportunity, not a case where the tool ever produced something
     # unsafe.
+    # Round 31 ("singleton/leftover mop-up") follow-up adds `StringIO` --
+    # not a class this project defines at all, but one it reopens: this
+    # same file (mruby-lcf/mrblib/lcf.rb, right above the LCF module body
+    # above) opens `class StringIO; def ungetbyte(substr); ...; end; end`,
+    # a real bytecode-defined method that this project's own real
+    # ungetc-based fallback wraps around StringIO's native #ungetc. The
+    # whole-program registry correctly reports it `POLY :ungetbyte (2
+    # defs: StringIO, <native>)` -- the native half is mruby-io's own
+    # `IO#ungetbyte` (extract_native_method_names's own core-registry scan,
+    # `core_native_srcs`), a different class colliding only by bare name,
+    # never this method's own owner -- so registering StringIO here changes
+    # no MONO/POLY soundness, exactly the "registry keys by name, not by
+    # class" property this whole mechanism relies on everywhere else. Real
+    # timing precedent for reopening a class this gem does not itself
+    # define: mruby-stringio is a real, always-active gem this project
+    # loads before mruby-lcf (mruby-lcf/mrblib/lcf.rb's own `StringIO.new`
+    # call sites throughout already depend on that load order working
+    # today), and mruby-lcf-compiled's own `add_dependency 'mruby-lcf'`
+    # guarantees mruby-lcf's own C hook + mrblib (this reopening included)
+    # have already fully run by the time this gem's own init installs the
+    # compiled override -- the identical "already loaded by dependency
+    # order" guarantee every native RGSS class override in this project
+    # already relies on, just one level further out (a core mrbgem instead
+    # of this project's own). No ivar embedding concern: `#ungetbyte`
+    # touches no ivar at all (it calls `substr.is_a?(Integer)`/`ungetc`),
+    # and StringIO has no bytecode-defined `#initialize` of its own for
+    # `drop_unsafe_embeddings` to even consider regardless.
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
                LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
-               LCF::Array1D LCF::Array2D],
+               LCF::Array1D LCF::Array2D StringIO],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -1909,6 +1936,222 @@ BC2CPP_COMPILED_GEMS = {
     # docs/adr/0139's own round 30 follow-up for the full breakdown and the
     # complete before/after regression-safety verification across all
     # three compiled gems.
+    #
+    # Round 31 adds two more, both real instance-method classes (no
+    # `.singleton` mechanism needed for either): `Game::Battle::Combatant`
+    # and `RPG2k` itself.
+    #
+    # `Game::Battle::Combatant` (mruby-rpg2k/mrblib/game/battle.rb) is a
+    # `Struct.new(:name, ..., :actor, :states, ...) do ... end` -- the
+    # ephemeral per-fight battler snapshot Game::Battle actually operates
+    # on (see this ADR's own fourth-severe-bug follow-up, which first made
+    # a `Struct.new(...) do...end` block's own real `def`s visible to the
+    # registry at all, using this exact class as its own live-bug proof).
+    # All 16 of its own real `def`s inside that block compile clean, no new
+    # opcode work needed: `#atk_states`, `#row`, `#gauge`, `#dead?`,
+    # `#display_max_hp`, `#display_max_mp`, `#strike_count`,
+    # `#half_sp_cost?`, `#turns_taken`, `#next_battle_turn`,
+    # `#out_of_play?`, `#member?`, `#int`, `#state?`, `#back_row?`,
+    # `#gauge_full?` -- confirmed in a real `ONLY_OWNERS` run against a
+    # real host `mrbc`, not just the unrestricted whole-program diagnostic:
+    # exactly these 16 appear in `== compiled entry points ==`, arities
+    # matching the source (`#state?` takes 1 mandatory argument, every
+    # other one 0), none flagged private/protected (`Struct.new`'s own
+    # block carries no bare `private`/`protected` anywhere).
+    #
+    # No ivar embedding at all, and not merely because of the usual
+    # non-mandatory-`#initialize` gate: a `Struct`'s own members are never
+    # backed by `iv_tbl`/`SETIV`/`GETIV` in the first place (mruby's own
+    # `mruby-struct` stores them positionally), so every one of these 16
+    # methods reads a member via a plain self-implicit method call
+    # (`hp`, `self[:row]`, ...), never a `GETIV` -- confirmed directly: the
+    # real whole-program `== ivar embedding ==` section has zero
+    # `Game::Battle::Combatant` lines (not even a later-vetoed raw
+    # `IvarLayout` proposal), and the class is absent from the "classes
+    # needing `MRB_SET_INSTANCE_TT`" listing both before and after this
+    # round. No `RClass*` type-tag change, no struct, nothing to guard.
+    #
+    # A structural subtlety re-confirmed rather than assumed, per this
+    # round's own explicit instruction to check `cpp_name`/`sanitize`
+    # collision safety directly: `#half_sp_cost?`/`#member?` each share
+    # their own owner with a `Struct`-native writer (`half_sp_cost=`/
+    # `member=`) that `sanitize` (`?`/`=` both collapse to `_`) would
+    # collide with under the exact same generated identifier -- the real,
+    # already-documented (docs/adr/0139's own round 30 adversarial sweep)
+    # "confirmed not currently live" finding that named this precise class.
+    # Still not live after actually shipping these methods: both `=`-halves
+    # are `Struct`-native (registered as synthetic, `irep: nil`
+    # `MethodDef`s by the `Struct.new` registry fix, never a real bytecode
+    # `def`), so `compile_all`'s own leaf worklist (`@owner_of[d.irep] = d
+    # if d.irep`) never inserts an entry for either and `cpp_name` is never
+    # invoked on them -- confirmed directly against the real generated
+    # `rpg2k_compiled_gen.cpp`: exactly one `Game__Battle__Combatant_half_
+    # sp_cost_impl`/`Game__Battle__Combatant_member_impl` symbol each (the
+    # real `def`s), no duplicate, no collision.
+    #
+    # Also worth recording rather than silently relying on: the
+    # whole-program registry lists `:atk_states`/`:gauge`/`:row` as POLY
+    # with "2 defs: Game::Battle::Combatant, Game::Battle::Combatant" --
+    # the same owner twice, because `Struct.new`'s own native reader for
+    # that member AND this block's own real `def` override (the one that
+    # actually wins at runtime, Ruby's ordinary last-`def`-wins semantics)
+    # both get registered as distinct `MethodDef`s under the identical
+    # owner string. Conservative, not unsound: it only means a call site
+    # sending one of these three names never devirtualizes into this class
+    # specifically (falls back to ordinary `mrb_funcall`, still correct),
+    # never that the wrong method could run. Real devirtualization still
+    # happens for the other, genuinely-MONO-or-uniquely-resolved names in
+    # this class: `#back_row?`/`#next_battle_turn`/`#out_of_play?`/
+    # `#turns_taken` are each called directly (no `mrb_funcall`) from
+    # already-compiled `Game::Battle` methods elsewhere in this same gem,
+    # confirmed directly in the real regenerated output.
+    #
+    # `RPG2k` itself (mruby-rpg2k/mrblib/main.rb) -- the top-level
+    # app/game object main.cxx constructs and drives (`push`/`pop` the
+    # scene stack, load the database/map-tree, boot the title screen or a
+    # skipped-title New Game, F8 bug-report text). 15 of its own real
+    # bytecode-defined methods compile clean, including `#initialize`
+    # itself (`def initialize args`, one mandatory argument, no super, no
+    # block): `#initialize`, `#hide_title?`, `#current_scene_name`,
+    # `#show_title?`, `#boot_title_or_new_game`, `#push_title_screen`,
+    # `#push`, `#pop`, `#pop_to_map`, `#map_scene`, `#map_path`,
+    # `#db_path`, `#load_map`, `#bug_report_interp_text`,
+    # `#bug_report_stamp` -- confirmed in a real `ONLY_OWNERS` run, not
+    # just the unrestricted diagnostic: exactly these 15 appear in
+    # `== compiled entry points ==`, matching source arity exactly
+    # (`#push`/`#map_path`/`#load_map`/`#bug_report_interp_text` each take
+    # 1 mandatory argument, the rest 0). `#initialize` is forced private by
+    # mruby's own interpreter regardless of source (`mrb_define_method_raw`
+    # special-cases this name unconditionally, docs/adr/0139's own
+    # coverage-expansion follow-up already established this), confirmed by
+    # the real diagnostic's own `[private -- use mrb_define_private_method,
+    # not mrb_define_method]` tag; the other 14 carry no such tag -- the
+    # one bare `private` anywhere in `main.rb` (line 299) sits inside the
+    # nested `RPG2k::Window` class body, not this outer class, confirmed by
+    # reading the real source directly rather than trusting indentation
+    # alone.
+    #
+    # Embedding safety checked directly, per this round's own explicit
+    # instruction, not assumed from `#initialize`'s own pure-mandatory-
+    # arity alone: `#initialize` DOES compile clean with pure mandatory
+    # arity, which is normally the first gate `drop_unsafe_embeddings`
+    # checks -- but this class still gets zero real embedded ivars, because
+    # every one of its own ivars (`@test_play`/`@hide_title`: boolean,
+    # `@db`: `LCF::Database`, `@map_tree`: `LCF::MapTree`, `@title`:
+    # `String`, `@scenes`: `Array`) is a type `IvarLayout`'s own embedding
+    # lattice never models (only Fixnum/Symbol are). So `every_accessor_
+    # compiles?` (the round 28 fix requiring every ivar-touching method,
+    # not just `#initialize`, to also compile clean) is never even reached
+    # for this class -- there is no raw candidate for it to accept or
+    # refuse in the first place. Confirmed directly against the real
+    # diagnostic, not inferred: the whole-program `== ivar embedding ==`
+    # section has zero `RPG2k#` lines, and `RPG2k` is absent from the
+    # "classes needing `MRB_SET_INSTANCE_TT`" listing both before and after
+    # this round -- unchanged at exactly `Game::Screen`,
+    # `RPG2k::Scene::VehicleWorld`.
+    #
+    # Real devirtualization proof, both directions: `#initialize`'s own
+    # self-implicit `db_path`/`boot_title_or_new_game` calls devirtualize
+    # straight into `RPG2k_db_path_impl`/`RPG2k_boot_title_or_new_game_
+    # impl` (no `mrb_funcall`), and already-shipped `RPG2k::Scene::
+    # ItemMenu#apply_switch_item`'s own `@parent.pop_to_map` (`@parent` a
+    # real `RPG2k` reference) now devirtualizes straight into `RPG2k_pop_
+    # to_map_impl` too -- a genuine cross-class call site, not merely a
+    # self-call, confirmed directly in the real regenerated
+    # `rpg2k_compiled_gen.cpp`. `:hide_title?`/`:pop`/`:push` are POLY
+    # (2-3 defs each, including `<native>`/`RPG2k::Scene::Title`/
+    # `RGSS::ErrorReport.singleton`) -- correctly never devirtualized
+    # *into* by any other call site sending those bare names, same safe
+    # conservative behavior as any other POLY name in this codebase.
+    #
+    # Round 31 ("singleton/leftover mop-up") follow-up picks off the
+    # remaining small `.singleton` scraps a real, unrestricted diagnostic
+    # run found but round 30's own two `.singleton`-coverage rounds didn't
+    # have time for -- all in `mruby-rpg2k/mrblib/game.rb` except
+    # `Game::BattlePage.singleton` (`mrblib/game/battle_support.rb`,
+    # alongside `Game::States`'s own second-half reopening there) and
+    # `RPG2k::Scene.singleton` (`mrblib/scene/base.rb`). Every one of these
+    # 12 owners is a plain `module` (`MoveType`/`MapAccess`/`Parallax`/
+    # `MessagePalette`/`MapBgm`/`BattlePage`/`WindowCursor`/`Message`/
+    # `EventPage`/`CharSet`/`Backdrop`/`Scene` -- confirmed directly by
+    # reading each one's own real `module X`/`class X` line, not assumed),
+    # never instantiated, so none was ever a `MRB_SET_INSTANCE_TT`
+    # candidate and none gets any ivar embedding -- confirmed by diff: the
+    # real "== ivar embedding ==" and "classes needing MRB_SET_INSTANCE_TT"
+    # sections are byte-identical before and after adding all 12. No bare
+    # `private`/`private_class_method`/`protected` anywhere near any of
+    # these 12 classes' own real source, so every one of the 34 real
+    # methods below is a plain, public `mrb_define_class_method`:
+    #
+    #   - `Game::MoveType.singleton` (4): `next_direction`/
+    #     `random_direction`/`toward_away_direction`/`bounce` -- the RPG2000
+    #     move-route direction-resolution table (a move command's own
+    #     numeric direction, resolved against the mover's current position).
+    #   - `Game::MapAccess.singleton` (4): `save_allowed?`/
+    #     `teleport_allowed?`/`escape_allowed?`/`allowed?` -- the current
+    #     map's own save/teleport/escape restriction flags.
+    #   - `Game::Parallax.singleton` (3): `autoscroll_px`/`axis_offset`/
+    #     `anchored_offset` -- parallax-background pixel-offset math.
+    #   - `Game::MessagePalette.singleton` (3): `valid?`/`cell_origin`/
+    #     `shadow_origin` -- the message-window text-color palette's own
+    #     cell geometry in the system graphic.
+    #   - `Game::MapBgm.singleton` (2): `int_field`/`chunk_for` -- save-chunk
+    #     field decoding for a map's own background music state, the same
+    #     shape `Game::State.singleton`'s own `bgm_from_chunk`/
+    #     `se_from_chunk` (already registered above) already established.
+    #   - `Game::BattlePage.singleton` (2): `check_turns`/`hp_within?` --
+    #     RPG2000 troop-page trigger-condition evaluation.
+    #   - `Game::WindowCursor.singleton` (1): `dest_rect` -- the selection
+    #     cursor's own destination rectangle for a given cell.
+    #   - `Game::Message.singleton` (1): `parse` -- message-command escape
+    #     sequence parsing (`\N[n]`, `\V[n]`, ...).
+    #   - `Game::EventPage.singleton` (1): `compare` -- event-page priority
+    #     comparison (which page's own conditions currently apply).
+    #   - `Game::CharSet.singleton` (1): `frame_rect` -- a charset sprite
+    #     sheet's own per-frame source rectangle.
+    #   - `Game::Backdrop.singleton` (1): `int_field` -- save-chunk field
+    #     decoding for the battle backdrop, the same shape as `Game::
+    #     MapBgm.singleton#int_field` right above.
+    #   - `RPG2k::Scene.singleton` (1): `battle_scene_class` -- resolves
+    #     `RPG2k3::Scene::Battle` vs. the plain RPG2000 `Battle` scene by
+    #     edition, a bare `def self.battle_scene_class(db)` (not
+    #     `class << self`) directly on the `RPG2k::Scene` module itself
+    #     (`mrblib/scene/base.rb`, not `main.rb`) -- re-derived from the
+    #     real source rather than trusted from the task's own two-file
+    #     guess.
+    #
+    # Every real, live GETCONST inside these 34 bodies (`RPG2k::Scene.
+    # singleton#battle_scene_class`'s own `RPG2k3::Scene::Battle`/`Battle`
+    # references) resolves at the correct owner-scope-first chain in the
+    # real generated output, re-confirmed directly rather than assumed
+    # from precedent -- the same `lexical_scope_path` fix this ADR's own
+    # ".singleton owner support" follow-up already established handles a
+    # bare `RPG2k::Scene.singleton` owner with zero further changes.
+    #
+    # Also closes out `RPG2k::Scene::Map::LRUBitmapCache` (`mrblib/
+    # scene/map.rb`), a small per-category tile-bitmap LRU cache nested
+    # inside `RPG2k::Scene::Map` -- explicitly called out as out of scope
+    # when `RPG2k::Scene::Map` itself was first added as an owner. 5 of
+    # its 6 real methods compile clean and register below: `#initialize`
+    # (private -- every `#initialize` is implicitly private in real Ruby
+    # regardless of a bare `private` marker, confirmed against the real
+    # diagnostic's own tag; pure mandatory arity, one argument,
+    # `@capacity_bytes = capacity_bytes`), `#[]`, `#[]=`, `#key?`, and the
+    # private `#bitmap_bytes` helper. `#evict_lru_until_within_budget`
+    # (also private) is the one method that stays interpreted -- a real
+    # `@entries.each_key { |k| ... break }` block, the same already-
+    # established BLOCK/SENDB gap as everywhere else in this file -- and
+    # `[]=`'s own call into it correctly falls back to ordinary dynamic
+    # dispatch rather than devirtualizing into a nonexistent compiled
+    # target, confirmed directly against the real generated output. No
+    # MRB_SET_INSTANCE_TT call belongs here: @capacity_bytes looks
+    # embeddable in IvarLayout.analyze's own raw pass (backed by this
+    # class's own pre-existing `# bc2cpp: (fixnum)` annotation on
+    # #initialize) but drop_unsafe_embeddings's every_accessor_compiles?
+    # gate correctly refuses it -- @bytes is compared against
+    # @capacity_bytes inside #evict_lru_until_within_budget, which never
+    # compiles -- confirmed directly: this class does not appear in the
+    # real "classes needing MRB_SET_INSTANCE_TT" listing.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -1930,7 +2173,15 @@ BC2CPP_COMPILED_GEMS = {
                Game::Battle.singleton Game::Transition.singleton
                Game::State.singleton Game::Party.singleton
                Game::Picture.singleton Game::Character.singleton
-               Game::ChipSet.singleton RPG2k::Scene::Map.singleton],
+               Game::ChipSet.singleton RPG2k::Scene::Map.singleton
+               Game::Battle::Combatant RPG2k
+               Game::MoveType.singleton Game::MapAccess.singleton
+               Game::Parallax.singleton Game::MessagePalette.singleton
+               Game::MapBgm.singleton Game::BattlePage.singleton
+               Game::WindowCursor.singleton Game::Message.singleton
+               Game::EventPage.singleton Game::CharSet.singleton
+               Game::Backdrop.singleton RPG2k::Scene.singleton
+               RPG2k::Scene::Map::LRUBitmapCache],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
@@ -2406,9 +2657,83 @@ BC2CPP_COMPILED_GEMS = {
     # diagnostic upper bound exactly), of which 38 are registered as real
     # `Class.method_name` entry points and 1 (Graphics.singleton#
     # brightness_sprite) is compiled-but-intentionally-unregistered.
+    #
+    # Round 31 ("singleton/leftover mop-up") follow-up closes out
+    # `RGSS::Font.singleton` -- the one `.singleton`-owned method this
+    # ADR's own "RGSS::Font investigated, and NOT added" follow-up (several
+    # rounds up, before ".singleton owner support" existed at all) left as
+    # "known-good, still-available" once the mechanism became real. Its
+    # one real method, `self.exist?(name)` (a bare `class << self ...
+    # def exist?(name); true; end; end` body -- `mruby-rgss/mrblib/
+    # lib.rb`), re-confirmed compiling clean in a real `ONLY_OWNERS` run
+    # exactly as the prior follow-up's own diagnostic already showed it
+    # would (nothing about the method's own body changed since then -- only
+    # whether the mechanism could ever *emit* it did). `RGSS::Font` itself
+    # is still not a plain (non-`.singleton`) owner: `#initialize(name =
+    # Font.default_name, size = Font.default_size)` still has two real
+    # optional arguments, hitting the same `pure_mandatory_arity?` gate as
+    # ever, re-confirmed against the real `#error` marker with
+    # `SKIP_UNSUPPORTED=0` -- unchanged since that earlier follow-up, so
+    # `RGSS::Font` (without `.singleton`) still contributes zero real
+    # coverage and is correctly left out. No embedding concern:
+    # `RGSS::Font.singleton#exist?` touches no ivar of any kind (`true`,
+    # a bare literal return), and even if it did, a `.singleton`-owned
+    # method's ivars are class ivars on a different object than any
+    # instance's own iv_tbl (this same mechanism's own introducing round
+    # already verified that isolation directly against the real code, not
+    # merely from Ruby semantics). Registered below via
+    # `mrb_define_class_method`, the same `font` `RClass*` fetched once and
+    # reused for this one method (Font has no other owner side to share it
+    # with).
+    #
+    # Also closes out two tiny leftover instance-method classes this same
+    # round's task named, both re-confirmed in a real `ONLY_OWNERS` run:
+    #
+    # `RGSS::ErrorReport::Tee` (`mruby-rgss/mrblib/error_report.rb`) -- a
+    # thin `IO`-like wrapper that mirrors every real write to
+    # `RGSS::ErrorReport.record` before forwarding to its own wrapped
+    # `@io`. Only `#initialize(io)` is a real, individually-compilable
+    # bytecode leaf (`@io = io`, pure mandatory arity, one argument) --
+    # `#write`/`#print` (`*args` splat) and `#puts` (calls `ErrorReport.
+    # puts_text`, already documented elsewhere in this file as a real
+    # gap) all stay interpreted, unchanged from before this round. Like
+    # every `#initialize` in real Ruby, it is implicitly private (no bare
+    # `private` needed in the source for that), confirmed directly against
+    # the real diagnostic's own `[private -- use
+    # mrb_define_private_method, not mrb_define_method]` tag -- registered
+    # accordingly below. `@io` is a `StringIO`/`IO`/custom-sink reference
+    # (confirmed by this file's own earlier `profile_annotations.rb`
+    # follow-up, which observed its real runtime class across actual test
+    # runs), never Fixnum/Symbol, so it was never an embedding candidate
+    # regardless of this class's own real diagnostic result (`RGSS::
+    # ErrorReport::Tee` does not appear in the real "classes needing
+    # MRB_SET_INSTANCE_TT" listing either way).
+    #
+    # `Array` (`mruby-rgss/mrblib/array_include.rb`) -- not a class this
+    # project defines, but one it reopens: a plain index-loop `#include?`
+    # replacing mruby's own block-allocating `Enumerable#include?`
+    # fallback (this file's own top comment has the full performance
+    # rationale). The whole-program registry correctly reports it `POLY
+    # :include? (2 defs: Array, <native>)` -- the native half is
+    # `Module#include?` (3rd/mruby/src/class.c, a *different* real method
+    # that only collides by bare name, checking whether a module is
+    # included rather than whether an array contains a value), never this
+    # method's own owner, so registering `Array` here changes no MONO/POLY
+    # soundness, the same "registry keys by name, not by class" property
+    # `StringIO` above (mruby-lcf-compiled) already relies on. Same real
+    # gem-load-order precedent as `StringIO`: `mruby-rgss`'s own C hook +
+    # mrblib (this reopening included) have already fully run by the time
+    # `mruby-rgss-compiled`'s own init installs the compiled override
+    # (`add_dependency 'mruby-rgss'`), so the interpreted version this
+    # override replaces is already correctly in place beforehand, exactly
+    # like every other native-class override in this file. No ivar
+    # embedding concern: `#include?`'s own index loop (`self[i] == obj`)
+    # touches no ivar at all, and `Array` has no bytecode-defined
+    # `#initialize` of its own for `drop_unsafe_embeddings` to even
+    # consider.
     owners: %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window RGSS::Bitmap RGSS::Bitmap.singleton
                RGSS.singleton RGSS::Audio.singleton RGSS::Input.singleton RGSS::ErrorReport.singleton
-               RGSS::Graphics.singleton],
+               RGSS::Graphics.singleton RGSS::Font.singleton RGSS::ErrorReport::Tee Array],
     out_symbol: 'rgss_compiled',
   },
 }.freeze
