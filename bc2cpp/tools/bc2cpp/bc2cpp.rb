@@ -2634,6 +2634,141 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
 # structural, not incidental) was judged not worth the added surface for
 # strictly zero measured benefit -- a judgment call, not a soundness finding,
 # so a future round is free to disagree and add it.
+#
+# Round 47: the dedicated `scene/battle.rb` sweep round 41's own follow-up
+# explicitly deferred ("its own dedicated round, not a follow-up item"),
+# closed now. Swept all 15 real `# bc2cpp:` annotation comments in
+# `mruby-rpg2k/mrblib/scene/battle.rb` (14 of them naming a `fixnum`/
+# `Symbol` position; the 15th, on `#initialize`, is a class-name annotation
+# -- `(RPG2k::Scene::Map, Hash, Game::Interpreter)`, `ClassAnnotations`
+# territory, not this table's own concern), plus `mruby-rpg2k/mrblib/game/
+# battle_support.rb`'s own 3 and `mruby-rpg2k/mrblib/scene/
+# battle_support.rb`'s own 1 -- confirmed by a fresh whole-closed-world grep
+# for `# bc2cpp: (`, not just trusted from the dispatching round's own
+# count. The latter two files needed no new work: `game/battle_support.rb`'s
+# `Game::EnemyAi#enemy`/`#set_switch` are the exact two methods round 46's
+# own writeup above already traced and excluded (both open with an
+# `id && id > 0`-style guard tolerating a genuine nil `id` today); its
+# third annotation, `EnemyAi#initialize(db, state)`, carries no fixnum/
+# symbol position at all (`Game::State`, a class-name annotation). `scene/
+# battle_support.rb`'s own one annotation, `Scene::Base#sticky_list_top`,
+# is already on this list (round 46 above).
+#
+# Every one of `scene/battle.rb`'s own 9 real additions below was checked
+# against a real, `SKIP_UNSUPPORTED=0` regenerated `rpg2k_compiled_gen.cpp`
+# (built from scratch this round: `git submodule update --init 3rd/mruby
+# 3rd/mruby-marshal 3rd/mruby-onig-regexp 3rd/mruby-stringio
+# 3rd/mgem-list`, all nine `patches/*.patch` files applied via `scripts/
+# apply_mruby_patch.bash`, then a real host `mrbc` built by running `rake`
+# from *inside* `3rd/mruby` itself with `HOST_CXX=c++`, the same recipe
+# this file's own prior follow-ups already document) -- not merely
+# `grep`ped for its own name in a `SKIP_UNSUPPORTED=1` run, which this
+# round's own immediate predecessor (round 46) learned the hard way
+# produces a real, misleadingly-clean-looking false positive: a method's
+# own `_impl(mrb_state* M, ...)` signature line is ALWAYS emitted, even
+# when its body is nothing but `#error unhandled opcode ...` lines, because
+# bc2cpp.rb prints the signature before ever walking the body's own
+# instructions. Reading each candidate's own real generated BODY (not just
+# grepping for its declaration) caught two genuine misses this round's own
+# first pass, going in, would otherwise have missed entirely:
+#
+# `#enter_battle_result(result)` (`@ui[:result] = result; ...; [@ui[:status_win],
+# @ui[:cmd_win]].each { |w| w.dispose if w }; ...`) and `#battle_result_lines
+# (result, troop)` (`troop.drops(...).each do |iid| ... end`, `@state.party.
+# actors.each do |a| ... end`) both looked promising on paper -- `#error
+# unhandled opcode BLOCK`/`SENDB` in each one's own real generated body says
+# otherwise: both end in a real Ruby block this compiler does not support,
+# so neither has a real `_impl` to retype regardless of anything else. (Both
+# also fail this table's own OTHER bar independently, a second, unrelated
+# reason each stays off this list: `result`'s own real value at the one
+# non-literal, non-`end_round`-preceded call site --
+# `Scene::Battle#leave_battle_event_phase`'s own `if battle.finished? ...
+# enter_battle_result(battle.result)`, with no intervening `end_round` call
+# for that round -- is the exact same "can't fully verify @result is
+# non-nil there" gap round 46's own `Game::Interpreter#resume_battle`
+# write-up above already found and declined to force through; every OTHER
+# real call site of `#enter_battle_result` -- `#settle_already_finished_battle`/
+# `#finish_round_animation`/`RPG2k3::Scene::Battle#drive_battle_atb`/
+# `#finish_round_animation`'s own four `battle.result` reads, plus the
+# literal `enter_battle_result(:escape)` in `#try_battle_escape` -- calls
+# `battle.end_round` immediately beforehand or passes a literal, so only
+# this one path is unresolved; `#battle_result_lines`'s own `result`
+# position is nil-TOLERANT regardless, not crashes-already: `return
+# [term(:escape_success)] if result == :escape; return [term(:defeat)]
+# unless result == :victory` both bare `==`, so a genuine nil `result`
+# reaching here today silently reads as "defeat" rather than raising,
+# exactly the `knows_skill?`/`learn_skill` shape this table's own top
+# comment already declines to retype.) `#battle_level_up_lines(actor,
+# before_level, before_skills)`'s own `before_level` position looked sound
+# on its own value-safety merits too (its one real caller,
+# `#battle_result_lines`'s own `lines.concat(battle_level_up_lines(a,
+# before_level, before_skills)) if before_level`, guards it directly at the
+# call site) -- moot regardless: its own body's `((before_level +
+# 1)..actor.level).each do |lv| ... actor.learn_table.each do |sid, at|
+# ... end end` hits the identical BLOCK/SENDB gap, confirmed directly
+# against its own real generated body, independent of `#battle_result_lines`
+# already being excluded above for an unrelated reason.
+#
+# `#draw_battle_stat_segment(c, x, y, w, label, cur, max, can_knockout)`'s
+# own `x`/`w` positions (`limit = x + w`, `cx = x`, both unguarded
+# arithmetic, the identical "crashes already" shape round 46's own `Scene::
+# Base#draw_stat_segment` entry above already establishes for the same
+# `x`/`w` pair on that method's own near-duplicate namesake) looked sound
+# too -- also moot regardless: its own body's `pieces.each do |text, pw,
+# align, color| ... end` hits the same BLOCK/SENDB gap, confirmed directly
+# against its own real generated body. `#battle_list_window(x, w, labels,
+# sel, z, column_max: 1, idxs: nil, desc: nil, scroll_key: nil)`'s own `w`
+# position was never a real prospect at all -- four trailing keyword
+# arguments with defaults make this non-mandatory arity, the same
+# `#error ... has non-mandatory arguments` gap `Game::Actor#set_level`/
+# `#equip_item` above already establish, confirmed directly against its own
+# real generated `#error` line rather than assumed from the signature.
+#
+# The real, sound 9 below (every one confirmed CLEAN against the real
+# generated body -- no `#error` anywhere in it -- and every annotated
+# position either crashes already today with no nil-guard in front of it,
+# or every real caller was individually traced to a provably-safe value):
+# `#battler_z(i)` (`100 + (@ui[:troop].members.size - 1 - i)`, unguarded;
+# its 3 real callers -- `#build_battle_sprites`'s own `Array.new(...) { |i|
+# ... }` block index, `#refresh_battle_sprites`'s own `#rebuild_battler_
+# sprite(i, foe)` forwarding an `each_with_index` `i`, and `#reveal_battle_
+# monster(index)` forwarding `Interpreter#take_revealed_monsters`'s own
+# drained `@revealed_monsters` queue, pushed only via `Interpreter#execute`'s
+# own `cmd.param(0)` -- all provably Integer). `#actor_sprite_z(i)` (`200 +
+# i`, unguarded; its 2 real callers -- `#build_actor_sprite`'s own `i`
+# forwarding param, itself always an `Array.new(...) { |i| ... }` block
+# index or `@ui[:allies].length - 1` / an already-`return unless i`-guarded
+# `Array#index` result at every one of ITS OWN 3 real call sites -- and
+# `#reset_actor_battler_z`'s own `each_with_index` `i` -- all provably
+# Integer). `#battle_grid_position(i, party_size)`'s own `party_size`
+# position only (`GRID_TABLE_0[party_size - 1]`, unguarded; `i` stays
+# untyped, not annotated); its one real caller passes `@ui[:allies].
+# length`. `#move_battle_target_cursor(delta, foes_count)`'s own
+# `foes_count` position only (`foes_count > BATTLE_VISIBLE_ROWS`,
+# unguarded; `delta` stays untyped); both real callers pass `foes.length`.
+# `#move_battle_list_index(index, delta, size)`, all three positions
+# (`index + delta`, `target >= size`, `index / BATTLE_LIST_COLUMN_MAX`,
+# `size - 1`, every one unguarded arithmetic/comparison -- crashes already
+# regardless of either real caller's own `@ui[:skill_i]`/`@ui[:item_i]`/
+# `delta`/`.length` values, so neither needed separate tracing, the same
+# `Game::Map#in_bounds?` reasoning above). `#battle_skill_unavailable?
+# (cost, sk)`'s own `cost` position only (`current_actor.mp < cost`,
+# unguarded; `sk` stays untyped); both real callers destructure `sid, cost
+# = @ui[:skills][@ui[:skill_i]]` the same way. `#draw_gauge_system2(c,
+# system2, x, y, cur, max, which)`'s own `cur`/`max` positions (`width = 25
+# * cur / max`, unguarded arithmetic reached regardless of the earlier
+# `max == 0`/`cur == max` bare-`==` branches, which only select a draw
+# variant, never filter out a bad value -- crashes already); `which` stays
+# untyped. `#draw_number_system2(c, system2, x, y, value)`'s own `value`
+# position (`value >= 1000`, `value %= 1000`, ..., all unguarded). `#refresh_
+# battle_list_arrows(scroll, row_count, rows)`, all three positions
+# (`scroll > 0`, `scroll + rows < row_count`, unguarded) -- its one real
+# caller is inside `#battle_list_window` itself, which never compiles (see
+# above), so this has zero real devirtualized call sites today, the same
+# "entry-wrapper/impl-signature only, still worth it" shape `Game::Actor#
+# gain_exp`/`RPG2k::Scene::Map::LRUBitmapCache#initialize` above already
+# establish -- not a soundness concern, just the honest measured-benefit
+# note.
 NATIVE_ARG_TARGETS = Set[
   'Game::Actor#gain_exp',
   'Game::Actor#change_level_by',
@@ -2687,6 +2822,17 @@ NATIVE_ARG_TARGETS = Set[
   'RPG2k::Scene::Menu#wait_term_for',
   'RPG2k::Scene::Menu#enter_actor_selection',
   'RPG2k::Scene::VehicleWorld#initialize',
+  # Round 47 additions -- see this constant's own top comment for the full
+  # per-entry trace.
+  'RPG2k::Scene::Battle#battler_z',
+  'RPG2k::Scene::Battle#actor_sprite_z',
+  'RPG2k::Scene::Battle#battle_grid_position',
+  'RPG2k::Scene::Battle#move_battle_target_cursor',
+  'RPG2k::Scene::Battle#move_battle_list_index',
+  'RPG2k::Scene::Battle#battle_skill_unavailable?',
+  'RPG2k::Scene::Battle#draw_gauge_system2',
+  'RPG2k::Scene::Battle#draw_number_system2',
+  'RPG2k::Scene::Battle#refresh_battle_list_arrows',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
