@@ -60,8 +60,18 @@ require 'set'
 # (host/wio/desktop/...) is invoking this script.
 MRBC = ENV['MRBC'] || 'mrbc'
 
-Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file, keyword_init: true)
+Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
+                   :catch_handlers, keyword_init: true)
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
+# One entry of an irep's own real catch handler table (3rd/mruby/include/
+# mruby/irep.h's own `struct mrb_irep_catch_handler`) -- mrbc's `-v`
+# disassembly prints one "catch type: TYPE   begin: NNNN end: NNNN
+# target: NNNN" header line per real `begin...rescue...end`/`ensure`
+# construct, right before that irep's own instruction listing (see
+# parse_disasm_blocks). `type` is "rescue" or "ensure" (mrb_catch_type,
+# same header); begin/end/target are the exact same byte addresses this
+# file's own Insn#addr already uses everywhere else.
+CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: true)
 MethodDef = Struct.new(:name, :owner, :irep, :visibility, keyword_init: true)
 
 # ---------------------------------------------------------------------------
@@ -193,17 +203,29 @@ def parse_disasm_blocks(text)
   # `lineno` (already real, 1-indexed source line numbers within that
   # file) rather than repeating it on every instruction.
   block_files = []
+  # Parallel to `blocks` too -- every "catch type: ..." header line seen
+  # before that block's own instruction listing starts (zero or more; a
+  # real irep can have several independent rescue/ensure constructs, or
+  # none). See CatchHandler's own comment for what these three addresses
+  # mean; RESCUE_SUPPORT (compile_method) is the only real consumer.
+  block_catches = []
   current = nil
   text.each_line do |line|
     if line =~ /^irep 0x[0-9a-f]+ /
       blocks << current if current
       current = []
       block_files << nil # overwritten by this block's own `file:` line below, if any.
+      block_catches << []
       next
     end
     next unless current
     if line =~ /^file: (.+)$/
       block_files[-1] = Regexp.last_match(1)
+      next
+    end
+    if line =~ /^catch type: (\w+)\s+begin: (\d+)\s+end: (\d+)\s+target: (\d+)/
+      type, b, e, t = Regexp.last_match.captures
+      block_catches[-1] << CatchHandler.new(type: type.to_sym, begin_addr: b.to_i, end_addr: e.to_i, target: t.to_i)
       next
     end
     if line =~ /^\s*(\d+)\s+(\d+)\s+([A-Z][A-Z0-9_]*)\s*(.*)$/
@@ -212,20 +234,21 @@ def parse_disasm_blocks(text)
     end
   end
   blocks << current if current
-  [blocks, block_files]
+  [blocks, block_files, block_catches]
 end
 
 # ---------------------------------------------------------------------------
 # Step 5: merge -- zip DFS label order against disassembly block order, and
 # attach each block's instructions onto its Irep.
 # ---------------------------------------------------------------------------
-def merge!(ireps, order, blocks, block_files = [])
+def merge!(ireps, order, blocks, block_files = [], block_catches = [])
   raise "irep count mismatch: #{order.size} (C dump) vs #{blocks.size} (disasm)" unless order.size == blocks.size
 
   order.each_with_index do |label, i|
     irep = ireps.fetch(label)
     irep.instructions = blocks[i]
     irep.file = block_files[i]
+    irep.catch_handlers = block_catches[i] || []
   end
 end
 
@@ -4001,13 +4024,46 @@ class CodeGen
     # while, ...) from the jump graph. All registers are already declared as
     # plain mrb_value locals above, before any label, so C++'s "goto must not
     # jump over a variable's initialization" rule can never be violated here.
-    targets = jump_targets(irep)
+    # RESCUE_SUPPORT: every recognized region (recognize_rescue_regions --
+    # see its own top comment for the exact shape required) gets a
+    # separate, real, extracted "try body" function -- emitted below,
+    # ahead of this function, since this function calls it -- and its own
+    # [begin_addr, end_addr] address range (the protected computation
+    # itself, plus its own trailing exit JMP) is skipped entirely by this
+    # loop below: emit_rescue_glue emits the actual `mrb_protect_error`
+    # call plus the `if (!err) return ...;` early-out in its place, right
+    # where the loop reaches that region's own begin_addr, and everything
+    # from `except_addr` onward (EXCEPT itself, and only that one address)
+    # is *also* skipped -- its own effect (capturing the exception into
+    # r<exc_reg>) is folded into emit_rescue_glue's own last line instead,
+    # since nothing else in this file can ever give EXCEPT a real,
+    # non-`#error` translation of its own (see RESCUE_SUPPORT's own
+    # compile_insn case comment). GETCONST/RESCUE/JMPIF/JMP/RAISEIF and
+    # the rescue clause's own handler body all continue right on through
+    # this same loop, completely unmodified -- no other opcode here needs
+    # any special-casing at all.
+    rescue_regions = recognize_rescue_regions(irep)
+    rescue_pre = String.new
+    suppressed = Set.new
+    glue_at = {}
+    rescue_regions.each_with_index do |region, i|
+      suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
+      suppressed << region[:except_addr]
+      try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
+      rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types)
+      glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types)
+    end
+
+    targets = jump_targets(irep) - suppressed
     irep.instructions.each_with_index do |insn, idx|
+      next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
+
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      out << compile_insn(insn, irep, d, idx)
+      out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
     end
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     out << "}\n\n"
+    out = rescue_pre + out
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty?
@@ -4062,6 +4118,283 @@ class CodeGen
       end
     end
     targets
+  end
+
+  # RESCUE_SUPPORT: a `begin BODY rescue SomeClass => e; HANDLER; end`
+  # construct (or, identically, a whole method body with a trailing
+  # `rescue` clause -- real Ruby desugars both to the exact same
+  # EXCEPT/RESCUE/RAISEIF shape, see this method's own top comment) is the
+  # ONLY real shape this file ever attempts to translate -- no `retry`, no
+  # `ensure`, no multi-class `rescue A, B`, no rescue clause that doesn't
+  # bind or use its own exception object the way this method assumes.
+  # Real Ruby's exception machinery has none of those restrictions; this
+  # prototype's own closed-world survey of every real rescue clause
+  # actually shipped (mruby-rpg2k/mrblib) found every single one already
+  # fits this exact narrow shape (a single class, no retry, at most one
+  # real `ensure` anywhere in the whole tree -- itself excluded here,
+  # never silently mistranslated), so narrowing to it costs nothing real
+  # today while keeping every other shape a loud, honest miss (falls
+  # through to compile_insn's own default `#error unhandled opcode
+  # EXCEPT` -- RESCUE/RAISEIF below are unconditionally safe wherever they
+  # appear, but EXCEPT genuinely needs this recognizer's own C++-level
+  # `mrb_protect_error` wrapping to mean anything at all, see this file's
+  # own top comment).
+  #
+  # The real, always-generated shape a real `rescue` clause's own catch
+  # handler entry (CatchHandler -- begin/end/target, mrbc's own "catch
+  # type: rescue" disassembly header) sits in front of, confirmed directly
+  # against real disassembly (mruby-rpg2k/mrblib/game.rb's own
+  # `Game::Actors#[]`) rather than assumed from mruby's own vm.c source
+  # alone:
+  #
+  #   [begin, end)   -- the protected computation itself (BODY above).
+  #   end            -- exactly one instruction, `JMP S` -- BODY's own
+  #                     normal (non-raising) exit, landing on the same
+  #                     final `RETURN`/`RETURN_BLK` (address S) every
+  #                     rescue-match path also independently converges on.
+  #   target         -- exactly `EXCEPT Rexc` (captures the raised
+  #                     exception -- mrb->exc -- into Rexc, clearing it).
+  #   target+1..+4   -- exactly `GETCONST Rcls <Name>`; `RESCUE Rexc
+  #                     Rcls` (Rcls := Rexc.isa?(Rcls)); `JMPIF Rcls
+  #                     match`; `JMP raise` -- mirrors this method's own
+  #                     RESCUE/RAISEIF compile_insn cases below, which are
+  #                     just that same real vm.c logic (OP_RESCUE/
+  #                     OP_RAISEIF) mechanically transcribed, unconditional
+  #                     on this recognizer ever running at all.
+  #   raise          -- exactly `RAISEIF Rexc` (re-raises unless nil).
+  #
+  # Every address in this chain is cross-checked, never assumed -- a real
+  # shape this narrow either matches completely (safe to translate) or
+  # doesn't match at all (falls through to the ordinary, honest #error
+  # path, same as any other unmodeled construct in this whole file).
+  #
+  # Returns one Hash per independently-recognized, non-nested handler:
+  # {begin_addr:, end_addr:, except_addr:, exc_reg:, cls_name:, match_addr:,
+  #  raise_addr:, shared_target:, connector_reg:}. compile_method is the
+  # only real caller.
+  def recognize_rescue_regions(irep)
+    return [] if irep.catch_handlers.nil? || irep.catch_handlers.empty?
+    return [] unless irep.catch_handlers.all? { |ch| ch.type == :rescue }
+
+    by_addr = irep.instructions.each_with_object({}) { |insn, h| h[insn.addr] = insn }
+    by_index = irep.instructions.each_with_index.to_h
+
+    regions = []
+    irep.catch_handlers.each do |ch|
+      b, e, t = ch.begin_addr, ch.end_addr, ch.target
+      # No nesting, checked symmetrically: reject ch if it contains
+      # another handler's range OR sits inside another's -- this file
+      # only ever models flat, sequential rescue clauses, never one
+      # rescue's own BODY containing (or being contained by) another. A
+      # one-directional version of this check here previously only ever
+      # rejected the *outer* handler of a real nested pair, never the
+      # *inner* one on its own turn through this each -- caught rewriting
+      # this comment, not by any real failure yet (0 nested rescue
+      # clauses exist in this program today, and even a nested case that
+      # slipped past this check couldn't have compiled to anything
+      # *wrong*: the inner construct's own EXCEPT would still hit this
+      # file's own ordinary `#error unhandled opcode EXCEPT` fallback
+      # inside the outer's own extracted try body, which
+      # compiles_clean?/SKIP_UNSUPPORTED already correctly treats as "this
+      # whole method stays interpreted" -- but fixed properly regardless,
+      # the same standard this whole recognizer holds every other check
+      # to).
+      next if irep.catch_handlers.any? do |o|
+        o != ch && ((o.begin_addr >= b && o.end_addr <= e) || (b >= o.begin_addr && e <= o.end_addr))
+      end
+
+      except_i = by_addr[t]
+      next unless except_i && except_i.op == 'EXCEPT'
+      exc_reg = except_i.args[/^R(\d+)/, 1]
+      next unless exc_reg
+
+      idx = by_index[except_i]
+      seq = irep.instructions[idx + 1, 4]
+      next unless seq && seq.size == 4
+      getconst_i, rescue_i, jmpif_i, jmp_i = seq
+      next unless getconst_i.op == 'GETCONST'
+      cls_reg = getconst_i.args[/^R(\d+)/, 1]
+      cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
+      next unless cls_reg && cls_name
+      next unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
+      next unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
+      match_addr = jmpif_i.args[/(\d+)\s*$/, 1].to_i
+      next unless jmp_i.op == 'JMP'
+      raise_addr = jmp_i.args.strip[/\d+/].to_i
+
+      raise_i = by_addr[raise_addr]
+      next unless raise_i && raise_i.op == 'RAISEIF' && raise_i.args[/^R(\d+)/, 1] == exc_reg
+
+      exit_i = by_addr[e]
+      next unless exit_i && exit_i.op == 'JMP'
+      shared_target = exit_i.args.strip[/\d+/].to_i
+      shared_i = by_addr[shared_target]
+      next unless shared_i && %w[RETURN RETURN_BLK].include?(shared_i.op)
+      connector_reg = shared_i.args.strip.empty? ? '0' : shared_i.args[/^R(\d+)/, 1]
+      next unless connector_reg
+
+      # Full containment, checked by real jump SOURCE address, not just
+      # by which addresses appear as *some* target somewhere (a blunter
+      # address-list check here previously passed a real jump landing
+      # exactly on `b` itself -- e.g. a `retry`'s own JMP back to the
+      # region's start, emitted from inside the rescue handler body,
+      # which sits *after* `e` -- straight through, since `b` itself was
+      # being subtracted out of the candidate list before ever comparing
+      # it against anything; caught rewriting this comment, not by any
+      # real failure yet, since retry is confirmed absent from every real
+      # rescue clause this prototype has ever seen, see this method's own
+      # top comment -- checked properly here regardless, never assumed).
+      # Two separate directions, both required:
+      #   1. No jump whose own SOURCE lies outside [b, e] may ever target
+      #      an address inside [b, e] -- the region's only two legitimate
+      #      entry points (falling into `b` from the preceding ENTER, and
+      #      this handler's own `t`/`match_addr`, both outside [b, e] by
+      #      construction) are real control transfers this recognizer
+      #      already models explicitly, never a bare goto into the middle.
+      #   2. No jump whose own SOURCE lies inside [b, e) (e itself is the
+      #      region's own designated exit instruction, allowed to target
+      #      shared_target, already checked above) may ever target an
+      #      address outside [b, e] -- the only sanctioned way out of the
+      #      protected computation is that one designated exit, or a real
+      #      raise (mrb_protect_error's own job, not a jump at all).
+      jump_target_of = lambda do |insn|
+        case insn.op
+        when 'JMP' then insn.args.strip[/\d+/].to_i
+        when 'JMPNOT', 'JMPIF', 'JMPNIL' then insn.args[/(\d+)\s*$/, 1].to_i
+        end
+      end
+      escapes = irep.instructions.any? do |src|
+        tgt = jump_target_of.call(src)
+        next false unless tgt
+        inside_target = tgt >= b && tgt <= e
+        if src.addr >= b && src.addr < e
+          !inside_target # (2): an internal source jumping outside the region
+        else
+          inside_target # (1): an external source jumping into the region
+        end
+      end
+      next if escapes
+
+      regions << { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, cls_name: cls_name,
+                   match_addr: match_addr, raise_addr: raise_addr, shared_target: shared_target,
+                   connector_reg: connector_reg }
+    end
+    regions
+  end
+
+  # RESCUE_SUPPORT: the extracted "try body" for one recognized region --
+  # a real, standalone, top-level static function (mrb_protect_error's own
+  # function-pointer body parameter can't be a closure, see
+  # emit_const_lookup_helper's own comment on the identical constraint for
+  # GETCONST's owner-scope lookup) containing exactly the protected
+  # computation ([begin_addr, end_addr], the region's own trailing exit
+  # JMP included -- see recognize_rescue_regions' own top comment for why
+  # that boundary is inclusive here). Its only live-in state at
+  # begin_addr is `self` plus this method's own mandatory arguments --
+  # true because begin_addr is always the very first real instruction
+  # after ENTER (recognize_rescue_regions never matches anything else,
+  # per this method's own real 4-part shape check) -- so a small by-value
+  # Ctx struct carrying exactly those, the same real parameter list
+  # compile_method's own `_impl` function already takes, is enough;
+  # mrb_protect_error's `void*` userdata is this struct's address.
+  #
+  # Every *other* register this body uses is a plain temporary, live only
+  # within [begin_addr, end_addr] -- declared and nil-initialized here
+  # exactly like compile_method's own `_impl` preamble does, never
+  # threaded through the Ctx. The one instruction at end_addr (the
+  # region's own real exit JMP, jumping to shared_target -- always a bare
+  # `RETURN`/`RETURN_BLK`, per recognize_rescue_regions' own check) is the
+  # one deliberate rewrite: translated to a real C++ `return`, carrying
+  # the exact value that JMP would have handed to that outer RETURN, since
+  # this function's own return value *is* mrb_protect_error's return
+  # value on the non-raising path (emit_rescue_glue's own early-return
+  # line is what actually turns that into the real method's own return).
+  # Every other instruction compiles completely normally (compile_insn,
+  # unmodified) -- including any internal jump within the region, which
+  # keeps working exactly like compile_method's own goto-threaded loop
+  # since every registered label this function needs is declared right
+  # here, the same L<addr> convention used everywhere else in this file.
+  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types)
+    ctx_struct = "#{try_name}_Ctx"
+    ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
+    out = String.new
+    out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
+    out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
+    out << "  #{ctx_struct}* ctx = (#{ctx_struct}*)ud;\n"
+    (0...irep.nregs).each do |i|
+      if i.zero?
+        # GETIV/SETIV's own codegen (compile_insn) hardcodes the bare C++
+        # identifier `self`, not `r0` -- it relies on `_impl`'s own real
+        # `self` parameter name, which this standalone try-body function
+        # doesn't have (its live-in state arrives packed in `ctx` instead,
+        # mrb_protect_error's body signature has no room for a second
+        # named parameter). A real, caught-immediately g++ error
+        # ("'self' was not declared in this scope") the very first time
+        # this ever ran on a real ivar-reading rescue clause -- fixed by
+        # giving this function its own `self` alias too, exactly the
+        # value `_impl`'s own real `self` had at begin_addr.
+        out << "  mrb_value self = ctx->self;\n"
+        out << "  mrb_value r0 = self;\n"
+      elsif i <= arg_names.size
+        a = arg_names[i - 1]
+        t = arg_native_types[i - 1]
+        out << if t
+                  "  mrb_value r#{i} = #{TYPE_OPS.fetch(t)[:box]}(ctx->#{a});\n"
+                else
+                  "  mrb_value r#{i} = ctx->#{a};\n"
+                end
+      else
+        out << "  mrb_value r#{i} = mrb_nil_value();\n"
+      end
+    end
+    body_targets = jump_targets(irep).select { |t| t >= region[:begin_addr] && t <= region[:end_addr] }
+    irep.instructions.each_with_index do |insn, idx|
+      next unless insn.addr >= region[:begin_addr] && insn.addr <= region[:end_addr]
+
+      out << "  L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      out << if insn.addr == region[:end_addr]
+                "  return r#{region[:connector_reg]};\n"
+              else
+                compile_insn(insn, irep, d, idx)
+              end
+    end
+    out << "  return mrb_nil_value(); // unreachable\n"
+    out << "}\n\n"
+    out
+  end
+
+  # RESCUE_SUPPORT: the glue emitted at a recognized region's own
+  # begin_addr, replacing that whole [begin_addr, end_addr] range (see
+  # compile_method's own suppressed-address loop) -- runs the extracted
+  # try body under mrb_protect_error (see this file's own top comment for
+  # why that's the right, already-proven primitive: it either returns the
+  # try body's own real result with err==FALSE, or the raised exception
+  # object itself with err==TRUE, exception state already cleared and the
+  # call-info stack already unwound back to here -- 3rd/mruby/src/vm.c's
+  # own mrb_protect_error, read directly, not assumed). On success,
+  # returns immediately -- correct because recognize_rescue_regions only
+  # ever matches a *whole-method-tail* rescue (both the success path and
+  # every rescue-match path converge on the exact same final RETURN, see
+  # its own top comment), so "the try body didn't raise" and "this is the
+  # method's own final return value" are the same fact here. On failure,
+  # assigns the exception into r<exc_reg> and falls straight through --
+  # the very next instruction compile_method's own loop emits is
+  # GETCONST/RESCUE/JMPIF (EXCEPT's own address is separately suppressed,
+  # its only real effect folded into this assignment), unmodified.
+  def emit_rescue_glue(try_name, region, arg_names, arg_native_types)
+    ctx_struct = "#{try_name}_Ctx"
+    ctx_args = (['self'] + arg_names).join(', ')
+    err_var = "#{try_name}_err"
+    result_var = "#{try_name}_result"
+    out = String.new
+    out << "  {\n"
+    out << "    #{ctx_struct} ctx{#{ctx_args}};\n"
+    out << "    mrb_bool #{err_var} = FALSE;\n"
+    out << "    mrb_value #{result_var} = mrb_protect_error(M, #{try_name}, &ctx, &#{err_var});\n"
+    out << "    if (!#{err_var}) { return #{result_var}; }\n"
+    out << "    r#{region[:exc_reg]} = #{result_var};\n"
+    out << "  }\n"
+    out
   end
 
   def compile_insn(insn, irep, owner_def, idx = nil)
@@ -4649,6 +4982,37 @@ class CodeGen
       # `return`, not a real block boundary).
       r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
+    when 'RESCUE'
+      # "RESCUE Ra Rb" -- OP_RESCUE's own real body (3rd/mruby/src/vm.c)
+      # is exactly `R[b] = R[a].isa?(R[b])`, unconditionally: Ra already
+      # holds the raised exception object (RESCUE_SUPPORT's own glue code
+      # -- see recognize_rescue_regions -- is the only thing that can ever
+      # put a real exception there; nothing else in this whole file emits
+      # an EXCEPT this opcode could otherwise be reacting to), Rb already
+      # holds a Class/Module object (always a GETCONST immediately before
+      # this, per RESCUE_SUPPORT's own recognized shape) -- so this
+      # translation is safe and correct wherever this opcode appears, not
+      # gated on the recognizer at all (unlike EXCEPT, which the
+      # recognizer's own glue is the only source of a real Ra value).
+      ra, rb = a.split(/\s+/)
+      d = ra[/^R(\d+)/, 1]
+      s = rb[/^R(\d+)/, 1]
+      "  r#{s} = mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})));\n"
+    when 'RAISEIF'
+      # "RAISEIF Ra" -- OP_RAISEIF's own real body re-raises Ra unless
+      # it's nil (a rescue clause that matched already cleared this via
+      # this same opcode's own real semantics one level up -- RESCUE_
+      # SUPPORT's own recognized shape only ever reaches this opcode on
+      # the *non-matching* path, with Ra still holding the original
+      # exception). The real opcode's own `mrb_break_p` branch (a
+      # `break`/`next`/`redo` unwinding through a Ruby block) can never
+      # apply to anything this whole file ever compiles -- every leaf
+      # irep here is a real `def`-compiled method body, and this file has
+      # no BLOCK/SENDB support at all (see this file's own top comment),
+      # so Ra can never hold anything but nil or a real MRB_TT_EXCEPTION
+      # object here.
+      ra = a[/^R(\d+)/, 1]
+      "  if (!mrb_nil_p(r#{ra})) { mrb_exc_raise(M, r#{ra}); }\n"
     else
       "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
     end
@@ -5148,8 +5512,8 @@ if $PROGRAM_NAME == __FILE__
   c_src, disasm_text = run_mrbc(srcs, symbol, out_dir)
   ireps, root_label = parse_c_dump(c_src, symbol)
   order = dfs_order(ireps, root_label)
-  blocks, block_files = parse_disasm_blocks(disasm_text)
-  merge!(ireps, order, blocks, block_files)
+  blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
+  merge!(ireps, order, blocks, block_files, block_catches)
   registry = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
