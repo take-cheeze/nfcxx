@@ -2005,22 +2005,39 @@ NATIVE_CONSTRUCT_TARGETS = {
 # visibility/singleton for every real compiled entry point) for all three
 # `*-compiled` gems is byte-for-byte IDENTICAL before and after this fix
 # with this table left unchanged (2 entries) -- and separately confirmed
-# real, not just theoretically unlocked, for the three names added below:
+# real, not just theoretically unlocked, for the four names added below:
 # regenerating the real `rpg2k_compiled_gen.cpp` shows `Game::State#
-# initialize`'s own `Switches.new`/`Timer.new` (x2)/`MessageConfig.new`
-# call sites now compile to the same `// MONO :new -> ..., direct compiled
-# construct (bc2cpp_direct_alloc + ..._impl)` runtime-guarded shape
-# `Game::Transition`/`Game::Map`'s own call sites already used, in place of
-# the generic `mrb_funcall` fallback they compiled to before. `Game::
-# Screen`'s own bare `Screen.new` call site (mruby-rpg2k/mrblib/game.rb,
-# also inside `Game::State#initialize`) is, by this exact same reasoning,
-# now provably unlockable too -- confirmed directly (temporarily adding it
-# here and regenerating shows the identical direct-construct shape) -- but
-# left off this table for now since unlocking it was not part of this
-# round's own brief; a trivial follow-up for whoever next touches this
-# table.
+# initialize`'s own `Switches.new`/`Timer.new` (x2)/`MessageConfig.new`/
+# `Screen.new` call sites now compile to the same `// MONO :new -> ...,
+# direct compiled construct (bc2cpp_direct_alloc + ..._impl)`
+# runtime-guarded shape `Game::Transition`/`Game::Map`'s own call sites
+# already used, in place of the generic `mrb_funcall` fallback they
+# compiled to before.
+#
+# `Game::Screen` itself re-verified independently against the real 4-part
+# bar (not just carried over on the strength of the round-43 writeup
+# above): zero `def self.new`/`def self.allocate`/`class << self` anywhere
+# in `mruby-rpg2k/mrblib/game.rb` (confirmed by grep, and by the real
+# whole-program registry dump below showing no `Game::Screen.singleton`
+# entry at all); `#initialize` is 0-arg and already compiles clean (its
+# `_impl` already exists in the real generated output), matching its one
+# real construction site's own `n=0` (`@screen = Screen.new`, `Game::
+# State#initialize`, mruby-rpg2k/mrblib/game.rb); and `Game::Screen` is a
+# real, unambiguous single entry in mruby-rpg2k-compiled's own `owners:`
+# list (compiled_gems.rb), not colliding with anything else -- also
+# already a `NATIVE_ARG_TARGETS`/`wio_strip_bc2cpp_stubs` owner for
+# several of its OTHER methods (`tint_to`/`restore_tint`/`shake`/`flash`/
+# `approach`, none of them `#initialize`), which is orthogonal to this
+# table and does not interact with it: this mechanism only ever touches
+# the `Owner.new` call site itself and the target `#initialize`, and
+# `#initialize` carries no `NATIVE_ARG_TARGETS` entry of its own. A full
+# `wio_registered_methods.rb` TSV dump for all three `*-compiled` gems is
+# byte-for-byte IDENTICAL before and after adding `Game::Screen` here,
+# same as every other entry in this table -- this is purely an additive
+# codegen unlock, never a registration change.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
-                               Game::Switches Game::Timer Game::MessageConfig].freeze
+                               Game::Switches Game::Timer Game::MessageConfig
+                               Game::Screen].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
