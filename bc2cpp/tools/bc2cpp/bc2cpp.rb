@@ -1609,7 +1609,7 @@ class ClassLayout
             # were a real class name (harmless downstream -- no real
             # owner is ever literally that -- but sloppy to let through).
             known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }
-            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes) || UNKNOWN
+            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner) || UNKNOWN
 
             before = classes[owner][ivar]
             # Two real sites disagreeing on the exact class permanently
@@ -1957,18 +1957,70 @@ NATIVE_CONSTRUCT_TARGETS = {
 # unmodified table -- confirming the bare-reference gap, not some other
 # unmet condition, is the actual and complete blocker for all four, exactly
 # as this table's own top comment already predicts for `Game::Screen`
-# alone. Left OFF this table (adding any of the four today is a proven
-# no-op, not a soundness risk, so there's nothing unsafe about leaving them
-# out) -- unlocking any of them needs the same real, general fix this
-# table's own top comment already calls out and defers ("making
-# trace_new_target's own GETCONST case lexical-scope-aware, mirroring
-# GETCONST's own ordinary codegen"): a change to a widely-shared helper
-# (also used by `NATIVE_CONSTRUCT_TARGETS`' own devirtualization and the
-# `ivar_classes`/`arg_classes` terminal sources) this round's own narrower
-# adversarial-sweep brief did not attempt, rather than guess at a fix for a
-# mechanism several other real call sites also depend on staying exactly as
-# conservative as it is today.
-DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map].freeze
+# alone. Left OFF this table at the time (adding any of the four then was a
+# proven no-op, not a soundness risk) -- unlocking any of them needed the
+# same real, general fix this table's own top comment already called out
+# and deferred ("making trace_new_target's own GETCONST case lexical-scope-
+# aware, mirroring GETCONST's own ordinary codegen").
+#
+# Round 43 follow-up implements that fix. trace_new_target's own GETCONST
+# case (this file's own function, not this table) now resolves a bare,
+# single-token receiver -- but ONLY as far as this table's own 4-part
+# soundness bar can independently prove safe, never a general lexical
+# lookup against the whole registry: it walks the enclosing method's own
+# real nesting chain (an `owner:` string now threaded into
+# trace_new_target from every one of its three call sites -- ClassLayout.
+# analyze's own `owner`, compile_send's own `owner_def&.owner`) innermost
+# first, exactly mirroring real Ruby's own Module.nesting search order (and
+# compile_insn's own GETCONST codegen, which already does this correctly
+# at runtime -- see lexical_scope_path's own comment), and returns the
+# first namespace-qualified candidate that is already an exact,
+# independently-vetted entry in THIS table. Deliberately narrower than a
+# general "resolve any bare constant through its enclosing namespace" fix
+# (real Ruby's own constant lookup can, in principle, still fall through a
+# whole nesting chain to a same-named TOP-LEVEL constant if no nested one
+# actually exists -- trace_new_target has no access to the whole-program
+# registry needed to rule that out in general): gating the resolution on
+# DIRECT_CONSTRUCT_TARGETS membership itself sidesteps that question
+# entirely, since every candidate this loop can possibly produce is by
+# construction a class this table's own 4-part bar has already separately
+# vetted end to end (see below). A bare reference that doesn't resolve to a
+# known entry this way (from any nesting level) falls straight through to
+# this function's original "just the bare token" behavior, unchanged --
+# still a provably safe miss, never a wrong guess, for every call site
+# (including `Tone`/`Color`/`Rect`'s own real bare top-level references,
+# NATIVE_CONSTRUCT_TARGETS' own table, which this change leaves completely
+# untouched) this round doesn't specifically target. See
+# trace_new_target's own GETCONST case for the full writeup, including the
+# defense-in-depth this table's own two call sites (compile_send's MONO
+# NATIVE_CONSTRUCT_TARGETS/DIRECT_CONSTRUCT_TARGETS branches and its TYPED
+# branch) already independently provide regardless (a real runtime
+# `mrb_class_ptr(recv) == ...` guard before ever taking the direct-call
+# fast path, falling back to ordinary `mrb_funcall` otherwise) -- this fix
+# could not misroute a real call even if its own nesting-chain reasoning
+# were somehow wrong for some case it didn't anticipate.
+#
+# Verified this fix is a true no-op for whole-program registry building --
+# a full `wio_registered_methods.rb` TSV dump (owner/name/arity/
+# visibility/singleton for every real compiled entry point) for all three
+# `*-compiled` gems is byte-for-byte IDENTICAL before and after this fix
+# with this table left unchanged (2 entries) -- and separately confirmed
+# real, not just theoretically unlocked, for the three names added below:
+# regenerating the real `rpg2k_compiled_gen.cpp` shows `Game::State#
+# initialize`'s own `Switches.new`/`Timer.new` (x2)/`MessageConfig.new`
+# call sites now compile to the same `// MONO :new -> ..., direct compiled
+# construct (bc2cpp_direct_alloc + ..._impl)` runtime-guarded shape
+# `Game::Transition`/`Game::Map`'s own call sites already used, in place of
+# the generic `mrb_funcall` fallback they compiled to before. `Game::
+# Screen`'s own bare `Screen.new` call site (mruby-rpg2k/mrblib/game.rb,
+# also inside `Game::State#initialize`) is, by this exact same reasoning,
+# now provably unlockable too -- confirmed directly (temporarily adding it
+# here and regenerating shows the identical direct-construct shape) -- but
+# left off this table for now since unlocking it was not part of this
+# round's own brief; a trivial follow-up for whoever next touches this
+# table.
+DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
+                               Game::Switches Game::Timer Game::MessageConfig].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
@@ -2497,7 +2549,7 @@ NATIVE_ARG_TARGETS = Set[
 # has -- deliberately narrower than the ivar-hint/argument-annotation
 # terminal sources above, which don't apply to a `.new` call's own
 # receiver at all.
-def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false)
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -2551,7 +2603,67 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # register, "GETCONST R3 MAX_DIGITS\t; R3:d" -- \S+ (not the rest
       # of the line) stops at the first whitespace/tab, same fix as
       # compile_insn's own GETCONST codegen needed for the identical bug.
-      path.unshift(insn.args[/^R\d+\s+(\S+)/, 1])
+      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+
+      # Round 41's own documented gap (DIRECT_CONSTRUCT_TARGETS' own top
+      # comment, "bare-reference gap"): when `path` is still empty right
+      # here, this GETCONST is the WHOLE receiver expression -- a bare,
+      # single-token reference like `Switches` -- not the qualifying
+      # root of an already-multi-segment chain a prior (later-executed,
+      # so already-visited in this backward walk) GETMCNST built onto
+      # `path` (that shape, e.g. "Game::Transition", is already handled
+      # correctly below by the plain `path.join('::')` fallback and is
+      # never touched by this block: `path` is non-empty by the time
+      # GETCONST is reached for it). A bare single-token reference is
+      # resolved through real Ruby's own lexical constant lookup, but
+      # ONLY as far as this function can actually PROVE sound: never a
+      # blind `"#{owner}::#{const_name}"` guess the way
+      # resolve_singleton_receiver gets away with elsewhere in this file
+      # (that helper only ever fires at a point build_registry is
+      # actively walking a namespace it is itself opening, where the
+      # prepended segment is real by construction; a `.new` call site's
+      # own bare receiver carries no such guarantee -- real Ruby's own
+      # Module.nesting-based lookup could just as easily resolve a bare
+      # name to a same-named TOP-LEVEL constant instead, if a namespace-
+      # qualified one doesn't actually exist, and this function has no
+      # general access to the whole-program registry needed to tell
+      # which). So: only ever resolve a bare reference to a namespace-
+      # qualified form when that EXACT string is already a known,
+      # independently-vetted DIRECT_CONSTRUCT_TARGETS entry -- never a
+      # general namespace lookup against the wider registry -- walking
+      # `owner`'s own real lexical nesting chain innermost first
+      # (mirroring real Ruby's own Module.nesting search order, and
+      # compile_insn's own GETCONST codegen's `owner_path`/
+      # lexical_scope_path, which resolves a bare reference's real
+      # runtime value the exact same innermost-first way; see that
+      # codegen's own comment) so a same-named INNER scope entry would
+      # be preferred over an outer one, exactly like real Ruby. Any bare
+      # name that doesn't resolve this way (not in that table, from any
+      # nesting level) falls straight through to the exact same "just
+      # the bare token" behavior this function has always had -- a
+      # provably safe miss, never a wrong guess, for every call site
+      # this change doesn't specifically target. (Even were this
+      # resolution somehow wrong for some byzantine real-Ruby shadowing
+      # case this reasoning missed, every consumer of this function's
+      # return value that matters for codegen correctness -- the MONO
+      # NATIVE_CONSTRUCT_TARGETS/DIRECT_CONSTRUCT_TARGETS paths and the
+      # TYPED path, compile_send's own -- independently re-verifies a
+      # `known`/`known_class` match with a real runtime
+      # `mrb_class_ptr(recv) == ...` guard before ever taking the direct-
+      # call fast path, falling back to ordinary mrb_funcall otherwise;
+      # `recv` itself there is always whatever compile_insn's own
+      # GETCONST codegen actually resolves at runtime, independent of
+      # this guess. This block is still written to never rely on that
+      # net, per this table's own "no wrong guess, ever" bar.)
+      if path.empty? && owner
+        nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
+        nesting.length.downto(1) do |n|
+          candidate = "#{nesting.first(n).join('::')}::#{const_name}"
+          return candidate if DIRECT_CONSTRUCT_TARGETS.include?(candidate)
+        end
+      end
+
+      path.unshift(const_name)
       return path.join('::')
     else
       return nil
@@ -4379,7 +4491,7 @@ class CodeGen
     # so checking them here is redundant with checking self_implicit, but
     # kept explicit since trace_new_target needs both regardless.
     if name == 'new' && !self_implicit && irep && idx
-      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true)
+      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner)
       native = known && NATIVE_CONSTRUCT_TARGETS[known]
       # Exact-arity-only (see NATIVE_CONSTRUCT_TARGETS' own comment) -- a
       # call site passing a different argument count just isn't this
@@ -4433,7 +4545,7 @@ class CodeGen
     # `known` fell through to nil there -- a harmless, cheap re-walk of a
     # single straight-line instruction range, not a correctness concern).
     if name == 'new' && !self_implicit && irep && idx
-      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true)
+      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner)
       if known && DIRECT_CONSTRUCT_TARGETS.include?(known)
         init_def = @registry['initialize'].find { |md| md.owner == known }
         # The full four-part soundness gate DIRECT_CONSTRUCT_TARGETS' own
@@ -4548,7 +4660,7 @@ class CodeGen
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
       ivar_classes = owner_def && @class_layout[owner_def.owner]
-      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes)
+      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner)
       if known_class
         candidate = @registry[name].find { |md| md.owner == known_class }
         # Same two guards as the MONO path above (its own comments have the
