@@ -1677,6 +1677,192 @@ NATIVE_CONSTRUCT_TARGETS = {
   'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4 },
 }.freeze
 
+# Generalizes NATIVE_CONSTRUCT_TARGETS' own "MONO :new -> direct native
+# construct" mechanism (above) from hand-written native C++ classes to
+# ordinary bc2cpp-COMPILED ones -- a parallel, additive mechanism, not a
+# replacement (nothing about NATIVE_CONSTRUCT_TARGETS/compile_send's own
+# native-construct branch changes here). Key difference: there is no
+# hand-written native constructor to call for one of these -- Rect/Color/
+# Tone each needed one (rgss_*_new_direct) because their own #initialize is
+# native C++, invisible to this compiler entirely, so it had to be
+# reimplemented by hand for the direct-construct path to have anything to
+# call. A bc2cpp-COMPILED class's own #initialize, by contrast, is *already*
+# a real, ordinary compiled `_impl` function once its owner joins some gem's
+# ONLY_OWNERS (the same _impl compile_send's own MONO/TYPED paths already
+# call for every other devirtualized send) -- so the only genuinely new
+# piece of machinery needed is a generic replacement for Class#new's own
+# `self.allocate` step (bc2cpp_direct_alloc, emitted by
+# emit_direct_construct_decls below), not a second constructor per class.
+#
+# A plain owner-name array, not a Hash like NATIVE_CONSTRUCT_TARGETS -- there
+# is no per-entry `fn`/`arity` to hand-carry: the constructor to call is
+# always `#{cpp_name(owner, 'initialize')}_impl` (derived, like every other
+# devirtualized call in this file) and the arity is whatever the real
+# #initialize candidate's own mandatory_arity turns out to be, re-checked
+# against the call site's own argument count at compile_send time exactly
+# the way the existing TYPED path already does for a class-exact ivar/
+# argument-annotation hit -- hardcoding it a second time here would risk it
+# drifting out of sync with the real registry. Only the class-identity
+# accessor function name is hand-carried, matching NATIVE_CONSTRUCT_TARGETS'
+# own `class_fn` -- compile_send's own comment on that guard's reasoning
+# applies identically here (a reassigned constant, e.g. `Game::Transition =
+# SomeOtherClass`, has to be caught the same way).
+#
+# Deliberately NOT auto-derived from compiled_gems.rb's own owners: BOTH
+# require a durable, gem-init-captured RClass* AND its own accessor function
+# to actually exist in that owner's compiled gem's own register.cxx (see
+# that file's own comment, mirroring mruby-rgss/src/lib.cxx's
+# g_native_rect_class/rgss_native_rect_class() precedent for this same
+# round) -- an owner simply being compiled at all (compiled_gems.rb's
+# `owners:` list) says nothing about whether anyone has actually wired up
+# that RClass*/accessor pair for it yet. Every entry here has one, confirmed
+# directly against mruby-rpg2k-compiled/src/register.cxx.
+#
+# Picked from mruby-rpg2k-compiled's own real owners (compiled_gems.rb) by
+# the same discipline as NATIVE_CONSTRUCT_TARGETS' own comment: a class
+# whose #initialize is confirmed to compile clean AND has a real,
+# fully-qualified (`Owner.new`, never a bare same-namespace reference --
+# see Game::Screen's own paragraph below for why that distinction matters)
+# construction site whose own argument count matches AND whose enclosing
+# method compiles all the way through with zero OTHER unsupported opcodes
+# anywhere in its own body (see the Game::EnemyAi/Game::ChipSet paragraph
+# below for why that last condition, easy to miss, is just as real a gate
+# as the first two -- this compiler emits or drops a whole method, never
+# part of one, so a perfectly-eligible `.new` receiver sitting one
+# instruction away from an unrelated `super`/`rescue`/block gets dropped
+# right along with it). Confirmed by actually regenerating this gem's own
+# real output (`ONLY_OWNERS`/`OTHER_OWNERS`/`NATIVE_SRCS`/
+# `SKIP_UNSUPPORTED=1` computed exactly the way mruby-rpg2k-compiled's own
+# mrbgem.rake does, through a real host `mrbc` built fresh in this checking
+# worktree) and grepping it for the real `// MONO :new -> ...` comment this
+# mechanism's own compile_send branch emits -- not merely reasoning about
+# the Ruby source, which (as the two exclusion paragraphs below both show)
+# is not sufficient on its own to know whether a given call site's own
+# devirtualization actually survives into the emitted file.
+#
+# Two real owners actually clear every one of these bars, confirmed present
+# in the real regenerated `rpg2k_compiled_gen.cpp` (which itself contains
+# zero `#error` markers at all under `SKIP_UNSUPPORTED=1`, so every hit
+# found this way is a real, live-in-production devirtualization, not a
+# diagnostic-only artifact from a non-representative run):
+#   Game::Transition.new(style, frames, Game::SCREEN_W, Game::SCREEN_H, erase)
+#     -- mruby-rpg2k/mrblib/game.rb, Game::Screen#fade_to (5 args, matching
+#     #initialize(style, frames, width, height, erase)'s own 5 mandatory
+#     arguments; #fade_to itself compiles clean end to end).
+#   Game::Map.new id, LCF::MapUnit.new(File.open(map_path(id)))
+#     -- mruby-rpg2k/mrblib/main.rb, RPG2k#load_map (2 args, matching
+#     #initialize(id, unit)'s own 2 mandatory arguments; #load_map itself
+#     compiles clean end to end).
+#
+# Three more classes were seriously considered and ruled out, each for a
+# genuinely different reason -- worth recording all three, since none of
+# them would be obvious from reading compiled_gems.rb's own "#initialize
+# compiles clean" writeup alone:
+#
+# Game::Screen's own #initialize takes zero arguments and compiles clean
+# (the very first embedding target this ADR ever shipped), but its one real
+# construction site (mruby-rpg2k/mrblib/game.rb: `@screen = Screen.new`,
+# inside Game::State#initialize) is a *bare* constant reference, resolved
+# only through `module Game`'s own real lexical scoping at runtime --
+# trace_new_target's own GETCONST case has no lexical-scope-aware
+# resolution the way build_registry's CLASS/MODULE walk or GETCONST's own
+# ordinary codegen do (see that case's own comment): it captures the bare
+# text "Screen" verbatim, which can never equal the real owner string
+# "Game::Screen", so this call site provably MISSES the whole mechanism
+# rather than being unsoundly matched -- confirmed directly: no
+# `Game__Screen_compiled_class` reference appears anywhere in the real
+# regenerated build, the same "safe miss, not a wrong answer" behavior this
+# whole file already accepts for every other unrecognized receiver shape.
+#
+# Game::State's own #initialize(party, map_id, x, y) also compiles clean,
+# and has exactly one real construction site anywhere in this closed world
+# (mruby-rpg2k/mrblib/main.rb's own RPG2k#start_new_game: `Game::State.new
+# Game::Party.new(@db), map_id, x, y`, 4 args, matching arity) -- but that
+# one call site sits inside `RGSS::Profiler.section("map.transition.party")
+# do ... end`, a genuine Ruby block. A block literal's own body compiles
+# into a completely separate child irep that compile_method never
+# independently visits at all (it has no MethodDef of its own in the
+# registry -- only a real class-body def/CLASS-MODULE-opened body does, per
+# build_registry's own walk) -- the SAME permanently-out-of-scope shape
+# every other BLOCK/SENDB gap this whole codebase already documents (e.g.
+# Game::Actor#party_level), just discovered here for a `.new` receiver
+# rather than an ordinary method body.
+#
+# Game::EnemyAi(db, state) and Game::ChipSet(db, id) both compile clean
+# too, and BOTH have a real, fully-qualified construction site whose own
+# argument count matches (`Game::EnemyAi.new(db, @state)`, mruby-rpg2k/
+# mrblib/scene/battle.rb; `Game::ChipSet.new(@db, @map.chipset_id)` /
+# `Game::ChipSet.new(@db, @tileset_id || @map.chipset_id)`, scene/
+# map_viewer.rb and scene/map.rb) -- genuinely different from Game::Screen's
+# own bare-reference miss and Game::State's own block-body miss, and easy
+# to mistake for a real win from the Ruby source alone. But EnemyAi's own
+# one real call site sits inside `RPG2k::Scene::Battle#initialize`, which
+# hits `#error unhandled opcode SUPER` (a `super parent` call, an entirely
+# unrelated statement several lines above the EnemyAi.new site itself), and
+# ChipSet's own two real call sites are each the sole statement of a
+# `#build_chipset` method (map_viewer.rb's and map.rb's own, two distinct
+# methods sharing one name) whose own very next line is `rescue
+# StandardError => e` -- `#error unhandled opcode RESCUE`/`RAISEIF`/
+# `EXCEPT`. compile_method emits or drops a method's ENTIRE body as one
+# unit (SKIP_UNSUPPORTED's own real mechanism: a method whose generated
+# code contains a `#error` marker anywhere is dropped whole, not trimmed
+# down to its compiling instructions) -- so a perfectly-eligible `.new`
+# receiver sitting right next to a totally unrelated unsupported opcode in
+# the SAME enclosing method is dropped right along with it, exactly the
+# same as any other devirtualization (MONO, TYPED, or this one) inside that
+# same uncompiled method would be. Confirmed directly, not just reasoned
+# about from the Ruby source: an earlier version of this same round's own
+# diagnostic run (bc2cpp.rb invoked directly, without `SKIP_UNSUPPORTED=1`)
+# DID show real `// MONO :new -> Game::EnemyAi`/`Game::ChipSet` comment
+# lines in its own raw, error-marker-riddled output -- indistinguishable
+# from a real win until cross-checked against the actual
+# `SKIP_UNSUPPORTED=1` build mrbgem.rake always runs, which shows neither
+# ever reaching the final file (their own accessor functions'
+# forward declarations are the only trace either owner would leave were it
+# still in this table -- confirmed absent once removed). A real, useful
+# lesson for any future owner considered for this table: checking
+# compiles_clean?(irep) for the *target* #initialize is not enough by
+# itself -- the call site's own *enclosing* method has to independently
+# clear the same bar, and the only way to know that for certain is to
+# regenerate the real, `SKIP_UNSUPPORTED=1` output and grep it, not to
+# reason about either method's source in isolation.
+#
+# All five names above (this table's own two members and the three
+# ruled-out ones) are left undocumented as a live TODO nowhere else in this
+# file -- a future round that removes Game::Screen's own bare-reference gap
+# (a real, general fix: making trace_new_target's own GETCONST case
+# lexical-scope-aware, mirroring GETCONST's own ordinary codegen), unwraps
+# Game::State's one real call site from its own profiler block, or adds
+# real SUPER/RESCUE support (both already flagged as future work by
+# RPG2k::Scene::Base's/ItemMenu's own registration-block comments) would
+# very likely unlock one or more of these for free, with the exact same
+# soundness gate already proven correct for the two below.
+#
+# Every one of these two #initialize candidates is registered
+# `mrb_define_private_method` (mruby's own src/class.c forces #initialize
+# private unconditionally, regardless of source -- see build_registry's own
+# TDEF-case comment) -- irrelevant to this mechanism's own soundness: a
+# devirtualized direct call here never goes through mrb_funcall's own
+# method-name/visibility lookup at all (the same reason Class#new's own real
+# allocate+initialize dispatch chain is itself allowed to invoke a private
+# #initialize), so bypassing that chain changes nothing about which
+# visibility rule would have applied.
+#
+# Checked directly against the real whole-program registry (this round's own
+# diagnostic run, ONLY_OWNERS set exactly the way mruby-rpg2k-compiled's own
+# mrbgem.rake computes it): no method named `new` or `allocate` exists
+# anywhere in the whole closed world under either
+# "Game::Transition.singleton" or "Game::Map.singleton" (in fact no
+# bytecode-visible `def self.new`/`def self.allocate` exists under ANY
+# owner in this whole closed world at all -- confirmed by grepping the real
+# registry dump for an exact `:new`/`:allocate` entry and finding none) --
+# so neither of these two has a custom `self.new`/`self.allocate` this
+# mechanism would have to respect and can't. compile_send's own gate
+# re-checks this same fact live against `@registry` rather than trusting
+# this comment, so a future edit to either class's own source that adds one
+# is caught automatically, not silently missed.
+DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map].freeze
+
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
 # with exactly one definition anywhere in the whole program), this asks a
 # narrower question about ONE specific SEND -- "is THIS receiver provably a
@@ -1953,6 +2139,10 @@ class CodeGen
     # "only emit what's used" shape as @const_lookup_helper_used, read by
     # emit_native_construct_decls after compile_all runs.
     @native_construct_used = Set.new
+    # Same "only emit what's used" shape, for DIRECT_CONSTRUCT_TARGETS' own
+    # generalized construction path -- read by emit_direct_construct_decls
+    # after compile_all runs.
+    @direct_construct_used = Set.new
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
     # @clean_cache/@probing (above) and @ivar_layout (below, temporarily the
@@ -2424,6 +2614,108 @@ class CodeGen
       out << "mrb_value #{native[:fn]}(#{params});\n"
     end
     out << "}\n"
+    out << "\n"
+    out
+  end
+
+  # The class-identity accessor function name DIRECT_CONSTRUCT_TARGETS'
+  # generalized path calls for `owner` (e.g. "Game::Transition" ->
+  # "Game__Transition_compiled_class") -- derived via the same `sanitize`
+  # every other generated identifier in this file already goes through,
+  # rather than hand-carried per entry the way NATIVE_CONSTRUCT_TARGETS'
+  # own `class_fn` is: unlike Rect/Color/Tone's own lib.cxx entry points
+  # (arbitrary hand-written names, no derivable convention), this name is
+  # purely mechanical, and a compiled gem's own register.cxx (the one place
+  # that actually DEFINES it -- see that file's own comment) can and does
+  # spell it exactly this way, so there is nothing here worth a second
+  # hand-maintained string to drift out of sync with.
+  def direct_construct_class_fn(owner)
+    "#{sanitize(owner)}_compiled_class"
+  end
+
+  # Forward declarations for DIRECT_CONSTRUCT_TARGETS' generalized
+  # construction path -- emitted once per generated file, and only for what
+  # at least one compiled `.new` call site actually used (same "declare
+  # only what's needed" shape as emit_native_construct_decls/
+  # emit_const_lookup_helper).
+  #
+  # Two distinct things, both only declared here, never defined:
+  #
+  # 1. `bc2cpp_direct_alloc` -- a GENERIC replacement for Class#new's own
+  #    `self.allocate` step, correct for ANY class regardless of its own
+  #    instance type (see its own body's comment for the real proof this
+  #    isn't RGSS::Sprite/#tone-specific reasoning). Defined here too (not
+  #    just declared) since, unlike a per-class native constructor, this one
+  #    helper is genuinely part of bc2cpp's own generated output -- there is
+  #    no natural per-gem "one real place" to hand-write it the way
+  #    register.cxx is for the accessor functions below, and every consumer
+  #    of it needs the identical body regardless of which gem's own
+  #    register.cxx eventually calls it.
+  # 2. One class-identity accessor per DIRECT_CONSTRUCT_TARGETS owner
+  #    actually used (direct_construct_class_fn) -- a REAL function this
+  #    owner's own compiled gem's register.cxx defines (mirroring
+  #    NATIVE_CONSTRUCT_TARGETS' own class_fn precedent, mruby-rgss/src/
+  #    lib.cxx's g_native_rect_class/rgss_native_rect_class()), declared
+  #    here only. Unlike emit_native_construct_decls' own `extern "C"`
+  #    declarations (needed there because lib.cxx's real definitions sit
+  #    inside an anonymous namespace, and are reached from a genuinely
+  #    different translation unit), this is a plain ordinary C++ declaration
+  #    -- exactly like every `_impl` forward declaration emit_forward_decls
+  #    already emits -- because both sides of this one are real C++ code:
+  #    the accessor's own real definition lives in the SAME compiled gem's
+  #    register.cxx, which #includes this generated file directly (see that
+  #    file's own comment) and so shares one translation unit with this
+  #    declaration; C++'s own language-linkage rule ([dcl.link]) means a
+  #    later definition in that same TU need not (and here, does not) repeat
+  #    any linkage specifier this declaration didn't use, so plain C++
+  #    linkage on both sides matches automatically. Every candidate this
+  #    round targets lives in the one gem that also consumes it
+  #    (mruby-rpg2k-compiled); a future cross-gem consumer of one of these
+  #    accessors would need the same OTHER_DECLS_HEADER treatment
+  #    emit_decls_header's own comment describes for `_impl` -- not wired up
+  #    here since no real call site needs it yet (same "safe miss, not
+  #    attempted" discipline as every other unhandled shape in this file).
+  def emit_direct_construct_decls
+    return '' unless @direct_construct_used.any?
+
+    out = String.new
+    out << "// A generic replacement for Class#new's own `self.allocate` step,\n"
+    out << "// correct for ANY class C regardless of its own MRB_INSTANCE_TT --\n"
+    out << "// including one with an embedded MRB_TT_DATA ivar struct, since\n"
+    out << "// MRB_INSTANCE_TT(c) reads the class's OWN stored instance type\n"
+    out << "// (set once, at gem-init time, by MRB_SET_INSTANCE_TT), never\n"
+    out << "// guesses it from the class's shape. This is exactly what\n"
+    out << "// mrb_instance_alloc (3rd/mruby/src/class.c, Class#allocate's own\n"
+    out << "// real implementation) does internally -- confirmed by reading that\n"
+    out << "// function directly -- just reimplemented here since it is `static`\n"
+    out << "// (no external linkage, so this generated file -- a different\n"
+    out << "// translation unit -- cannot call it directly) using only the two\n"
+    out << "// PUBLIC mruby APIs that do the same two steps: MRB_INSTANCE_TT(c)\n"
+    out << "// (mruby/class.h) and mrb_obj_alloc (mruby.h). Called directly in\n"
+    out << "// place of Class#new's own real allocate+initialize dispatch chain\n"
+    out << "// when a `.new` call site's receiver is provably one of\n"
+    out << "// DIRECT_CONSTRUCT_TARGETS' own bc2cpp-COMPILED classes\n"
+    out << "// (compile_send's own \"MONO :new -> direct compiled construct\" path)\n"
+    out << "// -- #initialize's own already-compiled _impl function is called\n"
+    out << "// right after, for its side effects only (its own return value is\n"
+    out << "// discarded, never assigned to the result register: real Ruby\n"
+    out << "// Class#new always returns the newly allocated object, never\n"
+    out << "// whatever #initialize itself returns).\n"
+    out << "static inline mrb_value bc2cpp_direct_alloc(mrb_state* M, RClass* c) {\n"
+    out << "  return mrb_obj_value(mrb_obj_alloc(M, MRB_INSTANCE_TT(c), c));\n"
+    out << "}\n\n"
+    out << "// Class-identity accessor functions DIRECT_CONSTRUCT_TARGETS' own\n"
+    out << "// owners define in their compiled gem's own register.cxx (mirroring\n"
+    out << "// NATIVE_CONSTRUCT_TARGETS' own class_fn precedent) -- a real,\n"
+    out << "// durable RClass* captured once at that gem's own gem-init time, NOT\n"
+    out << "// a second mrb_const_get/mrb_class_get_under lookup (see\n"
+    out << "// compile_send's own comment on why: that would just observe\n"
+    out << "// whatever the constant currently names, exactly what a\n"
+    out << "// reassignment would already have changed, so it could never\n"
+    out << "// actually detect one happened).\n"
+    @direct_construct_used.sort.each do |owner|
+      out << "RClass* #{direct_construct_class_fn(owner)}(void);\n"
+    end
     out << "\n"
     out
   end
@@ -3417,6 +3709,76 @@ class CodeGen
       end
     end
 
+    # Same shape as the NATIVE_CONSTRUCT_TARGETS block just above, generalized
+    # to ordinary bc2cpp-COMPILED classes (DIRECT_CONSTRUCT_TARGETS' own
+    # comment has the full design writeup and the real call sites this
+    # covers) -- a separate `if`, not an `elsif`/shared branch, deliberately:
+    # NATIVE_CONSTRUCT_TARGETS and DIRECT_CONSTRUCT_TARGETS' own owner-name
+    # sets can never overlap in practice (one is hand-written native C++
+    # classes, the other real Ruby classes this compiler itself compiles a
+    # body for), but keeping them as two independent, self-contained checks
+    # means neither can ever accidentally shadow the other's own matching
+    # logic, and the already-shipped native-construct branch above stays
+    # completely untouched by this addition (a second trace_new_target call
+    # here re-walks the same backward scan the block above already did when
+    # `known` fell through to nil there -- a harmless, cheap re-walk of a
+    # single straight-line instruction range, not a correctness concern).
+    if name == 'new' && !self_implicit && irep && idx
+      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true)
+      if known && DIRECT_CONSTRUCT_TARGETS.include?(known)
+        init_def = @registry['initialize'].find { |md| md.owner == known }
+        # The full four-part soundness gate DIRECT_CONSTRUCT_TARGETS' own
+        # comment lays out, checked live against the real registry/ONLY_
+        # OWNERS this run was actually given rather than trusted from that
+        # comment alone -- a future edit to either of these two classes' own
+        # source (a new `self.new`/`self.allocate`, a changed #initialize
+        # shape) is caught here automatically, never silently missed.
+        #
+        # 1/2: no custom `def self.new`/`def self.allocate` on this exact
+        # class -- the same "X.singleton" pseudo-owner every def-self.x/
+        # class<<self method in this file already registers under (see
+        # build_registry's own SDEF/SCLASS/unfused-DEF cases).
+        no_custom_new = @registry['new'].none? { |md| md.owner == "#{known}.singleton" }
+        no_custom_allocate = @registry['allocate'].none? { |md| md.owner == "#{known}.singleton" }
+        # 3: #initialize's own real candidate has to be a genuine, compiling,
+        # pure-mandatory-arity leaf whose arity matches THIS call site's own
+        # argument count -- the identical three checks the TYPED path below
+        # already applies to a class-exact candidate, reused as-is (a real,
+        # differently-shaped #initialize -- e.g. Game::Picture's own
+        # optional-argument shape -- must never be skipped past this way).
+        init_ok = init_def&.irep && pure_mandatory_arity?(@ireps.fetch(init_def.irep)) &&
+                  compiles_clean?(init_def.irep) && n == mandatory_arity(@ireps.fetch(init_def.irep))
+        if no_custom_new && no_custom_allocate && init_ok
+          # 4: same ONLY_OWNERS/OTHER_OWNERS emission-eligibility guard the
+          # MONO/TYPED paths below already apply -- an owner this run
+          # doesn't itself emit (and no other gem exposes) has no real
+          # `_impl`/class-accessor symbol to link against.
+          owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
+          if owner_emitted
+            @direct_construct_used << known
+            accessor = direct_construct_class_fn(known)
+            init_impl = cpp_name(known, 'initialize') + '_impl'
+            note = "  // MONO :new -> #{known}, direct compiled construct (bc2cpp_direct_alloc + " \
+                   "#{init_impl}) -- skips Class#new's own allocate+initialize dispatch chain entirely; " \
+                   "#{known}#initialize's own return value is discarded (real Ruby .new always returns " \
+                   "the new object, never whatever #initialize itself returns).\n" \
+                   "  // Runtime-guarded the same way NATIVE_CONSTRUCT_TARGETS' own native-construct path " \
+                   "is (see that block's own comment): #{known} could have been reassigned at the constant " \
+                   "level since #{accessor}'s own class was captured at gem-init, so #{recv} (this call " \
+                   "site's own already-resolved GETCONST/GETMCNST receiver) is compared against it rather " \
+                   "than trusted outright, falling back to ordinary mrb_funcall if they differ.\n"
+            return "#{note}" \
+                   "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
+                   "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
+                   "    #{init_impl}(M, #{([recv] + argv).join(', ')});\n" \
+                   "  } else {\n" \
+                   "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+                   "  }\n"
+          end
+        end
+      end
+    end
+
     target = monomorphic_target(name)
     # A monomorphic *name* is still only safe to devirtualize if its one
     # real definition fits this prototype's pure-mandatory-args calling
@@ -3752,6 +4114,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_structs
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
+  print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
   compiled.each { |m| print m[:code] }
 
