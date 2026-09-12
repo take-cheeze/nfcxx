@@ -2152,6 +2152,136 @@ BC2CPP_COMPILED_GEMS = {
     # @capacity_bytes inside #evict_lru_until_within_budget, which never
     # compiles -- confirmed directly: this class does not appear in the
     # real "classes needing MRB_SET_INSTANCE_TT" listing.
+    #
+    # Round 32 follow-up adds this gem's first owner reached purely through
+    # the SDEF-irep fix (docs/adr/0139's own ".singleton owner support"
+    # follow-up) with no prior owner ever actually naming it: `Game.singleton`
+    # -- `def self.x` methods defined directly on the `Game` module itself
+    # (mruby-rpg2k/mrblib/game.rb, right above `class ChipSet`), never
+    # `class << self`-wrapped. All 5 of its own real methods compile clean,
+    # needing no new opcode work at all: `#clamp` (`v, lo, hi` -- clamp `v`
+    # into `[lo, hi]`), `#round_half_even` (`num, den` -- banker's rounding,
+    # integer arithmetic standing in for C's `std::lrint` under its default
+    # FE_TONEAREST rounding mode), `#trans_to_opacity`/`#opacity_to_trans`
+    # (RPG2000's 0..100 transparency <-> 0..255 opacity scale, each the
+    # other's inverse), and `#camera_offset` (`player_px, screen_px,
+    # map_px` -- the map-scroll clamp keeping the camera inside the map's
+    # own bounds). Every one of these was ALREADY a real, confirmed-live
+    # MONO- or POLY-by-name registry entry going back to the original SDEF
+    # fix's own writeup (see build_registry's own SDEF case comment, which
+    # uses `Game.clamp` itself as the motivating live devirtualization-
+    # soundness bug) -- this round is the first time any `owners:` list
+    # actually names `Game.singleton`, so none of these 5 bodies has ever
+    # actually been emitted before, despite being registry-visible (and,
+    # for `#round_half_even`/`#trans_to_opacity`/`#opacity_to_trans`/
+    # `#camera_offset`, MONO -- `#clamp` alone is POLY, a real unrelated
+    # `RPG2k::Scene::MapViewer#clamp` instance method sharing the bare
+    # name) since round 1.
+    #
+    # Confirmed for real against the whole-program diagnostic (ONLY_OWNERS
+    # including `Game.singleton` alongside every pre-existing owner,
+    # SKIP_UNSUPPORTED=0, replayed against a real host `mrbc` built fresh
+    # in this round's own checking worktree, the same
+    # `git submodule update --init` + `cmake`/`rake` sequence this ADR's
+    # own prior follow-ups already document): all 5 generate a real,
+    # `#error`-free body (`Game_singleton_clamp_impl`/`_round_half_even_impl`/
+    # `_trans_to_opacity_impl`/`_opacity_to_trans_impl`/`_camera_offset_impl`),
+    # each flagged `[class method -- use mrb_define_class_method, not
+    # mrb_define_method]` by the diagnostic's own singleton-owner check, as
+    # expected. `#trans_to_opacity`/`#opacity_to_trans` each internally call
+    # `clamp(...)` on `self` (the `Game` module itself, a self-implicit
+    # SSEND) -- since `:clamp` is POLY by name, this correctly compiles to
+    # an ordinary `mrb_funcall(M, self, "clamp", 3, ...)` rather than a
+    # wrong direct call, confirmed directly against the real generated
+    # body: POLY names never devirtualize by name, the identical fallback
+    # every other POLY self-implicit call in this codebase already takes,
+    # not a gap specific to this class. The 4 MONO methods mean every
+    # already-compiled call site elsewhere in this gem that references them
+    # by bare name (Game::Interpreter, Game::Screen, Game::State, and
+    # others already call `Game.camera_offset`/`Game.trans_to_opacity`/
+    # `Game.opacity_to_trans`) now devirtualizes straight into these
+    # `_impl` functions instead of falling back to `mrb_funcall` -- a real,
+    # additive optimization to already-shipped code, not just new code of
+    # its own; re-verified that no other class's own generated output
+    # changed shape beyond swapping a `// POLY :camera_offset` (etc.)
+    # dynamic-dispatch comment for a `// MONO ... -> Game.singleton#...`
+    # direct call at each such site.
+    #
+    # No `MRB_SET_INSTANCE_TT` call belongs here and none is proposed:
+    # `Game` is a bare module, never instantiated, so none of its own
+    # `.singleton` methods has any instance state to embed at all -- the
+    # same "not a MRB_SET_INSTANCE_TT candidate" shape every other
+    # `.singleton` owner in this gem already documents. No bare
+    # `private`/`private_class_method`/`protected` anywhere near `Game`'s
+    # own real source, so all 5 are plain, public `mrb_define_class_method`
+    # registrations.
+    #
+    # This round's own sweep over the rest of the whole-program registry
+    # for anything else not yet an owner turned up five more real
+    # candidates, each checked against the real diagnostic and rejected for
+    # a genuine, confirmed reason rather than skipped on a guess:
+    #   - `Game::MoveCommand` (mruby-rpg2k/mrblib/game.rb, distinct from
+    #     `LCF::MoveCommand` above) -- its only real bytecode method,
+    #     `#initialize(command_id, string = '', a = 0, b = 0, c = 0)`, has
+    #     four optional arguments; its own `attr_reader` covers every ivar
+    #     natively. Zero real methods would ever compile, confirmed
+    #     directly (`#error Game::MoveCommand#initialize has non-mandatory
+    #     arguments`) -- adding this owner would register nothing at all.
+    #   - `RGSS::Font` (mruby-rgss/mrblib/lib.rb) -- its only real instance
+    #     bytecode method, `#initialize(name = Font.default_name, size =
+    #     Font.default_size)`, is entirely optional-arity; its own
+    #     `attr_accessor` covers every ivar natively. `.exist?` (this
+    #     class's own real `class << self` method) is already registered
+    #     under the pre-existing `RGSS::Font.singleton` owner. Zero
+    #     additional real methods would compile under a bare `RGSS::Font`
+    #     owner.
+    #   - `RGSS::Bitmap::LoadError` (mruby-rgss/mrblib/lib.rb) -- its own
+    #     `#initialize(path, reason)` ends in a real `super(...)` call
+    #     (`SUPER`, out of this compiler's opcode scope, the same
+    #     established gap `RPG2k::Scene::DebugMenu#initialize`'s own
+    #     `super parent` call already documents above); `attr_reader
+    #     :path, :reason` covers both ivars natively. Zero real methods
+    #     compile.
+    #   - `Game::MoveRoute.singleton`/`Game::CommonEvent.singleton` -- both
+    #     real, `.singleton`-owned pseudo-owners the SDEF/SCLASS fix
+    #     already makes registry-visible (`.from_page`/`.same_route?` and
+    #     `.load`/`.eligible` respectively -- `Game::MoveRoute`'s own
+    #     registration block above already flagged both of its own
+    #     singleton methods as "structurally invisible to bc2cpp's own
+    #     build_registry" at the time it was written; that limitation was
+    #     fixed by the later SDEF-irep follow-up, re-checked here directly
+    #     rather than left stale), but every one of their four combined
+    #     methods hits a genuine out-of-scope opcode shape confirmed
+    #     directly against the real generated body: `.from_page` hits a
+    #     real keyword-argument `.new` call plus a `rescue StandardError`
+    #     clause; `.same_route?`/`.load` each end in a real Ruby block
+    #     (`BLOCK`/`SENDB`) on top of their own `rescue`; `.eligible` is a
+    #     bare one-line `Enumerable#all?` block call. Zero of the four
+    #     would ever emit a real body -- adding either owner would
+    #     register nothing.
+    # `LCF` (the bare module itself, distinct from `LCF.singleton` above)
+    # was also considered and explicitly rejected, for a sharper reason
+    # than "nothing compiles": its own real bytecode methods (`#read_ber`,
+    # `#var_max`, `#parse_event_commands`, ...) DO compile clean -- 22 of
+    # them, confirmed directly against the real generated output -- but
+    # every real call site in this codebase reaches them as
+    # `LCF.read_ber(...)` etc., which resolves through `LCF`'s own
+    # singleton class (the `module_function`-installed copy this file's
+    # own `build_registry` SEND case registers under the synthetic,
+    # `irep: nil` `"LCF.singleton"` pseudo-owner -- see that case's own
+    # comment), never through `LCF`'s own plain instance method table.
+    # `LCF` is never `include`d or `extend`ed anywhere in this codebase
+    # (grepped the whole tree), so a compiled `LCF`-owned `_impl` would be
+    # real, callable C++ that no real Ruby call site could ever actually
+    # reach -- `register.cxx` would have no legitimate way to route
+    # `LCF.read_ber(...)` into it (that needs `mrb_define_class_method`/
+    # `mrb_define_module_function` on `LCF`'s own singleton class, not
+    # `mrb_define_method` on its instance table, and the singleton-side
+    # copy has no real irep of its own to route into `LCF`'s instance-side
+    # body even if it did) -- dead code by construction, not a missed
+    # opportunity. Matches this same file's own top comment, which already
+    # flagged `LCF` as "not currently exploitable" for exactly this reason;
+    # re-confirmed here rather than re-assumed.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu
@@ -2168,7 +2298,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::Rng Game::Weather Game::Troop Game::Vehicle
                Game::Enemy RPG2k3::Scene::Battle Game::MessageConfig
                Game::Interpreter RPG2k::Scene::Map RPG2k::Scene::Battle
-               Game::States.singleton Game::States::BattleText.singleton
+               Game.singleton Game::States.singleton Game::States::BattleText.singleton
                Game::ChipsetLayout.singleton Game::EventGraphic.singleton
                Game::Battle.singleton Game::Transition.singleton
                Game::State.singleton Game::Party.singleton
