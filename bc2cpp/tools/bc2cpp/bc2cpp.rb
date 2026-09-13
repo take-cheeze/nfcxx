@@ -3375,6 +3375,40 @@ def keyword_arg_table(irep)
   order.map { |sym| { name: sym, required: required[sym] } }
 end
 
+# REST_ARG_SUPPORT: ENTER's own `rest` field (`def foo(a, *rest)`) --
+# scoped to a real, exactly-recognized "rest alone, nothing else non-
+# mandatory" shape (`opt`/`mand2`/`kw`/`kwrest`/`block` all zero), matching
+# a real closed-world survey that found every currently-blocked `*rest`
+# method already shaped this way. Unlike OPTIONAL_ARG_SUPPORT's own real
+# ENTER jump table or KEYWORD_ARG_SUPPORT's own real KEY_P/KARG
+# instructions, a plain `*rest` needs no opcode-level recognition at all:
+# confirmed directly against real disassembly (`def foo(a, *rest)`
+# compiles to `ENTER 1:0:1:0:0:0:0:0` followed immediately by the method's
+# own real first body instruction -- nothing in between) that mruby's own
+# real `OP_ENTER` VM semantics (3rd/mruby/src/vm.c) populate the rest
+# register directly with a real, already-boxed Array value before the
+# method body ever starts running, the exact same "no opcode needed, the
+# entry wrapper's own real mrb_get_args call does all the real work"
+# shape KEYWORD_ARG_SUPPORT's own `**kwrest` case would need too (not
+# attempted here -- see keyword_arg_table's own comment). The rest
+# register itself sits immediately after the last mandatory argument's own
+# register, real disassembly confirms directly -- the exact same
+# contiguous layout OPTIONAL_ARG_SUPPORT's own `total_args = mand + opt`
+# already established, so compile_method folds `*rest` into that same
+# `total_args`-driven mechanism (one more contiguous slot, a plain
+# `mrb_value` parameter needing no register-initialization or signature
+# change of its own at all) rather than building a separate one.
+#
+# Returns true for a real, recognized rest-only shape, false otherwise.
+def rest_only_arity?(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return false unless enter
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  rest.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+end
+
 def report_annotation_candidates(ireps, registry, arg_types, annotations)
   candidates = []
   registry.each_value do |defs|
@@ -4311,9 +4345,15 @@ class CodeGen
     # keyword_arg_table's own gate refuses unless `opt` is zero too), same
     # short-circuiting shape as opt_jmp_targets' own guard above.
     kw_table = (mandatory_ok || opt_jmp_targets) ? nil : keyword_arg_table(irep)
-    supported = mandatory_ok || opt_jmp_targets || kw_table
+    # REST_ARG_SUPPORT: same short-circuiting shape as kw_table's own guard
+    # above -- see rest_only_arity?'s own comment for why a real `*rest`
+    # needs no opcode-level region of its own at all, just one more
+    # contiguous `total_args` slot (below), the exact same mechanism
+    # OPTIONAL_ARG_SUPPORT's own `opt` extension already established.
+    has_rest = (mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)
+    supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest
 
-    total_args = supported ? mand + opt : mand
+    total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| n ? sanitize_c_ident(n) : "arg#{i + 1}" }
     # NATIVE_ARG_TARGETS' own per-position native type, size == mand -- see
     # native_arg_types' own comment. All-nil (every position stays plain
@@ -4527,6 +4567,31 @@ class CodeGen
         kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
       end
       out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
+    elsif has_rest
+      # REST_ARG_SUPPORT: mrb_get_args' own `*` format specifier
+      # (mruby.h's own format table) hands back a raw `const mrb_value*` +
+      # `mrb_int` pair pointing straight into the VM's own live call-frame
+      # stack -- never safe to keep past this function's own return, so it
+      # gets copied into a real, independently-GC-owned Array right away
+      # via mrb_ary_new_from_values (the same real API mruby's own core
+      # uses for exactly this purpose), matching what the rest register
+      # already holds in the ordinary interpreted path (confirmed directly
+      # against real disassembly -- a real boxed Array value, populated by
+      # the VM's own real ENTER semantics, never a raw pointer pair).
+      # `_impl`'s own signature and this call's own trailing argument both
+      # fall out of `total_args`/`arg_names` unchanged (see
+      # rest_only_arity?'s own comment) -- only extracting the real value
+      # here is genuinely `*rest`-specific.
+      mand_names = arg_names.first(mand)
+      rest_name = arg_names.last
+      mand_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      out << "  const mrb_value* bc2cpp_rest_ptr;\n"
+      out << "  mrb_int bc2cpp_rest_len;\n"
+      fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + '*'
+      ptrs = (mand_names.map { |a| "&#{a}" } + ['&bc2cpp_rest_ptr', '&bc2cpp_rest_len']).join(', ')
+      out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
+      out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n"
+      out << "  return #{impl_name}(M, self, #{(mand_names + [rest_name]).join(', ')});\n"
     else
       # Each local's own declared type has to match what mrb_get_args'
       # own format character below writes into it -- 'o' (no coercion at
