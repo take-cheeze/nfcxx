@@ -2855,6 +2855,36 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
 # gain_exp`/`RPG2k::Scene::Map::LRUBitmapCache#initialize` above already
 # establish -- not a soundness concern, just the honest measured-benefit
 # note.
+# A real Ruby local-variable name is a perfectly ordinary identifier in
+# Ruby's own grammar but can still collide with a C++ reserved word --
+# found for real (not hypothetical) while verifying OPTIONAL_ARG_SUPPORT:
+# `RPG2k::Scene::Map#page_field(name, default)` has a real, literal
+# `default` parameter (mruby-rpg2k/mrblib/scene/map.rb), which
+# compile_method's own arg_names codegen previously emitted completely
+# unescaped -- `mrb_value default` as a real C++ parameter/local
+# declaration, a guaranteed g++ syntax error the moment this exact method
+# ever became compile-clean (not yet today -- it separately still hits a
+# real, unrelated `rescue`+`yield` gap -- but a real, live landmine
+# regardless, exactly the kind of bug this file's own verification passes
+# exist to catch before it ships). Deliberately NOT a full C++ keyword
+# table -- just real, plausible Ruby parameter names this codebase's own
+# survey has actually found colliding with a reserved word; `sanitize_c_ident`
+# is the single place every arg_names entry passes through, so a future
+# collision is a one-line fix here, not a repeat of this same bug.
+CPP_RESERVED_WORDS = Set[
+  'default', 'class', 'new', 'delete', 'template', 'namespace', 'operator',
+  'this', 'true', 'false', 'nullptr', 'try', 'catch', 'throw', 'const',
+  'static', 'struct', 'union', 'enum', 'typedef', 'sizeof', 'goto',
+  'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue',
+  'return', 'void', 'int', 'float', 'double', 'char', 'bool', 'long',
+  'short', 'auto', 'extern', 'volatile', 'explicit', 'typename', 'using',
+  'public', 'private', 'protected', 'virtual', 'friend', 'export', 'mutable',
+].freeze
+
+def sanitize_c_ident(name)
+  CPP_RESERVED_WORDS.include?(name) ? "#{name}_" : name
+end
+
 NATIVE_ARG_TARGETS = Set[
   'Game::Actor#gain_exp',
   'Game::Actor#change_level_by',
@@ -3198,6 +3228,52 @@ def mandatory_arity(irep)
   return 0 unless enter
 
   enter.args.split(':').first.to_i
+end
+
+# OPTIONAL_ARG_SUPPORT: ENTER's own real aspec is mandatory1:optional:
+# rest:mandatory2:keyword:kwrest:block -- this only ever models the second
+# field, plain positional optional arguments (`def foo(a, b = 1)`); every
+# other nonzero field (rest/mandatory2/keyword/kwrest/block) is still
+# completely unmodeled, exactly as before this existed. Returns
+# [optional_count, jump_source_addrs, jump_target_addrs] for a real,
+# exactly-recognized optional-only shape, or [0, nil, nil] for anything
+# else (a 0-arg/no-ENTER/pure-mandatory method, an ENTER whose optional
+# field is nonzero but some OTHER field is too, or one whose optional
+# field is nonzero alone but the real bytecode right after ENTER doesn't
+# match the one shape this recognizes) -- compile_method's own #error stub
+# is the fallback for all of those, identical to any other unrecognized
+# shape in this file; never guessed at.
+#
+# Real ENTER-then-jump-table shape, confirmed directly against real
+# disassembly rather than assumed from vm.c's own OP_ENTER comment alone
+# (`def foo(a, b = 1, c = 2)` compiles to `ENTER 1:2:0:0:0:0:0:0` followed
+# by exactly 3 (`optional + 1`) consecutive real, addressable JMP
+# instructions): entry k (0-indexed, k = how many of the real optional
+# arguments THIS call actually supplied) jumps straight to wherever this
+# method's own bytecode starts computing the (k+1)th optional argument's
+# own default-value expression, or straight to the method's own real first
+# statement when k == optional (every default already supplied by the
+# caller). This *is* the real mruby VM's own OP_ENTER PC-skip mechanism
+# (3rd/mruby/src/vm.c) -- compile_method reproduces it as an ordinary
+# native `switch`/`goto` instead of relying on any VM PC arithmetic (see
+# emit_optional_dispatch), so every default-value expression this file can
+# already translate (a literal, an ivar read, a reference to an earlier
+# argument -- confirmed directly against real disassembly for all three,
+# not just the literal case) just works, completely unmodified, wherever
+# it's reached from.
+def optional_arg_table(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return [0, nil, nil] unless enter
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+
+  enter_idx = irep.instructions.index { |i| i.op == 'ENTER' }
+  jmps = irep.instructions[enter_idx + 1, opt + 1]
+  return [opt, nil, nil] unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
+
+  [opt, jmps.map(&:addr), jmps.map { |i| i.args.strip[/\d+/].to_i }]
 end
 
 def report_annotation_candidates(ireps, registry, arg_types, annotations)
@@ -4119,23 +4195,40 @@ class CodeGen
     d = @owner_of.fetch(label)
     enter = irep.instructions.find { |i| i.op == 'ENTER' }
     mand = enter ? enter.args.split(':').first.to_i : 0
-    arg_names = irep.lv.first(mand).each_with_index.map { |n, i| n || "arg#{i + 1}" }
+
+    # OPTIONAL_ARG_SUPPORT: `opt` is >0 only for a real, exactly-recognized
+    # "plain optional positional arguments, nothing else non-mandatory"
+    # shape -- see optional_arg_table's own comment. Every other
+    # non-mandatory shape (rest, keyword, block, ...) still falls through
+    # to the ordinary #error stub below, completely unchanged from before
+    # this existed. `mandatory_ok` short-circuits the (irep-instructions-
+    # scanning) optional_arg_table call entirely for the overwhelmingly
+    # common pure-mandatory case, same as before.
+    mandatory_ok = pure_mandatory_arity?(irep)
+    opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
+    supported = mandatory_ok || opt_jmp_targets
+
+    total_args = supported ? mand + opt : mand
+    arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| n ? sanitize_c_ident(n) : "arg#{i + 1}" }
     # NATIVE_ARG_TARGETS' own per-position native type, size == mand -- see
     # native_arg_types' own comment. All-nil (every position stays plain
     # `mrb_value`, today's own uniform shape) unless this exact
     # "Owner#name" is explicitly listed there AND a real annotation names a
-    # recognized type at that position.
-    arg_native_types = native_arg_types(d, mand)
+    # recognized type at that position. A real optional argument (`opt` >
+    # 0) is never NATIVE_ARG_TARGETS-eligible -- that set only ever names
+    # already-pure-mandatory methods, so this padding is always all-nil in
+    # practice, just kept explicit rather than relying on that coincidence.
+    arg_native_types = native_arg_types(d, mand) + Array.new(total_args - mand)
 
     impl_name = "#{cpp_name(d.owner, d.name)}_impl"
     entry_name = cpp_name(d.owner, d.name)
     embedded_ivars = @ivar_layout[d.owner]
 
-    unless pure_mandatory_arity?(irep)
-      # Not modeled -- see pure_mandatory_arity?'s own comment. Emit a
-      # loud, honest #error instead of a function whose signature silently
-      # disagrees with what real call sites (interpreted or a devirtualized
-      # direct call) actually pass it.
+    unless supported
+      # Not modeled -- see pure_mandatory_arity?/optional_arg_table's own
+      # comments. Emit a loud, honest #error instead of a function whose
+      # signature silently disagrees with what real call sites (interpreted
+      # or a devirtualized direct call) actually pass it.
       code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
              "#error #{d.owner}##{d.name} has non-mandatory arguments (optional/rest/keyword/block) -- not in this prototype's supported subset\n\n"
       return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
@@ -4154,6 +4247,14 @@ class CodeGen
     # mechanism existed) -- `self` is never affected, only ever
     # NATIVE_ARG_TARGETS' own explicitly-listed arguments.
     arg_params = arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
+    # OPTIONAL_ARG_SUPPORT: one extra real parameter, `bc2cpp_given_opt` --
+    # how many of this method's own real optional arguments THIS call
+    # actually supplied (0..opt) -- the switch emit_optional_dispatch
+    # builds below reads it directly; a slot for an optional argument NOT
+    # supplied still gets a real (unused until the default-value code
+    # itself overwrites its register) placeholder argument from every
+    # caller, same as every other parameter here.
+    arg_params << 'mrb_int bc2cpp_given_opt' if opt.positive?
     out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     # A native-typed argument's own register still holds a plain mrb_value
@@ -4212,6 +4313,20 @@ class CodeGen
     rescue_pre = String.new
     suppressed = Set.new
     glue_at = {}
+
+    # OPTIONAL_ARG_SUPPORT: same suppressed-address/glue-at mechanism as
+    # RESCUE_SUPPORT/BLOCK_SUPPORT below, replacing the real ENTER jump
+    # table (optional_arg_table's own comment) with an equivalent native
+    # `switch` on the real given-optional-count parameter -- every other
+    # address in the region (each optional's own default-value computation,
+    # already ordinary already-supported bytecode) is untouched, reached
+    # only via `goto` from this switch exactly the way the real VM's own
+    # PC-skip reaches it.
+    if opt.positive? && opt_jmp_targets
+      opt_jmp_addrs.each { |a| suppressed << a }
+      glue_at[opt_jmp_addrs.first] = emit_optional_dispatch(opt_jmp_targets)
+    end
+
     rescue_regions.each_with_index do |region, i|
       suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
       suppressed << region[:except_addr]
@@ -4265,17 +4380,56 @@ class CodeGen
       # declaration per argument (rather than the previous single combined
       # `mrb_value a, b, c;` line) since a mixed-type argument list can no
       # longer share one declaration statement.
-      arg_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      # OPTIONAL_ARG_SUPPORT: an optional position (i >= mand) gets a real
+      # `= mrb_nil_value()` initializer -- mrb_get_args' own `|` marker
+      # (below) simply leaves an omitted optional's own out-param
+      # untouched, so without this it would read as uninitialized C++
+      # garbage rather than the harmless placeholder _impl expects (see
+      # its own comment: never read before the jump table's own default-
+      # value code overwrites it, but still real, defined behavior either
+      # way -- no UB from an unconditional read of an mrb_value that was
+      # never written).
+      arg_names.each_with_index do |a, i|
+        default = i >= mand ? ' = mrb_nil_value()' : ''
+        out << "  #{native_c_type(arg_native_types[i])} #{a}#{default};\n"
+      end
       # 'i' is mrb_as_int under the hood (mrb_ensure_int_type + a bigint
       # unwrap), 'n' is mrb_obj_to_sym -- the exact same two coercions
       # compile_send's own call-site unboxing (below) uses when it moves
       # this identical coercion to a devirtualized direct-call site
       # instead of through this entry wrapper; see that call site's own
-      # comment for why the two have to stay in lockstep.
-      fmt = arg_native_types.map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join
+      # comment for why the two have to stay in lockstep. OPTIONAL_ARG_
+      # SUPPORT's own `|` marker (mrb_get_args' own real optional-argument
+      # syntax, mruby.h's own format-specifier table) lands exactly at the
+      # mandatory/optional boundary -- everything from there on is simply
+      # left untouched in the real call if this exact call didn't supply
+      # it, matching the pre-initialized nil above.
+      fmt = arg_native_types.each_with_index.map do |t, i|
+        ch = t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o')
+        i == mand && opt.positive? ? "|#{ch}" : ch
+      end.join
       ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
-      out << "  return #{impl_name}(M, self, #{arg_names.join(', ')});\n"
+      if opt.positive?
+        # OPTIONAL_ARG_SUPPORT: mrb_get_argc is the real, public mruby API
+        # for "how many positional arguments did THIS call actually pass"
+        # (3rd/mruby/include/mruby.h) -- independent of mrb_get_args, and
+        # the exact same quantity the real VM's own OP_ENTER computes to
+        # decide which jump-table entry to land on, clamped to this
+        # method's own real [0, opt] range the same way (a call passing
+        # MORE than mandatory+optional positional args is already a real
+        # ArgumentError mrb_get_args itself would have raised above, so
+        # this clamp is a formality for the upper bound, never reachable
+        # with fewer given than mandatory for the same reason on the low
+        # end -- kept anyway since a clamp is free and this is exactly the
+        # value that walks straight into emit_optional_dispatch's switch).
+        out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
+        out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
+        out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
+        out << "  return #{impl_name}(M, self, #{arg_names.join(', ')}, bc2cpp_given_opt);\n"
+      else
+        out << "  return #{impl_name}(M, self, #{arg_names.join(', ')});\n"
+      end
     end
     out << "}\n\n"
     # arg_c_types: this method's own real per-position C++ parameter type
@@ -4283,9 +4437,31 @@ class CodeGen
     # reads it, so a devirtualized caller -- same gem or, via
     # OTHER_DECLS_HEADER, a different one -- declares this `_impl` with
     # exactly the signature it was actually emitted with).
+    arg_c_types = arg_names.each_index.map { |i| native_c_type(arg_native_types[i]) }
+    # OPTIONAL_ARG_SUPPORT: the extra `bc2cpp_given_opt` parameter (see
+    # above) is real, load-bearing part of this _impl's own signature --
+    # decl_line's own forward declaration has to include it too, or a
+    # devirtualized cross-TU caller (OTHER_DECLS_HEADER) would declare an
+    # arity-mismatched prototype for a real, externally-linked symbol.
+    arg_c_types << 'mrb_int' if opt.positive?
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-      arity: arg_names.size, arg_c_types: arg_names.each_index.map { |i| native_c_type(arg_native_types[i]) },
+      arity: arg_names.size, arg_c_types: arg_c_types,
       code: out, visibility: d.visibility }
+  end
+
+  # OPTIONAL_ARG_SUPPORT: the native `switch` that replaces the real ENTER
+  # jump table (optional_arg_table's own comment has the full design) --
+  # `targets` is that function's own third return value, the jump table's
+  # own real target addresses in order. `bc2cpp_given_opt` is the extra
+  # _impl parameter compile_method adds whenever this is reached.
+  def emit_optional_dispatch(targets)
+    out = String.new
+    out << "  switch (bc2cpp_given_opt) {\n"
+    targets.each_with_index do |addr, i|
+      out << (i == targets.size - 1 ? "    default: goto L#{addr};\n" : "    case #{i}: goto L#{addr};\n")
+    end
+    out << "  }\n"
+    out
   end
 
   # Every bytecode address any JMP/JMPNOT/JMPIF in this irep can land on --
