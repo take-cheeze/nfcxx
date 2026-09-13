@@ -4220,6 +4220,24 @@ class CodeGen
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types)
     end
 
+    # BLOCK_SUPPORT: same suppressed-address/glue-at mechanism as RESCUE_
+    # SUPPORT just above, for a recognized `.times` region (see
+    # recognize_times_regions/emit_times_inline's own comments) -- both
+    # the BLOCK and SENDB addresses are replaced by one inlined-loop
+    # chunk emitted at the BLOCK's own address. A region whose own block
+    # body doesn't come out clean (emit_times_inline returns nil) is
+    # simply skipped here -- BLOCK/SENDB then fall through to the
+    # ordinary per-instruction loop below completely unmodified, hitting
+    # compile_insn's own default `#error unhandled opcode` case exactly
+    # like any other unrecognized shape in this file.
+    recognize_times_regions(irep).each do |region|
+      inlined = emit_times_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
+
     targets = jump_targets(irep) - suppressed
     irep.instructions.each_with_index do |insn, idx|
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
@@ -4560,6 +4578,254 @@ class CodeGen
     out << "    if (!#{err_var}) { return #{result_var}; }\n"
     out << "    r#{region[:exc_reg]} = #{result_var};\n"
     out << "  }\n"
+    out
+  end
+
+  # BLOCK_SUPPORT: `receiver.times { |i| BODY }` (or `do...end`), the
+  # first (and, for this round, only) real Ruby-block shape this file
+  # compiles -- by *inlining* the block's own body directly into the
+  # enclosing compiled function, as one native C++ `for` loop, rather
+  # than building any real Proc/closure object at all. `#each`/`#map`/
+  # every other real Enumerable-family method stays unconditionally
+  # `#error unhandled opcode BLOCK` (see this method's own top comment
+  # for why `#times` specifically is safe to start with and those
+  # aren't, yet).
+  #
+  # Why inlining, not a general block-calling mechanism: mruby exposes
+  # real public APIs that look tempting for the general case
+  # (`mrb_proc_new`+`mrb_funcall_with_block`, wrapping the block's own
+  # already-compiled child irep in a real Proc and letting the ordinary
+  # interpreter run it) -- but a plain `mrb_proc_new` builds an *unbound*
+  # Proc with no captured environment, and real blocks routinely close
+  # over an outer local variable (confirmed directly against real source,
+  # not assumed -- e.g. `@instants.each { |a, b| return b if pos >= a &&
+  # pos < b }`, mruby-rpg2k/mrblib/game.rb, captures the enclosing
+  # method's own `pos`), which a bc2cpp-compiled function's plain C++
+  # stack locals can't feed into a real REnv without reimplementing a
+  # real chunk of mruby's own closure machinery. Inlining sidesteps this
+  # entirely: the block's own body becomes literal C++ sharing the exact
+  # same `r0..rN` register variables the enclosing method's own body
+  # already uses, so an outer local reference (`GETUPVAR`/`SETUPVAR`,
+  # level 0 only -- see compile_block_body_insn's own comment) is just
+  # that same shared variable, and a `return` inside the block (`OP_
+  # RETURN_BLK`'s own real non-local-return path, vm.c) collapses to a
+  # perfectly ordinary C++ `return` from the very same function it would
+  # otherwise have unwound out of -- both completely free, no closure
+  # object ever needed.
+  #
+  # Why `#times` specifically: `#times` has ZERO real bytecode-defined
+  # overrides anywhere in this whole program's real closed-world registry
+  # (confirmed directly -- it doesn't even appear as a registry entry at
+  # all, MONO or POLY, unlike e.g. `#each`, which real `Game::Actors`/
+  # `Game::Party`/`LCF::Array2D` all define their own competing versions
+  # of). Since no bytecode `#times` exists anywhere to override the real
+  # native `Integer#times`, calling `.times` on anything that ISN'T
+  # really an Integer is *already* a guaranteed real `NoMethodError` in
+  # the interpreted program today -- so the runtime `mrb_integer_p` guard
+  # this emits, raising a real error on mismatch instead of silently
+  # miscompiling, is provably equivalent to real dispatch for every
+  # possible receiver, not just "should never happen." This is the same
+  # trust model this file's own embedded-ivar SETIV codegen already uses
+  # (a real runtime `mrb_integer_p` guard even for a statically-proven
+  # type, TypeError on failure, never silent corruption) -- not a new
+  # pattern invented for this.
+  #
+  # Recognized shape (cross-checked against real disassembly, not
+  # assumed): `SENDB Ra :times n=0`, whose own destination register `Ra`
+  # already holds the receiver, immediately preceded by `BLOCK R(a+1)
+  # I[k]` (mrbc's own codegen always places a call's block argument at
+  # the very next register after the destination, for n=0 explicit
+  # args), where child irep `I[k]` takes exactly one mandatory argument
+  # (the yielded index) and nothing else. `mandatory_arity`/
+  # `pure_mandatory_arity?` are the same checks compile_method's own top-
+  # level gate already uses, reused here for the child irep instead.
+  def recognize_times_regions(irep)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless insn.op == 'SENDB' && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless name == ':times' && nstr == 'n=0'
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep }
+    end
+    regions
+  end
+
+  # BLOCK_SUPPORT: translate one instruction from an INLINED block body
+  # (never a top-level method body -- compile_method's own main loop
+  # never calls this). `offset` disambiguates the block's own local
+  # register numbering from the enclosing method's -- added to every
+  # bare `R<N>` register reference in `insn.args` before delegating to
+  # the ordinary `compile_insn` (a real irep, real instructions, just
+  # relabeled first) for every opcode this function doesn't special-case
+  # itself, so ordinary translation (ADD/MOVE/GETIV/SEND/...) needs no
+  # changes of its own at all -- `idx: nil` in that delegated call also
+  # cleanly disables compile_send's own MONO `.new`-devirtualization
+  # (gated on a truthy `idx`, see its own comment), the one piece of
+  # per-instruction codegen that would otherwise need real, aligned
+  # backward-scan access to this SAME (offset) instruction's true index
+  # in the ORIGINAL, un-offset `block_irep.instructions` array -- a real
+  # missed optimization inside an inlined block body, never a wrong one.
+  #
+  # Four opcodes need real, block-body-specific handling, none of them
+  # meaningful (or even reachable) in a top-level method body:
+  #   - `RETURN`/`RETNIL`/`RETFALSE`/`RETTRUE` -- a block's own ordinary
+  #     "yielded value" (confirmed directly: real `next` compiles to a
+  #     plain `RETNIL`, not `RETURN_BLK` -- see this method's own caller
+  #     comment). `#times` never uses this value at all, so it becomes a
+  #     bare `goto` to this iteration's own end label -- ending just the
+  #     current loop iteration, never the whole function.
+  #   - `RETURN_BLK` -- a REAL `return` inside the block, OP_RETURN_BLK's
+  #     own real non-local-return path (vm.c) for a genuine block. Since
+  #     inlining collapses the block's own call frame into the exact same
+  #     C++ function as its enclosing method, "unwind past the block back
+  #     to the method that created it" and "the method this C++ code
+  #     already belongs to" are the same frame -- so this is a perfectly
+  #     ordinary C++ `return`, no unwinding machinery needed.
+  #   - `GETUPVAR`/`SETUPVAR` -- real outer-local access (`uvget`/`uvset`,
+  #     vm.c), gated here on level `0` only (a single level of block
+  #     nesting -- this file has no nested-block support at all, so a
+  #     level other than 0 can never arise from anything this recognizer
+  #     itself accepts, but checked rather than assumed). Since the
+  #     "outer scope" at level 0 for an inlined block IS this exact
+  #     enclosing function, register index `b` already names one of its
+  #     own real `r<b>` variables directly -- no offset applied, unlike
+  #     every other register reference in this same instruction stream.
+  def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix)
+    case insn.op
+    when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
+      "  goto #{iter_end_label};\n"
+    when 'RETURN_BLK'
+      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      "  return r#{r.to_i + offset};\n"
+    when 'GETUPVAR'
+      dst, upvar_idx, level = insn.args.split(/\s+/)
+      if level == '0'
+        "  r#{dst[/\d+/].to_i + offset} = r#{upvar_idx};\n"
+      else
+        "  #error unhandled opcode GETUPVAR -- not in this prototype's supported subset\n"
+      end
+    when 'SETUPVAR'
+      src, upvar_idx, level = insn.args.split(/\s+/)
+      if level == '0'
+        "  r#{upvar_idx} = r#{src[/\d+/].to_i + offset};\n"
+      else
+        "  #error unhandled opcode SETUPVAR -- not in this prototype's supported subset\n"
+      end
+    # JMP/JMPNOT/JMPIF/JMPNIL need their OWN handling here, never a
+    # delegation to the shared compile_insn below: that codegen hardcodes
+    # a bare `goto L<target>;` (compile_method's own top-level "L<addr>"
+    # convention), which for an inlined block body would collide with --
+    # or simply fail to match -- this SAME function's own `label_prefix`-
+    # qualified labels (C++ goto labels have whole-FUNCTION scope, not
+    # block scope, so a bare, unprefixed "L16" here could even silently
+    # collide with a real, same-numbered label the enclosing method's own
+    # unrelated control flow already defined -- caught building this
+    # exact case, `with_next`'s own `next if i == 1`, before it ever
+    # shipped: g++ rejected the mismatched, undefined "L16" the shared
+    # codegen's own output referenced). `.to_i` on every extracted target
+    # is required, not cosmetic, for the exact same reason the shared
+    # compile_insn's own JMP case already documents: the disassembly
+    # zero-pads addresses ("016"), but labels are emitted by their real
+    # *integer* value ("LBLK9_16:") -- also caught live, building this.
+    when 'JMP'
+      "  goto #{label_prefix}#{insn.args.strip[/\d+/].to_i};\n"
+    when 'JMPNOT'
+      reg = insn.args[/^R(\d+)/, 1]
+      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.args[/(\d+)\s*$/, 1].to_i};\n"
+    when 'JMPIF'
+      reg = insn.args[/^R(\d+)/, 1]
+      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.args[/(\d+)\s*$/, 1].to_i};\n"
+    when 'JMPNIL'
+      reg = insn.args[/^R(\d+)/, 1]
+      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.args[/(\d+)\s*$/, 1].to_i};\n"
+    else
+      shifted_args = insn.args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" }
+      shifted = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op, args: shifted_args, raw: insn.raw)
+      compile_insn(shifted, block_irep, owner_def, nil)
+    end
+  end
+
+  # BLOCK_SUPPORT: the full inlined-loop replacement for one recognized
+  # `.times` region (recognize_times_regions), or nil if the block's own
+  # body doesn't come out clean (any `#error` anywhere -- an unsupported
+  # opcode inside the block itself, including a nested BLOCK/SENDB this
+  # file has no nested-block support for at all) -- never emitted
+  # partially; compile_method's own caller falls all the way back to
+  # leaving both BLOCK and SENDB as ordinary, honest `#error` stubs in
+  # that case, exactly like any other unrecognized shape in this file.
+  #
+  # `offset` (the enclosing irep's own `nregs`) gives the block's own
+  # local registers a disjoint numbering from the enclosing method's --
+  # R0 (a block's own "self", inherited unchanged from its enclosing
+  # method, real mruby semantics) is aliased straight to `self` rather
+  # than renumbered, matching GETIV/SETIV's own hardcoded `self`
+  # identifier (see emit_rescue_try_body's own identical fix for the
+  # exact same constraint). Every other block-local register is
+  # re-initialized to nil at the TOP OF EVERY ITERATION, not just once
+  # before the loop -- a fresh block activation each time it's yielded
+  # to, exactly like a real Proc#call would give it, never state leftover
+  # from a previous iteration.
+  def emit_times_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    body = String.new
+    iter_label = "Lbc2cpp_times_iter_#{region[:block_addr]}"
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix)
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    # Not E_TYPE_ERROR: that macro hardcodes the identifier `mrb` (see
+    # embedded-ivar SETIV's own identical comment/fix, compile_insn's own
+    # SETIV case) -- every register/state variable in this whole file is
+    # named `M`, never `mrb`, so the macro's own expansion would reference
+    # an undeclared identifier. A real g++ error caught building this
+    # exact case, not assumed from reading the macro alone.
+    out << "    if (!mrb_integer_p(r#{dest_reg})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Integer receiver for inlined #times\"); }\n"
+    out << "    mrb_int bc2cpp_times_n_#{region[:block_addr]} = mrb_integer(r#{dest_reg});\n"
+    out << "    for (mrb_int bc2cpp_times_i_#{region[:block_addr]} = 0; " \
+           "bc2cpp_times_i_#{region[:block_addr]} < bc2cpp_times_n_#{region[:block_addr]}; " \
+           "++bc2cpp_times_i_#{region[:block_addr]}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{region[:block_addr]});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "  }\n"
+    # Integer#times returns self (the original receiver), not the loop's
+    # own last value -- r<dest_reg> already still holds it, untouched by
+    # the loop above, so no further assignment is needed here at all.
     out
   end
 
