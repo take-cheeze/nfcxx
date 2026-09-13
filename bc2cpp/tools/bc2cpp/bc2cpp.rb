@@ -3261,6 +3261,26 @@ end
 # argument -- confirmed directly against real disassembly for all three,
 # not just the literal case) just works, completely unmodified, wherever
 # it's reached from.
+# JMPNOT/JMPIF/JMPNIL's own real disassembly shape is always
+# "R<reg>\t<target>", optionally followed by a "; R<reg>:<name>" comment
+# when the register operand happens to be a real, named local variable --
+# confirmed as a genuinely new shape while building KEYWORD_ARG_SUPPORT's
+# own KEY_P (the first opcode in this file to ever write its own result
+# directly into a keyword's own named register; every prior real JMPIF/
+# JMPNOT/JMPNIL call site in this codebase always tested an unnamed temp
+# register instead, so no comment ever appeared before). Every call site
+# in this file used to extract the target with a bare `/(\d+)\s*$/`
+# (anchored to the true end of the string) -- silently wrong the moment a
+# real comment like "; R5:b" doesn't itself end in a digit: the regex
+# simply fails to match anywhere, returning nil, and `nil.to_i` is 0 --
+# not a raised error, a silent `goto L0` instead of the real target,
+# caught for real (not hypothetical) building this against
+# `def foo(a, b: 1, c:)`. Anchoring right after the register operand
+# instead is correct whether or not a trailing comment follows.
+def jmp_target_after_reg(args)
+  args[/^R\d+\s+(\d+)/, 1].to_i
+end
+
 def optional_arg_table(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return [0, nil, nil] unless enter
@@ -3274,6 +3294,85 @@ def optional_arg_table(irep)
   return [opt, nil, nil] unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
 
   [opt, jmps.map(&:addr), jmps.map { |i| i.args.strip[/\d+/].to_i }]
+end
+
+# KEYWORD_ARG_SUPPORT: real per-keyword parameter naming, shared between
+# compile_method (building _impl's own signature and the entry wrapper's
+# real mrb_kwargs extraction) and compile_insn's own KEY_P/KARG cases
+# (which only ever see one instruction, and derive everything they need --
+# including this exact name -- straight from that instruction's own `:sym`
+# operand, never from an externally threaded table). Both sides only ever
+# agree because both run the identical symbol text through the identical
+# sanitize_c_ident + prefix scheme.
+def kwarg_param_name(sym)
+  "bc2cpp_kwarg_#{sanitize_c_ident(sym)}"
+end
+
+def kw_given_param_name(sym)
+  "bc2cpp_kw_given_#{sanitize_c_ident(sym)}"
+end
+
+# KEYWORD_ARG_SUPPORT: ENTER's own `keyword`/`kwrest` fields -- this only
+# ever models plain keyword arguments with `kwrest` == 0 (no real `**rest`
+# receiver); a real closed-world survey of every currently-blocked
+# keyword-only method found `kwrest` == 0 on every single one, so this is
+# not a narrowing against real code today, just an honest boundary for
+# what's actually verified (a real `**rest` needs this method's own
+# generated register to be populated directly by the VM's own ENTER
+# semantics rather than by any KARG/KEY_P instruction at all -- confirmed
+# directly against real disassembly -- a materially different shape this
+# round doesn't attempt).
+#
+# Unlike OPTIONAL_ARG_SUPPORT's own ENTER-jump-table replacement, no
+# suppressed-address/glue-at region is needed here at all: KEY_P/KARG/
+# KEYEND (compile_insn's own new cases) are ordinary, always-correct,
+# already-in-place-in-the-real-bytecode instructions once those three
+# opcodes have a real translation -- every already-supported opcode around
+# them (JMPIF for the presence check, JMP to skip a redundant KARG, LOADI/
+# GETIV/... for a default-value expression, exactly the same generality
+# OPTIONAL_ARG_SUPPORT's own default-value computation already relies on)
+# just works unmodified. This function's only real job is enumerating
+# every distinct keyword this irep's own KEY_P/KARG instructions name, in
+# real bytecode-declaration order, and whether each is required (a bare,
+# unguarded KARG with no KEY_P anywhere for that same symbol -- confirmed
+# directly against real disassembly: `c:` with no default compiles to a
+# lone `KARG R4 :c`, nothing else) or optional (a real `KEY_P`/`JMPIF`
+# guard precedes its own KARG) -- compile_method needs this list to build
+# _impl's own real parameter list and the entry wrapper's own real
+# mrb_kwargs extraction; compile_insn's own KEY_P/KARG cases need none of
+# it, deriving everything from their own instruction alone (see
+# kwarg_param_name's own comment).
+#
+# Returns an array of {name:, required:} descriptors, or nil for anything
+# this doesn't model (rest/mandatory2/optional/kwrest/block nonzero, or a
+# real mismatch between ENTER's own declared keyword count and the number
+# of distinct symbols actually found -- a defensive sanity check, never
+# silently guessed past).
+def keyword_arg_table(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return nil unless enter
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  return nil unless kw.positive? && opt.zero? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
+
+  order = []
+  required = {}
+  irep.instructions.each do |insn|
+    next unless insn.op == 'KEY_P' || insn.op == 'KARG'
+
+    sym = insn.args[/:(\S+)/, 1]
+    next unless sym
+
+    unless required.key?(sym)
+      order << sym
+      required[sym] = true
+    end
+    required[sym] = false if insn.op == 'KEY_P'
+  end
+  return nil unless order.size == kw
+
+  order.map { |sym| { name: sym, required: required[sym] } }
 end
 
 def report_annotation_candidates(ireps, registry, arg_types, annotations)
@@ -4206,7 +4305,13 @@ class CodeGen
     # common pure-mandatory case, same as before.
     mandatory_ok = pure_mandatory_arity?(irep)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
-    supported = mandatory_ok || opt_jmp_targets
+    # KEYWORD_ARG_SUPPORT: only attempted once both of the above have
+    # already failed (mandatory_ok and opt_jmp_targets are mutually
+    # exclusive with a real keyword-only ENTER shape by construction --
+    # keyword_arg_table's own gate refuses unless `opt` is zero too), same
+    # short-circuiting shape as opt_jmp_targets' own guard above.
+    kw_table = (mandatory_ok || opt_jmp_targets) ? nil : keyword_arg_table(irep)
+    supported = mandatory_ok || opt_jmp_targets || kw_table
 
     total_args = supported ? mand + opt : mand
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| n ? sanitize_c_ident(n) : "arg#{i + 1}" }
@@ -4255,6 +4360,17 @@ class CodeGen
     # itself overwrites its register) placeholder argument from every
     # caller, same as every other parameter here.
     arg_params << 'mrb_int bc2cpp_given_opt' if opt.positive?
+    # KEYWORD_ARG_SUPPORT: one real `mrb_value` parameter per keyword
+    # (required or optional alike -- see keyword_arg_table's own comment),
+    # plus one extra `mrb_int` "was it given" parameter for each optional
+    # one only (a required keyword is always given -- mrb_get_args itself
+    # already raises ArgumentError otherwise, before _impl is ever
+    # reached). Natural bytecode-declaration order, matching the entry
+    # wrapper's own call below exactly.
+    kw_table&.each do |kw|
+      arg_params << "mrb_value #{kwarg_param_name(kw[:name])}"
+      arg_params << "mrb_int #{kw_given_param_name(kw[:name])}" unless kw[:required]
+    end
     out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     # A native-typed argument's own register still holds a plain mrb_value
@@ -4365,8 +4481,52 @@ class CodeGen
     out = rescue_pre + out
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    if arg_names.empty?
+    if arg_names.empty? && !kw_table
       out << "  return #{impl_name}(M, self);\n"
+    elsif kw_table
+      # KEYWORD_ARG_SUPPORT: the real mrb_kwargs mechanism mruby.h's own
+      # `mrb_get_args` `:` format specifier documents -- `required` names
+      # how many of `table`'s own entries (which MUST list every required
+      # keyword first) are mandatory; `values[i]` comes back `mrb_undef_p`
+      # for an omitted optional keyword, real Ruby's own "undef" sentinel,
+      # never safe to hand to ordinary code (see the mrb_nil_value()
+      # fallback below -- the same "never a raw uninitialized/sentinel
+      # value" trust model OPTIONAL_ARG_SUPPORT's own `mrb_nil_value()`
+      # placeholder already establishes). `rest: NULL` means an
+      # unrecognized keyword raises ArgumentError automatically -- the
+      # real semantics KEYEND's own compile_insn case relies on already
+      # being enforced here, before _impl is ever reached (this round
+      # never declares a real `**kwrest` receiver -- see keyword_arg_
+      # table's own comment on why that's a real, confirmed non-issue for
+      # every currently-blocked keyword-only method, not just an
+      # unhandled gap). Mandatory positional arguments (if any) are
+      # unpacked exactly like the plain, non-keyword case above, just with
+      # `:` plus one extra `&bc2cpp_kwargs` pointer appended.
+      arg_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      required_kws = kw_table.select { |kw| kw[:required] }
+      optional_kws = kw_table.reject { |kw| kw[:required] }
+      ordered_kws = required_kws + optional_kws
+      table_entries = ordered_kws.map { |kw| "mrb_intern_cstr(M, \"#{kw[:name]}\")" }.join(', ')
+      out << "  mrb_sym bc2cpp_kw_table[#{ordered_kws.size}] = { #{table_entries} };\n"
+      out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
+      out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_kws.size}, " \
+             "bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
+      fmt = arg_native_types.map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + ':'
+      ptrs = (arg_names.map { |a| "&#{a}" } + ['&bc2cpp_kwargs']).join(', ')
+      out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
+      ordered_kws.each_with_index do |kw, i|
+        var = kwarg_param_name(kw[:name])
+        if kw[:required]
+          out << "  mrb_value #{var} = bc2cpp_kw_values[#{i}];\n"
+        else
+          out << "  mrb_value #{var} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? mrb_nil_value() : bc2cpp_kw_values[#{i}];\n"
+          out << "  mrb_int #{kw_given_param_name(kw[:name])} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
+        end
+      end
+      call_args = arg_names + kw_table.flat_map do |kw|
+        kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
+      end
+      out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
     else
       # Each local's own declared type has to match what mrb_get_args'
       # own format character below writes into it -- 'o' (no coercion at
@@ -4444,6 +4604,16 @@ class CodeGen
     # devirtualized cross-TU caller (OTHER_DECLS_HEADER) would declare an
     # arity-mismatched prototype for a real, externally-linked symbol.
     arg_c_types << 'mrb_int' if opt.positive?
+    # KEYWORD_ARG_SUPPORT: same reasoning as OPTIONAL_ARG_SUPPORT's own
+    # `bc2cpp_given_opt` line just above -- every real parameter arg_params
+    # added for a keyword (one `mrb_value` each, plus one `mrb_int` for an
+    # optional one) has to appear here too, in the exact same order, or a
+    # cross-TU devirtualized caller's own forward declaration would
+    # mismatch this real, externally-linked symbol's actual signature.
+    kw_table&.each do |kw|
+      arg_c_types << 'mrb_value'
+      arg_c_types << 'mrb_int' unless kw[:required]
+    end
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types,
       code: out, visibility: d.visibility }
@@ -4474,7 +4644,7 @@ class CodeGen
       when 'JMP'
         targets << insn.args.strip[/\d+/].to_i
       when 'JMPNOT', 'JMPIF', 'JMPNIL'
-        targets << insn.args[/(\d+)\s*$/, 1].to_i
+        targets << jmp_target_after_reg(insn.args)
       end
     end
     targets
@@ -4578,7 +4748,7 @@ class CodeGen
       next unless cls_reg && cls_name
       next unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
       next unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
-      match_addr = jmpif_i.args[/(\d+)\s*$/, 1].to_i
+      match_addr = jmp_target_after_reg(jmpif_i.args)
       next unless jmp_i.op == 'JMP'
       raise_addr = jmp_i.args.strip[/\d+/].to_i
 
@@ -4620,7 +4790,7 @@ class CodeGen
       jump_target_of = lambda do |insn|
         case insn.op
         when 'JMP' then insn.args.strip[/\d+/].to_i
-        when 'JMPNOT', 'JMPIF', 'JMPNIL' then insn.args[/(\d+)\s*$/, 1].to_i
+        when 'JMPNOT', 'JMPIF', 'JMPNIL' then jmp_target_after_reg(insn.args)
         end
       end
       escapes = irep.instructions.any? do |src|
@@ -4923,13 +5093,13 @@ class CodeGen
       "  goto #{label_prefix}#{insn.args.strip[/\d+/].to_i};\n"
     when 'JMPNOT'
       reg = insn.args[/^R(\d+)/, 1]
-      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.args[/(\d+)\s*$/, 1].to_i};\n"
+      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     when 'JMPIF'
       reg = insn.args[/^R(\d+)/, 1]
-      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.args[/(\d+)\s*$/, 1].to_i};\n"
+      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     when 'JMPNIL'
       reg = insn.args[/^R(\d+)/, 1]
-      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.args[/(\d+)\s*$/, 1].to_i};\n"
+      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     else
       shifted_args = insn.args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" }
       shifted = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op, args: shifted_args, raw: insn.raw)
@@ -5010,6 +5180,32 @@ class CodeGen
     case insn.op
     when 'ENTER'
       "  // #{insn.raw.strip} (args already bound above)\n"
+    when 'KEY_P'
+      # KEYWORD_ARG_SUPPORT: real presence check for one optional keyword
+      # -- the entry wrapper's own real mrb_kwargs extraction (compile_
+      # method) already computed this as a plain bool parameter, named
+      # purely from this same instruction's own `:sym` operand (see
+      # kwarg_param_name's own comment -- no external table needed here).
+      d = a[/^R(\d+)/, 1]
+      sym = a[/:(\S+)/, 1]
+      "  r#{d} = mrb_bool_value(#{kw_given_param_name(sym)});\n"
+    when 'KARG'
+      # KEYWORD_ARG_SUPPORT: fetch one keyword's own real value -- required
+      # or optional, both are already-unpacked plain mrb_value parameters
+      # by the time _impl runs (an optional one's own default-value
+      # computation, reached only when KEY_P's own JMPIF found it absent,
+      # simply overwrites this same register right afterward, exactly like
+      # OPTIONAL_ARG_SUPPORT's own default-value codegen).
+      d = a[/^R(\d+)/, 1]
+      sym = a[/:(\S+)/, 1]
+      "  r#{d} = #{kwarg_param_name(sym)};\n"
+    when 'KEYEND'
+      # KEYWORD_ARG_SUPPORT: real unrecognized-keyword-argument checking
+      # (raising ArgumentError on a key this method never declared) is
+      # already done by the entry wrapper's own real mrb_kwargs (`rest:
+      # NULL`, mruby.h's own documented behavior) before _impl is ever
+      # reached -- nothing left for this opcode to do here.
+      "  // KEYEND: already enforced by the entry wrapper's own mrb_kwargs (rest: NULL)\n"
     when 'MOVE'
       d, s = regs(a, 2)
       "  r#{d} = r#{s};\n"
@@ -5213,11 +5409,11 @@ class CodeGen
       "  goto L#{target};\n"
     when 'JMPNOT'
       reg = a[/^R(\d+)/, 1]
-      target = a[/(\d+)\s*$/, 1].to_i
+      target = jmp_target_after_reg(a)
       "  if (!mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPIF'
       reg = a[/^R(\d+)/, 1]
-      target = a[/(\d+)\s*$/, 1].to_i
+      target = jmp_target_after_reg(a)
       "  if (mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPNIL'
       # "JMPNIL R3 024" -- OP_JMPNIL's own real shape (src/vm.c): jump if
@@ -5226,7 +5422,7 @@ class CodeGen
       # emits for `x.nil? ? a : b` / `x || y`-shaped nil-specific tests,
       # e.g. `@opacity.nil? ? 255 : @opacity`).
       reg = a[/^R(\d+)/, 1]
-      target = a[/(\d+)\s*$/, 1].to_i
+      target = jmp_target_after_reg(a)
       "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
     when 'GETCONST'
       # "GETCONST R4 Integer" -- a bare top-level/lexical constant lookup.
