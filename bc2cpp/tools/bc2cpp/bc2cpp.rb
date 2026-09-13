@@ -5453,7 +5453,7 @@ class CodeGen
     when 'SEND0', 'SEND'
       compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
-      compile_send(a, self_implicit: true)
+      compile_send(a, self_implicit: true, irep: irep, idx: idx, owner_def: owner_def)
     when 'RETURN'
       r = a.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
@@ -5936,6 +5936,106 @@ class CodeGen
     CPP
   end
 
+  # KEYWORD_CALLSITE_SUPPORT: compile a `SEND`/`SSEND` call site that
+  # passes keyword arguments (`n=2|nk=1` shape) into a direct `_impl`
+  # call against an already-compiled callee. Returns the emitted C++ on
+  # success, nil when this call site is not a supported shape (the
+  # caller falls back to its honest #error).
+  #
+  # Why direct-call-only, never dynamic dispatch: mruby's own
+  # `mrb_funcall*` family can never carry keywords (`ci->nk = 0` in
+  # funcall_args_capture, 3rd/mruby/src/vm.c) -- only the VM's own
+  # OP_SEND packs nk pairs into a Hash at runtime. So unlike a
+  # positional call, there is no `mrb_funcall` spelling that preserves
+  # keywords at all; the only sound translation is calling the
+  # callee's own compiled `_impl` directly, whose signature already
+  # takes each keyword as an explicit `(value, given)` parameter pair
+  # (see compile_method's own entry-wrapper comment).
+  #
+  # Call-site layout (confirmed against real disassembly, e.g.
+  # `SSEND R9 :deal_attack n=3|nk=1` with `R10/R11/R12` positionals,
+  # `R13 = LOADSYM :charged`, `R14` = value): n positional registers
+  # immediately after the destination, then nk (sym, value) pairs.
+  # Only literal-symbol keys (a `LOADSYM :name` writing the sym
+  # register, verified by backward scan in this same irep) are
+  # supported -- a computed key has no static name to match against
+  # the callee's keyword table, so it keeps the #error.
+  #
+  # Callee resolution is MONO-only with the keyword-aware gate
+  # (callee compiles clean AND has a computable `keyword_arg_table`
+  # covering the call site's keys, AND positional count matches the
+  # callee's mandatory arity) instead of `pure_mandatory_arity?.
+  # Missing keywords pass `mrb_nil_value()` + `given=0`, exactly what
+  # the entry wrapper's own `mrb_undef_p` check produces for an omitted
+  # keyword; required keywords missing at the call site are rejected
+  # (nil return -- the interpreter would raise ArgumentError, so
+  # compiling a call that drops one would be silently wrong).
+  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
+    dest_reg = d.to_i
+    # Keyword (sym, value) pairs sit right after the n positionals.
+    kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
+    kw_val_regs = (0...nk).map { |k| dest_reg + 2 + n + k * 2 }
+    # Verify every key register is written by a LOADSYM with a literal
+    # symbol, scanning backward from the call site in this same irep.
+    kw_names = kw_sym_regs.map do |reg|
+      sym = nil
+      idx.downto(0) do |i|
+        insn = irep.instructions[i]
+        next unless insn
+        # A write to this register ends the scan -- it must be LOADSYM.
+        if insn.args =~ /^R#{reg}\b/
+          sym = insn.op == 'LOADSYM' ? insn.args[/:(\S+)/, 1] : nil
+          break
+        end
+      end
+      break nil if sym.nil?
+      sym.sub(/\A:/, '')
+    end
+    return nil if kw_names.nil? || kw_names.size != nk
+
+    recv = self_implicit ? 'self' : "r#{d}"
+    # MONO resolution only -- deliberately no TYPED path: a traced-
+    # receiver guard's `else` branch would need a dynamic keyword
+    # dispatch, which mruby's own `mrb_funcall*` family cannot express
+    # (`ci->nk = 0`, see above), so any guard failure would silently
+    # drop keywords. MONO needs no guard at all (exactly one def
+    # exists program-wide), so it is unconditionally sound. A POLY
+    # keyword call keeps the honest #error.
+    target = monomorphic_target(name)
+    return nil unless target&.irep
+    # monomorphic_target already verified compiles_clean? -- fetch the
+    # irep struct for the keyword-table/arity checks below (fetch, not
+    # compiles_clean?, which takes a label).
+    callee_irep = @ireps.fetch(target.irep)
+    kw_table = keyword_arg_table(callee_irep)
+    return nil unless kw_table
+    return nil unless n == mandatory_arity(callee_irep)
+    return nil unless (kw_names - kw_table.map { |k| k[:name] }).empty?
+    # Every required keyword must be present at the call site --
+    # otherwise the interpreter raises ArgumentError and compiling
+    # the call would be silently wrong.
+    required = kw_table.select { |k| k[:required] }.map { |k| k[:name] }
+    return nil unless (required - kw_names).empty?
+    # Same emission-eligibility guard as compile_send's own: no _impl
+    # exists for an owner this run is not emitting.
+    if @only_owners && !@only_owners.include?(target.owner)
+      return nil unless @other_owners&.include?(target.owner)
+    end
+    impl = cpp_name(target.owner, target.name) + '_impl'
+    argv = (1..n).map { |k| "r#{dest_reg + k}" }
+    kw_args = kw_table.flat_map do |kw|
+      ci = kw_names.index(kw[:name])
+      if ci
+        ["r#{kw_val_regs[ci]}", '1']
+      else
+        ['mrb_nil_value()', '0']
+      end
+    end
+    call = "r#{d} = #{impl}(M, #{([recv] + argv + kw_args).join(', ')});"
+    note = "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
+    "#{note}  #{call}\n"
+  end
+
   def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
     d = args[/^R(\d+)/, 1]
     # Real bug, caught by running against real code: this charset omitted
@@ -6068,6 +6168,17 @@ class CodeGen
     # instead of incidental).
     n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
     if n_match && (n_match[1] == '*' || n_match[2])
+      # Keyword-argument call site (nk>0, no splat): try devirtualizing
+      # into the compiled callee's own _impl (compile_keyword_send
+      # below) before falling back to the honest #error. Splat (`*`
+      # anywhere) still always #errors -- no fixed register list exists
+      # for it by construction.
+      if n_match[1] != '*' && n_match[2] != '*' && irep && !idx.nil?
+        kw_result = compile_keyword_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
+                                         owner_def: owner_def, name: name, d: d,
+                                         n: n_match[1].to_i, nk: n_match[2].to_i)
+        return kw_result if kw_result
+      end
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{n_match[0]}) -- not in this prototype's supported subset\n"
     end
 
