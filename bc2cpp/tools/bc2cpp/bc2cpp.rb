@@ -4615,6 +4615,17 @@ class CodeGen
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = inlined
     end
+    # SORT_BLOCK_SUPPORT: same mechanism for sort-family regions
+    # (`sort_by`/`uniq` key blocks; `sort`-comparator shapes are
+    # recognized-and-rejected inside the emitter). Same gate, same
+    # contract.
+    recognize_sort_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_sort_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
 
     targets = jump_targets(irep) - suppressed
     irep.instructions.each_with_index do |insn, idx|
@@ -5362,6 +5373,88 @@ class CodeGen
     regions
   end
 
+  # SORT_BLOCK_SUPPORT: recognize one inlinable sort-family region --
+  # `ary.sort_by { |x| key }` (1-mandatory-arg key block),
+  # `ary.sort { |a, b| ... }` (2-mandatory-arg comparator block),
+  # `ary.uniq { |x| ... }` (1-arg key block). Same `BLOCK R(a+1)` +
+  # `SENDB/SSENDB` adjacency and same static Array gate as every
+  # recognizer above. Per-method semantics live in emit_sort_inline.
+  # `sort_by!`/`uniq!` (bang, in-place) stay out -- mutating the
+  # receiver in place needs aliasing analysis this round doesn't do; a
+  # follow-up. `max`/`min`/`max_by`/`min_by` (2 sites, `uniq`-adjacent)
+  # stay out too -- same loop-with-key shape as `find`, trivially a
+  # follow-up on this machinery, but not this round. Arity mismatches
+  # keep the honest `#error`, same as every recognizer above.
+  SORT_BLOCK_METHODS = %w[sort sort_by uniq].freeze
+
+  def recognize_sort_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      meth = name&.sub(/\A:/, '')
+      next unless nstr == 'n=0' && SORT_BLOCK_METHODS.include?(meth)
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      want_arity = meth == 'sort' ? 2 : 1
+      next unless block_irep && mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Array'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        traced = chained_array_call(irep, idx, dest_reg) if traced != 'Array'
+        next unless traced == 'Array'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: meth, ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
+  # SORT_BLOCK_SUPPORT: the chained-receiver rule. A call site whose
+  # receiver register was itself just written by a * complying call --
+  # `select`/`reject`/`map` in any dispatch shape (plain SEND/SSEND or
+  # block-carrying SENDB/SSENDB, n=0) -- inherits that call's own
+  # Array-ness: every one of those returns a fresh Array
+  # unconditionally (real Ruby semantics, whatever the receiver was).
+  # Single-step backward scan, no fixpoint: the nearest write to the
+  # destination register decides. Sound by SKIP_UNSUPPORTED's own
+  # per-method partitioning: if the producing call itself has any gap,
+  # the whole method (including this site) falls back to the
+  # interpreter -- so this rule can only ever fire in a method where
+  # the producer ALSO compiled (or is itself a chained link whose root
+  # traced clean). Either the method interprets, or every link proved.
+  CHAINED_ARRAY_METHODS = %w[select reject map].freeze
+
+  def chained_array_call(irep, idx, dest_reg)
+    (idx - 1).downto(0) do |i|
+      pin = irep.instructions[i]
+      next unless pin
+      next unless pin.args[/^R(\d+)/, 1] == dest_reg
+      next unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
+
+      called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      return 'Array' if called && CHAINED_ARRAY_METHODS.include?(called)
+
+      return nil
+    end
+    nil
+  end
+
   # BLOCK_SUPPORT: translate one instruction from an INLINED block body
   # (never a top-level method body -- compile_method's own main loop
   # never calls this). `offset` disambiguates the block's own local
@@ -5928,6 +6021,173 @@ class CodeGen
       out << "if (#{check}) { #{impl}(M, #{elem_expr}); }\n"
     end
     out << "      else { #{fallback} }\n"
+    out
+  end
+
+  # SORT_BLOCK_SUPPORT: the inlined replacement for one recognized
+  # sort-family region (recognize_sort_regions), or nil when the block
+  # body doesn't come out clean -- same all-or-nothing contract as
+  # every emitter above. Two strategies, split by what the block MEANS:
+  #
+  # - `sort { |a, b| ... }` (comparator): delegate the WHOLE call to
+  #   the interpreter. A comparator block cannot inline as a loop at
+  #   all -- it runs O(n log n) times inside the VM's own sort, driven
+  #   by native code this file cannot reproduce. So `sort`-with-block
+  #   is NOT compiled here (returns nil -- honest `#error`, stays
+  #   interpreted). Recognized-and-rejected deliberately: the shape is
+  #   claimed so a future round (comparator-as-callback via retained
+  #   Proc, or key-extraction) has a named place to extend. Bare
+  #   `sort` with NO block (`n=0`, no BLOCK -- plain SEND, never
+  #   reaches this recognizer) already compiles as an ordinary call.
+  #
+  # - `sort_by { |x| key }` / `uniq { |x| key }` (key extraction): the
+  #   Schwartzian transform, expressed with/or ordinary compiled
+  #   operations only --
+  #     1. keys[i] = <block>(elem[i]) for each element (the inlined
+  #        block body, yielded-value capture shared with collect via
+  #        compile_collect_body_insn -- same `next`-collects-nil,
+  #        same `break`-overrides, same broke-flag);
+  #     2. decorate: pairs[i] = [keys[i], i, elem[i]] (index decoration
+  #        keeps the sort STABLE -- mruby's own sort is not stable, but
+  #        CRuby's sort_by IS stable, confirmed by oracle above:
+  #        `[[0,"b"],[0,"a"]].sort_by` keeps order -- and game code
+  #        like turn-order ties depends on it);
+  #     3. sort pairs by (key, index) with `mrb_cmp` (mruby.h's own
+  #        public three-way comparison: fixnum/float/string fast paths,
+  #        `<=>` dispatch otherwise, -2 on incomparable -- exactly the
+  #        comparison native sort itself uses);
+  #     4. undecorate: dest[i] = pairs[i][2].
+  #   `uniq` differs only in step 3-4: keep the FIRST element per key
+  #   (consecutive-key dedup after sorting by key -- sort stably by
+  #   key, then drop adjacent equal keys via `mrb_cmp == 0`).
+  #   All temporaries are fresh `mrb_ary_new` locals (never the
+  #   receiver -- `sort_by`/`uniq` return new arrays, confirmed by
+  #   oracle; the receiver is only ever READ via `mrb_ary_ref`).
+  #   A `break v` inside the key block overrides the whole expression
+  #   with v (same broke-flag pattern as collect/accum).
+  def emit_sort_inline(region, irep, d)
+    return nil if region[:method_name] == 'sort'
+
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    meth = region[:method_name]
+    param_reg = 1 + offset
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    iter_label = "Lbc2cpp_sort_iter_#{region[:block_addr]}"
+    break_label = "Lbc2cpp_sort_end_#{region[:block_addr]}"
+    result_var = "bc2cpp_sort_v_#{region[:block_addr]}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                result_var: result_var, break_dest: dest_reg,
+                                                break_label: break_label,
+                                                broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}")
+    end
+    return nil if body.include?('#error')
+
+    addr = region[:block_addr]
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
+    out << "    mrb_bool bc2cpp_sort_broke_#{addr} = FALSE;\n"
+    out << "    mrb_int bc2cpp_sort_n_#{addr} = RARRAY_LEN(#{recv_expr});\n"
+    out << "    mrb_value bc2cpp_sort_keys_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_n_#{addr});\n"
+    out << "    for (mrb_int bc2cpp_sort_i_#{addr} = 0; bc2cpp_sort_i_#{addr} < RARRAY_LEN(#{recv_expr}); ++bc2cpp_sort_i_#{addr}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero?
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_keys_#{addr}, #{result_var});\n"
+    out << "    }\n"
+    # Key loop uses a snapshot length (n) for allocation but re-checks
+    # live RARRAY_LEN per element -- push-during-key-block visits new
+    # elements (same live-length rule as every emitter above); keys and
+    # elements can only diverge if the body mutates the receiver, in
+    # which case the SORT phase below re-reads live length and the key
+    # array is shorter -- guarded: iterate min(keys, len) by indexing
+    # keys with the same live loop and pushing only while i < keys len.
+    # Simpler exact rule: sort phase loops over the KEY array's own
+    # length (keys are 1:1 with visited elements by construction), and
+    # element fetch uses mrb_ary_ref on the receiver at the same index
+    # (nil-padded by mrb_ary_ref semantics if the receiver shrank --
+    # matches interpreted sort_by-on-mutated-array within reason; a
+    # body that mutates mid-sort is already VM-undefined -- native sort
+    # RAISES "array modified during sort" -- so any sane behavior here
+    # is acceptable, and non-mutating bodies are exact).
+    out << "    #{break_label}:;\n"
+    out << "    if (!bc2cpp_sort_broke_#{addr}) {\n"
+    out << "    mrb_int bc2cpp_sort_m_#{addr} = RARRAY_LEN(bc2cpp_sort_keys_#{addr});\n"
+    out << "    mrb_value bc2cpp_sort_pairs_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
+    out << "    for (mrb_int bc2cpp_sort_j_#{addr} = 0; bc2cpp_sort_j_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_j_#{addr}) {\n"
+    out << "      mrb_value bc2cpp_sort_e_#{addr} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_k_#{addr} = mrb_ary_ref(M, bc2cpp_sort_keys_#{addr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_trip_#{addr} = mrb_ary_new_capa(M, 3);\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, bc2cpp_sort_k_#{addr});\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, mrb_fixnum_value(bc2cpp_sort_j_#{addr}));\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, bc2cpp_sort_e_#{addr});\n"
+    out << "      mrb_ary_push(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_trip_#{addr});\n"
+    out << "    }\n"
+    # Insertion sort on (key, index) -- O(n^2) worst case, but game
+    # arrays here are tiny (turn order, event lists, transition bands:
+    # single-to-double digits), and insertion sort is STABLE, which the
+    # index decoration would otherwise have to supply alone. The index
+    # tiebreak below makes stability explicit regardless of algorithm,
+    # so this is correct for any size, just tuned for small n.
+    # mrb_cmp: 1/0/-1, -2 on incomparable (same contract native
+    # sort_cmp relies on -- incomparable keys raise, matching the VM).
+    # mrb_integer on the decorated index: always a real fixnum (emitted
+    # above as mrb_fixnum_value(j)), never user data -- no TypeError
+    # path possible, matching native sort's own unchecked index ints.
+    out << "    for (mrb_int bc2cpp_sort_a_#{addr} = 1; bc2cpp_sort_a_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_a_#{addr}) {\n"
+    out << "      mrb_value bc2cpp_sort_tmp_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_a_#{addr});\n"
+    out << "      mrb_int bc2cpp_sort_b_#{addr} = bc2cpp_sort_a_#{addr} - 1;\n"
+    out << "      while (bc2cpp_sort_b_#{addr} >= 0) {\n"
+    out << "        mrb_value bc2cpp_sort_pa_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr});\n"
+    out << "        mrb_value bc2cpp_sort_ka_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pa_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ia_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pa_#{addr}, 1);\n"
+    out << "        mrb_value bc2cpp_sort_kb_#{addr} = mrb_ary_ref(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ib_#{addr} = mrb_ary_ref(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
+    out << "        mrb_int bc2cpp_sort_c_#{addr} = mrb_cmp(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
+    out << "        if (bc2cpp_sort_c_#{addr} == -2) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"ArgumentError\")), \"bc2cpp: sort_by comparison failed\"); }\n"
+    out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
+    out << "        if (bc2cpp_sort_c_#{addr} >= 0) break;\n"
+    out << "        mrb_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_pa_#{addr});\n"
+    out << "        --bc2cpp_sort_b_#{addr};\n"
+    out << "      }\n"
+    out << "      mrb_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_tmp_#{addr});\n"
+    out << "    }\n"
+    out << "    r#{dest_reg} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
+    if meth == 'uniq'
+      out << "    mrb_value bc2cpp_sort_lastk_#{addr} = mrb_nil_value();\n"
+      out << "    mrb_bool bc2cpp_sort_havek_#{addr} = FALSE;\n"
+      out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
+      out << "      mrb_value bc2cpp_sort_pu_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr});\n"
+      out << "      mrb_value bc2cpp_sort_ku_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pu_#{addr}, 0);\n"
+      out << "      mrb_int bc2cpp_sort_eq_#{addr} = (bc2cpp_sort_havek_#{addr} && mrb_cmp(M, bc2cpp_sort_ku_#{addr}, bc2cpp_sort_lastk_#{addr}) == 0) ? 1 : 0;\n"
+      out << "      if (!bc2cpp_sort_eq_#{addr}) { mrb_ary_push(M, r#{dest_reg}, mrb_ary_ref(M, bc2cpp_sort_pu_#{addr}, 2)); }\n"
+      out << "      bc2cpp_sort_lastk_#{addr} = bc2cpp_sort_ku_#{addr};\n"
+      out << "      bc2cpp_sort_havek_#{addr} = TRUE;\n"
+      out << "    }\n"
+    else
+      out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
+      out << "      mrb_ary_push(M, r#{dest_reg}, mrb_ary_ref(M, mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
+      out << "    }\n"
+    end
+    out << "    }\n"
+    out << "  }\n"
     out
   end
 
