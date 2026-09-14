@@ -1161,6 +1161,25 @@ OPSYM_TO_RUBY = {
 # call `mrb_define_method_id(mrb, klass, MRB_SYM(name), func, aspec)`
 # directly instead of a ROM table -- same MRB_SYM/MRB_OPSYM symbol
 # spelling, different call shape, covered by the same second regex below.
+# One MRB_SYM(name)/MRB_SYM_Q(name)/MRB_SYM_B(name)/MRB_SYM_E(name)/
+# MRB_OPSYM(op) token -- shared between extract_native_method_names (method
+# *definitions*, below) and extract_native_call_names (method *calls*,
+# below that), so the SYM_Q/SYM_B/SYM_E/OPSYM resolution logic (and the
+# "longer alternative before the bare one" ordering fix documented at this
+# constant's original call site) exists in exactly one place rather than
+# two copies that could quietly drift apart.
+MRB_SYM_TOKEN_RE = /MRB_(SYM_Q|SYM_B|SYM_E|SYM|OPSYM)\((\w+)\)/
+
+def resolve_mrb_sym_token(macro, name)
+  case macro
+  when 'SYM_Q' then "#{name}?"
+  when 'SYM_B' then "#{name}!"
+  when 'SYM_E' then "#{name}="
+  when 'OPSYM' then OPSYM_TO_RUBY[name] || name
+  else name # bare MRB_SYM(name)
+  end
+end
+
 def extract_native_method_names(src_paths)
   names = Set.new
   # MRB_SYM(name) spells the bare method name; MRB_OPSYM(op) spells an
@@ -1188,17 +1207,6 @@ def extract_native_method_names(src_paths)
   # SYM_Q/SYM_B/SYM_E alternatives must be tried before the bare SYM one
   # below (regex alternation order) or "MRB_SYM_Q(empty)" would match SYM
   # against "SYM" alone and then fail on the unconsumed "_Q(empty)".
-  sym_or_opsym = /MRB_(SYM_Q|SYM_B|SYM_E|SYM|OPSYM)\((\w+)\)/
-  resolve_sym = lambda do |macro, name|
-    case macro
-    when 'SYM_Q' then "#{name}?"
-    when 'SYM_B' then "#{name}!"
-    when 'SYM_E' then "#{name}="
-    when 'OPSYM' then OPSYM_TO_RUBY[name] || name
-    else name # bare MRB_SYM(name)
-    end
-  end
-
   Array(src_paths).each do |path|
     src = File.read(path, encoding: 'UTF-8')
     # Handles both single-line and the far more common multi-line call shape
@@ -1210,13 +1218,52 @@ def extract_native_method_names(src_paths)
 
     # MRB_MT_ENTRY(fn, MRB_SYM(name), flags) / MRB_MT_ENTRY(fn, MRB_OPSYM(op), flags)
     # -- mruby core's own ROM method-table idiom.
-    src.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{sym_or_opsym}/) { |tok| names << resolve_sym.call(tok[0], tok[1]) }
+    src.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/) { |tok| names << resolve_mrb_sym_token(tok[0], tok[1]) }
 
     # mrb_define_method_id(mrb, klass, MRB_SYM(name)/MRB_OPSYM(op), func, aspec)
     # (and the _class_method_id/_module_function_id siblings) -- the direct-call
     # form some core mrbgems (mruby-task, ...) use instead of a ROM table.
-    src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{sym_or_opsym}/) do |tok|
-      names << resolve_sym.call(tok[0], tok[1])
+    src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
+      names << resolve_mrb_sym_token(tok[0], tok[1])
+    end
+  end
+  names
+end
+
+# A sibling to extract_native_method_names above, but for the opposite
+# direction: which method names does this project's own native C/C++ (or
+# mruby's own C core, when fed the same NATIVE_SRCS list) ever *call* by
+# literal name -- mrb_funcall/mrb_funcall_id/mrb_funcall_argv/
+# mrb_funcall_with_block's own "name" argument, spelled either as a
+# literal C string or as one of the same MRB_SYM/MRB_OPSYM-family tokens
+# extract_native_method_names already resolves via resolve_mrb_sym_token.
+# Feeds the "never called" reachability diagnostic near the bottom of this
+# file's own driver -- never consulted by codegen itself, the same
+# diagnostic-only standing as Step 6e's report_annotation_candidates.
+#
+# Deliberately loose about which argument position the string/token
+# actually sits in (a bounded lookahead after the call, not a strict
+# comma-split): mrb_funcall's own receiver argument is frequently itself
+# a call expression with commas of its own (e.g. `mrb_funcall_id(mrb,
+# mrb_ary_entry(ary1, i), MRB_OPSYM(eq), ...)`), which a naive
+# `[^,]+`-between-commas split (extract_native_method_names' own approach,
+# safe there only because mrb_define_method's own receiver argument is
+# always a bare identifier by this codebase's convention) would
+# mis-parse. A 200-character bounded, non-greedy lookahead for "the
+# nearest quoted string or MRB_SYM-family token after the opening paren"
+# is a loose heuristic, not a real argument-position parse -- but the real
+# calling convention (mrb_state*, receiver, name, ...) never puts another
+# quoted string or symbol token before the name argument in practice, and
+# a false match here only ever adds a name to the "reachable" set, never
+# removes one -- so a wrong match is silently safe here, unlike the
+# definition side above (where a missed name would wrongly leave a real
+# collision looking MONO).
+def extract_native_call_names(src_paths)
+  names = Set.new
+  Array(src_paths).each do |path|
+    src = File.read(path, encoding: 'UTF-8')
+    src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
+      names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end
   end
   names
@@ -3515,6 +3562,65 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
     end
   end
   candidates
+end
+
+# ---------------------------------------------------------------------------
+# Step 6h: whole-program static call-target reachability -- diagnostic
+# only, never consulted by codegen (the same standing as Step 6e's
+# annotation-candidate report above). Answers a different question than
+# MONO/POLY registry resolution: not "if this name is called, which def
+# wins" but "is this name ever a call target anywhere in the whole
+# program's own bytecode at all". A compiled entry point whose name never
+# appears here, and whose name extract_native_call_names above also never
+# finds, has no known caller anywhere this tool can see -- a real,
+# load-bearing signal for "is this compiled entry point safe to delete",
+# surfaced by the "== never called ==" diagnostic near the bottom of this
+# file's own driver.
+#
+# Three ways a whole-program bytecode instruction can name a method
+# without ever emitting a literal SEND/SSEND targeting it:
+#   - SEND0/SEND/SSEND0/SSEND's own `:name` operand -- the ordinary case.
+#   - A fixed-name opcode -- ADD/SUB/MUL/DIV/EQ/LT/LE/GT/GE/GETIDX/
+#     GETIDX0/SETIDX and their *I/*ILV immediate variants always dispatch
+#     a hardcoded method name (`+`, `==`, `[]`, ...) on their own
+#     fixnum/array/hash-fastpath-failure path -- see compile_insn's/
+#     compile_cmp's own comments for the exact mrb_funcall shape each one
+#     emits. IMPLICIT_DISPATCH_NAMES below mirrors that same fixed-name
+#     table; keep the two in sync if a future round gives a new opcode a
+#     fixed-name mrb_funcall fallback.
+#   - LOADSYM's own `:name` operand -- a bare symbol *literal* anywhere in
+#     the program (`send(:name)`, `method(:name)`, `&:name` block
+#     conversion, `respond_to?(:name)`, or just a Hash key that happens to
+#     share a compiled method's own name). Deliberately as conservative as
+#     extract_native_call_names above: counting a symbol literal as
+#     "reachable" even when it turns out to be plain data, not a real
+#     dispatch, only ever shrinks the "never called" list, never wrongly
+#     grows it.
+# ---------------------------------------------------------------------------
+
+IMPLICIT_DISPATCH_NAMES = {
+  'ADD' => '+', 'ADDI' => '+', 'ADDILV' => '+',
+  'SUB' => '-', 'SUBI' => '-', 'SUBILV' => '-',
+  'MUL' => '*', 'DIV' => '/',
+  'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=',
+  'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=',
+}.freeze
+
+def collect_static_call_target_names(ireps)
+  names = Set.new
+  ireps.each_value do |irep|
+    (irep.instructions || []).each do |insn|
+      case insn.op
+      when 'SEND0', 'SEND', 'SSEND0', 'SSEND', 'LOADSYM'
+        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        names << name if name
+      else
+        fixed = IMPLICIT_DISPATCH_NAMES[insn.op]
+        names << fixed if fixed
+      end
+    end
+  end
+  names
 end
 
 # ---------------------------------------------------------------------------
@@ -8139,4 +8245,64 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn '== classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA) =='
   gen.embedding_classes.each { |k| warn "  #{k}" }
+
+  # Step 6h's own diagnostic: every compiled entry point whose name is
+  # never a call target anywhere in the whole program's own bytecode
+  # (collect_static_call_target_names) and never a literal mrb_funcall
+  # name anywhere in NATIVE_SRCS (extract_native_call_names) is a real
+  # candidate for deletion -- not proof of it. This tool has no visibility
+  # into a downstream game's own bundled Ruby scripts: RGSS's own
+  # `Sprite`/`Window`/`Plane`/`Bitmap`/`Audio`/`Graphics`/`Input` classes
+  # ARE the public scripting API those external, per-game "stock scripts"
+  # call (see docs/rpgxp-rgss-api-gap.md's own measured usage counts for
+  # `zoom_x`/`zoom_y`/`ox`/`oy`/`angle`/... ), so a name landing here from
+  # one of those classes is the expected, correct shape for a public API
+  # surface, not a bug -- only RPG2000/2003 (mruby-rpg2k/mruby-lcf) has no
+  # equivalent external-script layer, so a name from those two gems is
+  # much stronger evidence of real dead code. Either way: a real signal
+  # worth surfacing every run, rather than re-deriving this by hand (a
+  # rebuilt host mrbc, a bespoke script reusing this file's own parsing
+  # pipeline, a manual cross-check against docs/rpgxp-rgss-api-gap.md) the
+  # next time this question comes up.
+  static_call_names = collect_static_call_target_names(ireps)
+  native_call_names = ENV['NATIVE_SRCS'] ? extract_native_call_names(native_paths) : Set.new
+  # A short, closed list of Ruby-language "magic" methods mruby's own C
+  # core can call on any object independent of any literal call site
+  # anywhere in this program or in NATIVE_SRCS -- #initialize is the
+  # everyday case: mrb_obj_new/mrb_instance_new (3rd/mruby/src/class.c)
+  # call it through a `mrb_sym mid = MRB_SYM(initialize)` local variable a
+  # few lines above their own mrb_funcall_argv call, invisible to
+  # extract_native_call_names' own bounded lookahead (which only looks
+  # forward from the mrb_funcall* call site itself, not backward through
+  # arbitrary local-variable assignments). Every entry below has a real,
+  # confirmed call site in this project's own 3rd/mruby/src via this same
+  # indirect pattern -- checked directly, not guessed: `initialize`/
+  # `initialize_copy` in class.c (mrb_obj_new, mrb_instance_new,
+  # mrb_obj_init_copy, mrb_class_new_class); `method_missing`/
+  # `respond_to_missing?` in vm.c/kernel.c/class.c; `to_s`/`inspect` in
+  # kernel.c/array.c; `==`/`eql?`/`<=>`/`hash` in object.c/array.c/
+  # kernel.c/numeric.c/hash.c; `call` in hash.c (a Hash's own default
+  # Proc). Deliberately short -- e.g. `coerce`/`each`/`to_ary`/`to_str`/
+  # `to_int`/`to_hash`/`[]` were checked too and dropped: this mruby 4.0
+  # build's own core never reaches for them via mrb_funcall at all (no
+  # generic implicit-conversion-protocol dispatch in this leaner core),
+  # so claiming them "always reachable" here would be exactly the kind of
+  # unverified guess this file's own design avoids everywhere else.
+  always_reachable = %w[
+    initialize initialize_copy
+    method_missing respond_to_missing?
+    to_s inspect
+    == eql? <=> hash
+    call
+  ].to_set
+  reachable_names = static_call_names | native_call_names | always_reachable
+  never_called = compiled.reject { |m| reachable_names.include?(m[:name]) }
+  warn ''
+  warn "== never called (#{never_called.size} of #{compiled.size} compiled entry points -- " \
+       "zero evidence in this program's own bytecode or NATIVE_SRCS; see Step 6h's own comment) =="
+  if never_called.empty?
+    warn '  (none)'
+  else
+    never_called.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+  end
 end
