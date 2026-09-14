@@ -4604,6 +4604,17 @@ class CodeGen
       suppressed << region[:sym_addr] << region[:sendb_addr]
       glue_at[region[:sym_addr]] = inlined
     end
+    # MAP_BLOCK_SUPPORT: same mechanism for recognized collection-block
+    # regions (`map`/`select`/`reject`/`find`/`each_with_index` literal
+    # blocks). Same Array gate, same all-or-nothing contract -- a dirty
+    # body or a missed gate falls through to honest `#error` stubs.
+    recognize_collect_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_collect_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
 
     targets = jump_targets(irep) - suppressed
     irep.instructions.each_with_index do |insn, idx|
@@ -5229,6 +5240,62 @@ class CodeGen
     regions
   end
 
+  # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
+  # `ary.map/select/reject/find { |x| ... }` (1-mandatory-arg blocks) and
+  # `ary.each_with_index { |x, i| ... }` (2-mandatory-arg blocks). Same
+  # `BLOCK R(a+1)` + `SENDB/SSENDB Ra :name n=0` adjacency as
+  # recognize_each_regions above (confirmed against real `mrbc -v` for
+  # every name here -- `map`, `select`, `reject`, `find`,
+  # `each_with_index` all emit the identical shape), same static Array
+  # receiver gate (including the SSENDB/owner rule). The per-method
+  # result semantics live in emit_collect_inline, not here: this
+  # recognizer only admits shapes whose block arity matches the method
+  # (1 for map/select/reject/find, 2 for each_with_index -- a 2-arg
+  # `map` block or 1-arg `each_with_index` block is a real
+  # arity-mismatch the interpreter would raise on, so it keeps the
+  # honest `#error` here rather than compiling a silently-wrong loop).
+  # `any?`/`all?`/`none?`/`count`/`reduce` literal blocks stay out --
+  # each needs its own accumulator/early-exit codegen, a separate
+  # follow-up on this same machinery, not this round.
+  COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index].freeze
+
+  def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      meth = name&.sub(/\A:/, '')
+      next unless nstr == 'n=0' && COLLECT_BLOCK_METHODS.include?(meth)
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      want_arity = meth == 'each_with_index' ? 2 : 1
+      next unless block_irep && mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Array'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        next unless traced == 'Array'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: meth, ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
   # EACH_BLOCK_SUPPORT: recognize one `&:sym` block-pass site --
   # `ary.reject(&:dead?)` and friends. Shape (confirmed against real
   # `mrbc -v`): `LOADSYM R(a+1) :sym` immediately followed by
@@ -5546,6 +5613,159 @@ class CodeGen
     out << "    #{break_label}:;\n"
     out << "  }\n"
     out
+  end
+
+  # MAP_BLOCK_SUPPORT: the inlined-loop replacement for one recognized
+  # collection-block region (recognize_collect_regions), or nil when the
+  # block body doesn't come out clean -- same all-or-nothing contract as
+  # emit_each_inline above, whose loop this clones with four deliberate
+  # differences (each grounded in measured semantics, not analogy):
+  #   - RESULT slot: `map` collects each iteration's yielded value
+  #     (block-body RETURN/RETNIL -- a real `next value` -- pushes
+  #     `r<off>` into a fresh `mrb_ary_new` accumulator, the SENDB
+  #     destination takes the accumulator, never the receiver);
+  #     `select`/`reject` push the ELEMENT on truthy/falsy result;
+  #     `find` assigns the first truthy-result element and exits early
+  #     (nil default when nothing matches); `each_with_index` discards
+  #     like `each` but binds a second param to the loop index as a
+  #     fixnum each iteration.
+  #   - YIELDED VALUE capture: the block body's own `RETURN Rv` (and the
+  #     RETNIL/RETFALSE/RETTRUE family -- a real `next`, possibly with a
+  #     value) is the per-element result, NOT a bare end-of-iteration the
+  #     way `each` treats it. So the body is translated by
+  #     compile_collect_body_insn below (not compile_block_body_insn):
+  #     each return-form stores its own value into the per-iteration
+  #     result local, then jumps to iter-end. A value-less `next`
+  #     (RETNIL) stores nil -- correct: real `map { next if c }`
+  #     collects nil for that element (confirmed against CRuby).
+  #   - `BREAK Rv` (value) assigns the SENDB destination and jumps past
+  #     the loop (same L_UNWINDING semantics as each -- `map { break 99
+  #     }` is 99, confirmed against CRuby); bare `break` behaves the
+  #     same with the BREAK register's own (nil) value.
+  #   - Live `RARRAY_LEN` loop + `mrb_array_p` raise-guard, identical to
+  #     each (map-push-during-iteration visits new elements -- confirmed
+  #     against CRuby above -- so no snapshot).
+  def emit_collect_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    meth = region[:method_name]
+    param_reg = 1 + offset
+    param2_reg = 2 + offset # each_with_index's own index arg, R2 in block numbering.
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    iter_label = "Lbc2cpp_collect_iter_#{region[:block_addr]}"
+    break_label = "Lbc2cpp_collect_end_#{region[:block_addr]}"
+    result_var = "bc2cpp_collect_v_#{region[:block_addr]}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                result_var: result_var, break_dest: dest_reg,
+                                                break_label: break_label,
+                                                broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}")
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
+    out << "    mrb_value bc2cpp_collect_acc_#{region[:block_addr]} = mrb_ary_new(M);\n" if %w[map select reject].include?(meth)
+    out << "    mrb_value bc2cpp_collect_found_#{region[:block_addr]} = mrb_nil_value();\n" if meth == 'find'
+    out << "    mrb_bool bc2cpp_collect_broke_#{region[:block_addr]} = FALSE;\n" if meth != 'each_with_index'
+    out << "    for (mrb_int bc2cpp_collect_i_#{region[:block_addr]} = 0; " \
+           "bc2cpp_collect_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_collect_i_#{region[:block_addr]}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero?
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_collect_i_#{region[:block_addr]});\n"
+    out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{region[:block_addr]});\n" if meth == 'each_with_index'
+    out << body
+    out << "      #{iter_label}:;\n"
+    case meth
+    when 'map'
+      out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
+    when 'select'
+      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, r#{param_reg});\n"
+    when 'reject'
+      out << "      if (!mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, r#{param_reg});\n"
+    when 'find'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_collect_found_#{region[:block_addr]} = r#{param_reg}; goto #{break_label}; }\n"
+    end
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    # BREAK inside the loop jumps here with the destination ALREADY
+    # holding the break value (BREAK's own `r<dest> = r<v>` assignment,
+    # wired with this emitter's own broke-flag below) -- so the final
+    # accumulator assignment must NOT run on the break path (it would
+    # overwrite the break value with a partial accumulator, the exact
+    # `[1, 2]`-instead-of-`99` bug caught by the runtime harness).
+    # A loop-index comparison (fall-through exits with i == len, break
+    # with i < len) was considered and rejected: pop-during-iteration
+    # can shrink len below a later break index, misreading break as
+    # fall-through. A dedicated boolean, set only on the break path,
+    # has zero per-iteration cost and no such edge. each_with_index
+    # needs no guard at all (fall-through leaves the receiver, break
+    # already set dest -- no assignment either way), so it skips both
+    # the flag declaration and the guarded assignment.
+    if meth != 'each_with_index'
+      out << "    if (!bc2cpp_collect_broke_#{region[:block_addr]}) {\n"
+      case meth
+      when 'map', 'select', 'reject'
+        out << "    r#{dest_reg} = bc2cpp_collect_acc_#{region[:block_addr]};\n"
+      when 'find'
+        out << "    r#{dest_reg} = bc2cpp_collect_found_#{region[:block_addr]};\n"
+      end
+      out << "    }\n"
+    end
+    out << "  }\n"
+    out
+  end
+
+  # MAP_BLOCK_SUPPORT: translate one instruction from an INLINED
+  # collection-block body -- identical to compile_block_body_insn
+  # (RETURN_BLK, BREAK, GETUPVAR/SETUPVAR@0, JMP-family, delegated
+  # everything-else) EXCEPT the block's own ordinary return forms
+  # (`RETURN`/`RETNIL`/`RETFALSE`/`RETTRUE` -- a real `next`, possibly
+  # with a value): where each-inline treats them as bare end-of-
+  # iteration, collection methods USE the yielded value, so each such
+  # form first stores its own value register into `result_var`, then
+  # jumps to iter-end. `RETURN_BLK` (real `return`) is unchanged --
+  # still a plain C++ return. BREAK/BREAK-value, upvars, jumps, and the
+  # delegated remainder are line-for-line the each behavior.
+  def compile_collect_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
+                                result_var:, break_dest:, break_label:, broke_flag:)
+    case insn.op
+    when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
+      r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
+      store = case insn.op
+              when 'RETURN' then "r#{r.to_i + offset}"
+              when 'RETNIL' then 'mrb_nil_value()'
+              when 'RETFALSE' then 'mrb_false_value()'
+              when 'RETTRUE' then 'mrb_true_value()'
+              end
+      "  #{result_var} = #{store};\n  goto #{iter_end_label};\n"
+    when 'BREAK'
+      # Same L_UNWINDING value semantics as compile_block_body_insn's
+      # own BREAK case, PLUS setting this emitter's own broke-flag so
+      # the post-loop accumulator assignment knows not to run (see
+      # emit_collect_inline's own comment -- without the flag the break
+      # value would be overwritten by a partial accumulator).
+      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      "  r#{break_dest} = r#{r.to_i + offset};\n  #{broke_flag} = TRUE;\n  goto #{break_label};\n"
+    else
+      compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
+                              break_dest: break_dest, break_label: break_label)
+    end
   end
 
   # EACH_BLOCK_SUPPORT: the inlined-loop replacement for one recognized
