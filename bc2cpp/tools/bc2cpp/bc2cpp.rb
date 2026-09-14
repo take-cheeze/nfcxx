@@ -3114,6 +3114,18 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
       ivar = insn.args[/@(\w+)/, 1]
       return ivar_classes && ivar_classes[ivar]
+    when 'ARRAY', 'ARRAY2'
+      # EACH_BLOCK_SUPPORT: an array literal (`items = [1, 2, 3]`) always
+      # creates a real Array -- confirmed directly against
+      # 3rd/mruby/src/vm.c's own OP_ARRAY (`regs[a] =
+      # ary_new_from_regs(mrb, b, a)`), never assumed. Like GETIV above,
+      # only valid as the END of the trace (a `.new` chain or a
+      # constant path already in progress means this ARRAY belongs to a
+      # different expression reusing the register -- registers are
+      # reused, see trace_type's own comment).
+      return nil if resolving_new || !path.empty?
+
+      return 'Array'
     when 'GETMCNST'
       return nil unless resolving_new
 
@@ -4509,6 +4521,31 @@ class CodeGen
       glue_at[region[:block_addr]] = inlined
     end
 
+    # EACH_BLOCK_SUPPORT: same suppressed-address/glue-at mechanism as the
+    # times loop just above, for recognized `ary.each` and `&:sym`
+    # regions. The static Array gate lives in the recognizers themselves
+    # (trace_new_target/ClassLayout, mirroring compile_send's own TYPED
+    # path context); a region that fails any check simply never appears
+    # here, and its BLOCK/SENDB/LOADSYM fall through to the ordinary
+    # honest `#error` stubs below. A region whose own body doesn't come
+    # out clean (emit_* returns nil) is skipped the same way.
+    each_ctx_ivar = @class_layout[d.owner]
+    each_ctx_args = @class_annotations[irep.label]&.args
+    recognize_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_each_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
+    recognize_sym_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_sym_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:sym_addr] << region[:sendb_addr]
+      glue_at[region[:sym_addr]] = inlined
+    end
+
     targets = jump_targets(irep) - suppressed
     irep.instructions.each_with_index do |insn, idx|
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
@@ -5077,6 +5114,116 @@ class CodeGen
     regions
   end
 
+  # EACH_BLOCK_SUPPORT: recognize one inlinable `ary.each { |x| ... }`
+  # region. Shape (confirmed against real `mrbc -v` disassembly, never
+  # assumed): `SENDB`/`SSENDB Ra :each n=0` immediately preceded by
+  # `BLOCK R(a+1) I[k]`, where child irep `I[k]` takes exactly one
+  # mandatory argument and nothing else -- the identical adjacency the
+  # times recognizer above already requires, pointed at a new method
+  # name. Unlike `#times` (zero bytecode overrides program-wide, so a
+  # bare `mrb_integer_p` guard is unconditionally sound), `#each` has
+  # real competing definitions (`Game::Actors#each`, `Game::Party#each`,
+  # `LCF::Array2D#each`), so every region ALSO carries the static
+  # receiver gate: the SENDB destination register must trace (via
+  # trace_new_target, the same backward proof compile_send's own TYPED
+  # path trusts -- GETIV through ClassLayout-known ivars, `X.new`
+  # chains, ARRAY literals) to exactly `"Array"`. An SSENDB site has an
+  # implicit-self receiver, untraceable by register -- admitted only
+  # when the enclosing method's own owner IS `Array` itself (nearly
+  # vacuous in game code, but the only sound static claim available;
+  # a self-Enumerable game class calling bare `each` stays interpreted).
+  # Anything unproven yields no region at all -- honest `#error` via
+  # the ordinary per-instruction loop, exactly like any other
+  # unrecognized shape in this file.
+  def recognize_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless name == ':each' && nstr == 'n=0'
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Array'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        next unless traced == 'Array'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
+  # EACH_BLOCK_SUPPORT: recognize one `&:sym` block-pass site --
+  # `ary.reject(&:dead?)` and friends. Shape (confirmed against real
+  # `mrbc -v`): `LOADSYM R(a+1) :sym` immediately followed by
+  # `SENDB`/`SSENDB Ra :name n=0`, with NO `BLOCK` instruction involved
+  # at all -- the VM's own OP_SENDB packs `regs[bidx]` (here, the
+  # LOADSYM-written symbol) via `ensure_block` into a symbol-proc, so
+  # there is no closure to inline and no environment to capture. The
+  # recognized method set is the Enumerable core whose per-element
+  # semantics this file can express as a plain loop around one
+  # `mrb_funcall` per element (see emit_sym_inline): iteration
+  # (`each`), collection (`map`), filtering (`select`/`reject`),
+  # search (`find`), predicates (`any?`/`all?`/`none?`), counting
+  # (`count`). Same static Array receiver gate as
+  # recognize_each_regions above (including the SSENDB/owner rule).
+  SYM_BLOCK_METHODS = %w[each map select reject find any? all? none? count].freeze
+
+  def recognize_sym_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless nstr == 'n=0' && SYM_BLOCK_METHODS.include?(name&.sub(/\A:/, ''))
+
+      loadsym_insn = irep.instructions[idx - 1]
+      next unless loadsym_insn && loadsym_insn.op == 'LOADSYM'
+      # No BLOCK check needed here: the VM's own OP_SENDB takes its block
+      # from exactly one slot (`regs[bidx]`, bidx = dest+1 for n=0 --
+      # vm.c), and the LOADSYM immediately above provably overwrote that
+      # slot last (register match below), whatever wrote it before. A
+      # SENDB cannot take two blocks at once, so this site unambiguously
+      # passes the symbol -- unlike a literal-block SENDB, which the each
+      # recognizer above owns instead.
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      sym_reg = loadsym_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && sym_reg && sym_reg == (dest_reg.to_i + 1).to_s
+
+      sym_name = loadsym_insn.args[/:(\S+)/, 1]&.sub(/\A:/, '')
+      next unless sym_name && !sym_name.empty?
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Array'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        next unless traced == 'Array'
+      end
+
+      regions << { sym_addr: loadsym_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
+                   method_name: name.sub(/\A:/, ''), sym_name: sym_name, ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
   # BLOCK_SUPPORT: translate one instruction from an INLINED block body
   # (never a top-level method body -- compile_method's own main loop
   # never calls this). `offset` disambiguates the block's own local
@@ -5117,13 +5264,32 @@ class CodeGen
   #     enclosing function, register index `b` already names one of its
   #     own real `r<b>` variables directly -- no offset applied, unlike
   #     every other register reference in this same instruction stream.
-  def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix)
+  def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
+                                break_dest: nil, break_label: nil)
     case insn.op
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
       "  goto #{iter_end_label};\n"
     when 'RETURN_BLK'
       r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
       "  return r#{r.to_i + offset};\n"
+    when 'BREAK'
+      # EACH_BLOCK_SUPPORT: a real `break` (with or without a value -- the
+      # disassembly always carries the value register, LOADNIL-supplied when
+      # bare, confirmed against real `mrbc -v` output) unwinds to the call
+      # site with the break value as the whole SEND expression's own value
+      # (vm.c's own OP_BREAK `L_UNWINDING` path). Inlined, that is an
+      # assignment into the SENDB's own destination register plus a jump
+      # past the loop -- same shape as RETURN_BLK above, landing after the
+      # loop instead of leaving the function. Only wired by the each/sym
+      # emitters (which pass both); the times emitter passes neither, so a
+      # `break` inside a `#times` block keeps its honest `#error` exactly
+      # as before this existed.
+      if break_dest && break_label
+        r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+        "  r#{break_dest} = r#{r.to_i + offset};\n  goto #{break_label};\n"
+      else
+        "  #error unhandled opcode BREAK -- not in this prototype's supported subset\n"
+      end
     when 'GETUPVAR'
       dst, upvar_idx, level = insn.args.split(/\s+/)
       if level == '0'
@@ -5237,6 +5403,174 @@ class CodeGen
     # Integer#times returns self (the original receiver), not the loop's
     # own last value -- r<dest_reg> already still holds it, untouched by
     # the loop above, so no further assignment is needed here at all.
+    out
+  end
+
+  # EACH_BLOCK_SUPPORT: the full inlined-loop replacement for one
+  # recognized `ary.each` region (recognize_each_regions), or nil when
+  # the block body doesn't come out clean -- same all-or-nothing
+  # contract as emit_times_inline above. Three deliberate differences
+  # from the times loop, each grounded in real semantics rather than
+  # cloned by analogy:
+  #   - LIVE length (`i < RARRAY_LEN(recv)` re-checked every iteration,
+  #     the exact condition native iteration in 3rd/mruby/src/array.c
+  #     uses): real `Array#each` visits elements pushed mid-iteration
+  #     (confirmed against CRuby: `[1,2,3].each { a << 99 if first }`
+  #     visits 99) -- a snapshot `n` like times uses would silently
+  #     drop them. `mrb_ary_ref` (bounds-checked, negative-normalizing
+  #     -- the same public API GETIDX codegen already trusts) supplies
+  #     each element.
+  #   - `mrb_array_p` raise-guard (mirrors times' `mrb_integer_p`
+  #     guard): unreachable when the recognizer's own static gate is
+  #     sound, a loud TypeError tripwire if the trace is ever buggy --
+  #     never silent wrong dispatch into a `Game::Actors#each`-style
+  #     override. NOT a live `mrb_funcall` fallback: `mrb_funcall`
+  #     cannot carry a block, so falling back through it would silently
+  #     drop the block -- the exact bug class ADR 0147 rejected
+  #     proc-wrap for. The interpreter (honest `#error` on unproven
+  #     sites) is the real fallback, always correct.
+  #   - `BREAK` wired (break_dest/break_label): times leaves it `#error`;
+  #     here `BREAK Rv` assigns the SENDB destination and jumps past the
+  #     loop, matching OP_BREAK's own `L_UNWINDING` value semantics. A
+  #     completed loop leaves the destination holding the receiver
+  #     (real `Array#each` returns its receiver -- confirmed against
+  #     CRuby), so no assignment is needed on the fall-through path.
+  def emit_each_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    iter_label = "Lbc2cpp_each_iter_#{region[:block_addr]}"
+    break_label = "Lbc2cpp_each_end_#{region[:block_addr]}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                              break_dest: dest_reg, break_label: break_label)
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined #each\"); }\n"
+    out << "    for (mrb_int bc2cpp_each_i_#{region[:block_addr]} = 0; " \
+           "bc2cpp_each_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_each_i_#{region[:block_addr]}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_each_i_#{region[:block_addr]});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  # EACH_BLOCK_SUPPORT: the inlined-loop replacement for one recognized
+  # `&:sym` site (recognize_sym_regions) -- `ary.reject(&:dead?)` and
+  # friends. No closure exists (the VM packs the LOADSYM symbol via
+  # `ensure_block`), so instead of a translated block body each
+  # iteration performs one real `mrb_funcall(M, elem, "<sym>", 0)` --
+  # ordinary dynamic dispatch of the NAMED method, exactly what
+  # `Symbol#to_proc` does at runtime -- and accumulates per the call
+  # method's own real Enumerable semantics:
+  #   each: discard the result (destination keeps the receiver);
+  #   map: push each result into a fresh Array;
+  #   select/reject: push the ELEMENT when the result is truthy/falsy;
+  #   find: destination is the first element with a truthy result
+  #     (else nil), loop exits early;
+  #   any?/all?/none?: boolean destination with early exit
+  #     (all?/none? default true, any? defaults false);
+  #   count: destination is the fixnum tally of truthy results.
+  # Same live-length loop and `mrb_array_p` raise-guard as
+  # emit_each_inline above (same mutation-during-iteration and
+  # wrong-receiver reasoning -- confirmed the same way). Returns nil
+  # (caller falls back to `#error` stubs) only when the method name is
+  # outside the recognizer's own set, which cannot happen -- the
+  # recognizer is the sole caller and already gates on it.
+  def emit_sym_inline(region, _irep, _d)
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    meth = region[:method_name]
+    sym = region[:sym_name]
+    return nil unless SYM_BLOCK_METHODS.include?(meth)
+
+    iter_label = "Lbc2cpp_sym_iter_#{region[:sym_addr]}"
+    end_label = "Lbc2cpp_sym_end_#{region[:sym_addr]}"
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined &:#{sym}\"); }\n"
+    case meth
+    when 'map', 'select', 'reject'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_ary_new(M);\n"
+    when 'find'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_nil_value();\n"
+    when 'any?', 'none?'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value();\n"
+    when 'all?'
+      out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_true_value();\n"
+    when 'count'
+      out << "    mrb_int bc2cpp_sym_acc_#{region[:sym_addr]} = 0;\n"
+    end
+    out << "    for (mrb_int bc2cpp_sym_i_#{region[:sym_addr]} = 0; " \
+           "bc2cpp_sym_i_#{region[:sym_addr]} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
+    out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
+           "mrb_ary_ref(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
+    if meth == 'each'
+      out << "      mrb_funcall(M, bc2cpp_sym_e_#{region[:sym_addr]}, \"#{sym}\", 0);\n"
+    else
+      out << "      mrb_value bc2cpp_sym_r_#{region[:sym_addr]} = " \
+             "mrb_funcall(M, bc2cpp_sym_e_#{region[:sym_addr]}, \"#{sym}\", 0);\n"
+      case meth
+      when 'map'
+        out << "      mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_r_#{region[:sym_addr]});\n"
+      when 'select'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) " \
+               "mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_e_#{region[:sym_addr]});\n"
+      when 'reject'
+        out << "      if (!mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) " \
+               "mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_e_#{region[:sym_addr]});\n"
+      when 'find'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = bc2cpp_sym_e_#{region[:sym_addr]}; " \
+               "goto #{end_label}; }\n"
+      when 'any?'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_true_value(); goto #{end_label}; }\n"
+      when 'all?'
+        out << "      if (!mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value(); goto #{end_label}; }\n"
+      when 'none?'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) { " \
+               "bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_false_value(); goto #{end_label}; }\n"
+      when 'count'
+        out << "      if (mrb_test(bc2cpp_sym_r_#{region[:sym_addr]})) ++bc2cpp_sym_acc_#{region[:sym_addr]};\n"
+      end
+    end
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{end_label}:;\n"
+    case meth
+    when 'each'
+      # `each` returns the receiver, already in the destination register.
+    when 'count'
+      out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_sym_acc_#{region[:sym_addr]});\n"
+    else
+      out << "    r#{dest_reg} = bc2cpp_sym_acc_#{region[:sym_addr]};\n"
+    end
+    out << "  }\n"
     out
   end
 
