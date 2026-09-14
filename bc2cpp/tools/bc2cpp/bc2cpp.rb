@@ -4204,6 +4204,70 @@ class CodeGen
     end
   end
 
+  # NATIVE_PRIMITIVE_SEND_ARITY: the four native Kernel/NilClass methods
+  # compile_send's own NATIVE_PRIMITIVE_SENDS path (see that comment,
+  # right above compile_send's own `target = monomorphic_target(name)`
+  # line, for the full soundness writeup) knows how to inline directly,
+  # mapped to the exact real mandatory arity a call site must match --
+  # `!`/`nil?` take no arguments, `is_a?`/`kind_of?` take exactly one
+  # (confirmed against each one's own real MRB_ARGS_NONE()/
+  # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
+  # 3rd/mruby/src/class.c).
+  NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1 }.freeze
+
+  # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
+  # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
+  # and that one def must be the synthetic native placeholder build_
+  # registry's own NATIVE_SRCS merge creates (irep nil) -- i.e.
+  # name-monomorphic (the identical whole-program guarantee
+  # monomorphic_target's own registry check makes) AND that one def is
+  # native rather than bytecode. monomorphic_target itself requires the
+  # opposite (a real compiled `_impl` to call), so a name landing here is,
+  # by construction, exactly the shape monomorphic_target already falls
+  # through on -- this is genuinely a separate check, not a duplicate of
+  # it. If some future game-source class ever defines its own `nil?`/
+  # `!`/`is_a?`/`kind_of?` (however unlikely), `@registry[name]` grows a
+  # second, real bytecode def, `defs.size == 1` goes false here exactly
+  # the same way it already would for monomorphic_target, and this falls
+  # back to ordinary POLY dynamic dispatch, never a wrong direct call.
+  # When NATIVE_SRCS isn't passed at all (this project's own established
+  # no-NATIVE_SRCS diagnostic mode), the native placeholder is never
+  # added and `defs` is nil here too -- the same "can't prove it, don't"
+  # fallback as everywhere else in this file, not a special case needing
+  # its own handling.
+  def native_only_mono?(name)
+    defs = @registry[name]
+    defs && defs.size == 1 && defs.first.irep.nil?
+  end
+
+  # Emits the guarded direct C++ implementation for one
+  # NATIVE_PRIMITIVE_SEND_ARITY name -- see compile_send's own call site
+  # (right above `target = monomorphic_target(name)`) for the full
+  # per-method soundness citations against the real 3rd/mruby source;
+  # kept here, rather than inlined at that call site, purely to keep
+  # compile_send's own already-long body from growing a fifth deeply-
+  # nested branch for what is otherwise a small, self-contained C++
+  # snippet per name.
+  def compile_native_primitive_send(name, d, recv, argv)
+    case name
+    when '!'
+      "  // ! -- native primitive, no lookup needed\n" \
+      "  r#{d} = mrb_bool_value(!mrb_test(#{recv}));\n"
+    when 'nil?'
+      "  // nil? -- native primitive, no lookup needed\n" \
+      "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
+    when 'is_a?', 'kind_of?'
+      arg = argv.first
+      "  // #{name} -- native primitive, no lookup needed (argument type-checked at " \
+      "runtime -- see compile_send's own comment)\n" \
+      "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg})) {\n" \
+      "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
+      "  } else {\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+    end
+  end
+
   # SYM_DEVIRT: resolve a `&:sym` block-pass target for direct per-element
   # dispatch inside emit_sym_inline's own inlined loop. Returns
   # `[:mono, def]`, `[:poly, defs]`, or nil -- applying compile_send's own
@@ -7847,6 +7911,96 @@ class CodeGen
           end
         end
       end
+    end
+
+    # NATIVE_PRIMITIVE_SENDS: devirtualize `!`/`nil?`/`is_a?`/`kind_of?`
+    # straight to their real native primitive at ANY call site, entirely
+    # independent of trace_new_target/TYPED's own receiver-class-guard
+    # machinery -- unlike TYPED (which needs to prove the receiver's
+    # *class* before it can trust a class-exact candidate), none of these
+    # four need any receiver-class knowledge at all: each one's real
+    # native body is exactly the same single primitive expression for
+    # EVERY possible receiver, so "the name is uncontested whole-program"
+    # (monomorphic_target's own registry check, reused as-is via
+    # native_only_mono? below) is already the whole soundness argument,
+    # with no runtime class check needed the way TYPED's own
+    # `mrb_class_ptr(recv) == ...` guard is.
+    #
+    # monomorphic_target itself always refuses these (its own comment: a
+    # native-only MONO name has no compiled `_impl` to call, and calling
+    # the real native C function's raw pointer directly would leave any
+    # `mrb_get_args` inside it reading a stale `mrb->c->ci` call-info
+    # frame -- a real correctness bug for an ARBITRARY native method).
+    # That conservatism is correct in general but overly conservative for
+    # exactly these four, checked directly against the real mruby source
+    # rather than assumed:
+    #   - `!` (Kernel#!): 3rd/mruby/src/class.c's own `mrb_bob_not` is
+    #     exactly `mrb_bool_value(!mrb_test(cv))` -- `mrb_test`
+    #     (3rd/mruby/include/mruby/value.h's own `mrb_bool`,
+    #     `mrb_type(o) != MRB_TT_FALSE`) is a real, always-defined macro,
+    #     no `mrb_get_args` call anywhere in this body at all.
+    #   - `nil?` (Kernel#nil?/NilClass#nil?): 3rd/mruby/src/kernel.c
+    #     registers `mrb_false` (always `mrb_false_value()`) for Object's
+    #     own `nil?`, and 3rd/mruby/src/object.c separately registers
+    #     `mrb_true` (always `mrb_true_value()`) for NilClass's own
+    #     `nil?` -- two distinct native C functions in real mruby, but
+    #     extract_native_method_names only ever records the flat NAME
+    #     "nil?" once (no owner, by design -- see that function's own
+    #     comment), so the registry can't and doesn't distinguish them.
+    #     Collapsing both into one expression here is still sound, not
+    #     because the registry happens not to see the difference, but
+    #     because both real bodies TOGETHER are exactly the single
+    #     predicate `mrb_nil_p(recv)` (3rd/mruby/include/mruby/value.h:
+    #     `mrb_type(o) == MRB_TT_FALSE && !mrb_fixnum(o)`, true only for
+    #     the real nil value, false for every other receiver including
+    #     `false` itself) -- inlining it reproduces both real native
+    #     bodies' observable behavior at once, for every receiver, not
+    #     just the common case.
+    #   - `is_a?`/`kind_of?`: 3rd/mruby/src/kernel.c's own
+    #     `mrb_obj_is_kind_of_m` (registered under both `MRB_SYM_Q(is_a)`
+    #     and `MRB_SYM_Q(kind_of)`) is exactly `mrb_get_args(mrb, "c",
+    #     &c); return mrb_bool_value(mrb_obj_is_kind_of(mrb, self, c));`
+    #     -- `"c"` is mrb_get_args' own class/module-only format
+    #     character, which raises a real TypeError for anything else
+    #     BEFORE mrb_obj_is_kind_of ever runs, so the argument really is
+    #     always a Class/Module by the time that call happens. Reproduced
+    #     below as an explicit `mrb_class_p(arg) || mrb_module_p(arg)`
+    #     runtime guard (3rd/mruby/include/mruby/value.h, both real,
+    #     always-defined macros/fallback macros -- confirmed not
+    #     boxing-mode-specific: value.h's own `#ifndef` guards mean the
+    #     word-boxing build's own faster boxing_word.h definitions are
+    #     used instead where available, value.h's plain `mrb_type(o) ==
+    #     MRB_TT_CLASS`/`MRB_TT_MODULE` otherwise -- both always present
+    #     either way) around the direct `mrb_obj_is_kind_of(M, recv,
+    #     mrb_class_ptr(arg))` call; a non-Class/Module argument falls
+    #     back to ordinary `mrb_funcall` here instead of faking the
+    #     TypeError -- the exact same "loud gap over silently wrong"
+    #     posture as every other unmodeled shape in this file, and the
+    #     fallback raises the identical real TypeError mrb_get_args
+    #     itself would have (same code path, just reached through
+    #     mrb_funcall's own dispatch instead of straight-line here).
+    #     `mrb_class_ptr`/`mrb_obj_is_kind_of`/`mrb_bool_value` are not
+    #     new to this generated output either -- OP_RESCUE's own
+    #     translation above (`when 'RESCUE'`) already emits the identical
+    #     `mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})))`
+    #     unconditionally (safe there with no guard at all only because
+    #     RESCUE_SUPPORT's own recognized shape already guarantees Rb is
+    #     a Class/Module via a GETCONST immediately before it -- a
+    #     narrower, call-site-specific guarantee than the general
+    #     `is_a?`/`kind_of?` case here can rely on, hence the explicit
+    #     runtime guard added instead).
+    #
+    # Deliberately excludes `respond_to?` (also POLY-native, also a
+    # high-count name): real `Kernel#respond_to?`
+    # (3rd/mruby/src/kernel.c's own `obj_respond_to`) takes an optional
+    # `include_private` argument and falls back to a real
+    # `respond_to_missing?` method call when the name isn't found --
+    # `mrb_respond_to()`, the obvious native helper, does neither, so
+    # substituting it would be a silent behavior change. Left as
+    # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
+    # below.
+    if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name)
+      return compile_native_primitive_send(name, d, recv, argv)
     end
 
     target = monomorphic_target(name)
