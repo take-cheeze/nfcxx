@@ -72,7 +72,28 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
 # same header); begin/end/target are the exact same byte addresses this
 # file's own Insn#addr already uses everywhere else.
 CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: true)
-MethodDef = Struct.new(:name, :owner, :irep, :visibility, keyword_init: true)
+# `kind`: nil for an ordinary bytecode `def` (a real irep) and for every
+# pre-existing synthetic (irep: nil) MethodDef this file already
+# registered before this field existed -- monomorphic_target/the ordinary
+# TYPED path already treat any irep-nil def as "native, no compiled body
+# to call", regardless of `kind`, so leaving every one of those at the
+# default `nil` changes nothing about their existing behavior. Only ever
+# set to a real, specific value at the one call site that can actually
+# prove what a synthetic entry's real native body does -- today just
+# `:ivar_accessor` (build_registry's own attr_reader/attr_writer/
+# attr_accessor case below), consumed by IVAR_ACCESSOR_DEVIRT's own
+# compile_send branch to know it's safe to inline a bare mrb_iv_get/
+# mrb_iv_set rather than only ever falling back to mrb_funcall. Every
+# OTHER synthetic MethodDef in this file (Struct.new's own positional
+# members -- storage completely unrelated to iv_tbl, see that call site's
+# own comment; a `module_function`-installed singleton-class copy of an
+# existing instance method's own body; a NATIVE_SRCS-derived name with no
+# known real implementation at all) deliberately stays untagged: none of
+# those are safe to assume "reads/writes @name via the ordinary iv_tbl"
+# the way a real attr_reader/writer/accessor is, and getting this wrong
+# would be a silent wrong-value bug, not just a missed optimization the
+# way every other gap in this file safely degrades to.
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, keyword_init: true)
 
 # ---------------------------------------------------------------------------
 # Step 1: run mrbc's two debug dumps on the same input(s). mrbc accepts
@@ -919,12 +940,21 @@ def build_registry(ireps, root_label)
           setter_flag = %w[attr_writer attr_accessor].include?(name)
           collect_loadsym_names.call.each do |mname|
             owner = namespace || 'Object'
+            # kind: :ivar_accessor -- see MethodDef's own comment. Real
+            # mruby semantics confirmed directly against 3rd/mruby/src/
+            # class.c's own `attr_reader`/`attr_writer` (`mrb_iv_get(mrb,
+            # obj, to_sym(mrb, name))` / `mrb_iv_set(mrb, obj, to_sym(mrb,
+            # name), val); return val;` -- name here is always the bare
+            # `mname` itself, `prepare_ivar_name`'s own real behavior for
+            # the reader case and identically for the writer, never a
+            # transformed name), consumed by IVAR_ACCESSOR_DEVIRT below.
             if getter_flag
-              registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public)
+              registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public,
+                                                kind: :ivar_accessor)
             end
             if setter_flag
               registry["#{mname}="] << MethodDef.new(name: "#{mname}=", owner: owner, irep: nil,
-                                                       visibility: :public)
+                                                       visibility: :public, kind: :ivar_accessor)
             end
           end
         end
@@ -8058,6 +8088,7 @@ class CodeGen
     # every future extension to trace_new_target's own reach inherits the
     # same safety net for free.
     typed = false
+    ivar_accessor_target = nil
     if target.nil? && !self_implicit && irep && idx
       cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
@@ -8078,6 +8109,28 @@ class CodeGen
            compiles_clean?(candidate.irep) && n == mandatory_arity(@ireps.fetch(candidate.irep))
           target = candidate
           typed = true
+        elsif candidate&.kind == :ivar_accessor &&
+              n == (name.end_with?('=') ? 1 : 0)
+          # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
+          # will -- build_registry's own attr_reader/writer/accessor case
+          # registers it that way on purpose, see MethodDef's own `kind`
+          # comment), so it can never satisfy the ordinary TYPED branch
+          # just above -- an attr_reader/writer/accessor name is *always*
+          # POLY-native by the existing MONO/TYPED paths' own standards,
+          # regardless of how many real classes happen to define it. This
+          # is a real, separate devirtualization: not "call this class's
+          # own compiled body" (there is none), but "this class's own
+          # accessor is *provably* a bare mrb_iv_get/mrb_iv_set against
+          # the ordinary dynamic iv_tbl" (MethodDef's own `kind` comment
+          # has the real 3rd/mruby/src/class.c citation) -- safe to inline
+          # directly, runtime-guarded exactly like TYPED above, with no
+          # `_impl` function involved at all. Arity here is exactly 0 for
+          # a getter, exactly 1 for a setter (`name.end_with?('=')`) --
+          # `mandatory_arity`/`pure_mandatory_arity?` don't apply (there is
+          # no irep to ask), but a real attr_reader/writer call site can
+          # never have any other shape, so this is the complete, correct
+          # check on its own, not an approximation.
+          ivar_accessor_target = candidate
         end
       end
     end
@@ -8152,6 +8205,43 @@ class CodeGen
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      end
+    elsif ivar_accessor_target
+      # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
+      # == :ivar_accessor` branch above for the full soundness writeup.
+      # Runtime-guarded the same way TYPED is (a wrong static trace only
+      # ever costs a missed optimization, never a wrong answer): `recv`'s
+      # real runtime class might still differ from `known_class` (a
+      # subclass, a reassigned constant since gem-init, ...), so this
+      # checks before ever touching iv_tbl directly, falling back to
+      # ordinary `mrb_funcall` (which correctly dispatches to whatever
+      # `name` actually resolves to on the real receiver) otherwise.
+      owner = ivar_accessor_target.owner
+      check = "mrb_class_ptr(#{const_chain_value_expr(owner)}) == mrb_obj_class(M, #{recv})"
+      if name.end_with?('=')
+        ivar = name[0..-2]
+        val = argv.first
+        note = "  // IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (receiver traced to #{owner}), " \
+               "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall) -- see " \
+               "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
+               "citation this reproduces exactly (attr_writer's own mrb_iv_set then returning the " \
+               "assigned value, never the ivar read back).\n"
+        "#{note}  if (#{check}) {\n" \
+          "    mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
+          "    r#{d} = #{val};\n" \
+          "  } else {\n" \
+          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "  }\n"
+      else
+        note = "  // IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (receiver traced to #{owner}), " \
+               "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall) -- see " \
+               "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
+               "citation this reproduces exactly.\n"
+        "#{note}  if (#{check}) {\n" \
+          "    r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n" \
+          "  } else {\n" \
+          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "  }\n"
       end
     else
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
