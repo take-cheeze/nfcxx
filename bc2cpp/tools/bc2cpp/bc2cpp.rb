@@ -3915,6 +3915,57 @@ class CodeGen
     defs.first
   end
 
+  # SYM_DEVIRT: resolve a `&:sym` block-pass target for direct per-element
+  # dispatch inside emit_sym_inline's own inlined loop. Returns
+  # `[:mono, def]`, `[:poly, defs]`, or nil -- applying compile_send's own
+  # full MONO guard sequence (pure-mandatory arity, call-site arity match,
+  # ONLY_OWNERS/OTHER_OWNERS emission gate), NOT the bare
+  # monomorphic_target lookup alone, which checks none of those. The one
+  # deliberate simplification versus compile_send: the call-site arity is
+  # always 0 (a `&:sym` call passes no positional arguments by
+  # construction -- recognize_sym_regions already gates `n=0`), so the
+  # arity check is `mandatory_arity == 0` rather than `== n`.
+  #
+  # MONO needs no element-type knowledge at all (exactly one definition
+  # exists program-wide -- dispatch can only ever reach it). POLY needs a
+  # per-element runtime class guard per candidate (emit_sym_inline's own
+  # job, cloning compile_send's TYPED shape) -- so a POLY result is only
+  # useful when every candidate passes the same four checks AND the chain
+  # stays short (SYM_DEVIRT_CHAIN_CAP, user-confirmed at 4): a 16-way
+  # `dispose` chain would be pure code bloat for a megamorphic site.
+  # Anything else (native-only target like `Integer#even?`, an unclean
+  # callee like `Game::Actor#full_heal`, over-cap POLY) returns nil and
+  # the site keeps today's unconditional `mrb_funcall` -- already the
+  # fastest sound option there, byte-identical to before this existed.
+  SYM_DEVIRT_CHAIN_CAP = 4
+
+  def sym_call_target(sym)
+    defs = @registry[sym]
+    return nil unless defs
+
+    usable = defs.select do |d|
+      next false unless d.irep
+      next false unless pure_mandatory_arity?(@ireps.fetch(d.irep))
+      next false unless mandatory_arity(@ireps.fetch(d.irep)).zero?
+      next false unless compiles_clean?(d.irep)
+      next false if @only_owners && !@only_owners.include?(d.owner) && !(@other_owners&.include?(d.owner))
+
+      true
+    end
+    # A usable subset smaller than the full def list is still unsound for
+    # MONO (a skipped def is a real method some element could dispatch
+    # to), and a partial POLY chain would silently misroute the skipped
+    # classes' elements if the fallback were ever dropped -- require ALL
+    # or nothing so the fallback (`mrb_funcall`, exact `Symbol#to_proc`
+    # semantics) is merely an optimization miss, never a wrong dispatch.
+    return nil unless usable.size == defs.size && !usable.empty?
+
+    return [:mono, usable.first] if usable.size == 1
+    return [:poly, usable] if usable.size <= SYM_DEVIRT_CHAIN_CAP
+
+    nil
+  end
+
   # SUPER_SUPPORT: the real target a `super`/`super(...)` inside
   # `owner_def`'s own method reaches -- the same-named MethodDef on
   # `owner_def.owner`'s own registered superclass -- but ONLY when
@@ -4273,6 +4324,14 @@ class CodeGen
   def compile_all(only_owners: nil, other_owners: nil)
     @only_owners = only_owners
     @other_owners = other_owners
+    # SYM_DEVIRT route pre-pass: sym_call_target (MONO/POLY per-element
+    # resolution inside emit_sym_inline) calls compiles_clean? on CALLEE
+    # labels, whose own compile_method runs each recognizer against
+    # @only_owners/@other_owners -- both must be assigned BEFORE any
+    # compile_method runs, or a callee probed from inside another
+    # method's own compilation sees a nil-owner gate and wrongly misses.
+    # compile_method itself never assigns these (single-assignment here),
+    # so the ordering is simply this-then-map below, never racy.
     leaves = @owner_of.keys
     leaves = leaves.select { |l| only_owners.include?(@owner_of.fetch(l).owner) } if only_owners
     leaves.map { |label| compile_method(label) }
@@ -5203,6 +5262,18 @@ class CodeGen
       # SENDB cannot take two blocks at once, so this site unambiguously
       # passes the symbol -- unlike a literal-block SENDB, which the each
       # recognizer above owns instead.
+      #
+      # Adjacent-shape note (keyword calls also LOADSYM into neighbor
+      # registers): a keyword-argument call (`SEND ... n=k|nk=j`) parks
+      # its key symbols at dest+1+n onward (positionals first -- see
+      # compile_keyword_send's own kw_sym_regs), and is ALWAYS a plain
+      # SEND/SSEND, never SENDB/SSENDB (the VM packs keywords from the
+      # registers itself; only `ensure_block(regs[bidx])` in OP_SENDB's
+      # own path makes a register a block). This recognizer only fires
+      # on SENDB/SSENDB (the `next unless` at the top of the loop), so a
+      # keyword call's key LOADSYM can never form a region here -- the
+      # opcode disambiguates, not the slot. Documented because the slot
+      # reuse is genuinely surprising and the next reader will wonder.
 
       dest_reg = dest[/^R(\d+)/, 1]
       sym_reg = loadsym_insn.args[/^R(\d+)/, 1]
@@ -5529,10 +5600,9 @@ class CodeGen
     out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
            "mrb_ary_ref(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
     if meth == 'each'
-      out << "      mrb_funcall(M, bc2cpp_sym_e_#{region[:sym_addr]}, \"#{sym}\", 0);\n"
+      out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}")}\n"
     else
-      out << "      mrb_value bc2cpp_sym_r_#{region[:sym_addr]} = " \
-             "mrb_funcall(M, bc2cpp_sym_e_#{region[:sym_addr]}, \"#{sym}\", 0);\n"
+      out << "      #{sym_call_value(sym, "bc2cpp_sym_e_#{region[:sym_addr]}", "bc2cpp_sym_r_#{region[:sym_addr]}")}\n"
       case meth
       when 'map'
         out << "      mrb_ary_push(M, bc2cpp_sym_acc_#{region[:sym_addr]}, bc2cpp_sym_r_#{region[:sym_addr]});\n"
@@ -5571,6 +5641,73 @@ class CodeGen
       out << "    r#{dest_reg} = bc2cpp_sym_acc_#{region[:sym_addr]};\n"
     end
     out << "  }\n"
+    out
+  end
+
+  # SYM_DEVIRT: the per-element call for a `&:sym` site, devirtualized
+  # where sym_call_target allows. Both helpers emit full STATEMENTS
+  # (never bare expressions): `sym_call_value` declares
+  # `mrb_value <result_var> = ...` for valued methods, `sym_call_line`
+  # emits the discard-result call for `each`. Both take the element
+  # expression (always the loop's own `bc2cpp_sym_e_N` local -- a plain
+  # `mrb_value`, so the TYPED guard shape needs no register-specific
+  # adaptation).
+  #
+  # A POLY chain is a statement-level if/else-if/else (NOT a C
+  # conditional expression -- `if` is not an expression in C, caught by
+  # g++ building the first real chain), which is why valued and void
+  # cases need separate helpers rather than one shared expression core.
+  #
+  # Soundness: the `mrb_funcall` fallback is exact `Symbol#to_proc`
+  # semantics (unlike a literal block, a symbol-call carries no closure
+  # `mrb_funcall` would drop), so every fallback path is merely slower,
+  # never wrong. The MONO direct call needs no guard at all (one def
+  # program-wide); each POLY branch guards exact-class `==` (subclass
+  # elements take the fallback -- same as compile_send's TYPED path).
+  def sym_call_value(sym, elem_expr, result_var)
+    kind, target = sym_call_target(sym) || [nil, nil]
+    fallback = "mrb_funcall(M, #{elem_expr}, \"#{sym}\", 0)"
+    return "mrb_value #{result_var} = #{fallback};" unless kind
+
+    if kind == :mono
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n" \
+             "      mrb_value #{result_var} = #{impl}(M, #{elem_expr});"
+    end
+
+    out = String.new
+    out << "// POLY &:#{sym} (#{target.size} defs) -- per-element exact-class guard chain, mrb_funcall fallback\n"
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    target.each_with_index do |d, i|
+      impl = cpp_name(d.owner, d.name) + '_impl'
+      check = "mrb_class_ptr(#{const_chain_value_expr(d.owner)}) == mrb_obj_class(M, #{elem_expr})"
+      out << (i.zero? ? '      ' : '      else ')
+      out << "if (#{check}) { #{result_var} = #{impl}(M, #{elem_expr}); }\n"
+    end
+    out << "      else { #{result_var} = #{fallback}; }\n"
+    out
+  end
+
+  def sym_call_line(sym, elem_expr)
+    kind, target = sym_call_target(sym) || [nil, nil]
+    fallback = "mrb_funcall(M, #{elem_expr}, \"#{sym}\", 0);"
+    return fallback unless kind
+
+    if kind == :mono
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      return "// MONO &:#{sym} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)\n" \
+             "      #{impl}(M, #{elem_expr});"
+    end
+
+    out = String.new
+    out << "// POLY &:#{sym} (#{target.size} defs) -- per-element exact-class guard chain, mrb_funcall fallback\n"
+    target.each_with_index do |d, i|
+      impl = cpp_name(d.owner, d.name) + '_impl'
+      check = "mrb_class_ptr(#{const_chain_value_expr(d.owner)}) == mrb_obj_class(M, #{elem_expr})"
+      out << (i.zero? ? '      ' : '      else ')
+      out << "if (#{check}) { #{impl}(M, #{elem_expr}); }\n"
+    end
+    out << "      else { #{fallback} }\n"
     out
   end
 
