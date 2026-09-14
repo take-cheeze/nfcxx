@@ -1772,7 +1772,18 @@ class ClassLayout
             # were a real class name (harmless downstream -- no real
             # owner is ever literally that -- but sloppy to let through).
             known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }
-            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner) || UNKNOWN
+            # CHAINED_ACCESSOR_SUPPORT: `classes` (this whole method's own
+            # owner -> {ivar => class_name} accumulator, still mid-sweep
+            # and NOT yet UNKNOWN-filtered the way `known_so_far` just
+            # above is) is threaded through as the FULL per-class table a
+            # chained-accessor resolution needs to look up a DIFFERENT
+            # class's own ivar hints -- trace_new_target's own new SEND
+            # branch guards against reading a raw UNKNOWN entry back out of
+            # it directly (see its own comment), so passing the
+            # unfiltered, still-converging table here is sound and avoids
+            # re-filtering it on every single SETIV site in this sweep.
+            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner,
+                                      class_layout: classes, registry: registry) || UNKNOWN
 
             before = classes[owner][ivar]
             # Two real sites disagreeing on the exact class permanently
@@ -3218,7 +3229,40 @@ SUPER_TARGETS = Set[
 # has -- deliberately narrower than the ivar-hint/argument-annotation
 # terminal sources above, which don't apply to a `.new` call's own
 # receiver at all.
-def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil)
+#
+# CHAINED_ACCESSOR_SUPPORT: `class_layout` (owner -> {ivar_name =>
+# class_name}, the FULL, every-owner table ClassLayout.analyze itself
+# builds -- unlike `ivar_classes` above, which every real call site
+# already pre-slices down to just the CURRENT method's own owner) and
+# `registry` (name -> [MethodDef], for the same `:ivar_accessor` lookup
+# IVAR_ACCESSOR_DEVIRT's own compile_send branch uses) are a second,
+# independent pair of optional additional terminal sources, both default
+# nil so every pre-existing caller that doesn't pass them keeps its exact
+# prior behavior (see the guard at the top of the SEND0/SEND case below).
+# When present, they let a plain (non-`new`) SEND mid-chain -- e.g.
+# `@state.screen.foo`, where `.screen` is the SEND landing here -- also
+# resolve to a known class, by chaining two already-proven whole-program
+# facts that nothing before this connected: (1) this SEND's OWN receiver
+# is itself traceable (recursing into this exact same function, scanning
+# strictly before this SEND's own instruction index -- terminates for the
+# identical reason the outer `(idx-1).downto(0)` loop already does, since
+# `i` only ever shrinks) to some exact class `R`; (2) `R` has a real,
+# whole-program `:ivar_accessor` MethodDef for this SEND's own method
+# name (`registry[name]`, filtered to `owner == R` -- see MethodDef's own
+# `kind` comment and build_registry's own attr_reader/writer/accessor
+# case for why a getter's MethodDef is always registered under the bare
+# ivar name, a setter's always under "#{name}="); (3) `R`'s OWN
+# class_layout entry (a DIFFERENT class than the CURRENT method's own
+# owner, which is exactly why the full table is needed here and not just
+# `ivar_classes`) already names a known class for that same ivar (getter
+# name == ivar name, confirmed by the same build_registry case just
+# cited). Every hit through this path is still just as "unsound without a
+# runtime check" as a GETIV/argument-annotation hit above -- every real
+# consumer (compile_send's own TYPED/IVAR_ACCESSOR_DEVIRT branches)
+# already guards it with a real `mrb_obj_class` check before trusting it,
+# so this only ever risks a missed optimization, never a wrong answer.
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+                      class_layout: nil, registry: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -3247,9 +3291,100 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # below can never be affected by the operator characters that fix
       # covers.
       name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-      return nil unless name == 'new'
+      if name == 'new'
+        resolving_new = true
+      else
+        # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
+        # `name` isn't `new`, so this can never join the fresh-`.new`
+        # chain above, but it might still be a chained `:ivar_accessor`
+        # read (`@state.screen.foo` -- `.screen` is the SEND landing
+        # here) whose own return class is provable a different way.
+        # `class_layout`/`registry` are both nil for every caller that
+        # doesn't opt in (in particular every `resolving_new: true`
+        # caller -- e.g. DIRECT_CONSTRUCT_TARGETS' own two call sites --
+        # never even reaches this `else` branch at all: the
+        # `resolving_new || !path.empty?` guard at the very top of this
+        # `when` already returned nil for them), so this is a strict,
+        # additive no-op unless a caller actually threads both through.
+        return nil unless class_layout && registry
 
-      resolving_new = true
+        # Real attr_reader semantics take exactly zero arguments (3rd/
+        # mruby/src/class.c's own `attr_reader` -- confirmed already, see
+        # MethodDef's own `kind` comment) -- gating on that here (not just
+        # on the registry/class_layout match below) rules out a same-
+        # named-but-different-arity POLY method this SEND could otherwise
+        # be calling instead, the identical real-bug shape the MONO/TYPED
+        # paths' own arity guards already exist to catch (see compile_send's
+        # own comment on Input.repeat?/Game::MoveRoute#repeat?).
+        # SEND0's own real disassembly never prints "n=" at all (always
+        # zero args, src/vm.c's OP_SEND0 hardcodes c=0 -- same fact
+        # compile_send's own `n_match` comment already established) so a
+        # nil match here still correctly means n=0.
+        n_match = insn.args.match(/n=(\d+|\*)/)
+        return nil if n_match && n_match[1] != '0'
+
+        # This SEND's own receiver was whatever last wrote `reg` strictly
+        # BEFORE this instruction's own index `i` -- the exact same "SEND
+        # overwrites its receiver register with the result, in place"
+        # invariant the `.new` case below already relies on, just for
+        # THIS SEND instead of a later one. Recursing into this exact same
+        # function reuses the identical "find what wrote reg before
+        # position idx" contract every other caller already gets from
+        # `trace_new_target(irep, idx, reg, ...)` -- no new mechanism
+        # needed. Bounded by the same `(i-1).downto(0)` scan this
+        # recursion's own call performs, so it always terminates: `i` is
+        # strictly less than the outer call's own `idx` (it came from that
+        # same `(idx-1).downto(0)` loop), and every further nested
+        # recursion's own `i` is again strictly less than the `i` that
+        # spawned it -- a single, monotonically shrinking index, the same
+        # way the un-recursive scan above already terminates on its own.
+        recv_class = trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+                                       class_layout: class_layout, registry: registry)
+        return nil unless recv_class
+
+        # `registry[name]` is already sliced to real MethodDefs literally
+        # named `name` -- a real attr_writer's own MethodDef is always
+        # registered under "#{mname}=" instead (build_registry's own
+        # attr_reader/writer/accessor case, not the bare `mname` a getter
+        # gets), so this can only ever match a GETTER's own entry, never a
+        # setter's -- no separate `name.end_with?('=')` check needed here.
+        accessor = registry[name]&.find { |md| md.owner == recv_class && md.kind == :ivar_accessor }
+        return nil unless accessor
+
+        # `R`'s (== `recv_class`) OWN ivar-class hint for this same name
+        # (getter name == ivar name, same build_registry case just cited).
+        # `class_layout[recv_class]` can still be raw, UNKNOWN-poisoned
+        # ClassLayout.analyze fixed-point-sweep state -- the one real
+        # caller mid-sweep (ClassLayout.analyze's own SETIV loop) passes
+        # its own in-progress `classes` table directly here rather than
+        # paying to re-filter it on every single SETIV site -- so this
+        # never hands back ClassLayout::UNKNOWN as if it were a real class
+        # name, the same "no wrong guess, ever" bar every other terminal
+        # case in this function already holds itself to.
+        #
+        # `class_layout.key?(recv_class)` (never a bare `class_layout[recv_class]`
+        # here) -- real, checked bug caught comparing this function's own
+        # diagnostic stderr output before/after this change: ClassLayout.
+        # analyze's own `classes` table (the one real caller mid-sweep passes
+        # as `class_layout`, per the comment above) is a `Hash.new { |h, k|
+        # h[k] = {} }`, so an ordinary `[]` read on a class this scan has
+        # never SETIV'd anything for yet silently *inserts* an empty entry --
+        # changing that hash's own insertion order (and so its diagnostic
+        # `each`-order in the `== known-ivar-class hints ==` listing) despite
+        # this being nothing but a probing read. `Hash#key?` never touches
+        # the default proc, so this reads without ever mutating. Confirmed
+        # this was real, not hypothetical: the exact same 12-line CLASS_HINT
+        # reordering (zero content change, zero `.cpp` byte change) appeared
+        # in EVERY gem's own diagnostic before this fix, including
+        # mruby-lcf-compiled/mruby-rgss-compiled, whose own generated output
+        # never differs at all -- purely a side effect of this scan probing
+        # classes it never otherwise touches.
+        recv_ivars = class_layout[recv_class] if class_layout.key?(recv_class)
+        hint = recv_ivars && recv_ivars[name]
+        return nil unless hint && hint != ClassLayout::UNKNOWN
+
+        return hint
+      end
     # Same register, still tracing further back for the class object that
     # was `.new`'s own receiver -- SEND overwrites its receiver register
     # with the result, in place.
@@ -5634,7 +5769,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         next unless traced == 'Array'
       end
 
@@ -5724,7 +5867,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         next unless traced == 'Array'
       end
 
@@ -5762,7 +5913,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         next unless traced == 'Array'
       end
 
@@ -5828,7 +5987,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         next unless traced == 'Array'
       end
 
@@ -5879,7 +6046,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         traced = chained_array_call(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -8094,7 +8269,16 @@ class CodeGen
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
       ivar_classes = owner_def && @class_layout[owner_def.owner]
-      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner)
+      # CHAINED_ACCESSOR_SUPPORT: `@class_layout` (the full owner -> ivar-
+      # hint table, not just this call site's own already-sliced
+      # `ivar_classes`) and `@registry` let this same TYPED path also
+      # devirtualize a multi-level accessor chain (`@state.screen.foo`),
+      # not just a single-level GETIV/`.new`/ARRAY hit -- see
+      # trace_new_target's own top comment for the full mechanism. Both
+      # are already real CodeGen instance state (`initialize`, above), no
+      # new plumbing needed to reach them from here.
+      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
+                                      class_layout: @class_layout, registry: @registry)
       if known_class
         candidate = @registry[name].find { |md| md.owner == known_class }
         # Same two guards as the MONO path above (its own comments have the
