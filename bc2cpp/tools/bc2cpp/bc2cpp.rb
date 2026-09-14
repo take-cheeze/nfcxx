@@ -4615,6 +4615,16 @@ class CodeGen
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = inlined
     end
+    # ACCUM_BLOCK_SUPPORT: same mechanism for accumulator/predicate
+    # regions (`any?`/`all?`/`none?`/`count` literal blocks,
+    # `reduce`/`inject(init)` folds). Same gate, same contract.
+    recognize_accum_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_accum_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
 
     targets = jump_targets(irep) - suppressed
     irep.instructions.each_with_index do |insn, idx|
@@ -5259,6 +5269,78 @@ class CodeGen
   # follow-up on this same machinery, not this round.
   COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index].freeze
 
+  # ACCUM_BLOCK_SUPPORT: recognize one inlinable accumulator/predicate
+  # region -- `ary.any?/all?/none?/count { |x| ... }` (1-mandatory-arg
+  # blocks) and `ary.reduce/inject(init) { |acc, x| ... }` (2-
+  # mandatory-arg blocks, exactly one positional init argument:
+  # `n=1`). Same `BLOCK R(a+1)` + `SENDB/SSENDB` adjacency and same
+  # static Array gate as every recognizer above. Per-method semantics
+  # (defaults, early-exit, accumulation) live in emit_accum_inline:
+  #   - `any?`: false default, first truthy result exits with true.
+  #   - `all?`: true default, first falsy result exits with false.
+  #   - `none?`: true default, first truthy result exits with false.
+  #   - `count`: fixnum tally of truthy results, no early exit.
+  #   - `reduce`/`inject` with init (`n=1`): the SENDB's own R(dest+1)
+  #     register holds the init value (verified below by register
+  #     match, not assumed); each iteration feeds the accumulator
+  #     through the block's two params and takes the block's yielded
+  #     value back as the next accumulator.
+  # A no-init `reduce` (`n=0` -- first element seeds the accumulator)
+  # stays out: its empty-array/no-block nuances (nil on empty, each-
+  # element-visited-once shape) need their own emitter, a follow-up.
+  # Arity mismatches (2-arg `any?` block, 1-arg `reduce` block) keep
+  # the honest `#error`, same as the collect recognizer.
+  ACCUM_BLOCK_METHODS = %w[any? all? none? count].freeze
+  ACCUM_FOLD_METHODS = %w[reduce inject].freeze
+
+  def recognize_accum_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      meth = name&.sub(/\A:/, '')
+      n = nstr.to_s[/n=(\d+)/, 1]&.to_i
+      is_pred = n == 0 && ACCUM_BLOCK_METHODS.include?(meth)
+      is_fold = n == 1 && ACCUM_FOLD_METHODS.include?(meth)
+      next unless is_pred || is_fold
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      if is_fold
+        # `reduce(init)`: registers are dest, init, block -- the BLOCK
+        # must sit at dest+2 with the init value at dest+1 (confirmed
+        # against real `mrbc -v`: `BLOCK R4` + `SENDB R2 :reduce n=1`).
+        next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 2).to_s
+      else
+        next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+      end
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      want_arity = is_fold ? 2 : 1
+      next unless block_irep && mandatory_arity(block_irep) == want_arity && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Array'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        next unless traced == 'Array'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   method_name: meth, init_reg: is_fold ? (dest_reg.to_i + 1).to_s : nil,
+                   ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
   def recognize_collect_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
     irep.instructions.each_with_index do |insn, idx|
@@ -5727,6 +5809,123 @@ class CodeGen
       end
       out << "    }\n"
     end
+    out << "  }\n"
+    out
+  end
+
+  # ACCUM_BLOCK_SUPPORT: the inlined-loop replacement for one recognized
+  # accumulator/predicate region (recognize_accum_regions), or nil when
+  # the block body doesn't come out clean -- same all-or-nothing
+  # contract as every emitter above. Clones emit_collect_inline's loop
+  # with three deliberate differences (each grounded in measured CRuby
+  # semantics, listed in recognize_accum_regions' own comment):
+  #   - PREDICATE result: `any?`/`all?`/`none?` produce a boolean
+  #     destination with early exit (any?: false default, first truthy
+  #     result sets true + goto end; all?: true default, first falsy
+  #     sets false + goto end; none?: true default, first truthy sets
+  #     false + goto end). A `break v` inside overrides with v (same
+  #     broke-flag pattern as collect -- BREAK assigns dest + sets the
+  #     flag + jumps past; the final boolean assignment is flag-
+  #     guarded). Empty-array defaults fall out with zero iterations.
+  #   - COUNT tally: `count` keeps a fixnum tally local (no early exit),
+  #     destination takes the tally past the broke-guard (a `break v`
+  #     overrides with v -- confirmed against CRuby: `count { break 7 }`
+  #     is 7).
+  #   - FOLD threading: `reduce`/`inject(init)` seeds a block-local
+  #     accumulator from the SENDB's own R(dest+1) init register ONCE
+  #     before the loop (never re-initialized per iteration -- the whole
+  #     point of a fold); each iteration binds block param 1 to the
+  #     accumulator and param 2 to the element, and takes the block's
+  #     yielded value back as the next accumulator. Destination takes
+  #     the accumulator past the broke-guard. The init register is read
+  #     before the loop starts, so a body that later writes the same
+  #     enclosing register (possible only through a level-0 SETUPVAR
+  #     aliasing that local) cannot affect iteration -- sound by copy
+  #     timing, documented because subtle.
+  def emit_accum_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    meth = region[:method_name]
+    is_fold = !region[:init_reg].nil?
+    param_reg = 1 + offset
+    param2_reg = 2 + offset
+    acc_var = "bc2cpp_accum_acc_#{region[:block_addr]}"
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    iter_label = "Lbc2cpp_accum_iter_#{region[:block_addr]}"
+    break_label = "Lbc2cpp_accum_end_#{region[:block_addr]}"
+    result_var = "bc2cpp_accum_v_#{region[:block_addr]}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                result_var: result_var, break_dest: dest_reg,
+                                                break_label: break_label,
+                                                broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}")
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
+    out << "    mrb_bool bc2cpp_accum_broke_#{region[:block_addr]} = FALSE;\n"
+    case meth
+    when 'any?'
+      out << "    mrb_value bc2cpp_accum_res_#{region[:block_addr]} = mrb_false_value();\n"
+    when 'all?', 'none?'
+      out << "    mrb_value bc2cpp_accum_res_#{region[:block_addr]} = mrb_true_value();\n"
+    when 'count'
+      out << "    mrb_int bc2cpp_accum_n_#{region[:block_addr]} = 0;\n"
+    when 'reduce', 'inject'
+      out << "    mrb_value #{acc_var} = r#{region[:init_reg]};\n"
+    end
+    out << "    for (mrb_int bc2cpp_accum_i_#{region[:block_addr]} = 0; " \
+           "bc2cpp_accum_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_accum_i_#{region[:block_addr]}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero?
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      mrb_value #{result_var} = mrb_nil_value();\n"
+    if is_fold
+      out << "      r#{param_reg} = #{acc_var};\n"
+      out << "      r#{param2_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+    else
+      out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+    end
+    out << body
+    out << "      #{iter_label}:;\n"
+    case meth
+    when 'any?'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{region[:block_addr]} = mrb_true_value(); goto #{break_label}; }\n"
+    when 'all?'
+      out << "      if (!mrb_test(#{result_var})) { bc2cpp_accum_res_#{region[:block_addr]} = mrb_false_value(); goto #{break_label}; }\n"
+    when 'none?'
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{region[:block_addr]} = mrb_false_value(); goto #{break_label}; }\n"
+    when 'count'
+      out << "      if (mrb_test(#{result_var})) ++bc2cpp_accum_n_#{region[:block_addr]};\n"
+    when 'reduce', 'inject'
+      out << "      #{acc_var} = #{result_var};\n"
+    end
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "    if (!bc2cpp_accum_broke_#{region[:block_addr]}) {\n"
+    case meth
+    when 'any?', 'all?', 'none?'
+      out << "    r#{dest_reg} = bc2cpp_accum_res_#{region[:block_addr]};\n"
+    when 'count'
+      out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_accum_n_#{region[:block_addr]});\n"
+    when 'reduce', 'inject'
+      out << "    r#{dest_reg} = #{acc_var};\n"
+    end
+    out << "    }\n"
     out << "  }\n"
     out
   end
