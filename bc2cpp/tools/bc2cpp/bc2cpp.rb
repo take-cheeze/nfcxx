@@ -2168,9 +2168,76 @@ NATIVE_CONSTRUCT_TARGETS = {
 # byte-for-byte IDENTICAL before and after adding `Game::Screen` here,
 # same as every other entry in this table -- this is purely an additive
 # codegen unlock, never a registration change.
+#
+# Six more classes added this round, each independently checked against the
+# real whole-program registry/`== compiled entry points ==` dump for
+# `mruby-rpg2k-compiled` (never assumed from source reading alone) and
+# against this table's own 4-part bar: `Game::ChipSet` (`#initialize(db,
+# id)`, arity 2), `Game::Interpreter` (`#initialize(state)`, arity 1),
+# `RPG2k::Scene::Menu` (`#initialize parent, state`, arity 2),
+# `RPG2k::Scene::DebugMenu` (`#initialize(parent, state)`, arity 2),
+# `RPG2k::Scene::ItemMenu` (`#initialize parent, state`, arity 2),
+# `Game::NumberInput` (`#initialize(digits)`, arity 1). Every one: no `def
+# self.new`/`def self.allocate` (confirmed by the real registry showing no
+# matching `.singleton` entry for `:new`/`:allocate`), a real compiled
+# `#initialize` whose real source (`mruby-rpg2k/mrblib/game.rb`,
+# `interpreter.rb`, `scene/menu.rb`, `scene/debug_menu.rb`,
+# `scene/item_menu.rb`) takes only plain mandatory positional arguments (no
+# `= default`, no `*rest`, no keywords -- `pure_mandatory_arity?` would
+# refuse any of those), and already a member of `mruby-rpg2k-compiled`'s
+# own `owners:` list (`compiled_gems.rb`).
+#
+# Only THREE of these six are real, ACTIVE unlocks today, confirmed by a
+# real before/after diff of the regenerated output (`mruby-rpg2k-compiled/
+# src/register.cxx`'s own top-of-file comment has the matching C++-side
+# wiring these three also needed to actually link, not just text-generate
+# -- `emit_direct_construct_decls` only ever emits a forward declaration):
+# `Game::ChipSet` (2 real sites, `mruby-rpg2k/mrblib/scene/
+# map_viewer.rb:356` and `mruby-rpg2k/mrblib/scene/map.rb:1368` -- a THIRD
+# real call site, `mruby-rpg2k/mrblib/game/lsd_io.rb:444`, does NOT convert
+# and never will until its own containing method compiles: it sits inside a
+# `begin...rescue` block bc2cpp still can't compile at all today, so that
+# `SEND :new` is simply never reached by codegen, table membership or not),
+# `Game::Interpreter` (1 real site, `mruby-rpg2k/mrblib/scene/map.rb:379`),
+# `Game::NumberInput` (1 real site, `mruby-rpg2k/mrblib/scene/map.rb:9863`).
+#
+# The other three -- `RPG2k::Scene::Menu`/`DebugMenu`/`ItemMenu` -- pass
+# this table's own 4-part bar exactly as cleanly, and stay listed as
+# correct, harmless future-proofing (the identical "opt-in table checked
+# live against the real registry every run" property every other entry
+# here already has -- see this constant's own top comment), but confirmed
+# to have ZERO real call sites today: every real `Scene::Menu.new`/
+# `Scene::DebugMenu.new`/`Scene::ItemMenu.new` in `mruby-rpg2k/mrblib/
+# scene/{map,menu}.rb` sits inside a caller method (`RPG2k::Scene::Map#
+# perform_event_menu` and siblings) that is itself still on the
+# `== skipped (unsupported, left on the interpreter) ==` list -- same
+# "containing method doesn't compile yet" shape as ChipSet's own
+# `lsd_io.rb` site above, just for all of a given class's real call sites
+# rather than one of several. Confirmed these three add ZERO new forward
+# declarations to the regenerated output (unlike the three real unlocks
+# above) -- so, unlike those three, they need no matching register.cxx
+# wiring yet either; whenever their own caller methods eventually gain
+# opcode coverage, this table already covers them with no further Ruby-side
+# change, though the matching accessor-function wiring register.cxx's own
+# comment describes will still need adding at that point, the same real,
+# separate step this round needed for the three that activated today.
+#
+# A handful of sibling classes from the same candidate sweep were checked
+# and deliberately left OUT, not overlooked: `Game::Vehicle#initialize(type,
+# map_id = 0, x = 0, y = 0, direction = 2)`, `Game::Character#initialize(x =
+# 0, y = 0, direction = 2)`, `Game::Picture#initialize(id, opts = {})`,
+# `Game::Weather#initialize(type = 0, strength = 0)`,
+# `Game::Rng#initialize(seed = 1)`, and `Game::Variables#initialize(rpg2003
+# = false)` (all in `mruby-rpg2k/mrblib/game.rb`) each carry a real `=
+# default` optional argument, so `pure_mandatory_arity?` correctly refuses
+# every one of them -- listing any of these here would be a silent no-op
+# (the `init_ok` check below would just never pass), not a real unlock, so
+# they stay off this table rather than padding it with dead entries.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
-                               Game::Screen].freeze
+                               Game::Screen Game::ChipSet Game::Interpreter
+                               RPG2k::Scene::Menu RPG2k::Scene::DebugMenu
+                               RPG2k::Scene::ItemMenu Game::NumberInput].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
