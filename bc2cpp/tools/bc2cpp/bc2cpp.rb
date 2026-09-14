@@ -3335,6 +3335,78 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   nil
 end
 
+# LITERAL_EQQ_SUPPORT: backward-scan a `:===` SEND's own receiver register
+# for a literal Fixnum/Symbol write a few instructions earlier in the same
+# straight-line irep -- real Ruby's own `case x; when 5 ... when :bar ...
+# end` desugaring (`when` compiles to `LITERAL === x`), confirmed against
+# mrbc's own real disassembly for both shapes (a toy `case x; when 5;
+# when :bar; end` method body):
+#   LOADI_5  R4  (5)
+#   MOVE     R5  R3   ; R3 holds the case value
+#   SEND     R4  :===  n=1
+#   ...
+#   LOADSYM  R4  :bar
+#   MOVE     R5  R3
+#   SEND     R4  :===  n=1
+# -- i.e. SEND's own receiver register (R4 above, `d` in compile_send) is
+# freshly written by the literal load, immediately before the argument-
+# register MOVE. Deliberately a separate, self-contained walk from
+# trace_new_target above, not a reuse of it: this asks a completely
+# different question ("did a LOADI*/LOADSYM literal just write this
+# register", never "is this register traceable to a known object's
+# class"), and none of trace_new_target's own GETCONST/GETMCNST/GETIV/
+# ARRAY terminal cases apply to a literal receiver at all -- sharing that
+# function here would mean bending its own already-intricate case
+# analysis around an unrelated question, a real readability/soundness risk
+# for no real code reuse (this walk is a handful of lines). Still follows
+# the same defensive MOVE-chain-following idiom that function established
+# (same reasoning: mrbc could in principle interpose a MOVE before the
+# literal load; every real disassembly checked here never does, but
+# following the chain costs nothing and keeps this sound either way).
+# Returns {type: :fixnum, value: "5"} / {type: :symbol, name: "bar"}, or
+# nil the moment anything else writes `reg` first (an opaque incoming
+# argument, a computed value, ...) -- a safe miss, same as every other
+# backward-scan guard in this file: compile_send's own caller falls
+# straight through to ordinary POLY dynamic dispatch on nil, never guesses.
+def trace_eqq_literal_receiver(irep, idx, reg)
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'LOADSYM'
+      # Same shape as LOADSYM's own codegen above (":(\S+)" -- stops at
+      # the first whitespace, real code has a trailing local-variable
+      # comment on a named-destination register the same way GETCONST's
+      # own args do).
+      name = insn.args[/:(\S+)/, 1]
+      return name ? { type: :symbol, name: name } : nil
+    when /^LOADI/
+      # Same two-shape literal extraction LOADI's own codegen above uses
+      # (parenthesized for the small-immediate variants, bare for LOADI8/
+      # 16/32) -- see that codegen's own comment for why both forms exist.
+      lit = insn.args[/\(([^)]+)\)/, 1] || insn.args[/^R\d+\s+(-?\d+)/, 1]
+      return lit ? { type: :fixnum, value: lit } : nil
+    else
+      # Anything else writing `reg` first (GETIV, another SEND, a computed
+      # expression, ...) means the receiver isn't a bare literal -- a safe
+      # miss, never a wrong guess.
+      return nil
+    end
+  end
+  # `reg` was never written in this straight-line body -- an opaque
+  # incoming argument or block-entry register, not a literal. No
+  # arg_classes-style terminal fallback here on purpose: unlike
+  # trace_new_target's class-annotation fallback (a real magic-comment
+  # fact about an argument's *class*), there is no equivalent "this
+  # argument is always literal value N" whole-program fact this compiler
+  # tracks anywhere -- a safe miss.
+  nil
+end
+
 def pure_mandatory_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
@@ -4086,6 +4158,50 @@ class CodeGen
     return nil unless compiles_clean?(defs.first.irep)
 
     defs.first
+  end
+
+  # LITERAL_EQQ_SUPPORT's own soundness gate -- a LIVE re-check against
+  # THIS run's own @registry, not a comment trusting a fact that was true
+  # the day it was written. Both `#==` and `#===` have to still be
+  # exactly, unambiguously native (`MONO`, one def, owner `'<native>'`)
+  # anywhere in the whole program for compile_send's own LITERAL === block
+  # below to be sound at all:
+  #   - `:===` itself: a reopened `#===` anywhere (Integer, Symbol,
+  #     Object, Comparable, a mixin, ...) means `LITERAL === arg` might
+  #     not even call mruby's own native `mrb_eqq_m` (3rd/mruby/src/
+  #     kernel.c) in the first place.
+  #   - `:==`: `mrb_eqq_m` calls `mrb_equal` (3rd/mruby/src/object.c),
+  #     which -- whenever its own fast identity/type-mixing checks don't
+  #     already settle the answer -- dispatches to `self`'s own real
+  #     `#==` method (`mrb_func_basic_p`'s own guard, same file). Both the
+  #     Symbol branch (sound only because Symbol's own `#==` is still
+  #     literally `mrb_obj_equal_m`, the exact default `mrb_func_basic_p`
+  #     compares against) and the Fixnum branch (sound only because
+  #     Integer's own `#==` is still literally `int_equal`, 3rd/mruby/src/
+  #     numeric.c) below depend on this -- a reopened `#==` on ANY class
+  #     (not just Integer/Symbol) could change what `self` even IS by the
+  #     time `mrb_equal` dispatches, so the check is deliberately whole-
+  #     name, not scoped to Integer/Symbol's own owner. Confirmed for real
+  #     against mruby-rpg2k-compiled's own whole-program registry dump
+  #     (both `MONO :== (1 def: <native>)` and `MONO :=== (1 def:
+  #     <native>)`, zero `FLIP` lines for either -- i.e. neither name was
+  #     EVER a bytecode MONO name to begin with, the strongest form of
+  #     "never reopened anywhere"), not merely assumed from reading
+  #     mruby's own source in isolation.
+  # A future Ruby source change anywhere in the whole program that reopens
+  # either name flips this false automatically (POLY, or a second real
+  # native flip target) -- every LITERAL === call site falls back to
+  # ordinary POLY dynamic dispatch from then on, never silently keeps a
+  # now-unsound fast path. Memoized: `@registry` never changes after
+  # CodeGen.new (compile_all's own single pass over already-finalized
+  # ireps), so this is a pure function of it.
+  def eqq_literal_devirt_safe?
+    return @eqq_literal_devirt_safe if defined?(@eqq_literal_devirt_safe)
+
+    @eqq_literal_devirt_safe = %w[== ===].all? do |n|
+      defs = @registry[n]
+      defs && defs.size == 1 && defs.first.owner == '<native>'
+    end
   end
 
   # SYM_DEVIRT: resolve a `&:sym` block-pass target for direct per-element
@@ -7508,6 +7624,107 @@ class CodeGen
     n = n_match ? n_match[1].to_i : 0
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{d.to_i + k}" }
+
+    # LITERAL_EQQ_SUPPORT: `case x; when LITERAL ... end`'s own desugared
+    # `LITERAL === x` (a `:===` SEND whose own receiver is a bare literal
+    # Fixnum or Symbol, trace_eqq_literal_receiver's own comment has the
+    # exact real disassembly shape this matches) devirtualizes straight
+    # past ordinary MONO/POLY registry resolution and real dynamic
+    # dispatch, replicating mruby's own native `Object#===`/`#==`
+    # semantics directly (3rd/mruby/src/kernel.c's own `mrb_eqq_m` ->
+    # 3rd/mruby/src/object.c's own `mrb_equal`) -- see
+    # eqq_literal_devirt_safe?'s own comment for the full whole-program
+    # soundness argument (both `:==` and `:===` have to be registry-
+    # confirmed MONO-native, re-checked live every run, not just once) and
+    # trace_eqq_literal_receiver's own comment for the backward-scan
+    # mechanism. Deliberately runs BEFORE monomorphic_target/the ordinary
+    # POLY fallback below (`:===` itself can never devirtualize through
+    # either of those anyway -- monomorphic_target always refuses a
+    # native-only def, its own comment explains why -- so this changes
+    # nothing about their own behavior for every other name; it only ever
+    # intercepts a `:===` name that would otherwise fall straight to
+    # `dynamic_dispatch_line`'s own plain `mrb_funcall` at the bottom of
+    # this method). `n == 1`: real `#===`/`#==` always take exactly one
+    # argument (`MRB_ARGS_REQ(1)` on both native entries, 3rd/mruby/src/
+    # kernel.c) -- a `:===` SEND with any other arg count than 1 isn't
+    # this shape at all (never produced by real `when` desugaring, and
+    # this compiler's own SEND-arg-count parsing above already guarantees
+    # `n_match` matched a plain `n=1` shape to even reach here with
+    # `argv.size == 1`). `irep && idx`: same "only meaningful for an
+    # explicit-receiver send with real bytecode position to scan
+    # backward from" gate every other backward-scan devirtualization in
+    # this method already uses (never true when self_implicit is, per
+    # this method's own top comment).
+    if name == '===' && n == 1 && irep && idx && eqq_literal_devirt_safe?
+      literal = trace_eqq_literal_receiver(irep, idx, d)
+      if literal
+        arg = argv.first
+        case literal[:type]
+        when :symbol
+          # Sound with NO runtime fallback ever needed: Symbol's own real
+          # `#==` is confirmed (by the very same whole-program `:==` MONO
+          # check eqq_literal_devirt_safe? just ran) to still be mruby's
+          # own plain, unoverridden default (`mrb_obj_equal_m`,
+          # 3rd/mruby/src/symbol.c's own ROM table) -- so `mrb_equal`'s
+          # own `mrb_func_basic_p(mrb, obj1, MRB_OPSYM(eq),
+          # mrb_obj_equal_m)` guard (object.c) is unconditionally TRUE for
+          # a Symbol receiver, meaning `mrb_equal` NEVER dispatches at
+          # all: the whole call resolves entirely off its own initial
+          # `mrb_obj_eq` identity/type check (`MRB_TT_SYMBOL` case:
+          # `mrb_symbol(v1) == mrb_symbol(v2)`, requiring an EXACT type
+          # match first) -- true iff `arg` is this exact Symbol, false for
+          # literally every other value including every other type. No
+          # cross-type coercion exists for Symbol the way it does for
+          # Integer below, so there is nothing a runtime fallback could
+          # ever catch that this doesn't already get right.
+          note = "  // LITERAL === :symbol -- `:#{literal[:name]} === arg` (case/when literal), " \
+                 "Object#===/Symbol#== both confirmed native/unoverridden anywhere in this program's " \
+                 "own whole-program registry -- sound unconditionally, no mrb_funcall fallback ever " \
+                 "needed (see eqq_literal_devirt_safe?'s own comment).\n"
+          return "#{note}  r#{d} = mrb_bool_value(mrb_symbol_p(#{arg}) && " \
+                 "mrb_symbol(#{arg}) == mrb_intern_cstr(M, \"#{literal[:name]}\"));\n"
+        when :fixnum
+          # Sound ONLY for an exactly-Integer `arg` -- `mrb_equal`'s own
+          # real logic (object.c) applies a genuine Integer<->Float
+          # numeric cross-comparison BEFORE ever reaching Integer's own
+          # `#==` dispatch, and -- since this project's own
+          # build_config.rb unconditionally includes `mruby-bigint` for
+          # every build target (`conf.gem core: 'mruby-bigint'`, inside
+          # the shared `rpg_maker_gems` every target calls) -- a further
+          # Integer<->Bigint cross-comparison exists too (both in
+          # `mrb_equal` itself under `MRB_USE_BIGINT` and, redundantly,
+          # inside Integer's own real `#==`, `int_equal`, 3rd/mruby/src/
+          # numeric.c's own `MRB_TT_BIGINT` case). So `5 === 5.0` (a
+          # Float, real value 5.0) is real-Ruby-TRUE, not something this
+          # codegen can assume FALSE from a bare type mismatch --
+          # replicating that cross-type math inline would need pulling in
+          # float/bigint comparison helpers this call site has no other
+          # reason to reference, so instead: only the exact same-type
+          # shape (`arg` is itself `MRB_TT_INTEGER`) is handled directly
+          # here (matching `mrb_obj_eq`'s own fast path for an equal
+          # value, and `int_equal`'s own plain `MRB_TT_INTEGER` case for a
+          # differing one -- both are exact integer comparisons, no
+          # coercion, so no possible override changes the answer given
+          # `:==`'s own confirmed-MONO-native status); every other runtime
+          # type (Float, Bigint, String, nil, ...) falls back to ordinary
+          # `mrb_funcall`, deferring to the real interpreter for exactly
+          # the cases this reasoning can't safely resolve alone -- the
+          # identical "fixnum-fixnum fast path, mrb_funcall otherwise"
+          # shape `compile_cmp`'s own EQ codegen already established
+          # above, not a new pattern.
+          note = "  // LITERAL === :fixnum -- `#{literal[:value]} === arg` (case/when literal), " \
+                 "Object#===/Integer#== both confirmed native/unoverridden anywhere in this program's " \
+                 "own whole-program registry -- only the exact-Integer-type shape is handled directly; " \
+                 "a Float/Bigint/other-typed arg falls back to real mrb_funcall (mrb_equal's own " \
+                 "Integer<->Float/Bigint cross-type comparison, see this block's own top comment).\n"
+          return "#{note}  if (mrb_fixnum_p(#{arg})) {\n" \
+                 "    r#{d} = mrb_bool_value(mrb_fixnum(#{arg}) == #{literal[:value]});\n" \
+                 "  } else {\n" \
+                 "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+                 "  }\n"
+        end
+      end
+    end
 
     # Devirtualize a `SEND :new` whose receiver is provably (GETCONST-
     # traced, right here at this exact call site -- not the ivar/argument
