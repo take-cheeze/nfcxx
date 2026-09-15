@@ -4302,6 +4302,14 @@ class CodeGen
     @direct_construct_used = Set.new
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
+    # ATTR_STRUCT_DEVIRT: [owner, ivar] pairs drop_unsafe_embeddings below
+    # allowed to embed ONLY because a synthesized struct-aware accessor
+    # (emit_ivar_accessor_pair) will override the plain native
+    # attr_reader/writer/accessor that would otherwise still read/write
+    # the ordinary iv_tbl -- see that method's own comment for the full
+    # soundness argument. Populated by drop_unsafe_embeddings, read by
+    # emit_synthesized_accessors after compile_all runs.
+    @synthesize_accessor_for = Set.new
     # @clean_cache/@probing (above) and @ivar_layout (below, temporarily the
     # RAW layout) both have to exist before drop_unsafe_embeddings runs --
     # it calls compiles_clean?, which calls compile_method, which reads
@@ -4381,9 +4389,10 @@ class CodeGen
 
       # A per-owner #initialize gate alone isn't enough: an ivar only
       # embeds safely if *every* read/write of it goes through this
-      # compiler's own GETIV/SETIV codegen. A plain `attr_reader`/
-      # `attr_writer`/`attr_accessor` for that exact same name is a real,
-      # live counterexample -- its native C implementation
+      # compiler's own GETIV/SETIV codegen -- or through a replacement
+      # this file itself controls just as completely. A plain
+      # `attr_reader`/`attr_writer`/`attr_accessor` for that exact same
+      # name is a real, live counterexample -- its native C implementation
       # (3rd/mruby/src/class.c's own `attr_reader`/`attr_writer`) is a
       # bare `mrb_iv_get`/`mrb_iv_set` against the ordinary dynamic
       # `iv_tbl`, with no way to know this class's own SETIV codegen wrote
@@ -4402,9 +4411,44 @@ class CodeGen
       # "<name>="  (a writer) -- checked directly here, the same way
       # monomorphic_target already treats an irep-nil MethodDef as "native,
       # no compiled body", rather than assumed safe by construction.
+      #
+      # ATTR_STRUCT_DEVIRT: a `kind: :ivar_accessor` exposure specifically
+      # (as opposed to any OTHER irep-nil MethodDef under this owner --
+      # e.g. a `Struct.new(:name, ...)` member accessor, a completely
+      # different, non-iv_tbl storage mechanism this file has no business
+      # touching) is the ONE native-exposure shape this file can safely
+      # neutralize itself: emit_ivar_accessor_pair below hand-builds a
+      # real compiled getter/setter using the exact same struct-field
+      # codegen GETIV/SETIV already use, and the caller registers it in
+      # register.cxx the ordinary way -- overriding attr_reader's own
+      # installation PROGRAM-WIDE (mrb_define_method replaces the whole
+      # class's own method-table entry for that name, so a genuinely
+      # dynamic call path -- an unprovable receiver class, `send`,
+      # reflection -- reaches this synthesized accessor exactly the same
+      # as a statically-devirtualized one; IVAR_ACCESSOR_DEVIRT's own
+      # call-site shortcut in compile_send is a distinct, purely-additive
+      # speed optimization on top of this, never a substitute for it --
+      # it still falls through to `mrb_funcall` whenever a call site can't
+      # prove its receiver's class, and that `mrb_funcall` needs THIS
+      # override already in place to land somewhere struct-aware). Only
+      # ivars whose native reader AND writer exposure (when both exist)
+      # are exclusively :ivar_accessor qualify; anything else keeps the
+      # ivar off the struct exactly as before.
       safe = ivars.reject do |name, _|
-        natively_exposed?(owner, name) || natively_exposed?(owner, "#{name}=") ||
-          !every_accessor_compiles?(owner, name)
+        reader_native = natively_exposed?(owner, name)
+        writer_native = natively_exposed?(owner, "#{name}=")
+        reader_blocked = reader_native && !synthesizable_accessor_only?(owner, name)
+        writer_blocked = writer_native && !synthesizable_accessor_only?(owner, "#{name}=")
+        next true if reader_blocked || writer_blocked || !every_accessor_compiles?(owner, name)
+
+        # Record exactly which of reader/writer actually needs a
+        # synthesized override -- never both just because one did: a
+        # class with only `attr_reader :x` (no `attr_writer`) must not
+        # gain a brand-new public `x=` nobody wrote, a real behavior
+        # change (NoMethodError today, silently accepted after).
+        @synthesize_accessor_for << [owner, name, :reader] if reader_native
+        @synthesize_accessor_for << [owner, name, :writer] if writer_native
+        false
       end
       out[owner] = safe unless safe.empty?
     end
@@ -4419,6 +4463,26 @@ class CodeGen
   # whenever some other real accessor would silently miss it.
   def natively_exposed?(owner, name)
     (@registry[name] || []).any? { |d| d.owner == owner && d.irep.nil? }
+  end
+
+  # ATTR_STRUCT_DEVIRT: are ALL of this exact owner's own native
+  # definitions of `name` specifically a plain attr_reader/writer/
+  # accessor (kind: :ivar_accessor)? True vacuously when there are none
+  # (natively_exposed? already false in that case, so the caller never
+  # actually relies on this branch) or when the only one there is really
+  # is an :ivar_accessor. False whenever some OTHER native, non-bytecode
+  # definition shares this exact owner+name -- the concrete, checked
+  # counterexample is a `Struct.new(:name, ...)` member accessor
+  # (build_registry's own SENDB case, `kind: nil` -- see its own
+  # comment): Struct stores members positionally, never through iv_tbl
+  # at all, so there is no GETIV/SETIV-shaped struct field this file
+  # could ever synthesize a replacement for, and the ivar (which would
+  # only even appear in ivar_layout in the first place if some OTHER,
+  # unrelated method on the same class also does real `@name = ...`
+  # bytecode -- a real possibility, not paranoia) has to stay off the
+  # struct exactly as natively_exposed? alone already decided.
+  def synthesizable_accessor_only?(owner, name)
+    (@registry[name] || []).select { |d| d.owner == owner }.all? { |d| d.kind == :ivar_accessor }
   end
 
   # A real, previously-undiscovered gap in this same "safe to embed" gate,
@@ -4913,6 +4977,106 @@ class CodeGen
 
   def type_var(owner)
     sanitize("#{owner}_ivars_type")
+  end
+
+  # ATTR_STRUCT_DEVIRT: the real compiled getter/setter pair for one
+  # [owner, ivar, :reader | :writer] entry drop_unsafe_embeddings' own
+  # @synthesize_accessor_for recorded -- see that method's own comment
+  # for the full soundness argument (this is what makes it safe: once
+  # register.cxx registers these, EVERY access path reaches struct-aware
+  # code, not just a statically-devirtualized call site). No bytecode
+  # body exists to translate (attr_reader/writer never had one), so this
+  # hand-builds the exact same box/check/unbox codegen GETIV/SETIV
+  # already use for an embedded ivar (compile_insn's own GETIV/SETIV
+  # cases) instead. Returns one `compiled`-shaped Hash -- same keys
+  # compile_method's own return value has (label/owner/name/entry/impl/
+  # arity/arg_c_types/code/visibility) -- so it slots into the exact same
+  # `compiled` array as every ordinary compiled method, needing no
+  # special-casing from emit_forward_decls/emit_decls_header/the
+  # `== compiled entry points ==` diagnostic below.
+  def emit_ivar_accessor_pair(owner, ivar, which)
+    type = embed_type(owner, ivar)
+    return nil unless type
+
+    sname = struct_name(owner)
+    ops = TYPE_OPS.fetch(type)
+    base = "#{sanitize(owner)}_#{sanitize(ivar)}"
+
+    case which
+    when :reader
+      impl = "#{base}_impl"
+      entry = base
+      code = <<~CPP
+        // #{owner}##{ivar} -- synthesized attr_reader override (@#{ivar} is
+        // embedded; this replaces the plain native accessor -- see
+        // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment).
+        mrb_value #{impl}(mrb_state* M, mrb_value self) {
+          return #{ops[:box]}(((#{sname}*)DATA_PTR(self))->#{ivar});
+        }
+
+        static mrb_value #{entry}(mrb_state* M, mrb_value self) {
+          return #{impl}(M, self);
+        }
+
+      CPP
+      { label: "synth:#{owner}##{ivar}", owner: owner, name: ivar, entry: entry, impl: impl,
+        arity: 0, arg_c_types: [], code: code, visibility: :public }
+    when :writer
+      impl = "#{base}_eq_impl"
+      entry = "#{base}_eq"
+      code = <<~CPP
+        // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
+        // embedded; this replaces the plain native accessor -- see
+        // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment). Same
+        // guarded check-then-unbox as SETIV's own embedded-ivar codegen
+        // (compile_insn's own SETIV case) -- the whole-program analysis
+        // proved every *compiled* write site is this type, but an
+        // external caller (this accessor's own whole reason to exist) is
+        // exactly the case that analysis can't see, so this checks rather
+        // than blindly trusting it. Returns the assigned value, never the
+        // struct field read back -- real attr_writer's own behavior
+        // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
+        // MethodDef's own kind: :ivar_accessor comment for the citation).
+        mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
+          if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "@#{ivar}: expected #{ops[:err]}");
+          ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);
+          return arg;
+        }
+
+        static mrb_value #{entry}(mrb_state* M, mrb_value self) {
+          mrb_value arg;
+          mrb_get_args(M, "o", &arg);
+          return #{impl}(M, self, arg);
+        }
+
+      CPP
+      { label: "synth:#{owner}##{ivar}=", owner: owner, name: "#{ivar}=", entry: entry, impl: impl,
+        arity: 1, arg_c_types: ['mrb_value'], code: code, visibility: :public }
+    end
+  end
+
+  # Every synthesized accessor drop_unsafe_embeddings' own
+  # @synthesize_accessor_for recorded, built AFTER compile_all runs (it
+  # reads @ivar_layout, already finalized in initialize -- ordering here
+  # doesn't matter the way it does for GETIV/SETIV codegen, but running
+  # after keeps this call visually next to the rest of the post-compile
+  # assembly in the driver below). `emit_ivar_accessor_pair` returning
+  # nil (embed_type suddenly absent) can't actually happen -- an ivar
+  # only ever enters @synthesize_accessor_for inside the same
+  # drop_unsafe_embeddings pass that puts it in the real, final
+  # @ivar_layout -- but checked rather than assumed, same discipline as
+  # every other "this can't happen, but see for yourself" guard in this
+  # file.
+  #
+  # `only_owners` mirrors compile_all's own filter (its own comment has
+  # the real cross-gem-link-failure bug that guard exists for) -- an
+  # owner this run isn't actually emitting gets no synthesized accessor
+  # either, same reasoning: this run's own generated file would declare
+  # a struct/DATA_PTR access for a class it never defines here.
+  def emit_synthesized_accessors(only_owners: nil)
+    pairs = @synthesize_accessor_for.to_a
+    pairs = pairs.select { |owner, _, _| only_owners.include?(owner) } if only_owners
+    pairs.sort.filter_map { |owner, ivar, which| emit_ivar_accessor_pair(owner, ivar, which) }
   end
 
   # One real C struct + mrb_data_type per class that has any embeddable
@@ -9301,6 +9465,7 @@ if $PROGRAM_NAME == __FILE__
   # is safe to emit despite not being compiled in this run at all.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
   compiled = gen.compile_all(only_owners: only_owners, other_owners: other_owners)
+  compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
 
   # SKIP_UNSUPPORTED=1 drops any method whose body contains a `#error`
   # marker (an unmodeled opcode, or an arity this calling convention can't
