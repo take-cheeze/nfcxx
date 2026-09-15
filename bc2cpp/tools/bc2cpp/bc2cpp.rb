@@ -5425,23 +5425,37 @@ class CodeGen
 
   # RESCUE_SUPPORT: a `begin BODY rescue SomeClass => e; HANDLER; end`
   # construct (or, identically, a whole method body with a trailing
-  # `rescue` clause -- real Ruby desugars both to the exact same
-  # EXCEPT/RESCUE/RAISEIF shape, see this method's own top comment) is the
-  # ONLY real shape this file ever attempts to translate -- no `retry`, no
-  # `ensure`, no multi-class `rescue A, B`, no rescue clause that doesn't
-  # bind or use its own exception object the way this method assumes.
+  # `rescue` clause, or an inline `EXPR rescue FALLBACK` modifier -- real
+  # Ruby desugars all three to the exact same EXCEPT/RESCUE/RAISEIF shape,
+  # see this method's own top comment) is the ONLY real shape this file
+  # ever attempts to translate -- no `retry`, no `ensure`, no multi-class
+  # `rescue A, B`, no rescue clause that doesn't bind or use its own
+  # exception object the way this method assumes, no *nested* rescue (one
+  # rescue's own protected body containing -- or contained by -- another,
+  # e.g. an explicit `begin...rescue...end` sitting inside a method that
+  # also has its own trailing, whole-method `rescue` -- confirmed still
+  # unsupported, not just assumed, against RPG2k::Scene::Map
+  # #build_resolver/#perform_teleport, both of which stay `#error
+  # unhandled opcode EXCEPT` for exactly this reason as of this writing;
+  # see the real nesting-rejection check inside recognize_rescue_regions
+  # below), and no rescue naming a *namespaced* class (`rescue
+  # RGSS::Timeout`, RPG2k#start -- compiles to `GETCONST base; GETMCNST
+  # (base)::Name`, two instructions, not the one bare `GETCONST Rcls
+  # <Name>` this recognizer's own 4-instruction scan requires; a real,
+  # separate, smaller gap from the nesting one above, also still open).
   # Real Ruby's exception machinery has none of those restrictions; this
   # prototype's own closed-world survey of every real rescue clause
-  # actually shipped (mruby-rpg2k/mrblib) found every single one already
-  # fits this exact narrow shape (a single class, no retry, at most one
-  # real `ensure` anywhere in the whole tree -- itself excluded here,
-  # never silently mistranslated), so narrowing to it costs nothing real
-  # today while keeping every other shape a loud, honest miss (falls
-  # through to compile_insn's own default `#error unhandled opcode
-  # EXCEPT` -- RESCUE/RAISEIF below are unconditionally safe wherever they
-  # appear, but EXCEPT genuinely needs this recognizer's own C++-level
-  # `mrb_protect_error` wrapping to mean anything at all, see this file's
-  # own top comment).
+  # actually shipped (mruby-rpg2k/mrblib) found the overwhelming majority
+  # already fit this exact narrow shape (a single, bare-named class, no
+  # retry, no nesting, at most one real `ensure` anywhere in the whole
+  # tree -- itself excluded here, never silently mistranslated) -- the
+  # small remainder that doesn't (the nested and namespaced-class cases
+  # named above) stays a loud, honest miss, exactly like any other
+  # unmodeled shape in this file (falls through to compile_insn's own
+  # default `#error unhandled opcode EXCEPT` -- RESCUE/RAISEIF below are
+  # unconditionally safe wherever they appear, but EXCEPT genuinely needs
+  # this recognizer's own C++-level `mrb_protect_error` wrapping to mean
+  # anything at all, see this file's own top comment).
   #
   # The real, always-generated shape a real `rescue` clause's own catch
   # handler entry (CatchHandler -- begin/end/target, mrbc's own "catch
@@ -5452,9 +5466,16 @@ class CodeGen
   #
   #   [begin, end)   -- the protected computation itself (BODY above).
   #   end            -- exactly one instruction, `JMP S` -- BODY's own
-  #                     normal (non-raising) exit, landing on the same
-  #                     final `RETURN`/`RETURN_BLK` (address S) every
-  #                     rescue-match path also independently converges on.
+  #                     normal (non-raising) exit, landing on address S,
+  #                     which every rescue-match path also independently
+  #                     converges on (whole-method-tail rescue: S is a
+  #                     final `RETURN`/`RETURN_BLK`; a rescue embedded
+  #                     mid-method, or an inline `rescue` modifier with
+  #                     more code after it, or several independent rescue
+  #                     clauses in one method -- e.g. Scene::Map
+  #                     #parallax_config's own eight -- S is just the
+  #                     next ordinary instruction, exactly like any other
+  #                     JMP target this file already goto-threads).
   #   target         -- exactly `EXCEPT Rexc` (captures the raised
   #                     exception -- mrb->exc -- into Rexc, clearing it).
   #   target+1..+4   -- exactly `GETCONST Rcls <Name>`; `RESCUE Rexc
@@ -5466,6 +5487,28 @@ class CodeGen
   #                     on this recognizer ever running at all.
   #   raise          -- exactly `RAISEIF Rexc` (re-raises unless nil).
   #
+  # `Rexc` (the register EXCEPT above writes the exception object into) is
+  # also, always, the register the *whole rescue construct's own result
+  # value* ends up in on every path -- not by convention, by construction:
+  # 3rd/mruby/mrbgems/mruby-compiler/core/codegen.c's own codegen_rescue
+  # compiles the protected BODY at `cursp()` then takes `exc = cursp()`
+  # (the exact same register) for OP_EXCEPT, and every matched rescue
+  # clause's own handler body is compiled at that same still-unmoved
+  # `cursp()` too (its own trailing `push()`/no-op after the shared
+  # `pop()`s) -- so whatever address S turns out to be, the value flowing
+  # into it (in a plain `MOVE`, a `SETIV`, a Hash/Array literal slot,
+  # whatever real instruction sits at S) is always `r<exc_reg>`, read
+  # directly rather than re-derived from S's own operands. This is what
+  # lets this recognizer handle a `RETURN`/`RETURN_BLK` S (the original,
+  # narrower shape this recognizer used to require) and any other S
+  # identically -- `emit_rescue_glue` below still special-cases the
+  # `RETURN`/`RETURN_BLK` case as an early-return shortcut (a whole-
+  # method-tail rescue really can just return immediately, faster than a
+  # goto-then-return round trip through a label this file would otherwise
+  # have to declare and jump to), but that is an optimization, not a
+  # soundness requirement -- the general goto-to-S path below is
+  # unconditionally correct for both shapes.
+  #
   # Every address in this chain is cross-checked, never assumed -- a real
   # shape this narrow either matches completely (safe to translate) or
   # doesn't match at all (falls through to the ordinary, honest #error
@@ -5473,8 +5516,8 @@ class CodeGen
   #
   # Returns one Hash per independently-recognized, non-nested handler:
   # {begin_addr:, end_addr:, except_addr:, exc_reg:, cls_name:, match_addr:,
-  #  raise_addr:, shared_target:, connector_reg:}. compile_method is the
-  # only real caller.
+  #  raise_addr:, shared_target:, connector_reg:, tail_return:}.
+  # compile_method is the only real caller.
   def recognize_rescue_regions(irep)
     return [] if irep.catch_handlers.nil? || irep.catch_handlers.empty?
     return [] unless irep.catch_handlers.all? { |ch| ch.type == :rescue }
@@ -5531,10 +5574,30 @@ class CodeGen
       exit_i = by_addr[e]
       next unless exit_i && exit_i.op == 'JMP'
       shared_target = exit_i.args.strip[/\d+/].to_i
+      # shared_target can never legitimately be this same region's own
+      # except_addr in real mrbc-generated code (codegen_rescue emits
+      # OP_EXCEPT immediately, long before `dispatch(s, noexc)` -- the
+      # success JMP's own patch-up -- ever runs, so the two addresses
+      # are never unified) -- rejected explicitly anyway rather than
+      # trusted, since a coincidence here would target compile_method's
+      # own suppressed, label-less except_addr with the goto below.
+      next if shared_target == t
       shared_i = by_addr[shared_target]
-      next unless shared_i && %w[RETURN RETURN_BLK].include?(shared_i.op)
-      connector_reg = shared_i.args.strip.empty? ? '0' : shared_i.args[/^R(\d+)/, 1]
-      next unless connector_reg
+      next unless shared_i
+      # connector_reg is always exc_reg -- see this method's own top
+      # comment on codegen_rescue's shared `cursp()` -- not re-derived
+      # from shared_i's own operands. tail_return (RETURN/RETURN_BLK)
+      # stays a real, checked distinction: emit_rescue_glue takes the
+      # early-`return` shortcut only then, cross-verifying connector_reg
+      # against that instruction's own operand register as it always has,
+      # rather than trusting the codegen_rescue fact blind on the one
+      # shape real disassembly originally confirmed it against.
+      tail_return = %w[RETURN RETURN_BLK].include?(shared_i.op)
+      connector_reg = exc_reg
+      if tail_return
+        tail_reg = shared_i.args.strip.empty? ? '0' : shared_i.args[/^R(\d+)/, 1]
+        next unless tail_reg == connector_reg
+      end
 
       # Full containment, checked by real jump SOURCE address, not just
       # by which addresses appear as *some* target somewhere (a blunter
@@ -5550,16 +5613,40 @@ class CodeGen
       # Two separate directions, both required:
       #   1. No jump whose own SOURCE lies outside [b, e] may ever target
       #      an address inside [b, e] -- the region's only two legitimate
-      #      entry points (falling into `b` from the preceding ENTER, and
-      #      this handler's own `t`/`match_addr`, both outside [b, e] by
-      #      construction) are real control transfers this recognizer
-      #      already models explicitly, never a bare goto into the middle.
+      #      entry points (falling into `b` from the preceding ENTER or
+      #      an ordinary preceding branch, and this handler's own `t`/
+      #      `match_addr`, both outside [b, e] by construction) are real
+      #      control transfers this recognizer already models
+      #      explicitly, never a bare goto into the middle -- EXCEPT
+      #      (see the real, checked carve-out right below) a jump
+      #      targeting exactly `b` itself from strictly BEFORE it, which
+      #      is that same first legitimate entry point reached via an
+      #      explicit branch instead of plain fallthrough.
       #   2. No jump whose own SOURCE lies inside [b, e) (e itself is the
       #      region's own designated exit instruction, allowed to target
       #      shared_target, already checked above) may ever target an
       #      address outside [b, e] -- the only sanctioned way out of the
       #      protected computation is that one designated exit, or a real
       #      raise (mrb_protect_error's own job, not a jump at all).
+      #
+      # The carve-out in (1): an ordinary branch immediately before a
+      # `begin`/trailing-rescue -- an `if`/`unless` guard (confirmed
+      # directly, RPG2k::Scene::DebugMenu#open_map_viewer's own `if
+      # @state.map && ...; return; end` right before its `map = begin
+      # ... rescue ... end`), or OPTIONAL_ARG_SUPPORT's own default-
+      # value dispatch (RPG2k#save_exists?'s own `slot = 1`) -- compiles
+      # to a real JMP/JMPNOT/JMPIF/JMPNIL landing exactly on `b`, not a
+      # plain fallthrough, so the blunter "no external jump into [b, e]
+      # at all" rule above rejected every one of these as if they were
+      # unsafe, even though landing exactly on `b` from outside is
+      # exactly the same legitimate entry the ENTER-fallthrough case
+      # already is. Never true for `retry`: a real retry's own JMP would
+      # have to originate from *inside the handler body*, strictly after
+      # `e` (the handler runs after the whole [b, e] region, by
+      # construction), so gating this carve-out on `src.addr < b` -- is
+      # never true for a source inside the handler -- keeps retry exactly
+      # as unsupported (a genuine escape, caught by the plain `else`
+      # branch below) as this method's own top comment already documents.
       jump_target_of = lambda do |insn|
         case insn.op
         when 'JMP' then insn.args.strip[/\d+/].to_i
@@ -5569,18 +5656,19 @@ class CodeGen
       escapes = irep.instructions.any? do |src|
         tgt = jump_target_of.call(src)
         next false unless tgt
-        inside_target = tgt >= b && tgt <= e
         if src.addr >= b && src.addr < e
-          !inside_target # (2): an internal source jumping outside the region
+          !(tgt >= b && tgt <= e) # (2): an internal source jumping outside the region
+        elsif src.addr < b && tgt == b
+          false # legitimate explicit-branch entry into the region, see above
         else
-          inside_target # (1): an external source jumping into the region
+          tgt >= b && tgt <= e # (1): an external source jumping into the region
         end
       end
       next if escapes
 
       regions << { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, cls_name: cls_name,
                    match_addr: match_addr, raise_addr: raise_addr, shared_target: shared_target,
-                   connector_reg: connector_reg }
+                   connector_reg: connector_reg, tail_return: tail_return }
     end
     regions
   end
@@ -5674,16 +5762,33 @@ class CodeGen
   # try body's own real result with err==FALSE, or the raised exception
   # object itself with err==TRUE, exception state already cleared and the
   # call-info stack already unwound back to here -- 3rd/mruby/src/vm.c's
-  # own mrb_protect_error, read directly, not assumed). On success,
-  # returns immediately -- correct because recognize_rescue_regions only
-  # ever matches a *whole-method-tail* rescue (both the success path and
-  # every rescue-match path converge on the exact same final RETURN, see
-  # its own top comment), so "the try body didn't raise" and "this is the
-  # method's own final return value" are the same fact here. On failure,
+  # own mrb_protect_error, read directly, not assumed). On failure,
   # assigns the exception into r<exc_reg> and falls straight through --
   # the very next instruction compile_method's own loop emits is
   # GETCONST/RESCUE/JMPIF (EXCEPT's own address is separately suppressed,
   # its only real effect folded into this assignment), unmodified.
+  #
+  # On success: `region[:tail_return]` (a real, checked distinction --
+  # see recognize_rescue_regions' own top comment) picks between two
+  # provably-equivalent translations of the exact same fact, "the try
+  # body didn't raise" --
+  #   true  -- a whole-method-tail rescue, where that fact already IS
+  #            "this is the method's own final return value" (both the
+  #            success path and every rescue-match path converge on the
+  #            same final RETURN/RETURN_BLK); `return` immediately,
+  #            skipping a label hop this shape never needs.
+  #   false -- any other rescue (mid-method, an inline `EXPR rescue
+  #            FALLBACK` modifier with more code after it, one of
+  #            several independent rescue clauses in the same method,
+  #            ...): assign the try body's own result into
+  #            r<connector_reg> (== r<exc_reg>, the same register the
+  #            exception path already assigns on the very next line --
+  #            connector_reg's own comment is the citation) and fall
+  #            through to shared_target the same way every ordinary JMP
+  #            elsewhere in this file already does, via the label
+  #            compile_method's own pre-scan already declares for it
+  #            (shared_target is a real jump target -- exit_i's own --
+  #            so it's never a label this recognizer has to invent).
   def emit_rescue_glue(try_name, region, arg_names, arg_native_types)
     ctx_struct = "#{try_name}_Ctx"
     ctx_args = (['self'] + arg_names).join(', ')
@@ -5694,7 +5799,11 @@ class CodeGen
     out << "    #{ctx_struct} ctx{#{ctx_args}};\n"
     out << "    mrb_bool #{err_var} = FALSE;\n"
     out << "    mrb_value #{result_var} = mrb_protect_error(M, #{try_name}, &ctx, &#{err_var});\n"
-    out << "    if (!#{err_var}) { return #{result_var}; }\n"
+    out << if region[:tail_return]
+              "    if (!#{err_var}) { return #{result_var}; }\n"
+            else
+              "    if (!#{err_var}) { r#{region[:connector_reg]} = #{result_var}; goto L#{region[:shared_target]}; }\n"
+            end
     out << "    r#{region[:exc_reg]} = #{result_var};\n"
     out << "  }\n"
     out
