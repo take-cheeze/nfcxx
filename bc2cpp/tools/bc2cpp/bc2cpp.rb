@@ -72,7 +72,28 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
 # same header); begin/end/target are the exact same byte addresses this
 # file's own Insn#addr already uses everywhere else.
 CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: true)
-MethodDef = Struct.new(:name, :owner, :irep, :visibility, keyword_init: true)
+# `kind`: nil for an ordinary bytecode `def` (a real irep) and for every
+# pre-existing synthetic (irep: nil) MethodDef this file already
+# registered before this field existed -- monomorphic_target/the ordinary
+# TYPED path already treat any irep-nil def as "native, no compiled body
+# to call", regardless of `kind`, so leaving every one of those at the
+# default `nil` changes nothing about their existing behavior. Only ever
+# set to a real, specific value at the one call site that can actually
+# prove what a synthetic entry's real native body does -- today just
+# `:ivar_accessor` (build_registry's own attr_reader/attr_writer/
+# attr_accessor case below), consumed by IVAR_ACCESSOR_DEVIRT's own
+# compile_send branch to know it's safe to inline a bare mrb_iv_get/
+# mrb_iv_set rather than only ever falling back to mrb_funcall. Every
+# OTHER synthetic MethodDef in this file (Struct.new's own positional
+# members -- storage completely unrelated to iv_tbl, see that call site's
+# own comment; a `module_function`-installed singleton-class copy of an
+# existing instance method's own body; a NATIVE_SRCS-derived name with no
+# known real implementation at all) deliberately stays untagged: none of
+# those are safe to assume "reads/writes @name via the ordinary iv_tbl"
+# the way a real attr_reader/writer/accessor is, and getting this wrong
+# would be a silent wrong-value bug, not just a missed optimization the
+# way every other gap in this file safely degrades to.
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, keyword_init: true)
 
 # ---------------------------------------------------------------------------
 # Step 1: run mrbc's two debug dumps on the same input(s). mrbc accepts
@@ -919,12 +940,21 @@ def build_registry(ireps, root_label)
           setter_flag = %w[attr_writer attr_accessor].include?(name)
           collect_loadsym_names.call.each do |mname|
             owner = namespace || 'Object'
+            # kind: :ivar_accessor -- see MethodDef's own comment. Real
+            # mruby semantics confirmed directly against 3rd/mruby/src/
+            # class.c's own `attr_reader`/`attr_writer` (`mrb_iv_get(mrb,
+            # obj, to_sym(mrb, name))` / `mrb_iv_set(mrb, obj, to_sym(mrb,
+            # name), val); return val;` -- name here is always the bare
+            # `mname` itself, `prepare_ivar_name`'s own real behavior for
+            # the reader case and identically for the writer, never a
+            # transformed name), consumed by IVAR_ACCESSOR_DEVIRT below.
             if getter_flag
-              registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public)
+              registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public,
+                                                kind: :ivar_accessor)
             end
             if setter_flag
               registry["#{mname}="] << MethodDef.new(name: "#{mname}=", owner: owner, irep: nil,
-                                                       visibility: :public)
+                                                       visibility: :public, kind: :ivar_accessor)
             end
           end
         end
@@ -1757,7 +1787,18 @@ class ClassLayout
             # were a real class name (harmless downstream -- no real
             # owner is ever literally that -- but sloppy to let through).
             known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }
-            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner) || UNKNOWN
+            # CHAINED_ACCESSOR_SUPPORT: `classes` (this whole method's own
+            # owner -> {ivar => class_name} accumulator, still mid-sweep
+            # and NOT yet UNKNOWN-filtered the way `known_so_far` just
+            # above is) is threaded through as the FULL per-class table a
+            # chained-accessor resolution needs to look up a DIFFERENT
+            # class's own ivar hints -- trace_new_target's own new SEND
+            # branch guards against reading a raw UNKNOWN entry back out of
+            # it directly (see its own comment), so passing the
+            # unfiltered, still-converging table here is sound and avoids
+            # re-filtering it on every single SETIV site in this sweep.
+            found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner,
+                                      class_layout: classes, registry: registry) || UNKNOWN
 
             before = classes[owner][ivar]
             # Two real sites disagreeing on the exact class permanently
@@ -2183,9 +2224,76 @@ NATIVE_CONSTRUCT_TARGETS = {
 # byte-for-byte IDENTICAL before and after adding `Game::Screen` here,
 # same as every other entry in this table -- this is purely an additive
 # codegen unlock, never a registration change.
+#
+# Six more classes added this round, each independently checked against the
+# real whole-program registry/`== compiled entry points ==` dump for
+# `mruby-rpg2k-compiled` (never assumed from source reading alone) and
+# against this table's own 4-part bar: `Game::ChipSet` (`#initialize(db,
+# id)`, arity 2), `Game::Interpreter` (`#initialize(state)`, arity 1),
+# `RPG2k::Scene::Menu` (`#initialize parent, state`, arity 2),
+# `RPG2k::Scene::DebugMenu` (`#initialize(parent, state)`, arity 2),
+# `RPG2k::Scene::ItemMenu` (`#initialize parent, state`, arity 2),
+# `Game::NumberInput` (`#initialize(digits)`, arity 1). Every one: no `def
+# self.new`/`def self.allocate` (confirmed by the real registry showing no
+# matching `.singleton` entry for `:new`/`:allocate`), a real compiled
+# `#initialize` whose real source (`mruby-rpg2k/mrblib/game.rb`,
+# `interpreter.rb`, `scene/menu.rb`, `scene/debug_menu.rb`,
+# `scene/item_menu.rb`) takes only plain mandatory positional arguments (no
+# `= default`, no `*rest`, no keywords -- `pure_mandatory_arity?` would
+# refuse any of those), and already a member of `mruby-rpg2k-compiled`'s
+# own `owners:` list (`compiled_gems.rb`).
+#
+# Only THREE of these six are real, ACTIVE unlocks today, confirmed by a
+# real before/after diff of the regenerated output (`mruby-rpg2k-compiled/
+# src/register.cxx`'s own top-of-file comment has the matching C++-side
+# wiring these three also needed to actually link, not just text-generate
+# -- `emit_direct_construct_decls` only ever emits a forward declaration):
+# `Game::ChipSet` (2 real sites, `mruby-rpg2k/mrblib/scene/
+# map_viewer.rb:356` and `mruby-rpg2k/mrblib/scene/map.rb:1368` -- a THIRD
+# real call site, `mruby-rpg2k/mrblib/game/lsd_io.rb:444`, does NOT convert
+# and never will until its own containing method compiles: it sits inside a
+# `begin...rescue` block bc2cpp still can't compile at all today, so that
+# `SEND :new` is simply never reached by codegen, table membership or not),
+# `Game::Interpreter` (1 real site, `mruby-rpg2k/mrblib/scene/map.rb:379`),
+# `Game::NumberInput` (1 real site, `mruby-rpg2k/mrblib/scene/map.rb:9863`).
+#
+# The other three -- `RPG2k::Scene::Menu`/`DebugMenu`/`ItemMenu` -- pass
+# this table's own 4-part bar exactly as cleanly, and stay listed as
+# correct, harmless future-proofing (the identical "opt-in table checked
+# live against the real registry every run" property every other entry
+# here already has -- see this constant's own top comment), but confirmed
+# to have ZERO real call sites today: every real `Scene::Menu.new`/
+# `Scene::DebugMenu.new`/`Scene::ItemMenu.new` in `mruby-rpg2k/mrblib/
+# scene/{map,menu}.rb` sits inside a caller method (`RPG2k::Scene::Map#
+# perform_event_menu` and siblings) that is itself still on the
+# `== skipped (unsupported, left on the interpreter) ==` list -- same
+# "containing method doesn't compile yet" shape as ChipSet's own
+# `lsd_io.rb` site above, just for all of a given class's real call sites
+# rather than one of several. Confirmed these three add ZERO new forward
+# declarations to the regenerated output (unlike the three real unlocks
+# above) -- so, unlike those three, they need no matching register.cxx
+# wiring yet either; whenever their own caller methods eventually gain
+# opcode coverage, this table already covers them with no further Ruby-side
+# change, though the matching accessor-function wiring register.cxx's own
+# comment describes will still need adding at that point, the same real,
+# separate step this round needed for the three that activated today.
+#
+# A handful of sibling classes from the same candidate sweep were checked
+# and deliberately left OUT, not overlooked: `Game::Vehicle#initialize(type,
+# map_id = 0, x = 0, y = 0, direction = 2)`, `Game::Character#initialize(x =
+# 0, y = 0, direction = 2)`, `Game::Picture#initialize(id, opts = {})`,
+# `Game::Weather#initialize(type = 0, strength = 0)`,
+# `Game::Rng#initialize(seed = 1)`, and `Game::Variables#initialize(rpg2003
+# = false)` (all in `mruby-rpg2k/mrblib/game.rb`) each carry a real `=
+# default` optional argument, so `pure_mandatory_arity?` correctly refuses
+# every one of them -- listing any of these here would be a silent no-op
+# (the `init_ok` check below would just never pass), not a real unlock, so
+# they stay off this table rather than padding it with dead entries.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
-                               Game::Screen].freeze
+                               Game::Screen Game::ChipSet Game::Interpreter
+                               RPG2k::Scene::Menu RPG2k::Scene::DebugMenu
+                               RPG2k::Scene::ItemMenu Game::NumberInput].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
@@ -3136,7 +3244,40 @@ SUPER_TARGETS = Set[
 # has -- deliberately narrower than the ivar-hint/argument-annotation
 # terminal sources above, which don't apply to a `.new` call's own
 # receiver at all.
-def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil)
+#
+# CHAINED_ACCESSOR_SUPPORT: `class_layout` (owner -> {ivar_name =>
+# class_name}, the FULL, every-owner table ClassLayout.analyze itself
+# builds -- unlike `ivar_classes` above, which every real call site
+# already pre-slices down to just the CURRENT method's own owner) and
+# `registry` (name -> [MethodDef], for the same `:ivar_accessor` lookup
+# IVAR_ACCESSOR_DEVIRT's own compile_send branch uses) are a second,
+# independent pair of optional additional terminal sources, both default
+# nil so every pre-existing caller that doesn't pass them keeps its exact
+# prior behavior (see the guard at the top of the SEND0/SEND case below).
+# When present, they let a plain (non-`new`) SEND mid-chain -- e.g.
+# `@state.screen.foo`, where `.screen` is the SEND landing here -- also
+# resolve to a known class, by chaining two already-proven whole-program
+# facts that nothing before this connected: (1) this SEND's OWN receiver
+# is itself traceable (recursing into this exact same function, scanning
+# strictly before this SEND's own instruction index -- terminates for the
+# identical reason the outer `(idx-1).downto(0)` loop already does, since
+# `i` only ever shrinks) to some exact class `R`; (2) `R` has a real,
+# whole-program `:ivar_accessor` MethodDef for this SEND's own method
+# name (`registry[name]`, filtered to `owner == R` -- see MethodDef's own
+# `kind` comment and build_registry's own attr_reader/writer/accessor
+# case for why a getter's MethodDef is always registered under the bare
+# ivar name, a setter's always under "#{name}="); (3) `R`'s OWN
+# class_layout entry (a DIFFERENT class than the CURRENT method's own
+# owner, which is exactly why the full table is needed here and not just
+# `ivar_classes`) already names a known class for that same ivar (getter
+# name == ivar name, confirmed by the same build_registry case just
+# cited). Every hit through this path is still just as "unsound without a
+# runtime check" as a GETIV/argument-annotation hit above -- every real
+# consumer (compile_send's own TYPED/IVAR_ACCESSOR_DEVIRT branches)
+# already guards it with a real `mrb_obj_class` check before trusting it,
+# so this only ever risks a missed optimization, never a wrong answer.
+def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+                      class_layout: nil, registry: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -3165,9 +3306,100 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # below can never be affected by the operator characters that fix
       # covers.
       name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-      return nil unless name == 'new'
+      if name == 'new'
+        resolving_new = true
+      else
+        # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
+        # `name` isn't `new`, so this can never join the fresh-`.new`
+        # chain above, but it might still be a chained `:ivar_accessor`
+        # read (`@state.screen.foo` -- `.screen` is the SEND landing
+        # here) whose own return class is provable a different way.
+        # `class_layout`/`registry` are both nil for every caller that
+        # doesn't opt in (in particular every `resolving_new: true`
+        # caller -- e.g. DIRECT_CONSTRUCT_TARGETS' own two call sites --
+        # never even reaches this `else` branch at all: the
+        # `resolving_new || !path.empty?` guard at the very top of this
+        # `when` already returned nil for them), so this is a strict,
+        # additive no-op unless a caller actually threads both through.
+        return nil unless class_layout && registry
 
-      resolving_new = true
+        # Real attr_reader semantics take exactly zero arguments (3rd/
+        # mruby/src/class.c's own `attr_reader` -- confirmed already, see
+        # MethodDef's own `kind` comment) -- gating on that here (not just
+        # on the registry/class_layout match below) rules out a same-
+        # named-but-different-arity POLY method this SEND could otherwise
+        # be calling instead, the identical real-bug shape the MONO/TYPED
+        # paths' own arity guards already exist to catch (see compile_send's
+        # own comment on Input.repeat?/Game::MoveRoute#repeat?).
+        # SEND0's own real disassembly never prints "n=" at all (always
+        # zero args, src/vm.c's OP_SEND0 hardcodes c=0 -- same fact
+        # compile_send's own `n_match` comment already established) so a
+        # nil match here still correctly means n=0.
+        n_match = insn.args.match(/n=(\d+|\*)/)
+        return nil if n_match && n_match[1] != '0'
+
+        # This SEND's own receiver was whatever last wrote `reg` strictly
+        # BEFORE this instruction's own index `i` -- the exact same "SEND
+        # overwrites its receiver register with the result, in place"
+        # invariant the `.new` case below already relies on, just for
+        # THIS SEND instead of a later one. Recursing into this exact same
+        # function reuses the identical "find what wrote reg before
+        # position idx" contract every other caller already gets from
+        # `trace_new_target(irep, idx, reg, ...)` -- no new mechanism
+        # needed. Bounded by the same `(i-1).downto(0)` scan this
+        # recursion's own call performs, so it always terminates: `i` is
+        # strictly less than the outer call's own `idx` (it came from that
+        # same `(idx-1).downto(0)` loop), and every further nested
+        # recursion's own `i` is again strictly less than the `i` that
+        # spawned it -- a single, monotonically shrinking index, the same
+        # way the un-recursive scan above already terminates on its own.
+        recv_class = trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+                                       class_layout: class_layout, registry: registry)
+        return nil unless recv_class
+
+        # `registry[name]` is already sliced to real MethodDefs literally
+        # named `name` -- a real attr_writer's own MethodDef is always
+        # registered under "#{mname}=" instead (build_registry's own
+        # attr_reader/writer/accessor case, not the bare `mname` a getter
+        # gets), so this can only ever match a GETTER's own entry, never a
+        # setter's -- no separate `name.end_with?('=')` check needed here.
+        accessor = registry[name]&.find { |md| md.owner == recv_class && md.kind == :ivar_accessor }
+        return nil unless accessor
+
+        # `R`'s (== `recv_class`) OWN ivar-class hint for this same name
+        # (getter name == ivar name, same build_registry case just cited).
+        # `class_layout[recv_class]` can still be raw, UNKNOWN-poisoned
+        # ClassLayout.analyze fixed-point-sweep state -- the one real
+        # caller mid-sweep (ClassLayout.analyze's own SETIV loop) passes
+        # its own in-progress `classes` table directly here rather than
+        # paying to re-filter it on every single SETIV site -- so this
+        # never hands back ClassLayout::UNKNOWN as if it were a real class
+        # name, the same "no wrong guess, ever" bar every other terminal
+        # case in this function already holds itself to.
+        #
+        # `class_layout.key?(recv_class)` (never a bare `class_layout[recv_class]`
+        # here) -- real, checked bug caught comparing this function's own
+        # diagnostic stderr output before/after this change: ClassLayout.
+        # analyze's own `classes` table (the one real caller mid-sweep passes
+        # as `class_layout`, per the comment above) is a `Hash.new { |h, k|
+        # h[k] = {} }`, so an ordinary `[]` read on a class this scan has
+        # never SETIV'd anything for yet silently *inserts* an empty entry --
+        # changing that hash's own insertion order (and so its diagnostic
+        # `each`-order in the `== known-ivar-class hints ==` listing) despite
+        # this being nothing but a probing read. `Hash#key?` never touches
+        # the default proc, so this reads without ever mutating. Confirmed
+        # this was real, not hypothetical: the exact same 12-line CLASS_HINT
+        # reordering (zero content change, zero `.cpp` byte change) appeared
+        # in EVERY gem's own diagnostic before this fix, including
+        # mruby-lcf-compiled/mruby-rgss-compiled, whose own generated output
+        # never differs at all -- purely a side effect of this scan probing
+        # classes it never otherwise touches.
+        recv_ivars = class_layout[recv_class] if class_layout.key?(recv_class)
+        hint = recv_ivars && recv_ivars[name]
+        return nil unless hint && hint != ClassLayout::UNKNOWN
+
+        return hint
+      end
     # Same register, still tracing further back for the class object that
     # was `.new`'s own receiver -- SEND overwrites its receiver register
     # with the result, in place.
@@ -3290,6 +3522,78 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   pos = reg.to_i
   return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
 
+  nil
+end
+
+# LITERAL_EQQ_SUPPORT: backward-scan a `:===` SEND's own receiver register
+# for a literal Fixnum/Symbol write a few instructions earlier in the same
+# straight-line irep -- real Ruby's own `case x; when 5 ... when :bar ...
+# end` desugaring (`when` compiles to `LITERAL === x`), confirmed against
+# mrbc's own real disassembly for both shapes (a toy `case x; when 5;
+# when :bar; end` method body):
+#   LOADI_5  R4  (5)
+#   MOVE     R5  R3   ; R3 holds the case value
+#   SEND     R4  :===  n=1
+#   ...
+#   LOADSYM  R4  :bar
+#   MOVE     R5  R3
+#   SEND     R4  :===  n=1
+# -- i.e. SEND's own receiver register (R4 above, `d` in compile_send) is
+# freshly written by the literal load, immediately before the argument-
+# register MOVE. Deliberately a separate, self-contained walk from
+# trace_new_target above, not a reuse of it: this asks a completely
+# different question ("did a LOADI*/LOADSYM literal just write this
+# register", never "is this register traceable to a known object's
+# class"), and none of trace_new_target's own GETCONST/GETMCNST/GETIV/
+# ARRAY terminal cases apply to a literal receiver at all -- sharing that
+# function here would mean bending its own already-intricate case
+# analysis around an unrelated question, a real readability/soundness risk
+# for no real code reuse (this walk is a handful of lines). Still follows
+# the same defensive MOVE-chain-following idiom that function established
+# (same reasoning: mrbc could in principle interpose a MOVE before the
+# literal load; every real disassembly checked here never does, but
+# following the chain costs nothing and keeps this sound either way).
+# Returns {type: :fixnum, value: "5"} / {type: :symbol, name: "bar"}, or
+# nil the moment anything else writes `reg` first (an opaque incoming
+# argument, a computed value, ...) -- a safe miss, same as every other
+# backward-scan guard in this file: compile_send's own caller falls
+# straight through to ordinary POLY dynamic dispatch on nil, never guesses.
+def trace_eqq_literal_receiver(irep, idx, reg)
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'LOADSYM'
+      # Same shape as LOADSYM's own codegen above (":(\S+)" -- stops at
+      # the first whitespace, real code has a trailing local-variable
+      # comment on a named-destination register the same way GETCONST's
+      # own args do).
+      name = insn.args[/:(\S+)/, 1]
+      return name ? { type: :symbol, name: name } : nil
+    when /^LOADI/
+      # Same two-shape literal extraction LOADI's own codegen above uses
+      # (parenthesized for the small-immediate variants, bare for LOADI8/
+      # 16/32) -- see that codegen's own comment for why both forms exist.
+      lit = insn.args[/\(([^)]+)\)/, 1] || insn.args[/^R\d+\s+(-?\d+)/, 1]
+      return lit ? { type: :fixnum, value: lit } : nil
+    else
+      # Anything else writing `reg` first (GETIV, another SEND, a computed
+      # expression, ...) means the receiver isn't a bare literal -- a safe
+      # miss, never a wrong guess.
+      return nil
+    end
+  end
+  # `reg` was never written in this straight-line body -- an opaque
+  # incoming argument or block-entry register, not a literal. No
+  # arg_classes-style terminal fallback here on purpose: unlike
+  # trace_new_target's class-annotation fallback (a real magic-comment
+  # fact about an argument's *class*), there is no equivalent "this
+  # argument is always literal value N" whole-program fact this compiler
+  # tracks anywhere -- a safe miss.
   nil
 end
 
@@ -4048,6 +4352,114 @@ class CodeGen
     return nil unless compiles_clean?(defs.first.irep)
 
     defs.first
+  end
+
+  # LITERAL_EQQ_SUPPORT's own soundness gate -- a LIVE re-check against
+  # THIS run's own @registry, not a comment trusting a fact that was true
+  # the day it was written. Both `#==` and `#===` have to still be
+  # exactly, unambiguously native (`MONO`, one def, owner `'<native>'`)
+  # anywhere in the whole program for compile_send's own LITERAL === block
+  # below to be sound at all:
+  #   - `:===` itself: a reopened `#===` anywhere (Integer, Symbol,
+  #     Object, Comparable, a mixin, ...) means `LITERAL === arg` might
+  #     not even call mruby's own native `mrb_eqq_m` (3rd/mruby/src/
+  #     kernel.c) in the first place.
+  #   - `:==`: `mrb_eqq_m` calls `mrb_equal` (3rd/mruby/src/object.c),
+  #     which -- whenever its own fast identity/type-mixing checks don't
+  #     already settle the answer -- dispatches to `self`'s own real
+  #     `#==` method (`mrb_func_basic_p`'s own guard, same file). Both the
+  #     Symbol branch (sound only because Symbol's own `#==` is still
+  #     literally `mrb_obj_equal_m`, the exact default `mrb_func_basic_p`
+  #     compares against) and the Fixnum branch (sound only because
+  #     Integer's own `#==` is still literally `int_equal`, 3rd/mruby/src/
+  #     numeric.c) below depend on this -- a reopened `#==` on ANY class
+  #     (not just Integer/Symbol) could change what `self` even IS by the
+  #     time `mrb_equal` dispatches, so the check is deliberately whole-
+  #     name, not scoped to Integer/Symbol's own owner. Confirmed for real
+  #     against mruby-rpg2k-compiled's own whole-program registry dump
+  #     (both `MONO :== (1 def: <native>)` and `MONO :=== (1 def:
+  #     <native>)`, zero `FLIP` lines for either -- i.e. neither name was
+  #     EVER a bytecode MONO name to begin with, the strongest form of
+  #     "never reopened anywhere"), not merely assumed from reading
+  #     mruby's own source in isolation.
+  # A future Ruby source change anywhere in the whole program that reopens
+  # either name flips this false automatically (POLY, or a second real
+  # native flip target) -- every LITERAL === call site falls back to
+  # ordinary POLY dynamic dispatch from then on, never silently keeps a
+  # now-unsound fast path. Memoized: `@registry` never changes after
+  # CodeGen.new (compile_all's own single pass over already-finalized
+  # ireps), so this is a pure function of it.
+  def eqq_literal_devirt_safe?
+    return @eqq_literal_devirt_safe if defined?(@eqq_literal_devirt_safe)
+
+    @eqq_literal_devirt_safe = %w[== ===].all? do |n|
+      defs = @registry[n]
+      defs && defs.size == 1 && defs.first.owner == '<native>'
+    end
+  end
+
+  # NATIVE_PRIMITIVE_SEND_ARITY: the four native Kernel/NilClass methods
+  # compile_send's own NATIVE_PRIMITIVE_SENDS path (see that comment,
+  # right above compile_send's own `target = monomorphic_target(name)`
+  # line, for the full soundness writeup) knows how to inline directly,
+  # mapped to the exact real mandatory arity a call site must match --
+  # `!`/`nil?` take no arguments, `is_a?`/`kind_of?` take exactly one
+  # (confirmed against each one's own real MRB_ARGS_NONE()/
+  # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
+  # 3rd/mruby/src/class.c).
+  NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1 }.freeze
+
+  # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
+  # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
+  # and that one def must be the synthetic native placeholder build_
+  # registry's own NATIVE_SRCS merge creates (irep nil) -- i.e.
+  # name-monomorphic (the identical whole-program guarantee
+  # monomorphic_target's own registry check makes) AND that one def is
+  # native rather than bytecode. monomorphic_target itself requires the
+  # opposite (a real compiled `_impl` to call), so a name landing here is,
+  # by construction, exactly the shape monomorphic_target already falls
+  # through on -- this is genuinely a separate check, not a duplicate of
+  # it. If some future game-source class ever defines its own `nil?`/
+  # `!`/`is_a?`/`kind_of?` (however unlikely), `@registry[name]` grows a
+  # second, real bytecode def, `defs.size == 1` goes false here exactly
+  # the same way it already would for monomorphic_target, and this falls
+  # back to ordinary POLY dynamic dispatch, never a wrong direct call.
+  # When NATIVE_SRCS isn't passed at all (this project's own established
+  # no-NATIVE_SRCS diagnostic mode), the native placeholder is never
+  # added and `defs` is nil here too -- the same "can't prove it, don't"
+  # fallback as everywhere else in this file, not a special case needing
+  # its own handling.
+  def native_only_mono?(name)
+    defs = @registry[name]
+    defs && defs.size == 1 && defs.first.irep.nil?
+  end
+
+  # Emits the guarded direct C++ implementation for one
+  # NATIVE_PRIMITIVE_SEND_ARITY name -- see compile_send's own call site
+  # (right above `target = monomorphic_target(name)`) for the full
+  # per-method soundness citations against the real 3rd/mruby source;
+  # kept here, rather than inlined at that call site, purely to keep
+  # compile_send's own already-long body from growing a fifth deeply-
+  # nested branch for what is otherwise a small, self-contained C++
+  # snippet per name.
+  def compile_native_primitive_send(name, d, recv, argv)
+    case name
+    when '!'
+      "  // ! -- native primitive, no lookup needed\n" \
+      "  r#{d} = mrb_bool_value(!mrb_test(#{recv}));\n"
+    when 'nil?'
+      "  // nil? -- native primitive, no lookup needed\n" \
+      "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
+    when 'is_a?', 'kind_of?'
+      arg = argv.first
+      "  // #{name} -- native primitive, no lookup needed (argument type-checked at " \
+      "runtime -- see compile_send's own comment)\n" \
+      "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg})) {\n" \
+      "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
+      "  } else {\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+    end
   end
 
   # INTERP_UNLOCK: does MONO method `name` carry a hand-placed
@@ -5419,7 +5831,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -5548,7 +5968,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -5587,7 +6015,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -5654,7 +6090,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -5780,7 +6224,15 @@ class CodeGen
       if insn.op == 'SSENDB'
         next unless owner_name == 'Array'
       else
-        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+        # CHAINED_ACCESSOR_SUPPORT: threading the full @class_layout/
+        # @registry through here too (both already sitting on `self`, no
+        # new state) is a strictly additive extension of the same static
+        # Array gate this call site already relies on -- it only ever
+        # turns a prior nil into 'Array' when the receiver chain itself
+        # proves Array-typed a new way, never changes an existing 'Array'
+        # result.
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -7693,6 +8145,107 @@ class CodeGen
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{d.to_i + k}" }
 
+    # LITERAL_EQQ_SUPPORT: `case x; when LITERAL ... end`'s own desugared
+    # `LITERAL === x` (a `:===` SEND whose own receiver is a bare literal
+    # Fixnum or Symbol, trace_eqq_literal_receiver's own comment has the
+    # exact real disassembly shape this matches) devirtualizes straight
+    # past ordinary MONO/POLY registry resolution and real dynamic
+    # dispatch, replicating mruby's own native `Object#===`/`#==`
+    # semantics directly (3rd/mruby/src/kernel.c's own `mrb_eqq_m` ->
+    # 3rd/mruby/src/object.c's own `mrb_equal`) -- see
+    # eqq_literal_devirt_safe?'s own comment for the full whole-program
+    # soundness argument (both `:==` and `:===` have to be registry-
+    # confirmed MONO-native, re-checked live every run, not just once) and
+    # trace_eqq_literal_receiver's own comment for the backward-scan
+    # mechanism. Deliberately runs BEFORE monomorphic_target/the ordinary
+    # POLY fallback below (`:===` itself can never devirtualize through
+    # either of those anyway -- monomorphic_target always refuses a
+    # native-only def, its own comment explains why -- so this changes
+    # nothing about their own behavior for every other name; it only ever
+    # intercepts a `:===` name that would otherwise fall straight to
+    # `dynamic_dispatch_line`'s own plain `mrb_funcall` at the bottom of
+    # this method). `n == 1`: real `#===`/`#==` always take exactly one
+    # argument (`MRB_ARGS_REQ(1)` on both native entries, 3rd/mruby/src/
+    # kernel.c) -- a `:===` SEND with any other arg count than 1 isn't
+    # this shape at all (never produced by real `when` desugaring, and
+    # this compiler's own SEND-arg-count parsing above already guarantees
+    # `n_match` matched a plain `n=1` shape to even reach here with
+    # `argv.size == 1`). `irep && idx`: same "only meaningful for an
+    # explicit-receiver send with real bytecode position to scan
+    # backward from" gate every other backward-scan devirtualization in
+    # this method already uses (never true when self_implicit is, per
+    # this method's own top comment).
+    if name == '===' && n == 1 && irep && idx && eqq_literal_devirt_safe?
+      literal = trace_eqq_literal_receiver(irep, idx, d)
+      if literal
+        arg = argv.first
+        case literal[:type]
+        when :symbol
+          # Sound with NO runtime fallback ever needed: Symbol's own real
+          # `#==` is confirmed (by the very same whole-program `:==` MONO
+          # check eqq_literal_devirt_safe? just ran) to still be mruby's
+          # own plain, unoverridden default (`mrb_obj_equal_m`,
+          # 3rd/mruby/src/symbol.c's own ROM table) -- so `mrb_equal`'s
+          # own `mrb_func_basic_p(mrb, obj1, MRB_OPSYM(eq),
+          # mrb_obj_equal_m)` guard (object.c) is unconditionally TRUE for
+          # a Symbol receiver, meaning `mrb_equal` NEVER dispatches at
+          # all: the whole call resolves entirely off its own initial
+          # `mrb_obj_eq` identity/type check (`MRB_TT_SYMBOL` case:
+          # `mrb_symbol(v1) == mrb_symbol(v2)`, requiring an EXACT type
+          # match first) -- true iff `arg` is this exact Symbol, false for
+          # literally every other value including every other type. No
+          # cross-type coercion exists for Symbol the way it does for
+          # Integer below, so there is nothing a runtime fallback could
+          # ever catch that this doesn't already get right.
+          note = "  // LITERAL === :symbol -- `:#{literal[:name]} === arg` (case/when literal), " \
+                 "Object#===/Symbol#== both confirmed native/unoverridden anywhere in this program's " \
+                 "own whole-program registry -- sound unconditionally, no mrb_funcall fallback ever " \
+                 "needed (see eqq_literal_devirt_safe?'s own comment).\n"
+          return "#{note}  r#{d} = mrb_bool_value(mrb_symbol_p(#{arg}) && " \
+                 "mrb_symbol(#{arg}) == mrb_intern_cstr(M, \"#{literal[:name]}\"));\n"
+        when :fixnum
+          # Sound ONLY for an exactly-Integer `arg` -- `mrb_equal`'s own
+          # real logic (object.c) applies a genuine Integer<->Float
+          # numeric cross-comparison BEFORE ever reaching Integer's own
+          # `#==` dispatch, and -- since this project's own
+          # build_config.rb unconditionally includes `mruby-bigint` for
+          # every build target (`conf.gem core: 'mruby-bigint'`, inside
+          # the shared `rpg_maker_gems` every target calls) -- a further
+          # Integer<->Bigint cross-comparison exists too (both in
+          # `mrb_equal` itself under `MRB_USE_BIGINT` and, redundantly,
+          # inside Integer's own real `#==`, `int_equal`, 3rd/mruby/src/
+          # numeric.c's own `MRB_TT_BIGINT` case). So `5 === 5.0` (a
+          # Float, real value 5.0) is real-Ruby-TRUE, not something this
+          # codegen can assume FALSE from a bare type mismatch --
+          # replicating that cross-type math inline would need pulling in
+          # float/bigint comparison helpers this call site has no other
+          # reason to reference, so instead: only the exact same-type
+          # shape (`arg` is itself `MRB_TT_INTEGER`) is handled directly
+          # here (matching `mrb_obj_eq`'s own fast path for an equal
+          # value, and `int_equal`'s own plain `MRB_TT_INTEGER` case for a
+          # differing one -- both are exact integer comparisons, no
+          # coercion, so no possible override changes the answer given
+          # `:==`'s own confirmed-MONO-native status); every other runtime
+          # type (Float, Bigint, String, nil, ...) falls back to ordinary
+          # `mrb_funcall`, deferring to the real interpreter for exactly
+          # the cases this reasoning can't safely resolve alone -- the
+          # identical "fixnum-fixnum fast path, mrb_funcall otherwise"
+          # shape `compile_cmp`'s own EQ codegen already established
+          # above, not a new pattern.
+          note = "  // LITERAL === :fixnum -- `#{literal[:value]} === arg` (case/when literal), " \
+                 "Object#===/Integer#== both confirmed native/unoverridden anywhere in this program's " \
+                 "own whole-program registry -- only the exact-Integer-type shape is handled directly; " \
+                 "a Float/Bigint/other-typed arg falls back to real mrb_funcall (mrb_equal's own " \
+                 "Integer<->Float/Bigint cross-type comparison, see this block's own top comment).\n"
+          return "#{note}  if (mrb_fixnum_p(#{arg})) {\n" \
+                 "    r#{d} = mrb_bool_value(mrb_fixnum(#{arg}) == #{literal[:value]});\n" \
+                 "  } else {\n" \
+                 "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+                 "  }\n"
+        end
+      end
+    end
+
     # Devirtualize a `SEND :new` whose receiver is provably (GETCONST-
     # traced, right here at this exact call site -- not the ivar/argument
     # terminal sources trace_new_target also supports) one of
@@ -7816,6 +8369,96 @@ class CodeGen
       end
     end
 
+    # NATIVE_PRIMITIVE_SENDS: devirtualize `!`/`nil?`/`is_a?`/`kind_of?`
+    # straight to their real native primitive at ANY call site, entirely
+    # independent of trace_new_target/TYPED's own receiver-class-guard
+    # machinery -- unlike TYPED (which needs to prove the receiver's
+    # *class* before it can trust a class-exact candidate), none of these
+    # four need any receiver-class knowledge at all: each one's real
+    # native body is exactly the same single primitive expression for
+    # EVERY possible receiver, so "the name is uncontested whole-program"
+    # (monomorphic_target's own registry check, reused as-is via
+    # native_only_mono? below) is already the whole soundness argument,
+    # with no runtime class check needed the way TYPED's own
+    # `mrb_class_ptr(recv) == ...` guard is.
+    #
+    # monomorphic_target itself always refuses these (its own comment: a
+    # native-only MONO name has no compiled `_impl` to call, and calling
+    # the real native C function's raw pointer directly would leave any
+    # `mrb_get_args` inside it reading a stale `mrb->c->ci` call-info
+    # frame -- a real correctness bug for an ARBITRARY native method).
+    # That conservatism is correct in general but overly conservative for
+    # exactly these four, checked directly against the real mruby source
+    # rather than assumed:
+    #   - `!` (Kernel#!): 3rd/mruby/src/class.c's own `mrb_bob_not` is
+    #     exactly `mrb_bool_value(!mrb_test(cv))` -- `mrb_test`
+    #     (3rd/mruby/include/mruby/value.h's own `mrb_bool`,
+    #     `mrb_type(o) != MRB_TT_FALSE`) is a real, always-defined macro,
+    #     no `mrb_get_args` call anywhere in this body at all.
+    #   - `nil?` (Kernel#nil?/NilClass#nil?): 3rd/mruby/src/kernel.c
+    #     registers `mrb_false` (always `mrb_false_value()`) for Object's
+    #     own `nil?`, and 3rd/mruby/src/object.c separately registers
+    #     `mrb_true` (always `mrb_true_value()`) for NilClass's own
+    #     `nil?` -- two distinct native C functions in real mruby, but
+    #     extract_native_method_names only ever records the flat NAME
+    #     "nil?" once (no owner, by design -- see that function's own
+    #     comment), so the registry can't and doesn't distinguish them.
+    #     Collapsing both into one expression here is still sound, not
+    #     because the registry happens not to see the difference, but
+    #     because both real bodies TOGETHER are exactly the single
+    #     predicate `mrb_nil_p(recv)` (3rd/mruby/include/mruby/value.h:
+    #     `mrb_type(o) == MRB_TT_FALSE && !mrb_fixnum(o)`, true only for
+    #     the real nil value, false for every other receiver including
+    #     `false` itself) -- inlining it reproduces both real native
+    #     bodies' observable behavior at once, for every receiver, not
+    #     just the common case.
+    #   - `is_a?`/`kind_of?`: 3rd/mruby/src/kernel.c's own
+    #     `mrb_obj_is_kind_of_m` (registered under both `MRB_SYM_Q(is_a)`
+    #     and `MRB_SYM_Q(kind_of)`) is exactly `mrb_get_args(mrb, "c",
+    #     &c); return mrb_bool_value(mrb_obj_is_kind_of(mrb, self, c));`
+    #     -- `"c"` is mrb_get_args' own class/module-only format
+    #     character, which raises a real TypeError for anything else
+    #     BEFORE mrb_obj_is_kind_of ever runs, so the argument really is
+    #     always a Class/Module by the time that call happens. Reproduced
+    #     below as an explicit `mrb_class_p(arg) || mrb_module_p(arg)`
+    #     runtime guard (3rd/mruby/include/mruby/value.h, both real,
+    #     always-defined macros/fallback macros -- confirmed not
+    #     boxing-mode-specific: value.h's own `#ifndef` guards mean the
+    #     word-boxing build's own faster boxing_word.h definitions are
+    #     used instead where available, value.h's plain `mrb_type(o) ==
+    #     MRB_TT_CLASS`/`MRB_TT_MODULE` otherwise -- both always present
+    #     either way) around the direct `mrb_obj_is_kind_of(M, recv,
+    #     mrb_class_ptr(arg))` call; a non-Class/Module argument falls
+    #     back to ordinary `mrb_funcall` here instead of faking the
+    #     TypeError -- the exact same "loud gap over silently wrong"
+    #     posture as every other unmodeled shape in this file, and the
+    #     fallback raises the identical real TypeError mrb_get_args
+    #     itself would have (same code path, just reached through
+    #     mrb_funcall's own dispatch instead of straight-line here).
+    #     `mrb_class_ptr`/`mrb_obj_is_kind_of`/`mrb_bool_value` are not
+    #     new to this generated output either -- OP_RESCUE's own
+    #     translation above (`when 'RESCUE'`) already emits the identical
+    #     `mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})))`
+    #     unconditionally (safe there with no guard at all only because
+    #     RESCUE_SUPPORT's own recognized shape already guarantees Rb is
+    #     a Class/Module via a GETCONST immediately before it -- a
+    #     narrower, call-site-specific guarantee than the general
+    #     `is_a?`/`kind_of?` case here can rely on, hence the explicit
+    #     runtime guard added instead).
+    #
+    # Deliberately excludes `respond_to?` (also POLY-native, also a
+    # high-count name): real `Kernel#respond_to?`
+    # (3rd/mruby/src/kernel.c's own `obj_respond_to`) takes an optional
+    # `include_private` argument and falls back to a real
+    # `respond_to_missing?` method call when the name isn't found --
+    # `mrb_respond_to()`, the obvious native helper, does neither, so
+    # substituting it would be a silent behavior change. Left as
+    # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
+    # below.
+    if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name)
+      return compile_native_primitive_send(name, d, recv, argv)
+    end
+
     target = monomorphic_target(name)
     # A monomorphic *name* is still only safe to devirtualize if its one
     # real definition fits this prototype's pure-mandatory-args calling
@@ -7871,12 +8514,22 @@ class CodeGen
     # every future extension to trace_new_target's own reach inherits the
     # same safety net for free.
     typed = false
+    ivar_accessor_target = nil
     if target.nil? && !self_implicit && irep && idx
       cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
       ivar_classes = owner_def && @class_layout[owner_def.owner]
-      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner)
+      # CHAINED_ACCESSOR_SUPPORT: `@class_layout` (the full owner -> ivar-
+      # hint table, not just this call site's own already-sliced
+      # `ivar_classes`) and `@registry` let this same TYPED path also
+      # devirtualize a multi-level accessor chain (`@state.screen.foo`),
+      # not just a single-level GETIV/`.new`/ARRAY hit -- see
+      # trace_new_target's own top comment for the full mechanism. Both
+      # are already real CodeGen instance state (`initialize`, above), no
+      # new plumbing needed to reach them from here.
+      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
+                                      class_layout: @class_layout, registry: @registry)
       if known_class
         candidate = @registry[name].find { |md| md.owner == known_class }
         # Same two guards as the MONO path above (its own comments have the
@@ -7891,6 +8544,28 @@ class CodeGen
            compiles_clean?(candidate.irep) && n == mandatory_arity(@ireps.fetch(candidate.irep))
           target = candidate
           typed = true
+        elsif candidate&.kind == :ivar_accessor &&
+              n == (name.end_with?('=') ? 1 : 0)
+          # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
+          # will -- build_registry's own attr_reader/writer/accessor case
+          # registers it that way on purpose, see MethodDef's own `kind`
+          # comment), so it can never satisfy the ordinary TYPED branch
+          # just above -- an attr_reader/writer/accessor name is *always*
+          # POLY-native by the existing MONO/TYPED paths' own standards,
+          # regardless of how many real classes happen to define it. This
+          # is a real, separate devirtualization: not "call this class's
+          # own compiled body" (there is none), but "this class's own
+          # accessor is *provably* a bare mrb_iv_get/mrb_iv_set against
+          # the ordinary dynamic iv_tbl" (MethodDef's own `kind` comment
+          # has the real 3rd/mruby/src/class.c citation) -- safe to inline
+          # directly, runtime-guarded exactly like TYPED above, with no
+          # `_impl` function involved at all. Arity here is exactly 0 for
+          # a getter, exactly 1 for a setter (`name.end_with?('=')`) --
+          # `mandatory_arity`/`pure_mandatory_arity?` don't apply (there is
+          # no irep to ask), but a real attr_reader/writer call site can
+          # never have any other shape, so this is the complete, correct
+          # check on its own, not an approximation.
+          ivar_accessor_target = candidate
         end
       end
     end
@@ -7965,6 +8640,43 @@ class CodeGen
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      end
+    elsif ivar_accessor_target
+      # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
+      # == :ivar_accessor` branch above for the full soundness writeup.
+      # Runtime-guarded the same way TYPED is (a wrong static trace only
+      # ever costs a missed optimization, never a wrong answer): `recv`'s
+      # real runtime class might still differ from `known_class` (a
+      # subclass, a reassigned constant since gem-init, ...), so this
+      # checks before ever touching iv_tbl directly, falling back to
+      # ordinary `mrb_funcall` (which correctly dispatches to whatever
+      # `name` actually resolves to on the real receiver) otherwise.
+      owner = ivar_accessor_target.owner
+      check = "mrb_class_ptr(#{const_chain_value_expr(owner)}) == mrb_obj_class(M, #{recv})"
+      if name.end_with?('=')
+        ivar = name[0..-2]
+        val = argv.first
+        note = "  // IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (receiver traced to #{owner}), " \
+               "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall) -- see " \
+               "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
+               "citation this reproduces exactly (attr_writer's own mrb_iv_set then returning the " \
+               "assigned value, never the ivar read back).\n"
+        "#{note}  if (#{check}) {\n" \
+          "    mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
+          "    r#{d} = #{val};\n" \
+          "  } else {\n" \
+          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "  }\n"
+      else
+        note = "  // IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (receiver traced to #{owner}), " \
+               "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall) -- see " \
+               "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
+               "citation this reproduces exactly.\n"
+        "#{note}  if (#{check}) {\n" \
+          "    r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n" \
+          "  } else {\n" \
+          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "  }\n"
       end
     else
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
