@@ -4942,6 +4942,70 @@ class CodeGen
     out
   end
 
+  # ARY_ENTRY_INLINE: a same-translation-unit reproduction of
+  # `mrb_ary_entry` (3rd/mruby/src/array.c, read directly) --
+  #
+  #   struct RArray *a = mrb_ary_ptr(ary);
+  #   mrb_int len = ARY_LEN(a);
+  #   if (n < 0) n += len;
+  #   if (n < 0 || len <= n) return mrb_nil_value();
+  #   return ARY_PTR(a)[n];
+  #
+  # -- byte-for-byte, using only the public `mrb_ary_ptr`/`ARY_LEN`/
+  # `ARY_PTR` macros (mruby/array.h), never assumed equivalent. Every
+  # text this file emits of the shape "mrb_ary_ref" + "(M, " + args +
+  # ")" is replaced with "bc2cpp_ary_entry" + that identical "(M, " +
+  # args + ")" (the unused `M` parameter kept only so every call site
+  # stays a pure, mechanical, argument-for-argument rename -- the real
+  # `mrb_ary_ref` macro is itself `#define mrb_ary_ref(mrb, ary, n)
+  # mrb_ary_entry(ary, n)`, mruby/array.h read directly, so this changes
+  # NOTHING about bounds-checking, negative-index normalizing, or the
+  # nil-on-out-of-bounds result -- same behavior, different call target).
+  #
+  # The reason this exists at all: `mrb_ary_ref` is a macro alias for
+  # `mrb_ary_entry`, a real out-of-line `MRB_API` function
+  # (3rd/mruby/src/array.c) living in libmruby.a, a SEPARATE translation
+  # unit from every file this tool generates -- and this project does not
+  # build with LTO (docs/adr/0133/0135 record it being tried and reverted
+  # for wio, never adopted generally), so that call cannot be inlined by
+  # the real build, ever. Measured directly against this repo's own
+  # `libmruby.a` at real `-O3` (no LTO): replacing the out-of-line call
+  # with this in-TU `static inline` reproduction measured a real 2.3-2.4x
+  # speedup on a 245M-element-visit micro-benchmark, reproduced twice --
+  # by far the largest of the three array-access costs measured that
+  # round (dwarfing both a known-element-type `mrb_fixnum()` shortcut and
+  # a full unboxed-element representation change, the latter of which was
+  # rejected outright: 3rd/mruby's own GC walks a real `RArray` to mark
+  # array elements (src/gc.c, gc_mark_children), so anything other than a
+  # real `RArray` backing every array this file emits is a live
+  # use-after-free hazard, not a soundness tradeoff this file's usual
+  # "wrong hint just falls back to mrb_funcall" guard shape can cover).
+  # Purely mechanical and behavior-preserving, so no `#error`/fallback
+  # path is needed here the way a real class hint would need one -- this
+  # is not a new fact being trusted, just where the exact same, always-
+  # true fact (`mrb_ary_ref`'s real definition) gets evaluated.
+  #
+  # Emitted once per generated file, and only when at least one compiled
+  # method's own text actually calls it (scanning `compiled`'s own
+  # already-assembled `:code` text -- same "only emit what's needed"
+  # shape as emit_const_lookup_helper below, just checked post hoc
+  # against the real output instead of a flag threaded through every one
+  # of this file's own ~20 emission call sites individually).
+  def emit_ary_entry_helper(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_ary_entry(') }
+
+    <<~CPP
+      static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
+        struct RArray* a = mrb_ary_ptr(ary);
+        mrb_int len = ARY_LEN(a);
+        if (n < 0) n += len;
+        if (n < 0 || len <= n) return mrb_nil_value();
+        return ARY_PTR(a)[n];
+      }
+
+    CPP
+  end
+
   # The shared helper GETCONST's own owner-scope-first codegen calls
   # (compile_insn's own comment has the full story on why a bare
   # `mrb_const_get` can't just be tried-then-polled with mrb_check_error --
@@ -6867,7 +6931,7 @@ class CodeGen
       out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
     end
     out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_each_i_#{region[:block_addr]});\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{region[:block_addr]});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -7026,7 +7090,7 @@ class CodeGen
     end
     out << "      mrb_value r#{offset} = self;\n"
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_collect_i_#{region[:block_addr]});\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{region[:block_addr]});\n"
     out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{region[:block_addr]});\n" if meth == 'each_with_index'
     out << body
     out << "      #{iter_label}:;\n"
@@ -7054,7 +7118,7 @@ class CodeGen
       out << "      if (!mrb_array_p(#{result_var})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: flat_map yielded non-Array\"); }\n"
       out << "      mrb_int bc2cpp_collect_fm_n_#{region[:block_addr]} = RARRAY_LEN(#{result_var});\n"
       out << "      for (mrb_int bc2cpp_collect_fm_i_#{region[:block_addr]} = 0; bc2cpp_collect_fm_i_#{region[:block_addr]} < bc2cpp_collect_fm_n_#{region[:block_addr]}; ++bc2cpp_collect_fm_i_#{region[:block_addr]}) {\n"
-      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, mrb_ary_ref(M, #{result_var}, bc2cpp_collect_fm_i_#{region[:block_addr]}));\n"
+      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, bc2cpp_ary_entry(M, #{result_var}, bc2cpp_collect_fm_i_#{region[:block_addr]}));\n"
       out << "      }\n"
       out << "      } else {\n"
       out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
@@ -7179,9 +7243,9 @@ class CodeGen
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     if is_fold
       out << "      r#{param_reg} = #{acc_var};\n"
-      out << "      r#{param2_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+      out << "      r#{param2_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
     else
-      out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+      out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
     end
     out << body
     out << "      #{iter_label}:;\n"
@@ -7300,7 +7364,7 @@ class CodeGen
            "bc2cpp_sym_i_#{region[:sym_addr]} < RARRAY_LEN(#{recv_expr}); " \
            "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
     out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
-           "mrb_ary_ref(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
+           "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
     if meth == 'each'
       out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}")}\n"
     else
@@ -7496,7 +7560,7 @@ class CodeGen
     end
     out << "      mrb_value r#{offset} = self;\n"
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_keys_#{addr}, #{result_var});\n"
@@ -7521,8 +7585,8 @@ class CodeGen
     out << "    mrb_int bc2cpp_sort_m_#{addr} = RARRAY_LEN(bc2cpp_sort_keys_#{addr});\n"
     out << "    mrb_value bc2cpp_sort_pairs_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
     out << "    for (mrb_int bc2cpp_sort_j_#{addr} = 0; bc2cpp_sort_j_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_j_#{addr}) {\n"
-    out << "      mrb_value bc2cpp_sort_e_#{addr} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"
-    out << "      mrb_value bc2cpp_sort_k_#{addr} = mrb_ary_ref(M, bc2cpp_sort_keys_#{addr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_e_#{addr} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_k_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_keys_#{addr}, bc2cpp_sort_j_#{addr});\n"
     out << "      mrb_value bc2cpp_sort_trip_#{addr} = mrb_ary_new_capa(M, 3);\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, bc2cpp_sort_k_#{addr});\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, mrb_fixnum_value(bc2cpp_sort_j_#{addr}));\n"
@@ -7541,14 +7605,14 @@ class CodeGen
     # above as mrb_fixnum_value(j)), never user data -- no TypeError
     # path possible, matching native sort's own unchecked index ints.
     out << "    for (mrb_int bc2cpp_sort_a_#{addr} = 1; bc2cpp_sort_a_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_a_#{addr}) {\n"
-    out << "      mrb_value bc2cpp_sort_tmp_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_a_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_tmp_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_a_#{addr});\n"
     out << "      mrb_int bc2cpp_sort_b_#{addr} = bc2cpp_sort_a_#{addr} - 1;\n"
     out << "      while (bc2cpp_sort_b_#{addr} >= 0) {\n"
-    out << "        mrb_value bc2cpp_sort_pa_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr});\n"
-    out << "        mrb_value bc2cpp_sort_ka_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pa_#{addr}, 0);\n"
-    out << "        mrb_value bc2cpp_sort_ia_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pa_#{addr}, 1);\n"
-    out << "        mrb_value bc2cpp_sort_kb_#{addr} = mrb_ary_ref(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
-    out << "        mrb_value bc2cpp_sort_ib_#{addr} = mrb_ary_ref(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
+    out << "        mrb_value bc2cpp_sort_pa_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr});\n"
+    out << "        mrb_value bc2cpp_sort_ka_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ia_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 1);\n"
+    out << "        mrb_value bc2cpp_sort_kb_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ib_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
     out << "        mrb_int bc2cpp_sort_c_#{addr} = mrb_cmp(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
     out << "        if (bc2cpp_sort_c_#{addr} == -2) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"ArgumentError\")), \"bc2cpp: sort_by comparison failed\"); }\n"
     out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
@@ -7563,16 +7627,16 @@ class CodeGen
       out << "    mrb_value bc2cpp_sort_lastk_#{addr} = mrb_nil_value();\n"
       out << "    mrb_bool bc2cpp_sort_havek_#{addr} = FALSE;\n"
       out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
-      out << "      mrb_value bc2cpp_sort_pu_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr});\n"
-      out << "      mrb_value bc2cpp_sort_ku_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pu_#{addr}, 0);\n"
+      out << "      mrb_value bc2cpp_sort_pu_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr});\n"
+      out << "      mrb_value bc2cpp_sort_ku_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pu_#{addr}, 0);\n"
       out << "      mrb_int bc2cpp_sort_eq_#{addr} = (bc2cpp_sort_havek_#{addr} && mrb_cmp(M, bc2cpp_sort_ku_#{addr}, bc2cpp_sort_lastk_#{addr}) == 0) ? 1 : 0;\n"
-      out << "      if (!bc2cpp_sort_eq_#{addr}) { mrb_ary_push(M, r#{dest_reg}, mrb_ary_ref(M, bc2cpp_sort_pu_#{addr}, 2)); }\n"
+      out << "      if (!bc2cpp_sort_eq_#{addr}) { mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_sort_pu_#{addr}, 2)); }\n"
       out << "      bc2cpp_sort_lastk_#{addr} = bc2cpp_sort_ku_#{addr};\n"
       out << "      bc2cpp_sort_havek_#{addr} = TRUE;\n"
       out << "    }\n"
     else
       out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
-      out << "      mrb_ary_push(M, r#{dest_reg}, mrb_ary_ref(M, mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
+      out << "      mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
       out << "    }\n"
     end
     out << "    }\n"
@@ -7983,7 +8047,7 @@ class CodeGen
       # destructured local, all reading the same call-result register.
       d, s = regs(a, 2)
       c = a[/^R\d+\s+R\d+\s+(\d+)/, 1]
-      "  r#{d} = mrb_array_p(r#{s}) ? mrb_ary_ref(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
+      "  r#{d} = mrb_array_p(r#{s}) ? bc2cpp_ary_entry(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
     when 'GETIDX'
       # "GETIDX R2 (R3)" -- R[a] = R[a][R[a+1]] (real OP_GETIDX semantics,
       # src/vm.c): unlike AREF above, the index here is itself a *register*
@@ -8005,7 +8069,7 @@ class CodeGen
       d, s = regs(a, 2)
       <<~CPP
         if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
-          r#{d} = mrb_ary_ref(M, r#{d}, mrb_integer(r#{s}));
+          r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
         } else if (mrb_hash_p(r#{d})) {
           r#{d} = mrb_hash_get(M, r#{d}, r#{s});
         } else {
@@ -8029,7 +8093,7 @@ class CodeGen
       d, s = regs(a, 2)
       <<~CPP
         if (mrb_array_p(r#{s})) {
-          r#{d} = mrb_ary_ref(M, r#{s}, 0);
+          r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
         } else if (mrb_hash_p(r#{s})) {
           r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
         } else {
@@ -9284,6 +9348,7 @@ if $PROGRAM_NAME == __FILE__
   end
   puts ''
   print gen.emit_structs
+  print gen.emit_ary_entry_helper(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
