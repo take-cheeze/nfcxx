@@ -1624,10 +1624,25 @@ end
 # contributes nothing, same as omitting it).
 class Annotations
   TYPES = { 'fixnum' => :fixnum, 'Fixnum' => :fixnum, 'Integer' => :fixnum,
-            'symbol' => :symbol, 'Symbol' => :symbol }.freeze
+            'symbol' => :symbol, 'Symbol' => :symbol, 'Array' => :array }.freeze
   COMMENT_RE = /^\s*#\s*bc2cpp:\s*\(([^)]*)\)(?:\s*->\s*(\S+))?\s*$/
 
   Annotation = Struct.new(:args, :ret, keyword_init: true)
+
+  # `:array` (the `Array` token) feeds ONLY the block-receiver return-
+  # type gate (annotated_array_return -- "this MONO method returns a
+  # fresh Array", consumed by the block recognizers' chained rule). It
+  # must never reach struct-field codegen: native_arg_types (the sole
+  # consumer of `args`, and the only path from an annotation token to a
+  # C type) maps unrecognized tokens through native_c_type, which has
+  # no `:array` arm -- an `Array` token in ARGUMENT position would raise
+  # KeyError at codegen time rather than silently embed. That fail-loud
+  # shape is deliberate (same discipline as ClassAnnotations'
+  # silently-no-op on non-class tokens, mirrored): argument Array types
+  # are not modeled, return Array types are. See annotated_array_return's
+  # own comment for why the gate itself stays sound despite resting on a
+  # hand-placed comment (the emitter's own mrb_array_p tripwire verifies
+  # every admitted site at runtime).
 
   # irep label -> Annotation, for every real `def` (any registry entry with
   # a bytecode body -- a native MethodDef's `irep` is nil, nothing to
@@ -3405,6 +3420,16 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
 
       return 'Array'
+    when 'RANGE_INC', 'RANGE_EXC'
+      # INTERP_UNLOCK: a range literal (`(a..b).each`, `(a...b).each`)
+      # always creates a real Range -- confirmed directly against
+      # 3rd/mruby/src/vm.c's own OP_RANGE_INC (`regs[a] =
+      # mrb_range_new(mrb, regs[a], regs[a + 1], 0)`) and OP_RANGE_EXC
+      # (same with excl=1), never assumed. Same end-of-trace gating as
+      # ARRAY above.
+      return nil if resolving_new || !path.empty?
+
+      return 'Range'
     when 'GETMCNST'
       return nil unless resolving_new
 
@@ -4234,7 +4259,11 @@ class CodeGen
 
   # The native C++ parameter type for one `native_arg_types` slot --
   # `C_TYPE.fetch(t)` (`mrb_int`/`mrb_sym`) when native-typed, plain
-  # `mrb_value` (today's own uniform type, unchanged) otherwise.
+  # `mrb_value` (today's own uniform type, unchanged) otherwise. NOTE:
+  # `:array` (the `-> Array` return token) has deliberately NO arm here
+  # -- `fetch` raises KeyError, fail-loud, if an Array token ever
+  # reaches argument position. Return-type gates read `.ret` directly
+  # and never pass through this function.
   def native_c_type(t)
     t ? C_TYPE.fetch(t) : 'mrb_value'
   end
@@ -4431,6 +4460,29 @@ class CodeGen
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
       "  }\n"
     end
+  end
+
+  # INTERP_UNLOCK: does MONO method `name` carry a hand-placed
+  # `-> Array` return annotation? Consumed by the block recognizers'
+  # chained rule (proven_array_source): a call result from such a
+  # method is a fresh Array by the annotation's own claim. MONO-only
+  # (one def program-wide -- POLY-safe by the same keying argument as
+  # arg annotations: per-irep labels, never pooled by name). No
+  # `compiles_clean?` requirement: the fact consumed is only about the
+  # RETURN value's class, and the annotated methods (`stat_targets`
+  # and friends) return Array literals on every path by construction.
+  # Soundness rests on the comment being true -- hand-placed per
+  # method, never inferred -- AND every admitted site still passes
+  # through the emitter's own `mrb_array_p` raise-tripwire, which
+  # verifies the claim at runtime: a wrong annotation raises loudly at
+  # the first call, never silently miscompiles. Unknown/missing tokens
+  # resolve to nil (TYPES simply has no entry), so a typo degrades to
+  # today's honest `#error`, never a wrong gate.
+  def annotated_array_return(name)
+    defs = @registry[name]
+    return false unless defs && defs.size == 1 && defs.first.irep
+
+    @annotations[defs.first.irep]&.ret == :array
   end
 
   # SYM_DEVIRT: resolve a `&:sym` block-pass target for direct per-element
@@ -5115,6 +5167,16 @@ class CodeGen
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = inlined
     end
+    # INTERP_UNLOCK: same mechanism for recognized `Range#each`
+    # regions. Same gate shape (Range, not Array), same all-or-nothing
+    # contract.
+    recognize_range_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_range_each_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
     recognize_sym_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
       inlined = emit_sym_inline(region, irep, d)
       next unless inlined
@@ -5778,6 +5840,7 @@ class CodeGen
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                    class_layout: @class_layout, registry: @registry)
+        traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
 
@@ -5785,6 +5848,44 @@ class CodeGen
                    ssendb: insn.op == 'SSENDB' }
     end
     regions
+  end
+
+  # INTERP_UNLOCK: the chained-receiver rule, shared by every block
+  # recognizer above. When the static Array trace misses, scan backward
+  # for the nearest write to the destination register; the receiver is
+  # proven Array when that write is:
+  #   - a call to `select`/`reject`/`map` (any dispatch shape) -- each
+  #     returns a fresh Array unconditionally (real Ruby semantics,
+  #     whatever the receiver was), or
+  #   - a call to a MONO method carrying a hand-placed `-> Array`
+  #     return annotation (annotated_array_return -- e.g.
+  #     `stat_targets`).
+  # Single-step, no fixpoint: the nearest write decides. Sound by
+  # SKIP_UNSUPPORTED's own per-method partitioning: a producing call
+  # with any gap drops the whole method (including this site) to the
+  # interpreter -- so this rule only fires where the producer ALSO
+  # compiled (or is itself a chained link whose root traced clean).
+  CHAINED_ARRAY_METHODS = %w[select reject map].freeze
+
+  def proven_array_source(irep, idx, dest_reg)
+    (idx - 1).downto(0) do |i|
+      pin = irep.instructions[i]
+      next unless pin
+      # The block proc register (BLOCK writes dest+1 for n=0 calls)
+      # sits between the call and its receiver write -- skip over it:
+      # it is evidence FOR a region here, not a receiver writer.
+      next if pin.op == 'BLOCK'
+      next unless pin.args[/^R(\d+)/, 1] == dest_reg
+      next unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
+
+      called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      return nil unless called
+      return 'Array' if CHAINED_ARRAY_METHODS.include?(called)
+      return 'Array' if annotated_array_return(called)
+
+      return nil
+    end
+    nil
   end
 
   # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
@@ -5804,7 +5905,7 @@ class CodeGen
   # `any?`/`all?`/`none?`/`count`/`reduce` literal blocks stay out --
   # each needs its own accumulator/early-exit codegen, a separate
   # follow-up on this same machinery, not this round.
-  COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index].freeze
+  COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index flat_map].freeze
 
   # ACCUM_BLOCK_SUPPORT: recognize one inlinable accumulator/predicate
   # region -- `ary.any?/all?/none?/count { |x| ... }` (1-mandatory-arg
@@ -5876,6 +5977,7 @@ class CodeGen
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                    class_layout: @class_layout, registry: @registry)
+        traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
 
@@ -5922,6 +6024,7 @@ class CodeGen
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                    class_layout: @class_layout, registry: @registry)
+        traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
 
@@ -5996,6 +6099,7 @@ class CodeGen
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                    class_layout: @class_layout, registry: @registry)
+        traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
 
@@ -6005,12 +6109,86 @@ class CodeGen
     regions
   end
 
+  # INTERP_UNLOCK: recognize one inlinable `Range#each` region --
+  # `r.each { |id| ... }` where the receiver traces to `Range` (a
+  # `RANGE_INC`/`RANGE_EXC` literal, or the `range(cmd)` helper below).
+  # Same `BLOCK R(a+1)` + `SENDB Ra :each n=0` adjacency and 1-arg gate
+  # as recognize_each_regions (confirmed against real `mrbc -v`).
+  # SSENDB excluded: the owner-gate is Array-specific and no game class
+  # IS a Range.
+  def recognize_range_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless insn.op == 'SENDB' && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless name == ':each' && nstr == 'n=0'
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+
+      traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+      traced = range_return_call(irep, idx, dest_reg) if traced != 'Range'
+      next unless traced == 'Range'
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep }
+    end
+    regions
+  end
+
+  # INTERP_UNLOCK: `Game::Interpreter#range` always returns a Range --
+  # every path builds `a..b` (inclusive) or the empty `1..0`
+  # (indirect-mode miss), verified by reading the method, never
+  # inferred. Human-vetted single-entry allowlist in the SUPER_TARGETS
+  # tradition: when the backward scan from a range-each site lands on a
+  # `SEND :range` writer, the receiver is proven Range. Any other
+  # writer (or a future edit adding a non-Range path to #range)
+  # misses here and keeps the honest `#error` -- the allowlist names
+  # one exact Owner#name, not a bare method name, so an unrelated
+  # `range` method elsewhere can never sneak through.
+  RANGE_RETURN_METHODS = Set['Game::Interpreter#range'].freeze
+
+  def range_return_call(irep, idx, dest_reg)
+    (idx - 1).downto(0) do |i|
+      pin = irep.instructions[i]
+      next unless pin
+      next unless pin.args[/^R(\d+)/, 1] == dest_reg
+      # The receiver's own provenance: only a direct `range` call made
+      # FROM a Game::Interpreter method body counts. A subclass
+      # inheriting #range but overriding it would still dispatch to the
+      # override -- so verify the CALLER is itself the Interpreter (via
+      # the irep's own MethodDef owner), not just the method name.
+      next unless %w[SEND SSEND SEND0 SSEND0].include?(pin.op)
+
+      called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      return nil unless called == 'range'
+
+      return 'Range' if RANGE_RETURN_METHODS.include?("#{@owner_of.fetch(irep.label).owner}#range")
+
+      return nil
+    end
+    nil
+  end
+
   # SORT_BLOCK_SUPPORT: recognize one inlinable sort-family region --
   # `ary.sort_by { |x| key }` (1-mandatory-arg key block),
   # `ary.sort { |a, b| ... }` (2-mandatory-arg comparator block),
   # `ary.uniq { |x| ... }` (1-arg key block). Same `BLOCK R(a+1)` +
   # `SENDB/SSENDB` adjacency and same static Array gate as every
-  # recognizer above. Per-method semantics live in emit_sort_inline.
+  # recognizer above (upgraded here to the shared proven_array_source
+  # gate: static trace + chained rule + `-> Array` annotations).
+  # Per-method semantics live in emit_sort_inline.
   # `sort_by!`/`uniq!` (bang, in-place) stay out -- mutating the
   # receiver in place needs aliasing analysis this round doesn't do; a
   # follow-up. `max`/`min`/`max_by`/`min_by` (2 sites, `uniq`-adjacent)
@@ -6055,7 +6233,7 @@ class CodeGen
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                    class_layout: @class_layout, registry: @registry)
-        traced = chained_array_call(irep, idx, dest_reg) if traced != 'Array'
+        traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
 
@@ -6064,37 +6242,6 @@ class CodeGen
     end
     regions
   end
-
-  # SORT_BLOCK_SUPPORT: the chained-receiver rule. A call site whose
-  # receiver register was itself just written by a * complying call --
-  # `select`/`reject`/`map` in any dispatch shape (plain SEND/SSEND or
-  # block-carrying SENDB/SSENDB, n=0) -- inherits that call's own
-  # Array-ness: every one of those returns a fresh Array
-  # unconditionally (real Ruby semantics, whatever the receiver was).
-  # Single-step backward scan, no fixpoint: the nearest write to the
-  # destination register decides. Sound by SKIP_UNSUPPORTED's own
-  # per-method partitioning: if the producing call itself has any gap,
-  # the whole method (including this site) falls back to the
-  # interpreter -- so this rule can only ever fire in a method where
-  # the producer ALSO compiled (or is itself a chained link whose root
-  # traced clean). Either the method interprets, or every link proved.
-  CHAINED_ARRAY_METHODS = %w[select reject map].freeze
-
-  def chained_array_call(irep, idx, dest_reg)
-    (idx - 1).downto(0) do |i|
-      pin = irep.instructions[i]
-      next unless pin
-      next unless pin.args[/^R(\d+)/, 1] == dest_reg
-      next unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
-
-      called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-      return 'Array' if called && CHAINED_ARRAY_METHODS.include?(called)
-
-      return nil
-    end
-    nil
-  end
-
   # BLOCK_SUPPORT: translate one instruction from an INLINED block body
   # (never a top-level method body -- compile_method's own main loop
   # never calls this). `offset` disambiguates the block's own local
@@ -6348,6 +6495,84 @@ class CodeGen
     out
   end
 
+  # INTERP_UNLOCK: the inlined-loop replacement for one recognized
+  # `Range#each` region (recognize_range_each_regions), or nil when the
+  # block body doesn't come out clean -- same all-or-nothing contract
+  # as emit_each_inline above, whose loop this clones with four
+  # deliberate differences (each grounded in mrblib/range.rb's own
+  # integer fast path, never assumed):
+  #   - COUNTER, not fetch: the element is the loop index itself as a
+  #     fixnum (`r<param> = mrb_fixnum_value(i)`), no `mrb_ary_ref`.
+  #   - SNAPSHOT bounds: beg/end/excl read ONCE before looping (Ranges
+  #     are frozen -- `range_initialize` freezes -- so no
+  #     push-during-iteration analogue exists; unlike Array's live
+  #     `RARRAY_LEN` re-check, a snapshot is exactly sound here).
+  #   - OVERFLOW-SAFE comparison: `excl ? i < e : i <= e` instead of
+  #     mrblib's own `lim = end + 1; i < lim` (which overflows at
+  #     MRB_INT_MAX -- this formulation cannot).
+  #   - GUARD is two-part: `mrb_range_p` (right class) AND Integer
+  #     beg/end (the `succ`-path, Float edges, and nil-ended/endless
+  #     ranges -- an endless range would be an infinite loop -- all
+  #     raise rather than miscompile; unproven sites keep the honest
+  #     `#error`). Uses the REAL excl flag from `mrb_range_excl_p`,
+  #     never `begin == end` (a `1...1` exclusive range is empty while
+  #     `begin == end` -- the source-level shortcut in
+  #     do_control_switches is only valid because `range()` never
+  #     builds `...`, and the emitter must not replicate that
+  #     assumption).
+  # Fall-through leaves dest holding the receiver (Range#each returns
+  # self, mrblib/range.rb) -- no assignment, same as each. BREAK,
+  # RETURN_BLK, upvars, jumps: identical handling via
+  # compile_block_body_insn (same break_dest/break_label wiring).
+  def emit_range_each_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv = "r#{dest_reg}"
+    param_reg = 1 + offset
+    addr = region[:block_addr]
+
+    label_prefix = "LBLK#{addr}_"
+    iter_label = "Lbc2cpp_range_iter_#{addr}"
+    break_label = "Lbc2cpp_range_end_#{addr}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                              break_dest: dest_reg, break_label: break_label)
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_range_p(#{recv})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Range receiver for inlined #each\"); }\n"
+    out << "    mrb_value bc2cpp_range_b_#{addr} = mrb_range_beg(M, #{recv});\n"
+    out << "    mrb_value bc2cpp_range_e_#{addr} = mrb_range_end(M, #{recv});\n"
+    out << "    if (!mrb_integer_p(bc2cpp_range_b_#{addr}) || !mrb_integer_p(bc2cpp_range_e_#{addr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: non-Integer Range#each left to interpreter\"); }\n"
+    out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(bc2cpp_range_b_#{addr});\n"
+    out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(bc2cpp_range_e_#{addr});\n"
+    out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
+    out << "    for (mrb_int bc2cpp_range_i_#{addr} = bc2cpp_range_a_#{addr}; " \
+           "bc2cpp_range_x_#{addr} ? bc2cpp_range_i_#{addr} < bc2cpp_range_z_#{addr} : bc2cpp_range_i_#{addr} <= bc2cpp_range_z_#{addr}; " \
+           "++bc2cpp_range_i_#{addr}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero?
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_range_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
   # MAP_BLOCK_SUPPORT: the inlined-loop replacement for one recognized
   # collection-block region (recognize_collect_regions), or nil when the
   # block body doesn't come out clean -- same all-or-nothing contract as
@@ -6407,7 +6632,7 @@ class CodeGen
     out = String.new
     out << "  {\n"
     out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
-    out << "    mrb_value bc2cpp_collect_acc_#{region[:block_addr]} = mrb_ary_new(M);\n" if %w[map select reject].include?(meth)
+    out << "    mrb_value bc2cpp_collect_acc_#{region[:block_addr]} = mrb_ary_new(M);\n" if %w[map select reject flat_map].include?(meth)
     out << "    mrb_value bc2cpp_collect_found_#{region[:block_addr]} = mrb_nil_value();\n" if meth == 'find'
     out << "    mrb_bool bc2cpp_collect_broke_#{region[:block_addr]} = FALSE;\n" if meth != 'each_with_index'
     out << "    for (mrb_int bc2cpp_collect_i_#{region[:block_addr]} = 0; " \
@@ -6427,6 +6652,32 @@ class CodeGen
     case meth
     when 'map'
       out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
+    when 'flat_map'
+      # INTERP_UNLOCK: mruby's own flat_map (enum-ext/mrblib/enum.rb):
+      # each yielded value is pushed whole when it does NOT respond to
+      # `each`, else each of ITS elements is pushed (one level only --
+      # `e2.each { |e3| ary.push(e3) }`, never recursive). Mirror with
+      # the same respond_to? gate. The inner expansion loops over
+      # RARRAY_LEN -- but ONLY after an `mrb_array_p` tripwire on the
+      # yielded value (same trust class as every receiver guard: a
+      # Hash/Range yielder responds to `each` but is not an Array, and
+      # RARRAY_LEN on it would misread memory -- the tripwire raises
+      # loudly instead, never silently wrong). Divergence from the VM
+      # ONLY when a program yields a non-Array each-responder from
+      # flat_map AND expects expansion. Real game code never does
+      # (verified: the flat_map sites yield id-arrays); the tripwire
+      # message says exactly this. Documented as a known, deliberate
+      # narrowing (same class as the Integer-edges guard on Range#each,
+      # which also raises where the VM would iterate).
+      out << "      if (mrb_test(mrb_funcall(M, #{result_var}, \"respond_to?\", 1, mrb_symbol_value(mrb_intern_cstr(M, \"each\"))))) {\n"
+      out << "      if (!mrb_array_p(#{result_var})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: flat_map yielded non-Array\"); }\n"
+      out << "      mrb_int bc2cpp_collect_fm_n_#{region[:block_addr]} = RARRAY_LEN(#{result_var});\n"
+      out << "      for (mrb_int bc2cpp_collect_fm_i_#{region[:block_addr]} = 0; bc2cpp_collect_fm_i_#{region[:block_addr]} < bc2cpp_collect_fm_n_#{region[:block_addr]}; ++bc2cpp_collect_fm_i_#{region[:block_addr]}) {\n"
+      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, mrb_ary_ref(M, #{result_var}, bc2cpp_collect_fm_i_#{region[:block_addr]}));\n"
+      out << "      }\n"
+      out << "      } else {\n"
+      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
+      out << "      }\n"
     when 'select'
       out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, r#{param_reg});\n"
     when 'reject'
@@ -6453,7 +6704,7 @@ class CodeGen
     if meth != 'each_with_index'
       out << "    if (!bc2cpp_collect_broke_#{region[:block_addr]}) {\n"
       case meth
-      when 'map', 'select', 'reject'
+      when 'map', 'select', 'reject', 'flat_map'
         out << "    r#{dest_reg} = bc2cpp_collect_acc_#{region[:block_addr]};\n"
       when 'find'
         out << "    r#{dest_reg} = bc2cpp_collect_found_#{region[:block_addr]};\n"
