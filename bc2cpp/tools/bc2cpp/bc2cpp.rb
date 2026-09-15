@@ -1838,13 +1838,39 @@ CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 # emitter's own `mrb_array_p` raise-tripwire regardless.
 #
 # Deliberately NOT here, each for a checked reason, not an oversight:
-#   - `to_a`/`dup`/`first` -- receiver-dependent (`x.dup` is an Array
-#     only when `x` already was; `first` with no argument returns an
-#     ELEMENT, not an Array). No static receiver proof available at
-#     exactly the sites where this rule is needed.
+#   - `to_a`/`dup` -- receiver-dependent (`x.dup` is an Array only when
+#     `x` already was). No static receiver proof available at exactly
+#     the sites where this rule is needed.
 #   - `to_h` -- returns a Hash, not an Array.
 #   - `sort_by` (blockless) -- see CORE_ARRAY_CHAIN_NEEDS_BLOCK.
+#   - `first`/`last` (no argument) -- see CORE_ARRAY_CHAIN_NEEDS_ARG:
+#     an Array only with an explicit argument, an ELEMENT (or nil)
+#     without one.
 CORE_ARRAY_RETURN_METHODS = %w[keys values compact flatten split uniq].freeze
+
+# CORE_ARRAY_CHAIN: names that return a fresh Array ONLY when called
+# WITH an explicit argument (`n=1` or more at the call site -- a real
+# `SEND`/`SENDB` argument count, checked the same way
+# recognize_collect_regions' own `n=0` gate already is), so they are
+# rejected on a bare no-arg call. Read directly against this repo's
+# own pinned 3rd/mruby/src/array.c (both are core, MRB_MT_ENTRY table
+# entries -- picked up by extract_native_method_names via NATIVE_SRCS
+# exactly like keys/values above, never assumed):
+#   - `first` -- `mrb_ary_first`: `mrb_get_argc(mrb) == 0` returns the
+#     first ELEMENT (or nil, empty receiver) -- NOT an Array; the `|i`
+#     branch (an explicit `n`) always returns
+#     `mrb_ary_new_from_values`/`ary_subseq`, a real fresh Array,
+#     whatever `n` and the receiver's length are (clamped to the
+#     receiver's own length, never raises on an oversized `n`).
+#   - `last` -- `mrb_ary_last`, the identical no-arg-vs-arg split
+#     (`ARY_PTR(a)[alen - 1]` vs `ary_subseq`/`mrb_ary_new_from_values`
+#     depending on `size`).
+# Neither is redefined anywhere in this program's own source (checked:
+# no `def first`/`def last` in any closed-world mrblib file), so like
+# CORE_ARRAY_RETURN_METHODS this only ever needs the `'<native>'`
+# branch of core_array_return?'s own registry check, never a vetted
+# override.
+CORE_ARRAY_CHAIN_NEEDS_ARG = %w[first last].freeze
 
 # CORE_ARRAY_CHAIN: names that return a fresh Array ONLY when a real
 # block is passed, so they are admitted exclusively from a block-
@@ -1898,10 +1924,12 @@ VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
 # `RPG2k::Scene::Battle#map` are both `attr_accessor :map` (the
 # current Game::Map, not an Array at all), so "has no bytecode body"
 # is NOT a safe stand-in for "cannot be redefined here".
-def core_array_return?(name, block_carrying, registry)
+def core_array_return?(name, block_carrying, registry, argc: 0)
   vetted_by_name = VETTED_ARRAY_RETURN_OVERRIDES.any? { |o| o.end_with?("##{name}") }
   if CORE_ARRAY_CHAIN_NEEDS_BLOCK.include?(name)
     return false unless block_carrying
+  elsif CORE_ARRAY_CHAIN_NEEDS_ARG.include?(name)
+    return false unless argc >= 1
   elsif !CORE_ARRAY_RETURN_METHODS.include?(name) && !vetted_by_name
     return false
   end
@@ -1951,9 +1979,14 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil)
     return nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
+    # SEND0/SSEND0 carry no `n=` field at all (confirmed against real
+    # `mrbc -v`: a no-arg call is `SEND0 Ra :name`, never `SEND Ra
+    # :name n=0`) -- absent means 0 args, not "unknown", so the `|| 0`
+    # is the correct default, not a safe-miss fallback.
+    argc = pin.args[/n=(\d+)/, 1]&.to_i || 0
     return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
     return 'Array' if annotated&.call(called)
-    return 'Array' if core_array_return?(called, block_carrying, registry)
+    return 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
 
     return nil
   end
