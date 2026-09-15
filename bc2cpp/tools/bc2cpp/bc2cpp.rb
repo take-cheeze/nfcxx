@@ -1674,7 +1674,25 @@ class Annotations
         next unless m
 
         arg_types = m[1].split(',').map { |t| TYPES[t.strip] }
-        ret_type = m[2] && TYPES[m[2]]
+        # ELEMENT_CLASS_SUPPORT: an `Array<Game::Actor>` return token is
+        # still, first and foremost, an `Array` return token -- the
+        # element name only NARROWS an already-true claim, it never
+        # changes it. Stripping the `<...>` here (rather than adding
+        # every `Array<...>` spelling to TYPES, which is unbounded) keeps
+        # `-> Array<Klass>` a strict superset of `-> Array`: every site
+        # the plain form already unlocked through annotated_array_return
+        # keeps working byte-identically after a hand annotation is
+        # narrowed, and ElementAnnotations below reads the SAME comment
+        # independently for the element half -- exactly the way
+        # ClassAnnotations already shares Annotations' own comment line
+        # for class-shaped argument tokens without either reader
+        # disturbing the other. A bare `Array<...>` whose inner token
+        # isn't a real known class is still a plain `-> Array` here and
+        # simply contributes no element fact at all (see
+        # ElementAnnotations' own known_owners gate) -- a typo degrades
+        # to today's behavior, never to a wrong gate.
+        ret_token = m[2]&.sub(/<.*>\z/, '')
+        ret_type = ret_token && TYPES[ret_token]
         result[irep.label] = Annotation.new(args: arg_types, ret: ret_type)
       end
     end
@@ -1732,6 +1750,145 @@ class ClassAnnotations
         next if args.all?(&:nil?)
 
         result[irep.label] = Annotation.new(args: args)
+      end
+    end
+
+    result
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6f-ter: ELEMENT_CLASS_SUPPORT -- the third independent reader of the
+# very same `# bc2cpp: (...) -> T` magic comment, this one claiming
+# something neither of the two above can express: "this method returns an
+# Array every element of which is exactly this one real class".
+#
+#   # bc2cpp: () -> Array<Game::Actor>
+#   def stat_targets(cmd)
+#
+# Why a separate reader rather than another Annotations::TYPES entry, the
+# same reasoning ClassAnnotations' own comment already gives for argument
+# class tokens: `Annotations`' `ret` feeds a primitive-type lattice
+# (:fixnum/:symbol/:array) whose consumers map straight to C types, and a
+# real class name has no C type to map to. Annotations still reads the
+# same token as a plain `:array` (see its own `ret_token` comment), so the
+# element half is purely additive -- narrowing `-> Array` to
+# `-> Array<Klass>` can only ever unlock MORE, never disturb the
+# fresh-Array gate that token already fed.
+#
+# `known_owners` gates the inner token exactly the way ClassAnnotations
+# gates an argument token: a name this closed-world registry has never
+# seen as a real class is silently ignored (contributes nothing), never an
+# error and never a guess -- so a typo, a renamed class, or a class that
+# simply isn't in this run's own closed world all degrade to today's
+# behavior instead of producing a hint nothing can honor.
+#
+# Trust model, identical to annotated_array_return's own (see its
+# comment): this is a HAND-PLACED claim, not an inference, and its
+# soundness rests on two things rather than on the comment alone --
+#   (1) every consumer runtime-guards it. The block emitters' own
+#       ELEMENT_CLASS devirtualization reproduces compile_send's exact
+#       `mrb_class_ptr(...) == mrb_obj_class(M, elem)` check before any
+#       direct call, falling back to ordinary `mrb_funcall` otherwise, so
+#       a WRONG annotation costs a failed guard and a slower call -- never
+#       a wrong dispatch. This is strictly stronger than the plain
+#       `-> Array` annotation's own backstop (an `mrb_array_p` tripwire
+#       that RAISES), because a wrong element claim doesn't even raise:
+#       it simply never fires.
+#   (2) ArrayElementLayout below re-derives the same fact independently
+#       wherever it can, and POISONS an ivar whose real populating sites
+#       disagree -- the annotation is consulted as one terminal of that
+#       sweep, not as an override of it.
+# Two claims, read off the same `-> T` token and kept apart because they
+# are genuinely different facts:
+#   - `-> Array<Game::Actor>` (`element`): the RESULT is an Array and each
+#     of its elements is exactly Game::Actor.
+#   - `-> Game::Actor` (`ret_class`): the RESULT ITSELF is exactly
+#     Game::Actor. This is the leaf fact ArrayElementLayout's own sweep
+#     cannot reach any other way -- `trace_new_target` has no return-type
+#     inference at all (its own comment says so), so an array built by
+#     `ids.map { |i| @roster[i] }` is unresolvable until something names
+#     what `Game::Actors#[]` hands back.
+#
+# NIL, stated precisely rather than glossed: both forms claim
+# "every value that is not nil is exactly this class". A real method that
+# returns nil on a miss (`Game::Actors#[]` returns nil for a non-positive
+# or database-missing id -- read in full, not assumed) is therefore
+# annotatable truthfully, and a nil that does reach an element position
+# is a GUARANTEED miss at every consumer's own `mrb_obj_class` guard
+# (`mrb_obj_class(M, nil)` is NilClass, never the annotated class), so it
+# can only ever cost a fallback `mrb_funcall` -- it can never make a
+# direct call fire on a nil receiver. Defining the claim this way keeps
+# it exactly true instead of approximately true.
+#
+# `ret_class` is deliberately NOT wired into `trace_new_target` this
+# round, only into ArrayElementLayout's own value tracer (see
+# `element_value_class`). It would be sound there too (every consumer of
+# that function already runtime-guards), but it would change the TYPED
+# devirtualization decision at every call site in the program at once,
+# which is a much larger blast radius than one round should mix into a
+# new mechanism's own measurement. Named follow-up, recorded here rather
+# than left implicit: "ELEMENT_CLASS_SUPPORT: promote `ret_class` to a
+# trace_new_target terminal".
+class ElementAnnotations
+  Annotation = Struct.new(:element, :ret_class, keyword_init: true)
+
+  # `-> Array<Game::Actor>` / `-> Array<RPG2k::Window>`: one `::`-joined
+  # class path inside the angle brackets, matched against the exact same
+  # `Owner` spelling build_registry gives every MethodDef (see
+  # trace_new_target's own comment on why that spelling is directly
+  # comparable). Anchored whole-token on purpose -- a partial match like
+  # `Array<Foo, Bar>` (a heterogeneous claim this mechanism deliberately
+  # cannot express) simply doesn't match and contributes nothing.
+  ELEMENT_RE = /\AArray<([A-Za-z_][\w:]*)>\z/
+  RET_CLASS_RE = /\A([A-Za-z_][\w:]*)\z/
+
+  # Tokens that already mean something to `Annotations::TYPES` and must
+  # never ALSO be read as "returns an instance of the class with this
+  # name". `Array` is the one that actually bites: it is a real
+  # `known_owners` entry in every gem's own closed world (mruby-rgss/
+  # mrblib/array_sort.rb reopens it, so build_registry registers `Array`
+  # as a real owner), so a plain, long-standing `-> Array` annotation
+  # would otherwise silently acquire a second, new meaning here. Excluded
+  # by name so today's `-> Array` comments keep meaning exactly and only
+  # what they have always meant.
+  NON_CLASS_RET_TOKENS = (Annotations::TYPES.keys + ['Array']).uniq.freeze
+
+  # irep label -> Annotation, for every real `def` whose annotation
+  # comment carries a recognized element or return-class token.
+  def self.extract(ireps, registry, known_owners)
+    result = {}
+    file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
+
+    registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.irep
+
+        irep = ireps.fetch(d.irep)
+        next unless irep.file
+
+        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        next unless enter
+
+        lines = file_lines[irep.file]
+        idx = enter.lineno - 2
+        idx -= 1 while idx >= 0 && lines[idx].strip.empty?
+        next if idx < 0
+
+        m = Annotations::COMMENT_RE.match(lines[idx])
+        next unless m && m[2]
+
+        tok = m[2]
+        element = nil
+        ret_class = nil
+        if (em = ELEMENT_RE.match(tok))
+          element = em[1] if known_owners.include?(em[1])
+        elsif !NON_CLASS_RET_TOKENS.include?(tok) && (rm = RET_CLASS_RE.match(tok))
+          ret_class = rm[1] if known_owners.include?(rm[1])
+        end
+        next unless element || ret_class
+
+        result[irep.label] = Annotation.new(element: element, ret_class: ret_class)
       end
     end
 
@@ -1838,13 +1995,39 @@ CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 # emitter's own `mrb_array_p` raise-tripwire regardless.
 #
 # Deliberately NOT here, each for a checked reason, not an oversight:
-#   - `to_a`/`dup`/`first` -- receiver-dependent (`x.dup` is an Array
-#     only when `x` already was; `first` with no argument returns an
-#     ELEMENT, not an Array). No static receiver proof available at
-#     exactly the sites where this rule is needed.
+#   - `to_a`/`dup` -- receiver-dependent (`x.dup` is an Array only when
+#     `x` already was). No static receiver proof available at exactly
+#     the sites where this rule is needed.
 #   - `to_h` -- returns a Hash, not an Array.
 #   - `sort_by` (blockless) -- see CORE_ARRAY_CHAIN_NEEDS_BLOCK.
+#   - `first`/`last` (no argument) -- see CORE_ARRAY_CHAIN_NEEDS_ARG:
+#     an Array only with an explicit argument, an ELEMENT (or nil)
+#     without one.
 CORE_ARRAY_RETURN_METHODS = %w[keys values compact flatten split uniq].freeze
+
+# CORE_ARRAY_CHAIN: names that return a fresh Array ONLY when called
+# WITH an explicit argument (`n=1` or more at the call site -- a real
+# `SEND`/`SENDB` argument count, checked the same way
+# recognize_collect_regions' own `n=0` gate already is), so they are
+# rejected on a bare no-arg call. Read directly against this repo's
+# own pinned 3rd/mruby/src/array.c (both are core, MRB_MT_ENTRY table
+# entries -- picked up by extract_native_method_names via NATIVE_SRCS
+# exactly like keys/values above, never assumed):
+#   - `first` -- `mrb_ary_first`: `mrb_get_argc(mrb) == 0` returns the
+#     first ELEMENT (or nil, empty receiver) -- NOT an Array; the `|i`
+#     branch (an explicit `n`) always returns
+#     `mrb_ary_new_from_values`/`ary_subseq`, a real fresh Array,
+#     whatever `n` and the receiver's length are (clamped to the
+#     receiver's own length, never raises on an oversized `n`).
+#   - `last` -- `mrb_ary_last`, the identical no-arg-vs-arg split
+#     (`ARY_PTR(a)[alen - 1]` vs `ary_subseq`/`mrb_ary_new_from_values`
+#     depending on `size`).
+# Neither is redefined anywhere in this program's own source (checked:
+# no `def first`/`def last` in any closed-world mrblib file), so like
+# CORE_ARRAY_RETURN_METHODS this only ever needs the `'<native>'`
+# branch of core_array_return?'s own registry check, never a vetted
+# override.
+CORE_ARRAY_CHAIN_NEEDS_ARG = %w[first last].freeze
 
 # CORE_ARRAY_CHAIN: names that return a fresh Array ONLY when a real
 # block is passed, so they are admitted exclusively from a block-
@@ -1898,10 +2081,12 @@ VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
 # `RPG2k::Scene::Battle#map` are both `attr_accessor :map` (the
 # current Game::Map, not an Array at all), so "has no bytecode body"
 # is NOT a safe stand-in for "cannot be redefined here".
-def core_array_return?(name, block_carrying, registry)
+def core_array_return?(name, block_carrying, registry, argc: 0)
   vetted_by_name = VETTED_ARRAY_RETURN_OVERRIDES.any? { |o| o.end_with?("##{name}") }
   if CORE_ARRAY_CHAIN_NEEDS_BLOCK.include?(name)
     return false unless block_carrying
+  elsif CORE_ARRAY_CHAIN_NEEDS_ARG.include?(name)
+    return false unless argc >= 1
   elsif !CORE_ARRAY_RETURN_METHODS.include?(name) && !vetted_by_name
     return false
   end
@@ -1951,9 +2136,14 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil)
     return nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
+    # SEND0/SSEND0 carry no `n=` field at all (confirmed against real
+    # `mrbc -v`: a no-arg call is `SEND0 Ra :name`, never `SEND Ra
+    # :name n=0`) -- absent means 0 args, not "unknown", so the `|| 0`
+    # is the correct default, not a safe-miss fallback.
+    argc = pin.args[/n=(\d+)/, 1]&.to_i || 0
     return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
     return 'Array' if annotated&.call(called)
-    return 'Array' if core_array_return?(called, block_carrying, registry)
+    return 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
 
     return nil
   end
@@ -2092,6 +2282,905 @@ class ClassLayout
       out[owner] = known unless known.empty?
     end
   end
+end
+
+# ---------------------------------------------------------------------------
+# Step 6g-bis: ELEMENT_CLASS_SUPPORT -- the second dimension of the same
+# whole-program ivar fact Step 6g above establishes. ClassLayout answers
+# "this ivar always holds exactly this one class" and, for a great many
+# real game ivars, that answer is the singularly uninformative `Array`
+# (`Game::Party#@actors`, `Game::Troop#@members`, `Game::State#@timers`,
+# ... -- see the `== known-ivar-class hints ==` diagnostic, where Array is
+# by far the most common hint). This analysis answers the question that
+# actually pays off at a devirtualization site: "and every element of THAT
+# array is exactly this one class".
+#
+# Why it matters, concretely: once a block recognizer proves a receiver is
+# an Array and inlines the loop, the per-element loop register is just an
+# opaque `mrb_value`, so `party.each { |a| a.dead? }` keeps a full POLY
+# `mrb_funcall` per element per iteration even though `a` is provably
+# always a `Game::Actor`. With this table the emitters devirtualize that
+# call the exact same runtime-guarded way compile_send's own TYPED/
+# IVAR_ACCESSOR paths do.
+#
+# SOUNDNESS, stated plainly and without overclaiming. This is NOT a proof,
+# and it is not presented as one -- for exactly the reason ClassLayout's
+# own header already gives for its scalar hints, plus one more that is
+# specific to arrays:
+#   - Like ClassLayout, the sweep only sees this program's own bytecode.
+#     An ivar written from outside the compiled set is invisible to it.
+#   - UNLIKE a scalar ivar, an Array is a mutable object other code can
+#     hold a reference to: `Game::Party#actors` is an `attr_reader`, so
+#     `party.actors.push(x)` anywhere in the program mutates the very
+#     array this table describes, through a receiver this sweep has no way
+#     to attribute back to `Game::Party#@actors`. The sweep attributes
+#     every mutation site it CAN (see ARRAY_ELEMENT_WRITERS below -- a
+#     mutator whose receiver backward-traces to a real `GETIV @x` in the
+#     owner's own body) and poisons on any it can resolve but disagree
+#     with; a mutation through an aliased reference it cannot attribute is
+#     a real, named residual it does not pretend to cover.
+# What makes that residual harmless rather than a correctness hole is the
+# SAME thing that makes every ClassLayout hint safe: every single consumer
+# re-checks the fact at runtime with a real `mrb_class_ptr(...) ==
+# mrb_obj_class(M, elem)` guard before taking the direct-call path, and
+# falls back to an ordinary `mrb_funcall` otherwise. A wrong entry in this
+# table therefore costs one failed pointer comparison and a normal dynamic
+# dispatch -- never a wrong call, never a miscompile. This table is
+# consumed ONLY for that guarded devirtualization; it is never embedded,
+# never used to pick a C type, and never used to skip a check.
+#
+# Fixed-point, ten passes, same shape and same sticky UNKNOWN join as
+# ClassLayout: one array's element class routinely depends on another's
+# (`@actors = new_order.map { |i| @actors[i] }` is literally
+# self-referential), and UNKNOWN once reached is never un-poisoned by a
+# later, differently-ordered pass.
+# ---------------------------------------------------------------------------
+
+# ELEMENT_CLASS_SUPPORT: core methods that return an Array whose elements
+# are a SUBSET of the receiver's own elements -- so the result's element
+# class is exactly the receiver's element class, whatever that is. Each
+# one read directly against this repo's own pinned 3rd/mruby (831da26b),
+# never assumed:
+#   - `compact` (mruby-array-ext/src/array.c `ary_compact`): a `dup` with
+#     the nils deleted -- strictly a subset.
+#   - `uniq`: `self.dup` with duplicates dropped / `__uniq` -- subset.
+#   - `sort`: `self.dup.sort!` (mrblib/array.rb) -- a PERMUTATION, so the
+#     same multiset of elements.
+#   - `reverse`: `mrb_ary_new_from_values` over the same values -- a
+#     permutation too.
+#   - `dup`: `mrb_obj_dup` -- a shallow copy, same element objects. Note
+#     `dup` is receiver-dependent for the *Array-ness* question (which is
+#     why CORE_ARRAY_RETURN_METHODS deliberately excludes it), but this
+#     rule only ever runs on a receiver whose own element class already
+#     resolved, i.e. one already known to be an Array, so the narrower
+#     question asked here is well-founded where the broader one was not.
+#   - `first`/`last` WITH an argument, `take`/`drop`: `ary_subseq`/
+#     `mrb_ary_new_from_values` over a contiguous run of the receiver's
+#     own values -- subset. (The no-argument `first`/`last` return an
+#     ELEMENT, not an Array; they are handled by the separate
+#     `ARRAY_ELEMENT_INDEXERS` rule below, not here.)
+#   - `select`/`reject` WITH a block: mruby's own definitions push the
+#     ELEMENT itself (`mrblib/array.rb`'s `select`/`find_all` and
+#     `reject`), never a derived value -- subset. Block-gated for the
+#     identical reason CHAINED_ARRAY_METHODS is (a blockless
+#     `select`/`reject` returns an enumerator, not an Array).
+# `map`/`collect`/`flat_map` are deliberately absent: those REPLACE each
+# element with the block's own yielded value, so they are handled by
+# their own block-return rule instead.
+ARRAY_ELEMENT_PRESERVING = %w[compact uniq sort reverse dup].freeze
+ARRAY_ELEMENT_PRESERVING_NEEDS_ARG = %w[first last take drop].freeze
+ARRAY_ELEMENT_PRESERVING_NEEDS_BLOCK = %w[select reject].freeze
+
+# ELEMENT_CLASS_SUPPORT: core methods that hand back one ELEMENT of the
+# receiver, so a value produced by one of them has the receiver's own
+# element class. `[]` with exactly one integer-ish argument
+# (`a[i]` -- `a[i, n]` and `a[range]` return an Array instead and are
+# excluded by the argument count), `first`/`last` with NO argument (the
+# exact complement of the `NEEDS_ARG` rule above -- both read against
+# `mrb_ary_first`/`mrb_ary_last` in src/array.c), `sample`, `min`, `max`.
+# Only `[]`/`first`/`last` actually fire in this program today; the rest
+# are listed because the rule is about the shape, not about which names
+# happen to be reachable this week, and each was read the same way.
+ARRAY_ELEMENT_INDEXERS_NEEDS_ARG = %w[[] at fetch].freeze
+ARRAY_ELEMENT_INDEXERS_NO_ARG = %w[first last sample min max].freeze
+
+# ELEMENT_CLASS_SUPPORT: every method that can INTRODUCE a new element
+# into an array in place. The sweep must see agreement from all of them,
+# not just from the SETIV sites, or `@actors = []` followed by
+# `@actors.push(whatever)` would "prove" an element class off an empty
+# literal that says nothing at all. Split by how the element values are
+# reached at the call site:
+#   - `push`/`<<`/`unshift`: every positional argument IS an element.
+#   - `insert`: `insert(index, *values)` -- every argument after the
+#     first is an element.
+#   - `[]=`: `a[i] = v` (exactly two arguments) makes `v` an element;
+#     `a[i, n] = v` / `a[range] = v` (three) splice an ARRAY in instead,
+#     a shape this rule does not model, so it poisons.
+#   - `concat`/`replace`: the single argument is itself an Array, so the
+#     element fact comes from asking this same scan about THAT array.
+# Anything else in this list with an unmodeled shape (a splat call, a
+# wrong argument count, `fill`, `collect!`/`map!`/`flatten!`, ...)
+# poisons the ivar to UNKNOWN rather than being quietly ignored -- an
+# element writer this sweep cannot read is exactly the case where
+# claiming a uniform element class would be a guess.
+ARRAY_ELEMENT_WRITERS = %w[push << unshift insert []= concat replace fill collect! map! flatten! sort_by!].freeze
+
+# ELEMENT_CLASS_SUPPORT: "what is the element class of the Array-valued
+# expression in `reg` at `idx`?" -- the element-dimension analogue of
+# proven_array_source_scan above, and deliberately built the same way:
+# one backward scan to the nearest real write of the register, MOVE
+# chains followed through (same stale-register reasoning that scan's own
+# comment spells out), and a hard nil on anything not explicitly
+# modelled. `ctx` carries the tables this needs (see
+# ArrayElementLayout.analyze, its only caller, for how each is built).
+#
+# Returns a class-name String, or nil for "unknown" -- and nil is always
+# a safe answer: the caller turns it into a poisoned (UNKNOWN) ivar.
+def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  # Depth cap: every recursive arm below either walks to a strictly
+  # smaller instruction index or steps into a strictly smaller expression,
+  # but two ivars can still reference each other across the fixed point
+  # (`@a = @b.compact`, `@b = @a.compact`), so the cap makes termination a
+  # property of this function alone rather than of the table it reads.
+  return nil if depth > 8
+
+  reg = dest_reg
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn
+
+    # Same reasoning as proven_array_source_scan's own BLOCK skip: the
+    # block proc register sits between a block-carrying call and its
+    # receiver write, and is evidence FOR the shape rather than a writer.
+    next if insn.op == 'BLOCK'
+    next unless insn.args[/^R(\d+)/, 1] == reg
+
+    case insn.op
+    when 'MOVE'
+      src = insn.args.scan(/R(\d+)/).flatten[1]
+      return nil unless src
+
+      reg = src
+      next
+    when 'ARRAY', 'ARRAY2'
+      # "ARRAY R3 2" -- N consecutive registers starting at Rd (see
+      # compile_insn's own ARRAY codegen comment for the real OP_ARRAY
+      # semantics this reads).
+      #
+      # An EMPTY literal (`@members = []`, n == 0) is VACUOUS, not
+      # unknown, and the distinction is load-bearing rather than
+      # pedantic. The claim this whole analysis makes is "every element
+      # of this array is exactly X"; an array with no elements satisfies
+      # that for every X, so an empty literal cannot contradict any other
+      # site and must not poison one. Treating it as unknown instead was
+      # measured to poison essentially the entire table on the first
+      # pass, because nearly every real array ivar in this program is
+      # born as `@x = []` in `#initialize` and filled in later
+      # (`Game::Troop#@members`, `Game::Battle#@log`,
+      # `RPG2k::Scene::Map#@events`, ...). VACUOUS is skipped by the join
+      # rather than merged into it, so an ivar whose ONLY site is an
+      # empty literal still ends up with no entry at all -- silence, not
+      # a claim.
+      n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+      return nil if n.nil?
+      return ArrayElementLayout::VACUOUS if n.zero?
+
+      base = reg.to_i
+      classes = (0...n).map { |k| element_value_class(irep, i, (base + k).to_s, ctx, depth + 1) }
+      return nil if classes.any?(&:nil?) || classes.uniq.size != 1
+
+      return classes.first
+    when 'GETIV'
+      ivar = insn.args[/@(\w+)/, 1]
+      return nil unless ivar
+
+      return ivar_element_hint(ctx[:owner], ivar, ctx)
+    when 'SEND', 'SEND0', 'SENDB', 'SSENDB', 'SSEND', 'SSEND0'
+      return send_element_class(irep, i, reg, insn, ctx, depth)
+    else
+      return nil
+    end
+  end
+  nil
+end
+
+# ELEMENT_CLASS_SUPPORT: the SEND arm of the scan above, split out purely
+# for readability -- `insn` is the instruction that wrote `reg`, at index
+# `i`.
+def send_element_class(irep, i, reg, insn, ctx, depth)
+  # Same charset as compile_send's own name extraction (see its comment).
+  name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+  return nil unless name
+
+  block_carrying = %w[SENDB SSENDB].include?(insn.op)
+  # SEND0/SSEND0 never print an "n=" field at all -- a real, always-zero
+  # argument count, the same fact proven_array_source_scan's own comment
+  # already establishes against real `mrbc -v` output.
+  argc = insn.args[/n=(\d+)/, 1]&.to_i || 0
+  self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
+
+  # A hand-placed `-> Array<Klass>` claim, re-validated against the real
+  # whole-program registry the same way core_array_return? re-validates a
+  # core name: the annotation sits on ONE irep, so it can only be trusted
+  # when that irep is the ONLY definition of the name in the whole program
+  # (otherwise this call site might be reaching a different method that
+  # merely shares the name).
+  annotated = ctx[:annotated_element]&.call(name)
+  return annotated if annotated
+
+  # An element-preserving chain hands back the receiver's own elements, so
+  # the answer is whatever THIS send's own receiver is an array of. A
+  # self-receiver (`SSEND`) has no register to trace, so it stops here.
+  preserving =
+    ARRAY_ELEMENT_PRESERVING.include?(name) ||
+    (ARRAY_ELEMENT_PRESERVING_NEEDS_ARG.include?(name) && argc >= 1) ||
+    (ARRAY_ELEMENT_PRESERVING_NEEDS_BLOCK.include?(name) && block_carrying)
+  if preserving
+    return nil if self_recv
+
+    return array_element_source_scan(irep, i, reg, ctx, depth + 1)
+  end
+
+  # `map`/`collect` with a real block REPLACES every element with the
+  # block's own yielded value, so the result's element class is the class
+  # of that value -- read out of the block's own irep (see
+  # block_return_class). `flat_map` is excluded on purpose: its yielded
+  # value is spliced rather than pushed, so the element class is the
+  # element class of the yielded ARRAY, one level further in than this
+  # rule models.
+  if block_carrying && %w[map collect].include?(name) && argc.zero?
+    block_irep = adjacent_block_irep(irep, i, reg, ctx)
+    return nil unless block_irep
+
+    return block_return_class(block_irep, ctx, depth + 1)
+  end
+
+  # CHAINED_ACCESSOR_SUPPORT, element dimension: `@state.party.actors` --
+  # a plain `attr_reader` read whose receiver is itself traceable to an
+  # exact class. Identical three-part check to trace_new_target's own
+  # chained-accessor branch (see its comment): the receiver resolves to a
+  # real class R, R really does define this name as an `:ivar_accessor`
+  # (so the call is a bare ivar read and nothing else), and R's own entry
+  # in THIS table names an element class for that same ivar.
+  return nil if self_recv || argc.positive? || block_carrying
+
+  recv_class = traced_owner(irep, i, reg, ctx)
+  return nil unless recv_class
+
+  accessor = ctx[:registry][name]&.find { |md| md.owner == recv_class && md.kind == :ivar_accessor }
+  return nil unless accessor
+
+  ivar_element_hint(recv_class, name, ctx)
+end
+
+# ELEMENT_CLASS_SUPPORT: read one entry out of the (still-converging)
+# element table without ever handing back the UNKNOWN sentinel as if it
+# were a real class name -- the same discipline trace_new_target's own
+# chained-accessor branch applies to ClassLayout's in-progress table, and
+# `key?` for the same reason (the table is a `Hash.new { {} }`, so a plain
+# `[]` read on an untouched owner would silently insert an entry and
+# perturb the diagnostic's own ordering).
+def ivar_element_hint(owner, ivar, ctx)
+  table = ctx[:elements]
+  return nil unless owner && ivar && table&.key?(owner)
+
+  hint = table[owner][ivar]
+  return nil if hint.nil? || hint == ArrayElementLayout::UNKNOWN
+
+  hint
+end
+
+# ELEMENT_CLASS_SUPPORT: the child irep a block-carrying send at index `i`
+# takes its block from -- the same `BLOCK R(a+1) I[k]` adjacency every
+# block recognizer in this file already checks (confirmed against real
+# `mrbc -v` output there), re-checked here rather than assumed because
+# this scan reaches a SENDB from a completely different direction.
+def adjacent_block_irep(irep, i, recv_reg, ctx)
+  block_insn = i.positive? ? irep.instructions[i - 1] : nil
+  return nil unless block_insn && block_insn.op == 'BLOCK'
+  return nil unless block_insn.args[/^R(\d+)/, 1] == (recv_reg.to_i + 1).to_s
+
+  k = block_insn.args[/I\[(\d+)\]/, 1]
+  return nil unless k
+
+  label = irep.reps[k.to_i]
+  label && ctx[:ireps][label]
+end
+
+# ELEMENT_CLASS_SUPPORT: the class of the value a `map` block yields --
+# i.e. the class every element of the resulting Array has. A block's
+# yielded value is whatever its own `RETURN` hands back (a bare `next`
+# compiles to `RETNIL`, confirmed in compile_block_body_insn's own
+# comment), so every RETURN in the block body must agree, and any other
+# return form (`RETNIL`/`RETFALSE`/`RETTRUE`, a `break`) is a value whose
+# class is not an object class at all -- unknown, so the whole answer is
+# unknown. A block with no RETURN at all likewise answers nothing.
+def block_return_class(block_irep, ctx, depth)
+  # A block's own `self` is its enclosing method's self (real mruby
+  # semantics, the same fact emit_each_inline relies on to alias R0
+  # straight to `self`), so the owner and its ivar hints carry over
+  # unchanged. Its PARAMETERS do not: they are block params, not method
+  # arguments, so the argument-annotation terminal is switched off
+  # (`mand: 0` makes trace_new_target's own `pos.between?(1, mand)`
+  # fallback unreachable) rather than left to misread a block param as an
+  # annotated method argument.
+  irep_return_class(block_irep, ctx.merge(arg_classes: nil, mand: 0), depth)
+end
+
+# ELEMENT_CLASS_SUPPORT: trace a register to a real class name the
+# whole-program REGISTRY actually knows, not merely to whatever token the
+# source wrote.
+#
+# trace_new_target hands back a bare, unqualified name for a bare
+# `GETCONST` receiver -- `Actors.new(db)` inside `Game::Party` traces to
+# the literal string "Actors", while every MethodDef in the registry
+# spells that class "Game::Actors" (build_registry's own `::`-joined
+# owner). The two never compare equal, so an unresolved bare name is a
+# dead hint: it can never match a candidate at a devirtualization site,
+# and it would show up in the `== known-ivar-class hints ==`-style
+# diagnostic looking like a fact when nothing can ever use it. (Real,
+# measured: a first cut of this analysis emitted `Array<EnemyAction>` and
+# `Array<Window>` hints, neither of which is a registry owner, alongside
+# a silently-lost `Game::Party#@roster (Actors)`.)
+#
+# This resolves a bare name the same way real Ruby does and the same way
+# compile_insn's own GETCONST codegen and trace_new_target's own
+# DIRECT_CONSTRUCT_TARGETS branch already do: walk the enclosing owner's
+# lexical nesting INNERMOST FIRST (so an inner `Game::Party::Actors`
+# would win over an outer `Game::Actors`, exactly like Module.nesting),
+# and accept only a candidate the registry really has. Anything that
+# doesn't resolve returns nil -- an honest "unknown", never a guess and
+# never a dead hint.
+#
+# Deliberately scoped to this analysis rather than pushed down into
+# trace_new_target itself, even though that function has the same gap:
+# changing what IT returns would change the TYPED devirtualization
+# decision at every call site in the program at once. Named follow-up,
+# same as ElementAnnotations' own: "ELEMENT_CLASS_SUPPORT: teach
+# trace_new_target's bare-GETCONST case this same registry-validated
+# lexical resolution".
+def traced_owner(irep, idx, reg, ctx)
+  cls = trace_new_target(irep, idx, reg, ctx[:ivar_classes], ctx[:mand], ctx[:arg_classes],
+                         owner: ctx[:owner], class_layout: ctx[:class_layout], registry: ctx[:registry])
+  resolve_owner_name(cls, ctx)
+end
+
+def resolve_owner_name(name, ctx)
+  return nil unless name
+
+  known = ctx[:known_owners]
+  return name if known.include?(name)
+  # Already namespace-qualified and still unknown: there is no lexical
+  # search that could rescue it, so this is a real miss.
+  return nil if name.include?('::')
+
+  nesting = ctx[:owner].to_s.sub(/\.singleton\z/, '').split('::')
+  nesting.length.downto(1) do |n|
+    candidate = "#{nesting.first(n).join('::')}::#{name}"
+    return candidate if known.include?(candidate)
+  end
+  nil
+end
+
+# ELEMENT_CLASS_SUPPORT: this irep's own mandatory arity, read the same
+# way ClassLayout.analyze reads it (the ENTER instruction's first `:`
+# field), with 0 for a body that has none.
+def mand_of(ireps, label)
+  enter = ireps.fetch(label).instructions.find { |i| i.op == 'ENTER' }
+  enter ? enter.args.split(':').first.to_i : 0
+end
+
+# ELEMENT_CLASS_SUPPORT: every child irep reachable from `label` through
+# `reps`, transitively (a block inside a block inside a method). `seen`
+# makes this terminate on any self- or mutually-referential `reps` table
+# rather than trusting one not to exist.
+def nested_block_labels(ireps, label, seen = Set.new)
+  out = []
+  stack = [label]
+  until stack.empty?
+    cur = stack.pop
+    irep = ireps[cur]
+    next unless irep
+
+    (irep.reps || []).each do |child|
+      next if child.nil? || seen.include?(child) || !ireps.key?(child)
+
+      seen << child
+      out << child
+      stack << child
+    end
+  end
+  out
+end
+
+# ELEMENT_CLASS_SUPPORT: the one class every `RETURN` in this irep hands
+# back, or nil when they disagree or any of them is unresolvable. Shared
+# by block_return_class (a `map` block's yielded value) and
+# mono_fresh_return_class (a whole method's result).
+def irep_return_class(irep, ctx, depth)
+  return nil if depth > 8
+
+  found = nil
+  irep.instructions.each_with_index do |insn, i|
+    case insn.op
+    when 'RETURN'
+      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      cls = element_value_class(irep, i, r, ctx, depth)
+      return nil unless cls
+      return nil if found && found != cls
+
+      found = cls
+    when 'RETNIL', 'RETFALSE', 'RETTRUE', 'BREAK', 'RETURN_BLK'
+      # A nil/false/true result is not an object class this mechanism can
+      # name, and a non-local return leaves through a path this scan is
+      # not reading -- either way the answer is honestly unknown.
+      return nil
+    end
+  end
+  found
+end
+
+# ELEMENT_CLASS_SUPPORT: real, inferred return-class evidence -- no
+# annotation involved -- for the one shape where it is a hard Ruby
+# guarantee rather than a claim: a method with exactly ONE definition in
+# the whole program (so dispatch cannot reach anything else -- the same
+# argument monomorphic_target's own gate makes) whose every `RETURN`
+# provably hands back a fresh `Klass.new`. `X.new` never allocates a
+# subclass in disguise (trace_new_target's own comment establishes this),
+# so where this fires it is as strong as the fresh-`.new` terminal that
+# function already trusts, just observed one call frame further out.
+#
+# Real example this exists for: `Game::Troop#member(db, m)` is literally
+# `Enemy.new(db, m.enemy_id, m.x, m.y, m.invisible)` and is the sole
+# writer into `Game::Troop#@members` (`@members << member(db, m)`), so the
+# whole troop-members element fact falls out of this with nothing
+# hand-placed at all.
+# ELEMENT_CLASS_SUPPORT: the return class of a call whose RECEIVER is
+# traceable to one exact class -- class-exact resolution, not name-keyed,
+# and that difference is what makes it usable at all for the names that
+# matter here.
+#
+# `Game::Party#initialize` builds `@actors` as
+# `ids.reject { ... }.map { |i| @roster[i] }.compact`, so the element
+# class is whatever `@roster[i]` hands back. `@roster` is a
+# `Game::Actors` and `Game::Actors#[]` really does return exactly a
+# `Game::Actor` (or nil -- see ElementAnnotations' own NIL note) -- but
+# `:[]` is one of the most POLY names in the whole program (Array, Hash,
+# LCF::Array1D/Array2D, Game::Switches, ... plus mruby's own natives), so
+# the name-MONO lookups above can never speak for it and never will. What
+# IS available is exactly what compile_send's own TYPED path uses: trace
+# this send's own receiver to an exact class, then look up the
+# class-exact MethodDef for the name on THAT class.
+#
+# Two sources are accepted for the class-exact definition, in order: a
+# hand-placed `-> Klass` return annotation on it, or -- with nothing
+# hand-placed at all -- a body that provably returns a fresh `Klass.new`
+# on every path. Both are guarded downstream exactly like every other
+# fact in this file.
+def receiver_scoped_return_class(irep, i, recv_reg, name, ctx, depth)
+  return nil if depth > 8
+
+  recv_class = traced_owner(irep, i, recv_reg, ctx)
+  return nil unless recv_class
+
+  class_scoped_return_class(recv_class, name, ctx, depth)
+end
+
+# ELEMENT_CLASS_SUPPORT: the shared tail of the rule above -- given an
+# exact receiver class, what does `name` return on it?
+def class_scoped_return_class(recv_class, name, ctx, depth)
+  return nil if depth > 8
+
+  md = ctx[:registry][name]&.find { |m| m.owner == recv_class && m.irep }
+  return nil unless md
+
+  ann = ctx[:element_annotations][md.irep]&.ret_class
+  return ann if ann
+
+  callee = ctx[:ireps][md.irep]
+  return nil unless callee
+
+  sub = ctx.merge(owner: md.owner, ivar_classes: (ctx[:class_layout][md.owner] || {}),
+                  mand: mandatory_arity(callee), arg_classes: ctx[:class_annotations][md.irep]&.args)
+  irep_return_class(callee, sub, depth + 1)
+end
+
+# ELEMENT_CLASS_SUPPORT: the class of `self` inside a method of `owner`,
+# when that can be answered exactly -- needed because a great deal of
+# real populating code is an implicit-self call, not an explicit-receiver
+# one: `Game::Troop#initialize`'s only writer into `@members` is
+# `@members << member(db, m)`, and `:member` is POLY program-wide
+# (`Game::Battle::Combatant` defines one too), so no name-keyed lookup can
+# ever speak for it.
+#
+# "self is exactly `owner`" is NOT free: if any class in the program
+# inherits from `owner`, then `self` inside one of `owner`'s own methods
+# may be an instance of that subclass, and the call could dispatch to a
+# subclass override instead. So this answers only when a real
+# whole-program check says no such subclass exists -- `subclassed` is
+# every name that appears as SOMEBODY's declared superclass
+# (build_registry's own resolve_superclass_ref result, the same table
+# compile_insn's own SUPER case reads). A class with any subclass at all
+# is refused outright rather than reasoned about per-method: cheap,
+# checked, and re-evaluated from the real registry on every run, so a
+# future `class Foo < Game::Troop` silently withdraws the fact instead of
+# leaving a stale claim behind.
+#
+# A `.singleton` pseudo-owner is refused too: its `self` is the class
+# object, not an instance, so an instance-method lookup on it would be
+# reasoning about the wrong object entirely.
+def self_receiver_class(ctx)
+  owner = ctx[:owner]
+  return nil if owner.nil? || owner.end_with?('.singleton')
+  return nil unless ctx[:known_owners].include?(owner)
+  return nil if ctx[:subclassed].include?(owner)
+
+  owner
+end
+
+def mono_fresh_return_class(name, ctx, depth)
+  defs = ctx[:registry][name]
+  return nil unless defs && defs.size == 1 && defs.first.irep
+
+  d = defs.first
+  irep = ctx[:ireps][d.irep]
+  return nil unless irep
+
+  sub = ctx.merge(owner: d.owner, ivar_classes: (ctx[:class_layout][d.owner] || {}),
+                  mand: mandatory_arity(irep), arg_classes: ctx[:class_annotations][d.irep]&.args)
+  irep_return_class(irep, sub, depth + 1)
+end
+
+# ELEMENT_CLASS_SUPPORT: "what class is the SCALAR value in `reg` at
+# `idx`?" -- the value-level companion to array_element_source_scan.
+# Three sources, in order:
+#   1. trace_new_target, unchanged and untouched: a fresh `X.new`, a GETIV
+#      of a ClassLayout-known ivar, a `# bc2cpp: (Klass)` argument
+#      annotation, or a chained accessor. This is the workhorse.
+#   2. a hand-placed `-> Klass` return-class annotation (see
+#      ElementAnnotations) -- the leaf fact nothing else in this file can
+#      supply, since there is no return-type inference here at all.
+#   3. an ARRAY INDEXER on an array whose own element class is already
+#      known (`@actors[i]`, `list.first`) -- the exact inverse of
+#      array_element_source_scan, and the rule that makes a
+#      self-referential reorder (`@actors = new_order.map { |i|
+#      @actors[i] }`) resolve to agreement instead of poison.
+def element_value_class(irep, idx, reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  direct = traced_owner(irep, idx, reg, ctx)
+  return direct if direct
+
+  cur = reg
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn
+
+    next if insn.op == 'BLOCK'
+    next unless insn.args[/^R(\d+)/, 1] == cur
+
+    if insn.op == 'MOVE'
+      src = insn.args.scan(/R(\d+)/).flatten[1]
+      return nil unless src
+
+      cur = src
+      next
+    end
+
+    # ELEMENT_CLASS_SUPPORT: `a[i]` is NOT a `SEND :[]` in real bytecode
+    # -- mrbc emits a dedicated index opcode and the VM only falls back to
+    # a real `:[]` send for a receiver that is neither Array nor Hash
+    # (confirmed against this file's own GETIDX/GETIDX0/AREF codegen,
+    # which mirrors src/vm.c's fast paths). So an element read has to be
+    # recognized by OPCODE here, not by method name; matching only the
+    # name was measured to miss every real `@actors[i]`/`@roster[i]` site
+    # in the program. The three shapes differ only in where the RECEIVER
+    # register sits:
+    #   GETIDX  R2 (R3)      -- R[a] = R[a][R[a+1]]: receiver is R2 itself.
+    #   GETIDX0 R7 R4[0]     -- R[a] = R[b][0]:      receiver is R4.
+    #   AREF    R2 R6 0      -- R[a] = R[b][c]:      receiver is R6.
+    if %w[GETIDX GETIDX0 AREF].include?(insn.op)
+      recv = insn.op == 'GETIDX' ? cur : insn.args.scan(/R(\d+)/).flatten[1]
+      return nil unless recv
+
+      hit = array_element_source_scan(irep, i, recv, ctx, depth + 1)
+      return hit if hit && hit != ArrayElementLayout::VACUOUS
+      # The receiver is not an array this analysis knows the elements of.
+      # For GETIDX/GETIDX0 that is not the end of the road: vm.c's own
+      # non-Array/non-Hash path is a REAL `:[]` send, so `@roster[i]`
+      # (a `Game::Actors`, not an Array) resolves exactly the way the
+      # equivalent explicit send would. AREF is excluded on purpose --
+      # its non-Array behavior is "index 0 yields the receiver itself",
+      # a destructuring shape, not a `:[]` dispatch.
+      return nil if insn.op == 'AREF'
+
+      return receiver_scoped_return_class(irep, i, recv, '[]', ctx, depth)
+    end
+    return nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
+
+    name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    return nil unless name
+
+    annotated = ctx[:annotated_ret_class]&.call(name)
+    return annotated if annotated
+
+    argc = insn.args[/n=(\d+)/, 1]&.to_i || 0
+    self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
+    indexer =
+      (ARRAY_ELEMENT_INDEXERS_NEEDS_ARG.include?(name) && argc == 1) ||
+      (ARRAY_ELEMENT_INDEXERS_NO_ARG.include?(name) && argc.zero?)
+    # An indexer read on an array whose element class is already known.
+    # Skipped for an implicit-self receiver (no register to ask about),
+    # and allowed to MISS rather than to fail: `@roster[i]` matches this
+    # shape syntactically but `@roster` is a `Game::Actors`, not an
+    # Array, so the element table has nothing for it -- that has to fall
+    # through to the receiver-scoped rule below, not end the search.
+    if indexer && !self_recv
+      hit = array_element_source_scan(irep, i, cur, ctx, depth + 1)
+      return hit if hit && hit != ArrayElementLayout::VACUOUS
+    end
+
+    scoped = if self_recv
+               sc = self_receiver_class(ctx)
+               sc && class_scoped_return_class(sc, name, ctx, depth)
+             else
+               receiver_scoped_return_class(irep, i, cur, name, ctx, depth)
+             end
+    return scoped if scoped
+
+    # Last resort: a name exactly one definition in the whole program
+    # owns, whose body provably manufactures one exact class on every
+    # path -- no receiver reasoning needed at all.
+    mono_fresh_return_class(name, ctx, depth)
+  end
+  nil
+end
+
+class ArrayElementLayout
+  UNKNOWN = :unknown
+  # "this site provably introduces NO elements at all" -- see the ARRAY
+  # arm of array_element_source_scan for why an empty literal has to be
+  # kept apart from an unreadable one.
+  VACUOUS = :vacuous
+
+  # owner -> {ivar_name => element class name}, for every ivar ClassLayout
+  # has ALREADY proved always holds an `Array`. Restricting the sweep to
+  # those is not an optimization: an element claim about an ivar that
+  # isn't reliably an Array in the first place could never be consumed
+  # (every consumer sits behind a recognizer that has already proved its
+  # receiver is an Array), and sweeping the rest would only manufacture
+  # entries nothing can use.
+  def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, superclass_of = {})
+    methods_of = Hash.new { |h, k| h[k] = [] }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+    # Same `known_owners` set every other annotation reader gates on --
+    # the real classes this closed world has, used here by
+    # resolve_owner_name to turn a bare `GETCONST` token into a name the
+    # registry can actually be asked about.
+    known_owners = Set.new(registry.values.flatten.map(&:owner))
+    # Every class name that some OTHER class declares as its superclass --
+    # see self_receiver_class for why a class with any subclass at all is
+    # refused as an exact `self` type. `:none` (no explicit superclass)
+    # and an unrecognized/computed expression are not names, so they are
+    # dropped rather than counted.
+    subclassed = Set.new(superclass_of.values.select { |v| v.is_a?(String) })
+
+    # name -> element class / return class, but ONLY for a name exactly one
+    # definition in the whole program owns. Same whole-program
+    # re-validation core_array_return? performs on a vetted core name, and
+    # the same MONO-keying argument annotated_array_return's own comment
+    # makes: a magic comment sits on one real irep, so it can only speak
+    # for a call site when no other method could be the one being called.
+    mono_ann = lambda do |field|
+      lambda do |name|
+        defs = registry[name]
+        next nil unless defs && defs.size == 1 && defs.first.irep
+
+        element_annotations[defs.first.irep]&.public_send(field)
+      end
+    end
+    annotated_element = mono_ann.call(:element)
+    annotated_ret_class = mono_ann.call(:ret_class)
+
+    elements = Hash.new { |h, k| h[k] = {} }
+
+    10.times do
+      changed = false
+      methods_of.each do |owner, labels|
+        array_ivars = (class_layout[owner] || {}).select { |_, c| c == 'Array' }.keys
+        next if array_ivars.empty?
+
+        labels.each do |label|
+          # ELEMENT_CLASS_SUPPORT: sweep the method's own body AND every
+          # block body nested inside it. This is load-bearing, not
+          # thoroughness for its own sake: real populating code very often
+          # lives in a block rather than in the method itself --
+          # `Game::Troop#initialize`'s only writer into `@members` is
+          # `row.members.each { |_, m| @members << member(db, m) }`, i.e.
+          # inside a child irep the registry never lists (only top-level
+          # `def` bodies get MethodDefs). A sweep that stopped at the
+          # method body would see `@members = []` and nothing else, and
+          # would then have to poison on an empty literal while the real
+          # writer sat one frame down, unexamined. Walking `reps`
+          # transitively is what makes "EVERY site that populates this
+          # array" an accurate description of what this sweep checks.
+          #
+          # A block's `self` is its enclosing method's self, so `owner`
+          # and its ivar hints carry straight over; its parameters are not
+          # method arguments, so `mand`/`arg_classes` are zeroed for the
+          # nested ireps exactly the way block_return_class zeroes them.
+          sweep = [[label, mand_of(ireps, label), class_annotations[label]&.args]]
+          nested_block_labels(ireps, label).each { |bl| sweep << [bl, 0, nil] }
+
+          sweep.each do |(cur_label, mand, arg_classes)|
+            irep = ireps.fetch(cur_label)
+            ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
+                    class_annotations: class_annotations, element_annotations: element_annotations,
+                    known_owners: known_owners, subclassed: subclassed,
+                    ivar_classes: (class_layout[owner] || {}), mand: mand,
+                    arg_classes: arg_classes, elements: elements,
+                    annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
+
+            irep.instructions.each_with_index do |insn, idx|
+              found = nil
+              ivar = nil
+              if insn.op == 'SETIV'
+                ivar = insn.args[/@(\w+)/, 1]
+                next unless array_ivars.include?(ivar)
+
+                found = array_element_source_scan(irep, idx, insn.args[/R(\d+)/, 1], ctx)
+              # SSEND/SSENDB deliberately excluded: their receiver is the
+              # implicit self, so the `^R` register in the disassembly is the
+              # DESTINATION, not a receiver to backward-trace -- feeding it to
+              # mutated_ivar_target would be reading an unrelated register.
+              elsif %w[SEND SEND0 SENDB].include?(insn.op)
+                name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+                next unless name && ARRAY_ELEMENT_WRITERS.include?(name)
+
+                recv = insn.args[/^R(\d+)/, 1]
+                ivar = mutated_ivar_target(irep, idx, recv)
+                next unless ivar && array_ivars.include?(ivar)
+
+                found = written_element_class(irep, idx, insn, recv, name, ctx)
+              elsif insn.op == 'SETIDX'
+                # ELEMENT_CLASS_SUPPORT: `@actors[0] = actor` is an
+                # OP_SETIDX, not a `SEND :[]=` -- the same opcode-not-name
+                # point element_value_class's own GETIDX arm makes, for
+                # the writing direction. "SETIDX R4 (R5) (R6)" is
+                # `R[a][R[a+1]] = R[a+2]`, so the receiver is R4 and the
+                # element being written is R6. Missing this would have let
+                # `Game::Party#promote_to_leader`'s own slot-0 assignment
+                # introduce an unexamined element behind the sweep's back.
+                recv, _i_reg, val = insn.args.scan(/R(\d+)/).flatten
+                next unless recv && val
+
+                ivar = mutated_ivar_target(irep, idx, recv)
+                next unless ivar && array_ivars.include?(ivar)
+
+                found = element_value_class(irep, idx, val, ctx, 1)
+              else
+                next
+              end
+
+              # A provably element-free site (`@x = []`) is skipped
+              # entirely -- it neither confirms nor contradicts, so it
+              # must not reach the join in either direction.
+              next if found == VACUOUS
+
+              found ||= UNKNOWN
+              before = elements[owner][ivar]
+              # Identical sticky join to ClassLayout's own: two sites that
+              # disagree, or one site that cannot be read at all, poison the
+              # ivar permanently. Never a majority vote, never "the one I
+              # understood wins".
+              merged = if before.nil?
+                         found
+                       elsif before == UNKNOWN || found == UNKNOWN || before != found
+                         UNKNOWN
+                       else
+                         before
+                       end
+              if merged != before
+                elements[owner][ivar] = merged
+                changed = true
+              end
+            end
+          end
+        end
+      end
+      break unless changed
+    end
+
+    elements
+  end
+
+  # The consumable half of `analyze`'s own raw result -- UNKNOWN entries
+  # dropped, empty owners dropped. Split out (rather than filtered inside
+  # `analyze`, the way ClassLayout does it) precisely so the poisoned
+  # entries survive long enough to be REPORTED: an Array ivar that came
+  # out UNKNOWN is exactly the actionable candidate list a future round
+  # (or a hand-placed `-> Array<Klass>` / `-> Klass` annotation) needs,
+  # the same role `report_annotation_candidates` already plays for opaque
+  # incoming arguments. See the `== array-element candidates ==`
+  # diagnostic.
+  def self.known(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      known = ivars.reject { |_, c| c == UNKNOWN }
+      out[owner] = known unless known.empty?
+    end
+  end
+
+  def self.unknowns(table)
+    table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
+end
+
+# ELEMENT_CLASS_SUPPORT: which ivar (if any) does the receiver of an
+# in-place array mutation actually name? Backward-scans the receiver
+# register to a real `GETIV @x` in this same body, following MOVE chains,
+# and bails to nil on anything else. nil means "this mutator is on some
+# other array" -- the sweep then simply doesn't attribute it, which is
+# exactly the documented residual in this section's own header (a mutation
+# reached through an aliased reference is invisible), NOT a claim that no
+# mutation happened.
+def mutated_ivar_target(irep, idx, reg)
+  return nil unless reg
+
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn
+
+    next if insn.op == 'BLOCK'
+    next unless insn.args[/^R(\d+)/, 1] == reg
+
+    return insn.args[/@(\w+)/, 1] if insn.op == 'GETIV'
+
+    if insn.op == 'MOVE'
+      src = insn.args.scan(/R(\d+)/).flatten[1]
+      return nil unless src
+
+      reg = src
+      next
+    end
+    return nil
+  end
+  nil
+end
+
+# ELEMENT_CLASS_SUPPORT: the element class one in-place mutation writes
+# into the array, or nil (-> poison) for any shape this doesn't model.
+# See ARRAY_ELEMENT_WRITERS' own comment for the per-name argument
+# layout each branch here reads.
+def written_element_class(irep, idx, insn, recv, name, ctx)
+  # A splat call site prints "n=*" (mrbc's own CALL_MAXARGS sentinel, the
+  # same shape compile_send's own n_match comment documents) -- no fixed
+  # register list exists for it, so it can only poison.
+  n_match = insn.args.match(/n=(\d+|\*)/)
+  return nil if n_match && n_match[1] == '*'
+
+  argc = n_match ? n_match[1].to_i : 0
+  base = recv.to_i
+  arg_regs = (1..argc).map { |k| (base + k).to_s }
+
+  value_regs =
+    case name
+    when 'push', '<<', 'unshift' then arg_regs
+    when 'insert' then argc >= 2 ? arg_regs.drop(1) : nil
+    when '[]=' then argc == 2 ? [arg_regs.last] : nil
+    when 'concat', 'replace'
+      return nil unless argc == 1
+
+      # The argument is itself an Array, so the element fact is that
+      # array's own element class -- the same question, asked one level
+      # in, through the same scan.
+      return array_element_source_scan(irep, idx, arg_regs.first, ctx, 1)
+    end
+  return nil if value_regs.nil? || value_regs.empty?
+
+  classes = value_regs.map { |r| element_value_class(irep, idx, r, ctx, 1) }
+  return nil if classes.any?(&:nil?) || classes.uniq.size != 1
+
+  classes.first
 end
 
 # ---------------------------------------------------------------------------
@@ -4220,8 +5309,23 @@ class CodeGen
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
   }.freeze
 
-  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {}, superclass_of = {})
+  def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
+                 superclass_of = {}, element_layout = {}, element_annotations = {})
     @ireps = ireps
+    # ELEMENT_CLASS_SUPPORT: owner -> {ivar => element class name}
+    # (ArrayElementLayout.analyze's own filtered result) and irep label ->
+    # ElementAnnotations::Annotation. Both are read ONLY by the block
+    # emitters' own per-element devirtualization, which guards every use
+    # with a real runtime `mrb_obj_class` check -- see ArrayElementLayout's
+    # own header for the full soundness argument.
+    @element_layout = element_layout
+    @element_annotations = element_annotations
+    # The per-element class currently in scope, set by the block emitters
+    # around one inlined loop body and consulted by compile_send for a
+    # receiver that provably still holds the loop element. nil everywhere
+    # else, so every call site outside an inlined block behaves exactly as
+    # it did before this existed.
+    @elem_class_hint = nil
     @registry = registry
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
@@ -4269,6 +5373,14 @@ class CodeGen
     @direct_construct_used = Set.new
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
+    # ATTR_STRUCT_DEVIRT: [owner, ivar] pairs drop_unsafe_embeddings below
+    # allowed to embed ONLY because a synthesized struct-aware accessor
+    # (emit_ivar_accessor_pair) will override the plain native
+    # attr_reader/writer/accessor that would otherwise still read/write
+    # the ordinary iv_tbl -- see that method's own comment for the full
+    # soundness argument. Populated by drop_unsafe_embeddings, read by
+    # emit_synthesized_accessors after compile_all runs.
+    @synthesize_accessor_for = Set.new
     # @clean_cache/@probing (above) and @ivar_layout (below, temporarily the
     # RAW layout) both have to exist before drop_unsafe_embeddings runs --
     # it calls compiles_clean?, which calls compile_method, which reads
@@ -4348,9 +5460,10 @@ class CodeGen
 
       # A per-owner #initialize gate alone isn't enough: an ivar only
       # embeds safely if *every* read/write of it goes through this
-      # compiler's own GETIV/SETIV codegen. A plain `attr_reader`/
-      # `attr_writer`/`attr_accessor` for that exact same name is a real,
-      # live counterexample -- its native C implementation
+      # compiler's own GETIV/SETIV codegen -- or through a replacement
+      # this file itself controls just as completely. A plain
+      # `attr_reader`/`attr_writer`/`attr_accessor` for that exact same
+      # name is a real, live counterexample -- its native C implementation
       # (3rd/mruby/src/class.c's own `attr_reader`/`attr_writer`) is a
       # bare `mrb_iv_get`/`mrb_iv_set` against the ordinary dynamic
       # `iv_tbl`, with no way to know this class's own SETIV codegen wrote
@@ -4369,9 +5482,44 @@ class CodeGen
       # "<name>="  (a writer) -- checked directly here, the same way
       # monomorphic_target already treats an irep-nil MethodDef as "native,
       # no compiled body", rather than assumed safe by construction.
+      #
+      # ATTR_STRUCT_DEVIRT: a `kind: :ivar_accessor` exposure specifically
+      # (as opposed to any OTHER irep-nil MethodDef under this owner --
+      # e.g. a `Struct.new(:name, ...)` member accessor, a completely
+      # different, non-iv_tbl storage mechanism this file has no business
+      # touching) is the ONE native-exposure shape this file can safely
+      # neutralize itself: emit_ivar_accessor_pair below hand-builds a
+      # real compiled getter/setter using the exact same struct-field
+      # codegen GETIV/SETIV already use, and the caller registers it in
+      # register.cxx the ordinary way -- overriding attr_reader's own
+      # installation PROGRAM-WIDE (mrb_define_method replaces the whole
+      # class's own method-table entry for that name, so a genuinely
+      # dynamic call path -- an unprovable receiver class, `send`,
+      # reflection -- reaches this synthesized accessor exactly the same
+      # as a statically-devirtualized one; IVAR_ACCESSOR_DEVIRT's own
+      # call-site shortcut in compile_send is a distinct, purely-additive
+      # speed optimization on top of this, never a substitute for it --
+      # it still falls through to `mrb_funcall` whenever a call site can't
+      # prove its receiver's class, and that `mrb_funcall` needs THIS
+      # override already in place to land somewhere struct-aware). Only
+      # ivars whose native reader AND writer exposure (when both exist)
+      # are exclusively :ivar_accessor qualify; anything else keeps the
+      # ivar off the struct exactly as before.
       safe = ivars.reject do |name, _|
-        natively_exposed?(owner, name) || natively_exposed?(owner, "#{name}=") ||
-          !every_accessor_compiles?(owner, name)
+        reader_native = natively_exposed?(owner, name)
+        writer_native = natively_exposed?(owner, "#{name}=")
+        reader_blocked = reader_native && !synthesizable_accessor_only?(owner, name)
+        writer_blocked = writer_native && !synthesizable_accessor_only?(owner, "#{name}=")
+        next true if reader_blocked || writer_blocked || !every_accessor_compiles?(owner, name)
+
+        # Record exactly which of reader/writer actually needs a
+        # synthesized override -- never both just because one did: a
+        # class with only `attr_reader :x` (no `attr_writer`) must not
+        # gain a brand-new public `x=` nobody wrote, a real behavior
+        # change (NoMethodError today, silently accepted after).
+        @synthesize_accessor_for << [owner, name, :reader] if reader_native
+        @synthesize_accessor_for << [owner, name, :writer] if writer_native
+        false
       end
       out[owner] = safe unless safe.empty?
     end
@@ -4386,6 +5534,26 @@ class CodeGen
   # whenever some other real accessor would silently miss it.
   def natively_exposed?(owner, name)
     (@registry[name] || []).any? { |d| d.owner == owner && d.irep.nil? }
+  end
+
+  # ATTR_STRUCT_DEVIRT: are ALL of this exact owner's own native
+  # definitions of `name` specifically a plain attr_reader/writer/
+  # accessor (kind: :ivar_accessor)? True vacuously when there are none
+  # (natively_exposed? already false in that case, so the caller never
+  # actually relies on this branch) or when the only one there is really
+  # is an :ivar_accessor. False whenever some OTHER native, non-bytecode
+  # definition shares this exact owner+name -- the concrete, checked
+  # counterexample is a `Struct.new(:name, ...)` member accessor
+  # (build_registry's own SENDB case, `kind: nil` -- see its own
+  # comment): Struct stores members positionally, never through iv_tbl
+  # at all, so there is no GETIV/SETIV-shaped struct field this file
+  # could ever synthesize a replacement for, and the ivar (which would
+  # only even appear in ivar_layout in the first place if some OTHER,
+  # unrelated method on the same class also does real `@name = ...`
+  # bytecode -- a real possibility, not paranoia) has to stay off the
+  # struct exactly as natively_exposed? alone already decided.
+  def synthesizable_accessor_only?(owner, name)
+    (@registry[name] || []).select { |d| d.owner == owner }.all? { |d| d.kind == :ivar_accessor }
   end
 
   # A real, previously-undiscovered gap in this same "safe to embed" gate,
@@ -4748,6 +5916,68 @@ class CodeGen
     @annotations[defs.first.irep]&.ret == :array
   end
 
+  # ELEMENT_CLASS_SUPPORT: the same MONO-keyed annotation lookup
+  # annotated_array_return performs, for the element dimension -- see
+  # ElementAnnotations' own header for what each field claims and why a
+  # hand-placed claim is safe here (every consumer runtime-guards it).
+  # MONO-only for the identical reason: a magic comment sits on ONE irep,
+  # so it can only speak for a call site when no other method in the whole
+  # program shares the name.
+  def annotated_element_return(name)
+    defs = @registry[name]
+    return nil unless defs && defs.size == 1 && defs.first.irep
+
+    @element_annotations[defs.first.irep]&.element
+  end
+
+  def annotated_ret_class(name)
+    defs = @registry[name]
+    return nil unless defs && defs.size == 1 && defs.first.irep
+
+    @element_annotations[defs.first.irep]&.ret_class
+  end
+
+  # ELEMENT_CLASS_SUPPORT: "the receiver of this block-carrying call is a
+  # proven Array -- an Array of WHAT?" Asked by every block recognizer
+  # right after its own static Array gate passes, and answered by exactly
+  # the same top-level scan ArrayElementLayout's own sweep uses, so the
+  # two can never drift apart on a soundness-critical question (the same
+  # sharing argument proven_array_source's own comment makes for the
+  # Array-ness question). This wrapper only supplies what is specific to a
+  # CodeGen instance: the whole-program registry, the finished element
+  # table, and the two annotation lookups.
+  #
+  # nil (the overwhelmingly common answer) means the loop body compiles
+  # exactly as it did before this mechanism existed -- every per-element
+  # call stays an ordinary POLY `mrb_funcall`.
+  def proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    array_element_source_scan(irep, idx, dest_reg, element_ctx(ivar_classes, mand, arg_classes, owner_name))
+  end
+
+  # Memoized for the same reason eqq_literal_devirt_safe? memoizes: the
+  # registry never changes after CodeGen.new, so this is a pure function
+  # of it, rebuilt once instead of per call site.
+  def known_owner_set
+    @known_owner_set ||= Set.new(@registry.values.flatten.map(&:owner))
+  end
+
+  # See self_receiver_class: every class some other class inherits from.
+  # Memoized for the same reason as above -- @superclass_of is fixed at
+  # construction.
+  def subclassed_set
+    @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
+  end
+
+  def element_ctx(ivar_classes, mand, arg_classes, owner_name)
+    { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
+      class_annotations: @class_annotations, element_annotations: @element_annotations,
+      known_owners: known_owner_set, subclassed: subclassed_set,
+      ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
+      elements: @element_layout,
+      annotated_element: ->(n) { annotated_element_return(n) },
+      annotated_ret_class: ->(n) { annotated_ret_class(n) } }
+  end
+
   # SYM_DEVIRT: resolve a `&:sym` block-pass target for direct per-element
   # dispatch inside emit_sym_inline's own inlined loop. Returns
   # `[:mono, def]`, `[:poly, defs]`, or nil -- applying compile_send's own
@@ -4882,6 +6112,106 @@ class CodeGen
     sanitize("#{owner}_ivars_type")
   end
 
+  # ATTR_STRUCT_DEVIRT: the real compiled getter/setter pair for one
+  # [owner, ivar, :reader | :writer] entry drop_unsafe_embeddings' own
+  # @synthesize_accessor_for recorded -- see that method's own comment
+  # for the full soundness argument (this is what makes it safe: once
+  # register.cxx registers these, EVERY access path reaches struct-aware
+  # code, not just a statically-devirtualized call site). No bytecode
+  # body exists to translate (attr_reader/writer never had one), so this
+  # hand-builds the exact same box/check/unbox codegen GETIV/SETIV
+  # already use for an embedded ivar (compile_insn's own GETIV/SETIV
+  # cases) instead. Returns one `compiled`-shaped Hash -- same keys
+  # compile_method's own return value has (label/owner/name/entry/impl/
+  # arity/arg_c_types/code/visibility) -- so it slots into the exact same
+  # `compiled` array as every ordinary compiled method, needing no
+  # special-casing from emit_forward_decls/emit_decls_header/the
+  # `== compiled entry points ==` diagnostic below.
+  def emit_ivar_accessor_pair(owner, ivar, which)
+    type = embed_type(owner, ivar)
+    return nil unless type
+
+    sname = struct_name(owner)
+    ops = TYPE_OPS.fetch(type)
+    base = "#{sanitize(owner)}_#{sanitize(ivar)}"
+
+    case which
+    when :reader
+      impl = "#{base}_impl"
+      entry = base
+      code = <<~CPP
+        // #{owner}##{ivar} -- synthesized attr_reader override (@#{ivar} is
+        // embedded; this replaces the plain native accessor -- see
+        // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment).
+        mrb_value #{impl}(mrb_state* M, mrb_value self) {
+          return #{ops[:box]}(((#{sname}*)DATA_PTR(self))->#{ivar});
+        }
+
+        static mrb_value #{entry}(mrb_state* M, mrb_value self) {
+          return #{impl}(M, self);
+        }
+
+      CPP
+      { label: "synth:#{owner}##{ivar}", owner: owner, name: ivar, entry: entry, impl: impl,
+        arity: 0, arg_c_types: [], code: code, visibility: :public }
+    when :writer
+      impl = "#{base}_eq_impl"
+      entry = "#{base}_eq"
+      code = <<~CPP
+        // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
+        // embedded; this replaces the plain native accessor -- see
+        // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment). Same
+        // guarded check-then-unbox as SETIV's own embedded-ivar codegen
+        // (compile_insn's own SETIV case) -- the whole-program analysis
+        // proved every *compiled* write site is this type, but an
+        // external caller (this accessor's own whole reason to exist) is
+        // exactly the case that analysis can't see, so this checks rather
+        // than blindly trusting it. Returns the assigned value, never the
+        // struct field read back -- real attr_writer's own behavior
+        // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
+        // MethodDef's own kind: :ivar_accessor comment for the citation).
+        mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
+          if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "@#{ivar}: expected #{ops[:err]}");
+          ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);
+          return arg;
+        }
+
+        static mrb_value #{entry}(mrb_state* M, mrb_value self) {
+          mrb_value arg;
+          mrb_get_args(M, "o", &arg);
+          return #{impl}(M, self, arg);
+        }
+
+      CPP
+      { label: "synth:#{owner}##{ivar}=", owner: owner, name: "#{ivar}=", entry: entry, impl: impl,
+        arity: 1, arg_c_types: ['mrb_value'], code: code, visibility: :public }
+    end
+  end
+
+  # Every synthesized accessor drop_unsafe_embeddings' own
+  # @synthesize_accessor_for recorded, built AFTER compile_all runs (it
+  # reads @ivar_layout, already finalized in initialize -- ordering here
+  # doesn't matter the way it does for GETIV/SETIV codegen, but running
+  # after keeps this call visually next to the rest of the post-compile
+  # assembly in the driver below). `emit_ivar_accessor_pair` returning
+  # nil (embed_type suddenly absent) can't actually happen -- an ivar
+  # only ever enters @synthesize_accessor_for inside the same
+  # drop_unsafe_embeddings pass that puts it in the real, final
+  # @ivar_layout -- but checked rather than assumed, same discipline as
+  # every other "this can't happen, but see for yourself" guard in this
+  # file.
+  #
+  # `only_owners` mirrors compile_all's own filter (its own comment has
+  # the real cross-gem-link-failure bug that guard exists for) -- an
+  # owner this run isn't actually emitting gets no synthesized accessor
+  # either, same reasoning: this run's own generated file would declare
+  # a struct/DATA_PTR access for a class it never defines here.
+  def emit_synthesized_accessors(only_owners: nil)
+    pairs = @synthesize_accessor_for.to_a
+    pairs = pairs.select { |owner, _, _| only_owners.include?(owner) } if only_owners
+    pairs.sort.filter_map { |owner, ivar, which| emit_ivar_accessor_pair(owner, ivar, which) }
+  end
+
   # One real C struct + mrb_data_type per class that has any embeddable
   # ivars -- the actual "embed known primitive ivars into RData" mechanism.
   # Non-embeddable ivars on the same class (Counter#@label, mixed
@@ -4907,6 +6237,70 @@ class CodeGen
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
     end
     out
+  end
+
+  # ARY_ENTRY_INLINE: a same-translation-unit reproduction of
+  # `mrb_ary_entry` (3rd/mruby/src/array.c, read directly) --
+  #
+  #   struct RArray *a = mrb_ary_ptr(ary);
+  #   mrb_int len = ARY_LEN(a);
+  #   if (n < 0) n += len;
+  #   if (n < 0 || len <= n) return mrb_nil_value();
+  #   return ARY_PTR(a)[n];
+  #
+  # -- byte-for-byte, using only the public `mrb_ary_ptr`/`ARY_LEN`/
+  # `ARY_PTR` macros (mruby/array.h), never assumed equivalent. Every
+  # text this file emits of the shape "mrb_ary_ref" + "(M, " + args +
+  # ")" is replaced with "bc2cpp_ary_entry" + that identical "(M, " +
+  # args + ")" (the unused `M` parameter kept only so every call site
+  # stays a pure, mechanical, argument-for-argument rename -- the real
+  # `mrb_ary_ref` macro is itself `#define mrb_ary_ref(mrb, ary, n)
+  # mrb_ary_entry(ary, n)`, mruby/array.h read directly, so this changes
+  # NOTHING about bounds-checking, negative-index normalizing, or the
+  # nil-on-out-of-bounds result -- same behavior, different call target).
+  #
+  # The reason this exists at all: `mrb_ary_ref` is a macro alias for
+  # `mrb_ary_entry`, a real out-of-line `MRB_API` function
+  # (3rd/mruby/src/array.c) living in libmruby.a, a SEPARATE translation
+  # unit from every file this tool generates -- and this project does not
+  # build with LTO (docs/adr/0133/0135 record it being tried and reverted
+  # for wio, never adopted generally), so that call cannot be inlined by
+  # the real build, ever. Measured directly against this repo's own
+  # `libmruby.a` at real `-O3` (no LTO): replacing the out-of-line call
+  # with this in-TU `static inline` reproduction measured a real 2.3-2.4x
+  # speedup on a 245M-element-visit micro-benchmark, reproduced twice --
+  # by far the largest of the three array-access costs measured that
+  # round (dwarfing both a known-element-type `mrb_fixnum()` shortcut and
+  # a full unboxed-element representation change, the latter of which was
+  # rejected outright: 3rd/mruby's own GC walks a real `RArray` to mark
+  # array elements (src/gc.c, gc_mark_children), so anything other than a
+  # real `RArray` backing every array this file emits is a live
+  # use-after-free hazard, not a soundness tradeoff this file's usual
+  # "wrong hint just falls back to mrb_funcall" guard shape can cover).
+  # Purely mechanical and behavior-preserving, so no `#error`/fallback
+  # path is needed here the way a real class hint would need one -- this
+  # is not a new fact being trusted, just where the exact same, always-
+  # true fact (`mrb_ary_ref`'s real definition) gets evaluated.
+  #
+  # Emitted once per generated file, and only when at least one compiled
+  # method's own text actually calls it (scanning `compiled`'s own
+  # already-assembled `:code` text -- same "only emit what's needed"
+  # shape as emit_const_lookup_helper below, just checked post hoc
+  # against the real output instead of a flag threaded through every one
+  # of this file's own ~20 emission call sites individually).
+  def emit_ary_entry_helper(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_ary_entry(') }
+
+    <<~CPP
+      static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
+        struct RArray* a = mrb_ary_ptr(ary);
+        mrb_int len = ARY_LEN(a);
+        if (n < 0) n += len;
+        if (n < 0 || len <= n) return mrb_nil_value();
+        return ARY_PTR(a)[n];
+      }
+
+    CPP
   end
 
   # The shared helper GETCONST's own owner-scope-first codegen calls
@@ -6217,9 +7611,24 @@ class CodeGen
       end
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == 'SSENDB',
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
     end
     regions
+  end
+
+  # ELEMENT_CLASS_SUPPORT: the element class of one recognized region's
+  # receiver, or nil. Shared by every recognizer below so the gate is
+  # written once. An `SSENDB` site always answers nil: its receiver is the
+  # implicit self, which has no register to backward-scan, and the only
+  # self-receiver these recognizers admit at all is an enclosing owner
+  # that literally IS `Array` (see recognize_each_regions' own comment) --
+  # a case with no element fact available and none worth inventing.
+  def region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    return nil if insn.op == 'SSENDB'
+
+    proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
   end
 
   # INTERP_UNLOCK / CORE_ARRAY_CHAIN: the chained-receiver rule, shared by
@@ -6331,7 +7740,9 @@ class CodeGen
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
                    method_name: meth, init_reg: is_fold ? (dest_reg.to_i + 1).to_s : nil,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == 'SSENDB',
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
     end
     regions
   end
@@ -6377,7 +7788,9 @@ class CodeGen
       end
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: meth, ssendb: insn.op == 'SSENDB' }
+                   method_name: meth, ssendb: insn.op == 'SSENDB',
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
     end
     regions
   end
@@ -6586,7 +7999,9 @@ class CodeGen
       end
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   method_name: meth, ssendb: insn.op == 'SSENDB' }
+                   method_name: meth, ssendb: insn.op == 'SSENDB',
+                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                   owner_name) }
     end
     regions
   end
@@ -6630,6 +8045,72 @@ class CodeGen
   #     enclosing function, register index `b` already names one of its
   #     own real `r<b>` variables directly -- no offset applied, unlike
   #     every other register reference in this same instruction stream.
+  # ELEMENT_CLASS_SUPPORT: publish "the receiver of THIS instruction is the
+  # loop element, whose class is `elem_class`" for exactly the one
+  # instruction about to be translated, then take it straight back down.
+  # compile_send consumes the hint on read (see its own first lines), so
+  # even a recursive compile triggered from inside that same call --
+  # compiles_clean? probing a devirtualization candidate re-enters
+  # compile_method for a COMPLETELY different body -- can never see a
+  # stale hint belonging to this loop. The `ensure` is the second half of
+  # the same belt-and-braces: a hint that some path never reads still
+  # cannot outlive this one instruction.
+  #
+  # Only a real explicit-receiver send is eligible. `SSEND`/`SSEND0` are
+  # implicit-self calls (the receiver is the enclosing method's own self,
+  # never the element) and everything else has no receiver register at
+  # all.
+  def with_element_hint(block_irep, insn, i, elem_reg, elem_class)
+    hint = nil
+    if elem_class && elem_reg && %w[SEND SEND0].include?(insn.op) &&
+       element_receiver?(block_irep, i, insn.args[/^R(\d+)/, 1], elem_reg)
+      hint = elem_class
+    end
+    prev = @elem_class_hint
+    @elem_class_hint = hint
+    yield
+  ensure
+    @elem_class_hint = prev
+  end
+
+  # ELEMENT_CLASS_SUPPORT: does register `reg` still hold the loop element
+  # at instruction `idx` of this block body? mrbc never sends directly on
+  # a block parameter register -- it always MOVEs the parameter into a
+  # scratch register first (`MOVE R10 R8` then `SEND R10 :dead?`,
+  # confirmed against this project's own real generated output, not
+  # assumed) -- so this follows MOVE chains back exactly the way
+  # trace_new_target and proven_array_source_scan already do, and answers
+  # true only when the chain bottoms out on the element register with
+  # nothing having overwritten it in between.
+  #
+  # A block body that REASSIGNS its own parameter (`each { |a| a = x;
+  # a.foo }`) writes the element register directly, and that write is a
+  # non-MOVE writer this scan stops at -- correctly answering false.
+  #
+  # Straight-line, control-flow-insensitive, exactly like every other
+  # backward scan in this file: a jump into the middle of the scanned
+  # range could make this answer true where a real execution path had
+  # overwritten the register. That is a PRECISION limit, not a soundness
+  # one -- the emitted code still checks `mrb_obj_class` at runtime before
+  # taking the direct call, so the worst case is one failed pointer
+  # comparison and an ordinary `mrb_funcall`, never a wrong dispatch.
+  def element_receiver?(block_irep, idx, reg, elem_reg)
+    return false unless reg
+
+    (idx - 1).downto(0) do |i|
+      insn = block_irep.instructions[i]
+      next unless insn
+      next unless insn.args[/^R(\d+)/, 1] == reg
+      return false unless insn.op == 'MOVE'
+
+      src = insn.args.scan(/R(\d+)/).flatten[1]
+      return false unless src
+
+      reg = src
+    end
+    reg == elem_reg
+  end
+
   def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
                                 break_dest: nil, break_label: nil)
     case insn.op
@@ -6813,12 +8294,19 @@ class CodeGen
     break_label = "Lbc2cpp_each_end_#{region[:block_addr]}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                              break_dest: dest_reg, break_label: break_label)
+      # ELEMENT_CLASS_SUPPORT: the block's own single mandatory parameter
+      # is R1 in its own register numbering (mandatory_arity == 1, checked
+      # by this region's own recognizer), and this emitter binds exactly
+      # that register to `mrb_ary_ref(...)` below -- so R1 IS the loop
+      # element for the whole body.
+      with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
+        body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                break_dest: dest_reg, break_label: break_label)
+      end
     end
     return nil if body.include?('#error')
 
@@ -6834,7 +8322,7 @@ class CodeGen
       out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
     end
     out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_each_i_#{region[:block_addr]});\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{region[:block_addr]});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -6966,14 +8454,21 @@ class CodeGen
     result_var = "bc2cpp_collect_v_#{region[:block_addr]}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                result_var: result_var, break_dest: dest_reg,
-                                                break_label: break_label,
-                                                broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}")
+      # ELEMENT_CLASS_SUPPORT: R1 in the block's own numbering is the
+      # ELEMENT for every method this recognizer admits -- including
+      # `each_with_index`, whose second parameter (R2) is the fixnum index
+      # and is deliberately NOT hinted (it is not an element, and its
+      # class is already known to codegen anyway).
+      with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
+        body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                  result_var: result_var, break_dest: dest_reg,
+                                                  break_label: break_label,
+                                                  broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}")
+      end
     end
     return nil if body.include?('#error')
 
@@ -6993,7 +8488,7 @@ class CodeGen
     end
     out << "      mrb_value r#{offset} = self;\n"
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_collect_i_#{region[:block_addr]});\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{region[:block_addr]});\n"
     out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{region[:block_addr]});\n" if meth == 'each_with_index'
     out << body
     out << "      #{iter_label}:;\n"
@@ -7021,7 +8516,7 @@ class CodeGen
       out << "      if (!mrb_array_p(#{result_var})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: flat_map yielded non-Array\"); }\n"
       out << "      mrb_int bc2cpp_collect_fm_n_#{region[:block_addr]} = RARRAY_LEN(#{result_var});\n"
       out << "      for (mrb_int bc2cpp_collect_fm_i_#{region[:block_addr]} = 0; bc2cpp_collect_fm_i_#{region[:block_addr]} < bc2cpp_collect_fm_n_#{region[:block_addr]}; ++bc2cpp_collect_fm_i_#{region[:block_addr]}) {\n"
-      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, mrb_ary_ref(M, #{result_var}, bc2cpp_collect_fm_i_#{region[:block_addr]}));\n"
+      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, bc2cpp_ary_entry(M, #{result_var}, bc2cpp_collect_fm_i_#{region[:block_addr]}));\n"
       out << "      }\n"
       out << "      } else {\n"
       out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
@@ -7109,14 +8604,23 @@ class CodeGen
     result_var = "bc2cpp_accum_v_#{region[:block_addr]}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                result_var: result_var, break_dest: dest_reg,
-                                                break_label: break_label,
-                                                broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}")
+      # ELEMENT_CLASS_SUPPORT: which parameter register holds the ELEMENT
+      # depends on the shape this region actually is -- a predicate block
+      # (`any?`/`all?`/`none?`/`count`) takes the element as its single
+      # parameter R1, while a fold (`reduce`/`inject`) takes the
+      # ACCUMULATOR as R1 and the element as R2. Read straight off the
+      # same `is_fold` flag that decides the register binding a few lines
+      # below, so the two can never disagree.
+      with_element_hint(block_irep, insn, i, is_fold ? '2' : '1', region[:elem_class]) do
+        body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                  result_var: result_var, break_dest: dest_reg,
+                                                  break_label: break_label,
+                                                  broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}")
+      end
     end
     return nil if body.include?('#error')
 
@@ -7146,9 +8650,9 @@ class CodeGen
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     if is_fold
       out << "      r#{param_reg} = #{acc_var};\n"
-      out << "      r#{param2_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+      out << "      r#{param2_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
     else
-      out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+      out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
     end
     out << body
     out << "      #{iter_label}:;\n"
@@ -7267,7 +8771,7 @@ class CodeGen
            "bc2cpp_sym_i_#{region[:sym_addr]} < RARRAY_LEN(#{recv_expr}); " \
            "++bc2cpp_sym_i_#{region[:sym_addr]}) {\n"
     out << "      mrb_value bc2cpp_sym_e_#{region[:sym_addr]} = " \
-           "mrb_ary_ref(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
+           "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sym_i_#{region[:sym_addr]});\n"
     if meth == 'each'
       out << "      #{sym_call_line(sym, "bc2cpp_sym_e_#{region[:sym_addr]}")}\n"
     else
@@ -7437,14 +8941,18 @@ class CodeGen
     result_var = "bc2cpp_sort_v_#{region[:block_addr]}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                result_var: result_var, break_dest: dest_reg,
-                                                break_label: break_label,
-                                                broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}")
+      # ELEMENT_CLASS_SUPPORT: a `sort_by`/`uniq` key block takes the
+      # element as its single parameter R1, same as the collect family.
+      with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
+        body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                  result_var: result_var, break_dest: dest_reg,
+                                                  break_label: break_label,
+                                                  broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}")
+      end
     end
     return nil if body.include?('#error')
 
@@ -7463,7 +8971,7 @@ class CodeGen
     end
     out << "      mrb_value r#{offset} = self;\n"
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    out << "      r#{param_reg} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_keys_#{addr}, #{result_var});\n"
@@ -7488,8 +8996,8 @@ class CodeGen
     out << "    mrb_int bc2cpp_sort_m_#{addr} = RARRAY_LEN(bc2cpp_sort_keys_#{addr});\n"
     out << "    mrb_value bc2cpp_sort_pairs_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_m_#{addr});\n"
     out << "    for (mrb_int bc2cpp_sort_j_#{addr} = 0; bc2cpp_sort_j_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_j_#{addr}) {\n"
-    out << "      mrb_value bc2cpp_sort_e_#{addr} = mrb_ary_ref(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"
-    out << "      mrb_value bc2cpp_sort_k_#{addr} = mrb_ary_ref(M, bc2cpp_sort_keys_#{addr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_e_#{addr} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_j_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_k_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_keys_#{addr}, bc2cpp_sort_j_#{addr});\n"
     out << "      mrb_value bc2cpp_sort_trip_#{addr} = mrb_ary_new_capa(M, 3);\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, bc2cpp_sort_k_#{addr});\n"
     out << "      mrb_ary_push(M, bc2cpp_sort_trip_#{addr}, mrb_fixnum_value(bc2cpp_sort_j_#{addr}));\n"
@@ -7508,14 +9016,14 @@ class CodeGen
     # above as mrb_fixnum_value(j)), never user data -- no TypeError
     # path possible, matching native sort's own unchecked index ints.
     out << "    for (mrb_int bc2cpp_sort_a_#{addr} = 1; bc2cpp_sort_a_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_a_#{addr}) {\n"
-    out << "      mrb_value bc2cpp_sort_tmp_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_a_#{addr});\n"
+    out << "      mrb_value bc2cpp_sort_tmp_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_a_#{addr});\n"
     out << "      mrb_int bc2cpp_sort_b_#{addr} = bc2cpp_sort_a_#{addr} - 1;\n"
     out << "      while (bc2cpp_sort_b_#{addr} >= 0) {\n"
-    out << "        mrb_value bc2cpp_sort_pa_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr});\n"
-    out << "        mrb_value bc2cpp_sort_ka_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pa_#{addr}, 0);\n"
-    out << "        mrb_value bc2cpp_sort_ia_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pa_#{addr}, 1);\n"
-    out << "        mrb_value bc2cpp_sort_kb_#{addr} = mrb_ary_ref(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
-    out << "        mrb_value bc2cpp_sort_ib_#{addr} = mrb_ary_ref(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
+    out << "        mrb_value bc2cpp_sort_pa_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr});\n"
+    out << "        mrb_value bc2cpp_sort_ka_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ia_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pa_#{addr}, 1);\n"
+    out << "        mrb_value bc2cpp_sort_kb_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
+    out << "        mrb_value bc2cpp_sort_ib_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
     out << "        mrb_int bc2cpp_sort_c_#{addr} = mrb_cmp(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
     out << "        if (bc2cpp_sort_c_#{addr} == -2) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"ArgumentError\")), \"bc2cpp: sort_by comparison failed\"); }\n"
     out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
@@ -7530,16 +9038,16 @@ class CodeGen
       out << "    mrb_value bc2cpp_sort_lastk_#{addr} = mrb_nil_value();\n"
       out << "    mrb_bool bc2cpp_sort_havek_#{addr} = FALSE;\n"
       out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
-      out << "      mrb_value bc2cpp_sort_pu_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr});\n"
-      out << "      mrb_value bc2cpp_sort_ku_#{addr} = mrb_ary_ref(M, bc2cpp_sort_pu_#{addr}, 0);\n"
+      out << "      mrb_value bc2cpp_sort_pu_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr});\n"
+      out << "      mrb_value bc2cpp_sort_ku_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_pu_#{addr}, 0);\n"
       out << "      mrb_int bc2cpp_sort_eq_#{addr} = (bc2cpp_sort_havek_#{addr} && mrb_cmp(M, bc2cpp_sort_ku_#{addr}, bc2cpp_sort_lastk_#{addr}) == 0) ? 1 : 0;\n"
-      out << "      if (!bc2cpp_sort_eq_#{addr}) { mrb_ary_push(M, r#{dest_reg}, mrb_ary_ref(M, bc2cpp_sort_pu_#{addr}, 2)); }\n"
+      out << "      if (!bc2cpp_sort_eq_#{addr}) { mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_sort_pu_#{addr}, 2)); }\n"
       out << "      bc2cpp_sort_lastk_#{addr} = bc2cpp_sort_ku_#{addr};\n"
       out << "      bc2cpp_sort_havek_#{addr} = TRUE;\n"
       out << "    }\n"
     else
       out << "    for (mrb_int bc2cpp_sort_u_#{addr} = 0; bc2cpp_sort_u_#{addr} < bc2cpp_sort_m_#{addr}; ++bc2cpp_sort_u_#{addr}) {\n"
-      out << "      mrb_ary_push(M, r#{dest_reg}, mrb_ary_ref(M, mrb_ary_ref(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
+      out << "      mrb_ary_push(M, r#{dest_reg}, bc2cpp_ary_entry(M, bc2cpp_ary_entry(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_u_#{addr}), 2));\n"
       out << "    }\n"
     end
     out << "    }\n"
@@ -7950,7 +9458,7 @@ class CodeGen
       # destructured local, all reading the same call-result register.
       d, s = regs(a, 2)
       c = a[/^R\d+\s+R\d+\s+(\d+)/, 1]
-      "  r#{d} = mrb_array_p(r#{s}) ? mrb_ary_ref(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
+      "  r#{d} = mrb_array_p(r#{s}) ? bc2cpp_ary_entry(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
     when 'GETIDX'
       # "GETIDX R2 (R3)" -- R[a] = R[a][R[a+1]] (real OP_GETIDX semantics,
       # src/vm.c): unlike AREF above, the index here is itself a *register*
@@ -7972,7 +9480,7 @@ class CodeGen
       d, s = regs(a, 2)
       <<~CPP
         if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
-          r#{d} = mrb_ary_ref(M, r#{d}, mrb_integer(r#{s}));
+          r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
         } else if (mrb_hash_p(r#{d})) {
           r#{d} = mrb_hash_get(M, r#{d}, r#{s});
         } else {
@@ -7996,7 +9504,7 @@ class CodeGen
       d, s = regs(a, 2)
       <<~CPP
         if (mrb_array_p(r#{s})) {
-          r#{d} = mrb_ary_ref(M, r#{s}, 0);
+          r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
         } else if (mrb_hash_p(r#{s})) {
           r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
         } else {
@@ -8344,6 +9852,14 @@ class CodeGen
   end
 
   def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
+    # ELEMENT_CLASS_SUPPORT: consume-and-clear. The hint is published by
+    # with_element_hint for exactly the one instruction being translated
+    # right now, and taking it down here (before ANY other work, including
+    # the compiles_clean? probes further down that re-enter compile_method
+    # for unrelated bodies) is what makes it impossible for a second,
+    # unrelated call site to read a hint that was never about it.
+    elem_class_hint = @elem_class_hint
+    @elem_class_hint = nil
     d = args[/^R(\d+)/, 1]
     # Real bug, caught by running against real code: this charset omitted
     # `?` -- every predicate-style method name (`rpg2003?`, `key?`, `eof?`,
@@ -8862,7 +10378,9 @@ class CodeGen
     # every future extension to trace_new_target's own reach inherits the
     # same safety net for free.
     typed = false
+    via_element = false
     ivar_accessor_target = nil
+    known_class = nil
     if target.nil? && !self_implicit && irep && idx
       cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
@@ -8878,43 +10396,72 @@ class CodeGen
       # new plumbing needed to reach them from here.
       known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
                                       class_layout: @class_layout, registry: @registry)
-      if known_class
-        candidate = @registry[name].find { |md| md.owner == known_class }
-        # Same two guards as the MONO path above (its own comments have the
-        # real bugs both catch, e.g. Game::State#set_parallax/
-        # #set_screen_transition/#show_picture/#erase_picture -- all four
-        # real TYPED-path arity mismatches this exact check fixed, caught
-        # building Game::Screen's own compiled target): a class-exact
-        # candidate still isn't safe to call directly unless its own body
-        # actually compiles AND the call site's argument count matches its
-        # real mandatory arity.
-        if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep)) &&
-           compiles_clean?(candidate.irep) && n == mandatory_arity(@ireps.fetch(candidate.irep))
-          target = candidate
-          typed = true
-        elsif candidate&.kind == :ivar_accessor &&
-              n == (name.end_with?('=') ? 1 : 0)
-          # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
-          # will -- build_registry's own attr_reader/writer/accessor case
-          # registers it that way on purpose, see MethodDef's own `kind`
-          # comment), so it can never satisfy the ordinary TYPED branch
-          # just above -- an attr_reader/writer/accessor name is *always*
-          # POLY-native by the existing MONO/TYPED paths' own standards,
-          # regardless of how many real classes happen to define it. This
-          # is a real, separate devirtualization: not "call this class's
-          # own compiled body" (there is none), but "this class's own
-          # accessor is *provably* a bare mrb_iv_get/mrb_iv_set against
-          # the ordinary dynamic iv_tbl" (MethodDef's own `kind` comment
-          # has the real 3rd/mruby/src/class.c citation) -- safe to inline
-          # directly, runtime-guarded exactly like TYPED above, with no
-          # `_impl` function involved at all. Arity here is exactly 0 for
-          # a getter, exactly 1 for a setter (`name.end_with?('=')`) --
-          # `mandatory_arity`/`pure_mandatory_arity?` don't apply (there is
-          # no irep to ask), but a real attr_reader/writer call site can
-          # never have any other shape, so this is the complete, correct
-          # check on its own, not an approximation.
-          ivar_accessor_target = candidate
-        end
+    end
+    # ELEMENT_CLASS_SUPPORT: the same TYPED/IVAR_ACCESSOR resolution, fed
+    # by a fact the backward scan above structurally cannot reach. Inside
+    # an inlined block body the receiver is the loop-element register,
+    # which no instruction in that body ever writes (the EMITTER binds it,
+    # right outside the translated instruction stream), so trace_new_target
+    # has nothing to find -- and in fact never even runs there, because a
+    # block body is compiled with `idx` nil (see compile_block_body_insn's
+    # own delegation). The hint published by with_element_hint carries
+    # exactly the missing piece: "this receiver is element N of an array
+    # whose element class is X".
+    #
+    # Placed AFTER the ordinary trace on purpose, as a strict fallback:
+    # `known_class` is only ever nil here (the two sources are mutually
+    # exclusive in practice -- one only fires outside a block body, the
+    # other only inside), but ordering it this way means the pre-existing
+    # path keeps priority by construction rather than by coincidence, so
+    # nothing about a non-block call site can change.
+    #
+    # Everything downstream is shared verbatim with the TYPED path: the
+    # exact-owner registry match, the pure-mandatory/compiles_clean?/
+    # arity guards, the ONLY_OWNERS emission gate, and -- the part that
+    # matters for soundness -- the real runtime `mrb_class_ptr(...) ==
+    # mrb_obj_class(M, recv)` check with an `mrb_funcall` fallback. A
+    # wrong element fact can therefore only ever cost one failed pointer
+    # comparison, exactly like a wrong ivar-class hint.
+    if target.nil? && !self_implicit && known_class.nil? && elem_class_hint
+      known_class = elem_class_hint
+      via_element = true
+    end
+    if target.nil? && !self_implicit && known_class
+      candidate = @registry[name]&.find { |md| md.owner == known_class }
+      # Same two guards as the MONO path above (its own comments have the
+      # real bugs both catch, e.g. Game::State#set_parallax/
+      # #set_screen_transition/#show_picture/#erase_picture -- all four
+      # real TYPED-path arity mismatches this exact check fixed, caught
+      # building Game::Screen's own compiled target): a class-exact
+      # candidate still isn't safe to call directly unless its own body
+      # actually compiles AND the call site's argument count matches its
+      # real mandatory arity.
+      if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep)) &&
+         compiles_clean?(candidate.irep) && n == mandatory_arity(@ireps.fetch(candidate.irep))
+        target = candidate
+        typed = true
+      elsif candidate&.kind == :ivar_accessor &&
+            n == (name.end_with?('=') ? 1 : 0)
+        # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
+        # will -- build_registry's own attr_reader/writer/accessor case
+        # registers it that way on purpose, see MethodDef's own `kind`
+        # comment), so it can never satisfy the ordinary TYPED branch
+        # just above -- an attr_reader/writer/accessor name is *always*
+        # POLY-native by the existing MONO/TYPED paths' own standards,
+        # regardless of how many real classes happen to define it. This
+        # is a real, separate devirtualization: not "call this class's
+        # own compiled body" (there is none), but "this class's own
+        # accessor is *provably* a bare mrb_iv_get/mrb_iv_set against
+        # the ordinary dynamic iv_tbl" (MethodDef's own `kind` comment
+        # has the real 3rd/mruby/src/class.c citation) -- safe to inline
+        # directly, runtime-guarded exactly like TYPED above, with no
+        # `_impl` function involved at all. Arity here is exactly 0 for
+        # a getter, exactly 1 for a setter (`name.end_with?('=')`) --
+        # `mandatory_arity`/`pure_mandatory_arity?` don't apply (there is
+        # no irep to ask), but a real attr_reader/writer call site can
+        # never have any other shape, so this is the complete, correct
+        # check on its own, not an approximation.
+        ivar_accessor_target = candidate
       end
     end
     # A monomorphic target whose *owner* is being filtered out of this run's
@@ -8977,7 +10524,13 @@ class CodeGen
                                                     "#{impl}'s own native argument type)"
       if typed
         check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
-        note = "  // TYPED :#{name} -> #{target.owner}##{target.name} (receiver traced to #{target.owner}), " \
+        # ELEMENT_CLASS_SUPPORT: same codegen, different provenance -- the
+        # tag says which fact proved the receiver so a reader of the
+        # generated file can tell an ordinary traced receiver from an
+        # inlined-loop element without re-deriving it.
+        kind = via_element ? 'ELEMENT' : 'TYPED'
+        traced_note = via_element ? "inlined block element of Array<#{target.owner}>" : "receiver traced to #{target.owner}"
+        note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
@@ -9001,10 +10554,13 @@ class CodeGen
       # `name` actually resolves to on the real receiver) otherwise.
       owner = ivar_accessor_target.owner
       check = "mrb_class_ptr(#{const_chain_value_expr(owner)}) == mrb_obj_class(M, #{recv})"
+      # ELEMENT_CLASS_SUPPORT: see the TYPED branch above -- same tag, same
+      # reason, so both provenances stay greppable in generated output.
+      traced_note = via_element ? "inlined block element of Array<#{owner}>" : "receiver traced to #{owner}"
       if name.end_with?('=')
         ivar = name[0..-2]
         val = argv.first
-        note = "  // IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (receiver traced to #{owner}), " \
+        note = "  // IVAR_ACCESSOR#{via_element ? '/ELEMENT' : ''} :#{name} -> #{owner}#@#{ivar} (#{traced_note}), " \
                "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall) -- see " \
                "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
                "citation this reproduces exactly (attr_writer's own mrb_iv_set then returning the " \
@@ -9016,7 +10572,7 @@ class CodeGen
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
       else
-        note = "  // IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (receiver traced to #{owner}), " \
+        note = "  // IVAR_ACCESSOR#{via_element ? '/ELEMENT' : ''} :#{name} -> #{owner}#@#{name} (#{traced_note}), " \
                "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall) -- see " \
                "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
                "citation this reproduces exactly.\n"
@@ -9176,6 +10732,47 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # ELEMENT_CLASS_SUPPORT: the element dimension of the same ivar facts
+  # (see ArrayElementLayout's own header). Runs after ClassLayout because
+  # it only ever sweeps ivars ClassLayout has already proved hold an
+  # `Array`, and after ClassAnnotations because an incoming-argument class
+  # hint is one of the real terminals its value tracer bottoms out at.
+  element_annotations = ElementAnnotations.extract(ireps, registry, known_owners)
+  warn ''
+  warn '== magic-comment element annotations (# bc2cpp: ... -> Array<Klass> / -> Klass) =='
+  if element_annotations.empty?
+    warn '  (none found)'
+  else
+    element_annotations.each do |label, ann|
+      d = registry.values.flatten.find { |md| md.irep == label }
+      name = d ? "#{d.owner}##{d.name}" : label
+      claim = ann.element ? "Array<#{ann.element}>" : ann.ret_class
+      warn "  ELEM_ANNOTATED  #{name}  (-> #{claim})"
+    end
+  end
+
+  element_raw = ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
+                                           element_annotations, superclass_of)
+  element_layout = ArrayElementLayout.known(element_raw)
+  warn ''
+  warn '== known-array-element-class hints (guarded devirtualization only) =='
+  if element_layout.empty?
+    warn '  (none)'
+  else
+    element_layout.each do |klass, ivars|
+      ivars.each { |name, cls| warn "  ELEM_HINT  #{klass}#@#{name}  (Array<#{cls}>)" }
+    end
+  end
+
+  element_unknowns = ArrayElementLayout.unknowns(element_raw)
+  warn ''
+  warn '== array-element candidates (proven-Array ivar, element class poisoned to unknown) =='
+  if element_unknowns.empty?
+    warn '  (none)'
+  else
+    element_unknowns.each { |n| warn "  ELEM_CANDIDATE  #{n}" }
+  end
+
   candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
   warn ''
   warn '== annotation candidates (opaque incoming argument, unresolved) =='
@@ -9191,7 +10788,8 @@ if $PROGRAM_NAME == __FILE__
   # `annotations` (computed above, previously fed only to IvarLayout.analyze)
   # also now drives NATIVE_ARG_TARGETS' own native-argument calling
   # convention -- see that constant's own comment.
-  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of)
+  gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
+                    element_layout, element_annotations)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
@@ -9204,6 +10802,7 @@ if $PROGRAM_NAME == __FILE__
   # is safe to emit despite not being compiled in this run at all.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
   compiled = gen.compile_all(only_owners: only_owners, other_owners: other_owners)
+  compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
 
   # SKIP_UNSUPPORTED=1 drops any method whose body contains a `#error`
   # marker (an unmodeled opcode, or an arity this calling convention can't
@@ -9251,6 +10850,7 @@ if $PROGRAM_NAME == __FILE__
   end
   puts ''
   print gen.emit_structs
+  print gen.emit_ary_entry_helper(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
