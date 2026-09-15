@@ -1740,6 +1740,227 @@ class ClassAnnotations
 end
 
 # ---------------------------------------------------------------------------
+# Step 6f-bis: the shared "this expression is a proven fresh Array" rule.
+# Used by BOTH the whole-program ivar-class analysis below (Step 6g, at its
+# own SETIV sites) and, via CodeGen#proven_array_source, by every block
+# recognizer further down -- one implementation, so the two can never drift
+# apart on a soundness-critical question.
+# ---------------------------------------------------------------------------
+# INTERP_UNLOCK: the chained-receiver rule, shared by every block
+# recognizer further down in this file (and by Step 6g below). When the
+# static Array trace misses, scan backward
+# for the nearest write to the destination register; the receiver is
+# proven Array when that write is:
+#   - a BLOCK-CARRYING call to `select`/`reject`/`map` (see the
+#     block-gate note on CHAINED_ARRAY_METHODS below), or
+#   - a call to a MONO method carrying a hand-placed `-> Array`
+#     return annotation (annotated_array_return -- e.g.
+#     `stat_targets`), or
+#   - a call to a core method whose fresh-Array return is verified
+#     against mruby's own implementation AND re-checked against this
+#     program's real registry (core_array_return? below).
+# Single-step, no fixpoint: the nearest write decides (MOVE chains are
+# followed through to the register actually written -- see the scan's
+# own comment). Sound by
+# SKIP_UNSUPPORTED's own per-method partitioning: a producing call
+# with any gap drops the whole method (including this site) to the
+# interpreter -- so this rule only fires where the producer ALSO
+# compiled (or is itself a chained link whose root traced clean).
+#
+# CORE_ARRAY_CHAIN block gate: these three are admitted ONLY from a
+# block-carrying send (`SENDB`/`SSENDB`), never a bare `SEND`/`SEND0`.
+# This is a TIGHTENING of the original rule (which matched the bare
+# name in any dispatch shape), made after that looser form was caught
+# producing a real, verifiably WRONG answer once ClassLayout started
+# consulting this same scan: `RPG2k::Scene::MapViewer#@map = map ||
+# state.map` (mruby-rpg2k/mrblib/scene/map_viewer.rb) got classified
+# `Array`, because the `||`'s own right-hand side is a `SEND0 :map` --
+# `Game::State#map` is an `attr_accessor` holding the current
+# Game::Map, not an Array at all. Two independently checked facts make
+# the block the right discriminator:
+#   - A blockless `map`/`select`/`reject` never returns an Array in
+#     mruby anyway: `Enumerable#collect` (aliased to `map`,
+#     mrblib/enum.rb) and `Enumerable#reject` both open with
+#     `return to_enum(...) unless block`, and `select` is
+#     `alias select find_all`, the same shape -- i.e. an ENUMERATOR.
+#     So requiring a block does not lose a single real Array producer;
+#     it only drops shapes the old rule was answering wrongly.
+#   - An `attr_reader`/`attr_accessor` read is always a bare,
+#     argument-less, blockless send, so the block requirement excludes
+#     that entire (large) class of same-named accessors by
+#     construction, which is exactly what went wrong above.
+# Known remaining narrowing, recorded rather than papered over: a
+# block-carrying `select`/`reject` on a HASH receiver returns a Hash,
+# not an Array (mrblib/hash.rb's own `Hash#select` builds `h = {}`),
+# so this rule is still receiver-agnostic in a way that can overclaim
+# there. Every block-recognizer consumer backstops that with its own
+# `mrb_array_p` raise-tripwire (loud TypeError, never a silent
+# miscompile), and the ClassLayout consumer's readers all re-check the
+# class at runtime before trusting a hint -- but proving the receiver
+# is not a Hash is genuinely out of reach here, so it stays a
+# documented narrowing, not a claim.
+CHAINED_ARRAY_METHODS = %w[select reject map].freeze
+
+# CORE_ARRAY_CHAIN: a second, independent producer set for the same
+# chained rule -- core methods that return a *fresh Array* on every
+# path that returns at all. Unlike CHAINED_ARRAY_METHODS above (bare
+# name, no whole-program check), every name here is admitted ONLY
+# after `core_array_return?` below re-confirms, against the real
+# whole-program registry, that nothing in THIS program defines the
+# name except mruby's own core -- so a future `def keys` on a game
+# class silently drops the name back to today's honest `#error`
+# instead of quietly keeping a now-false claim. That check is the
+# whole reason this is a separate set rather than three more entries
+# in CHAINED_ARRAY_METHODS.
+#
+# Every entry verified by reading 3rd/mruby's own implementation at
+# this repo's own pinned submodule commit (831da26b), never assumed:
+#   - `keys`   -- `mrb_hash_keys`, src/hash.c's own Hash method table
+#                 (MRB_SYM(keys), MRB_ARGS_NONE) -> a real Array.
+#   - `values` -- `mrb_hash_values`, same table (MRB_SYM(values)).
+#   - `compact`-- mrbgems/mruby-array-ext/src/array.c `ary_compact`:
+#                 `mrb_ary_dup(mrb, self)` + compact_bang, returns
+#                 that dup -- an Array by construction.
+#   - `flatten`-- same file, `ary_flatten` -> `flatten_internal`,
+#                 which builds and returns a new Array.
+#   - `split`  -- String#split (src/string.c) -> a real Array.
+#   - `uniq`   -- BOTH core definitions return an Array: Array#uniq
+#                 (mruby-array-ext/mrblib/array.rb) yields `ary`
+#                 (a `self.dup`) with a block and `__uniq` without,
+#                 and Enumerable#uniq (mruby-enum-ext/mrblib/enum.rb)
+#                 ends in `hash.values` -- Array either way, block or
+#                 no block.
+# A receiver that has no such method at all raises a real
+# NoMethodError before ever returning, so "whenever this call returns,
+# it returned an Array" holds for every possible receiver -- the same
+# trust model recognize_times_regions' own `mrb_integer_p` guard
+# already documents, and every admitted site still passes through the
+# emitter's own `mrb_array_p` raise-tripwire regardless.
+#
+# Deliberately NOT here, each for a checked reason, not an oversight:
+#   - `to_a`/`dup`/`first` -- receiver-dependent (`x.dup` is an Array
+#     only when `x` already was; `first` with no argument returns an
+#     ELEMENT, not an Array). No static receiver proof available at
+#     exactly the sites where this rule is needed.
+#   - `to_h` -- returns a Hash, not an Array.
+#   - `sort_by` (blockless) -- see CORE_ARRAY_CHAIN_NEEDS_BLOCK.
+CORE_ARRAY_RETURN_METHODS = %w[keys values compact flatten split uniq].freeze
+
+# CORE_ARRAY_CHAIN: names that return a fresh Array ONLY when a real
+# block is passed, so they are admitted exclusively from a block-
+# carrying send (`SENDB`/`SSENDB`), never a bare `SEND`/`SEND0`:
+#   - `sort_by` -- BOTH core definitions open with
+#     `return to_enum(:sort_by) unless block` (Array#sort_by and
+#     Enumerable#sort_by, mruby-enum-ext/mrblib/enum.rb), i.e. a
+#     blockless `sort_by` hands back an ENUMERATOR, not an Array.
+#     With a block, Array#sort_by ends in `ary.collect! {...}` (an
+#     Array) and Enumerable#sort_by delegates to `self.to_a.sort_by`
+#     (that same Array). So the block is exactly what makes the claim
+#     true, and it is checked here rather than assumed.
+CORE_ARRAY_CHAIN_NEEDS_BLOCK = %w[sort_by].freeze
+
+# CORE_ARRAY_CHAIN: the one real bytecode definition this round vetted
+# by hand, in the same single-entry, exact-`Owner#name` tradition as
+# RANGE_RETURN_METHODS/SUPER_TARGETS -- naming a bare method name here
+# would defeat the whole-program check `core_array_return?` performs.
+#
+# `sort` is the only chain producer in the measured set that this
+# program really does redefine in bytecode: mruby-rgss/mrblib/
+# array_sort.rb reopens `class Array` to normalize a comparator's
+# answer around mruby's own `-2` "comparison failed" sentinel. Read in
+# full: both of its paths (`return _rgss_native_sort if block.nil?`
+# and `_rgss_native_sort { ... }`) return the value of
+# `_rgss_native_sort`, an `alias_method` of mruby's own native
+# `Array#sort`, which is `self.dup.sort!` (mrblib/array.rb) -- an
+# Array on both paths. The only other `sort` any receiver in this
+# program can reach is Enumerable#sort (mrblib/enum.rb),
+# `self.map {...}.sort(&block)` -- an Array too. So `sort` returns a
+# fresh Array for every possible receiver here, and unlike the names
+# above that fact depends on a file in THIS repo, which is precisely
+# why it is called out by exact owner instead of trusted by name.
+VETTED_ARRAY_RETURN_OVERRIDES = Set['Array#sort'].freeze
+
+# CORE_ARRAY_CHAIN: is `name` a core producer whose fresh-Array claim
+# still holds against THIS program's real whole-program registry?
+# Every MethodDef registered under the name must be either mruby's own
+# native core (owner `'<native>'`, build_registry's own marker for a
+# NATIVE_SRCS-derived entry -- confirmed for every name in the two
+# sets above that mruby-rgss/src/*.cxx defines none of them, so a
+# `<native>` entry here can only be mruby core itself) or an
+# explicitly vetted bytecode override. A name with NO registry entry
+# at all (`uniq`, `sort_by` -- implemented in mruby's own mrblib,
+# which is neither a closed-world source nor a NATIVE_SRCS file) is
+# likewise fine: nothing in this program redefines it.
+#
+# Crucially this rejects an `attr_reader`/`attr_accessor` definition
+# too, which carries a real owner and NO irep -- the exact shape that
+# makes a bare-name rule unsound: `Game::State#map`/
+# `RPG2k::Scene::Battle#map` are both `attr_accessor :map` (the
+# current Game::Map, not an Array at all), so "has no bytecode body"
+# is NOT a safe stand-in for "cannot be redefined here".
+def core_array_return?(name, block_carrying, registry)
+  vetted_by_name = VETTED_ARRAY_RETURN_OVERRIDES.any? { |o| o.end_with?("##{name}") }
+  if CORE_ARRAY_CHAIN_NEEDS_BLOCK.include?(name)
+    return false unless block_carrying
+  elsif !CORE_ARRAY_RETURN_METHODS.include?(name) && !vetted_by_name
+    return false
+  end
+
+  (registry[name] || []).all? do |md|
+    md.owner == '<native>' || VETTED_ARRAY_RETURN_OVERRIDES.include?("#{md.owner}##{md.name}")
+  end
+end
+
+def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil)
+  reg = dest_reg
+  (idx - 1).downto(0) do |i|
+    pin = irep.instructions[i]
+    next unless pin
+    # The block proc register (BLOCK writes dest+1 for n=0 calls)
+    # sits between the call and its receiver write -- skip over it:
+    # it is evidence FOR a region here, not a receiver writer.
+    next if pin.op == 'BLOCK'
+    next unless pin.args[/^R(\d+)/, 1] == reg
+
+    # CORE_ARRAY_CHAIN: follow MOVE chains, exactly the way
+    # trace_new_target's own backward walk already does, instead of
+    # stepping over them. `OP_MOVE` is a verbatim register copy --
+    # `regs[a] = regs[b]` (3rd/mruby/src/vm.c, CASE(OP_MOVE)), read
+    # directly, not assumed -- so whatever wrote the SOURCE register
+    # is exactly what this receiver holds, and the scan simply
+    # continues on that register.
+    #
+    # This also closes a real hole in the previous `next unless
+    # <send ops>` form: a MOVE writing the receiver register used to
+    # be SKIPPED, leaving the scan free to walk further back and
+    # latch onto an OLDER, already-overwritten `select`/`reject`/
+    # `map` result on that same (reused) register and call the
+    # receiver Array on that stale evidence. Registers are reused
+    # aggressively (trace_type's own comment makes the same point),
+    # so that was a wrong-answer path, not just an imprecise one.
+    if pin.op == 'MOVE'
+      src = pin.args.scan(/R(\d+)/).flatten[1]
+      return nil unless src
+
+      reg = src
+      next
+    end
+    return nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
+
+    called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    return nil unless called
+
+    block_carrying = %w[SENDB SSENDB].include?(pin.op)
+    return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
+    return 'Array' if annotated&.call(called)
+    return 'Array' if core_array_return?(called, block_carrying, registry)
+
+    return nil
+  end
+  nil
+end
+
+# ---------------------------------------------------------------------------
 # Step 6g: whole-program "this ivar always holds an instance of exactly
 # this real class" analysis -- the object-reference analogue of
 # IvarLayout, but deliberately never merged into it: a known object
@@ -1798,7 +2019,49 @@ class ClassLayout
             # unfiltered, still-converging table here is sound and avoids
             # re-filtering it on every single SETIV site in this sweep.
             found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner,
-                                      class_layout: classes, registry: registry) || UNKNOWN
+                                      class_layout: classes, registry: registry)
+            # CORE_ARRAY_CHAIN: when the fresh-`.new`/literal trace misses,
+            # ask the SAME chained fresh-Array question the block
+            # recognizers already ask of a block receiver -- see
+            # proven_array_source_scan's own comment for the full rule and
+            # why each producer really does return a fresh Array.
+            #
+            # Why this is a sound *terminal* for a SETIV site specifically:
+            # the scan only ever answers 'Array' when the value written
+            # into the ivar came straight out of an expression that
+            # allocates a NEW Array (`@actors = new_order.map { ... }`,
+            # `@states = @states.select { ... }`), so the ivar genuinely
+            # holds an Array after this assignment -- exactly the same
+            # class of fact as the `ARRAY` literal terminal
+            # (`@states = []`) trace_new_target already accepts one line
+            # above, just reached through a call instead of an opcode.
+            # Nothing is weakened: this runs ONLY where the existing trace
+            # already gave up (nil), and the join below still poisons the
+            # ivar to UNKNOWN the moment any OTHER site disagrees, so an
+            # ivar that is an Array on one path and something else on
+            # another is rejected exactly as before.
+            #
+            # `registry` is threaded through (it is already this method's
+            # own parameter) because the core-producer half of the rule
+            # re-checks every candidate name against the real whole-program
+            # registry; no `-> Array` annotation lambda is passed, so a
+            # SETIV fed by an ANNOTATED call stays UNKNOWN here -- a
+            # deliberate narrowing, not an oversight: those annotations are
+            # hand-placed claims whose runtime backstop is the block
+            # emitters' own `mrb_array_p` tripwire, and a ClassLayout hint
+            # is consumed in more places than that, so this only ever
+            # promotes facts that are true by construction.
+            #
+            # Safe for every consumer of the resulting hint: this table is
+            # devirtualization-only, never embedded (IvarLayout.analyze is
+            # the separate analysis that decides RData embedding -- see the
+            # `known-ivar-class hints (devirtualization only, never
+            # embedded)` diagnostic), and every reader of a hint guards it
+            # with a real runtime class check before trusting it
+            # (compile_send's own TYPED/IVAR_ACCESSOR_DEVIRT branches, and
+            # the block emitters' `mrb_array_p` raise-tripwire).
+            found ||= proven_array_source_scan(irep, idx, src_reg, registry)
+            found ||= UNKNOWN
 
             before = classes[owner][ivar]
             # Two real sites disagreeing on the exact class permanently
@@ -5959,42 +6222,18 @@ class CodeGen
     regions
   end
 
-  # INTERP_UNLOCK: the chained-receiver rule, shared by every block
-  # recognizer above. When the static Array trace misses, scan backward
-  # for the nearest write to the destination register; the receiver is
-  # proven Array when that write is:
-  #   - a call to `select`/`reject`/`map` (any dispatch shape) -- each
-  #     returns a fresh Array unconditionally (real Ruby semantics,
-  #     whatever the receiver was), or
-  #   - a call to a MONO method carrying a hand-placed `-> Array`
-  #     return annotation (annotated_array_return -- e.g.
-  #     `stat_targets`).
-  # Single-step, no fixpoint: the nearest write decides. Sound by
-  # SKIP_UNSUPPORTED's own per-method partitioning: a producing call
-  # with any gap drops the whole method (including this site) to the
-  # interpreter -- so this rule only fires where the producer ALSO
-  # compiled (or is itself a chained link whose root traced clean).
-  CHAINED_ARRAY_METHODS = %w[select reject map].freeze
-
+  # INTERP_UNLOCK / CORE_ARRAY_CHAIN: the chained-receiver rule, shared by
+  # every block recognizer above. The rule itself (and its full soundness
+  # argument) lives at top level as `proven_array_source_scan`, because
+  # ClassLayout.analyze needs the exact same "is this expression a proven
+  # fresh Array" question answered at its own SETIV sites, and two copies
+  # of a soundness-critical rule is exactly the silent-drift shape
+  # compiled_gems.rb's own closed_world_mrblib_srcs comment warns about.
+  # This wrapper only supplies what is specific to a CodeGen instance: the
+  # whole-program registry and the `-> Array` return annotations (which
+  # ClassLayout has no access to and does not need).
   def proven_array_source(irep, idx, dest_reg)
-    (idx - 1).downto(0) do |i|
-      pin = irep.instructions[i]
-      next unless pin
-      # The block proc register (BLOCK writes dest+1 for n=0 calls)
-      # sits between the call and its receiver write -- skip over it:
-      # it is evidence FOR a region here, not a receiver writer.
-      next if pin.op == 'BLOCK'
-      next unless pin.args[/^R(\d+)/, 1] == dest_reg
-      next unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
-
-      called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-      return nil unless called
-      return 'Array' if CHAINED_ARRAY_METHODS.include?(called)
-      return 'Array' if annotated_array_return(called)
-
-      return nil
-    end
-    nil
+    proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) })
   end
 
   # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
