@@ -11197,6 +11197,25 @@ class CodeGen
       "  return mrb_false_value();\n"
     when 'RETTRUE'
       "  return mrb_true_value();\n"
+    when 'RETSELF'
+      # "RETSELF" (Z, no operand) -- ops.h's own terse comment: `/* return
+      # self */`. Real OP_RETSELF (src/vm.c) is `a = 0; goto NORMAL_RETURN;`
+      # -- the exact same bare-value return path OP_RETURN itself takes,
+      # just with the return register hardwired to 0 (self always lives in
+      # r0, real mruby calling convention -- the same fact RETURN's own
+      # `a.empty? ? '0' : ...` above already leans on). mrbc's own codegen
+      # (mrbgems/mruby-compiler/core/codegen.c, gen_return) only ever
+      # produces this opcode as a peephole fusion of a LOADSELF immediately
+      # followed by a RETURN reading that same register (`data.insn ==
+      # OP_LOADSELF && src == data.a && op == OP_RETURN`) -- i.e. a plain
+      # `self`/implicit-self return, never anything else. Every leaf irep
+      # this compiler ever emits a function body for is a real `def`-
+      # compiled method (see RETURN_BLK's own comment below for why: never
+      # a block/proc irep), so `self` here is exactly this generated
+      # function's own real `self` parameter -- translating straight to it
+      # is exactly as mechanical and safe as RETURN/RETNIL/RETFALSE/
+      # RETTRUE just above.
+      "  return self;\n"
     when 'JMP'
       # .to_i (not the raw text) on purpose: the disassembly zero-pads
       # addresses ("018"), but jump_targets/compile_method label instructions
@@ -11366,6 +11385,84 @@ class CodeGen
         out << "  }\n"
         out
       end
+    when 'ARYPUSH'
+      # "ARYPUSH R3 2" -- same 2-operand "Rd N" disassembly shape as ARRAY
+      # just above (src/codedump.c: `"ARYPUSH\tR%d\t%d"`, a, b), but the
+      # semantics differ: push N consecutive registers (Ra+1..Ra+N) onto
+      # the array ALREADY held in Ra, rather than building a fresh one
+      # (real OP_ARYPUSH, src/vm.c: `mrb_ensure_array_type(mrb, regs[a]);
+      # for (i=0;i<b;i++) mrb_ary_push(mrb, regs[a], regs[a+i+1]);` -- a
+      # pure in-place mutation, no write to regs[a] itself).
+      #
+      # R[a] is PROVABLY already a real Array at every real occurrence,
+      # never merely assumed: mrbc's own codegen (mrbgems/mruby-compiler/
+      # core/codegen.c) emits OP_ARYPUSH from exactly two functions --
+      # gen_values (call-argument splat flushing, `foo(*a, b)`-shaped) and
+      # codegen_array (array-literal splat flushing, `[*a, b]`-shaped) --
+      # and every one of the 7 real call sites in both is gated behind a
+      # `first`/`!first`-style flag that only ever clears once a
+      # `genop_2(s, OP_ARRAY, ...)` has already written that exact same
+      # register (either directly above it in the same function, or -- the
+      # one indirect case, codegen_call_assign's own >13-argument overflow
+      # packing -- forces its own OP_ARRAY first before ever reaching
+      # ARYPUSH). So the real VM's own `mrb_ensure_array_type` guard is
+      # unconditionally a no-op here -- translating straight to N
+      # unconditional `mrb_ary_push` calls (mruby/array.h, MRB_API,
+      # already #include'd; call pattern matches this file's own existing
+      # `mrb_ary_push(M, ary, elem)` usage, e.g. emit_sort_inline) is
+      # exactly as safe as ARRAY's own codegen above, just mutating an
+      # existing array instead of allocating a new one.
+      d = a[/^R(\d+)/, 1].to_i
+      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      out = String.new
+      n.times { |i| out << "  mrb_ary_push(M, r#{d}, r#{d + i + 1});\n" }
+      out
+    when 'ARYCAT'
+      # "ARYCAT R3 (R4)" -- the same "Rd (Rs)" disassembly shape as MUL/
+      # DIV/EQ/LT/LE/GT/GE above (src/codedump.c: `"ARYCAT\tR%d\t(R%d)"`,
+      # a, a+1), extracted the same way (anchored `^R` for the
+      # destination, parenthesized `(R\d+)` for the source -- a trailing
+      # print_lv_a local-variable annotation is unparenthesized, so it can
+      # never collide with the source capture).
+      #
+      # Real OP_ARYCAT semantics (src/vm.c) are NOT the bare concatenation
+      # the terse ops.h comment (`/* ary_cat(R[a],R[a+1]) */`) alone
+      # suggests:
+      #   mrb_value splat = mrb_ary_splat(mrb, regs[a+1]);
+      #   if (mrb_nil_p(regs[a])) regs[a] = splat;
+      #   else { mrb_ensure_array_type(mrb, regs[a]); mrb_ary_concat(mrb, regs[a], splat); }
+      # R[a+1] is SPLATTED first (mrb_ary_splat, src/array.c: an Array is
+      # duplicated as-is; anything else is converted via a real #to_a call
+      # if it responds to one, otherwise wrapped as a single-element
+      # array) -- and R[a] has a nil-becomes-the-splat special case ahead
+      # of the real concat.
+      #
+      # This compiler only ever needs the `else` arm, never the nil one:
+      # mrbc's own codegen (mrbgems/mruby-compiler/core/codegen.c) emits
+      # OP_ARYCAT from exactly two call sites -- gen_values (`foo(*a,
+      # *b)`-style call-argument splats) and codegen_array (`[*a,
+      # *b]`-style array-literal splats) -- and in BOTH, R[a] is always the
+      # register most recently written by a `genop_2(s, OP_ARRAY, ...)`
+      # immediately before that splat element's own codegen runs
+      # (confirmed reading both directly: codegen_array's own
+      # `first`-gated `OP_ARRAY, cursp(), regular_elements` / its
+      # first-splat-is-first-element special case `OP_ARRAY, cursp(), 0`;
+      # gen_values' identical `first`-gated OP_ARRAY before its own
+      # ARYCAT). So R[a] is PROVABLY a real, already-built Array at every
+      # real occurrence, NEVER nil -- exactly the same "always immediately
+      # preceded by ARRAY/ARRAY2 building R[a]" invariant ARYPUSH just
+      # above already relies on. `mrb_ensure_array_type` is therefore
+      # unconditionally a no-op here too, safe to skip.
+      #
+      # R[a+1] (the splat source) has NO such guarantee -- it's whatever
+      # expression follows the `*` (a local, a method call, another
+      # literal array, ...) -- so `mrb_ary_splat` (mruby/array.h, MRB_API,
+      # already #include'd) is still called for real here, mirroring the
+      # real VM's own two-step "splat, then concat" rather than assuming
+      # R[a+1] is already an Array.
+      d = a[/^R(\d+)/, 1]
+      s = a[/\(R(\d+)\)/, 1]
+      "  mrb_ary_concat(M, r#{d}, mrb_ary_splat(M, r#{s}));\n"
     when 'AREF'
       # "AREF R2 R6 0 ; R2:x" -- R[a] = R[b][c], c a plain immediate index,
       # never a register (real OP_AREF semantics, src/vm.c): when R[b]
@@ -11497,6 +11594,25 @@ class CodeGen
       d = a[/^R(\d+)/, 1]
       name = a[/(\$\S+)/, 1]
       "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
+    when 'SETGV'
+      # "SETGV $stderr R4" -- write-direction symmetric opcode to GETGV
+      # just above, but codedump.c prints the two operands in REVERSED
+      # order vs. GETGV's own "GETGV R4 $stderr" (confirmed directly:
+      # OP_GETGV is `"GETGV\t\tR%d\t%s"` but OP_SETGV is `"SETGV\t\t%s\tR%d"`,
+      # symbol first, register second) -- so unlike GETGV's own `^R`-
+      # anchored capture, the register here can't be assumed to start the
+      # string; both extractions below search unanchored instead (still
+      # unambiguous: exactly one `$`-prefixed token and one `R<digits>`
+      # token appear in this opcode's own disassembly text, same as
+      # GETGV's own reasoning for why an unqualified regex is already
+      # safe there). Real OP_SETGV semantics (src/vm.c): `mrb_gv_set(mrb,
+      # irep->syms[b], regs[a])` -- same flat global table GETGV reads,
+      # same already-`$`-spelled interned symbol name (no separate sigil
+      # handling needed, GETGV's own comment already established this),
+      # `mrb_gv_set` declared in mruby/variable.h (already #include'd).
+      s = a[/R(\d+)/, 1]
+      name = a[/(\$\S+)/, 1]
+      "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
     when 'STOP'
       ''
     when 'NOP'
