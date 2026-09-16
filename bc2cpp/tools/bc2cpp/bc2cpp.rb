@@ -1566,8 +1566,25 @@ class IvarLayout
       # irep, not pooled by name the way ArgTypes below is), so it's
       # authoritative and safe to trust regardless of whether `method_name`
       # is MONO or POLY -- tried first for exactly that reason.
+      #
+      # EMBED_TYPE_SAFETY: a real, caught bug -- Annotations' own token
+      # table (TYPES, above) maps an `Array` argument annotation to
+      # `:array`, a tag CodeGen::TYPE_OPS never defines a `:box`/etc. entry
+      # for (that class's own header comment: "Only a fixnum/symbol type
+      # token means anything today -- matching the two primitive types
+      # IvarLayout/ArgTypes themselves model"). Blindly trusting ANY
+      # truthy annotation token here (as this line used to) lets an
+      # `Array`-annotated argument flow straight into `@ivar_layout` as if
+      # it were embeddable, only failing much later and far less legibly
+      # -- a raw `TYPE_OPS.fetch(:array)` KeyError deep inside GETIV/SETIV
+      # codegen for a real, otherwise-unrelated owner, first actually
+      # triggered by a devirtualization path speculatively probing a
+      # method nothing had ever needed `compiles_clean?` for before.
+      # Restricting to exactly the two tags TYPE_OPS actually supports
+      # keeps this the same "safe miss, not a wrong answer" shape every
+      # other branch of this function already holds itself to.
       t = annotations && annotations[irep.label]&.args&.[](pos - 1)
-      return t if t
+      return t if t == :fixnum || t == :symbol
 
       t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
       return t if t
@@ -1692,17 +1709,28 @@ class Annotations
   # `:array` (the `Array` token) feeds ONLY the block-receiver return-
   # type gate (annotated_array_return -- "this MONO method returns a
   # fresh Array", consumed by the block recognizers' chained rule). It
-  # must never reach struct-field codegen: native_arg_types (the sole
-  # consumer of `args`, and the only path from an annotation token to a
-  # C type) maps unrecognized tokens through native_c_type, which has
-  # no `:array` arm -- an `Array` token in ARGUMENT position would raise
-  # KeyError at codegen time rather than silently embed. That fail-loud
-  # shape is deliberate (same discipline as ClassAnnotations'
-  # silently-no-op on non-class tokens, mirrored): argument Array types
-  # are not modeled, return Array types are. See annotated_array_return's
-  # own comment for why the gate itself stays sound despite resting on a
-  # hand-placed comment (the emitter's own mrb_array_p tripwire verifies
-  # every admitted site at runtime).
+  # must never reach struct-field codegen: `native_arg_types` (the only
+  # path from an annotation token to a C *parameter* type) maps
+  # unrecognized tokens through native_c_type, which has no `:array` arm
+  # -- an `Array` token in ARGUMENT position would raise KeyError at
+  # codegen time rather than silently embed. That fail-loud shape is
+  # deliberate (same discipline as ClassAnnotations' silently-no-op on
+  # non-class tokens, mirrored): argument Array types are not modeled,
+  # return Array types are. See annotated_array_return's own comment for
+  # why the gate itself stays sound despite resting on a hand-placed
+  # comment (the emitter's own mrb_array_p tripwire verifies every
+  # admitted site at runtime).
+  #
+  # `native_arg_types` is NOT the only real consumer of `args`, though (a
+  # real, caught bug in this comment's own earlier claim that it was):
+  # `IvarLayout.trace_type`'s own incoming-argument fallback also reads
+  # an annotation's `args` directly, to seed an ivar's inferred type from
+  # a same-named parameter it was assigned from (`@x = x`). It has its
+  # own matching filter now (only `:fixnum`/`:symbol` pass through) --
+  # see that function's own EMBED_TYPE_SAFETY comment for the real,
+  # whole-program crash this closes (an `Array`-annotated argument
+  # reaching `CodeGen::TYPE_OPS.fetch(:array)`, a KeyError, deep inside
+  # GETIV/SETIV codegen for a totally unrelated owner).
 
   # irep label -> Annotation, for every real `def` (any registry entry with
   # a bytecode body -- a native MethodDef's `irep` is nil, nothing to
@@ -6830,6 +6858,106 @@ class CodeGen
     return nil unless compiles_clean?(defs.first.irep)
 
     defs.first
+  end
+
+  # POLY_SMALL_N_SUPPORT: a genuinely POLY name (monomorphic_target's own
+  # `defs.size == 1` gate already failed) can still often be devirtualized
+  # -- not to ONE direct call the way MONO/TYPED are, but to a real
+  # runtime-class-checked CHAIN of them, one `if` per known real owner,
+  # falling back to ordinary `mrb_funcall` only for a receiver matching
+  # none. Measured real whole-program fan-out for the actual top dynamic-
+  # dispatch names first, not assumed: `width` has 5 real owners, `term`/
+  # `party`/`size`/`repeat?`/`db` have 2-3, `dispose` has 16 -- so this is
+  # gated on a small, bounded owner count (`POLY_SMALL_N_MAX`) rather than
+  # attempted unconditionally; past that point a linear chain of runtime
+  # class checks stops being clearly cheaper than mruby's own real method-
+  # table hash lookup, and the code-size cost (one whole extra `if` branch
+  # per owner) keeps growing regardless.
+  #
+  # Real C++ virtual dispatch (a vtable) was considered and rejected for
+  # this whole problem, not just scoped smaller: every mruby object is an
+  # opaque, tagged `mrb_value` (`RObject`/`RData` for a user class), never
+  # a real C++ polymorphic instance -- giving every compiled class a real
+  # vtable would mean growing a second, parallel object model alongside
+  # mruby's own GC-managed one, a fundamentally bigger undertaking than
+  # anything this file's own narrow "compile individual leaf method
+  # bodies against the real mruby object model" scope has ever done. A
+  # chain of `mrb_obj_class`-compares reuses the exact same trust model
+  # every other runtime-guarded direct call in this file already
+  # establishes (TYPED, IVAR_ACCESSOR) -- just against several owners
+  # instead of one -- with no new architecture at all.
+  #
+  # Deliberately narrower than TYPED/MONO in two ways, to keep this
+  # function simple and independently reviewable rather than threading
+  # every candidate through the existing (intricate, optional-arg- and
+  # NATIVE_ARG_TARGETS-aware) `call_argv` construction those paths use:
+  # only a PURE-mandatory candidate (no optional args) participates, and
+  # only when its own arity exactly matches this call site's real `n` --
+  # a candidate that doesn't fit either way just never joins the chain,
+  # always safe (it still gets a real, correct answer through the
+  # ordinary `mrb_funcall` fallback every chain ends with, exactly like a
+  # receiver of some OTHER, unlisted class does today already). Same
+  # `@only_owners`/`@other_owners` emission-eligibility gate every other
+  # devirtualization path here already uses (no `_impl` exists for an
+  # owner this run isn't emitting).
+  POLY_SMALL_N_MAX = 5
+
+  def poly_small_n_targets(name, n)
+    defs = @registry[name]
+    return nil unless defs && defs.size >= 2
+
+    candidates = defs.select do |t|
+      next false unless t.irep
+      # SINGLETON_OWNER_EXCLUSION: a `.singleton`-suffixed owner (bc2cpp's
+      # own naming for `def self.foo`/`class << self` methods) can never
+      # actually match this chain's own runtime guard below --
+      # `mrb_obj_class(M, recv)` is `mrb_class_real(mrb_class(mrb, obj))`
+      # (confirmed by reading 3rd/mruby/src/class.c directly), which walks
+      # PAST `MRB_TT_SCLASS`/`MRB_TT_ICLASS` wrappers via `cl->super` and
+      # returns the real underlying class (e.g. plain `Module`) for a
+      # module/class object with its own singleton methods -- never that
+      # object's own identity. `const_chain_value_expr(t.owner)` for a
+      # `.singleton` owner resolves the plain module/class constant (its
+      # `.singleton` suffix just gets stripped), which is NOT the right
+      # RClass for a receiver-class-identity check against a singleton
+      # method. Left in, such a candidate would silently never fire --
+      # not wrong (the chain falls through to the next candidate or the
+      # `mrb_funcall` fallback either way), just dead code generation
+      # miscategorized as "runtime-class-checked". Excluded up front
+      # instead of generated-and-dead.
+      next false if t.owner.end_with?('.singleton')
+      next false unless compiles_clean?(t.irep)
+
+      t_irep = @ireps.fetch(t.irep)
+      next false unless pure_mandatory_arity?(t_irep)
+      next false unless n == mandatory_arity(t_irep)
+      next false unless native_arg_types(t, n).compact.empty?
+
+      if @only_owners && !@only_owners.include?(t.owner)
+        next false unless @other_owners&.include?(t.owner)
+      end
+
+      true
+    end
+    return nil unless candidates.size.between?(2, POLY_SMALL_N_MAX)
+
+    candidates
+  end
+
+  def compile_poly_small_n(name, d, recv, argv, n)
+    candidates = poly_small_n_targets(name, n)
+    return nil unless candidates
+
+    branches = candidates.map do |target|
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
+      call = "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+      "if (#{check}) {\n    #{call}\n  } else "
+    end
+    owners_note = candidates.map(&:owner).join(', ')
+    note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
+           "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
+    "#{note}  #{branches.join}{\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
   end
 
   # LITERAL_EQQ_SUPPORT's own soundness gate -- a LIVE re-check against
@@ -13708,6 +13836,9 @@ class CodeGen
           "  }\n"
       end
     else
+      poly_small_n = compile_poly_small_n(name, d, recv, argv, n)
+      return poly_small_n if poly_small_n
+
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
       "#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
     end
