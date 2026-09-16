@@ -2272,6 +2272,36 @@ class ClassLayout
             # (compile_send's own TYPED/IVAR_ACCESSOR_DEVIRT branches, and
             # the block emitters' `mrb_array_p` raise-tripwire).
             found ||= proven_array_source_scan(irep, idx, src_reg, registry)
+
+            # NIL_TOLERANT_JOIN: a plain `@x = nil` SETIV site (real
+            # bytecode shape confirmed directly against mrbc's own
+            # disassembly: `LOADNIL Rn` immediately followed by `SETIV @x
+            # Rn`) is evidence of NOTHING -- it neither proves nor
+            # disproves any class this ivar might also hold on some other
+            # path. Treating it as "disagreeing evidence" the same way an
+            # opaque, unresolvable NON-nil write is treated (the `found ||=
+            # UNKNOWN` fallback just below) permanently poisons the ivar
+            # the moment `#initialize` merely nils out a field for a real
+            # object assigned elsewhere -- confirmed to be the single
+            # largest real source of poisoned CLASS_HINT entries. Skipping
+            # the site outright (never recording it as either agreeing or
+            # disagreeing evidence) is sound rather than merely convenient:
+            # every consumer of this table already re-verifies the fact
+            # with a real runtime `mrb_class_ptr(...) == mrb_obj_class(M,
+            # elem)` guard before ever taking a direct-call path (see this
+            # method's own comment a few lines up) and falls back to
+            # ordinary `mrb_funcall` otherwise, so a genuinely-sometimes-
+            # nil ivar with an otherwise-single-class hint is already
+            # handled correctly at every real call site: the guard just
+            # fails on the nil path, the same cost as any other guard miss,
+            # never a wrong call. IvarLayout (struct EMBEDDING) is a
+            # completely separate analysis and is deliberately NOT touched
+            # by this: a raw C++ struct field has no room for "or nil" the
+            # way a runtime-guarded devirtualization hint does, so an ivar
+            # that's genuinely nilable stays correctly unembeddable there
+            # regardless of this change.
+            next if found.nil? && nil_literal_write?(irep, idx, src_reg)
+
             found ||= UNKNOWN
 
             before = classes[owner][ivar]
@@ -4942,6 +4972,38 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
 
   nil
+end
+
+# NIL_TOLERANT_JOIN's own predicate (see ClassLayout.analyze's own call
+# site for the full rule this serves): true only when `reg`'s value at
+# `idx` was unambiguously just loaded from a literal `nil` (`LOADNIL`),
+# following the same defensive MOVE-chain-following idiom
+# trace_eqq_literal_receiver below already established (mrbc could in
+# principle interpose a MOVE before the literal load; every real
+# disassembly checked here never does, but following the chain costs
+# nothing and keeps this sound either way). Anything else writing `reg`
+# first -- a real object, a computed value, an opaque incoming argument --
+# returns false: a missed nil-tolerant opportunity is always safe (falls
+# straight through to the ordinary "disagreeing evidence" join, exactly
+# today's pre-existing behavior), while a wrong "yes, this is nil" would
+# silently drop real evidence -- this stays exactly as conservative as
+# every other backward-scan guard in this file.
+def nil_literal_write?(irep, idx, reg)
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'LOADNIL'
+      return true
+    else
+      return false
+    end
+  end
+  false
 end
 
 # LITERAL_EQQ_SUPPORT: backward-scan a `:===` SEND's own receiver register
