@@ -5894,13 +5894,16 @@ class CodeGen
   # right above compile_send's own `target = monomorphic_target(name)`
   # line, for the full soundness writeup) knows how to inline directly,
   # mapped to the exact real mandatory arity a call site must match --
-  # `!`/`nil?`/`class`/`object_id`/`keys` take no arguments, `is_a?`/
+  # `!`/`nil?`/`class`/`object_id`/`keys`/`to_s` take no arguments, `is_a?`/
   # `kind_of?`/`equal?` take exactly one (confirmed against each one's
   # own real MRB_ARGS_NONE()/MRB_ARGS_REQ(1) registration in
-  # 3rd/mruby/src/kernel.c / 3rd/mruby/src/class.c /
-  # 3rd/mruby/src/hash.c).
+  # 3rd/mruby/src/kernel.c / 3rd/mruby/src/class.c / 3rd/mruby/src/hash.c
+  # / 3rd/mruby/src/string.c / 3rd/mruby/src/numeric.c). `to_s` is the one
+  # entry that ISN'T "one real native implementation" -- see
+  # compile_native_primitive_send's own TO_S_TYPE_TAG_DISPATCH comment.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
-                                   'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0 }.freeze
+                                   'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
+                                   'to_s' => 0 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -5990,6 +5993,77 @@ class CodeGen
       "    r#{d} = mrb_hash_keys(M, #{recv});\n" \
       "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+    when 'to_s'
+      # TO_S_TYPE_TAG_DISPATCH: unlike every other name above (one native
+      # implementation total, whole-program-uncontested), `to_s` is the
+      # canonical case native_only_mono? can't safely answer alone -- a
+      # real grep across 3rd/mruby/src finds it registered separately on
+      # Array/String/Hash/Integer/Float/Range/Module *and* inherited from
+      # Kernel's own default for everything else, seven-plus distinct
+      # native bodies collapsed into the registry's one synthetic
+      # `<native>` entry (see this round's own changelog for the full
+      # accounting). Safe here only because this is a real `mrb_type(recv)`
+      # switch -- an RBasic-derived-struct type-tag check, the same kind
+      # `mrb_hash_p` above already is -- covering ONLY the tags whose real
+      # native body was individually verified side-effect-free enough to
+      # call outside an actual dispatched call frame, with every other
+      # tag (including two, Array and Hash, deliberately left out below)
+      # falling through to ordinary `mrb_funcall`.
+      #
+      # MRB_TT_STRING: 3rd/mruby/src/string.c's own `mrb_str_to_s` is
+      # exactly `mrb_obj_class(mrb, self) != mrb->string_class ?
+      # mrb_str_dup(mrb, self) : self` (a String subclass instance gets a
+      # real plain-String dup, matching #to_s's own real contract of
+      # "always returns an actual String, never a subclass instance";
+      # `self` unchanged when it's already a plain String) -- static (not
+      # exported), but this three-line body is simple and side-effect-free
+      # enough to reproduce directly rather than needing the function
+      # itself linkable.
+      #
+      # MRB_TT_INTEGER: 3rd/mruby/src/numeric.c's own `int_to_s` (also
+      # static) is `mrb_integer_to_str(mrb, self, base)`, `base` defaulting
+      # to 10 when the call took no argument -- always true here, this
+      # devirtualization only ever fires for a real `n == 0` call site
+      # (NATIVE_PRIMITIVE_SEND_ARITY's own arity gate). `mrb_integer_to_str`
+      # itself (3rd/mruby/include/mruby/numeric.h) IS a real, public
+      # `MRB_API`, callable directly with the same `base=10` default.
+      #
+      # Deliberately excludes MRB_TT_ARRAY/MRB_TT_HASH despite having a
+      # single, named native implementation each (`mrb_ary_to_s`/
+      # `mrb_hash_to_s`) -- a real, easy-to-miss trap caught only by
+      # reading each body, not by checking static/exported status alone:
+      # both of them unconditionally run `mrb->c->ci->mid = MRB_SYM
+      # (inspect);` as their own first line, reaching into and MUTATING
+      # the VM's own current call-info frame (the same `mrb->c->ci`
+      # monomorphic_target's own comment already flags as unsafe to trust
+      # outside a real dispatched call for a DIFFERENT reason, stale
+      # `mrb_get_args` reads) -- calling either directly from here would
+      # silently corrupt whatever real call frame this generated code
+      # happens to be running inside, not just risk a stale read. Also
+      # excludes MRB_TT_FLOAT (`flo_to_s`)/MRB_TT_RANGE (`range_to_s`),
+      # both static with no safe public equivalent found; MRB_TT_CLASS/
+      # MRB_TT_MODULE/MRB_TT_SCLASS (`mrb_mod_to_s`, declared non-static in
+      # mruby/internal.h -- real and side-effect-free on inspection, but
+      # left for a future round rather than pulling in an internal header
+      # for one more tag in the same change that just found the Array/Hash
+      # trap). Every one of these, like every tag not listed here at all,
+      # correctly falls through to the `default:` case's ordinary
+      # `mrb_funcall`.
+      "  // to_s -- native primitive, runtime-guarded per real receiver type\n" \
+      "  // (only String/Integer are handled directly -- see compile_native_\n" \
+      "  // primitive_send's own TO_S_TYPE_TAG_DISPATCH comment for why Array/\n" \
+      "  // Hash/Float/Range/Class are deliberately left to ordinary dispatch)\n" \
+      "  switch (mrb_type(#{recv})) {\n" \
+      "  case MRB_TT_STRING:\n" \
+      "    r#{d} = mrb_obj_class(M, #{recv}) != M->string_class ? mrb_str_dup(M, #{recv}) : #{recv};\n" \
+      "    break;\n" \
+      "  case MRB_TT_INTEGER:\n" \
+      "    r#{d} = mrb_integer_to_str(M, #{recv}, 10);\n" \
+      "    break;\n" \
+      "  default:\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    break;\n" \
       "  }\n"
     end
   end
@@ -9570,20 +9644,51 @@ class CodeGen
       # value only exists in a register by the time this opcode runs).
       # Mirrors vm.c's own fast paths: Array with an Integer index
       # (mrb_ary_ref -- bounds-checked, negative-index-normalizing, same
-      # public API AREF's own codegen above already uses) and Hash
+      # public API AREF's own codegen above already uses), Hash
       # (mrb_hash_get, the same public API HASH's own codegen above already
-      # uses); anything else (String/Range #[], or a class overriding #[])
+      # uses), and String with an Integer/String/Range index (mrb_str_aref
+      # -- see below); anything else (Range#[], or a class overriding #[])
       # falls back to the real method the interpreter itself would call --
       # never unsound, just without the in-VM fast path. `r<d>` (the
       # receiver) is read by every branch before any of them writes it, the
       # same "read before overwrite" safety AREF/HASH/ARRAY's own codegen
       # already relies on.
+      #
+      # GETIDX_STRING_AREF: the real vm.c's own OP_GETIDX handler
+      # (3rd/mruby/src/vm.c) has a third arm this codegen used to skip
+      # entirely -- String with an Integer/String/Range index (character
+      # index, substring search, or a Range slice respectively) calls
+      # `mrb_str_aref(mrb, str, idx, mrb_undef_value())` (the real "no
+      # length argument" sentinel -- the exact form `str[idx]` compiles to,
+      # as opposed to `str[idx, len]`'s own explicit third argument, a
+      # different real call shape codegen.c's own OP_GETIDX emission never
+      # produces at all -- confirmed directly against mrbgems/mruby-
+      # compiler/core/codegen.c, GETIDX is only ever emitted for the
+      # exactly-one-argument `[]` shape). `mrb_str_aref` is a real,
+      # externally-linked function (see this file's own top-of-output
+      # `extern "C"` forward declaration and its own comment for why a
+      # plain #include of the header that declares it doesn't work).
+      # Reproduces the real VM's own index-type gate exactly (`case
+      # MRB_TT_INTEGER: case MRB_TT_STRING: case MRB_TT_RANGE:` -- anything
+      # else, e.g. a Regexp, falls through to `default: break` there too,
+      # same as this codegen's own `mrb_funcall` fallback). Does NOT
+      # reproduce the real VM's own additional `ary->c != mrb->array_class`
+      # (Array)/`obj_ptr(va)->c != mrb->string_class` (String) exact-class
+      # guard (rejects an Array/String/Hash subclass or singleton
+      # overriding `[]`) -- a real, pre-existing gap this codegen's own
+      # Array/Hash arms already shared before this round touched String at
+      # all, left alone here rather than fixed as a drive-by (this
+      # project's own established mrblib never subclasses Array/String/
+      # Hash to override `[]`, so it costs nothing in practice today, but
+      # it is a real gap, not a proven-safe simplification).
       d, s = regs(a, 2)
       <<~CPP
         if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
           r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
         } else if (mrb_hash_p(r#{d})) {
           r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+        } else if (mrb_string_p(r#{d}) && (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
+          r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
         } else {
           r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
         }
@@ -10444,6 +10549,28 @@ class CodeGen
     #     check, the same *kind* of check `mrb_class_p`/`mrb_module_p`
     #     above already are) before the direct call, falling back to
     #     ordinary `mrb_funcall` otherwise.
+    #   - `to_s`: the one entry here that ISN'T "one native implementation,
+    #     whole-program uncontested" -- native_only_mono? only ever proves
+    #     the second half (no bytecode override anywhere), never the
+    #     first, and `to_s` is real, live proof they're different claims:
+    #     a direct grep across 3rd/mruby/src finds `mrb_ary_to_s` (Array),
+    #     `mrb_str_to_s` (String), `mrb_hash_to_s` (Hash), `int_to_s`
+    #     (Integer), `flo_to_s` (Float), `range_to_s` (Range), `mrb_mod_
+    #     to_s` (Module/Class), and `mrb_any_to_s` (Kernel's own default,
+    #     inherited by everything else) -- eight distinct native bodies
+    #     the registry's `'<native>'` marker still collapses into one
+    #     entry. See compile_native_primitive_send's own TO_S_TYPE_TAG_
+    #     DISPATCH comment for the full per-type accounting -- only
+    #     String/Integer are handled directly there (both individually
+    #     verified side-effect-free by reading their real bodies, not
+    #     assumed from being native-registered), with Array/Hash
+    #     deliberately excluded despite having a single named
+    #     implementation each: both mutate `mrb->c->ci->mid` as their own
+    #     first line, real VM call-frame state a direct call from here
+    #     would silently corrupt rather than merely risk a stale read.
+    #     Every other tag -- Float/Range/Class-ish included -- falls
+    #     through to the same `default: mrb_funcall` case, exactly like a
+    #     tag this switch never heard of.
     #
     # Deliberately excludes `respond_to?` (also POLY-native, also a
     # high-count name): real `Kernel#respond_to?`
@@ -11028,6 +11155,18 @@ if $PROGRAM_NAME == __FILE__
   # out of the wrong branch. A real core API (always available, not gated
   # behind the mruby-error gem the way mrb_protect/mrb_rescue are).
   puts '#include <mruby/error.h>'
+  # GETIDX's own String arm (see compile_insn's own comment on that opcode)
+  # calls `mrb_str_aref` directly -- a real, non-static, externally-linked
+  # function (3rd/mruby/src/string.c), but declared only in mruby/
+  # internal.h, which -- unlike every other mruby header this file already
+  # includes -- has no MRB_BEGIN_DECL/MRB_END_DECL C-linkage guard at all
+  # (confirmed by reading the whole file, not assumed from its name):
+  # #include-ing it here would declare `mrb_str_aref` with C++ linkage,
+  # then fail to link against the plain-C symbol libmruby.a actually has.
+  # A direct `extern "C"` forward declaration sidesteps needing that header
+  # at all, matching the real signature exactly (3rd/mruby/include/mruby/
+  # internal.h's own declaration).
+  puts 'extern "C" mrb_value mrb_str_aref(mrb_state*, mrb_value, mrb_value, mrb_value);'
   # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
   # another gem's own *_decls.h, written by this same OUT_DIR mechanism
   # below) to #include so a devirtualized call to an OTHER_OWNERS target
