@@ -11710,16 +11710,36 @@ class CodeGen
         }
       CPP
     when 'DIV'
-      # No fixnum/fixnum fastpath here (unlike ADD/SUB): real Ruby integer
-      # division (`Fixnum#/`) floors toward negative infinity, not C's own
-      # truncating `/` -- getting that right means duplicating mruby's own
-      # `mrb_div_int` rounding, not worth it for this prototype's scope, so
-      # this always goes through the real method (`mrb_funcall`), which
-      # calls the same C-implemented `Integer#/` the interpreter itself
-      # would -- always correct, just without OP_DIV's own in-VM fast path.
+      # DIV_FASTPATH_SUPPORT: real Ruby integer division (`Integer#/`)
+      # floors toward negative infinity, not C's own truncating `/` --
+      # this file's own earlier round punted on replicating that rounding
+      # by hand and always went through `mrb_funcall`. Turns out nothing
+      # needs replicating: `int_div` (the real `Integer#/` native
+      # implementation, 3rd/mruby/src/numeric.c) itself calls a real,
+      # already-public API for exactly the plain-Integer/plain-Integer
+      # case -- `mrb_div_int_value(mrb, mrb_integer(x), mrb_integer(y))`
+      # -- confirmed by reading `int_div` directly, not assumed from the
+      # function's name. Calling that same function here (declared via an
+      # `extern "C"` forward declaration exactly like `mrb_str_aref`'s own
+      # -- `mruby/internal.h` has no MRB_BEGIN_DECL/MRB_END_DECL guard
+      # either, confirmed by reading it) reproduces `Integer#/`'s real
+      # rounding AND its real `ZeroDivisionError`/overflow raises exactly,
+      # not an approximation -- the same "call mruby's own real
+      # implementation function directly" substitution `GETIDX`'s own
+      # String arm already makes for `mrb_str_aref`. Same fixnum/fixnum
+      # runtime guard ADD/SUB/MUL already use (no bigint check, matching
+      # their own established precedent for this exact reason), `mrb_
+      # funcall` fallback for anything else (Float, a user #/ override, a
+      # real Bignum).
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      "  r#{d} = mrb_funcall(M, r#{d}, \"/\", 1, r#{s});\n"
+      <<~CPP
+        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "/", 1, r#{s});
+        }
+      CPP
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
       compile_cmp(insn.op, a)
     when 'SEND0', 'SEND'
@@ -14137,6 +14157,11 @@ if $PROGRAM_NAME == __FILE__
   # at all, matching the real signature exactly (3rd/mruby/include/mruby/
   # internal.h's own declaration).
   puts 'extern "C" mrb_value mrb_str_aref(mrb_state*, mrb_value, mrb_value, mrb_value);'
+  # DIV_FASTPATH_SUPPORT: same `mruby/internal.h`-has-no-C-linkage-guard
+  # situation as `mrb_str_aref` just above -- `DIV`'s own compile_insn
+  # case calls this directly (mruby.h's own `mrb_int` typedef is already
+  # in scope by this point, matching that header's own declaration).
+  puts 'extern "C" mrb_value mrb_div_int_value(mrb_state*, mrb_int, mrb_int);'
   # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
   # another gem's own *_decls.h, written by this same OUT_DIR mechanism
   # below) to #include so a devirtualized call to an OTHER_OWNERS target
