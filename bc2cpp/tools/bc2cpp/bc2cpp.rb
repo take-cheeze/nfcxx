@@ -5894,16 +5894,18 @@ class CodeGen
   # right above compile_send's own `target = monomorphic_target(name)`
   # line, for the full soundness writeup) knows how to inline directly,
   # mapped to the exact real mandatory arity a call site must match --
-  # `!`/`nil?`/`class`/`object_id`/`keys`/`to_s` take no arguments, `is_a?`/
-  # `kind_of?`/`equal?` take exactly one (confirmed against each one's
-  # own real MRB_ARGS_NONE()/MRB_ARGS_REQ(1) registration in
-  # 3rd/mruby/src/kernel.c / 3rd/mruby/src/class.c / 3rd/mruby/src/hash.c
-  # / 3rd/mruby/src/string.c / 3rd/mruby/src/numeric.c). `to_s` is the one
-  # entry that ISN'T "one real native implementation" -- see
-  # compile_native_primitive_send's own TO_S_TYPE_TAG_DISPATCH comment.
+  # `!`/`nil?`/`class`/`object_id`/`keys`/`to_s`/`length`/`first`/`dup`
+  # take no arguments, `is_a?`/`kind_of?`/`equal?` take exactly one
+  # (confirmed against each one's own real MRB_ARGS_NONE()/
+  # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
+  # 3rd/mruby/src/class.c / 3rd/mruby/src/hash.c / 3rd/mruby/src/string.c
+  # / 3rd/mruby/src/numeric.c / 3rd/mruby/src/array.c /
+  # 3rd/mruby/src/range.c). `to_s`/`length`/`first`/`dup` are the entries
+  # that AREN'T "one real native implementation" -- see each one's own
+  # `*_TYPE_TAG_DISPATCH` comment in compile_native_primitive_send.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
-                                   'to_s' => 0 }.freeze
+                                   'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -6063,6 +6065,112 @@ class CodeGen
       "    break;\n" \
       "  default:\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    break;\n" \
+      "  }\n"
+    when 'length'
+      # LENGTH_TYPE_TAG_DISPATCH: same shape as to_s -- real registrations
+      # found on Array (`mrb_ary_size`), String (`mrb_str_size`), and Hash
+      # (`mrb_hash_size_m`), three distinct native bodies collapsed into
+      # one registry entry. Array and Hash are both safe and simple:
+      # `mrb_ary_size` is `mrb_int_value(mrb, ARY_LEN(a))` (ARY_LEN and
+      # mrb_ary_ptr both real public macros, already used by this file's
+      # own GETIDX/AREF codegen); `mrb_hash_size_m` is a thin wrapper
+      # around `mrb_hash_size`, itself a real public `MRB_API`. String is
+      # deliberately excluded despite `mrb_str_size` itself being harmless
+      # (no ci mutation, no argc read): its own body reads
+      # `RSTRING_CHAR_LEN(self)`, a macro defined twice, *inside
+      # string.c itself* (never in any public header) -- `utf8_strlen(s)`
+      # under `MRB_UTF8_STRING`, plain `RSTRING_LEN(s)` otherwise. This
+      # project's own mrbconf.h leaves `MRB_UTF8_STRING` at its default
+      # (commented out, confirmed by reading the file, not assumed), so
+      # `RSTRING_LEN` would be the real answer today -- but hardcoding
+      # that here would silently go wrong the moment this project's own
+      # build config changes, an unstated coupling this file's own
+      # established style doesn't take on elsewhere. Left to ordinary
+      # `mrb_funcall`, like every tag not listed below.
+      "  // length -- native primitive, runtime-guarded per real receiver type\n" \
+      "  // (only Array/Hash are handled directly -- String is deliberately left\n" \
+      "  // to ordinary dispatch, see compile_native_primitive_send's own\n" \
+      "  // LENGTH_TYPE_TAG_DISPATCH comment for why)\n" \
+      "  switch (mrb_type(#{recv})) {\n" \
+      "  case MRB_TT_ARRAY:\n" \
+      "    r#{d} = mrb_int_value(M, ARY_LEN(mrb_ary_ptr(#{recv})));\n" \
+      "    break;\n" \
+      "  case MRB_TT_HASH:\n" \
+      "    r#{d} = mrb_int_value(M, mrb_hash_size(M, #{recv}));\n" \
+      "    break;\n" \
+      "  default:\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    break;\n" \
+      "  }\n"
+    when 'first'
+      # FIRST_TYPE_TAG_DISPATCH: this entry's own arity (0, see
+      # NATIVE_PRIMITIVE_SEND_ARITY) only ever matches a real `x.first`
+      # call site with no argument -- `x.first(n)` (the "first n elements"
+      # form real call sites also use, per the whole-program survey that
+      # found this candidate) simply never reaches this table at all
+      # (compile_send's own `n == expected_n` gate), so it stays ordinary
+      # `mrb_funcall`, untouched, same as any other arity mismatch
+      # elsewhere in this file.
+      #
+      # Only MRB_TT_RANGE is handled directly: `range_beg` (registered
+      # under `first`, ARGS_NONE -- a real, separate 0-arg-only
+      # registration, not the same function as Array's optional-arg one)
+      # is exactly `mrb_range_beg(mrb, range)`, a real public macro
+      # (`RANGE_BEG(mrb_range_ptr(mrb, r))`) with no VM state touched at
+      # all. MRB_TT_ARRAY is deliberately excluded even though `first` has
+      # a single, real, named implementation there too (`mrb_ary_first`):
+      # its own body calls `mrb_get_argc(mrb)` to decide which of its two
+      # real behaviors to run (bare `x.first` vs `x.first(n)`) -- calling
+      # it directly from here would read the WRONG call frame's argument
+      # count (this call site's own caller, not "0"), the exact same
+      # stale-call-info-frame trap monomorphic_target's own comment
+      # already warns about for an arbitrary native function, just for
+      # `mrb_get_argc` instead of `mrb_get_args`. Everything else,
+      # Array included, falls through to ordinary `mrb_funcall`.
+      "  // first -- native primitive, runtime-guarded (only Range is handled\n" \
+      "  // directly -- see compile_native_primitive_send's own\n" \
+      "  // FIRST_TYPE_TAG_DISPATCH comment for why Array is deliberately left\n" \
+      "  // to ordinary dispatch despite having a single real implementation)\n" \
+      "  if (mrb_range_p(#{recv})) {\n" \
+      "    r#{d} = mrb_range_beg(M, #{recv});\n" \
+      "  } else {\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+    when 'dup'
+      # DUP_TYPE_TAG_DISPATCH: unlike every other entry here, this one is
+      # actually EXHAUSTIVE -- no `mrb_funcall` fallback arm at all.
+      # `dup` has exactly two real native registrations, confirmed via a
+      # full grep across every native source this project's own closed
+      # world can see (3rd/mruby/src, every active mrbgem, mruby-rgss):
+      # `mrb_obj_dup` (Kernel's own default, MRB_API, real body:
+      # immediate values return `self` unchanged via `mrb_immediate_p`,
+      # everything else does a real `mrb_obj_alloc` + `init_copy` --
+      # which itself dispatches the copied object's own real
+      # `#initialize_copy` through the ordinary method-call mechanism, so
+      # a class overriding it is still honored correctly even from
+      # here) and `mrb_mod_dup` (Class/Module's own override -- static,
+      # but its whole body, `mrb_value mod = mrb_obj_clone(mrb, self);
+      # mrb_obj_ptr(mod)->frozen = 0; return mod;`, is three lines,
+      # reproduced directly; `mrb_obj_clone` is a real public MRB_API,
+      # `mrb_obj_ptr` a real public macro). Since Kernel#dup's own real
+      # body is already correct and safe for literally every receiver
+      # type OTHER than a Class/Module/singleton-class instance (which
+      # Module's own registration overrides), the `default:` arm calls it
+      # directly instead of falling back to `mrb_funcall` -- there is no
+      # third real implementation anywhere left for that arm to miss.
+      "  // dup -- native primitive, no lookup needed for any receiver (exactly\n" \
+      "  // two real native implementations exist, both handled directly -- see\n" \
+      "  // compile_native_primitive_send's own DUP_TYPE_TAG_DISPATCH comment)\n" \
+      "  switch (mrb_type(#{recv})) {\n" \
+      "  case MRB_TT_CLASS:\n" \
+      "  case MRB_TT_MODULE:\n" \
+      "  case MRB_TT_SCLASS:\n" \
+      "    r#{d} = mrb_obj_clone(M, #{recv});\n" \
+      "    mrb_obj_ptr(r#{d})->frozen = 0;\n" \
+      "    break;\n" \
+      "  default:\n" \
+      "    r#{d} = mrb_obj_dup(M, #{recv});\n" \
       "    break;\n" \
       "  }\n"
     end
@@ -10571,6 +10679,35 @@ class CodeGen
     #     Every other tag -- Float/Range/Class-ish included -- falls
     #     through to the same `default: mrb_funcall` case, exactly like a
     #     tag this switch never heard of.
+    #   - `length`: same shape as `to_s` -- `mrb_ary_size`/`mrb_str_size`/
+    #     `mrb_hash_size_m` (Array/String/Hash) collapsed into one entry.
+    #     Array and Hash handled directly (see compile_native_primitive_
+    #     send's own LENGTH_TYPE_TAG_DISPATCH comment); String excluded
+    #     because its own real body reads a macro (`RSTRING_CHAR_LEN`)
+    #     defined only inside string.c itself, never in a public header,
+    #     with two different real bodies gated on this project's own
+    #     `MRB_UTF8_STRING` build flag -- reproducing it here would be a
+    #     silent, unstated coupling to that flag's current (disabled)
+    #     value rather than a proven-safe simplification.
+    #   - `first`: `mrb_ary_first` (Array, optional-arg form) vs
+    #     `range_beg` (Range, real separate ARGS_NONE-only registration).
+    #     Only Range is handled directly -- see compile_native_primitive_
+    #     send's own FIRST_TYPE_TAG_DISPATCH comment for why Array is
+    #     excluded despite having a single real implementation: its own
+    #     body reads `mrb_get_argc(mrb)` to pick between its two real
+    #     behaviors, which would read the WRONG call frame's argument
+    #     count if called directly from here.
+    #   - `dup`: exactly two real native registrations found (confirmed
+    #     via a full grep across every native source this project's own
+    #     closed world can see, not just 3rd/mruby/src) -- `mrb_obj_dup`
+    #     (Kernel's own default, a real public `MRB_API`, safe and
+    #     correct for literally any receiver except a Class/Module/
+    #     singleton-class instance) and `mrb_mod_dup` (Module's own
+    #     override for that one case -- static, but its three-line body
+    #     is reproduced directly). See compile_native_primitive_send's own
+    #     DUP_TYPE_TAG_DISPATCH comment -- the only entry in this whole
+    #     table with no `mrb_funcall` fallback arm at all, because there
+    #     is no third real implementation left to miss.
     #
     # Deliberately excludes `respond_to?` (also POLY-native, also a
     # high-count name): real `Kernel#respond_to?`
