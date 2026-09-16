@@ -5127,6 +5127,65 @@ NATIVE_ARG_TARGETS = Set[
 # holds for every entry below, but -- same as the block-forwarding check
 # above -- is a fact about this program today, re-checked per future
 # entry, never a standing assumption.
+#
+# A further whole-program survey (docs/bc2cpp_coverage.txt's own 7-strong
+# `#error unhandled opcode SUPER` count) found exactly 7 remaining sites,
+# individually re-checked, not assumed from any prior entry's shape:
+#
+# 2 landed -- both the exact first shape above (`super parent`, one
+# explicit mandatory arg, into the same already-clean `RPG2k::Scene::
+# Base#initialize`), confirmed via the real disassembly (`SUPER R6 n=1`/
+# `SUPER R5 n=1`) rather than just the source text: `RPG2k::Scene::
+# Map#initialize` (`class Map < Base`, mruby-rpg2k/mrblib/scene/map.rb)
+# and `RPG2k::Scene::SaveLoad#initialize` (`class SaveLoad < Base`,
+# mruby-rpg2k/mrblib/scene/save_load.rb). Grepped every real
+# `Scene::Map.new`/`Scene::SaveLoad.new` call site across the whole
+# closed world (mruby-rpg2k/mruby-lcf/mruby-rgss mrblib plus
+# scripts/rpg2k_scene_check.rb, and beyond it into every other real gem
+# and script in the repo for good measure) -- none pass a block literal.
+# Re-grepped `include`/`prepend` fresh (not trusted from the paragraph
+# above): still exactly 3 real `include`s in the whole closed world
+# (`Game::Party`/`LCF::Array1D` each `include Enumerable`, top-level
+# `class Object; include RGSS; end` in mruby-rpg2k/mrblib/main.rb), none
+# between `Map`/`SaveLoad` and `Base`. `Map#initialize` also takes a
+# `apply_access: true` keyword arg -- irrelevant to the SUPER opcode
+# itself (only the explicitly-forwarded `parent` positional feeds it, per
+# `super parent`'s own source; the keyword only feeds a local hash used
+# later in the method body, confirmed against the real generated C++).
+#
+# The other 5 do NOT belong here, each for a real, checked reason, not a
+# skipped check:
+#
+# - `RPG2k3::Scene::Battle#finish_round_animation` (bare `super`, the
+#   second shape above, into `RPG2k::Scene::Battle#finish_round_
+#   animation`) has a sound target NAME but the target's own body itself
+#   does not compile clean today -- it hits real `#error unhandled opcode
+#   SENDB`/`BLOCK` of its own, from genuine Ruby blocks
+#   (`select(&:defending)`, `select(&:dead?)`, `.uniq { |a| ... }`,
+#   `.each { |ally| ... }`; already documented by tools/bc2cpp/
+#   compiled_gems.rb's own RPG2k3::Scene::Battle comment). `super_target`
+#   already gates on `compiles_clean?(target_def.irep)` for exactly this
+#   reason, so adding this entry would be inert (still `#error`) unless/
+#   until that target's own blocks are separately supported -- confirmed
+#   directly against the real generated output rather than assumed from
+#   the pre-existing comment.
+#
+# - `LCF::Sections#method_missing`, `LCF::Sections#respond_to_missing?`,
+#   `LCF::Array1D#respond_to_missing?`, `LCF::File#respond_to_missing?`
+#   (all plain `class ... ; ... end`, implicit `Object` superclass) each
+#   call `super`/`|| super` reaching `Object#method_missing`/`Object#
+#   respond_to_missing?` -- both are native (C, `mrb_kernel_method_
+#   missing`/`mrb_obj_respond_to_missing` in mruby core), never Ruby-
+#   bytecode-defined anywhere in the whole closed world (grepped; no
+#   `def method_missing`/`def respond_to_missing?` under `Object`/
+#   `Kernel` exists at all). `@registry['method_missing'|
+#   'respond_to_missing?'].find { |d| d.owner == 'Object' }` can never
+#   find a MethodDef for a method nothing here ever defines in bytecode,
+#   so `super_target` returns nil regardless of an allowlist entry --
+#   exactly the same already-excluded shape this comment's own first
+#   paragraph names for `RGSS::Bitmap::LoadError#initialize` (super into
+#   a native, non-bytecode superclass method is never a target here, full
+#   stop, allowlisted or not).
 SUPER_TARGETS = Set[
   'RPG2k::Scene::Battle#initialize',
   'RPG2k::Scene::DebugMenu#initialize',
@@ -5146,6 +5205,8 @@ SUPER_TARGETS = Set[
   'RPG2k3::Scene::Battle#open_battle_options',
   'RPG2k3::Scene::Battle#advance_actor',
   'RPG2k3::Scene::Battle#prev_commandable_actor_index',
+  'RPG2k::Scene::Map#initialize',
+  'RPG2k::Scene::SaveLoad#initialize',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
@@ -5796,6 +5857,111 @@ def mandatory_arity(irep)
   return 0 unless enter
 
   enter.args.split(':').first.to_i
+end
+
+# BLOCK_CFUNC_FALLBACK_SUPPORT: is this block's own child irep safe to
+# compile as a plain top-level C++ function and wrap in a real cfunc-
+# backed RProc (`mrb_proc_new_cfunc_with_env`), rather than needing a
+# genuine captured environment this compiler has no general way to
+# build?
+#
+# `self` is NOT a rejection reason (a prior round of this same feature
+# rejected any block referencing it at all -- see git history/changelog
+# for that round's own reasoning): `mrb_proc_get_self` (3rd/mruby/src/
+# proc.c) returns `self = nil` UNCONDITIONALLY for a plain CFUNC-backed
+# proc only because it falls back to asking the PROC ITSELF (no real
+# captured `REnv`, in the no-`_with_env` case) -- but this compiler
+# controls the construction site and always knows the real value
+# (literally the enclosing method's own `self` C++ variable, in scope
+# right where the RProc gets built). Capturing it explicitly via
+# `mrb_proc_new_cfunc_with_env`'s own one-slot env array and reading it
+# back inside the cfunc body via `mrb_proc_cfunc_env_get(M, 0)` --
+# instead of trusting whatever `self` mruby's own `mrb_yield`/
+# `mrb_yield_argv` (which still derive it from the nil-returning
+# `mrb_proc_get_self`) pass to the cfunc entry point -- sidesteps the
+# whole problem: the block gets the CORRECT, lexically-captured self a
+# real Ruby closure would have, never mruby's own (irrelevant, always
+# nil) per-invocation guess. See emit_proc_fallback_fn/emit_block_
+# fallback_glue's own comments for the actual capture/retrieval codegen.
+#
+# `GETUPVAR`/`SETUPVAR` (a real OUTER-LOCAL reference, as opposed to
+# `self`) still has no matching real `REnv` register layout a one-slot
+# `_with_env` capture satisfies -- rejected outright, out of scope for
+# this round (capturing every referenced outer local the same
+# self-capture way is a natural follow-up, not attempted here).
+# `RETURN_BLK`/`BREAK` (a real non-local exit) still has no plain C++
+# `return` equivalent once this block is a genuinely separate top-level
+# function, possibly several C call frames deep inside whatever method
+# is iterating -- rejected. `BLOCK`/`SENDB`/`SSENDB` (a nested block-
+# carrying call inside this one) is rejected too -- no recursive
+# fallback support in this round. `RESCUE`/`RAISEIF`/`EXCEPT` (a real
+# rescue-region opcode) is rejected -- this fallback builds no
+# equivalent of `recognize_rescue_regions`' own extracted-try-body
+# machinery.
+BLOCK_FALLBACK_UNSAFE_OPS = %w[
+  GETUPVAR SETUPVAR RETURN_BLK BREAK BLOCK SENDB SSENDB
+  RESCUE RAISEIF EXCEPT
+].freeze
+
+def block_fallback_safe?(block_irep)
+  return false unless pure_mandatory_arity?(block_irep)
+
+  block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
+end
+
+# LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of block_fallback_
+# safe? above -- is this LAMBDA's own child irep safe to compile the same
+# way BLOCK_CFUNC_FALLBACK_SUPPORT compiles a block body (a standalone
+# top-level C++ function wrapped in a real cfunc-backed RProc via
+# mrb_proc_new_cfunc_with_env, self captured at construction time --
+# emit_proc_fallback_fn below is shared verbatim between both features)?
+#
+# Deliberately NOT block_fallback_safe? reused unchanged: a real `->() {
+# }`/`lambda { }` LAMBDA-constructed proc is unconditionally
+# MRB_PROC_STRICT (3rd/mruby/include/mruby/opcode.h: `#define OP_L_LAMBDA
+# (OP_L_STRICT|OP_L_CAPTURE)`, the flag `genop_2(s, OP_LAMBDA, ...)` bakes
+# in at `codegen_lambda`, mrbgems/mruby-compiler/core/codegen.c), and
+# RETURN_BLK/BREAK's own real VM dispatch (3rd/mruby/src/vm.c,
+# `CASE(OP_RETURN_BLK)`/`CASE(OP_BREAK)`) BOTH start with `if
+# (MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;` -- an ORDINARY,
+# same-frame return, exactly RETURN's own semantics, whenever the
+# executing proc is strict. That is real Ruby's own well-known "a
+# lambda's own return/break exits the lambda itself" rule, confirmed
+# here at the real bytecode/VM-source level, not assumed from language
+# docs.
+#
+# This is NOT visible as a different opcode inside the child irep itself
+# -- confirmed against real `mrbc -v` disassembly (not just source
+# reading): `codegen_lambda` builds a real lambda's own child irep via
+# `lambda_body(s, n->locals, n->args, n->body, 1)`, the exact same `blk=1`
+# a plain block's own `NODE_BLOCK` codegen passes, so a lambda pushes the
+# identical `LOOP_BLOCK` scope a block does and a `return`/`break` inside
+# it compiles to the exact same RETURN_BLK/BREAK opcodes a block's
+# identically-shaped source would use -- e.g. `->(x) { return x * 2
+# }.call(5)` disassembles its own child irep to `RETURN_BLK R3`, not a
+# distinct "lambda return" opcode. The only thing that differs between an
+# otherwise-identical block's and a lambda's own RETURN_BLK/BREAK is
+# which TOP-LEVEL opcode constructed the enclosing proc (BLOCK vs
+# LAMBDA) -- exactly the one piece of context this recognizer already has
+# for free (it only ever fires from a real LAMBDA instruction, never
+# BLOCK/SENDB/SSENDB). So, unlike block_fallback_safe?, RETURN_BLK/BREAK
+# are safe to let through here -- see compile_insn's own RETURN_BLK/BREAK
+# cases for the (identical, ordinary-`return`) translation this licenses.
+#
+# GETUPVAR/SETUPVAR (no captured-REnv support), a nested LAMBDA/BLOCK/
+# SENDB/SSENDB (no recursive fallback support this round), and
+# RESCUE/RAISEIF/EXCEPT (no rescue-region support in this standalone
+# function) are still rejected, for the identical reasons block_fallback_
+# safe?'s own comment already gives for each.
+LAMBDA_FALLBACK_UNSAFE_OPS = %w[
+  GETUPVAR SETUPVAR LAMBDA BLOCK SENDB SSENDB
+  RESCUE RAISEIF EXCEPT
+].freeze
+
+def lambda_fallback_safe?(lambda_irep)
+  return false unless pure_mandatory_arity?(lambda_irep)
+
+  lambda_irep.instructions.none? { |insn| LAMBDA_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
 
 # CALLSITE_OPTIONAL_ARG_SUPPORT: the real optional-argument count `mandatory_
@@ -8303,6 +8469,60 @@ class CodeGen
       glue_at[region[:block_addr]] = inlined
     end
 
+    # BLOCK_CFUNC_FALLBACK_SUPPORT: same suppressed/glue_at mechanism as
+    # every named block inliner above, but as a genuine catch-all --
+    # unlike those, this one runs LAST and only ever considers a BLOCK/
+    # SENDB(SSENDB) pair NONE of them already claimed (the `suppressed`
+    # membership check right here, not a method-name exclusion list --
+    # every named inliner above already added its own claimed addresses
+    # to that same set). A qualifying region gets a real standalone
+    # cfunc function (emit_proc_fallback_fn, emitted ahead of this
+    # method's own impl exactly like a RESCUE region's own extracted try
+    # body) plus call-site glue that builds a real RProc around it and
+    # dispatches dynamically (emit_block_fallback_glue) -- see
+    # block_fallback_safe?'s own comment for exactly which block bodies
+    # qualify and why.
+    block_fallback_pre = String.new
+    recognize_block_fallback_regions(irep).each do |region|
+      next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
+
+      fn_result = emit_proc_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
+      block_fallback_pre << fn_code
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
+    end
+
+    # LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of
+    # BLOCK_CFUNC_FALLBACK_SUPPORT immediately above -- reuses the exact
+    # same emit_proc_fallback_fn helper (compile the child irep as a
+    # standalone cfunc, wrap it in a real cfunc-backed RProc with self
+    # captured at construction time) to build the RProc, but stores it
+    # straight into its destination register with no dispatch at all
+    # (emit_lambda_fallback_glue, not emit_block_fallback_glue's own
+    # mrb_funcall_with_block) -- a LAMBDA only ever BUILDS a value, it
+    # never calls anything itself. Runs after the BLOCK/SENDB fallback
+    # above purely by convention (LAMBDA is a disjoint opcode from BLOCK/
+    # SENDB/SSENDB, so there is no real overlap to order against; the
+    # `suppressed` check here is the same defensive habit every other
+    # recognizer in this file already holds itself to, not a response to
+    # an observed collision). See lambda_fallback_safe?'s own comment for
+    # why this is safe to allow RETURN_BLK/BREAK through, unlike
+    # block_fallback_safe? above.
+    recognize_lambda_fallback_regions(irep).each do |region|
+      next if suppressed.include?(region[:block_addr])
+
+      fn_result = emit_proc_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
+      block_fallback_pre << fn_code
+      suppressed << region[:block_addr]
+      glue_at[region[:block_addr]] = emit_lambda_fallback_glue(region, fn_name)
+    end
+
     # JUMP_TARGET_GLUE_FIX: a real, caught bug -- `- suppressed` alone
     # would ALSO drop the label for any address that is suppressed but
     # still has real replacement code sitting at it (`glue_at.key?`), and
@@ -8340,7 +8560,7 @@ class CodeGen
     end
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     out << "}\n\n"
-    out = rescue_pre + out
+    out = block_fallback_pre + rescue_pre + out
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty? && !kw_table
@@ -10974,6 +11194,278 @@ class CodeGen
     out
   end
 
+  # BLOCK_CFUNC_FALLBACK_SUPPORT: recognize a `BLOCK`/`SENDB`(`SSENDB`)
+  # region NOT already claimed by any of the specific inliners above
+  # (`.times`/`.each`/`.map`/... -- compile_method's own caller only ever
+  # runs this recognizer's own results through the `suppressed` set those
+  # already populated, so a region this DOES match but one of those
+  # already claimed never double-fires). Unlike every inliner above, this
+  # one names no specific method at all -- it fires for ANY block-
+  # carrying call, gated purely on the block BODY being safe to run as a
+  # free-standing computation (block_fallback_safe? above) rather than on
+  # the receiver's proven class.
+  #
+  # `n=0` only (no explicit positional args alongside the block) --
+  # deliberately narrower than SPLAT_UNROLL_SUPPORT's own `n=N` case:
+  # real `OP_SENDB` (3rd/mruby/src/vm.c) places the block register at
+  # `a + c + 1` (`c` == the call's own real positional arg count), so
+  # `BLOCK R(a+1)` immediately preceding the SENDB/SSENDB is only a
+  # sound, confirmed layout when `c == 0` -- every OTHER block recognizer
+  # in this file (`.times`/`.each`/...) already only ever matches real
+  # `n=0` call sites too, for the exact same reason, never independently
+  # exercised for `n>0` anywhere in this whole file. Combining this with
+  # a real positional arg list is a natural follow-up once that layout
+  # is independently confirmed, not this round's own scope.
+  #
+  # See recognize_lambda_fallback_regions below for the LAMBDA_FALLBACK_
+  # SUPPORT sibling of this recognizer -- a single-instruction `LAMBDA`
+  # region (build-only, no paired SENDB, no dispatch) instead of this
+  # BLOCK/SENDB pair.
+  def recognize_block_fallback_regions(irep)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless insn.op == 'BLOCK'
+
+      paired = irep.instructions[idx + 1]
+      next unless paired && %w[SENDB SSENDB].include?(paired.op)
+      next unless paired.args =~ /n=0(?:\s|$)/
+
+      dest, _rest = paired.args.split(/\s+/, 2)
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      name = paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      next unless name
+
+      block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && block_fallback_safe?(block_irep)
+
+      regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
+                   block_irep: block_irep, name: name, n: 0,
+                   self_implicit: paired.op == 'SSENDB' }
+    end
+    regions
+  end
+
+  # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the block/
+  # lambda body's own standalone top-level function pair -- a real `_impl`
+  # (this body's own instructions, translated exactly like any other
+  # irep's body via the same compile_insn every other emitter here
+  # reuses) plus a genuine `mrb_func_t`-shaped cfunc entry
+  # (`mrb_value(mrb_state*, mrb_value)`, `mrb_proc_new_cfunc_with_env`'s
+  # own required signature) that extracts the real yielded/called
+  # arguments via `mrb_get_args` -- the identical mechanism
+  # `compile_method`'s own plain-mandatory-arity entry wrapper already
+  # uses, reused here because a CFUNC-backed proc invoked either as a
+  # yielded block or an ordinary `.call` (`exec_irep`, 3rd/mruby/src/
+  # vm.c: `ci->stack[0] = self; return MRB_PROC_CFUNC(p)(mrb, self);`)
+  # receives its real call arguments on the VM stack in exactly the same
+  # shape an ordinary call does.
+  #
+  # Shared verbatim by both features -- called from BLOCK_CFUNC_FALLBACK_
+  # SUPPORT's own recognize_block_fallback_regions/emit_block_fallback_
+  # glue (a BLOCK/SENDB pair, dispatched with mrb_funcall_with_block) and
+  # LAMBDA_FALLBACK_SUPPORT's own recognize_lambda_fallback_regions/
+  # emit_lambda_fallback_glue (a single LAMBDA instruction, stored into
+  # its destination register with no dispatch at all) below: this
+  # function only ever needs `region[:block_irep]` (the child irep to
+  # compile) and `region[:block_addr]` (for a globally-unique function
+  # name) -- both recognizers populate them the same way, so nothing
+  # about the call-site shape ever needs to leak in here.
+  #
+  # SELF_CAPTURE_SUPPORT: the entry point's own `self` PARAMETER (what
+  # mruby itself passes in) is deliberately never used for anything --
+  # it's whatever `mrb_yield`/`mrb_proc_get_self` guessed, always `nil`
+  # for a CFUNC-backed proc (see block_fallback_safe?'s own comment).
+  # The REAL self this body should see is instead read back out of the
+  # RProc's own captured env slot 0 (`mrb_proc_cfunc_env_get`) --
+  # emit_rproc_construction below is the OTHER half of this, shared by
+  # both glue emitters: it captures the enclosing method's own real
+  # `self` C++ variable into that exact slot at RProc-construction time,
+  # the one place this compiler actually knows the correct value.
+  def emit_proc_fallback_fn(region, d)
+    block_irep = region[:block_irep]
+    mand = mandatory_arity(block_irep)
+    arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
+    # `block_addr` alone is only unique WITHIN one irep -- two unrelated
+    # methods can easily have a BLOCK/LAMBDA at the same numeric bytecode
+    # offset (a real, caught-before-shipping bug: the first version of
+    # this named the function off `block_addr` alone, which would have
+    # emitted duplicate top-level C++ symbols the moment two different
+    # methods' own fallback bodies happened to share an address).
+    # `cpp_name(d.owner, d.name)` is already this whole program's own
+    # established globally-unique per-method key (every `_impl`/entry
+    # function name here is built from it) -- prefixing with it, exactly
+    # like emit_rescue_try_body's own `"#{impl_name}_rescue_try#{i}"`,
+    # makes the combination unique too. `region[:kind]` (`block_fallback`
+    # by default, `lambda_fallback` from recognize_lambda_fallback_
+    # regions) only affects the generated C++ symbol's own readability --
+    # both recognizers already guarantee `block_addr` uniqueness the same
+    # way, so it plays no role in the uniqueness argument itself.
+    fn_name = "#{cpp_name(d.owner, d.name)}_#{region[:kind] || 'block_fallback'}_#{region[:block_addr]}"
+    impl_name = "#{fn_name}_impl"
+
+    # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
+    # this file already holds itself to (emit_sort_inline's own explicit
+    # `return nil if body.include?('#error')`, emit_times_inline's own
+    # caller comment) -- a block body that itself hits an unsupported
+    # opcode must produce NO region at all, not a real-looking RProc/
+    # cfunc wrapper around a function that still can't compile. Without
+    # this check the caller would still correctly leave the WHOLE
+    # enclosing method uncompiled (compiles_clean? scans the complete
+    # returned code string, this function's own embedded `#error`
+    # included -- confirmed nothing unsound could ship even without this
+    # check), but it would waste a real region slot and, worse, sit
+    # there miscounting this site as a genuine BLOCK_FALLBACK win in the
+    # coverage report's own diagnostic. Caught live: BLKCALL/BLKPUSH's
+    # own whole-program #error counts ticked up by exactly 1 each the
+    # first time this check was missing, from a block body that itself
+    # used one of those two still-unsupported opcodes.
+    body = String.new
+    targets = jump_targets(block_irep)
+    block_irep.instructions.each_with_index do |insn, idx|
+      next if insn.op == 'ENTER'
+
+      body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
+      body << compile_insn(insn, block_irep, d, idx)
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+    (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
+    arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
+    out << body
+    out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
+    out << "}\n\n"
+
+    out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_unused_self) {\n"
+    out << "  (void)bc2cpp_unused_self;\n"
+    out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
+    if mand.zero?
+      out << "  return #{impl_name}(M, bc2cpp_captured_self);\n"
+    else
+      arg_names.each { |a| out << "  mrb_value #{a};\n" }
+      fmt = 'o' * mand
+      ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
+      out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
+      out << "  return #{impl_name}(M, bc2cpp_captured_self, #{arg_names.join(', ')});\n"
+    end
+    out << "}\n\n"
+    [fn_name, out]
+  end
+
+  # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the shared
+  # RProc-construction snippet both glue emitters below build on --
+  # `mrb_proc_new_cfunc_with_env` (not the plain `mrb_proc_new_cfunc`)
+  # with a one-element env array holding this enclosing method's own real
+  # `self` C++ variable -- captured HERE, not inside the block/lambda
+  # body, because this is the one place the real value is actually in
+  # scope as an ordinary local. emit_proc_fallback_fn's own entry point
+  # reads it straight back via `mrb_proc_cfunc_env_get(M, 0)`, giving the
+  # body the correct, lexically-captured self a real Ruby closure would
+  # have -- see that function's own comment for why the self mruby itself
+  # would otherwise pass in is useless. Returns `[rproc_var, code]` --
+  # what the caller does with `rproc_var` (dispatch it, as
+  # emit_block_fallback_glue does, or just store it, as
+  # emit_lambda_fallback_glue does) is entirely up to it.
+  def emit_rproc_construction(addr, fn_name)
+    var = "bc2cpp_blk_proc_#{addr}"
+    out = String.new
+    out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { self };\n"
+    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, 1, bc2cpp_blk_env_#{addr});\n"
+    [var, out]
+  end
+
+  # BLOCK_CFUNC_FALLBACK_SUPPORT: the call-site glue -- build a real
+  # `RProc` around the standalone cfunc entry (emit_rproc_construction
+  # above), then an ordinary dynamic call carrying it as the block
+  # argument (`mrb_funcall_with_block`, mruby's own public API for
+  # exactly this -- 3rd/mruby/src/vm.c). Deliberately still dynamic
+  # dispatch, never MONO/POLY/TYPED devirtualization -- getting a
+  # previously-#error'd block-carrying call site to compile correctly at
+  # all is this round's own goal (the exact same "proven, wired, not yet
+  # the fastest path" shape idea 1's own SPLAT_UNROLL_SUPPORT already
+  # established for its own dynamic-dispatch fallback).
+  #
+  # See emit_lambda_fallback_glue below for the LAMBDA_FALLBACK_SUPPORT
+  # sibling of this glue -- same RProc construction, no dispatch at all.
+  def emit_block_fallback_glue(region, fn_name)
+    dest_reg = region[:dest_reg].to_i
+    recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
+    argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name)
+    out = String.new
+    out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
+           "(self captured at construction time), dynamic dispatch\n"
+    out << "  {\n"
+    out << ctor
+    if argv.empty?
+      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
+             "mrb_obj_value(#{rproc_var}));\n"
+    else
+      out << "    mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n"
+      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+             "#{argv.size}, bc2cpp_blk_argv_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
+    end
+    out << "  }\n"
+    out
+  end
+
+  # LAMBDA_FALLBACK_SUPPORT: recognize a `LAMBDA` instruction whose own
+  # child irep is safe to compile as a standalone cfunc (lambda_fallback_
+  # safe? above) -- the single-instruction analogue of
+  # recognize_block_fallback_regions above: `LAMBDA Ra I[b]` (ops.h:
+  # `R[a] = lambda(Irep[b],L_LAMBDA)`) just BUILDS the proc value into
+  # register `a`; unlike a BLOCK/SENDB(SSENDB) pair there is no paired
+  # call instruction to also recognize or suppress, and no `n`/receiver/
+  # method-name to record -- the whole region is this one instruction.
+  def recognize_lambda_fallback_regions(irep)
+    regions = []
+    irep.instructions.each do |insn|
+      next unless insn.op == 'LAMBDA'
+
+      dest_reg = insn.args[/^R(\d+)/, 1]
+      next unless dest_reg
+
+      lambda_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      next unless lambda_irep_idx
+
+      lambda_label = irep.reps[lambda_irep_idx.to_i]
+      lambda_irep = lambda_label && @ireps[lambda_label]
+      next unless lambda_irep && lambda_fallback_safe?(lambda_irep)
+
+      regions << { block_addr: insn.addr, dest_reg: dest_reg, block_irep: lambda_irep, kind: 'lambda_fallback' }
+    end
+    regions
+  end
+
+  # LAMBDA_FALLBACK_SUPPORT: the call-site glue -- build a real `RProc`
+  # around the standalone cfunc entry (emit_rproc_construction above,
+  # shared verbatim with emit_block_fallback_glue) and just STORE it into
+  # its destination register (`mrb_obj_value`) -- unlike
+  # emit_block_fallback_glue's own mrb_funcall_with_block, a LAMBDA never
+  # calls anything: the resulting value is an ordinary callable/passable
+  # Proc that may be invoked (or not) arbitrarily later, exactly like any
+  # other real Ruby lambda value.
+  def emit_lambda_fallback_glue(region, fn_name)
+    dest_reg = region[:dest_reg].to_i
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name)
+    out = String.new
+    out << "  // LAMBDA_FALLBACK -- lambda body compiled as a standalone cfunc, wrapped as a real RProc " \
+           "(self captured at construction time), stored -- not dispatched\n"
+    out << "  {\n"
+    out << ctor
+    out << "    r#{dest_reg} = mrb_obj_value(#{rproc_var});\n"
+    out << "  }\n"
+    out
+  end
+
   def compile_insn(insn, irep, owner_def, idx = nil)
     a = insn.args
     case insn.op
@@ -11076,6 +11568,52 @@ class CodeGen
         "  r#{d} = mrb_str_new_cstr(M, #{c_string_literal(entry)});\n"
       else
         "  #error STRING references a non-string pool entry (#{entry[:type]}) -- not in this prototype's supported subset\n"
+      end
+    when 'SYMBOL'
+      # "SYMBOL R2 L[0] ; atk_mod" -- real OP_SYMBOL semantics (ops.h: `R[a]
+      # = intern(Pool[b])`) -- a DIFFERENT opcode from LOADSYM: LOADSYM
+      # embeds an already-interned mrb_sym directly as an operand (no pool
+      # lookup at all, this file's SEND-argument code and the `when
+      # 'LOADSYM'` case above already read plenty of literal `:name`
+      # symbols straight off it), while SYMBOL instead names a *string*-pool
+      # entry to intern at runtime. Confirmed against src/codedump.c's own
+      # disassembler (`CASE(OP_SYMBOL, BB): ... fprintf(out, "SYMBOL\tR%d\t
+      # L[%d]\t; %s", ...)`) -- an identical `L[idx]` pool-index shape to
+      # STRING's own disassembly (real dump above: "SYMBOL R2 L[0] ;
+      # atk_mod"), so the literal string value is read out of `irep.pool`
+      # via the exact same mechanism STRING's own `when 'STRING'` case just
+      # above already uses (reused verbatim, not reinvented), then interned
+      # through the real public API (`mrb_symbol_value(mrb_intern_cstr(...))
+      # `, the identical call LOADSYM's own case above already makes for its
+      # own `:name` operand).
+      #
+      # Real trigger, confirmed against both real whole-program SYMBOL
+      # occurrences (Game::Battle#apply_knockout_reset's `%i[atk_mod
+      # def_mod spi_mod agi_mod]`, 4 words -> 4 SYMBOL + one ARRAY(4); and
+      # RPG2k::Scene::Map#vehicle_blocks?'s own 2-word `%i[...]` -> 2 SYMBOL
+      # + one ARRAY(2)) AND a fresh `mrbc -v` disassembly of that exact
+      # literal (matches byte-for-byte):
+      # a bare `:foo` or quoted `:"foo"` symbol literal never reaches here
+      # at all -- parse.y's own `sym: tSTRING_BEG tSTRING` interns those at
+      # PARSE time, straight into a LOADSYM operand (confirmed by a fresh
+      # disassembly of both shapes: `LOADSYM R2 :foo` / `LOADSYM R2 :bar`,
+      # neither ever produces a SYMBOL opcode). SYMBOL is instead mrbc's own
+      # `%i[...]`/`%I[...]` symbol-*array*-literal codegen (codegen.c's
+      # gen_literal_array, called from codegen_symbols): each non-
+      # interpolated word first codegens as a plain OP_STRING, then
+      # gen_intern's own peephole (`data.insn == OP_STRING && data.a ==
+      # cursp()`) rewrites that STRING into SYMBOL in place -- a compile-
+      # time string-to-symbol fold, same spirit as LOADSYM's own compile-
+      # time-interned literal -- immediately followed by this opcode's own
+      # ARRAY(N) to collect them (this file's own `when 'ARRAY'` case
+      # handles that half already; nothing SYMBOL-specific needed there).
+      d = a[/^R(\d+)/, 1]
+      sidx = a[/L\[(\d+)\]/, 1].to_i
+      sentry = irep.pool.fetch(sidx)
+      if sentry.is_a?(String)
+        "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(sentry)}));\n"
+      else
+        "  #error SYMBOL references a non-string pool entry (#{sentry[:type]}) -- not in this prototype's supported subset\n"
       end
     when 'STRCAT'
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
@@ -11188,6 +11726,111 @@ class CodeGen
       compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true, irep: irep, idx: idx, owner_def: owner_def)
+    when 'BLKCALL'
+      # "BLKCALL R7 0" / "BLKCALL R4 2" -- real OP_BLKCALL semantics (ops.h:
+      # `R[a] = R[a].call(R[a+1],...,R[a+b]); direct block call`). Confirmed
+      # against both real whole-program BLKCALL occurrences AND a fresh
+      # `mrbc -v` disassembly of the same source shape: this is mrbc's own
+      # fast path for a *bare* `yield(...)` (codegen.c's codegen_yield) --
+      # BLKPUSH first fetches the current method's own block into R[a], then
+      # -- only for the plain shape (no keyword args, <15 positional args,
+      # no splat) -- BLKCALL invokes it directly; any other shape
+      # (kwargs/splat/>=15 args) falls back to an ordinary `SEND :call`
+      # instead and never reaches here (codegen_yield's own `if (nk == 0 &&
+      # n < 15) { ...OP_BLKCALL...} else { ...OP_SEND :call...}`). This is
+      # the ONLY codegen.c call site that ever emits OP_BLKCALL, and real
+      # bytecode always has it immediately preceded by a BLKPUSH into the
+      # very same register (confirmed against all three real BLKCALL sites
+      # in this whole program's compiled output: Scene::Battle#cached_
+      # bitmap's `cache[key] = yield`, Scene::Map#cached_bitmap's identical
+      # one-liner, and Scene::Map#page_field's `yield` -- rescued by its own
+      # `rescue StandardError`. Every real *caller* of all three -- 8 call
+      # sites for #cached_bitmap across battle.rb/map.rb, 15 for
+      # #page_field in map.rb -- passes a literal `do...end`/`{...}` block,
+      # never a forwarded `&proc`) -- so despite the generic-sounding name,
+      # this is not a "call whatever Proc happens to be in a register"
+      # primitive, it is specifically mrbc's `yield` fast path.
+      #
+      # Real vm.c's own CASE(OP_BLKCALL, ...) does NOT go through ordinary
+      # method dispatch at all -- no mrb_funcall/method-table lookup by
+      # name -- it raises TypeError directly if R[a] isn't literally a Proc
+      # (`if (!mrb_proc_p(recv)) mrb_raisef(mrb, E_TYPE_ERROR, "wrong type
+      # %T (expected Proc)", recv);`), then invokes the proc's own body
+      # straight off its RProc*, bypassing whatever #call method (if any)
+      # the receiver's own class happens to define. A plain `mrb_funcall(M,
+      # r<a>, "call", ...)` substitute -- this file's own usual "dynamic
+      # dispatch is always a safe fallback" pattern, see dynamic_dispatch_
+      # line -- would NOT be sound here: if R[a] were ever some other
+      # object whose class defines #call, mrb_funcall would silently invoke
+      # that #call method instead of raising, which real BLKCALL never
+      # does. So real BLKCALL's own type check is reproduced directly
+      # (same exception class, TypeError; not vm.c's own %T-formatted
+      # message text, which no #error/raise site in this whole file
+      # reproduces byte-for-byte either -- see every existing "bc2cpp:
+      # expected ... receiver" TypeError raise above for the same fixed-
+      # string convention), and the actual invocation is done through
+      # `mrb_yield_argv` -- mruby's own public, officially documented "run
+      # this block synchronously and return its result" API (mruby.h),
+      # used throughout mruby's own core C extensions to implement `yield`
+      # from C -- rather than hand-reimplementing vm.c's own register-
+      # window/callinfo bookkeeping by hand, the same "same observable
+      # result, different but officially-sanctioned internal mechanism"
+      # substitution this file's SEND/SSEND translations already make
+      # throughout via plain mrb_funcall. For every real occurrence here
+      # (an irep-backed Proc from a literal `do...end`/`{}` block, the only
+      # kind ever seen at a real BLKCALL site in this codebase), vm.c's own
+      # non-cfunc branch runs the proc's irep with `self` taken from its
+      # captured environment (`MRB_PROC_ENV(p)->stack[0]`) -- exactly what
+      # `mrb_yield_argv` itself computes too (its own `mrb_proc_get_self`,
+      # src/proc.c, follows the identical env branch for a non-CFUNC proc),
+      # so the two are observably equivalent for this case, including
+      # `break`: `mrb_yield_argv` unwinds via mruby's ordinary MRB_THROW/
+      # longjmp exception machinery exactly like every other raise this
+      # file already emits elsewhere, correctly skipping past this
+      # generated C++ frame's own POD `mrb_value` locals (nothing here has
+      # a non-trivial destructor to skip) up to whatever real C frame
+      # receives it (this method's own caller) -- the same mechanism a
+      # `break` inside a block given to any ordinary C-implemented
+      # `#each`-style method already depends on working correctly.
+      #
+      # Deliberately NOT modeled: a CFUNC-backed Proc (e.g. from `&:sym`/
+      # `&method(...)` forwarding) reaching this opcode -- real vm.c calls
+      # such a proc's cfunc with `self` = the proc object itself (`recv`,
+      # not yet reassigned at that point in vm.c's own code -- ordinary
+      # "receiver is the thing #call was invoked on" semantics), whereas
+      # `mrb_yield_argv`'s own `mrb_proc_get_self` returns `mrb_nil_value()`
+      # for a CFUNC-backed proc instead -- a real, different self. Hand-
+      # reproducing vm.c's own cfunc branch instead (calling `MRB_PROC_
+      # CFUNC(p)` directly) was considered and rejected: real vm.c's cfunc
+      # only receives its actual arguments because the surrounding `cipush`
+      # sets up a real callinfo/stack frame first, which `mrb_get_args`
+      # inside the cfunc then reads -- calling the raw function pointer
+      # directly here, with no such frame, would leave any such cfunc
+      # reading stale/wrong argument state, an actual correctness hazard
+      # worse than the self-value mismatch it would dodge. No real
+      # occurrence in this whole codebase's own compiled output is a
+      # CFUNC-backed proc (all four real call sites use a literal block),
+      # and no mruby-core CFUNC-backed proc (Symbol#to_proc and friends)
+      # observably branches on its own `self` parameter -- so this
+      # narrower `mrb_yield_argv`-only translation is sound for every real
+      # occurrence, with the CFUNC-self divergence being real but inert in
+      # practice rather than provably unreachable -- documented here rather
+      # than silently assumed away.
+      d = a[/^R(\d+)/, 1].to_i
+      blkn = a[/^R\d+\s+(\d+)/, 1].to_i
+      out = String.new
+      out << "  if (!mrb_proc_p(r#{d})) {\n"
+      out << "    mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: BLKCALL (yield) expected a Proc\");\n"
+      out << "  }\n"
+      if blkn.zero?
+        out << "  r#{d} = mrb_yield_argv(M, r#{d}, 0, NULL);\n"
+      else
+        out << "  {\n"
+        out << "    mrb_value blkcall_args[] = { #{(1..blkn).map { |i| "r#{d + i}" }.join(', ')} };\n"
+        out << "    r#{d} = mrb_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
+        out << "  }\n"
+      end
+      out
     when 'RETURN'
       r = a.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
@@ -11197,6 +11840,25 @@ class CodeGen
       "  return mrb_false_value();\n"
     when 'RETTRUE'
       "  return mrb_true_value();\n"
+    when 'RETSELF'
+      # "RETSELF" (Z, no operand) -- ops.h's own terse comment: `/* return
+      # self */`. Real OP_RETSELF (src/vm.c) is `a = 0; goto NORMAL_RETURN;`
+      # -- the exact same bare-value return path OP_RETURN itself takes,
+      # just with the return register hardwired to 0 (self always lives in
+      # r0, real mruby calling convention -- the same fact RETURN's own
+      # `a.empty? ? '0' : ...` above already leans on). mrbc's own codegen
+      # (mrbgems/mruby-compiler/core/codegen.c, gen_return) only ever
+      # produces this opcode as a peephole fusion of a LOADSELF immediately
+      # followed by a RETURN reading that same register (`data.insn ==
+      # OP_LOADSELF && src == data.a && op == OP_RETURN`) -- i.e. a plain
+      # `self`/implicit-self return, never anything else. Every leaf irep
+      # this compiler ever emits a function body for is a real `def`-
+      # compiled method (see RETURN_BLK's own comment below for why: never
+      # a block/proc irep), so `self` here is exactly this generated
+      # function's own real `self` parameter -- translating straight to it
+      # is exactly as mechanical and safe as RETURN/RETNIL/RETFALSE/
+      # RETTRUE just above.
+      "  return self;\n"
     when 'JMP'
       # .to_i (not the raw text) on purpose: the disassembly zero-pads
       # addresses ("018"), but jump_targets/compile_method label instructions
@@ -11366,6 +12028,84 @@ class CodeGen
         out << "  }\n"
         out
       end
+    when 'ARYPUSH'
+      # "ARYPUSH R3 2" -- same 2-operand "Rd N" disassembly shape as ARRAY
+      # just above (src/codedump.c: `"ARYPUSH\tR%d\t%d"`, a, b), but the
+      # semantics differ: push N consecutive registers (Ra+1..Ra+N) onto
+      # the array ALREADY held in Ra, rather than building a fresh one
+      # (real OP_ARYPUSH, src/vm.c: `mrb_ensure_array_type(mrb, regs[a]);
+      # for (i=0;i<b;i++) mrb_ary_push(mrb, regs[a], regs[a+i+1]);` -- a
+      # pure in-place mutation, no write to regs[a] itself).
+      #
+      # R[a] is PROVABLY already a real Array at every real occurrence,
+      # never merely assumed: mrbc's own codegen (mrbgems/mruby-compiler/
+      # core/codegen.c) emits OP_ARYPUSH from exactly two functions --
+      # gen_values (call-argument splat flushing, `foo(*a, b)`-shaped) and
+      # codegen_array (array-literal splat flushing, `[*a, b]`-shaped) --
+      # and every one of the 7 real call sites in both is gated behind a
+      # `first`/`!first`-style flag that only ever clears once a
+      # `genop_2(s, OP_ARRAY, ...)` has already written that exact same
+      # register (either directly above it in the same function, or -- the
+      # one indirect case, codegen_call_assign's own >13-argument overflow
+      # packing -- forces its own OP_ARRAY first before ever reaching
+      # ARYPUSH). So the real VM's own `mrb_ensure_array_type` guard is
+      # unconditionally a no-op here -- translating straight to N
+      # unconditional `mrb_ary_push` calls (mruby/array.h, MRB_API,
+      # already #include'd; call pattern matches this file's own existing
+      # `mrb_ary_push(M, ary, elem)` usage, e.g. emit_sort_inline) is
+      # exactly as safe as ARRAY's own codegen above, just mutating an
+      # existing array instead of allocating a new one.
+      d = a[/^R(\d+)/, 1].to_i
+      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      out = String.new
+      n.times { |i| out << "  mrb_ary_push(M, r#{d}, r#{d + i + 1});\n" }
+      out
+    when 'ARYCAT'
+      # "ARYCAT R3 (R4)" -- the same "Rd (Rs)" disassembly shape as MUL/
+      # DIV/EQ/LT/LE/GT/GE above (src/codedump.c: `"ARYCAT\tR%d\t(R%d)"`,
+      # a, a+1), extracted the same way (anchored `^R` for the
+      # destination, parenthesized `(R\d+)` for the source -- a trailing
+      # print_lv_a local-variable annotation is unparenthesized, so it can
+      # never collide with the source capture).
+      #
+      # Real OP_ARYCAT semantics (src/vm.c) are NOT the bare concatenation
+      # the terse ops.h comment (`/* ary_cat(R[a],R[a+1]) */`) alone
+      # suggests:
+      #   mrb_value splat = mrb_ary_splat(mrb, regs[a+1]);
+      #   if (mrb_nil_p(regs[a])) regs[a] = splat;
+      #   else { mrb_ensure_array_type(mrb, regs[a]); mrb_ary_concat(mrb, regs[a], splat); }
+      # R[a+1] is SPLATTED first (mrb_ary_splat, src/array.c: an Array is
+      # duplicated as-is; anything else is converted via a real #to_a call
+      # if it responds to one, otherwise wrapped as a single-element
+      # array) -- and R[a] has a nil-becomes-the-splat special case ahead
+      # of the real concat.
+      #
+      # This compiler only ever needs the `else` arm, never the nil one:
+      # mrbc's own codegen (mrbgems/mruby-compiler/core/codegen.c) emits
+      # OP_ARYCAT from exactly two call sites -- gen_values (`foo(*a,
+      # *b)`-style call-argument splats) and codegen_array (`[*a,
+      # *b]`-style array-literal splats) -- and in BOTH, R[a] is always the
+      # register most recently written by a `genop_2(s, OP_ARRAY, ...)`
+      # immediately before that splat element's own codegen runs
+      # (confirmed reading both directly: codegen_array's own
+      # `first`-gated `OP_ARRAY, cursp(), regular_elements` / its
+      # first-splat-is-first-element special case `OP_ARRAY, cursp(), 0`;
+      # gen_values' identical `first`-gated OP_ARRAY before its own
+      # ARYCAT). So R[a] is PROVABLY a real, already-built Array at every
+      # real occurrence, NEVER nil -- exactly the same "always immediately
+      # preceded by ARRAY/ARRAY2 building R[a]" invariant ARYPUSH just
+      # above already relies on. `mrb_ensure_array_type` is therefore
+      # unconditionally a no-op here too, safe to skip.
+      #
+      # R[a+1] (the splat source) has NO such guarantee -- it's whatever
+      # expression follows the `*` (a local, a method call, another
+      # literal array, ...) -- so `mrb_ary_splat` (mruby/array.h, MRB_API,
+      # already #include'd) is still called for real here, mirroring the
+      # real VM's own two-step "splat, then concat" rather than assuming
+      # R[a+1] is already an Array.
+      d = a[/^R(\d+)/, 1]
+      s = a[/\(R(\d+)\)/, 1]
+      "  mrb_ary_concat(M, r#{d}, mrb_ary_splat(M, r#{s}));\n"
     when 'AREF'
       # "AREF R2 R6 0 ; R2:x" -- R[a] = R[b][c], c a plain immediate index,
       # never a register (real OP_AREF semantics, src/vm.c): when R[b]
@@ -11497,6 +12237,25 @@ class CodeGen
       d = a[/^R(\d+)/, 1]
       name = a[/(\$\S+)/, 1]
       "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
+    when 'SETGV'
+      # "SETGV $stderr R4" -- write-direction symmetric opcode to GETGV
+      # just above, but codedump.c prints the two operands in REVERSED
+      # order vs. GETGV's own "GETGV R4 $stderr" (confirmed directly:
+      # OP_GETGV is `"GETGV\t\tR%d\t%s"` but OP_SETGV is `"SETGV\t\t%s\tR%d"`,
+      # symbol first, register second) -- so unlike GETGV's own `^R`-
+      # anchored capture, the register here can't be assumed to start the
+      # string; both extractions below search unanchored instead (still
+      # unambiguous: exactly one `$`-prefixed token and one `R<digits>`
+      # token appear in this opcode's own disassembly text, same as
+      # GETGV's own reasoning for why an unqualified regex is already
+      # safe there). Real OP_SETGV semantics (src/vm.c): `mrb_gv_set(mrb,
+      # irep->syms[b], regs[a])` -- same flat global table GETGV reads,
+      # same already-`$`-spelled interned symbol name (no separate sigil
+      # handling needed, GETGV's own comment already established this),
+      # `mrb_gv_set` declared in mruby/variable.h (already #include'd).
+      s = a[/R(\d+)/, 1]
+      name = a[/(\$\S+)/, 1]
+      "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
     when 'STOP'
       ''
     when 'NOP'
@@ -11598,22 +12357,58 @@ class CodeGen
       # VM semantics (src/vm.c, OP_RETURN_BLK) start with:
       # `if (!MRB_PROC_ENV_P(ci->proc) || MRB_PROC_STRICT_P(ci->proc)) goto
       # NORMAL_RETURN;` -- i.e. falls through to the exact same bare-value
-      # return OP_RETURN itself uses, whenever the executing proc is an
-      # ordinary (non-block) method. Every leaf irep this compiler ever
-      # translates *is* exactly that: a real `def`-compiled method body
-      # (mrb_proc_new_irep tags it MRB_PROC_SCOPE|MRB_PROC_STRICT --
-      # confirmed reading 3rd/mruby/src/vm.c's own OP_METHOD/OP_L_METHOD
-      # lambda-creation path), never a block/proc irep (those are separate
-      # child ireps this whole-program TDEF-only registry never registers
-      # as a leaf method body in the first place -- see build_registry's
-      # own comment). So for every real call site this opcode's own
-      # MRB_PROC_STRICT_P branch is unconditionally taken here -- safe to
-      # translate identically to a plain RETURN. Real code hits this from a
-      # `return` that isn't the method's own last statement (confirmed
-      # against real disassembly: Game::Party#include_actor?/#any_alive?/
-      # #actor_by_id's own early `return true`/`return a` inside a `while`
-      # loop body, mrbc's own codegen choice for a non-tail-position
-      # `return`, not a real block boundary).
+      # return OP_RETURN itself uses, whenever the executing proc is
+      # strict. This case is reached from TWO real contexts now, both
+      # always strict:
+      # (1) Every ordinary leaf irep this compiler translates at the top
+      #     level *is* a real `def`-compiled method body (mrb_proc_new_irep
+      #     tags it MRB_PROC_SCOPE|MRB_PROC_STRICT -- confirmed reading
+      #     3rd/mruby/src/vm.c's own OP_METHOD/OP_L_METHOD lambda-creation
+      #     path), never a block/proc irep (those are separate child ireps
+      #     this whole-program TDEF-only registry never registers as a
+      #     leaf method body in the first place -- see build_registry's
+      #     own comment). Real code hits this from a `return` that isn't
+      #     the method's own last statement (confirmed against real
+      #     disassembly: Game::Party#include_actor?/#any_alive?/
+      #     #actor_by_id's own early `return true`/`return a` inside a
+      #     `while` loop body, mrbc's own codegen choice for a non-tail-
+      #     position `return`, not a real block boundary).
+      # (2) LAMBDA_FALLBACK_SUPPORT's own emit_proc_fallback_fn, compiling
+      #     a real LAMBDA's child irep (lambda_fallback_safe? is the only
+      #     thing in this whole file that lets RETURN_BLK through for a
+      #     block/lambda BODY at all -- see its own comment for why a
+      #     LAMBDA-constructed proc is unconditionally MRB_PROC_STRICT,
+      #     confirmed against both `3rd/mruby/include/mruby/opcode.h`'s
+      #     `OP_L_LAMBDA` flags and real `mrbc -v` disassembly of a real
+      #     `->() { return ... }`).
+      # Either way this opcode's own MRB_PROC_STRICT_P branch is
+      # unconditionally taken -- safe to translate identically to a plain
+      # RETURN.
+      r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
+      "  return r#{r};\n"
+    when 'BREAK'
+      # "BREAK Ra" -- OP_BREAK's own real VM semantics (src/vm.c,
+      # `CASE(OP_BREAK)`) start with the identical `if
+      # (MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;` check
+      # RETURN_BLK's own case above already documents -- an ordinary,
+      # same-frame return, exactly RETURN's own semantics, whenever the
+      # executing proc is strict. This case is ONLY ever reached from
+      # LAMBDA_FALLBACK_SUPPORT's own emit_proc_fallback_fn compiling a
+      # real LAMBDA's child irep -- lambda_fallback_safe? is the only
+      # thing in this whole file that lets BREAK through at all
+      # (block_fallback_safe? still rejects it outright for a plain block
+      # body: a plain block's own proc is never strict, and a real BREAK
+      # there needs the non-local-exit search up the real call stack this
+      # compiler has no general way to build -- see that function's own
+      # comment). A LAMBDA-constructed proc IS unconditionally strict
+      # (RETURN_BLK's own case above cites the confirming evidence) -- and
+      # real Ruby's own well-known "a lambda's own break exits the lambda
+      # itself, exactly like return" rule is exactly this same STRICT
+      # check, confirmed here at the real VM-source level. Nothing here
+      # ever re-enters the real VM's own OP_BREAK dispatch for this body
+      # at runtime (no MRB_PROC_STRICT flag needs to exist on the actual
+      # cfunc-backed RProc this fallback constructs) -- this translation
+      # IS the whole runtime behavior.
       r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
     when 'RESCUE'
@@ -11735,39 +12530,48 @@ class CodeGen
   # keyword; required keywords missing at the call site are rejected
   # (nil return -- the interpreter would raise ArgumentError, so
   # compiling a call that drops one would be silently wrong).
-  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
-    dest_reg = d.to_i
-    # Keyword (sym, value) pairs sit right after the n positionals.
-    kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
-    kw_val_regs = (0...nk).map { |k| dest_reg + 2 + n + k * 2 }
-    # Verify every key register is written by a LOADSYM with a literal
-    # symbol, scanning backward from the call site in this same irep.
-    kw_names = kw_sym_regs.map do |reg|
-      sym = nil
-      idx.downto(0) do |i|
-        insn = irep.instructions[i]
-        next unless insn
-        # A write to this register ends the scan -- it must be LOADSYM.
-        if insn.args =~ /^R#{reg}\b/
-          sym = insn.op == 'LOADSYM' ? insn.args[/:(\S+)/, 1] : nil
-          break
-        end
-      end
-      break nil if sym.nil?
-      sym.sub(/\A:/, '')
-    end
-    return nil if kw_names.nil? || kw_names.size != nk
+  # Was this specific register's own most recent write (scanning backward
+  # from `before_idx`, inclusive) a `LOADSYM :name` literal? Shared by
+  # compile_keyword_send's own ordinary keyword-pair extraction and
+  # splat_hash_literal_pairs' own double-splat-literal key extraction --
+  # the identical "prove this register's own value" question, not two
+  # unrelated tables the way hash_element_source_scan's own comment warns
+  # against sharing.
+  def literal_symbol_write(irep, before_idx, reg)
+    before_idx.downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      # A write to this register ends the scan -- it must be LOADSYM.
+      next unless insn.args =~ /^R#{reg}\b/
 
-    recv = self_implicit ? 'self' : "r#{d}"
+      return nil unless insn.op == 'LOADSYM'
+
+      return insn.args[/:(\S+)/, 1]&.sub(/\A:/, '')
+    end
+    nil
+  end
+
+  # KEYWORD_CALLSITE_SUPPORT: the shared tail of compile_keyword_send --
+  # MONO target resolution, keyword-table/arity/required-keyword checks,
+  # and the direct `_impl` call emission -- factored out so
+  # compile_splat_send (below) can reuse the exact same devirtualization
+  # rule against an unrolled splat/double-splat's own register list,
+  # which (unlike an ordinary keyword call site) is never a fixed
+  # dest-relative offset. `argv`/`kw_val_exprs` are already-resolved C++
+  # expression strings (usually `r<N>`, one register each), not register
+  # numbers -- compile_keyword_send's own caller still passes plain
+  # `r<N>` strings, so this is a pure extraction, not a behavior change.
+  def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:)
     # MONO resolution only -- deliberately no TYPED path: a traced-
     # receiver guard's `else` branch would need a dynamic keyword
     # dispatch, which mruby's own `mrb_funcall*` family cannot express
-    # (`ci->nk = 0`, see above), so any guard failure would silently
-    # drop keywords. MONO needs no guard at all (exactly one def
-    # exists program-wide), so it is unconditionally sound. A POLY
-    # keyword call keeps the honest #error.
+    # (`ci->nk = 0`, see compile_keyword_send's own top comment). MONO
+    # needs no guard at all (exactly one def exists program-wide), so it
+    # is unconditionally sound. A POLY keyword call keeps the honest
+    # #error.
     target = monomorphic_target(name)
     return nil unless target&.irep
+
     # monomorphic_target already verified compiles_clean? -- fetch the
     # irep struct for the keyword-table/arity checks below (fetch, not
     # compiles_clean?, which takes a label).
@@ -11776,22 +12580,23 @@ class CodeGen
     return nil unless kw_table
     return nil unless n == mandatory_arity(callee_irep)
     return nil unless (kw_names - kw_table.map { |k| k[:name] }).empty?
+
     # Every required keyword must be present at the call site --
     # otherwise the interpreter raises ArgumentError and compiling
     # the call would be silently wrong.
     required = kw_table.select { |k| k[:required] }.map { |k| k[:name] }
     return nil unless (required - kw_names).empty?
+
     # Same emission-eligibility guard as compile_send's own: no _impl
     # exists for an owner this run is not emitting.
     if @only_owners && !@only_owners.include?(target.owner)
       return nil unless @other_owners&.include?(target.owner)
     end
     impl = cpp_name(target.owner, target.name) + '_impl'
-    argv = (1..n).map { |k| "r#{dest_reg + k}" }
     kw_args = kw_table.flat_map do |kw|
       ci = kw_names.index(kw[:name])
       if ci
-        ["r#{kw_val_regs[ci]}", '1']
+        [kw_val_exprs[ci], '1']
       else
         ['mrb_nil_value()', '0']
       end
@@ -11799,6 +12604,219 @@ class CodeGen
     call = "r#{d} = #{impl}(M, #{([recv] + argv + kw_args).join(', ')});"
     note = "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
     "#{note}  #{call}\n"
+  end
+
+  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
+    dest_reg = d.to_i
+    # Keyword (sym, value) pairs sit right after the n positionals.
+    kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
+    kw_val_regs = (0...nk).map { |k| dest_reg + 2 + n + k * 2 }
+    # Verify every key register is written by a LOADSYM with a literal
+    # symbol, scanning backward from the call site in this same irep.
+    kw_names = kw_sym_regs.map { |reg| literal_symbol_write(irep, idx, reg) }
+    return nil if kw_names.any?(&:nil?)
+
+    recv = self_implicit ? 'self' : "r#{d}"
+    compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: (1..n).map { |k| "r#{dest_reg + k}" },
+                          kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" })
+  end
+
+  # SPLAT_UNROLL_SUPPORT: "what argument expressions does the literal
+  # Array built at `reg` (traced backward from just before `idx`, MOVE
+  # chains followed) actually hold?" -- the register-LIST analogue of
+  # array_element_source_scan's own ARRAY arm, for compile_splat_send
+  # below. A splat call site (`n=*`) never gets a fixed register list
+  # from mrbc's own disassembly the way an ordinary `n=N` call does
+  # (confirmed against real src/vm.c OP_SEND: when `n==CALL_MAXARGS`, the
+  # VM spreads whatever real Array object already sits in R(d+1) at
+  # *runtime*) -- so the only way to recover a fixed list at COMPILE time
+  # is proving that source register was itself just built by a literal
+  # `ARRAY Rd N` a few instructions back, never a computed/variable
+  # array.
+  #
+  # Deliberately `mrb_ary_ref(M, r<base>, k)`, never the raw `r<base+k>`
+  # source registers ARRAY's own N-1 non-zeroth registers would still
+  # hold: real OP_ARRAY semantics overwrite `r<base>` ITSELF with the
+  # constructed Array object (`compile_insn`'s own ARRAY case, "the
+  # result overwrites Rd itself" -- Rd is element 0's own register). A
+  # bare `r<base>` for element 0 would silently read that already-
+  # clobbered Array object instead of the real first argument -- caught
+  # live building this exact feature (Game::Battle::AllTargetSkillCommand.
+  # new(*args)'s own real generated call passed the freshly-built Array as
+  # its own first positional argument instead of the real value, before
+  # this fix). Reading every element back out of the array object mrbc's
+  # own codegen already built sidesteps the clobber entirely, for
+  # elements 0 and 1..N-1 alike -- one rule, not an off-by-one special
+  # case for index 0 only.
+  #
+  # Returns an Array of C++ expression Strings ("mrb_ary_ref(M, r5, 0)",
+  # ...), or nil for "not a traceable literal" (the caller keeps the
+  # honest #error).
+  def splat_array_literal_regs(irep, idx, reg)
+    hops = 0
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      # Same reasoning as array_element_source_scan's own BLOCK skip: a
+      # block-carrying call's own block-proc register sits between the
+      # call and its receiver write, evidence FOR the shape rather than
+      # a writer of it.
+      next if insn.op == 'BLOCK'
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      case insn.op
+      when 'MOVE'
+        hops += 1
+        return nil if hops > 8
+
+        src = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless src
+
+        reg = src
+        next
+      when 'ARRAY', 'ARRAY2'
+        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+        return nil if n.nil?
+
+        base = reg.to_i
+        return (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  # SPLAT_UNROLL_SUPPORT: the Hash-double-splat analogue of
+  # splat_array_literal_regs above -- traces the register backward for a
+  # literal `HASH Rd N` (N key/value PAIRS spanning Rd..Rd+2N-1, the same
+  # real layout HashElementLayout's own hash_element_source_scan already
+  # confirmed against src/vm.c's OP_HASH), and additionally requires
+  # every key to be a literal `LOADSYM` -- a computed key has no static
+  # name to match against the callee's own keyword table (the same bar
+  # compile_keyword_send's own ordinary keyword-pair extraction already
+  # holds itself to). Returns an Array of `{name:, val_reg:}` Hashes (one
+  # per pair, in source order), or nil for "not a traceable all-literal-
+  # key Hash".
+  def splat_hash_literal_pairs(irep, idx, reg)
+    hops = 0
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      next if insn.op == 'BLOCK'
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      case insn.op
+      when 'MOVE'
+        hops += 1
+        return nil if hops > 8
+
+        src = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless src
+
+        reg = src
+        next
+      when 'HASH'
+        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+        return nil if n.nil?
+
+        base = reg.to_i
+        return (0...n).map do |k|
+          key_reg = base + (2 * k)
+          val_reg = base + (2 * k) + 1
+          kname = literal_symbol_write(irep, i - 1, key_reg.to_s)
+          return nil unless kname
+
+          { name: kname, val_reg: "r#{val_reg}" }
+        end
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  # SPLAT_UNROLL_SUPPORT: a `SEND`/`SSEND` call site whose own arg list is
+  # a splat (`n=*`) and/or a double-splat (`nk=*`) -- previously an
+  # unconditional #error (see this method's own caller, the `n_match`
+  # branch in compile_send) -- compiles as an ordinary call when the
+  # splatted Array/Hash traces back to a compile-time-fixed-size LITERAL
+  # (splat_array_literal_regs/splat_hash_literal_pairs above), rather
+  # than a runtime-variable expression this codegen has no fixed
+  # register list for. Anything not traceable to such a literal (a
+  # splatted local variable, a computed array/hash, a non-literal key in
+  # a double-splat) keeps the honest #error -- this never guesses.
+  #
+  # Deliberately dynamic-dispatch-only for the plain-positional case
+  # (dynamic_dispatch_line, never a devirtualized MONO/POLY/TYPED call):
+  # getting these previously-#error'd call sites compiling correctly at
+  # all is this round's own goal; layering MONO/POLY/TYPED
+  # devirtualization on top of an unrolled splat call is a natural
+  # follow-up once this lands, exactly like every other "proven, wired,
+  # not yet the fastest path" round this file's own history already has
+  # plenty of. A keyword-carrying unroll (double-splat, or a literal
+  # keyword-pair tail riding alongside a positional splat) reuses
+  # compile_keyword_call's own MONO-direct-_impl-call machinery instead
+  # -- mruby's own `mrb_funcall*` family can never carry keywords at all
+  # (compile_keyword_send's own top comment), so a dynamic-dispatch
+  # fallback isn't an option there the way it is for the plain-
+  # positional case.
+  def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:)
+    return nil unless irep && idx
+
+    n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
+    return nil unless n_match
+
+    n_spec, nk_spec = n_match[1], n_match[2]
+    return nil unless n_spec == '*' || nk_spec == '*'
+
+    dest_reg = d.to_i
+    recv = self_implicit ? 'self' : "r#{d}"
+
+    next_reg = dest_reg + 1
+    if n_spec == '*'
+      positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
+      return nil unless positional
+
+      next_reg += 1 # the single register the splatted array itself occupied.
+    else
+      n = n_spec.to_i
+      positional = (1..n).map { |k| "r#{dest_reg + k}" }
+      next_reg += n
+    end
+
+    kw_pairs =
+      if nk_spec == '*'
+        pairs = splat_hash_literal_pairs(irep, idx, next_reg.to_s)
+        return nil unless pairs
+
+        pairs
+      elsif nk_spec
+        nk = nk_spec.to_i
+        (0...nk).map do |k|
+          key_reg = next_reg + (k * 2)
+          val_reg = next_reg + (k * 2) + 1
+          kname = literal_symbol_write(irep, idx, key_reg.to_s)
+          return nil unless kname
+
+          { name: kname, val_reg: "r#{val_reg}" }
+        end
+      else
+        []
+      end
+
+    if kw_pairs.empty?
+      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat, dynamic dispatch\n"
+      "#{note}  #{dynamic_dispatch_line(d, recv, name, positional)}"
+    else
+      result = compile_keyword_call(name: name, d: d, recv: recv, n: positional.size, argv: positional,
+                                     kw_names: kw_pairs.map { |p| p[:name] },
+                                     kw_val_exprs: kw_pairs.map { |p| p[:val_reg] })
+      return nil unless result
+
+      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat/double-splat\n"
+      "#{note}#{result}"
+    end
   end
 
   def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
@@ -11943,14 +12961,24 @@ class CodeGen
     if n_match && (n_match[1] == '*' || n_match[2])
       # Keyword-argument call site (nk>0, no splat): try devirtualizing
       # into the compiled callee's own _impl (compile_keyword_send
-      # below) before falling back to the honest #error. Splat (`*`
-      # anywhere) still always #errors -- no fixed register list exists
-      # for it by construction.
+      # below) before falling back to the honest #error.
       if n_match[1] != '*' && n_match[2] != '*' && irep && !idx.nil?
         kw_result = compile_keyword_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
                                          owner_def: owner_def, name: name, d: d,
                                          n: n_match[1].to_i, nk: n_match[2].to_i)
         return kw_result if kw_result
+      end
+      # SPLAT_UNROLL_SUPPORT: a splat (`n=*`) and/or double-splat
+      # (`nk=*`) call site: try unrolling it into an ordinary call when
+      # the splatted Array/Hash traces to a compile-time-fixed-size
+      # literal (compile_splat_send below) before falling back to the
+      # honest #error. A splatted variable/computed expression still
+      # always #errors -- no fixed register list exists for it by
+      # construction.
+      if irep && !idx.nil?
+        splat_result = compile_splat_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
+                                          name: name, d: d)
+        return splat_result if splat_result
       end
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{n_match[0]}) -- not in this prototype's supported subset\n"
     end
@@ -13091,6 +14119,12 @@ if $PROGRAM_NAME == __FILE__
   # out of the wrong branch. A real core API (always available, not gated
   # behind the mruby-error gem the way mrb_protect/mrb_rescue are).
   puts '#include <mruby/error.h>'
+  # mrb_proc_new_cfunc -- BLOCK_CFUNC_FALLBACK_SUPPORT's own RProc
+  # construction (emit_block_fallback_glue's own comment) needs this;
+  # unlike mrb_str_aref above, this header has a real MRB_BEGIN_DECL/
+  # MRB_END_DECL C-linkage guard (confirmed by reading it), so a plain
+  # #include is safe here.
+  puts '#include <mruby/proc.h>'
   # GETIDX's own String arm (see compile_insn's own comment on that opcode)
   # calls `mrb_str_aref` directly -- a real, non-static, externally-linked
   # function (3rd/mruby/src/string.c), but declared only in mruby/
