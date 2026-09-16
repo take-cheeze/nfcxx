@@ -5881,8 +5881,8 @@ end
 # `mrb_proc_get_self`) pass to the cfunc entry point -- sidesteps the
 # whole problem: the block gets the CORRECT, lexically-captured self a
 # real Ruby closure would have, never mruby's own (irrelevant, always
-# nil) per-invocation guess. See emit_block_fallback_fn/_glue's own
-# comments for the actual capture/retrieval codegen.
+# nil) per-invocation guess. See emit_proc_fallback_fn/emit_block_
+# fallback_glue's own comments for the actual capture/retrieval codegen.
 #
 # `GETUPVAR`/`SETUPVAR` (a real OUTER-LOCAL reference, as opposed to
 # `self`) still has no matching real `REnv` register layout a one-slot
@@ -5907,6 +5907,61 @@ def block_fallback_safe?(block_irep)
   return false unless pure_mandatory_arity?(block_irep)
 
   block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
+end
+
+# LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of block_fallback_
+# safe? above -- is this LAMBDA's own child irep safe to compile the same
+# way BLOCK_CFUNC_FALLBACK_SUPPORT compiles a block body (a standalone
+# top-level C++ function wrapped in a real cfunc-backed RProc via
+# mrb_proc_new_cfunc_with_env, self captured at construction time --
+# emit_proc_fallback_fn below is shared verbatim between both features)?
+#
+# Deliberately NOT block_fallback_safe? reused unchanged: a real `->() {
+# }`/`lambda { }` LAMBDA-constructed proc is unconditionally
+# MRB_PROC_STRICT (3rd/mruby/include/mruby/opcode.h: `#define OP_L_LAMBDA
+# (OP_L_STRICT|OP_L_CAPTURE)`, the flag `genop_2(s, OP_LAMBDA, ...)` bakes
+# in at `codegen_lambda`, mrbgems/mruby-compiler/core/codegen.c), and
+# RETURN_BLK/BREAK's own real VM dispatch (3rd/mruby/src/vm.c,
+# `CASE(OP_RETURN_BLK)`/`CASE(OP_BREAK)`) BOTH start with `if
+# (MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;` -- an ORDINARY,
+# same-frame return, exactly RETURN's own semantics, whenever the
+# executing proc is strict. That is real Ruby's own well-known "a
+# lambda's own return/break exits the lambda itself" rule, confirmed
+# here at the real bytecode/VM-source level, not assumed from language
+# docs.
+#
+# This is NOT visible as a different opcode inside the child irep itself
+# -- confirmed against real `mrbc -v` disassembly (not just source
+# reading): `codegen_lambda` builds a real lambda's own child irep via
+# `lambda_body(s, n->locals, n->args, n->body, 1)`, the exact same `blk=1`
+# a plain block's own `NODE_BLOCK` codegen passes, so a lambda pushes the
+# identical `LOOP_BLOCK` scope a block does and a `return`/`break` inside
+# it compiles to the exact same RETURN_BLK/BREAK opcodes a block's
+# identically-shaped source would use -- e.g. `->(x) { return x * 2
+# }.call(5)` disassembles its own child irep to `RETURN_BLK R3`, not a
+# distinct "lambda return" opcode. The only thing that differs between an
+# otherwise-identical block's and a lambda's own RETURN_BLK/BREAK is
+# which TOP-LEVEL opcode constructed the enclosing proc (BLOCK vs
+# LAMBDA) -- exactly the one piece of context this recognizer already has
+# for free (it only ever fires from a real LAMBDA instruction, never
+# BLOCK/SENDB/SSENDB). So, unlike block_fallback_safe?, RETURN_BLK/BREAK
+# are safe to let through here -- see compile_insn's own RETURN_BLK/BREAK
+# cases for the (identical, ordinary-`return`) translation this licenses.
+#
+# GETUPVAR/SETUPVAR (no captured-REnv support), a nested LAMBDA/BLOCK/
+# SENDB/SSENDB (no recursive fallback support this round), and
+# RESCUE/RAISEIF/EXCEPT (no rescue-region support in this standalone
+# function) are still rejected, for the identical reasons block_fallback_
+# safe?'s own comment already gives for each.
+LAMBDA_FALLBACK_UNSAFE_OPS = %w[
+  GETUPVAR SETUPVAR LAMBDA BLOCK SENDB SSENDB
+  RESCUE RAISEIF EXCEPT
+].freeze
+
+def lambda_fallback_safe?(lambda_irep)
+  return false unless pure_mandatory_arity?(lambda_irep)
+
+  lambda_irep.instructions.none? { |insn| LAMBDA_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
 
 # CALLSITE_OPTIONAL_ARG_SUPPORT: the real optional-argument count `mandatory_
@@ -8421,7 +8476,7 @@ class CodeGen
     # membership check right here, not a method-name exclusion list --
     # every named inliner above already added its own claimed addresses
     # to that same set). A qualifying region gets a real standalone
-    # cfunc function (emit_block_fallback_fn, emitted ahead of this
+    # cfunc function (emit_proc_fallback_fn, emitted ahead of this
     # method's own impl exactly like a RESCUE region's own extracted try
     # body) plus call-site glue that builds a real RProc around it and
     # dispatches dynamically (emit_block_fallback_glue) -- see
@@ -8431,13 +8486,41 @@ class CodeGen
     recognize_block_fallback_regions(irep).each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
 
-      fn_result = emit_block_fallback_fn(region, d)
+      fn_result = emit_proc_fallback_fn(region, d)
       next unless fn_result
 
       fn_name, fn_code = fn_result
       block_fallback_pre << fn_code
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
+    end
+
+    # LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of
+    # BLOCK_CFUNC_FALLBACK_SUPPORT immediately above -- reuses the exact
+    # same emit_proc_fallback_fn helper (compile the child irep as a
+    # standalone cfunc, wrap it in a real cfunc-backed RProc with self
+    # captured at construction time) to build the RProc, but stores it
+    # straight into its destination register with no dispatch at all
+    # (emit_lambda_fallback_glue, not emit_block_fallback_glue's own
+    # mrb_funcall_with_block) -- a LAMBDA only ever BUILDS a value, it
+    # never calls anything itself. Runs after the BLOCK/SENDB fallback
+    # above purely by convention (LAMBDA is a disjoint opcode from BLOCK/
+    # SENDB/SSENDB, so there is no real overlap to order against; the
+    # `suppressed` check here is the same defensive habit every other
+    # recognizer in this file already holds itself to, not a response to
+    # an observed collision). See lambda_fallback_safe?'s own comment for
+    # why this is safe to allow RETURN_BLK/BREAK through, unlike
+    # block_fallback_safe? above.
+    recognize_lambda_fallback_regions(irep).each do |region|
+      next if suppressed.include?(region[:block_addr])
+
+      fn_result = emit_proc_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
+      block_fallback_pre << fn_code
+      suppressed << region[:block_addr]
+      glue_at[region[:block_addr]] = emit_lambda_fallback_glue(region, fn_name)
     end
 
     # JUMP_TARGET_GLUE_FIX: a real, caught bug -- `- suppressed` alone
@@ -11133,6 +11216,11 @@ class CodeGen
   # exercised for `n>0` anywhere in this whole file. Combining this with
   # a real positional arg list is a natural follow-up once that layout
   # is independently confirmed, not this round's own scope.
+  #
+  # See recognize_lambda_fallback_regions below for the LAMBDA_FALLBACK_
+  # SUPPORT sibling of this recognizer -- a single-instruction `LAMBDA`
+  # region (build-only, no paired SENDB, no dispatch) instead of this
+  # BLOCK/SENDB pair.
   def recognize_block_fallback_regions(irep)
     regions = []
     irep.instructions.each_with_index do |insn, idx|
@@ -11164,46 +11252,62 @@ class CodeGen
     regions
   end
 
-  # BLOCK_CFUNC_FALLBACK_SUPPORT: the block body's own standalone
-  # top-level function pair -- a real `_impl` (this block's own
-  # instructions, translated exactly like any other irep's body via the
-  # same compile_insn every other emitter here reuses) plus a genuine
-  # `mrb_func_t`-shaped cfunc entry (`mrb_value(mrb_state*, mrb_value)`,
-  # `mrb_proc_new_cfunc_with_env`'s own required signature) that
-  # extracts the real yielded arguments via `mrb_get_args` -- the
-  # identical mechanism `compile_method`'s own plain-mandatory-arity
-  # entry wrapper already uses, reused here because a CFUNC-backed proc
-  # invoked as a yielded block (`exec_irep`, 3rd/mruby/src/vm.c:
-  # `ci->stack[0] = self; return MRB_PROC_CFUNC(p)(mrb, self);`)
+  # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the block/
+  # lambda body's own standalone top-level function pair -- a real `_impl`
+  # (this body's own instructions, translated exactly like any other
+  # irep's body via the same compile_insn every other emitter here
+  # reuses) plus a genuine `mrb_func_t`-shaped cfunc entry
+  # (`mrb_value(mrb_state*, mrb_value)`, `mrb_proc_new_cfunc_with_env`'s
+  # own required signature) that extracts the real yielded/called
+  # arguments via `mrb_get_args` -- the identical mechanism
+  # `compile_method`'s own plain-mandatory-arity entry wrapper already
+  # uses, reused here because a CFUNC-backed proc invoked either as a
+  # yielded block or an ordinary `.call` (`exec_irep`, 3rd/mruby/src/
+  # vm.c: `ci->stack[0] = self; return MRB_PROC_CFUNC(p)(mrb, self);`)
   # receives its real call arguments on the VM stack in exactly the same
   # shape an ordinary call does.
+  #
+  # Shared verbatim by both features -- called from BLOCK_CFUNC_FALLBACK_
+  # SUPPORT's own recognize_block_fallback_regions/emit_block_fallback_
+  # glue (a BLOCK/SENDB pair, dispatched with mrb_funcall_with_block) and
+  # LAMBDA_FALLBACK_SUPPORT's own recognize_lambda_fallback_regions/
+  # emit_lambda_fallback_glue (a single LAMBDA instruction, stored into
+  # its destination register with no dispatch at all) below: this
+  # function only ever needs `region[:block_irep]` (the child irep to
+  # compile) and `region[:block_addr]` (for a globally-unique function
+  # name) -- both recognizers populate them the same way, so nothing
+  # about the call-site shape ever needs to leak in here.
   #
   # SELF_CAPTURE_SUPPORT: the entry point's own `self` PARAMETER (what
   # mruby itself passes in) is deliberately never used for anything --
   # it's whatever `mrb_yield`/`mrb_proc_get_self` guessed, always `nil`
   # for a CFUNC-backed proc (see block_fallback_safe?'s own comment).
-  # The REAL self this block should see is instead read back out of the
+  # The REAL self this body should see is instead read back out of the
   # RProc's own captured env slot 0 (`mrb_proc_cfunc_env_get`) --
-  # `emit_block_fallback_glue` below is the OTHER half of this: it
-  # captures the enclosing method's own real `self` C++ variable into
-  # that exact slot at RProc-construction time, the one place this
-  # compiler actually knows the correct value.
-  def emit_block_fallback_fn(region, d)
+  # emit_rproc_construction below is the OTHER half of this, shared by
+  # both glue emitters: it captures the enclosing method's own real
+  # `self` C++ variable into that exact slot at RProc-construction time,
+  # the one place this compiler actually knows the correct value.
+  def emit_proc_fallback_fn(region, d)
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
     arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
     # `block_addr` alone is only unique WITHIN one irep -- two unrelated
-    # methods can easily have a BLOCK at the same numeric bytecode
+    # methods can easily have a BLOCK/LAMBDA at the same numeric bytecode
     # offset (a real, caught-before-shipping bug: the first version of
     # this named the function off `block_addr` alone, which would have
     # emitted duplicate top-level C++ symbols the moment two different
-    # methods' own fallback blocks happened to share an address).
+    # methods' own fallback bodies happened to share an address).
     # `cpp_name(d.owner, d.name)` is already this whole program's own
     # established globally-unique per-method key (every `_impl`/entry
     # function name here is built from it) -- prefixing with it, exactly
     # like emit_rescue_try_body's own `"#{impl_name}_rescue_try#{i}"`,
-    # makes the combination unique too.
-    fn_name = "#{cpp_name(d.owner, d.name)}_block_fallback_#{region[:block_addr]}"
+    # makes the combination unique too. `region[:kind]` (`block_fallback`
+    # by default, `lambda_fallback` from recognize_lambda_fallback_
+    # regions) only affects the generated C++ symbol's own readability --
+    # both recognizers already guarantee `block_addr` uniqueness the same
+    # way, so it plays no role in the uniqueness argument itself.
+    fn_name = "#{cpp_name(d.owner, d.name)}_#{region[:kind] || 'block_fallback'}_#{region[:block_addr]}"
     impl_name = "#{fn_name}_impl"
 
     # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
@@ -11256,46 +11360,108 @@ class CodeGen
     [fn_name, out]
   end
 
+  # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the shared
+  # RProc-construction snippet both glue emitters below build on --
+  # `mrb_proc_new_cfunc_with_env` (not the plain `mrb_proc_new_cfunc`)
+  # with a one-element env array holding this enclosing method's own real
+  # `self` C++ variable -- captured HERE, not inside the block/lambda
+  # body, because this is the one place the real value is actually in
+  # scope as an ordinary local. emit_proc_fallback_fn's own entry point
+  # reads it straight back via `mrb_proc_cfunc_env_get(M, 0)`, giving the
+  # body the correct, lexically-captured self a real Ruby closure would
+  # have -- see that function's own comment for why the self mruby itself
+  # would otherwise pass in is useless. Returns `[rproc_var, code]` --
+  # what the caller does with `rproc_var` (dispatch it, as
+  # emit_block_fallback_glue does, or just store it, as
+  # emit_lambda_fallback_glue does) is entirely up to it.
+  def emit_rproc_construction(addr, fn_name)
+    var = "bc2cpp_blk_proc_#{addr}"
+    out = String.new
+    out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { self };\n"
+    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, 1, bc2cpp_blk_env_#{addr});\n"
+    [var, out]
+  end
+
   # BLOCK_CFUNC_FALLBACK_SUPPORT: the call-site glue -- build a real
-  # `RProc` around the standalone cfunc entry, then an ordinary dynamic
-  # call carrying it as the block argument (`mrb_funcall_with_block`,
-  # mruby's own public API for exactly this -- 3rd/mruby/src/vm.c).
-  # Deliberately still dynamic dispatch, never MONO/POLY/TYPED
-  # devirtualization -- getting a previously-#error'd block-carrying
-  # call site to compile correctly at all is this round's own goal (the
-  # exact same "proven, wired, not yet the fastest path" shape idea 1's
-  # own SPLAT_UNROLL_SUPPORT already established for its own dynamic-
-  # dispatch fallback).
+  # `RProc` around the standalone cfunc entry (emit_rproc_construction
+  # above), then an ordinary dynamic call carrying it as the block
+  # argument (`mrb_funcall_with_block`, mruby's own public API for
+  # exactly this -- 3rd/mruby/src/vm.c). Deliberately still dynamic
+  # dispatch, never MONO/POLY/TYPED devirtualization -- getting a
+  # previously-#error'd block-carrying call site to compile correctly at
+  # all is this round's own goal (the exact same "proven, wired, not yet
+  # the fastest path" shape idea 1's own SPLAT_UNROLL_SUPPORT already
+  # established for its own dynamic-dispatch fallback).
   #
-  # SELF_CAPTURE_SUPPORT: `mrb_proc_new_cfunc_with_env` (not the plain
-  # `mrb_proc_new_cfunc`) with a one-element env array holding this
-  # enclosing method's own real `self` C++ variable -- captured HERE,
-  # not inside the block body, because this is the one place the real
-  # value is actually in scope as an ordinary local. emit_block_fallback_
-  # fn's own entry point reads it straight back via
-  # `mrb_proc_cfunc_env_get(M, 0)`, giving the block the correct,
-  # lexically-captured self a real Ruby closure would have -- see that
-  # function's own comment for why the self mruby itself would otherwise
-  # pass in is useless.
+  # See emit_lambda_fallback_glue below for the LAMBDA_FALLBACK_SUPPORT
+  # sibling of this glue -- same RProc construction, no dispatch at all.
   def emit_block_fallback_glue(region, fn_name)
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name)
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), dynamic dispatch\n"
     out << "  {\n"
-    out << "    mrb_value bc2cpp_blk_env_#{region[:block_addr]}[] = { self };\n"
-    out << "    struct RProc* bc2cpp_blk_proc_#{region[:block_addr]} = " \
-           "mrb_proc_new_cfunc_with_env(M, #{fn_name}, 1, bc2cpp_blk_env_#{region[:block_addr]});\n"
+    out << ctor
     if argv.empty?
       out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
-             "mrb_obj_value(bc2cpp_blk_proc_#{region[:block_addr]}));\n"
+             "mrb_obj_value(#{rproc_var}));\n"
     else
       out << "    mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n"
       out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-             "#{argv.size}, bc2cpp_blk_argv_#{region[:block_addr]}, mrb_obj_value(bc2cpp_blk_proc_#{region[:block_addr]}));\n"
+             "#{argv.size}, bc2cpp_blk_argv_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
     end
+    out << "  }\n"
+    out
+  end
+
+  # LAMBDA_FALLBACK_SUPPORT: recognize a `LAMBDA` instruction whose own
+  # child irep is safe to compile as a standalone cfunc (lambda_fallback_
+  # safe? above) -- the single-instruction analogue of
+  # recognize_block_fallback_regions above: `LAMBDA Ra I[b]` (ops.h:
+  # `R[a] = lambda(Irep[b],L_LAMBDA)`) just BUILDS the proc value into
+  # register `a`; unlike a BLOCK/SENDB(SSENDB) pair there is no paired
+  # call instruction to also recognize or suppress, and no `n`/receiver/
+  # method-name to record -- the whole region is this one instruction.
+  def recognize_lambda_fallback_regions(irep)
+    regions = []
+    irep.instructions.each do |insn|
+      next unless insn.op == 'LAMBDA'
+
+      dest_reg = insn.args[/^R(\d+)/, 1]
+      next unless dest_reg
+
+      lambda_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      next unless lambda_irep_idx
+
+      lambda_label = irep.reps[lambda_irep_idx.to_i]
+      lambda_irep = lambda_label && @ireps[lambda_label]
+      next unless lambda_irep && lambda_fallback_safe?(lambda_irep)
+
+      regions << { block_addr: insn.addr, dest_reg: dest_reg, block_irep: lambda_irep, kind: 'lambda_fallback' }
+    end
+    regions
+  end
+
+  # LAMBDA_FALLBACK_SUPPORT: the call-site glue -- build a real `RProc`
+  # around the standalone cfunc entry (emit_rproc_construction above,
+  # shared verbatim with emit_block_fallback_glue) and just STORE it into
+  # its destination register (`mrb_obj_value`) -- unlike
+  # emit_block_fallback_glue's own mrb_funcall_with_block, a LAMBDA never
+  # calls anything: the resulting value is an ordinary callable/passable
+  # Proc that may be invoked (or not) arbitrarily later, exactly like any
+  # other real Ruby lambda value.
+  def emit_lambda_fallback_glue(region, fn_name)
+    dest_reg = region[:dest_reg].to_i
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name)
+    out = String.new
+    out << "  // LAMBDA_FALLBACK -- lambda body compiled as a standalone cfunc, wrapped as a real RProc " \
+           "(self captured at construction time), stored -- not dispatched\n"
+    out << "  {\n"
+    out << ctor
+    out << "    r#{dest_reg} = mrb_obj_value(#{rproc_var});\n"
     out << "  }\n"
     out
   end
@@ -12191,22 +12357,58 @@ class CodeGen
       # VM semantics (src/vm.c, OP_RETURN_BLK) start with:
       # `if (!MRB_PROC_ENV_P(ci->proc) || MRB_PROC_STRICT_P(ci->proc)) goto
       # NORMAL_RETURN;` -- i.e. falls through to the exact same bare-value
-      # return OP_RETURN itself uses, whenever the executing proc is an
-      # ordinary (non-block) method. Every leaf irep this compiler ever
-      # translates *is* exactly that: a real `def`-compiled method body
-      # (mrb_proc_new_irep tags it MRB_PROC_SCOPE|MRB_PROC_STRICT --
-      # confirmed reading 3rd/mruby/src/vm.c's own OP_METHOD/OP_L_METHOD
-      # lambda-creation path), never a block/proc irep (those are separate
-      # child ireps this whole-program TDEF-only registry never registers
-      # as a leaf method body in the first place -- see build_registry's
-      # own comment). So for every real call site this opcode's own
-      # MRB_PROC_STRICT_P branch is unconditionally taken here -- safe to
-      # translate identically to a plain RETURN. Real code hits this from a
-      # `return` that isn't the method's own last statement (confirmed
-      # against real disassembly: Game::Party#include_actor?/#any_alive?/
-      # #actor_by_id's own early `return true`/`return a` inside a `while`
-      # loop body, mrbc's own codegen choice for a non-tail-position
-      # `return`, not a real block boundary).
+      # return OP_RETURN itself uses, whenever the executing proc is
+      # strict. This case is reached from TWO real contexts now, both
+      # always strict:
+      # (1) Every ordinary leaf irep this compiler translates at the top
+      #     level *is* a real `def`-compiled method body (mrb_proc_new_irep
+      #     tags it MRB_PROC_SCOPE|MRB_PROC_STRICT -- confirmed reading
+      #     3rd/mruby/src/vm.c's own OP_METHOD/OP_L_METHOD lambda-creation
+      #     path), never a block/proc irep (those are separate child ireps
+      #     this whole-program TDEF-only registry never registers as a
+      #     leaf method body in the first place -- see build_registry's
+      #     own comment). Real code hits this from a `return` that isn't
+      #     the method's own last statement (confirmed against real
+      #     disassembly: Game::Party#include_actor?/#any_alive?/
+      #     #actor_by_id's own early `return true`/`return a` inside a
+      #     `while` loop body, mrbc's own codegen choice for a non-tail-
+      #     position `return`, not a real block boundary).
+      # (2) LAMBDA_FALLBACK_SUPPORT's own emit_proc_fallback_fn, compiling
+      #     a real LAMBDA's child irep (lambda_fallback_safe? is the only
+      #     thing in this whole file that lets RETURN_BLK through for a
+      #     block/lambda BODY at all -- see its own comment for why a
+      #     LAMBDA-constructed proc is unconditionally MRB_PROC_STRICT,
+      #     confirmed against both `3rd/mruby/include/mruby/opcode.h`'s
+      #     `OP_L_LAMBDA` flags and real `mrbc -v` disassembly of a real
+      #     `->() { return ... }`).
+      # Either way this opcode's own MRB_PROC_STRICT_P branch is
+      # unconditionally taken -- safe to translate identically to a plain
+      # RETURN.
+      r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
+      "  return r#{r};\n"
+    when 'BREAK'
+      # "BREAK Ra" -- OP_BREAK's own real VM semantics (src/vm.c,
+      # `CASE(OP_BREAK)`) start with the identical `if
+      # (MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;` check
+      # RETURN_BLK's own case above already documents -- an ordinary,
+      # same-frame return, exactly RETURN's own semantics, whenever the
+      # executing proc is strict. This case is ONLY ever reached from
+      # LAMBDA_FALLBACK_SUPPORT's own emit_proc_fallback_fn compiling a
+      # real LAMBDA's child irep -- lambda_fallback_safe? is the only
+      # thing in this whole file that lets BREAK through at all
+      # (block_fallback_safe? still rejects it outright for a plain block
+      # body: a plain block's own proc is never strict, and a real BREAK
+      # there needs the non-local-exit search up the real call stack this
+      # compiler has no general way to build -- see that function's own
+      # comment). A LAMBDA-constructed proc IS unconditionally strict
+      # (RETURN_BLK's own case above cites the confirming evidence) -- and
+      # real Ruby's own well-known "a lambda's own break exits the lambda
+      # itself, exactly like return" rule is exactly this same STRICT
+      # check, confirmed here at the real VM-source level. Nothing here
+      # ever re-enters the real VM's own OP_BREAK dispatch for this body
+      # at runtime (no MRB_PROC_STRICT flag needs to exist on the actual
+      # cfunc-backed RProc this fallback constructs) -- this translation
+      # IS the whole runtime behavior.
       r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
     when 'RESCUE'
