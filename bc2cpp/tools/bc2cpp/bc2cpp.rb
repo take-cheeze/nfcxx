@@ -2232,7 +2232,7 @@ end
 class ClassLayout
   UNKNOWN = :unknown
 
-  def self.analyze(ireps, registry, class_annotations = {}, container_constants = {})
+  def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
 
@@ -2295,23 +2295,36 @@ class ClassLayout
             # `registry` is threaded through (it is already this method's
             # own parameter) because the core-producer half of the rule
             # re-checks every candidate name against the real whole-program
-            # registry; no `-> Array` annotation lambda is passed, so a
-            # SETIV fed by an ANNOTATED call stays UNKNOWN here -- a
-            # deliberate narrowing, not an oversight: those annotations are
-            # hand-placed claims whose runtime backstop is the block
-            # emitters' own `mrb_array_p` tripwire, and a ClassLayout hint
-            # is consumed in more places than that, so this only ever
-            # promotes facts that are true by construction.
+            # registry.
             #
-            # Safe for every consumer of the resulting hint: this table is
-            # devirtualization-only, never embedded (IvarLayout.analyze is
-            # the separate analysis that decides RData embedding -- see the
-            # `known-ivar-class hints (devirtualization only, never
-            # embedded)` diagnostic), and every reader of a hint guards it
-            # with a real runtime class check before trusting it
-            # (compile_send's own TYPED/IVAR_ACCESSOR_DEVIRT branches, and
-            # the block emitters' `mrb_array_p` raise-tripwire).
-            found ||= proven_array_source_scan(irep, idx, src_reg, registry)
+            # ANNOTATED_ARRAY_RETURN_THREADING: `annotated_array_return` (a
+            # 5th, optional parameter this method now accepts -- see its
+            # own call site in the driver, which builds it from the exact
+            # same MONO-keyed `# bc2cpp: (...) -> Array` lookup
+            # CodeGen#annotated_array_return already performs for the block
+            # recognizers' own identical chained-Array rule, see that
+            # method's own comment for the full soundness argument) is
+            # passed straight through to `proven_array_source_scan` as its
+            # own `annotated` argument. Previously this call always passed
+            # nil there, so a SETIV fed by a self-call to a hand-annotated,
+            # bytecode-defined MONO method (`@equipment =
+            # normalize_equipment(...)`, `@base = base_stats(1)`,
+            # `@battle_commands = class_battle_commands` -- all three real,
+            # measured `Game::Actor` sites that were poisoning their own
+            # ivar to UNKNOWN before this change, per the whole-program
+            # `CLASS_CANDIDATE` diagnostic) stayed UNKNOWN here even though
+            # the exact same fact was already being trusted by the block
+            # recognizers a few opcodes away in the very same method body.
+            # Nothing about the annotation's own trust model changes: it is
+            # still a hand-placed claim, still MONO-gated (a magic comment
+            # sits on ONE irep, so it can only speak for a call site no
+            # other same-named method in the whole program could also be
+            # reaching), and still backstopped at every real consumer by a
+            # runtime class check before any direct-call path is taken (see
+            # this method's own header comment) -- this call site is simply
+            # no longer arbitrarily withholding a fact the rest of the file
+            # already relies on elsewhere.
+            found ||= proven_array_source_scan(irep, idx, src_reg, registry, annotated_array_return)
 
             # NIL_TOLERANT_JOIN: a plain `@x = nil` SETIV site (real
             # bytecode shape confirmed directly against mrbc's own
@@ -4797,6 +4810,52 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       if name == 'new'
         resolving_new = true
+      elsif name == 'dup' && registry && (registry['dup'] || []).all? { |md| md.owner == '<native>' }
+        # DUP_PRESERVES_CLASS: a bare, blockless, argument-less `.dup`
+        # (`SEND0`/`SEND` only -- this `elsif` is unreachable from the
+        # `SENDB` arm below, which returns immediately for any name other
+        # than `new`, so a stray block on a `.dup` call never reaches
+        # here) always constructs an object of the EXACT SAME class as
+        # its own receiver, for ANY receiver whatsoever -- read directly
+        # against this repo's own pinned 3rd/mruby (831da26b)
+        # `mrb_obj_dup` (src/class.c): `mrb_obj_alloc(mrb,
+        # mrb_type(obj), mrb_obj_class(mrb, obj))`, i.e. the new object's
+        # class is read straight off the receiver, unconditionally, no
+        # class-specific special-casing anywhere in that function. Bound
+        # as plain `Kernel#dup` (src/kernel.c's own MRB_MT_ENTRY table,
+        # `MRB_SYM(dup), MRB_ARGS_NONE()`) -- MRB_ARGS_NONE is exactly
+        # why only the 0-arg SEND0/SEND shape is ever real `.dup`; this
+        # program's own bytecode never overrides it either (grepped: no
+        # `def dup` in any closed-world mrblib file), which is exactly
+        # what the `registry['dup']` re-check just above rules out for
+        # good, the identical "own-registry re-validation" discipline
+        # core_array_return? already applies to CORE_ARRAY_RETURN_METHODS
+        # (a future `def dup` in this program's own source would fail
+        # that check and this branch would simply stop firing, never keep
+        # trusting a now-false claim). So this receiver's own class,
+        # however THIS function itself already knows how to prove it
+        # (another `.new`, a chained accessor, a GETIV of an
+        # already-known ivar, ...), is exactly this `.dup` call's own
+        # result class too -- recursing into this exact same function for
+        # the receiver (identical "SEND overwrites its receiver register
+        # with the result, in place" invariant the chained-accessor
+        # branch below already relies on, so `i`/`reg` here name the
+        # receiver's own producer instruction) reuses every one of those
+        # proofs for free, with the exact same termination argument
+        # (strictly decreasing `i`) as that branch's own recursive call.
+        #
+        # `SEND0` never prints an `n=` field at all (always 0 args, same
+        # fact this function's own chained-accessor branch already cites
+        # against real `mrbc -v` output), so the guard below only ever
+        # has real work to do for a plain `SEND` -- a real `.dup(x)` call
+        # site (MRB_ARGS_NONE, so genuinely an ArgumentError at runtime)
+        # is not evidence of anything and must not be trusted here.
+        n_match = insn.args.match(/n=(\d+|\*)/)
+        return nil if n_match && n_match[1] != '0'
+
+        return trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+                                 class_layout: class_layout, registry: registry,
+                                 container_constants: container_constants)
       else
         # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
         # `name` isn't `new`, so this can never join the fresh-`.new`
@@ -4890,6 +4949,44 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
         return hint
       end
+    when 'SENDB'
+      # BLOCK_CARRYING_NEW: `Klass.new(...) { block }` -- e.g.
+      # `Array.new(@base_raw.size) { |i| ... }`, mruby-array-ext's own
+      # documented block form of `Array#initialize`, confirmed as a real,
+      # measured shape in this program's own bytecode (`Game::Actor#@base`)
+      # -- compiles to `SENDB`/`SSENDB` exactly the way any other
+      # block-carrying call does, never plain `SEND0`/`SEND`, so it was
+      # previously invisible to this function entirely (this `when` only
+      # ever matched `SEND0`/`SEND` before, and the bare `case`'s own
+      # `else` arm below returns nil for anything unmatched). A block
+      # argument to `#initialize` never changes WHICH class gets
+      # constructed -- `.new` always allocates an instance of the exact
+      # receiver class first (real Ruby object-model semantics, the same
+      # trust this function's own `resolving_new` flow already rests on
+      # for the blockless form), then merely runs `#initialize` -- with or
+      # without a block -- against that already-allocated instance. So
+      # this only ever needs to set the exact same `resolving_new = true`
+      # flag the `SEND0`/`SEND` arm's own `name == 'new'` case already
+      # sets, and let the SAME downstream GETCONST/GETMCNST chain-walking
+      # logic below (shared, not duplicated) resolve the receiver's class
+      # name exactly as it already does for a blockless `.new`.
+      #
+      # `SSENDB` (a block-carrying `self.new`) is deliberately NOT
+      # included here -- unlike the chained-accessor branch above (which
+      # explicitly re-validates a `self`-prefixed accessor call through
+      # `registry`), there is no real measured `self.new { ... }` call
+      # site in this program to vet, and a wrong guess here (self's OWN
+      # class differs by receiver, not a fixed name) is a real path this
+      # function has no chain-walking logic for regardless -- narrower
+      # than strictly necessary, exactly per this function's own "no
+      # wrong guess, ever" bar, rather than reaching for a shape nothing
+      # here actually exercises.
+      return nil if resolving_new || !path.empty?
+
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      return nil unless name == 'new'
+
+      resolving_new = true
     # Same register, still tracing further back for the class object that
     # was `.new`'s own receiver -- SEND overwrites its receiver register
     # with the result, in place.
@@ -12206,7 +12303,26 @@ if $PROGRAM_NAME == __FILE__
     container_constants.sort.each { |name, cls| warn "  CONST_HINT  #{name}  (#{cls})" }
   end
 
-  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants)
+  # ANNOTATED_ARRAY_RETURN_THREADING: the exact same MONO-keyed `-> Array`
+  # lookup CodeGen#annotated_array_return performs (see its own comment for
+  # the full soundness argument -- one real irep per name, so a magic
+  # comment on it can only ever speak for a call site nothing else in the
+  # whole program could also be reaching), rebuilt here as a bare lambda
+  # because CodeGen itself is not constructed yet at this point in the
+  # driver (ClassLayout.analyze, like every other whole-program analysis
+  # above it, runs before codegen starts) -- `annotations` (Annotations.
+  # extract's own result, already computed above) and `registry` are both
+  # already in scope, so this is nothing but the identical lookup CodeGen's
+  # own instance method performs against its own `@annotations`/`@registry`
+  # ivars, duplicated here rather than shared only because no shared
+  # instance exists yet to call it on.
+  annotated_array_return = lambda do |name|
+    defs = registry[name]
+    next false unless defs && defs.size == 1 && defs.first.irep
+
+    annotations[defs.first.irep]&.ret == :array
+  end
+  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return)
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
