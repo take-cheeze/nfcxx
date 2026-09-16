@@ -766,14 +766,14 @@ BC2CPP_COMPILED_GEMS = {
     # have a real `rescue` clause, 3 have a non-mandatory argument, 4 call
     # a real Ruby block, and 1 (#play_animation_se) combines a block with
     # its own `rescue StandardError` clause -- see register.cxx's own
-    # comment for the full per-method breakdown. Notably, since
-    # RPG2k::Scene::ItemMenu, RPG2k::Scene::DebugMenu and
-    # RPG2k::Scene::Menu's own #initialize are each blocked purely by
-    # their own `super parent` call into this now-clean-compiling
-    # #initialize (no other non-mandatory arguments), real SUPER opcode
-    # support could unlock all three in a future round -- out of scope
-    # here (whole-program coordination across every already-shipped
-    # scene class's own registration block), but flagged for later.
+    # comment for the full per-method breakdown. `RPG2k::Scene::Battle`/
+    # `DebugMenu`/`ItemMenu`/`Menu`'s own `#initialize` -- each blocked
+    # purely by its own `super parent` call into this already-clean-
+    # compiling #initialize -- and 8 more scene classes with the exact
+    # same shape found in a later round (`ChipsetEditor`/`EquipMenu`/
+    # `GameOver`/`MapViewer`/`Order`/`SkillMenu`/`StatusMenu`/`Title`) are
+    # all real SUPER_TARGETS entries now (see that table's own comment in
+    # tools/bc2cpp/bc2cpp.rb).
     #
     # Game::Character (docs/adr/0139's own follow-up, mruby-rpg2k/mrblib/
     # game.rb) -- the shared moving-on-map-entity state/movement protocol

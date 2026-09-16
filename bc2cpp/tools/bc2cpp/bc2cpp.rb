@@ -4541,6 +4541,23 @@ NATIVE_ARG_TARGETS = Set[
 # other native-reaching call site this file's own devirtualization always
 # stays out of.
 #
+# A follow-up survey against a fresh whole-program regen (same recipe)
+# found 8 MORE methods blocked ONLY by SUPER, every one an `#initialize`
+# calling `super parent` (the exact first shape above) into the same,
+# already-clean `RPG2k::Scene::Base#initialize`: `RPG2k::Scene::
+# ChipsetEditor#initialize`, `EquipMenu#initialize`, `GameOver#
+# initialize`, `MapViewer#initialize`, `Order#initialize`, `SkillMenu#
+# initialize`, `StatusMenu#initialize`, `Title#initialize` -- exactly the
+# "later round" tools/bc2cpp/compiled_gems.rb's own `RPG2k::Scene::Base`
+# comment already flagged when the first 4 landed. Re-checked both real
+# soundness facts fresh for these 8, not assumed from the first 4: grepped
+# every real `.new` call site for all 8 classes across the whole closed
+# world (mruby-rpg2k/mruby-lcf/mruby-rgss mrblib plus scripts/
+# rpg2k_scene_check.rb) -- none pass a block literal; and the whole closed
+# world still has exactly the same 3 real `include`s total (two unrelated
+# `Enumerable`s, one top-level `include RGSS`), none between any of these
+# 8 classes and `RPG2k::Scene::Base`.
+#
 # Every real `super`/`super(...)` (mrbc's own codegen, `codegen_super`/
 # `codegen_zsuper`) unconditionally forwards whatever block was passed
 # into the CURRENT method, whether or not that method ever otherwise
@@ -4577,6 +4594,14 @@ SUPER_TARGETS = Set[
   'RPG2k::Scene::DebugMenu#initialize',
   'RPG2k::Scene::ItemMenu#initialize',
   'RPG2k::Scene::Menu#initialize',
+  'RPG2k::Scene::ChipsetEditor#initialize',
+  'RPG2k::Scene::EquipMenu#initialize',
+  'RPG2k::Scene::GameOver#initialize',
+  'RPG2k::Scene::MapViewer#initialize',
+  'RPG2k::Scene::Order#initialize',
+  'RPG2k::Scene::SkillMenu#initialize',
+  'RPG2k::Scene::StatusMenu#initialize',
+  'RPG2k::Scene::Title#initialize',
   'RPG2k3::Scene::Battle#update',
   'RPG2k3::Scene::Battle#drive_battle_command',
   'RPG2k3::Scene::Battle#enter_command_phase',
