@@ -1256,6 +1256,27 @@ def extract_native_method_names(src_paths)
     src.scan(/mrb_define_(?:method|class_method|module_function)_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
       names << resolve_mrb_sym_token(tok[0], tok[1])
     end
+
+    # mrb_define_method_raw(mrb, klass, MRB_SYM(name)/MRB_OPSYM(op), m) -- a
+    # third, real registration idiom (3rd/mruby/src/class.c's own bob_init:
+    # `mrb_method_t m; MRB_METHOD_FROM_PROC(m, &neq_proc); mrb_define_method_
+    # raw(mrb, bob, MRB_OPSYM(neq), m);`) that pre-builds an mrb_method_t --
+    # sometimes wrapping a real C function, sometimes (like `!=` here) a
+    # hand-written static RProc/irep baked directly into the C source rather
+    # than compiled from any .rb file this run ever sees. Either way it is
+    # still a real, whole-program-visible definition this registry must
+    # know about, or a name like `!=` looks like it has NO definition at
+    # all (worse than looking POLY-native: `native_only_mono?` requires an
+    # actual `<native>` entry to gate on, so with no entry here it can never
+    # fire, silently leaving a real, always-safe candidate undevirtualized
+    # forever) -- confirmed via a full grep across 3rd/mruby/src that only
+    # three literal-token call sites exist at all (`new` on Class, `!=` on
+    # BasicObject, `call`/`[]` on Proc); the rest all pass a runtime
+    # variable (alias/`define_method`-style dynamic definition), which no
+    # static regex could or should try to match.
+    src.scan(/mrb_define_method_raw\s*\(\s*\w+\s*,\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/) do |tok|
+      names << resolve_mrb_sym_token(tok[0], tok[1])
+    end
   end
   names
 end
@@ -5895,8 +5916,8 @@ class CodeGen
   # line, for the full soundness writeup) knows how to inline directly,
   # mapped to the exact real mandatory arity a call site must match --
   # `!`/`nil?`/`class`/`object_id`/`keys`/`to_s`/`length`/`first`/`dup`
-  # take no arguments, `is_a?`/`kind_of?`/`equal?`/`===` take exactly one
-  # (confirmed against each one's own real MRB_ARGS_NONE()/
+  # take no arguments, `is_a?`/`kind_of?`/`equal?`/`===`/`!=` take exactly
+  # one (confirmed against each one's own real MRB_ARGS_NONE()/
   # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
   # 3rd/mruby/src/class.c / 3rd/mruby/src/hash.c / 3rd/mruby/src/string.c
   # / 3rd/mruby/src/numeric.c / 3rd/mruby/src/array.c /
@@ -5904,10 +5925,22 @@ class CodeGen
   # entries that AREN'T "one real native implementation" -- see each
   # one's own `*_TYPE_TAG_DISPATCH` comment in
   # compile_native_primitive_send.
+  #
+  # `push`/`size`/`empty?`/`<<` were investigated this round too (each has
+  # a real, safely-reproducible native body -- see this round's own
+  # changelog) but deliberately NOT added here: this exact program's own
+  # whole-program registry shows each one genuinely collided with a real
+  # bytecode override somewhere in the closed world (`RPG2k#push`,
+  # `Game::Party#size`, `Game::MoveRoute#empty?`,
+  # `RGSS::ErrorReport::Tee#<<`), confirmed directly against the live
+  # registry (not assumed) -- `native_only_mono?` correctly refuses all
+  # four every time, so an entry for any of them would be real, dead,
+  # never-reached code today. Left out rather than shipped inert; revisit
+  # if a future edit to any of those four classes removes the collision.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
-                                   '===' => 1 }.freeze
+                                   '===' => 1, '!=' => 1 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -6282,6 +6315,41 @@ class CodeGen
       "    r#{d} = mrb_obj_dup(M, #{recv});\n" \
       "    break;\n" \
       "  }\n"
+    when '!='
+      # NEQ_UNCONDITIONAL: `!=` is not backed by any C function at all --
+      # 3rd/mruby/src/class.c's own `bob_init` registers it via a hand-
+      # written static bytecode `RProc` (`neq_proc`/`neq_irep`: `OP_ENTER,
+      # OP_EQ, OP_JMPNOT, OP_LOADFALSE/OP_LOADTRUE, OP_RETURN` -- literally
+      # "return !(self == other)") through `mrb_define_method_raw`, a
+      # registration idiom extract_native_method_names didn't recognize at
+      # all before this round (see that function's own new scan, added
+      # alongside this entry) -- without it, `!=` would have no registry
+      # entry whatsoever and this case would be silent dead code, gated
+      # out by native_only_mono? forever despite being genuinely safe.
+      # Real `OP_EQ` itself (3rd/mruby/src/vm.c) is: an identity check
+      # first (`mrb_obj_eq`), then -- ONLY for a Symbol receiver -- a
+      # hardcoded `false` (no dispatch), then `OP_CMP(==,eq)` (an Integer/
+      # Integer, Integer/Float, Float/Integer, Float/Float fast path, else
+      # a real `SEND :==` dispatch). The real public `mrb_equal` MRB_API
+      # (3rd/mruby/src/object.c, already trusted for `===`'s own
+      # MRB_TT_INTEGER/FLOAT/STRING/SYMBOL/... bucket above) reproduces
+      # this exactly for EVERY type, including the Symbol case: its own
+      # identity check comes first, then (for a Symbol whose `==` is still
+      # the real, unmodified `mrb_obj_equal_m` default) `mrb_func_basic_p`
+      # is true, so its own `else if` dispatch branch is skipped and it
+      # falls through to `return FALSE` -- the same answer OP_EQ's
+      # hardcoded Symbol special case gives, just reached generically
+      # rather than as a hardcoded type check. So `!mrb_equal(...)` is a
+      # full, unconditional, no-fallback-needed reproduction of `!=` for
+      # any receiver -- the same "no third real implementation to miss"
+      # shape `dup` already has above, just via negation instead of a
+      # type switch.
+      arg = argv.first
+      "  // != -- native primitive, no lookup needed for any receiver (real\n" \
+      "  // bytecode is exactly `!(self == other)`, mrb_equal reproduces ==\n" \
+      "  // exactly for every type -- see compile_native_primitive_send's own\n" \
+      "  // NEQ_UNCONDITIONAL comment)\n" \
+      "  r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n"
     end
   end
 
