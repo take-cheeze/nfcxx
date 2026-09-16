@@ -612,11 +612,18 @@ BC2CPP_COMPILED_GEMS = {
     # #load_face_bitmap name -- POLY, never MONO, at any call site);
     # #build_commands/#build_windows/#draw_command_labels/
     # #build_end_game_confirm_windows all end in a genuine Ruby block
-    # (BLOCK/SENDB); #draw_status_row's own `line = ->(n) { ... }` hits a
-    # LAMBDA opcode (checked, not assumed) but is the same permanently-
-    # out-of-scope closure-creation gap as a block, just different
-    # syntax, so it was left interpreted rather than chased. Its own
-    # #initialize never compiles, so its provably-typed ivars stay
+    # (BLOCK/SENDB); #draw_status_row's own `line = ->(n) { y + n *
+    # LINE_H }` hits a LAMBDA opcode too, but (checked via real `mrbc -v`
+    # disassembly, LAMBDA_FALLBACK_SUPPORT's own build round) its child
+    # irep opens with `GETUPVAR R3 1 0` -- it captures the enclosing
+    # method's own local `y`, a real outer-local reference
+    # LAMBDA_FALLBACK_SUPPORT still declines exactly like
+    # BLOCK_CFUNC_FALLBACK_SUPPORT already does (no captured-REnv support
+    # this round), so it stays interpreted -- not the "permanently out of
+    # scope" gap this comment used to describe (a bare `->() { }`/`lambda
+    # { }` with no outer-local reference now compiles via LAMBDA_FALLBACK_
+    # SUPPORT's own cfunc/RProc construction, same mechanism as a block).
+    # Its own #initialize never compiles, so its provably-typed ivars stay
     # unembedded too, same shape as Picture's/Window's/Actor's/Battle's/
     # ItemMenu's.
     #
