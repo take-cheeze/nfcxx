@@ -5798,62 +5798,54 @@ def mandatory_arity(irep)
   enter.args.split(':').first.to_i
 end
 
-# BLOCK_CFUNC_FALLBACK_SUPPORT: is this block's own child irep a
-# completely free-standing computation -- no real `self`, no outer-local
-# capture, no non-local exit -- safe to compile as a plain top-level C++
-# function and wrap in a real cfunc-backed RProc (`mrb_proc_new_cfunc`),
-# rather than needing a genuine captured environment this compiler has
-# no way to build?
+# BLOCK_CFUNC_FALLBACK_SUPPORT: is this block's own child irep safe to
+# compile as a plain top-level C++ function and wrap in a real cfunc-
+# backed RProc (`mrb_proc_new_cfunc_with_env`), rather than needing a
+# genuine captured environment this compiler has no general way to
+# build?
 #
-# `recognize_times_regions`' own top comment already explains why a
-# plain `mrb_proc_new` is unusable in general (an UNBOUND proc, no
-# captured env, and real blocks routinely close over an outer local) --
-# confirmed the cfunc variant has an equally real, independent problem:
-# `mrb_proc_get_self` (3rd/mruby/src/proc.c) returns `self = nil`
-# UNCONDITIONALLY for any CFUNC-backed proc, regardless of any
-# `_with_env` capture, and that is exactly what native iterators
-# (`Array#each`/`Hash#each`/...) use to determine a yielded block's own
-# `self`. So a block that reads `self` anywhere in its own body --
-# implicitly or explicitly -- would silently run against `nil` at
-# runtime if compiled this way. This function is the static proof that
-# a given block never does.
+# `self` is NOT a rejection reason (a prior round of this same feature
+# rejected any block referencing it at all -- see git history/changelog
+# for that round's own reasoning): `mrb_proc_get_self` (3rd/mruby/src/
+# proc.c) returns `self = nil` UNCONDITIONALLY for a plain CFUNC-backed
+# proc only because it falls back to asking the PROC ITSELF (no real
+# captured `REnv`, in the no-`_with_env` case) -- but this compiler
+# controls the construction site and always knows the real value
+# (literally the enclosing method's own `self` C++ variable, in scope
+# right where the RProc gets built). Capturing it explicitly via
+# `mrb_proc_new_cfunc_with_env`'s own one-slot env array and reading it
+# back inside the cfunc body via `mrb_proc_cfunc_env_get(M, 0)` --
+# instead of trusting whatever `self` mruby's own `mrb_yield`/
+# `mrb_yield_argv` (which still derive it from the nil-returning
+# `mrb_proc_get_self`) pass to the cfunc entry point -- sidesteps the
+# whole problem: the block gets the CORRECT, lexically-captured self a
+# real Ruby closure would have, never mruby's own (irrelevant, always
+# nil) per-invocation guess. See emit_block_fallback_fn/_glue's own
+# comments for the actual capture/retrieval codegen.
 #
-# R0 is always this block's own "self" (real mruby calling convention --
-# `exec_irep`'s own `ci->stack[0] = self`, the same fact
-# `emit_times_inline`'s own comment already establishes for the inlined-
-# block case). A bare literal "R0" token anywhere in this irep's own
-# instructions is proof enough that self is read somewhere, however
-# indirectly (MOVE-copied into another register first, used later) --
-# no separate dataflow trace needed, one substring check per instruction
-# catches every case. `SSEND`/`SSEND0`/`SSENDB`/`SSENDB0`'s own
-# implicit-self receiver is the one shape that does NOT spell out "R0"
-# in its own disassembly (that is exactly what "implicit" means here),
-# so it's rejected by opcode name instead. `GETUPVAR`/`SETUPVAR` (a real
-# outer-local reference) has no matching real `REnv` register layout a
-# `_with_env`-captured plain argv array can satisfy -- rejected
-# outright rather than attempting env-capture, out of scope for this
-# round. `RETURN_BLK`/`BREAK` (a real non-local exit) has no plain
-# C++ `return` equivalent once this block is a genuinely separate
-# top-level function, possibly several C call frames deep inside
-# whatever method is iterating -- rejected. `BLOCK`/`SENDB`/`SSENDB` (a
-# nested block-carrying call inside this one) is rejected too -- no
-# recursive fallback support in this round. `RESCUE`/`RAISEIF`/`EXCEPT`
-# (a real rescue-region opcode) is rejected -- this fallback builds no
+# `GETUPVAR`/`SETUPVAR` (a real OUTER-LOCAL reference, as opposed to
+# `self`) still has no matching real `REnv` register layout a one-slot
+# `_with_env` capture satisfies -- rejected outright, out of scope for
+# this round (capturing every referenced outer local the same
+# self-capture way is a natural follow-up, not attempted here).
+# `RETURN_BLK`/`BREAK` (a real non-local exit) still has no plain C++
+# `return` equivalent once this block is a genuinely separate top-level
+# function, possibly several C call frames deep inside whatever method
+# is iterating -- rejected. `BLOCK`/`SENDB`/`SSENDB` (a nested block-
+# carrying call inside this one) is rejected too -- no recursive
+# fallback support in this round. `RESCUE`/`RAISEIF`/`EXCEPT` (a real
+# rescue-region opcode) is rejected -- this fallback builds no
 # equivalent of `recognize_rescue_regions`' own extracted-try-body
 # machinery.
 BLOCK_FALLBACK_UNSAFE_OPS = %w[
-  GETIV SETIV GETUPVAR SETUPVAR RETURN_BLK BREAK
-  SSEND SSEND0 SSENDB SSENDB0 BLOCK SENDB
+  GETUPVAR SETUPVAR RETURN_BLK BREAK BLOCK SENDB SSENDB
   RESCUE RAISEIF EXCEPT
 ].freeze
 
 def block_fallback_safe?(block_irep)
   return false unless pure_mandatory_arity?(block_irep)
 
-  block_irep.instructions.none? do |insn|
-    BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) ||
-      (insn.op != 'ENTER' && insn.args =~ /\bR0\b/)
-  end
+  block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
 
 # CALLSITE_OPTIONAL_ARG_SUPPORT: the real optional-argument count `mandatory_
@@ -8378,7 +8370,10 @@ class CodeGen
     recognize_block_fallback_regions(irep).each do |region|
       next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
 
-      fn_name, fn_code = emit_block_fallback_fn(region, d)
+      fn_result = emit_block_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
       block_fallback_pre << fn_code
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
@@ -11113,23 +11108,25 @@ class CodeGen
   # instructions, translated exactly like any other irep's body via the
   # same compile_insn every other emitter here reuses) plus a genuine
   # `mrb_func_t`-shaped cfunc entry (`mrb_value(mrb_state*, mrb_value)`,
-  # `mrb_proc_new_cfunc`'s own required signature) that extracts the
-  # real yielded arguments via `mrb_get_args` -- the identical mechanism
-  # `compile_method`'s own plain-mandatory-arity entry wrapper already
-  # uses, reused here because a CFUNC-backed proc invoked as a yielded
-  # block (`exec_irep`, 3rd/mruby/src/vm.c: `ci->stack[0] = self; return
-  # MRB_PROC_CFUNC(p)(mrb, self);`) receives its real call arguments on
-  # the VM stack in exactly the same shape an ordinary call does.
+  # `mrb_proc_new_cfunc_with_env`'s own required signature) that
+  # extracts the real yielded arguments via `mrb_get_args` -- the
+  # identical mechanism `compile_method`'s own plain-mandatory-arity
+  # entry wrapper already uses, reused here because a CFUNC-backed proc
+  # invoked as a yielded block (`exec_irep`, 3rd/mruby/src/vm.c:
+  # `ci->stack[0] = self; return MRB_PROC_CFUNC(p)(mrb, self);`)
+  # receives its real call arguments on the VM stack in exactly the same
+  # shape an ordinary call does.
   #
-  # `self` is threaded through unused -- block_fallback_safe? already
-  # proved this block body never reads it (no bare "R0" token, no
-  # implicit-self send) -- kept only so `compile_insn`'s own GETCONST/
-  # lexical-scope codegen (which needs `owner_def`, passed through
-  # unchanged from the ENCLOSING method -- a block's own lexical scope
-  # for constant resolution is always its enclosing method's, real Ruby
-  # scoping rules) has a real, declared `self`/`r0` to match its own
-  # hardcoded identifier, exactly like emit_rescue_try_body's own
-  # identical fix for the same constraint.
+  # SELF_CAPTURE_SUPPORT: the entry point's own `self` PARAMETER (what
+  # mruby itself passes in) is deliberately never used for anything --
+  # it's whatever `mrb_yield`/`mrb_proc_get_self` guessed, always `nil`
+  # for a CFUNC-backed proc (see block_fallback_safe?'s own comment).
+  # The REAL self this block should see is instead read back out of the
+  # RProc's own captured env slot 0 (`mrb_proc_cfunc_env_get`) --
+  # `emit_block_fallback_glue` below is the OTHER half of this: it
+  # captures the enclosing method's own real `self` C++ variable into
+  # that exact slot at RProc-construction time, the one place this
+  # compiler actually knows the correct value.
   def emit_block_fallback_fn(region, d)
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
@@ -11148,53 +11145,88 @@ class CodeGen
     fn_name = "#{cpp_name(d.owner, d.name)}_block_fallback_#{region[:block_addr]}"
     impl_name = "#{fn_name}_impl"
 
-    out = String.new
-    out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
-    (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
-    arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
+    # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
+    # this file already holds itself to (emit_sort_inline's own explicit
+    # `return nil if body.include?('#error')`, emit_times_inline's own
+    # caller comment) -- a block body that itself hits an unsupported
+    # opcode must produce NO region at all, not a real-looking RProc/
+    # cfunc wrapper around a function that still can't compile. Without
+    # this check the caller would still correctly leave the WHOLE
+    # enclosing method uncompiled (compiles_clean? scans the complete
+    # returned code string, this function's own embedded `#error`
+    # included -- confirmed nothing unsound could ship even without this
+    # check), but it would waste a real region slot and, worse, sit
+    # there miscounting this site as a genuine BLOCK_FALLBACK win in the
+    # coverage report's own diagnostic. Caught live: BLKCALL/BLKPUSH's
+    # own whole-program #error counts ticked up by exactly 1 each the
+    # first time this check was missing, from a block body that itself
+    # used one of those two still-unsupported opcodes.
+    body = String.new
     targets = jump_targets(block_irep)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
 
-      out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      out << compile_insn(insn, block_irep, d, idx)
+      body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
+      body << compile_insn(insn, block_irep, d, idx)
     end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+    (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
+    arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
+    out << body
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     out << "}\n\n"
 
-    out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value self) {\n"
+    out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_unused_self) {\n"
+    out << "  (void)bc2cpp_unused_self;\n"
+    out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
     if mand.zero?
-      out << "  return #{impl_name}(M, self);\n"
+      out << "  return #{impl_name}(M, bc2cpp_captured_self);\n"
     else
       arg_names.each { |a| out << "  mrb_value #{a};\n" }
       fmt = 'o' * mand
       ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
-      out << "  return #{impl_name}(M, self, #{arg_names.join(', ')});\n"
+      out << "  return #{impl_name}(M, bc2cpp_captured_self, #{arg_names.join(', ')});\n"
     end
     out << "}\n\n"
     [fn_name, out]
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT: the call-site glue -- build a real
-  # `RProc` around the standalone cfunc entry (`mrb_proc_new_cfunc`, no
-  # `_with_env`: block_fallback_safe? already proved this block captures
-  # no outer local), then an ordinary dynamic call carrying it as the
-  # block argument (`mrb_funcall_with_block`, mruby's own public API for
-  # exactly this -- 3rd/mruby/src/vm.c). Deliberately still dynamic
-  # dispatch, never MONO/POLY/TYPED devirtualization -- getting a
-  # previously-#error'd block-carrying call site to compile correctly at
-  # all is this round's own goal (the exact same "proven, wired, not yet
-  # the fastest path" shape idea 1's own SPLAT_UNROLL_SUPPORT already
-  # established for its own dynamic-dispatch fallback).
+  # `RProc` around the standalone cfunc entry, then an ordinary dynamic
+  # call carrying it as the block argument (`mrb_funcall_with_block`,
+  # mruby's own public API for exactly this -- 3rd/mruby/src/vm.c).
+  # Deliberately still dynamic dispatch, never MONO/POLY/TYPED
+  # devirtualization -- getting a previously-#error'd block-carrying
+  # call site to compile correctly at all is this round's own goal (the
+  # exact same "proven, wired, not yet the fastest path" shape idea 1's
+  # own SPLAT_UNROLL_SUPPORT already established for its own dynamic-
+  # dispatch fallback).
+  #
+  # SELF_CAPTURE_SUPPORT: `mrb_proc_new_cfunc_with_env` (not the plain
+  # `mrb_proc_new_cfunc`) with a one-element env array holding this
+  # enclosing method's own real `self` C++ variable -- captured HERE,
+  # not inside the block body, because this is the one place the real
+  # value is actually in scope as an ordinary local. emit_block_fallback_
+  # fn's own entry point reads it straight back via
+  # `mrb_proc_cfunc_env_get(M, 0)`, giving the block the correct,
+  # lexically-captured self a real Ruby closure would have -- see that
+  # function's own comment for why the self mruby itself would otherwise
+  # pass in is useless.
   def emit_block_fallback_glue(region, fn_name)
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
     out = String.new
-    out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc, dynamic dispatch\n"
+    out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
+           "(self captured at construction time), dynamic dispatch\n"
     out << "  {\n"
-    out << "    struct RProc* bc2cpp_blk_proc_#{region[:block_addr]} = mrb_proc_new_cfunc(M, #{fn_name});\n"
+    out << "    mrb_value bc2cpp_blk_env_#{region[:block_addr]}[] = { self };\n"
+    out << "    struct RProc* bc2cpp_blk_proc_#{region[:block_addr]} = " \
+           "mrb_proc_new_cfunc_with_env(M, #{fn_name}, 1, bc2cpp_blk_env_#{region[:block_addr]});\n"
     if argv.empty?
       out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
              "mrb_obj_value(bc2cpp_blk_proc_#{region[:block_addr]}));\n"
