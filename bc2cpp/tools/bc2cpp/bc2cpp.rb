@@ -3604,8 +3604,12 @@ class HashElementLayout
   # ArrayElementLayout.analyze for that table to mean anything; the
   # default empty table just makes any such chain poison instead, like any
   # other unmodeled shape, never a wrong guess.
+  # ANY_OPAQUE_SUPPORT: see ArrayElementLayout.analyze's own `poison_reason`
+  # header for the full :any/:opaque distinction -- identical mechanism,
+  # applied here to Hash values instead of Array elements. `nil` (the
+  # default) keeps exactly the pre-existing behavior.
   def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, array_elements = {},
-                    superclass_of = {})
+                    superclass_of = {}, poison_reason: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     known_owners = Set.new(registry.values.flatten.map(&:owner))
@@ -3653,7 +3657,13 @@ class HashElementLayout
                 ivar = insn.args[/@(\w+)/, 1]
                 next unless hash_ivars.include?(ivar)
 
-                found = hash_element_source_scan(irep, idx, insn.args[/R(\d+)/, 1], ctx)
+                src_reg = insn.args[/R(\d+)/, 1]
+                found = hash_element_source_scan(irep, idx, src_reg, ctx)
+                # NIL_TOLERANT_JOIN (hash-value dimension): see
+                # ArrayElementLayout.analyze's own SETIV arm -- a plain
+                # `@h = nil` site is evidence of nothing about the values
+                # either, and must not poison an otherwise-uniform ivar.
+                next if found.nil? && nil_literal_write?(irep, idx, src_reg)
               # SSEND/SSENDB excluded for the identical reason
               # ArrayElementLayout.analyze's own SEND arm excludes them --
               # an implicit-self receiver has no register to backward-trace.
@@ -3702,6 +3712,11 @@ class HashElementLayout
                        end
               if merged != before
                 hash_elements[owner][ivar] = merged
+                if merged == UNKNOWN && poison_reason
+                  # See ArrayElementLayout.analyze's own `poison_reason`
+                  # header for the :any/:opaque distinction.
+                  (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+                end
                 changed = true
               end
             end
@@ -3715,16 +3730,36 @@ class HashElementLayout
   end
 
   # See ArrayElementLayout.known's own comment -- identical role, one
-  # table over.
+  # table over, including the same primitive-tag exclusion (see
+  # PRIMITIVE_ELEMENT_CLASSES' own comment for why CodeGen must never see
+  # one).
   def self.known(table)
     table.each_with_object({}) do |(owner, ivars), out|
-      known = ivars.reject { |_, c| c == UNKNOWN }
+      known = ivars.reject { |_, c| c == UNKNOWN || PRIMITIVE_ELEMENT_CLASSES.include?(c) }
       out[owner] = known unless known.empty?
+    end
+  end
+
+  # See ArrayElementLayout.primitives' own comment -- identical role, one
+  # table over.
+  def self.primitives(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      prim = ivars.select { |_, c| PRIMITIVE_ELEMENT_CLASSES.include?(c) }
+      out[owner] = prim unless prim.empty?
     end
   end
 
   def self.unknowns(table)
     table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
+
+  # See ArrayElementLayout.unknowns_by_reason's own comment -- identical
+  # filter, one table over.
+  def self.unknowns_by_reason(table, poison_reason, reason)
+    unknowns(table).select do |name|
+      owner, ivar = name.split('#@', 2)
+      poison_reason.dig(owner, ivar) == reason
+    end
   end
 end
 
@@ -12926,8 +12961,12 @@ if $PROGRAM_NAME == __FILE__
   # (see HashElementLayout's own header). Runs after ArrayElementLayout so
   # a Hash value chained through a known-element array can still resolve
   # -- see HashElementLayout.analyze's own comment on `array_elements`.
+  # ANY_OPAQUE_SUPPORT: see class_poison_reason's own comment above --
+  # identical mechanism, one analysis over.
+  hash_poison_reason = {}
   hash_element_raw = HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
-                                               element_annotations, element_raw, superclass_of)
+                                               element_annotations, element_raw, superclass_of,
+                                               poison_reason: hash_poison_reason)
   hash_element_layout = HashElementLayout.known(hash_element_raw)
   warn ''
   warn '== known-hash-element-class hints (guarded devirtualization only) =='
@@ -12939,6 +12978,19 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # PRIMITIVE_ELEMENT_SUPPORT: see element_primitives' own comment above --
+  # identical mechanism, one table over.
+  hash_element_primitives = HashElementLayout.primitives(hash_element_raw)
+  warn ''
+  warn '== known-hash-element PRIMITIVE hints (informational only, never embedded) =='
+  if hash_element_primitives.empty?
+    warn '  (none)'
+  else
+    hash_element_primitives.each do |klass, ivars|
+      ivars.each { |name, cls| warn "  HASH_ELEM_HINT_PRIMITIVE  #{klass}#@#{name}  (Hash<#{cls}>)" }
+    end
+  end
+
   hash_element_unknowns = HashElementLayout.unknowns(hash_element_raw)
   warn ''
   warn '== hash-element candidates (proven-Hash ivar, value class poisoned to unknown) =='
@@ -12946,6 +12998,24 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     hash_element_unknowns.each { |n| warn "  HASH_ELEM_CANDIDATE  #{n}" }
+  end
+
+  warn ''
+  warn '== hash-element candidates split: ANY (proven heterogeneous, not fixable) =='
+  hash_any = HashElementLayout.unknowns_by_reason(hash_element_raw, hash_poison_reason, :any)
+  if hash_any.empty?
+    warn '  (none)'
+  else
+    hash_any.sort.each { |n| warn "  HASH_ELEM_CANDIDATE_ANY  #{n}" }
+  end
+
+  warn ''
+  warn '== hash-element candidates split: OPAQUE (unresolved, may be fixable) =='
+  hash_opaque = HashElementLayout.unknowns_by_reason(hash_element_raw, hash_poison_reason, :opaque)
+  if hash_opaque.empty?
+    warn '  (none)'
+  else
+    hash_opaque.sort.each { |n| warn "  HASH_ELEM_CANDIDATE_OPAQUE  #{n}" }
   end
 
   candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
