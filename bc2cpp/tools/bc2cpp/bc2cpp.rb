@@ -5127,6 +5127,65 @@ NATIVE_ARG_TARGETS = Set[
 # holds for every entry below, but -- same as the block-forwarding check
 # above -- is a fact about this program today, re-checked per future
 # entry, never a standing assumption.
+#
+# A further whole-program survey (docs/bc2cpp_coverage.txt's own 7-strong
+# `#error unhandled opcode SUPER` count) found exactly 7 remaining sites,
+# individually re-checked, not assumed from any prior entry's shape:
+#
+# 2 landed -- both the exact first shape above (`super parent`, one
+# explicit mandatory arg, into the same already-clean `RPG2k::Scene::
+# Base#initialize`), confirmed via the real disassembly (`SUPER R6 n=1`/
+# `SUPER R5 n=1`) rather than just the source text: `RPG2k::Scene::
+# Map#initialize` (`class Map < Base`, mruby-rpg2k/mrblib/scene/map.rb)
+# and `RPG2k::Scene::SaveLoad#initialize` (`class SaveLoad < Base`,
+# mruby-rpg2k/mrblib/scene/save_load.rb). Grepped every real
+# `Scene::Map.new`/`Scene::SaveLoad.new` call site across the whole
+# closed world (mruby-rpg2k/mruby-lcf/mruby-rgss mrblib plus
+# scripts/rpg2k_scene_check.rb, and beyond it into every other real gem
+# and script in the repo for good measure) -- none pass a block literal.
+# Re-grepped `include`/`prepend` fresh (not trusted from the paragraph
+# above): still exactly 3 real `include`s in the whole closed world
+# (`Game::Party`/`LCF::Array1D` each `include Enumerable`, top-level
+# `class Object; include RGSS; end` in mruby-rpg2k/mrblib/main.rb), none
+# between `Map`/`SaveLoad` and `Base`. `Map#initialize` also takes a
+# `apply_access: true` keyword arg -- irrelevant to the SUPER opcode
+# itself (only the explicitly-forwarded `parent` positional feeds it, per
+# `super parent`'s own source; the keyword only feeds a local hash used
+# later in the method body, confirmed against the real generated C++).
+#
+# The other 5 do NOT belong here, each for a real, checked reason, not a
+# skipped check:
+#
+# - `RPG2k3::Scene::Battle#finish_round_animation` (bare `super`, the
+#   second shape above, into `RPG2k::Scene::Battle#finish_round_
+#   animation`) has a sound target NAME but the target's own body itself
+#   does not compile clean today -- it hits real `#error unhandled opcode
+#   SENDB`/`BLOCK` of its own, from genuine Ruby blocks
+#   (`select(&:defending)`, `select(&:dead?)`, `.uniq { |a| ... }`,
+#   `.each { |ally| ... }`; already documented by tools/bc2cpp/
+#   compiled_gems.rb's own RPG2k3::Scene::Battle comment). `super_target`
+#   already gates on `compiles_clean?(target_def.irep)` for exactly this
+#   reason, so adding this entry would be inert (still `#error`) unless/
+#   until that target's own blocks are separately supported -- confirmed
+#   directly against the real generated output rather than assumed from
+#   the pre-existing comment.
+#
+# - `LCF::Sections#method_missing`, `LCF::Sections#respond_to_missing?`,
+#   `LCF::Array1D#respond_to_missing?`, `LCF::File#respond_to_missing?`
+#   (all plain `class ... ; ... end`, implicit `Object` superclass) each
+#   call `super`/`|| super` reaching `Object#method_missing`/`Object#
+#   respond_to_missing?` -- both are native (C, `mrb_kernel_method_
+#   missing`/`mrb_obj_respond_to_missing` in mruby core), never Ruby-
+#   bytecode-defined anywhere in the whole closed world (grepped; no
+#   `def method_missing`/`def respond_to_missing?` under `Object`/
+#   `Kernel` exists at all). `@registry['method_missing'|
+#   'respond_to_missing?'].find { |d| d.owner == 'Object' }` can never
+#   find a MethodDef for a method nothing here ever defines in bytecode,
+#   so `super_target` returns nil regardless of an allowlist entry --
+#   exactly the same already-excluded shape this comment's own first
+#   paragraph names for `RGSS::Bitmap::LoadError#initialize` (super into
+#   a native, non-bytecode superclass method is never a target here, full
+#   stop, allowlisted or not).
 SUPER_TARGETS = Set[
   'RPG2k::Scene::Battle#initialize',
   'RPG2k::Scene::DebugMenu#initialize',
@@ -5146,6 +5205,8 @@ SUPER_TARGETS = Set[
   'RPG2k3::Scene::Battle#open_battle_options',
   'RPG2k3::Scene::Battle#advance_actor',
   'RPG2k3::Scene::Battle#prev_commandable_actor_index',
+  'RPG2k::Scene::Map#initialize',
+  'RPG2k::Scene::SaveLoad#initialize',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
