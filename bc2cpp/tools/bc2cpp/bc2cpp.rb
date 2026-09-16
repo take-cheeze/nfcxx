@@ -5895,17 +5895,19 @@ class CodeGen
   # line, for the full soundness writeup) knows how to inline directly,
   # mapped to the exact real mandatory arity a call site must match --
   # `!`/`nil?`/`class`/`object_id`/`keys`/`to_s`/`length`/`first`/`dup`
-  # take no arguments, `is_a?`/`kind_of?`/`equal?` take exactly one
+  # take no arguments, `is_a?`/`kind_of?`/`equal?`/`===` take exactly one
   # (confirmed against each one's own real MRB_ARGS_NONE()/
   # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
   # 3rd/mruby/src/class.c / 3rd/mruby/src/hash.c / 3rd/mruby/src/string.c
   # / 3rd/mruby/src/numeric.c / 3rd/mruby/src/array.c /
-  # 3rd/mruby/src/range.c). `to_s`/`length`/`first`/`dup` are the entries
-  # that AREN'T "one real native implementation" -- see each one's own
-  # `*_TYPE_TAG_DISPATCH` comment in compile_native_primitive_send.
+  # 3rd/mruby/src/range.c). `to_s`/`length`/`first`/`dup`/`===` are the
+  # entries that AREN'T "one real native implementation" -- see each
+  # one's own `*_TYPE_TAG_DISPATCH` comment in
+  # compile_native_primitive_send.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
-                                   'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0 }.freeze
+                                   'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
+                                   '===' => 1 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -6136,6 +6138,113 @@ class CodeGen
       "    r#{d} = mrb_range_beg(M, #{recv});\n" \
       "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+    when '==='
+      # EQQ_TYPE_TAG_DISPATCH: same shape as to_s/length -- a real grep
+      # across 3rd/mruby/src finds `===` registered separately on
+      # Object/Kernel (`mrb_eqq_m`), Class/Module (`mrb_mod_eqq`) and
+      # Range (`range_include`), three distinct native bodies the
+      # registry's own `<native>` placeholder collapses into one entry.
+      # All three are `static` and read their argument via
+      # `mrb_get_arg1(mrb)` (a call-frame read, unsafe to call directly --
+      # the same trap as every other name in this table with more than
+      # one real implementation), but each one's own logic is trivially
+      # and safely reproducible from genuinely public, direct-parameter
+      # MRB_APIs:
+      #   - MRB_TT_CLASS/MRB_TT_MODULE/MRB_TT_SCLASS: `mrb_mod_eqq` is
+      #     exactly `mrb_obj_is_kind_of(mrb, arg, mrb_class_ptr(mod))` --
+      #     `mrb_class_ptr` is the same real public macro this file's own
+      #     shipped is_a?/kind_of? case above already uses on its
+      #     argument; here it's the *receiver* being cast, always safe
+      #     since the switch already proved the receiver's own type tag.
+      #   - MRB_TT_RANGE: `range_include`'s real body (3rd/mruby/src/
+      #     range.c) is reproduced inline using `mrb_range_beg`/
+      #     `mrb_range_end`/`mrb_range_excl_p` (the same real public
+      #     macros this file's own #each-inlining codegen already uses,
+      #     see compile_insn's OP_SEND each-on-Range case) plus `mrb_cmp`
+      #     (a real public MRB_API, already used by this file's own #sort
+      #     codegen) standing in for range.c's own static `r_le`/`r_gt`/
+      #     `r_ge` one-line wrappers around that exact same `mrb_cmp`.
+      #     Safe to call unconditionally once the switch itself has
+      #     already matched `MRB_TT_RANGE` -- the same "the switch IS the
+      #     guard" reasoning `to_s`'s own switch above already relies on,
+      #     no separate `mrb_range_p` check needed inside the case body.
+      #   - MRB_TT_INTEGER/FLOAT/STRING/SYMBOL/TRUE/FALSE (also covers
+      #     MRB_TT_NIL: this mruby build has no separate nil type tag --
+      #     nil and false both report `MRB_TT_FALSE` from `mrb_type`,
+      #     distinguished only by a hidden flag bit, confirmed against
+      #     3rd/mruby/include/mruby/value.h's own `mrb_nil_p`/`mrb_false_p`
+      #     macros -- so a bare `case MRB_TT_FALSE:` already covers both,
+      #     and a separate `case MRB_TT_NIL:` would be a compile error, not
+      #     just redundant)/ARRAY/HASH:
+      #     `mrb_eqq_m` (Kernel/Object's own default) is exactly
+      #     `mrb_bool_value(mrb_equal(mrb, self, arg))` -- `mrb_equal` is
+      #     a real public MRB_API, side-effect-free, safe for literally
+      #     any receiver/argument pair (it internally re-dispatches to a
+      #     real `==` method call only when its own fast paths don't
+      #     resolve, exactly like `equal?`'s own case above already
+      #     relies on `mrb_obj_equal` for). Array/Hash included here even
+      #     though `to_s` excluded them for a DIFFERENT native function
+      #     with a real ci->mid-mutation bug -- `mrb_equal` itself has no
+      #     such trap for any receiver, so there's nothing to exclude.
+      #
+      # Deliberately excludes MRB_TT_DATA (mruby-onig-regexp's `Regexp`
+      # registers a real, active, BYTECODE `#===` override --
+      # `closed_world_mrblib_srcs` never scans mruby-onig-regexp's own
+      # mrblib, so `native_only_mono?` can't see it; MRB_TT_DATA is also
+      # shared by mruby-marshal/mruby-stringio/mruby-rgss's own wrapper
+      # objects, worse ambiguity than any tag `to_s` ever had to exclude)
+      # and MRB_TT_PROC (mruby-proc-ext's bytecode `Proc#===`, confirmed
+      # not part of this project's real dependency graph today, excluded
+      # anyway as cheap insurance against that changing). Both, like every
+      # tag not listed here, correctly fall through to `default:`'s
+      # ordinary `mrb_funcall`.
+      arg = argv.first
+      "  // === -- native primitive, runtime-guarded per real receiver type\n" \
+      "  // (see compile_native_primitive_send's own EQQ_TYPE_TAG_DISPATCH\n" \
+      "  // comment for why MRB_TT_DATA/MRB_TT_PROC and everything else fall\n" \
+      "  // through to ordinary dispatch)\n" \
+      "  switch (mrb_type(#{recv})) {\n" \
+      "  case MRB_TT_CLASS:\n" \
+      "  case MRB_TT_MODULE:\n" \
+      "  case MRB_TT_SCLASS:\n" \
+      "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{arg}, mrb_class_ptr(#{recv})));\n" \
+      "    break;\n" \
+      "  case MRB_TT_RANGE: {\n" \
+      "    mrb_value bc2cpp_eqq_beg#{d} = mrb_range_beg(M, #{recv});\n" \
+      "    mrb_value bc2cpp_eqq_end#{d} = mrb_range_end(M, #{recv});\n" \
+      "    mrb_bool bc2cpp_eqq_excl#{d} = mrb_range_excl_p(M, #{recv});\n" \
+      "    mrb_bool bc2cpp_eqq_r#{d} = FALSE;\n" \
+      "    if (mrb_nil_p(bc2cpp_eqq_beg#{d})) {\n" \
+      "      mrb_int bc2cpp_eqq_c#{d} = mrb_cmp(M, bc2cpp_eqq_end#{d}, #{arg});\n" \
+      "      bc2cpp_eqq_r#{d} = bc2cpp_eqq_excl#{d} ? (bc2cpp_eqq_c#{d} == 1) : (bc2cpp_eqq_c#{d} == 0 || bc2cpp_eqq_c#{d} == 1);\n" \
+      "    } else {\n" \
+      "      mrb_int bc2cpp_eqq_cb#{d} = mrb_cmp(M, bc2cpp_eqq_beg#{d}, #{arg});\n" \
+      "      if (bc2cpp_eqq_cb#{d} == 0 || bc2cpp_eqq_cb#{d} == -1) {\n" \
+      "        if (mrb_nil_p(bc2cpp_eqq_end#{d})) {\n" \
+      "          bc2cpp_eqq_r#{d} = TRUE;\n" \
+      "        } else {\n" \
+      "          mrb_int bc2cpp_eqq_ce#{d} = mrb_cmp(M, bc2cpp_eqq_end#{d}, #{arg});\n" \
+      "          bc2cpp_eqq_r#{d} = bc2cpp_eqq_excl#{d} ? (bc2cpp_eqq_ce#{d} == 1) : (bc2cpp_eqq_ce#{d} == 0 || bc2cpp_eqq_ce#{d} == 1);\n" \
+      "        }\n" \
+      "      }\n" \
+      "    }\n" \
+      "    r#{d} = mrb_bool_value(bc2cpp_eqq_r#{d});\n" \
+      "    break;\n" \
+      "  }\n" \
+      "  case MRB_TT_INTEGER:\n" \
+      "  case MRB_TT_FLOAT:\n" \
+      "  case MRB_TT_STRING:\n" \
+      "  case MRB_TT_SYMBOL:\n" \
+      "  case MRB_TT_TRUE:\n" \
+      "  case MRB_TT_FALSE:\n" \
+      "  case MRB_TT_ARRAY:\n" \
+      "  case MRB_TT_HASH:\n" \
+      "    r#{d} = mrb_bool_value(mrb_equal(M, #{recv}, #{arg}));\n" \
+      "    break;\n" \
+      "  default:\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    break;\n" \
       "  }\n"
     when 'dup'
       # DUP_TYPE_TAG_DISPATCH: unlike every other entry here, this one is
