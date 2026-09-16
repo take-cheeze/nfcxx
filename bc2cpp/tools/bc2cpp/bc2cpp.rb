@@ -2530,6 +2530,24 @@ ARRAY_ELEMENT_INDEXERS_NO_ARG = %w[first last sample min max].freeze
 # claiming a uniform element class would be a guess.
 ARRAY_ELEMENT_WRITERS = %w[push << unshift insert []= concat replace fill collect! map! flatten! sort_by!].freeze
 
+# HASH_ELEMENT_SUPPORT: the Hash-value analogue of ARRAY_ELEMENT_WRITERS
+# above, deliberately much narrower -- this only ever claims a VALUE
+# class (never a key class; real Hash literals in this codebase are
+# overwhelmingly Symbol-keyed already, so a key fact would mostly be
+# redundant, and the real payoff -- devirtualizing a call made on the
+# yielded value inside an inlined `hash.each { |k, v| v.foo }` -- only
+# ever needs the value side). Only the two real explicit write-method
+# names (`h[k] = v` real Ruby source always compiles to `SETIDX`, not a
+# `SEND :[]=` -- see HashElementLayout.analyze's own SETIDX arm -- so
+# this list only matters for the explicit-call spelling, `h.[]=(k, v)`/
+# `h.store(k, v)`, confirmed both real aliases of the same native
+# `hash_set`, 3rd/mruby/src/hash.c). No `merge!`/`update`/`replace`
+# chain-preserving rule exists here the way ARRAY_ELEMENT_PRESERVING
+# gives Array one -- deliberately out of scope for this first round;
+# unmodeled shapes poison, the same "never guess" bar every writer list
+# in this file already holds itself to.
+HASH_ELEMENT_WRITERS = %w[[]= store].freeze
+
 # ELEMENT_CLASS_SUPPORT: "what is the element class of the Array-valued
 # expression in `reg` at `idx`?" -- the element-dimension analogue of
 # proven_array_source_scan above, and deliberately built the same way:
@@ -2602,6 +2620,67 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       return ivar_element_hint(ctx[:owner], ivar, ctx)
     when 'SEND', 'SEND0', 'SENDB', 'SSENDB', 'SSEND', 'SSEND0'
       return send_element_class(irep, i, reg, insn, ctx, depth)
+    else
+      return nil
+    end
+  end
+  nil
+end
+
+# HASH_ELEMENT_SUPPORT: "what is the VALUE class of the Hash-valued
+# expression in `reg` at `idx`?" -- the Hash-value analogue of
+# array_element_source_scan above, deliberately narrower: no SEND arm at
+# all (no `send_element_class`-style preserving-chain/map-replaces-
+# elements rule -- HASH_ELEMENT_WRITERS' own comment explains why this
+# round doesn't attempt one), just the two terminals that actually occur
+# for a Hash-typed ivar in this closed world -- a literal and a chained
+# ivar read -- plus the same MOVE-following every other backward scan in
+# this file already does. A hard nil (never a wrong guess) on anything
+# else, exactly like every other scan here.
+def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
+  return nil if depth > 8
+
+  reg = dest_reg
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn
+
+    next if insn.op == 'BLOCK'
+    next unless insn.args[/^R(\d+)/, 1] == reg
+
+    case insn.op
+    when 'MOVE'
+      src = insn.args.scan(/R(\d+)/).flatten[1]
+      return nil unless src
+
+      reg = src
+      next
+    when 'HASH'
+      # "HASH R2 2" -- N key/value PAIRS starting at Rd (confirmed
+      # directly against real `mrbc -v` output and 3rd/mruby/src/vm.c's
+      # own OP_HASH: `for (i=a; i<a+b*2; i+=2) mrb_hash_set(regs[i],
+      # regs[i+1])`, so VALUES sit at the ODD offsets -- Rd+1, Rd+3, ...
+      # -- never the even ones a naive "N consecutive registers" read
+      # (the ARRAY/ARRAY2 shape) would wrongly assume). An EMPTY literal
+      # (`@h = {}`, n == 0) is VACUOUS for the exact same reason
+      # array_element_source_scan's own ARRAY arm treats `[]` that way --
+      # it says nothing about any element, so it must not poison a real
+      # site found elsewhere, and it must not be merged as agreement
+      # either.
+      n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+      return nil if n.nil?
+      return HashElementLayout::VACUOUS if n.zero?
+
+      base = reg.to_i
+      classes = (0...n).map { |k| element_value_class(irep, i, (base + 2 * k + 1).to_s, ctx, depth + 1) }
+      return nil if classes.any?(&:nil?) || classes.uniq.size != 1
+
+      return classes.first
+    when 'GETIV'
+      ivar = insn.args[/@(\w+)/, 1]
+      return nil unless ivar
+
+      return ivar_hash_element_hint(ctx[:owner], ivar, ctx)
     else
       return nil
     end
@@ -2691,6 +2770,24 @@ def ivar_element_hint(owner, ivar, ctx)
 
   hint = table[owner][ivar]
   return nil if hint.nil? || hint == ArrayElementLayout::UNKNOWN
+
+  hint
+end
+
+# HASH_ELEMENT_SUPPORT: the Hash-value analogue of ivar_element_hint
+# above -- reads `ctx[:hash_elements]` (HashElementLayout's own
+# in-progress table during its own sweep, or the finished one once
+# consumed by a block recognizer) rather than `ctx[:elements]`, which
+# stays Array-only. Kept as its own small function, not a shared/
+# parameterized one, for the same "don't bend one function around two
+# unrelated tables" reasoning this file already applies elsewhere
+# (trace_eqq_literal_receiver's own comment makes the identical call).
+def ivar_hash_element_hint(owner, ivar, ctx)
+  table = ctx[:hash_elements]
+  return nil unless owner && ivar && table&.key?(owner)
+
+  hint = table[owner][ivar]
+  return nil if hint.nil? || hint == HashElementLayout::UNKNOWN
 
   hint
 end
@@ -3306,6 +3403,175 @@ def written_element_class(irep, idx, insn, recv, name, ctx)
   return nil if classes.any?(&:nil?) || classes.uniq.size != 1
 
   classes.first
+end
+
+# HASH_ELEMENT_SUPPORT: the value class one in-place `h[]=`/`h.store` call
+# writes into the hash -- the Hash analogue of written_element_class above,
+# deliberately trivial next to it: both HASH_ELEMENT_WRITERS names share
+# the exact same (key, value) two-argument layout (confirmed real aliases
+# of the same native `hash_set`, 3rd/mruby/src/hash.c), so there is no
+# per-name branching to do at all -- just confirm arity is exactly 2 and
+# read the second argument register. No `merge!`/`update` chain-preserving
+# arm exists here the way `concat`/`replace` gives Array one above --
+# HASH_ELEMENT_WRITERS' own comment already explains why that's out of
+# scope for this round.
+def written_hash_element_class(irep, idx, insn, recv, ctx)
+  n_match = insn.args.match(/n=(\d+|\*)/)
+  return nil unless n_match && n_match[1] == '2'
+
+  val_reg = (recv.to_i + 2).to_s
+  element_value_class(irep, idx, val_reg, ctx, 1)
+end
+
+# HASH_ELEMENT_SUPPORT: the Hash-value analogue of ArrayElementLayout
+# above -- proves "every VALUE of this Hash-typed ivar is class X"
+# (HASH_ELEM_HINT). Deliberately narrower than the Array version in two
+# ways, both explained where the asymmetry is introduced: values only,
+# never keys (HASH_ELEMENT_WRITERS' own comment), and no SEND-based
+# preserving-chain rule the way Array has for `select`/`map`/etc. --
+# `merge!`/`update` and any other unmodeled writer shape simply poisons,
+# the same "never guess" bar every writer list in this file already holds
+# itself to. Structurally this mirrors ArrayElementLayout's own `analyze`/
+# `known`/`unknowns` almost line for line; kept as its own class (not a
+# parameterized shared one) for the same reason this file never merges
+# ivar_element_hint and ivar_hash_element_hint into one function -- see
+# that pair's own comments, and trace_eqq_literal_receiver's identical
+# call on a different pair of tables.
+class HashElementLayout
+  UNKNOWN = :unknown
+  VACUOUS = :vacuous
+
+  # owner -> {ivar_name => value class name}, for every ivar ClassLayout
+  # has ALREADY proved always holds a `Hash`. Takes the ALREADY-FINISHED
+  # ArrayElementLayout raw table (`array_elements`) so a hash value
+  # chained through a known-element array (`@h[k] = @roster[i]`) can still
+  # resolve, via element_value_class's own GETIDX/AREF indexer rule -- see
+  # that function's own comment. This must run after
+  # ArrayElementLayout.analyze for that table to mean anything; the
+  # default empty table just makes any such chain poison instead, like any
+  # other unmodeled shape, never a wrong guess.
+  def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, array_elements = {},
+                    superclass_of = {})
+    methods_of = Hash.new { |h, k| h[k] = [] }
+    registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+    known_owners = Set.new(registry.values.flatten.map(&:owner))
+    subclassed = Set.new(superclass_of.values.select { |v| v.is_a?(String) })
+
+    mono_ann = lambda do |field|
+      lambda do |name|
+        defs = registry[name]
+        next nil unless defs && defs.size == 1 && defs.first.irep
+
+        element_annotations[defs.first.irep]&.public_send(field)
+      end
+    end
+    annotated_element = mono_ann.call(:element)
+    annotated_ret_class = mono_ann.call(:ret_class)
+
+    hash_elements = Hash.new { |h, k| h[k] = {} }
+
+    10.times do
+      changed = false
+      methods_of.each do |owner, labels|
+        hash_ivars = (class_layout[owner] || {}).select { |_, c| c == 'Hash' }.keys
+        next if hash_ivars.empty?
+
+        labels.each do |label|
+          # Same transitive block-body sweep as ArrayElementLayout.analyze
+          # -- see that loop's own comment for why this is load-bearing,
+          # not thoroughness for its own sake.
+          sweep = [[label, mand_of(ireps, label), class_annotations[label]&.args]]
+          nested_block_labels(ireps, label).each { |bl| sweep << [bl, 0, nil] }
+
+          sweep.each do |(cur_label, mand, arg_classes)|
+            irep = ireps.fetch(cur_label)
+            ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
+                    class_annotations: class_annotations, element_annotations: element_annotations,
+                    known_owners: known_owners, subclassed: subclassed,
+                    ivar_classes: (class_layout[owner] || {}), mand: mand,
+                    arg_classes: arg_classes, elements: array_elements, hash_elements: hash_elements,
+                    annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
+
+            irep.instructions.each_with_index do |insn, idx|
+              found = nil
+              ivar = nil
+              if insn.op == 'SETIV'
+                ivar = insn.args[/@(\w+)/, 1]
+                next unless hash_ivars.include?(ivar)
+
+                found = hash_element_source_scan(irep, idx, insn.args[/R(\d+)/, 1], ctx)
+              # SSEND/SSENDB excluded for the identical reason
+              # ArrayElementLayout.analyze's own SEND arm excludes them --
+              # an implicit-self receiver has no register to backward-trace.
+              elsif %w[SEND SEND0 SENDB].include?(insn.op)
+                name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+                next unless name && HASH_ELEMENT_WRITERS.include?(name)
+
+                recv = insn.args[/^R(\d+)/, 1]
+                ivar = mutated_ivar_target(irep, idx, recv)
+                next unless ivar && hash_ivars.include?(ivar)
+
+                found = written_hash_element_class(irep, idx, insn, recv, ctx)
+              elsif insn.op == 'SETIDX'
+                # `h[k] = v` is a real OP_SETIDX, not a `SEND :[]=` --
+                # confirmed via real `mrbc -v` output, see this file's own
+                # HASH_ELEMENT_WRITERS comment. "SETIDX R4 (R5) (R6)" is
+                # `R[a][R[a+1]] = R[a+2]`: receiver R4, value R6 (the key
+                # at R5 is never read here -- values only, see this
+                # class's own header).
+                recv, _i_reg, val = insn.args.scan(/R(\d+)/).flatten
+                next unless recv && val
+
+                ivar = mutated_ivar_target(irep, idx, recv)
+                next unless ivar && hash_ivars.include?(ivar)
+
+                found = element_value_class(irep, idx, val, ctx, 1)
+              else
+                next
+              end
+
+              # A provably value-free site (`@h = {}`) is skipped entirely
+              # -- see hash_element_source_scan's own HASH arm for why an
+              # empty literal is VACUOUS, not UNKNOWN.
+              next if found == VACUOUS
+
+              found ||= UNKNOWN
+              before = hash_elements[owner][ivar]
+              # Identical sticky join to ArrayElementLayout's own -- see
+              # that method's own comment.
+              merged = if before.nil?
+                         found
+                       elsif before == UNKNOWN || found == UNKNOWN || before != found
+                         UNKNOWN
+                       else
+                         before
+                       end
+              if merged != before
+                hash_elements[owner][ivar] = merged
+                changed = true
+              end
+            end
+          end
+        end
+      end
+      break unless changed
+    end
+
+    hash_elements
+  end
+
+  # See ArrayElementLayout.known's own comment -- identical role, one
+  # table over.
+  def self.known(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      known = ivars.reject { |_, c| c == UNKNOWN }
+      out[owner] = known unless known.empty?
+    end
+  end
+
+  def self.unknowns(table)
+    table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
 end
 
 # ---------------------------------------------------------------------------
@@ -5722,7 +5988,8 @@ class CodeGen
   }.freeze
 
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
-                 superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {})
+                 superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
+                 hash_element_layout = {})
     @ireps = ireps
     # CONST_CONTAINER_SUPPORT: real, fully-qualified constant name ->
     # 'Array'/'Hash'/'Range' -- build_registry's own SETCONST scan (see
@@ -5738,6 +6005,13 @@ class CodeGen
     # own header for the full soundness argument.
     @element_layout = element_layout
     @element_annotations = element_annotations
+    # HASH_ELEMENT_SUPPORT: owner -> {ivar => value class name}
+    # (HashElementLayout.analyze's own filtered result) -- the Hash-value
+    # analogue of @element_layout above. Read only by
+    # recognize_hash_each_regions/emit_hash_each_inline's own per-value
+    # devirtualization, guarded the identical way (a real runtime
+    # `mrb_obj_class` check) -- see HashElementLayout's own header.
+    @hash_element_layout = hash_element_layout
     # The per-element class currently in scope, set by the block emitters
     # around one inlined loop body and consulted by compile_send for a
     # receiver that provably still holds the loop element. nil everywhere
@@ -6882,6 +7156,27 @@ class CodeGen
       known_owners: known_owner_set, subclassed: subclassed_set,
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout,
+      annotated_element: ->(n) { annotated_element_return(n) },
+      annotated_ret_class: ->(n) { annotated_ret_class(n) } }
+  end
+
+  # HASH_ELEMENT_SUPPORT: the Hash-value analogue of proven_element_class/
+  # element_ctx above -- "this proven-Hash receiver's VALUES are provably
+  # class X, or nil". Same wrapper role: HashElementLayout.analyze/
+  # hash_element_source_scan are the shared, CodeGen-agnostic reasoning
+  # (already proven reusable for the block-recognizer question, the same
+  # sharing argument proven_array_source's own comment makes); this
+  # wrapper only supplies what is specific to a CodeGen instance.
+  def proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    hash_element_source_scan(irep, idx, dest_reg, hash_element_ctx(ivar_classes, mand, arg_classes, owner_name))
+  end
+
+  def hash_element_ctx(ivar_classes, mand, arg_classes, owner_name)
+    { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
+      class_annotations: @class_annotations, element_annotations: @element_annotations,
+      known_owners: known_owner_set, subclassed: subclassed_set,
+      ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
+      elements: @element_layout, hash_elements: @hash_element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },
       annotated_ret_class: ->(n) { annotated_ret_class(n) } }
   end
@@ -8651,7 +8946,9 @@ class CodeGen
       end
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB' }
+                   ssendb: insn.op == 'SSENDB',
+                   elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                        owner_name) }
     end
     regions
   end
@@ -8805,6 +9102,15 @@ class CodeGen
     return nil if insn.op == 'SSENDB'
 
     proven_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+  end
+
+  # HASH_ELEMENT_SUPPORT: the Hash-value analogue of region_element_class
+  # above, used only by recognize_hash_each_regions. Same SSENDB exclusion
+  # for the same reason.
+  def region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
+    return nil if insn.op == 'SSENDB'
+
+    proven_hash_element_class(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner_name)
   end
 
   # INTERP_UNLOCK / CORE_ARRAY_CHAIN: the chained-receiver rule, shared by
@@ -9649,8 +9955,16 @@ class CodeGen
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                               break_dest: dest_reg, break_label: break_label)
+      # HASH_ELEMENT_SUPPORT: the block's own second mandatory parameter
+      # (mandatory_arity == 2, checked by this region's own recognizer) is
+      # R2 in its own numbering, and this emitter binds exactly that
+      # register to a Hash-values fetch below -- so R2 IS the loop VALUE
+      # for the whole body (see HashElementLayout's own header for why
+      # only values, never keys, ever get a hint here).
+      with_element_hint(block_irep, insn, i, '2', region[:elem_class]) do
+        body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                 break_dest: dest_reg, break_label: break_label)
+      end
     end
     return nil if body.include?('#error')
 
@@ -12384,6 +12698,32 @@ if $PROGRAM_NAME == __FILE__
     element_unknowns.each { |n| warn "  ELEM_CANDIDATE  #{n}" }
   end
 
+  # HASH_ELEMENT_SUPPORT: the Hash-value dimension of the same ivar facts
+  # (see HashElementLayout's own header). Runs after ArrayElementLayout so
+  # a Hash value chained through a known-element array can still resolve
+  # -- see HashElementLayout.analyze's own comment on `array_elements`.
+  hash_element_raw = HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
+                                               element_annotations, element_raw, superclass_of)
+  hash_element_layout = HashElementLayout.known(hash_element_raw)
+  warn ''
+  warn '== known-hash-element-class hints (guarded devirtualization only) =='
+  if hash_element_layout.empty?
+    warn '  (none)'
+  else
+    hash_element_layout.each do |klass, ivars|
+      ivars.each { |name, cls| warn "  HASH_ELEM_HINT  #{klass}#@#{name}  (Hash<#{cls}>)" }
+    end
+  end
+
+  hash_element_unknowns = HashElementLayout.unknowns(hash_element_raw)
+  warn ''
+  warn '== hash-element candidates (proven-Hash ivar, value class poisoned to unknown) =='
+  if hash_element_unknowns.empty?
+    warn '  (none)'
+  else
+    hash_element_unknowns.each { |n| warn "  HASH_ELEM_CANDIDATE  #{n}" }
+  end
+
   candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
   warn ''
   warn '== annotation candidates (opaque incoming argument, unresolved) =='
@@ -12400,7 +12740,7 @@ if $PROGRAM_NAME == __FILE__
   # also now drives NATIVE_ARG_TARGETS' own native-argument calling
   # convention -- see that constant's own comment.
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
-                    element_layout, element_annotations, container_constants)
+                    element_layout, element_annotations, container_constants, hash_element_layout)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
