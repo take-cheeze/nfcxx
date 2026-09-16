@@ -5889,16 +5889,18 @@ class CodeGen
     end
   end
 
-  # NATIVE_PRIMITIVE_SEND_ARITY: the four native Kernel/NilClass methods
+  # NATIVE_PRIMITIVE_SEND_ARITY: the native Kernel/NilClass/Hash methods
   # compile_send's own NATIVE_PRIMITIVE_SENDS path (see that comment,
   # right above compile_send's own `target = monomorphic_target(name)`
   # line, for the full soundness writeup) knows how to inline directly,
   # mapped to the exact real mandatory arity a call site must match --
-  # `!`/`nil?` take no arguments, `is_a?`/`kind_of?` take exactly one
-  # (confirmed against each one's own real MRB_ARGS_NONE()/
-  # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
-  # 3rd/mruby/src/class.c).
-  NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1 }.freeze
+  # `!`/`nil?`/`class`/`object_id`/`keys` take no arguments, `is_a?`/
+  # `kind_of?`/`equal?` take exactly one (confirmed against each one's
+  # own real MRB_ARGS_NONE()/MRB_ARGS_REQ(1) registration in
+  # 3rd/mruby/src/kernel.c / 3rd/mruby/src/class.c /
+  # 3rd/mruby/src/hash.c).
+  NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
+                                   'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -5947,6 +5949,45 @@ class CodeGen
       "runtime -- see compile_send's own comment)\n" \
       "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg})) {\n" \
       "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
+      "  } else {\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "  }\n"
+    when 'equal?'
+      arg = argv.first
+      "  // equal? -- native primitive, no lookup needed (mrb_obj_equal is a real\n" \
+      "  // public MRB_API, safe for any receiver/argument pair -- no struct cast)\n" \
+      "  r#{d} = mrb_bool_value(mrb_obj_equal(M, #{recv}, #{arg}));\n"
+    when 'class'
+      "  // class -- native primitive, no lookup needed (mrb_obj_class is a real\n" \
+      "  // public MRB_API, safe for any receiver -- no struct cast)\n" \
+      "  r#{d} = mrb_obj_value(mrb_obj_class(M, #{recv}));\n"
+    when 'object_id'
+      "  // object_id -- native primitive, no lookup needed (mrb_obj_id is a real\n" \
+      "  // public MRB_API, safe for any receiver -- no struct cast)\n" \
+      "  r#{d} = mrb_fixnum_value(mrb_obj_id(#{recv}));\n"
+    when 'keys'
+      # KEYS_TYPE_TAG_GUARD: unlike equal?/class/object_id above,
+      # mrb_hash_keys is Hash-specific -- its own body casts the receiver
+      # straight to `struct RHash*` via mrb_hash_ptr's own unchecked
+      # `(struct RHash*)(mrb_ptr(v))` macro (3rd/mruby/include/mruby/
+      # hash.h), no type check inside it at all. Calling it on a non-Hash
+      # receiver would reinterpret that receiver's real struct (RArray,
+      # RString, ...) as an RHash -- undefined behavior, not a clean
+      # NoMethodError the way real Ruby would raise for `[].keys`.
+      # `mrb_hash_p` (mrb_type(o) == MRB_TT_HASH, always-defined regardless
+      # of boxing mode) is the same RBasic-derived-struct type-tag check
+      # `mrb_class_p`/`mrb_module_p` above already use for is_a?/kind_of?'s
+      # own argument -- guarding on it here, falling back to ordinary
+      # `mrb_funcall` otherwise, reproduces the real NoMethodError a
+      # genuinely non-Hash receiver would raise (no OTHER native or
+      # bytecode `:keys` exists anywhere in the closed world --
+      # native_only_mono? already proved that -- so mrb_funcall's own
+      # dispatch correctly fails to find one).
+      "  // keys -- native primitive, runtime-guarded (mrb_hash_keys casts straight\n" \
+      "  // to struct RHash*, unsafe on a non-Hash receiver -- see compile_native_\n" \
+      "  // primitive_send's own KEYS_TYPE_TAG_GUARD comment)\n" \
+      "  if (mrb_hash_p(#{recv})) {\n" \
+      "    r#{d} = mrb_hash_keys(M, #{recv});\n" \
       "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
       "  }\n"
@@ -10369,6 +10410,40 @@ class CodeGen
     #     narrower, call-site-specific guarantee than the general
     #     `is_a?`/`kind_of?` case here can rely on, hence the explicit
     #     runtime guard added instead).
+    #   - `equal?` (Kernel#equal?/BasicObject#equal?): 3rd/mruby/src/
+    #     class.c's own `mrb_obj_equal_m` is exactly `mrb_get_arg1` (this
+    #     call site's own `argv.first`, already extracted) then
+    #     `mrb_bool_value(mrb_obj_equal(mrb, self, arg))` --
+    #     `mrb_obj_equal` is a real, public `MRB_API` (mruby.h), no struct
+    #     cast, safe for any receiver/argument pair (identity comparison,
+    #     `mrb_obj_eq` underneath). Also confirmed genuinely name-
+    #     uncontested for real via a direct grep of every mrb_define_*/
+    #     MRB_MT_ENTRY registration across this project's own NATIVE_SRCS
+    #     and mrblib -- `equal?` has exactly one native registration
+    #     (class.c's own Kernel-level one) and no bytecode override
+    #     anywhere.
+    #   - `class` (Kernel#class): 3rd/mruby/src/kernel.c's own
+    #     `mrb_obj_class_m` is exactly `mrb_obj_value(mrb_obj_class(mrb,
+    #     self))` -- `mrb_obj_class` is a real, public `MRB_API`, safe for
+    #     any receiver (immediate or heap-allocated alike, no struct
+    #     cast).
+    #   - `object_id` (Kernel#object_id): 3rd/mruby/src/kernel.c's own
+    #     `mrb_obj_id_m` is exactly `mrb_fixnum_value(mrb_obj_id(self))`
+    #     -- `mrb_obj_id` is a real, public `MRB_API`, boxing-mode-generic
+    #     (its own body branches on MRB_NAN_BOXING/MRB_WORD_BOXING/
+    #     MRB_NO_BOXING internally, never a struct cast).
+    #   - `keys` (Hash#keys): 3rd/mruby/src/hash.c's own `mrb_hash_keys`
+    #     IS the whole native body (registered directly, no `_m` wrapper)
+    #     -- also a real, public `MRB_API` (mruby/hash.h), but UNLIKE the
+    #     three above it is Hash-specific: its own first line,
+    #     `mrb_hash_ptr(hash)`, is an unchecked `(struct RHash*)(mrb_ptr(v))`
+    #     cast with no type check inside it at all -- see
+    #     compile_native_primitive_send's own KEYS_TYPE_TAG_GUARD comment
+    #     for why this one, alone among the names here, needs a real
+    #     runtime `mrb_hash_p` guard (an RBasic-derived-struct type-tag
+    #     check, the same *kind* of check `mrb_class_p`/`mrb_module_p`
+    #     above already are) before the direct call, falling back to
+    #     ordinary `mrb_funcall` otherwise.
     #
     # Deliberately excludes `respond_to?` (also POLY-native, also a
     # high-count name): real `Kernel#respond_to?`
