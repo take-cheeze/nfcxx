@@ -5937,6 +5937,14 @@ class CodeGen
   # four every time, so an entry for any of them would be real, dead,
   # never-reached code today. Left out rather than shipped inert; revisit
   # if a future edit to any of those four classes removes the collision.
+  #
+  # `clear` was investigated too but excluded: `RGSS::ErrorReport`'s own
+  # `class << self; def clear; ...; end; end` (mruby-rgss/mrblib/
+  # error_report.rb) is a real bytecode override this table's own gate
+  # correctly refuses on every time -- confirmed against the live
+  # registry (`RGSS::ErrorReport.singleton#clear` shows up as a second
+  # def alongside the native placeholder), not assumed. Would be dead
+  # code today, same reasoning as `push`/`size`/`empty?`/`<<` above.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
