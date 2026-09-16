@@ -2232,7 +2232,12 @@ end
 class ClassLayout
   UNKNOWN = :unknown
 
-  def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil)
+  # ANY_OPAQUE_SUPPORT: see ArrayElementLayout.analyze's own `poison_reason`
+  # header for the full :any/:opaque distinction -- identical mechanism,
+  # applied here to the ivar's own CLASS instead of its elements. `nil`
+  # (the default) keeps exactly the pre-existing behavior.
+  def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil,
+                    poison_reason: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
 
@@ -2373,6 +2378,11 @@ class ClassLayout
                      end
             if merged != before
               classes[owner][ivar] = merged
+              if merged == UNKNOWN && poison_reason
+                # See this method's own `poison_reason` header -- same
+                # :any/:opaque split ArrayElementLayout.analyze uses.
+                (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+              end
               changed = true
             end
           end
@@ -2406,6 +2416,15 @@ class ClassLayout
 
   def self.unknowns(classes)
     classes.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
+
+  # ANY_OPAQUE_SUPPORT: see ArrayElementLayout.unknowns_by_reason's own
+  # comment -- identical filter, one table over.
+  def self.unknowns_by_reason(classes, poison_reason, reason)
+    unknowns(classes).select do |name|
+      owner, ivar = name.split('#@', 2)
+      poison_reason.dig(owner, ivar) == reason
+    end
   end
 end
 
@@ -2529,6 +2548,25 @@ ARRAY_ELEMENT_INDEXERS_NO_ARG = %w[first last sample min max].freeze
 # element writer this sweep cannot read is exactly the case where
 # claiming a uniform element class would be a guess.
 ARRAY_ELEMENT_WRITERS = %w[push << unshift insert []= concat replace fill collect! map! flatten! sort_by!].freeze
+
+# PRIMITIVE_ELEMENT_SUPPORT: the element-class tags `element_value_class`
+# hands back for a literal primitive value (see that function's own
+# terminal cases), as opposed to a real registry class name. None of
+# these is ever a real `known_owners` entry (confirmed: no `class
+# Integer`/`Hash`/`String`/`Symbol` reopen anywhere in mruby-rpg2k/
+# mruby-lcf/mruby-rgss), so there is no risk of a primitive tag colliding
+# with a genuine devirtualization target -- but `.known` on both
+# ArrayElementLayout and HashElementLayout still strips them explicitly
+# rather than relying on that absence alone, because CodeGen's own
+# consumers (`with_element_hint` et al.) have no runtime guard for
+# anything but a real `mrb_obj_class` comparison and were never designed
+# to receive one of these. A primitive-tagged ivar is purely a
+# diagnostic-only fact: "every element is provably this scalar type,
+# nothing more to investigate here" -- distinct from both a real
+# class-devirtualization hint (ELEM_HINT) and a genuinely poisoned/
+# unresolved one (ELEM_CANDIDATE, split further into ANY/OPAQUE -- see
+# ArrayElementLayout.analyze's own header).
+PRIMITIVE_ELEMENT_CLASSES = %w[Integer Hash String Symbol].freeze
 
 # ELEMENT_CLASS_SUPPORT: "what is the element class of the Array-valued
 # expression in `reg` at `idx`?" -- the element-dimension analogue of
@@ -2992,6 +3030,38 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
       next
     end
 
+    # PRIMITIVE_ELEMENT_SUPPORT: a literal primitive value written directly
+    # into this register -- an Integer/Hash/String/Symbol element, as
+    # opposed to every other case in this function which traces to a real
+    # user-defined CLASS. These never feed devirtualization (see
+    # PRIMITIVE_ELEMENT_CLASSES' own comment on why `.known` strips them
+    # back out before CodeGen ever sees them) -- they exist purely so the
+    # whole-program diagnostic can tell "this ivar's elements are provably
+    # Integer, nothing to investigate" apart from "this ivar's elements
+    # could not be traced at all, might be a real annotation gap" (the
+    # `ANY`/`OPAQUE` split, see ArrayElementLayout.analyze's own header).
+    # `HASH`/`STRING` cover a literal `{...}`/string built right here
+    # (`arr.push({...})`, a real shape found by code-reading
+    # `Game::Battle#@log`/`#@pending`); `/^LOADI/` covers every small- and
+    # wide-immediate Fixnum opcode (`LOADI`/`LOADI_n`/`LOADI8/16/32`, the
+    # same opcode family IvarLayout.trace_type's own header cites);
+    # `LOADSYM` a bare symbol literal. Deliberately no `LOADNIL` here: a
+    # nil ELEMENT (as opposed to a nil whole-ivar assignment, handled
+    # separately at the SETIV-site level, see ArrayElementLayout.analyze's
+    # own nil-tolerant skip) was not a real shape found in this program by
+    # the code-reading rounds that motivated this -- left out rather than
+    # guessed at.
+    case insn.op
+    when 'HASH'
+      return 'Hash'
+    when 'STRING'
+      return 'String'
+    when /^LOADI/
+      return 'Integer'
+    when 'LOADSYM'
+      return 'Symbol'
+    end
+
     # ELEMENT_CLASS_SUPPORT: `a[i]` is NOT a `SEND :[]` in real bytecode
     # -- mrbc emits a dedicated index opcode and the VM only falls back to
     # a real `:[]` send for a receiver that is neither Array nor Hash
@@ -3075,7 +3145,33 @@ class ArrayElementLayout
   # (every consumer sits behind a recognizer that has already proved its
   # receiver is an Array), and sweeping the rest would only manufacture
   # entries nothing can use.
-  def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, superclass_of = {})
+  # ANY_OPAQUE_SUPPORT: `poison_reason`, when the caller passes a real Hash,
+  # is filled in as a side effect (never read, only written here) with
+  # `owner -> {ivar_name => :any | :opaque}` for every ivar that ends up
+  # UNKNOWN below -- recorded once, at the exact instant a given ivar
+  # FIRST transitions to UNKNOWN (the sticky join below never revisits an
+  # already-poisoned ivar, so this can never be overwritten afterward
+  # either). The two reasons are genuinely different claims:
+  #   :any    -- two REAL sites were both traced successfully and they
+  #              disagree (`before` and `found` are both non-UNKNOWN and
+  #              differ). This is a proven fact about the program: the
+  #              ivar really is heterogeneous, and no annotation, however
+  #              clever, could ever make it resolve to one class --
+  #              investigating it further is a waste of a future round's
+  #              time (see the two code-reading rounds this diagnostic is
+  #              built to save the next one from repeating).
+  #   :opaque -- at least one site could not be traced at all (`found ==
+  #              UNKNOWN` on its own, independent of what `before` was).
+  #              This is an admission of ignorance, not a proven fact: the
+  #              real element class might well be uniform, this analysis
+  #              just couldn't follow one expression. A genuine, actionable
+  #              candidate for a hand-placed annotation.
+  # A caller that passes nil (the default) gets the exact pre-existing
+  # behavior with zero overhead -- this is purely additive instrumentation
+  # on the same merge, never a change to what `elements` itself ends up
+  # holding.
+  def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, superclass_of = {},
+                    poison_reason: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     # Same `known_owners` set every other annotation reader gates on --
@@ -3153,7 +3249,18 @@ class ArrayElementLayout
                 ivar = insn.args[/@(\w+)/, 1]
                 next unless array_ivars.include?(ivar)
 
-                found = array_element_source_scan(irep, idx, insn.args[/R(\d+)/, 1], ctx)
+                src_reg = insn.args[/R(\d+)/, 1]
+                found = array_element_source_scan(irep, idx, src_reg, ctx)
+                # NIL_TOLERANT_JOIN (element dimension): the exact same
+                # rule ClassLayout.analyze's own SETIV arm already applies
+                # to the ivar's CLASS (see that method's own comment for
+                # the full soundness argument) -- a plain `@x = nil` site
+                # is evidence of nothing about the elements either, and
+                # must not poison an otherwise-uniform ivar (confirmed a
+                # real gap by code-reading: `Game::Interpreter#@choice_
+                # labels`/`#@teleport` are both cleared to nil in some
+                # paths and only ever hold real elements on others).
+                next if found.nil? && nil_literal_write?(irep, idx, src_reg)
               # SSEND/SSENDB deliberately excluded: their receiver is the
               # implicit self, so the `^R` register in the disassembly is the
               # DESTINATION, not a receiver to backward-trace -- feeding it to
@@ -3207,6 +3314,17 @@ class ArrayElementLayout
                        end
               if merged != before
                 elements[owner][ivar] = merged
+                if merged == UNKNOWN && poison_reason
+                  # First-time poisoning event -- see this method's own
+                  # `poison_reason` header for the exact :any/:opaque
+                  # distinction. `found == UNKNOWN` covers both "this site
+                  # alone was unreadable" (before.nil?) and "this site was
+                  # unreadable while a real value already existed"
+                  # (before was real) -- either way at least one site was
+                  # never actually traced, so it's an admission of
+                  # ignorance, not a proven conflict.
+                  (poison_reason[owner] ||= {})[ivar] = found == UNKNOWN ? :opaque : :any
+                end
                 changed = true
               end
             end
@@ -3230,13 +3348,49 @@ class ArrayElementLayout
   # diagnostic.
   def self.known(table)
     table.each_with_object({}) do |(owner, ivars), out|
-      known = ivars.reject { |_, c| c == UNKNOWN }
+      # PRIMITIVE_ELEMENT_SUPPORT: a primitive-tagged entry (`Integer`,
+      # `Hash`, ...) is dropped here too, alongside UNKNOWN -- it is a
+      # real, resolved fact (see `.primitives` below for where it's
+      # actually reported), but not one any CodeGen consumer of this
+      # table's result knows how to use: `with_element_hint` and friends
+      # only ever guard a direct call with a real `mrb_obj_class`
+      # comparison against a registry class, and a primitive was never a
+      # `known_owners` entry in the first place (see
+      # PRIMITIVE_ELEMENT_CLASSES' own comment).
+      known = ivars.reject { |_, c| c == UNKNOWN || PRIMITIVE_ELEMENT_CLASSES.include?(c) }
       out[owner] = known unless known.empty?
+    end
+  end
+
+  # PRIMITIVE_ELEMENT_SUPPORT: the diagnostic-only counterpart to `.known`
+  # above -- every ivar whose elements resolved to a primitive tag rather
+  # than a real registry class. Never consumed by CodeGen (see `.known`'s
+  # own comment); exists purely so the `== array-element candidates ==`
+  # diagnostic doesn't lump "this is provably Array<Integer>, there is
+  # nothing left to investigate" in with the genuinely actionable OPAQUE
+  # entries a future annotation round should look at.
+  def self.primitives(table)
+    table.each_with_object({}) do |(owner, ivars), out|
+      prim = ivars.select { |_, c| PRIMITIVE_ELEMENT_CLASSES.include?(c) }
+      out[owner] = prim unless prim.empty?
     end
   end
 
   def self.unknowns(table)
     table.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
+  end
+
+  # ANY_OPAQUE_SUPPORT: `.unknowns` split by WHY, using the `poison_reason`
+  # side table `.analyze` optionally filled in -- see that method's own
+  # header for what :any/:opaque each mean. Kept as a filter over
+  # `.unknowns`'s own output (rather than a third parallel traversal of
+  # `table`) so the two can never disagree about which ivars count as
+  # poisoned in the first place.
+  def self.unknowns_by_reason(table, poison_reason, reason)
+    unknowns(table).select do |name|
+      owner, ivar = name.split('#@', 2)
+      poison_reason.dig(owner, ivar) == reason
+    end
   end
 end
 
@@ -12322,7 +12476,14 @@ if $PROGRAM_NAME == __FILE__
 
     annotations[defs.first.irep]&.ret == :array
   end
-  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return)
+  # ANY_OPAQUE_SUPPORT: owner -> {ivar => :any | :opaque}, filled in by
+  # ClassLayout.analyze as a side effect -- see that method's own
+  # `poison_reason` header. Reported below as two extra, purely additive
+  # breakdowns of the exact same `class_layout_unknowns` list -- neither
+  # that list's own membership nor the `CLASS_CANDIDATE` lines change.
+  class_poison_reason = {}
+  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
+                                         annotated_array_return, poison_reason: class_poison_reason)
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
@@ -12341,6 +12502,32 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     class_layout_unknowns.sort.each { |n| warn "  CLASS_CANDIDATE  #{n}" }
+  end
+
+  # ANY_OPAQUE_SUPPORT: the same candidate list, split by why. :any means
+  # two real sites were traced and proven to genuinely disagree -- a fact
+  # about the program, not a gap in this analysis, and no future
+  # annotation round should spend time on it. :opaque means at least one
+  # site could never be traced at all -- the real, actionable candidate
+  # list for a future code-reading/annotation round (see
+  # ClassLayout.analyze's own `poison_reason` header for the full
+  # distinction).
+  warn ''
+  warn '== ivar-class candidates split: ANY (proven heterogeneous, not fixable) =='
+  any = ClassLayout.unknowns_by_reason(class_layout_raw, class_poison_reason, :any)
+  if any.empty?
+    warn '  (none)'
+  else
+    any.sort.each { |n| warn "  CLASS_CANDIDATE_ANY  #{n}" }
+  end
+
+  warn ''
+  warn '== ivar-class candidates split: OPAQUE (unresolved, may be fixable) =='
+  opaque = ClassLayout.unknowns_by_reason(class_layout_raw, class_poison_reason, :opaque)
+  if opaque.empty?
+    warn '  (none)'
+  else
+    opaque.sort.each { |n| warn "  CLASS_CANDIDATE_OPAQUE  #{n}" }
   end
 
   # ELEMENT_CLASS_SUPPORT: the element dimension of the same ivar facts
@@ -12362,8 +12549,12 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # ANY_OPAQUE_SUPPORT: see class_poison_reason's own comment above --
+  # identical mechanism, one analysis over.
+  element_poison_reason = {}
   element_raw = ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
-                                           element_annotations, superclass_of)
+                                           element_annotations, superclass_of,
+                                           poison_reason: element_poison_reason)
   element_layout = ArrayElementLayout.known(element_raw)
   warn ''
   warn '== known-array-element-class hints (guarded devirtualization only) =='
@@ -12375,6 +12566,21 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # PRIMITIVE_ELEMENT_SUPPORT: every ivar whose elements resolved to a
+  # primitive scalar tag rather than a real registry class -- informational
+  # only, see ArrayElementLayout.primitives' own comment for why these are
+  # deliberately excluded from `element_layout`/`ELEM_HINT` above.
+  element_primitives = ArrayElementLayout.primitives(element_raw)
+  warn ''
+  warn '== known-array-element PRIMITIVE hints (informational only, never embedded) =='
+  if element_primitives.empty?
+    warn '  (none)'
+  else
+    element_primitives.each do |klass, ivars|
+      ivars.each { |name, cls| warn "  ELEM_HINT_PRIMITIVE  #{klass}#@#{name}  (Array<#{cls}>)" }
+    end
+  end
+
   element_unknowns = ArrayElementLayout.unknowns(element_raw)
   warn ''
   warn '== array-element candidates (proven-Array ivar, element class poisoned to unknown) =='
@@ -12382,6 +12588,24 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     element_unknowns.each { |n| warn "  ELEM_CANDIDATE  #{n}" }
+  end
+
+  warn ''
+  warn '== array-element candidates split: ANY (proven heterogeneous, not fixable) =='
+  elem_any = ArrayElementLayout.unknowns_by_reason(element_raw, element_poison_reason, :any)
+  if elem_any.empty?
+    warn '  (none)'
+  else
+    elem_any.sort.each { |n| warn "  ELEM_CANDIDATE_ANY  #{n}" }
+  end
+
+  warn ''
+  warn '== array-element candidates split: OPAQUE (unresolved, may be fixable) =='
+  elem_opaque = ArrayElementLayout.unknowns_by_reason(element_raw, element_poison_reason, :opaque)
+  if elem_opaque.empty?
+    warn '  (none)'
+  else
+    elem_opaque.sort.each { |n| warn "  ELEM_CANDIDATE_OPAQUE  #{n}" }
   end
 
   candidates = report_annotation_candidates(ireps, registry, arg_types, annotations)
