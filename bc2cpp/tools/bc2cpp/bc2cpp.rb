@@ -4991,6 +4991,45 @@ def mandatory_arity(irep)
   enter.args.split(':').first.to_i
 end
 
+# CALLSITE_OPTIONAL_ARG_SUPPORT: the real optional-argument count `mandatory_
+# arity`'s own sibling leaves out -- ENTER's aspec field 2 (0-indexed 1),
+# same parse, just the next field instead of the first. 0 for a no-ENTER/
+# pure-mandatory method, same as mandatory_arity's own 0 case. Used by
+# compile_send's own call-site devirtualization guard (see
+# pure_mandatory_or_optional_arity?'s own comment) to know how many trailing
+# `mrb_nil_value()` placeholders/what `bc2cpp_given_opt` value a direct call
+# needs when the call site itself supplied fewer than the target's full
+# mandatory+optional count -- mirrors compile_method's own entry-wrapper
+# `bc2cpp_given_opt = mrb_get_argc(M) - mand` computation exactly, just
+# computed from the call site's own already-known argument count instead of
+# a runtime mrb_get_argc call.
+def optional_arity(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return 0 unless enter
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields[1] || 0
+end
+
+# CALLSITE_OPTIONAL_ARG_SUPPORT: `pure_mandatory_arity?`'s own sibling,
+# widened to also accept a real OPTIONAL_ARG_SUPPORT shape (plain positional
+# optional arguments, `def foo(a, b = 1)`) as call-site-devirtualizable --
+# every other non-mandatory field (rest/mandatory2/keyword/kwrest/block)
+# still has to be zero, exactly as before. This alone doesn't prove the
+# target's own body actually compiles with that shape (optional_arg_table's
+# own JMP-shape recognition can still fail, e.g. a default-value expression
+# this file can't translate) -- callers of this predicate still gate on
+# `compiles_clean?` separately, same as the pure-mandatory path always has,
+# so a method whose ENTER *looks* optional-shaped but whose body doesn't
+# actually compile still correctly falls back to ordinary dynamic dispatch.
+def pure_mandatory_or_optional_arity?(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields[2..].all?(&:zero?)
+end
+
 # OPTIONAL_ARG_SUPPORT: ENTER's own real aspec is mandatory1:optional:
 # rest:mandatory2:keyword:kwrest:block -- this only ever models the second
 # field, plain positional optional arguments (`def foo(a, b = 1)`); every
@@ -10346,10 +10385,13 @@ class CodeGen
 
     target = monomorphic_target(name)
     # A monomorphic *name* is still only safe to devirtualize if its one
-    # real definition fits this prototype's pure-mandatory-args calling
-    # convention -- see pure_mandatory_arity?'s own comment (a real bug,
-    # caught by running against real code, not a hypothetical).
-    target = nil if target && !pure_mandatory_arity?(@ireps.fetch(target.irep))
+    # real definition fits this prototype's pure-mandatory-or-optional-args
+    # calling convention -- see pure_mandatory_or_optional_arity?'s own
+    # comment (widened from a pure-mandatory-only check to also cover
+    # CALLSITE_OPTIONAL_ARG_SUPPORT; the original pure-mandatory bug this
+    # replaced is unchanged, caught by running against real code, not a
+    # hypothetical).
+    target = nil if target && !pure_mandatory_or_optional_arity?(@ireps.fetch(target.irep))
     # ...and if the call site's own argument count actually matches that
     # target's real mandatory arity. Real, pre-existing bug (present before
     # this round's own changes too, confirmed against a true before/after):
@@ -10373,7 +10415,14 @@ class CodeGen
     # own argument count is real, load-bearing data already sitting right
     # here, and simply never matches a genuinely different method's real
     # arity by construction, whatever its name happens to collide with.
-    target = nil if target && n != mandatory_arity(@ireps.fetch(target.irep))
+    # CALLSITE_OPTIONAL_ARG_SUPPORT: a real optional-argument target accepts
+    # any call-site argument count in [mandatory_arity, mandatory_arity +
+    # optional_arity], not just an exact match -- the pure-mandatory case
+    # (optional_arity == 0) collapses back to the original exact-match check
+    # unchanged, so this is a strict widening, never a behavior change for
+    # any target this file already devirtualized before.
+    target = nil if target && !n.between?(mandatory_arity(@ireps.fetch(target.irep)),
+                                           mandatory_arity(@ireps.fetch(target.irep)) + optional_arity(@ireps.fetch(target.irep)))
     # Name-based devirtualization failed (still POLY by name) -- try a
     # call-site-specific fallback: THIS receiver, traced backward through
     # the same straight-line method body, might still be provably a fresh
@@ -10457,8 +10506,10 @@ class CodeGen
       # candidate still isn't safe to call directly unless its own body
       # actually compiles AND the call site's argument count matches its
       # real mandatory arity.
-      if candidate&.irep && pure_mandatory_arity?(@ireps.fetch(candidate.irep)) &&
-         compiles_clean?(candidate.irep) && n == mandatory_arity(@ireps.fetch(candidate.irep))
+      if candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(candidate.irep)) &&
+         compiles_clean?(candidate.irep) &&
+         n.between?(mandatory_arity(@ireps.fetch(candidate.irep)),
+                    mandatory_arity(@ireps.fetch(candidate.irep)) + optional_arity(@ireps.fetch(candidate.irep)))
         target = candidate
         typed = true
       elsif candidate&.kind == :ivar_accessor &&
@@ -10528,16 +10579,46 @@ class CodeGen
       # already holds at this position (a bare register, or itself the
       # result of another expression -- e.g. Game::Actor#change_mp's own
       # real `-weapon_sp_cost` call site), never assumes a bare register
-      # name. `target.irep`'s own mandatory arity already equals `argv.size`
-      # here (checked above, both for the MONO and TYPED paths), so
-      # `native_arg_types` is asked for exactly that many positions.
-      call_types = native_arg_types(target, argv.size)
+      # name. `target.irep`'s own mandatory arity is now only ever a LOWER
+      # bound on `argv.size` (checked above, both for the MONO and TYPED
+      # paths -- CALLSITE_OPTIONAL_ARG_SUPPORT widened the exact-match guard
+      # to a range), so `native_arg_types` is asked for exactly the target's
+      # own mandatory-position count -- NATIVE_ARG_TARGETS never names an
+      # optional-arg method (see that table's own comment), so every
+      # position at or past `t_mand` always stays plain `mrb_value` here
+      # regardless; passing `t_mand` rather than `argv.size` just makes that
+      # explicit instead of relying on `call_types[i]` reading past its own
+      # array bounds (nil either way, but not by coincidence).
+      t_irep = @ireps.fetch(target.irep)
+      t_mand = mandatory_arity(t_irep)
+      t_opt = optional_arity(t_irep)
+      call_types = native_arg_types(target, t_mand)
       call_argv = argv.each_with_index.map do |a, i|
         case call_types[i]
         when :fixnum then "mrb_as_int(M, #{a})"
         when :symbol then "mrb_obj_to_sym(M, #{a})"
         else a
         end
+      end
+      # CALLSITE_OPTIONAL_ARG_SUPPORT: `impl`'s own real signature (see
+      # compile_method's own `arg_params << 'mrb_int bc2cpp_given_opt' if
+      # opt.positive?`) always has room for the target's FULL optional
+      # count, whether or not this exact call site supplied all of them --
+      # so a call site that only gave some of them still needs one real
+      # placeholder mrb_value per omitted trailing optional, plus the
+      # target's own `bc2cpp_given_opt` figure as a trailing integer
+      # literal. `mrb_nil_value()` is the identical placeholder
+      # compile_method's own entry wrapper already initializes an omitted
+      # optional's out-param to (see its own comment: never read before the
+      # jump table's own default-value code overwrites it) -- reusing it
+      # here keeps the devirtualized direct-call path and the ordinary
+      # mrb_funcall-through-entry-wrapper path observably identical. The
+      # given-count is `argv.size - t_mand` rather than a runtime
+      # `mrb_get_argc` call because the call site's own real argument count
+      # is already known statically here, unlike inside the entry wrapper.
+      if t_opt.positive?
+        call_argv += Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
+        call_argv << (argv.size - t_mand).to_s
       end
       native_positions = call_types.each_index.select { |i| call_types[i] }.map { |i| i + 1 }
       native_note = native_positions.empty? ? '' : " (position#{'s' unless native_positions.one?} " \
