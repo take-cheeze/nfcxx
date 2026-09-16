@@ -7635,6 +7635,18 @@ class CodeGen
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = inlined
     end
+    # EACH_INDEX_SUPPORT: same mechanism for recognized
+    # `ary.each_index { |i| ... }` regions (recognize_each_index_regions
+    # above). Same all-or-nothing contract; distinct method name
+    # (`:each_index`, never `:each`) so no collision with the Array
+    # #each recognizer just above.
+    recognize_each_index_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_each_index_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
     # HASH_EACH_SUPPORT: same mechanism for recognized `hash.each { |k, v|
     # ... }` regions (recognize_hash_each_regions above). Same all-or-
     # nothing contract; shares the ':each' method name with the Array
@@ -7643,6 +7655,18 @@ class CodeGen
     # comment).
     recognize_hash_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
       inlined = emit_hash_each_inline(region, irep, d)
+      next unless inlined
+
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = inlined
+    end
+    # EACH_KEY_SUPPORT: same mechanism for recognized `hash.each_key { |k|
+    # ... }` regions (recognize_each_key_regions above). Same all-or-
+    # nothing contract; distinct method name (`:each_key`, never
+    # `:each`) so no collision with the Hash #each recognizer just
+    # above.
+    recognize_each_key_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      inlined = emit_each_key_inline(region, irep, d)
       next unless inlined
 
       suppressed << region[:block_addr] << region[:sendb_addr]
@@ -8535,6 +8559,144 @@ class CodeGen
     regions
   end
 
+  # EACH_INDEX_SUPPORT: recognize one inlinable `ary.each_index { |i|
+  # ... }` region. Real `Array#each_index` (3rd/mruby/mrblib/array.rb):
+  #
+  #   def each_index(&block)
+  #     return to_enum(:each_index) unless block
+  #     idx = 0
+  #     while idx < length
+  #       yield idx
+  #       idx += 1
+  #     end
+  #     self
+  #   end
+  #
+  # -- LIVE `length` re-check every pass (`length` is a real method call,
+  # re-evaluated each iteration, exactly like emit_each_inline's own
+  # live `RARRAY_LEN` re-check -- see that method's own comment), the
+  # block is yielded the INDEX only (a fixnum, never an element), and
+  # the return value is the receiver. Same `BLOCK R(a+1)` +
+  # `SENDB`/`SSENDB Ra :each_index n=0` adjacency as recognize_each_
+  # regions above (confirmed against real `mrbc -v -S` on a synthetic
+  # `a.each_index { |i| p i }`: `BLOCK R4 I[0]` immediately followed by
+  # `SENDB R3 :each_index n=0`, identical shape). Real call sites: 13
+  # across mruby-rpg2k/mrblib (Game::Actor#defensive_attribute_ids/
+  # #weapon_attributes/game.rb's own several `set.each_index`/
+  # `sset.each_index` id-bitset scans, Scene::Battle's shake-timer scan,
+  # Game::LsdIO's several save/load id scans, Game::Battle's flee scan)
+  # plus 2 in mruby-rgss/mrblib/lib.rb (RGSS::Input's own
+  # @triggered/@pressed key scans). Same static Array receiver gate
+  # (including the SSENDB/owner rule): no real bytecode override of
+  # `#each_index` exists anywhere in this closed world (confirmed: the
+  # only real `class Array` reopens in mruby-rpg2k/mruby-lcf/
+  # mruby-rgss's own mrblib are mruby-rgss/mrblib/array_include.rb's
+  # `#include?` and array_sort.rb's `#sort`/`#sort!` -- neither touches
+  # `each_index` -- and no `class X < Array` subclass exists at all;
+  # `mruby-lcf/mrblib/lcf.rb`'s `Array1D`/`Array2D` are standalone
+  # classes, not Array subclasses, confirmed by their own class headers
+  # having no `< Array`).
+  def recognize_each_index_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless name == ':each_index' && nstr == 'n=0'
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Array'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
+        traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
+        next unless traced == 'Array'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
+  # EACH_KEY_SUPPORT: recognize one inlinable `hash.each_key { |k| ...
+  # }` region. Real `Hash#each_key` (3rd/mruby/mrblib/hash.rb):
+  #
+  #   def each_key(&block)
+  #     return to_enum(:each_key) unless block
+  #     self.keys.each {|k| block.call(k)}
+  #     self
+  #   end
+  #
+  # -- SNAPSHOT (`self.keys` returns a FRESH Array -- mrblib/hash.rb's
+  # own `#keys` -> real `mrb_hash_keys`, MRB_API,
+  # 3rd/mruby/include/mruby/hash.h -- so mutating the receiver mid-
+  # iteration cannot affect an already-taken snapshot, the identical
+  # soundness argument emit_hash_each_inline's own comment gives for its
+  # keys/values snapshot), ONE value (the key) yielded per iteration,
+  # receiver returned. Same `BLOCK R(a+1)` + `SENDB`/`SSENDB Ra
+  # :each_key n=0` adjacency as recognize_hash_each_regions above
+  # (confirmed against real `mrbc -v -S` on a synthetic
+  # `h.each_key { |k| p k }`: `BLOCK R4 I[0]` immediately followed by
+  # `SENDB R3 :each_key n=0`, identical shape). Real call site:
+  # `Scene_Map`'s own LRU-eviction scan (mruby-rpg2k/mrblib/scene/
+  # map.rb, `@entries.each_key { |k| oldest_key = k; break }`). Same
+  # static Hash receiver gate (including the SSENDB/owner rule) -- no
+  # real bytecode override of `Hash#each_key` exists anywhere in this
+  # closed world (confirmed: no `class Hash` reopen, no `class X <
+  # Hash`, in any of mruby-rpg2k/mruby-lcf/mruby-rgss's own mrblib).
+  def recognize_each_key_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless name == ':each_key' && nstr == 'n=0'
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Hash'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
+        next unless traced == 'Hash'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
   # ELEMENT_CLASS_SUPPORT: the element class of one recognized region's
   # receiver, or nil. Shared by every recognizer below so the gate is
   # written once. An `SSENDB` site always answers nil: its receiver is the
@@ -8563,23 +8725,57 @@ class CodeGen
   end
 
   # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
-  # `ary.map/select/reject/find { |x| ... }` (1-mandatory-arg blocks) and
-  # `ary.each_with_index { |x, i| ... }` (2-mandatory-arg blocks). Same
-  # `BLOCK R(a+1)` + `SENDB/SSENDB Ra :name n=0` adjacency as
-  # recognize_each_regions above (confirmed against real `mrbc -v` for
-  # every name here -- `map`, `select`, `reject`, `find`,
-  # `each_with_index` all emit the identical shape), same static Array
-  # receiver gate (including the SSENDB/owner rule). The per-method
-  # result semantics live in emit_collect_inline, not here: this
-  # recognizer only admits shapes whose block arity matches the method
-  # (1 for map/select/reject/find, 2 for each_with_index -- a 2-arg
-  # `map` block or 1-arg `each_with_index` block is a real
-  # arity-mismatch the interpreter would raise on, so it keeps the
-  # honest `#error` here rather than compiling a silently-wrong loop).
+  # `ary.map/select/reject/find/filter_map { |x| ... }` (1-mandatory-arg
+  # blocks) and `ary.each_with_index { |x, i| ... }` (2-mandatory-arg
+  # blocks). Same `BLOCK R(a+1)` + `SENDB/SSENDB Ra :name n=0` adjacency
+  # as recognize_each_regions above (confirmed against real `mrbc -v`
+  # for every name here -- `map`, `select`, `reject`, `find`,
+  # `each_with_index`, `filter_map` all emit the identical shape), same
+  # static Array receiver gate (including the SSENDB/owner rule). The
+  # per-method result semantics live in emit_collect_inline, not here:
+  # this recognizer only admits shapes whose block arity matches the
+  # method (1 for map/select/reject/find/filter_map, 2 for
+  # each_with_index -- a 2-arg `map` block or 1-arg `each_with_index`
+  # block is a real arity-mismatch the interpreter would raise on, so it
+  # keeps the honest `#error` here rather than compiling a
+  # silently-wrong loop).
+  #
+  # `filter_map` itself: NOT a native Array method (no MRB_SYM(filter_map)
+  # in 3rd/mruby/src/array.c) -- it comes from `Enumerable#filter_map`
+  # (3rd/mruby/mrbgems/mruby-enum-ext/mrblib/enum.rb, mixed into Array),
+  # confirmed present in this closed world (mruby-enum-ext is a real
+  # dependency of both mruby-rpg2k and mruby-wolf's own mrbgem.rake and
+  # build_config.rb). Its real body:
+  #
+  #   def filter_map(&blk)
+  #     return to_enum(:filter_map) unless blk
+  #     ary = []
+  #     self.each do |*x|
+  #       x = blk.call(*x)
+  #       ary.push x if x
+  #     end
+  #     ary
+  #   end
+  #
+  # -- for an Array receiver `self.each` yields one element at a time
+  # (never an array to splat), so the block always gets exactly the
+  # element; the RESULT of the block (not the element itself, unlike
+  # select/reject) is pushed only when truthy. Confirmed against real
+  # `mrbc -v -S` on a synthetic `a.filter_map { |x| x if x > 0 }`: same
+  # `BLOCK R4 I[0]` + `SENDB R3 :filter_map n=0` shape, block arity 1.
+  # Real call site: `Scene_Menu`'s own command-id remap (mruby-rpg2k/
+  # mrblib/scene/menu.rb, `ids.filter_map { |id| RPG2K3_COMMAND_IDS[id]
+  # } << RPG2K_COMMAND_KEYS.last` -- the returned Array is then chained
+  # with `<<`, an ordinary CALL on the inlined result, nothing special
+  # needed here). No real receiver-class ambiguity: `filter_map` is not
+  # redefined by any `class Array`/`class X < Array` reopen in
+  # mruby-rpg2k/mruby-lcf/mruby-rgss's own mrblib (same audit as
+  # recognize_each_index_regions' own comment).
+  #
   # `any?`/`all?`/`none?`/`count`/`reduce` literal blocks stay out --
   # each needs its own accumulator/early-exit codegen, a separate
   # follow-up on this same machinery, not this round.
-  COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index flat_map].freeze
+  COLLECT_BLOCK_METHODS = %w[map select reject find each_with_index flat_map filter_map].freeze
 
   # ACCUM_BLOCK_SUPPORT: recognize one inlinable accumulator/predicate
   # region -- `ary.any?/all?/none?/count { |x| ... }` (1-mandatory-arg
@@ -9253,6 +9449,64 @@ class CodeGen
     out
   end
 
+  # EACH_INDEX_SUPPORT: the inlined-loop replacement for one recognized
+  # `ary.each_index` region (recognize_each_index_regions above), or nil
+  # when the block body doesn't come out clean -- same all-or-nothing
+  # contract as emit_each_inline, whose live-`RARRAY_LEN` loop this
+  # clones with one deliberate difference: the block's own single
+  # mandatory parameter is bound to the loop COUNTER itself
+  # (`mrb_fixnum_value(i)`), never an `mrb_ary_ref`/`bc2cpp_ary_entry`
+  # fetch -- real `Array#each_index` (mrblib/array.rb, cited in
+  # recognize_each_index_regions' own comment) yields `idx`, not
+  # `self[idx]`. No `with_element_hint` here, for the identical reason
+  # emit_collect_inline's own `each_with_index` index parameter skips it
+  # (that method's own comment): the bound value is always Integer,
+  # already known to codegen without a hint. Fall-through leaves dest
+  # holding the receiver (real `#each_index` returns `self`, its own
+  # mrblib body's trailing `self`) -- no assignment needed, same as
+  # emit_each_inline.
+  def emit_each_index_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    iter_label = "Lbc2cpp_eachidx_iter_#{region[:block_addr]}"
+    break_label = "Lbc2cpp_eachidx_end_#{region[:block_addr]}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                              break_dest: dest_reg, break_label: break_label)
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined #each_index\"); }\n"
+    out << "    for (mrb_int bc2cpp_eachidx_i_#{region[:block_addr]} = 0; " \
+           "bc2cpp_eachidx_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_eachidx_i_#{region[:block_addr]}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_eachidx_i_#{region[:block_addr]});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
   # HASH_EACH_SUPPORT: the full inlined-loop replacement for one
   # recognized `hash.each` region (recognize_hash_each_regions above), or
   # nil when the block body doesn't come out clean -- same all-or-nothing
@@ -9322,6 +9576,64 @@ class CodeGen
            "bc2cpp_heach_i_#{region[:block_addr]});\n"
     out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{region[:block_addr]}, " \
            "bc2cpp_heach_i_#{region[:block_addr]});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
+  # EACH_KEY_SUPPORT: the full inlined-loop replacement for one
+  # recognized `hash.each_key` region (recognize_each_key_regions
+  # above), or nil when the block body doesn't come out clean -- same
+  # all-or-nothing contract as emit_hash_each_inline, whose SNAPSHOT
+  # loop this clones with one deliberate difference: only the KEY
+  # snapshot is taken (`mrb_hash_keys`) and only ONE value is bound per
+  # iteration -- real `Hash#each_key` (mrblib/hash.rb, cited in
+  # recognize_each_key_regions' own comment) never touches `#values` at
+  # all, so no `mrb_hash_values` snapshot is taken here (unlike
+  # emit_hash_each_inline's own two-snapshot loop). `mrb_hash_p`
+  # raise-guard and fall-through-leaves-receiver behavior mirror
+  # emit_hash_each_inline exactly (real `Hash#each_key` also returns
+  # `self`).
+  def emit_each_key_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    dest_reg = region[:dest_reg]
+    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    key_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    iter_label = "Lbc2cpp_ekey_iter_#{region[:block_addr]}"
+    break_label = "Lbc2cpp_ekey_end_#{region[:block_addr]}"
+    body = String.new
+    body_targets = jump_targets(block_irep)
+    block_irep.instructions.each do |insn|
+      next if insn.op == 'ENTER'
+
+      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                               break_dest: dest_reg, break_label: break_label)
+    end
+    return nil if body.include?('#error')
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_hash_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Hash receiver for inlined #each_key\"); }\n"
+    out << "    mrb_value bc2cpp_ekey_keys_#{region[:block_addr]} = mrb_hash_keys(M, #{recv_expr});\n"
+    out << "    mrb_int bc2cpp_ekey_len_#{region[:block_addr]} = mrb_hash_size(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_ekey_i_#{region[:block_addr]} = 0; " \
+           "bc2cpp_ekey_i_#{region[:block_addr]} < bc2cpp_ekey_len_#{region[:block_addr]}; " \
+           "++bc2cpp_ekey_i_#{region[:block_addr]}) {\n"
+    (0...block_irep.nregs).each do |i|
+      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
+
+      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
+    end
+    out << "      mrb_value r#{offset} = self;\n"
+    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{region[:block_addr]}, " \
+           "bc2cpp_ekey_i_#{region[:block_addr]});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -9474,7 +9786,7 @@ class CodeGen
     out = String.new
     out << "  {\n"
     out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
-    out << "    mrb_value bc2cpp_collect_acc_#{region[:block_addr]} = mrb_ary_new(M);\n" if %w[map select reject flat_map].include?(meth)
+    out << "    mrb_value bc2cpp_collect_acc_#{region[:block_addr]} = mrb_ary_new(M);\n" if %w[map select reject flat_map filter_map].include?(meth)
     out << "    mrb_value bc2cpp_collect_found_#{region[:block_addr]} = mrb_nil_value();\n" if meth == 'find'
     out << "    mrb_bool bc2cpp_collect_broke_#{region[:block_addr]} = FALSE;\n" if meth != 'each_with_index'
     out << "    for (mrb_int bc2cpp_collect_i_#{region[:block_addr]} = 0; " \
@@ -9526,6 +9838,14 @@ class CodeGen
       out << "      if (!mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, r#{param_reg});\n"
     when 'find'
       out << "      if (mrb_test(#{result_var})) { bc2cpp_collect_found_#{region[:block_addr]} = r#{param_reg}; goto #{break_label}; }\n"
+    when 'filter_map'
+      # COLLECT_BLOCK_SUPPORT / filter_map: pushes the block's own RESULT
+      # (not the element, unlike select/reject) when truthy -- real
+      # Enumerable#filter_map (cited in COLLECT_BLOCK_METHODS' own
+      # comment) reassigns `x = blk.call(*x)` before the `ary.push x if
+      # x` truthiness test, so the pushed value and the tested value are
+      # the same block-result register.
+      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
     end
     out << "    }\n"
     out << "    #{break_label}:;\n"
@@ -9546,7 +9866,7 @@ class CodeGen
     if meth != 'each_with_index'
       out << "    if (!bc2cpp_collect_broke_#{region[:block_addr]}) {\n"
       case meth
-      when 'map', 'select', 'reject', 'flat_map'
+      when 'map', 'select', 'reject', 'flat_map', 'filter_map'
         out << "    r#{dest_reg} = bc2cpp_collect_acc_#{region[:block_addr]};\n"
       when 'find'
         out << "    r#{dest_reg} = bc2cpp_collect_found_#{region[:block_addr]};\n"
