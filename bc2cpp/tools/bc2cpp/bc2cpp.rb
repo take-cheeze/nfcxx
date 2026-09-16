@@ -290,6 +290,20 @@ def build_registry(ireps, root_label)
   # resolve_superclass_ref's own comment; never guessed). MODULE has no
   # superclass at all, so only ever populated from a real CLASS opcode.
   superclass_of = {}
+  # CONST_CONTAINER_SUPPORT: real, fully-qualified constant name (e.g.
+  # "Game::Vehicle::TYPES") -> 'Array'/'Hash'/'Range' when every real
+  # SETCONST site for that exact name (there is almost always exactly
+  # one -- reassigning a Ruby constant is rare, and this table poisons to
+  # nil rather than guess if it ever happens) writes a proven
+  # literal_container_class value. nil-poisoned entries are removed
+  # before this method returns (see the .compact below), so a caller
+  # only ever sees a real class name or a missing key -- never a raw nil
+  # poison sentinel leaking out. No separate .known/.unknowns split
+  # needed the way ClassLayout's own UNKNOWN-poisoning table needs:
+  # there is no multi-pass fixed point here -- a constant's own literal
+  # shape is a pure one-shot syntactic fact, never dependent on another
+  # constant already being resolved, unlike an ivar's class hint.
+  container_constants = {}
 
   walk = lambda do |label, namespace|
     irep = ireps.fetch(label)
@@ -485,6 +499,31 @@ def build_registry(ireps, root_label)
         # leaves pending_name nil, so the EXEC case below's own `&&
         # pending_name` guard correctly never recurses into it.
         pending_name = recv ? "#{recv}.singleton" : nil
+      when 'SETCONST'
+        # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" -- the real shape
+        # a top-level `CONST = ...` assignment (module/class-body scope,
+        # `namespace` is exactly this body's own real lexical nesting at
+        # this point in the walk, confirmed by CLASS/MODULE's own case
+        # above) compiles to. `literal_container_class` recognizes only
+        # the specific literal-then-optional-freeze shape this codebase's
+        # own constants overwhelmingly use; anything else (a computed
+        # expression, a method call whose return isn't a bare literal)
+        # is a safe miss (nil), same as everywhere else in this file.
+        const_name = insn.args[/^(\S+)/, 1]
+        src_reg = insn.args[/R(\d+)/, 1]
+        qualified = namespace ? "#{namespace}::#{const_name}" : const_name
+        klass = literal_container_class(irep, idx, src_reg)
+        # Two real SETCONST sites for the exact same qualified name
+        # disagreeing (or either being unresolvable) permanently poisons
+        # it to nil -- never guess which one is right, the identical
+        # "one bad site poisons the whole name" discipline ClassLayout/
+        # IvarLayout already use, just without needing their own fixed-
+        # point re-sweep (see this table's own top comment for why).
+        if container_constants.key?(qualified)
+          container_constants[qualified] = nil if container_constants[qualified] != klass
+        else
+          container_constants[qualified] = klass
+        end
       when 'EXEC'
         reg, irep_ref = insn.args.split(/\s+/, 2)
         idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
@@ -1085,7 +1124,7 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
-  [registry, superclass_of]
+  [registry, superclass_of, container_constants.compact]
 end
 
 # SUPER_SUPPORT: resolve a real `class X < SUPER_EXPR`'s own SUPER_EXPR to
@@ -2193,7 +2232,7 @@ end
 class ClassLayout
   UNKNOWN = :unknown
 
-  def self.analyze(ireps, registry, class_annotations = {})
+  def self.analyze(ireps, registry, class_annotations = {}, container_constants = {})
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
 
@@ -2230,7 +2269,8 @@ class ClassLayout
             # unfiltered, still-converging table here is sound and avoids
             # re-filtering it on every single SETIV site in this sweep.
             found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner,
-                                      class_layout: classes, registry: registry)
+                                      class_layout: classes, registry: registry,
+                                      container_constants: container_constants)
             # CORE_ARRAY_CHAIN: when the fresh-`.new`/literal trace misses,
             # ask the SAME chained fresh-Array question the block
             # recognizers already ask of a block receiver -- see
@@ -4726,7 +4766,7 @@ SUPER_TARGETS = Set[
 # already guards it with a real `mrb_obj_class` check before trusting it,
 # so this only ever risks a missed optimization, never a wrong answer.
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
-                      class_layout: nil, registry: nil)
+                      class_layout: nil, registry: nil, container_constants: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -4803,7 +4843,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # spawned it -- a single, monotonically shrinking index, the same
         # way the un-recursive scan above already terminates on its own.
         recv_class = trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
-                                       class_layout: class_layout, registry: registry)
+                                       class_layout: class_layout, registry: registry,
+                                       container_constants: container_constants)
         return nil unless recv_class
 
         # `registry[name]` is already sliced to real MethodDefs literally
@@ -4869,6 +4910,15 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
 
       return 'Array'
+    when 'HASH'
+      # HASH_EACH_SUPPORT: a hash literal (`h = { a: 1, b: 2 }`) always
+      # creates a real Hash -- confirmed directly against 3rd/mruby/src/
+      # vm.c's own OP_HASH (`mrb_hash_new_capa` then a `mrb_hash_set` loop,
+      # result written to `regs[a]`), never assumed. Same end-of-trace
+      # gating as ARRAY/ARRAY2 above.
+      return nil if resolving_new || !path.empty?
+
+      return 'Hash'
     when 'RANGE_INC', 'RANGE_EXC'
       # INTERP_UNLOCK: a range literal (`(a..b).each`, `(a...b).each`)
       # always creates a real Range -- confirmed directly against
@@ -4880,20 +4930,67 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
       return 'Range'
     when 'GETMCNST'
-      return nil unless resolving_new
-
+      # CONST_CONTAINER_SUPPORT: accumulating a qualified-name segment is
+      # harmless whether or not `resolving_new` -- it only ever matters
+      # once GETCONST (the chain's own root, always reached last in this
+      # backward walk) decides what to DO with the assembled `path`, and
+      # that decision is still fully gated below (resolving_new keeps its
+      # own pre-existing DIRECT_CONSTRUCT_TARGETS-only behavior; the new
+      # non-resolving_new branch is additive, see GETCONST's own comment).
+      #
       # Not `$`-anchored on purpose -- a trailing "; R6:name" local-
       # variable comment (real code, same shape as SETIV's own) would
       # otherwise land inside the captured segment.
       path.unshift(insn.args[/::(\w+)/, 1])
     when 'GETCONST'
-      return nil unless resolving_new
-
       # "GETCONST R4 Integer" or, with a named-local destination
       # register, "GETCONST R3 MAX_DIGITS\t; R3:d" -- \S+ (not the rest
       # of the line) stops at the first whitespace/tab, same fix as
       # compile_insn's own GETCONST codegen needed for the identical bug.
       const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+
+      # CONST_CONTAINER_SUPPORT: a completely separate question from
+      # everything below this point (which only ever resolves a bare/
+      # qualified name to a CLASS NAME string, for a `.new` receiver) --
+      # here, `resolving_new` is false, so this GETCONST/GETMCNST chain is
+      # not building a `.new` target at all; it's the receiver of an
+      # ordinary call (e.g. `Game::Vehicle::TYPES.each { ... }`), and the
+      # only useful fact this function can hand back is "this constant's
+      # own VALUE is a proven Array/Hash" -- fed by build_registry's own
+      # SETCONST scan (`container_constants`, see that scan's own
+      # comment), keyed by the exact same fully-qualified dotted name
+      # this walk already assembles (`path` holds every already-visited
+      # GETMCNST segment, most-recently-visited first per `unshift`, so
+      # `[const_name] + path` is this chain's own full qualified name,
+      # root first -- identical convention to the `path.unshift(const_name)
+      # ; path.join('::')` the resolving_new branch below uses for the
+      # exact same chain shape).
+      unless resolving_new
+        return nil unless container_constants
+
+        unless path.empty?
+          full = ([const_name] + path).join('::')
+          return container_constants[full]
+        end
+
+        # A bare, single-token reference (`STAT_NAMES.each`) -- real
+        # Ruby's own lexical constant lookup, walked the SAME innermost-
+        # first nesting order as the resolving_new branch below (and
+        # compile_insn's own GETCONST codegen), but checked against
+        # `container_constants` instead of DIRECT_CONSTRUCT_TARGETS.
+        # Never a blind guess: a name absent from every nesting level
+        # (including bare, i.e. real top-level/Object scope) is simply
+        # not in the table, so this returns nil -- a safe miss, exactly
+        # like every other terminal case in this function.
+        if owner
+          nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
+          nesting.length.downto(1) do |n|
+            candidate = "#{nesting.first(n).join('::')}::#{const_name}"
+            return container_constants[candidate] if container_constants.key?(candidate)
+          end
+        end
+        return container_constants[const_name]
+      end
 
       # Round 41's own documented gap (DIRECT_CONSTRUCT_TARGETS' own top
       # comment, "bare-reference gap"): when `path` is still empty right
@@ -5004,6 +5101,56 @@ def nil_literal_write?(irep, idx, reg)
     end
   end
   false
+end
+
+# CONST_CONTAINER_SUPPORT's own predicate (see build_registry's SETCONST
+# handling and trace_new_target's GETCONST/GETMCNST terminal for the two
+# ends of the same feature): true only when `reg`'s value at `idx` is
+# unambiguously a fresh Array/Hash/Range literal, optionally wrapped in
+# exactly one trailing `.freeze` -- confirmed against real `mrbc -v`
+# disassembly for the universal `CONST = [...].freeze` / `CONST =
+# {...}.freeze` idiom this codebase's own module-level constants
+# overwhelmingly use (`ARRAY R1 2` / `SEND0 R1 :freeze` / `SETCONST NAME
+# R1`, freeze reusing its own receiver register in place, the same "SEND
+# overwrites its receiver register with the result" invariant every other
+# backward scan in this file already relies on).
+#
+# `.freeze` is recognized ONLY in this one narrow adjacency -- never as a
+# general "any `.freeze` call anywhere is a safe passthrough" rule. Real
+# `Kernel#freeze` (3rd/mruby/src/kernel.c's own mrb_obj_freeze,
+# unconditionally `return self`) is the correct read for THIS specific
+# shape, but this file never assumes a POLY name means the same thing
+# everywhere it appears -- confirmed a real, unrelated bytecode override
+# exists (`RGSS::Transition#freeze`, mruby-rgss/mrblib/lib.rb, an
+# unrelated screen-transition snapshot method with a totally different
+# return value). This helper structurally can never reach that method's
+# own body: it only ever recognizes `:freeze` as a hop-through when the
+# instruction directly beneath it, on the exact same register, is already
+# a proven ARRAY/ARRAY2/HASH/RANGE_INC/RANGE_EXC literal -- a real
+# `RGSS::Transition` instance is never constructed that way at a real
+# SETCONST site.
+def literal_container_class(irep, idx, reg)
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    d = insn.args[/^R(\d+)/, 1]
+    next unless d == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'SEND0'
+      return nil unless insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'freeze'
+    when 'ARRAY', 'ARRAY2'
+      return 'Array'
+    when 'HASH'
+      return 'Hash'
+    when 'RANGE_INC', 'RANGE_EXC'
+      return 'Range'
+    else
+      return nil
+    end
+  end
+  nil
 end
 
 # LITERAL_EQQ_SUPPORT: backward-scan a `:===` SEND's own receiver register
@@ -5478,8 +5625,14 @@ class CodeGen
   }.freeze
 
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
-                 superclass_of = {}, element_layout = {}, element_annotations = {})
+                 superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {})
     @ireps = ireps
+    # CONST_CONTAINER_SUPPORT: real, fully-qualified constant name ->
+    # 'Array'/'Hash'/'Range' -- build_registry's own SETCONST scan (see
+    # that table's own comment). Read only by the block recognizers'
+    # static receiver-class gate, threaded through trace_new_target the
+    # same additive way @class_layout/@registry already are.
+    @container_constants = container_constants
     # ELEMENT_CLASS_SUPPORT: owner -> {ivar => element class name}
     # (ArrayElementLayout.analyze's own filtered result) and irep label ->
     # ElementAnnotations::Annotation. Both are read ONLY by the block
@@ -8263,7 +8416,8 @@ class CodeGen
         # proves Array-typed a new way, never changes an existing 'Array'
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
-                                   class_layout: @class_layout, registry: @registry)
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -8391,7 +8545,8 @@ class CodeGen
         # proves Array-typed a new way, never changes an existing 'Array'
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
-                                   class_layout: @class_layout, registry: @registry)
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -8440,7 +8595,8 @@ class CodeGen
         # proves Array-typed a new way, never changes an existing 'Array'
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
-                                   class_layout: @class_layout, registry: @registry)
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -8517,7 +8673,8 @@ class CodeGen
         # proves Array-typed a new way, never changes an existing 'Array'
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
-                                   class_layout: @class_layout, registry: @registry)
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -8557,7 +8714,8 @@ class CodeGen
       block_irep = block_label && @ireps[block_label]
       next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
 
-      traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name)
+      traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                 container_constants: @container_constants)
       traced = range_return_call(irep, idx, dest_reg) if traced != 'Range'
       next unless traced == 'Range'
 
@@ -8651,7 +8809,8 @@ class CodeGen
         # proves Array-typed a new way, never changes an existing 'Array'
         # result.
         traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
-                                   class_layout: @class_layout, registry: @registry)
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
         traced = proven_array_source(irep, idx, dest_reg) if traced != 'Array'
         next unless traced == 'Array'
       end
@@ -11459,7 +11618,7 @@ if $PROGRAM_NAME == __FILE__
   order = dfs_order(ireps, root_label)
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
-  registry, superclass_of = build_registry(ireps, root_label)
+  registry, superclass_of, container_constants = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
   # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
@@ -11537,7 +11696,15 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations)
+  warn ''
+  warn '== known container-class constants (Array/Hash/Range-valued, whole program) =='
+  if container_constants.empty?
+    warn '  (none)'
+  else
+    container_constants.sort.each { |name, cls| warn "  CONST_HINT  #{name}  (#{cls})" }
+  end
+
+  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants)
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
@@ -11615,7 +11782,7 @@ if $PROGRAM_NAME == __FILE__
   # also now drives NATIVE_ARG_TARGETS' own native-argument calling
   # convention -- see that constant's own comment.
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
-                    element_layout, element_annotations)
+                    element_layout, element_annotations, container_constants)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
