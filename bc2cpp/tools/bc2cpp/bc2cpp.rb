@@ -2277,10 +2277,31 @@ class ClassLayout
       break unless changed
     end
 
+    classes
+  end
+
+  # The consumable half of `analyze`'s own raw result -- UNKNOWN entries
+  # dropped, empty owners dropped. Split out this way (mirroring
+  # ArrayElementLayout's own known/unknowns split below) precisely so the
+  # poisoned entries survive long enough to be REPORTED: an ivar that came
+  # out UNKNOWN is exactly the actionable candidate list a future round
+  # (a widened trace_new_target rule, or a hand-placed annotation) needs --
+  # see the `== ivar-class candidates (poisoned to unknown) ==` diagnostic.
+  # Every existing caller of `ClassLayout.analyze` already expects exactly
+  # this filtered shape (never a raw UNKNOWN value) -- the driver's own
+  # call site is the only one updated to call `.known` immediately after
+  # `.analyze`, so every downstream consumer (ArrayElementLayout.analyze,
+  # CodeGen's own @class_layout, compile_send's TYPED/chained-accessor
+  # paths) sees byte-identical content to before this split existed.
+  def self.known(classes)
     classes.each_with_object({}) do |(owner, ivars), out|
       known = ivars.reject { |_, c| c == UNKNOWN }
       out[owner] = known unless known.empty?
     end
+  end
+
+  def self.unknowns(classes)
+    classes.flat_map { |owner, ivars| ivars.select { |_, c| c == UNKNOWN }.keys.map { |i| "#{owner}#@#{i}" } }
   end
 end
 
@@ -10802,7 +10823,8 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  class_layout = ClassLayout.analyze(ireps, registry, class_annotations)
+  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations)
+  class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
   if class_layout.empty?
@@ -10811,6 +10833,15 @@ if $PROGRAM_NAME == __FILE__
     class_layout.each do |klass, ivars|
       ivars.each { |name, cls| warn "  CLASS_HINT  #{klass}#@#{name}  (#{cls})" }
     end
+  end
+
+  class_layout_unknowns = ClassLayout.unknowns(class_layout_raw)
+  warn ''
+  warn '== ivar-class candidates (real SETIV evidence found, but poisoned to unknown) =='
+  if class_layout_unknowns.empty?
+    warn '  (none)'
+  else
+    class_layout_unknowns.sort.each { |n| warn "  CLASS_CANDIDATE  #{n}" }
   end
 
   # ELEMENT_CLASS_SUPPORT: the element dimension of the same ivar facts
