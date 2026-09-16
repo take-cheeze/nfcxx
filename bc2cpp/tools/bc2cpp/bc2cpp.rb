@@ -5945,10 +5945,35 @@ class CodeGen
   # registry (`RGSS::ErrorReport.singleton#clear` shows up as a second
   # def alongside the native placeholder), not assumed. Would be dead
   # code today, same reasoning as `push`/`size`/`empty?`/`<<` above.
+  #
+  # `include?`/`member?` were investigated too and also excluded, for the
+  # same "individually sound, but real bytecode override collides"
+  # reason: Hash/Range/String/Class-Module-SClass's own four real native
+  # registrations of `include?` are each safely reproducible (Range's own
+  # case is literally the same real function, `range_include`, already
+  # reimplemented for `===`'s own MRB_TT_RANGE arm above -- see
+  # EQQ_TYPE_TAG_DISPATCH), but `mruby-rgss/mrblib/array_include.rb`
+  # deliberately defines a real bytecode `Array#include?` (that file's own
+  # comment: mruby's Array class has no native `#include?` of its own),
+  # so `native_only_mono?('include?')` is false today. `member?` shares
+  # `range_include`/`mrb_hash_has_key`'s own native registrations too, but
+  # would need its own separate table entry (compile_send's own dispatch
+  # is keyed by the literal call-site name, not an alias set) and is
+  # independently blocked by a real, unrelated `Game::Battle::Combatant#
+  # member?` (0-arg, mruby-rpg2k/mrblib/game/battle.rb) -- the one real
+  # `member?` call site in the whole program is that custom method, not
+  # Hash/Range's 1-arg native one, so even the arity gate alone would
+  # already exclude it. Neither added; revisit if either override is ever
+  # removed.
+  #
+  # `to_i` (arity 0 only -- see TO_I_TYPE_TAG_DISPATCH below for why the
+  # explicit-base `str.to_i(base)` shape is deliberately left as ordinary
+  # POLY dispatch) has no bytecode override anywhere in this project's own
+  # closed world and fires for real.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
-                                   '===' => 1, '!=' => 1 }.freeze
+                                   '===' => 1, '!=' => 1, 'to_i' => 0 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -6358,6 +6383,84 @@ class CodeGen
       "  // exactly for every type -- see compile_native_primitive_send's own\n" \
       "  // NEQ_UNCONDITIONAL comment)\n" \
       "  r#{d} = mrb_bool_value(!mrb_equal(M, #{recv}, #{arg}));\n"
+    when 'to_i'
+      # TO_I_TYPE_TAG_DISPATCH: real grep across 3rd/mruby/src finds
+      # `to_i` registered on Integer/Float/String plus (via mruby-time,
+      # the one loaded non-core gem that registers it -- mruby-complex/
+      # mruby-rational/mruby-object-ext all real registrations too, but
+      # none of those three gems are ever `conf.gem`'d anywhere in this
+      # project's own build_config.rb, confirmed by reading the whole
+      # file, so none of their own `to_i` bodies can ever actually run
+      # here) Time.
+      #
+      # MRB_TT_INTEGER: `mrb_obj_itself` (3rd/mruby/src/object.c) is
+      # exactly `return self;` -- a real public MRB_API, trivially safe
+      # for any receiver.
+      #
+      # MRB_TT_FLOAT: `flo_to_i` (3rd/mruby/src/numeric.c) is `mrb_check_
+      # num_exact(mrb, f)` (raises FloatDomainError for NaN/Infinity --
+      # itself just `isinf`/`isnan` plus `mrb_raise`, both reproduced
+      # inline rather than linked: `mrb_check_num_exact` is declared only
+      # in mruby/internal.h, no C-linkage guard), then -- only when
+      # `!FIXABLE_FLOAT(f)` (real public macro, mruby/numeric.h) -- a
+      # Bignum-promotion/overflow path through `mrb_bint_new_float`/
+      # `mrb_int_overflow`, BOTH internal.h-only with no public MRB_API
+      # substitute (the same "won't reach into mruby/internal.h for a
+      # function with no public equivalent" posture `to_s`'s own case
+      # already took deferring `mrb_mod_to_s`). So only the common finite-
+      # and-in-range case is handled directly (real bodies for `f > 0.0`/
+      # `f < 0.0` matched exactly via `floor`/`ceil`, `mrb_int_value` a
+      # real public MRB_API); NaN, Infinity, and anything too large for a
+      # native mrb_int fall through to ordinary `mrb_funcall`, which
+      # raises/promotes exactly as real `flo_to_i` would.
+      #
+      # MRB_TT_STRING: `mrb_str_to_i` (3rd/mruby/src/string.c) reads
+      # `mrb_get_args(mrb, "|i", &base)` -- a real call-frame read, but
+      # this table's own `to_i` arity is pinned to 0 (see this table's own
+      # comment above), and for that exact shape `mrb_str_to_i`'s own real
+      # body always resolves `base` to its 10 default before calling the
+      # real public MRB_API `mrb_str_to_integer(mrb, self, base, FALSE)`
+      # -- confirmed by reading the whole function, not assumed. A real
+      # `str.to_i(base)` call site (n=1) never reaches this table's own
+      # arity gate at all and stays ordinary `mrb_funcall`, unaffected
+      # (confirmed zero such call sites exist in this program today
+      # anyway).
+      #
+      # MRB_TT_DATA (Time, mruby-time) deliberately excluded: `time_to_i`
+      # reads straight from `struct mrb_time`, a type defined only inside
+      # mruby-time's own time.c (never in the public mruby/time.h) --
+      # fully opaque outside that one file, no public accessor for the raw
+      # epoch-seconds field exists (`mrb_time_get_tm` returns a calendar
+      # `struct tm*` via a real timezone-dependent recomputation, not a
+      # safe drop-in substitute). Falls through to `default:`'s ordinary
+      # `mrb_funcall`, like every other unhandled tag.
+      "  // to_i -- native primitive, runtime-guarded per real receiver type\n" \
+      "  // (Integer/Float/String handled directly -- see compile_native_\n" \
+      "  // primitive_send's own TO_I_TYPE_TAG_DISPATCH comment for why Time\n" \
+      "  // and Float's own NaN/Infinity/overflow edge are deliberately left\n" \
+      "  // to ordinary dispatch)\n" \
+      "  switch (mrb_type(#{recv})) {\n" \
+      "  case MRB_TT_INTEGER:\n" \
+      "    r#{d} = #{recv};\n" \
+      "    break;\n" \
+      "  case MRB_TT_FLOAT: {\n" \
+      "    mrb_float bc2cpp_toi_f#{d} = mrb_float(#{recv});\n" \
+      "    if (isnan(bc2cpp_toi_f#{d}) || isinf(bc2cpp_toi_f#{d}) || !FIXABLE_FLOAT(bc2cpp_toi_f#{d})) {\n" \
+      "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    } else {\n" \
+      "      if (bc2cpp_toi_f#{d} > 0.0) bc2cpp_toi_f#{d} = floor(bc2cpp_toi_f#{d});\n" \
+      "      if (bc2cpp_toi_f#{d} < 0.0) bc2cpp_toi_f#{d} = ceil(bc2cpp_toi_f#{d});\n" \
+      "      r#{d} = mrb_int_value(M, (mrb_int)bc2cpp_toi_f#{d});\n" \
+      "    }\n" \
+      "    break;\n" \
+      "  }\n" \
+      "  case MRB_TT_STRING:\n" \
+      "    r#{d} = mrb_str_to_integer(M, #{recv}, 10, FALSE);\n" \
+      "    break;\n" \
+      "  default:\n" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    break;\n" \
+      "  }\n"
     end
   end
 
@@ -11460,6 +11563,11 @@ if $PROGRAM_NAME == __FILE__
   end
 
   puts '#include <mruby.h>'
+  # isnan/isinf/floor/ceil -- to_i's own Float case (see compile_native_
+  # primitive_send's own TO_I_TYPE_TAG_DISPATCH comment) needs these to
+  # reproduce flo_to_i's own real NaN/Infinity guard and truncation-
+  # toward-zero, nothing else here already pulls this in.
+  puts '#include <math.h>'
   puts '#include <mruby/string.h>'
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
