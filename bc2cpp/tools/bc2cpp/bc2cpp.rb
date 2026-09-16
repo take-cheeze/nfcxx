@@ -11077,6 +11077,52 @@ class CodeGen
       else
         "  #error STRING references a non-string pool entry (#{entry[:type]}) -- not in this prototype's supported subset\n"
       end
+    when 'SYMBOL'
+      # "SYMBOL R2 L[0] ; atk_mod" -- real OP_SYMBOL semantics (ops.h: `R[a]
+      # = intern(Pool[b])`) -- a DIFFERENT opcode from LOADSYM: LOADSYM
+      # embeds an already-interned mrb_sym directly as an operand (no pool
+      # lookup at all, this file's SEND-argument code and the `when
+      # 'LOADSYM'` case above already read plenty of literal `:name`
+      # symbols straight off it), while SYMBOL instead names a *string*-pool
+      # entry to intern at runtime. Confirmed against src/codedump.c's own
+      # disassembler (`CASE(OP_SYMBOL, BB): ... fprintf(out, "SYMBOL\tR%d\t
+      # L[%d]\t; %s", ...)`) -- an identical `L[idx]` pool-index shape to
+      # STRING's own disassembly (real dump above: "SYMBOL R2 L[0] ;
+      # atk_mod"), so the literal string value is read out of `irep.pool`
+      # via the exact same mechanism STRING's own `when 'STRING'` case just
+      # above already uses (reused verbatim, not reinvented), then interned
+      # through the real public API (`mrb_symbol_value(mrb_intern_cstr(...))
+      # `, the identical call LOADSYM's own case above already makes for its
+      # own `:name` operand).
+      #
+      # Real trigger, confirmed against both real whole-program SYMBOL
+      # occurrences (Game::Battle#apply_knockout_reset's `%i[atk_mod
+      # def_mod spi_mod agi_mod]`, 4 words -> 4 SYMBOL + one ARRAY(4); and
+      # RPG2k::Scene::Map#vehicle_blocks?'s own 2-word `%i[...]` -> 2 SYMBOL
+      # + one ARRAY(2)) AND a fresh `mrbc -v` disassembly of that exact
+      # literal (matches byte-for-byte):
+      # a bare `:foo` or quoted `:"foo"` symbol literal never reaches here
+      # at all -- parse.y's own `sym: tSTRING_BEG tSTRING` interns those at
+      # PARSE time, straight into a LOADSYM operand (confirmed by a fresh
+      # disassembly of both shapes: `LOADSYM R2 :foo` / `LOADSYM R2 :bar`,
+      # neither ever produces a SYMBOL opcode). SYMBOL is instead mrbc's own
+      # `%i[...]`/`%I[...]` symbol-*array*-literal codegen (codegen.c's
+      # gen_literal_array, called from codegen_symbols): each non-
+      # interpolated word first codegens as a plain OP_STRING, then
+      # gen_intern's own peephole (`data.insn == OP_STRING && data.a ==
+      # cursp()`) rewrites that STRING into SYMBOL in place -- a compile-
+      # time string-to-symbol fold, same spirit as LOADSYM's own compile-
+      # time-interned literal -- immediately followed by this opcode's own
+      # ARRAY(N) to collect them (this file's own `when 'ARRAY'` case
+      # handles that half already; nothing SYMBOL-specific needed there).
+      d = a[/^R(\d+)/, 1]
+      sidx = a[/L\[(\d+)\]/, 1].to_i
+      sentry = irep.pool.fetch(sidx)
+      if sentry.is_a?(String)
+        "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(sentry)}));\n"
+      else
+        "  #error SYMBOL references a non-string pool entry (#{sentry[:type]}) -- not in this prototype's supported subset\n"
+      end
     when 'STRCAT'
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
@@ -11188,6 +11234,111 @@ class CodeGen
       compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true, irep: irep, idx: idx, owner_def: owner_def)
+    when 'BLKCALL'
+      # "BLKCALL R7 0" / "BLKCALL R4 2" -- real OP_BLKCALL semantics (ops.h:
+      # `R[a] = R[a].call(R[a+1],...,R[a+b]); direct block call`). Confirmed
+      # against both real whole-program BLKCALL occurrences AND a fresh
+      # `mrbc -v` disassembly of the same source shape: this is mrbc's own
+      # fast path for a *bare* `yield(...)` (codegen.c's codegen_yield) --
+      # BLKPUSH first fetches the current method's own block into R[a], then
+      # -- only for the plain shape (no keyword args, <15 positional args,
+      # no splat) -- BLKCALL invokes it directly; any other shape
+      # (kwargs/splat/>=15 args) falls back to an ordinary `SEND :call`
+      # instead and never reaches here (codegen_yield's own `if (nk == 0 &&
+      # n < 15) { ...OP_BLKCALL...} else { ...OP_SEND :call...}`). This is
+      # the ONLY codegen.c call site that ever emits OP_BLKCALL, and real
+      # bytecode always has it immediately preceded by a BLKPUSH into the
+      # very same register (confirmed against all three real BLKCALL sites
+      # in this whole program's compiled output: Scene::Battle#cached_
+      # bitmap's `cache[key] = yield`, Scene::Map#cached_bitmap's identical
+      # one-liner, and Scene::Map#page_field's `yield` -- rescued by its own
+      # `rescue StandardError`. Every real *caller* of all three -- 8 call
+      # sites for #cached_bitmap across battle.rb/map.rb, 15 for
+      # #page_field in map.rb -- passes a literal `do...end`/`{...}` block,
+      # never a forwarded `&proc`) -- so despite the generic-sounding name,
+      # this is not a "call whatever Proc happens to be in a register"
+      # primitive, it is specifically mrbc's `yield` fast path.
+      #
+      # Real vm.c's own CASE(OP_BLKCALL, ...) does NOT go through ordinary
+      # method dispatch at all -- no mrb_funcall/method-table lookup by
+      # name -- it raises TypeError directly if R[a] isn't literally a Proc
+      # (`if (!mrb_proc_p(recv)) mrb_raisef(mrb, E_TYPE_ERROR, "wrong type
+      # %T (expected Proc)", recv);`), then invokes the proc's own body
+      # straight off its RProc*, bypassing whatever #call method (if any)
+      # the receiver's own class happens to define. A plain `mrb_funcall(M,
+      # r<a>, "call", ...)` substitute -- this file's own usual "dynamic
+      # dispatch is always a safe fallback" pattern, see dynamic_dispatch_
+      # line -- would NOT be sound here: if R[a] were ever some other
+      # object whose class defines #call, mrb_funcall would silently invoke
+      # that #call method instead of raising, which real BLKCALL never
+      # does. So real BLKCALL's own type check is reproduced directly
+      # (same exception class, TypeError; not vm.c's own %T-formatted
+      # message text, which no #error/raise site in this whole file
+      # reproduces byte-for-byte either -- see every existing "bc2cpp:
+      # expected ... receiver" TypeError raise above for the same fixed-
+      # string convention), and the actual invocation is done through
+      # `mrb_yield_argv` -- mruby's own public, officially documented "run
+      # this block synchronously and return its result" API (mruby.h),
+      # used throughout mruby's own core C extensions to implement `yield`
+      # from C -- rather than hand-reimplementing vm.c's own register-
+      # window/callinfo bookkeeping by hand, the same "same observable
+      # result, different but officially-sanctioned internal mechanism"
+      # substitution this file's SEND/SSEND translations already make
+      # throughout via plain mrb_funcall. For every real occurrence here
+      # (an irep-backed Proc from a literal `do...end`/`{}` block, the only
+      # kind ever seen at a real BLKCALL site in this codebase), vm.c's own
+      # non-cfunc branch runs the proc's irep with `self` taken from its
+      # captured environment (`MRB_PROC_ENV(p)->stack[0]`) -- exactly what
+      # `mrb_yield_argv` itself computes too (its own `mrb_proc_get_self`,
+      # src/proc.c, follows the identical env branch for a non-CFUNC proc),
+      # so the two are observably equivalent for this case, including
+      # `break`: `mrb_yield_argv` unwinds via mruby's ordinary MRB_THROW/
+      # longjmp exception machinery exactly like every other raise this
+      # file already emits elsewhere, correctly skipping past this
+      # generated C++ frame's own POD `mrb_value` locals (nothing here has
+      # a non-trivial destructor to skip) up to whatever real C frame
+      # receives it (this method's own caller) -- the same mechanism a
+      # `break` inside a block given to any ordinary C-implemented
+      # `#each`-style method already depends on working correctly.
+      #
+      # Deliberately NOT modeled: a CFUNC-backed Proc (e.g. from `&:sym`/
+      # `&method(...)` forwarding) reaching this opcode -- real vm.c calls
+      # such a proc's cfunc with `self` = the proc object itself (`recv`,
+      # not yet reassigned at that point in vm.c's own code -- ordinary
+      # "receiver is the thing #call was invoked on" semantics), whereas
+      # `mrb_yield_argv`'s own `mrb_proc_get_self` returns `mrb_nil_value()`
+      # for a CFUNC-backed proc instead -- a real, different self. Hand-
+      # reproducing vm.c's own cfunc branch instead (calling `MRB_PROC_
+      # CFUNC(p)` directly) was considered and rejected: real vm.c's cfunc
+      # only receives its actual arguments because the surrounding `cipush`
+      # sets up a real callinfo/stack frame first, which `mrb_get_args`
+      # inside the cfunc then reads -- calling the raw function pointer
+      # directly here, with no such frame, would leave any such cfunc
+      # reading stale/wrong argument state, an actual correctness hazard
+      # worse than the self-value mismatch it would dodge. No real
+      # occurrence in this whole codebase's own compiled output is a
+      # CFUNC-backed proc (all four real call sites use a literal block),
+      # and no mruby-core CFUNC-backed proc (Symbol#to_proc and friends)
+      # observably branches on its own `self` parameter -- so this
+      # narrower `mrb_yield_argv`-only translation is sound for every real
+      # occurrence, with the CFUNC-self divergence being real but inert in
+      # practice rather than provably unreachable -- documented here rather
+      # than silently assumed away.
+      d = a[/^R(\d+)/, 1].to_i
+      blkn = a[/^R\d+\s+(\d+)/, 1].to_i
+      out = String.new
+      out << "  if (!mrb_proc_p(r#{d})) {\n"
+      out << "    mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: BLKCALL (yield) expected a Proc\");\n"
+      out << "  }\n"
+      if blkn.zero?
+        out << "  r#{d} = mrb_yield_argv(M, r#{d}, 0, NULL);\n"
+      else
+        out << "  {\n"
+        out << "    mrb_value blkcall_args[] = { #{(1..blkn).map { |i| "r#{d + i}" }.join(', ')} };\n"
+        out << "    r#{d} = mrb_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
+        out << "  }\n"
+      end
+      out
     when 'RETURN'
       r = a.empty? ? '0' : a[/^R(\d+)/, 1]
       "  return r#{r};\n"
