@@ -7633,6 +7633,36 @@ class CodeGen
     @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
   end
 
+  # LEXICAL_SELF_SUPPORT: compile_send's own call-dispatch analogue of
+  # self_receiver_class (top-level function, above) -- "is `self` inside a
+  # method of `owner_def.owner` provably an instance of exactly that
+  # class?" Exact same three-part answer, exact same reasoning
+  # (self_receiver_class's own comment has the full soundness argument:
+  # no subclass may exist anywhere in the program, or an override could
+  # dispatch differently; a `.singleton` owner's `self` is a Class/Module
+  # object, not an instance, so instance-method reasoning about it would
+  # be answering about the wrong object entirely), just reading this
+  # CodeGen instance's own memoized `known_owner_set`/`subclassed_set`
+  # instead of a `ctx` hash built for the separate return-class-inference
+  # pass self_receiver_class itself serves.
+  #
+  # Deliberately NOT reused by calling self_receiver_class directly: that
+  # function's own `ctx` argument is a purpose-built hash several other
+  # analyses construct differently (element_ctx, hash_element_ctx, ...),
+  # and threading a real CodeGen instance through that shared shape only
+  # to satisfy this one caller would be a bigger, riskier change than one
+  # small parallel function reusing the same two already-memoized sets.
+  def lexical_self_owner(owner_def)
+    return nil unless owner_def
+
+    owner = owner_def.owner
+    return nil if owner.nil? || owner.end_with?('.singleton')
+    return nil unless known_owner_set.include?(owner)
+    return nil if subclassed_set.include?(owner)
+
+    owner
+  end
+
   def element_ctx(ivar_classes, mand, arg_classes, owner_name)
     { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
       class_annotations: @class_annotations, element_annotations: @element_annotations,
@@ -13574,6 +13604,48 @@ class CodeGen
     # any target this file already devirtualized before.
     target = nil if target && !n.between?(mandatory_arity(@ireps.fetch(target.irep)),
                                            mandatory_arity(@ireps.fetch(target.irep)) + optional_arity(@ireps.fetch(target.irep)))
+    # LEXICAL_SELF_SUPPORT: still POLY by name, but this particular call
+    # site is an IMPLICIT-self send (`member(db, m)`, not
+    # `some_receiver.member(db, m)`) -- and unlike an explicit receiver,
+    # `self`'s class inside a method body is not merely traced, it is
+    # KNOWN outright whenever `lexical_self_owner` says so (no subclass of
+    # the enclosing owner exists anywhere in the whole program, and
+    # self-rebinding -- `instance_eval`/`instance_exec` -- never occurs in
+    # this closed world; see that function's own comment and
+    # self_receiver_class's, which this mirrors). That is a strictly
+    # stronger guarantee than TYPED/trace_new_target's own runtime-checked
+    # trace below (a fact *proven*, not merely *observed*), so the direct
+    # call this resolves to needs no runtime `mrb_class_ptr` guard and no
+    # `mrb_funcall` fallback at all -- the same unconditional-call shape
+    # MONO gets, just reached by a different, receiver-independent route.
+    # Never attempted for an explicit-receiver send: `self_implicit` is
+    # exactly the one bit of information (also see self_receiver_class's
+    # own header) that makes "self" mean "owner_def.owner" here at all --
+    # an explicit receiver register could hold literally anything.
+    lexical_self = false
+    lexical_self_ivar_accessor = nil
+    if target.nil? && self_implicit
+      lex_owner = lexical_self_owner(owner_def)
+      if lex_owner
+        lex_candidate = @registry[name]&.find { |md| md.owner == lex_owner }
+        if lex_candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(lex_candidate.irep)) &&
+           compiles_clean?(lex_candidate.irep) &&
+           n.between?(mandatory_arity(@ireps.fetch(lex_candidate.irep)),
+                      mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
+          target = lex_candidate
+          lexical_self = true
+        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
+          # LEXICAL_SELF_IVAR_ACCESSOR: the ivar_accessor-kind analogue of
+          # the branch just above -- see IVAR_ACCESSOR_DEVIRT's own
+          # comment (below) for why an attr_reader/writer candidate can
+          # never satisfy the ordinary `.irep`-based branch. Same
+          # certain-not-traced guarantee applies here too: no runtime
+          # `mrb_class_ptr` guard needed, straight to `mrb_iv_get`/
+          # `mrb_iv_set`.
+          lexical_self_ivar_accessor = lex_candidate
+        end
+      end
+    end
     # Name-based devirtualization failed (still POLY by name) -- try a
     # call-site-specific fallback: THIS receiver, traced backward through
     # the same straight-line method body, might still be provably a fresh
@@ -13790,10 +13862,38 @@ class CodeGen
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
+      elsif lexical_self
+        note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
+               "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
+               "no runtime check)#{native_note}\n"
+        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       else
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      end
+    elsif lexical_self_ivar_accessor
+      # LEXICAL_SELF_IVAR_ACCESSOR's own codegen -- the implicit-self
+      # analogue of IVAR_ACCESSOR_DEVIRT below, with the same
+      # lexical_self_owner certainty LEXICAL_SELF's own comment (above)
+      # already established: no runtime `mrb_class_ptr` guard, no
+      # `mrb_funcall` fallback, straight to iv_tbl.
+      owner = lexical_self_ivar_accessor.owner
+      if name.end_with?('=')
+        ivar = name[0..-2]
+        val = argv.first
+        note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (self, statically #{owner}), " \
+               "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall, no runtime " \
+               "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
+               "3rd/mruby/src/class.c citation this reproduces exactly.\n"
+        "#{note}  mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
+          "  r#{d} = #{val};\n"
+      else
+        note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (self, statically #{owner}), " \
+               "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall, no runtime " \
+               "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
+               "3rd/mruby/src/class.c citation this reproduces exactly.\n"
+        "#{note}  r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n"
       end
     elsif ivar_accessor_target
       # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
