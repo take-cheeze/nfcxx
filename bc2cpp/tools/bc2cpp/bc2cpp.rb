@@ -11735,39 +11735,48 @@ class CodeGen
   # keyword; required keywords missing at the call site are rejected
   # (nil return -- the interpreter would raise ArgumentError, so
   # compiling a call that drops one would be silently wrong).
-  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
-    dest_reg = d.to_i
-    # Keyword (sym, value) pairs sit right after the n positionals.
-    kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
-    kw_val_regs = (0...nk).map { |k| dest_reg + 2 + n + k * 2 }
-    # Verify every key register is written by a LOADSYM with a literal
-    # symbol, scanning backward from the call site in this same irep.
-    kw_names = kw_sym_regs.map do |reg|
-      sym = nil
-      idx.downto(0) do |i|
-        insn = irep.instructions[i]
-        next unless insn
-        # A write to this register ends the scan -- it must be LOADSYM.
-        if insn.args =~ /^R#{reg}\b/
-          sym = insn.op == 'LOADSYM' ? insn.args[/:(\S+)/, 1] : nil
-          break
-        end
-      end
-      break nil if sym.nil?
-      sym.sub(/\A:/, '')
-    end
-    return nil if kw_names.nil? || kw_names.size != nk
+  # Was this specific register's own most recent write (scanning backward
+  # from `before_idx`, inclusive) a `LOADSYM :name` literal? Shared by
+  # compile_keyword_send's own ordinary keyword-pair extraction and
+  # splat_hash_literal_pairs' own double-splat-literal key extraction --
+  # the identical "prove this register's own value" question, not two
+  # unrelated tables the way hash_element_source_scan's own comment warns
+  # against sharing.
+  def literal_symbol_write(irep, before_idx, reg)
+    before_idx.downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      # A write to this register ends the scan -- it must be LOADSYM.
+      next unless insn.args =~ /^R#{reg}\b/
 
-    recv = self_implicit ? 'self' : "r#{d}"
+      return nil unless insn.op == 'LOADSYM'
+
+      return insn.args[/:(\S+)/, 1]&.sub(/\A:/, '')
+    end
+    nil
+  end
+
+  # KEYWORD_CALLSITE_SUPPORT: the shared tail of compile_keyword_send --
+  # MONO target resolution, keyword-table/arity/required-keyword checks,
+  # and the direct `_impl` call emission -- factored out so
+  # compile_splat_send (below) can reuse the exact same devirtualization
+  # rule against an unrolled splat/double-splat's own register list,
+  # which (unlike an ordinary keyword call site) is never a fixed
+  # dest-relative offset. `argv`/`kw_val_exprs` are already-resolved C++
+  # expression strings (usually `r<N>`, one register each), not register
+  # numbers -- compile_keyword_send's own caller still passes plain
+  # `r<N>` strings, so this is a pure extraction, not a behavior change.
+  def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:)
     # MONO resolution only -- deliberately no TYPED path: a traced-
     # receiver guard's `else` branch would need a dynamic keyword
     # dispatch, which mruby's own `mrb_funcall*` family cannot express
-    # (`ci->nk = 0`, see above), so any guard failure would silently
-    # drop keywords. MONO needs no guard at all (exactly one def
-    # exists program-wide), so it is unconditionally sound. A POLY
-    # keyword call keeps the honest #error.
+    # (`ci->nk = 0`, see compile_keyword_send's own top comment). MONO
+    # needs no guard at all (exactly one def exists program-wide), so it
+    # is unconditionally sound. A POLY keyword call keeps the honest
+    # #error.
     target = monomorphic_target(name)
     return nil unless target&.irep
+
     # monomorphic_target already verified compiles_clean? -- fetch the
     # irep struct for the keyword-table/arity checks below (fetch, not
     # compiles_clean?, which takes a label).
@@ -11776,22 +11785,23 @@ class CodeGen
     return nil unless kw_table
     return nil unless n == mandatory_arity(callee_irep)
     return nil unless (kw_names - kw_table.map { |k| k[:name] }).empty?
+
     # Every required keyword must be present at the call site --
     # otherwise the interpreter raises ArgumentError and compiling
     # the call would be silently wrong.
     required = kw_table.select { |k| k[:required] }.map { |k| k[:name] }
     return nil unless (required - kw_names).empty?
+
     # Same emission-eligibility guard as compile_send's own: no _impl
     # exists for an owner this run is not emitting.
     if @only_owners && !@only_owners.include?(target.owner)
       return nil unless @other_owners&.include?(target.owner)
     end
     impl = cpp_name(target.owner, target.name) + '_impl'
-    argv = (1..n).map { |k| "r#{dest_reg + k}" }
     kw_args = kw_table.flat_map do |kw|
       ci = kw_names.index(kw[:name])
       if ci
-        ["r#{kw_val_regs[ci]}", '1']
+        [kw_val_exprs[ci], '1']
       else
         ['mrb_nil_value()', '0']
       end
@@ -11799,6 +11809,219 @@ class CodeGen
     call = "r#{d} = #{impl}(M, #{([recv] + argv + kw_args).join(', ')});"
     note = "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
     "#{note}  #{call}\n"
+  end
+
+  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
+    dest_reg = d.to_i
+    # Keyword (sym, value) pairs sit right after the n positionals.
+    kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
+    kw_val_regs = (0...nk).map { |k| dest_reg + 2 + n + k * 2 }
+    # Verify every key register is written by a LOADSYM with a literal
+    # symbol, scanning backward from the call site in this same irep.
+    kw_names = kw_sym_regs.map { |reg| literal_symbol_write(irep, idx, reg) }
+    return nil if kw_names.any?(&:nil?)
+
+    recv = self_implicit ? 'self' : "r#{d}"
+    compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: (1..n).map { |k| "r#{dest_reg + k}" },
+                          kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" })
+  end
+
+  # SPLAT_UNROLL_SUPPORT: "what argument expressions does the literal
+  # Array built at `reg` (traced backward from just before `idx`, MOVE
+  # chains followed) actually hold?" -- the register-LIST analogue of
+  # array_element_source_scan's own ARRAY arm, for compile_splat_send
+  # below. A splat call site (`n=*`) never gets a fixed register list
+  # from mrbc's own disassembly the way an ordinary `n=N` call does
+  # (confirmed against real src/vm.c OP_SEND: when `n==CALL_MAXARGS`, the
+  # VM spreads whatever real Array object already sits in R(d+1) at
+  # *runtime*) -- so the only way to recover a fixed list at COMPILE time
+  # is proving that source register was itself just built by a literal
+  # `ARRAY Rd N` a few instructions back, never a computed/variable
+  # array.
+  #
+  # Deliberately `mrb_ary_ref(M, r<base>, k)`, never the raw `r<base+k>`
+  # source registers ARRAY's own N-1 non-zeroth registers would still
+  # hold: real OP_ARRAY semantics overwrite `r<base>` ITSELF with the
+  # constructed Array object (`compile_insn`'s own ARRAY case, "the
+  # result overwrites Rd itself" -- Rd is element 0's own register). A
+  # bare `r<base>` for element 0 would silently read that already-
+  # clobbered Array object instead of the real first argument -- caught
+  # live building this exact feature (Game::Battle::AllTargetSkillCommand.
+  # new(*args)'s own real generated call passed the freshly-built Array as
+  # its own first positional argument instead of the real value, before
+  # this fix). Reading every element back out of the array object mrbc's
+  # own codegen already built sidesteps the clobber entirely, for
+  # elements 0 and 1..N-1 alike -- one rule, not an off-by-one special
+  # case for index 0 only.
+  #
+  # Returns an Array of C++ expression Strings ("mrb_ary_ref(M, r5, 0)",
+  # ...), or nil for "not a traceable literal" (the caller keeps the
+  # honest #error).
+  def splat_array_literal_regs(irep, idx, reg)
+    hops = 0
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      # Same reasoning as array_element_source_scan's own BLOCK skip: a
+      # block-carrying call's own block-proc register sits between the
+      # call and its receiver write, evidence FOR the shape rather than
+      # a writer of it.
+      next if insn.op == 'BLOCK'
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      case insn.op
+      when 'MOVE'
+        hops += 1
+        return nil if hops > 8
+
+        src = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless src
+
+        reg = src
+        next
+      when 'ARRAY', 'ARRAY2'
+        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+        return nil if n.nil?
+
+        base = reg.to_i
+        return (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  # SPLAT_UNROLL_SUPPORT: the Hash-double-splat analogue of
+  # splat_array_literal_regs above -- traces the register backward for a
+  # literal `HASH Rd N` (N key/value PAIRS spanning Rd..Rd+2N-1, the same
+  # real layout HashElementLayout's own hash_element_source_scan already
+  # confirmed against src/vm.c's OP_HASH), and additionally requires
+  # every key to be a literal `LOADSYM` -- a computed key has no static
+  # name to match against the callee's own keyword table (the same bar
+  # compile_keyword_send's own ordinary keyword-pair extraction already
+  # holds itself to). Returns an Array of `{name:, val_reg:}` Hashes (one
+  # per pair, in source order), or nil for "not a traceable all-literal-
+  # key Hash".
+  def splat_hash_literal_pairs(irep, idx, reg)
+    hops = 0
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      next if insn.op == 'BLOCK'
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      case insn.op
+      when 'MOVE'
+        hops += 1
+        return nil if hops > 8
+
+        src = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless src
+
+        reg = src
+        next
+      when 'HASH'
+        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+        return nil if n.nil?
+
+        base = reg.to_i
+        return (0...n).map do |k|
+          key_reg = base + (2 * k)
+          val_reg = base + (2 * k) + 1
+          kname = literal_symbol_write(irep, i - 1, key_reg.to_s)
+          return nil unless kname
+
+          { name: kname, val_reg: "r#{val_reg}" }
+        end
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  # SPLAT_UNROLL_SUPPORT: a `SEND`/`SSEND` call site whose own arg list is
+  # a splat (`n=*`) and/or a double-splat (`nk=*`) -- previously an
+  # unconditional #error (see this method's own caller, the `n_match`
+  # branch in compile_send) -- compiles as an ordinary call when the
+  # splatted Array/Hash traces back to a compile-time-fixed-size LITERAL
+  # (splat_array_literal_regs/splat_hash_literal_pairs above), rather
+  # than a runtime-variable expression this codegen has no fixed
+  # register list for. Anything not traceable to such a literal (a
+  # splatted local variable, a computed array/hash, a non-literal key in
+  # a double-splat) keeps the honest #error -- this never guesses.
+  #
+  # Deliberately dynamic-dispatch-only for the plain-positional case
+  # (dynamic_dispatch_line, never a devirtualized MONO/POLY/TYPED call):
+  # getting these previously-#error'd call sites compiling correctly at
+  # all is this round's own goal; layering MONO/POLY/TYPED
+  # devirtualization on top of an unrolled splat call is a natural
+  # follow-up once this lands, exactly like every other "proven, wired,
+  # not yet the fastest path" round this file's own history already has
+  # plenty of. A keyword-carrying unroll (double-splat, or a literal
+  # keyword-pair tail riding alongside a positional splat) reuses
+  # compile_keyword_call's own MONO-direct-_impl-call machinery instead
+  # -- mruby's own `mrb_funcall*` family can never carry keywords at all
+  # (compile_keyword_send's own top comment), so a dynamic-dispatch
+  # fallback isn't an option there the way it is for the plain-
+  # positional case.
+  def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:)
+    return nil unless irep && idx
+
+    n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
+    return nil unless n_match
+
+    n_spec, nk_spec = n_match[1], n_match[2]
+    return nil unless n_spec == '*' || nk_spec == '*'
+
+    dest_reg = d.to_i
+    recv = self_implicit ? 'self' : "r#{d}"
+
+    next_reg = dest_reg + 1
+    if n_spec == '*'
+      positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
+      return nil unless positional
+
+      next_reg += 1 # the single register the splatted array itself occupied.
+    else
+      n = n_spec.to_i
+      positional = (1..n).map { |k| "r#{dest_reg + k}" }
+      next_reg += n
+    end
+
+    kw_pairs =
+      if nk_spec == '*'
+        pairs = splat_hash_literal_pairs(irep, idx, next_reg.to_s)
+        return nil unless pairs
+
+        pairs
+      elsif nk_spec
+        nk = nk_spec.to_i
+        (0...nk).map do |k|
+          key_reg = next_reg + (k * 2)
+          val_reg = next_reg + (k * 2) + 1
+          kname = literal_symbol_write(irep, idx, key_reg.to_s)
+          return nil unless kname
+
+          { name: kname, val_reg: "r#{val_reg}" }
+        end
+      else
+        []
+      end
+
+    if kw_pairs.empty?
+      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat, dynamic dispatch\n"
+      "#{note}  #{dynamic_dispatch_line(d, recv, name, positional)}"
+    else
+      result = compile_keyword_call(name: name, d: d, recv: recv, n: positional.size, argv: positional,
+                                     kw_names: kw_pairs.map { |p| p[:name] },
+                                     kw_val_exprs: kw_pairs.map { |p| p[:val_reg] })
+      return nil unless result
+
+      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat/double-splat\n"
+      "#{note}#{result}"
+    end
   end
 
   def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
@@ -11943,14 +12166,24 @@ class CodeGen
     if n_match && (n_match[1] == '*' || n_match[2])
       # Keyword-argument call site (nk>0, no splat): try devirtualizing
       # into the compiled callee's own _impl (compile_keyword_send
-      # below) before falling back to the honest #error. Splat (`*`
-      # anywhere) still always #errors -- no fixed register list exists
-      # for it by construction.
+      # below) before falling back to the honest #error.
       if n_match[1] != '*' && n_match[2] != '*' && irep && !idx.nil?
         kw_result = compile_keyword_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
                                          owner_def: owner_def, name: name, d: d,
                                          n: n_match[1].to_i, nk: n_match[2].to_i)
         return kw_result if kw_result
+      end
+      # SPLAT_UNROLL_SUPPORT: a splat (`n=*`) and/or double-splat
+      # (`nk=*`) call site: try unrolling it into an ordinary call when
+      # the splatted Array/Hash traces to a compile-time-fixed-size
+      # literal (compile_splat_send below) before falling back to the
+      # honest #error. A splatted variable/computed expression still
+      # always #errors -- no fixed register list exists for it by
+      # construction.
+      if irep && !idx.nil?
+        splat_result = compile_splat_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
+                                          name: name, d: d)
+        return splat_result if splat_result
       end
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{n_match[0]}) -- not in this prototype's supported subset\n"
     end
