@@ -6550,6 +6550,13 @@ class CodeGen
     # case to choose `throw bc2cpp_block_break{...}` over the plain
     # `return` every other context still uses.
     @block_fallback_active = false
+    # BLKPUSH_YIELD_SUPPORT: the current method's own real block parameter
+    # name (`'bc2cpp_blk'`), set by compile_method around exactly its own
+    # top-level body-compile loop, consulted by compile_insn's own BLKPUSH
+    # case. nil everywhere else -- a BLOCK_FALLBACK body never sets this
+    # (see @block_fallback_upvars' own comment for why), so a BLKPUSH
+    # inside one always keeps the honest #error.
+    @blk_param_name = nil
     @registry = registry
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
@@ -8519,6 +8526,27 @@ class CodeGen
     # scanning) optional_arg_table call entirely for the overwhelmingly
     # common pure-mandatory case, same as before.
     mandatory_ok = pure_mandatory_arity?(irep)
+    # BLKPUSH_YIELD_SUPPORT: a bare `yield(...)` inside an otherwise plain
+    # mandatory-arity method (`cache[key] = yield` -- mrbc's own BLKCALL
+    # fast path, codegen.c's codegen_yield, already handled by compile_insn's
+    # own `when 'BLKCALL'` case) first needs the CURRENT call's own real
+    # block value fetched into a register via `BLKPUSH` -- previously
+    # unhandled at the opcode level, an honest `#error` for every real
+    # occurrence regardless of how simple the rest of the method was.
+    # `lv == 0` (the level field, real disasm `BLKPUSH R7 2:0:0:0 (0)` --
+    # confirmed against 3rd/mruby/src/vm.c's own `OP_BLKPUSH`: `if (lv == 0)
+    # stack = regs + 1;`, i.e. THIS call frame's own received block, not an
+    # outer scope's) is the only shape modeled -- a nested block forwarding
+    # a yield from inside its own body (lv > 0) still gets the honest
+    # `#error` (compile_insn's own BLKPUSH case below refuses it too, not
+    # just this gate). Scoped to `mandatory_ok` methods only (every real
+    # occurrence in this whole program is a plain `def foo(a, b); ...
+    # yield; ...; end`, confirmed against the real whole-program registry --
+    # never combined with optional/keyword/rest args) so this doesn't have
+    # to touch the opt/kw/rest entry-wrapper branches below at all.
+    needs_blk_param = mandatory_ok && irep.instructions.any? do |i|
+      i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0'
+    end
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT: only attempted once both of the above have
     # already failed (mandatory_ok and opt_jmp_targets are mutually
@@ -8573,6 +8601,13 @@ class CodeGen
     # mechanism existed) -- `self` is never affected, only ever
     # NATIVE_ARG_TARGETS' own explicitly-listed arguments.
     arg_params = arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
+    # BLKPUSH_YIELD_SUPPORT: one extra real parameter carrying THIS call's
+    # own actual block value (a real `mrb_value`, Proc or nil) -- extracted
+    # by the entry wrapper below (mrb_get_args' own `&` format specifier,
+    # the same "no block given" -> nil semantics `BLKPUSH`'s own `lv==0`
+    # case reads out of the live call frame) and forwarded straight through,
+    # exactly like `bc2cpp_given_opt`/each keyword parameter above.
+    arg_params << 'mrb_value bc2cpp_blk' if needs_blk_param
     # OPTIONAL_ARG_SUPPORT: one extra real parameter, `bc2cpp_given_opt` --
     # how many of this method's own real optional arguments THIS call
     # actually supplied (0..opt) -- the switch emit_optional_dispatch
@@ -8897,12 +8932,22 @@ class CodeGen
     # -- anything with a `glue_at` entry has real code starting exactly
     # there, so a jump landing on it is always well-defined.
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
+    # BLKPUSH_YIELD_SUPPORT: consume-and-clear, same discipline as
+    # @block_fallback_upvars/@block_fallback_active -- set for exactly this
+    # method's own top-level body-compile loop, never a nested call
+    # compile_insn might make into an unrelated irep (emit_proc_fallback_fn
+    # never sets this at all, so a BLKPUSH inside a BLOCK_FALLBACK body
+    # always sees it nil/false and keeps the honest #error -- see that
+    # case's own comment for why `lv==0` inside a nested scope means
+    # something different anyway).
+    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
     irep.instructions.each_with_index do |insn, idx|
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
     end
+    @blk_param_name = nil
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     if needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
@@ -8913,8 +8958,15 @@ class CodeGen
     out = block_fallback_pre + rescue_pre + out
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    if arg_names.empty? && !kw_table
+    if arg_names.empty? && !kw_table && !needs_blk_param
       out << "  return #{impl_name}(M, self);\n"
+    elsif arg_names.empty? && needs_blk_param
+      # BLKPUSH_YIELD_SUPPORT: the same 0-mandatory-argument case as the
+      # plain branch below, just with no positional `mrb_get_args` call to
+      # append `&` onto -- a standalone one instead.
+      out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+      out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
+      out << "  return #{impl_name}(M, self, bc2cpp_blk);\n"
     elsif kw_table
       # KEYWORD_ARG_SUPPORT: the real mrb_kwargs mechanism mruby.h's own
       # `mrb_get_args` `:` format specifier documents -- `required` names
@@ -9026,6 +9078,20 @@ class CodeGen
         i == mand && opt.positive? ? "|#{ch}" : ch
       end.join
       ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
+      # BLKPUSH_YIELD_SUPPORT: `&` is mrb_get_args' own real "the block
+      # passed to THIS call" format specifier (3rd/mruby/src/class.c's own
+      # `case '&':` -- `*p = *bp;`, the live call frame's own block slot,
+      # nil when none was given since this uses plain `&`, not the
+      # required-block `&!`) -- appended to the same single mrb_get_args
+      # call rather than a second one, mirroring how KEYWORD_ARG_SUPPORT's
+      # own `:` modifier above shares its call. `needs_blk_param` is only
+      # ever true for a `mandatory_ok` method (this gate's own comment), so
+      # this never has to interact with the `opt.positive?` branch below.
+      if needs_blk_param
+        out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+        fmt += '&'
+        ptrs += ', &bc2cpp_blk'
+      end
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       if opt.positive?
         # OPTIONAL_ARG_SUPPORT: mrb_get_argc is the real, public mruby API
@@ -9045,7 +9111,8 @@ class CodeGen
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
         out << "  return #{impl_name}(M, self, #{arg_names.join(', ')}, bc2cpp_given_opt);\n"
       else
-        out << "  return #{impl_name}(M, self, #{arg_names.join(', ')});\n"
+        call_args = needs_blk_param ? arg_names + ['bc2cpp_blk'] : arg_names
+        out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
       end
     end
     out << "}\n\n"
@@ -9055,6 +9122,18 @@ class CodeGen
     # OTHER_DECLS_HEADER, a different one -- declares this `_impl` with
     # exactly the signature it was actually emitted with).
     arg_c_types = arg_names.each_index.map { |i| native_c_type(arg_native_types[i]) }
+    # BLKPUSH_YIELD_SUPPORT: same reasoning as OPTIONAL_ARG_SUPPORT's own
+    # `bc2cpp_given_opt` line just below -- has to appear here too, or a
+    # cross-TU devirtualized caller's own forward declaration would
+    # mismatch this real, externally-linked symbol's actual signature. In
+    # practice never reached by a real devirtualized direct call today:
+    # every real call site to a `needs_blk_param` method is itself a real
+    # block-carrying call (it has to be, to supply the `yield` this method
+    # depends on), and a block-carrying call site (SENDB/SSENDB) is never
+    # MONO/POLY/TYPED-devirtualized to a direct call in this file -- see
+    # emit_block_fallback_glue's own comment -- kept anyway so a mismatch
+    # would be a loud compile error, never a silent wrong signature.
+    arg_c_types << 'mrb_value' if needs_blk_param
     # OPTIONAL_ARG_SUPPORT: the extra `bc2cpp_given_opt` parameter (see
     # above) is real, load-bearing part of this _impl's own signature --
     # decl_line's own forward declaration has to include it too, or a
@@ -12220,6 +12299,38 @@ class CodeGen
       compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true, irep: irep, idx: idx, owner_def: owner_def)
+    when 'BLKPUSH'
+      # BLKPUSH_YIELD_SUPPORT: `BLKPUSH Ra m1:r:m2:kd (lv)` (real disasm,
+      # confirmed via a fresh `mrbc -v` of `def foo(a,b); yield(a,b); end`:
+      # `BLKPUSH R4 2:0:0:0 (0)`) -- 3rd/mruby/src/vm.c's own `OP_BLKPUSH`:
+      # `lv == 0` reads `regs[1 + offset]`, this call frame's OWN received
+      # block (never an outer scope's -- `lv > 0` walks `uvenv` instead, a
+      # genuinely different value this compiler has no register/pointer for
+      # today, same "not modeled, honest #error" territory as a depth>0
+      # upvar). Only ever compiled with `@blk_param_name` set -- exactly
+      # when compile_method's own prescan (`needs_blk_param`) found this
+      # exact shape ahead of time and arranged for the entry wrapper to
+      # extract the real block value into that C++ local -- so the `lv`
+      # check here is really just re-confirming the same shape prescan
+      # already required, not a fresh capability test.
+      #
+      # Real vm.c also raises `LocalJumpError` ("unexpected yield") if the
+      # slot holds `nil` -- reproduced directly (`mrb_get_args`' own `&`
+      # format specifier, unlike BLKPUSH's own raw stack read, happily
+      # returns nil for "no block given" rather than raising itself, so
+      # this check can't be skipped).
+      d = a[/^R(\d+)/, 1]
+      lv = a[/\((\d+)\)/, 1]
+      if lv == '0' && @blk_param_name
+        <<~CPP
+          if (mrb_nil_p(#{@blk_param_name})) {
+            mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "bc2cpp: unexpected yield");
+          }
+          r#{d} = #{@blk_param_name};
+        CPP
+      else
+        "#error unhandled opcode BLKPUSH #{a}\n"
+      end
     when 'BLKCALL'
       # "BLKCALL R7 0" / "BLKCALL R4 2" -- real OP_BLKCALL semantics (ops.h:
       # `R[a] = R[a].call(R[a+1],...,R[a+b]); direct block call`). Confirmed
