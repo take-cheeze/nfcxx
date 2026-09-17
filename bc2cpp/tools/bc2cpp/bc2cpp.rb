@@ -8949,29 +8949,15 @@ class CodeGen
     # dispatches dynamically (emit_block_fallback_glue) -- see
     # block_fallback_safe?'s own comment for exactly which block bodies
     # qualify and why.
-    block_fallback_pre = String.new
-    block_fallback_regions.each do |region|
-      next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
-
-      fn_result = emit_proc_fallback_fn(region, d)
-      next unless fn_result
-
-      fn_name, fn_code = fn_result
-      block_fallback_pre << fn_code
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
-    end
-
     # EXPLICIT_BLOCK_ARG_SUPPORT: `&expr`'s own real bytecode shape (no
     # `BLOCK` instruction at all -- see recognize_explicit_block_arg_
     # regions' own comment) has no `block_addr` of its own to suppress,
     # only `sendb_addr` -- the whole region IS that one instruction.
-    recognize_explicit_block_arg_regions(irep).each do |region|
-      next if suppressed.include?(region[:sendb_addr])
-
-      suppressed << region[:sendb_addr]
-      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region)
-    end
+    # RESCUE_BODY_BLOCK_SUPPORT: shared with emit_rescue_try_body's own
+    # identical pass below (see emit_block_fallback_glue_pass' own
+    # comment) -- one implementation, not two that could silently drift.
+    block_fallback_pre = emit_block_fallback_glue_pass(block_fallback_regions, recognize_explicit_block_arg_regions(irep),
+                                                        d, suppressed, glue_at)
 
     # LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of
     # BLOCK_CFUNC_FALLBACK_SUPPORT immediately above -- reuses the exact
@@ -9569,7 +9555,42 @@ class CodeGen
   def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types)
     ctx_struct = "#{try_name}_Ctx"
     ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
-    out = String.new
+    # RESCUE_BODY_BLOCK_SUPPORT: a block-carrying call site sitting INSIDE
+    # this try-body's own protected range previously always hit the raw
+    # opcode-level `#error` -- this instruction loop used to be a plain
+    # `compile_insn` call with none of compile_method's own top-level
+    # suppress/glue machinery, so a real `RGSS::Profiler.section("...") {
+    # ... }` (or any other block-carrying call) inside a method's own
+    # `rescue`-wrapped body could never compile, regardless of how simple
+    # the block itself was -- caught live: `RPG2k#start_new_game`'s own
+    # `RGSS::Profiler.section("map.transition.load") { load_map map_id }`,
+    # sitting inside its own whole-method rescue, stayed `#error unhandled
+    # opcode BLOCK`/`SENDB` even after `section` was added to
+    # BLOCK_FALLBACK_UPVAR_SAFE_METHODS specifically to unblock it.
+    #
+    # Reuses emit_block_fallback_glue_pass's own recognize -> emit ->
+    # suppress pipeline (identical to compile_method's own top-level
+    # pass), scanning the SAME `irep` but restricted to `region`'s own
+    # `[begin_addr, end_addr]` range so this try-body only ever claims
+    # (and emits nested cfunc code for) a region that's genuinely inside
+    # ITS OWN protected body -- never one compile_method's own top-level
+    # pass will separately claim (that pass's own `suppressed` set
+    # already excludes this whole range unconditionally, regardless of
+    # what this one recognizes -- see RESCUE_SUPPORT's own comment on
+    # `suppressed.merge((begin_addr..end_addr).to_a)`, computed before
+    # the top-level pass ever runs). A fresh, LOCAL `suppressed`/`glue_at`
+    # pair -- this is a genuinely separate C++ function/scope from
+    # `_impl`'s own body, with its own address-to-label mapping. Computed
+    # and emitted BEFORE this try-body function's own opening brace, not
+    # inside it -- a nested nreg region's own standalone cfunc is a real
+    # top-level C++ function definition, illegal to nest inside another
+    # function's body the way the main instruction loop below is.
+    range = (region[:begin_addr]..region[:end_addr])
+    local_suppressed = Set.new
+    local_glue_at = {}
+    nested_block_regions = recognize_block_fallback_regions(irep).select { |r| range.cover?(r[:block_addr]) }
+    nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
+    out = emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
     out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
     out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
     out << "  #{ctx_struct}* ctx = (#{ctx_struct}*)ud;\n"
@@ -9599,15 +9620,17 @@ class CodeGen
         out << "  mrb_value r#{i} = mrb_nil_value();\n"
       end
     end
-    body_targets = jump_targets(irep).select { |t| t >= region[:begin_addr] && t <= region[:end_addr] }
+    body_targets = jump_targets(irep).select { |t| t >= region[:begin_addr] && t <= region[:end_addr] } -
+                   (local_suppressed.to_a - local_glue_at.keys)
     irep.instructions.each_with_index do |insn, idx|
       next unless insn.addr >= region[:begin_addr] && insn.addr <= region[:end_addr]
+      next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
 
       out << "  L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       out << if insn.addr == region[:end_addr]
                 "  return r#{region[:connector_reg]};\n"
               else
-                compile_insn(insn, irep, d, idx)
+                local_glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
               end
     end
     out << "  return mrb_nil_value(); // unreachable\n"
@@ -12228,6 +12251,41 @@ class CodeGen
     out << "    r#{dest_reg} = bc2cpp_brk.value;\n"
     out << "  }\n"
     out
+  end
+
+  # RESCUE_BODY_BLOCK_SUPPORT: the shared BLOCK_FALLBACK/EXPLICIT_BLOCK_ARG
+  # suppress-and-glue pass, factored out so `emit_rescue_try_body` below
+  # can run the identical recognize -> emit -> suppress pipeline
+  # `compile_method`'s own top-level loop already runs, against its own
+  # extracted try-body function instead. Takes already-recognized region
+  # lists (both recognizers are pure functions of `irep` alone, so the
+  # caller decides whether to scan the whole irep or a filtered subset)
+  # and mutates the caller's own `suppressed`/`glue_at` in place -- the
+  # same two collections every other named block recognizer in this file
+  # already accumulates into, so a region this pass claims is exactly as
+  # invisible to a caller's own later, unrelated instruction-loop pass as
+  # any of them. Returns the accumulated nested-function pre-code (empty
+  # string when neither region list has anything to emit).
+  def emit_block_fallback_glue_pass(block_regions, explicit_arg_regions, d, suppressed, glue_at)
+    pre = String.new
+    block_regions.each do |region|
+      next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:sendb_addr])
+
+      fn_result = emit_proc_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
+      pre << fn_code
+      suppressed << region[:block_addr] << region[:sendb_addr]
+      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
+    end
+    explicit_arg_regions.each do |region|
+      next if suppressed.include?(region[:sendb_addr])
+
+      suppressed << region[:sendb_addr]
+      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region)
+    end
+    pre
   end
 
   # LAMBDA_FALLBACK_SUPPORT: recognize a `LAMBDA` instruction whose own
