@@ -10313,13 +10313,17 @@ class CodeGen
   # fallback unchanged for the nil case, so a miss here costs nothing but
   # the missed fast path, never a wrong answer.
   #
-  # `idx.nil?` (compile_block_body_insn's own shared `else` branch,
-  # dispatching an inlined loop body's OWN shifted-register instructions
-  # through this exact same compile_insn switch with `idx: nil` -- see
-  # that function's own comment) bails immediately: `trace_new_target`'s
-  # backward scan needs a real position to start from, and the shifted
-  # register numbers there don't correspond 1:1 with unshifted positions
-  # in `irep.instructions` the way every other real caller's `idx` does.
+  # `idx.nil?` still bails immediately -- `trace_new_target`'s backward scan
+  # needs a real position to start from. BLOCK_BODY_INDEX_SUPPORT: that used
+  # to rule out every inlined loop body unconditionally, because
+  # compile_block_body_insn's own shared `else` branch dispatched the body's
+  # OWN shifted-register instructions through this same compile_insn switch
+  # with `idx: nil`. It now passes the instruction's real position in
+  # `block_irep.instructions` together with the register shift, and
+  # compile_insn's GETIDX/GETIDX0/SETIDX cases translate `reg` back into
+  # block_irep's own numbering with `unshift_proof_reg` before calling this
+  # -- so `irep`, `idx` and `reg` here are always in one consistent
+  # namespace, for an inlined block body exactly as for a method body.
   def static_indexable_class(irep, idx, reg, owner_def)
     return nil unless owner_def && idx
 
@@ -10602,6 +10606,40 @@ class CodeGen
     return false unless r >= 1 && r <= mand
 
     native_arg_types(owner_def, mand)[r - 1] == :fixnum
+  end
+
+  # BLOCK_BODY_INDEX_SUPPORT: map one of the register numbers compile_insn
+  # just extracted from `insn.args` back into `irep`'s OWN, un-shifted
+  # register numbering.
+  #
+  # Every caller but one passes `reg_offset == 0` and this is the identity:
+  # a top-level method body (compile_method), an extracted rescue-try body
+  # (emit_rescue_try_body) and a BLOCK_FALLBACK/LAMBDA_FALLBACK body
+  # (emit_proc_fallback_fn) all hand compile_insn the irep's own real
+  # instructions with their own real register numbers.
+  #
+  # `compile_block_body_insn` is the exception: an INLINED block body
+  # (`.times`/`.each`/`.each_index`/`.each_key`/`.each_with_index`/Range
+  # `.each`/the collect family) is spliced straight into the ENCLOSING
+  # method's C++ function, so the block's own `R<n>` are rewritten to
+  # `R<n + offset>` (the enclosing irep's own `nregs`) before delegation, to
+  # keep the two frames' `r<n>` C++ variables disjoint. Those shifted numbers
+  # are what the emitted C++ must say, but they are NOT positions in
+  # `block_irep.instructions` -- every backward-scan proof in this file
+  # (`proven_fixnum_operand?`, `trace_new_target`, `proven_array_source`)
+  # reads that array and matches `R<n>` against it, so it has to be asked
+  # about `n`, not `n + offset`. Subtracting here is exactly that translation,
+  # and it is total: the delegation's own `gsub(/R(\d+)/)` shifts EVERY
+  # register reference in the instruction, so `reg >= reg_offset` always
+  # holds for a real operand (a negative result can only mean a malformed
+  # extraction, and returns nil -- every proof entry point already treats a
+  # nil register as "not provable").
+  def unshift_proof_reg(reg, reg_offset)
+    return reg if reg_offset.zero?
+    return nil if reg.nil?
+
+    n = reg.to_i - reg_offset
+    n.negative? ? nil : n.to_s
   end
 
   # Both operand registers of one binary opcode, proven at the same point.
@@ -11024,13 +11062,28 @@ class CodeGen
   # the ordinary `compile_insn` (a real irep, real instructions, just
   # relabeled first) for every opcode this function doesn't special-case
   # itself, so ordinary translation (ADD/MOVE/GETIV/SEND/...) needs no
-  # changes of its own at all -- `idx: nil` in that delegated call also
-  # cleanly disables compile_send's own MONO `.new`-devirtualization
-  # (gated on a truthy `idx`, see its own comment), the one piece of
-  # per-instruction codegen that would otherwise need real, aligned
-  # backward-scan access to this SAME (offset) instruction's true index
-  # in the ORIGINAL, un-offset `block_irep.instructions` array -- a real
-  # missed optimization inside an inlined block body, never a wrong one.
+  # changes of its own at all.
+  #
+  # BLOCK_BODY_INDEX_SUPPORT: that delegation used to pass `idx: nil`,
+  # because every backward-scan proof reached from compile_insn reads
+  # `irep.instructions` and matches a bare `R<n>` against it -- and the
+  # registers in the relabeled instruction are `n + offset`, which are not
+  # positions in that array. The two facts a proof needs (this
+  # instruction's real index, and the shift applied to its registers) are
+  # now both passed instead, and `unshift_proof_reg` undoes the shift at
+  # every point a register number reaches a proof rather than the emitted
+  # C++. Everything else a proof consults -- `block_irep.instructions`,
+  # `jump_targets(block_irep)`, `block_irep.catch_handlers`,
+  # `subtree_upvar_written_regs(block_irep)` -- was already correctly
+  # scoped to this block irep, and `insn.addr` is carried through
+  # unchanged into the relabeled copy below, so no address remapping is
+  # involved at all. `owner_def` stays the ENCLOSING method's, which is
+  # exactly right: a block's `self` is its enclosing method's `self`, so
+  # every ivar fact still applies, while `fixnum_proof_entry_arg?`'s own
+  # `owner_def.irep == irep.label` guard keeps the enclosing method's
+  # NATIVE_ARG_TARGETS parameter types from being misread as this block's
+  # own parameters (the identical guard BLOCK_FALLBACK bodies already
+  # rely on).
   #
   # Four opcodes need real, block-body-specific handling, none of them
   # meaningful (or even reachable) in a top-level method body:
@@ -11123,7 +11176,7 @@ class CodeGen
   end
 
   def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
-                                break_dest: nil, break_label: nil)
+                                break_dest: nil, break_label: nil, idx: nil)
     case insn.op
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
       "  goto #{iter_end_label};\n"
@@ -11192,7 +11245,18 @@ class CodeGen
     else
       shifted_args = insn.args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" }
       shifted = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op, args: shifted_args, raw: insn.raw)
-      compile_insn(shifted, block_irep, owner_def, nil)
+      # BLOCK_BODY_INDEX_SUPPORT: `idx` is this instruction's own REAL
+      # position in `block_irep.instructions` (every one of this file's
+      # inlined-loop emitters walks that array in order with
+      # `each_with_index`, skipping only ENTER, and never reorders it), and
+      # `offset` is the register shift applied to `shifted_args` just above.
+      # Handing compile_insn both lets FIXNUM_OPERAND_PROOF and
+      # GETIDX_STATIC_RECEIVER_SUPPORT run inside an inlined block body
+      # against block_irep's own instructions, addresses, `jump_targets` and
+      # `subtree_upvar_written_regs` -- all of which are already correctly
+      # scoped to block_irep here -- with every register number translated
+      # back out of the shifted namespace by `unshift_proof_reg`.
+      compile_insn(shifted, block_irep, owner_def, idx, offset)
     end
   end
 
@@ -11226,11 +11290,11 @@ class CodeGen
     body = String.new
     iter_label = "Lbc2cpp_times_iter_#{region[:block_addr]}"
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix)
+      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix, idx: i)
     end
     return nil if body.include?('#error')
 
@@ -11316,7 +11380,7 @@ class CodeGen
       # element for the whole body.
       with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
         body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                break_dest: dest_reg, break_label: break_label)
+                                                break_dest: dest_reg, break_label: break_label, idx: i)
       end
     end
     return nil if body.include?('#error')
@@ -11370,12 +11434,12 @@ class CodeGen
     break_label = "Lbc2cpp_eachidx_end_#{region[:block_addr]}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                              break_dest: dest_reg, break_label: break_label)
+                                              break_dest: dest_reg, break_label: break_label, idx: i)
     end
     return nil if body.include?('#error')
 
@@ -11453,7 +11517,7 @@ class CodeGen
       # only values, never keys, ever get a hint here).
       with_element_hint(block_irep, insn, i, '2', region[:elem_class]) do
         body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                 break_dest: dest_reg, break_label: break_label)
+                                                 break_dest: dest_reg, break_label: break_label, idx: i)
       end
     end
     return nil if body.include?('#error')
@@ -11510,12 +11574,12 @@ class CodeGen
     break_label = "Lbc2cpp_ekey_end_#{region[:block_addr]}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                               break_dest: dest_reg, break_label: break_label)
+                                               break_dest: dest_reg, break_label: break_label, idx: i)
     end
     return nil if body.include?('#error')
 
@@ -11585,12 +11649,12 @@ class CodeGen
     break_label = "Lbc2cpp_range_end_#{addr}"
     body = String.new
     body_targets = jump_targets(block_irep)
-    block_irep.instructions.each do |insn|
+    block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                              break_dest: dest_reg, break_label: break_label)
+                                              break_dest: dest_reg, break_label: break_label, idx: i)
     end
     return nil if body.include?('#error')
 
@@ -11679,7 +11743,7 @@ class CodeGen
         body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
                                                   result_var: result_var, break_dest: dest_reg,
                                                   break_label: break_label,
-                                                  broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}")
+                                                  broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}", idx: i)
       end
     end
     return nil if body.include?('#error')
@@ -11839,7 +11903,7 @@ class CodeGen
         body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
                                                   result_var: result_var, break_dest: dest_reg,
                                                   break_label: break_label,
-                                                  broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}")
+                                                  broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}", idx: i)
       end
     end
     return nil if body.include?('#error')
@@ -11916,7 +11980,7 @@ class CodeGen
   # still a plain C++ return. BREAK/BREAK-value, upvars, jumps, and the
   # delegated remainder are line-for-line the each behavior.
   def compile_collect_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
-                                result_var:, break_dest:, break_label:, broke_flag:)
+                                result_var:, break_dest:, break_label:, broke_flag:, idx: nil)
     case insn.op
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
       r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
@@ -11937,7 +12001,7 @@ class CodeGen
       "  r#{break_dest} = r#{r.to_i + offset};\n  #{broke_flag} = TRUE;\n  goto #{break_label};\n"
     else
       compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
-                              break_dest: break_dest, break_label: break_label)
+                              break_dest: break_dest, break_label: break_label, idx: idx)
     end
   end
 
@@ -12171,7 +12235,7 @@ class CodeGen
         body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
                                                   result_var: result_var, break_dest: dest_reg,
                                                   break_label: break_label,
-                                                  broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}")
+                                                  broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}", idx: i)
       end
     end
     return nil if body.include?('#error')
@@ -12921,7 +12985,14 @@ class CodeGen
     out
   end
 
-  def compile_insn(insn, irep, owner_def, idx = nil)
+  # `idx` is this instruction's own position in `irep.instructions`, the start
+  # point every backward-scan proof here needs. `reg_offset` is non-zero for
+  # exactly one caller -- compile_block_body_insn's inlined-block-body
+  # delegation, whose `insn.args` registers are shifted by the enclosing
+  # irep's `nregs` -- and is applied via `unshift_proof_reg` (see its own
+  # header) at every point a register number is handed to a proof rather than
+  # printed into the generated C++.
+  def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
     a = insn.args
     case insn.op
     when 'ENTER'
@@ -13142,7 +13213,7 @@ class CodeGen
       # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum by construction, so
       # only the destination register needs proving here (see
       # proven_fixnum_operand?'s own header).
-      if proven_fixnum_operand?(irep, idx, d, owner_def)
+      if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
       else
         <<~CPP
@@ -13156,7 +13227,7 @@ class CodeGen
     when 'ADD'
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+      if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n"
       else
         <<~CPP
@@ -13170,7 +13241,7 @@ class CodeGen
     when 'SUBI'
       d = a[/^R(\d+)/, 1]
       lit = a.split(/\s+/).last
-      if proven_fixnum_operand?(irep, idx, d, owner_def)
+      if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
         <<~CPP
@@ -13184,7 +13255,7 @@ class CodeGen
     when 'SUB'
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+      if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n"
       else
         <<~CPP
@@ -13205,7 +13276,7 @@ class CodeGen
       # fastpath for its own real rounding-direction reason, see below).
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+      if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n"
       else
         <<~CPP
@@ -13240,7 +13311,7 @@ class CodeGen
       # real Bignum).
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+      if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
       else
         <<~CPP
@@ -13252,11 +13323,27 @@ class CodeGen
         CPP
       end
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
-      compile_cmp(insn.op, a, irep, idx, owner_def)
+      compile_cmp(insn.op, a, irep, idx, owner_def, reg_offset)
+    # BLOCK_BODY_INDEX_SUPPORT: compile_send is deliberately STILL handed a
+    # nil `idx` inside an inlined block body, the one place this round leaves
+    # exactly as it found it. The proofs above ask about the one or two
+    # register numbers this case has already extracted, so `unshift_proof_reg`
+    # can translate each of them on its own and every one of them is only ever
+    # read; compile_send instead re-parses `args` itself, derives a whole
+    # `r<d>..r<d+n>` receiver/argument window from it, and hands those raw
+    # numbers to six different backward scans -- two of which
+    # (compile_keyword_send, compile_splat_send) hand REGISTER LISTS back out
+    # to be printed straight into the generated C++, so they would need the
+    # shift re-applied on the way out as well as removed on the way in.
+    # Threading the offset through only the four read-only scans was tried and
+    # measured on the real whole-program build: it moved 18 call sites between
+    # the POLY-marked and not-yet-attempted buckets and removed exactly zero
+    # of them, so it is not carried here. `idx` nil keeps every one of those
+    # paths declining on its own `irep && idx` guard, exactly as before.
     when 'SEND0', 'SEND'
-      compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
+      compile_send(a, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
-      compile_send(a, self_implicit: true, irep: irep, idx: idx, owner_def: owner_def)
+      compile_send(a, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def)
     when 'BLKPUSH'
       # BLKPUSH_YIELD_SUPPORT: `BLKPUSH Ra m1:r:m2:kd (lv)` (real disasm,
       # confirmed via a fresh `mrbc -v` of `def foo(a,b); yield(a,b); end`:
@@ -13756,7 +13843,7 @@ class CodeGen
       # has to fall through to the real `[]=` -- `bc2cpp_ary_entry` only
       # ever handles a fixnum index).
       d, s = regs(a, 2)
-      case static_indexable_class(irep, idx, d, owner_def)
+      case static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -13803,7 +13890,7 @@ class CodeGen
       # GETIDX above, applied to `s` (the receiver here, not `d` -- see
       # this opcode's own separate dest/src register pair).
       d, s = regs(a, 2)
-      case static_indexable_class(irep, idx, s, owner_def)
+      case static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -13847,7 +13934,7 @@ class CodeGen
       # with the index REGISTER instead, silently breaking the trace for
       # every SETIDX site the moment it ran.
       d, idx_reg, val = regs(a, 3)
-      case static_indexable_class(irep, idx, d, owner_def)
+      case static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -13959,7 +14046,7 @@ class CodeGen
       # in-place increment, whose back-edge target sits between the initial
       # write and this use, so the dominance check declines), wired for
       # uniformity rather than for a measured win.
-      if proven_fixnum_operand?(irep, idx, d, owner_def)
+      if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
       else
         <<~CPP
@@ -13980,7 +14067,7 @@ class CodeGen
       # extraction fix as ADDILV above, same reason.
       d = a[/^R(\d+)/, 1]
       lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
-      if proven_fixnum_operand?(irep, idx, d, owner_def)
+      if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
         <<~CPP
@@ -14185,11 +14272,11 @@ class CodeGen
   # `mrb_bool_value` of a C++ `<`/`<=`/... on two `mrb_int`s is exactly what
   # today's fast path already computes, so this changes nothing but which of
   # the two existing branches survives into the generated C++.
-  def compile_cmp(op, args, irep = nil, idx = nil, owner_def = nil)
+  def compile_cmp(op, args, irep = nil, idx = nil, owner_def = nil, reg_offset = 0)
     sym = { 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.fetch(op)
     d = args[/^R(\d+)/, 1]
     s = args[/\(R(\d+)\)/, 1]
-    if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+    if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
       return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
     end
 
@@ -15258,11 +15345,13 @@ class CodeGen
     # an inlined block body the receiver is the loop-element register,
     # which no instruction in that body ever writes (the EMITTER binds it,
     # right outside the translated instruction stream), so trace_new_target
-    # has nothing to find -- and in fact never even runs there, because a
-    # block body is compiled with `idx` nil (see compile_block_body_insn's
-    # own delegation). The hint published by with_element_hint carries
-    # exactly the missing piece: "this receiver is element N of an array
-    # whose element class is X".
+    # has nothing to find -- and in fact never even runs there, because
+    # compile_insn still hands compile_send a nil `idx` for an inlined block
+    # body (see BLOCK_BODY_INDEX_SUPPORT's own note at that SEND/SSEND case
+    # for why this one delegation keeps the old bail while the fixnum and
+    # indexable proofs no longer do). The hint published by with_element_hint
+    # carries exactly the missing piece: "this receiver is element N of an
+    # array whose element class is X".
     #
     # Placed AFTER the ordinary trace on purpose, as a strict fallback:
     # `known_class` is only ever nil here (the two sources are mutually
