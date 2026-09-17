@@ -11578,12 +11578,33 @@ class CodeGen
 
       paired = irep.instructions[idx + 1]
       next unless paired && %w[SENDB SSENDB].include?(paired.op)
-      next unless paired.args =~ /n=0(?:\s|$)/
 
+      # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: `n=0` was this mechanism's
+      # own original, narrowest gate (a block call with no OTHER explicit
+      # positional args, e.g. `ary.each { ... }`); generalized here to any
+      # fixed positional count (`ary.inject(0) { ... }`,
+      # `ary.each_slice(2) { ... }`, ...). Deliberately still `\d+` only,
+      # never `*` (a real splat -- SPLAT_CALL_ARGS, a genuinely dynamic
+      # argument count with no static register layout to build `argv`
+      # from) and never followed by anything but whitespace/end-of-string
+      # (excludes a keyword call, `n=3|nk=1` -- KEYWORD_CALLSITE_SUPPORT's
+      # own comment: `mrb_funcall_with_block` can never carry keywords at
+      # all, `ci->nk = 0` in mruby's own funcall_args_capture, so a
+      # keyword-plus-block call site has no sound dynamic-dispatch
+      # translation here regardless of upvar/break/return support).
+      n_match = paired.args.match(/n=(\d+)(?:\s|$)/)
+      next unless n_match
+
+      n = n_match[1].to_i
       dest, _rest = paired.args.split(/\s+/, 2)
       dest_reg = dest[/^R(\d+)/, 1]
       block_reg = insn.args[/^R(\d+)/, 1]
-      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+      # Register layout confirmed against the identical `reduce(init)`
+      # shape recognize_accum_regions already established (`dest, then n
+      # positional args, then the block` -- real `mrbc -v`: `BLOCK R4` +
+      # `SENDB R2 :reduce n=1` has the block two past dest, matching
+      # `dest + n + 1` for n=1; `n=0` keeps the original `dest + 1`).
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s
 
       name = paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       next unless name
@@ -11609,7 +11630,7 @@ class CodeGen
       next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
 
       regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
-                   block_irep: block_irep, name: name, n: 0,
+                   block_irep: block_irep, name: name, n: n,
                    self_implicit: paired.op == 'SSENDB', upvars: upvars }
     end
     regions
