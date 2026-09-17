@@ -10299,6 +10299,288 @@ class CodeGen
     proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
   end
 
+  # ---------------------------------------------------------------------------
+  # FIXNUM_OPERAND_PROOF: "is THIS register provably a Fixnum at THIS exact
+  # program point" -- the arithmetic/comparison analogue of
+  # `static_indexable_class` above (a static receiver-class proof that lets
+  # `GETIDX`/`SETIDX` drop their runtime three-way dispatch), applied to
+  # `ADD`/`ADDI`/`SUB`/`SUBI`/`MUL`/`DIV`/`EQ`/`LT`/`LE`/`GT`/`GE`'s own
+  # operand registers.
+  #
+  # Why this matters at all: every one of those opcodes today emits BOTH a
+  # `mrb_fixnum_p(rd) && mrb_fixnum_p(rs)` fast path AND an unconditional
+  # `mrb_funcall(M, rd, "<op>", 1, rs)` else-branch, even where both operands
+  # are structurally incapable of being anything but a Fixnum. The else branch
+  # is then a real, permanent `mrb_funcall` call site in the generated C++ --
+  # counted by `scripts/bc2cpp_coverage_report.rb`'s own text scan, compiled
+  # by g++, and (for the `+`/`-` family) one of the very largest single
+  # contributors to this program's whole-program dynamic-dispatch total. When
+  # BOTH operands are proven here, compile_insn emits ONLY the native
+  # computation: no `if`, no `else`, no `mrb_funcall` at all.
+  #
+  # Exactly four proof sources, each one a fact this file already computes and
+  # already relies on elsewhere -- never a general dataflow/SSA prover:
+  #
+  #   1. An integer literal load. Every `LOADI`-family opcode this build's
+  #      mrbc emits (`LOADI8`/`LOADI16`/`LOADI32`/`LOADINEG`/`LOADI__1`/
+  #      `LOADI_0`..`LOADI_7`, per 3rd/mruby's own ops.h, all matched by the
+  #      same `/\ALOADI/` compile_insn already uses for their shared codegen)
+  #      writes `mrb_fixnum_value(<literal>)` and nothing else.
+  #   2. A `NATIVE_ARG_TARGETS`-typed `:fixnum` mandatory argument register
+  #      that has not been reassigned since method entry. compile_method's own
+  #      preamble emits `r<i+1> = mrb_fixnum_value(<arg>)` for exactly these
+  #      (see `arg_native_types` there): the C++ parameter is a real `mrb_int`,
+  #      so the boxed register value is a Fixnum by C++ type, not by hope.
+  #   3. A `GETIV` of an ivar IvarLayout proved embeddable as `:fixnum`.
+  #      compile_insn's own GETIV case emits
+  #      `r<d> = mrb_fixnum_value(((Owner_ivars*)DATA_PTR(self))->@ivar)` for
+  #      exactly these -- again a boxed `mrb_int` struct field, and every write
+  #      site to that field already carries a raising `mrb_integer_p` guard
+  #      (the embedded-ivar SETIV codegen), so the field can never hold
+  #      anything else.
+  #   4. An `ADD`/`SUB`/`MUL`/`ADDI`/`SUBI` whose OWN operands are themselves
+  #      proven by 1-4 (bounded recursion, FIXNUM_PROOF_MAX_DEPTH). That is
+  #      self-consistent rather than circular: an op whose operands are proven
+  #      is emitted by this same round as the bare `mrb_fixnum_value(a <op> b)`
+  #      form, so its destination register demonstrably holds a Fixnum.
+  #      `DIV` is deliberately NOT a source: its fast path calls
+  #      `mrb_div_int_value`, whose return type this round has not audited for
+  #      every overflow/bigint configuration -- devirtualizing a DIV is safe
+  #      (its own two operands are what's proven), trusting its RESULT is a
+  #      separate question, declined.
+  #
+  # `MOVE` chains are followed exactly the way `trace_new_target`/
+  # `proven_array_source_scan`/`trace_eqq_literal_receiver` already follow them
+  # (`OP_MOVE` is a verbatim `regs[a] = regs[b]` copy), so a value that mrbc
+  # shuffled through a temporary is still provable.
+  #
+  # The part that is genuinely new here, and the part everything above depends
+  # on, is DOMINANCE: a plain backward scan for "the most recent write" is only
+  # meaningful if control cannot ENTER the instruction stream between that write
+  # and this use. Three real entry-point kinds exist in a compiled body, and all
+  # three are honoured:
+  #   - a `goto` target. `jump_targets(irep)` is the exact set compile_method
+  #     itself emits a real C `L<addr>:` label for; the scan refuses to step
+  #     back past any of them, and also refuses outright when the USE's own
+  #     address is one (control could arrive there from anywhere).
+  #   - an exception handler. Every real catch handler (`Irep#catch_handlers`,
+  #     mrbc's own "catch type: rescue begin: ... end: ... target: ..." header)
+  #     contributes its `target` to the entry set -- that address is reached by
+  #     a raise, not by any `goto` `jump_targets` could see -- AND its whole
+  #     `begin_addr..end_addr` protected range to a second, stronger barrier:
+  #     an address in that range refuses the proof outright, at the USE and at
+  #     every step of the walk. Both halves are needed. RESCUE_SUPPORT extracts
+  #     exactly that range into a SEPARATE C++ function
+  #     (`emit_rescue_try_body`) whose registers are re-initialized from a Ctx
+  #     struct carrying only `self` and the method's arguments, so a write
+  #     before `begin_addr` genuinely does not reach a use inside the try body
+  #     at all -- and `emit_rescue_try_body` calls this same `compile_insn`
+  #     with the ENCLOSING method's own irep and real instruction indices, so
+  #     without the range barrier the walk would happily step from inside the
+  #     extracted function back out into code that is no longer in front of it.
+  #   - a nested block writing an enclosing local. `SETUPVAR R<src> <b> <lv>`
+  #     compiles to a direct `r<b> = ...` (inlined block bodies,
+  #     compile_block_body_insn) or `*bc2cpp_upvar_<b> = ...` against `&r<b>`
+  #     (BLOCK_FALLBACK bodies, UPVAR_CAPTURE_SUPPORT) -- a real write to an
+  #     enclosing register that this irep's own instruction list does not
+  #     contain. Every `SETUPVAR` destination anywhere in the whole child-irep
+  #     subtree (any depth, deliberately ignoring the level operand) is
+  #     collected once per irep and refused as an operand.
+  #
+  # Everything else declines silently and falls through to today's unchanged
+  # dual-path codegen -- always correct, just not a size win.
+  # ---------------------------------------------------------------------------
+
+  # The opcodes the backward scan is allowed to STEP OVER, i.e. the ones
+  # verified (against 3rd/mruby's own ops.h + vm.c operand semantics) to write
+  # at most the single register named by their first `R<n>` operand and to
+  # create no control-flow entry point of their own. Anything NOT listed --
+  # `RESCUE` (writes its SECOND operand, `R[b] = R[a].isa?(R[b])`), `APOST`
+  # (writes a whole `a..a+b+c` range), `ARGARY` (writes `a` AND `a+1`), `ASET`,
+  # `SETUPVAR` (writes an ENCLOSING frame's register), `EXCEPT`/`RAISEIF`/
+  # `MATCHERR`/`JMPUW` (exception-edge entry points), `EXT1`/`EXT2`/`EXT3`,
+  # `CALL`, `ERR`, or any future opcode this list has not been re-audited for
+  # -- ends the scan with a refusal. An over-approximated WRITE only ever costs
+  # a missed proof; an under-approximated one would be a wrong answer, which is
+  # why this is a whitelist rather than a blacklist.
+  FIXNUM_PROOF_STEP_OVER_OPS = Set[
+    'NOP', 'MOVE', 'LOADL', 'LOADSYM', 'LOADNIL', 'LOADSELF', 'LOADTRUE', 'LOADFALSE',
+    'GETGV', 'SETGV', 'GETSV', 'SETSV', 'GETIV', 'SETIV', 'GETCV', 'SETCV',
+    'GETCONST', 'SETCONST', 'GETMCNST', 'SETMCNST', 'GETUPVAR',
+    'GETIDX', 'GETIDX0', 'SETIDX',
+    'JMP', 'JMPIF', 'JMPNOT', 'JMPNIL',
+    'SSEND', 'SSEND0', 'SSENDB', 'SEND', 'SEND0', 'SENDB', 'SUPER', 'BLKCALL', 'BLKPUSH',
+    'ENTER', 'KEY_P', 'KEYEND', 'KARG',
+    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK',
+    'ADD', 'ADDI', 'SUB', 'SUBI', 'ADDILV', 'SUBILV', 'MUL', 'DIV',
+    'EQ', 'LT', 'LE', 'GT', 'GE',
+    'ARRAY', 'ARRAY2', 'ARYCAT', 'ARYPUSH', 'ARYSPLAT', 'AREF',
+    'INTERN', 'SYMBOL', 'STRING', 'STRCAT', 'HASH', 'HASHADD', 'HASHCAT',
+    'LAMBDA', 'BLOCK', 'METHOD', 'RANGE_INC', 'RANGE_EXC',
+    'OCLASS', 'CLASS', 'MODULE', 'EXEC', 'DEF', 'TDEF', 'SDEF', 'ALIAS', 'UNDEF',
+    'SCLASS', 'TCLASS', 'DEBUG', 'STOP'
+  ].freeze
+
+  # How many nested "this operand is itself a proven arithmetic result" hops
+  # source 4 above may take. Deliberately small: a real `(a + b) * (c - d)`
+  # needs two, and an unbounded walk would turn a linear codegen pass into a
+  # potentially exponential one on a long expression chain.
+  FIXNUM_PROOF_MAX_DEPTH = 4
+
+  # Per-irep, memoized: the entry-address set (every `goto` target plus every
+  # catch handler's own raise target), the protected-range address set (every
+  # catch handler's own `begin_addr..end_addr`), and the enclosing-register
+  # SETUPVAR destination set -- see the header above for what each one rules
+  # out.
+  def fixnum_proof_ctx(irep)
+    @fixnum_proof_ctx ||= {}
+    return @fixnum_proof_ctx[irep.label] if @fixnum_proof_ctx.key?(irep.label)
+
+    entries = jump_targets(irep).dup
+    protected_addrs = Set.new
+    (irep.catch_handlers || []).each do |ch|
+      entries << ch.target
+      protected_addrs.merge(ch.begin_addr..ch.end_addr)
+    end
+    @fixnum_proof_ctx[irep.label] =
+      { entries: entries, protected: protected_addrs, upvars: subtree_upvar_written_regs(irep) }
+  end
+
+  # Every register any `SETUPVAR` in this irep's whole child subtree names as
+  # its destination (operand B), as a Set of decimal strings. The level operand
+  # is deliberately ignored: a depth-1 `SETUPVAR` inside a grandchild names a
+  # register of THIS frame just as a depth-0 one inside a direct child does,
+  # and over-collecting only ever costs a missed proof.
+  def subtree_upvar_written_regs(irep, acc = Set.new, seen = Set.new)
+    (irep.reps || []).each do |label|
+      next if seen.include?(label)
+
+      seen << label
+      child = @ireps[label]
+      next unless child
+
+      child.instructions.each do |insn|
+        next unless insn.op == 'SETUPVAR'
+
+        b = insn.args.split(/\s+/)[1]
+        acc << b if b =~ /\A\d+\z/
+      end
+      subtree_upvar_written_regs(child, acc, seen)
+    end
+    acc
+  end
+
+  # FIXNUM_OPERAND_PROOF's own entry point -- see the header above for the full
+  # soundness argument. `reg` is a register NUMBER STRING (exactly what
+  # compile_insn's own `a[/^R(\d+)/, 1]` extraction hands back). Returns true
+  # only for a real, exactly-verified proof; false means "not provable here",
+  # never "provably not a Fixnum".
+  def proven_fixnum_operand?(irep, idx, reg, owner_def, depth = 0)
+    return false unless irep && idx && reg && owner_def
+    return false if depth > FIXNUM_PROOF_MAX_DEPTH
+
+    ctx = fixnum_proof_ctx(irep)
+    return false unless ctx
+
+    cur = reg.to_s
+    return false if ctx[:upvars].include?(cur)
+
+    j = idx
+    while j >= 0
+      insn = irep.instructions[j]
+      return false unless insn
+      # Inside a real catch handler's protected range: RESCUE_SUPPORT compiles
+      # this address into a separate extracted function with re-initialized
+      # registers, so neither a use here nor a step across here is meaningful.
+      return false if ctx[:protected].include?(insn.addr)
+      # An opcode this scan has not been audited for could write `cur` from a
+      # position the first-operand test below never looks at -- refuse rather
+      # than walk past it.
+      return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
+
+      if j < idx && insn.args =~ /\AR#{cur}\b/
+        if insn.op == 'MOVE'
+          # `regs[a] = regs[b]` -- keep scanning, now for whatever wrote the
+          # SOURCE register, exactly as trace_new_target's own walk does.
+          src = insn.args.scan(/R(\d+)/).flatten[1]
+          return false unless src
+          return false if ctx[:upvars].include?(src)
+
+          cur = src
+        else
+          return fixnum_proof_source?(irep, j, insn, cur, owner_def, depth)
+        end
+      end
+
+      # Control must not be able to ENTER the stream here: if this address
+      # carries a real `L<addr>:` label, a `goto` from anywhere else in the
+      # function can land on it, and nothing further back dominates the use.
+      return false if ctx[:entries].include?(insn.addr)
+
+      j -= 1
+    end
+
+    # Fell off the top of the body without finding any write: `cur` still holds
+    # whatever compile_method's own preamble put there at method entry.
+    fixnum_proof_entry_arg?(irep, cur, owner_def)
+  end
+
+  # Classify the one instruction the backward scan found writing `reg` -- the
+  # four proof sources from the header above (MOVE is handled by the caller,
+  # since it continues the walk rather than terminating it).
+  def fixnum_proof_source?(irep, j, insn, reg, owner_def, depth)
+    return true if insn.op.start_with?('LOADI')
+
+    case insn.op
+    when 'GETIV'
+      ivar = insn.args[/@(\w+)/, 1]
+      !ivar.nil? && embed_type(owner_def.owner, ivar) == :fixnum
+    when 'ADD', 'SUB', 'MUL'
+      s = insn.args[/\(R(\d+)\)/, 1]
+      !s.nil? && proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1) &&
+        proven_fixnum_operand?(irep, j, s, owner_def, depth + 1)
+    when 'ADDI', 'SUBI'
+      proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1)
+    else
+      false
+    end
+  end
+
+  # Proof source 2: `reg` is a mandatory argument register of THIS method's own
+  # top-level irep whose NATIVE_ARG_TARGETS-driven C++ parameter type is
+  # `mrb_int`, so compile_method's preamble boxed it with `mrb_fixnum_value`.
+  #
+  # `owner_def.irep == irep.label` is load-bearing, not defensive: compile_insn
+  # is also reached with a BLOCK_FALLBACK child irep while `owner_def` still
+  # names the ENCLOSING method (emit_proc_fallback_fn), and that block's own
+  # `r1..` are its block parameters, which no annotation here describes.
+  # `pure_mandatory_arity?` likewise: with real optional arguments the register
+  # numbering no longer maps 1:1 onto `native_arg_types`' own mandatory slots.
+  def fixnum_proof_entry_arg?(irep, reg, owner_def)
+    return false unless owner_def.irep == irep.label
+    return false unless pure_mandatory_arity?(irep)
+
+    enter = irep.instructions.find { |i| i.op == 'ENTER' }
+    mand = enter ? enter.args.split(':').first.to_i : 0
+    r = reg.to_i
+    return false unless r >= 1 && r <= mand
+
+    native_arg_types(owner_def, mand)[r - 1] == :fixnum
+  end
+
+  # Both operand registers of one binary opcode, proven at the same point.
+  def proven_fixnum_pair?(irep, idx, dreg, sreg, owner_def)
+    return false unless dreg && sreg
+
+    proven_fixnum_operand?(irep, idx, dreg, owner_def) &&
+      proven_fixnum_operand?(irep, idx, sreg, owner_def)
+  end
+
+  # The one-line note emitted above a devirtualized arithmetic/comparison op,
+  # mirroring the embedded-ivar GETIV/SETIV codegen's own `// @x embedded`
+  # marker -- so a real generated body says WHY it has no fallback.
+  FIXNUM_PROOF_NOTE = "  // operands proven Fixnum -- no runtime check, no mrb_funcall fallback\n"
+
   # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
   # `ary.map/select/reject/find/filter_map { |x| ... }` (1-mandatory-arg
   # blocks) and `ary.each_with_index { |x, i| ... }` (2-mandatory-arg
@@ -12791,43 +13073,62 @@ class CodeGen
     when 'ADDI'
       d = a[/^R(\d+)/, 1]
       lit = a.split(/\s+/).last
-      <<~CPP
-        if (mrb_integer_p(r#{d})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
-        }
-      CPP
+      # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum by construction, so
+      # only the destination register needs proving here (see
+      # proven_fixnum_operand?'s own header).
+      if proven_fixnum_operand?(irep, idx, d, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
+      else
+        <<~CPP
+          if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+          }
+        CPP
+      end
     when 'ADD'
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      <<~CPP
-        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "+", 1, r#{s});
-        }
-      CPP
+      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n"
+      else
+        <<~CPP
+          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "+", 1, r#{s});
+          }
+        CPP
+      end
     when 'SUBI'
       d = a[/^R(\d+)/, 1]
       lit = a.split(/\s+/).last
-      <<~CPP
-        if (mrb_integer_p(r#{d})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
-        }
-      CPP
+      if proven_fixnum_operand?(irep, idx, d, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
+      else
+        <<~CPP
+          if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+          }
+        CPP
+      end
     when 'SUB'
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      <<~CPP
-        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "-", 1, r#{s});
-        }
-      CPP
+      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n"
+      else
+        <<~CPP
+          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "-", 1, r#{s});
+          }
+        CPP
+      end
     when 'MUL'
       # ADD/SUB's own fixnum-fastpath-else-mrb_funcall shape exactly:
       # src/vm.c's OP_ADD/OP_SUB/OP_MUL all expand from the identical
@@ -12838,13 +13139,17 @@ class CodeGen
       # fastpath for its own real rounding-direction reason, see below).
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      <<~CPP
-        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "*", 1, r#{s});
-        }
-      CPP
+      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n"
+      else
+        <<~CPP
+          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "*", 1, r#{s});
+          }
+        CPP
+      end
     when 'DIV'
       # DIV_FASTPATH_SUPPORT: real Ruby integer division (`Integer#/`)
       # floors toward negative infinity, not C's own truncating `/` --
@@ -12869,15 +13174,19 @@ class CodeGen
       # real Bignum).
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      <<~CPP
-        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-          r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "/", 1, r#{s});
-        }
-      CPP
+      if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
+      else
+        <<~CPP
+          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+            r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "/", 1, r#{s});
+          }
+        CPP
+      end
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
-      compile_cmp(insn.op, a)
+      compile_cmp(insn.op, a, irep, idx, owner_def)
     when 'SEND0', 'SEND'
       compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
@@ -13579,13 +13888,22 @@ class CodeGen
       # is not valid C++), never a silently-wrong translation.
       d = a[/^R(\d+)/, 1]
       lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
-      <<~CPP
-        if (mrb_integer_p(r#{d})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
-        }
-      CPP
+      # FIXNUM_OPERAND_PROOF: same single-operand question ADDI asks -- rarely
+      # provable in practice (the real shape here is a `while` loop's own
+      # in-place increment, whose back-edge target sits between the initial
+      # write and this use, so the dominance check declines), wired for
+      # uniformity rather than for a measured win.
+      if proven_fixnum_operand?(irep, idx, d, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
+      else
+        <<~CPP
+          if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+          }
+        CPP
+      end
     when 'SUBILV'
       # OP_SUBILV -- ADDILV's own OP_MATHILV(sub) sibling, identical shape
       # (see ADDILV's own comment above for the real b-register-is-dead
@@ -13596,13 +13914,17 @@ class CodeGen
       # extraction fix as ADDILV above, same reason.
       d = a[/^R(\d+)/, 1]
       lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
-      <<~CPP
-        if (mrb_integer_p(r#{d})) {
-          r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
-        }
-      CPP
+      if proven_fixnum_operand?(irep, idx, d, owner_def)
+        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
+      else
+        <<~CPP
+          if (mrb_integer_p(r#{d})) {
+            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+          }
+        CPP
+      end
     when 'RANGE_INC'
       # "RANGE_INC Ra" -- R[a] = Range.new(R[a], R[a+1], exclude_end=false)
       # (real OP_RANGE_INC semantics, src/vm.c: `mrb_range_new(mrb, regs[a],
@@ -13790,10 +14112,21 @@ class CodeGen
   # ever reaching this fallback), but never *unsound*: mrb_funcall("==")
   # against an unoverridden class already falls back to identity equality
   # on its own, so the observable result is identical either way.
-  def compile_cmp(op, args)
+  # FIXNUM_OPERAND_PROOF: `irep`/`idx`/`owner_def` are threaded through purely
+  # so this can ask the same "are BOTH operands provably Fixnum here" question
+  # ADD/SUB/MUL/DIV now ask -- when they are, the whole runtime check and its
+  # `mrb_funcall` else-branch disappear and only the native comparison remains.
+  # `mrb_bool_value` of a C++ `<`/`<=`/... on two `mrb_int`s is exactly what
+  # today's fast path already computes, so this changes nothing but which of
+  # the two existing branches survives into the generated C++.
+  def compile_cmp(op, args, irep = nil, idx = nil, owner_def = nil)
     sym = { 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.fetch(op)
     d = args[/^R(\d+)/, 1]
     s = args[/\(R(\d+)\)/, 1]
+    if proven_fixnum_pair?(irep, idx, d, s, owner_def)
+      return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
+    end
+
     <<~CPP
       if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
         r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));
