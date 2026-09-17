@@ -1566,8 +1566,25 @@ class IvarLayout
       # irep, not pooled by name the way ArgTypes below is), so it's
       # authoritative and safe to trust regardless of whether `method_name`
       # is MONO or POLY -- tried first for exactly that reason.
+      #
+      # EMBED_TYPE_SAFETY: a real, caught bug -- Annotations' own token
+      # table (TYPES, above) maps an `Array` argument annotation to
+      # `:array`, a tag CodeGen::TYPE_OPS never defines a `:box`/etc. entry
+      # for (that class's own header comment: "Only a fixnum/symbol type
+      # token means anything today -- matching the two primitive types
+      # IvarLayout/ArgTypes themselves model"). Blindly trusting ANY
+      # truthy annotation token here (as this line used to) lets an
+      # `Array`-annotated argument flow straight into `@ivar_layout` as if
+      # it were embeddable, only failing much later and far less legibly
+      # -- a raw `TYPE_OPS.fetch(:array)` KeyError deep inside GETIV/SETIV
+      # codegen for a real, otherwise-unrelated owner, first actually
+      # triggered by a devirtualization path speculatively probing a
+      # method nothing had ever needed `compiles_clean?` for before.
+      # Restricting to exactly the two tags TYPE_OPS actually supports
+      # keeps this the same "safe miss, not a wrong answer" shape every
+      # other branch of this function already holds itself to.
       t = annotations && annotations[irep.label]&.args&.[](pos - 1)
-      return t if t
+      return t if t == :fixnum || t == :symbol
 
       t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
       return t if t
@@ -1692,17 +1709,28 @@ class Annotations
   # `:array` (the `Array` token) feeds ONLY the block-receiver return-
   # type gate (annotated_array_return -- "this MONO method returns a
   # fresh Array", consumed by the block recognizers' chained rule). It
-  # must never reach struct-field codegen: native_arg_types (the sole
-  # consumer of `args`, and the only path from an annotation token to a
-  # C type) maps unrecognized tokens through native_c_type, which has
-  # no `:array` arm -- an `Array` token in ARGUMENT position would raise
-  # KeyError at codegen time rather than silently embed. That fail-loud
-  # shape is deliberate (same discipline as ClassAnnotations'
-  # silently-no-op on non-class tokens, mirrored): argument Array types
-  # are not modeled, return Array types are. See annotated_array_return's
-  # own comment for why the gate itself stays sound despite resting on a
-  # hand-placed comment (the emitter's own mrb_array_p tripwire verifies
-  # every admitted site at runtime).
+  # must never reach struct-field codegen: `native_arg_types` (the only
+  # path from an annotation token to a C *parameter* type) maps
+  # unrecognized tokens through native_c_type, which has no `:array` arm
+  # -- an `Array` token in ARGUMENT position would raise KeyError at
+  # codegen time rather than silently embed. That fail-loud shape is
+  # deliberate (same discipline as ClassAnnotations' silently-no-op on
+  # non-class tokens, mirrored): argument Array types are not modeled,
+  # return Array types are. See annotated_array_return's own comment for
+  # why the gate itself stays sound despite resting on a hand-placed
+  # comment (the emitter's own mrb_array_p tripwire verifies every
+  # admitted site at runtime).
+  #
+  # `native_arg_types` is NOT the only real consumer of `args`, though (a
+  # real, caught bug in this comment's own earlier claim that it was):
+  # `IvarLayout.trace_type`'s own incoming-argument fallback also reads
+  # an annotation's `args` directly, to seed an ivar's inferred type from
+  # a same-named parameter it was assigned from (`@x = x`). It has its
+  # own matching filter now (only `:fixnum`/`:symbol` pass through) --
+  # see that function's own EMBED_TYPE_SAFETY comment for the real,
+  # whole-program crash this closes (an `Array`-annotated argument
+  # reaching `CodeGen::TYPE_OPS.fetch(:array)`, a KeyError, deep inside
+  # GETIV/SETIV codegen for a totally unrelated owner).
 
   # irep label -> Annotation, for every real `def` (any registry entry with
   # a bytecode body -- a native MethodDef's `irep` is nil, nothing to
@@ -6832,6 +6860,106 @@ class CodeGen
     defs.first
   end
 
+  # POLY_SMALL_N_SUPPORT: a genuinely POLY name (monomorphic_target's own
+  # `defs.size == 1` gate already failed) can still often be devirtualized
+  # -- not to ONE direct call the way MONO/TYPED are, but to a real
+  # runtime-class-checked CHAIN of them, one `if` per known real owner,
+  # falling back to ordinary `mrb_funcall` only for a receiver matching
+  # none. Measured real whole-program fan-out for the actual top dynamic-
+  # dispatch names first, not assumed: `width` has 5 real owners, `term`/
+  # `party`/`size`/`repeat?`/`db` have 2-3, `dispose` has 16 -- so this is
+  # gated on a small, bounded owner count (`POLY_SMALL_N_MAX`) rather than
+  # attempted unconditionally; past that point a linear chain of runtime
+  # class checks stops being clearly cheaper than mruby's own real method-
+  # table hash lookup, and the code-size cost (one whole extra `if` branch
+  # per owner) keeps growing regardless.
+  #
+  # Real C++ virtual dispatch (a vtable) was considered and rejected for
+  # this whole problem, not just scoped smaller: every mruby object is an
+  # opaque, tagged `mrb_value` (`RObject`/`RData` for a user class), never
+  # a real C++ polymorphic instance -- giving every compiled class a real
+  # vtable would mean growing a second, parallel object model alongside
+  # mruby's own GC-managed one, a fundamentally bigger undertaking than
+  # anything this file's own narrow "compile individual leaf method
+  # bodies against the real mruby object model" scope has ever done. A
+  # chain of `mrb_obj_class`-compares reuses the exact same trust model
+  # every other runtime-guarded direct call in this file already
+  # establishes (TYPED, IVAR_ACCESSOR) -- just against several owners
+  # instead of one -- with no new architecture at all.
+  #
+  # Deliberately narrower than TYPED/MONO in two ways, to keep this
+  # function simple and independently reviewable rather than threading
+  # every candidate through the existing (intricate, optional-arg- and
+  # NATIVE_ARG_TARGETS-aware) `call_argv` construction those paths use:
+  # only a PURE-mandatory candidate (no optional args) participates, and
+  # only when its own arity exactly matches this call site's real `n` --
+  # a candidate that doesn't fit either way just never joins the chain,
+  # always safe (it still gets a real, correct answer through the
+  # ordinary `mrb_funcall` fallback every chain ends with, exactly like a
+  # receiver of some OTHER, unlisted class does today already). Same
+  # `@only_owners`/`@other_owners` emission-eligibility gate every other
+  # devirtualization path here already uses (no `_impl` exists for an
+  # owner this run isn't emitting).
+  POLY_SMALL_N_MAX = 5
+
+  def poly_small_n_targets(name, n)
+    defs = @registry[name]
+    return nil unless defs && defs.size >= 2
+
+    candidates = defs.select do |t|
+      next false unless t.irep
+      # SINGLETON_OWNER_EXCLUSION: a `.singleton`-suffixed owner (bc2cpp's
+      # own naming for `def self.foo`/`class << self` methods) can never
+      # actually match this chain's own runtime guard below --
+      # `mrb_obj_class(M, recv)` is `mrb_class_real(mrb_class(mrb, obj))`
+      # (confirmed by reading 3rd/mruby/src/class.c directly), which walks
+      # PAST `MRB_TT_SCLASS`/`MRB_TT_ICLASS` wrappers via `cl->super` and
+      # returns the real underlying class (e.g. plain `Module`) for a
+      # module/class object with its own singleton methods -- never that
+      # object's own identity. `const_chain_value_expr(t.owner)` for a
+      # `.singleton` owner resolves the plain module/class constant (its
+      # `.singleton` suffix just gets stripped), which is NOT the right
+      # RClass for a receiver-class-identity check against a singleton
+      # method. Left in, such a candidate would silently never fire --
+      # not wrong (the chain falls through to the next candidate or the
+      # `mrb_funcall` fallback either way), just dead code generation
+      # miscategorized as "runtime-class-checked". Excluded up front
+      # instead of generated-and-dead.
+      next false if t.owner.end_with?('.singleton')
+      next false unless compiles_clean?(t.irep)
+
+      t_irep = @ireps.fetch(t.irep)
+      next false unless pure_mandatory_arity?(t_irep)
+      next false unless n == mandatory_arity(t_irep)
+      next false unless native_arg_types(t, n).compact.empty?
+
+      if @only_owners && !@only_owners.include?(t.owner)
+        next false unless @other_owners&.include?(t.owner)
+      end
+
+      true
+    end
+    return nil unless candidates.size.between?(2, POLY_SMALL_N_MAX)
+
+    candidates
+  end
+
+  def compile_poly_small_n(name, d, recv, argv, n)
+    candidates = poly_small_n_targets(name, n)
+    return nil unless candidates
+
+    branches = candidates.map do |target|
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
+      call = "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+      "if (#{check}) {\n    #{call}\n  } else "
+    end
+    owners_note = candidates.map(&:owner).join(', ')
+    note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
+           "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
+    "#{note}  #{branches.join}{\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+  end
+
   # LITERAL_EQQ_SUPPORT's own soundness gate -- a LIVE re-check against
   # THIS run's own @registry, not a comment trusting a fact that was true
   # the day it was written. Both `#==` and `#===` have to still be
@@ -7503,6 +7631,36 @@ class CodeGen
   # construction.
   def subclassed_set
     @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
+  end
+
+  # LEXICAL_SELF_SUPPORT: compile_send's own call-dispatch analogue of
+  # self_receiver_class (top-level function, above) -- "is `self` inside a
+  # method of `owner_def.owner` provably an instance of exactly that
+  # class?" Exact same three-part answer, exact same reasoning
+  # (self_receiver_class's own comment has the full soundness argument:
+  # no subclass may exist anywhere in the program, or an override could
+  # dispatch differently; a `.singleton` owner's `self` is a Class/Module
+  # object, not an instance, so instance-method reasoning about it would
+  # be answering about the wrong object entirely), just reading this
+  # CodeGen instance's own memoized `known_owner_set`/`subclassed_set`
+  # instead of a `ctx` hash built for the separate return-class-inference
+  # pass self_receiver_class itself serves.
+  #
+  # Deliberately NOT reused by calling self_receiver_class directly: that
+  # function's own `ctx` argument is a purpose-built hash several other
+  # analyses construct differently (element_ctx, hash_element_ctx, ...),
+  # and threading a real CodeGen instance through that shared shape only
+  # to satisfy this one caller would be a bigger, riskier change than one
+  # small parallel function reusing the same two already-memoized sets.
+  def lexical_self_owner(owner_def)
+    return nil unless owner_def
+
+    owner = owner_def.owner
+    return nil if owner.nil? || owner.end_with?('.singleton')
+    return nil unless known_owner_set.include?(owner)
+    return nil if subclassed_set.include?(owner)
+
+    owner
   end
 
   def element_ctx(ivar_classes, mand, arg_classes, owner_name)
@@ -11710,16 +11868,36 @@ class CodeGen
         }
       CPP
     when 'DIV'
-      # No fixnum/fixnum fastpath here (unlike ADD/SUB): real Ruby integer
-      # division (`Fixnum#/`) floors toward negative infinity, not C's own
-      # truncating `/` -- getting that right means duplicating mruby's own
-      # `mrb_div_int` rounding, not worth it for this prototype's scope, so
-      # this always goes through the real method (`mrb_funcall`), which
-      # calls the same C-implemented `Integer#/` the interpreter itself
-      # would -- always correct, just without OP_DIV's own in-VM fast path.
+      # DIV_FASTPATH_SUPPORT: real Ruby integer division (`Integer#/`)
+      # floors toward negative infinity, not C's own truncating `/` --
+      # this file's own earlier round punted on replicating that rounding
+      # by hand and always went through `mrb_funcall`. Turns out nothing
+      # needs replicating: `int_div` (the real `Integer#/` native
+      # implementation, 3rd/mruby/src/numeric.c) itself calls a real,
+      # already-public API for exactly the plain-Integer/plain-Integer
+      # case -- `mrb_div_int_value(mrb, mrb_integer(x), mrb_integer(y))`
+      # -- confirmed by reading `int_div` directly, not assumed from the
+      # function's name. Calling that same function here (declared via an
+      # `extern "C"` forward declaration exactly like `mrb_str_aref`'s own
+      # -- `mruby/internal.h` has no MRB_BEGIN_DECL/MRB_END_DECL guard
+      # either, confirmed by reading it) reproduces `Integer#/`'s real
+      # rounding AND its real `ZeroDivisionError`/overflow raises exactly,
+      # not an approximation -- the same "call mruby's own real
+      # implementation function directly" substitution `GETIDX`'s own
+      # String arm already makes for `mrb_str_aref`. Same fixnum/fixnum
+      # runtime guard ADD/SUB/MUL already use (no bigint check, matching
+      # their own established precedent for this exact reason), `mrb_
+      # funcall` fallback for anything else (Float, a user #/ override, a
+      # real Bignum).
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      "  r#{d} = mrb_funcall(M, r#{d}, \"/\", 1, r#{s});\n"
+      <<~CPP
+        if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
+        } else {
+          r#{d} = mrb_funcall(M, r#{d}, "/", 1, r#{s});
+        }
+      CPP
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
       compile_cmp(insn.op, a)
     when 'SEND0', 'SEND'
@@ -13426,6 +13604,48 @@ class CodeGen
     # any target this file already devirtualized before.
     target = nil if target && !n.between?(mandatory_arity(@ireps.fetch(target.irep)),
                                            mandatory_arity(@ireps.fetch(target.irep)) + optional_arity(@ireps.fetch(target.irep)))
+    # LEXICAL_SELF_SUPPORT: still POLY by name, but this particular call
+    # site is an IMPLICIT-self send (`member(db, m)`, not
+    # `some_receiver.member(db, m)`) -- and unlike an explicit receiver,
+    # `self`'s class inside a method body is not merely traced, it is
+    # KNOWN outright whenever `lexical_self_owner` says so (no subclass of
+    # the enclosing owner exists anywhere in the whole program, and
+    # self-rebinding -- `instance_eval`/`instance_exec` -- never occurs in
+    # this closed world; see that function's own comment and
+    # self_receiver_class's, which this mirrors). That is a strictly
+    # stronger guarantee than TYPED/trace_new_target's own runtime-checked
+    # trace below (a fact *proven*, not merely *observed*), so the direct
+    # call this resolves to needs no runtime `mrb_class_ptr` guard and no
+    # `mrb_funcall` fallback at all -- the same unconditional-call shape
+    # MONO gets, just reached by a different, receiver-independent route.
+    # Never attempted for an explicit-receiver send: `self_implicit` is
+    # exactly the one bit of information (also see self_receiver_class's
+    # own header) that makes "self" mean "owner_def.owner" here at all --
+    # an explicit receiver register could hold literally anything.
+    lexical_self = false
+    lexical_self_ivar_accessor = nil
+    if target.nil? && self_implicit
+      lex_owner = lexical_self_owner(owner_def)
+      if lex_owner
+        lex_candidate = @registry[name]&.find { |md| md.owner == lex_owner }
+        if lex_candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(lex_candidate.irep)) &&
+           compiles_clean?(lex_candidate.irep) &&
+           n.between?(mandatory_arity(@ireps.fetch(lex_candidate.irep)),
+                      mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
+          target = lex_candidate
+          lexical_self = true
+        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
+          # LEXICAL_SELF_IVAR_ACCESSOR: the ivar_accessor-kind analogue of
+          # the branch just above -- see IVAR_ACCESSOR_DEVIRT's own
+          # comment (below) for why an attr_reader/writer candidate can
+          # never satisfy the ordinary `.irep`-based branch. Same
+          # certain-not-traced guarantee applies here too: no runtime
+          # `mrb_class_ptr` guard needed, straight to `mrb_iv_get`/
+          # `mrb_iv_set`.
+          lexical_self_ivar_accessor = lex_candidate
+        end
+      end
+    end
     # Name-based devirtualization failed (still POLY by name) -- try a
     # call-site-specific fallback: THIS receiver, traced backward through
     # the same straight-line method body, might still be provably a fresh
@@ -13642,10 +13862,38 @@ class CodeGen
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
+      elsif lexical_self
+        note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
+               "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
+               "no runtime check)#{native_note}\n"
+        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       else
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      end
+    elsif lexical_self_ivar_accessor
+      # LEXICAL_SELF_IVAR_ACCESSOR's own codegen -- the implicit-self
+      # analogue of IVAR_ACCESSOR_DEVIRT below, with the same
+      # lexical_self_owner certainty LEXICAL_SELF's own comment (above)
+      # already established: no runtime `mrb_class_ptr` guard, no
+      # `mrb_funcall` fallback, straight to iv_tbl.
+      owner = lexical_self_ivar_accessor.owner
+      if name.end_with?('=')
+        ivar = name[0..-2]
+        val = argv.first
+        note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (self, statically #{owner}), " \
+               "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall, no runtime " \
+               "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
+               "3rd/mruby/src/class.c citation this reproduces exactly.\n"
+        "#{note}  mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
+          "  r#{d} = #{val};\n"
+      else
+        note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (self, statically #{owner}), " \
+               "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall, no runtime " \
+               "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
+               "3rd/mruby/src/class.c citation this reproduces exactly.\n"
+        "#{note}  r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n"
       end
     elsif ivar_accessor_target
       # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
@@ -13688,6 +13936,9 @@ class CodeGen
           "  }\n"
       end
     else
+      poly_small_n = compile_poly_small_n(name, d, recv, argv, n)
+      return poly_small_n if poly_small_n
+
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
       "#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
     end
@@ -14137,6 +14388,11 @@ if $PROGRAM_NAME == __FILE__
   # at all, matching the real signature exactly (3rd/mruby/include/mruby/
   # internal.h's own declaration).
   puts 'extern "C" mrb_value mrb_str_aref(mrb_state*, mrb_value, mrb_value, mrb_value);'
+  # DIV_FASTPATH_SUPPORT: same `mruby/internal.h`-has-no-C-linkage-guard
+  # situation as `mrb_str_aref` just above -- `DIV`'s own compile_insn
+  # case calls this directly (mruby.h's own `mrb_int` typedef is already
+  # in scope by this point, matching that header's own declaration).
+  puts 'extern "C" mrb_value mrb_div_int_value(mrb_state*, mrb_int, mrb_int);'
   # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
   # another gem's own *_decls.h, written by this same OUT_DIR mechanism
   # below) to #include so a devirtualized call to an OTHER_OWNERS target
