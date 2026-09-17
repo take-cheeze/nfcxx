@@ -8962,6 +8962,17 @@ class CodeGen
       glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
     end
 
+    # EXPLICIT_BLOCK_ARG_SUPPORT: `&expr`'s own real bytecode shape (no
+    # `BLOCK` instruction at all -- see recognize_explicit_block_arg_
+    # regions' own comment) has no `block_addr` of its own to suppress,
+    # only `sendb_addr` -- the whole region IS that one instruction.
+    recognize_explicit_block_arg_regions(irep).each do |region|
+      next if suppressed.include?(region[:sendb_addr])
+
+      suppressed << region[:sendb_addr]
+      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region)
+    end
+
     # LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of
     # BLOCK_CFUNC_FALLBACK_SUPPORT immediately above -- reuses the exact
     # same emit_proc_fallback_fn helper (compile the child irep as a
@@ -11962,6 +11973,17 @@ class CodeGen
       nested_suppressed << nregion[:block_addr] << nregion[:sendb_addr]
       nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name)
     end
+    # EXPLICIT_BLOCK_ARG_SUPPORT: same recursive composition as the
+    # nested BLOCK_FALLBACK pass just above -- a `&expr`-shaped SENDB/
+    # SSENDB inside THIS block's own body needs no recursive compile of
+    # its own (see that recognizer's own comment, no block body exists to
+    # compile at all here either), just the same suppress/glue wiring.
+    recognize_explicit_block_arg_regions(block_irep).each do |nregion|
+      next if nested_suppressed.include?(nregion[:sendb_addr])
+
+      nested_suppressed << nregion[:sendb_addr]
+      nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion)
+    end
 
     # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
     # this file already holds itself to (emit_sort_inline's own explicit
@@ -12125,6 +12147,85 @@ class CodeGen
     out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
     out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
     out << "    }\n"
+    out << "  }\n"
+    out
+  end
+
+  # EXPLICIT_BLOCK_ARG_SUPPORT: `ary.select(&:defending)` /
+  # `ary.each(&proc_var)` / `ary.map(&method(:bar))` -- real Ruby's
+  # `&expr` explicit-block-argument syntax, confirmed via a fresh `mrbc
+  # -v` run to compile to a COMPLETELY DIFFERENT bytecode shape than a
+  # literal `{ }`/`do...end` block: no `BLOCK` instruction at all, just
+  # `expr`'s own ordinary evaluation landing in `R(dest+n+1)` immediately
+  # before the `SENDB`/`SSENDB`. Every recognizer in this file that
+  # handles a block-carrying call (this one included, until now) gates on
+  # a `BLOCK` instruction immediately preceding the call -- so this whole
+  # shape fell through to the raw `#error unhandled opcode SENDB`/
+  # `SSENDB` unconditionally, regardless of how simple `expr` itself was.
+  #
+  # No block BODY exists to compile here at all -- `expr` is just an
+  # ordinary value already sitting in a register (a Symbol, an existing
+  # Proc, whatever `&` was applied to) -- so this needs none of
+  # BLOCK_CFUNC_FALLBACK_SUPPORT's own machinery (no standalone cfunc, no
+  # RProc construction, no self/upvar capture). Real `mrb_funcall_with_
+  # block` (3rd/mruby/src/vm.c) already calls `ensure_block` on whatever
+  # it's handed: `if (!mrb_nil_p(blk) && !mrb_proc_p(blk)) blk =
+  # mrb_type_convert(mrb, blk, MRB_TT_PROC, MRB_SYM(to_proc));` -- the
+  # exact real `#to_proc` coercion a Symbol/Method/anything else `&`
+  # accepts needs, and a real `nil` (`&nil`, "explicitly no block") passes
+  # straight through unchanged, both already handled by mruby's own
+  # public API with no special-casing needed here. So the whole
+  # translation is just handing that register straight to
+  # `mrb_funcall_with_block` in place of the RProc `emit_block_fallback_
+  # glue` above builds -- same `try`/`catch (bc2cpp_block_break&)`
+  # wrapping, unconditional, for the identical reason that comment gives
+  # (a forwarded Proc might itself be one of THIS program's own
+  # BLOCK_FALLBACK-compiled RProcs, whose own `break` throws that exact
+  # type; harmless, never-thrown overhead otherwise).
+  def recognize_explicit_block_arg_regions(irep)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op)
+
+      prev = idx.positive? ? irep.instructions[idx - 1] : nil
+      next if prev && prev.op == 'BLOCK'
+
+      n_match = insn.args.match(/n=(\d+)(?:\s|$)/)
+      next unless n_match
+
+      n = n_match[1].to_i
+      dest, = insn.args.split(/\s+/, 2)
+      dest_reg = dest[/^R(\d+)/, 1]
+      next unless dest_reg
+
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      next unless name
+
+      regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
+                   blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
+                   self_implicit: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
+  def emit_explicit_block_arg_glue(region)
+    dest_reg = region[:dest_reg].to_i
+    recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
+    argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    out = String.new
+    out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr forwarded directly as the block " \
+           "(mrb_funcall_with_block's own ensure_block coerces Symbol/Proc/anything with #to_proc), dynamic dispatch\n"
+    out << "  try {\n"
+    if argv.empty?
+      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
+             "r#{region[:blk_reg]});\n"
+    else
+      out << "    mrb_value bc2cpp_ebarg_argv_#{region[:sendb_addr]}[] = { #{argv.join(', ')} };\n"
+      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+             "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, r#{region[:blk_reg]});\n"
+    end
+    out << "  } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
+    out << "    r#{dest_reg} = bc2cpp_brk.value;\n"
     out << "  }\n"
     out
   end
