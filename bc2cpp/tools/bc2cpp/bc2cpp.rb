@@ -1524,6 +1524,74 @@ module IntegerConstants
   end
 end
 
+# ---------------------------------------------------------------------------
+# FIXNUM_RETURN_PROOF's own out-of-closed-world poison source -- the method
+# twin of `IntegerConstants.foreign_const_names` above, and needed for
+# exactly the same reason that one is. `build_registry`'s own MONO/POLY
+# registry is built from `closed_world_mrblib_srcs` plus the NATIVE_SRCS
+# name scan, so a method defined in `3rd/mruby/mrblib` (real Ruby, compiled
+# into the very same VM, invisible to both) leaves a bare name looking
+# MONO when a second, completely different body for it really exists.
+#
+# That gap costs nothing extra for the devirtualization this file already
+# performs -- a wrong MONO there is already a wrong direct call today, and
+# the arity cross-check at `monomorphic_target`'s own call site is what
+# catches the realistic collisions. It matters much more here: a wrong
+# return-type proof emits a bare `mrb_fixnum()` with no runtime check and
+# no `mrb_funcall` arm at all, so it is undefined behavior rather than a
+# visibly wrong answer. FIXNUM_RETURN_PROOF is therefore deliberately
+# STRICTER than the MONO test it otherwise reuses: a name defined anywhere
+# in these files is refused outright, whatever the registry thinks.
+#
+# Real collisions this actually catches in this repo, found by measuring
+# rather than assuming: `size` (3rd/mruby/mrbgems/mruby-enumerator/mrblib/
+# enumerator.rb's own `def size`, which returns `@size` -- very often nil),
+# `max`/`min` (3rd/mruby/mrblib/enum.rb, which return whatever the
+# collection holds), `abs` (mruby-complex's own `def abs`, a Float).
+#
+# Textual and deliberately over-broad, the same trade `foreign_const_names`
+# makes: over-collecting a name only ever costs a proof, under-collecting
+# it would be a wrong answer. `def`/`attr_*`/`alias`/`alias_method`/
+# `define_method` are all real method-defining forms here; a fully dynamic
+# one (`alias_method :"string_#{v}", v`, 3rd/mruby-onig-regexp) cannot be
+# enumerated textually at all, which is why this is only ever a POISON
+# source layered on top of the registry's own uniqueness test and never a
+# source of positive evidence on its own.
+# ---------------------------------------------------------------------------
+# One method-name token, matching the same character set every SEND-name
+# extraction in this file already uses (so `def <=>` / `def []=` are seen).
+FOREIGN_METHOD_NAME_RE = %r{[\w+\-*/<>=!?\[\]&|^~%@]+}
+
+def foreign_method_names(paths)
+  names = Set.new
+  Array(paths).each do |path|
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
+    # `def name`, `def self.name`, `def obj.name`.
+    src.scan(/^\s*def\s+(?:[A-Za-z_][A-Za-z_0-9]*\.)?(#{FOREIGN_METHOD_NAME_RE})/o) do
+      names << Regexp.last_match(1)
+    end
+    # `attr_reader :a, :b` defines `a`/`b`; `attr_writer`/`attr_accessor`
+    # additionally define `a=`/`b=`. All three spellings are collected for
+    # all three macros -- over-collection, on purpose.
+    src.scan(/^\s*attr_(?:reader|writer|accessor)\s+(.+)$/) do
+      Regexp.last_match(1).scan(/:(\w+)/) do
+        n = Regexp.last_match(1)
+        names << n
+        names << "#{n}="
+      end
+    end
+    # A second body installed under a name with no `def` of its own.
+    src.scan(/^\s*alias\s+:?(#{FOREIGN_METHOD_NAME_RE})/o) { names << Regexp.last_match(1) }
+    src.scan(/alias_method\s*\(?\s*:"?(#{FOREIGN_METHOD_NAME_RE})/o) { names << Regexp.last_match(1) }
+    src.scan(/define_method\s*\(?\s*:"?(#{FOREIGN_METHOD_NAME_RE})/o) { names << Regexp.last_match(1) }
+  end
+  names
+end
+
 def extract_native_method_names(src_paths)
   names = Set.new
   # MRB_SYM(name) spells the bare method name; MRB_OPSYM(op) spells an
@@ -7026,8 +7094,16 @@ class CodeGen
 
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
-                 hash_element_layout = {}, integer_constants = Set.new)
+                 hash_element_layout = {}, integer_constants = Set.new,
+                 foreign_method_names = nil)
     @ireps = ireps
+    # FIXNUM_RETURN_PROOF: every method name defined in a Ruby source that
+    # shares this VM but sits outside the closed world (foreign_method_names,
+    # above). nil means the caller never ran that scan -- see
+    # compute_fixnum_return_names, which then proves nothing at all rather
+    # than run against a knowingly incomplete poison set, exactly the gate
+    # IntegerConstants' own two out-of-bytecode inputs already use.
+    @foreign_method_names = foreign_method_names
     # INTEGER_CONSTANT_PROOF: the set of bare constant names every definition
     # in this whole program agrees is an integer literal (IntegerConstants.
     # analyze, above). Read only by fixnum_proof_source?'s own GETCONST/
@@ -7147,11 +7223,29 @@ class CodeGen
     # NoMethodError on `[]` before ever reaching that check). Reassigned to
     # the real, filtered result immediately after.
     @ivar_layout = ivar_layout
+    # FIXNUM_RETURN_PROOF: the proven set, read by fixnum_proof_source?'s own
+    # SEND arm. It has to EXIST (empty) before drop_unsafe_embeddings runs
+    # just below, because that calls compiles_clean? -> compile_method ->
+    # proven_fixnum_operand?. Probing with the empty set is not merely safe
+    # but exact: compiles_clean? only ever asks whether a body contains
+    # `#error` text, and this proof never produces or removes one -- it picks
+    # between two equally #error-free codegen arms for the same opcode. So
+    # the boolean drop_unsafe_embeddings memoizes into @clean_cache is
+    # identical either way, and the real fixpoint below can safely run after
+    # @ivar_layout is final (which it must, since proof source 3 reads it).
+    @fixnum_return_names = Set.new
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
+    compute_fixnum_return_names
   end
 
   def const_lookup_helper_used?
     @const_lookup_helper_used
+  end
+
+  # FIXNUM_RETURN_PROOF's own result, for the whole-program diagnostic --
+  # see compute_fixnum_return_names.
+  def fixnum_return_names
+    @fixnum_return_names
   end
 
   # Embedding an ivar as a real struct field only works if the struct is
@@ -11338,6 +11432,15 @@ class CodeGen
       # register's own value is a runtime lookup this file does not model, so
       # the proof has to hold for EVERY `DEPTH` in the program or not at all.
       @integer_constants.include?(insn.args[/::(\S+)/, 1])
+    when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
+      # FIXNUM_RETURN_PROOF (proof source 6) -- see compute_fixnum_return_names
+      # for the admission rules, the greatest-fixpoint soundness argument, and
+      # why SENDB/SSENDB are deliberately absent from this list (a `break`
+      # inside the caller's own block becomes the send's result, so a
+      # block-carrying send does not necessarily yield its callee's return
+      # value at all).
+      nm = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      !nm.nil? && @fixnum_return_names.include?(nm)
     else
       false
     end
@@ -11363,6 +11466,214 @@ class CodeGen
     return false unless r >= 1 && r <= mand
 
     native_arg_types(owner_def, mand)[r - 1] == :fixnum
+  end
+
+  # ---------------------------------------------------------------------------
+  # FIXNUM_RETURN_PROOF (proof source 6): the set of bare method names a
+  # `SEND`/`SEND0`/`SSEND`/`SSEND0` of which provably leaves a Fixnum in its
+  # destination register -- the whole-program return-type analogue of
+  # IntegerConstants' own whole-program assignment analysis, and the largest
+  # single remaining gap this mechanism had.
+  #
+  # Measured, not guessed. Instrumenting every refusal inside
+  # proven_fixnum_operand? across all 7215 whole-program proven_fixnum_pair?
+  # queries (6303 failing), tagging each with its exact reason and counting
+  # only the COSTLY ones (a refusal only costs a real call site when the
+  # OTHER operand already proves), put "a SEND-family result" first at 1249
+  # costly refusals, well ahead of GETIDX (214), DIV (198), GETUPVAR (76) and
+  # AREF (68). A ceiling run treating EVERY SEND result as a Fixnum removes
+  # 783 real call sites (14933 -> 14150), which is the honest upper bound for
+  # this whole direction.
+  #
+  # ADMISSION. A name N is admitted only when ALL of the following hold.
+  #
+  #   1. `@registry[N]` holds EXACTLY ONE MethodDef, and it has a real
+  #      bytecode body (`irep` non-nil). This is verbatim the uniqueness test
+  #      monomorphic_target already applies before emitting a real direct
+  #      call, against the same closed-world registry, so nothing new is
+  #      trusted here -- a same-named NATIVE definition anywhere in
+  #      NATIVE_SRCS already puts a second, irep-nil MethodDef in that list
+  #      (extract_native_method_names) and disqualifies N outright, which is
+  #      why every genuinely polymorphic name (`size` 6 defs, `length`,
+  #      `min`, `%`, `&`) is refused here without needing a special case.
+  #   2. N appears nowhere in `foreign_method_names` (see that function).
+  #      This is STRICTLY STRONGER than the MONO test above, deliberately:
+  #      a wrong MONO is a visibly wrong direct call, a wrong return-type
+  #      proof is a bare `mrb_fixnum()` on a non-Fixnum, i.e. UB.
+  #   3. Its one body is return-analyzable (`fixnum_return_analyzable?`) --
+  #      no catch handlers, no child ireps, at least one real `RETURN`.
+  #   4. EVERY return site in that body provably holds a Fixnum
+  #      (`fixnum_return_sites_proven?`), using this same
+  #      proven_fixnum_operand? against the callee's OWN irep and MethodDef.
+  #
+  # WHY ONLY SEND/SEND0/SSEND/SSEND0, never SENDB/SSENDB. A block-carrying
+  # send does not necessarily yield its callee's return value at all: a real
+  # `break` inside the caller's own block hands the BREAK operand straight
+  # back as the send's result (ops.h's own `OPCODE(BREAK, B)`), so
+  # `ary.each { break "x" }` evaluates to "x" no matter what `each` returns.
+  # The four opcodes admitted here structurally cannot carry a block --
+  # codedump.c prints them from separate `CASE(OP_SEND, BBB)`/`CASE(OP_SEND0,
+  # BB)`/`CASE(OP_SSEND, BBB)`/`CASE(OP_SSEND0, BB)` arms, distinct from
+  # OP_SENDB/OP_SSENDB -- so there is no break path to miss.
+  #
+  # WHY A GREATEST FIXPOINT IS SOUND, including for recursion. Start from
+  # every name passing 1-3, then repeatedly drop any name whose own return
+  # sites stop proving, until stable. That admits mutual and self recursion
+  # (`def f(n); n <= 0 ? 0 : f(n - 1); end` proves, and so do two methods
+  # that only return each other's results), which a least fixpoint could
+  # never do. The induction is on the DYNAMIC CALL TREE of one completed
+  # call, not on the shape of the graph: consider any call to an admitted N
+  # that actually RETURNS. Its returned register was written by one of the
+  # classified sources; all but the SEND arm are Fixnums outright by proof
+  # sources 1-5, and the SEND arm is a call to an admitted name that itself
+  # completed and returned strictly earlier in that same finite call tree, so
+  # by the induction hypothesis it returned a Fixnum. A cycle with no
+  # terminating base case never returns at all (it raises SystemStackError),
+  # so it is vacuous -- exactly the shape of the NameError step that makes
+  # IntegerConstants' own greatest fixpoint safe.
+  #
+  # WHY `RETURN`'s register is the whole story. A method body leaves through
+  # exactly the return opcodes ops.h defines: RETURN, RETURN_BLK, BREAK,
+  # RETSELF, RETNIL, RETTRUE, RETFALSE (plus STOP, which halts the VM).
+  # Only `RETURN R[a]` is accepted; every one of the others is an immediate
+  # refusal, so `return self`/`return nil`/`return true`/`return false`, a
+  # non-local block return and a `break` can none of them slip past. Every
+  # RETURN in the body is checked, not just the textually last one.
+  # ---------------------------------------------------------------------------
+  def compute_fixnum_return_names
+    @fixnum_return_names = Set.new
+    # No foreign scan means poison source 2 is missing, which would make this
+    # strictly more optimistic than a real build -- prove nothing instead.
+    return @fixnum_return_names unless @foreign_method_names
+
+    cand = {}
+    accessors = Set.new
+    @registry.each do |name, defs|
+      next unless defs.size == 1
+
+      d = defs.first
+      next if @foreign_method_names.include?(name)
+
+      # ADMISSION VARIANT B -- a MONO `attr_reader`/`attr_accessor` whose ivar
+      # IvarLayout proved embeddable as `:fixnum`. There is no bytecode body
+      # to read return sites out of (`irep` is nil for a `kind:
+      # :ivar_accessor` MethodDef), and none is needed: this is proof source
+      # 3's own argument moved from the caller's GETIV to the callee's
+      # return. `drop_unsafe_embeddings` only ever leaves an `:ivar_accessor`
+      # name embedded when ATTR_STRUCT_DEVIRT will replace that plain native
+      # accessor PROGRAM-WIDE with `emit_ivar_accessor_pair`'s synthesized
+      # struct-aware getter (mrb_define_method overwrites the class's whole
+      # method-table entry, so `send`/reflection/an unprovable receiver all
+      # land there too) -- and that getter is literally
+      # `return mrb_fixnum_value(((Owner_ivars*)DATA_PTR(self))->name);`
+      # over an `mrb_int` field, confirmed against the real regenerated
+      # output for LCF::EventCommand#code, not assumed. The same gate also
+      # guarantees the struct is really allocated (a clean, pure-mandatory
+      # `#initialize` running mrb_data_init) and that every write to the
+      # field went through SETIV's own raising `mrb_integer_p` guard.
+      #
+      # A receiver of some OTHER class never reaches this at all -- the name
+      # is MONO, so any other receiver raises NoMethodError and returns
+      # nothing. These names skip the fixpoint entirely: a struct field read
+      # depends on no other method's return type, so there is nothing to
+      # iterate.
+      if d.irep.nil?
+        accessors << name if d.kind == :ivar_accessor && embed_type(d.owner, name) == :fixnum
+        next
+      end
+
+      irep = @ireps[d.irep]
+      next unless irep && fixnum_return_analyzable?(irep)
+
+      cand[name] = d
+    end
+
+    # The greatest fixpoint starts from every candidate and shrinks. Variant
+    # B's accessors are seeded in from the start and never re-examined (they
+    # depend on no other method's return type), but they ARE visible to the
+    # bytecode candidates' own return-site proofs while the fixpoint runs --
+    # a method that returns `other.code` proves exactly because of that.
+    @fixnum_return_names = Set.new(cand.keys) | accessors
+    loop do
+      dropped = cand.keys.select do |n|
+        @fixnum_return_names.include?(n) && !fixnum_return_sites_proven?(cand[n])
+      end
+      break if dropped.empty?
+
+      dropped.each { |n| @fixnum_return_names.delete(n) }
+    end
+    @fixnum_return_names
+  end
+
+  # Structural preconditions for reading a body's return sites at all.
+  #
+  # `catch_handlers`: RESCUE_SUPPORT extracts a protected range into a
+  # SEPARATE C++ function with re-initialized registers, and
+  # proven_fixnum_operand? already refuses any address inside one -- but a
+  # rescue arm is also a whole extra return path, so the simplest correct
+  # thing is to refuse the method outright.
+  #
+  # Child ireps (`reps`, i.e. block and lambda bodies) are NOT refused
+  # wholesale, because the one thing that would make them dangerous for an
+  # ordinary operand proof -- a nested body writing an enclosing register
+  # through SETUPVAR -- is already handled: `fixnum_proof_ctx` collects
+  # `subtree_upvar_written_regs` across the whole child subtree at any depth
+  # and refuses every one of those registers as an operand.
+  #
+  # What is genuinely specific to a RETURN-site analysis is a NON-LOCAL EXIT
+  # written inside a nested body, which is a real return from THIS method
+  # that this body's own instruction list does not contain at all:
+  # `def f; ary.each { return "x" }; 1; end` really does return a String,
+  # and only the child irep holds the `RETURN_BLK` that says so. Any
+  # descendant `RETURN_BLK` therefore refuses the method outright.
+  # `BREAK` is refused with it, one step more conservative than strictly
+  # needed: a `break` returns from the SEND that yielded, not from this
+  # method (`ary.each { break 5 }` makes `each` evaluate to 5 and leaves the
+  # enclosing method running), so it can only ever affect a block-carrying
+  # send's own result register -- and SENDB/SSENDB are already not proof
+  # sources. Refusing anyway costs nothing measurable and keeps this
+  # function's claim a simple one.
+  def fixnum_return_analyzable?(irep)
+    return false unless (irep.catch_handlers || []).empty?
+    return false if subtree_has_nonlocal_exit?(irep)
+
+    irep.instructions.any? { |i| i.op == 'RETURN' }
+  end
+
+  # Does any nested block/lambda body under `irep` contain a non-local exit?
+  # Same shape as subtree_upvar_written_regs' own walk (all depths, `seen`
+  # guarded against a rep list that revisits a label).
+  def subtree_has_nonlocal_exit?(irep, seen = Set.new)
+    (irep.reps || []).any? do |label|
+      next false if seen.include?(label)
+
+      seen << label
+      child = @ireps[label]
+      next false unless child
+
+      child.instructions.any? { |i| i.op == 'RETURN_BLK' || i.op == 'BREAK' } ||
+        subtree_has_nonlocal_exit?(child, seen)
+    end
+  end
+
+  # Every real return path of one method body holds a Fixnum. See
+  # compute_fixnum_return_names' own header for why this exact opcode split.
+  def fixnum_return_sites_proven?(d)
+    irep = @ireps[d.irep]
+    return false unless irep
+
+    irep.instructions.each_with_index do |insn, idx|
+      case insn.op
+      when 'RETURN'
+        # `"RETURN\tR%d"` -- the returned register is the first operand.
+        reg = insn.args[/\AR(\d+)/, 1]
+        return false unless reg
+        return false unless proven_fixnum_operand?(irep, idx, reg, d)
+      when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
+        return false
+      end
+    end
+    true
   end
 
   # BLOCK_BODY_INDEX_SUPPORT: map one of the register numbers compile_insn
@@ -16951,10 +17262,23 @@ if $PROGRAM_NAME == __FILE__
   else
     integer_constants.sort.each { |n| warn "  CONST #{n}" }
   end
+  # FIXNUM_RETURN_PROOF: same out-of-closed-world poison gate INTEGER_CONSTANT_
+  # PROOF uses right above -- without FOREIGN_RUBY_SRCS this analysis would be
+  # strictly more optimistic than a real build, so it is skipped entirely
+  # (nil, never an empty set, which compute_fixnum_return_names reads as "the
+  # scan never ran" and proves nothing at all) rather than run half-informed.
+  foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
   warn ''
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
-                    integer_constants)
+                    integer_constants, foreign_methods)
+  warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
+  if gen.fixnum_return_names.empty?
+    warn '  (none)'
+  else
+    gen.fixnum_return_names.sort.each { |n| warn "  RET #{n}" }
+  end
+  warn ''
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at
