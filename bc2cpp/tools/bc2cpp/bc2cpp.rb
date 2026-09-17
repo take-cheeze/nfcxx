@@ -13613,6 +13613,20 @@ class CodeGen
         out << "  }\n"
         out
       end
+    when 'OCLASS'
+      # OCLASS_SUPPORT: "OCLASS R3" -- real `::Foo` root-scope constant
+      # syntax (`::File.open(...)`, `LCF::File#save_to`'s own real body)
+      # compiles to this instruction immediately followed by a `GETMCNST`
+      # reading the named constant off of whatever OCLASS pushed -- real
+      # `OP_OCLASS` semantics (3rd/mruby/src/vm.c, confirmed directly, not
+      # inferred from the mnemonic): `regs[a] = mrb_obj_value(mrb->
+      # object_class)`, the exact same "the root/Object scope, as a real
+      # mrb_value" GETCONST's own top-level-owner branch already
+      # constructs by hand a few lines up -- GETMCNST (already supported,
+      # unconditionally) needs no special-casing at all once this register
+      # holds the right starting scope.
+      d = a[/^R(\d+)/, 1]
+      "  r#{d} = mrb_obj_value(M->object_class);\n"
     when 'GETMCNST'
       # "GETMCNST R6 (R6)::Sections" -- module-qualified lookup: r<d> already
       # holds the owning module/class (from a prior GETCONST/GETMCNST in the
