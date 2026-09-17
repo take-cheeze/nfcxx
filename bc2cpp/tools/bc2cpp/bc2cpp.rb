@@ -5956,17 +5956,45 @@ end
 # gate actually lives (`BLOCK_FALLBACK_UPVAR_SAFE_METHODS`), not here --
 # this function has no call-site method name to gate on.
 #
-# `RETURN_BLK`/`BREAK` (a real non-local exit) still has no plain C++
-# `return` equivalent once this block is a genuinely separate top-level
-# function, possibly several C call frames deep inside whatever method
-# is iterating -- rejected. `BLOCK`/`SENDB`/`SSENDB` (a nested block-
-# carrying call inside this one) is rejected too -- no recursive
-# fallback support in this round. `RESCUE`/`RAISEIF`/`EXCEPT` (a real
-# rescue-region opcode) is rejected -- this fallback builds no
-# equivalent of `recognize_rescue_regions`' own extracted-try-body
-# machinery.
+# EXCEPTION_BREAK_SUPPORT: `BREAK` (real `break` from inside this block)
+# now has a plain C++ equivalent once this block is a genuinely separate
+# top-level function -- `throw`. Real `OP_BREAK` (3rd/mruby/src/vm.c)
+# non-strict-path semantics are exactly "unwind to the call site that
+# yielded this block, with the break value becoming that whole call's own
+# result" (`compile_block_body_insn`'s own inlined-loop BREAK case already
+# reproduces this with a plain `goto` for the cases it can reach; this is
+# the same semantics for a case that goto can't reach at all -- a
+# genuinely separate top-level function, dispatched through real mruby VM
+# frames via `mrb_funcall_with_block`). `mruby is built with
+# MRB_USE_CXX_EXCEPTION` project-wide (see `CMakeLists.txt`'s own comment
+# -- mruby's OWN `MRB_TRY`/`MRB_CATCH` already compile to real C++
+# `try`/`catch` this way, not `setjmp`/`longjmp`, so a C++ exception
+# thrown here and caught at the SENDB/SSENDB call site (emit_block_
+# fallback_glue's own `catch (bc2cpp_block_break&)`) unwinds through
+# frames that are already built for exactly this, the same real,
+# load-bearing fact `build_config.rb`'s own wio section documents (a
+# `-fno-exceptions` build fails to even compile mruby's own core). See
+# that catch site's own comment for the one real, separate safety
+# question this raises (a stored/escaping block invoked outside this
+# call's own dynamic scope) and why it's a loud crash in an
+# already-erroneous usage pattern, not silent corruption.
+#
+# `RETURN_BLK` (return from the whole ENCLOSING METHOD, not just this
+# block) still has no plain C++ `return`/`throw`-at-this-call-site
+# equivalent: unlike `BREAK`, it needs to unwind PAST this call site,
+# out through however much of the enclosing method's own body sits
+# between here and that method's own top-level entry point (potentially
+# another inlined loop, another BLOCK_FALLBACK region, ...) -- a real,
+# separate change to compile_method's own top-level function-body
+# wrapping (a catch there converting the exception into `return`),
+# deliberately not attempted alongside BREAK in this same round. Still
+# rejected. `BLOCK`/`SENDB`/`SSENDB` (a nested block-carrying call inside
+# this one) is rejected too -- no recursive fallback support in this
+# round. `RESCUE`/`RAISEIF`/`EXCEPT` (a real rescue-region opcode) is
+# rejected -- this fallback builds no equivalent of `recognize_rescue_
+# regions`' own extracted-try-body machinery.
 BLOCK_FALLBACK_UNSAFE_OPS = %w[
-  RETURN_BLK BREAK BLOCK SENDB SSENDB
+  RETURN_BLK BLOCK SENDB SSENDB
   RESCUE RAISEIF EXCEPT
 ].freeze
 
@@ -6494,6 +6522,12 @@ class CodeGen
     # which never reaches these two opcodes through this shared function
     # at all -- see that function's own comment).
     @block_fallback_upvars = nil
+    # EXCEPTION_BREAK_SUPPORT: true for exactly one BLOCK_FALLBACK body-
+    # compile loop (never a LAMBDA_FALLBACK one, and never an ordinary
+    # top-level method body) -- consulted by compile_insn's own BREAK
+    # case to choose `throw bc2cpp_block_break{...}` over the plain
+    # `return` every other context still uses.
+    @block_fallback_active = false
     @registry = registry
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
@@ -11608,6 +11642,14 @@ class CodeGen
     # to declare a parameter for, never a stale value left over from a
     # previous, unrelated block-fallback body.
     @block_fallback_upvars = upvar_regs
+    # EXCEPTION_BREAK_SUPPORT: same consume-and-clear discipline, gating
+    # compile_insn's own BREAK case between two real, already-established
+    # translations -- LAMBDA_FALLBACK (region[:kind] == 'lambda_fallback')
+    # keeps the existing plain `return` (a LAMBDA-constructed proc is
+    # unconditionally strict, see that case's own comment), BLOCK_FALLBACK
+    # gets the new `throw`. Never both at once (this function only ever
+    # compiles one region's own body per call).
+    @block_fallback_active = region[:kind] != 'lambda_fallback'
     body = String.new
     targets = jump_targets(block_irep)
     block_irep.instructions.each_with_index do |insn, idx|
@@ -11617,6 +11659,7 @@ class CodeGen
       body << compile_insn(insn, block_irep, d, idx)
     end
     @block_fallback_upvars = nil
+    @block_fallback_active = false
     return nil if body.include?('#error')
 
     out = String.new
@@ -11709,14 +11752,26 @@ class CodeGen
            "(self captured at construction time), dynamic dispatch\n"
     out << "  {\n"
     out << ctor
+    # EXCEPTION_BREAK_SUPPORT: wraps the dispatch unconditionally (cheap
+    # under the zero-cost exception model this project already relies on
+    # -- see BLOCK_FALLBACK_UNSAFE_OPS's own comment -- and avoids needing
+    # to track, from all the way back in recognize_block_fallback_regions,
+    # whether THIS particular block body happens to contain a real BREAK)
+    # rather than conditionally. A block with no BREAK at all simply never
+    # throws bc2cpp_block_break, so this catch clause never fires for it
+    # -- functionally identical to today's own bare call.
+    out << "    try {\n"
     if argv.empty?
-      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
+      out << "      r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
              "mrb_obj_value(#{rproc_var}));\n"
     else
-      out << "    mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n"
-      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+      out << "      mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n"
+      out << "      r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
              "#{argv.size}, bc2cpp_blk_argv_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
     end
+    out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
+    out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
+    out << "    }\n"
     out << "  }\n"
     out
   end
@@ -12745,25 +12800,36 @@ class CodeGen
       # (MRB_PROC_STRICT_P(ci->proc)) goto NORMAL_RETURN;` check
       # RETURN_BLK's own case above already documents -- an ordinary,
       # same-frame return, exactly RETURN's own semantics, whenever the
-      # executing proc is strict. This case is ONLY ever reached from
-      # LAMBDA_FALLBACK_SUPPORT's own emit_proc_fallback_fn compiling a
-      # real LAMBDA's child irep -- lambda_fallback_safe? is the only
-      # thing in this whole file that lets BREAK through at all
-      # (block_fallback_safe? still rejects it outright for a plain block
-      # body: a plain block's own proc is never strict, and a real BREAK
-      # there needs the non-local-exit search up the real call stack this
-      # compiler has no general way to build -- see that function's own
-      # comment). A LAMBDA-constructed proc IS unconditionally strict
-      # (RETURN_BLK's own case above cites the confirming evidence) -- and
-      # real Ruby's own well-known "a lambda's own break exits the lambda
-      # itself, exactly like return" rule is exactly this same STRICT
-      # check, confirmed here at the real VM-source level. Nothing here
-      # ever re-enters the real VM's own OP_BREAK dispatch for this body
-      # at runtime (no MRB_PROC_STRICT flag needs to exist on the actual
-      # cfunc-backed RProc this fallback constructs) -- this translation
-      # IS the whole runtime behavior.
+      # executing proc is strict. This case is reached from TWO real
+      # contexts now:
+      # (1) LAMBDA_FALLBACK_SUPPORT's own emit_proc_fallback_fn compiling
+      #     a real LAMBDA's child irep (@block_fallback_active false --
+      #     lambda_fallback_safe? is the only thing that lets BREAK
+      #     through for that context, and a LAMBDA-constructed proc IS
+      #     unconditionally strict, RETURN_BLK's own case above cites the
+      #     confirming evidence -- real Ruby's own well-known "a lambda's
+      #     own break exits the lambda itself, exactly like return" rule
+      #     is exactly this same STRICT check). Unchanged: a plain
+      #     `return`.
+      # (2) EXCEPTION_BREAK_SUPPORT: BLOCK_FALLBACK_SUPPORT's own
+      #     emit_proc_fallback_fn compiling a real BLOCK's child irep
+      #     (@block_fallback_active true -- block_fallback_safe? now lets
+      #     BREAK through too, see BLOCK_FALLBACK_UNSAFE_OPS's own
+      #     comment for the real non-strict-path semantics this
+      #     reproduces and the C++-exceptions-enabled-project-wide fact
+      #     that makes it safe). A plain `return` here would only exit
+      #     THIS standalone cfunc, back to mruby's own VM dispatch inside
+      #     `mrb_funcall_with_block` -- not far enough; real non-strict
+      #     `OP_BREAK` unwinds all the way back to the SENDB/SSENDB call
+      #     site itself. `throw` does exactly that, caught by
+      #     emit_block_fallback_glue's own `catch (bc2cpp_block_break&)`
+      #     wrapped around that same call.
       r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
-      "  return r#{r};\n"
+      if @block_fallback_active
+        "  throw bc2cpp_block_break{r#{r}};\n"
+      else
+        "  return r#{r};\n"
+      end
     when 'RESCUE'
       # "RESCUE Ra Rb" -- OP_RESCUE's own real body (3rd/mruby/src/vm.c)
       # is exactly `R[b] = R[a].isa?(R[b])`, unconditionally: Ra already
@@ -14551,6 +14617,17 @@ if $PROGRAM_NAME == __FILE__
   # MRB_END_DECL C-linkage guard (confirmed by reading it), so a plain
   # #include is safe here.
   puts '#include <mruby/proc.h>'
+  # EXCEPTION_BREAK_SUPPORT: the real C++ exception type a BLOCK_FALLBACK
+  # body's own compiled BREAK throws (compile_insn's own BREAK case) and
+  # emit_block_fallback_glue's own call-site glue catches -- see
+  # BLOCK_FALLBACK_UNSAFE_OPS's own comment for why this is safe on a
+  # project that already builds mruby itself with MRB_USE_CXX_EXCEPTION.
+  # Emitted unconditionally (cheap, a single header-only struct, no
+  # linkage of its own to get wrong) rather than gated on whether this
+  # run's own output happens to use it -- the same "always correct, no
+  # conditional-emission bookkeeping" tradeoff the DIV/mrb_str_aref
+  # `extern "C"` declarations just above already make.
+  puts 'struct bc2cpp_block_break { mrb_value value; };'
   # GETIDX's own String arm (see compile_insn's own comment on that opcode)
   # calls `mrb_str_aref` directly -- a real, non-static, externally-linked
   # function (3rd/mruby/src/string.c), but declared only in mruby/
