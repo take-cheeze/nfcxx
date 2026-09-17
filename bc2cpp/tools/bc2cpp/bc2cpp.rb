@@ -8924,7 +8924,7 @@ class CodeGen
     # the rescue clause's own handler body all continue right on through
     # this same loop, completely unmodified -- no other opcode here needs
     # any special-casing at all.
-    rescue_regions = recognize_rescue_regions(irep)
+    rescue_regions = top_level_rescue_regions(recognize_rescue_regions(irep))
     rescue_pre = String.new
     suppressed = Set.new
     glue_at = {}
@@ -9560,25 +9560,36 @@ class CodeGen
     regions = []
     irep.catch_handlers.each do |ch|
       b, e, t = ch.begin_addr, ch.end_addr, ch.target
-      # No nesting, checked symmetrically: reject ch if it contains
-      # another handler's range OR sits inside another's -- this file
-      # only ever models flat, sequential rescue clauses, never one
-      # rescue's own BODY containing (or being contained by) another. A
-      # one-directional version of this check here previously only ever
-      # rejected the *outer* handler of a real nested pair, never the
-      # *inner* one on its own turn through this each -- caught rewriting
-      # this comment, not by any real failure yet (0 nested rescue
-      # clauses exist in this program today, and even a nested case that
-      # slipped past this check couldn't have compiled to anything
-      # *wrong*: the inner construct's own EXCEPT would still hit this
-      # file's own ordinary `#error unhandled opcode EXCEPT` fallback
-      # inside the outer's own extracted try body, which
-      # compiles_clean?/SKIP_UNSUPPORTED already correctly treats as "this
-      # whole method stays interpreted" -- but fixed properly regardless,
-      # the same standard this whole recognizer holds every other check
-      # to).
+      # NESTED_RESCUE_SUPPORT: proper nesting (one handler's own
+      # [begin_addr, end_addr] range fully contained inside another's) is
+      # allowed through -- a real, common composition (confirmed via a
+      # fresh `mrbc -v` disassembly of `RPG2k::Scene::Map#build_resolver`'s
+      # own `map_events = (@map.unit.events rescue nil)` modifier-rescue
+      # sitting entirely inside its own enclosing method-level `rescue
+      # StandardError; ...; end`: `begin: 0004 end: 0057 target: 0060`
+      # (outer) vs `begin: 0007 end: 0016 target: 0019` (inner), the
+      # inner fully inside the outer). Only a GENUINE partial overlap --
+      # two ranges that intersect without either containing the other,
+      # which real mrbc-generated rescue clauses never produce (this
+      # file's own control-flow model has no construct that could) -- is
+      # still rejected here; a real occurrence would mean this
+      # recognizer's own shape assumptions are wrong somewhere else, not
+      # a case to silently paper over.
+      #
+      # compile_method's own top-level rescue loop and this method's own
+      # recursive nested-extraction pass inside emit_rescue_try_body (see
+      # its own top comment) are what actually turn "both ends of a
+      # nesting pair recognized here" into correct, non-overlapping C++:
+      # each only ever claims the TOP-LEVEL regions in its own current
+      # scope (top_level_rescue_regions, just below), extracting any
+      # region nested inside one it already claimed as that region's own
+      # separate, further-nested try-body function instead of a sibling.
       next if irep.catch_handlers.any? do |o|
-        o != ch && ((o.begin_addr >= b && o.end_addr <= e) || (b >= o.begin_addr && e <= o.end_addr))
+        next false if o == ch
+
+        overlaps = o.begin_addr <= e && b <= o.end_addr
+        nested = (o.begin_addr <= b && e <= o.end_addr) || (b <= o.begin_addr && o.end_addr <= e)
+        overlaps && !nested
       end
 
       except_i = by_addr[t]
@@ -9705,6 +9716,23 @@ class CodeGen
     regions
   end
 
+  # NESTED_RESCUE_SUPPORT: the subset of `regions` (recognize_rescue_
+  # regions' own real output, now that proper nesting is allowed through
+  # -- see that method's own top comment) that isn't itself contained
+  # inside another region ALSO present in this same list -- i.e. exactly
+  # the regions a caller iterating "this scope's own top-level rescue
+  # clauses" should claim directly, leaving anything nested inside one of
+  # them for THAT region's own separate, recursive extraction instead
+  # (compile_method's own top-level loop, and emit_rescue_try_body's own
+  # nested pass, both call this on their own respective candidate list --
+  # the whole irep's regions for the former, only those still strictly
+  # inside the region currently being extracted for the latter).
+  def top_level_rescue_regions(regions)
+    regions.reject do |r|
+      regions.any? { |o| o != r && o[:begin_addr] <= r[:begin_addr] && r[:end_addr] <= o[:end_addr] }
+    end
+  end
+
   # RESCUE_SUPPORT: the extracted "try body" for one recognized region --
   # a real, standalone, top-level static function (mrb_protect_error's own
   # function-pointer body parameter can't be a closure, see
@@ -9788,9 +9816,96 @@ class CodeGen
     range = (region[:begin_addr]..region[:end_addr])
     local_suppressed = Set.new
     local_glue_at = {}
+    # NESTED_RESCUE_SUPPORT: computed and pre-claimed into `local_
+    # suppressed` BEFORE the block-fallback pass just below ever runs --
+    # exactly the same ordering RESCUE_SUPPORT's own top-level loop
+    # already uses relative to its own later BLOCK_SUPPORT/EACH_BLOCK_
+    # SUPPORT passes (rescue ranges claimed first, everything else scoped
+    # around them via that same pass's own `suppressed.include?` check --
+    # see emit_block_fallback_glue_pass' own comment). A block-carrying
+    # call whose own address falls inside one of these nested ranges
+    # belongs to that nested region's own separate, recursive emit_
+    # rescue_try_body call instead (a few lines down), which reruns this
+    # same block-fallback recognition scoped to its own narrower range;
+    # selecting it here too would extract the exact same block body as
+    # two same-named C++ functions, a real, caught `redefinition of ...`
+    # g++ error the first time this ran on `RPG2k::Scene::Map#
+    # perform_teleport`'s own nested `RGSS::Profiler.section("map.
+    # transition.load") { ... }` (itself already inside one rescue
+    # clause, with a second, unrelated rescue elsewhere in the same
+    # method now also recognized once nesting was allowed through).
+    nested_rescue_regions = top_level_rescue_regions(
+      recognize_rescue_regions(irep).select do |r|
+        r != region && region[:begin_addr] <= r[:begin_addr] && r[:end_addr] <= region[:end_addr]
+      end
+    )
+    nested_rescue_regions.each do |nregion|
+      local_suppressed.merge((nregion[:begin_addr]..nregion[:end_addr]).to_a)
+      local_suppressed << nregion[:except_addr]
+    end
     nested_block_regions = recognize_block_fallback_regions(irep).select { |r| range.cover?(r[:block_addr]) }
     nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
     out = emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
+
+    # NESTED_RESCUE_SUPPORT: a rescue region -- top-level method-level
+    # rescue or another already-nested one -- sitting entirely inside
+    # THIS region's own [begin_addr, end_addr] (a modifier-rescue
+    # expression nested inside a method-level rescue's own try body,
+    # confirmed live: RPG2k::Scene::Map#build_resolver's own `map_events
+    # = (@map.unit.events rescue nil)` nested inside its own enclosing
+    # `rescue StandardError; ...; end`) gets its own further-nested
+    # try-body function, extracted and emitted here (recognize_rescue_
+    # regions' own top comment covers why proper nesting is now
+    # recognized at all; top_level_rescue_regions -- see its own comment
+    # -- picks out only the DIRECT children of this region, leaving any
+    # deeper nesting for that child's own recursive call into this same
+    # method).
+    #
+    # Unlike this region's OWN ctx (just `self` plus the enclosing
+    # method's own mandatory arguments -- sound only because a top-level
+    # region's begin_addr is always the very first real instruction after
+    # ENTER), a NESTED region's begin_addr is reached only after
+    # arbitrary earlier code in THIS try body has already run, so its own
+    # live-in state isn't just self+args -- it's potentially every
+    # register this function has touched so far. Rather than computing
+    # real liveness, this just captures the entire register file (every
+    # r1..r<nregs-1> this function already declares, all plain `mrb_value`
+    # locals regardless of any native-typed argument boxing -- that
+    # boxing only ever applies at the _impl/try-body's own outermost
+    # argument boundary, never to a register's own storage type) by value
+    # into the nested ctx, reusing extra_fields/extra_field_values (the
+    # exact mechanism BLOCK_FALLBACK_RESCUE_SUPPORT's own upvar pointers
+    # already use for "extra live state beyond self+args") rather than
+    # inventing a second mechanism. THIS function's own `extra_fields`
+    # (e.g. a block body's own `bc2cpp_upvar_N` pointers) are inherited
+    # unchanged, in addition to the saved registers -- they're already
+    # real, in-scope locals at the point this nested glue is emitted, and
+    # a nested region's own body can reference an upvar exactly as freely
+    # as this region's own body can. `arg_names`/`arg_native_types` are
+    # passed empty for the recursive call: none of the enclosing method's
+    # own named argument locals exist inside this try-body function's own
+    # scope in the first place (only its plain r<N> registers do), so
+    # there is nothing for that mechanism to contribute here that the
+    # register capture doesn't already cover. The per-register init loop
+    # just below recognizes a saved-register field by its own
+    # `bc2cpp_saved_r<N>` name and uses it in place of the ordinary "nil"
+    # default whenever one is present. `nested_rescue_regions` itself was
+    # already computed above (needed earlier, to exclude these same
+    # ranges from the block-fallback pass) -- reused verbatim here, not
+    # recomputed.
+    saved_regs = (1...irep.nregs).to_a
+    nested_saved_fields = saved_regs.map { |i| { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' } }
+    nested_extra_fields = extra_fields + nested_saved_fields
+    nested_extra_values = extra_fields.map { |f| f[:name] } + saved_regs.map { |i| "r#{i}" }
+    nested_rescue_regions.each_with_index do |nregion, ni|
+      # (already pre-claimed into local_suppressed above, before the
+      # block-fallback pass ran -- not re-merged here.)
+      nested_try_name = "#{try_name}_nested#{nested_rescue_regions.size > 1 ? "_#{ni}" : ''}"
+      out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields)
+      local_glue_at[nregion[:begin_addr]] =
+        emit_rescue_glue(nested_try_name, nregion, [], [], extra_field_values: nested_extra_values)
+    end
+
     out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
     out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
     out << "  #{ctx_struct}* ctx = (#{ctx_struct}*)ud;\n"
@@ -9818,7 +9933,18 @@ class CodeGen
                   "  mrb_value r#{i} = ctx->#{a};\n"
                 end
       else
-        out << "  mrb_value r#{i} = mrb_nil_value();\n"
+        # NESTED_RESCUE_SUPPORT: a saved-register capture field (see this
+        # method's own nested-extraction pass above) takes priority over
+        # the ordinary nil default -- this register's real value at the
+        # point the enclosing region's own nested rescue was reached,
+        # already restored into a same-named local by the `extra_fields`
+        # loop above, exactly like `bc2cpp_upvar_N` already is.
+        saved = extra_fields.find { |f| f[:name] == "bc2cpp_saved_r#{i}" }
+        out << if saved
+                  "  mrb_value r#{i} = #{saved[:name]};\n"
+                else
+                  "  mrb_value r#{i} = mrb_nil_value();\n"
+                end
       end
     end
     body_targets = jump_targets(irep).select { |t| t >= region[:begin_addr] && t <= region[:end_addr] } -
@@ -12555,7 +12681,7 @@ class CodeGen
     # pass's own comment states the other way around (it has to run
     # BEFORE those ivars are set). Splitting "claim the addresses" from
     # "emit the real code" is what lets both constraints hold at once.
-    rescue_regions = recognize_rescue_regions(block_irep)
+    rescue_regions = top_level_rescue_regions(recognize_rescue_regions(block_irep))
     rescue_regions.each do |rregion|
       nested_suppressed.concat((rregion[:begin_addr]..rregion[:end_addr]).to_a)
       nested_suppressed << rregion[:except_addr]
