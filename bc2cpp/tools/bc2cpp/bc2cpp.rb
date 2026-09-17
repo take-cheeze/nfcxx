@@ -6086,11 +6086,65 @@ end
 # intended. `each_char` (3rd/mruby/mrbgems/mruby-string-ext/mrblib/
 # string.rb) is `while pos < self.size; block.call(self[pos]); pos += 1;
 # end` -- same plain synchronous shape as every other entry here.
+#
+# `page_field`/`section`/`open`/`new`/`reduce`/`inject`/`each_with_object`/
+# `downto`/`auto_battle_best_target` added in a follow-up sweep of the real
+# whole-program upvar-blocked call sites still remaining after the first
+# round, same discipline -- every one's own real body read directly, not
+# assumed from its name:
+#   - `page_field` (mruby-rpg2k/mrblib/scene/map.rb): `yield rescue
+#     StandardError => e; ...; default; end` -- a plain synchronous single
+#     yield. Its own `rescue StandardError` is its OWN method body's rescue
+#     clause (separate bytecode from the BLOCK this allowlist gates), not
+#     something the block itself contains -- the exact same "callee's own
+#     unrelated rescue can't swallow a foreign exception thrown from
+#     inside its own yield" argument `loop`'s own citation above already
+#     makes, MRB_CATCH's real type-specific matching applies identically
+#     here.
+#   - `section` (mruby-rgss/src/profiler.cxx, `prof_section`/its wio-build
+#     `prof_stub_yield` stand-in): `mrb_yield_argv` called exactly once,
+#     optionally timed around, never stored.
+#   - `open` (3rd/mruby/mrbgems/mruby-io/mrblib/io.rb, `IO.open`/inherited
+#     by `File.open` -- neither `mruby-lcf/mrblib/lcf_file.rb`'s nor
+#     mruby-io's own `File` reopens `self.open`): `begin yield io ensure
+#     io.close ...  end` -- a real Ruby `ensure`, same "callee's own
+#     unrelated rescue/ensure machinery" argument as `page_field` above.
+#   - `new` (3rd/mruby/src/array.c's own `mrb_ary_init`, real `Array.new(n)
+#     { |i| ... }`): a plain `for` loop calling `mrb_yield` once per index,
+#     never stored. Gated by NAME alone like every other entry here, so
+#     this trusts EVERY `.new` call site whose block captures an upvar to
+#     be `Array.new`, not merely the ones already proven Array-receiver --
+#     confirmed safe only because a real whole-program grep found no
+#     bytecode `initialize` (mruby-rgss/mruby-rpg2k/mruby-lcf's own
+#     mrblib) and no native constructor (mruby-rgss/src/*.cxx) declaring
+#     a block parameter at all, so no OTHER real definition of `.new`
+#     exists anywhere in this closed world that could receive a captured
+#     upvar unsafely -- re-verify this claim before adding a genuinely
+#     block-taking bytecode `initialize` anywhere in the future.
+#   - `reduce`/`inject` (3rd/mruby/mrblib/enum.rb, aliased): `self.each
+#     {|*val| ... result = block.call(result, val) ...}` -- synchronous,
+#     no bytecode override anywhere in this closed world (confirmed by
+#     grep). The dedicated `recognize_accum_regions` above already inlines
+#     the common case (a receiver PROVEN Array); this only ever matters
+#     for a `reduce`/`inject` call whose receiver ACCUM's own gate missed
+#     (e.g. an ivar not yet CLASS_HINT-proven Array), same "catch-all,
+#     never the fast path" relationship BLOCK_FALLBACK already has with
+#     every other named inliner in this file.
+#   - `each_with_object` (3rd/mruby/mrbgems/mruby-enum-ext/mrblib/enum.rb):
+#     `self.each {|*val| block.call(val.__svalue, obj)}` -- same shape as
+#     `reduce`/`inject` above, same conclusion.
+#   - `downto` (3rd/mruby/mrblib/numeric.rb): `while i >= num; yield i; i
+#     -= 1; end` -- plain synchronous, core Integer method.
+#   - `auto_battle_best_target` (mruby-rpg2k/mrblib/game/battle.rb, this
+#     program's own domain method): `targets.each do |t| r = yield t; ...
+#     end; best` -- plain synchronous, real body read directly.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
   find find_index any? all? none? count index sort_by
   _rgss_native_sort _rgss_native_sort! loop each_char
+  page_field section open new reduce inject each_with_object downto
+  auto_battle_best_target
 ].freeze
 
 def block_fallback_safe?(block_irep)
@@ -8906,6 +8960,17 @@ class CodeGen
       block_fallback_pre << fn_code
       suppressed << region[:block_addr] << region[:sendb_addr]
       glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
+    end
+
+    # EXPLICIT_BLOCK_ARG_SUPPORT: `&expr`'s own real bytecode shape (no
+    # `BLOCK` instruction at all -- see recognize_explicit_block_arg_
+    # regions' own comment) has no `block_addr` of its own to suppress,
+    # only `sendb_addr` -- the whole region IS that one instruction.
+    recognize_explicit_block_arg_regions(irep).each do |region|
+      next if suppressed.include?(region[:sendb_addr])
+
+      suppressed << region[:sendb_addr]
+      glue_at[region[:sendb_addr]] = emit_explicit_block_arg_glue(region)
     end
 
     # LAMBDA_FALLBACK_SUPPORT: the LAMBDA-opcode sibling of
@@ -11908,6 +11973,17 @@ class CodeGen
       nested_suppressed << nregion[:block_addr] << nregion[:sendb_addr]
       nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name)
     end
+    # EXPLICIT_BLOCK_ARG_SUPPORT: same recursive composition as the
+    # nested BLOCK_FALLBACK pass just above -- a `&expr`-shaped SENDB/
+    # SSENDB inside THIS block's own body needs no recursive compile of
+    # its own (see that recognizer's own comment, no block body exists to
+    # compile at all here either), just the same suppress/glue wiring.
+    recognize_explicit_block_arg_regions(block_irep).each do |nregion|
+      next if nested_suppressed.include?(nregion[:sendb_addr])
+
+      nested_suppressed << nregion[:sendb_addr]
+      nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion)
+    end
 
     # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
     # this file already holds itself to (emit_sort_inline's own explicit
@@ -12071,6 +12147,85 @@ class CodeGen
     out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
     out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
     out << "    }\n"
+    out << "  }\n"
+    out
+  end
+
+  # EXPLICIT_BLOCK_ARG_SUPPORT: `ary.select(&:defending)` /
+  # `ary.each(&proc_var)` / `ary.map(&method(:bar))` -- real Ruby's
+  # `&expr` explicit-block-argument syntax, confirmed via a fresh `mrbc
+  # -v` run to compile to a COMPLETELY DIFFERENT bytecode shape than a
+  # literal `{ }`/`do...end` block: no `BLOCK` instruction at all, just
+  # `expr`'s own ordinary evaluation landing in `R(dest+n+1)` immediately
+  # before the `SENDB`/`SSENDB`. Every recognizer in this file that
+  # handles a block-carrying call (this one included, until now) gates on
+  # a `BLOCK` instruction immediately preceding the call -- so this whole
+  # shape fell through to the raw `#error unhandled opcode SENDB`/
+  # `SSENDB` unconditionally, regardless of how simple `expr` itself was.
+  #
+  # No block BODY exists to compile here at all -- `expr` is just an
+  # ordinary value already sitting in a register (a Symbol, an existing
+  # Proc, whatever `&` was applied to) -- so this needs none of
+  # BLOCK_CFUNC_FALLBACK_SUPPORT's own machinery (no standalone cfunc, no
+  # RProc construction, no self/upvar capture). Real `mrb_funcall_with_
+  # block` (3rd/mruby/src/vm.c) already calls `ensure_block` on whatever
+  # it's handed: `if (!mrb_nil_p(blk) && !mrb_proc_p(blk)) blk =
+  # mrb_type_convert(mrb, blk, MRB_TT_PROC, MRB_SYM(to_proc));` -- the
+  # exact real `#to_proc` coercion a Symbol/Method/anything else `&`
+  # accepts needs, and a real `nil` (`&nil`, "explicitly no block") passes
+  # straight through unchanged, both already handled by mruby's own
+  # public API with no special-casing needed here. So the whole
+  # translation is just handing that register straight to
+  # `mrb_funcall_with_block` in place of the RProc `emit_block_fallback_
+  # glue` above builds -- same `try`/`catch (bc2cpp_block_break&)`
+  # wrapping, unconditional, for the identical reason that comment gives
+  # (a forwarded Proc might itself be one of THIS program's own
+  # BLOCK_FALLBACK-compiled RProcs, whose own `break` throws that exact
+  # type; harmless, never-thrown overhead otherwise).
+  def recognize_explicit_block_arg_regions(irep)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op)
+
+      prev = idx.positive? ? irep.instructions[idx - 1] : nil
+      next if prev && prev.op == 'BLOCK'
+
+      n_match = insn.args.match(/n=(\d+)(?:\s|$)/)
+      next unless n_match
+
+      n = n_match[1].to_i
+      dest, = insn.args.split(/\s+/, 2)
+      dest_reg = dest[/^R(\d+)/, 1]
+      next unless dest_reg
+
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      next unless name
+
+      regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
+                   blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
+                   self_implicit: insn.op == 'SSENDB' }
+    end
+    regions
+  end
+
+  def emit_explicit_block_arg_glue(region)
+    dest_reg = region[:dest_reg].to_i
+    recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
+    argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    out = String.new
+    out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr forwarded directly as the block " \
+           "(mrb_funcall_with_block's own ensure_block coerces Symbol/Proc/anything with #to_proc), dynamic dispatch\n"
+    out << "  try {\n"
+    if argv.empty?
+      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
+             "r#{region[:blk_reg]});\n"
+    else
+      out << "    mrb_value bc2cpp_ebarg_argv_#{region[:sendb_addr]}[] = { #{argv.join(', ')} };\n"
+      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+             "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, r#{region[:blk_reg]});\n"
+    end
+    out << "  } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
+    out << "    r#{dest_reg} = bc2cpp_brk.value;\n"
     out << "  }\n"
     out
   end
@@ -12819,32 +12974,44 @@ class CodeGen
       # array) -- and R[a] has a nil-becomes-the-splat special case ahead
       # of the real concat.
       #
-      # This compiler only ever needs the `else` arm, never the nil one:
-      # mrbc's own codegen (mrbgems/mruby-compiler/core/codegen.c) emits
-      # OP_ARYCAT from exactly two call sites -- gen_values (`foo(*a,
-      # *b)`-style call-argument splats) and codegen_array (`[*a,
-      # *b]`-style array-literal splats) -- and in BOTH, R[a] is always the
-      # register most recently written by a `genop_2(s, OP_ARRAY, ...)`
-      # immediately before that splat element's own codegen runs
-      # (confirmed reading both directly: codegen_array's own
-      # `first`-gated `OP_ARRAY, cursp(), regular_elements` / its
-      # first-splat-is-first-element special case `OP_ARRAY, cursp(), 0`;
-      # gen_values' identical `first`-gated OP_ARRAY before its own
-      # ARYCAT). So R[a] is PROVABLY a real, already-built Array at every
-      # real occurrence, NEVER nil -- exactly the same "always immediately
-      # preceded by ARRAY/ARRAY2 building R[a]" invariant ARYPUSH just
-      # above already relies on. `mrb_ensure_array_type` is therefore
-      # unconditionally a no-op here too, safe to skip.
+      # ARYCAT_NIL_START_SUPPORT: an earlier version of this comment
+      # claimed R[a] is PROVABLY never nil here, reasoning from
+      # codegen_array/gen_values always emitting a `genop_2(s, OP_ARRAY,
+      # ...)` immediately before ARYCAT -- wrong, caught by a real `mrbc
+      # -v` run rather than trusting the prior (incomplete) static
+      # reading: `bar(*list, *list2)` (the call's own FIRST argument is
+      # itself a splat, no leading non-splat element for an `OP_ARRAY` to
+      # build) compiles to `LOADNIL R5` then `ARYCAT R5 (R6)` -- R[a]
+      # genuinely starts nil at the very first ARYCAT in that shape, real
+      # OP_ARYCAT's own nil-becomes-the-splat branch is real, live code
+      # here, not dead. (`bar(a, *list)`, a LEADING non-splat argument, is
+      # the case the prior comment actually confirmed: `ARRAY R5 1` does
+      # run first there -- both shapes coexist, gated by whether the
+      # call's own first argument is a splat or not.) `mrb_ensure_array_
+      # type` on the non-nil branch is still unconditionally a no-op
+      # (every real ARYCAT chain's own non-nil R[a] only ever got there
+      # via a prior ARRAY or ARYCAT, both of which always leave a real
+      # Array), so this only restores the nil branch, not the whole
+      # guard.
       #
-      # R[a+1] (the splat source) has NO such guarantee -- it's whatever
-      # expression follows the `*` (a local, a method call, another
-      # literal array, ...) -- so `mrb_ary_splat` (mruby/array.h, MRB_API,
-      # already #include'd) is still called for real here, mirroring the
-      # real VM's own two-step "splat, then concat" rather than assuming
-      # R[a+1] is already an Array.
+      # R[a+1] (the splat source) has no such guarantee either way --
+      # it's whatever expression follows the `*` (a local, a method call,
+      # another literal array, ...) -- so `mrb_ary_splat` (mruby/array.h,
+      # MRB_API, already #include'd) is still called for real here,
+      # mirroring the real VM's own two-step "splat, then either assign
+      # or concat" exactly.
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      "  mrb_ary_concat(M, r#{d}, mrb_ary_splat(M, r#{s}));\n"
+      <<~CPP
+        {
+          mrb_value bc2cpp_arycat_splat = mrb_ary_splat(M, r#{s});
+          if (mrb_nil_p(r#{d})) {
+            r#{d} = bc2cpp_arycat_splat;
+          } else {
+            mrb_ary_concat(M, r#{d}, bc2cpp_arycat_splat);
+          }
+        }
+      CPP
     when 'AREF'
       # "AREF R2 R6 0 ; R2:x" -- R[a] = R[b][c], c a plain immediate index,
       # never a register (real OP_AREF semantics, src/vm.c): when R[b]
@@ -13607,6 +13774,37 @@ class CodeGen
   # (compile_keyword_send's own top comment), so a dynamic-dispatch
   # fallback isn't an option there the way it is for the plain-
   # positional case.
+  #
+  # DYNAMIC_SPLAT_SUPPORT: a plain positional splat (`n=*`, no `|nk=` at
+  # all) whose source ISN'T a compile-time literal -- `foo(*list)`, the
+  # overwhelming majority of real splat call sites in this program --
+  # still doesn't need to stay an honest #error: real `mrbc` codegen
+  # (confirmed by a fresh `mrbc -v` run, not assumed) ALWAYS builds the
+  # complete, real Array of positional arguments into `R(dest+1)` before
+  # a `SEND ... n=*` ever executes (an `ARRAY`-then-`ARYCAT` chain for a
+  # leading non-splat argument, `bar(a, *list)`; a `LOADNIL`-then-`ARYCAT`
+  # chain when the call's own first argument is itself a splat, `bar(*list,
+  # *list2)` -- see ARYCAT's own compile_insn comment, the same real
+  # bytecode reading that caught and fixed that case's own latent `R[a]`
+  # nil-handling gap). So `R(dest+1)` is ALWAYS a genuine, fully-built
+  # `mrb_value` Array by the time this SEND runs, real receiver and
+  # argument count included -- `mrb_funcall_argv` (mruby.h, MRB_API,
+  # exactly the public "call with a real argc/argv pair" entry point this
+  # file's own dynamic-dispatch fallback already leans on for every other
+  # shape) accepts that `RARRAY_LEN`/`RARRAY_PTR` pair directly, with no
+  # per-element unrolling needed at all. Scoped to the plain-positional
+  # case only, same reason the literal path above stays dynamic-dispatch-
+  # only for keywords: `mrb_funcall*` can never carry keywords, so a
+  # non-literal double-splat (`nk=*`) or keyword tail alongside a
+  # non-literal positional splat has no sound translation here and keeps
+  # the honest #error.
+  def compile_dynamic_splat_send(name, recv, d, argv_reg)
+    <<~CPP
+      // SPLAT n=* :#{name} runtime-sized (not a literal), dynamic dispatch via mrb_funcall_argv
+      r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+    CPP
+  end
+
   def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:)
     return nil unless irep && idx
 
@@ -13622,7 +13820,11 @@ class CodeGen
     next_reg = dest_reg + 1
     if n_spec == '*'
       positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
-      return nil unless positional
+      if positional.nil?
+        return nil if nk_spec
+
+        return compile_dynamic_splat_send(name, recv, d, next_reg)
+      end
 
       next_reg += 1 # the single register the splatted array itself occupied.
     else
