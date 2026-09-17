@@ -6521,29 +6521,29 @@ end
 #     program's own domain method): `targets.each do |t| r = yield t; ...
 #     end; best` -- plain synchronous, real body read directly.
 #
-# `flat_map` is INVESTIGATED AND VERIFIED SAFE but deliberately NOT added
-# yet -- the one entry on this list's shortlist that a real measurement,
-# not a safety doubt, is holding back. DEEP_UPVAR_CAPTURE_SUPPORT's own
-# propagation is what first made a `flat_map` call site reachable by this
-# gate at all (this program's single real one, `RPG2k::Scene::Map#global_
+# `flat_map` is INVESTIGATED AND VERIFIED SAFE and now ADMITTED -- the one
+# entry on this list's shortlist that a real measurement, not a safety
+# doubt, used to hold back. DEEP_UPVAR_CAPTURE_SUPPORT's own propagation is
+# what first made a `flat_map` call site reachable by this gate at all
+# (this program's single real one, `RPG2k::Scene::Map#global_
 # animation_targets`, mruby-rpg2k/mrblib/scene/map.rb: `(-1..1).flat_map
 # do |gy| (-1..1).map do |gx| ... cam_x ... flash_target ... end end` --
 # the OUTER block captures the method's own `cam_x`/`cam_y`/`flash_target`
-# only because the INNER one reads them at level 1). Admitting it does
-# compile that method and closes its remaining BLOCK/SENDB pair, but the
-# method's own inner block body then reaches a PRE-EXISTING, unrelated
-# KEYWORD_CALLSITE_SUPPORT MONO bug: the devirtualized direct call emits
-# an extra literal `1` presence flag after each keyword value
+# only because the INNER one reads them at level 1). Admitting it compiles
+# that method and closes its remaining BLOCK/SENDB pair; what blocked it
+# was that the method's own inner block body then reached a PRE-EXISTING,
+# unrelated KEYWORD_CALLSITE_SUPPORT MONO arity bug -- the devirtualized
+# direct call emitted a literal `1` presence flag after EVERY keyword
+# value, including the required ones that declare no such parameter
 # (`RPG2k__Scene__Map_anim_target_impl(M, self, r6, r7, r9, 1, r11, 1,
-# r13, 1)`) while that callee's own real signature declares only
-# `(mrb_state*, mrb_value self, tx, ty, height, index, flash_target)` --
-# a hard `g++` error, already firing at 12 other call sites today
-# (`RPG2k::Scene::Map#start_map_animation`, `RPG2k::Scene::Battle#
-# whole_side_anim_targets`, the `apply_pending_*` family, ...). Adding
-# `flat_map` would take the whole-program syntax-only error count from its
-# documented 17 to 18, so it waits for that keyword-MONO arity bug to be
-# fixed first -- at which point this entry is a one-word change, the
-# safety argument below already done and re-checked:
+# r13, 1)` against a real signature of only `(mrb_state*, mrb_value self,
+# tx, ty, height, index, flash_target)`). That bug is now FIXED at its own
+# single source (see compile_keyword_call's own KEYWORD_CALLSITE_ARITY_FIX
+# comment); it had been failing at 17 other call sites program-wide, and
+# with it gone the whole-program `g++ -std=c++17 -fsyntax-only` error count
+# went 17 -> 0, so admitting `flat_map` no longer adds an 18th. The safety
+# argument below was re-verified directly against the real vendored sources
+# and this project's own build_config.rb at the time of that admission:
 #
 # The name needed a real extra check the other entries did not, because
 # TWO different definitions of it exist in mruby's own tree and they
@@ -6586,7 +6586,7 @@ BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   find find_index any? all? none? count index sort_by
   _rgss_native_sort _rgss_native_sort! loop each_char
   page_field section open new reduce inject each_with_object downto
-  auto_battle_best_target cached_bitmap
+  auto_battle_best_target cached_bitmap flat_map
 ].freeze
 
 # DEEP_UPVAR_CAPTURE_SUPPORT: the `collect_block_upvars(...).nil?` gate
@@ -15638,13 +15638,36 @@ class CodeGen
       return nil unless @other_owners&.include?(target.owner)
     end
     impl = cpp_name(target.owner, target.name) + '_impl'
+    # KEYWORD_CALLSITE_ARITY_FIX: the emitted argument list has to match the
+    # callee's own real `_impl` parameter list EXACTLY, and that list is not
+    # a uniform `(value, given)` pair per keyword -- compile_method's own
+    # signature builder emits the extra `mrb_int bc2cpp_kw_given_<name>`
+    # parameter for an OPTIONAL keyword only (`unless kw[:required]`, same
+    # place the entry wrapper's own `_impl` call already mirrors: `kw[:
+    # required] ? [value] : [value, given]`). A required keyword is always
+    # given -- `mrb_get_args` itself raises ArgumentError otherwise, before
+    # `_impl` is ever reached -- so it carries no presence flag at all.
+    # Emitting one unconditionally here (what this did before) shifted every
+    # later argument by one slot per required keyword, a hard g++ error at
+    # every one of this program's real keyword MONO call sites: 12 x `could
+    # not convert '1' from 'int' to 'mrb_value'` (the literal `1` landing in
+    # a later `mrb_value` parameter, e.g. `Game::Battle#command_skill_all`'s
+    # required `name`/`cost` pair, or `RPG2k::Scene::Map#anim_target`'s three
+    # required `height`/`index`/`flash_target`) plus 5 x `too many arguments
+    # to function` (`RPG2k::Scene::Map#vehicle_blocks?`, whose single
+    # required `block_airship` keyword left the call one argument past the
+    # end of a signature with no trailing slot to absorb it). The two
+    # spellings are the same bug, differing only in whether the shifted
+    # argument still had a parameter to land in.
+    #
+    # `ci` is never nil for a required keyword -- the required-keyword check
+    # above already returned nil for a call site that omits one -- so the
+    # `mrb_nil_value()`/`0` "keyword not passed here" arm is reachable for an
+    # optional keyword only, exactly the one that really does declare a flag.
     kw_args = kw_table.flat_map do |kw|
       ci = kw_names.index(kw[:name])
-      if ci
-        [kw_val_exprs[ci], '1']
-      else
-        ['mrb_nil_value()', '0']
-      end
+      val = ci ? kw_val_exprs[ci] : 'mrb_nil_value()'
+      kw[:required] ? [val] : [val, ci ? '1' : '0']
     end
     call = "r#{d} = #{impl}(M, #{([recv] + argv + kw_args).join(', ')});"
     note = "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
