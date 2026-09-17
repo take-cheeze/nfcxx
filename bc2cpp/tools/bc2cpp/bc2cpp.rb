@@ -6328,7 +6328,17 @@ def optional_arg_table(irep)
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
-  return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+  # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `kw` is deliberately no longer
+  # required to be zero here -- a real ENTER shape can declare both
+  # (`def f(a, b = 1, k: nil)`; confirmed via a fresh `mrbc -v` disassembly
+  # of `Game::Battle#initialize`'s own real 8-optional/3-keyword
+  # signature): the optional jump table's own real default-value code
+  # (recognized below exactly like the opt-only case) simply falls
+  # straight through into the same KEY_P/KARG/KEYEND sequence
+  # keyword_arg_table recognizes separately -- the two recognizers never
+  # need to interact, only their two independent gates need to stop
+  # excluding each other's field.
+  return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
 
   enter_idx = irep.instructions.index { |i| i.op == 'ENTER' }
   jmps = irep.instructions[enter_idx + 1, opt + 1]
@@ -6395,7 +6405,15 @@ def keyword_arg_table(irep)
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
-  return nil unless kw.positive? && opt.zero? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
+  # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt` is deliberately no longer
+  # required to be zero here -- see optional_arg_table's own comment,
+  # the other half of this same combined shape. This scan is already
+  # whole-irep (every KEY_P/KARG instruction, wherever it sits), so it
+  # needs no change at all beyond widening its own gate -- the real
+  # KEY_P/KARG sequence sits right where it always does, just after the
+  # optional jump table's own default-value code instead of right after
+  # ENTER.
+  return nil unless kw.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
 
   order = []
   required = {}
@@ -8680,12 +8698,34 @@ class CodeGen
       i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0'
     end
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
-    # KEYWORD_ARG_SUPPORT: only attempted once both of the above have
-    # already failed (mandatory_ok and opt_jmp_targets are mutually
-    # exclusive with a real keyword-only ENTER shape by construction --
-    # keyword_arg_table's own gate refuses unless `opt` is zero too), same
-    # short-circuiting shape as opt_jmp_targets' own guard above.
-    kw_table = (mandatory_ok || opt_jmp_targets) ? nil : keyword_arg_table(irep)
+    # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: attempted
+    # whenever mandatory_ok is false, independent of whether the optional
+    # jump table itself resolved -- keyword_arg_table's own whole-irep
+    # KEY_P/KARG scan doesn't care where in the instruction stream those
+    # land (see optional_arg_table's own comment for the real combined
+    # shape this unlocks, e.g. Game::Battle#initialize's own real
+    # 8-optional/3-keyword signature).
+    kw_table = mandatory_ok ? nil : keyword_arg_table(irep)
+    # Two real ENTER fields (`opt`'s own jump-table shape, `kw`'s own real
+    # count) each independently either resolve cleanly or have to force
+    # this WHOLE method unsupported -- never silently treated as if the
+    # unrecognized half of its own arity didn't exist. `opt.positive? &&
+    # !opt_jmp_targets` means a real optional-arg ENTER field whose own
+    # jump-table shape this file doesn't recognize; ENTER's own real `kw`
+    # field (fields[4], the same one optional_arg_table/keyword_arg_table
+    # both already parse) being nonzero while `kw_table` is nil means a
+    # real keyword ENTER field whose own KEY_P/KARG shape wasn't
+    # recognized either. Either failure has to zero out `opt_jmp_targets`
+    # too -- it's the one flag `supported` below trusts to mean "the
+    # optional jump table AND everything downstream of it, including any
+    # real keyword params, compiled cleanly" -- otherwise a method with an
+    # unrecognized keyword shape but a recognized optional shape would
+    # silently compile with its real keyword arguments dropped entirely.
+    enter_kw = enter ? enter.args.split(':').map { |f| f[/\d+/].to_i }[4] : 0
+    if (opt.positive? && !opt_jmp_targets) || (enter_kw.positive? && !kw_table)
+      opt_jmp_targets = nil
+      kw_table = nil
+    end
     # REST_ARG_SUPPORT: same short-circuiting shape as kw_table's own guard
     # above -- see rest_only_arity?'s own comment for why a real `*rest`
     # needs no opcode-level region of its own at all, just one more
@@ -9144,7 +9184,21 @@ class CodeGen
       # unhandled gap). Mandatory positional arguments (if any) are
       # unpacked exactly like the plain, non-keyword case above, just with
       # `:` plus one extra `&bc2cpp_kwargs` pointer appended.
-      arg_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      #
+      # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt.positive?` here means a
+      # real ENTER shape combining both (`def f(a, b = 1, k: nil)`) --
+      # see optional_arg_table's own comment for the real disassembly this
+      # was confirmed against. Every optional position (i >= mand) needs
+      # the exact same `mrb_nil_value()` placeholder default and `|`
+      # format-string marker OPTIONAL_ARG_SUPPORT's own plain (no-keyword)
+      # branch below already establishes -- mrb_get_args' own `|`/`:`
+      # markers are independent, already-documented features (mruby.h's
+      # own format table) that simply union here, never needing to
+      # interact with each other's own logic.
+      arg_names.each_with_index do |a, i|
+        default = i >= mand ? ' = mrb_nil_value()' : ''
+        out << "  #{native_c_type(arg_native_types[i])} #{a}#{default};\n"
+      end
       required_kws = kw_table.select { |kw| kw[:required] }
       optional_kws = kw_table.reject { |kw| kw[:required] }
       ordered_kws = required_kws + optional_kws
@@ -9153,7 +9207,10 @@ class CodeGen
       out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
       out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_kws.size}, " \
              "bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
-      fmt = arg_native_types.map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + ':'
+      fmt = arg_native_types.each_with_index.map do |t, i|
+        ch = t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o')
+        i == mand && opt.positive? ? "|#{ch}" : ch
+      end.join + ':'
       ptrs = (arg_names.map { |a| "&#{a}" } + ['&bc2cpp_kwargs']).join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       ordered_kws.each_with_index do |kw, i|
@@ -9165,7 +9222,20 @@ class CodeGen
           out << "  mrb_int #{kw_given_param_name(kw[:name])} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
         end
       end
-      call_args = arg_names + kw_table.flat_map do |kw|
+      call_args = arg_names.dup
+      if opt.positive?
+        # Same real, public mrb_get_argc API OPTIONAL_ARG_SUPPORT's own
+        # plain branch below already uses -- positional argc alone,
+        # unaffected by whether this same call also passed keyword
+        # arguments (a real, independent count in mruby's own calling
+        # convention; confirmed no regression by this round's own full
+        # correctness-check-script run, not just assumed).
+        out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
+        out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
+        out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
+        call_args << 'bc2cpp_given_opt'
+      end
+      call_args += kw_table.flat_map do |kw|
         kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
       end
       out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
