@@ -12873,32 +12873,44 @@ class CodeGen
       # array) -- and R[a] has a nil-becomes-the-splat special case ahead
       # of the real concat.
       #
-      # This compiler only ever needs the `else` arm, never the nil one:
-      # mrbc's own codegen (mrbgems/mruby-compiler/core/codegen.c) emits
-      # OP_ARYCAT from exactly two call sites -- gen_values (`foo(*a,
-      # *b)`-style call-argument splats) and codegen_array (`[*a,
-      # *b]`-style array-literal splats) -- and in BOTH, R[a] is always the
-      # register most recently written by a `genop_2(s, OP_ARRAY, ...)`
-      # immediately before that splat element's own codegen runs
-      # (confirmed reading both directly: codegen_array's own
-      # `first`-gated `OP_ARRAY, cursp(), regular_elements` / its
-      # first-splat-is-first-element special case `OP_ARRAY, cursp(), 0`;
-      # gen_values' identical `first`-gated OP_ARRAY before its own
-      # ARYCAT). So R[a] is PROVABLY a real, already-built Array at every
-      # real occurrence, NEVER nil -- exactly the same "always immediately
-      # preceded by ARRAY/ARRAY2 building R[a]" invariant ARYPUSH just
-      # above already relies on. `mrb_ensure_array_type` is therefore
-      # unconditionally a no-op here too, safe to skip.
+      # ARYCAT_NIL_START_SUPPORT: an earlier version of this comment
+      # claimed R[a] is PROVABLY never nil here, reasoning from
+      # codegen_array/gen_values always emitting a `genop_2(s, OP_ARRAY,
+      # ...)` immediately before ARYCAT -- wrong, caught by a real `mrbc
+      # -v` run rather than trusting the prior (incomplete) static
+      # reading: `bar(*list, *list2)` (the call's own FIRST argument is
+      # itself a splat, no leading non-splat element for an `OP_ARRAY` to
+      # build) compiles to `LOADNIL R5` then `ARYCAT R5 (R6)` -- R[a]
+      # genuinely starts nil at the very first ARYCAT in that shape, real
+      # OP_ARYCAT's own nil-becomes-the-splat branch is real, live code
+      # here, not dead. (`bar(a, *list)`, a LEADING non-splat argument, is
+      # the case the prior comment actually confirmed: `ARRAY R5 1` does
+      # run first there -- both shapes coexist, gated by whether the
+      # call's own first argument is a splat or not.) `mrb_ensure_array_
+      # type` on the non-nil branch is still unconditionally a no-op
+      # (every real ARYCAT chain's own non-nil R[a] only ever got there
+      # via a prior ARRAY or ARYCAT, both of which always leave a real
+      # Array), so this only restores the nil branch, not the whole
+      # guard.
       #
-      # R[a+1] (the splat source) has NO such guarantee -- it's whatever
-      # expression follows the `*` (a local, a method call, another
-      # literal array, ...) -- so `mrb_ary_splat` (mruby/array.h, MRB_API,
-      # already #include'd) is still called for real here, mirroring the
-      # real VM's own two-step "splat, then concat" rather than assuming
-      # R[a+1] is already an Array.
+      # R[a+1] (the splat source) has no such guarantee either way --
+      # it's whatever expression follows the `*` (a local, a method call,
+      # another literal array, ...) -- so `mrb_ary_splat` (mruby/array.h,
+      # MRB_API, already #include'd) is still called for real here,
+      # mirroring the real VM's own two-step "splat, then either assign
+      # or concat" exactly.
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
-      "  mrb_ary_concat(M, r#{d}, mrb_ary_splat(M, r#{s}));\n"
+      <<~CPP
+        {
+          mrb_value bc2cpp_arycat_splat = mrb_ary_splat(M, r#{s});
+          if (mrb_nil_p(r#{d})) {
+            r#{d} = bc2cpp_arycat_splat;
+          } else {
+            mrb_ary_concat(M, r#{d}, bc2cpp_arycat_splat);
+          }
+        }
+      CPP
     when 'AREF'
       # "AREF R2 R6 0 ; R2:x" -- R[a] = R[b][c], c a plain immediate index,
       # never a register (real OP_AREF semantics, src/vm.c): when R[b]
@@ -13661,6 +13673,37 @@ class CodeGen
   # (compile_keyword_send's own top comment), so a dynamic-dispatch
   # fallback isn't an option there the way it is for the plain-
   # positional case.
+  #
+  # DYNAMIC_SPLAT_SUPPORT: a plain positional splat (`n=*`, no `|nk=` at
+  # all) whose source ISN'T a compile-time literal -- `foo(*list)`, the
+  # overwhelming majority of real splat call sites in this program --
+  # still doesn't need to stay an honest #error: real `mrbc` codegen
+  # (confirmed by a fresh `mrbc -v` run, not assumed) ALWAYS builds the
+  # complete, real Array of positional arguments into `R(dest+1)` before
+  # a `SEND ... n=*` ever executes (an `ARRAY`-then-`ARYCAT` chain for a
+  # leading non-splat argument, `bar(a, *list)`; a `LOADNIL`-then-`ARYCAT`
+  # chain when the call's own first argument is itself a splat, `bar(*list,
+  # *list2)` -- see ARYCAT's own compile_insn comment, the same real
+  # bytecode reading that caught and fixed that case's own latent `R[a]`
+  # nil-handling gap). So `R(dest+1)` is ALWAYS a genuine, fully-built
+  # `mrb_value` Array by the time this SEND runs, real receiver and
+  # argument count included -- `mrb_funcall_argv` (mruby.h, MRB_API,
+  # exactly the public "call with a real argc/argv pair" entry point this
+  # file's own dynamic-dispatch fallback already leans on for every other
+  # shape) accepts that `RARRAY_LEN`/`RARRAY_PTR` pair directly, with no
+  # per-element unrolling needed at all. Scoped to the plain-positional
+  # case only, same reason the literal path above stays dynamic-dispatch-
+  # only for keywords: `mrb_funcall*` can never carry keywords, so a
+  # non-literal double-splat (`nk=*`) or keyword tail alongside a
+  # non-literal positional splat has no sound translation here and keeps
+  # the honest #error.
+  def compile_dynamic_splat_send(name, recv, d, argv_reg)
+    <<~CPP
+      // SPLAT n=* :#{name} runtime-sized (not a literal), dynamic dispatch via mrb_funcall_argv
+      r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+    CPP
+  end
+
   def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:)
     return nil unless irep && idx
 
@@ -13676,7 +13719,11 @@ class CodeGen
     next_reg = dest_reg + 1
     if n_spec == '*'
       positional = splat_array_literal_regs(irep, idx, next_reg.to_s)
-      return nil unless positional
+      if positional.nil?
+        return nil if nk_spec
+
+        return compile_dynamic_splat_send(name, recv, d, next_reg)
+      end
 
       next_reg += 1 # the single register the splatted array itself occupied.
     else
