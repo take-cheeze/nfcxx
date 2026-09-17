@@ -1306,6 +1306,18 @@ end
 # computed at runtime -- confirmed absent: a grep for `const_set` across this
 # whole closed world finds none) stays unproven and costs nothing but the
 # missed proof, exactly like every other backward-scan guard in this file.
+#
+# CONST_ALIAS_CHAINING: a definition does not have to be an integer LITERAL.
+# `SCREEN_W = RPG2k::WIDTH` is a real, integral definition too, and this
+# codebase is full of them -- a scene class that re-exports the handful of
+# layout numbers it uses is the dominant idiom here (`SCREEN_W = RPG2k::WIDTH`
+# alone appears in twelve separate scene files). So a definition whose source
+# register is a `GETCONST`/`GETMCNST` records an ALIAS to that bare name
+# rather than poisoning, and `resolve_integral` (see its own header for the
+# runtime-assignment-order induction that makes this sound, and for why it
+# must be the GREATEST fixpoint) settles the resulting graph. Measured on the
+# real shipped build this admits 24 more names -- 669 to 693 -- and removes
+# 123 real `mrb_funcall` call sites, 13993 to 13870.
 module IntegerConstants
   # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (real codedump.c formats:
   # `"SETCONST\t%s\tR%d"` and `"SETMCNST\t(R%d)::%s\tR%d"` -- the name comes
@@ -1314,9 +1326,13 @@ module IntegerConstants
   # also call `print_lv_a`, which can append a trailing `; R1:name` comment,
   # so the comment is stripped before the register is read.
   def self.analyze(ireps, native_paths, foreign_paths)
-    integral = Set.new
+    # name -> list of one entry per real definition of that bare name:
+    # `:literal` (an integer literal), `[:alias, M]` (a read of bare constant
+    # name M), or nil (anything else -- an unconditional poison).
+    defs = Hash.new { |h, k| h[k] = [] }
     poisoned = Set.new
     ireps.each_value do |irep|
+      entries = const_entry_addrs(irep)
       irep.instructions.each_with_index do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
@@ -1324,11 +1340,7 @@ module IntegerConstants
           next unless name
 
           src = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten.last
-          if src && literal_int_const_source?(irep, i, src)
-            integral << name
-          else
-            poisoned << name
-          end
+          defs[name] << (src && const_source_kind(irep, i, src, entries))
         when 'CLASS', 'MODULE'
           nm = insn.args[/:(\S+)/, 1]
           poisoned << nm if nm
@@ -1337,38 +1349,140 @@ module IntegerConstants
     end
     poisoned.merge(native_const_names(native_paths))
     poisoned.merge(foreign_const_names(foreign_paths))
-    integral - poisoned
+    resolve_integral(defs, poisoned)
   end
 
-  # Is the register `reg` written, at this exact point in this class/module
-  # body, by an integer literal? The same bounded backward walk
-  # `proven_fixnum_operand?` runs, minus the dominance machinery: a constant
-  # body is straight-line by construction, and ANY complication (a label, an
-  # unrecognized writer, a register this scan loses track of) simply returns
-  # false and poisons the name, which is always the safe direction.
-  def self.literal_int_const_source?(irep, idx, reg)
+  # CONST_ALIAS_CHAINING: the greatest fixpoint of "every definition of this
+  # bare name assigns either an integer literal or the value of another such
+  # name".
+  #
+  # Start from every name that has at least one definition, no definition this
+  # scan could not classify, and no out-of-bytecode poison; then repeatedly
+  # drop any name one of whose definitions aliases a name that is no longer in
+  # the set, until nothing moves. Dropping (rather than adding) is what makes
+  # this the GREATEST fixpoint, and that is deliberate -- the least fixpoint
+  # would refuse the single most common real shape this whole change exists
+  # for. `Scene::Map::TILE = Game::TILE` (mruby-rpg2k/mrblib/scene/map.rb)
+  # aliases its OWN bare name `TILE`, because bare-name keying cannot tell the
+  # two apart, so a least fixpoint could never admit `TILE` at all even though
+  # `Game::TILE = 16` is right there.
+  #
+  # Soundness is a real induction on RUNTIME ASSIGNMENT ORDER, not on the
+  # shape of the graph. Claim: for every admitted name N, every value ever
+  # bound to a constant with bare name N is a Fixnum. Consider the constant
+  # assignments a real run performs, in the order it performs them, and
+  # induct. The k-th assignment binding an admitted bare name N executes one
+  # of exactly two classified definitions:
+  #   - an integer literal, which is a Fixnum by construction (`LOADI*` only;
+  #     see the walk below); or
+  #   - a read of a constant with bare name M, where M is also admitted. That
+  #     read must SUCCEED -- a read of a not-yet-assigned constant raises
+  #     NameError and the program does not run at all -- so some assignment
+  #     binding bare name M already happened, strictly earlier, and by the
+  #     induction hypothesis it stored a Fixnum.
+  # A self-referential cycle with no literal at its base (`A = B; B = A`)
+  # would be admitted by this fixpoint, and is exactly the case the NameError
+  # step rules out: neither assignment can ever execute first, so no run
+  # reaches either one.
+  #
+  # The induction needs every binding of an admitted name to be one this scan
+  # classified, which is what the four poison sources guarantee: a name bound
+  # by `CLASS`/`MODULE`, by native code, or by a Ruby source outside this
+  # closed world is poisoned outright and can never be admitted, nor be the
+  # target of an admitted alias.
+  def self.resolve_integral(defs, poisoned)
+    cand = Set.new
+    defs.each do |name, kinds|
+      next if poisoned.include?(name)
+      next if kinds.empty? || kinds.any?(&:nil?)
+
+      cand << name
+    end
+    loop do
+      dropped = cand.reject do |name|
+        defs[name].all? { |k| k == :literal || cand.include?(k[1]) }
+      end
+      break if dropped.empty?
+
+      dropped.each { |n| cand.delete(n) }
+    end
+    cand
+  end
+
+  # Every address control can enter this irep's instruction stream at other
+  # than by falling through: the target of each of the five `JMP*` opcodes
+  # ops.h defines as moving `pc` within a frame (the same map
+  # `fixnum_proof_edge_sources` builds, and verified the same way), plus every
+  # catch handler's own raise target.
+  def self.const_entry_addrs(irep)
+    addrs = Set.new
+    irep.instructions.each do |insn|
+      case insn.op
+      when 'JMP', 'JMPUW'
+        addrs << insn.args.strip[/\d+/].to_i
+      when 'JMPIF', 'JMPNOT', 'JMPNIL'
+        # `"JMPIF\t\tR%d\t%03d"` -- register first, target last.
+        t = insn.args.sub(/;.*\z/m, '').strip.split(/\s+/).last
+        addrs << t.to_i if t
+      end
+    end
+    (irep.catch_handlers || []).each { |ch| addrs << ch.target }
+    addrs
+  end
+
+  # How is the register `reg` written, at this exact point in this
+  # class/module body? Returns `:literal`, `[:alias, NAME]`, or nil -- the
+  # same bounded backward walk `proven_fixnum_operand?` runs, and ANY
+  # complication (an unrecognized writer, a register this scan loses track of,
+  # a label it would have to step across) returns nil and poisons the name,
+  # which is always the safe direction.
+  #
+  # The label check is a real barrier rather than the no-check-at-all this
+  # walk originally shipped with. A class body is very nearly straight-line,
+  # but it is not straight-line BY CONSTRUCTION the way that claim assumed:
+  # `X = cond ? "s" : 1` compiles to `JMPNOT`/`STRING`/`JMP`/`LOADI_1`/
+  # `SETCONST`, whose nearest backward writer of the source register really is
+  # a `LOADI` even though the other arm binds a String. Refusing to step over
+  # any jump target closes that off; measured against the real whole-program
+  # build it costs nothing (the same 669 names qualify without aliasing), so
+  # it is pure soundness rather than a trade.
+  def self.const_source_kind(irep, idx, reg, entries)
     cur = reg.to_s
     j = idx - 1
     while j >= 0
       insn = irep.instructions[j]
-      return false unless insn
+      return nil unless insn
+      return nil if entries.include?(insn.addr)
 
       if insn.args =~ /\AR#{cur}\b/
-        return true if insn.op.start_with?('LOADI')
-        # `regs[a] = regs[b]` -- keep looking for whatever wrote the source.
-        if insn.op == 'MOVE'
+        return :literal if insn.op.start_with?('LOADI')
+
+        case insn.op
+        when 'MOVE'
+          # `regs[a] = regs[b]` -- keep looking for whatever wrote the source.
           src = insn.args.scan(/R(\d+)/).flatten[1]
-          return false unless src
+          return nil unless src
 
           cur = src
-          j -= 1
-          next
+        when 'GETCONST'
+          # `"GETCONST\tR%d\t%s"` -- register first, bare name second.
+          n = insn.args.split(/\s+/)[1]
+          return n && [:alias, n]
+        when 'GETMCNST'
+          # `"GETMCNST\tR%d\t(R%d)::%s"` -- only the bare name after `::` is
+          # taken, for exactly the reason this whole analysis is bare-name
+          # keyed: the scope register's own value is a runtime lookup this
+          # file does not model, so the proof has to hold for EVERY constant
+          # of that name in the program or not at all.
+          n = insn.args[/::(\S+)/, 1]
+          return n && [:alias, n]
+        else
+          return nil
         end
-        return false
       end
       j -= 1
     end
-    false
+    nil
   end
 
   # Poison source 3 -- see the header above for the three real call forms.
