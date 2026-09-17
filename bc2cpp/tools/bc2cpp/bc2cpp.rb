@@ -1249,6 +1249,167 @@ def resolve_mrb_sym_token(macro, name)
   end
 end
 
+# ---------------------------------------------------------------------------
+# INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
+# can only ever resolve to an Integer -- FIXNUM_OPERAND_PROOF's own fifth
+# proof source (see `fixnum_proof_source?`).
+#
+# Why this one is worth a whole-program analysis at all, measured rather than
+# assumed: instrumenting every failing `proven_fixnum_pair?` query across a
+# real whole-program run put `GETCONST` fifth by raw count (469 of 6950) but
+# FIRST by realized value once the other operand's own odds are taken into
+# account -- a ceiling run that treats every integer-literal-defined constant
+# as proven removes 386 real `mrb_funcall` call sites, against 21 for the
+# region-dominance widening in this same round and ~70 for the entire
+# original FIXNUM_OPERAND_PROOF. That is not a coincidence of this codebase
+# so much as of the genre: an RPG2000 interpreter is built out of opcode
+# numbers (`CONTROL_SWITCHES = 10210`), slot indices (`WEAPON_SLOT = 0`) and
+# stat ids, and they are read in arithmetic and comparison position
+# constantly. 454 real integer-literal constant definitions exist across this
+# closed world's own Ruby sources.
+#
+# Keyed by BARE name, never by qualified path, and that is the whole
+# soundness argument rather than a shortcut. A real `GETCONST R4 FOO` carries
+# only the bare name `FOO`; what it resolves to depends on the lexical
+# nesting at that point and then on the cref's own ancestors, neither of
+# which this file models. So instead of trying to predict WHICH `FOO` wins, a
+# name is admitted only when EVERY definition of that bare name anywhere
+# agrees it is an integer -- which makes the answer independent of the
+# resolution this file cannot perform. Identical in shape to the "MONO by
+# name" discipline the method registry already runs on, and to
+# `container_constants`' own "two sites disagreeing poisons the name"
+# rule right above it.
+#
+# Four independent poison sources, all required, none of them theoretical:
+#
+#   1. A `SETCONST`/`SETMCNST` of that name whose source register is not an
+#      integer literal (`literal_int_const_source?` below). `ShopState =
+#      Struct.new(...)` and `NAME = "hi"` are poisoned exactly here.
+#   2. A `CLASS`/`MODULE` instruction naming it. A class or module name is a
+#      real constant binding too (`OP_CLASS` does its own `mrb_const_set`,
+#      3rd/mruby/src/class.c), and it never goes through `SETCONST` at all --
+#      so without this a name used for both a module and an integer would
+#      look unanimously integral.
+#   3. A native definition -- `mrb_define_const`/`mrb_define_global_const`
+#      (quoted name) or `mrb_define_const_id` (a presym `MRB_SYM(name)`
+#      token), the three real forms a grep across every native source in
+#      this closed world actually finds. C code is never bytecode, so no
+#      amount of scanning ireps could see these.
+#   4. A definition in a Ruby source compiled into the same VM but outside
+#      this tool's own closed world (`foreign_mrblib_srcs`, compiled_gems.rb
+#      -- see its comment for the real, live `Enumerable::NONE = Object.new`
+#      vs `NONE = 37` collision that this gate exists for, found by measuring
+#      the overlap rather than by assuming there wasn't one).
+#
+# A name with zero integer definitions is never admitted, so a constant this
+# analysis simply cannot see (a gem outside the scanned set, a `const_set`
+# computed at runtime -- confirmed absent: a grep for `const_set` across this
+# whole closed world finds none) stays unproven and costs nothing but the
+# missed proof, exactly like every other backward-scan guard in this file.
+module IntegerConstants
+  # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (real codedump.c formats:
+  # `"SETCONST\t%s\tR%d"` and `"SETMCNST\t(R%d)::%s\tR%d"` -- the name comes
+  # FIRST and the source register LAST, the reverse of GETCONST's own operand
+  # order, the same already-documented asymmetry SETGV/GETGV carry). Both
+  # also call `print_lv_a`, which can append a trailing `; R1:name` comment,
+  # so the comment is stripped before the register is read.
+  def self.analyze(ireps, native_paths, foreign_paths)
+    integral = Set.new
+    poisoned = Set.new
+    ireps.each_value do |irep|
+      irep.instructions.each_with_index do |insn, i|
+        case insn.op
+        when 'SETCONST', 'SETMCNST'
+          name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.args[/::(\S+)/, 1]
+          next unless name
+
+          src = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten.last
+          if src && literal_int_const_source?(irep, i, src)
+            integral << name
+          else
+            poisoned << name
+          end
+        when 'CLASS', 'MODULE'
+          nm = insn.args[/:(\S+)/, 1]
+          poisoned << nm if nm
+        end
+      end
+    end
+    poisoned.merge(native_const_names(native_paths))
+    poisoned.merge(foreign_const_names(foreign_paths))
+    integral - poisoned
+  end
+
+  # Is the register `reg` written, at this exact point in this class/module
+  # body, by an integer literal? The same bounded backward walk
+  # `proven_fixnum_operand?` runs, minus the dominance machinery: a constant
+  # body is straight-line by construction, and ANY complication (a label, an
+  # unrecognized writer, a register this scan loses track of) simply returns
+  # false and poisons the name, which is always the safe direction.
+  def self.literal_int_const_source?(irep, idx, reg)
+    cur = reg.to_s
+    j = idx - 1
+    while j >= 0
+      insn = irep.instructions[j]
+      return false unless insn
+
+      if insn.args =~ /\AR#{cur}\b/
+        return true if insn.op.start_with?('LOADI')
+        # `regs[a] = regs[b]` -- keep looking for whatever wrote the source.
+        if insn.op == 'MOVE'
+          src = insn.args.scan(/R(\d+)/).flatten[1]
+          return false unless src
+
+          cur = src
+          j -= 1
+          next
+        end
+        return false
+      end
+      j -= 1
+    end
+    false
+  end
+
+  # Poison source 3 -- see the header above for the three real call forms.
+  def self.native_const_names(paths)
+    names = Set.new
+    Array(paths).each do |path|
+      src = begin
+        File.read(path, encoding: 'UTF-8')
+      rescue StandardError
+        next
+      end
+      src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\(.{0,200}?/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Za-z_][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+    end
+    names
+  end
+
+  # Poison source 4 -- a textual constant-assignment scan, deliberately
+  # broader than it strictly needs to be (any `NAME =` at the start of a
+  # line, whatever the right-hand side). Over-collecting here can only ever
+  # cost a missed proof; under-collecting would be a wrong answer.
+  def self.foreign_const_names(paths)
+    names = Set.new
+    Array(paths).each do |path|
+      src = begin
+        File.read(path, encoding: 'UTF-8')
+      rescue StandardError
+        next
+      end
+      src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
+      # `class Foo` / `module Foo` bind a constant just as much as `Foo =`
+      # does -- same reasoning as poison source 2's CLASS/MODULE arm.
+      src.scan(/^\s*(?:class|module)\s+([A-Z][A-Za-z_0-9]*)/) { names << Regexp.last_match(1) }
+    end
+    names
+  end
+end
+
 def extract_native_method_names(src_paths)
   names = Set.new
   # MRB_SYM(name) spells the bare method name; MRB_OPSYM(op) spells an
@@ -6668,8 +6829,15 @@ class CodeGen
 
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
-                 hash_element_layout = {})
+                 hash_element_layout = {}, integer_constants = Set.new)
     @ireps = ireps
+    # INTEGER_CONSTANT_PROOF: the set of bare constant names every definition
+    # in this whole program agrees is an integer literal (IntegerConstants.
+    # analyze, above). Read only by fixnum_proof_source?'s own GETCONST/
+    # GETMCNST arms; an empty set (the default, and what a caller that never
+    # ran the analysis gets) simply means no constant is ever provable, i.e.
+    # exactly today's behavior.
+    @integer_constants = integer_constants
     # CONST_CONTAINER_SUPPORT: real, fully-qualified constant name ->
     # 'Array'/'Hash'/'Range' -- build_registry's own SETCONST scan (see
     # that table's own comment). Read only by the block recognizers'
@@ -10484,7 +10652,7 @@ class CodeGen
   # BOTH operands are proven here, compile_insn emits ONLY the native
   # computation: no `if`, no `else`, no `mrb_funcall` at all.
   #
-  # Exactly four proof sources, each one a fact this file already computes and
+  # Exactly five proof sources, each one a fact this file already computes and
   # already relies on elsewhere -- never a general dataflow/SSA prover:
   #
   #   1. An integer literal load. Every `LOADI`-family opcode this build's
@@ -10514,6 +10682,14 @@ class CodeGen
   #      every overflow/bigint configuration -- devirtualizing a DIV is safe
   #      (its own two operands are what's proven), trusting its RESULT is a
   #      separate question, declined.
+  #   5. A `GETCONST`/`GETMCNST` of a constant name `IntegerConstants` (see
+  #      that module's own header) proved every definition in the whole
+  #      program assigns an integer literal to. By raw refusal count this was
+  #      only the fifth-largest gap, but by measured value it is the largest
+  #      single source in this whole mechanism -- 386 real `mrb_funcall` call
+  #      sites, against ~70 for the original four combined. An RPG2000
+  #      interpreter reads opcode numbers and slot indices in arithmetic
+  #      position constantly, and until now every one of them was opaque.
   #
   # `MOVE` chains are followed exactly the way `trace_new_target`/
   # `proven_array_source_scan`/`trace_eqq_literal_receiver` already follow them
@@ -10526,9 +10702,17 @@ class CodeGen
   # and this use. Three real entry-point kinds exist in a compiled body, and all
   # three are honoured:
   #   - a `goto` target. `jump_targets(irep)` is the exact set compile_method
-  #     itself emits a real C `L<addr>:` label for; the scan refuses to step
-  #     back past any of them, and also refuses outright when the USE's own
-  #     address is one (control could arrive there from anywhere).
+  #     itself emits a real C `L<addr>:` label for. This used to be a flat
+  #     barrier -- the scan refused to step back past any of them at all --
+  #     which was correct but discarded the single largest class of provable
+  #     operands in the whole program (a plain `if` between an assignment and
+  #     its use). It is now a real, local dominance test instead: a label may
+  #     be stepped past exactly when every instruction that branches to it
+  #     lies inside the write..use region itself, so no path can enter that
+  #     region anywhere but at the write. See `fixnum_proof_region_ok?` for
+  #     the full containment argument and `fixnum_proof_edge_sources` for the
+  #     branch-edge map it needs (complete by construction -- exactly the five
+  #     `JMP*` opcodes ops.h defines, re-verified against it).
   #   - an exception handler. Every real catch handler (`Irep#catch_handlers`,
   #     mrbc's own "catch type: rescue begin: ... end: ... target: ..." header)
   #     contributes its `target` to the entry set -- that address is reached by
@@ -10595,21 +10779,147 @@ class CodeGen
 
   # Per-irep, memoized: the entry-address set (every `goto` target plus every
   # catch handler's own raise target), the protected-range address set (every
-  # catch handler's own `begin_addr..end_addr`), and the enclosing-register
+  # catch handler's own `begin_addr..end_addr`), the enclosing-register
   # SETUPVAR destination set -- see the header above for what each one rules
-  # out.
+  # out -- and (REGION_DOMINANCE, below) the real branch-edge map plus the
+  # catch-handler target set the region test needs to tell a label whose
+  # every in-edge is visible from one that can be reached by a raise.
   def fixnum_proof_ctx(irep)
     @fixnum_proof_ctx ||= {}
     return @fixnum_proof_ctx[irep.label] if @fixnum_proof_ctx.key?(irep.label)
 
     entries = jump_targets(irep).dup
     protected_addrs = Set.new
+    catch_targets = Set.new
     (irep.catch_handlers || []).each do |ch|
       entries << ch.target
+      catch_targets << ch.target
       protected_addrs.merge(ch.begin_addr..ch.end_addr)
     end
+    edges = fixnum_proof_edge_sources(irep)
+    entries.merge(edges.keys)
     @fixnum_proof_ctx[irep.label] =
-      { entries: entries, protected: protected_addrs, upvars: subtree_upvar_written_regs(irep) }
+      { entries: entries, protected: protected_addrs, upvars: subtree_upvar_written_regs(irep),
+        edge_sources: edges, catch_targets: catch_targets }
+  end
+
+  # REGION_DOMINANCE: target address -> the set of instruction ADDRESSES that
+  # branch to it. The complete intra-frame branch set, verified directly
+  # against 3rd/mruby's own `include/mruby/ops.h` rather than assumed: exactly
+  # five opcodes move `pc` within the current frame -- `JMP`/`JMPUW` (both `S`
+  # operand: codedump.c prints the resolved target alone, `"JMP\t\t%03d"`) and
+  # `JMPIF`/`JMPNOT`/`JMPNIL` (all `BS`: `"JMPIF\t\tR%d\t%03d"`, register
+  # first, target second -- exactly the split `jump_targets`/
+  # `jmp_target_after_reg` above already make). `OP_ENTER` itself does NOT
+  # branch (its `CASE(OP_ENTER)` arm falls straight through to `NEXT`); a real
+  # optional-argument signature's own dispatch is an ordinary `JMP` table
+  # emitted immediately after it (see `optional_arg_table` above), already
+  # covered here. `RETURN`/`RETURN_BLK`/`BREAK`/`STOP` leave the frame
+  # entirely, and `RAISEIF`/`ERR`/`EXCEPT` reach a handler only through a real
+  # catch entry -- which is why `catch_targets` is tracked separately and
+  # always refuses: a raise edge has no visible source instruction at all, so
+  # its in-edge set can never be shown to be contained in anything.
+  #
+  # `JMPUW` is deliberately included even though `jump_targets` (which only
+  # feeds real `L<addr>:` label emission for opcodes compile_method can
+  # actually translate) omits it: a method containing one always ends up
+  # `#error unhandled opcode JMPUW` and is dropped, but the proof still RUNS
+  # inside such a body during a speculative `compiles_clean?` probe, and an
+  # unmodelled edge is the one kind of miss this test cannot afford. Its
+  # targets are merged into `entries` too, so an unwritable-past label stays
+  # unwritable-past on the old path as well.
+  def fixnum_proof_edge_sources(irep)
+    edges = Hash.new { |h, k| h[k] = Set.new }
+    irep.instructions.each do |insn|
+      case insn.op
+      when 'JMP', 'JMPUW'
+        edges[insn.args.strip[/\d+/].to_i] << insn.addr
+      when 'JMPIF', 'JMPNOT', 'JMPNIL'
+        edges[jmp_target_after_reg(insn.args)] << insn.addr
+      end
+    end
+    edges
+  end
+
+  # REGION_DOMINANCE: does the write at instruction index `w_idx` DOMINATE the
+  # use at `u_idx` -- i.e. can control reach `u_idx` without having executed
+  # `w_idx` first?
+  #
+  # This replaces the original, far blunter rule ("refuse the moment the
+  # backward walk steps onto ANY address that carries a real `L<addr>:`
+  # label"), which was correct but threw away the single largest class of
+  # provable operands in this whole program: measured over a full
+  # whole-program run, a plain label barrier was the reason 1452 of 6950
+  # failing `proven_fixnum_pair?` queries failed -- more than any other cause,
+  # and more than twice the next one. The overwhelmingly common real shape it
+  # rejected is simply an `if` between a literal assignment and its use:
+  #
+  #     x = 5          # W  -- LOADI_5
+  #     if cond        #    -- JMPNOT ... L1
+  #       ...
+  #     end            # L1:
+  #     y = x + 1      # U  -- ADD, operand x
+  #
+  # `L1` sits between W and U, so the old rule refused -- even though every
+  # path that reaches `L1` at all came through W.
+  #
+  # The replacement is a real, local dominance test rather than a syntactic
+  # one, and rests on a single containment argument. Let the REGION be the
+  # contiguous instruction range `[w_idx, u_idx]` (contiguous by construction:
+  # the backward walk only ever steps `j -= 1`, and an irep's instruction
+  # addresses increase monotonically with index). Trace any execution path
+  # that reaches `u_idx` BACKWARD from there. Each backward step is either a
+  # fall-through from the preceding instruction or a branch from some source
+  # address. While the path stays inside the region it cannot have written the
+  # traced register -- the forward walk already checked every single
+  # instruction in `(w_idx, u_idx]` and found none that writes it. So the only
+  # question is where the path first ENTERED the region, and there are exactly
+  # two ways in:
+  #
+  #   - falling through into `w_idx` from `w_idx - 1`, which means W executed
+  #     -- exactly what is being proven; or
+  #   - branching to some label L inside `(w_idx, u_idx]`, which skips W.
+  #
+  # So W dominates U iff no in-region label can be reached from outside the
+  # region. That is what this checks, directly: for every address in
+  # `(w_idx, u_idx]` that is a control-flow entry at all, every source address
+  # that branches to it must itself lie within `[lo, hi]` (the region's own
+  # address bounds). A source BELOW `lo` is a jump from before the write that
+  # lands after it -- the real skip-the-write case. A source ABOVE `hi` is a
+  # back-edge from after the use, which matters just as much: it would let a
+  # write sitting after U clobber the register and then loop back to U, which
+  # the forward walk never looked at.
+  #
+  # Both of the shapes this codebase actually generates fall out correctly. A
+  # `while` loop entirely between W and U has its head label reached only by
+  # its own back-edge (inside) and its exit label only by its own head test
+  # (inside), so a write before the loop still dominates a use after it -- now
+  # correctly admitted. A loop whose BODY contains the use, with the back-edge
+  # after it, has that back-edge source above `hi` -- correctly refused.
+  #
+  # A catch-handler target always refuses: it is reached by a raise, which has
+  # no source instruction to contain (see `fixnum_proof_edge_sources`). An
+  # entry address with no recorded in-edge at all refuses too -- that can only
+  # mean a control-flow edge this file does not model, and the whole test is
+  # worthless unless the edge map is complete.
+  #
+  # `w_idx` is -1 for the "fell off the top of the body" case (the register
+  # still holds what the method preamble put there), which correctly makes the
+  # region the whole body up to the use and still rejects a back-edge from
+  # below it.
+  def fixnum_proof_region_ok?(irep, ctx, w_idx, u_idx)
+    lo = irep.instructions[[w_idx, 0].max].addr
+    hi = irep.instructions[u_idx].addr
+    ((w_idx + 1)..u_idx).each do |k|
+      addr = irep.instructions[k].addr
+      next unless ctx[:entries].include?(addr)
+      return false if ctx[:catch_targets].include?(addr)
+
+      srcs = ctx[:edge_sources][addr]
+      return false if srcs.nil? || srcs.empty?
+      return false unless srcs.all? { |s| s >= lo && s <= hi }
+    end
+    true
   end
 
   # Every register any `SETUPVAR` in this irep's whole child subtree names as
@@ -10674,20 +10984,26 @@ class CodeGen
 
           cur = src
         else
+          # REGION_DOMINANCE: `j` is the write this use depends on, so the
+          # region is finally known -- check that control cannot enter it
+          # anywhere but at `j` itself before trusting the write.
+          return false unless fixnum_proof_region_ok?(irep, ctx, j, idx)
+
           return fixnum_proof_source?(irep, j, insn, cur, owner_def, depth)
         end
       end
-
-      # Control must not be able to ENTER the stream here: if this address
-      # carries a real `L<addr>:` label, a `goto` from anywhere else in the
-      # function can land on it, and nothing further back dominates the use.
-      return false if ctx[:entries].include?(insn.addr)
 
       j -= 1
     end
 
     # Fell off the top of the body without finding any write: `cur` still holds
     # whatever compile_method's own preamble put there at method entry.
+    # REGION_DOMINANCE: `-1` makes the region the whole body up to this use --
+    # the method preamble's own write dominates by construction, but a
+    # back-edge from BELOW the use would still let later code clobber the
+    # register and loop back, so the same containment test still has to run.
+    return false unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
+
     fixnum_proof_entry_arg?(irep, cur, owner_def)
   end
 
@@ -10707,6 +11023,19 @@ class CodeGen
         proven_fixnum_operand?(irep, j, s, owner_def, depth + 1)
     when 'ADDI', 'SUBI'
       proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1)
+    when 'GETCONST'
+      # "GETCONST R4 WEAPON_SLOT" -- register FIRST, bare name second (the
+      # reverse of SETCONST's own operand order; codedump.c's own
+      # `"GETCONST\tR%d\t%s"`). A trailing `print_lv_a` comment can only ever
+      # follow the name, so a plain whitespace split still isolates it.
+      @integer_constants.include?(insn.args.split(/\s+/)[1])
+    when 'GETMCNST'
+      # "GETMCNST R4 (R4)::DEPTH" -- a scoped read (`Inner::DEPTH`). Only the
+      # bare name after `::` is matched, which is exactly what
+      # IntegerConstants keys on, and for exactly the same reason: the scope
+      # register's own value is a runtime lookup this file does not model, so
+      # the proof has to hold for EVERY `DEPTH` in the program or not at all.
+      @integer_constants.include?(insn.args[/::(\S+)/, 1])
     else
       false
     end
@@ -16104,8 +16433,33 @@ if $PROGRAM_NAME == __FILE__
   # `annotations` (computed above, previously fed only to IvarLayout.analyze)
   # also now drives NATIVE_ARG_TARGETS' own native-argument calling
   # convention -- see that constant's own comment.
+  # INTEGER_CONSTANT_PROOF: needs the same two out-of-bytecode inputs its own
+  # poison sources 3 and 4 describe. `native_paths` is already whatever
+  # NATIVE_SRCS named (nil when it wasn't passed at all -- the established
+  # no-NATIVE_SRCS diagnostic mode); FOREIGN_RUBY_SRCS is its Ruby-side twin
+  # (`foreign_mrblib_srcs`, compiled_gems.rb). Omitting either one only ever
+  # REMOVES poison, i.e. would make this less conservative than a real build
+  # -- so when either is missing the analysis is skipped outright and no
+  # constant is proven at all, rather than run against a knowingly incomplete
+  # picture. That keeps a bare `ruby bc2cpp.rb foo.rb` exploration honest
+  # instead of quietly more optimistic than the code that actually ships.
+  foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
+  integer_constants =
+    if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
+      IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
+    else
+      Set.new
+    end
+  warn "== integer-valued constants proven (INTEGER_CONSTANT_PROOF) =="
+  if integer_constants.empty?
+    warn '  (none)'
+  else
+    integer_constants.sort.each { |n| warn "  CONST #{n}" }
+  end
+  warn ''
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
-                    element_layout, element_annotations, container_constants, hash_element_layout)
+                    element_layout, element_annotations, container_constants, hash_element_layout,
+                    integer_constants)
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
   # e.g. "LCF::File,LCF::Database") without narrowing the closed-world
   # registry itself -- srcs above should still be the whole program (or at

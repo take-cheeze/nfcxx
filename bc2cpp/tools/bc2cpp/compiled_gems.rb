@@ -3046,3 +3046,34 @@ def closed_world_mrblib_srcs(gems_root)
     Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
     Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]
 end
+
+# INTEGER_CONSTANT_PROOF: every Ruby source that is compiled into the same
+# real VM as the closed world above but is NOT part of it -- mruby's own
+# core mrblib, every core mrbgem's mrblib, and the three always-active
+# external gems' (see `external_gem_native_srcs` above for why those three
+# and no others). `closed_world_mrblib_srcs` deliberately does not include
+# them: they define no method this project's own MONO/POLY registry needs
+# to resolve, and compiling them is not this tool's job.
+#
+# They matter for exactly one question, and it is a soundness question:
+# `IntegerConstants` (bc2cpp.rb) proves "every definition of bare constant
+# name N anywhere assigns an integer literal", and a definition sitting in
+# one of these files is still a real definition that a real `GETCONST N`
+# inside compiled code could resolve to (lexical scope first, then the
+# cref's own ancestors -- so a constant on an ancestor MODULE, `Enumerable`
+# being the obvious one, is genuinely reachable from a compiled class that
+# includes it). Scanned for constant-assignment names only, never parsed or
+# compiled.
+#
+# This is not hypothetical. A real collision exists in this repo right now
+# and was found by measuring rather than assuming: `3rd/mruby/mrblib/
+# enum.rb` defines `NONE = Object.new`, while `mruby-rpg2k/mrblib/game.rb`
+# defines `NONE = 37`. Bare-name agreement across the closed world alone
+# would have called `NONE` a proven integer; it is not.
+def foreign_mrblib_srcs(gems_root)
+  Dir["#{gems_root}/3rd/mruby/mrblib/**/*.rb"] +
+    Dir["#{gems_root}/3rd/mruby/mrbgems/*/mrblib/**/*.rb"] +
+    Dir["#{gems_root}/3rd/mruby-marshal/mrblib/**/*.rb"] +
+    Dir["#{gems_root}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
+    Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
+end
