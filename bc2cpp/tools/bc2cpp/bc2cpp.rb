@@ -6343,6 +6343,28 @@ def collect_block_upvars(block_irep)
   upvars.uniq.sort
 end
 
+# DEEP_UPVAR_CAPTURE_SUPPORT: the C++ name of one captured upvar pointer,
+# keyed by the REAL `(level, index)` pair its own `GETUPVAR`/`SETUPVAR`
+# operands carry -- never by index alone, because the same index at two
+# different levels is a real, routinely-occurring shape, not a corner
+# case. Confirmed against real `mrbc -v` disassembly of this program's
+# own `Game::ChipsetLayout.quads_from_quarters` shape (`out = []; 2.times
+# do |j| 2.times do |i| ... quarters[j][i] ... out << ... end end`), whose
+# INNER block's own body contains BOTH
+#   GETUPVAR R5 1 1   ; level 1, index 1 -- the METHOD's R1, `quarters`
+#   GETUPVAR R6 1 0   ; level 0, index 1 -- the OUTER BLOCK's R1, `j`
+# -- the identical index `1` naming two completely different variables.
+# Indexing captured pointers by `b` alone (what UPVAR_CAPTURE_SUPPORT did
+# before this existed, when level 0 was the only level ever accepted)
+# would silently alias those two together, so the level is part of the
+# name. Level 0 deliberately keeps the ORIGINAL, un-suffixed spelling:
+# every one of the 330 already-shipping BLOCK_FALLBACK bodies is level-0
+# only, so their generated C++ is byte-for-byte unchanged by this and the
+# whole diff stays confined to the genuinely new deeper-capture case.
+def upvar_var_name(level, idx)
+  level.zero? ? "bc2cpp_upvar_#{idx}" : "bc2cpp_upvar_u#{level}_#{idx}"
+end
+
 # UPVAR_CAPTURE_SUPPORT: the call-site half of the safety argument
 # BLOCK_FALLBACK_UNSAFE_OPS's own comment makes -- pointer-capturing an
 # outer register is only sound when the receiver invokes the block
@@ -6431,6 +6453,60 @@ end
 #     program's own domain method): `targets.each do |t| r = yield t; ...
 #     end; best` -- plain synchronous, real body read directly.
 #
+# `flat_map` is INVESTIGATED AND VERIFIED SAFE but deliberately NOT added
+# yet -- the one entry on this list's shortlist that a real measurement,
+# not a safety doubt, is holding back. DEEP_UPVAR_CAPTURE_SUPPORT's own
+# propagation is what first made a `flat_map` call site reachable by this
+# gate at all (this program's single real one, `RPG2k::Scene::Map#global_
+# animation_targets`, mruby-rpg2k/mrblib/scene/map.rb: `(-1..1).flat_map
+# do |gy| (-1..1).map do |gx| ... cam_x ... flash_target ... end end` --
+# the OUTER block captures the method's own `cam_x`/`cam_y`/`flash_target`
+# only because the INNER one reads them at level 1). Admitting it does
+# compile that method and closes its remaining BLOCK/SENDB pair, but the
+# method's own inner block body then reaches a PRE-EXISTING, unrelated
+# KEYWORD_CALLSITE_SUPPORT MONO bug: the devirtualized direct call emits
+# an extra literal `1` presence flag after each keyword value
+# (`RPG2k__Scene__Map_anim_target_impl(M, self, r6, r7, r9, 1, r11, 1,
+# r13, 1)`) while that callee's own real signature declares only
+# `(mrb_state*, mrb_value self, tx, ty, height, index, flash_target)` --
+# a hard `g++` error, already firing at 12 other call sites today
+# (`RPG2k::Scene::Map#start_map_animation`, `RPG2k::Scene::Battle#
+# whole_side_anim_targets`, the `apply_pending_*` family, ...). Adding
+# `flat_map` would take the whole-program syntax-only error count from its
+# documented 17 to 18, so it waits for that keyword-MONO arity bug to be
+# fixed first -- at which point this entry is a one-word change, the
+# safety argument below already done and re-checked:
+#
+# The name needed a real extra check the other entries did not, because
+# TWO different definitions of it exist in mruby's own tree and they
+# differ on exactly the property this allowlist is about:
+#   - `Enumerable#flat_map` (3rd/mruby/mrbgems/mruby-enum-ext/mrblib/
+#     enum.rb, `alias collect_concat flat_map`): `ary = []; self.each do
+#     |*e| e2 = block.call(*e); ... end; ary` -- the block is called once
+#     per element, synchronously, inside `each`, and `ary` is returned.
+#     Never stored. SAFE, and this is the one this program actually gets.
+#   - `Enumerator::Lazy#flat_map` (3rd/mruby/mrbgems/mruby-enum-lazy/
+#     mrblib/lazy.rb): `Lazy.new(self){|yielder, val| result =
+#     block.call(val) ... }` -- the block is CAPTURED INTO A CLOSURE stored
+#     on the returned Lazy and invoked whenever that Lazy is later
+#     enumerated, i.e. an escaping, deferred callback. Exactly the shape
+#     this allowlist exists to refuse, and exactly why `flat_map` could not
+#     simply be assumed safe from its Enumerable body alone.
+# Since the gate is by NAME, admitting `flat_map` would only be sound if the Lazy
+# definition cannot be reached anywhere in this closed world. It cannot:
+# `mruby-enum-lazy` is NOT built into this program at all -- build_config.rb
+# names every core gem it wants explicitly (no default gembox), and
+# `mruby-enum-ext` is on that list while `mruby-enum-lazy` is not, so
+# `Enumerator::Lazy` does not exist at runtime. A whole-program grep also
+# found no `def flat_map`/`alias ... flat_map`/`collect_concat` in any of
+# this project's own mrblib or native sources, so `Enumerable#flat_map` is
+# the only definition any call site can reach. (`LCF.lazy`, mruby-lcf/
+# mrblib/schema.rb -- `cache = nil; -> { cache ||= block.call }`, the real
+# block-storing pattern BLOCK_FALLBACK_UNSAFE_OPS' own comment already
+# cites -- is an unrelated DOMAIN method that merely shares the word
+# "lazy"; it defines no `flat_map` and is not Enumerator::Lazy.) Re-verify
+# this before ever adding mruby-enum-lazy to the build.
+#
 # `cached_bitmap` added alongside BLOCK_FALLBACK_RESCUE_SUPPORT, the same
 # real call site (`RPG2k::Scene::Battle`/`RPG2k::Scene::Map`, both
 # identical): `return cache[key] if cache.key?(key); cache[key] = yield`
@@ -6445,9 +6521,16 @@ BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   auto_battle_best_target cached_bitmap
 ].freeze
 
+# DEEP_UPVAR_CAPTURE_SUPPORT: the `collect_block_upvars(...).nil?` gate
+# (refuse any block referencing a level>0 upvar outright) used to live
+# here. It now lives in `recognize_block_fallback_regions` instead, as a
+# real "can this level actually SUPPLY that pointer?" check against the
+# enclosing function's own captured-pointer set -- see that recognizer's
+# own `available_upvars` comment. Nothing else moved: this function is
+# still the pure, irep-only half of the gate (arity plus the unsafe-op
+# scan), exactly as every caller already assumes.
 def block_fallback_safe?(block_irep)
   return false unless pure_mandatory_arity?(block_irep)
-  return false if collect_block_upvars(block_irep).nil?
 
   block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
@@ -10153,7 +10236,18 @@ class CodeGen
   # SETUPVAR's own compile_insn case (keyed on the literal name, not on
   # which function it happens to be compiled inside) work correctly with
   # no special-casing on its own part at all.
-  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [])
+  # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` is the captured-pointer
+  # set of the function this extracted try body is being lifted OUT of --
+  # empty for an ordinary method-level rescue (no enclosing Ruby scope to
+  # capture from), and the enclosing block's own set when the rescue lives
+  # inside a BLOCK_FALLBACK body. Those same pointers are threaded in by
+  # name through `extra_fields`, so they really are in scope inside the
+  # extracted function, which is exactly what makes it sound to let a
+  # block-carrying call nested in here forward one of them a level
+  # further. Passed straight through to the block-fallback pass below and
+  # to any nested rescue body lifted out of this one.
+  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
+                           available_upvars: [])
     ctx_struct = "#{try_name}_Ctx"
     ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
                  extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
@@ -10217,7 +10311,8 @@ class CodeGen
       local_suppressed.merge((nregion[:begin_addr]..nregion[:end_addr]).to_a)
       local_suppressed << nregion[:except_addr]
     end
-    nested_block_regions = recognize_block_fallback_regions(irep).select { |r| range.cover?(r[:block_addr]) }
+    nested_block_regions = recognize_block_fallback_regions(irep, available_upvars: available_upvars)
+                           .select { |r| range.cover?(r[:block_addr]) }
     nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
     out = emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
 
@@ -10275,7 +10370,8 @@ class CodeGen
       # (already pre-claimed into local_suppressed above, before the
       # block-fallback pass ran -- not re-merged here.)
       nested_try_name = "#{try_name}_nested#{nested_rescue_regions.size > 1 ? "_#{ni}" : ''}"
-      out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields)
+      out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields,
+                                                                            available_upvars: available_upvars)
       local_glue_at[nregion[:begin_addr]] =
         emit_rescue_glue(nested_try_name, nregion, [], [], extra_field_values: nested_extra_values)
     end
@@ -13057,10 +13153,85 @@ class CodeGen
     block_irep = region[:block_irep]
     return true if block_irep.instructions.any? { |i| i.op == 'RETURN_BLK' }
 
-    recognize_block_fallback_regions(block_irep).any? { |nregion| block_fallback_region_has_return_blk?(nregion) }
+    # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` must be this region's
+    # OWN captured set here, exactly the value emit_proc_fallback_fn will
+    # later pass when it really compiles this same body -- otherwise this
+    # pre-scan would recognize a strictly SMALLER set of nested regions
+    # than the real emit pass does, and a `RETURN_BLK` living inside a
+    # nested region that only the real pass can see would get no
+    # `needs_return_catch` wrapper at all: a thrown `bc2cpp_method_return`
+    # with nothing to catch it, i.e. `std::terminate`, not a wrong value.
+    # One shared expression, so the two passes cannot drift.
+    recognize_block_fallback_regions(block_irep, available_upvars: region[:upvars] || [])
+      .any? { |nregion| block_fallback_region_has_return_blk?(nregion) }
   end
 
-  def recognize_block_fallback_regions(irep)
+  # DEEP_UPVAR_CAPTURE_SUPPORT: every enclosing-scope register this irep
+  # needs, INCLUDING the ones only its own nested block bodies reference,
+  # as real `[level, index]` pairs (`level` counted exactly the way the
+  # `GETUPVAR`/`SETUPVAR` third operand counts it: 0 = the immediately
+  # enclosing scope).
+  #
+  # The nested half is the whole point. A block that never mentions an
+  # enclosing local ITSELF still has to capture one when a block nested
+  # inside IT does -- real, verified shape (`mrbc -v`, this program's own
+  # `Game::ChipsetLayout.quads_from_quarters`): the outer `2.times do |j|`
+  # block's own irep contains NO `GETUPVAR` at all, while the inner
+  # `2.times do |i|` block's does (`GETUPVAR R5 1 1` -> the method's
+  # `quarters`, `GETUPVAR R5 3 1` -> the method's `out`). Those level-1
+  # references resolve, from the OUTER block's own standalone C++
+  # function, to that function's own captured pointer parameters -- which
+  # only exist if the outer block captured them, which it will only do
+  # because of this propagation. Hence `[l, x]` in a CHILD contributes
+  # `[l - 1, x]` here for every `l >= 1` (a child's level 0 is this
+  # irep's OWN registers -- ordinary C++ locals in this irep's own
+  # function, nothing to capture), applied recursively so an arbitrarily
+  # deep nest still lands every pointer it needs in every intermediate
+  # frame along the way.
+  #
+  # Deliberately walks EVERY child irep in `reps`, not only the ones that
+  # will really be compiled as nested BLOCK_FALLBACK regions: capturing a
+  # pointer nothing ends up reading costs one unused env slot and one
+  # unused parameter, while MISSING one would be a dangling C++ name, so
+  # the over-approximation is the safe direction. (It cannot cost a
+  # regression either: a region this widens into needing a level>0
+  # pointer its own enclosing frame cannot supply is declined by the
+  # recognizer below and simply stays on today's `#error` path, and a
+  # named inliner -- `.times`/`.each`/... -- always claims its own call
+  # site BEFORE the BLOCK_FALLBACK pass ever sees it, so an inlined site's
+  # codegen is unaffected by anything decided here.)
+  #
+  # `nil` means "not modelable" -- a malformed operand pair. Recursion is
+  # bounded by `MAX_UPVAR_NEST_DEPTH` purely as a guard against a
+  # pathological irep graph; real bytecode nests a handful of levels at
+  # most.
+  MAX_UPVAR_NEST_DEPTH = 16
+
+  def block_upvar_needs(irep, depth = 0)
+    return nil if depth > MAX_UPVAR_NEST_DEPTH
+
+    needs = []
+    irep.instructions.each do |insn|
+      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
+
+      _reg, upvar_idx, level = insn.args.split(/\s+/)
+      return nil unless upvar_idx =~ /\A\d+\z/ && level =~ /\A\d+\z/
+
+      needs << [level.to_i, upvar_idx.to_i]
+    end
+    (irep.reps || []).each do |child_label|
+      child = child_label && @ireps[child_label]
+      next unless child
+
+      child_needs = block_upvar_needs(child, depth + 1)
+      return nil if child_needs.nil?
+
+      child_needs.each { |(l, x)| needs << [l - 1, x] if l >= 1 }
+    end
+    needs.uniq.sort
+  end
+
+  def recognize_block_fallback_regions(irep, available_upvars: [])
     regions = []
     irep.instructions.each_with_index do |insn, idx|
       next unless insn.op == 'BLOCK'
@@ -13105,17 +13276,49 @@ class CodeGen
       block_irep = block_label && @ireps[block_label]
       next unless block_irep && block_fallback_safe?(block_irep)
 
-      # UPVAR_CAPTURE_SUPPORT: block_fallback_safe? already confirmed
-      # every upvar reference is depth-0 (or that there are none at all);
-      # collect_block_upvars can't return nil here as a result. A NON-
-      # EMPTY list still needs the call-site's own method name to be on
-      # the hand-vetted synchronous-dispatch allowlist -- see
-      # BLOCK_FALLBACK_UNSAFE_OPS's own comment for why pointer-capture
-      # is unsound for a receiver that might store the block rather than
-      # invoke it synchronously. An empty list (no upvars at all) needs
-      # no such gate -- identical to this mechanism's pre-existing
-      # behavior, zero new risk.
-      upvars = collect_block_upvars(block_irep)
+      upvars = block_upvar_needs(block_irep)
+      next if upvars.nil?
+
+      # DEEP_UPVAR_CAPTURE_SUPPORT: a level-0 need is always suppliable --
+      # it names a register of the function this call site sits in, an
+      # ordinary C++ local there (`&r<idx>`), exactly as UPVAR_CAPTURE_
+      # SUPPORT always did. A level-L need for L >= 1 names a register
+      # L more frames out, which this call site can only forward if the
+      # function it sits in ALREADY holds that pointer itself -- i.e. if
+      # `[L - 1, idx]` is in `available_upvars`, the captured set of the
+      # enclosing block body being compiled right now (empty at ordinary
+      # method level, where there is no enclosing Ruby scope to capture
+      # from at all, so every L >= 1 is correctly refused there).
+      # `block_upvar_needs`' own child propagation is exactly what makes
+      # this hold rather than merely be checked: the enclosing block's own
+      # needs were computed with the same function, from the same child
+      # ireps, so whatever a nested region asks for here was already
+      # propagated into that enclosing capture set. The check is kept as a
+      # real gate rather than an assertion so that any shape the
+      # propagation does NOT cover degrades to today's honest `#error`
+      # instead of emitting a dangling C++ name.
+      next unless upvars.all? { |(l, x)| l.zero? || available_upvars.include?([l - 1, x]) }
+
+      # UPVAR_CAPTURE_SUPPORT: a NON-EMPTY capture set still needs the
+      # call-site's own method name to be on the hand-vetted synchronous-
+      # dispatch allowlist -- see BLOCK_FALLBACK_UNSAFE_OPS's own comment
+      # for why pointer-capture is unsound for a receiver that might store
+      # the block rather than invoke it synchronously. An empty set (no
+      # upvars at all) needs no such gate.
+      #
+      # DEEP_UPVAR_CAPTURE_SUPPORT: this gate is what makes a DEEPER
+      # capture sound too, with no new argument needed. A level-1 pointer
+      # forwarded from here points into the frame of the method two calls
+      # out, and stays valid exactly as long as that frame is live. It is
+      # live because EVERY level between here and it is itself gated by
+      # this same allowlist: the inner block only runs while the outer
+      # block that forwarded the pointer is running, and the outer block
+      # only runs while the enclosing method is, because the outer call
+      # site's own capture set is non-empty by construction (the
+      # propagation above put the forwarded index in it) and so the outer
+      # site had to pass this identical check. Synchronous invocation at
+      # every level chains into "the whole frame chain is live", which is
+      # precisely the property the level-0 argument already relied on.
       next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
 
       regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
@@ -13172,8 +13375,14 @@ class CodeGen
     # real escape-safety reason a stored/escaping Proc can't reuse this
     # mechanism), so `|| []` here is the plain "no upvars" case for both,
     # not a defensive guess.
+    # DEEP_UPVAR_CAPTURE_SUPPORT: each entry is a real `[level, index]`
+    # pair now, never a bare index -- see upvar_var_name's own comment for
+    # the real disassembly showing why the level has to be part of the
+    # identity. A level-0 entry still spells its parameter exactly as
+    # before, so every already-shipping level-0-only body's generated C++
+    # is unchanged.
     upvar_regs = region[:upvars] || []
-    upvar_params = upvar_regs.map { |b| "mrb_value* bc2cpp_upvar_#{b}" }
+    upvar_params = upvar_regs.map { |(l, b)| "mrb_value* #{upvar_var_name(l, b)}" }
     # `block_addr` alone is only unique WITHIN one irep -- two unrelated
     # methods can easily have a BLOCK/LAMBDA at the same numeric bytecode
     # offset (a real, caught-before-shipping bug: the first version of
@@ -13238,7 +13447,11 @@ class CodeGen
       nested_suppressed.concat((rregion[:begin_addr]..rregion[:end_addr]).to_a)
       nested_suppressed << rregion[:except_addr]
     end
-    recognize_block_fallback_regions(block_irep).each do |nregion|
+    # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` is THIS body's own
+    # captured-pointer set -- exactly the parameters `upvar_params` above
+    # declares and therefore exactly what a nested region is allowed to
+    # forward one level further in (see the recognizer's own comment).
+    recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs).each do |nregion|
       # BLOCK_FALLBACK_RESCUE_SUPPORT: skip a region already pre-claimed
       # above by a rescue region's own address range -- it belongs to
       # THAT region's own separate, restricted-range recognize/emit pass
@@ -13331,9 +13544,9 @@ class CodeGen
     # recomputed (one real region list, not two that could drift).
     rescue_regions.each_with_index do |rregion, i|
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
-      extra_fields = upvar_regs.map { |b| { name: "bc2cpp_upvar_#{b}", c_type: 'mrb_value*' } }
+      extra_fields = upvar_regs.map { |(l, b)| { name: upvar_var_name(l, b), c_type: 'mrb_value*' } }
       nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
-                                          extra_fields: extra_fields)
+                                          extra_fields: extra_fields, available_upvars: upvar_regs)
       nested_glue_at[rregion[:begin_addr]] = emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
                                                                 extra_field_values: extra_fields.map { |f| f[:name] })
     end
@@ -13373,9 +13586,10 @@ class CodeGen
     # the exact same order emit_rproc_construction below builds its own
     # env array in (both read `region[:upvars]`/`upvar_regs` verbatim, so
     # this ordering can never drift between the two).
-    upvar_args = upvar_regs.each_with_index.map do |b, i|
-      out << "  mrb_value* bc2cpp_upvar_#{b} = static_cast<mrb_value*>(mrb_cptr(mrb_proc_cfunc_env_get(M, #{i + 1})));\n"
-      "bc2cpp_upvar_#{b}"
+    upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
+      vname = upvar_var_name(l, b)
+      out << "  mrb_value* #{vname} = static_cast<mrb_value*>(mrb_cptr(mrb_proc_cfunc_env_get(M, #{i + 1})));\n"
+      vname
     end
     call_args = (['bc2cpp_captured_self'] + upvar_args).join(', ')
     if mand.zero?
@@ -13416,7 +13630,19 @@ class CodeGen
     # opaque native pointer crosses the mrb_value boundary in this file.
     # Order matches emit_proc_fallback_fn's own env-slot reads exactly
     # (both iterate `upvar_regs` verbatim, self always first).
-    env_entries = ['self'] + upvar_regs.map { |b| "mrb_cptr_value(M, &r#{b})" }
+    # DEEP_UPVAR_CAPTURE_SUPPORT: a level-0 entry is this enclosing
+    # function's OWN register, so its address is what gets boxed (`&r<b>`,
+    # unchanged). A level-L entry for L >= 1 names a register L more
+    # frames out, which this enclosing function does not hold as a local
+    # at all -- it holds the POINTER to it, as its own captured parameter
+    # `upvar_var_name(l - 1, b)` (the recognizer only ever admits such an
+    # entry after checking that exact pair is in the enclosing capture
+    # set). So the pointer is forwarded straight through, never
+    # re-addressed: `&` here would box a pointer-to-pointer and read back
+    # as garbage.
+    env_entries = ['self'] + upvar_regs.map do |(l, b)|
+      l.zero? ? "mrb_cptr_value(M, &r#{b})" : "mrb_cptr_value(M, #{upvar_var_name(l - 1, b)})"
+    end
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, #{env_entries.size}, " \
            "bc2cpp_blk_env_#{addr});\n"
@@ -13693,13 +13919,24 @@ class CodeGen
       # number -- confirmed against 3rd/mruby/src/vm.c's own
       # `OP_GETUPVAR`/`OP_SETUPVAR` (`e->stack[b]`, the exact same
       # indexing a bare `R(b)` read would use in the DEFINING scope).
+      # DEEP_UPVAR_CAPTURE_SUPPORT: matched on the real `[level, index]`
+      # pair, not on `index` with `level` forced to 0. Both operands are
+      # taken verbatim from the disassembly and looked up in the captured
+      # set this body's own function really declares parameters for, so a
+      # level the enclosing frame never captured still falls through to
+      # the honest `#error` below rather than naming a variable that does
+      # not exist. The generated access is identical at every level -- the
+      # captured value IS an `mrb_value*` aimed at the defining frame's
+      # own register, whichever frame that is (see upvar_var_name and
+      # emit_rproc_construction for how a deeper one is forwarded).
       reg, upvar_idx, level = a.split(/\s+/)
-      idx_i = upvar_idx.to_i
-      if level == '0' && @block_fallback_upvars&.include?(idx_i)
+      key = [level.to_i, upvar_idx.to_i]
+      if level =~ /\A\d+\z/ && @block_fallback_upvars&.include?(key)
+        vname = upvar_var_name(*key)
         if insn.op == 'GETUPVAR'
-          "  r#{reg[/\d+/]} = *bc2cpp_upvar_#{idx_i};\n"
+          "  r#{reg[/\d+/]} = *#{vname};\n"
         else
-          "  *bc2cpp_upvar_#{idx_i} = r#{reg[/\d+/]};\n"
+          "  *#{vname} = r#{reg[/\d+/]};\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
