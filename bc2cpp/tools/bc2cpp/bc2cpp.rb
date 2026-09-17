@@ -5912,11 +5912,50 @@ end
 # nil) per-invocation guess. See emit_proc_fallback_fn/emit_block_
 # fallback_glue's own comments for the actual capture/retrieval codegen.
 #
-# `GETUPVAR`/`SETUPVAR` (a real OUTER-LOCAL reference, as opposed to
-# `self`) still has no matching real `REnv` register layout a one-slot
-# `_with_env` capture satisfies -- rejected outright, out of scope for
-# this round (capturing every referenced outer local the same
-# self-capture way is a natural follow-up, not attempted here).
+# UPVAR_CAPTURE_SUPPORT: `GETUPVAR`/`SETUPVAR` (a real OUTER-LOCAL
+# reference, as opposed to `self`) was rejected outright by an earlier
+# round of this same feature -- exactly the follow-up that round's own
+# comment predicted ("capturing every referenced outer local the same
+# self-capture way is a natural follow-up, not attempted here"). Now
+# real: every VM register in a compiled method's own body is already a
+# plain `mrb_value` C++ local (`r0`, `r1`, ...), so "capture an outer
+# local" reduces to "read/write one specific `mrb_value` variable that
+# lives in the ENCLOSING C++ function's own stack frame" -- generalizing
+# the exact `_with_env` mechanism `self`-capture (above) already
+# established, just capturing a POINTER (`mrb_cptr_value(M, &rN)`) per
+# referenced outer register instead of one fixed `self` value slot.
+# `collect_block_upvars`/`compile_insn`'s own `GETUPVAR`/`SETUPVAR` cases
+# have the real codegen; this function only still enforces the one
+# precondition real 3rd/mruby/src/vm.c confirms is load-bearing --
+# `uvenv(mrb, up)` walks `up` proc->upper hops before reading `e->stack`,
+# so an upvar whose real DEPTH operand is not `0` (a capture crossing
+# MORE than one lexical scope -- structurally impossible anyway given
+# `BLOCK`/`SENDB`/`SSENDB` staying rejected below, i.e. no nested block
+# this fallback could ever see a depth-1+ reference from) has no register
+# in THIS block's own immediately-enclosing frame to point at, and is
+# refused rather than guessed at. Confirmed against a real `mrbc -v`
+# closure disassembly, not assumed: `GETUPVAR R3 4 0`/`SETUPVAR R3 4 0`
+# for `total += x + bonus` inside `list.each { |x| total += x + bonus }`
+# -- operand B (`4`) is literally the enclosing method's own `R4` (its
+# `total` local), operand C (`0`) the depth.
+#
+# A real, separate safety question -- NOT decided by `block_fallback_
+# safe?` at all, deliberately -- is WHETHER pointer-capture is safe for a
+# given call site: unlike `self` (copied BY VALUE, so remains a valid
+# GC-rooted handle indefinitely even if a stored block outlives this
+# call), a captured upvar is a raw pointer into THIS ENCLOSING C++
+# FUNCTION'S OWN STACK FRAME -- safe only as long as the block is
+# invoked strictly synchronously and fully finished before this call's
+# own `mrb_funcall_with_block` returns, never stored by the callee for
+# later/async invocation (a real, confirmed-existing pattern in this
+# program: `LCF.lazy(&block)`, mruby-lcf/mrblib/schema.rb, stores the
+# block in a closure and calls it lazily on first access -- not reachable
+# from inside a compiled method body today, since it only ever appears at
+# class-body top level, but proof this pattern is not merely
+# hypothetical). `recognize_block_fallback_regions` below is where that
+# gate actually lives (`BLOCK_FALLBACK_UPVAR_SAFE_METHODS`), not here --
+# this function has no call-site method name to gate on.
+#
 # `RETURN_BLK`/`BREAK` (a real non-local exit) still has no plain C++
 # `return` equivalent once this block is a genuinely separate top-level
 # function, possibly several C call frames deep inside whatever method
@@ -5927,12 +5966,58 @@ end
 # equivalent of `recognize_rescue_regions`' own extracted-try-body
 # machinery.
 BLOCK_FALLBACK_UNSAFE_OPS = %w[
-  GETUPVAR SETUPVAR RETURN_BLK BREAK BLOCK SENDB SSENDB
+  RETURN_BLK BREAK BLOCK SENDB SSENDB
   RESCUE RAISEIF EXCEPT
+].freeze
+
+# UPVAR_CAPTURE_SUPPORT: every outer register a block body's own
+# GETUPVAR/SETUPVAR instructions reference (depth 0 only -- see
+# BLOCK_FALLBACK_UNSAFE_OPS's own comment for why a deeper capture is
+# refused, not just unsupported), sorted and de-duplicated. `nil` means
+# "unsafe to capture at all" (a real depth != 0 reference found) --
+# distinct from `[]`, "no upvars referenced, nothing to capture."
+def collect_block_upvars(block_irep)
+  upvars = []
+  block_irep.instructions.each do |insn|
+    next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
+
+    _reg, upvar_idx, depth = insn.args.split(/\s+/)
+    return nil unless depth == '0'
+
+    upvars << upvar_idx.to_i
+  end
+  upvars.uniq.sort
+end
+
+# UPVAR_CAPTURE_SUPPORT: the call-site half of the safety argument
+# BLOCK_FALLBACK_UNSAFE_OPS's own comment makes -- pointer-capturing an
+# outer register is only sound when the receiver invokes the block
+# strictly synchronously (never stores it for later/async invocation).
+# Rather than trying to prove that of an arbitrary, dynamically-dispatched
+# method name, this is a small, hand-vetted allowlist of real Ruby/RGSS
+# enumerable-protocol names, built from this program's own actual
+# whole-program GETUPVAR/SETUPVAR-blocked call sites (a real, run
+# diagnostic sweep, not guessed) -- every one of them is either mruby's
+# own native C-implemented Array/Enumerable method (`each`, `map`,
+# `times`, `select`, ...; 3rd/mruby/src/array.c, mruby-enum-*) or a
+# same-shaped domain method in this codebase's own mrblib confirmed by
+# reading its body (e.g. `RPG2k::Scene::MapViewer#each_event_position`:
+# a bare `events.each do |id, ev| ... yield ... end`, done synchronously
+# before returning). Deliberately excludes anything resembling storage
+# (`lazy`, `define_method`, a callback-registration method) -- none of
+# those appeared in the real sweep this list is built from, and none
+# should ever be added here without the same kind of real body-reading
+# check this list's own existing entries already got.
+BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
+  each each_with_index each_index each_key each_event_position
+  times map select reject reject! delete_if
+  find find_index any? all? none? count index sort_by
+  _rgss_native_sort _rgss_native_sort!
 ].freeze
 
 def block_fallback_safe?(block_irep)
   return false unless pure_mandatory_arity?(block_irep)
+  return false if collect_block_upvars(block_irep).nil?
 
   block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
@@ -6401,6 +6486,14 @@ class CodeGen
     # else, so every call site outside an inlined block behaves exactly as
     # it did before this existed.
     @elem_class_hint = nil
+    # UPVAR_CAPTURE_SUPPORT: the outer-register set currently capturable
+    # by pointer, set by emit_proc_fallback_fn around exactly one
+    # BLOCK_FALLBACK body-compile loop and consulted by compile_insn's own
+    # GETUPVAR/SETUPVAR cases. nil everywhere else (an ordinary top-level
+    # method body, or a directly-inlined `.each`/`.times`/... loop body,
+    # which never reaches these two opcodes through this shared function
+    # at all -- see that function's own comment).
+    @block_fallback_upvars = nil
     @registry = registry
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
@@ -11403,9 +11496,22 @@ class CodeGen
       block_irep = block_label && @ireps[block_label]
       next unless block_irep && block_fallback_safe?(block_irep)
 
+      # UPVAR_CAPTURE_SUPPORT: block_fallback_safe? already confirmed
+      # every upvar reference is depth-0 (or that there are none at all);
+      # collect_block_upvars can't return nil here as a result. A NON-
+      # EMPTY list still needs the call-site's own method name to be on
+      # the hand-vetted synchronous-dispatch allowlist -- see
+      # BLOCK_FALLBACK_UNSAFE_OPS's own comment for why pointer-capture
+      # is unsound for a receiver that might store the block rather than
+      # invoke it synchronously. An empty list (no upvars at all) needs
+      # no such gate -- identical to this mechanism's pre-existing
+      # behavior, zero new risk.
+      upvars = collect_block_upvars(block_irep)
+      next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
+
       regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
                    block_irep: block_irep, name: name, n: 0,
-                   self_implicit: paired.op == 'SSENDB' }
+                   self_implicit: paired.op == 'SSENDB', upvars: upvars }
     end
     regions
   end
@@ -11450,6 +11556,15 @@ class CodeGen
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
     arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
+    # UPVAR_CAPTURE_SUPPORT: `region[:upvars]` is only ever set by
+    # recognize_block_fallback_regions (recognize_lambda_fallback_regions
+    # never populates it -- LAMBDA_FALLBACK_UNSAFE_OPS still forbids
+    # GETUPVAR/SETUPVAR outright, see that constant's own comment for the
+    # real escape-safety reason a stored/escaping Proc can't reuse this
+    # mechanism), so `|| []` here is the plain "no upvars" case for both,
+    # not a defensive guess.
+    upvar_regs = region[:upvars] || []
+    upvar_params = upvar_regs.map { |b| "mrb_value* bc2cpp_upvar_#{b}" }
     # `block_addr` alone is only unique WITHIN one irep -- two unrelated
     # methods can easily have a BLOCK/LAMBDA at the same numeric bytecode
     # offset (a real, caught-before-shipping bug: the first version of
@@ -11484,6 +11599,15 @@ class CodeGen
     # own whole-program #error counts ticked up by exactly 1 each the
     # first time this check was missing, from a block body that itself
     # used one of those two still-unsupported opcodes.
+    # UPVAR_CAPTURE_SUPPORT: consume-and-clear, exactly like
+    # compile_send's own @elem_class_hint -- set for exactly this one
+    # body-compile loop (never any other call to compile_insn, including
+    # a nested call this same loop might make for an unrelated irep), so
+    # compile_insn's own GETUPVAR/SETUPVAR cases can only ever see a real
+    # captured-pointer variable name that this function ITSELF is about
+    # to declare a parameter for, never a stale value left over from a
+    # previous, unrelated block-fallback body.
+    @block_fallback_upvars = upvar_regs
     body = String.new
     targets = jump_targets(block_irep)
     block_irep.instructions.each_with_index do |insn, idx|
@@ -11492,10 +11616,12 @@ class CodeGen
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       body << compile_insn(insn, block_irep, d, idx)
     end
+    @block_fallback_upvars = nil
     return nil if body.include?('#error')
 
     out = String.new
-    out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+    out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
+           "#{upvar_params.map { |p| ", #{p}" }.join}#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     out << body
@@ -11505,14 +11631,24 @@ class CodeGen
     out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_unused_self) {\n"
     out << "  (void)bc2cpp_unused_self;\n"
     out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
+    # UPVAR_CAPTURE_SUPPORT: slot 0 is always `self` (SELF_CAPTURE_SUPPORT,
+    # above) -- each captured upvar's own pointer sits at slot `i + 1`, in
+    # the exact same order emit_rproc_construction below builds its own
+    # env array in (both read `region[:upvars]`/`upvar_regs` verbatim, so
+    # this ordering can never drift between the two).
+    upvar_args = upvar_regs.each_with_index.map do |b, i|
+      out << "  mrb_value* bc2cpp_upvar_#{b} = static_cast<mrb_value*>(mrb_cptr(mrb_proc_cfunc_env_get(M, #{i + 1})));\n"
+      "bc2cpp_upvar_#{b}"
+    end
+    call_args = (['bc2cpp_captured_self'] + upvar_args).join(', ')
     if mand.zero?
-      out << "  return #{impl_name}(M, bc2cpp_captured_self);\n"
+      out << "  return #{impl_name}(M, #{call_args});\n"
     else
       arg_names.each { |a| out << "  mrb_value #{a};\n" }
       fmt = 'o' * mand
       ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
-      out << "  return #{impl_name}(M, bc2cpp_captured_self, #{arg_names.join(', ')});\n"
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
     end
     out << "}\n\n"
     [fn_name, out]
@@ -11532,11 +11668,21 @@ class CodeGen
   # what the caller does with `rproc_var` (dispatch it, as
   # emit_block_fallback_glue does, or just store it, as
   # emit_lambda_fallback_glue does) is entirely up to it.
-  def emit_rproc_construction(addr, fn_name)
+  def emit_rproc_construction(addr, fn_name, upvar_regs = [])
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
-    out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { self };\n"
-    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, 1, bc2cpp_blk_env_#{addr});\n"
+    # UPVAR_CAPTURE_SUPPORT: `&r#{b}` takes the address of THIS enclosing
+    # method's own already-declared `mrb_value r#{b}` local (compile_
+    # method's own register-declaration preamble -- the same one every
+    # ordinary instruction in this method already reads/writes as a plain
+    # C++ local) -- boxed via `mrb_cptr_value` the same way any other
+    # opaque native pointer crosses the mrb_value boundary in this file.
+    # Order matches emit_proc_fallback_fn's own env-slot reads exactly
+    # (both iterate `upvar_regs` verbatim, self always first).
+    env_entries = ['self'] + upvar_regs.map { |b| "mrb_cptr_value(M, &r#{b})" }
+    out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
+    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, #{env_entries.size}, " \
+           "bc2cpp_blk_env_#{addr});\n"
     [var, out]
   end
 
@@ -11557,7 +11703,7 @@ class CodeGen
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name)
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [])
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), dynamic dispatch\n"
@@ -11629,6 +11775,35 @@ class CodeGen
     case insn.op
     when 'ENTER'
       "  // #{insn.raw.strip} (args already bound above)\n"
+    when 'GETUPVAR', 'SETUPVAR'
+      # UPVAR_CAPTURE_SUPPORT: only ever real here inside a BLOCK_FALLBACK
+      # body (emit_proc_fallback_fn's own consume-and-clear
+      # @block_fallback_upvars, set for exactly that one body-compile
+      # loop) -- an ordinary top-level method irep never legitimately
+      # contains GETUPVAR/SETUPVAR at all (only a block/lambda child irep
+      # does), and a directly-INLINED block body (`.each`/`.times`/...)
+      # never reaches this shared compile_insn for these two opcodes in
+      # the first place -- compile_block_body_insn (a different function)
+      # has its own, register-offset-aware translation for the inlined
+      # case, unaffected by this one. `reg`/`upvar_idx`/`level` match
+      # real `mrbc -v` disassembly exactly (`GETUPVAR R3 4 0`): `level`
+      # must be `0` (see BLOCK_FALLBACK_UNSAFE_OPS's own comment on why a
+      # deeper capture is refused outright, not just unsupported here),
+      # and `upvar_idx` is literally the enclosing method's own register
+      # number -- confirmed against 3rd/mruby/src/vm.c's own
+      # `OP_GETUPVAR`/`OP_SETUPVAR` (`e->stack[b]`, the exact same
+      # indexing a bare `R(b)` read would use in the DEFINING scope).
+      reg, upvar_idx, level = a.split(/\s+/)
+      idx_i = upvar_idx.to_i
+      if level == '0' && @block_fallback_upvars&.include?(idx_i)
+        if insn.op == 'GETUPVAR'
+          "  r#{reg[/\d+/]} = *bc2cpp_upvar_#{idx_i};\n"
+        else
+          "  *bc2cpp_upvar_#{idx_i} = r#{reg[/\d+/]};\n"
+        end
+      else
+        "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
+      end
     when 'KEY_P'
       # KEYWORD_ARG_SUPPORT: real presence check for one optional keyword
       # -- the entry wrapper's own real mrb_kwargs extraction (compile_
