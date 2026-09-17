@@ -6086,11 +6086,65 @@ end
 # intended. `each_char` (3rd/mruby/mrbgems/mruby-string-ext/mrblib/
 # string.rb) is `while pos < self.size; block.call(self[pos]); pos += 1;
 # end` -- same plain synchronous shape as every other entry here.
+#
+# `page_field`/`section`/`open`/`new`/`reduce`/`inject`/`each_with_object`/
+# `downto`/`auto_battle_best_target` added in a follow-up sweep of the real
+# whole-program upvar-blocked call sites still remaining after the first
+# round, same discipline -- every one's own real body read directly, not
+# assumed from its name:
+#   - `page_field` (mruby-rpg2k/mrblib/scene/map.rb): `yield rescue
+#     StandardError => e; ...; default; end` -- a plain synchronous single
+#     yield. Its own `rescue StandardError` is its OWN method body's rescue
+#     clause (separate bytecode from the BLOCK this allowlist gates), not
+#     something the block itself contains -- the exact same "callee's own
+#     unrelated rescue can't swallow a foreign exception thrown from
+#     inside its own yield" argument `loop`'s own citation above already
+#     makes, MRB_CATCH's real type-specific matching applies identically
+#     here.
+#   - `section` (mruby-rgss/src/profiler.cxx, `prof_section`/its wio-build
+#     `prof_stub_yield` stand-in): `mrb_yield_argv` called exactly once,
+#     optionally timed around, never stored.
+#   - `open` (3rd/mruby/mrbgems/mruby-io/mrblib/io.rb, `IO.open`/inherited
+#     by `File.open` -- neither `mruby-lcf/mrblib/lcf_file.rb`'s nor
+#     mruby-io's own `File` reopens `self.open`): `begin yield io ensure
+#     io.close ...  end` -- a real Ruby `ensure`, same "callee's own
+#     unrelated rescue/ensure machinery" argument as `page_field` above.
+#   - `new` (3rd/mruby/src/array.c's own `mrb_ary_init`, real `Array.new(n)
+#     { |i| ... }`): a plain `for` loop calling `mrb_yield` once per index,
+#     never stored. Gated by NAME alone like every other entry here, so
+#     this trusts EVERY `.new` call site whose block captures an upvar to
+#     be `Array.new`, not merely the ones already proven Array-receiver --
+#     confirmed safe only because a real whole-program grep found no
+#     bytecode `initialize` (mruby-rgss/mruby-rpg2k/mruby-lcf's own
+#     mrblib) and no native constructor (mruby-rgss/src/*.cxx) declaring
+#     a block parameter at all, so no OTHER real definition of `.new`
+#     exists anywhere in this closed world that could receive a captured
+#     upvar unsafely -- re-verify this claim before adding a genuinely
+#     block-taking bytecode `initialize` anywhere in the future.
+#   - `reduce`/`inject` (3rd/mruby/mrblib/enum.rb, aliased): `self.each
+#     {|*val| ... result = block.call(result, val) ...}` -- synchronous,
+#     no bytecode override anywhere in this closed world (confirmed by
+#     grep). The dedicated `recognize_accum_regions` above already inlines
+#     the common case (a receiver PROVEN Array); this only ever matters
+#     for a `reduce`/`inject` call whose receiver ACCUM's own gate missed
+#     (e.g. an ivar not yet CLASS_HINT-proven Array), same "catch-all,
+#     never the fast path" relationship BLOCK_FALLBACK already has with
+#     every other named inliner in this file.
+#   - `each_with_object` (3rd/mruby/mrbgems/mruby-enum-ext/mrblib/enum.rb):
+#     `self.each {|*val| block.call(val.__svalue, obj)}` -- same shape as
+#     `reduce`/`inject` above, same conclusion.
+#   - `downto` (3rd/mruby/mrblib/numeric.rb): `while i >= num; yield i; i
+#     -= 1; end` -- plain synchronous, core Integer method.
+#   - `auto_battle_best_target` (mruby-rpg2k/mrblib/game/battle.rb, this
+#     program's own domain method): `targets.each do |t| r = yield t; ...
+#     end; best` -- plain synchronous, real body read directly.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
   find find_index any? all? none? count index sort_by
   _rgss_native_sort _rgss_native_sort! loop each_char
+  page_field section open new reduce inject each_with_object downto
+  auto_battle_best_target
 ].freeze
 
 def block_fallback_safe?(block_irep)
