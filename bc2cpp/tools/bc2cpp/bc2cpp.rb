@@ -5994,13 +5994,41 @@ end
 # own per-call-site `catch (bc2cpp_block_break&)`, which structurally
 # cannot match a `bc2cpp_method_return&` at all (C++ catch-type matching
 # is exact) and so lets it pass straight through, exactly as needed.
-# `BLOCK`/`SENDB`/`SSENDB` (a nested block-carrying call inside this one)
-# is rejected too -- no recursive fallback support in this round.
-# `RESCUE`/`RAISEIF`/`EXCEPT` (a real rescue-region opcode) is rejected
-# -- this fallback builds no equivalent of `recognize_rescue_regions`'
-# own extracted-try-body machinery.
+# NESTED_BLOCK_FALLBACK_SUPPORT: `BLOCK`/`SENDB`/`SSENDB` (a nested
+# block-carrying call inside this one -- `ary.each { |x| x.each { |y|
+# ... } }`) is no longer unconditionally unsafe: `emit_proc_fallback_fn`
+# now runs the exact same recognize -> suppress -> glue pass this block's
+# OWN body that `compile_method`'s top-level loop already runs on an
+# ordinary method body, recursively -- a nested region that itself
+# resolves (same `block_fallback_safe?` gate, applied to the nested
+# block's own child irep) gets its own standalone cfunc/RProc, emitted
+# BEFORE this level's own function so it's already defined when this
+# level's own glue references it; a nested region that DOESN'T resolve
+# (its own arity/upvar-depth/RESCUE gate fails, or ITS OWN body still has
+# an unhandled opcode) leaves the raw `BLOCK`/`SENDB` opcodes for
+# `compile_insn`'s ordinary opcode switch to hit -- which still has no
+# case for either, so this whole level's own body still gets the honest
+# `#error` and `emit_proc_fallback_fn` still returns nil, exactly as
+# before this existed for any other reason a body doesn't compile.
+# `collect_block_upvars`'s own depth-0-only rule composes correctly with
+# this without any change: a NESTED block's own depth-0
+# `GETUPVAR`/`SETUPVAR` reference means "my immediate parent's own
+# registers" (real mruby bytecode semantics, confirmed against vm.c) --
+# exactly the OUTER block's own C++ locals, which only exist once this
+# recursive pass runs from INSIDE the outer block's own body-compile (not
+# hoisted ahead of time the way top-level regions are batched in
+# `compile_method`), so `emit_rproc_construction`'s own `&r#{b}` already
+# takes the address of the right function's own local with no special
+# casing. `@block_fallback_upvars`/`@block_fallback_active` need no real
+# stack either: the recursive pass for a level's own NESTED regions always
+# runs, completes, and clears those two ivars back to nil/false BEFORE
+# this level sets its own -- never concurrently, since Ruby method calls
+# here are always synchronous, one level at a time.
+# `RESCUE`/`RAISEIF`/`EXCEPT` (a real rescue-region opcode) is still
+# rejected -- this fallback builds no equivalent of
+# `recognize_rescue_regions`' own extracted-try-body machinery, at any
+# nesting depth.
 BLOCK_FALLBACK_UNSAFE_OPS = %w[
-  BLOCK SENDB SSENDB
   RESCUE RAISEIF EXCEPT
 ].freeze
 
@@ -6550,6 +6578,13 @@ class CodeGen
     # case to choose `throw bc2cpp_block_break{...}` over the plain
     # `return` every other context still uses.
     @block_fallback_active = false
+    # BLKPUSH_YIELD_SUPPORT: the current method's own real block parameter
+    # name (`'bc2cpp_blk'`), set by compile_method around exactly its own
+    # top-level body-compile loop, consulted by compile_insn's own BLKPUSH
+    # case. nil everywhere else -- a BLOCK_FALLBACK body never sets this
+    # (see @block_fallback_upvars' own comment for why), so a BLKPUSH
+    # inside one always keeps the honest #error.
+    @blk_param_name = nil
     @registry = registry
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
@@ -8506,9 +8541,14 @@ class CodeGen
     # `recognize_block_fallback_regions(irep)` call) -- one computation,
     # not two that could silently drift apart.
     block_fallback_regions = recognize_block_fallback_regions(irep)
-    needs_return_catch = block_fallback_regions.any? do |region|
-      region[:block_irep].instructions.any? { |i| i.op == 'RETURN_BLK' }
-    end
+    # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK buried inside a region
+    # NESTED two (or more) levels deep still throws the exact same
+    # `bc2cpp_method_return` all the way out to this SAME top-level catch
+    # (emit_block_fallback_glue's own `catch (bc2cpp_block_break&)`, at
+    # every level, structurally can't match it -- see that catch's own
+    # comment) -- block_fallback_region_has_return_blk? recurses into each
+    # region's own nested regions to find one, however deep.
+    needs_return_catch = block_fallback_regions.any? { |region| block_fallback_region_has_return_blk?(region) }
 
     # OPTIONAL_ARG_SUPPORT: `opt` is >0 only for a real, exactly-recognized
     # "plain optional positional arguments, nothing else non-mandatory"
@@ -8519,6 +8559,27 @@ class CodeGen
     # scanning) optional_arg_table call entirely for the overwhelmingly
     # common pure-mandatory case, same as before.
     mandatory_ok = pure_mandatory_arity?(irep)
+    # BLKPUSH_YIELD_SUPPORT: a bare `yield(...)` inside an otherwise plain
+    # mandatory-arity method (`cache[key] = yield` -- mrbc's own BLKCALL
+    # fast path, codegen.c's codegen_yield, already handled by compile_insn's
+    # own `when 'BLKCALL'` case) first needs the CURRENT call's own real
+    # block value fetched into a register via `BLKPUSH` -- previously
+    # unhandled at the opcode level, an honest `#error` for every real
+    # occurrence regardless of how simple the rest of the method was.
+    # `lv == 0` (the level field, real disasm `BLKPUSH R7 2:0:0:0 (0)` --
+    # confirmed against 3rd/mruby/src/vm.c's own `OP_BLKPUSH`: `if (lv == 0)
+    # stack = regs + 1;`, i.e. THIS call frame's own received block, not an
+    # outer scope's) is the only shape modeled -- a nested block forwarding
+    # a yield from inside its own body (lv > 0) still gets the honest
+    # `#error` (compile_insn's own BLKPUSH case below refuses it too, not
+    # just this gate). Scoped to `mandatory_ok` methods only (every real
+    # occurrence in this whole program is a plain `def foo(a, b); ...
+    # yield; ...; end`, confirmed against the real whole-program registry --
+    # never combined with optional/keyword/rest args) so this doesn't have
+    # to touch the opt/kw/rest entry-wrapper branches below at all.
+    needs_blk_param = mandatory_ok && irep.instructions.any? do |i|
+      i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0'
+    end
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT: only attempted once both of the above have
     # already failed (mandatory_ok and opt_jmp_targets are mutually
@@ -8573,6 +8634,13 @@ class CodeGen
     # mechanism existed) -- `self` is never affected, only ever
     # NATIVE_ARG_TARGETS' own explicitly-listed arguments.
     arg_params = arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
+    # BLKPUSH_YIELD_SUPPORT: one extra real parameter carrying THIS call's
+    # own actual block value (a real `mrb_value`, Proc or nil) -- extracted
+    # by the entry wrapper below (mrb_get_args' own `&` format specifier,
+    # the same "no block given" -> nil semantics `BLKPUSH`'s own `lv==0`
+    # case reads out of the live call frame) and forwarded straight through,
+    # exactly like `bc2cpp_given_opt`/each keyword parameter above.
+    arg_params << 'mrb_value bc2cpp_blk' if needs_blk_param
     # OPTIONAL_ARG_SUPPORT: one extra real parameter, `bc2cpp_given_opt` --
     # how many of this method's own real optional arguments THIS call
     # actually supplied (0..opt) -- the switch emit_optional_dispatch
@@ -8897,12 +8965,22 @@ class CodeGen
     # -- anything with a `glue_at` entry has real code starting exactly
     # there, so a jump landing on it is always well-defined.
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
+    # BLKPUSH_YIELD_SUPPORT: consume-and-clear, same discipline as
+    # @block_fallback_upvars/@block_fallback_active -- set for exactly this
+    # method's own top-level body-compile loop, never a nested call
+    # compile_insn might make into an unrelated irep (emit_proc_fallback_fn
+    # never sets this at all, so a BLKPUSH inside a BLOCK_FALLBACK body
+    # always sees it nil/false and keeps the honest #error -- see that
+    # case's own comment for why `lv==0` inside a nested scope means
+    # something different anyway).
+    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
     irep.instructions.each_with_index do |insn, idx|
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
     end
+    @blk_param_name = nil
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     if needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
@@ -8913,8 +8991,15 @@ class CodeGen
     out = block_fallback_pre + rescue_pre + out
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    if arg_names.empty? && !kw_table
+    if arg_names.empty? && !kw_table && !needs_blk_param
       out << "  return #{impl_name}(M, self);\n"
+    elsif arg_names.empty? && needs_blk_param
+      # BLKPUSH_YIELD_SUPPORT: the same 0-mandatory-argument case as the
+      # plain branch below, just with no positional `mrb_get_args` call to
+      # append `&` onto -- a standalone one instead.
+      out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+      out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
+      out << "  return #{impl_name}(M, self, bc2cpp_blk);\n"
     elsif kw_table
       # KEYWORD_ARG_SUPPORT: the real mrb_kwargs mechanism mruby.h's own
       # `mrb_get_args` `:` format specifier documents -- `required` names
@@ -9026,6 +9111,20 @@ class CodeGen
         i == mand && opt.positive? ? "|#{ch}" : ch
       end.join
       ptrs = arg_names.map { |a| "&#{a}" }.join(', ')
+      # BLKPUSH_YIELD_SUPPORT: `&` is mrb_get_args' own real "the block
+      # passed to THIS call" format specifier (3rd/mruby/src/class.c's own
+      # `case '&':` -- `*p = *bp;`, the live call frame's own block slot,
+      # nil when none was given since this uses plain `&`, not the
+      # required-block `&!`) -- appended to the same single mrb_get_args
+      # call rather than a second one, mirroring how KEYWORD_ARG_SUPPORT's
+      # own `:` modifier above shares its call. `needs_blk_param` is only
+      # ever true for a `mandatory_ok` method (this gate's own comment), so
+      # this never has to interact with the `opt.positive?` branch below.
+      if needs_blk_param
+        out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+        fmt += '&'
+        ptrs += ', &bc2cpp_blk'
+      end
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       if opt.positive?
         # OPTIONAL_ARG_SUPPORT: mrb_get_argc is the real, public mruby API
@@ -9045,7 +9144,8 @@ class CodeGen
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
         out << "  return #{impl_name}(M, self, #{arg_names.join(', ')}, bc2cpp_given_opt);\n"
       else
-        out << "  return #{impl_name}(M, self, #{arg_names.join(', ')});\n"
+        call_args = needs_blk_param ? arg_names + ['bc2cpp_blk'] : arg_names
+        out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
       end
     end
     out << "}\n\n"
@@ -9055,6 +9155,18 @@ class CodeGen
     # OTHER_DECLS_HEADER, a different one -- declares this `_impl` with
     # exactly the signature it was actually emitted with).
     arg_c_types = arg_names.each_index.map { |i| native_c_type(arg_native_types[i]) }
+    # BLKPUSH_YIELD_SUPPORT: same reasoning as OPTIONAL_ARG_SUPPORT's own
+    # `bc2cpp_given_opt` line just below -- has to appear here too, or a
+    # cross-TU devirtualized caller's own forward declaration would
+    # mismatch this real, externally-linked symbol's actual signature. In
+    # practice never reached by a real devirtualized direct call today:
+    # every real call site to a `needs_blk_param` method is itself a real
+    # block-carrying call (it has to be, to supply the `yield` this method
+    # depends on), and a block-carrying call site (SENDB/SSENDB) is never
+    # MONO/POLY/TYPED-devirtualized to a direct call in this file -- see
+    # emit_block_fallback_glue's own comment -- kept anyway so a mismatch
+    # would be a loud compile error, never a silent wrong signature.
+    arg_c_types << 'mrb_value' if needs_blk_param
     # OPTIONAL_ARG_SUPPORT: the extra `bc2cpp_given_opt` parameter (see
     # above) is real, load-bearing part of this _impl's own signature --
     # decl_line's own forward declaration has to include it too, or a
@@ -9884,6 +9996,46 @@ class CodeGen
   # ClassLayout has no access to and does not need).
   def proven_array_source(irep, idx, dest_reg)
     proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) })
+  end
+
+  # GETIDX_STATIC_RECEIVER_SUPPORT: is THIS `GETIDX`/`GETIDX0`/`SETIDX`
+  # instruction's own receiver register (`reg`, at this exact `idx` inside
+  # `irep`) provably `Array` or `Hash` -- reusing, unchanged, the identical
+  # whole-program facts `recognize_each_regions`/`recognize_hash_each_
+  # regions` already trust for the exact same question at a `.each`/
+  # `.map`/... call site (`trace_new_target`'s own fresh-`.new`/GETIV-
+  # CLASS_HINT/argument-annotation/chained-accessor chase, plus
+  # `proven_array_source`'s own ARRAY-literal/core-Array-return-method
+  # chase, Hash-only via the former since no HASH-literal/core-Hash-return
+  # scan exists yet -- a real, narrower gap, not a soundness concern, just
+  # fewer real Hash receivers provable this way today). No new tracing
+  # logic: a new call site for logic this file already ships and relies on
+  # elsewhere. Returns `'Array'`, `'Hash'`, or nil (not statically
+  # provable, or provably something else) -- compile_insn's own GETIDX/
+  # GETIDX0/SETIDX cases keep their full three-way runtime-checked
+  # fallback unchanged for the nil case, so a miss here costs nothing but
+  # the missed fast path, never a wrong answer.
+  #
+  # `idx.nil?` (compile_block_body_insn's own shared `else` branch,
+  # dispatching an inlined loop body's OWN shifted-register instructions
+  # through this exact same compile_insn switch with `idx: nil` -- see
+  # that function's own comment) bails immediately: `trace_new_target`'s
+  # backward scan needs a real position to start from, and the shifted
+  # register numbers there don't correspond 1:1 with unshifted positions
+  # in `irep.instructions` the way every other real caller's `idx` does.
+  def static_indexable_class(irep, idx, reg, owner_def)
+    return nil unless owner_def && idx
+
+    enter = irep.instructions.find { |i| i.op == 'ENTER' }
+    mand = enter ? enter.args.split(':').first.to_i : 0
+    arg_classes = @class_annotations[irep.label]&.args
+    ivar_classes = @class_layout[owner_def.owner]
+    traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_def.owner,
+                               class_layout: @class_layout, registry: @registry,
+                               container_constants: @container_constants)
+    return traced if %w[Array Hash].include?(traced)
+
+    proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
   end
 
   # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
@@ -11571,6 +11723,22 @@ class CodeGen
   # SUPPORT sibling of this recognizer -- a single-instruction `LAMBDA`
   # region (build-only, no paired SENDB, no dispatch) instead of this
   # BLOCK/SENDB pair.
+  # NESTED_BLOCK_FALLBACK_SUPPORT: does this region's own block body
+  # contain a real `RETURN_BLK`, at ANY nesting depth -- either directly,
+  # or inside one of ITS OWN nested BLOCK_FALLBACK regions (recursively).
+  # compile_method's own `needs_return_catch` needs this whole-subtree
+  # answer, not just the region's own immediate instructions, or a
+  # `return` buried two levels deep would silently lose the top-level
+  # `try`/`catch` it needs to ever be caught by (emit_proc_fallback_fn's
+  # own recursive pass always throws `bc2cpp_method_return` regardless of
+  # nesting depth -- only WHERE it's caught depends on this).
+  def block_fallback_region_has_return_blk?(region)
+    block_irep = region[:block_irep]
+    return true if block_irep.instructions.any? { |i| i.op == 'RETURN_BLK' }
+
+    recognize_block_fallback_regions(block_irep).any? { |nregion| block_fallback_region_has_return_blk?(nregion) }
+  end
+
   def recognize_block_fallback_regions(irep)
     regions = []
     irep.instructions.each_with_index do |insn, idx|
@@ -11578,12 +11746,33 @@ class CodeGen
 
       paired = irep.instructions[idx + 1]
       next unless paired && %w[SENDB SSENDB].include?(paired.op)
-      next unless paired.args =~ /n=0(?:\s|$)/
 
+      # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: `n=0` was this mechanism's
+      # own original, narrowest gate (a block call with no OTHER explicit
+      # positional args, e.g. `ary.each { ... }`); generalized here to any
+      # fixed positional count (`ary.inject(0) { ... }`,
+      # `ary.each_slice(2) { ... }`, ...). Deliberately still `\d+` only,
+      # never `*` (a real splat -- SPLAT_CALL_ARGS, a genuinely dynamic
+      # argument count with no static register layout to build `argv`
+      # from) and never followed by anything but whitespace/end-of-string
+      # (excludes a keyword call, `n=3|nk=1` -- KEYWORD_CALLSITE_SUPPORT's
+      # own comment: `mrb_funcall_with_block` can never carry keywords at
+      # all, `ci->nk = 0` in mruby's own funcall_args_capture, so a
+      # keyword-plus-block call site has no sound dynamic-dispatch
+      # translation here regardless of upvar/break/return support).
+      n_match = paired.args.match(/n=(\d+)(?:\s|$)/)
+      next unless n_match
+
+      n = n_match[1].to_i
       dest, _rest = paired.args.split(/\s+/, 2)
       dest_reg = dest[/^R(\d+)/, 1]
       block_reg = insn.args[/^R(\d+)/, 1]
-      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+      # Register layout confirmed against the identical `reduce(init)`
+      # shape recognize_accum_regions already established (`dest, then n
+      # positional args, then the block` -- real `mrbc -v`: `BLOCK R4` +
+      # `SENDB R2 :reduce n=1` has the block two past dest, matching
+      # `dest + n + 1` for n=1; `n=0` keeps the original `dest + 1`).
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s
 
       name = paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       next unless name
@@ -11609,7 +11798,7 @@ class CodeGen
       next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
 
       regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
-                   block_irep: block_irep, name: name, n: 0,
+                   block_irep: block_irep, name: name, n: n,
                    self_implicit: paired.op == 'SSENDB', upvars: upvars }
     end
     regions
@@ -11651,7 +11840,7 @@ class CodeGen
   # both glue emitters: it captures the enclosing method's own real
   # `self` C++ variable into that exact slot at RProc-construction time,
   # the one place this compiler actually knows the correct value.
-  def emit_proc_fallback_fn(region, d)
+  def emit_proc_fallback_fn(region, d, fn_prefix = nil)
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
     arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
@@ -11679,8 +11868,46 @@ class CodeGen
     # regions) only affects the generated C++ symbol's own readability --
     # both recognizers already guarantee `block_addr` uniqueness the same
     # way, so it plays no role in the uniqueness argument itself.
-    fn_name = "#{cpp_name(d.owner, d.name)}_#{region[:kind] || 'block_fallback'}_#{region[:block_addr]}"
+    # NESTED_BLOCK_FALLBACK_SUPPORT: `fn_prefix`, when this call is itself
+    # the recursive processing of a region NESTED inside another block
+    # body, is that OUTER level's own already-unique `fn_name` -- a nested
+    # region's own `block_addr` lives in the block irep's OWN local
+    # address space, which can numerically collide with an unrelated
+    # region elsewhere using `cpp_name(d.owner, d.name)` alone (the same
+    # `d`, an unrelated top-level or sibling-nested region happening to
+    # share a numeric offset); chaining through the parent's own name --
+    # itself unique by the same recursive argument -- keeps every level
+    # unique without needing a separate global counter.
+    fn_name = "#{fn_prefix || cpp_name(d.owner, d.name)}_#{region[:kind] || 'block_fallback'}_#{region[:block_addr]}"
     impl_name = "#{fn_name}_impl"
+
+    # NESTED_BLOCK_FALLBACK_SUPPORT: recursively recognize/emit/suppress
+    # any BLOCK/SENDB(SSENDB) region NESTED inside THIS block's own body,
+    # exactly the same recognize_block_fallback_regions -> emit_proc_
+    # fallback_fn -> emit_block_fallback_glue pipeline compile_method's own
+    # top-level loop already runs -- see BLOCK_FALLBACK_UNSAFE_OPS's own
+    # NESTED_BLOCK_FALLBACK_SUPPORT comment for why this composes safely
+    # with upvar capture and the two exception carriers with no other
+    # change needed. Runs BEFORE this level's own `@block_fallback_upvars`/
+    # `@block_fallback_active` are set below -- a recursive call fully
+    # sets, uses, and clears its OWN copies of those same two ivars before
+    # returning, so by the time this level sets its own there is nothing
+    # left to clobber (never concurrent -- one call frame at a time).
+    # Emitted into `nested_pre`, prepended to this level's own returned
+    # code below, so a nested function is always textually defined before
+    # this level's own trampoline/glue references it.
+    nested_pre = String.new
+    nested_suppressed = []
+    nested_glue_at = {}
+    recognize_block_fallback_regions(block_irep).each do |nregion|
+      fn_result = emit_proc_fallback_fn(nregion, d, fn_name)
+      next unless fn_result
+
+      nfn_name, nfn_code = fn_result
+      nested_pre << nfn_code
+      nested_suppressed << nregion[:block_addr] << nregion[:sendb_addr]
+      nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name)
+    end
 
     # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
     # this file already holds itself to (emit_sort_inline's own explicit
@@ -11716,18 +11943,25 @@ class CodeGen
     # compiles one region's own body per call).
     @block_fallback_active = region[:kind] != 'lambda_fallback'
     body = String.new
-    targets = jump_targets(block_irep)
+    # NESTED_BLOCK_FALLBACK_SUPPORT: same `targets - (suppressed -
+    # glue_at.keys)` shape compile_method's own top-level loop already
+    # uses -- a nested region's own `sendb_addr` (suppressed, no glue_at
+    # entry of its own) still correctly loses any label a stray jump might
+    # otherwise target, while `block_addr` (suppressed WITH a glue_at
+    # entry) keeps one, since real code starts exactly there.
+    targets = jump_targets(block_irep) - (nested_suppressed - nested_glue_at.keys)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
+      next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      body << compile_insn(insn, block_irep, d, idx)
+      body << (nested_glue_at[insn.addr] || compile_insn(insn, block_irep, d, idx))
     end
     @block_fallback_upvars = nil
     @block_fallback_active = false
     return nil if body.include?('#error')
 
-    out = String.new
+    out = nested_pre
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
            "#{upvar_params.map { |p| ", #{p}" }.join}#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
@@ -12199,6 +12433,38 @@ class CodeGen
       compile_send(a, self_implicit: false, irep: irep, idx: idx, owner_def: owner_def)
     when 'SSEND0', 'SSEND'
       compile_send(a, self_implicit: true, irep: irep, idx: idx, owner_def: owner_def)
+    when 'BLKPUSH'
+      # BLKPUSH_YIELD_SUPPORT: `BLKPUSH Ra m1:r:m2:kd (lv)` (real disasm,
+      # confirmed via a fresh `mrbc -v` of `def foo(a,b); yield(a,b); end`:
+      # `BLKPUSH R4 2:0:0:0 (0)`) -- 3rd/mruby/src/vm.c's own `OP_BLKPUSH`:
+      # `lv == 0` reads `regs[1 + offset]`, this call frame's OWN received
+      # block (never an outer scope's -- `lv > 0` walks `uvenv` instead, a
+      # genuinely different value this compiler has no register/pointer for
+      # today, same "not modeled, honest #error" territory as a depth>0
+      # upvar). Only ever compiled with `@blk_param_name` set -- exactly
+      # when compile_method's own prescan (`needs_blk_param`) found this
+      # exact shape ahead of time and arranged for the entry wrapper to
+      # extract the real block value into that C++ local -- so the `lv`
+      # check here is really just re-confirming the same shape prescan
+      # already required, not a fresh capability test.
+      #
+      # Real vm.c also raises `LocalJumpError` ("unexpected yield") if the
+      # slot holds `nil` -- reproduced directly (`mrb_get_args`' own `&`
+      # format specifier, unlike BLKPUSH's own raw stack read, happily
+      # returns nil for "no block given" rather than raising itself, so
+      # this check can't be skipped).
+      d = a[/^R(\d+)/, 1]
+      lv = a[/\((\d+)\)/, 1]
+      if lv == '0' && @blk_param_name
+        <<~CPP
+          if (mrb_nil_p(#{@blk_param_name})) {
+            mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "bc2cpp: unexpected yield");
+          }
+          r#{d} = #{@blk_param_name};
+        CPP
+      else
+        "#error unhandled opcode BLKPUSH #{a}\n"
+      end
     when 'BLKCALL'
       # "BLKCALL R7 0" / "BLKCALL R4 2" -- real OP_BLKCALL semantics (ops.h:
       # `R[a] = R[a].call(R[a+1],...,R[a+b]); direct block call`). Confirmed
@@ -12638,18 +12904,50 @@ class CodeGen
       # project's own established mrblib never subclasses Array/String/
       # Hash to override `[]`, so it costs nothing in practice today, but
       # it is a real gap, not a proven-safe simplification).
+      #
+      # GETIDX_STATIC_RECEIVER_SUPPORT: when `static_indexable_class`
+      # proves the receiver Array or Hash ahead of time (the exact same
+      # whole-program facts `.each`/`.map`/... inlining already trusts,
+      # just asked at this new call site), skip straight to a single
+      # cheap type-checked fast path instead of the full four-way runtime
+      # gate below -- still a real `mrb_raise` on a mismatch (defense in
+      # depth against a wrong trace, the same "trust the proof to pick
+      # the fast path, still verify at runtime" shape emit_each_inline's
+      # own `#each` receiver check already established), never a silent
+      # wrong answer. A proven Hash needs no index-type branch at all
+      # (`mrb_hash_get` already accepts any key type); a proven Array
+      # still needs the `mrb_integer_p` check (a Range/other index still
+      # has to fall through to the real `[]=` -- `bc2cpp_ary_entry` only
+      # ever handles a fixnum index).
       d, s = regs(a, 2)
-      <<~CPP
-        if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
-          r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
-        } else if (mrb_hash_p(r#{d})) {
+      case static_indexable_class(irep, idx, d, owner_def)
+      when 'Array'
+        <<~CPP
+          if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
+          if (mrb_integer_p(r#{s})) {
+            r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+          }
+        CPP
+      when 'Hash'
+        <<~CPP
+          if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
           r#{d} = mrb_hash_get(M, r#{d}, r#{s});
-        } else if (mrb_string_p(r#{d}) && (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
-          r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
-        }
-      CPP
+        CPP
+      else
+        <<~CPP
+          if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
+            r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+          } else if (mrb_hash_p(r#{d})) {
+            r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+          } else if (mrb_string_p(r#{d}) && (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
+            r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+          }
+        CPP
+      end
     when 'GETIDX0'
       # "GETIDX0 R7 R4[0]" -- R[a] = R[b][0] (real OP_GETIDX0 semantics,
       # src/vm.c): mrbc's own peephole for the common literal `x[0]` index
@@ -12664,16 +12962,33 @@ class CodeGen
       # mirrors vm.c's own `getidx0_fallback` label exactly (regs[a]=recv,
       # regs[a+1]=Fixnum(0), then real :[] dispatch through the ordinary
       # SEND path).
+      #
+      # GETIDX_STATIC_RECEIVER_SUPPORT: same static-receiver fast path as
+      # GETIDX above, applied to `s` (the receiver here, not `d` -- see
+      # this opcode's own separate dest/src register pair).
       d, s = regs(a, 2)
-      <<~CPP
-        if (mrb_array_p(r#{s})) {
+      case static_indexable_class(irep, idx, s, owner_def)
+      when 'Array'
+        <<~CPP
+          if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
           r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
-        } else if (mrb_hash_p(r#{s})) {
+        CPP
+      when 'Hash'
+        <<~CPP
+          if (!mrb_hash_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
           r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
-        } else {
-          r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
-        }
-      CPP
+        CPP
+      else
+        <<~CPP
+          if (mrb_array_p(r#{s})) {
+            r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
+          } else if (mrb_hash_p(r#{s})) {
+            r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+          } else {
+            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+          }
+        CPP
+      end
     when 'SETIDX'
       # "SETIDX R4 (R5) (R6)" -- R[a][R[a+1]] = R[a+2], then R[a] = R[a+2]
       # too (real OP_SETIDX semantics, src/vm.c: the fast Array/Hash paths
@@ -12686,18 +13001,46 @@ class CodeGen
       # real method returns, matching the interpreter's own SENDB-based
       # fallback exactly (no explicit regs[a]=vc override on that path
       # either, confirmed reading vm.c's own setidx_fallback).
-      d, idx, val = regs(a, 3)
-      <<~CPP
-        if (mrb_array_p(r#{d}) && mrb_integer_p(r#{idx})) {
-          mrb_ary_set(M, r#{d}, mrb_integer(r#{idx}), r#{val});
+      #
+      # GETIDX_STATIC_RECEIVER_SUPPORT: same static-receiver fast path as
+      # GETIDX above. Destructured as `idx_reg` (not `idx`) here
+      # specifically -- this `when` branch is the one case in this whole
+      # switch that would otherwise shadow `compile_insn`'s own `idx`
+      # parameter (this instruction's own position, exactly what
+      # `static_indexable_class` needs to start its backward scan from)
+      # with the index REGISTER instead, silently breaking the trace for
+      # every SETIDX site the moment it ran.
+      d, idx_reg, val = regs(a, 3)
+      case static_indexable_class(irep, idx, d, owner_def)
+      when 'Array'
+        <<~CPP
+          if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
+          if (mrb_integer_p(r#{idx_reg})) {
+            mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
+            r#{d} = r#{val};
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+          }
+        CPP
+      when 'Hash'
+        <<~CPP
+          if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
+          mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
           r#{d} = r#{val};
-        } else if (mrb_hash_p(r#{d})) {
-          mrb_hash_set(M, r#{d}, r#{idx}, r#{val});
-          r#{d} = r#{val};
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx}, r#{val});
-        }
-      CPP
+        CPP
+      else
+        <<~CPP
+          if (mrb_array_p(r#{d}) && mrb_integer_p(r#{idx_reg})) {
+            mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
+            r#{d} = r#{val};
+          } else if (mrb_hash_p(r#{d})) {
+            mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
+            r#{d} = r#{val};
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+          }
+        CPP
+      end
     when 'GETGV'
       # "GETGV R4 $stderr" -- R[a] = mrb_gv_get(M, sym) (real OP_GETGV
       # semantics, src/vm.c). A global variable's own symbol name already
