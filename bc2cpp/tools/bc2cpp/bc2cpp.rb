@@ -9439,20 +9439,112 @@ class CodeGen
     out
   end
 
-  # Every bytecode address any JMP/JMPNOT/JMPIF in this irep can land on --
-  # each one needs a real C label emitted in compile_method, or `goto` has
-  # nowhere valid to target.
+  # Every bytecode address any JMP/JMPNOT/JMPIF/JMPUW in this irep can land
+  # on -- each one needs a real C label emitted in compile_method, or `goto`
+  # has nowhere valid to target. JMPUW carries the exact same `S` (one
+  # 16-bit jump offset, already resolved to an absolute address by the
+  # disassembler) operand shape as JMP -- 3rd/mruby/include/mruby/ops.h's
+  # own `OPCODE(JMPUW, S)`, printed by codedump.c's own `CASE(OP_JMPUW, S)`
+  # as a bare zero-padded address exactly like `CASE(OP_JMP, S)` -- so it
+  # parses identically here. Listing it unconditionally (not only when
+  # jmpuw_is_plain_jump? below lets it actually compile) is deliberate and
+  # harmless: an extra `L55:;` label in an irep whose JMPUW still `#error`s
+  # costs nothing, and the method never ships anyway.
   def jump_targets(irep)
     targets = Set.new
     irep.instructions.each do |insn|
       case insn.op
-      when 'JMP'
+      when 'JMP', 'JMPUW'
         targets << insn.args.strip[/\d+/].to_i
       when 'JMPNOT', 'JMPIF', 'JMPNIL'
         targets << jmp_target_after_reg(insn.args)
       end
     end
     targets
+  end
+
+  # JMPUW_SUPPORT: is this irep's OP_JMPUW provably identical to a plain
+  # OP_JMP -- i.e. can it compile to a bare `goto`?
+  #
+  # OP_JMPUW ("unwind_and_jump_to(a)", ops.h) is NOT an `ensure`-only
+  # opcode, despite the name. mrbc emits it for FOUR purely intra-irep
+  # control-flow jumps, none of which need an `ensure` to exist at all
+  # (3rd/mruby/mrbgems/mruby-compiler/core/codegen.c, every real
+  # `genjmp(s, OP_JMPUW, ...)` call site in the file):
+  #
+  #   loop_break     -> `break` inside a LOOP_NORMAL (while/until/for)
+  #   codegen_next   -> `next`  inside a LOOP_NORMAL
+  #   codegen_redo   -> `redo`
+  #   codegen_retry  -> `retry`
+  #
+  # (`break`/`next` inside a *block* are a different shape entirely --
+  # codegen.c takes the `else` arm there and emits OP_BREAK/OP_RETURN via
+  # gen_return, which is why this file's own BLOCK machinery never sees a
+  # JMPUW for those.) Confirmed against real `mrbc -v` disassembly, not
+  # assumed: a bare `def f(s); e = s.size; while e > 0; ...; break unless
+  # ...; e -= 1; end; s[0, e]; end` -- no `begin`, no `rescue`, no
+  # `ensure` anywhere -- compiles to `087 JMPUW 097` with an irep whose
+  # disassembly prints NO "catch type:" header line at all (clen == 0).
+  # That is exactly the shape of all 7 real JMPUW sites in this program.
+  #
+  # The unwinding half only ever engages through the irep's own catch
+  # handler table. src/vm.c's own `CASE(OP_JMPUW, S)` reads, in full:
+  #
+  #     a = (uint32_t)((ci->pc - irep->iseq) + (int16_t)a);
+  #     CHECKPOINT_RESTORE(RBREAK_TAG_JUMP) { ...resume after ensure... }
+  #     CHECKPOINT_MAIN(RBREAK_TAG_JUMP) {
+  #       if (irep->clen > 0 &&
+  #           (ch = catch_handler_find(irep, ci->pc, MRB_CATCH_FILTER_ENSURE))) {
+  #         if (a < ...ch->begin || a > ...ch->end) {
+  #           THROW_TAGGED_BREAK(mrb, RBREAK_TAG_JUMP, mrb->c->ci, mrb_fixnum_value(a));
+  #         }
+  #       }
+  #     }
+  #     CHECKPOINT_END(RBREAK_TAG_JUMP);
+  #     mrb->exc = NULL;
+  #     ci->pc = irep->iseq + a;
+  #     JUMP;
+  #
+  # `irep->clen > 0` is the VM's own FIRST condition, so an irep with an
+  # empty catch handler table can never take the throwing path: every
+  # JMPUW in it falls through to the bare `ci->pc = irep->iseq + a; JUMP`
+  # tail, which is byte-for-byte what `CASE(OP_JMP, S)` does. (The
+  # CHECKPOINT_RESTORE arm is likewise unreachable -- it is only ever
+  # re-entered by a THROW_TAGGED_BREAK this same instruction raised, and
+  # with clen == 0 it never raises one. `mrb->exc = NULL` is a no-op at a
+  # normally-executing instruction: a pending exception would already have
+  # sent the VM to L_RAISE.) So `clen == 0` => JMPUW IS JMP, exactly.
+  #
+  # This predicate is deliberately the whole-irep `clen == 0` test and not
+  # the VM's finer per-pc `catch_handler_find(..., FILTER_ENSURE)` range
+  # check, for three real reasons:
+  #
+  #  1. It is a direct, un-paraphrased reading of vm.c's own first
+  #     condition -- nothing to get subtly wrong about half-open vs.
+  #     closed ranges (catch_cover_p's own `>`/`<=` asymmetry, which
+  #     exists because `ci->pc` already points at the NEXT instruction),
+  #     nor about the "jump stays inside the same handler" carve-out.
+  #  2. An unsound case genuinely exists and must keep `#error`ing. Real
+  #     disassembly of `while i < 10; begin; break if a[i] == 3; i += 1;
+  #     ensure; a.tick; end; end` gives `catch type: ensure begin: 0019
+  #     end: 0042` with `035 JMPUW 055`: pc-after is 038 (inside 19..42)
+  #     and the target 055 is outside it, so the VM really does
+  #     THROW_TAGGED_BREAK and really does run `a.tick` before landing on
+  #     055. A bare `goto L55` there would silently skip the ensure body
+  #     -- precisely the "silently-wrong C++" this file never emits.
+  #  3. It keeps JMPUW from interacting at all with RESCUE_SUPPORT's own
+  #     region extraction, which lifts a protected address range out into
+  #     a SEPARATE C++ function run under mrb_protect_error. A `retry`- or
+  #     `break`-shaped JMPUW crossing that boundary is not expressible as
+  #     a `goto` in either function, and an irep with a recognized rescue
+  #     region by definition has a non-empty catch handler table -- so
+  #     this test excludes the whole question rather than reasoning about
+  #     it.
+  #
+  # Measured cost of that conservatism against the real whole program:
+  # zero. All 7 JMPUW sites sit in ireps with no catch handlers at all.
+  def jmpuw_is_plain_jump?(irep)
+    irep.catch_handlers.nil? || irep.catch_handlers.empty?
   end
 
   # RESCUE_SUPPORT: a `begin BODY rescue SomeClass => e; HANDLER; end`
@@ -11359,6 +11451,23 @@ class CodeGen
     # *integer* value ("LBLK9_16:") -- also caught live, building this.
     when 'JMP'
       "  goto #{label_prefix}#{insn.args.strip[/\d+/].to_i};\n"
+    when 'JMPUW'
+      # JMPUW_SUPPORT: same reasoning as compile_insn's own JMPUW case,
+      # but scoped to `block_irep` -- an inlined block body can contain its
+      # own real `while ... break` loop, and both the catch handler table
+      # consulted by jmpuw_is_plain_jump? and the `jump_targets` labels
+      # this `goto` lands on are the BLOCK's own here, never the enclosing
+      # method's. Must be handled in this function rather than left to the
+      # `else` arm's compile_insn delegation for exactly the reason JMP
+      # just above is: the shared codegen emits a bare `L<addr>` label
+      # name, which in an inlined block body is either undefined or (worse)
+      # a real collision with the enclosing method's own same-numbered
+      # label -- see this function's own `label_prefix` comment.
+      if jmpuw_is_plain_jump?(block_irep)
+        "  goto #{label_prefix}#{insn.args.strip[/\d+/].to_i};\n"
+      else
+        "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
+      end
     when 'JMPNOT'
       reg = insn.args[/^R(\d+)/, 1]
       "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
@@ -13644,6 +13753,18 @@ class CodeGen
       # compile-time "label not found" bug caught by building this.
       target = a.strip[/\d+/].to_i
       "  goto L#{target};\n"
+    when 'JMPUW'
+      # JMPUW_SUPPORT: a `break`/`next`/`redo`/`retry` jump. Identical to
+      # JMP above (same `S` operand, same zero-padding, so the same `.to_i`
+      # is just as load-bearing here) whenever this irep has no catch
+      # handler table -- see jmpuw_is_plain_jump? for the full vm.c
+      # derivation and for the real `ensure`-inside-a-loop shape that is
+      # NOT expressible as a `goto` and keeps its honest `#error`.
+      if jmpuw_is_plain_jump?(irep)
+        "  goto L#{a.strip[/\d+/].to_i};\n"
+      else
+        "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
+      end
     when 'JMPNOT'
       reg = a[/^R(\d+)/, 1]
       target = jmp_target_after_reg(a)
