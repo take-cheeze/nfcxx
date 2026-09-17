@@ -9998,6 +9998,46 @@ class CodeGen
     proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) })
   end
 
+  # GETIDX_STATIC_RECEIVER_SUPPORT: is THIS `GETIDX`/`GETIDX0`/`SETIDX`
+  # instruction's own receiver register (`reg`, at this exact `idx` inside
+  # `irep`) provably `Array` or `Hash` -- reusing, unchanged, the identical
+  # whole-program facts `recognize_each_regions`/`recognize_hash_each_
+  # regions` already trust for the exact same question at a `.each`/
+  # `.map`/... call site (`trace_new_target`'s own fresh-`.new`/GETIV-
+  # CLASS_HINT/argument-annotation/chained-accessor chase, plus
+  # `proven_array_source`'s own ARRAY-literal/core-Array-return-method
+  # chase, Hash-only via the former since no HASH-literal/core-Hash-return
+  # scan exists yet -- a real, narrower gap, not a soundness concern, just
+  # fewer real Hash receivers provable this way today). No new tracing
+  # logic: a new call site for logic this file already ships and relies on
+  # elsewhere. Returns `'Array'`, `'Hash'`, or nil (not statically
+  # provable, or provably something else) -- compile_insn's own GETIDX/
+  # GETIDX0/SETIDX cases keep their full three-way runtime-checked
+  # fallback unchanged for the nil case, so a miss here costs nothing but
+  # the missed fast path, never a wrong answer.
+  #
+  # `idx.nil?` (compile_block_body_insn's own shared `else` branch,
+  # dispatching an inlined loop body's OWN shifted-register instructions
+  # through this exact same compile_insn switch with `idx: nil` -- see
+  # that function's own comment) bails immediately: `trace_new_target`'s
+  # backward scan needs a real position to start from, and the shifted
+  # register numbers there don't correspond 1:1 with unshifted positions
+  # in `irep.instructions` the way every other real caller's `idx` does.
+  def static_indexable_class(irep, idx, reg, owner_def)
+    return nil unless owner_def && idx
+
+    enter = irep.instructions.find { |i| i.op == 'ENTER' }
+    mand = enter ? enter.args.split(':').first.to_i : 0
+    arg_classes = @class_annotations[irep.label]&.args
+    ivar_classes = @class_layout[owner_def.owner]
+    traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_def.owner,
+                               class_layout: @class_layout, registry: @registry,
+                               container_constants: @container_constants)
+    return traced if %w[Array Hash].include?(traced)
+
+    proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
+  end
+
   # MAP_BLOCK_SUPPORT: recognize one inlinable collection-block region --
   # `ary.map/select/reject/find/filter_map { |x| ... }` (1-mandatory-arg
   # blocks) and `ary.each_with_index { |x, i| ... }` (2-mandatory-arg
@@ -12864,18 +12904,50 @@ class CodeGen
       # project's own established mrblib never subclasses Array/String/
       # Hash to override `[]`, so it costs nothing in practice today, but
       # it is a real gap, not a proven-safe simplification).
+      #
+      # GETIDX_STATIC_RECEIVER_SUPPORT: when `static_indexable_class`
+      # proves the receiver Array or Hash ahead of time (the exact same
+      # whole-program facts `.each`/`.map`/... inlining already trusts,
+      # just asked at this new call site), skip straight to a single
+      # cheap type-checked fast path instead of the full four-way runtime
+      # gate below -- still a real `mrb_raise` on a mismatch (defense in
+      # depth against a wrong trace, the same "trust the proof to pick
+      # the fast path, still verify at runtime" shape emit_each_inline's
+      # own `#each` receiver check already established), never a silent
+      # wrong answer. A proven Hash needs no index-type branch at all
+      # (`mrb_hash_get` already accepts any key type); a proven Array
+      # still needs the `mrb_integer_p` check (a Range/other index still
+      # has to fall through to the real `[]=` -- `bc2cpp_ary_entry` only
+      # ever handles a fixnum index).
       d, s = regs(a, 2)
-      <<~CPP
-        if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
-          r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
-        } else if (mrb_hash_p(r#{d})) {
+      case static_indexable_class(irep, idx, d, owner_def)
+      when 'Array'
+        <<~CPP
+          if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
+          if (mrb_integer_p(r#{s})) {
+            r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+          }
+        CPP
+      when 'Hash'
+        <<~CPP
+          if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
           r#{d} = mrb_hash_get(M, r#{d}, r#{s});
-        } else if (mrb_string_p(r#{d}) && (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
-          r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
-        }
-      CPP
+        CPP
+      else
+        <<~CPP
+          if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
+            r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+          } else if (mrb_hash_p(r#{d})) {
+            r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+          } else if (mrb_string_p(r#{d}) && (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
+            r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+          }
+        CPP
+      end
     when 'GETIDX0'
       # "GETIDX0 R7 R4[0]" -- R[a] = R[b][0] (real OP_GETIDX0 semantics,
       # src/vm.c): mrbc's own peephole for the common literal `x[0]` index
@@ -12890,16 +12962,33 @@ class CodeGen
       # mirrors vm.c's own `getidx0_fallback` label exactly (regs[a]=recv,
       # regs[a+1]=Fixnum(0), then real :[] dispatch through the ordinary
       # SEND path).
+      #
+      # GETIDX_STATIC_RECEIVER_SUPPORT: same static-receiver fast path as
+      # GETIDX above, applied to `s` (the receiver here, not `d` -- see
+      # this opcode's own separate dest/src register pair).
       d, s = regs(a, 2)
-      <<~CPP
-        if (mrb_array_p(r#{s})) {
+      case static_indexable_class(irep, idx, s, owner_def)
+      when 'Array'
+        <<~CPP
+          if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
           r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
-        } else if (mrb_hash_p(r#{s})) {
+        CPP
+      when 'Hash'
+        <<~CPP
+          if (!mrb_hash_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
           r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
-        } else {
-          r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
-        }
-      CPP
+        CPP
+      else
+        <<~CPP
+          if (mrb_array_p(r#{s})) {
+            r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
+          } else if (mrb_hash_p(r#{s})) {
+            r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+          } else {
+            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+          }
+        CPP
+      end
     when 'SETIDX'
       # "SETIDX R4 (R5) (R6)" -- R[a][R[a+1]] = R[a+2], then R[a] = R[a+2]
       # too (real OP_SETIDX semantics, src/vm.c: the fast Array/Hash paths
@@ -12912,18 +13001,46 @@ class CodeGen
       # real method returns, matching the interpreter's own SENDB-based
       # fallback exactly (no explicit regs[a]=vc override on that path
       # either, confirmed reading vm.c's own setidx_fallback).
-      d, idx, val = regs(a, 3)
-      <<~CPP
-        if (mrb_array_p(r#{d}) && mrb_integer_p(r#{idx})) {
-          mrb_ary_set(M, r#{d}, mrb_integer(r#{idx}), r#{val});
+      #
+      # GETIDX_STATIC_RECEIVER_SUPPORT: same static-receiver fast path as
+      # GETIDX above. Destructured as `idx_reg` (not `idx`) here
+      # specifically -- this `when` branch is the one case in this whole
+      # switch that would otherwise shadow `compile_insn`'s own `idx`
+      # parameter (this instruction's own position, exactly what
+      # `static_indexable_class` needs to start its backward scan from)
+      # with the index REGISTER instead, silently breaking the trace for
+      # every SETIDX site the moment it ran.
+      d, idx_reg, val = regs(a, 3)
+      case static_indexable_class(irep, idx, d, owner_def)
+      when 'Array'
+        <<~CPP
+          if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
+          if (mrb_integer_p(r#{idx_reg})) {
+            mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
+            r#{d} = r#{val};
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+          }
+        CPP
+      when 'Hash'
+        <<~CPP
+          if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
+          mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
           r#{d} = r#{val};
-        } else if (mrb_hash_p(r#{d})) {
-          mrb_hash_set(M, r#{d}, r#{idx}, r#{val});
-          r#{d} = r#{val};
-        } else {
-          r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx}, r#{val});
-        }
-      CPP
+        CPP
+      else
+        <<~CPP
+          if (mrb_array_p(r#{d}) && mrb_integer_p(r#{idx_reg})) {
+            mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
+            r#{d} = r#{val};
+          } else if (mrb_hash_p(r#{d})) {
+            mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
+            r#{d} = r#{val};
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+          }
+        CPP
+      end
     when 'GETGV'
       # "GETGV R4 $stderr" -- R[a] = mrb_gv_get(M, sym) (real OP_GETGV
       # semantics, src/vm.c). A global variable's own symbol name already
