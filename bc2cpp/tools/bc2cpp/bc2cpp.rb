@@ -6465,7 +6465,20 @@ def rest_only_arity?(irep)
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
-  rest.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+  # EXPLICIT_BLOCK_PARAM_SUPPORT's own REST_BLOCK_COMBINED_SUPPORT follow-up:
+  # `block` is deliberately no longer required to be zero here -- a real
+  # ENTER shape can declare both (`def method_missing(name, *args, &block);
+  # ...; end`, confirmed via a fresh `mrbc -v` disassembly: `ENTER
+  # 1:0:1:0:0:0:1:0`, the real block value arriving at register mand+rest+1,
+  # copied by a plain MOVE into whatever local name mrbc chose -- the exact
+  # same "ordinary entry-argument calling convention, no opcode needed"
+  # shape block_param_arity?'s own comment already established, just one
+  # register further along). Unlike OPTIONAL_KEYWORD_COMBINED_SUPPORT, ENTER's
+  # `rest`/`block` fields need no separate bytecode-shape recognition of
+  # their own (both are pure ENTER-field facts, real register position
+  # follows mechanically) -- so, unlike optional_arg_table's own jump-table
+  # gate, there's no partial-recognition-failure case to guard against here.
+  rest.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero?
 end
 
 # EXPLICIT_BLOCK_PARAM_SUPPORT: a real, exactly-recognized "plain mandatory
@@ -6487,7 +6500,10 @@ def block_param_arity?(irep)
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
-  block.positive? && opt.zero? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero?
+  # REST_BLOCK_COMBINED_SUPPORT: `rest` is deliberately no longer required
+  # to be zero here -- see rest_only_arity?'s own comment, the other half
+  # of this same combined shape.
+  block.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero?
 end
 
 def report_annotation_candidates(ireps, registry, arg_types, annotations)
@@ -8731,14 +8747,17 @@ class CodeGen
     # needs no opcode-level region of its own at all, just one more
     # contiguous `total_args` slot (below), the exact same mechanism
     # OPTIONAL_ARG_SUPPORT's own `opt` extension already established.
+    # REST_BLOCK_COMBINED_SUPPORT: `has_rest` and `has_blk` (just below) can
+    # now BOTH be true for the same method (`def method_missing(name, *args,
+    # &block)`) -- rest_only_arity?/block_param_arity? each dropped the
+    # other's own zero-field requirement (see their own comments). Both stay
+    # mutually exclusive with mandatory_ok/opt_jmp_targets/kw_table by
+    # construction (pure_mandatory_arity?/optional_arg_table/
+    # keyword_arg_table all still require ENTER's own rest AND block fields
+    # zero), so only this one combination is possible, never a three- or
+    # four-way one.
     has_rest = (mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)
-    # EXPLICIT_BLOCK_PARAM_SUPPORT: same short-circuiting shape as has_rest's
-    # own guard just above -- see block_param_arity?'s own comment. Mutually
-    # exclusive with every other non-mandatory shape by construction (each
-    # of those guards already requires ENTER's own block-arity field to be
-    # zero), so this is never reached, and never checked, once any of them
-    # already matched.
-    has_blk = (mandatory_ok || opt_jmp_targets || kw_table || has_rest) ? false : block_param_arity?(irep)
+    has_blk = (mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep)
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
@@ -8862,7 +8881,13 @@ class CodeGen
     # downstream (the real MOVE copying it into whatever local name mrbc
     # chose, and every SEND/GETUPVAR/... reading it from there) is already-
     # supported, unmodified bytecode -- no compile_insn case needed at all.
-    out << "  r#{mand + 1} = bc2cpp_blk;\n" if has_blk
+    # REST_BLOCK_COMBINED_SUPPORT: the real block register sits at
+    # mand+rest+1 (real disasm: `ENTER 1:0:1:0:0:0:1:0` -> block value
+    # arrives at R3 = mand(1)+rest(1)+1), which is exactly `total_args + 1`
+    # whenever `has_rest` also holds (`total_args` already includes the rest
+    # slot then) and reduces to the original `mand + 1` when it doesn't
+    # (`total_args == mand`) -- one formula, no has_rest-specific branch.
+    out << "  r#{total_args + 1} = bc2cpp_blk;\n" if has_blk
     if embedded_ivars && d.name == 'initialize'
       # self is a bare, freshly allocated MRB_TT_DATA shell (data == NULL)
       # at the start of #initialize -- allocate the real struct once, here,
@@ -9261,9 +9286,20 @@ class CodeGen
       out << "  mrb_int bc2cpp_rest_len;\n"
       fmt = arg_native_types.first(mand).map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + '*'
       ptrs = (mand_names.map { |a| "&#{a}" } + ['&bc2cpp_rest_ptr', '&bc2cpp_rest_len']).join(', ')
+      # REST_BLOCK_COMBINED_SUPPORT: `*` (rest) and `&` (block) are
+      # independent mrb_get_args format specifiers (mruby.h's own format
+      # table) -- safe to combine on the same call, same as OPTIONAL_
+      # KEYWORD_COMBINED_SUPPORT's own `|`+`:` union above.
+      if has_blk
+        out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
+        fmt += '&'
+        ptrs += ', &bc2cpp_blk'
+      end
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n"
-      out << "  return #{impl_name}(M, self, #{(mand_names + [rest_name]).join(', ')});\n"
+      call_args = mand_names + [rest_name]
+      call_args << 'bc2cpp_blk' if has_blk
+      out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
     else
       # Each local's own declared type has to match what mrb_get_args'
       # own format character below writes into it -- 'o' (no coercion at
@@ -12731,10 +12767,22 @@ class CodeGen
       prev = idx.positive? ? irep.instructions[idx - 1] : nil
       next if prev && prev.op == 'BLOCK'
 
-      n_match = insn.args.match(/n=(\d+)(?:\s|$)/)
+      # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (a plain positional
+      # splat, no `|nk=` -- a double-splat/keyword tail alongside `&expr`
+      # keeps the honest #error, same scope decision compile_dynamic_
+      # splat_send's own comment already makes for the non-`&expr` case)
+      # combines with `&expr` for real -- `__send__(name, *args, &block)`,
+      # `RGSS::ErrorReport::Tee#method_missing`'s own real body. Confirmed
+      # via a fresh `mrbc -v` disassembly (`def f(name,*args,&block);
+      # @io.__send__(name,*args,&block); end`): the real args Array is
+      # already fully built into R(dest+1) by the time this SENDB runs --
+      # same ARRAY/LOADNIL-then-ARYCAT guarantee compile_dynamic_splat_
+      # send's own comment establishes -- with the block's own value
+      # sitting in the very next register, R(dest+2), not R(dest+n+1)
+      # (n isn't a compile-time constant here at all).
+      n_match = insn.args.match(/n=(\d+|\*)(?:\s|$)/)
       next unless n_match
 
-      n = n_match[1].to_i
       dest, = insn.args.split(/\s+/, 2)
       dest_reg = dest[/^R(\d+)/, 1]
       next unless dest_reg
@@ -12742,9 +12790,17 @@ class CodeGen
       name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       next unless name
 
-      regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
-                   blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
-                   self_implicit: insn.op == 'SSENDB' }
+      if n_match[1] == '*'
+        regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
+                     argv_reg: (dest_reg.to_i + 1).to_s,
+                     blk_reg: (dest_reg.to_i + 2).to_s, name: name,
+                     self_implicit: insn.op == 'SSENDB' }
+      else
+        n = n_match[1].to_i
+        regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
+                     blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
+                     self_implicit: insn.op == 'SSENDB' }
+      end
     end
     regions
   end
@@ -12752,18 +12808,28 @@ class CodeGen
   def emit_explicit_block_arg_glue(region)
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
-    argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
     out = String.new
     out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr forwarded directly as the block " \
            "(mrb_funcall_with_block's own ensure_block coerces Symbol/Proc/anything with #to_proc), dynamic dispatch\n"
     out << "  try {\n"
-    if argv.empty?
-      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
-             "r#{region[:blk_reg]});\n"
-    else
-      out << "    mrb_value bc2cpp_ebarg_argv_#{region[:sendb_addr]}[] = { #{argv.join(', ')} };\n"
+    if region[:n] == '*'
+      # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: R(dest+1) is already a
+      # real, fully-built Array by construction (see recognize_explicit_
+      # block_arg_regions' own comment) -- RARRAY_LEN/RARRAY_PTR straight
+      # into mrb_funcall_with_block, same shape compile_dynamic_splat_
+      # send's own mrb_funcall_argv call already trusts.
       out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-             "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, r#{region[:blk_reg]});\n"
+             "RARRAY_LEN(r#{region[:argv_reg]}), RARRAY_PTR(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
+    else
+      argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+      if argv.empty?
+        out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
+               "r#{region[:blk_reg]});\n"
+      else
+        out << "    mrb_value bc2cpp_ebarg_argv_#{region[:sendb_addr]}[] = { #{argv.join(', ')} };\n"
+        out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+               "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, r#{region[:blk_reg]});\n"
+      end
     end
     out << "  } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
     out << "    r#{dest_reg} = bc2cpp_brk.value;\n"
