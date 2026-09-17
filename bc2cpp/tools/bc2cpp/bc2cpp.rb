@@ -6024,13 +6024,30 @@ end
 # runs, completes, and clears those two ivars back to nil/false BEFORE
 # this level sets its own -- never concurrently, since Ruby method calls
 # here are always synchronous, one level at a time.
-# `RESCUE`/`RAISEIF`/`EXCEPT` (a real rescue-region opcode) is still
-# rejected -- this fallback builds no equivalent of
-# `recognize_rescue_regions`' own extracted-try-body machinery, at any
-# nesting depth.
-BLOCK_FALLBACK_UNSAFE_OPS = %w[
-  RESCUE RAISEIF EXCEPT
-].freeze
+# BLOCK_FALLBACK_RESCUE_SUPPORT: `RESCUE`/`RAISEIF`/`EXCEPT` (a real
+# `rescue` clause inside this block's own body -- `cached_bitmap(cache,
+# key) { Bitmap.new(...) rescue StandardError => e; ...; end }`, a real
+# shape this program ships) is no longer unconditionally unsafe either,
+# for the identical reason BLOCK/SENDB/SSENDB just above stopped being:
+# `emit_proc_fallback_fn` now runs `recognize_rescue_regions`/
+# `emit_rescue_try_body`/`emit_rescue_glue` -- the exact same real
+# `mrb_protect_error`-based extraction `compile_method`'s own top-level
+# loop already runs on an ordinary method body -- against this block's
+# own irep too. `RESCUE`/`RAISEIF` were ALREADY unconditionally safe
+# wherever they appear, real, always-correct translations regardless of
+# whether the surrounding construct is ever recognized as an extractable
+# region at all (see compile_insn's own `when 'RESCUE'`/`when 'RAISEIF'`
+# cases) -- only `EXCEPT` genuinely needs the recognizer's own real
+# extraction to mean anything (a real "capture the exception" tied to
+# `mrb_protect_error`), and still has no case of its own in compile_insn's
+# ordinary switch, so a `rescue` shape `recognize_rescue_regions` itself
+# declines to recognize (real Ruby's `retry`/`ensure`/a multi-class
+# `rescue A, B`/nesting/a namespaced rescue class -- see that function's
+# own top comment for the full, narrow, real-closed-world-vetted list)
+# still correctly leaves the honest `#error unhandled opcode EXCEPT`
+# behind, exactly as before this existed for any other reason a body
+# doesn't compile.
+BLOCK_FALLBACK_UNSAFE_OPS = [].freeze
 
 # UPVAR_CAPTURE_SUPPORT: every outer register a block body's own
 # GETUPVAR/SETUPVAR instructions reference (depth 0 only -- see
@@ -6138,13 +6155,19 @@ end
 #   - `auto_battle_best_target` (mruby-rpg2k/mrblib/game/battle.rb, this
 #     program's own domain method): `targets.each do |t| r = yield t; ...
 #     end; best` -- plain synchronous, real body read directly.
+#
+# `cached_bitmap` added alongside BLOCK_FALLBACK_RESCUE_SUPPORT, the same
+# real call site (`RPG2k::Scene::Battle`/`RPG2k::Scene::Map`, both
+# identical): `return cache[key] if cache.key?(key); cache[key] = yield`
+# -- plain synchronous single yield (or none at all on a cache hit),
+# never stored, both real definitions read directly.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
   find find_index any? all? none? count index sort_by
   _rgss_native_sort _rgss_native_sort! loop each_char
   page_field section open new reduce inject each_with_object downto
-  auto_battle_best_target
+  auto_battle_best_target cached_bitmap
 ].freeze
 
 def block_fallback_safe?(block_irep)
@@ -9552,9 +9575,24 @@ class CodeGen
   # keeps working exactly like compile_method's own goto-threaded loop
   # since every registered label this function needs is declared right
   # here, the same L<addr> convention used everywhere else in this file.
-  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types)
+  # `extra_fields` (default `[]`, every pre-existing caller's own exact
+  # prior behavior unchanged): `[{name:, c_type:}]` -- additional ctx
+  # struct members beyond `self`/`arg_names`, restored into a same-named
+  # local verbatim (no boxing/unboxing, unlike `arg_names`) at the top of
+  # the try-body function. BLOCK_FALLBACK_RESCUE_SUPPORT's own use below
+  # is the only real caller: a captured upvar pointer (`mrb_value*
+  # bc2cpp_upvar_N`) a RESCUE region nested inside a block body's own
+  # protected range still needs to read/write, exactly the same real
+  # variable name the enclosing block's own `_impl` function already
+  # declares as a parameter -- referencing it by that same name from
+  # inside this separate extracted function is what makes GETUPVAR/
+  # SETUPVAR's own compile_insn case (keyed on the literal name, not on
+  # which function it happens to be compiled inside) work correctly with
+  # no special-casing on its own part at all.
+  def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [])
     ctx_struct = "#{try_name}_Ctx"
-    ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" }
+    ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
+                 extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
     # RESCUE_BODY_BLOCK_SUPPORT: a block-carrying call site sitting INSIDE
     # this try-body's own protected range previously always hit the raw
     # opcode-level `#error` -- this instruction loop used to be a plain
@@ -9594,6 +9632,7 @@ class CodeGen
     out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
     out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
     out << "  #{ctx_struct}* ctx = (#{ctx_struct}*)ud;\n"
+    extra_fields.each { |f| out << "  #{f[:c_type]} #{f[:name]} = ctx->#{f[:name]};\n" }
     (0...irep.nregs).each do |i|
       if i.zero?
         # GETIV/SETIV's own codegen (compile_insn) hardcodes the bare C++
@@ -9673,9 +9712,17 @@ class CodeGen
   #            compile_method's own pre-scan already declares for it
   #            (shared_target is a real jump target -- exit_i's own --
   #            so it's never a label this recognizer has to invent).
-  def emit_rescue_glue(try_name, region, arg_names, arg_native_types)
+  # `extra_field_values` (default `[]`): real C++ value EXPRESSIONS, one
+  # per `emit_rescue_try_body`'s own `extra_fields` entry, in the same
+  # order -- appended positionally to the aggregate-init `ctx{...}` list
+  # below (a plain C++ struct, no designated initializers used anywhere
+  # else in this file either). BLOCK_FALLBACK_RESCUE_SUPPORT's own upvar
+  # pointer parameters (`bc2cpp_upvar_N`) are already real, in-scope
+  # local variable names at this exact call site (the enclosing block's
+  # own `_impl` function), so the expression is just that same name.
+  def emit_rescue_glue(try_name, region, arg_names, arg_native_types, extra_field_values: [])
     ctx_struct = "#{try_name}_Ctx"
-    ctx_args = (['self'] + arg_names).join(', ')
+    ctx_args = (['self'] + arg_names + extra_field_values).join(', ')
     err_var = "#{try_name}_err"
     result_var = "#{try_name}_result"
     out = String.new
@@ -11987,7 +12034,33 @@ class CodeGen
     nested_pre = String.new
     nested_suppressed = []
     nested_glue_at = {}
+    # BLOCK_FALLBACK_RESCUE_SUPPORT: pre-claim every real `rescue`
+    # region's own address range in `nested_suppressed` BEFORE the
+    # nested-BLOCK_FALLBACK pass just below ever runs, so a block-carrying
+    # call sitting INSIDE a rescue clause here is never independently
+    # (mis)claimed by that pass -- `recognize_rescue_regions` itself is a
+    # pure, side-effect-free function of `block_irep` alone, safe to call
+    # this early, but the actual extraction (`emit_rescue_try_body`, a few
+    # lines below) has to wait until `@block_fallback_upvars`/
+    # `@block_fallback_active` are set (its own compile_insn calls need
+    # them) -- exactly the ordering constraint the nested-BLOCK_FALLBACK
+    # pass's own comment states the other way around (it has to run
+    # BEFORE those ivars are set). Splitting "claim the addresses" from
+    # "emit the real code" is what lets both constraints hold at once.
+    rescue_regions = recognize_rescue_regions(block_irep)
+    rescue_regions.each do |rregion|
+      nested_suppressed.concat((rregion[:begin_addr]..rregion[:end_addr]).to_a)
+      nested_suppressed << rregion[:except_addr]
+    end
     recognize_block_fallback_regions(block_irep).each do |nregion|
+      # BLOCK_FALLBACK_RESCUE_SUPPORT: skip a region already pre-claimed
+      # above by a rescue region's own address range -- it belongs to
+      # THAT region's own separate, restricted-range recognize/emit pass
+      # (a few lines below, via emit_rescue_try_body's own internal
+      # emit_block_fallback_glue_pass call), never this unrestricted one,
+      # or it would be emitted twice.
+      next if nested_suppressed.include?(nregion[:block_addr]) || nested_suppressed.include?(nregion[:sendb_addr])
+
       fn_result = emit_proc_fallback_fn(nregion, d, fn_name)
       next unless fn_result
 
@@ -12041,6 +12114,43 @@ class CodeGen
     # gets the new `throw`. Never both at once (this function only ever
     # compiles one region's own body per call).
     @block_fallback_active = region[:kind] != 'lambda_fallback'
+    # BLOCK_FALLBACK_RESCUE_SUPPORT: a real `rescue` clause INSIDE a
+    # block's own body -- `cached_bitmap(cache, key) { Bitmap.new(...)
+    # rescue StandardError => e; ...; end }`, `RPG2k::Scene::Battle#
+    # actor_battlecharset_bitmap`'s own real shape -- was still
+    # unconditionally rejected by `BLOCK_FALLBACK_UNSAFE_OPS`
+    # (RESCUE/RAISEIF/EXCEPT) even after NESTED_BLOCK_FALLBACK_SUPPORT
+    # taught this function to recurse into a nested BLOCK/SENDB: a rescue
+    # clause needs `recognize_rescue_regions`/`emit_rescue_try_body`/
+    # `emit_rescue_glue`'s own real `mrb_protect_error` extraction, a
+    # completely different mechanism, never attempted from inside a block
+    # body before. Reuses that exact same top-level machinery unchanged
+    # (must run AFTER `@block_fallback_upvars`/`@block_fallback_active`
+    # are set just above, unlike the nested-BLOCK_FALLBACK pass above --
+    # `emit_rescue_try_body`'s own compile_insn calls need those ivars
+    # live too, whereas a recursive emit_proc_fallback_fn call manages
+    # its own copies independently and needs them still unset when IT
+    # runs). `extra_fields`/`extra_field_values` thread this block's own
+    # captured upvar pointers into the extracted try-body function by
+    # name -- the same real variable name the enclosing block's own
+    # `_impl` function already has in scope, so GETUPVAR/SETUPVAR's own
+    # compile_insn case needs no special-casing to find it there too.
+    # `arg_names`/an all-nil `arg_native_types` (no NATIVE_ARG_TARGETS
+    # equivalent for a block's own mandatory params) are this function's
+    # own already-computed values, exactly matching what the block's own
+    # `_impl` signature/preamble already binds `r1..r<mand>` from.
+    # `rescue_regions` itself and its own address ranges were already
+    # computed and pre-claimed into `nested_suppressed` above, before the
+    # nested-BLOCK_FALLBACK pass ran -- reused verbatim here, not
+    # recomputed (one real region list, not two that could drift).
+    rescue_regions.each_with_index do |rregion, i|
+      try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
+      extra_fields = upvar_regs.map { |b| { name: "bc2cpp_upvar_#{b}", c_type: 'mrb_value*' } }
+      nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
+                                          extra_fields: extra_fields)
+      nested_glue_at[rregion[:begin_addr]] = emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
+                                                                extra_field_values: extra_fields.map { |f| f[:name] })
+    end
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: same `targets - (suppressed -
     # glue_at.keys)` shape compile_method's own top-level loop already
@@ -12058,7 +12168,7 @@ class CodeGen
     end
     @block_fallback_upvars = nil
     @block_fallback_active = false
-    return nil if body.include?('#error')
+    return nil if nested_pre.include?('#error') || body.include?('#error')
 
     out = nested_pre
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
