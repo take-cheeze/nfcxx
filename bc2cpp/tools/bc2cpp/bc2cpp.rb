@@ -6328,7 +6328,17 @@ def optional_arg_table(irep)
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
-  return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+  # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `kw` is deliberately no longer
+  # required to be zero here -- a real ENTER shape can declare both
+  # (`def f(a, b = 1, k: nil)`; confirmed via a fresh `mrbc -v` disassembly
+  # of `Game::Battle#initialize`'s own real 8-optional/3-keyword
+  # signature): the optional jump table's own real default-value code
+  # (recognized below exactly like the opt-only case) simply falls
+  # straight through into the same KEY_P/KARG/KEYEND sequence
+  # keyword_arg_table recognizes separately -- the two recognizers never
+  # need to interact, only their two independent gates need to stop
+  # excluding each other's field.
+  return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
 
   enter_idx = irep.instructions.index { |i| i.op == 'ENTER' }
   jmps = irep.instructions[enter_idx + 1, opt + 1]
@@ -6395,7 +6405,15 @@ def keyword_arg_table(irep)
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
-  return nil unless kw.positive? && opt.zero? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
+  # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt` is deliberately no longer
+  # required to be zero here -- see optional_arg_table's own comment,
+  # the other half of this same combined shape. This scan is already
+  # whole-irep (every KEY_P/KARG instruction, wherever it sits), so it
+  # needs no change at all beyond widening its own gate -- the real
+  # KEY_P/KARG sequence sits right where it always does, just after the
+  # optional jump table's own default-value code instead of right after
+  # ENTER.
+  return nil unless kw.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
 
   order = []
   required = {}
@@ -6448,6 +6466,28 @@ def rest_only_arity?(irep)
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
   _mand, opt, rest, mand2, kw, kwrest, block = fields
   rest.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.zero?
+end
+
+# EXPLICIT_BLOCK_PARAM_SUPPORT: a real, exactly-recognized "plain mandatory
+# arguments plus one named block parameter" shape (`def each(&blk); ...;
+# end`) -- ENTER's own block-arity flag (fields[6], same field
+# rest_only_arity?/optional_arg_table/keyword_arg_table above all already
+# parse out and name `block`) is the only non-mandatory bit set. Confirmed
+# against a fresh `mrbc -v` disassembly of `def each(&blk); [1,2,3].each(&blk);
+# end`: `ENTER 0:0:0:0:0:0:1:0`, then a plain `MOVE R2 R1 ; R2:blk` -- the
+# real block value arrives via the ordinary entry-argument calling
+# convention (register mand+1, right where an (mand+1)-th positional
+# argument would land), not through BLKPUSH/BLKCALL at all, so it needs no
+# opcode-level region of its own -- same "just one more thing to plumb
+# through the entry wrapper" shape REST_ARG_SUPPORT's own comment already
+# established for `*rest`.
+def block_param_arity?(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return false unless enter
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  _mand, opt, rest, mand2, kw, kwrest, block = fields
+  block.positive? && opt.zero? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero?
 end
 
 def report_annotation_candidates(ireps, registry, arg_types, annotations)
@@ -8658,19 +8698,48 @@ class CodeGen
       i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0'
     end
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
-    # KEYWORD_ARG_SUPPORT: only attempted once both of the above have
-    # already failed (mandatory_ok and opt_jmp_targets are mutually
-    # exclusive with a real keyword-only ENTER shape by construction --
-    # keyword_arg_table's own gate refuses unless `opt` is zero too), same
-    # short-circuiting shape as opt_jmp_targets' own guard above.
-    kw_table = (mandatory_ok || opt_jmp_targets) ? nil : keyword_arg_table(irep)
+    # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: attempted
+    # whenever mandatory_ok is false, independent of whether the optional
+    # jump table itself resolved -- keyword_arg_table's own whole-irep
+    # KEY_P/KARG scan doesn't care where in the instruction stream those
+    # land (see optional_arg_table's own comment for the real combined
+    # shape this unlocks, e.g. Game::Battle#initialize's own real
+    # 8-optional/3-keyword signature).
+    kw_table = mandatory_ok ? nil : keyword_arg_table(irep)
+    # Two real ENTER fields (`opt`'s own jump-table shape, `kw`'s own real
+    # count) each independently either resolve cleanly or have to force
+    # this WHOLE method unsupported -- never silently treated as if the
+    # unrecognized half of its own arity didn't exist. `opt.positive? &&
+    # !opt_jmp_targets` means a real optional-arg ENTER field whose own
+    # jump-table shape this file doesn't recognize; ENTER's own real `kw`
+    # field (fields[4], the same one optional_arg_table/keyword_arg_table
+    # both already parse) being nonzero while `kw_table` is nil means a
+    # real keyword ENTER field whose own KEY_P/KARG shape wasn't
+    # recognized either. Either failure has to zero out `opt_jmp_targets`
+    # too -- it's the one flag `supported` below trusts to mean "the
+    # optional jump table AND everything downstream of it, including any
+    # real keyword params, compiled cleanly" -- otherwise a method with an
+    # unrecognized keyword shape but a recognized optional shape would
+    # silently compile with its real keyword arguments dropped entirely.
+    enter_kw = enter ? enter.args.split(':').map { |f| f[/\d+/].to_i }[4] : 0
+    if (opt.positive? && !opt_jmp_targets) || (enter_kw.positive? && !kw_table)
+      opt_jmp_targets = nil
+      kw_table = nil
+    end
     # REST_ARG_SUPPORT: same short-circuiting shape as kw_table's own guard
     # above -- see rest_only_arity?'s own comment for why a real `*rest`
     # needs no opcode-level region of its own at all, just one more
     # contiguous `total_args` slot (below), the exact same mechanism
     # OPTIONAL_ARG_SUPPORT's own `opt` extension already established.
     has_rest = (mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)
-    supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest
+    # EXPLICIT_BLOCK_PARAM_SUPPORT: same short-circuiting shape as has_rest's
+    # own guard just above -- see block_param_arity?'s own comment. Mutually
+    # exclusive with every other non-mandatory shape by construction (each
+    # of those guards already requires ENTER's own block-arity field to be
+    # zero), so this is never reached, and never checked, once any of them
+    # already matched.
+    has_blk = (mandatory_ok || opt_jmp_targets || kw_table || has_rest) ? false : block_param_arity?(irep)
+    supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| n ? sanitize_c_ident(n) : "arg#{i + 1}" }
@@ -8717,7 +8786,17 @@ class CodeGen
     # the same "no block given" -> nil semantics `BLKPUSH`'s own `lv==0`
     # case reads out of the live call frame) and forwarded straight through,
     # exactly like `bc2cpp_given_opt`/each keyword parameter above.
-    arg_params << 'mrb_value bc2cpp_blk' if needs_blk_param
+    # EXPLICIT_BLOCK_PARAM_SUPPORT: shares the exact same extra `_impl`
+    # parameter BLKPUSH_YIELD_SUPPORT already established -- both are "the
+    # real block value THIS call was given", differing only in where it
+    # ends up inside the body (BLKPUSH_YIELD_SUPPORT leaves it as a bare
+    # parameter read wherever BLKPUSH needs it; EXPLICIT_BLOCK_PARAM_SUPPORT
+    # writes it into register mand+1 once, below, since that's a real named
+    # local an ordinary MOVE/SEND/GETUPVAR already expects to find it in).
+    # Never both true for the same method (needs_blk_param requires
+    # mandatory_ok, which itself requires ENTER's own block-arity field to
+    # be zero -- exactly the field has_blk requires nonzero).
+    arg_params << 'mrb_value bc2cpp_blk' if needs_blk_param || has_blk
     # OPTIONAL_ARG_SUPPORT: one extra real parameter, `bc2cpp_given_opt` --
     # how many of this method's own real optional arguments THIS call
     # actually supplied (0..opt) -- the switch emit_optional_dispatch
@@ -8775,6 +8854,15 @@ class CodeGen
                 "  r#{i + 1} = #{a};\n"
               end
     end
+    # EXPLICIT_BLOCK_PARAM_SUPPORT: the real block value (already extracted
+    # into `bc2cpp_blk` by the entry wrapper below) is written into register
+    # mand+1 exactly once, here, before the ordinary instruction loop runs --
+    # matching where mrbc's own real ENTER semantics land it (confirmed via
+    # a fresh disassembly, see block_param_arity?'s own comment). Everything
+    # downstream (the real MOVE copying it into whatever local name mrbc
+    # chose, and every SEND/GETUPVAR/... reading it from there) is already-
+    # supported, unmodified bytecode -- no compile_insn case needed at all.
+    out << "  r#{mand + 1} = bc2cpp_blk;\n" if has_blk
     if embedded_ivars && d.name == 'initialize'
       # self is a bare, freshly allocated MRB_TT_DATA shell (data == NULL)
       # at the start of #initialize -- allocate the real struct once, here,
@@ -9065,12 +9153,15 @@ class CodeGen
     out = block_fallback_pre + rescue_pre + out
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    if arg_names.empty? && !kw_table && !needs_blk_param
+    if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"
-    elsif arg_names.empty? && needs_blk_param
-      # BLKPUSH_YIELD_SUPPORT: the same 0-mandatory-argument case as the
-      # plain branch below, just with no positional `mrb_get_args` call to
-      # append `&` onto -- a standalone one instead.
+    elsif arg_names.empty? && (needs_blk_param || has_blk)
+      # BLKPUSH_YIELD_SUPPORT/EXPLICIT_BLOCK_PARAM_SUPPORT: the same
+      # 0-mandatory-argument case as the plain branch below, just with no
+      # positional `mrb_get_args` call to append `&` onto -- a standalone
+      # one instead. Both mechanisms want the identical extraction here;
+      # they differ only in what compile_method does with `bc2cpp_blk`
+      # afterward (see has_blk's own register-init comment above).
       out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
       out << "  mrb_get_args(M, \"&\", &bc2cpp_blk);\n"
       out << "  return #{impl_name}(M, self, bc2cpp_blk);\n"
@@ -9093,7 +9184,21 @@ class CodeGen
       # unhandled gap). Mandatory positional arguments (if any) are
       # unpacked exactly like the plain, non-keyword case above, just with
       # `:` plus one extra `&bc2cpp_kwargs` pointer appended.
-      arg_names.each_with_index { |a, i| out << "  #{native_c_type(arg_native_types[i])} #{a};\n" }
+      #
+      # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt.positive?` here means a
+      # real ENTER shape combining both (`def f(a, b = 1, k: nil)`) --
+      # see optional_arg_table's own comment for the real disassembly this
+      # was confirmed against. Every optional position (i >= mand) needs
+      # the exact same `mrb_nil_value()` placeholder default and `|`
+      # format-string marker OPTIONAL_ARG_SUPPORT's own plain (no-keyword)
+      # branch below already establishes -- mrb_get_args' own `|`/`:`
+      # markers are independent, already-documented features (mruby.h's
+      # own format table) that simply union here, never needing to
+      # interact with each other's own logic.
+      arg_names.each_with_index do |a, i|
+        default = i >= mand ? ' = mrb_nil_value()' : ''
+        out << "  #{native_c_type(arg_native_types[i])} #{a}#{default};\n"
+      end
       required_kws = kw_table.select { |kw| kw[:required] }
       optional_kws = kw_table.reject { |kw| kw[:required] }
       ordered_kws = required_kws + optional_kws
@@ -9102,7 +9207,10 @@ class CodeGen
       out << "  mrb_value bc2cpp_kw_values[#{ordered_kws.size}];\n"
       out << "  mrb_kwargs bc2cpp_kwargs = { #{ordered_kws.size}, #{required_kws.size}, " \
              "bc2cpp_kw_table, bc2cpp_kw_values, NULL };\n"
-      fmt = arg_native_types.map { |t| t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o') }.join + ':'
+      fmt = arg_native_types.each_with_index.map do |t, i|
+        ch = t == :fixnum ? 'i' : (t == :symbol ? 'n' : 'o')
+        i == mand && opt.positive? ? "|#{ch}" : ch
+      end.join + ':'
       ptrs = (arg_names.map { |a| "&#{a}" } + ['&bc2cpp_kwargs']).join(', ')
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       ordered_kws.each_with_index do |kw, i|
@@ -9114,7 +9222,20 @@ class CodeGen
           out << "  mrb_int #{kw_given_param_name(kw[:name])} = mrb_undef_p(bc2cpp_kw_values[#{i}]) ? 0 : 1;\n"
         end
       end
-      call_args = arg_names + kw_table.flat_map do |kw|
+      call_args = arg_names.dup
+      if opt.positive?
+        # Same real, public mrb_get_argc API OPTIONAL_ARG_SUPPORT's own
+        # plain branch below already uses -- positional argc alone,
+        # unaffected by whether this same call also passed keyword
+        # arguments (a real, independent count in mruby's own calling
+        # convention; confirmed no regression by this round's own full
+        # correctness-check-script run, not just assumed).
+        out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
+        out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
+        out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
+        call_args << 'bc2cpp_given_opt'
+      end
+      call_args += kw_table.flat_map do |kw|
         kw[:required] ? [kwarg_param_name(kw[:name])] : [kwarg_param_name(kw[:name]), kw_given_param_name(kw[:name])]
       end
       out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
@@ -9192,9 +9313,11 @@ class CodeGen
       # required-block `&!`) -- appended to the same single mrb_get_args
       # call rather than a second one, mirroring how KEYWORD_ARG_SUPPORT's
       # own `:` modifier above shares its call. `needs_blk_param` is only
-      # ever true for a `mandatory_ok` method (this gate's own comment), so
-      # this never has to interact with the `opt.positive?` branch below.
-      if needs_blk_param
+      # ever true for a `mandatory_ok` method (this gate's own comment), and
+      # `has_blk` (EXPLICIT_BLOCK_PARAM_SUPPORT) always has `opt.zero?`
+      # (block_param_arity?'s own guard), so neither ever has to interact
+      # with the `opt.positive?` branch below.
+      if needs_blk_param || has_blk
         out << "  mrb_value bc2cpp_blk = mrb_nil_value();\n"
         fmt += '&'
         ptrs += ', &bc2cpp_blk'
@@ -9218,7 +9341,7 @@ class CodeGen
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
         out << "  return #{impl_name}(M, self, #{arg_names.join(', ')}, bc2cpp_given_opt);\n"
       else
-        call_args = needs_blk_param ? arg_names + ['bc2cpp_blk'] : arg_names
+        call_args = (needs_blk_param || has_blk) ? arg_names + ['bc2cpp_blk'] : arg_names
         out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
       end
     end
@@ -9239,8 +9362,11 @@ class CodeGen
     # depends on), and a block-carrying call site (SENDB/SSENDB) is never
     # MONO/POLY/TYPED-devirtualized to a direct call in this file -- see
     # emit_block_fallback_glue's own comment -- kept anyway so a mismatch
-    # would be a loud compile error, never a silent wrong signature.
-    arg_c_types << 'mrb_value' if needs_blk_param
+    # would be a loud compile error, never a silent wrong signature. Same
+    # reasoning for `has_blk` (EXPLICIT_BLOCK_PARAM_SUPPORT): every real
+    # call site is itself block-carrying (SENDB/SSENDB), so this is equally
+    # never reached by a real devirtualized direct call today.
+    arg_c_types << 'mrb_value' if needs_blk_param || has_blk
     # OPTIONAL_ARG_SUPPORT: the extra `bc2cpp_given_opt` parameter (see
     # above) is real, load-bearing part of this _impl's own signature --
     # decl_line's own forward declaration has to include it too, or a
