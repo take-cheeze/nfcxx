@@ -10536,9 +10536,23 @@ class CodeGen
   # doesn't match at all (falls through to the ordinary, honest #error
   # path, same as any other unmodeled construct in this whole file).
   #
+  # DEFINED_CONST_RESCUE_SUPPORT: one SECOND handler shape is recognized
+  # here as of this writing -- a compiler-generated `defined?` constant
+  # probe, a BARE `EXCEPT` with no `RESCUE` instruction behind it at all,
+  # emitted for real source that contains no `rescue` keyword whatsoever.
+  # Everything this method's own top comment says above about the classic
+  # `rescue SomeClass` shape still holds for that shape unchanged; the
+  # new one is matched by its own separate, deliberately narrower helper
+  # (recognize_defined_const_handler, below -- read its top comment for
+  # the real verified disassembly and, more importantly, for the one
+  # extra restriction it has to impose that a real `rescue` region gets
+  # for free).
+  #
   # Returns one Hash per independently-recognized, non-nested handler:
   # {begin_addr:, end_addr:, except_addr:, exc_reg:, cls_name:, match_addr:,
-  #  raise_addr:, shared_target:, connector_reg:, tail_return:}.
+  #  raise_addr:, shared_target:, connector_reg:, tail_return:, kind:}.
+  # `kind` is :rescue_class or :defined_const; the emitters read neither
+  # it nor cls_name/match_addr/raise_addr (nil for :defined_const).
   # compile_method is the only real caller.
   def recognize_rescue_regions(irep)
     return [] if irep.catch_handlers.nil? || irep.catch_handlers.empty?
@@ -10587,22 +10601,24 @@ class CodeGen
       exc_reg = except_i.args[/^R(\d+)/, 1]
       next unless exc_reg
 
-      idx = by_index[except_i]
-      seq = irep.instructions[idx + 1, 4]
-      next unless seq && seq.size == 4
-      getconst_i, rescue_i, jmpif_i, jmp_i = seq
-      next unless getconst_i.op == 'GETCONST'
-      cls_reg = getconst_i.args[/^R(\d+)/, 1]
-      cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
-      next unless cls_reg && cls_name
-      next unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
-      next unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
-      match_addr = jmp_target_after_reg(jmpif_i.args)
-      next unless jmp_i.op == 'JMP'
-      raise_addr = jmp_i.args.strip[/\d+/].to_i
+      # Two mutually exclusive handler shapes sit behind a `catch type:
+      # rescue` entry, each recognized by its own narrowly-scoped helper
+      # below (both return nil -- "not this shape, fall through to the
+      # honest #error" -- rather than raising or guessing):
+      #   * the classic `rescue SomeClass` clause (GETCONST/RESCUE/JMPIF/
+      #     JMP/RAISEIF), this recognizer's original and still only
+      #     general shape;
+      #   * DEFINED_CONST_RESCUE_SUPPORT's compiler-generated `defined?`
+      #     constant probe (a BARE `EXCEPT`, no `RESCUE` instruction at
+      #     all), which is not a Ruby `rescue` clause in the source at
+      #     all -- see recognize_defined_const_handler's own top comment.
+      handler = recognize_rescue_class_handler(irep, by_addr, by_index, except_i, exc_reg) ||
+                recognize_defined_const_handler(irep, by_index, except_i, exc_reg, b, e)
+      next unless handler
 
-      raise_i = by_addr[raise_addr]
-      next unless raise_i && raise_i.op == 'RAISEIF' && raise_i.args[/^R(\d+)/, 1] == exc_reg
+      cls_name = handler[:cls_name]
+      match_addr = handler[:match_addr]
+      raise_addr = handler[:raise_addr]
 
       exit_i = by_addr[e]
       next unless exit_i && exit_i.op == 'JMP'
@@ -10617,6 +10633,21 @@ class CodeGen
       next if shared_target == t
       shared_i = by_addr[shared_target]
       next unless shared_i
+      # DEFINED_CONST_RESCUE_SUPPORT: the non-raising path of a real
+      # `defined?` constant probe lands on exactly one instruction --
+      # `STRING R<exc_reg> L[n]`, codegen_defined_const's own
+      # `codegen_defined_push_str(s, "constant")` emitted immediately
+      # after `dispatch(s, success_jmp)` (patches/mruby-defined-keyword.
+      # patch, read directly) -- which OVERWRITES r<exc_reg>, discarding
+      # the probed constant's own value. Checked, never assumed: it is
+      # what makes the try body's own return value provably dead on the
+      # success path (see recognize_defined_const_handler's own top
+      # comment), so anything else here is a shape this recognizer has
+      # not verified and must not claim.
+      if handler[:kind] == :defined_const
+        next unless shared_i.op == 'STRING' && shared_i.args[/^R(\d+)/, 1] == exc_reg
+        next unless handler[:join_addr] > shared_target
+      end
       # connector_reg is always exc_reg -- see this method's own top
       # comment on codegen_rescue's shared `cursp()` -- not re-derived
       # from shared_i's own operands. tail_return (RETURN/RETURN_BLK)
@@ -10701,9 +10732,165 @@ class CodeGen
 
       regions << { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, cls_name: cls_name,
                    match_addr: match_addr, raise_addr: raise_addr, shared_target: shared_target,
-                   connector_reg: connector_reg, tail_return: tail_return }
+                   connector_reg: connector_reg, tail_return: tail_return, kind: handler[:kind] }
     end
     regions
+  end
+
+  # RESCUE_SUPPORT: the classic `rescue SomeClass` handler shape, lifted
+  # verbatim out of recognize_rescue_regions' own loop above when
+  # DEFINED_CONST_RESCUE_SUPPORT added a second, parallel shape beside it
+  # -- every check below is the same check, in the same order, against
+  # the same real disassembly that recognizer's own top comment cites
+  # (`target+1..+4`, then `raise`). Returns nil for anything that doesn't
+  # match completely, exactly like the `next unless` chain it replaces.
+  def recognize_rescue_class_handler(irep, by_addr, by_index, except_i, exc_reg)
+    idx = by_index[except_i]
+    seq = irep.instructions[idx + 1, 4]
+    return nil unless seq && seq.size == 4
+
+    getconst_i, rescue_i, jmpif_i, jmp_i = seq
+    return nil unless getconst_i.op == 'GETCONST'
+    cls_reg = getconst_i.args[/^R(\d+)/, 1]
+    cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
+    return nil unless cls_reg && cls_name
+    return nil unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
+    return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
+
+    match_addr = jmp_target_after_reg(jmpif_i.args)
+    return nil unless jmp_i.op == 'JMP'
+    raise_addr = jmp_i.args.strip[/\d+/].to_i
+
+    raise_i = by_addr[raise_addr]
+    return nil unless raise_i && raise_i.op == 'RAISEIF' && raise_i.args[/^R(\d+)/, 1] == exc_reg
+
+    { kind: :rescue_class, cls_name: cls_name, match_addr: match_addr, raise_addr: raise_addr }
+  end
+
+  # DEFINED_CONST_RESCUE_SUPPORT: the OTHER real shape that sits behind a
+  # `catch type: rescue` entry in this program's bytecode -- and the only
+  # other one, confirmed directly rather than assumed (see below). It is
+  # not a Ruby `rescue` clause at all: it is what this repo's own
+  # `defined?` implementation (patches/mruby-defined-keyword.patch,
+  # applied to the 3rd/mruby submodule by scripts/apply_mruby_patch.bash
+  # -- upstream mruby's own codegen_defined is a stub that just returns
+  # nil) emits for `defined?(CONST)` / `defined?(A::B)` / `defined?(::B)`.
+  # Real source with no `rescue` anywhere in it therefore still produces
+  # an EXCEPT, which is why this was a live `#error unhandled opcode
+  # EXCEPT` site: `RPG2k::Scene::Map#try_open_debug_menu`'s own `return
+  # unless defined?(Scene::DebugMenu)` (mruby-rpg2k/mrblib/scene/map.rb).
+  #
+  # The real, verified shape (`mrbc -v` disassembly of that exact real
+  # method, not a reconstruction -- addresses are its own):
+  #
+  #   catch type: rescue   begin: 0051 end: 0057 target: 0060
+  #    051 GETCONST  R2  Scene            <- b, the probe itself
+  #    054 GETMCNST  R2  (R2)::DebugMenu
+  #    057 JMP       067                  <- e, the non-raising exit
+  #    060 EXCEPT    R2                   <- t, a BARE EXCEPT
+  #    062 LOADNIL   R2  (nil)
+  #    064 JMP       070                  <- join, past the STRING
+  #    067 STRING    R2  L[0]  ; constant <- shared_target
+  #    070 JMPIF     R2  075
+  #
+  # There is NO `RESCUE` instruction, no class to match against, and no
+  # `RAISEIF` -- which is exactly why recognize_rescue_class_handler
+  # above rejects it (its 4-instruction scan has no `RESCUE` to find).
+  # The handler is unconditional and total: whatever was raised is
+  # consumed by EXCEPT, immediately overwritten by LOADNIL, and control
+  # joins the normal path past the `"constant"` STRING.
+  #
+  # Why this is sound to translate with the exact same mrb_protect_error
+  # machinery a real `rescue` uses, with NO new emitter at all:
+  #
+  #  1. `emit_rescue_glue`'s existing non-tail_return output is already
+  #     bit-for-bit the right code. On success it assigns the try body's
+  #     result into r<connector_reg> and jumps to shared_target -- the
+  #     STRING, which overwrites that register anyway (checked, see
+  #     recognize_rescue_regions' own shared_i check), so the assignment
+  #     is dead and harmless. On failure it assigns the exception object
+  #     into r<exc_reg> and falls through -- landing on exactly the
+  #     LOADNIL that the real VM's own EXCEPT falls through to, which
+  #     overwrites it with nil, and then the JMP to the join. Both paths
+  #     are the interpreter's own, instruction for instruction.
+  #  2. Unlike a real `rescue` body, there is no user code in the
+  #     handler to run, no `ensure` to interact with, and no `retry`/
+  #     `break`/`return` that could escape it -- the handler is two
+  #     instructions (LOADNIL, JMP) that this file already compiles
+  #     unconditionally, and they are left to compile completely
+  #     normally rather than being folded into any glue.
+  #  3. The protected range is restricted HERE to a pure constant-read
+  #     chain whose live-in register state is empty. This is the one
+  #     real soundness requirement, and it is not hypothetical:
+  #     `emit_rescue_try_body` nil-initializes every register that isn't
+  #     `self` or a mandatory argument, which is only safe because a
+  #     real `rescue` region's own begin_addr is the first instruction
+  #     after ENTER. A `defined?` probe is NOT -- it can sit anywhere in
+  #     a method (address 51 above) -- so a protected range that read a
+  #     live local would silently see nil instead. Real and reachable:
+  #     `defined?(x.bar::Baz)` compiles to `MOVE R3 R2; SEND0 R3 :bar;
+  #     GETMCNST R3 (R3)::Baz` inside the protected range, where `R2` is
+  #     a live local (confirmed by real disassembly). The chain check
+  #     below rejects that -- and every other NODE_COLON2 whose base is
+  #     an arbitrary expression, including `self.class::Baz` -- leaving
+  #     it on today's honest `#error`.
+  #
+  # Accepted protected ranges, and nothing else (all registers must be
+  # r<exc_reg>, which is also codegen_defined_const's own `r = cursp()`):
+  #     GETCONST Rd <Name>                                (`defined?(C)`)
+  #     GETCONST Rd <Base>  (GETMCNST Rd (Rd)::<Name>)+   (`defined?(A::B)`)
+  #     OCLASS   Rd         (GETMCNST Rd (Rd)::<Name>)+   (`defined?(::B)`)
+  # Every instruction in such a chain writes r<exc_reg> before it is
+  # read, reads nothing else, and calls no Ruby method -- so the
+  # extracted try body's only live-in really is `self` (which only
+  # GETCONST's own lexical-scope lookup needs, and which `ctx` carries).
+  #
+  # `codegen_defined_const` is the ONLY `catch_handler_new` call the
+  # whole `defined?` patch adds (grepped, not assumed) -- every other
+  # `defined?` kind compiles to plain sends and literal strings with no
+  # catch handler at all -- so this recognizer does not need to reason
+  # about any other compiler-generated rescue region.
+  #
+  # Returns {kind:, cls_name:, match_addr:, raise_addr:, join_addr:} --
+  # the three classic fields are nil (there is no rescued class, no
+  # match target and no re-raise here) and are, verified by grep,
+  # consumed by nothing: `emit_rescue_try_body`/`emit_rescue_glue` read
+  # only begin_addr/end_addr/except_addr/exc_reg/connector_reg/
+  # shared_target/tail_return.
+  def recognize_defined_const_handler(irep, by_index, except_i, exc_reg, b, e)
+    idx = by_index[except_i]
+    seq = irep.instructions[idx + 1, 2]
+    return nil unless seq && seq.size == 2
+
+    loadnil_i, jmp_i = seq
+    return nil unless loadnil_i.op == 'LOADNIL' && loadnil_i.args[/^R(\d+)/, 1] == exc_reg
+    return nil unless jmp_i.op == 'JMP'
+
+    join_addr = jmp_i.args.strip[/\d+/].to_i
+    # The handler only ever runs forward into the shared join -- never
+    # back into itself, into the protected range, or into the EXCEPT.
+    return nil unless join_addr > jmp_i.addr
+
+    body = irep.instructions.select { |i| i.addr >= b && i.addr < e }
+    head, *rest = body
+    return nil unless head
+    case head.op
+    when 'GETCONST'
+      return nil unless head.args[/^R(\d+)/, 1] == exc_reg && head.args[/^R\d+\s+(\S+)/, 1]
+    when 'OCLASS'
+      # `::Name` always needs a GETMCNST after it -- OCLASS alone just
+      # loads the Object class and can never raise, so a lone OCLASS is
+      # not a shape codegen_defined_const ever emits.
+      return nil unless head.args[/^R(\d+)/, 1] == exc_reg && !rest.empty?
+    else
+      return nil
+    end
+    rest.each do |i|
+      return nil unless i.op == 'GETMCNST'
+      return nil unless i.args.strip =~ /^R#{exc_reg}\s+\(R#{exc_reg}\)::\w+\s*(;.*)?$/
+    end
+
+    { kind: :defined_const, cls_name: nil, match_addr: nil, raise_addr: nil, join_addr: join_addr }
   end
 
   # NESTED_RESCUE_SUPPORT: the subset of `regions` (recognize_rescue_
