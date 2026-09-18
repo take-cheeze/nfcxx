@@ -10059,7 +10059,32 @@ class CodeGen
     # first method scope, so a method's own `yield` is always level 0 -- and
     # if one somehow did, this level keeps it at the honest #error.
     @blk_param_level = 0
+    # ENSURE_RAII_SUPPORT: a recognized `ensure` needs two things emitted
+    # AROUND existing instructions rather than in place of them -- the
+    # guard (plus its opening brace) immediately before the protected
+    # range's own first instruction, and the closing brace immediately
+    # before the handler, whose `}` is what actually runs the ensure body
+    # by destroying the guard. Neither address can use `glue_at`, which
+    # REPLACES an address's code: `begin_addr` carries a real instruction
+    # that still has to execute, and the closing brace has to land
+    # outside any label emitted for the handler address. Hence a separate
+    # `prefix_at`, emitted ahead of both the suppression check and the
+    # label so it applies to suppressed addresses too.
+    prefix_at = {}
+    ensure_region = recognize_ensure_region(irep)
+    if ensure_region
+      open_glue, ok = emit_ensure_guard(ensure_region, irep, d)
+      if ok
+        prefix_at[ensure_region[:begin_addr]] = open_glue
+        prefix_at[ensure_region[:except_addr]] = "  } // ensure guard leaves scope: runs the ensure body\n"
+        # EXCEPT, the ensure body, and the terminating RAISEIF are all
+        # folded into the guard above -- none of them is emitted inline.
+        suppressed.merge((ensure_region[:except_addr]..ensure_region[:raiseif_addr]).to_a)
+        targets -= (ensure_region[:except_addr]..ensure_region[:raiseif_addr]).to_a
+      end
+    end
     irep.instructions.each_with_index do |insn, idx|
+      out << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
@@ -10443,6 +10468,170 @@ class CodeGen
   # zero. All 7 JMPUW sites sit in ireps with no catch handlers at all.
   def jmpuw_is_plain_jump?(irep)
     irep.catch_handlers.nil? || irep.catch_handlers.empty?
+  end
+
+  # ENSURE_RAII_SUPPORT: the jump target an instruction branches to, or
+  # nil if it is not a branch at all. Same two arg shapes
+  # `const_entry_addrs` above already parses (JMP/JMPUW carry the target
+  # alone; JMPIF/JMPNOT/JMPNIL carry a register first, target last), kept
+  # as its own small helper because the ensure recognizer below needs the
+  # answer PER INSTRUCTION rather than as one whole-irep target set.
+  def ensure_jump_target(insn)
+    case insn.op
+    when 'JMP', 'JMPUW'
+      insn.args.strip[/\d+/].to_i
+    when 'JMPIF', 'JMPNOT', 'JMPNIL'
+      insn.args.sub(/;.*\z/m, '').strip.split(/\s+/).last&.to_i
+    end
+  end
+
+  # ENSURE_RAII_SUPPORT: recognize a single real `begin BODY ensure
+  # ENSURE_BODY end` construct and return
+  # {begin_addr:, except_addr:, raiseif_addr:, body_insns:} -- or nil,
+  # which keeps the honest `#error unhandled opcode EXCEPT` this file
+  # already emits. compile_method is the only caller.
+  #
+  # The real, always-generated shape (confirmed against fresh `mrbc -v`
+  # disassembly of BOTH real sites in this program -- Game::Battle
+  # #deal_attack and RGSS.singleton#audio_probe -- not assumed from
+  # mruby's codegen.c):
+  #
+  #   catch type: ensure   begin: B   end: E   target: E
+  #     [B, E)   the protected computation
+  #     E        EXCEPT Rx      -- captures whatever is unwinding (a real
+  #                               exception OR an MRB_TT_BREAK break
+  #                               object) into Rx
+  #     (E, R)   the ensure body itself
+  #     R        RAISEIF Rx     -- re-raises/resumes unless Rx is nil
+  #     R+       the method continues (or RETURNs)
+  #
+  # Under the RAII model EXCEPT and RAISEIF both DISAPPEAR rather than
+  # being translated: C++ unwinding already carries the in-flight
+  # exception past this frame, and the guard's destructor already reruns
+  # the ensure body on every exit, so there is nothing left for either
+  # opcode to do. That is also what makes mruby's own break-object
+  # machinery a non-issue here: an MRB_TT_BREAK that EXCEPT would have
+  # captured is, in compiled code, either a real mruby unwind (carried in
+  # M->exc, saved and restored across the ensure body by
+  # bc2cpp_ensure_guard) or one of this file's OWN C++ break/return
+  # exceptions -- and a C++ unwind of ANY type runs the destructor and
+  # then continues to its own catch site untouched.
+  #
+  # Everything below is a rejection: any shape this has not positively
+  # proven stays on the interpreter rather than being guessed at.
+  def recognize_ensure_region(irep)
+    return nil if irep.catch_handlers.nil?
+    # Exactly one handler, and it must be the ensure. A second handler
+    # (another ensure, or a rescue sharing this irep) means nesting or
+    # interaction this single-guard model does not attempt.
+    return nil unless irep.catch_handlers.size == 1
+    ch = irep.catch_handlers.first
+    return nil unless ch.type == :ensure
+    # `end == target` is what every real ensure handler in this program
+    # looks like; anything else is a shape this has not seen and has not
+    # reasoned about.
+    return nil unless ch.end_addr == ch.target
+
+    by_addr = irep.instructions.each_with_object({}) { |insn, h| h[insn.addr] = insn }
+    b, t = ch.begin_addr, ch.target
+    return nil unless by_addr.key?(b)
+
+    exc = by_addr[t]
+    return nil unless exc && exc.op == 'EXCEPT'
+    exc_reg = exc.args.strip[/R(\d+)/, 1]
+    return nil unless exc_reg
+
+    # Find this handler's own terminating `RAISEIF Rx` (same register).
+    after = irep.instructions.select { |i| i.addr > t }
+    raiseif = after.find { |i| i.op == 'RAISEIF' && i.args.strip[/R(\d+)/, 1] == exc_reg }
+    return nil unless raiseif
+
+    body = after.select { |i| i.addr < raiseif.addr }
+    # An ensure body that can leave through anything other than falling
+    # off its own end is out of scope: a RETURN would have to return from
+    # the enclosing METHOD rather than from the destructor's lambda, and
+    # a BREAK/BLOCK/SENDB/LAMBDA could throw one of this file's own C++
+    # exceptions straight out of a destructor -- std::terminate, since
+    # the destructor may already be running mid-unwind.
+    return nil if body.any? do |i|
+      %w[RETURN RETURN_BLK BREAK BLOCK SENDB SSENDB LAMBDA EXCEPT RAISEIF].include?(i.op)
+    end
+    # Every branch inside the ensure body must stay inside it (its own
+    # trailing RAISEIF address is allowed -- that is mrbc's own "skip the
+    # rest of the ensure body" target, emitted for a conditional ensure
+    # body such as deal_attack's own `... = saved if saved`, and becomes
+    # a label at the end of the destructor's lambda).
+    return nil if body.any? do |i|
+      jt = ensure_jump_target(i)
+      jt && !(jt > t && jt <= raiseif.addr)
+    end
+    # No branch anywhere else in the irep may cross into or out of the
+    # protected range: the guard is a real C++ scope, and a `goto` that
+    # jumped into it would skip the guard's own initialization (ill-formed
+    # C++), while one that jumped out of it would run the ensure at a
+    # point the bytecode never intended. Jumps wholly inside the range,
+    # and jumps wholly outside it, are both fine.
+    inside = ->(a) { a >= b && a < ch.end_addr }
+    irep.instructions.each do |i|
+      jt = ensure_jump_target(i)
+      next unless jt
+      # The ensure body itself was already checked above, on its own
+      # (stricter) rule.
+      next if i.addr > t && i.addr < raiseif.addr
+      return nil if inside.call(i.addr) != inside.call(jt)
+    end
+    # An optional-argument jump table (ENTER's own dispatch, which
+    # OPTIONAL_ARG_SUPPORT replaces with a native `switch` of `goto`s to
+    # these same addresses) needs no separate check here: that table is
+    # built out of real `JMP` instructions in this same irep, so the
+    # crossing test just above has already covered every one of its
+    # targets.
+    { begin_addr: b, except_addr: t, raiseif_addr: raiseif.addr, body_insns: body }
+  end
+
+  # ENSURE_RAII_SUPPORT: build the opening half of a recognized ensure
+  # region -- `{`, the ensure body compiled into a by-reference lambda,
+  # and the guard object whose destructor runs it. Returns
+  # [text, ok]; `ok` is false when any ensure-body instruction failed to
+  # compile, in which case compile_method emits nothing at all here and
+  # the region falls back to the honest `#error unhandled opcode EXCEPT`.
+  #
+  # The lambda captures `[&]`, so the ensure body reads and writes THE
+  # SAME `rN` locals the surrounding function already has -- no copying,
+  # no context struct, no register threading, because it is quite
+  # literally the same C++ scope. Those `rN` are declared at the very top
+  # of the function, before the guard, so C++'s reverse destruction order
+  # guarantees every register the ensure body touches is still alive when
+  # the guard is destroyed.
+  def emit_ensure_guard(region, irep, d)
+    body = String.new
+    ok = true
+    # The ensure body's own internal branches (mrbc emits one for a
+    # conditional ensure body such as `... = saved if saved`) target
+    # either an address inside the body or the terminating RAISEIF; both
+    # become labels local to this lambda, so the `goto`s compile_insn
+    # already emits need no rewriting at all.
+    body_targets = region[:body_insns].filter_map { |i| ensure_jump_target(i) }.to_set
+    region[:body_insns].each do |insn|
+      idx = irep.instructions.index(insn)
+      body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      code = compile_insn(insn, irep, d, idx)
+      ok = false if code.include?('#error')
+      body << code
+    end
+    # mrbc's own "skip the rest of the ensure body" branch lands on the
+    # RAISEIF address; in compiled code that simply means "this lambda is
+    # done".
+    body << "    L#{region[:raiseif_addr]}:;\n" if body_targets.include?(region[:raiseif_addr])
+    text = String.new
+    text << "  { // ensure region [#{region[:begin_addr]}, #{region[:except_addr]})\n"
+    text << "  auto bc2cpp_ensure_fn = [&]() {\n"
+    text << body
+    text << "  };\n"
+    text << "  bc2cpp_ensure_guard<decltype(bc2cpp_ensure_fn)> " \
+            "bc2cpp_ensure_g{M, bc2cpp_ensure_fn};\n"
+    text << "  (void)bc2cpp_ensure_g;\n"
+    [text, ok]
   end
 
   # RESCUE_SUPPORT: a `begin BODY rescue SomeClass => e; HANDLER; end`
@@ -19493,6 +19682,111 @@ if $PROGRAM_NAME == __FILE__
   # makes that true for free, no discriminant field needed). Same
   # unconditional-emission tradeoff as bc2cpp_block_break just above.
   puts 'struct bc2cpp_method_return { mrb_value value; };'
+  # ENSURE_RAII_SUPPORT: the one runtime piece a recognized `ensure`
+  # region needs (recognize_ensure_region / emit_ensure_guard_open). A
+  # real Ruby `ensure` has to run on EVERY exit from its protected range;
+  # a C++ local's destructor is exactly that guarantee, for free, on all
+  # of them at once:
+  #
+  #   - normal fall-through and an explicit `return` from inside the
+  #     range: ordinary scope exit (a `return` evaluates its operand
+  #     FIRST, then runs destructors -- which is precisely Ruby's own
+  #     rule that a plain `ensure` cannot change the returned value).
+  #   - this file's OWN non-local exits (`bc2cpp_block_break`,
+  #     `bc2cpp_method_return` above): C++ unwinding runs the destructors
+  #     of every intervening scope regardless of the exception's type.
+  #   - a real Ruby `raise` crossing this frame: THE case `ensure` exists
+  #     for, and the one that makes this whole approach viable rather
+  #     than a narrower "runs on the easy paths" half-measure. It works
+  #     only because mruby here is built with MRB_USE_CXX_EXCEPTION, so
+  #     MRB_THROW is a real C++ `throw (mrb_jmpbuf*)` (include/mruby/
+  #     throw.h) and unwinding through this frame really does run this
+  #     destructor. Verified empirically on this repo's own submodule --
+  #     a destructor between an mrb_raise and its catch point RAN under
+  #     the project's real (cxx-exception) configuration and did NOT run
+  #     under an otherwise-identical setjmp/longjmp build of the same
+  #     sources. See docs/adr/0134 and build_config.rb's own wio section
+  #     for why that configuration is load-bearing here and not
+  #     incidental.
+  #
+  # The destructor cannot let anything escape (C++ terminates on an
+  # exception leaving a destructor during unwinding), so the ensure body
+  # runs under mrb_protect_error, which also -- importantly -- pops the
+  # VM's own callinfo stack back to where it found it (src/vm.c's own
+  # MRB_CATCH arm) and restores the GC arena to its entry index, leaving
+  # the interpreter exactly as it was. Registers live BEFORE the guard
+  # were allocated below that saved arena index, so the restore never
+  # unprotects them.
+  #
+  # MRB_THROW below is include/mruby/throw.h's own macro, and that header
+  # is not pulled in by <mruby.h> alone.
+  puts '#include <mruby/throw.h>'
+  # std::uncaught_exceptions() -- the guard's own "is an unwind already in
+  # flight" test (see its comment below for why that, and not M->exc, is
+  # the question that matters there).
+  puts '#include <exception>'
+  puts <<~'ENSURE_GUARD'
+    template <class F>
+    struct bc2cpp_ensure_guard {
+      mrb_state* M;
+      F fn;
+      ~bc2cpp_ensure_guard() noexcept(false) {
+        struct RObject* saved = M->exc;
+        M->exc = NULL;
+        /* M->exc is itself a GC root (src/gc.c's own mrb_gc_mark of it in
+           both mark phases). Clearing it just above therefore removed the
+           ONLY root keeping the in-flight exception alive -- the object
+           may long since have been dropped from the GC arena by the
+           ordinary mrb_gc_arena_restore every VM send already does. The
+           ensure body allocates and so can trigger a real GC, which would
+           then collect the very exception this guard is about to put
+           back. Re-root it in the arena for the duration, BELOW the index
+           mrb_protect_error saves and restores internally, so its own
+           restore cannot drop this entry either.
+
+           Found by the differential test, not by reading: it shows up
+           only once enough allocation has happened to make a GC actually
+           fire inside the ensure body, which is exactly the kind of
+           silent, load-dependent corruption a wrong `ensure` translation
+           produces. */
+        int bc2cpp_ai = mrb_gc_arena_save(M);
+        if (saved) mrb_gc_protect(M, mrb_obj_value(saved));
+        mrb_bool err = FALSE;
+        mrb_value raised = mrb_protect_error(M, [](mrb_state* m, void* ud) -> mrb_value {
+          (*(F*)ud)();
+          return mrb_nil_value();
+        }, (void*)&fn, &err);
+        if (!err) {
+          /* Restore the real root FIRST, then drop our arena entry. */
+          M->exc = saved;
+          mrb_gc_arena_restore(M, bc2cpp_ai);
+          return;
+        }
+        /* The ensure body itself raised. Real Ruby semantics: that
+           exception SUPERSEDES whatever was already propagating. */
+        M->exc = mrb_obj_ptr(raised);
+        mrb_gc_arena_restore(M, bc2cpp_ai);
+        if (std::uncaught_exceptions() == 0 && M->jmp != NULL) {
+          /* Nothing was unwinding yet (normal or `return` exit), so
+             nothing will carry this exception outward unless we start
+             the unwind ourselves. Throwing here is safe for exactly
+             that reason -- hence noexcept(false).
+
+             The test is std::uncaught_exceptions(), NOT "was M->exc
+             set": this file's OWN bc2cpp_block_break/
+             bc2cpp_method_return unwind the C++ stack while M->exc
+             stays NULL, so keying off M->exc would throw straight into
+             an in-flight exception and std::terminate -- the classic
+             throwing-destructor hazard, and a real one here rather than
+             a hypothetical, since those two types cross exactly these
+             frames. */
+          MRB_THROW(M->jmp);
+        }
+        /* Otherwise an unwind is already in progress and simply
+           continues, now carrying the superseding exception in M->exc. */
+      }
+    };
+  ENSURE_GUARD
   # GETIDX's own String arm (see compile_insn's own comment on that opcode)
   # calls `mrb_str_aref` directly -- a real, non-static, externally-linked
   # function (3rd/mruby/src/string.c), but declared only in mruby/
