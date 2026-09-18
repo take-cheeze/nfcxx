@@ -6,6 +6,9 @@ used as a Ruby-implementation benchmark) runs under this project's own
 vendored mruby, as a candidate stress test for `tools/bc2cpp`. It does not
 touch the RPG engine's build, gems, or bc2cpp's own closed-world registry.
 
+`optcarrot_bundle.rb` is derived from optcarrot's MIT-licensed source; see
+`LICENSE.optcarrot`.
+
 ## Result
 
 optcarrot's headless benchmark (`--benchmark`, `examples/Lan_Master.nes`, 180
