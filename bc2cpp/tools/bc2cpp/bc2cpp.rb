@@ -4678,31 +4678,56 @@ NATIVE_CONSTRUCT_TARGETS = {
 #     error, not a safe miss). Supporting the combined optional-positional
 #     plus keyword construct is a real, separate piece of work.
 #
+# LEXICAL_NEW_TARGET_RESOLUTION (this round) unblocks the three entries the
+# keyword round listed here as "investigated and deliberately left OUT":
+#
 #   RPG2k::Scene::Map / RPG2k::Scene::MapViewer / RPG2k::Scene::ChipsetEditor
 #     -- 5 sites between them (main.rb:876/884/1218, debug_menu.rb:323/333).
-#     Every one of their `#initialize`s passes this path's own keyword gate
-#     cleanly (confirmed by instrumenting a real whole-program run), but
-#     `trace_new_target` resolves their call sites' receivers to the
-#     LEXICALLY-WRITTEN constant path -- `"Scene::Map"`, `"Scene::MapViewer"`,
+#     Every one of their `#initialize`s already passed the keyword gate
+#     cleanly; what blocked them was NOT keywords at all but
+#     `trace_new_target` resolving their receivers to the LEXICALLY-WRITTEN
+#     constant path -- `"Scene::Map"`, `"Scene::MapViewer"`,
 #     `"Scene::ChipsetEditor"` -- never the fully-qualified `RPG2k::`-prefixed
 #     owner name the registry keys on, because those sites sit inside
-#     `module RPG2k` and write the constant relative to it. That is a real,
-#     PRE-EXISTING constant-resolution limitation of trace_new_target
-#     entirely independent of keywords, and it cannot be papered over by
-#     simply listing the short names here: the registry lookup below would
-#     then find no `#initialize` at all. Nor can `"Scene::X"` be rewritten to
-#     `"RPG2k::Scene::X"` unconditionally -- a real `RPG2k3::Scene` module
-#     exists in this same program, so a bare `Scene::` reference is genuinely
-#     ambiguous without real lexical-nesting resolution. Left as honest
-#     `#error` sites; resolving them needs that separate trace_new_target
-#     work, which would also affect every existing non-keyword construct
-#     site and so does not belong in this change.
+#     `module RPG2k` and write the constant relative to it. That round noted
+#     the short names could NOT simply be listed here (the registry lookup
+#     would find no `#initialize`), nor `"Scene::X"` blindly rewritten to
+#     `"RPG2k::Scene::X"` (a real `RPG2k3::Scene` module exists in this same
+#     program, making a bare `Scene::` reference genuinely ambiguous), and
+#     deferred the work to a real lexical-nesting resolution.
+#
+#     `lexically_resolve_construct_target` (see its own comment) is that
+#     resolution: real Ruby's Module.nesting rule, verified against actual
+#     ruby -- including that the `RPG2k3::Scene` ambiguity resolves to
+#     RPG2k3's own Scene and provably cannot leak into RPG2k -- walking the
+#     owner's nesting innermost-first, requiring membership in THIS table,
+#     and refusing outright on any cross-level ambiguity. With it, these
+#     three resolve correctly and are listed below.
+#
+#     Their shape is the keyword one (`mandatory_and_keyword_only_arity?`),
+#     same as Game::MoveRoute above, all three being two mandatory
+#     positionals plus all-optional keywords:
+#       RPG2k::Scene::Map#initialize(parent, state, apply_access: true)
+#       RPG2k::Scene::MapViewer#initialize(parent, state, map: nil,
+#                                          start_mode: :pan,
+#                                          quit_on_close: false)
+#       RPG2k::Scene::ChipsetEditor#initialize(parent, state,
+#                                              quit_on_close: false)
+#     The two remaining NO-KEYWORD sites on these same classes
+#     (main.rb:843 `Scene::Map.new(self, state)`, debug_menu.rb:301
+#     `Scene::ChipsetEditor.new(@parent, @state)`) now resolve their
+#     receiver correctly too, but stay honest `#error`s regardless:
+#     `pure_mandatory_arity?` refuses an `#initialize` that declares
+#     keywords at all, so the non-keyword construct path cannot fire for
+#     them -- listing these classes cannot silently change those sites.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
                                Game::Screen Game::ChipSet Game::Interpreter
                                RPG2k::Scene::Menu RPG2k::Scene::DebugMenu
                                RPG2k::Scene::ItemMenu Game::NumberInput
-                               Game::MoveRoute].freeze
+                               Game::MoveRoute RPG2k::Scene::Map
+                               RPG2k::Scene::MapViewer
+                               RPG2k::Scene::ChipsetEditor].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
@@ -5771,6 +5796,89 @@ SUPER_TARGETS = Set[
 # consumer (compile_send's own TYPED/IVAR_ACCESSOR_DEVIRT branches)
 # already guards it with a real `mrb_obj_class` check before trusting it,
 # so this only ever risks a missed optimization, never a wrong answer.
+# LEXICAL_NEW_TARGET_RESOLUTION: resolve the constant path a `.new` call
+# site LEXICALLY WRITES (`written`, e.g. "Scene::MapViewer" or a bare
+# "Switches") to the fully-qualified registry name it really denotes,
+# using real Ruby's own Module.nesting rule and nothing else.
+#
+# Why this exists: `trace_new_target`'s GETCONST/GETMCNST chain walk can
+# only ever recover the constant path as the SOURCE SPELLS IT. Sites
+# inside `module RPG2k` write `Scene::MapViewer.new(...)`, so the walk
+# hands back "Scene::MapViewer", while the closed-world registry (and
+# DIRECT_CONSTRUCT_TARGETS) key on the real owner name
+# "RPG2k::Scene::MapViewer" -- so the direct-construct lookup missed even
+# though the target class is a real, vetted table entry. That gap was
+# diagnosed and deliberately left unfixed by the keyword-construct round
+# (see DIRECT_CONSTRUCT_TARGETS' own "FOUR further classes" note); this is
+# that separate fix.
+#
+# The rule implemented here is Module.nesting, VERIFIED against real Ruby
+# rather than assumed:
+#
+#     module RPG2k; module Scene; class DebugMenu
+#       def f; Scene::MapViewer.new; end
+#     end; end; end
+#
+#   Module.nesting inside DebugMenu is, measured on real ruby:
+#     [RPG2k::Scene::DebugMenu, RPG2k::Scene, RPG2k]
+#   i.e. exactly the INNERMOST-FIRST PREFIXES of the owner's own dotted
+#   name. Ruby checks each for the reference's first segment and takes the
+#   first hit, so `Scene::MapViewer` there really is
+#   RPG2k::Scene::MapViewer. The same measurement confirms the sibling
+#   namespace does NOT leak: an identical bare `Scene::Battle` written
+#   inside `module RPG2k3` (a real module in this program -- the exact
+#   ambiguity that made "just also try the short name" unsound) resolves
+#   to RPG2k3::Scene::Battle, never RPG2k::Scene::Battle, because RPG2k is
+#   not a prefix of RPG2k3's nesting.
+#
+# Deriving the nesting from the owner's dotted name is only equivalent to
+# real Module.nesting when the sources use NESTED (not compact `class
+# A::B`) definitions -- compact form puts only ONE entry in Module.nesting
+# and would make this walk over-permissive. Measured, not assumed: the
+# closed world (mruby-rpg2k/mruby-lcf/mruby-rgss mrblib) contains ZERO
+# compact class/module definitions, so owner-prefix == Module.nesting for
+# every method here. If one is ever added, the ambiguity refusal below and
+# the DIRECT_CONSTRUCT_TARGETS membership requirement both still stand
+# between this and a wrong answer.
+#
+# This is LEXICAL SCOPE ONLY, on purpose. Real Ruby also falls back to the
+# cref's own ANCESTORS (verified separately: a constant on an included
+# module is reachable that way), and that is a genuinely different
+# mechanism needing the inheritance graph -- deliberately NOT implemented
+# here.
+#
+# Soundness, in the same "no wrong guess, ever" style the rest of this
+# table's machinery is held to:
+#   * Only ever resolves to a string that is ALREADY a known, vetted
+#     DIRECT_CONSTRUCT_TARGETS entry -- never a general registry lookup,
+#     so a name this table doesn't list can never be invented here.
+#   * AMBIGUITY REFUSES. Ruby's own rule is "innermost nesting level
+#     wins", but since the nesting is reconstructed rather than observed,
+#     a `written` that matches a table entry at MORE THAN ONE level is
+#     treated as unresolvable and returns nil rather than picking one.
+#   * No owner (nesting genuinely unknown) returns nil.
+#   * nil is always a safe miss: every caller falls straight through to
+#     the pre-existing "just the written path" behavior, i.e. today's
+#     dynamic dispatch / honest `#error`.
+def lexically_resolve_construct_target(written, owner)
+  return nil if written.nil? || written.empty?
+  return nil if owner.nil?
+
+  nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
+  return nil if nesting.empty?
+
+  hits = []
+  nesting.length.downto(1) do |n|
+    candidate = "#{nesting.first(n).join('::')}::#{written}"
+    hits << candidate if DIRECT_CONSTRUCT_TARGETS.include?(candidate)
+  end
+
+  # Ambiguous across nesting levels -- refuse rather than guess (see above).
+  return nil if hits.length > 1
+
+  hits.first
+end
+
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil)
   path = []
@@ -6132,13 +6240,31 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # GETCONST codegen actually resolves at runtime, independent of
       # this guess. This block is still written to never rely on that
       # net, per this table's own "no wrong guess, ever" bar.)
-      if path.empty? && owner
-        nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
-        nesting.length.downto(1) do |n|
-          candidate = "#{nesting.first(n).join('::')}::#{const_name}"
-          return candidate if DIRECT_CONSTRUCT_TARGETS.include?(candidate)
-        end
-      end
+      # LEXICAL_NEW_TARGET_RESOLUTION: this used to fire only when `path`
+      # was EMPTY, i.e. only for a bare single-token receiver (`Switches
+      # .new`). That left the far more common QUALIFIED shape -- a
+      # GETCONST root plus one or more GETMCNST segments, e.g.
+      # `Scene::MapViewer.new` written inside `module RPG2k` -- resolving
+      # to the lexically-written "Scene::MapViewer" and nothing else, so
+      # it could never match the registry's real "RPG2k::Scene::MapViewer"
+      # key even when that class is a vetted table entry. Both shapes are
+      # the SAME Ruby question (Module.nesting applied to whatever
+      # constant path the source wrote), so both now go through the one
+      # helper, with the whole written path -- root first, exactly the
+      # spelling the plain fallback below produces -- handed to it.
+      #
+      # Everything the bare case already guaranteed still holds verbatim
+      # and now covers the qualified case too: innermost-first (so an
+      # inner scope wins, like real Ruby), DIRECT_CONSTRUCT_TARGETS
+      # membership required, ambiguity refused, and any miss falling
+      # straight through to the unchanged "just the written path"
+      # behavior. In particular a receiver that is ALREADY fully
+      # qualified (`Game::Transition.new`) resolves through that
+      # unchanged fallback exactly as before: no nesting level prefixes
+      # it into a table entry, so the helper returns nil.
+      written = ([const_name] + path).join('::')
+      resolved = lexically_resolve_construct_target(written, owner)
+      return resolved if resolved
 
       path.unshift(const_name)
       return path.join('::')
