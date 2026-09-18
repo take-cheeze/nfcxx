@@ -1715,6 +1715,32 @@ def extract_native_method_names(src_paths)
   names
 end
 
+# ZSUPER_NATIVE_SUPPORT: the same scan as extract_native_method_names, but
+# keeping WHICH source file contributed each name instead of flattening
+# every one of them into a single owner-less set.
+#
+# That flattening is deliberate and correct for the registry (see that
+# function's own comment: a native name only has to poison MONO/POLY
+# accounting, and an owner would be guessed, not known). It is exactly the
+# wrong shape for ZSUPER_NATIVE_TARGETS, though, whose whole soundness
+# question is "is the `<native>` definition of this name the one specific
+# mruby-core function being reproduced, or has some OTHER native gem also
+# registered a method by that name that could be sitting in the ancestor
+# chain instead?" -- a question the flat set cannot answer at all, and one
+# that silently becomes wrong if a future gem grows such a definition.
+#
+# Runs one file at a time and unions the results, so the total file I/O is
+# identical to a single extract_native_method_names(all_paths) call (each
+# path is still read exactly once); the driver below derives the flat name
+# set from this map's own keys rather than scanning twice.
+def extract_native_method_sources(src_paths)
+  sources = Hash.new { |h, k| h[k] = [] }
+  Array(src_paths).each do |path|
+    extract_native_method_names([path]).each { |name| sources[name] << path }
+  end
+  sources
+end
+
 # A sibling to extract_native_method_names above, but for the opposite
 # direction: which method names does this project's own native C/C++ (or
 # mruby's own C core, when fed the same NATIVE_SRCS list) ever *call* by
@@ -5810,6 +5836,216 @@ SUPER_TARGETS = Set[
   'Optcarrot::APU::Noise#reset',
 ].freeze
 
+# ---------------------------------------------------------------------------
+# ZSUPER_NATIVE_SUPPORT: the OTHER `super` shape, the one SUPER_TARGETS' own
+# comment above names and declines -- a bare (implicit) `super` inside a
+# method that HAS parameters. mrbc's own `codegen_zsuper` compiles that to
+# two instructions, confirmed against real `mrbc -v` disassembly of these
+# exact four sites rather than inferred from the source text:
+#
+#     ARGARY  R(a+1)  m1:r:m2:lv (kd)      ; rebuild this method's own
+#                                          ; original argument list into a
+#                                          ; fresh Array in R(a+1)
+#     SUPER   R(a)    n=*                  ; n=CALL_MAXARGS: forward that
+#                                          ; one Array as the WHOLE argument
+#                                          ; list
+#
+# SUPER_TARGETS' own `n=(\d+)` parse does not match `n=*`, and `super_target`
+# could never resolve these anyway: it looks for a same-named MethodDef on
+# the owner's own registered superclass, and all four of these reach a method
+# that is NATIVE C in mruby core -- there is no bytecode `_impl` to call, so
+# no amount of ancestor-chain work turns one into a direct call. That is where
+# the earlier round correctly stopped.
+#
+# It is not, however, where the problem stops, because for these two specific
+# native targets the C code is short enough to reproduce EXACTLY rather than
+# call. Both were read directly out of the real mruby tree (3rd/mruby, this
+# repo's own submodule), not recalled:
+#
+#   * `Object#respond_to_missing?` is registered on the KERNEL module
+#     (3rd/mruby/src/kernel.c's own `kernel_methods` ROM table:
+#     `MRB_MT_ENTRY(mrb_false, MRB_SYM_Q(respond_to_missing),
+#     MRB_ARGS_ARG(1,1) | MRB_MT_PRIVATE)`, installed by that file's own
+#     `mrb->kernel_module = krn = mrb_define_module_id(...)` +
+#     `mrb_include_module(mrb, mrb->object_class, mrb->kernel_module)`), and
+#     `mrb_false` (same file) is in its entirety
+#
+#         static mrb_value
+#         mrb_false(mrb_state *mrb, mrb_value self)
+#         { return mrb_false_value(); }
+#
+#     -- unconditional, ignores `self`, ignores every argument, calls no
+#     `mrb_get_args` at all. So the whole ARGARY+SUPER pair's observable
+#     result is the literal value `false`, and the array ARGARY built is
+#     dead. `static` (not externally linkable), which is exactly why this
+#     REPRODUCES the body instead of calling it -- there is nothing to link
+#     against, and nothing worth linking against either.
+#
+#   * `Object#method_missing` is registered on BASICOBJECT
+#     (3rd/mruby/src/class.c's own `bob_rom_entries`:
+#     `MRB_MT_ENTRY(mrb_obj_missing, MRB_SYM(method_missing), MRB_ARGS_ANY()
+#     | MRB_MT_PRIVATE)`), and `mrb_obj_missing` (same file) is
+#
+#         mrb_value
+#         mrb_obj_missing(mrb_state *mrb, mrb_value mod)
+#         {
+#           mrb_sym name; const mrb_value *a; mrb_int alen;
+#           mrb->c->ci->mid = 0;
+#           mrb_get_args(mrb, "n*!", &name, &a, &alen);
+#           mrb_method_missing(mrb, name, mod,
+#                              mrb_ary_new_from_values(mrb, alen, a));
+#           return mrb_nil_value();   /* not reached */
+#         }
+#
+#     This one CANNOT be called as a plain C function: it reads its own
+#     arguments via `mrb_get_args`, i.e. off the currently active call-info
+#     frame (`mrb->c->ci`), which only the VM's own OP_SEND/cfunc dispatch
+#     ever sets up. Hand-building such a frame here was considered and
+#     rejected -- it is the exact hazard this file already refuses by name in
+#     three separate places (extract_native_method_names' own comment,
+#     monomorphic_target's, and BLKCALL's "calling the raw function pointer
+#     directly here, with no such frame, would leave any such cfunc reading
+#     stale/wrong argument state, an actual correctness hazard"). It does not
+#     need to be called: everything it computes is available here already,
+#     and the ONE thing it actually does is tail-call
+#
+#         mrb_noreturn void
+#         mrb_method_missing(mrb_state *mrb, mrb_sym name, mrb_value self,
+#                            mrb_value args)
+#
+#     (3rd/mruby/include/mruby/internal.h:24, defined non-`static` in
+#     src/class.c) -- which takes all four of its inputs as PLAIN C
+#     PARAMETERS and touches no frame state at all. So the translation calls
+#     THAT, with the same three values `mrb_obj_missing` would have computed:
+#       - `name` = `mrb_get_args`' own `"n"` conversion of the first
+#         forwarded argument, which is literally `mrb_obj_to_sym`
+#         (3rd/mruby/src/class.c:1195, `#define to_sym(mrb, ss)
+#         mrb_obj_to_sym(mrb, ss)`, used at that file's own `case 'n':`) --
+#         a real public MRB_API declared in mruby.h, so it is spelled out
+#         here rather than approximated with `mrb_symbol()` (which would
+#         wrongly reject an explicit `obj.method_missing("name", ...)`
+#         passing a String, something `"n"` really does accept).
+#       - `self` = the receiver, `mod` in mruby's own spelling.
+#       - `args` = a fresh Array of everything after the first forwarded
+#         argument, matching `mrb_obj_missing`'s own
+#         `mrb_ary_new_from_values(mrb, alen, a)` COPY rather than aliasing
+#         the method's own `*args` local (that copy is observable:
+#         `mrb_no_method_error` stores this very array in the raised
+#         exception's own `@args` ivar, 3rd/mruby/src/error.c, and a
+#         `rescue` in the same method could otherwise mutate the caller's
+#         array through it).
+#     `mrb_method_missing` is declared only in `mruby/internal.h`, which has
+#     no MRB_BEGIN_DECL/MRB_END_DECL C-linkage guard -- so it is forward-
+#     declared `extern "C"` in the generated prologue, the exact same way
+#     `mrb_str_aref` (GETIDX's own String arm) and `mrb_div_int_value`
+#     (DIV's own fast path) already are. See that prologue's own comment.
+#
+# THE ONE DIVERGENCE, and why it is not observable. The interpreter pushes a
+# real call-info frame for `mrb_obj_missing` and that function's first
+# statement zeroes its `mid`; the compiled translation pushes no such frame
+# at all. `mid` on an about-to-be-discarded frame has exactly one consumer in
+# all of mruby: `pack_backtrace` (3rd/mruby/src/backtrace.c), whose cfunc arm
+# is `if (!loc.method_id) continue;` -- a cfunc frame with `mid == 0` is
+# SKIPPED. So `mrb->c->ci->mid = 0` exists precisely to hide that frame from
+# the backtrace, and having no frame to hide produces the identical
+# backtrace. Checked in the real source, not assumed from the statement's
+# shape.
+#
+# WHAT THE REST OF THE ARGARY/SUPER PAIR DOES, and why dropping it is sound.
+# Both opcodes' full bodies were read (3rd/mruby/src/vm.c, `CASE(OP_ARGARY,
+# BS)` and `CASE(OP_SUPER, BB)` falling into `L_SENDB_SYM`):
+#   - OP_ARGARY: for `lv == 0` (all four sites) it reads `regs+1` and builds
+#     one Array. Its only other exit is `RAISE_LIT(..., "super called outside
+#     of method")` when `ci->mid == 0 || CI_TARGET_CLASS(ci) == NULL`, which
+#     a real `def`-compiled method body can never hit. No other side effect.
+#   - OP_SUPER: raises for the same `mid == 0` case, for a PREPENDED or
+#     module target class, and for `!mrb_obj_is_kind_of(mrb, recv,
+#     target_class)` -- `recv` is `regs[0]`, i.e. this method's own `self`,
+#     always kind_of its own defining class. Then `ci->u.target_class =
+#     CI_TARGET_CLASS(ci - 1)->super` and an ordinary method lookup. The one
+#     remaining observable is `check_argument_count(mrb, ci,
+#     MRB_MT_ASPEC(m.flags))`, which the ROM-entry arm of `L_SENDB_SYM` does
+#     run: for `method_missing` the aspec is `MRB_ARGS_ANY()` (never raises),
+#     and for `respond_to_missing?` it is `MRB_ARGS_ARG(1,1)` against an
+#     ARGARY spec of `2:0:0:0` -- m1=2, r=0, so the rebuilt array holds
+#     EXACTLY 2 values on every path, inside [1,2], so that check can never
+#     raise either. OP_SUPER is also deliberately absent from the
+#     `SET_NIL_VALUE(regs[new_bidx])` visibility check list OP_SEND/OP_SEND0/
+#     OP_SENDB are gated on, so both targets being MRB_MT_PRIVATE is inert.
+#
+# WHAT THIS TABLE GATES that the codegen cannot re-derive on its own: that
+# `super` from each listed method really reaches the named native target and
+# nothing in between. `zsuper_native_kind` re-checks mechanically, per site,
+# every part of that which IS derivable (see its own comment); what stays
+# here is the hand-verified remainder, re-grepped fresh for this round:
+#   - The whole closed world contains exactly THREE `include`s and ZERO
+#     `prepend`s: `include Enumerable` in `LCF::Array2D` (mruby-lcf/mrblib/
+#     lcf.rb:723 -- note this is Array2D, NOT Array1D; SUPER_TARGETS' own
+#     comment above says Array1D, which is a real misattribution corrected
+#     here, and which only ever made that paragraph's argument stronger than
+#     it needed to be), `include Enumerable` in `Game::Party` (mruby-rpg2k/
+#     mrblib/game.rb:3848), and `class Object; include RGSS; end`
+#     (mruby-rpg2k/mrblib/main.rb:2). So the real C ancestor chain above each
+#     of the three listed owners is `Owner -> Object -> ICLASS(RGSS) ->
+#     ICLASS(Kernel) -> BasicObject`, and none of `Object`, `RGSS`, `Kernel`
+#     or `BasicObject` carries a Ruby-level definition of either name
+#     anywhere in this program (mechanically re-checked below as well).
+#   - Across all 82 files a real gem build passes as NATIVE_SRCS, the name
+#     `method_missing` is contributed by exactly ONE file
+#     (3rd/mruby/src/class.c) and `respond_to_missing?` by exactly ONE
+#     (3rd/mruby/src/kernel.c) -- i.e. the `<native>` registry entry for each
+#     of these two names IS the target being reproduced, never some other
+#     native override sitting in the chain. That is the one fact
+#     `extract_native_method_names`' deliberately owner-less flat name set
+#     cannot express, so `zsuper_native_kind` re-checks it directly against
+#     the per-name source map `extract_native_method_sources` builds, rather
+#     than trusting this paragraph.
+ZSUPER_NATIVE_TARGETS = {
+  'LCF::Sections#respond_to_missing?' => :kernel_respond_to_missing,
+  'LCF::Array1D#respond_to_missing?' => :kernel_respond_to_missing,
+  'LCF::File#respond_to_missing?' => :kernel_respond_to_missing,
+  'LCF::Sections#method_missing' => :basic_object_method_missing,
+}.freeze
+
+# Per kind: the method name the site must really have, the ARGARY operand
+# spec mrbc must really have emitted for it, and the single NATIVE_SRCS file
+# that must be the sole native contributor of that name. All three are
+# re-checked per site by `zsuper_native_kind` -- a different name, a
+# different parameter shape (hence a different ARGARY spec), or a second
+# native definition appearing anywhere in NATIVE_SRCS all decline back to
+# today's honest `#error` instead of silently compiling something else.
+ZSUPER_NATIVE_SHAPES = {
+  # `def respond_to_missing? sym, include_private = false` -> ENTER 1:1:...,
+  # zsuper rebuilds both positional slots: m1=2, r=0, m2=0, kd=0, lv=0.
+  kernel_respond_to_missing: {
+    name: 'respond_to_missing?',
+    argary: '2:0:0:0',
+    native_src: '3rd/mruby/src/kernel.c',
+  }.freeze,
+  # `def method_missing sym, *args` -> ENTER 1:0:1:..., zsuper rebuilds the
+  # one mandatory slot plus the rest array: m1=1, r=1, m2=0, kd=0, lv=0. The
+  # array it builds is therefore literally `[sym, *args]` -- exactly the
+  # split `mrb_obj_missing`'s own `mrb_get_args(mrb, "n*!", ...)` performs,
+  # confirmed against vm.c's OP_ARGARY `r != 0` branch (m1 values copied
+  # first, then the rest array spliced) rather than assumed from the
+  # parameter list.
+  basic_object_method_missing: {
+    name: 'method_missing',
+    argary: '1:1:0:0',
+    native_src: '3rd/mruby/src/class.c',
+  }.freeze,
+}.freeze
+
+# Owners that, if they carried a Ruby-level definition of the name, really
+# would intercept `super` before it reached the native target -- the classes
+# on every listed owner's own ancestor chain above itself. A module cannot
+# appear here by name because it can be `include`d anywhere; that case is
+# handled structurally instead (see `zsuper_native_kind`: any owner missing
+# from `superclass_of` is refused outright, and `build_registry` populates
+# that map from real CLASS opcodes only, so every module, every singleton
+# owner and every unrecognized-superclass class is absent from it).
+ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
+
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
 # with exactly one definition anywhere in the whole program), this asks a
 # narrower question about ONE specific SEND -- "is THIS receiver provably a
@@ -7546,7 +7782,8 @@ class CodeGen
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
                  hash_element_layout = {}, integer_constants = Set.new,
-                 foreign_method_names = nil, outside_tokens = nil)
+                 foreign_method_names = nil, outside_tokens = nil,
+                 native_name_sources = nil)
     @ireps = ireps
     # ENTRY_ARG_CALLSITE_PROOF: every identifier-shaped token appearing
     # anywhere in NATIVE_SRCS or FOREIGN_RUBY_SRCS (outside_world_tokens,
@@ -7561,6 +7798,13 @@ class CodeGen
     # than run against a knowingly incomplete poison set, exactly the gate
     # IntegerConstants' own two out-of-bytecode inputs already use.
     @foreign_method_names = foreign_method_names
+    # ZSUPER_NATIVE_SUPPORT: method name -> the list of NATIVE_SRCS files
+    # that really register a method by that name (extract_native_method_
+    # sources, above). nil means the caller never ran that scan at all,
+    # which `zsuper_native_kind` treats exactly the way @foreign_method_
+    # names and @outside_tokens treat their own nil -- prove nothing, decline
+    # every site -- rather than assume an unscanned native world is empty.
+    @native_name_sources = native_name_sources
     # INTEGER_CONSTANT_PROOF: the set of bare constant names every definition
     # in this whole program agrees is an integer literal (IntegerConstants.
     # analyze, above). Read only by fixnum_proof_source?'s own GETCONST/
@@ -9055,6 +9299,109 @@ class CodeGen
     return nil unless compiles_clean?(target_def.irep)
 
     target_def
+  end
+
+  # ZSUPER_NATIVE_SUPPORT: which native mruby-core method (if any) the bare
+  # `super` at `irep.instructions[idx]` -- an `ARGARY` whose very next
+  # instruction is the matching `SUPER ... n=*` -- really reaches, as one of
+  # ZSUPER_NATIVE_SHAPES' own kind symbols. nil declines, leaving both
+  # opcodes on today's unchanged honest `#error`.
+  #
+  # `idx` may name EITHER half of the pair: the ARGARY (so ARGARY's own
+  # compile_insn arm can suppress its dead array build) or the SUPER (so
+  # SUPER's arm can emit the replacement). Both resolve to the same pair and
+  # therefore to the same answer, so the two arms can never disagree and
+  # emit half a translation.
+  #
+  # Everything below is a mechanical re-check, done fresh per site at
+  # codegen time. ZSUPER_NATIVE_TARGETS' own comment carries only the
+  # residue that genuinely cannot be re-derived from the bytecode.
+  def zsuper_native_kind(owner_def, irep, idx)
+    return nil unless owner_def && irep && idx
+
+    kind = ZSUPER_NATIVE_TARGETS["#{owner_def.owner}##{owner_def.name}"]
+    return nil unless kind
+
+    shape = ZSUPER_NATIVE_SHAPES.fetch(kind)
+    # (1) The allowlist key already pinned the name, but pin it again off
+    # the MethodDef itself rather than off string surgery on that key.
+    return nil unless owner_def.name == shape[:name]
+
+    # (2) The two instructions really are the adjacent pair mrbc's own
+    # codegen_zsuper emits, with the exact register relationship vm.c gives
+    # them (`SUPER R(a)` + `ARGARY R(a+1)`: OP_SUPER's `regs[a] = recv` then
+    # `L_SENDB_SYM` reading the single packed argument out of `regs[a+1]`).
+    # Nothing here trusts "an ARGARY somewhere near a SUPER".
+    # `idx - 1` must never be allowed to go negative: Ruby would index from
+    # the END of the instruction list and cheerfully match some unrelated
+    # trailing pair.
+    argary_idx = irep.instructions[idx]&.op == 'ARGARY' ? idx : idx - 1
+    return nil if argary_idx.negative?
+
+    argary = irep.instructions[argary_idx]
+    super_insn = irep.instructions[argary_idx + 1]
+    return nil unless argary && super_insn
+    # Strict adjacency, deliberately: an interposed EXT1/EXT2/EXT3 (see
+    # build_registry's own skip_ext_back comment for when mrbc emits one)
+    # would simply decline here rather than be skipped over. None of the
+    # real sites has one -- both operands are far too small to need a width
+    # prefix -- and refusing is the safe direction if one ever appears.
+    return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
+
+    argary_dest = argary.args[/^R(\d+)/, 1]
+    super_dest = super_insn.args[/^R(\d+)/, 1]
+    return nil unless argary_dest && super_dest
+    return nil unless argary_dest.to_i == super_dest.to_i + 1
+
+    # (3) The SUPER really is the `n=*` (CALL_MAXARGS) splat shape, not the
+    # fixed-count `n=N` one SUPER_TARGETS' own codegen handles.
+    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+
+    # (4) The ARGARY operand spec really is the one this kind's translation
+    # was derived against -- `2:0:0:0` or `1:1:0:0`, always with lv=0 (the
+    # only case vm.c's OP_ARGARY reads plain `regs+1` rather than walking an
+    # enclosing REnv) and kd=0 (no keyword dictionary to forward). A method
+    # whose parameter list changed shape gets a different spec here and is
+    # declined rather than silently mistranslated.
+    return nil unless argary.args[/\s(\d+:\d+:\d+:\d+)\s*\(/, 1] == shape[:argary]
+    return nil unless argary.args[/\((\d+)\)\s*\z/, 1].to_s == '0'
+
+    # (5) The owner's own registered superclass really is the implicit
+    # `Object` every part of the ancestor-chain argument assumes. `:none` is
+    # build_registry's own explicit "a real CLASS opcode with no superclass
+    # expression", never its "absent / unrecognized" state.
+    return nil unless @superclass_of[owner_def.owner] == :none
+
+    # (6) Nothing in the whole closed world can intercept this name before
+    # the native target. Every registered definition of it must be owned by
+    # a real CLASS (present in @superclass_of at all -- so every module,
+    # every `.singleton` owner and every class whose superclass expression
+    # build_registry could not resolve refuses here) that is not itself one
+    # of the chain classes above the owner. A class that passes both tests
+    # cannot sit between `owner_def.owner` and `Object`, because the only
+    # way a class joins another's ancestry is `<`, and (5) just established
+    # that this owner's superclass is `Object` itself.
+    #
+    # The `<native>` sentinel is the one owner that is legitimately absent
+    # from @superclass_of, because it IS the target being reproduced -- so
+    # it is not blanket-trusted but checked by name in (7).
+    return nil unless @registry[owner_def.name].all? { |d|
+      d.owner == '<native>' ||
+        (@superclass_of.key?(d.owner) && !ZSUPER_NATIVE_BLOCKED_OWNERS.include?(d.owner))
+    }
+
+    # (7) The native world contributes EXACTLY the one definition being
+    # reproduced. A second native registration of this name anywhere in
+    # NATIVE_SRCS could be an override sitting in the chain, which no
+    # bytecode-level check could ever see; a missing map (`nil`) means the
+    # scan never ran, which is strictly less information than a real gem
+    # build has. Both decline.
+    return nil unless @native_name_sources
+
+    srcs = @native_name_sources[owner_def.name] || []
+    return nil unless srcs.size == 1 && srcs.first.end_with?(shape[:native_src])
+
+    kind
   end
 
   # Does compile_method(label) actually come out #error-free? A MONO name
@@ -18438,14 +18785,100 @@ class CodeGen
       dest, nstr = a.split(/\s+/, 2)
       d_reg = dest[/^R(\d+)/, 1]
       n = nstr && nstr[/^n=(\d+)$/, 1]
+      zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
       if target_def && d_reg && n
         args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
         "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
+      elsif zsuper_kind && d_reg
+        compile_zsuper_native(zsuper_kind, d_reg)
       else
         "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
       end
+    when 'ARGARY'
+      # ZSUPER_NATIVE_SUPPORT: the array this opcode builds is the argument
+      # list for the `SUPER ... n=*` on the very next line, and nothing else
+      # ever reads it (mrbc emits the pair together and the SUPER consumes
+      # it immediately -- re-checked per site by zsuper_native_kind, which
+      # matches the exact adjacency and the `SUPER R(a)` / `ARGARY R(a+1)`
+      # register relationship rather than assuming it). Both recognized
+      # translations below consume the ORIGINAL registers directly instead
+      # of that array -- `mrb_false` ignores its arguments entirely, and
+      # `mrb_obj_missing` would only have split the array straight back
+      # apart -- so building it here would be dead code, and vm.c's own
+      # OP_ARGARY body has no other observable effect to preserve (see
+      # ZSUPER_NATIVE_TARGETS' own comment for the full read of that body,
+      # including the one raise it can perform and why a real `def`-compiled
+      # method body can never reach it).
+      #
+      # Deliberately NOT a general OP_ARGARY implementation: an ARGARY that
+      # is not this exact recognized zsuper prelude still falls through to
+      # the same honest `#error` it always produced.
+      if reg_offset.zero? && zsuper_native_kind(owner_def, irep, idx)
+        "  // #{insn.raw.strip} (zsuper argument array not built -- consumed by the SUPER below)\n"
+      else
+        "  #error unhandled opcode ARGARY -- not in this prototype's supported subset\n"
+      end
     else
       "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
+    end
+  end
+
+  # ZSUPER_NATIVE_SUPPORT: the replacement body for a recognized `ARGARY` +
+  # `SUPER ... n=*` pair, `d_reg` being the SUPER's own destination register.
+  # See ZSUPER_NATIVE_TARGETS' own comment for where each of these two
+  # translations comes from in real mruby source, and zsuper_native_kind for
+  # the per-site checks that have already passed by the time this runs.
+  def compile_zsuper_native(kind, d_reg)
+    case kind
+    when :kernel_respond_to_missing
+      # Kernel#respond_to_missing? is 3rd/mruby/src/kernel.c's own
+      # `mrb_false`, whose entire body is `return mrb_false_value();` --
+      # unconditional, no `self`, no arguments, no `mrb_get_args`. The same
+      # `mrb_false_value()` spelling LOADFALSE/RETFALSE already emit.
+      "  // super -> Kernel#respond_to_missing? (3rd/mruby/src/kernel.c's own `mrb_false`: " \
+        "unconditionally false, reads neither self nor arguments)\n" \
+        "  r#{d_reg} = mrb_false_value();\n"
+    when :basic_object_method_missing
+      # BasicObject#method_missing is 3rd/mruby/src/class.c's own
+      # `mrb_obj_missing`, which cannot be called directly (it reads its
+      # arguments through `mrb_get_args` off `mrb->c->ci`). Everything it
+      # computes is reproduced here and handed to the one function it
+      # actually tail-calls, `mrb_method_missing`, which takes all four
+      # inputs as plain C parameters.
+      #
+      # The ARGARY spec this kind is gated on is `1:1:0:0` with lv=0, which
+      # vm.c's OP_ARGARY builds from `regs+1` as m1=1 copied values followed
+      # by the spliced rest array -- i.e. `[r1, *r2]`, so `mrb_get_args`'
+      # own `"n*!"` split of that array yields exactly `name = r1` and
+      # `args = r2`. Read off the live registers rather than the entry
+      # wrapper's parameters, so a body that reassigned either one before
+      # the `super` would still forward what the interpreter would.
+      #
+      # The `mrb_array_p` guard is not defensive padding -- it is vm.c's own
+      # OP_ARGARY `r != 0` branch reproduced exactly: that code does
+      # `if (mrb_array_p(stack[m1])) { pp = ARY_PTR(ary); len = ARY_LEN(ary); }`
+      # and otherwise leaves `len` at 0, so a non-Array in the rest slot
+      # really does yield `[r1]` alone, i.e. an EMPTY forwarded argument
+      # list. It is also what keeps `RARRAY_LEN`/`RARRAY_PTR` (unchecked
+      # accessor macros) off a non-Array value.
+      #
+      # `self` rather than `r0`: OP_SUPER reads `recv = regs[0]`, and the
+      # generated prologue's own `mrb_value r0 = self;` makes those the same
+      # value -- the existing fixed-count SUPER arm above already passes
+      # `self` for exactly this reason.
+      #
+      # `mrb_method_missing` is `mrb_noreturn` -- it always raises -- so
+      # nothing may follow it on this path. Nothing is emitted after it and
+      # `d_reg` is deliberately left unassigned; the RETURN the next
+      # instruction compiles to is unreachable code g++ accepts and never
+      # executes, the same already-established shape RAISEIF's own
+      # unconditional `mrb_exc_raise` arm produces.
+      "  // super -> BasicObject#method_missing (3rd/mruby/src/class.c's own `mrb_obj_missing`, " \
+        "reproduced via the `mrb_method_missing` it tail-calls -- always raises NoMethodError)\n" \
+        "  mrb_method_missing(M, mrb_obj_to_sym(M, r1), self,\n" \
+        "                     mrb_array_p(r2)\n" \
+        "                       ? mrb_ary_new_from_values(M, RARRAY_LEN(r2), RARRAY_PTR(r2))\n" \
+        "                       : mrb_ary_new(M));\n"
     end
   end
 
@@ -20292,9 +20725,15 @@ if $PROGRAM_NAME == __FILE__
   # see extract_native_method_names's own comment. Optional: omitting it
   # just means the registry stays exactly as unsound as it always was with
   # respect to that native gem, same as before this existed.
+  native_name_sources = nil
   if ENV['NATIVE_SRCS']
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
-    native_names = extract_native_method_names(native_paths)
+    # ZSUPER_NATIVE_SUPPORT: the per-name source map is the scan, and the
+    # flat name set below is derived from its own keys -- so NATIVE_SRCS is
+    # still read exactly once, and the two can never disagree about which
+    # names the native world defines.
+    native_name_sources = extract_native_method_sources(native_paths)
+    native_names = native_name_sources.keys.to_set
     flipped = native_names.select { |n| registry.key?(n) && registry[n].size == 1 }
     native_names.each do |name|
       registry[name] << MethodDef.new(name: name, owner: '<native>', irep: nil, visibility: :public)
@@ -20639,7 +21078,7 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
-                    integer_constants, foreign_methods, outside_tokens)
+                    integer_constants, foreign_methods, outside_tokens, native_name_sources)
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
@@ -20866,6 +21305,17 @@ if $PROGRAM_NAME == __FILE__
   # case calls this directly (mruby.h's own `mrb_int` typedef is already
   # in scope by this point, matching that header's own declaration).
   puts 'extern "C" mrb_value mrb_div_int_value(mrb_state*, mrb_int, mrb_int);'
+  # ZSUPER_NATIVE_SUPPORT: same `mruby/internal.h`-has-no-C-linkage-guard
+  # situation as the two above -- the recognized `super` into
+  # BasicObject#method_missing calls this directly (see
+  # ZSUPER_NATIVE_TARGETS' own comment for why it calls THIS rather than the
+  # `mrb_obj_missing` that wraps it). Declared exactly as
+  # 3rd/mruby/include/mruby/internal.h:24 declares it, `mrb_noreturn`
+  # included -- that attribute is what lets g++ see the unreachable RETURN
+  # the next instruction compiles to for what it is, and mruby's own
+  # `mrb_noreturn` (3rd/mruby/include/mruby/common.h) is already in scope
+  # via mruby.h.
+  puts 'extern "C" mrb_noreturn void mrb_method_missing(mrb_state*, mrb_sym, mrb_value, mrb_value);'
   # OTHER_DECLS_HEADER: shell-word-separated list of real file paths (each
   # another gem's own *_decls.h, written by this same OUT_DIR mechanism
   # below) to #include so a devirtualized call to an OTHER_OWNERS target
