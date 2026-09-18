@@ -1592,6 +1592,58 @@ def foreign_method_names(paths)
   names
 end
 
+# ---------------------------------------------------------------------------
+# ENTRY_ARG_CALLSITE_PROOF's own out-of-closed-world poison source -- the
+# CALL-SITE twin of `foreign_method_names` above, and the reason that
+# mechanism can claim to have enumerated EVERY call site of a method at all.
+#
+# `foreign_method_names` answers "does a second BODY for this name exist
+# outside the closed world". ENTRY_ARG_CALLSITE_PROOF needs the strictly
+# harder question answered too: "can anything outside the closed world CALL
+# this name". A `mrb_funcall(M, obj, "tile_color", 1, v)` buried in
+# mruby-rgss's own C++, or a `x.tile_color` inside 3rd/mruby/mrblib, is a
+# real invocation of a compiled method whose argument this file has no
+# bytecode for and therefore cannot prove anything about -- and the whole
+# proof is "every site passes a Fixnum", so a single unseen site is a wrong
+# answer, not a missed optimization.
+#
+# Deliberately the bluntest possible scan: every identifier-shaped token in
+# every one of those files, whatever it lexically is -- a call, a
+# definition, a local variable, a struct field, a C function name, a word
+# inside a comment. A name is poisoned if it appears AT ALL. This
+# over-collects enormously (`block`, `mark`, `size`, `width`, `type` are all
+# poisoned by mruby's own C sources many times over), and that is the
+# correct direction: over-collecting costs a proof, under-collecting emits a
+# bare `mrb_fixnum()` on a value that was never checked, i.e. undefined
+# behavior. It also needs no model whatsoever of C++ or of mruby's own
+# dispatch surface -- no `mrb_funcall`/`mrb_intern`/`MRB_SYM` shape to keep
+# in sync, no `mrb_respond_to`, no `method_missing`, nothing to miss.
+#
+# Operator-spelled names (`+`, `<=>`, `[]=`) are NOT tokenizable this way
+# and are refused wholesale by the mechanism itself rather than scanned for
+# here -- see ENTRY_ARG_CALLSITE_PROOF's own `\A[A-Za-z_]` gate.
+#
+# Read as bytes, not UTF-8: mruby's own C sources are not all valid UTF-8
+# (`3rd/mruby/src/` carries real Latin-1 bytes in comments), and a
+# `String#scan` against an invalid-encoding string raises ArgumentError.
+# The token pattern is pure ASCII, so a byte-wise match finds exactly the
+# same identifiers.
+# ---------------------------------------------------------------------------
+OUTSIDE_TOKEN_RE = /[A-Za-z_][A-Za-z_0-9]*[?!=]?/.freeze
+
+def outside_world_tokens(paths)
+  names = Set.new
+  Array(paths).each do |path|
+    src = begin
+      File.binread(path)
+    rescue StandardError
+      next
+    end
+    src.scan(OUTSIDE_TOKEN_RE) { |t| names << t }
+  end
+  names
+end
+
 def extract_native_method_names(src_paths)
   names = Set.new
   # MRB_SYM(name) spells the bare method name; MRB_OPSYM(op) spells an
@@ -7095,8 +7147,14 @@ class CodeGen
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
                  hash_element_layout = {}, integer_constants = Set.new,
-                 foreign_method_names = nil)
+                 foreign_method_names = nil, outside_tokens = nil)
     @ireps = ireps
+    # ENTRY_ARG_CALLSITE_PROOF: every identifier-shaped token appearing
+    # anywhere in NATIVE_SRCS or FOREIGN_RUBY_SRCS (outside_world_tokens,
+    # above). nil means neither scan ran, which would make that mechanism
+    # strictly more optimistic than a real build -- compute_entry_arg_fixnum
+    # then proves nothing at all, the same gate @foreign_method_names uses.
+    @outside_tokens = outside_tokens
     # FIXNUM_RETURN_PROOF: every method name defined in a Ruby source that
     # shares this VM but sits outside the closed world (foreign_method_names,
     # above). nil means the caller never ran that scan -- see
@@ -7249,8 +7307,31 @@ class CodeGen
     # identical either way, and the real fixpoint below can safely run after
     # @ivar_layout is final (which it must, since proof source 3 reads it).
     @fixnum_return_names = Set.new
+    # ENTRY_ARG_CALLSITE_PROOF: nil, not an empty Set, until its own fixpoint
+    # has really run -- fixnum_proof_entry_arg? reads nil as "this proof
+    # source does not exist yet" and refuses, so the FIRST
+    # compute_fixnum_return_names pass below behaves byte-identically to
+    # today's and there is no circular seeding between the two mechanisms.
+    @entry_arg_fixnum = nil
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     compute_fixnum_return_names
+    # ENTRY_ARG_CALLSITE_PROOF <-> FIXNUM_RETURN_PROOF alternation. Each of
+    # the two is a greatest fixpoint that is sound GIVEN the other's current
+    # set is sound (see compute_entry_arg_fixnum's own header for the joint
+    # induction-on-execution-time argument covering both at once), and each
+    # re-seeds from ALL of its candidates rather than from the previous
+    # round's survivors -- so a fact newly proven by one mechanism really can
+    # bring back a name the other dropped last round, and both sets only ever
+    # grow from one alternation to the next. The loop therefore converges;
+    # the bound is a cheap guarantee that this stays a linear codegen pass
+    # even if some future proof source makes convergence slower.
+    ENTRY_ARG_ALTERNATION_LIMIT.times do
+      before_args = @entry_arg_fixnum
+      before_rets = @fixnum_return_names
+      compute_entry_arg_fixnum
+      compute_fixnum_return_names
+      break if @entry_arg_fixnum == before_args && @fixnum_return_names == before_rets
+    end
   end
 
   def const_lookup_helper_used?
@@ -11763,7 +11844,421 @@ class CodeGen
     r = reg.to_i
     return false unless r >= 1 && r <= mand
 
-    native_arg_types(owner_def, mand)[r - 1] == :fixnum
+    return true if native_arg_types(owner_def, mand)[r - 1] == :fixnum
+
+    # ENTRY_ARG_CALLSITE_PROOF (proof source 7) -- the same register, proven
+    # a completely different way: not "the C++ parameter is an mrb_int" but
+    # "every call site in the whole program passes a Fixnum here". See
+    # compute_entry_arg_fixnum for the enumeration and the soundness
+    # argument. nil (not merely empty) until that fixpoint has run.
+    !@entry_arg_fixnum.nil? && @entry_arg_fixnum.include?([irep.label, r])
+  end
+
+  # ---------------------------------------------------------------------------
+  # ENTRY_ARG_CALLSITE_PROOF (proof source 7): a mandatory argument register
+  # of a compiled method holds a Fixnum on entry, not because its C++
+  # parameter was retyped to `mrb_int` (that is proof source 2,
+  # NATIVE_ARG_TARGETS, a hand-vetted table), but because EVERY call site in
+  # the whole program that can reach this method passes an already-proven
+  # Fixnum in that position.
+  #
+  # MEASURED, NOT GUESSED. Instrumenting every refusal inside
+  # proven_fixnum_operand? across all 7239 whole-program proven_fixnum_pair?
+  # queries (6217 failing), tagging each with its exact cause and counting
+  # only the COSTLY ones (a refusal only blocks a real call site when the
+  # OTHER operand already proves), put entry-argument refusals second overall
+  # at 770 costly refusals, behind only "a SEND result"
+  # (FIXNUM_RETURN_PROOF's own territory, 1433) and ahead of an unembedded
+  # GETIV (272), GETIDX (263) and DIV (248). That 770 splits as:
+  #
+  #     371  not a NATIVE_ARG_TARGETS entry, no annotation either
+  #     285  the register is not in the method's OWN irep (a BLOCK_FALLBACK
+  #          body, where r1.. are the BLOCK's parameters -- out of scope
+  #          here, see "WHAT THIS DELIBERATELY DOES NOT DO" below)
+  #      75  a real `# bc2cpp: (fixnum, ...)` annotation exists at that
+  #          position, but the method is not a NATIVE_ARG_TARGETS entry
+  #      31  the method has optional/rest arguments (pure_mandatory_arity?)
+  #       8  a NATIVE_ARG_TARGETS entry whose annotation names another type
+  #
+  # A ceiling run treating every mandatory argument of a method's own irep as
+  # a Fixnum, with no proof at all, removes 317 real call sites (15268 ->
+  # 14951) -- the honest upper bound for this whole direction, and what the
+  # enumeration below is measured against.
+  #
+  # WHAT THIS ACTUALLY BANKS, MEASURED: 138 (method, argument position) facts
+  # proven, worth 14 real shipped call sites (15268 -> 15254: `+` -5, `==`
+  # -2, `-` -2, `/` -2, `>` -2, `*` -1). That is 4.4% of the 317 ceiling, and
+  # the gap is NOT this mechanism refusing to enumerate -- 889 methods and
+  # 1448 argument positions clear every admission gate below. It is admission
+  # rule 9: at least one real call site passes something no proof source in
+  # this file can type yet. Tagging every failing site by cause (iteration-
+  # weighted across the fixpoint) ranks them a SEND result FIXNUM_RETURN_PROOF
+  # has not admitted (746), a caller entry argument that is itself unproven
+  # (726), `GETIDX` (258), `GETUPVAR` (252), an unembedded `GETIV` (150) and
+  # `AREF` (114) -- every one of them another mechanism's territory, not this
+  # one's. A further 122 failing sites are tagged `LOADNIL`/`LOADFALSE`/
+  # `LOADTRUE`/`LOADSYM`, i.e. real evidence that the argument genuinely is
+  # NOT a Fixnum at that site: those positions are correctly refused and are
+  # not recoverable by any amount of extra proof machinery.
+  #
+  # ---------------------------------------------------------------------------
+  # WHY AN EXHAUSTIVE CALL-SITE ENUMERATION IS POSSIBLE AT ALL
+  #
+  # This is the part that has to be right, because unlike a wrong MONO (a
+  # visibly wrong direct call) a wrong operand proof emits a bare
+  # `mrb_fixnum()` with no runtime check and no `mrb_funcall` arm -- reading
+  # the integer field of a union that holds something else, i.e. undefined
+  # behavior, silently. So the question is not "have we found the call sites
+  # we can think of" but "is there any path into this body at all that this
+  # enumeration structurally cannot see".
+  #
+  # VERIFIED FACT 1 -- this program runs no Ruby the compiler cannot see.
+  # `mrb_load_string`/`mrb_load_file`/`mrb_load_irep`/`mrb_load_nstring`
+  # appear NOWHERE in mruby-rgss/src, mruby-rpg2k/src or mruby-lcf/src
+  # (grepped, not assumed -- the single textual hit in lib.cxx is the word
+  # `mrb_load_irep_buf` inside a comment). Every line of Ruby that ever
+  # executes is therefore either closed-world mrblib (parsed here, every
+  # irep in `@ireps`) or foreign mrblib compiled into the same VM (poisoned
+  # wholesale, see below). There is no script layer, no `eval`, no
+  # user-supplied RGSS script that could invent a new call site at runtime.
+  #
+  # VERIFIED FACT 2 -- the closed world contains no reflective dispatch.
+  # Scanning all 30 closed-world Ruby sources: ZERO `send`/`__send__`/
+  # `public_send`, ZERO `method(:x)`, ZERO `define_method`, ZERO
+  # `instance_eval`/`class_eval`/`module_eval`. The only reflective forms
+  # present at all are `alias_method` (5 sites), `&:sym` (28 sites) and
+  # `instance_variable_get/set` (3 sites) -- and the bytecode poison below
+  # catches every one of them without depending on this count staying true,
+  # because `alias_method :a, :b` and `ary.reject(&:out_of_play?)` both
+  # necessarily materialize their names as real `LOADSYM R<n> :name`
+  # instructions, which poison unconditionally.
+  #
+  # So a call into method M under name N can only be:
+  #   (a) a bytecode SEND-family instruction naming `:N` in some irep this
+  #       run parsed -- enumerated exhaustively below;
+  #   (b) a symbol-mediated dispatch (`send`, `&:N`, `method(:N)`,
+  #       `define_method(:N)`, an alias) -- every one of which puts `:N` in
+  #       a non-call opcode's operands, which POISONS N outright;
+  #   (c) something outside the closed world -- native C++ or foreign
+  #       mrblib -- which poisons N if the token `N` appears anywhere in
+  #       NATIVE_SRCS or FOREIGN_RUBY_SRCS at all (outside_world_tokens);
+  #   (d) `super` into M. Impossible: admission requires N to be MONO in
+  #       `@registry`, and the registry already carries a second, irep-nil
+  #       MethodDef for every name NATIVE_SRCS defines, so no second body
+  #       for N exists anywhere for a `super` to be dispatched from or to.
+  #   (e) `X.new` reaching `#initialize`. `new` is a C-defined method, so
+  #       there is NO bytecode `SEND :initialize` to find and the
+  #       enumeration would see zero sites and vacuously "prove" anything.
+  #       `initialize` is refused by name, and separately every candidate
+  #       must have at least one real enumerated site.
+  #   (f) `method_missing`. It fires only when a method is NOT found, so it
+  #       cannot be a path INTO an existing M; and its own body's dispatches
+  #       are ordinary bytecode SENDs already covered by (a)/(b).
+  #
+  # THE OPCODE INVENTORY THIS RESTS ON IS REAL, NOT ASSUMED. Every opcode in
+  # the whole program whose operands (after stripping codedump.c's own
+  # trailing "\t; R<n>:<local>" annotation, which is a COMMENT and never an
+  # operand) contain a `:name` token was enumerated from a real run:
+  # SEND/SEND0/SENDB/SSEND/SSEND0/SSENDB (calls), DEF/SDEF/TDEF
+  # (definitions), LOADSYM (symbol literals), KARG/KEY_P (keyword names),
+  # CLASS/MODULE (class names), and ARGARY/BLKPUSH/ENTER/GETMCNST (whose
+  # ":" is part of a numeric field list or a "::" scope, never a method
+  # name). Only the four block-capable-or-not positional call opcodes are
+  # treated as enumerable sites; every other one of them poisons. An opcode
+  # NOT on that list that names anything raises outright
+  # (ENTRY_ARG_CLASSIFIED_OPS below) rather than silently under-poisoning --
+  # the same fail-loud discipline `native_c_type`'s own `C_TYPE.fetch`
+  # already uses, and the only kind of change that could quietly break this.
+  #
+  # ---------------------------------------------------------------------------
+  # ADMISSION. A (method, argument position k) pair is admitted only when ALL
+  # of the following hold.
+  #
+  #   1. `@registry[N]` holds EXACTLY ONE MethodDef with a real bytecode
+  #      body. Verbatim FIXNUM_RETURN_PROOF's admission 1, against the same
+  #      closed-world registry, and it is what makes (d) above impossible.
+  #   2. N appears nowhere in `foreign_method_names` -- no second body in
+  #      foreign mrblib. Verbatim FIXNUM_RETURN_PROOF's admission 2.
+  #   3. N appears nowhere in `outside_tokens` -- nothing outside the closed
+  #      world so much as mentions the name, so (c) is impossible.
+  #   4. N starts with a letter or underscore. An operator-spelled name
+  #      (`+`, `<=>`, `[]=`) is not tokenizable by outside_world_tokens at
+  #      all, so rule 3 could not be enforced for it; refused wholesale
+  #      rather than half-checked. Every such name in this program is also
+  #      massively POLY and would fail rule 1 anyway.
+  #   5. N is not `initialize` -- see (e).
+  #   6. `pure_mandatory_arity?` on M's own irep, and `mand >= k >= 1`. The
+  #      same gate proof source 2 uses, and for the same reason: with real
+  #      optional arguments the register numbering no longer maps 1:1 onto
+  #      argument positions.
+  #   7. N is not poisoned by the bytecode scan -- no `LOADSYM :N`, no
+  #      `DEF/SDEF/TDEF :N` outside the one registry body, no `SEND0/SSEND0
+  #      :N` (a zero-argument call of a method with mand >= 1 would raise
+  #      ArgumentError, so its presence means this model of N is wrong), no
+  #      `:N` in any other opcode's operands.
+  #   8. At least ONE call site was enumerated, and EVERY enumerated site
+  #      is a plain positional `SEND`/`SENDB`/`SSEND`/`SSENDB` with a
+  #      literal `n=<count>` exactly equal to `mand` (so `n=*`, mrbc's own
+  #      splat/CALL_MAXARGS spelling, refuses), sitting in an irep this run
+  #      can attribute to a known method body (so its operands can be
+  #      proven at all).
+  #   9. At EVERY one of those sites, the register holding argument k --
+  #      `R[a+k]` for a call whose receiver is `R[a]`, confirmed against
+  #      real `mrbc -v` output (`SSEND R3 :helper n=2` with the two
+  #      arguments written to R4 and R5) and ops.h's own OP_SEND
+  #      `regs[a+1..a+n]` -- is itself `proven_fixnum_operand?`.
+  #
+  # ---------------------------------------------------------------------------
+  # WHY A GREATEST FIXPOINT IS SOUND, INCLUDING FOR RECURSION -- and why the
+  # same argument covers FIXNUM_RETURN_PROOF running alternately with it.
+  #
+  # Start from every (M, k) passing 1-8, then repeatedly drop any whose sites
+  # stop proving, until stable. That admits self- and mutual recursion
+  # (`def f(n); n <= 0 ? 0 : f(n - 1); end` proves, because f's only
+  # recursive site passes `n - 1` and `n` is the very fact being assumed),
+  # which a least fixpoint could never do.
+  #
+  # The induction is on POSITION IN THE EXECUTION TRACE of one real program
+  # run, not on the shape of the call graph. Consider the sequence of
+  # dynamic events in wall-clock order, where an event is either "invocation
+  # I of M begins" (carrying M's entry-argument facts) or "invocation I of P
+  # returns" (carrying P's return fact). Take any event E and assume every
+  # strictly earlier event's fact holds.
+  #
+  #   - E is an entry event for M. By the enumeration above, I was started
+  #     by one of the enumerated call sites, executing inside some caller
+  #     frame F. The argument register was proven by proof sources 1-7: a
+  #     literal, an embedded ivar, an INTEGER_CONSTANT_PROOF constant, an
+  #     arithmetic op over those -- all unconditional; or F's OWN entry
+  #     argument, whose entry event is strictly earlier than E; or a
+  #     FIXNUM_RETURN_PROOF'd SEND, whose return event is strictly earlier
+  #     than E (the call completed before its result could be passed).
+  #     Every dependency is strictly earlier, so the hypothesis applies.
+  #   - E is a return event for P. Its returned register was proven the same
+  #     way: unconditional sources; or P's own entry arguments, whose entry
+  #     event is strictly earlier than P's return; or a nested call's return,
+  #     strictly earlier.
+  #
+  # So both fact kinds are established by strong induction over a finite
+  # prefix of one execution -- which is exactly why the two mechanisms can
+  # be alternated to convergence (see the constructor) without either one
+  # having to treat the other's set as untrusted. A non-terminating mutual
+  # cycle never produces an entry OR a return event that the induction has
+  # to justify at all (it raises SystemStackError), so it is vacuous --
+  # the same shape as the NameError step that makes IntegerConstants' own
+  # greatest fixpoint safe.
+  #
+  # ---------------------------------------------------------------------------
+  # WHAT THIS DELIBERATELY DOES NOT DO.
+  #
+  # BLOCK PARAMETERS (285 costly refusals, tagged `entry:not_own_irep`, and
+  # a measured 193 further call sites by ceiling run -- 14951 -> 14758 when
+  # every block parameter is assumed Fixnum too). A block body's `r1..` are
+  # filled by whatever `mrb_yield` hands them, from inside the CALLEE that
+  # yields -- `each`, `times`, `map`, or a native C `mrb_yield` in
+  # array.c. That is a completely different enumeration problem (which
+  # yielder, with what, under which of this file's several block-lowering
+  # paths) and shares none of this mechanism's machinery, so it stays
+  # refused exactly as today rather than being bolted on. Real, measured,
+  # and left on the table on purpose.
+  #
+  # TRUSTING THE `# bc2cpp: (fixnum, ...)` MAGIC COMMENT ON ITS OWN (75
+  # costly refusals). Tempting -- the annotation already exists, and the
+  # Annotations class comment calls a wrong annotation harmless. It is
+  # harmless THERE because every consumer of it re-checks at runtime: the
+  # embedded-ivar SETIV codegen guards with `mrb_integer_p` + `mrb_raise`,
+  # and a NATIVE_ARG_TARGETS parameter is a real `mrb_int` whose FFI
+  # boundary raises TypeError on a non-integer. FIXNUM_OPERAND_PROOF has no
+  # such check by construction -- removing it is the entire point -- so a
+  # wrong comment here would be silent UB rather than a TypeError. Declined:
+  # the right way to bank those 75 is to put the method in
+  # NATIVE_ARG_TARGETS after the per-entry trace that table's own header
+  # demands, which is a human step, not an analysis.
+  # ---------------------------------------------------------------------------
+
+  # Bound on the ENTRY_ARG_CALLSITE_PROOF <-> FIXNUM_RETURN_PROOF alternation
+  # (see the constructor). Both sets grow monotonically across rounds, so
+  # this only ever stops a pathologically slow convergence, never a correct
+  # one -- and stopping early is always safe, it just proves less.
+  ENTRY_ARG_ALTERNATION_LIMIT = 4
+
+  # The four call opcodes an enumerable positional call site may use.
+  # SEND0/SSEND0 are absent deliberately: they pass zero arguments, so a
+  # method with `mand >= 1` could never be legally invoked through one, and
+  # seeing one means this analysis has the wrong method in mind -- they
+  # poison instead.
+  ENTRY_ARG_CALL_OPS = Set['SEND', 'SENDB', 'SSEND', 'SSENDB'].freeze
+
+  # The three opcodes that DEFINE a method under a name rather than call one
+  # (`DEF R1 :handle_name_input (R2)`, plus SDEF/TDEF's singleton and
+  # top-self forms). They are neutral here, not poison: a definition is not
+  # a path into the body, and a SECOND definition of the same name is
+  # already what `@registry[N].size == 1` refuses in admission rule 1. They
+  # need their own arm because every bytecode-defined method necessarily
+  # names itself in one of them -- treating a DEF as poison made every
+  # single candidate in the program poison itself (measured: 1863 of 3414
+  # registry names refused by that poison alone, zero candidates admitted at
+  # all, versus 866 refused and 889 admitted once DEF/SDEF/TDEF are neutral).
+  ENTRY_ARG_DEF_OPS = Set['DEF', 'SDEF', 'TDEF'].freeze
+
+  # Every opcode verified (by enumerating the real whole-program instruction
+  # stream, see this mechanism's header) to be able to carry a `:token` in
+  # its OPERANDS. Anything else that does raises rather than silently
+  # skipping a possible call site.
+  ENTRY_ARG_CLASSIFIED_OPS = Set[
+    'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB',
+    'DEF', 'SDEF', 'TDEF', 'LOADSYM', 'KARG', 'KEY_P', 'CLASS', 'MODULE',
+    'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
+  ].freeze
+
+  # Same method-name character set every SEND-name extraction in this file
+  # already uses.
+  ENTRY_ARG_NAME_RE = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
+
+  # codedump.c appends a "\t; R<n>:<local>" (or "\t; <literal>") annotation
+  # to many instructions. It is a COMMENT -- a local variable named `tile`
+  # must never be mistaken for a mention of the method `tile`. Operands are
+  # everything before the first "\t;".
+  def entry_arg_operands(insn)
+    insn.args.to_s.split(/\t;/, 2).first.to_s
+  end
+
+  # irep label -> the MethodDef whose body it is, following `reps` to every
+  # nested block/lambda body at any depth. `@owner_of` only has LEAF method
+  # bodies, but a call site inside a block is still a real call site, and
+  # proving its operands needs the ENCLOSING method's MethodDef -- exactly
+  # what compile_insn itself passes for a BLOCK_FALLBACK body. A label this
+  # map does not cover (the root irep, a class/module body) yields no owner,
+  # and a call site there poisons rather than being skipped.
+  def entry_arg_body_owner
+    @entry_arg_body_owner ||= begin
+      map = {}
+      @registry.each_value do |defs|
+        defs.each do |d|
+          next unless d.irep
+
+          stack = [d.irep]
+          until stack.empty?
+            label = stack.pop
+            next if map.key?(label)
+
+            map[label] = d
+            child = @ireps[label]
+            (child&.reps || []).each { |c| stack << c }
+          end
+        end
+      end
+      map
+    end
+  end
+
+  # One pass over EVERY irep this run parsed, splitting every `:name` mention
+  # into either a real enumerable call site or a poison. Memoized: neither
+  # `@ireps` nor `@registry` changes after CodeGen.new, so this is a pure
+  # function of them and the fixpoint below re-reads it for free.
+  def entry_arg_call_index
+    @entry_arg_call_index ||= begin
+      sites = Hash.new { |h, k| h[k] = [] }
+      poisoned = Set.new
+      owner_of_body = entry_arg_body_owner
+      @ireps.each_value do |irep|
+        owner = owner_of_body[irep.label]
+        irep.instructions.each_with_index do |insn, i|
+          operands = entry_arg_operands(insn)
+          name = operands[ENTRY_ARG_NAME_RE, 1]
+          next unless name
+
+          unless ENTRY_ARG_CLASSIFIED_OPS.include?(insn.op)
+            raise "ENTRY_ARG_CALLSITE_PROOF: opcode #{insn.op} names :#{name} " \
+                  "(#{operands.inspect}) but is not classified -- refusing to " \
+                  'guess whether that is a call site'
+          end
+
+          # A `def` naming itself is not a call site and not poison -- see
+          # ENTRY_ARG_DEF_OPS.
+          next if ENTRY_ARG_DEF_OPS.include?(insn.op)
+
+          unless ENTRY_ARG_CALL_OPS.include?(insn.op) && owner
+            poisoned << name
+            next
+          end
+
+          recv = operands[/\AR(\d+)/, 1]
+          argc = operands[/\bn=(\d+)\b/, 1]
+          # `n=*` (mrbc's own splat/CALL_MAXARGS spelling) leaves argc nil:
+          # the arguments are a packed array, not R[a+1..a+n], so argument k
+          # has no register of its own to prove.
+          if recv.nil? || argc.nil?
+            poisoned << name
+            next
+          end
+
+          sites[name] << [irep, i, recv.to_i, argc.to_i, owner]
+        end
+      end
+      [sites, poisoned]
+    end
+  end
+
+  # ENTRY_ARG_CALLSITE_PROOF's own greatest fixpoint -- see the header above
+  # for admission rules 1-9 and the induction-on-execution-time soundness
+  # argument. Result: a Set of [irep label, mandatory argument register].
+  def compute_entry_arg_fixnum
+    @entry_arg_fixnum = Set.new
+    # Either scan missing means a poison source is missing, which would make
+    # this strictly more optimistic than a real build -- prove nothing.
+    return @entry_arg_fixnum unless @foreign_method_names && @outside_tokens
+
+    sites, poisoned = entry_arg_call_index
+    cand = {}
+    @registry.each do |name, defs|
+      next unless defs.size == 1                       # rule 1
+      next if @foreign_method_names.include?(name)     # rule 2
+      next if @outside_tokens.include?(name)           # rule 3
+      next unless name =~ /\A[A-Za-z_]/                # rule 4
+      next if name == 'initialize'                     # rule 5
+      next if poisoned.include?(name)                  # rule 7
+
+      d = defs.first
+      next unless d.irep
+
+      irep = @ireps[d.irep]
+      next unless irep && pure_mandatory_arity?(irep)  # rule 6
+
+      mand = mandatory_arity(irep)
+      next if mand.zero?
+
+      here = sites[name]
+      next if here.empty?                              # rule 8
+      next unless here.all? { |(_ir, _i, _a, argc, _own)| argc == mand }
+
+      (1..mand).each { |k| cand[[d.irep, k]] = [here, k] }
+    end
+
+    @entry_arg_fixnum = Set.new(cand.keys)
+    loop do
+      dropped = cand.keys.select do |key|
+        @entry_arg_fixnum.include?(key) && !entry_arg_sites_proven?(*cand[key])
+      end
+      break if dropped.empty?
+
+      dropped.each { |key| @entry_arg_fixnum.delete(key) }
+    end
+    @entry_arg_fixnum
+  end
+
+  # Admission rule 9: argument k of EVERY enumerated call site proves. For a
+  # call whose receiver is R[a], argument k is R[a+k] -- ops.h's own OP_SEND
+  # `regs[a+1]..regs[a+n]`, confirmed against real `mrbc -v` output.
+  def entry_arg_sites_proven?(sites, k)
+    sites.all? do |(irep, idx, recv, _argc, owner)|
+      proven_fixnum_operand?(irep, idx, (recv + k).to_s, owner)
+    end
+  end
+
+  # ENTRY_ARG_CALLSITE_PROOF's own result, for the whole-program diagnostic.
+  def entry_arg_fixnum_facts
+    @entry_arg_fixnum || Set.new
   end
 
   # ---------------------------------------------------------------------------
@@ -18004,15 +18499,40 @@ if $PROGRAM_NAME == __FILE__
   # (nil, never an empty set, which compute_fixnum_return_names reads as "the
   # scan never ran" and proves nothing at all) rather than run half-informed.
   foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
+  # ENTRY_ARG_CALLSITE_PROOF: the same two out-of-closed-world inputs again,
+  # scanned for EVERY identifier token rather than only for method-defining
+  # forms -- see outside_world_tokens for why that mechanism needs the
+  # broader question ("can anything out there CALL this name") answered, and
+  # why nil rather than an empty Set when either input is absent.
+  outside_tokens =
+    if native_paths && foreign_ruby_srcs
+      outside_world_tokens(native_paths + foreign_ruby_srcs)
+    end
   warn ''
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
-                    integer_constants, foreign_methods)
+                    integer_constants, foreign_methods, outside_tokens)
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
   else
     gen.fixnum_return_names.sort.each { |n| warn "  RET #{n}" }
+  end
+  warn ''
+  # ENTRY_ARG_CALLSITE_PROOF: one line per proven (method, argument
+  # position), spelled by real owner/name rather than by irep label so the
+  # coverage report and a human reading this diagnostic see the same thing.
+  warn '== entry arguments proven Fixnum by call-site enumeration (ENTRY_ARG_CALLSITE_PROOF) =='
+  entry_arg_facts = gen.entry_arg_fixnum_facts
+  if entry_arg_facts.empty?
+    warn '  (none)'
+  else
+    owner_by_irep = {}
+    registry.each_value { |defs| defs.each { |d| owner_by_irep[d.irep] = d if d.irep } }
+    entry_arg_facts.map do |(label, k)|
+      d = owner_by_irep[label]
+      d ? "  ARG #{d.owner}##{d.name} arg#{k}" : "  ARG <irep #{label}> arg#{k}"
+    end.sort.each { |l| warn l }
   end
   warn ''
   # ONLY_OWNERS narrows *emitted* code to specific classes (comma-separated,
