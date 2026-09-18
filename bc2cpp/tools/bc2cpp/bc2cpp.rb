@@ -11109,6 +11109,19 @@ class CodeGen
   #     the full containment argument and `fixnum_proof_edge_sources` for the
   #     branch-edge map it needs (complete by construction -- exactly the five
   #     `JMP*` opcodes ops.h defines, re-verified against it).
+  #
+  #     JOIN_REACHING_DEFS: that dominance test asks about exactly ONE write,
+  #     so it necessarily refuses a JOIN -- `x = cond ? 5 : 7`, or an `if`
+  #     that assigns `x` in both arms -- where no single write dominates the
+  #     use even though every write reaching it is a literal. A failed
+  #     dominance test therefore no longer ends the proof: it hands over to
+  #     `fixnum_proof_reaching_defs?`, a real multi-path reaching-definitions
+  #     walk that demands EVERY definition reaching the use prove
+  #     independently. See that method for the worklist, the predecessor map
+  #     (`fixnum_proof_preds`, whose fall-through direction is deliberately
+  #     over-approximated) and why re-reaching a state across a loop back-edge
+  #     is memoization rather than an optimistic assumption. Measured yield:
+  #     14904 -> 14860 real shipped `mrb_funcall` call sites.
   #   - an exception handler. Every real catch handler (`Irep#catch_handlers`,
   #     mrbc's own "catch type: rescue begin: ... end: ... target: ..." header)
   #     contributes its `target` to the entry set -- that address is reached by
@@ -11357,6 +11370,15 @@ class CodeGen
     cur = reg.to_s
     return false if ctx[:upvars].include?(cur)
 
+    # JOIN_REACHING_DEFS: the instruction index at which `cur` is actually
+    # READ. It starts at the use itself and moves back to each `MOVE` the
+    # chain crosses, because a `MOVE Ra Rb` reads `Rb` at ITS OWN address, not
+    # at the original use -- so "what reaches `cur`" has to be asked at `MOVE`,
+    # not at `idx`. The single-path walk below never needed this distinction
+    # (it only ever looks at instructions it has already scanned past), but the
+    # multi-path walk does: starting it at `idx` would ask about a register
+    # that later code is free to overwrite.
+    need_idx = idx
     j = idx
     while j >= 0
       insn = irep.instructions[j]
@@ -11379,13 +11401,20 @@ class CodeGen
           return false if ctx[:upvars].include?(src)
 
           cur = src
+          need_idx = j
         else
           # REGION_DOMINANCE: `j` is the write this use depends on, so the
           # region is finally known -- check that control cannot enter it
           # anywhere but at `j` itself before trusting the write.
-          return false unless fixnum_proof_region_ok?(irep, ctx, j, idx)
+          if fixnum_proof_region_ok?(irep, ctx, j, idx)
+            return fixnum_proof_source?(irep, j, insn, cur, owner_def, depth)
+          end
 
-          return fixnum_proof_source?(irep, j, insn, cur, owner_def, depth)
+          # JOIN_REACHING_DEFS: `j` does NOT dominate the use -- some path
+          # reaches the use without executing it. That is not "unprovable",
+          # only "one write is not the whole story": ask the real multi-path
+          # question instead, and demand every reaching definition prove.
+          return fixnum_proof_reaching_defs?(irep, ctx, need_idx, cur, owner_def, depth)
         end
       end
 
@@ -11398,9 +11427,174 @@ class CodeGen
     # the method preamble's own write dominates by construction, but a
     # back-edge from BELOW the use would still let later code clobber the
     # register and loop back, so the same containment test still has to run.
-    return false unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
+    unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
+      return fixnum_proof_reaching_defs?(irep, ctx, need_idx, cur, owner_def, depth)
+    end
 
     fixnum_proof_entry_arg?(irep, cur, owner_def)
+  end
+
+  # JOIN_REACHING_DEFS -------------------------------------------------------
+  # How many distinct (instruction index, register) states the multi-path walk
+  # may expand before giving up. A refusal on exhaustion is always safe (it is
+  # just a missed proof), and the bound keeps a pathological irep from turning
+  # this linear codegen pass superlinear.
+  FIXNUM_PROOF_REACHING_MAX_STATES = 400
+
+  # Intra-frame predecessor map: instruction INDEX -> the set of indices control
+  # can arrive from, with the sentinel -1 meaning "method entry". Memoized per
+  # irep alongside fixnum_proof_ctx's own facts.
+  #
+  # Soundness direction matters and is the whole reason this is built the way it
+  # is: an EXTRA predecessor only ever costs a missed proof, a MISSING one is a
+  # wrong answer. So fall-through is assumed for every opcode except the handful
+  # verified against 3rd/mruby's own ops.h/vm.c to never fall through at all
+  # (`JMP`/`JMPUW` -- unconditional `pc` moves; `RETURN`/`RETURN_BLK`/`RETSELF`/
+  # `RETNIL`/`RETTRUE`/`RETFALSE`/`BREAK`/`STOP` -- all leave the frame), and the
+  # branch edges are exactly the five `JMP*` opcodes fixnum_proof_edge_sources
+  # already enumerates against that same header. A jump whose target address has
+  # no instruction at all returns nil for the WHOLE map, which makes every query
+  # refuse -- an unmodelled edge must never silently look like "no edge".
+  FIXNUM_PROOF_NO_FALLTHROUGH_OPS = Set[
+    'JMP', 'JMPUW',
+    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'
+  ].freeze
+
+  def fixnum_proof_preds(irep)
+    @fixnum_proof_preds ||= {}
+    return @fixnum_proof_preds[irep.label] if @fixnum_proof_preds.key?(irep.label)
+
+    @fixnum_proof_preds[irep.label] = build_fixnum_proof_preds(irep)
+  end
+
+  def build_fixnum_proof_preds(irep)
+    insns = irep.instructions
+    addr_to_idx = {}
+    insns.each_with_index { |ins, k| addr_to_idx[ins.addr] = k }
+    preds = Hash.new { |h, k| h[k] = Set.new }
+    preds[0] << -1
+    insns.each_with_index do |ins, k|
+      unless FIXNUM_PROOF_NO_FALLTHROUGH_OPS.include?(ins.op)
+        preds[k + 1] << k if k + 1 < insns.size
+      end
+      t =
+        case ins.op
+        when 'JMP', 'JMPUW' then ins.args.strip[/\d+/].to_i
+        when 'JMPIF', 'JMPNOT', 'JMPNIL' then jmp_target_after_reg(ins.args)
+        end
+      next if t.nil?
+
+      ti = addr_to_idx[t]
+      return nil if ti.nil?
+
+      preds[ti] << k
+    end
+    preds
+  end
+
+  # JOIN_REACHING_DEFS: does EVERY definition of `reg` that reaches the read at
+  # instruction index `need_idx` prove Fixnum?
+  #
+  # This is the real answer to the question REGION_DOMINANCE can only ask in its
+  # single-write form. The dominance test accepts exactly one reaching write and
+  # demands it dominate; the overwhelmingly common real shape it therefore
+  # refuses is a JOIN -- `x = cond ? 5 : 7`, or an `if`/`else` that assigns `x`
+  # in both arms -- where no single write dominates but every one of them is a
+  # literal. Verified against real mrbc disassembly (`mrbc -v`) of exactly those
+  # shapes: `x = c ? 5 : 7; x + 1` compiles to
+  #
+  #     007 JMPNOT  R4  016
+  #     011 LOADI_5 R4  (5)
+  #     013 JMP     018
+  #     016 LOADI_7 R4  (7)
+  #     018 MOVE    R3  R4        <- the join
+  #
+  # -- two literal writes, neither dominating the use, both trivially Fixnum.
+  #
+  # The walk is a plain backward worklist over (instruction index, register)
+  # states, where a state (i, r) means "the value of `r` flowing INTO
+  # instruction i must be Fixnum". For each predecessor p of i: if p writes r,
+  # p is a reaching definition -- a `MOVE` continues the walk at (p, source
+  # register), anything else must satisfy the same `fixnum_proof_source?` the
+  # single-path walk uses; if p does not write r, the question simply moves back
+  # to (p, r). Reaching the method-entry sentinel falls back to the same
+  # entry-argument test.
+  #
+  # Termination and soundness both come from `seen`: every state is expanded at
+  # most once, and expansion never stops early on a positive -- the walk only
+  # ever returns true after the worklist is EMPTY, i.e. after every state
+  # reachable backward from the use has been expanded and every terminal
+  # definition among them has been checked. Re-reaching an already-seen state
+  # (which is exactly what a loop back-edge does) is therefore memoization, not
+  # an optimistic assumption: that state's own definitions are checked by the
+  # expansion that first queued it.
+  #
+  # Every barrier the single-path walk honours is honoured here identically, and
+  # for the same reasons: an address inside a catch handler's protected range
+  # refuses (RESCUE_SUPPORT extracts that range into a separate function with
+  # re-initialized registers), a catch-handler target refuses (it is reached by
+  # a raise, which has no source instruction any predecessor map can contain),
+  # an opcode outside FIXNUM_PROOF_STEP_OVER_OPS refuses (it may write `r` from
+  # an operand position this scan does not read), and a register any `SETUPVAR`
+  # in the child-irep subtree writes refuses (a nested block can store to it
+  # from outside this instruction list entirely).
+  def fixnum_proof_reaching_defs?(irep, ctx, need_idx, reg, owner_def, depth)
+    return false if depth > FIXNUM_PROOF_MAX_DEPTH
+
+    preds = fixnum_proof_preds(irep)
+    return false if preds.nil?
+
+    seen = Set.new
+    work = [[need_idx, reg.to_s]]
+    until work.empty?
+      state = work.pop
+      next if seen.include?(state)
+
+      seen << state
+      return false if seen.size > FIXNUM_PROOF_REACHING_MAX_STATES
+
+      i, r = state
+      return false if ctx[:upvars].include?(r)
+
+      here = irep.instructions[i]
+      return false unless here
+      return false if ctx[:catch_targets].include?(here.addr)
+      return false if ctx[:protected].include?(here.addr)
+
+      ps = preds[i]
+      return false if ps.nil? || ps.empty?
+
+      ps.each do |p|
+        if p < 0
+          # Method entry: `r` still holds whatever compile_method's preamble
+          # put there, so the ordinary entry-argument proof is the answer.
+          return false unless fixnum_proof_entry_arg?(irep, r, owner_def)
+
+          next
+        end
+
+        insn = irep.instructions[p]
+        return false unless insn
+        return false if ctx[:protected].include?(insn.addr)
+        return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
+
+        if insn.args =~ /\AR#{r}\b/
+          if insn.op == 'MOVE'
+            src = insn.args.scan(/R(\d+)/).flatten[1]
+            return false unless src
+            return false if ctx[:upvars].include?(src)
+
+            work << [p, src]
+          else
+            return false unless fixnum_proof_source?(irep, p, insn, r, owner_def, depth)
+          end
+        else
+          work << [p, r]
+        end
+      end
+    end
+
+    true
   end
 
   # Classify the one instruction the backward scan found writing `reg` -- the
