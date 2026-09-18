@@ -5684,6 +5684,34 @@ SUPER_TARGETS = Set[
   'RPG2k3::Scene::Battle#prev_commandable_actor_index',
   'RPG2k::Scene::Map#initialize',
   'RPG2k::Scene::SaveLoad#initialize',
+
+  # tools/optcarrot_probe's own standalone closed world (see its README.md;
+  # never mixed with this project's own registry above -- these owner/name
+  # strings only ever match something when bc2cpp.rb is invoked against
+  # that separate program, so they are inert for every real gem build).
+  # `Optcarrot::APU::{Pulse,Triangle,Noise}#reset`/`#active?` are bare
+  # `super` with zero explicit args in the calling method -- confirmed via
+  # the real disassembly (`SUPER R2 n=0`/`SUPER R2 n=0`, not assumed from
+  # source text), the exact already-supported RPG2k3::Scene::Battle shape
+  # above, into `Optcarrot::APU::Oscillator#reset`/`#active?`, which
+  # already compiles clean (docs/optcarrot_bc2cpp_coverage.txt). Checked,
+  # not assumed: grepped every real `.reset`/`.active?` call site across
+  # the whole closed world (3rd/optcarrot/lib) -- none pass a block
+  # literal; and the whole closed world has exactly two real `include`s
+  # (`include CodeOptimizationHelper` in `CPU::OptimizedCodeBuilder`/
+  # `PPU::OptimizedCodeBuilder`, unrelated to APU entirely), none between
+  # Pulse/Triangle/Noise and Oscillator. `#initialize`/`#poke_0`/`#poke_3`
+  # deliberately NOT added here: their own bare `super` disassembles to
+  # `SUPER Ra n=*` (a zsuper forwarding multiple explicit params via an
+  # ARGARY-built array, not this opcode case's own `n=N` fixed-count
+  # parse), a real, different, unimplemented shape -- not a fact this
+  # allowlist gates at all, so no amount of call-site/include auditing
+  # makes them safe to add until that shape has real codegen support.
+  'Optcarrot::APU::Pulse#reset',
+  'Optcarrot::APU::Pulse#active?',
+  'Optcarrot::APU::Triangle#reset',
+  'Optcarrot::APU::Triangle#active?',
+  'Optcarrot::APU::Noise#reset',
 ].freeze
 
 # Call-site-specific devirtualization: unlike monomorphic_target (a name
@@ -15484,6 +15512,21 @@ class CodeGen
       else
         "  #error SYMBOL references a non-string pool entry (#{sentry[:type]}) -- not in this prototype's supported subset\n"
       end
+    when 'INTERN'
+      # "INTERN R<a>" -- OP_INTERN's own real body (src/vm.c): `mrb_ensure_
+      # string_type(mrb, regs[a]); mrb_sym sym = mrb_intern_str(mrb, regs[a]);
+      # regs[a] = mrb_symbol_value(sym);` -- an in-place String->Symbol
+      # conversion (mrbc's own codegen: `:"#{expr}"`/`expr.to_sym`-shaped
+      # dynamic symbol construction, confirmed against src/codedump.c's own
+      # disassembler, `CASE(OP_INTERN, B): fprintf(out, "INTERN\tR%d\t", a)`
+      # -- a single register operand, read AND written, unlike STRING/SYMBOL
+      # above which only ever write their own `d`). Always safe regardless
+      # of program shape or receiver class -- a pure runtime conversion, no
+      # whole-program fact to verify (unlike SUPER_TARGETS' own gated
+      # cases) -- so this is unconditional, the same way STRCAT immediately
+      # above is.
+      d = a[/^R(\d+)/, 1]
+      "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  r#{d} = mrb_symbol_value(mrb_intern_str(M, r#{d}));\n"
     when 'STRCAT'
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).

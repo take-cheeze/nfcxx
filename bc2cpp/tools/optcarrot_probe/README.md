@@ -90,55 +90,102 @@ this probe doesn't enable and a bc2cpp target wouldn't need either.
 
 ## bc2cpp coverage
 
-`bc2cpp_probe.rb` runs `tools/bc2cpp/bc2cpp.rb` against optcarrot's own real
-source (`3rd/optcarrot/lib`, unmodified) as its own standalone closed
-world -- entirely separate from bc2cpp's real registry (the RPG engine's own
-3 compiled gems), same NATIVE_SRCS/FOREIGN_RUBY_SRCS inputs
+`bc2cpp_probe.rb`/`optcarrot_bc2cpp_coverage_report.rb` run
+`tools/bc2cpp/bc2cpp.rb` against optcarrot's own real source
+(`3rd/optcarrot/lib`, unmodified) as its own standalone closed world --
+entirely separate from bc2cpp's real registry (the RPG engine's own 3
+compiled gems), same NATIVE_SRCS/FOREIGN_RUBY_SRCS inputs
 `scripts/bc2cpp_coverage_report.rb` feeds the real one, and the same
 method-level attempted/compiled-clean/`#error`-reason parsing logic reused
-directly from that script.
+directly from that script. The full report lives at
+`docs/optcarrot_bc2cpp_coverage.txt`, the same convention
+`docs/bc2cpp_coverage.txt` sets for the real project -- regenerate it after
+any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
+tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
-**Result, with zero bc2cpp code changes: 353/383 methods (92.2%) compile
-clean.** Both of the actual hot-path entry points compile clean with real
-devirtualization already firing -- `CPU#run` (the fetch/dispatch loop) gets
-a direct C++ call for `do_clock`, proven monomorphic program-wide
-(`LEXICAL_SELF`); `PPU#run` (the pixel-rendering loop, itself built on a
-`Fiber` internally) correctly falls back to real dynamic dispatch only where
-the receiver's class genuinely isn't known (`POLY :loglevel`) and to a
-wrapped-cfunc block fallback for its one `Fiber.new { ... }` block.
+**Result: 362/383 methods (94.5%) compile clean**, up from an initial
+92.2% baseline (measured with zero bc2cpp code changes) after two real
+`tools/bc2cpp/bc2cpp.rb` fixes landed alongside this probe (both verified
+inert for the real project -- see below):
 
-The remaining 30 errored methods, by `#error` reason:
+1. **`SUPER_TARGETS` gained 5 entries**: `Optcarrot::APU::{Pulse,Triangle,
+   Noise}#reset`/`#active?`. Their bare `super` disassembles to `SUPER R2
+   n=0` -- the exact already-supported shape this allowlist already covers
+   for the real project's own `RPG2k3::Scene::Battle` methods -- into
+   `Optcarrot::APU::Oscillator#reset`/`#active?`, which already compiled
+   clean. Added only after the same due-diligence the existing entries
+   document: grepped every real `.reset`/`.active?` call site in
+   `3rd/optcarrot/lib` (none pass a block literal) and every real
+   `include`/`prepend` in the whole closed world (2 total, both
+   `include CodeOptimizationHelper`, unrelated to APU). `#initialize`/
+   `#poke_0`/`#poke_3` deliberately NOT added: their own bare `super`
+   disassembles to `SUPER Ra n=*` (a zsuper forwarding multiple explicit
+   params via an ARGARY-built array) -- a real, different, still-
+   unimplemented opcode shape, not a fact this allowlist gates at all.
+2. **A new `INTERN` opcode case**, unconditional (unlike `SUPER_TARGETS`,
+   no whole-program fact to verify -- `OP_INTERN` is a pure, always-safe
+   in-place String->Symbol conversion, `src/vm.c`'s own `mrb_ensure_
+   string_type` + `mrb_intern_str`). optcarrot's `opt.rb` builds symbols
+   dynamically (`:"#{...}"`-shaped); this is a genuine new bc2cpp
+   capability, not optcarrot-specific, so it's unconditional the same way
+   the pre-existing `STRCAT` case is.
+
+Both hot-path entry points compile clean with real devirtualization already
+firing -- `CPU#run` (the fetch/dispatch loop) gets a direct C++ call for
+`do_clock`, proven monomorphic program-wide (`LEXICAL_SELF`); `PPU#run`
+(the pixel-rendering loop, itself built on a `Fiber` internally) correctly
+falls back to real dynamic dispatch only where the receiver's class
+genuinely isn't known (`POLY :loglevel`) and to a wrapped-cfunc block
+fallback for its one `Fiber.new { ... }` block.
+
+The remaining 21 errored methods, by `#error` reason
+(`docs/optcarrot_bc2cpp_coverage.txt` has the full, current breakdown):
 
 ```
-    15  unhandled opcode BLOCK
-    15  unhandled opcode SENDB
-    12  unhandled opcode SUPER
+    12  unhandled opcode BLOCK
+    12  unhandled opcode SENDB
      7  unhandled opcode ARGARY
+     7  unhandled opcode SUPER
      4  SEND/SSEND has a splat and/or keyword argument list (n=...)
-     2  unhandled opcode INTERN
      1  unhandled opcode EXCEPT
-    56  total (a method can carry more than one #error)
+    43  total (a method can carry more than one #error)
 ```
 
-(counts sum to more than 30 because one method can hit more than one
-unsupported construct). Mostly concentrated in two places, neither on the
-hot path: the `--opt` runtime-codegen machinery itself
+Mostly concentrated in the `--opt` runtime-codegen machinery itself
 (`CodeOptimizationHelper`/`OptimizedCodeBuilder` -- string-building,
 `gsub`/regex-heavy methods that were never going to be AOT-compilable
-candidates, `--opt` being metaprogrammed source generation by design), and
-the APU channel classes' (`Noise`/`Pulse`/`Triangle`) `#initialize`/`#reset`
-calling `super` into a shared `Oscillator` base -- `SUPER` is a real,
-scoped, well-understood bc2cpp gap (`docs/bc2cpp_coverage.txt`'s own
-`#error` breakdown for the real project shows the same 5 unhandled `SUPER`
-cases), not something optcarrot-specific.
+candidates, `--opt` being metaprogrammed source generation by design). The
+remaining `SUPER` count is exactly the `SUPER Ra n=*` zsuper-with-multiple-
+params shape described above (`#initialize`/`#poke_0`/`#poke_3`), tied to
+the `ARGARY` count -- a real, scoped, larger codegen feature, not attempted
+here. `docs/bc2cpp_coverage.txt`'s own `#error` breakdown for the real
+project shows the same `BLOCK`/`SENDB`/`SUPER` opcode gaps, so none of
+these are optcarrot-specific.
 
-Not yet attempted: actually adding bc2cpp support for any of these opcodes,
-or checking whether the 353 "compiled clean" methods produce *correct*
-output (this only confirms bc2cpp's own compiler accepted them without a
-`#error`, the same bar `docs/bc2cpp_coverage.txt`'s own numbers measure for
-the real project -- not that the generated C++ was run and its output
-checked against CRuby/mruby's own, the way the headless-benchmark checksum
-above verifies the *interpreted* path).
+**Verifying "no regression to the real project"**: both fixes above touch
+shared code (`tools/bc2cpp/bc2cpp.rb`), so before landing either, this
+probe's own `mrbc` (imperfect -- missing several of `3rd/mruby`'s other
+real patches, see `mruby_build_config.rb`) was used to run
+`scripts/bc2cpp_coverage_report.rb` against the *real* project's closed
+world twice with the *same* binary -- once with the bc2cpp.rb change, once
+without (`git stash` on just that file) -- and the raw output diffed
+directly. `SUPER_TARGETS`' new entries are exclusively `Optcarrot::...`-
+namespaced, so this diff is byte-identical by construction; `INTERN`'s new
+support diffed identical too (the real project's own code doesn't
+currently build any symbol dynamically). This sidesteps needing this
+sandbox to reproduce the real project's exact pinned toolchain (its own
+`gperf`/`bison` versions) just to regenerate `docs/bc2cpp_coverage.txt`
+for comparison -- which was tried first and produces spurious diffs
+(different `mrbc` binary, not a real behavior change) rather than genuinely
+mismatching output.
+
+Not yet attempted: checking whether the 362 "compiled clean" methods
+produce *correct* output (this only confirms bc2cpp's own compiler accepted
+them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
+numbers measure for the real project -- not that the generated C++ was run
+and its output checked against CRuby/mruby's own, the way the
+headless-benchmark checksum above verifies the *interpreted* path), or
+adding support for `BLOCK`/`SENDB`/`ARGARY`/splat-kwarg `SEND`/`EXCEPT`.
 
 ## Files
 
