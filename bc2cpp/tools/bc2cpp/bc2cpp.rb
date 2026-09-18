@@ -5672,22 +5672,92 @@ NATIVE_ARG_TARGETS = Set[
 #   directly against the real generated output rather than assumed from
 #   the pre-existing comment.
 #
+#   THIS IS NOW RESOLVED and the entry has landed below. The blocker above
+#   was never about `super` at all -- it was the TARGET's own four Ruby
+#   blocks, and BLOCK_CFUNC_FALLBACK_SUPPORT (the report's own
+#   `BLOCK_FALLBACK` line) has since compiled exactly those. Re-measured
+#   against a fresh whole-program regen rather than trusted from the
+#   paragraph above: `RPG2k::Scene::Battle#finish_round_animation` now
+#   compiles with ZERO `#error` markers of any kind, so the
+#   `compiles_clean?(target_def.irep)` gate that made this entry inert
+#   now passes and the direct `_impl` call is really emitted. Both of the
+#   two genuine soundness facts this table exists to carry were re-checked
+#   fresh for this entry, not inherited from the 6 sibling `RPG2k3::
+#   Scene::Battle` entries that already share its owner and superclass:
+#
+#     * Block forwarding: grepped every real call site of
+#       `finish_round_animation` across the entire repo (not just the
+#       closed world) -- `mruby-rpg2k/mrblib/scene/battle.rb:2607` (a bare
+#       self-call) and four `scripts/rpg2k_scene_check.rb` `.send(:finish_
+#       round_animation)` probes. None passes a block literal, so the
+#       block register OP_SUPER unconditionally forwards (`blk =
+#       ensure_block(mrb, regs[bidx])`, vm.c's own L_SENDB_SYM -- OP_SUPER
+#       is deliberately NOT in the `SET_NIL_VALUE(regs[new_bidx])` list
+#       that OP_SEND/OP_SEND0/OP_SSEND/OP_SSEND0 are) is always nil here,
+#       exactly what a compiled `_impl` with no block parameter models.
+#     * No `include`/`prepend` between `RPG2k3::Scene::Battle` and
+#       `RPG2k::Scene::Battle`. Re-grepped fresh: the whole closed world
+#       still has exactly 3 real `include`s (`Game::Party` at mruby-rpg2k/
+#       mrblib/game.rb:3848 and `LCF::Array1D` at mruby-lcf/mrblib/
+#       lcf.rb:723 each `include Enumerable`, plus `class Object; include
+#       RGSS; end` at mruby-rpg2k/mrblib/main.rb:2), none of them between
+#       these two classes. This matters because OP_SUPER resolves through
+#       `CI_TARGET_CLASS(ci - 1)->super` -- the real C `->super` link,
+#       which threads through an ICLASS per included module -- so a
+#       same-named module override really would win over the registered
+#       Ruby superclass, and "jump straight to `@superclass_of`" really
+#       would skip it.
+#
+#   Real disassembly, confirmed rather than inferred from the source text:
+#   `SUPER R4 n=0` (mruby-rpg2k/mrblib/scene/battle_rpg2k3.rb:244), the
+#   zero-explicit-arg second shape -- a bare `super` inside a
+#   zero-parameter method, so mrbc's own codegen_zsuper emits no ARGARY
+#   and no `n=*` splat at all, and the existing `n=(\d+)` codegen path
+#   below handles it unchanged. No new codegen was needed for this entry:
+#   it is purely an allowlist addition.
+#
 # - `LCF::Sections#method_missing`, `LCF::Sections#respond_to_missing?`,
 #   `LCF::Array1D#respond_to_missing?`, `LCF::File#respond_to_missing?`
 #   (all plain `class ... ; ... end`, implicit `Object` superclass) each
 #   call `super`/`|| super` reaching `Object#method_missing`/`Object#
-#   respond_to_missing?` -- both are native (C, `mrb_kernel_method_
-#   missing`/`mrb_obj_respond_to_missing` in mruby core), never Ruby-
-#   bytecode-defined anywhere in the whole closed world (grepped; no
-#   `def method_missing`/`def respond_to_missing?` under `Object`/
-#   `Kernel` exists at all). `@registry['method_missing'|
-#   'respond_to_missing?'].find { |d| d.owner == 'Object' }` can never
-#   find a MethodDef for a method nothing here ever defines in bytecode,
-#   so `super_target` returns nil regardless of an allowlist entry --
-#   exactly the same already-excluded shape this comment's own first
-#   paragraph names for `RGSS::Bitmap::LoadError#initialize` (super into
-#   a native, non-bytecode superclass method is never a target here, full
-#   stop, allowlisted or not).
+#   respond_to_missing?` -- both are native, never Ruby-bytecode-defined
+#   anywhere in the whole closed world. Re-confirmed against the real
+#   mruby tree rather than from memory: `Object#method_missing` is the C
+#   `mrb_obj_missing` (3rd/mruby/src/class.c's own MRB_MT_ENTRY table) and
+#   `Object#respond_to_missing?` is literally the C `mrb_false`
+#   (3rd/mruby/src/kernel.c's own MRB_MT_ENTRY table); neither has any
+#   mrblib Ruby definition in mruby at all, and no `def method_missing`/
+#   `def respond_to_missing?` under `Object`/`Kernel` exists anywhere in
+#   this project either (every real hit is one of these subclasses' own
+#   overrides). `@registry['method_missing'|'respond_to_missing?'].find
+#   { |d| d.owner == 'Object' }` can never find a MethodDef for a method
+#   nothing here ever defines in bytecode, so `super_target` returns nil
+#   regardless of an allowlist entry -- exactly the same already-excluded
+#   shape this comment's own first paragraph names for `RGSS::Bitmap::
+#   LoadError#initialize` (super into a native, non-bytecode superclass
+#   method is never a target here, full stop, allowlisted or not). These
+#   4 are a structural exclusion, not a deferred one: no amount of
+#   ancestor-chain work makes a C function into a callable `_impl`.
+#
+#   Two further independent reasons these 4 stay out, each real:
+#   (a) their `super` is the OTHER mrbc shape entirely -- real
+#   disassembly is `ARGARY R5 <spec>` + `SUPER R4 n=*`, i.e. a bare
+#   `super` inside a method that HAS parameters, so codegen_zsuper
+#   rebuilds the original argument list into an array and passes
+#   `n=CALL_MAXARGS`. The `n=(\d+)` parse below does not match `n=*` at
+#   all, so this splat shape is outside the supported subset on its own
+#   terms, independent of the target. (b) all 4 additionally carry their
+#   own `#error unhandled opcode ARGARY` (exactly the 4 ARGARY markers in
+#   docs/bc2cpp_coverage.txt), so each would stay on the interpreter even
+#   if SUPER alone were somehow satisfied.
+#
+#   `LCF::Array1D` is also the live illustration of the module hazard the
+#   paragraph above guards against: it really does `include Enumerable`
+#   (mruby-lcf/mrblib/lcf.rb:723), so its true C ancestor chain is
+#   `Array1D -> ICLASS(Enumerable) -> Object`, and a naive "jump straight
+#   to the registered superclass" would silently skip Enumerable. Moot
+#   here only because the eventual target is native regardless -- but it
+#   is why that check stays mandatory per entry rather than assumed.
 SUPER_TARGETS = Set[
   'RPG2k::Scene::Battle#initialize',
   'RPG2k::Scene::DebugMenu#initialize',
@@ -5709,6 +5779,7 @@ SUPER_TARGETS = Set[
   'RPG2k3::Scene::Battle#prev_commandable_actor_index',
   'RPG2k::Scene::Map#initialize',
   'RPG2k::Scene::SaveLoad#initialize',
+  'RPG2k3::Scene::Battle#finish_round_animation',
 
   # tools/optcarrot_probe's own standalone closed world (see its README.md;
   # never mixed with this project's own registry above -- these owner/name
