@@ -16805,7 +16805,12 @@ class CodeGen
   def runtime_def_devirt_audit(code)
     return '' unless @runtime_installed_names
 
-    offenders = code.scan(%r{^\s*// ([A-Z][A-Z_0-9]*) :(\S+?)(?:\s|,|$)}).reject do |kind, _name|
+    # `/` is part of the kind, not a separator: one real marker spells itself
+    # `IVAR_ACCESSOR/ELEMENT`, and a kind pattern that stopped at the slash
+    # would simply fail to match that whole line -- i.e. silently skip
+    # auditing it. A compound kind is not in RUNTIME_DEF_DYNAMIC_MARKERS, so
+    # it lands on the audited side, which is the correct default.
+    offenders = code.scan(%r{^\s*// ([A-Z][A-Z_0-9/]*) :(\S+?)(?:\s|,|$)}).reject do |kind, _name|
       RUNTIME_DEF_DYNAMIC_MARKERS.include?(kind)
     end.select { |_kind, name| devirt_blocked_name?(name) }
     return '' if offenders.empty?
