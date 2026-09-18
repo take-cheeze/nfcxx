@@ -7010,13 +7010,34 @@ end
 # are safe to let through here -- see compile_insn's own RETURN_BLK/BREAK
 # cases for the (identical, ordinary-`return`) translation this licenses.
 #
-# GETUPVAR/SETUPVAR (no captured-REnv support), a nested LAMBDA/BLOCK/
-# SENDB/SSENDB (no recursive fallback support this round), and
-# RESCUE/RAISEIF/EXCEPT (no rescue-region support in this standalone
-# function) are still rejected, for the identical reasons block_fallback_
-# safe?'s own comment already gives for each.
+# A nested LAMBDA/BLOCK/SENDB/SSENDB (no recursive fallback support this
+# round) and RESCUE/RAISEIF/EXCEPT (no rescue-region support in this
+# standalone function) are still rejected, for the identical reasons
+# block_fallback_safe?'s own comment already gives for each.
+#
+# CONFINED_LAMBDA_UPVAR_SUPPORT: GETUPVAR/SETUPVAR used to be rejected here
+# too, and the reason was never "this file cannot compile them" -- the
+# BLOCK_FALLBACK half of this exact same machinery (emit_proc_fallback_fn /
+# emit_rproc_construction, shared verbatim) has captured upvar POINTERS
+# since UPVAR_CAPTURE_SUPPORT and deeper ones since DEEP_UPVAR_CAPTURE_
+# SUPPORT. The reason was an ESCAPE-lifetime one, and it is real: an upvar
+# is captured as `mrb_cptr_value(M, &r<b>)`, a raw pointer into the
+# ENCLOSING C++ function's own frame, so the proc must not outlive that
+# frame. A BLOCK_FALLBACK site proves that with BLOCK_FALLBACK_UPVAR_SAFE_
+# METHODS (the receiver invokes the block synchronously and never stores
+# it); a LAMBDA has no call site at all to make that argument about -- it
+# just BUILDS a value that may be returned, stored in an ivar, or handed to
+# anything.
+#
+# So the gate moved rather than disappeared: it now lives in
+# recognize_lambda_fallback_regions, as a real "does this particular proc
+# value provably never leave this frame?" proof over the ENCLOSING irep
+# (lambda_proc_frame_confined? below). A lambda with NO upvars at all is
+# completely unaffected and needs no such proof -- nothing is borrowed, so
+# nothing can dangle -- which is exactly the shape every already-shipping
+# LAMBDA_FALLBACK body has, so their generated C++ is unchanged.
 LAMBDA_FALLBACK_UNSAFE_OPS = %w[
-  GETUPVAR SETUPVAR LAMBDA BLOCK SENDB SSENDB
+  LAMBDA BLOCK SENDB SSENDB
   RESCUE RAISEIF EXCEPT
 ].freeze
 
@@ -10012,6 +10033,19 @@ class CodeGen
       block_fallback_pre << fn_code
       suppressed << region[:block_addr]
       glue_at[region[:block_addr]] = emit_lambda_fallback_glue(region, fn_name)
+      # CONFINED_LAMBDA_UPVAR_SUPPORT: claim this lambda's own proved
+      # `.call` sites too, replacing each one's dynamic dispatch with a
+      # direct call to the body just emitted -- see emit_lambda_confined_
+      # call_glue for the real (segfaulting) VM behavior that makes this
+      # mandatory rather than merely faster. Only ever non-empty for a
+      # site lambda_confined_call_sites actually proved; an escaping
+      # lambda claims nothing here and keeps today's codegen exactly.
+      region[:call_sites].each do |site|
+        next if suppressed.include?(site[:send_addr])
+
+        suppressed << site[:send_addr]
+        glue_at[site[:send_addr]] = emit_lambda_confined_call_glue(region, fn_name, site)
+      end
     end
 
     # JUMP_TARGET_GLUE_FIX: a real, caught bug -- `- suppressed` alone
@@ -15463,13 +15497,15 @@ class CodeGen
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
     arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
-    # UPVAR_CAPTURE_SUPPORT: `region[:upvars]` is only ever set by
-    # recognize_block_fallback_regions (recognize_lambda_fallback_regions
-    # never populates it -- LAMBDA_FALLBACK_UNSAFE_OPS still forbids
-    # GETUPVAR/SETUPVAR outright, see that constant's own comment for the
-    # real escape-safety reason a stored/escaping Proc can't reuse this
-    # mechanism), so `|| []` here is the plain "no upvars" case for both,
-    # not a defensive guess.
+    # UPVAR_CAPTURE_SUPPORT: `region[:upvars]` is set by
+    # recognize_block_fallback_regions and -- since CONFINED_LAMBDA_UPVAR_
+    # SUPPORT -- by recognize_lambda_fallback_regions too, for a LAMBDA
+    # whose own proc value was PROVED never to leave the frame it is built
+    # in (lambda_proc_frame_confined?; see LAMBDA_FALLBACK_UNSAFE_OPS' own
+    # comment for why that proof is what a lambda needs in place of a
+    # BLOCK_FALLBACK site's synchronous-dispatch allowlist). Either way the
+    # capture mechanism below is byte-for-byte the same one, so `|| []`
+    # here is still the plain "no upvars" case, not a defensive guess.
     # DEEP_UPVAR_CAPTURE_SUPPORT: each entry is a real `[level, index]`
     # pair now, never a bare index -- see upvar_var_name's own comment for
     # the real disassembly showing why the level has to be part of the
@@ -16013,7 +16049,14 @@ class CodeGen
   # register `a`; unlike a BLOCK/SENDB(SSENDB) pair there is no paired
   # call instruction to also recognize or suppress, and no `n`/receiver/
   # method-name to record -- the whole region is this one instruction.
-  def recognize_lambda_fallback_regions(irep)
+  #
+  # CONFINED_LAMBDA_UPVAR_SUPPORT: `available_upvars` is the same
+  # captured-pointer set recognize_block_fallback_regions takes, for the
+  # identical "can this level actually SUPPLY that pointer?" gate -- empty
+  # at ordinary method level (compile_method's own call), where there is no
+  # enclosing Ruby scope to forward anything from, so every level >= 1 need
+  # is correctly refused there.
+  def recognize_lambda_fallback_regions(irep, available_upvars: [])
     regions = []
     irep.instructions.each do |insn|
       next unless insn.op == 'LAMBDA'
@@ -16028,9 +16071,246 @@ class CodeGen
       lambda_irep = lambda_label && @ireps[lambda_label]
       next unless lambda_irep && lambda_fallback_safe?(lambda_irep)
 
-      regions << { block_addr: insn.addr, dest_reg: dest_reg, block_irep: lambda_irep, kind: 'lambda_fallback' }
+      # CONFINED_LAMBDA_UPVAR_SUPPORT: exactly the same two questions
+      # recognize_block_fallback_regions already asks of a block body --
+      # what does it need captured (`block_upvar_needs`, `nil` for a
+      # shape that isn't modelable at all), and can THIS level supply it
+      # -- followed by the one question that is genuinely different for a
+      # LAMBDA, because it has no call site to reason about: does the
+      # resulting proc value provably never escape this frame?
+      upvars = block_upvar_needs(lambda_irep)
+      next if upvars.nil?
+      next unless upvars.all? { |(l, x)| l.zero? || available_upvars.include?([l - 1, x]) }
+
+      call_sites = lambda_confined_call_sites(irep, insn, dest_reg.to_i, lambda_irep)
+      next if upvars.any? && call_sites.nil?
+
+      regions << { block_addr: insn.addr, dest_reg: dest_reg, block_irep: lambda_irep,
+                   kind: 'lambda_fallback', upvars: upvars, call_sites: call_sites || [] }
     end
     regions
+  end
+
+  # CONFINED_LAMBDA_UPVAR_SUPPORT: the whole safety argument for letting a
+  # LAMBDA body capture upvar POINTERS (`mrb_cptr_value(M, &r<b>)` into the
+  # enclosing C++ function's own frame -- see LAMBDA_FALLBACK_UNSAFE_OPS'
+  # own comment for why this is the one question a lambda cannot answer the
+  # way a BLOCK_FALLBACK call site answers it).
+  #
+  # Proves: the proc value this `LAMBDA R<d> I[n]` builds is CONFINED to the
+  # frame it is built in -- it is never returned, stored, or passed to
+  # anything, so nothing can still be holding it once this C++ function
+  # returns and `&r<b>` goes dead. Everything below is a real
+  # over-approximation: anything this cannot positively account for is
+  # declined, leaving today's honest `#error`.
+  #
+  # Real `mrbc -v` disassembly of the one shape this recognizes -- this
+  # program's own `RPG2k::Scene::Menu#draw_status_row`, `line = ->(n) { y +
+  # n * LINE_H }` then three `line.call(k)` (irep nregs=19 nlocals=9,
+  # `R6:line`):
+  #
+  #     531 013 LAMBDA  R6   I[0]
+  #     532 022 MOVE    R12  R6      ; R6:line
+  #     532 025 LOADI_0 R13  (0)
+  #     532 027 SEND    R12  :call   n=1
+  #     534 058 MOVE    R9   R6      ; R6:line
+  #     534 061 LOADI_1 R10  (1)
+  #     534 063 SEND    R9   :call   n=1
+  #     541 204 MOVE    R9   R6      ; R6:line
+  #     541 207 LOADI_2 R10  (2)
+  #     541 209 SEND    R9   :call   n=1
+  #
+  # Three separate gates, each load-bearing:
+  #
+  # (1) `d` is a NAMED LOCAL (`1 <= d < irep.nlocals`). This is what makes
+  #     the purely TEXTUAL scan below sound. mrbc's own register allocator
+  #     sets `s->nlocals = s->nregs = s->sp` at scope creation and only ever
+  #     `push_n_`/`pop_n_`es temporaries ABOVE that (3rd/mruby/mrbgems/
+  #     mruby-compiler/core/codegen.c; the peephole optimizer's own repeated
+  #     `data.a < s->nlocals` guards are the same boundary, respected from
+  #     the other side), so no opcode's IMPLICIT register window -- the
+  #     registers a counted opcode touches without the disassembly ever
+  #     printing them, `SEND Ra :m n=N` reading `Ra+1..Ra+N`, `ARRAY Ra n`
+  #     reading `Ra..Ra+n-1`, and so on -- can ever reach down into the
+  #     named-local region. Verified empirically as well as from the
+  #     allocator source: a whole-closed-world sweep (3944 ireps, 14595
+  #     implicit-window instructions across every mrblib source this build
+  #     compiles) found ZERO instructions whose implicit window dips below
+  #     its own irep's `nlocals`. So every reference to `R<d>` anywhere in
+  #     this irep is one the disassembly really prints, and finding them all
+  #     with `\bR<d>\b` really is finding all of them.
+  #
+  # (2) The enclosing irep contains no ARGARY and no BLKPUSH. These are the
+  #     only two opcodes in the whole VM that read a frame register WITHOUT
+  #     naming it and without going through a temporary window -- both index
+  #     the raw parameter slots (3rd/mruby/src/vm.c: `CASE(OP_ARGARY)`'s
+  #     `stack[m1+r+m2]`, `CASE(OP_BLKPUSH)`'s `regs[a] = stack[offset]`),
+  #     which ARE named locals and so are exactly the case gate (1) cannot
+  #     cover. A bare `super` (ARGARY) forwarding a parameter a lambda had
+  #     been assigned into, or a `yield` (BLKPUSH) of a block parameter
+  #     likewise reassigned, would both hand the proc straight out of the
+  #     frame. Checked directly rather than reasoned around.
+  #
+  # (3) Every OTHER textual occurrence of `R<d>` is a `MOVE R<t> R<d>` whose
+  #     copy is consumed, on a straight-line stretch, as the RECEIVER of a
+  #     `:call` SEND -- and nothing else. `Proc#call` is mruby's own static
+  #     `call_proc` (3rd/mruby/src/proc.c's `mrb_init_proc`, a one-opcode
+  #     `OP_CALL` body): it invokes the proc synchronously and never retains
+  #     it, so passing the value there is not an escape. The SEND then
+  #     OVERWRITES `R<t>` with its own result, so the copy's lifetime ends
+  #     exactly there.
+  #
+  #     `R<t>` is a temporary (`t >= nlocals`), so gate (1)'s argument does
+  #     NOT apply to it and an intervening instruction's implicit window
+  #     really could cover it (`SSEND R9 :draw_system_text n=7` reads
+  #     R9..R16 -- which is precisely how `R12` at address 022 above would
+  #     escape into a call if the `.call` had not already consumed it).
+  #     That is why the instructions between the MOVE and the SEND are
+  #     checked against an explicit WHITELIST of opcodes that touch only the
+  #     registers they print, rather than merely scanned for the text
+  #     `R<t>`. Real argument setup for the shape this exists for is a
+  #     single literal load, so the whitelist is deliberately small: a
+  #     richer argument expression simply declines to today's `#error`.
+  LAMBDA_CONFINED_CALL_SETUP_OPS = %w[
+    LOADI LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6 LOADI_7
+    LOADI__1 LOADI8 LOADI16 LOADI32 LOADINEG LOADL LOADL16
+    LOADSYM LOADSYM16 LOADNIL LOADSELF LOADTRUE LOADFALSE
+    STRING STRING16 MOVE GETIV GETGV GETCV GETCONST GETMCNST GETUPVAR
+    ADDI SUBI
+  ].freeze
+
+  #
+  # Returns the real `.call` sites (each `{ send_addr:, dest_reg:, n: }`) on
+  # success, or `nil` when the proof fails. The sites are returned, not just
+  # counted, because the emitter needs them: see emit_lambda_confined_call_
+  # glue for why a confined site must NOT be dispatched through the VM.
+  def lambda_confined_call_sites(irep, lambda_insn, d, lambda_irep)
+    nlocals = irep.nlocals.to_i
+    # (1) a named local, so no implicit register window can alias it.
+    return nil unless d >= 1 && d < nlocals
+    # (2) the two opcodes that read a named local without printing it.
+    return nil if irep.instructions.any? { |i| %w[ARGARY BLKPUSH].include?(i.op) }
+
+    # A child irep capturing `R<d>` as an upvar would hold a pointer to it
+    # from a scope this proof says nothing about (a block body that may be
+    # a BLOCK_FALLBACK region of its own, or stay on the interpreter) --
+    # `block_upvar_needs` already propagates a grandchild's own deeper need
+    # up as `[level - 1, idx]`, so `[0, d]` here covers any depth.
+    return nil if (irep.reps || []).any? do |child_label|
+      child = child_label && @ireps[child_label]
+      needs = child && block_upvar_needs(child)
+      needs.nil? || needs.include?([0, d])
+    end
+
+    mand = mandatory_arity(lambda_irep)
+    sites = []
+    insns = irep.instructions
+    insns.each_with_index do |insn, i|
+      next if insn.equal?(lambda_insn)
+      next unless insn.args =~ /\bR#{d}\b/
+
+      # (3) the only permitted consumer: `MOVE R<t> R<d>` into a temporary.
+      m = insn.op == 'MOVE' && insn.args.match(/\AR(\d+)\s+R#{d}\b/)
+      return nil unless m
+
+      t = m[1].to_i
+      return nil unless t >= nlocals
+
+      site = lambda_confined_call_consumes?(irep, i, t)
+      return nil unless site
+      # A real Ruby lambda is STRICT about arity (unlike a proc/block): a
+      # wrong-arity `.call` raises ArgumentError. The direct call the
+      # emitter is about to generate cannot raise that, so a site whose
+      # argument count does not exactly match the lambda's own mandatory
+      # arity is declined outright rather than silently given different
+      # behavior.
+      return nil unless site[:n] == mand
+
+      sites << site
+    end
+    sites
+  end
+
+  # CONFINED_LAMBDA_UPVAR_SUPPORT: gate (3)'s straight-line half -- walk
+  # forward from the `MOVE R<t> R<d>` at `i` to the `SEND R<t> :call`/
+  # `SEND0 R<t> :call` that consumes it, allowing only whitelisted
+  # argument-setup opcodes in between, and requiring that stretch to be
+  # genuinely straight-line: no jump/branch opcode inside it (control cannot
+  # leave with the proc still sitting live in `R<t>`) and no jump TARGET
+  # inside it (control cannot arrive mid-stretch either, which would put the
+  # `.call` after instructions this proof never examined). Together those
+  # make "once the MOVE runs, the very next thing that touches `R<t>` is the
+  # `:call` receiver read, which then overwrites it" a real property of
+  # every execution, not just of the printed instruction order.
+  #
+  # Returns `{ send_addr:, dest_reg:, n: }` for the consuming `.call`, or
+  # `nil`.
+  def lambda_confined_call_consumes?(irep, i, t)
+    insns = irep.instructions
+    targets = jump_targets(irep)
+    ((i + 1)...insns.size).each do |j|
+      nxt = insns[j]
+      if %w[SEND SEND0].include?(nxt.op) &&
+         (m = nxt.args.match(/\AR#{t}\s+:call(?:\s+n=(\d+))?(?:\s|\z)/))
+        return { send_addr: nxt.addr, dest_reg: t, n: m[1].to_i }
+      end
+
+      return nil unless LAMBDA_CONFINED_CALL_SETUP_OPS.include?(nxt.op)
+      return nil if nxt.args =~ /\bR#{t}\b/
+      return nil if targets.include?(nxt.addr)
+    end
+    nil
+  end
+
+  # CONFINED_LAMBDA_UPVAR_SUPPORT: replace a confined site's `.call` with a
+  # DIRECT C++ call to the lambda body's own `_impl` -- never a dynamic
+  # `mrb_funcall(..., "call", ...)` through the VM.
+  #
+  # This is not an optimization, it is a correctness requirement, and it was
+  # found by a real end-to-end run rather than reasoned about in advance.
+  # `Proc#call` (and its alias `Proc#[]`) is mruby's own static `call_proc`,
+  # whose whole body is one `OP_CALL`; 3rd/mruby/src/vm.c's `CASE(OP_CALL)`
+  # has a dedicated arm for a CFUNC-backed proc -- which is exactly what
+  # emit_rproc_construction builds -- and that arm ends with
+  #
+  #     ci = cipop(mrb);
+  #     ci[1].stack[0] = recv;
+  #     irep = ci->proc->body.irep;     /* <-- unconditional deref */
+  #
+  # with no check on the popped-to frame's own `cci`. When the caller is a
+  # real C frame -- and a bc2cpp-compiled method registered with
+  # mrb_define_method IS one -- that frame's `ci->proc` is NULL
+  # (mrb_funcall_with_block's own `ci->proc = MRB_METHOD_PROC_P(m) ?
+  # MRB_METHOD_PROC(m) : NULL`), so this dereferences NULL and segfaults.
+  # Confirmed under gdb on a real linked binary, not inferred: `ci->proc =
+  # (const struct RProc *) 0x0`, `ci->cci = 0` (CINFO_DIRECT), crashing at
+  # that exact line. So "compiled method builds a cfunc-backed proc and then
+  # `.call`s it" is a shape that cannot go through the VM at all on this
+  # mruby.
+  #
+  # The confinement proof already hands over everything a direct call needs,
+  # which is what makes this small rather than a new mechanism: the receiver
+  # is provably this exact lambda (gate 3 admits no other writer of `R<d>`),
+  # `self` is the same enclosing-function local emit_rproc_construction
+  # captures into env slot 0, the captured upvar pointers are the very same
+  # `&r<b>` / forwarded-parameter expressions it boxes into the slots after
+  # it (identical order, so the two can never drift), and the arguments are
+  # the call site's own `R<t+1>..R<t+n>` with `n` already checked equal to
+  # the lambda's mandatory arity. The RProc is still constructed at the
+  # LAMBDA itself and still stored into `R<d>`: it costs one allocation and
+  # keeps that register holding a genuine, correct Proc value rather than
+  # something this file would then have to reason about the absence of.
+  def emit_lambda_confined_call_glue(region, fn_name, site)
+    dest = site[:dest_reg]
+    args = (1..site[:n]).map { |k| "r#{dest + k}" }
+    upvar_args = (region[:upvars] || []).map do |(l, b)|
+      l.zero? ? "&r#{b}" : upvar_var_name(l - 1, b)
+    end
+    out = String.new
+    out << "  // CONFINED_LAMBDA_CALL -- provably this frame's own lambda (never escapes); " \
+           "direct C++ call, not mrb_funcall(:call)\n"
+    out << "  r#{dest} = #{fn_name}_impl(M, self#{(upvar_args + args).map { |x| ", #{x}" }.join});\n"
+    out
   end
 
   # LAMBDA_FALLBACK_SUPPORT: the call-site glue -- build a real `RProc`
@@ -16041,9 +16321,17 @@ class CodeGen
   # calls anything: the resulting value is an ordinary callable/passable
   # Proc that may be invoked (or not) arbitrarily later, exactly like any
   # other real Ruby lambda value.
+  # CONFINED_LAMBDA_UPVAR_SUPPORT: `region[:upvars]` rides into the exact
+  # same emit_rproc_construction a BLOCK_FALLBACK site already uses -- the
+  # env-slot layout, the `&r<b>` boxing and the read-back order in
+  # emit_proc_fallback_fn are all shared verbatim, so there is no
+  # lambda-specific codegen here at all. It is only ever non-empty for a
+  # site recognize_lambda_fallback_regions proved frame-confined (see
+  # lambda_proc_frame_confined?); an escaping lambda still has to have no
+  # upvars, exactly as before.
   def emit_lambda_fallback_glue(region, fn_name)
     dest_reg = region[:dest_reg].to_i
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name)
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [])
     out = String.new
     out << "  // LAMBDA_FALLBACK -- lambda body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), stored -- not dispatched\n"
