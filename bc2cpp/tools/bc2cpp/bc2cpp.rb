@@ -7155,10 +7155,25 @@ class CodeGen
     # BLKPUSH_YIELD_SUPPORT: the current method's own real block parameter
     # name (`'bc2cpp_blk'`), set by compile_method around exactly its own
     # top-level body-compile loop, consulted by compile_insn's own BLKPUSH
-    # case. nil everywhere else -- a BLOCK_FALLBACK body never sets this
-    # (see @block_fallback_upvars' own comment for why), so a BLKPUSH
-    # inside one always keeps the honest #error.
+    # case. nil everywhere else.
+    # BLOCK_FALLBACK_YIELD_SUPPORT: also set by emit_proc_fallback_fn around
+    # exactly one BLOCK_FALLBACK body-compile loop, for a body that really
+    # does forward the enclosing method's own block (`region[:needs_blk]`) --
+    # same consume-and-restore discipline @block_fallback_upvars already
+    # uses, except it SAVES and RESTORES rather than clearing, because
+    # emit_proc_fallback_fn can be reached recursively and (unlike the upvar
+    # ivars) compile_method's own top-level loop sets this one too.
     @blk_param_name = nil
+    # BLOCK_FALLBACK_YIELD_SUPPORT: the `lv` operand value a BLKPUSH must
+    # carry for `@blk_param_name` to be the right value to answer it with --
+    # 0 in an ordinary method body (vm.c's own `if (lv == 0) stack = regs +
+    # 1`, this frame's own received block), and exactly the current body's
+    # own nesting depth below its enclosing method inside a BLOCK_FALLBACK
+    # body (codegen.c's own `while (!s2->mscope) { lv++; s2 = s2->prev; }`,
+    # i.e. `lv` counts scopes up to the enclosing METHOD scope -- so a
+    # direct child block of a method always says `lv == 1`). Any other `lv`
+    # keeps the honest #error.
+    @blk_param_level = 0
     @registry = registry
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
@@ -9132,7 +9147,15 @@ class CodeGen
     # processing loop below (`block_fallback_regions.each`, not a second
     # `recognize_block_fallback_regions(irep)` call) -- one computation,
     # not two that could silently drift apart.
-    block_fallback_regions = recognize_block_fallback_regions(irep)
+    # BLOCK_FALLBACK_YIELD_SUPPORT: `blk_available` is the method-level half
+    # of the recognizer's own "can this frame actually supply the block a
+    # nested `yield` wants?" gate. `pure_mandatory_arity?(irep)` is the
+    # identical condition `mandatory_ok` below computes (and that
+    # `needs_blk_param` is itself gated on), spelled out here because this
+    # call happens first -- so the recognizer can never mark a region
+    # `needs_blk` for a method whose entry wrapper will not actually declare
+    # and extract `bc2cpp_blk`.
+    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: pure_mandatory_arity?(irep))
     # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK buried inside a region
     # NESTED two (or more) levels deep still throws the exact same
     # `bc2cpp_method_return` all the way out to this SAME top-level catch
@@ -9169,9 +9192,21 @@ class CodeGen
     # yield; ...; end`, confirmed against the real whole-program registry --
     # never combined with optional/keyword/rest args) so this doesn't have
     # to touch the opt/kw/rest entry-wrapper branches below at all.
-    needs_blk_param = mandatory_ok && irep.instructions.any? do |i|
-      i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0'
-    end
+    #
+    # BLOCK_FALLBACK_YIELD_SUPPORT: the same parameter is now ALSO what a
+    # BLOCK_FALLBACK region's own forwarded block is captured from -- a
+    # `yield` that sits inside a block body rather than directly in the
+    # method (`@data.size.times { |i| ... yield i, v ... }`, real disasm
+    # `BLKPUSH R4 0:0:0:0 (1)`, LCF::Array2D#each). The method's own
+    # top-level instruction scan can never see that BLKPUSH: it lives in the
+    # child irep. `block_fallback_regions` (recognized just above, with the
+    # matching `blk_available` gate) is what reports it, and
+    # emit_rproc_construction is what actually reads `bc2cpp_blk` at the
+    # call site. Both disjuncts stay gated on the SAME `mandatory_ok`, so
+    # this remains mutually exclusive with `has_blk` exactly as before.
+    needs_blk_param = mandatory_ok &&
+                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0' } ||
+                       block_fallback_regions.any? { |r| r[:needs_blk] })
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: attempted
     # whenever mandatory_ok is false, independent of whether the optional
@@ -9620,6 +9655,13 @@ class CodeGen
     # case's own comment for why `lv==0` inside a nested scope means
     # something different anyway).
     @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
+    # BLOCK_FALLBACK_YIELD_SUPPORT: this is a real METHOD body, so the only
+    # BLKPUSH `bc2cpp_blk` can legitimately answer here is `lv == 0` (vm.c:
+    # `if (lv == 0) stack = regs + 1`). A `lv >= 1` BLKPUSH cannot occur in
+    # a method irep at all -- codegen_yield's own outward walk stops at the
+    # first method scope, so a method's own `yield` is always level 0 -- and
+    # if one somehow did, this level keeps it at the honest #error.
+    @blk_param_level = 0
     irep.instructions.each_with_index do |insn, idx|
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
@@ -13736,7 +13778,90 @@ class CodeGen
     needs.uniq.sort
   end
 
-  def recognize_block_fallback_regions(irep, available_upvars: [])
+  # BLOCK_FALLBACK_YIELD_SUPPORT: the BLKPUSH analogue of block_upvar_needs
+  # above -- which enclosing frame's own received block does this irep (or
+  # anything nested inside it) need in order to run its `yield`s?
+  #
+  # Real `mrbc -v` disassembly of the exact shape this exists for
+  # (`def each; @data.size.times { |i| v = self[i]; yield i, v unless
+  # v.nil?; }; end`, this program's own LCF::Array2D#each):
+  #
+  #     irep (method each)  nregs=4 nlocals=2      -- R1 is the block slot
+  #       GETIV R2 @data / SEND0 R2 :size
+  #       BLOCK R3 I[0] / SENDB R2 :times n=0
+  #     irep (block |i|)    nregs=8 nlocals=4  R1:i  R3:v
+  #       ...
+  #       BLKPUSH  R4  0:0:0:0 (1)     ; <-- lv == 1
+  #       BLKCALL  R4  2
+  #
+  # versus the same `yield` written directly in a method body
+  # (`def plain; yield 1, 2; end`), which is what BLKPUSH_YIELD_SUPPORT
+  # already handles:
+  #
+  #       BLKPUSH  R2  0:0:0:0 (0)     ; <-- lv == 0
+  #       BLKCALL  R2  2
+  #
+  # The trailing parenthesised field is `lv`. 3rd/mruby/src/vm.c's own
+  # `CASE(OP_BLKPUSH, BS)` decodes the 16-bit operand as
+  # `m1=(b>>11)&0x3f, r=(b>>10)&0x1, m2=(b>>5)&0x1f, kd=(b>>4)&0x1,
+  # lv=(b>>0)&0xf`, then `if (lv == 0) stack = regs + 1; else { struct REnv
+  # *e = uvenv(mrb, lv-1); ...; stack = e->stack + 1; }` and reads
+  # `stack[m1+r+m2+kd]`. So `lv` names a FRAME (0 = this one, L = L frames
+  # out) exactly the way GETUPVAR's own level operand does -- this is not
+  # an assumption carried over from GETUPVAR, it is the real decode.
+  #
+  # Unlike an upvar, though, there is only ever ONE possible answer, and no
+  # index to disambiguate: mrbc's own codegen_yield (3rd/mruby/mrbgems/
+  # mruby-compiler/core/codegen.c) computes `lv` as
+  #
+  #     int lv = 0; codegen_scope *s2 = s;
+  #     while (!s2->mscope) { lv++; s2 = s2->prev; if (!s2) break; }
+  #     if (s2) ainfo = (int)s2->ainfo;
+  #     if (ainfo < 0) codegen_error(s, "invalid yield (SyntaxError)");
+  #
+  # -- it walks strictly OUTWARD until it hits the first METHOD scope and
+  # stops there, taking that method's own `ainfo` (its ENTER argument
+  # counts, which is what supplies `m1:r:m2:kd` and hence the register
+  # offset of that method's own block slot). A block scope is never
+  # `mscope`, so `lv` inside a block body is always >= 1 and always lands
+  # on the enclosing METHOD -- never on an intervening block (a block has
+  # no block of its own to yield to), and never on a method further out
+  # than the first one (the walk stops). `yield` outside any method scope
+  # at all is a compile-time SyntaxError, so there is no "no answer" case
+  # to model either.
+  #
+  # Returns the sorted, de-duplicated set of levels `irep`'s own frame
+  # would have to supply, with the same child-propagation rule
+  # block_upvar_needs uses (a child's `l` becomes `l - 1` here, for
+  # `l >= 1`). A child's `l == 0` deliberately contributes NOTHING: that is
+  # a nested `def`'s own irep asking for its OWN block, which is that
+  # method's business, not this frame's. `nil` means "not modelable" -- a
+  # BLKPUSH whose operand text this function could not parse.
+  def block_blk_needs(irep, depth = 0)
+    return nil if depth > MAX_UPVAR_NEST_DEPTH
+
+    needs = []
+    irep.instructions.each do |insn|
+      next unless insn.op == 'BLKPUSH'
+
+      lv = insn.args[/\((\d+)\)\s*\z/, 1]
+      return nil unless lv
+
+      needs << lv.to_i
+    end
+    (irep.reps || []).each do |child_label|
+      child = child_label && @ireps[child_label]
+      next unless child
+
+      child_needs = block_blk_needs(child, depth + 1)
+      return nil if child_needs.nil?
+
+      child_needs.each { |l| needs << l - 1 if l >= 1 }
+    end
+    needs.uniq.sort
+  end
+
+  def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
     regions = []
     irep.instructions.each_with_index do |insn, idx|
       next unless insn.op == 'BLOCK'
@@ -13826,9 +13951,60 @@ class CodeGen
       # precisely the property the level-0 argument already relied on.
       next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
 
+      # BLOCK_FALLBACK_YIELD_SUPPORT: does this block body's own `yield`
+      # (`BLKPUSH`, see block_blk_needs above) need the ENCLOSING METHOD's
+      # own received block forwarded into the standalone cfunc?
+      #
+      # `[1]` -- and ONLY `[1]` -- is the shape this round models: every
+      # BLKPUSH in the whole subtree resolves to the frame exactly one level
+      # out from the block body, i.e. the frame THIS call site sits in. That
+      # is the frame whose own block value the emitter below can actually
+      # name as a C++ local, so it is the frame it can actually capture.
+      #
+      # Deliberately a bounded slice. A deeper need (`[2]`, a `yield` inside
+      # a block inside a block, reaching back through TWO frames) is real,
+      # modelable in principle by forwarding the already-captured value one
+      # more level exactly the way DEEP_UPVAR_CAPTURE_SUPPORT forwards an
+      # upvar pointer -- but no such site exists anywhere in this whole
+      # closed world today (a real whole-program sweep: every BLKPUSH inside
+      # a block body is `lv == 1`), so it is left at the honest `#error`
+      # rather than shipped untested. `blk_available` is the other half of
+      # the same "can this level actually SUPPLY it?" question the
+      # `available_upvars` gate above asks: only compile_method's own
+      # top-level call passes it true, and only for a method whose entry
+      # wrapper can really extract a block (`pure_mandatory_arity?`, the
+      # same `mandatory_ok` condition `needs_blk_param` itself is gated on,
+      # so the two can never disagree about whether the parameter exists).
+      #
+      # `needs_blk` never gates region ADMISSION -- a body whose BLKPUSH
+      # this cannot answer still produces its region here, exactly as
+      # before, and still fails later on the `#error` its own unhandled
+      # BLKPUSH emits (emit_proc_fallback_fn's own ALL_OR_NOTHING_SUPPORT
+      # check), which is precisely today's behaviour. So every shape not
+      # newly supported keeps byte-for-byte identical output.
+      #
+      # The synchronous-dispatch allowlist is required here for the same
+      # reason UPVAR_CAPTURE_SUPPORT requires it, though for a subtly
+      # different failure mode. The captured block is an `mrb_value` COPY
+      # (see emit_rproc_construction), not a pointer into a frame, so it
+      # cannot dangle and is independently GC-rooted by the RProc's own env
+      # array -- but the block it names is itself an ordinary irep-backed
+      # RProc whose OWN env is on the caller's stack, so invoking it after
+      # the enclosing method's caller has returned would be exactly the
+      # escaped-block hazard. Real vm.c refuses that case itself
+      # (`if (!e || (!MRB_ENV_ONSTACK_P(e) && e->mid == 0) ...) RAISE_LIT(
+      # mrb, E_LOCALJUMP_ERROR, "unexpected yield")`); the allowlist is
+      # what keeps this compiler from having to. Every receiver on it has
+      # already been hand-vetted to invoke its block synchronously and never
+      # store it -- so the enclosing method's frame, and therefore its
+      # caller's, is still live for the whole duration of the call.
+      blk_needs = block_blk_needs(block_irep)
+      needs_blk = blk_available && blk_needs == [1] &&
+                  BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
+
       regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
                    block_irep: block_irep, name: name, n: n,
-                   self_implicit: paired.op == 'SSENDB', upvars: upvars }
+                   self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk }
     end
     regions
   end
@@ -13888,6 +14064,18 @@ class CodeGen
     # is unchanged.
     upvar_regs = region[:upvars] || []
     upvar_params = upvar_regs.map { |(l, b)| "mrb_value* #{upvar_var_name(l, b)}" }
+    # BLOCK_FALLBACK_YIELD_SUPPORT: one more captured value when this body
+    # really does `yield` to the ENCLOSING METHOD's own block -- see
+    # recognize_block_fallback_regions' own `needs_blk` comment for the real
+    # disassembly and the exact gate. Only ever set by
+    # recognize_block_fallback_regions, never by recognize_lambda_fallback_
+    # regions (a LAMBDA-constructed proc can genuinely escape and outlive
+    # the frame whose block it would be capturing -- exactly the hazard the
+    # synchronous-dispatch allowlist rules out for a BLOCK_FALLBACK site and
+    # nothing rules out for a lambda), so `false` here is the plain "no
+    # forwarded block" case for LAMBDA_FALLBACK, not a defensive guess.
+    needs_blk = region[:needs_blk] ? true : false
+    blk_param = needs_blk ? ['mrb_value bc2cpp_blk'] : []
     # `block_addr` alone is only unique WITHIN one irep -- two unrelated
     # methods can easily have a BLOCK/LAMBDA at the same numeric bytecode
     # offset (a real, caught-before-shipping bug: the first version of
@@ -14018,6 +14206,20 @@ class CodeGen
     # gets the new `throw`. Never both at once (this function only ever
     # compiles one region's own body per call).
     @block_fallback_active = region[:kind] != 'lambda_fallback'
+    # BLOCK_FALLBACK_YIELD_SUPPORT: same consume-and-restore discipline,
+    # gating compile_insn's own BLKPUSH case. SAVED and RESTORED rather than
+    # cleared, unlike the two ivars just above: compile_method's own
+    # top-level body loop sets @blk_param_name too (BLKPUSH_YIELD_SUPPORT),
+    # and this function can also be reached recursively for a nested region,
+    # so simply nil-ing it afterwards would silently disarm an enclosing
+    # context's own perfectly valid BLKPUSH translation. Level 1 is the only
+    # value ever set here, matching exactly the `blk_needs == [1]` shape the
+    # recognizer admitted -- a direct child block of the method, whose own
+    # `yield` disassembles as `BLKPUSH Rx m1:r:m2:kd (1)`.
+    saved_blk_param_name = @blk_param_name
+    saved_blk_param_level = @blk_param_level
+    @blk_param_name = needs_blk ? 'bc2cpp_blk' : nil
+    @blk_param_level = 1
     # BLOCK_FALLBACK_RESCUE_SUPPORT: a real `rescue` clause INSIDE a
     # block's own body -- `cached_bitmap(cache, key) { Bitmap.new(...)
     # rescue StandardError => e; ...; end }`, `RPG2k::Scene::Battle#
@@ -14049,7 +14251,17 @@ class CodeGen
     # recomputed (one real region list, not two that could drift).
     rescue_regions.each_with_index do |rregion, i|
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
+      # BLOCK_FALLBACK_YIELD_SUPPORT: the forwarded block rides into the
+      # extracted try-body function through the exact same `extra_fields`
+      # channel the captured upvar pointers already use -- an `mrb_value`
+      # rather than an `mrb_value*` (the block slot is only ever READ:
+      # vm.c's own OP_BLKPUSH is `regs[a] = stack[offset]`, and no opcode
+      # anywhere writes back through it), landing in that function under the
+      # identical name `bc2cpp_blk`, which is exactly what @blk_param_name
+      # (still set, deliberately, for emit_rescue_try_body's own compile_insn
+      # calls) is about to emit references to.
       extra_fields = upvar_regs.map { |(l, b)| { name: upvar_var_name(l, b), c_type: 'mrb_value*' } }
+      extra_fields += [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] if needs_blk
       nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
                                           extra_fields: extra_fields, available_upvars: upvar_regs)
       nested_glue_at[rregion[:begin_addr]] = emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
@@ -14072,11 +14284,20 @@ class CodeGen
     end
     @block_fallback_upvars = nil
     @block_fallback_active = false
+    @blk_param_name = saved_blk_param_name
+    @blk_param_level = saved_blk_param_level
     return nil if nested_pre.include?('#error') || body.include?('#error')
 
     out = nested_pre
+    # BLOCK_FALLBACK_YIELD_SUPPORT: the forwarded block sits AFTER the
+    # captured upvar pointers and BEFORE this block's own mandatory
+    # parameters, matching the env-slot order below exactly (self, upvars,
+    # blk). A body that doesn't need it declares nothing, so every one of
+    # the already-shipping BLOCK_FALLBACK bodies generates byte-for-byte
+    # identical C++.
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
-           "#{upvar_params.map { |p| ", #{p}" }.join}#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+           "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}" \
+           "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     out << body
@@ -14096,7 +14317,18 @@ class CodeGen
       out << "  mrb_value* #{vname} = static_cast<mrb_value*>(mrb_cptr(mrb_proc_cfunc_env_get(M, #{i + 1})));\n"
       vname
     end
-    call_args = (['bc2cpp_captured_self'] + upvar_args).join(', ')
+    # BLOCK_FALLBACK_YIELD_SUPPORT: the forwarded block is the LAST env slot
+    # -- after `self` (slot 0) and after every captured upvar pointer --
+    # matching emit_rproc_construction's own env array construction exactly
+    # (both derive the position the same way from the same two flags, so the
+    # ordering can never drift between them). Read back as a plain
+    # `mrb_value`, not unboxed through mrb_cptr like an upvar pointer is:
+    # what was captured IS the block value itself, a copy, which is also why
+    # the RProc's own env keeps it GC-reachable for the whole call.
+    if needs_blk
+      out << "  mrb_value bc2cpp_blk = mrb_proc_cfunc_env_get(M, #{upvar_regs.size + 1});\n"
+    end
+    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
     if mand.zero?
       out << "  return #{impl_name}(M, #{call_args});\n"
     else
@@ -14124,7 +14356,7 @@ class CodeGen
   # what the caller does with `rproc_var` (dispatch it, as
   # emit_block_fallback_glue does, or just store it, as
   # emit_lambda_fallback_glue does) is entirely up to it.
-  def emit_rproc_construction(addr, fn_name, upvar_regs = [])
+  def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` takes the address of THIS enclosing
@@ -14145,9 +14377,22 @@ class CodeGen
     # set). So the pointer is forwarded straight through, never
     # re-addressed: `&` here would box a pointer-to-pointer and read back
     # as garbage.
+    # BLOCK_FALLBACK_YIELD_SUPPORT: the enclosing frame's own received block
+    # value, appended as the last env slot. Captured HERE for exactly the
+    # same reason `self` is: this glue is emitted INSIDE the enclosing
+    # function, which is the one place the real value is in scope as an
+    # ordinary C++ local. That local is `bc2cpp_blk` -- compile_method's own
+    # `needs_blk_param` parameter (BLKPUSH_YIELD_SUPPORT's `mrb_get_args(M,
+    # "&", &bc2cpp_blk)` extraction) at method level, or this same forwarded
+    # capture again one level in. Stored BY VALUE, never by address: unlike
+    # an upvar there is nothing to write back through (vm.c's OP_BLKPUSH
+    # only ever reads `stack[offset]`), and a value in the env array is
+    # GC-rooted by the RProc itself rather than merely borrowed from a
+    # frame.
     env_entries = ['self'] + upvar_regs.map do |(l, b)|
       l.zero? ? "mrb_cptr_value(M, &r#{b})" : "mrb_cptr_value(M, #{upvar_var_name(l - 1, b)})"
     end
+    env_entries << 'bc2cpp_blk' if needs_blk
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, #{env_entries.size}, " \
            "bc2cpp_blk_env_#{addr});\n"
@@ -14171,7 +14416,8 @@ class CodeGen
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
-    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [])
+    rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
+                                              region[:needs_blk] ? true : false)
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), dynamic dispatch\n"
@@ -14784,9 +15030,18 @@ class CodeGen
       # format specifier, unlike BLKPUSH's own raw stack read, happily
       # returns nil for "no block given" rather than raising itself, so
       # this check can't be skipped).
+      #
+      # BLOCK_FALLBACK_YIELD_SUPPORT: `lv > 0` is no longer unconditionally
+      # unmodelable. Inside a BLOCK_FALLBACK body, emit_proc_fallback_fn
+      # sets @blk_param_name/@blk_param_level for exactly the bodies whose
+      # enclosing method's own block really was captured into the RProc's
+      # env -- so the SAME `bc2cpp_blk` read answers `lv == 1` there. The
+      # match is on the exact level, never `lv > 0` generally: vm.c walks
+      # `uvenv(mrb, lv-1)`, a different frame for every distinct `lv`, and
+      # this compiler holds exactly one of them.
       d = a[/^R(\d+)/, 1]
       lv = a[/\((\d+)\)/, 1]
-      if lv == '0' && @blk_param_name
+      if lv == @blk_param_level.to_s && @blk_param_name
         <<~CPP
           if (mrb_nil_p(#{@blk_param_name})) {
             mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "bc2cpp: unexpected yield");
