@@ -6753,7 +6753,7 @@ end
 # `mrb_protect_error`), and still has no case of its own in compile_insn's
 # ordinary switch, so a `rescue` shape `recognize_rescue_regions` itself
 # declines to recognize (real Ruby's `retry`/`ensure`/a multi-class
-# `rescue A, B`/nesting/a namespaced rescue class -- see that function's
+# `rescue A, B` clause/nesting -- see that function's
 # own top comment for the full, narrow, real-closed-world-vetted list)
 # still correctly leaves the honest `#error unhandled opcode EXCEPT`
 # behind, exactly as before this existed for any other reason a body
@@ -10451,8 +10451,12 @@ class CodeGen
   # Ruby desugars all three to the exact same EXCEPT/RESCUE/RAISEIF shape,
   # see this method's own top comment) is the ONLY real shape this file
   # ever attempts to translate -- no `retry`, no `ensure`, no multi-class
-  # `rescue A, B`, no rescue clause that doesn't bind or use its own
-  # exception object the way this method assumes, no *nested* rescue (one
+  # `rescue A, B` (ONE clause naming several classes -- distinct from,
+  # and still unsupported unlike, several chained single-class `rescue`
+  # clauses, which MULTI_RESCUE_SUPPORT now does handle, see
+  # recognize_rescue_class_handler), no rescue clause that doesn't bind
+  # or use its own exception object the way this method assumes, no
+  # *nested* rescue (one
   # rescue's own protected body containing -- or contained by -- another,
   # e.g. an explicit `begin...rescue...end` sitting inside a method that
   # also has its own trailing, whole-method `rescue` -- confirmed still
@@ -10460,19 +10464,22 @@ class CodeGen
   # #build_resolver/#perform_teleport, both of which stay `#error
   # unhandled opcode EXCEPT` for exactly this reason as of this writing;
   # see the real nesting-rejection check inside recognize_rescue_regions
-  # below), and no rescue naming a *namespaced* class (`rescue
-  # RGSS::Timeout`, RPG2k#start -- compiles to `GETCONST base; GETMCNST
-  # (base)::Name`, two instructions, not the one bare `GETCONST Rcls
-  # <Name>` this recognizer's own 4-instruction scan requires; a real,
-  # separate, smaller gap from the nesting one above, also still open).
+  # below). A rescue naming a *namespaced* class (`rescue RGSS::Timeout`,
+  # RPG2k#start -- `GETCONST base; GETMCNST (base)::Name`, a chain rather
+  # than one bare `GETCONST Rcls <Name>`) used to be listed here as a
+  # third open gap; NAMESPACED_RESCUE_SUPPORT closed it, along with
+  # MULTI_RESCUE_SUPPORT for several chained clauses -- both entirely
+  # inside recognize_rescue_class_handler, whose own top comment carries
+  # the real verified disassembly for each and the reason no emitter
+  # needed to change.
   # Real Ruby's exception machinery has none of those restrictions; this
   # prototype's own closed-world survey of every real rescue clause
   # actually shipped (mruby-rpg2k/mrblib) found the overwhelming majority
   # already fit this exact narrow shape (a single, bare-named class, no
   # retry, no nesting, at most one real `ensure` anywhere in the whole
   # tree -- itself excluded here, never silently mistranslated) -- the
-  # small remainder that doesn't (the nested and namespaced-class cases
-  # named above) stays a loud, honest miss, exactly like any other
+  # small remainder that doesn't (the `ensure` and multi-class-clause
+  # cases named above) stays a loud, honest miss, exactly like any other
   # unmodeled shape in this file (falls through to compile_insn's own
   # default `#error unhandled opcode EXCEPT` -- RESCUE/RAISEIF below are
   # unconditionally safe wherever they appear, but EXCEPT genuinely needs
@@ -10500,9 +10507,16 @@ class CodeGen
   #                     JMP target this file already goto-threads).
   #   target         -- exactly `EXCEPT Rexc` (captures the raised
   #                     exception -- mrb->exc -- into Rexc, clearing it).
-  #   target+1..+4   -- exactly `GETCONST Rcls <Name>`; `RESCUE Rexc
-  #                     Rcls` (Rcls := Rexc.isa?(Rcls)); `JMPIF Rcls
-  #                     match`; `JMP raise` -- mirrors this method's own
+  #   target+1..    -- one or more rescue CLAUSE TESTS, chained: each is
+  #                     a class-name chain (`GETCONST Rcls <Root>`, then
+  #                     zero or more `GETMCNST Rcls (Rcls)::<Seg>` for a
+  #                     namespaced name); `RESCUE Rexc Rcls` (Rcls :=
+  #                     Rexc.isa?(Rcls)); `JMPIF Rcls match`; `JMP next`,
+  #                     where `next` is the FOLLOWING clause's own test
+  #                     head, or `raise` for the last clause -- see
+  #                     recognize_rescue_class_handler, which is what
+  #                     actually walks and verifies this chain -- mirrors
+  #                     this method's own
   #                     RESCUE/RAISEIF compile_insn cases below, which are
   #                     just that same real vm.c logic (OP_RESCUE/
   #                     OP_RAISEIF) mechanically transcribed, unconditional
@@ -10744,27 +10758,178 @@ class CodeGen
   # the same real disassembly that recognizer's own top comment cites
   # (`target+1..+4`, then `raise`). Returns nil for anything that doesn't
   # match completely, exactly like the `next unless` chain it replaces.
+  #
+  # NAMESPACED_RESCUE_SUPPORT / MULTI_RESCUE_SUPPORT: this used to be a
+  # rigid four-instruction window (exactly one bare `GETCONST`, then
+  # `RESCUE`/`JMPIF`/`JMP`, then a `RAISEIF` at the JMP's own target),
+  # which is why two real shapes shipped in this program stayed `#error
+  # unhandled opcode EXCEPT`. Both are now matched by the same single
+  # clause-chain walk below. Neither needed any emitter change at all --
+  # see the "why nothing downstream moves" note at the end of this
+  # comment, which is the whole soundness argument.
+  #
+  # (a) A NAMESPACED rescue class (`rescue RGSS::Timeout`) -- the class
+  #     is named by a `GETCONST` ROOT plus one or more `GETMCNST`
+  #     segments, all into the same register, not one bare `GETCONST`.
+  #     Real `mrbc -v` disassembly of the real `RPG2k#start`
+  #     (mruby-rpg2k/mrblib/main.rb:1377), addresses its own:
+  #
+  #       catch type: rescue   begin: 0004 end: 0011 target: 0014
+  #        004 BLOCK     R3  I[0]
+  #        007 SSENDB    R2  :loop  n=0
+  #        011 JMP       039           <- e, the non-raising exit
+  #        014 EXCEPT    R2            <- t
+  #        016 GETCONST  R3  RGSS      <- class chain ROOT
+  #        019 GETMCNST  R3  (R3)::Timeout   <- ...and its one segment
+  #        022 RESCUE    R2  R3
+  #        025 JMPIF     R3  032       <- match
+  #        029 JMP       037           <- no match: straight to RAISEIF
+  #        032 LOADNIL   R2  (nil)     <- the (empty) handler body
+  #        034 JMP       039
+  #        037 RAISEIF   R2
+  #        039 RETURN    R2            <- shared_target
+  #
+  # (b) SEVERAL chained rescue clauses on one construct. Real `mrbc -v`
+  #     disassembly of the real `RGSS::Graphics.singleton#_transition_map`
+  #     (mruby-rgss/mrblib/lib.rb:1695) -- which is BOTH shapes at once,
+  #     its first clause namespaced:
+  #
+  #       catch type: rescue   begin: 0004 end: 0038 target: 0041
+  #        038 JMP       166           <- e; shared_target 166
+  #        041 EXCEPT    R4            <- t
+  #        043 GETCONST  R5  Bitmap              -- clause 1 test
+  #        046 GETMCNST  R5  (R5)::LoadError
+  #        049 RESCUE    R4  R5
+  #        052 JMPIF     R5  059       <- match -> body 1
+  #        056 JMP       105           <- NO match -> clause 2's GETCONST
+  #        059 ... body 1 ...
+  #        102 JMP       166           <- body 1 converges on shared_target
+  #        105 GETCONST  R5  StandardError      -- clause 2 test
+  #        108 RESCUE    R4  R5
+  #        111 JMPIF     R5  118       <- match -> body 2
+  #        115 JMP       164           <- NO match -> RAISEIF (last clause)
+  #        118 ... body 2 ...
+  #        161 JMP       166
+  #        164 RAISEIF   R4
+  #        166 RETURN    R4            <- shared_target
+  #
+  # So a multi-clause handler is just clause tests laid out linearly,
+  # each clause's own no-match `JMP` targeting the NEXT clause's test,
+  # and only the LAST clause's no-match `JMP` targeting the real
+  # `RAISEIF`. That is exactly real Ruby's first-match-wins semantics,
+  # and exactly what real vm.c does: OP_RESCUE (3rd/mruby/src/vm.c, read
+  # directly) is only ever `regs[b] = mrb_bool_value(mrb_obj_is_kind_of(
+  # mrb, exc, ec))` -- a pure, side-effect-free class test that leaves
+  # regs[a] (the exception) completely alone -- and OP_RAISEIF re-raises
+  # whatever is still in regs[a] unless it is nil. The walk below
+  # therefore accepts a clause test, follows its no-match JMP, and
+  # requires the instruction landed on to be EITHER the next clause's own
+  # `GETCONST` test head OR the terminating `RAISEIF Rexc`; anything else
+  # is a shape this file has not verified and still falls through to the
+  # honest `#error`.
+  #
+  # The one property that makes chaining sound, checked here rather than
+  # assumed: the no-match JMP lands on the next clause's CLASS TEST, never
+  # inside any handler BODY. Handler bodies are arbitrary user code and do
+  # clobber r<exc_reg> (body 1 above ends `LOADNIL R4`), but they are only
+  # ever reached through a JMPIF that already matched, and every one of
+  # them exits to shared_target -- so on the path from one clause test to
+  # the next, the only instructions executed are `GETCONST`/`GETMCNST`/
+  # `RESCUE`/`JMPIF`/`JMP`, none of which writes r<exc_reg> (RESCUE writes
+  # its *second* operand, the class register, per vm.c above; the class
+  # chain writes only the class register, which `cls_reg != exc_reg`
+  # below makes explicit rather than trusting cursp() ordering). The
+  # exception object is therefore still intact at every later clause's
+  # own `RESCUE`, which is precisely what first-match-wins needs.
+  #
+  # Why nothing downstream moves: `cls_name`/`match_addr`/`raise_addr`
+  # are recognition artifacts only -- no emitter reads any of them (see
+  # recognize_rescue_regions' own returns-one-Hash comment). compile_
+  # method suppresses exactly [begin_addr, end_addr] plus the one
+  # `except_addr`, and emits EVERYTHING from except_addr+1 onward -- the
+  # whole class chain, every clause test, every handler body -- through
+  # the ordinary compile_insn switch, where `GETCONST`, `GETMCNST`,
+  # `RESCUE`, `JMPIF`, `JMP` and `RAISEIF` all already have unconditional,
+  # shape-independent translations of their own. So a longer class chain
+  # and additional clauses are, downstream of this recognizer, simply
+  # more ordinary already-supported instructions and more ordinary
+  # goto-threaded labels. In particular this changes NOTHING about the
+  # protected range [begin_addr, end_addr] itself, about which registers
+  # are live-in there, or about emit_rescue_try_body's Ctx: every one of
+  # those concerns the region BEFORE `target`, and every check governing
+  # it (the nesting check, the `escapes` check, the shared_target /
+  # tail_return / connector_reg checks) is in recognize_rescue_regions
+  # and is completely untouched by this helper.
   def recognize_rescue_class_handler(irep, by_addr, by_index, except_i, exc_reg)
-    idx = by_index[except_i]
-    seq = irep.instructions[idx + 1, 4]
-    return nil unless seq && seq.size == 4
+    clause_idx = by_index[except_i]
+    return nil unless clause_idx
 
-    getconst_i, rescue_i, jmpif_i, jmp_i = seq
-    return nil unless getconst_i.op == 'GETCONST'
-    cls_reg = getconst_i.args[/^R(\d+)/, 1]
-    cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
-    return nil unless cls_reg && cls_name
-    return nil unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
-    return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
+    clause_idx += 1
+    cls_names = []
+    first_match_addr = nil
 
-    match_addr = jmp_target_after_reg(jmpif_i.args)
-    return nil unless jmp_i.op == 'JMP'
-    raise_addr = jmp_i.args.strip[/\d+/].to_i
+    loop do
+      # The class name itself: a `GETCONST` root, then zero or more
+      # `GETMCNST` segments refining it in place. Every segment must read
+      # AND write the same register the root wrote -- the shape mrbc
+      # emits for a qualified constant path -- so a GETMCNST naming any
+      # other register (not something real codegen produces here) is
+      # rejected rather than silently folded into the name.
+      getconst_i = irep.instructions[clause_idx]
+      return nil unless getconst_i && getconst_i.op == 'GETCONST'
+      cls_reg = getconst_i.args[/^R(\d+)/, 1]
+      cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
+      return nil unless cls_reg && cls_name
+      # The class chain must never target the exception register itself
+      # (it would destroy the very value RESCUE/RAISEIF still need). Real
+      # codegen_rescue always puts the class at cursp(), strictly above
+      # exc -- checked here instead of trusted.
+      return nil if cls_reg == exc_reg
 
-    raise_i = by_addr[raise_addr]
-    return nil unless raise_i && raise_i.op == 'RAISEIF' && raise_i.args[/^R(\d+)/, 1] == exc_reg
+      seg_idx = clause_idx + 1
+      while (seg_i = irep.instructions[seg_idx]) && seg_i.op == 'GETMCNST'
+        seg_m = seg_i.args.strip.match(/^R#{cls_reg}\s+\(R#{cls_reg}\)::(\S+?)\s*(?:;.*)?$/)
+        return nil unless seg_m
+        cls_name = "#{cls_name}::#{seg_m[1]}"
+        seg_idx += 1
+      end
 
-    { kind: :rescue_class, cls_name: cls_name, match_addr: match_addr, raise_addr: raise_addr }
+      rescue_i, jmpif_i, jmp_i = irep.instructions[seg_idx, 3]
+      return nil unless rescue_i && jmpif_i && jmp_i
+      return nil unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
+      return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
+
+      match_addr = jmp_target_after_reg(jmpif_i.args)
+      return nil unless match_addr && match_addr > jmpif_i.addr
+      return nil unless jmp_i.op == 'JMP'
+      next_addr = jmp_i.args.strip[/\d+/].to_i
+      # Strictly forward, always: this is what bounds the walk (addresses
+      # increase every iteration, so it always terminates) and what keeps
+      # a backward `retry`-style jump out of the recognized shape.
+      return nil unless next_addr > jmp_i.addr
+
+      cls_names << cls_name
+      first_match_addr ||= match_addr
+
+      next_i = by_addr[next_addr]
+      return nil unless next_i
+
+      # Last clause: the no-match path re-raises. Done.
+      if next_i.op == 'RAISEIF'
+        return nil unless next_i.args[/^R(\d+)/, 1] == exc_reg
+
+        return { kind: :rescue_class, cls_name: cls_names.join(', '),
+                 match_addr: first_match_addr, raise_addr: next_addr }
+      end
+
+      # Otherwise it must be another clause's own class-test head -- never
+      # a handler body, never anything else (see this method's own top
+      # comment for why that distinction is the soundness property).
+      return nil unless next_i.op == 'GETCONST'
+
+      clause_idx = by_index[next_i]
+      return nil unless clause_idx
+    end
   end
 
   # DEFINED_CONST_RESCUE_SUPPORT: the OTHER real shape that sits behind a
@@ -16976,8 +17141,10 @@ class CodeGen
       # -- see recognize_rescue_regions -- is the only thing that can ever
       # put a real exception there; nothing else in this whole file emits
       # an EXCEPT this opcode could otherwise be reacting to), Rb already
-      # holds a Class/Module object (always a GETCONST immediately before
-      # this, per RESCUE_SUPPORT's own recognized shape) -- so this
+      # holds a Class/Module object (always the tail of a class-name chain
+      # immediately before this -- a bare `GETCONST`, or a `GETCONST` root
+      # followed by `GETMCNST` segments for a namespaced name like
+      # `RGSS::Timeout`, per RESCUE_SUPPORT's own recognized shape) -- so this
       # translation is safe and correct wherever this opcode appears, not
       # gated on the recognizer at all (unlike EXCEPT, which the
       # recognizer's own glue is the only source of a real Ra value).
