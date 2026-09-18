@@ -10500,6 +10500,24 @@ class CodeGen
     # ordinary per-instruction loop below completely unmodified, hitting
     # compile_insn's own default `#error unhandled opcode` case exactly
     # like any other unrecognized shape in this file.
+    # INLINE_NESTED_BLOCK_SUPPORT: file-scope code for the standalone cfuncs
+    # backing any block NESTED inside one of the inlined loops recognized
+    # below (see inline_nested_block_pass). Accumulated in an ivar rather
+    # than returned through each emitter's own `glue_at` string because it
+    # has to land at FILE scope, ahead of this method's own function --
+    # exactly where `block_fallback_pre` and `rescue_pre` already land, and
+    # prepended alongside them below. Initialized HERE, ahead of the very
+    # first recognizer pass, and never carried across two compile_method
+    # calls. Empty for every method with no such nested region, which is
+    # every method in today's baseline -- so their emitted C++ is unchanged.
+    # SAVED and restored, not merely initialized and cleared, for the
+    # identical re-entrancy reason @inline_nested itself is (see the
+    # emitters' own comment): this same function can be re-entered from
+    # inside one of the emitter body loops below, via compiles_clean? /
+    # monomorphic_target / compile_send, and the inner call must not
+    # swallow the outer one's already-accumulated file-scope code.
+    bc2cpp_saved_inline_pre = @inline_nested_pre
+    @inline_nested_pre = String.new
     recognize_times_regions(irep).each do |region|
       inlined = emit_times_inline(region, irep, d)
       next unless inlined
@@ -10806,7 +10824,12 @@ class CodeGen
       out << "  }\n"
     end
     out << "}\n\n"
-    out = block_fallback_pre + rescue_pre + out
+    # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` joins the two
+    # pre-existing file-scope channels, first, so a nested block's own
+    # standalone cfunc is always textually defined before the inlined loop
+    # that references it. Empty unless a nested region was really claimed.
+    out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
+    @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
     @runtime_installed_names = nil
 
@@ -14603,9 +14626,61 @@ class CodeGen
     reg == elem_reg
   end
 
+  # INLINE_NESTED_BLOCK_SUPPORT: the register-shift-then-compile_insn step that
+  # compile_block_body_insn's own shared `else` arm has always performed,
+  # factored out under a name so the BLOCK/SENDB/SSENDB case just below can
+  # reuse it verbatim for an UNCLAIMED nested region instead of re-spelling it
+  # (two copies of this would be exactly the silent-drift shape this file's own
+  # proven_array_source comment warns about). Behaviour is unchanged: the `else`
+  # arm still calls it for every other opcode.
+  def compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
+    shifted_args = insn.args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" }
+    shifted = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op, args: shifted_args, raw: insn.raw)
+    compile_insn(shifted, block_irep, owner_def, idx, offset)
+  end
+
   def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
                                 break_dest: nil, break_label: nil, idx: nil)
     case insn.op
+    # INLINE_NESTED_BLOCK_SUPPORT: a nested block-carrying call inside this
+    # inlined loop body. `@inline_nested` is set for exactly the one body
+    # loop that is running right now (consume-and-clear, the identical
+    # discipline @block_fallback_upvars/@elem_class_hint/@blk_param_name
+    # already use in this file) by whichever emitter below is driving it,
+    # and holds the regions inline_nested_block_pass was able to claim.
+    # A claimed region's `BLOCK` address carries the whole replacement --
+    # the real RProc construction plus its dynamic dispatch -- and its
+    # `SENDB`/`SSENDB` address carries nothing at all, exactly the way a
+    # claimed region's two addresses are already handled by
+    # compile_method's own top-level pass and by emit_proc_fallback_fn's
+    # own nested pass.
+    #
+    # An UNCLAIMED nested BLOCK/SENDB deliberately falls through to the
+    # `else` arm below, i.e. to compile_insn, which has no case for either
+    # opcode and so emits the same honest `#error unhandled opcode BLOCK`
+    # it always did -- which makes the driving emitter's own `return nil if
+    # body.include?('#error')` fire and the whole loop fall back to one
+    # BLOCK_FALLBACK dispatch, precisely today's behaviour. So a shape this
+    # pass cannot claim is never made worse, only left alone.
+    when 'BLOCK', 'SENDB', 'SSENDB'
+      glue = @inline_nested&.glue&.[](insn.addr)
+      if glue
+        glue
+      elsif @inline_nested&.skip?(insn.addr)
+        # A claimed region's `SENDB`/`SSENDB` address: the whole call was
+        # already emitted at its `BLOCK` address just above, so this
+        # instruction contributes nothing, exactly like a claimed region's own
+        # `sendb_addr` in compile_method's own top-level pass.
+        ''
+      else
+        # Unclaimed: fall through to the identical shift-then-compile_insn the
+        # shared `else` arm at the bottom of this method already did for these
+        # three opcodes before this case existed -- compile_insn still has no
+        # case for any of them, so this is byte-for-byte today's honest
+        # `#error unhandled opcode ...`, which is what makes the driving
+        # emitter abandon the whole region.
+        compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
+      end
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
       "  goto #{iter_end_label};\n"
     when 'RETURN_BLK'
@@ -14688,8 +14763,6 @@ class CodeGen
       reg = insn.args[/^R(\d+)/, 1]
       "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     else
-      shifted_args = insn.args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" }
-      shifted = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op, args: shifted_args, raw: insn.raw)
       # BLOCK_BODY_INDEX_SUPPORT: `idx` is this instruction's own REAL
       # position in `block_irep.instructions` (every one of this file's
       # inlined-loop emitters walks that array in order with
@@ -14700,16 +14773,213 @@ class CodeGen
       # against block_irep's own instructions, addresses, `jump_targets` and
       # `subtree_upvar_written_regs` -- all of which are already correctly
       # scoped to block_irep here -- with every register number translated
-      # back out of the shifted namespace by `unshift_proof_reg`.
-      compile_insn(shifted, block_irep, owner_def, idx, offset)
+      # back out of the shifted namespace by `unshift_proof_reg`. The shift
+      # itself lives in compile_shifted_body_insn above, shared with the
+      # BLOCK/SENDB/SSENDB case's own unclaimed path.
+      compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
     end
+  end
+
+  # INLINE_NESTED_BLOCK_SUPPORT: the outcome of running the ordinary
+  # BLOCK_FALLBACK recognize -> emit -> suppress pipeline against ONE
+  # inlined loop body's own irep (see inline_nested_block_pass below).
+  # `pre` is the standalone cfunc/`_impl` code that has to be emitted at
+  # FILE scope, ahead of the enclosing method's own function; `suppressed`
+  # and `glue` drive the emitter's own instruction loop exactly the way
+  # compile_method's own top-level `suppressed`/`glue_at` pair already
+  # does. An empty instance (`InlineNested.none`) is the "nothing claimed"
+  # case -- every emitter below composes with it to byte-for-byte the code
+  # it emitted before this mechanism existed, which is precisely why every
+  # already-inlined loop in today's baseline is unaffected.
+  InlineNested = Struct.new(:pre, :suppressed, :glue) do
+    def self.none = new(String.new, [], {})
+
+    # Same `targets - (suppressed - glue.keys)` shape compile_method's own
+    # JUMP_TARGET_GLUE_FIX establishes and emit_proc_fallback_fn's own
+    # nested pass already reuses: an address that is suppressed but still
+    # carries real replacement code (`glue`) keeps its label, because a
+    # jump landing there is still well-defined; a suppressed address with
+    # no code of its own (a claimed region's own `sendb_addr`) loses it.
+    def targets(all) = all - (suppressed - glue.keys)
+
+    def skip?(addr) = suppressed.include?(addr) && !glue.key?(addr)
+  end
+
+  # INLINE_NESTED_BLOCK_SUPPORT: recognize/emit/suppress every BLOCK/
+  # SENDB(SSENDB) region NESTED inside ONE inlined loop body, so that a
+  # region a named recognizer above ALREADY fully proved (receiver class
+  # and block arity both gated, exactly as before) stops being thrown away
+  # by its emitter merely because its block body happens to contain
+  # another block-carrying call.
+  #
+  # This is the exact same gap `NESTED_BLOCK_FALLBACK_SUPPORT` already
+  # closed for `emit_proc_fallback_fn` -- that function runs this same
+  # recognize -> emit -> glue pipeline recursively against a BLOCK_FALLBACK
+  # body -- applied to the one family of body compilers that never got it:
+  # the inlined-loop emitters (emit_times_inline, emit_each_inline,
+  # emit_collect_inline, ...). Their shared body compiler,
+  # compile_block_body_insn, delegates everything it has no case of its own
+  # for to compile_insn, which has no `BLOCK`/`SENDB`/`SSENDB` case at all
+  # -- so a nested block-carrying call put `#error unhandled opcode BLOCK`
+  # into the body, every emitter's own `return nil if body.include?
+  # ('#error')` fired, and the WHOLE loop fell back to one dynamically
+  # dispatched `mrb_funcall_with_block`, discarding a receiver proof that
+  # had already succeeded.
+  #
+  # Real, measured scope (a whole-program diagnostic sweep of this exact
+  # baseline, not an estimate): 24 distinct source sites are recognizer-
+  # ACCEPTED and emitter-declined for exactly this reason, and for every
+  # one of them `recognize_block_fallback_regions` claims EVERY nested
+  # BLOCK/SENDB in the body (zero left over), e.g.
+  #   Game::ChipsetLayout.quads_from_quarters (mruby-rpg2k/mrblib/game.rb)
+  #     out = []
+  #     2.times do |j|
+  #       2.times do |i|
+  #         qc, qr = quarters[j][i]
+  #         out << [i * HTS, j * HTS, qc * TS + i * HTS, qr * TS + j * HTS, HTS, HTS]
+  #       end
+  #     end
+  # whose real `mrbc -v` disassembly gives the OUTER block a plain
+  # `BLOCK R4 I[0]` + `SENDB R3 :times n=0` (recognize_times_regions
+  # accepts it: 1 mandatory arg, pure arity) and whose INNER block carries
+  # `GETUPVAR R5 1 1` (level 1, the METHOD's own `quarters`) and
+  # `GETUPVAR R6 1 0` (level 0, the OUTER BLOCK's own `j`) -- the two
+  # capture levels this mechanism has to answer, and the only two that
+  # occur anywhere in the real sweep (never level >= 2).
+  #
+  # WHY BOTH LEVELS ARE DIRECTLY ADDRESSABLE HERE, with no pointer
+  # forwarding at all -- the one real difference from the
+  # emit_proc_fallback_fn case. A BLOCK_FALLBACK body is a SEPARATE C++
+  # function, so it can only reach an outer frame through a captured
+  # pointer parameter. An INLINED loop body is not: it is emitted straight
+  # into the enclosing method's own `_impl`, where
+  #   - the method's own registers are the locals `r0 .. r<irep.nregs-1>`
+  #     (compile_method's own preamble, `mrb_value r#{i}`, `r0 = self`), and
+  #   - the inlined block's own registers are the locals
+  #     `r<offset> .. r<offset + block_irep.nregs - 1>`, `offset ==
+  #     irep.nregs`, re-declared at the top of every iteration by each
+  #     emitter below.
+  # A nested block's `GETUPVAR x 0` names the INLINED block's register x
+  # (`&r<x + offset>`); its `GETUPVAR x 1` names the METHOD's register x
+  # (`&r<x>`). Both are ordinary C++ locals of the one function this glue
+  # is emitted into. This is sound only because the inlined-loop emitters
+  # are called from compile_method and NOWHERE ELSE (confirmed by a real
+  # whole-program grep: the ten `emit_*_inline(region, irep, d)` call sites
+  # all sit in compile_method's own recognizer sequence -- never from
+  # emit_proc_fallback_fn, never from emit_rescue_try_body), so `irep` is
+  # always a real method body and `offset` always that method's own
+  # `nregs`. Re-verify this before ever calling an inlined-loop emitter
+  # from a nested context.
+  #
+  # `available_upvars` expresses exactly that fact in the recognizer's own
+  # existing vocabulary rather than adding a new gate to it: the pairs
+  # `[0, x]` for every method register x mean "this host can supply a
+  # level-1 need for any of those", so the recognizer's own
+  # `l.zero? || available_upvars.include?([l - 1, x])` admits level 0 and
+  # level 1 and refuses level >= 2 -- which is precisely the truth here,
+  # since level 2 would name a frame outside `irep` that this function
+  # genuinely does not hold.
+  #
+  # RETURN_BLK IS DELIBERATELY REFUSED. A `return` inside a nested
+  # BLOCK_FALLBACK body compiles to a thrown `bc2cpp_method_return`, which
+  # is only ever caught by compile_method's own whole-body `try`/`catch`,
+  # and that wrapper is armed by `needs_return_catch` -- computed far
+  # earlier (from `block_fallback_regions` alone) than any inlined-loop
+  # emitter runs. Admitting such a region here would therefore throw with
+  # nothing to catch it: `std::terminate`, not a wrong value. Refusing it
+  # keeps this round strictly additive -- `needs_return_catch` is not
+  # touched at all, so no method that lacks the wrapper today can newly
+  # need one. Real cost, measured on this exact baseline: exactly ONE of
+  # the 24 sites (`RGSS::Input`'s own key scan, mruby-rgss/mrblib/lib.rb),
+  # left on BLOCK_FALLBACK exactly as today and left for a follow-up round
+  # that threads the inline regions into `needs_return_catch` properly.
+  #
+  # `blk_available: false` (the default) for the same kind of reason: a
+  # `yield` inside a nested block would need the enclosing METHOD's own
+  # received block forwarded, and the frame arithmetic `BLKPUSH`'s own
+  # level operand encodes is counted over REAL VM frames, which an inlined
+  # loop deliberately collapses. Left unmodelled, so such a body keeps its
+  # honest `#error`, its region is dropped, and the site falls back exactly
+  # as today.
+  #
+  # All-or-nothing, like every other emitter here: a nested region whose
+  # own body doesn't compile (`emit_proc_fallback_fn` returns nil) is
+  # simply not claimed, its `BLOCK`/`SENDB` stay in the body, the caller's
+  # own `#error` check fires, and the whole loop falls back to
+  # BLOCK_FALLBACK precisely as it does today.
+  # INLINE_NESTED_BLOCK_SUPPORT: does this nested region's own body contain a
+  # real `BREAK`, at ANY depth -- the exact same whole-subtree question
+  # block_fallback_region_has_return_blk? asks about `RETURN_BLK`, and refused
+  # here for a closely related reason.
+  #
+  # A `break` inside a BLOCK_FALLBACK body compiles to `throw
+  # bc2cpp_block_break`, which has to unwind from the standalone cfunc, back
+  # through the real mruby VM frames `mrb_funcall_with_block` pushed, to the
+  # `catch (bc2cpp_block_break&)` at the call-site glue. That unwind is a
+  # PRE-EXISTING hazard of this project's BLOCK_FALLBACK mechanism, not
+  # anything this round introduces, and it is really broken today: a real
+  # differential harness built for this round (two VMs from this repo's own
+  # 3rd/mruby submodule, both with MRB_USE_CXX_EXCEPTION exactly as the shipped
+  # build has it -- mruby's own MRB_CATCH is `catch(mrb_jmpbuf *e)`, verified in
+  # 3rd/mruby/include/mruby/throw.h, so it demonstrably does NOT swallow the
+  # foreign type) shows the shape
+  #
+  #     rows.each { |row| acc << row.each { |v| break v * 100 if v > 1 } }
+  #
+  # failing on the UNMODIFIED baseline compiler too -- mruby's own
+  # `mrb_vm_run` assertion `c->ci == c->cibase || (c->ci - c->cibase) ==
+  # cioff - 1` (3rd/mruby/src/vm.c) fires, i.e. the C++ unwind left the VM's
+  # own callinfo stack inconsistent. So the mechanism cannot reproduce a real
+  # `break` across that boundary regardless of who calls it.
+  #
+  # Refusing such a region here is therefore the only strictly-additive
+  # choice: the site keeps exactly the BLOCK_FALLBACK translation it has
+  # today, this round neither fixes nor worsens that pre-existing hazard, and
+  # nothing this round newly admits depends on an unwind that does not work.
+  # Measured cost on this baseline: ZERO real sites (the whole-program
+  # BLOCK_FALLBACK count is identical with and without this gate) -- it is
+  # purely a guard against a future site, and against the synthetic case the
+  # differential test deliberately includes.
+  #
+  # `available_upvars` must be the SAME set the real emit pass uses, for the
+  # identical "a pre-scan that recognizes fewer nested regions than the real
+  # pass would is worse than useless" reason block_fallback_region_has_return_
+  # blk?'s own comment gives.
+  def inline_nested_region_has_break?(region, available_upvars)
+    block_irep = region[:block_irep]
+    return true if block_irep.instructions.any? { |i| i.op == 'BREAK' }
+
+    recognize_block_fallback_regions(block_irep, available_upvars: region[:upvars] || available_upvars)
+      .any? { |nregion| inline_nested_region_has_break?(nregion, available_upvars) }
+  end
+
+  def inline_nested_block_pass(block_irep, irep, d, offset, outer_addr)
+    host_upvars = (0...irep.nregs).map { |x| [0, x] }
+    regions = recognize_block_fallback_regions(block_irep, available_upvars: host_upvars)
+    return InlineNested.none if regions.empty?
+
+    fn_prefix = "#{cpp_name(d.owner, d.name)}_inline_#{outer_addr}"
+    nested = InlineNested.none
+    regions.each do |nregion|
+      next if block_fallback_region_has_return_blk?(nregion)
+      next if inline_nested_region_has_break?(nregion, host_upvars)
+
+      fn_result = emit_proc_fallback_fn(nregion, d, fn_prefix)
+      next unless fn_result
+
+      nfn_name, nfn_code = fn_result
+      nested.pre << nfn_code
+      nested.suppressed << nregion[:block_addr] << nregion[:sendb_addr]
+      nested.glue[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name, inline_offset: offset)
+    end
+    nested
   end
 
   # BLOCK_SUPPORT: the full inlined-loop replacement for one recognized
   # `.times` region (recognize_times_regions), or nil if the block's own
   # body doesn't come out clean (any `#error` anywhere -- an unsupported
-  # opcode inside the block itself, including a nested BLOCK/SENDB this
-  # file has no nested-block support for at all) -- never emitted
+  # opcode inside the block itself, or a nested BLOCK/SENDB that
+  # INLINE_NESTED_BLOCK_SUPPORT's own pass above could not claim) -- never emitted
   # partially; compile_method's own caller falls all the way back to
   # leaving both BLOCK and SENDB as ordinary, honest `#error` stubs in
   # that case, exactly like any other unrecognized shape in this file.
@@ -14734,14 +15004,41 @@ class CodeGen
     label_prefix = "LBLK#{region[:block_addr]}_"
     body = String.new
     iter_label = "Lbc2cpp_times_iter_#{region[:block_addr]}"
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
       body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix, idx: i)
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -14813,7 +15110,23 @@ class CodeGen
     iter_label = "Lbc2cpp_each_iter_#{region[:block_addr]}"
     break_label = "Lbc2cpp_each_end_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -14828,7 +15141,18 @@ class CodeGen
                                                 break_dest: dest_reg, break_label: break_label, idx: i)
       end
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -14878,7 +15202,23 @@ class CodeGen
     iter_label = "Lbc2cpp_eachidx_iter_#{region[:block_addr]}"
     break_label = "Lbc2cpp_eachidx_end_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -14886,7 +15226,18 @@ class CodeGen
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
                                               break_dest: dest_reg, break_label: break_label, idx: i)
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -14949,7 +15300,23 @@ class CodeGen
     iter_label = "Lbc2cpp_heach_iter_#{region[:block_addr]}"
     break_label = "Lbc2cpp_heach_end_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -14965,7 +15332,18 @@ class CodeGen
                                                  break_dest: dest_reg, break_label: break_label, idx: i)
       end
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -15018,7 +15396,23 @@ class CodeGen
     iter_label = "Lbc2cpp_ekey_iter_#{region[:block_addr]}"
     break_label = "Lbc2cpp_ekey_end_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -15026,7 +15420,18 @@ class CodeGen
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
                                                break_dest: dest_reg, break_label: break_label, idx: i)
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -15093,7 +15498,23 @@ class CodeGen
     iter_label = "Lbc2cpp_range_iter_#{addr}"
     break_label = "Lbc2cpp_range_end_#{addr}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -15101,7 +15522,18 @@ class CodeGen
       body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
                                               break_dest: dest_reg, break_label: break_label, idx: i)
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -15174,7 +15606,23 @@ class CodeGen
     break_label = "Lbc2cpp_collect_end_#{region[:block_addr]}"
     result_var = "bc2cpp_collect_v_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -15191,7 +15639,18 @@ class CodeGen
                                                   broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}", idx: i)
       end
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -15332,7 +15791,23 @@ class CodeGen
     break_label = "Lbc2cpp_accum_end_#{region[:block_addr]}"
     result_var = "bc2cpp_accum_v_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -15351,7 +15826,18 @@ class CodeGen
                                                   broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}", idx: i)
       end
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     out = String.new
     out << "  {\n"
@@ -15669,7 +16155,23 @@ class CodeGen
     break_label = "Lbc2cpp_sort_end_#{region[:block_addr]}"
     result_var = "bc2cpp_sort_v_#{region[:block_addr]}"
     body = String.new
-    body_targets = jump_targets(block_irep)
+    # INLINE_NESTED_BLOCK_SUPPORT: claim any nested block-carrying call in
+    # this body BEFORE compiling it (see inline_nested_block_pass), so a
+    # region this emitter's own recognizer already fully proved is no
+    # longer discarded merely because its block body contains another
+    # block. `@inline_nested` is consumed by compile_block_body_insn's own
+    # BLOCK/SENDB cases and RESTORED again below, before any `return`.
+    # SAVED and restored rather than simply cleared, the same discipline
+    # emit_proc_fallback_fn's own @blk_param_name already follows and for
+    # the same reason: compile_method is genuinely RE-ENTRANT (its own
+    # `compiles_clean?` -> `monomorphic_target` -> `compile_send` ->
+    # `compile_insn` path can re-enter it from inside this very body loop,
+    # to decide a MONO devirtualization target), so nil-ing this would
+    # silently disarm an enclosing inlined body's own perfectly valid
+    # nested-region map. Caught live building this, as a real crash.
+    bc2cpp_saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
 
@@ -15683,7 +16185,18 @@ class CodeGen
                                                   broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}", idx: i)
       end
     end
+    # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
+    # return -- the ivar must never outlive this one body loop. The claimed
+    # regions' own standalone cfunc code is handed to compile_method (which
+    # emits it at file scope ahead of this method's own function) only on
+    # success; on failure this whole region is abandoned, so emitting its
+    # nested functions would leave real but permanently unreferenced code
+    # behind.
+    bc2cpp_nested_pre = @inline_nested.pre
+    @inline_nested = bc2cpp_saved_nested
     return nil if body.include?('#error')
+
+    @inline_nested_pre << bc2cpp_nested_pre
 
     addr = region[:block_addr]
     out = String.new
@@ -16561,7 +17074,24 @@ class CodeGen
   # what the caller does with `rproc_var` (dispatch it, as
   # emit_block_fallback_glue does, or just store it, as
   # emit_lambda_fallback_glue does) is entirely up to it.
-  def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false)
+  #
+  # INLINE_NESTED_BLOCK_SUPPORT: `inline_offset` is non-nil for exactly one
+  # caller -- a region nested inside an INLINED loop body (see
+  # inline_nested_block_pass' own comment for the full argument). It
+  # switches the two capture levels that can occur there from "forward a
+  # pointer this function holds as a parameter" to "take the address of a
+  # local this function actually declares", because that is what an inlined
+  # body really has: level 0 names the inlined block's own register, the
+  # local `r<b + inline_offset>` the emitter re-declares at the top of every
+  # iteration; level 1 names the enclosing METHOD's register, the local
+  # `r<b>` compile_method's own preamble declares. Level >= 2 cannot reach
+  # here at all -- the recognizer's own `available_upvars` gate refuses it
+  # (that comment states exactly why), so the `else` arm below is the
+  # pre-existing pointer-forwarding path, reached only when `inline_offset`
+  # is nil, i.e. from every caller that existed before this keyword did.
+  # Defaulted to nil precisely so those callers emit byte-for-byte the code
+  # they emitted before.
+  def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` takes the address of THIS enclosing
@@ -16595,7 +17125,13 @@ class CodeGen
     # GC-rooted by the RProc itself rather than merely borrowed from a
     # frame.
     env_entries = ['self'] + upvar_regs.map do |(l, b)|
-      l.zero? ? "mrb_cptr_value(M, &r#{b})" : "mrb_cptr_value(M, #{upvar_var_name(l - 1, b)})"
+      if inline_offset
+        "mrb_cptr_value(M, &r#{l.zero? ? b + inline_offset : b})"
+      elsif l.zero?
+        "mrb_cptr_value(M, &r#{b})"
+      else
+        "mrb_cptr_value(M, #{upvar_var_name(l - 1, b)})"
+      end
     end
     env_entries << 'bc2cpp_blk' if needs_blk
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
@@ -16617,12 +17153,24 @@ class CodeGen
   #
   # See emit_lambda_fallback_glue below for the LAMBDA_FALLBACK_SUPPORT
   # sibling of this glue -- same RProc construction, no dispatch at all.
-  def emit_block_fallback_glue(region, fn_name)
-    dest_reg = region[:dest_reg].to_i
+  #
+  # INLINE_NESTED_BLOCK_SUPPORT: `inline_offset`, when non-nil, shifts this
+  # region's own destination/argument registers out of the nested block's
+  # numbering into the enclosing function's (`+ offset`, the identical
+  # shift compile_block_body_insn's own `else` arm already applies to every
+  # other instruction of an inlined body) and is forwarded to
+  # emit_rproc_construction for the capture levels -- see that function's
+  # own comment and inline_nested_block_pass'. `self` is deliberately NOT
+  # shifted: a block inherits its enclosing method's `self` unchanged (real
+  # mruby semantics), which is exactly the `self` C++ parameter already in
+  # scope here, and is also what the inlined body's own `r<offset> = self`
+  # alias holds. Defaulted to nil so every pre-existing caller is unchanged.
+  def emit_block_fallback_glue(region, fn_name, inline_offset: nil)
+    dest_reg = region[:dest_reg].to_i + (inline_offset || 0)
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
-                                              region[:needs_blk] ? true : false)
+                                              region[:needs_blk] ? true : false, inline_offset: inline_offset)
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), dynamic dispatch\n"
