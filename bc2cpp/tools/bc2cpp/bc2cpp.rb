@@ -2605,7 +2605,25 @@ def core_array_return?(name, block_carrying, registry, argc: 0)
   end
 end
 
-def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil)
+# ARRAY_RETURN_PROOF: `ret_proof`, when supplied, is a second, independent
+# "a call to this bare name leaves an Array in its destination register"
+# oracle, layered beside the hand-placed `-> Array` magic comment
+# `annotated` already carries. It defaults to nil, so every pre-existing
+# caller that does not opt in (in particular ClassLayout.analyze's own
+# SETIV-site call, which has no CodeGen instance and therefore no
+# whole-program return fixpoint to consult) keeps byte-identical behavior.
+# See CodeGen#compute_array_return_names for what it actually proves.
+#
+# Consulted ONLY for a NON-block-carrying send, and that restriction is
+# load-bearing rather than defensive: a real `break` inside the CALLER's own
+# block hands the BREAK operand straight back as the send's result (ops.h's
+# own `OPCODE(BREAK, B)`), so `obj.thing { break 5 }` evaluates to 5 no
+# matter what `thing` itself returns. This is verbatim the reasoning
+# compute_fixnum_return_names' own "WHY ONLY SEND/SEND0/SSEND/SSEND0, never
+# SENDB/SSENDB" paragraph already gives for the identical hazard, and
+# `block_carrying` here is already computed from exactly the same opcode
+# split (SENDB/SSENDB vs SEND/SEND0/SSEND/SSEND0) that argument relies on.
+def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret_proof = nil)
   reg = dest_reg
   (idx - 1).downto(0) do |i|
     pin = irep.instructions[i]
@@ -2653,6 +2671,9 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil)
     return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
     return 'Array' if annotated&.call(called)
     return 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
+    # ARRAY_RETURN_PROOF -- see this function's own `ret_proof` comment above
+    # for why the block-carrying shape is excluded here and nowhere else.
+    return 'Array' if !block_carrying && ret_proof&.call(called)
 
     return nil
   end
@@ -8045,8 +8066,29 @@ class CodeGen
     # compute_fixnum_return_names pass below behaves byte-identically to
     # today's and there is no circular seeding between the two mechanisms.
     @entry_arg_fixnum = nil
+    # ARRAY_RETURN_PROOF: like @fixnum_return_names above, this has to EXIST
+    # (empty) before drop_unsafe_embeddings runs just below, because that
+    # calls compiles_clean? -> compile_method -> the loop recognizers ->
+    # proven_array_source. Probing with the empty set is not merely safe but
+    # exact, for the same reason its FIXNUM sibling's own comment gives:
+    # compiles_clean? only ever asks whether a body contains `#error` text,
+    # and this proof never produces or removes one. A region a recognizer
+    # newly accepts is emitted all-or-nothing (emit_each_inline and friends
+    # return nil on an unclean body) and otherwise falls through to the
+    # BLOCK_FALLBACK path, which is itself always `#error`-free -- so the
+    # boolean drop_unsafe_embeddings memoizes into @clean_cache is identical
+    # either way, and the real fixpoint below can safely run afterwards.
+    @array_return_names = Set.new
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     compute_fixnum_return_names
+    # ARRAY_RETURN_PROOF: computed once, after @class_layout and
+    # @ivar_layout are final (its own per-return-site predicate reads both,
+    # through trace_new_target). Deliberately NOT part of the
+    # ENTRY_ARG_CALLSITE_PROOF <-> FIXNUM_RETURN_PROOF alternation below:
+    # this fixpoint neither reads nor feeds either Fixnum set (an Array-
+    # returning method is never a Fixnum-returning one), so there is nothing
+    # for an alternation to converge on and running it once is exact.
+    compute_array_return_names
     # ENTRY_ARG_CALLSITE_PROOF <-> FIXNUM_RETURN_PROOF alternation. Each of
     # the two is a greatest fixpoint that is sound GIVEN the other's current
     # set is sound (see compute_entry_arg_fixnum's own header for the joint
@@ -12694,8 +12736,21 @@ class CodeGen
   # This wrapper only supplies what is specific to a CodeGen instance: the
   # whole-program registry and the `-> Array` return annotations (which
   # ClassLayout has no access to and does not need).
+  # ARRAY_RETURN_PROOF: the whole-program return fixpoint is threaded in as
+  # the scan's second oracle, alongside the hand-placed `-> Array`
+  # annotation. Deliberately supplied HERE and not from ClassLayout.analyze's
+  # own call to the same scan: this fact is computed by a CodeGen instance
+  # (it needs @class_layout, which ClassLayout is itself still building), and
+  # keeping it out of that call is also what makes this change strictly
+  # additive -- the 255 CLASS_HINT / 9 ELEM_HINT / 10 HASH_ELEM_HINT facts
+  # ClassLayout proves, and the whole TYPED devirtualization cascade that
+  # rests on them, are bit-for-bit unchanged. Widening ClassLayout with the
+  # same fact is real, measured follow-up work (it would prove ivars like
+  # `Game::Battle#@queue`, assigned from `turn_order`, to be Array), not
+  # something to fold into the same round.
   def proven_array_source(irep, idx, dest_reg)
-    proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) })
+    proven_array_source_scan(irep, idx, dest_reg, @registry, ->(n) { annotated_array_return(n) },
+                             ->(n) { @array_return_names.include?(n) })
   end
 
   # GETIDX_STATIC_RECEIVER_SUPPORT: is THIS `GETIDX`/`GETIDX0`/`SETIDX`
@@ -14057,6 +14112,323 @@ class CodeGen
       end
     end
     true
+  end
+
+  # ---------------------------------------------------------------------------
+  # ARRAY_RETURN_PROOF: the set of bare method names a `SEND`/`SEND0`/
+  # `SSEND`/`SSEND0` of which provably leaves an Array in its destination
+  # register -- the Array analogue of FIXNUM_RETURN_PROOF above, built from
+  # the identical admission rules, the identical greatest fixpoint and the
+  # identical soundness argument, with only the per-return-site predicate
+  # swapped (from "this register holds a Fixnum" to "this register holds an
+  # Array").
+  #
+  # MEASURED, NOT GUESSED. A real whole-program `RECV_DIAG` sweep of every
+  # block-carrying call site whose method name one of the loop recognizers
+  # can inline (`each`/`map`/`select`/`any?`/`each_with_index`/... -- 495
+  # distinct sites) found 185 whose receiver no recognizer could prove.
+  # Bucketed by the real opcode that last wrote the receiver register:
+  #
+  #      42  SEND0   -- `reqs = interp.take_move_route_requests; reqs.each`
+  #      38  <none>  -- an opaque incoming argument (no annotation)
+  #      30  GETIDX  -- `pages[i].each`, an element of a container
+  #      18  SSEND   -- `self.foo(x).each`
+  #      17  SSEND0  -- `stat_targets.each`
+  #      13  GETIV   -- an ivar ClassLayout poisoned to UNKNOWN
+  #      10  LOADNIL -- an if/else merge seeded `x = nil` (control flow)
+  #       6  SEND
+  #       4  ADD / 3 RETURN / 3 GETCONST / 1 GETMCNST
+  #
+  # The four SEND-family buckets together are 83 of 185 -- by far the largest
+  # single cause, and exactly one question: "what class does this method
+  # return?". That is what this proves. The other buckets are real and are
+  # deliberately left alone this round (see the PR's own follow-up note): an
+  # opaque argument needs a magic-comment class annotation per call site, a
+  # GETIDX needs an ELEM_HINT that says Array, and the LOADNIL merges need a
+  # control-flow-joining scan `proven_array_source_scan` does not have.
+  #
+  # ADMISSION. A name N is admitted only when ALL of the following hold --
+  # these are compute_fixnum_return_names' own rules 1-4, verbatim, and the
+  # reason each exists is unchanged from that function's own header:
+  #
+  #   1. `@registry[N]` holds EXACTLY ONE MethodDef with a real bytecode body
+  #      (`irep` non-nil). Verbatim monomorphic_target's own uniqueness test
+  #      against the same closed-world registry: a same-named NATIVE
+  #      definition anywhere in NATIVE_SRCS already puts a second, irep-nil
+  #      MethodDef in that list and disqualifies N outright.
+  #   2. N appears nowhere in `foreign_method_names` -- a method defined in
+  #      `3rd/mruby/mrblib` is real Ruby compiled into this same VM and is
+  #      invisible to the registry, so it would otherwise leave a bare name
+  #      looking MONO when a second, completely different body exists. This
+  #      is what refuses `values`, `sort`, `first` and friends here without
+  #      needing a special case.
+  #   3. Its one body is return-analyzable (`array_return_analyzable?`, which
+  #      is `fixnum_return_analyzable?`'s own rule reused unchanged): no
+  #      catch handlers, no descendant `RETURN_BLK`/`BREAK` (a non-local exit
+  #      written inside a nested block is a real return from this method that
+  #      this body's own instruction list does not contain at all), and at
+  #      least one real `RETURN`.
+  #   4. EVERY `RETURN R[a]` site in that body provably holds an Array
+  #      (`array_return_sites_proven?`), and every OTHER method-exit opcode
+  #      (`RETURN_BLK`/`BREAK`/`RETSELF`/`RETNIL`/`RETTRUE`/`RETFALSE`/
+  #      `STOP`) refuses the method outright -- so `return nil`, `return
+  #      self` and a non-local block return can none of them slip past.
+  #
+  # WHY A GREATEST FIXPOINT IS SOUND, INCLUDING FOR RECURSION. Start from
+  # every name passing 1-3, then repeatedly drop any name whose own return
+  # sites stop proving, until stable. The induction is on the DYNAMIC CALL
+  # TREE of one completed call, not on the shape of the call graph: consider
+  # any call to an admitted N that actually RETURNS. Its returned register
+  # was written by one of the classified sources; all but the SEND arm are
+  # Arrays outright by the predicate below, and the SEND arm is a call to an
+  # admitted name that itself completed and returned strictly earlier in that
+  # same finite call tree, so by the induction hypothesis it returned an
+  # Array. A cycle with no terminating base case never returns at all (it
+  # raises SystemStackError), so it is vacuous. Verbatim
+  # compute_fixnum_return_names' own argument, for the same reason.
+  #
+  # NO COMPETING DEFINITION, THE WHOLE-PROGRAM CHECK. This mechanism never
+  # admits a CLASS the way recognize_each_regions' own Array gate does, so
+  # the "is there another `#each` for this class" question that gate exists
+  # to answer (`Game::Actors#each`/`Game::Party#each`/`LCF::Array2D#each` are
+  # the real competing definitions it must exclude) is answered here one
+  # level earlier and more strongly: rules 1+2 together mean the proven name
+  # has exactly ONE body in the entire closed world AND no body anywhere in
+  # the foreign mrblib either, so there is no second definition for any
+  # receiver to reach. A receiver that does not respond to N raises
+  # NoMethodError and never returns, which is vacuous for a claim of the form
+  # "whenever this call returns, it returned an Array" -- the identical trust
+  # model CORE_ARRAY_RETURN_METHODS' own header already documents.
+  #
+  # TRUST LEVEL, STATED HONESTLY. The per-return-site predicate below is
+  # exactly the predicate the loop recognizers already apply to their OWN
+  # receiver register (`trace_new_target == 'Array'`, else
+  # `proven_array_source`) -- the same facts, at the same strength, merely
+  # transplanted from the caller's receiver to the callee's return. That
+  # includes trace_new_target's GETIV/ClassLayout-hint terminal, which is a
+  # whole-program agreement fact rather than a Ruby-semantics guarantee; it
+  # is admitted here for precisely the reason it is already admitted at every
+  # `@ivar.each` site this file inlines today, and under precisely the same
+  # net: every consumer is a loop recognizer whose emitter still carries its
+  # own `mrb_array_p` raise-tripwire (see emit_each_inline's own comment), so
+  # a wrong fact raises a loud TypeError at the first call, never silently
+  # miscompiles and never becomes UB. This is FIXNUM_RETURN_PROOF's own
+  # "ADMISSION VARIANT B" move -- "proof source 3's own argument moved from
+  # the caller's GETIV to the callee's return" -- applied to the Array
+  # dimension.
+  #
+  # No `compiles_clean?` requirement, for the same reason
+  # annotated_array_return's own header gives: the fact consumed is only
+  # about the RETURN value's class, never about how the callee is compiled.
+  # ---------------------------------------------------------------------------
+  def compute_array_return_names
+    @array_return_names = Set.new
+    # No foreign scan means admission rule 2 is missing, which would make
+    # this strictly more optimistic than a real build -- prove nothing
+    # instead. Verbatim compute_fixnum_return_names' own guard.
+    return @array_return_names unless @foreign_method_names
+
+    cand = {}
+    @registry.each do |name, defs|
+      next unless defs.size == 1
+
+      d = defs.first
+      next if @foreign_method_names.include?(name)
+      # An `attr_reader`/`attr_accessor` MethodDef has no bytecode body to
+      # read return sites out of (`irep` nil). Unlike FIXNUM_RETURN_PROOF's
+      # own variant B there is no struct-field analogue to fall back on for
+      # an Array (an ivar holding a real heap Array is never an embedding
+      # candidate -- see ClassLayout's own header), so these are simply
+      # refused rather than seeded.
+      next unless d.irep
+
+      irep = @ireps[d.irep]
+      next unless irep && array_return_analyzable?(irep)
+
+      cand[name] = d
+    end
+
+    @array_return_names = Set.new(cand.keys)
+    loop do
+      dropped = cand.keys.select do |n|
+        @array_return_names.include?(n) && !array_return_sites_proven?(cand[n])
+      end
+      break if dropped.empty?
+
+      dropped.each { |n| @array_return_names.delete(n) }
+    end
+    @array_return_names
+  end
+
+  # ARRAY_RETURN_PROOF's own result, for the whole-program diagnostic.
+  def array_return_names
+    @array_return_names || Set.new
+  end
+
+  # Structural preconditions for reading a body's return sites at all --
+  # fixnum_return_analyzable?'s own rule, reused verbatim rather than
+  # re-derived, because the question ("does this body's own instruction list
+  # really contain every one of its return paths?") is identical and
+  # type-independent. See that function's own comment for why a catch handler
+  # and a descendant RETURN_BLK/BREAK each refuse the method outright.
+  def array_return_analyzable?(irep)
+    return false unless (irep.catch_handlers || []).empty?
+    return false if subtree_has_nonlocal_exit?(irep)
+
+    irep.instructions.any? { |i| i.op == 'RETURN' }
+  end
+
+  # Every real return path of one method body holds an Array. Same opcode
+  # split, and same "every RETURN is checked, not just the textually last
+  # one", as fixnum_return_sites_proven? above.
+  def array_return_sites_proven?(d)
+    irep = @ireps[d.irep]
+    return false unless irep
+
+    # Exactly the context compile_method itself builds before handing an
+    # irep to the loop recognizers (see its own `each_ctx_ivar`/
+    # `each_ctx_args`), so the predicate below asks the identical question
+    # against the identical facts -- just about the callee's body instead of
+    # the caller's.
+    ivar_classes = @class_layout[d.owner]
+    arg_classes = @class_annotations[irep.label]&.args
+    mand = mandatory_arity(irep)
+    targets = jump_targets(irep)
+
+    irep.instructions.each_with_index do |insn, idx|
+      case insn.op
+      when 'RETURN'
+        # `"RETURN\tR%d"` -- the returned register is the first operand.
+        reg = insn.args[/\AR(\d+)/, 1]
+        return false unless reg
+        return false unless straightline_return_reg?(irep, idx, reg, targets)
+        return false unless proven_array_operand?(irep, idx, reg, d.owner, mand, ivar_classes, arg_classes)
+      when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
+        return false
+      end
+    end
+    true
+  end
+
+  # ARRAY_RETURN_PROOF's own CONTROL-FLOW guard, and the one place this
+  # mechanism is deliberately STRICTER than the receiver gate it otherwise
+  # reuses verbatim.
+  #
+  # Every backward scan in this file (`trace_new_target`,
+  # `proven_array_source_scan`, `proven_fixnum_operand?`) walks the
+  # instruction array LINEARLY -- `(idx - 1).downto(0)` -- and ignores jumps
+  # entirely. At an ordinary receiver site that is an accepted imprecision
+  # backed by the emitter's own `mrb_array_p` raise-tripwire. At a RETURN
+  # site it would be something worse: this mechanism's whole claim is
+  # "EVERY return path of this method hands back an Array", and a linear
+  # backward walk only ever sees the TEXTUALLY PRECEDING writer, never the
+  # other predecessors of a join.
+  #
+  # This is a REAL shape in this program, not a hypothetical -- found by
+  # listing the names a first, unguarded version of this fixpoint admitted
+  # and reading them back against their own source. `RGSS::Cache#extensions`
+  # (mruby-rgss/mrblib/lib.rb:643) is
+  #
+  #     def extensions
+  #       @extensions || EXTENSIONS
+  #     end
+  #
+  # which mrbc compiles to `GETIV R1 @extensions` / a conditional jump /
+  # `GETCONST R1 EXTENSIONS` / `RETURN R1`. The unguarded walk sees only the
+  # GETCONST, proves `EXTENSIONS` is a frozen Array literal
+  # (CONST_CONTAINER_SUPPORT) and admits the name -- having never looked at
+  # the `@extensions` path at all. (That particular method happens to be
+  # safe anyway: `@extensions` is never assigned anywhere in this whole
+  # program, so the `||` always falls through. The ANALYSIS was still
+  # unsound, and a second ivar-returning `||` arm somewhere else would have
+  # been a real wrong answer.)
+  #
+  # THE RULE. Walking backward from the RETURN, following MOVE chains
+  # exactly the way the two predicates themselves do, the instruction that
+  # writes the returned register must be reached WITHOUT ever stepping PAST
+  # an instruction whose address is a jump target. An instruction that is
+  # itself a jump target is fine to land on (control arriving there really
+  # does execute it); what is refused is looking further back THROUGH one,
+  # because control can enter the body at that address having executed none
+  # of what lies below it. `jump_targets` supplies exactly those addresses,
+  # and it is complete here: `array_return_analyzable?` has already refused
+  # any irep with catch handlers, which are the only other way into the
+  # middle of a body.
+  #
+  # NO EXEMPTION for a register the body never writes (an incoming argument,
+  # which `trace_new_target` can still resolve through a magic-comment class
+  # annotation). Falling off the front of the walk is refused outright: the
+  # exemption would be sound on its own terms, but telling "never written
+  # anywhere" apart from "not written below this RETURN" needs a real
+  # writes-this-register predicate, and the disassembly's own "first R<n> is
+  # the destination" convention is not one (`RETURN R1` and `SETIV @x R1`
+  # both print a SOURCE first). It is worth nothing measurable here anyway --
+  # `-> Array` class annotations on an opaque argument are not a shape this
+  # program currently uses -- so this stays the strictly conservative form.
+  #
+  # WHAT THIS GUARD DOES NOT COVER, stated honestly: the two predicates'
+  # own DEEPER walks -- trace_new_target continuing from a `SEND :new`
+  # through its GETCONST/GETMCNST class path, from a chained accessor or
+  # `.dup` into its own receiver -- still walk linearly past this point.
+  # Those steps are resolving SUB-EXPRESSIONS of the producer instruction
+  # this guard already located (the receiver of a send, the qualifying
+  # segments of one constant path), and mrbc emits each of those
+  # contiguously, immediately ahead of the instruction that consumes them,
+  # with no join interposed: a jump target landing between `GETCONST R1
+  # Array` and `SEND R1 :new` would mean control could reach that send with
+  # no receiver in R1 at all, which is not code mrbc generates. The guard
+  # is placed where the measured hazard actually was -- a conditional at
+  # STATEMENT level feeding one register into one RETURN.
+  def straightline_return_reg?(irep, idx, reg, targets)
+    r = reg
+    # The RETURN INSTRUCTION ITSELF is the join in the shape that motivated
+    # this guard: mrbc compiles `@extensions || EXTENSIONS` so that the
+    # truthy arm's `JMPIF` lands directly ON the `RETURN`, leaving the
+    # `GETCONST` as the RETURN's immediate textual predecessor and the
+    # `GETIV` reachable only by a path that skips it. Checking only the
+    # instructions strictly BELOW the RETURN misses that entirely (measured:
+    # `extensions` survived a first version of this guard that did), so the
+    # RETURN's own address is checked first.
+    return false if targets.include?(irep.instructions[idx].addr)
+
+    (idx - 1).downto(0) do |i|
+      pin = irep.instructions[i]
+      if pin.args[/^R(\d+)/, 1] == r
+        # Following a MOVE means continuing further back on the SOURCE
+        # register, so this instruction being a join is just as fatal as any
+        # other instruction the walk has to look through.
+        if pin.op == 'MOVE'
+          return false if targets.include?(pin.addr)
+
+          src = pin.args.scan(/R(\d+)/).flatten[1]
+          return false unless src
+
+          r = src
+          next
+        end
+        return true
+      end
+      # Not a writer of `r`, so the walk has to keep going back -- only
+      # valid while control cannot enter the body here.
+      return false if targets.include?(pin.addr)
+    end
+    # Fell off the front of the body without ever finding a writer -- see
+    # "NO EXEMPTION" above.
+    false
+  end
+
+  # "Is register `reg` at position `idx` of `irep` provably an Array?" --
+  # literally the two-step gate recognize_each_regions applies to its own
+  # receiver register, factored out so the two can never drift apart on a
+  # soundness-critical question (the same sharing argument
+  # proven_array_source's own comment already makes).
+  def proven_array_operand?(irep, idx, reg, owner_name, mand, ivar_classes, arg_classes)
+    traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                               class_layout: @class_layout, registry: @registry,
+                               container_constants: @container_constants)
+    return true if traced == 'Array'
+
+    !proven_array_source(irep, idx, reg).nil?
   end
 
   # BLOCK_BODY_INDEX_SUPPORT: map one of the register numbers compile_insn
@@ -22015,6 +22387,16 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     gen.fixnum_return_names.sort.each { |n| warn "  RET #{n}" }
+  end
+  warn ''
+  # ARRAY_RETURN_PROOF: the Array analogue of the listing just above, same
+  # one-line-per-proven-name shape so the coverage report can count it the
+  # same way. See CodeGen#compute_array_return_names.
+  warn '== methods proven Array-returning (ARRAY_RETURN_PROOF) =='
+  if gen.array_return_names.empty?
+    warn '  (none)'
+  else
+    gen.array_return_names.sort.each { |n| warn "  ARET #{n}" }
   end
   warn ''
   # ENTRY_ARG_CALLSITE_PROOF: one line per proven (method, argument
