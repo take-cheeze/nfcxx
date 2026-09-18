@@ -2706,8 +2706,15 @@ class ClassLayout
   # header for the full :any/:opaque distinction -- identical mechanism,
   # applied here to the ivar's own CLASS instead of its elements. `nil`
   # (the default) keeps exactly the pre-existing behavior.
+  # ARRAY_RETURN_IVAR_HINT: `array_ret_proof`, when supplied, is the
+  # whole-program ARRAY_RETURN_PROOF oracle (CodeGen#compute_array_return_
+  # names' own result, rebuilt into a bare lambda at this method's driver call
+  # site) handed straight through to `proven_array_source_scan` as its own
+  # `ret_proof` argument. nil (the default) keeps byte-identical behavior for
+  # every caller that does not opt in, and is also what the driver's own FIRST,
+  # probing pass passes -- see that call site for the stratification argument.
   def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil,
-                    poison_reason: nil)
+                    poison_reason: nil, array_ret_proof: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
 
@@ -2799,7 +2806,43 @@ class ClassLayout
             # this method's own header comment) -- this call site is simply
             # no longer arbitrarily withholding a fact the rest of the file
             # already relies on elsewhere.
-            found ||= proven_array_source_scan(irep, idx, src_reg, registry, annotated_array_return)
+            #
+            # ARRAY_RETURN_IVAR_HINT: `array_ret_proof` is the sixth argument
+            # `proven_array_source_scan` already accepts (`ret_proof`, added by
+            # ARRAY_RETURN_PROOF and until now always nil HERE -- that
+            # function's own header says so in as many words). Passing it makes
+            # a SETIV whose RHS is a plain, non-block-carrying call to a method
+            # PROVEN to return an Array on every one of its return paths count
+            # as real 'Array' evidence instead of falling through to the
+            # `found ||= UNKNOWN` poison below.
+            #
+            # The real, measured shape this closes is `Game::Battle#@queue`
+            # (mruby-rpg2k/mrblib/game/battle.rb), which has four SETIV sites:
+            #
+            #     :541   @queue = []                       -> ARRAY literal
+            #     :1263  @queue = [b]                       -> ARRAY literal
+            #     :1950  @queue = @queue.reject { ... }     -> CHAINED_ARRAY_METHODS
+            #     :1947  @queue = turn_order                -> UNKNOWN, before this
+            #
+            # Three of the four already proved Array; the fourth poisoned the
+            # whole ivar, so `@queue.each` (:1962, :1969) could not inline.
+            # `turn_order` is ARRAY_RETURN_PROOF-proven (it appears in the
+            # `== methods proven Array-returning ==` listing on master today),
+            # so that site is now real agreeing evidence and the ivar resolves.
+            #
+            # NOTHING about the join below is weakened. This only ever turns a
+            # site that USED to yield UNKNOWN into one that yields 'Array', so
+            # the change is monotone: an ivar also written from a genuinely
+            # different class still sees 'Array' vs that class and is still
+            # poisoned to UNKNOWN by the very same sticky join, exactly as a
+            # disagreeing ARRAY-literal site already is today. The `next if
+            # found.nil? && nil_literal_write?` skip just below is likewise
+            # untouched in practice: a `LOADNIL Rn` / `SETIV @x Rn` pair leaves
+            # the scan looking at a LOADNIL, which is not one of the SEND-family
+            # opcodes it accepts, so it still returns nil there and the
+            # NIL_TOLERANT_JOIN skip still fires.
+            found ||= proven_array_source_scan(irep, idx, src_reg, registry, annotated_array_return,
+                                               array_ret_proof)
 
             # NIL_TOLERANT_JOIN: a plain `@x = nil` SETIV site (real
             # bytecode shape confirmed directly against mrbc's own
@@ -7893,7 +7936,7 @@ class CodeGen
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
                  hash_element_layout = {}, integer_constants = Set.new,
                  foreign_method_names = nil, outside_tokens = nil,
-                 native_name_sources = nil)
+                 native_name_sources = nil, analysis_only: false)
     @ireps = ireps
     # ENTRY_ARG_CALLSITE_PROOF: every identifier-shaped token appearing
     # anywhere in NATIVE_SRCS or FOREIGN_RUBY_SRCS (outside_world_tokens,
@@ -8079,6 +8122,31 @@ class CodeGen
     # boolean drop_unsafe_embeddings memoizes into @clean_cache is identical
     # either way, and the real fixpoint below can safely run afterwards.
     @array_return_names = Set.new
+    # ARRAY_RETURN_IVAR_HINT: the driver needs ARRAY_RETURN_PROOF's own result
+    # BEFORE it can run the ClassLayout.analyze pass that consumes it, but this
+    # fixpoint is a CodeGen method because it reads @class_layout. `analysis_
+    # only` breaks that knot: it builds an instance far enough to answer
+    # `array_return_names` and stops, so the driver can compute the fact from a
+    # first, probing class_layout and feed it back into a second, final one.
+    # See the driver's own call site for the full stratification argument.
+    #
+    # Stopping HERE is exact, not merely cheap. `compute_array_return_names`
+    # reads @class_layout, @registry, @ireps, @class_annotations,
+    # @container_constants, @foreign_method_names, @annotations and its own
+    # @array_return_names -- all of which are already final at this point --
+    # and reads NEITHER @ivar_layout NOR @fixnum_return_names. (Its per-return-
+    # site predicate is `proven_array_operand?`, which is exactly
+    # `trace_new_target` plus `proven_array_source`; `trace_new_target` is a
+    # top-level function and so cannot touch a CodeGen ivar at all, and
+    # `proven_array_source` reads only @registry, @annotations and
+    # @array_return_names.) So the set computed here is bit-for-bit the set the
+    # full constructor computes below from the same class_layout -- verified
+    # empirically as well: the probe's 114 ARET names are identical to
+    # master's.
+    if analysis_only
+      compute_array_return_names
+      return
+    end
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
     compute_fixnum_return_names
     # ARRAY_RETURN_PROOF: computed once, after @class_layout and
@@ -22137,9 +22205,89 @@ if $PROGRAM_NAME == __FILE__
   # `poison_reason` header. Reported below as two extra, purely additive
   # breakdowns of the exact same `class_layout_unknowns` list -- neither
   # that list's own membership nor the `CLASS_CANDIDATE` lines change.
+  # FIXNUM_RETURN_PROOF / ARRAY_RETURN_PROOF: the out-of-closed-world poison
+  # set both need. Hoisted above ClassLayout.analyze (it used to sit just
+  # before CodeGen.new) because the probing pass immediately below consumes
+  # ARRAY_RETURN_PROOF, which refuses to prove anything at all without it.
+  # Without FOREIGN_RUBY_SRCS this stays nil and compute_array_return_names
+  # proves nothing, so the probe below is simply vacuous rather than
+  # optimistic -- the established no-FOREIGN_RUBY_SRCS diagnostic mode.
+  foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
+  foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
+
+  # ---------------------------------------------------------------------------
+  # ARRAY_RETURN_IVAR_HINT: ClassLayout and ARRAY_RETURN_PROOF are MUTUALLY
+  # dependent, and this is the stratification that breaks the cycle.
+  #
+  # THE CYCLE IS REAL, not hypothetical. `compute_array_return_names` proves
+  # "every RETURN site of this body holds an Array" with `proven_array_operand?`
+  # -> `trace_new_target`, whose GETIV terminal reads the ClassLayout table
+  # (`ivar_classes = @class_layout[d.owner]`, array_return_sites_proven?). So
+  # ARRAY_RETURN_PROOF already consumes ClassLayout. Feeding ARRAY_RETURN_PROOF
+  # back INTO ClassLayout's own SETIV arm -- which is the whole point of this
+  # change -- closes the loop. Left naive, that loop would admit exactly the
+  # circular nonsense it looks like it should:
+  #
+  #     def initialize; @queue = turn_order; end
+  #     def turn_order; @queue; end          # @queue is really nil
+  #
+  # "@queue is an Array because turn_order returns one, and turn_order returns
+  # an Array because @queue is one" is a derivation with no base case.
+  #
+  # THE FIX: STRATIFY. Level 0 is the ClassLayout table computed with NO
+  # ARRAY_RETURN_PROOF evidence at all -- byte-for-byte the table this driver
+  # produced before this change. Level 1 is ARRAY_RETURN_PROOF computed against
+  # level 0. Level 2 is the ClassLayout table computed WITH level 1. Every fact
+  # at level N+1 is derived only from facts at level N, so every derivation is
+  # well-founded by construction and the cycle above is refused: `@queue` is
+  # UNKNOWN at level 0, so `turn_order` is not admitted at level 1, so `@queue`
+  # is still UNKNOWN at level 2. Stable, and correctly so.
+  #
+  # WHY EACH LEVEL IS SOUND GIVEN THE ONE BELOW IT, by induction on N:
+  #   - Level 0 is today's shipped, already-argued table.
+  #   - Level 1 is ARRAY_RETURN_PROOF, whose own soundness argument (see
+  #     compute_array_return_names' header) is parameterized on exactly one
+  #     external input, "the ClassLayout facts I read are true" -- supplied by
+  #     level 0.
+  #   - Level 2 is ClassLayout.analyze, whose SETIV arm now has one additional
+  #     evidence source whose truth is supplied by level 1. The aggregation
+  #     itself is untouched: two sites that disagree still poison to UNKNOWN.
+  #
+  # THE RESULT IS MONOTONE, which is what makes this strictly additive rather
+  # than a re-derivation. The new evidence can only fire where
+  # `proven_array_source_scan` previously returned nil and the site therefore
+  # yielded UNKNOWN; it turns those, and only those, into 'Array'. So no ivar
+  # that had a real class hint can lose or change it -- level 2's table is a
+  # superset of level 0's. Everything downstream (ArrayElementLayout,
+  # HashElementLayout, every diagnostic below, and CodeGen itself) is fed level
+  # 2 and is therefore internally consistent; nothing reads a stale table.
+  #
+  # WHY NOT ITERATE TO A JOINT FIXPOINT (the ENTRY_ARG_ALTERNATION shape)? It
+  # would be sound -- each further level is sound by the same induction -- but
+  # it is deliberately NOT done here. Two levels is what the measured payoff
+  # needs, stopping early is the conservative direction (strictly fewer facts
+  # than a full alternation), and an unbounded alternation over a table this
+  # many analyses hang off is a much larger change to justify. The real
+  # CodeGen below does recompute ARRAY_RETURN_PROOF against the level-2 table
+  # as it always has, so the proven-Array name set genuinely does get the
+  # benefit of the richer table; only ClassLayout itself stops at level 2.
+  # ---------------------------------------------------------------------------
+  class_layout_probe = ClassLayout.known(
+    ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return)
+  )
+  # Built far enough to answer `array_return_names` and no further -- see
+  # CodeGen#initialize's own `analysis_only` comment for why stopping there is
+  # exact. The layouts this probe is not given ({} for element/hash-element,
+  # an empty integer-constant set, nil outside-tokens) are all inputs
+  # `compute_array_return_names` never reads.
+  array_return_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
+                                   annotations, superclass_of, {}, {}, container_constants, {},
+                                   Set.new, foreign_methods, nil, nil,
+                                   analysis_only: true).array_return_names
   class_poison_reason = {}
   class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
-                                         annotated_array_return, poison_reason: class_poison_reason)
+                                         annotated_array_return, poison_reason: class_poison_reason,
+                                         array_ret_proof: ->(n) { array_return_probe.include?(n) })
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
@@ -22350,7 +22498,12 @@ if $PROGRAM_NAME == __FILE__
   # constant is proven at all, rather than run against a knowingly incomplete
   # picture. That keeps a bare `ruby bc2cpp.rb foo.rb` exploration honest
   # instead of quietly more optimistic than the code that actually ships.
-  foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
+  # ARRAY_RETURN_IVAR_HINT: `foreign_ruby_srcs`/`foreign_methods` are computed
+  # further up now (ClassLayout's own probing pass needs ARRAY_RETURN_PROOF,
+  # which needs the foreign-method poison set) -- both are pure reads of ENV
+  # and of files on disk with no dependency on anything between the old and
+  # new positions, and neither produces any diagnostic output, so the hoist
+  # leaves this run's stderr byte-identical.
   integer_constants =
     if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
       IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
@@ -22368,7 +22521,6 @@ if $PROGRAM_NAME == __FILE__
   # strictly more optimistic than a real build, so it is skipped entirely
   # (nil, never an empty set, which compute_fixnum_return_names reads as "the
   # scan never ran" and proves nothing at all) rather than run half-informed.
-  foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
   # ENTRY_ARG_CALLSITE_PROOF: the same two out-of-closed-world inputs again,
   # scanned for EVERY identifier token rather than only for method-defining
   # forms -- see outside_world_tokens for why that mechanism needs the
