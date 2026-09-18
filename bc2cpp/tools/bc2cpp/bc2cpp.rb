@@ -9192,6 +9192,96 @@ class CodeGen
     owner
   end
 
+  # LEXICAL_SELF_KEYWORD_SUPPORT: the keyword-call-site selector built on
+  # `lexical_self_owner` above, playing exactly the role `monomorphic_target`
+  # plays for compile_keyword_call today -- "which single, compiled MethodDef
+  # can THIS call site possibly reach?" -- for the one case
+  # `monomorphic_target` structurally cannot answer: a name that is POLY
+  # across the whole program, sent with no explicit receiver.
+  #
+  # `monomorphic_target` asks a whole-program question about a NAME ("does
+  # exactly one definition of it exist anywhere?"). That question is the
+  # right one for an explicit-receiver send, whose receiver register could
+  # hold an instance of literally any class, but it is strictly weaker than
+  # what an implicit-self send actually makes available, and it throws away
+  # the one fact that decides this call site: `self` inside a method body of
+  # class C is an instance of C, and `lexical_self_owner` has already proven
+  # (via the closed-world `@superclass_of` registry, not a grep) that no
+  # subclass of C exists anywhere in the program to make it an instance of
+  # anything else. So dispatch from here can only ever reach C's own
+  # definition, however many OTHER, unrelated classes happen to define the
+  # same name -- the identical reasoning real `super` dispatch relies on in
+  # `super_target` (also owner-relative, also correct for a POLY name), and
+  # the identical reasoning compile_send's own already-shipped
+  # LEXICAL_SELF_SUPPORT branch (see its comment at the `lexical_self` local)
+  # already applies to the NON-keyword half of this exact problem. This is
+  # that branch's missing keyword twin, nothing more: `compile_keyword_call`
+  # was reached through a different function (`compile_keyword_send`) that
+  # never had the `owner_def`/`self_implicit` pair threaded into its
+  # resolution step, so the keyword path kept refusing sites the positional
+  # path had already been resolving soundly for some time.
+  #
+  # Two guards this adds that compile_send's own branch does not have,
+  # deliberately kept rather than mirrored-for-symmetry:
+  #
+  #   * `devirt_blocked_name?` -- the RUNTIME_DEF_DEVIRT_GUARD gate
+  #     `monomorphic_target`/`poly_small_n_targets` both apply and the
+  #     LEXICAL_SELF branch in compile_send reaches only via the emitted-text
+  #     audit (`runtime_def_devirt_audit`). Asking it up front here is
+  #     strictly cheaper and strictly safer: a name some method installs on a
+  #     runtime singleton class can shadow even a statically-known `self`'s
+  #     own class method, so it must never bind statically by ANY route. (The
+  #     emitted `LEXICAL_SELF` marker below is also NOT in
+  #     RUNTIME_DEF_DYNAMIC_MARKERS, so the text audit still catches it as a
+  #     second line of defense, exactly as intended.)
+  #   * No arity/keyword-shape check at all, on purpose -- every one of those
+  #     (`keyword_arg_table`, the `[t_mand, t_mand + t_opt]` positional
+  #     window, the exact keyword-NAME match, the every-required-keyword-
+  #     supplied check, the ONLY_OWNERS/OTHER_OWNERS emission gate) already
+  #     sits in `compile_keyword_call` itself, downstream of this selector,
+  #     and applies unchanged to a target reached this way. A candidate that
+  #     fits none of them is a safe miss (nil, honest `#error`) exactly as
+  #     before.
+  #
+  # The one real limit of the underlying proof, stated rather than left
+  # implicit, and MEASURED against this closed world rather than assumed:
+  # `subclassed_set` is built from `@superclass_of`, and build_registry
+  # records an entry there only for a real `CLASS` opcode whose superclass
+  # expression `resolve_superclass_ref` could resolve to a constant path
+  # (`superclass_of[name] = resolved if resolved` -- an unresolvable
+  # expression leaves NO entry at all, so a subclass created that way would
+  # not mark its parent as subclassed). Checked directly against the real
+  # closed world, via the compiler's own registry rather than a grep: 75
+  # classes carry a resolved superclass and ZERO fail to resolve; only 5
+  # classes are subclassed at all; and the only three registry owners with no
+  # `@superclass_of` entry that are not `.singleton` pseudo-owners are the
+  # `<native>` sentinel, the `LCF` module (a MODULE opcode, which has no
+  # superclass to record), and `Game::Battle::Combatant`, which is a
+  # `Struct.new(...)` assigned to a constant -- its real superclass is native
+  # `Struct`, not any user class, so it hides no user-level subclass edge.
+  # There is no `Class.new(...)` anywhere in the closed world. So the set is
+  # complete today. This is also not a NEW exposure: it is exactly the
+  # exposure compile_send's own already-shipped LEXICAL_SELF branch and
+  # self_receiver_class already carry, since all three read the same
+  # `subclassed_set`.
+  #
+  # Returns nil for every explicit-receiver send by construction:
+  # `self_implicit` is the one bit that makes "self" mean `owner_def.owner`
+  # here at all.
+  def lexical_self_keyword_target(name, self_implicit:, owner_def:)
+    return nil unless self_implicit
+    return nil if devirt_blocked_name?(name)
+
+    lex_owner = lexical_self_owner(owner_def)
+    return nil unless lex_owner
+
+    candidate = @registry[name]&.find { |md| md.owner == lex_owner }
+    return nil unless candidate&.irep
+    return nil unless compiles_clean?(candidate.irep)
+
+    candidate
+  end
+
   def element_ctx(ivar_classes, mand, arg_classes, owner_name)
     { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
       class_annotations: @class_annotations, element_annotations: @element_annotations,
@@ -18981,7 +19071,8 @@ class CodeGen
   # expression strings (usually `r<N>`, one register each), not register
   # numbers -- compile_keyword_send's own caller still passes plain
   # `r<N>` strings, so this is a pure extraction, not a behavior change.
-  def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:)
+  def compile_keyword_call(name:, d:, recv:, n:, argv:, kw_names:, kw_val_exprs:,
+                           self_implicit: false, owner_def: nil)
     # MONO resolution only -- deliberately no TYPED path: a traced-
     # receiver guard's `else` branch would need a dynamic keyword
     # dispatch, which mruby's own `mrb_funcall*` family cannot express
@@ -18990,6 +19081,22 @@ class CodeGen
     # is unconditionally sound. A POLY keyword call keeps the honest
     # #error.
     target = monomorphic_target(name)
+    # LEXICAL_SELF_KEYWORD_SUPPORT: ...and a name that is POLY program-wide
+    # can STILL have exactly one reachable definition at THIS call site,
+    # when the site is an implicit-self send inside a class that provably
+    # has no subclasses -- see lexical_self_keyword_target's own comment for
+    # the full argument. Same certain-not-traced guarantee MONO has (proven
+    # from the closed-world registry, not observed from a backward trace),
+    # so the emitted call needs no runtime guard and no mrb_funcall fallback
+    # either, and every arity/keyword-shape check below applies to it
+    # unchanged. Strictly additive: only ever consulted when
+    # `monomorphic_target` already declined, so no call site this path
+    # already compiled changes at all.
+    lexical_self = false
+    if target.nil?
+      target = lexical_self_keyword_target(name, self_implicit: self_implicit, owner_def: owner_def)
+      lexical_self = !target.nil?
+    end
     return nil unless target&.irep
 
     # monomorphic_target already verified compiles_clean? -- fetch the
@@ -19122,7 +19229,25 @@ class CodeGen
       opt_args << (argv.size - t_mand).to_s
     end
     call = "r#{d} = #{impl}(M, #{([recv] + argv + opt_args + kw_args).join(', ')});"
-    note = "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
+    # LEXICAL_SELF_KEYWORD_SUPPORT: a distinct marker from MONO, because the
+    # two resolutions rest on genuinely different facts and an auditor
+    # reading the generated C++ should be able to tell them apart -- MONO
+    # means "one definition exists program-wide", LEXICAL_SELF means "several
+    # do, but this implicit-self receiver is provably an instance of exactly
+    # one owner, which has no subclasses". Same spelling compile_send's own
+    # non-keyword LEXICAL_SELF branch already emits, so both halves of the
+    # mechanism are greppable as one thing, and (like that one) it is
+    # deliberately absent from RUNTIME_DEF_DYNAMIC_MARKERS so
+    # runtime_def_devirt_audit still treats it as a static bind to check.
+    note =
+      if lexical_self
+        "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (keyword call; self, statically " \
+          "known -- #{target.owner} has no subclasses anywhere in this closed world, so this " \
+          "implicit-self send can reach no other definition of this POLY name), direct C++ call " \
+          "(no mrb_funcall)\n"
+      else
+        "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
+      end
     "#{note}  #{call}\n"
   end
 
@@ -19139,7 +19264,8 @@ class CodeGen
     recv = self_implicit ? 'self' : "r#{d}"
     argv = (1..n).map { |k| "r#{dest_reg + k}" }
     direct = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv,
-                                  kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" })
+                                  kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" },
+                                  self_implicit: self_implicit, owner_def: owner_def)
     return direct if direct
 
     # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: compile_keyword_call just declined,
@@ -19729,7 +19855,7 @@ class CodeGen
     CPP
   end
 
-  def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:)
+  def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
     return nil unless irep && idx
 
     n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
@@ -19783,7 +19909,8 @@ class CodeGen
     else
       result = compile_keyword_call(name: name, d: d, recv: recv, n: positional.size, argv: positional,
                                      kw_names: kw_pairs.map { |p| p[:name] },
-                                     kw_val_exprs: kw_pairs.map { |p| p[:val_reg] })
+                                     kw_val_exprs: kw_pairs.map { |p| p[:val_reg] },
+                                     self_implicit: self_implicit, owner_def: owner_def)
       return nil unless result
 
       note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat/double-splat\n"
@@ -19949,7 +20076,7 @@ class CodeGen
       # construction.
       if irep && !idx.nil?
         splat_result = compile_splat_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
-                                          name: name, d: d)
+                                          name: name, d: d, owner_def: owner_def)
         return splat_result if splat_result
       end
       return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{n_match[0]}) -- not in this prototype's supported subset\n"
