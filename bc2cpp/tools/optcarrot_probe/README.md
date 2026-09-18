@@ -6,8 +6,8 @@ used as a Ruby-implementation benchmark) runs under this project's own
 vendored mruby, as a candidate stress test for `tools/bc2cpp`. It does not
 touch the RPG engine's build, gems, or bc2cpp's own closed-world registry.
 
-`optcarrot_bundle.rb` is derived from optcarrot's MIT-licensed source; see
-`LICENSE.optcarrot`.
+optcarrot's own source lives in the `3rd/optcarrot` submodule (real upstream
+history, its own `LICENSE`) rather than a bundled copy in this directory.
 
 ## Result
 
@@ -25,7 +25,7 @@ Getting there took no upstream mruby changes -- only:
 1. Concatenating optcarrot's 9 core files (`optcarrot.rb`, `nes.rb`, `rom.rb`,
    `pad.rb`, `opt.rb`, `cpu.rb`, `apu.rb`, `ppu.rb`, `palette.rb`,
    `driver.rb`, `config.rb`) in real dependency order in place of
-   `require_relative`, which mruby doesn't have (`optcarrot_bundle.rb`).
+   `require_relative`, which mruby doesn't have (`build_bundle.rb`).
 2. Five small pure-Ruby shims (`shims.rb`, ~30 lines) for mruby stdlib gaps:
    - `File.binread` -- missing; trivially backed by `IO.read(path, mode: "rb")`.
    - `Integer#[]` (bit read, e.g. `n[3]`) -- missing everywhere in mruby core
@@ -44,14 +44,19 @@ Getting there took no upstream mruby changes -- only:
    to load, for two regex-literal constants) -- solved by pulling in
    `3rd/mruby-onig-regexp`, which this project already vendors for its own
    build.
-4. Two one-line **source patches to optcarrot itself** (in `optcarrot_bundle.rb`,
-   not upstream): bare `module_function` (the "everything defined from here
-   on" scope form, no arguments) is a literal no-op stub in mruby's own C
-   source (`src/class.c`, `mrb_mod_module_function`: `if (argc == 0) { /* set
-   MODFUNC SCOPE if implemented */ return mod; }` -- explicitly unimplemented
-   upstream). `driver.rb` and `palette.rb` both use it and needed rewriting to
-   the explicit `module_function :a, :b` form. A third occurrence
-   (`driver/misc.rb`) wasn't exercised in headless mode.
+4. `patches/optcarrot-module-function-scope.patch`, applied to the
+   `3rd/optcarrot` submodule checkout the same way (and with the same script,
+   `scripts/apply_mruby_patch.bash`) as this project's `patches/mruby-*.patch`
+   files are applied to `3rd/mruby`: bare `module_function` (the "everything
+   defined from here on" scope form, no arguments) is a literal no-op stub in
+   mruby's own C source (`src/class.c`, `mrb_mod_module_function`: `if (argc
+   == 0) { /* set MODFUNC SCOPE if implemented */ return mod; }` --
+   explicitly unimplemented upstream). `driver.rb`, `palette.rb`, and
+   `driver/misc.rb` all use it and need rewriting to the explicit
+   `module_function :a, :b` form; see the patch file's own preamble for the
+   full trail. This one is optcarrot's own source being patched, not
+   vendored mruby, hence a separate patch file rather than one of the
+   existing `mruby-*.patch` ones.
 
 Confirmed *not* a problem: the default (non-`--opt`) code path -- the actual
 CPU/PPU emulation hot loop -- never calls `eval`/`send`/`define_method`; those
@@ -73,36 +78,33 @@ against optcarrot's actual method shapes (`CPU#run`'s dispatch table,
 
 ## Files
 
-- `optcarrot_bundle.rb` -- optcarrot's core source, concatenated and patched
-  as described above. Generated from a `mame/optcarrot` checkout; regenerate
-  by re-running the same concatenation over a fresh clone if optcarrot
-  upstream changes.
-- `shims.rb` -- the 5 stdlib shims, meant to be loaded before the bundle.
-- `runner_tail.rb` -- headless `Optcarrot::NES.new(...).run` driver.
+- `build_bundle.rb` -- assembles a single runnable mruby script: applies
+  `patches/optcarrot-module-function-scope.patch` to `3rd/optcarrot` (via
+  `scripts/apply_mruby_patch.bash`, idempotent), then concatenates that
+  submodule's 9 core files (in the real dependency order, `require_relative`
+  lines stripped since the concatenation IS the loading) between `shims.rb`
+  and `runner_tail.rb`. Nothing under this directory hardcodes optcarrot's
+  content -- output isn't checked in since it's fully mechanical to
+  regenerate, and stays in sync with whatever commit `3rd/optcarrot` is
+  pinned to.
+- `shims.rb` -- the 5 stdlib shims, prepended to the bundle.
+- `runner_tail.rb` -- headless `Optcarrot::NES.new(...).run` driver, appended
+  to the bundle.
 - `mruby_build_config.rb` -- the `MRUBY_CONFIG` used to build a probe-only
   `mruby`/`mrbc` host binary (full-core gembox + `mruby-onig-regexp`). Not
   part of the project's real build.
+- `../../patches/optcarrot-module-function-scope.patch` -- see point 4 above.
 
 ## Reproducing
 
 ```
-git submodule update --init --depth 1 3rd/mruby 3rd/mruby-onig-regexp
+git submodule update --init --depth 1 3rd/mruby 3rd/mruby-onig-regexp 3rd/optcarrot
 # Needs oniguruma headers -- on Debian/Ubuntu: apt-get install libonig-dev
 # (otherwise mruby-onig-regexp falls back to a slow bundled onigmo build)
 cd 3rd/mruby
 MRUBY_CONFIG=$(pwd)/../../tools/optcarrot_probe/mruby_build_config.rb rake -j"$(nproc)"
 cd -
 
-# optcarrot's own source, needed only to regenerate optcarrot_bundle.rb --
-# not required just to run the existing bundle.
-git clone --depth 1 https://github.com/mame/optcarrot /tmp/optcarrot
-
-cd tools/optcarrot_probe
-cat shims.rb optcarrot_bundle.rb runner_tail.rb > /tmp/full_probe.rb
-../../3rd/mruby/bin/mruby /tmp/full_probe.rb /tmp/optcarrot/examples/Lan_Master.nes 180
+ruby tools/optcarrot_probe/build_bundle.rb /tmp/full_probe.rb
+./3rd/mruby/bin/mruby /tmp/full_probe.rb 3rd/optcarrot/examples/Lan_Master.nes 180
 ```
-
-(mruby has no `require`/`load`, so `shims.rb` + `optcarrot_bundle.rb` +
-`runner_tail.rb` have to be concatenated into one file before running --
-that combined file isn't checked in since it's fully mechanical to
-regenerate.)
