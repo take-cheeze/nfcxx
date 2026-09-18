@@ -4704,6 +4704,62 @@ NATIVE_CONSTRUCT_TARGETS = {
 #     error, not a safe miss). Supporting the combined optional-positional
 #     plus keyword construct is a real, separate piece of work.
 #
+# KEYWORD_CONSTRUCT_OPTIONAL_POSITIONAL_SUPPORT (this round) is that "real,
+# separate piece of work", and `Game::Battle` is listed below as a result.
+# Two things had to change together, and neither alone would have done
+# anything -- worth stating plainly, because the obvious reading of the
+# paragraph just above ("declined only because it isn't in the table") is
+# WRONG, and the round that widened the ordinary keyword CALL path said so
+# itself: `Game::Battle.new` declined at this table's membership gate FIRST,
+# so that round's own arity widening (compile_keyword_call's
+# `n.between?(mand, mand + opt)`) never even ran here and changed nothing
+# for this site. The construct path kept its own independent `opt == 0`
+# refusal. So: (1) the class is added to this table, AND (2)
+# compile_keyword_direct_construct gets the same range check plus the same
+# `mrb_nil_value()`-padding/`bc2cpp_given_opt` splice compile_keyword_call
+# already carries (mandatory_and_keyword_only_arity? is correspondingly
+# renamed mandatory_optional_and_keyword_arity?).
+#
+# Vetted against this table's own four-part bar, each part checked against
+# real evidence rather than inherited from the paragraph above:
+#
+#   * No custom `self.new`/`self.allocate`. `class Battle` (mruby-rpg2k/
+#     mrblib/game/battle.rb:20) declares NO superclass, so its only ancestor
+#     is Object; and the whole closed world still contains ZERO `def
+#     self.new` and ZERO `def self.allocate` (re-grepped this round across
+#     all three gems' mrblib, including the 6 real `class << self` bodies,
+#     none of which defines either). The live whole-program check below
+#     re-asserts this every run regardless.
+#   * `#initialize` compiles clean -- its real `Game__Battle_initialize_impl`
+#     is present in a real SKIP_UNSUPPORTED=1 whole-program regeneration,
+#     with exactly the 10-positional + `bc2cpp_given_opt` + 3x(value, given)
+#     signature the splice above targets.
+#   * The optional jump table really resolved: the real `mrbc -v`
+#     disassembly shows ENTER immediately followed by exactly `opt + 1 == 9`
+#     consecutive JMPs, and the generated body really does contain the
+#     matching 9-arm `switch (bc2cpp_given_opt)`.
+#   * Keyword names match BY NAME, not count: `#initialize` declares
+#     `rpg2003:`/`party:`/`battle_type:` (all three OPTIONAL, so no required
+#     keyword can go missing), and the site supplies `rpg2003:`/
+#     `battle_type:`/`party:` -- a DIFFERENT order, which is exactly what
+#     the by-name `kw_table.flat_map`/`kw_names.index` pairing above exists
+#     to handle.
+#
+# The eight optional positionals deserve their own note, since a default
+# value that called a method or had side effects would need real care here.
+# None do: every one of the eight is a bare literal, read off the real
+# disassembly rather than the Ruby source -- `LOADNIL` (rng), `LOADNIL`
+# (states), `LOADFALSE` x4 (variance/criticals/accuracy/first_strike),
+# `LOADNIL` x2 (attributes/ai). No SEND, no GETIV, no reference to an
+# earlier parameter: strictly SIMPLER than the three default-value kinds
+# (literal, earlier argument, ivar read) the call-path round's own
+# differential test already covered. And the single real call site supplies
+# ALL EIGHT explicitly, so `bc2cpp_given_opt` is `8`, the switch takes its
+# own `default:` arm, and not one of those default-value assignments ever
+# executes at this site -- the default-computation path is wired through
+# correctly but genuinely not exercised by the real program, the same
+# pattern the `deal_attack` sites showed.
+#
 # LEXICAL_NEW_TARGET_RESOLUTION (this round) unblocks the three entries the
 # keyword round listed here as "investigated and deliberately left OUT":
 #
@@ -4730,7 +4786,7 @@ NATIVE_CONSTRUCT_TARGETS = {
 #     and refusing outright on any cross-level ambiguity. With it, these
 #     three resolve correctly and are listed below.
 #
-#     Their shape is the keyword one (`mandatory_and_keyword_only_arity?`),
+#     Their shape is the keyword one (`mandatory_optional_and_keyword_arity?`),
 #     same as Game::MoveRoute above, all three being two mandatory
 #     positionals plus all-optional keywords:
 #       RPG2k::Scene::Map#initialize(parent, state, apply_access: true)
@@ -4753,7 +4809,8 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                RPG2k::Scene::ItemMenu Game::NumberInput
                                Game::MoveRoute RPG2k::Scene::Map
                                RPG2k::Scene::MapViewer
-                               RPG2k::Scene::ChipsetEditor].freeze
+                               RPG2k::Scene::ChipsetEditor
+                               Game::Battle].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
@@ -6797,17 +6854,18 @@ def mandatory_arity(irep)
   enter.args.split(':').first.to_i
 end
 
-# KEYWORD_DIRECT_CONSTRUCT_SUPPORT: does this ENTER declare ONLY mandatory
-# positionals plus real KEYWORD parameters -- `kw` non-zero, and every one
-# of opt/rest/post/kwrest/block/noblock zero? The keyword-aware sibling of
-# pure_mandatory_arity? just above, which requires `kw` to be zero TOO and
-# so can never match a keyword-declaring `#initialize` at all (exactly why
-# DIRECT_CONSTRUCT_TARGETS' own existing non-keyword construct path silently
-# refuses every class this gate is for -- a real, measured property, not an
-# assumption: all five classes this round adds to that table have a
-# keyword-declaring `#initialize`, so the pre-existing path provably cannot
-# fire for any of them and this addition can only ever enable the NEW path
-# below, never change the behavior of an already-compiled construct site).
+# KEYWORD_DIRECT_CONSTRUCT_SUPPORT: does this ENTER declare mandatory
+# positionals (optionally followed by real OPTIONAL positionals) plus real
+# KEYWORD parameters -- `kw` non-zero, and every one of rest/post/kwrest/
+# block/noblock zero? The keyword-aware sibling of pure_mandatory_arity?
+# just above, which requires `kw` to be zero TOO and so can never match a
+# keyword-declaring `#initialize` at all (exactly why DIRECT_CONSTRUCT_
+# TARGETS' own existing non-keyword construct path silently refuses every
+# class this gate is for -- a real, measured property, not an assumption:
+# every class on that table with a keyword-declaring `#initialize` is
+# provably unreachable from the pre-existing path, so those entries can
+# only ever enable the keyword path below, never change the behavior of an
+# already-compiled construct site).
 #
 # ENTER's own eight dumped fields are REQ:OPT:REST:POST:KEY:KDICT:BLOCK:
 # NOBLOCK, read directly from 3rd/mruby/src/codedump.c's own OP_ENTER case
@@ -6815,22 +6873,53 @@ end
 # e.g. `Game::MoveRoute#initialize(commands, repeat: true, skippable:
 # false)` dumps `ENTER 1:0:0:0:2:0:0:0` in a real `mrbc -v` disassembly.
 #
-# `opt` is deliberately required to be ZERO here, unlike keyword_arg_table's
-# own OPTIONAL_KEYWORD_COMBINED_SUPPORT widening: a direct construct emits
-# exactly one C++ argument per positional parameter, and compile_method's own
-# signature builder gives an OPTIONAL positional an extra `mrb_int given`
-# slot of its own that a call site passing only the mandatory ones would
-# leave unfilled -- a hard g++ "too few arguments" error, not a silent miss.
-# Every real class this round covers is `opt == 0` (verified against their
-# own real generated `_impl` signatures), so refusing the combined shape
-# outright costs nothing real and keeps this gate provably argument-exact.
-def mandatory_and_keyword_only_arity?(irep)
+# KEYWORD_CONSTRUCT_OPTIONAL_POSITIONAL_SUPPORT: `opt` USED to be required
+# to be zero here, for a real and correct reason that this round's own
+# change to compile_keyword_direct_construct is what actually retires. The
+# original wording, kept verbatim because it names the exact hazard:
+#
+#     a direct construct emits exactly one C++ argument per positional
+#     parameter, and compile_method's own signature builder gives an
+#     OPTIONAL positional an extra `mrb_int given` slot of its own that a
+#     call site passing only the mandatory ones would leave unfilled -- a
+#     hard g++ "too few arguments" error, not a silent miss.
+#
+# That hazard is real, and it is a PROPERTY OF THE EMITTER, not of the
+# ENTER shape: the fix is to emit the missing slots, which is precisely
+# what the just-merged KEYWORD_CALLSITE_OPTIONAL_POSITIONAL_SUPPORT round
+# already did for the ordinary (non-construct) keyword CALL path in
+# compile_keyword_call -- splicing `mrb_nil_value()` padding out to the
+# callee's full `mand + opt` positional count plus the `bc2cpp_given_opt`
+# count, in the one position `_impl`'s real signature puts them (after all
+# positionals, BEFORE the keyword block). compile_keyword_direct_construct
+# now does the identical splice against the identical `_impl` signature
+# convention, so the "left unfilled" premise no longer holds and this
+# predicate can stop excluding the combined shape.
+#
+# Widening a GATE can only ever admit more call sites, never change one
+# already compiling: every class already in DIRECT_CONSTRUCT_TARGETS has
+# `opt == 0` (re-verified this round against their own real generated
+# `_impl` signatures), so for all of them `optional_arity` is 0, the
+# padding array is empty, no `bc2cpp_given_opt` argument is emitted at all,
+# and the widened `n.between?(mand, mand + opt)` range check collapses back
+# to the original exact `n == mand` -- byte-identical output.
+#
+# Renamed from `mandatory_and_keyword_only_arity?` to match what it now
+# really asks. `rest`/`post`/`kwrest`/`block`/`noblock` all stay required
+# to be zero, exactly as before: only the `opt` field is relaxed.
+#
+# The first real entry of this combined shape is `Game::Battle#initialize(
+# allies, enemies, rng = nil, states = nil, variance = false, criticals =
+# false, accuracy = false, first_strike = false, attributes = nil, ai =
+# nil, rpg2003: false, party: nil, battle_type: 0)`, which dumps
+# `ENTER 2:8:0:0:3:0:0:0` in a real `mrbc -v` disassembly.
+def mandatory_optional_and_keyword_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return false unless enter
 
   fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
-  _mand, opt, rest, post, kw, kwrest, block, noblock = fields
-  kw.to_i.positive? && opt.to_i.zero? && rest.to_i.zero? && post.to_i.zero? &&
+  _mand, _opt, rest, post, kw, kwrest, block, noblock = fields
+  kw.to_i.positive? && rest.to_i.zero? && post.to_i.zero? &&
     kwrest.to_i.zero? && block.to_i.zero? && noblock.to_i.zero?
 end
 
@@ -19322,7 +19411,7 @@ class CodeGen
   #
   # The gate is compile_send's own four-part DIRECT_CONSTRUCT_TARGETS gate
   # with `pure_mandatory_arity?` swapped for the keyword-aware
-  # `mandatory_and_keyword_only_arity?`, plus three additions:
+  # `mandatory_optional_and_keyword_arity?`, plus three additions:
   #
   #   a. EXACT-NAME keyword matching (`kw_names - table_names` empty), never
   #      a count match -- two same-arity keyword sets with different names
@@ -19373,16 +19462,60 @@ class CodeGen
                     .none? { |md| md.owner.to_s.end_with?('.singleton') }
     return nil unless none_anywhere
 
-    # 3: `#initialize` must be a real, compiling, mandatory-positionals-plus-
-    # keywords-only leaf whose mandatory arity matches THIS call site's own
-    # positional count exactly.
+    # 3: `#initialize` must be a real, compiling, positionals-plus-keywords-
+    # only leaf whose real positional arity RANGE covers THIS call site's own
+    # positional count.
     init_def = @registry['initialize'].find { |md| md.owner == known }
     return nil unless init_def&.irep
 
     init_irep = @ireps.fetch(init_def.irep)
-    return nil unless mandatory_and_keyword_only_arity?(init_irep)
+    return nil unless mandatory_optional_and_keyword_arity?(init_irep)
     return nil unless compiles_clean?(init_def.irep)
-    return nil unless n == mandatory_arity(init_irep)
+
+    # KEYWORD_CONSTRUCT_OPTIONAL_POSITIONAL_SUPPORT: the callee's own real
+    # positional arity is a RANGE, `[mand, mand + opt]`, not a single number
+    # -- the identical widening the just-merged KEYWORD_CALLSITE_OPTIONAL_
+    # POSITIONAL_SUPPORT round made to compile_keyword_call's own guard (and
+    # CALLSITE_OPTIONAL_ARG_SUPPORT before it to compile_send's no-keyword
+    # MONO guard), applied to the direct-CONSTRUCT path, which was still
+    # demanding an exact `n == mandatory_arity` match. `optional_arity` is 0
+    # for every class already on this table, so this collapses back to that
+    # original exact-match check, unchanged, for every construct site this
+    # path already compiled.
+    #
+    # Why it is sound, read straight out of 3rd/mruby/src/vm.c's own
+    # `CASE(OP_ENTER, W)` rather than assumed -- and note this reasoning is
+    # about `#initialize`'s OWN OP_ENTER, which is exactly the same OP_ENTER
+    # compile_keyword_call already reasoned about, because real Ruby's
+    # `Class#new` forwards its whole argument list (positionals, keywords and
+    # all) to `#initialize` untouched: once `kd` is set (guaranteed here,
+    # `keyword_arg_table` below requires ENTER's own `kw` field positive),
+    # keywords and positionals never interact. `OP_SEND`'s prologue packs
+    # this site's `nk` (sym, value) pairs into one Hash at
+    # `regs[mrb_ci_kidx(ci)]` and sets `ci->nk = CALL_MAXARGS`, leaving
+    # `ci->n` -- the `argc` OP_ENTER reads -- counting POSITIONALS ONLY, so
+    # the `!kd` arm that folds a trailing kdict back into the positional list
+    # is unreachable by construction. Optional-slot resolution is therefore a
+    # pure function of `argc`: with `r == m2 == 0` (both required zero by
+    # mandatory_optional_and_keyword_arity? above), `len = m1 + o`, the
+    # strict check admits exactly `m1 <= argc <= len`, and the initializer
+    # skip (`(argc - m1 - m2) * 3` when `argc < len`, `o * 3` when
+    # `argc == len`) selects jump-table entry `argc - m1` in both arms. That
+    # index IS `bc2cpp_given_opt`, so this call site's statically-known
+    # `n - t_mand` reproduces the VM's own choice exactly.
+    #
+    # `optional_arg_table`'s jump targets are additionally required to have
+    # really RESOLVED (not merely `opt` positive) before trusting that
+    # switch: it returns `[opt, nil, nil]` for an ENTER whose `opt` field is
+    # nonzero but whose real following bytecode isn't the recognized
+    # `opt + 1` consecutive JMP shape, and `bc2cpp_given_opt` only means what
+    # this path needs it to mean when the dispatch switch it feeds was
+    # genuinely emitted by emit_optional_dispatch. A safe miss (nil, honest
+    # `#error`) otherwise.
+    t_mand = mandatory_arity(init_irep)
+    t_opt = optional_arity(init_irep)
+    return nil unless n.between?(t_mand, t_mand + t_opt)
+    return nil if t_opt.positive? && !optional_arg_table(init_irep)[1]
 
     # (a): exact keyword-NAME match, plus every required keyword supplied.
     kw_table = keyword_arg_table(init_irep)
@@ -19408,6 +19541,52 @@ class CodeGen
       ci = kw_names.index(kw[:name])
       val = ci ? kw_val_exprs[ci] : 'mrb_nil_value()'
       kw[:required] ? [val] : [val, ci ? '1' : '0']
+    end
+    # KEYWORD_CONSTRUCT_OPTIONAL_POSITIONAL_SUPPORT: `_impl`'s own real
+    # positional parameter list always has room for the callee's FULL
+    # `mand + opt` count (compile_method's own `total_args = mand + opt`),
+    # followed by one `mrb_int bc2cpp_given_opt` when `opt` is positive, and
+    # only THEN the keyword parameters -- that exact order, confirmed against
+    # this program's own real generated signature for the one site this
+    # enables:
+    #
+    #   mrb_value Game__Battle_initialize_impl(mrb_state* M, mrb_value self,
+    #       mrb_value allies, mrb_value enemies, mrb_value rng,
+    #       mrb_value states, mrb_value variance, mrb_value criticals,
+    #       mrb_value accuracy, mrb_value first_strike, mrb_value attributes,
+    #       mrb_value ai, mrb_int bc2cpp_given_opt,
+    #       mrb_value bc2cpp_kwarg_rpg2003, mrb_int bc2cpp_kw_given_rpg2003,
+    #       mrb_value bc2cpp_kwarg_party,   mrb_int bc2cpp_kw_given_party,
+    #       mrb_value bc2cpp_kwarg_battle_type,
+    #       mrb_int bc2cpp_kw_given_battle_type);
+    #
+    # So the padding has to be spliced in BEFORE `kw_args`, never appended
+    # after it -- appending would shift every keyword argument one slot and
+    # land `bc2cpp_given_opt`'s integer literal in an `mrb_value` parameter,
+    # the identical class of hard g++ error KEYWORD_CALLSITE_ARITY_FIX
+    # already had to fix once for the required-keyword flag, and the
+    # identical splice compile_keyword_call now performs.
+    #
+    # `mrb_nil_value()` is the same placeholder compile_send's own
+    # CALLSITE_OPTIONAL_ARG_SUPPORT branch, compile_keyword_call and
+    # compile_method's own entry wrapper all already use for an omitted
+    # optional: never read, because the callee's own `bc2cpp_given_opt`
+    # switch jumps straight into that slot's default-value code, which
+    # overwrites the register first. Measured on this program's real closed
+    # world: the single real site this enables (`Game::Battle.new`,
+    # mruby-rpg2k/mrblib/scene/battle.rb:178, `n=10|nk=3`) supplies ALL TEN
+    # positionals explicitly against `ENTER 2:8:0:0:3:0:0:0`, so
+    # `n == t_mand + t_opt`, the padding array is EMPTY there and only the
+    # `bc2cpp_given_opt` literal (`8`, selecting the switch's own `default:`
+    # arm, i.e. skip every default-value assignment) is actually new. The
+    # padding is emitted anyway because an omitting call site is a legal
+    # shape the VM accepts, and silently emitting a short argument list for
+    # one would be a hard g++ error rather than the safe miss this file's
+    # gates are built to produce.
+    opt_args = []
+    if t_opt.positive?
+      opt_args = Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
+      opt_args << (argv.size - t_mand).to_s
     end
     note = "  // MONO :new -> #{known}, direct compiled construct with real KEYWORD arguments " \
            "(bc2cpp_direct_alloc + #{init_impl}) -- skips Class#new's own allocate+initialize " \
@@ -19462,7 +19641,7 @@ class CodeGen
     "#{note}" \
       "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
       "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-      "    #{init_impl}(M, #{(["r#{d}"] + argv + kw_args).join(', ')});\n" \
+      "    #{init_impl}(M, #{(["r#{d}"] + argv + opt_args + kw_args).join(', ')});\n" \
       "  } else {\n" \
       "#{kw_hash}" \
       "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}" \
