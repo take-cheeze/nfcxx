@@ -16134,8 +16134,233 @@ class CodeGen
     return nil if kw_names.any?(&:nil?)
 
     recv = self_implicit ? 'self' : "r#{d}"
-    compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: (1..n).map { |k| "r#{dest_reg + k}" },
-                          kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" })
+    argv = (1..n).map { |k| "r#{dest_reg + k}" }
+    direct = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv,
+                                  kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" })
+    return direct if direct
+
+    # KEYWORD_HASH_POSITIONAL_SUPPORT: compile_keyword_call just declined
+    # (see below for the exact reasons this round measured), but a large
+    # share of the call sites it declines aren't real keyword calls AT ALL
+    # -- they only look like one in the disassembly.
+    compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
+                                         argv: argv, kw_sym_regs: kw_sym_regs,
+                                         kw_val_regs: kw_val_regs, kw_names: kw_names)
+  end
+
+  # KEYWORD_HASH_POSITIONAL_SUPPORT: a `SEND`/`SSEND` call site carrying
+  # `nk` keyword pairs (`n=N|nk=K`) whose real callee declares NO keyword
+  # parameters of its own -- in which case the keywords are not keywords in
+  # any runtime sense: the VM hands the callee ONE ordinary trailing
+  # POSITIONAL Hash argument, and the method signature that receives it is a
+  # plain `def foo(opts)`.
+  #
+  # This is the single biggest real sub-shape inside the "SEND/SSEND has a
+  # splat and/or keyword argument list" #error bucket, and it is a pure
+  # CALL-SITE concern: the callee side needs nothing at all (it is an
+  # ordinary all-mandatory-positional method this compiler already compiles
+  # clean today). Measured, not assumed -- a whole-program run with this
+  # round's own instrumentation showed the 20 sites in that bucket are ALL
+  # `n=N|nk=K` (literal counts) and NOT ONE is a splat (`n=*`/`nk=*`) at
+  # all, splitting by why compile_keyword_call declined:
+  #   8  `:new`     -- native `Class#new`, no MONO target at all (the
+  #                    keywords belong to the class's own `#initialize`,
+  #                    which for `Game::MoveRoute#initialize(commands,
+  #                    repeat: true, skippable: false)` really does declare
+  #                    keywords) -- a genuinely different mechanism, left
+  #                    open, see this round's own changelog entry.
+  #   4  `:deal_attack` -- one real def (`Game::Battle#deal_attack(b,
+  #                    target, swing_index = 0, charged: nil)`) that does
+  #                    declare a real keyword but is itself not compiling
+  #                    clean, so `monomorphic_target` refuses it. Left open.
+  #   7  THIS SHAPE -- the callee has no keyword parameters whatsoever.
+  #   1  `:close_message` -- genuinely POLY across two real defs that
+  #                    DISAGREE (`RPG2k::Scene::Menu#close_message` takes no
+  #                    arguments; `RPG2k::Scene::Map#close_message(animate:
+  #                    true)` declares a real keyword), so no single
+  #                    translation is correct for both receivers. Correctly
+  #                    stays an honest #error -- this is the case the gate
+  #                    below exists to catch.
+  #
+  # The seven real sites this closes and their real callee signatures (read
+  # from the real Ruby source, not inferred):
+  #   Game::Interpreter#do_change_parallax   -> Game::State#set_parallax(opts)
+  #   Game::State.singleton#from_lsd         -> Game::State#set_parallax(opts)
+  #   Game::Interpreter#do_show_picture      -> Game::State#show_picture(id, opts)
+  #   RPG2k::Scene::Map#apply_map_access     -> RPG2k::Scene::Map#play_bgm(music)
+  #   Game::State.singleton#from_lsd         -> Game::Party#load_state(data)
+  #   RPG2k::Scene::Battle#start_battle_page_animation
+  #                                          -> RPG2k::Scene::Battle#battle_animation_pixel(entry)
+  #   Game::State.singleton#from_lsd         -> `:load_h`, POLY across FIVE
+  #       real defs (Game::MessageConfig/Screen/Weather/Vehicle/Timer) that
+  #       all AGREE -- every one is `def load_h(h)`, one mandatory
+  #       positional and no keywords -- so the translation below is correct
+  #       for every possible receiver and the POLY-ness costs nothing.
+  #
+  # An EIGHTH real site of this same shape sits one level down, inside a
+  # BLOCK's own child irep rather than a method body, and so never showed up
+  # in that 20-site bucket at all: `Game::State.restore_pictures`'s own
+  # `pictures.each do |id, pic| ... state.show_picture(id, name: name, ...)
+  # ... end` (mruby-rpg2k/mrblib/game/lsd_io.rb:1647-1674, a 13-keyword call
+  # site -- `n=1|nk=13`). Compiling it has a real second-order effect worth
+  # naming explicitly, because it is where this round's measured #error
+  # reduction exceeds the seven sites above: BLOCK_CFUNC_FALLBACK_SUPPORT
+  # only compiles a block whose own child irep compiles CLEAN, so that one
+  # unsupported call site used to poison the whole block, and
+  # `Game::State.singleton#restore_pictures` fell back to `#error unhandled
+  # opcode BLOCK` + `#error unhandled opcode SENDB`. With the call site
+  # compiling, the block irep is clean and both of those opcodes now compile
+  # through the ordinary cfunc-backed RProc path. So the real whole-program
+  # movement is 48 -> 39 #error markers (-9): -7 in the splat/keyword bucket
+  # (20 -> 13), -1 BLOCK (4 -> 3) and -1 SENDB (4 -> 3), all four numbers
+  # from a real whole-program diagnostic run, not projected.
+  #
+  # Real bytecode shape, confirmed by a fresh `mrbc -v` disassembly of a
+  # minimal reproduction (mruby 4.0.0, `/tmp/freshbuild` host mrbc), NOT
+  # assumed to transfer from the existing keyword path:
+  #
+  #   class Foo; def bar(h); h; end; def baz(a, h); [a, h]; end; end
+  #   f.bar(name: 1, x: 2)     ->  19 022 LOADSYM  R3  :name
+  #                                19 025 LOADI_1  R4  (1)
+  #                                19 027 LOADSYM  R5  :x
+  #                                19 030 LOADI_2  R6  (2)
+  #                                19 032 SEND     R2  :bar   n=0|nk=2
+  #   f.baz(9, name: 1, x: 2)  ->  20 039 LOADI8   R3  9
+  #                                20 042 LOADSYM  R4  :name   ... R7
+  #                                20 052 SEND     R2  :baz   n=1|nk=2
+  #
+  #   and the two callees' own real entry shapes:
+  #     def bar(h)      ->  3 000 ENTER  1:0:0:0:0:0:0:0   (kw=0, kwrest=0)
+  #     def baz(a, h)   ->  8 000 ENTER  2:0:0:0:0:0:0:0   (kw=0, kwrest=0)
+  #   contrasted against a callee that really DOES take keywords:
+  #     def kw(a, name: nil, x: 0)
+  #                     -> 13 000 ENTER  1:0:0:0:2:0:0:0   (kw=2)
+  #                        13 004 KEY_P  R4 :name  ... KARG ... KEYEND
+  #
+  # So the call-site register layout is exactly the one compile_keyword_send
+  # above already computes (n positionals at d+1.., then K (sym, value)
+  # pairs) -- unchanged -- and the DECIDING fact is on the callee: ENTER's
+  # own `kw`/`kwrest` fields.
+  #
+  # Real VM semantics, read from real 3rd/mruby/src/vm.c (mruby 4.0.0,
+  # submodule 831da26b9), in two separate places:
+  #
+  #   1. OP_SEND, vm.c:2283-2288 -- the packing is UNCONDITIONAL and knows
+  #      nothing about the callee:
+  #        else if (nk > 0) {  /* pack keyword arguments */
+  #          mrb_int kidx = a+(n==CALL_MAXARGS?1:n)+1;
+  #          mrb_value kdict = hash_new_from_regs(mrb, nk, kidx);
+  #          regs[kidx] = kdict;
+  #          nk = CALL_MAXARGS;
+  #      i.e. the K (sym, value) register pairs ALWAYS become one real Hash
+  #      object sitting at `kidx = d+n+1`, before the callee is entered.
+  #      `hash_new_from_regs` (vm.c:1641) is the same `mrb_hash_new_capa` +
+  #      `mrb_hash_set` loop this file's own OP_HASH codegen already emits.
+  #
+  #   2. OP_ENTER, vm.c:2573 and 2589-2611 -- the callee decides what that
+  #      Hash MEANS:
+  #        mrb_int kd = (MRB_ASPEC_KEY(a) > 0 || MRB_ASPEC_KDICT(a))? 1 : 0;
+  #        ...
+  #        if (!kd) {
+  #          if (!mrb_nil_p(kdict) && mrb_hash_p(kdict) && mrb_hash_size(mrb, kdict) > 0) {
+  #            if (argc < 14) {
+  #              ci->n++;
+  #              argc++;    /* include kdict in normal arguments */
+  #            }
+  #            ...
+  #          }
+  #          kdict = mrb_nil_value();
+  #          ci->nk = 0;
+  #      i.e. when the callee declares neither named keywords nor `**rest`
+  #      (`kd == 0`), the packed Hash is APPENDED TO THE POSITIONAL ARGUMENT
+  #      LIST and the call is, from that point on, an ordinary positional
+  #      call with `ci->nk == 0`.
+  #
+  # Therefore the exact, complete translation for this shape is: build the
+  # Hash from the same K register pairs, then perform an ORDINARY positional
+  # call with N+1 arguments. Nothing keyword-specific survives into the
+  # emitted code at all -- which is precisely why `mrb_funcall` is usable
+  # here even though compile_keyword_call's own top comment correctly rules
+  # it out for a REAL keyword call: vm.c:740's own `ci->nk = 0; /* funcall
+  # does not support keyword arguments */` is not a limitation here, it is
+  # exactly the state OP_ENTER would have produced anyway.
+  #
+  # The soundness gate is `pure_mandatory_arity?` + an exact
+  # `mandatory_arity == n + 1` match on EVERY def the closed-world registry
+  # knows for this name:
+  #   - `pure_mandatory_arity?` requires ENTER's opt/rest/post/kw/kwrest/
+  #     block fields to ALL be zero (see that function), so it already
+  #     proves `MRB_ASPEC_KEY == 0 && MRB_ASPEC_KDICT == 0`, i.e. exactly
+  #     the `kd == 0` the vm.c arm above turns on. It is deliberately used
+  #     rather than a narrower hand-rolled kw/kwrest check: a callee with
+  #     optional/rest arguments would also need this call site to reason
+  #     about WHERE the appended Hash lands among them, which this round
+  #     does not attempt.
+  #   - `mandatory_arity == n + 1` is the "+1" the `ci->n++` above performs,
+  #     checked against the real signature rather than assumed to fit.
+  #   - Requiring it of EVERY registry def (not just a MONO one) is what
+  #     makes the emitted DYNAMIC dispatch sound: `mrb_funcall` resolves the
+  #     real method at runtime, so every def that could possibly answer this
+  #     name has to agree that the trailing Hash is a positional. That is
+  #     exactly what separates `:load_h` (five defs, all `(h)`, compiled)
+  #     from `:close_message` (two defs that disagree, left alone).
+  #   - Any `<native>` def of the name fails the `t.irep` check outright: a
+  #     native method's real argument spec is invisible to this compiler, so
+  #     it can never be proven keyword-free. This is what (correctly) keeps
+  #     the eight `:new` sites out.
+  #   - `n < 14` mirrors vm.c's own `if (argc < 14)` fast arm above; the
+  #     `argc == 14` / `argc == 15` arms pack arguments into an Array
+  #     instead, a different shape this does not model.
+  #
+  # Deliberately dynamic-dispatch-only (`mrb_funcall`, never a devirtualized
+  # MONO/TYPED direct `_impl` call), the same scoping choice SPLAT_UNROLL_
+  # SUPPORT's own plain-positional case already documents and for the same
+  # reason: getting these previously-#error'd call sites compiling AT ALL is
+  # this round's goal, and layering the existing MONO/POLY/TYPED
+  # devirtualization on top of an N+1-argument positional call built this
+  # way is a clean, independent follow-up. Note that once the Hash is built
+  # this really is an ordinary positional call, so unlike a real keyword
+  # call there is no obstacle to that follow-up at all.
+  #
+  # Returns the emitted C++, or nil for "not this shape" (the caller keeps
+  # the honest #error). Never guesses.
+  def compile_keyword_hash_positional_send(name:, d:, recv:, n:, nk:, argv:, kw_sym_regs:,
+                                           kw_val_regs:, kw_names:)
+    # vm.c's own `if (argc < 14)` arm -- see this method's own comment.
+    return nil unless nk.positive? && n < 14
+
+    defs = @registry[name]
+    return nil if defs.nil? || defs.empty?
+
+    total = n + 1
+    all_keyword_free = defs.all? do |t|
+      # A native def's real argument spec is invisible here, so it can never
+      # be proven keyword-free.
+      next false unless t.irep
+
+      callee_irep = @ireps[t.irep]
+      next false unless callee_irep
+
+      pure_mandatory_arity?(callee_irep) && mandatory_arity(callee_irep) == total
+    end
+    return nil unless all_keyword_free
+
+    owners = defs.map(&:owner).join(', ')
+    out = String.new
+    out << "  // KEYWORD_HASH_POSITIONAL :#{name} (n=#{n}|nk=#{nk}) -- every real def of this name " \
+           "(#{owners}) takes #{total} mandatory positional arguments and declares NO keyword " \
+           "parameters, so real src/vm.c OP_ENTER (`if (!kd) { ... ci->n++; argc++; }`) delivers the " \
+           "#{nk} keyword pair(s) as ONE ordinary trailing positional Hash, exactly as built here by " \
+           "OP_SEND's own hash_new_from_regs. Not a keyword call at runtime at all.\n"
+    out << "  {\n"
+    out << "    mrb_value bc2cpp_kwh = mrb_hash_new_capa(M, #{nk});\n"
+    nk.times do |k|
+      out << "    mrb_hash_set(M, bc2cpp_kwh, r#{kw_sym_regs[k]}, r#{kw_val_regs[k]});" \
+             "  // :#{kw_names[k]}\n"
+    end
+    out << "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}"
+    out << "  }\n"
+    out
   end
 
   # SPLAT_UNROLL_SUPPORT: "what argument expressions does the literal
