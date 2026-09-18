@@ -7047,6 +7047,68 @@ def lambda_fallback_safe?(lambda_irep)
   lambda_irep.instructions.none? { |insn| LAMBDA_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
 
+# RUNTIME_DEF_FALLBACK_SUPPORT (SDEF_FALLBACK / SCLASS_FALLBACK+EXEC_FALLBACK):
+# the `kind` values emit_proc_fallback_fn treats as a real METHOD-or-CLASS
+# BODY rather than a block/lambda body. Two things follow from membership,
+# both checked at the exact points the two flags are set/read:
+#
+#   * `self` comes from the REAL RECEIVER mruby passes the cfunc, not from
+#     env slot 0 (see emit_proc_fallback_fn's own self_source branch). A
+#     block body deliberately IGNORES the self mruby hands it and reads the
+#     lexically-captured one instead; a method body (and an EXEC-opened
+#     class body, whose self is the target class itself -- see below) must
+#     do exactly the opposite.
+#   * `@block_fallback_active` is FALSE, so a stray BREAK keeps its honest
+#     `#error` instead of compiling to a `throw bc2cpp_block_break`. A real
+#     `break` cannot appear at the top level of a `def` body or a class
+#     body at all (mrbc rejects it outright), so this only ever closes a
+#     translation that could never have been reached -- the same defensive
+#     discipline `lambda_fallback`'s own arm of that flag already uses.
+RUNTIME_DEF_FALLBACK_KINDS = %w[sdef_fallback tdef_fallback exec_fallback].freeze
+
+# RUNTIME_DEF_FALLBACK_SUPPORT: does this region compile a real method/class
+# BODY (as opposed to a block or lambda body)? The single predicate both
+# consequences listed above are keyed off, so the two can never disagree
+# about which kinds are which.
+def runtime_def_fallback_kind?(kind)
+  RUNTIME_DEF_FALLBACK_KINDS.include?(kind)
+end
+
+# RUNTIME_DEF_FALLBACK_SUPPORT: is this child irep a real `def` BODY this
+# file can install on a runtime class as a plain cfunc method?
+#
+# `pure_mandatory_arity?` is the load-bearing half. emit_proc_fallback_fn's
+# own entry wrapper binds a body's parameters with `mrb_get_args(M, "oo...",
+# ...)` -- exactly `mand` mandatory `o` slots and nothing else. For a BLOCK
+# body that is merely lenient (a block never arity-checks), but a METHOD
+# body installed via mrb_define_method_id is arity-CHECKED by mruby itself,
+# and `mrb_get_args` with N bare `o` specifiers raises ArgumentError for
+# anything but exactly N arguments -- which is precisely real Ruby's own
+# behaviour for a mandatory-only `def`, and precisely WRONG for one with an
+# optional/rest/keyword/block parameter. So an ENTER declaring anything
+# beyond mandatory positionals is refused here rather than silently
+# compiled into a method with the wrong arity contract.
+#
+# Nothing else needs its own gate: every remaining hazard is already caught
+# structurally by machinery emit_proc_fallback_fn ALREADY has.
+#   * GETUPVAR/SETUPVAR at this body's own level: a `def` body opens a new
+#     scope and provably cannot reference an enclosing method's locals
+#     (mrbc emits a fresh irep with no upvar access), but the check costs
+#     nothing to not write -- these bodies are compiled with an EMPTY
+#     captured-upvar set, so compile_insn's own GETUPVAR/SETUPVAR arm finds
+#     no matching entry and falls through to its honest `#error`, which
+#     ALL_OR_NOTHING_SUPPORT then turns into "no region at all".
+#   * BLKPUSH (`yield`): compiled with `needs_blk` false and
+#     `@blk_param_name` nil, so the same `#error`/ALL_OR_NOTHING path
+#     applies. A `def` that yields is simply left to the interpreter.
+#   * Any other unsupported opcode: identical -- emit_proc_fallback_fn
+#     returns nil the moment its own compiled body contains an `#error`,
+#     and every caller below treats nil as "leave the original `#error`
+#     marker in place", never as "install a half-compiled method".
+def runtime_def_body_safe?(def_irep)
+  pure_mandatory_arity?(def_irep)
+end
+
 # CALLSITE_OPTIONAL_ARG_SUPPORT: the real optional-argument count `mandatory_
 # arity`'s own sibling leaves out -- ENTER's aspec field 2 (0-indexed 1),
 # same parse, just the next field instead of the first. 0 for a no-ENTER/
@@ -8061,6 +8123,13 @@ class CodeGen
   # *only* natively defined just falls back to ordinary dynamic dispatch,
   # same as any other unresolvable call site.
   def monomorphic_target(name)
+    # RUNTIME_DEF_DEVIRT_GUARD: a name the method currently being compiled
+    # may install on some object's SINGLETON class at runtime can never be
+    # bound statically -- see devirt_blocked_name?/class_body_installed_names
+    # for the real, differential-test-caught reason. Always false outside the
+    # two runtime-patching methods in this closed world.
+    return nil if devirt_blocked_name?(name)
+
     defs = @registry[name]
     return nil unless defs && defs.size == 1
     return nil unless defs.first.irep
@@ -8112,6 +8181,13 @@ class CodeGen
   POLY_SMALL_N_MAX = 5
 
   def poly_small_n_targets(name, n)
+    # RUNTIME_DEF_DEVIRT_GUARD: same gate as monomorphic_target above, and
+    # this is the exact chain the differential test caught returning the
+    # unpatched implementation -- its `mrb_obj_class(M, recv) == Widget`
+    # guard still matched an object whose SINGLETON class had just been
+    # given its own `shared_name`.
+    return nil if devirt_blocked_name?(name)
+
     defs = @registry[name]
     return nil unless defs && defs.size >= 2
 
@@ -9552,6 +9628,12 @@ class CodeGen
     enter = irep.instructions.find { |i| i.op == 'ENTER' }
     mand = enter ? enter.args.split(':').first.to_i : 0
 
+    # RUNTIME_DEF_DEVIRT_GUARD: cleared HERE, at the single entry point, so
+    # no early return anywhere below can leak one method's blocked-name set
+    # into the next one's compile. Populated a few dozen lines down, once
+    # this method's own SDEF/EXEC regions are known.
+    @runtime_installed_names = nil
+
     # EXCEPTION_RETURN_SUPPORT: computed early (a pure function of `irep`
     # alone -- no dependency on anything else compile_method builds, and
     # no side effect of its own: `emit_proc_fallback_fn`, called later
@@ -9841,6 +9923,26 @@ class CodeGen
     suppressed = Set.new
     glue_at = {}
 
+    # RUNTIME_DEF_DEVIRT_GUARD: armed BEFORE any code is emitted for this
+    # method -- every block/lambda/rescue/exec fallback body below, and the
+    # main instruction loop, all reach compile_send through this same ivar,
+    # so one assignment here covers the whole method including its nested
+    # compiled bodies. `nil` (the overwhelmingly common case: no SDEF and no
+    # SCLASS+EXEC anywhere in this method) makes devirt_blocked_name? a
+    # constant false, so nothing about any other method's generated code
+    # changes. `:unknown` is the "cannot bound the installed names"
+    # fallback, which blocks devirtualization of every name in this method
+    # rather than refusing to compile it.
+    #
+    # recognize_exec_fallback_regions is a pure function of `irep` and is
+    # called again by the emission pass further down; running it twice is
+    # cheaper and less error-prone than threading one result across the
+    # several hundred lines between here and there.
+    if irep.instructions.any? { |i| i.op == 'SDEF' } || !recognize_exec_fallback_regions(irep).empty?
+      @runtime_installed_names =
+        runtime_installed_names_for(irep, recognize_exec_fallback_regions(irep)) || :unknown
+    end
+
     # OPTIONAL_ARG_SUPPORT: same suppressed-address/glue-at mechanism as
     # RESCUE_SUPPORT/BLOCK_SUPPORT below, replacing the real ENTER jump
     # table (optional_arg_table's own comment) with an equivalent native
@@ -10048,6 +10150,52 @@ class CodeGen
       end
     end
 
+    # RUNTIME_DEF_FALLBACK_SUPPORT: the SDEF/SCLASS+EXEC siblings of the two
+    # fallback passes above. Same suppressed/glue_at mechanism, same
+    # emit_proc_fallback_fn body compiler, same all-or-nothing contract (a
+    # nil result leaves the original instruction -- and therefore its
+    # existing `#error` -- exactly as it was). They run LAST purely by
+    # convention: SDEF, SCLASS and EXEC are disjoint opcodes from BLOCK/
+    # SENDB/SSENDB/LAMBDA, so there is no real overlap to order against, and
+    # the `suppressed` checks are the same defensive habit every recognizer
+    # in this file already keeps.
+    #
+    # SDEF first, because it is the strictly simpler of the two: one method
+    # onto one runtime object's singleton class, no class body to execute at
+    # all (see emit_sdef_fallback_glue's own comment).
+    irep.instructions.each do |insn|
+      next unless insn.op == 'SDEF'
+      next if suppressed.include?(insn.addr)
+
+      region = sdef_fallback_region(insn, irep)
+      next unless region
+
+      fn_result = emit_proc_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
+      block_fallback_pre << fn_code
+      suppressed << insn.addr
+      glue_at[insn.addr] = emit_sdef_fallback_glue(region, fn_name)
+    end
+
+    # SCLASS+EXEC: the class-reopen pair. `block_addr` is the SCLASS
+    # instruction (where the real replacement code starts, so it keeps any
+    # jump label -- see JUMP_TARGET_GLUE_FIX below) and `exec_addr` is the
+    # EXEC, suppressed with no glue of its own exactly the way a
+    # BLOCK_FALLBACK region's own `sendb_addr` is.
+    recognize_exec_fallback_regions(irep).each do |region|
+      next if suppressed.include?(region[:block_addr]) || suppressed.include?(region[:exec_addr])
+
+      fn_result = emit_proc_fallback_fn(region, d)
+      next unless fn_result
+
+      fn_name, fn_code = fn_result
+      block_fallback_pre << fn_code
+      suppressed << region[:block_addr] << region[:exec_addr]
+      glue_at[region[:block_addr]] = emit_exec_fallback_glue(region, fn_name)
+    end
+
     # JUMP_TARGET_GLUE_FIX: a real, caught bug -- `- suppressed` alone
     # would ALSO drop the label for any address that is suppressed but
     # still has real replacement code sitting at it (`glue_at.key?`), and
@@ -10133,6 +10281,8 @@ class CodeGen
     end
     out << "}\n\n"
     out = block_fallback_pre + rescue_pre + out
+    out << runtime_def_devirt_audit(out)
+    @runtime_installed_names = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
@@ -15623,6 +15773,47 @@ class CodeGen
       nested_glue_at[nregion[:sendb_addr]] = emit_explicit_block_arg_glue(nregion)
     end
 
+    # RUNTIME_DEF_FALLBACK_SUPPORT: a real `def` inside an EXEC-opened class
+    # body (`class << Graphics; def update; ...; end; end`) compiles to a
+    # TDEF instruction whose `I[c]` operand names the method body's own child
+    # irep. That body is compiled here by exactly the same recursive
+    # emit_proc_fallback_fn call the nested-BLOCK_FALLBACK pass just above
+    # already makes -- same all-or-nothing contract, same unique-name
+    # chaining through `fn_name` -- just with `self_source: :receiver` and a
+    # `tdef_fallback` kind, and installed by emit_tdef_fallback_glue rather
+    # than wrapped in an RProc.
+    #
+    # Deliberately gated on `exec_fallback`: a TDEF is only translatable when
+    # this body's own `self` is provably the target class, which is true for
+    # an EXEC-opened class body (OP_EXEC's own `recv`/`c` identity, see the
+    # self_source comment below) and is NOT true anywhere else this function
+    # is ever reached from -- inside a block or lambda body, `check_target_
+    # class(mrb)` walks out to whatever lexical scope the proc was built in,
+    # which compiled code has no handle on at all. Everywhere else a TDEF
+    # keeps its honest `#error`, exactly as before this mechanism existed.
+    #
+    # Runs BEFORE `@block_fallback_upvars`/`@block_fallback_active` are set,
+    # for the identical reason the nested-BLOCK_FALLBACK pass above states:
+    # the recursive call manages its own copies of those ivars and needs them
+    # still unset when it runs.
+    if region[:kind] == 'exec_fallback'
+      block_irep.instructions.each do |tinsn|
+        next unless tinsn.op == 'TDEF'
+        next if nested_suppressed.include?(tinsn.addr)
+
+        tregion = tdef_fallback_region(tinsn, block_irep)
+        next unless tregion
+
+        tfn_result = emit_proc_fallback_fn(tregion, d, fn_name)
+        next unless tfn_result
+
+        tfn_name, tfn_code = tfn_result
+        nested_pre << tfn_code
+        nested_suppressed << tinsn.addr
+        nested_glue_at[tinsn.addr] = emit_tdef_fallback_glue(tregion, tfn_name)
+      end
+    end
+
     # ALL_OR_NOTHING_SUPPORT: same contract every other block emitter in
     # this file already holds itself to (emit_sort_inline's own explicit
     # `return nil if body.include?('#error')`, emit_times_inline's own
@@ -15655,7 +15846,19 @@ class CodeGen
     # unconditionally strict, see that case's own comment), BLOCK_FALLBACK
     # gets the new `throw`. Never both at once (this function only ever
     # compiles one region's own body per call).
-    @block_fallback_active = region[:kind] != 'lambda_fallback'
+    # RUNTIME_DEF_FALLBACK_SUPPORT: a method body / EXEC-opened class body is
+    # neither of the two pre-existing kinds, and must NOT get BLOCK_FALLBACK's
+    # throwing BREAK -- see RUNTIME_DEF_FALLBACK_KINDS' own comment. Spelled
+    # as an explicit membership test on the two kinds that have always set
+    # this true (`nil`, the recognizer's own default, and the literal
+    # 'block_fallback') rather than as a second `!=` exclusion, so every
+    # future kind added to this function is opted OUT by default instead of
+    # silently inheriting a translation it may not be entitled to. The
+    # runtime_def_fallback_kind? assertion below states the same fact the
+    # other way round, so the two can never drift apart unnoticed.
+    raise "unexpected self_source for #{region[:kind]}" if
+      runtime_def_fallback_kind?(region[:kind]) && region[:self_source] != :receiver
+    @block_fallback_active = [nil, 'block_fallback'].include?(region[:kind])
     # BLOCK_FALLBACK_YIELD_SUPPORT: same consume-and-restore discipline,
     # gating compile_insn's own BLKPUSH case. SAVED and RESTORED rather than
     # cleared, unlike the two ivars just above: compile_method's own
@@ -15754,9 +15957,35 @@ class CodeGen
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     out << "}\n\n"
 
-    out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_unused_self) {\n"
-    out << "  (void)bc2cpp_unused_self;\n"
-    out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
+    # RUNTIME_DEF_FALLBACK_SUPPORT: a method body installed on a real runtime
+    # class, and an EXEC-opened class body, both take `self` from the REAL
+    # RECEIVER mruby passes this cfunc -- the exact opposite of a block/lambda
+    # body, which deliberately ignores it in favour of the lexically-captured
+    # one in env slot 0 (see emit_rproc_construction's own header for why a
+    # block has to).
+    #
+    # For an installed method that receiver is whatever object the call site
+    # dispatched on, which is the only correct `self` there is -- capturing
+    # anything at definition time would pin every later call to whatever
+    # object happened to be around when the `def` ran.
+    #
+    # For an EXEC-opened class body it is the target class itself, and this
+    # is a real proven identity rather than a convenience: src/vm.c's own
+    # OP_EXEC does `struct RClass *c = mrb_class_ptr(recv);` and then
+    # `cipush(mrb, a, 0, c, p, NULL, 0, 0)` -- the pushed frame's regs[0]
+    # (i.e. `self`) IS `recv`, and its target_class IS `mrb_class_ptr(recv)`,
+    # the same object. So inside a class body `self` and the class that
+    # `def`/`alias`/`private` act on are interchangeable, which is exactly
+    # what emit_tdef_fallback_glue below relies on to spell TDEF's own
+    # `check_target_class(mrb)` as `mrb_class_ptr(self)`.
+    if region[:self_source] == :receiver
+      out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_recv_self) {\n"
+      out << "  mrb_value bc2cpp_captured_self = bc2cpp_recv_self;\n"
+    else
+      out << "static mrb_value #{fn_name}(mrb_state* M, mrb_value bc2cpp_unused_self) {\n"
+      out << "  (void)bc2cpp_unused_self;\n"
+      out << "  mrb_value bc2cpp_captured_self = mrb_proc_cfunc_env_get(M, 0);\n"
+    end
     # UPVAR_CAPTURE_SUPPORT: slot 0 is always `self` (SELF_CAPTURE_SUPPORT,
     # above) -- each captured upvar's own pointer sits at slot `i + 1`, in
     # the exact same order emit_rproc_construction below builds its own
@@ -16338,6 +16567,546 @@ class CodeGen
     out << "  {\n"
     out << ctor
     out << "    r#{dest_reg} = mrb_obj_value(#{rproc_var});\n"
+    out << "  }\n"
+    out
+  end
+
+  # RUNTIME_DEF_FALLBACK_SUPPORT: parse one `SDEF R3 :read I[0]` /
+  # `TDEF R1 :update I[0]` instruction into a region emit_proc_fallback_fn
+  # can compile. Both opcodes print with the identical three-operand layout
+  # (src/codedump.c: `"%cDEF\t\tR%d\t:%s\tI[%d]\n"`), so one parser serves
+  # both -- only the `kind` and the install site differ.
+  #
+  # Returns nil (leave the original `#error` marker alone) for anything this
+  # mechanism cannot honour: a disassembly line that doesn't match the
+  # expected shape, a child-irep index this irep's own reps[] doesn't
+  # actually contain, or a body whose arity isn't purely mandatory
+  # (runtime_def_body_safe?).
+  def runtime_def_region(insn, irep, kind)
+    m = insn.args.match(/\AR(\d+)\s+:(\S+)\s+I\[(\d+)\]\z/)
+    return nil unless m
+
+    child_label = irep.reps[m[3].to_i]
+    return nil unless child_label
+
+    child = @ireps[child_label]
+    return nil unless child && runtime_def_body_safe?(child)
+
+    # RUNTIME_DEF_FALLBACK_SUPPORT: the ENCLOSING irep's own declared register
+    # count, carried along so emit_runtime_def_install can tell whether this
+    # opcode's `a` register is one that irep actually has. It genuinely may
+    # not be -- see that method's own comment for the real mrbc output.
+    { block_irep: child, block_addr: insn.addr, kind: kind, self_source: :receiver,
+      dest_reg: m[1].to_i, name: m[2], mand: mandatory_arity(child),
+      enclosing_nregs: irep.nregs.to_i }
+  end
+
+  def tdef_fallback_region(insn, irep)
+    runtime_def_region(insn, irep, 'tdef_fallback')
+  end
+
+  # RUNTIME_DEF_DEVIRT_GUARD: the class-body sends whose installed method
+  # names this file can read straight off the bytecode, given literal Symbol
+  # arguments. Everything else in a class body is treated as "installs an
+  # unknown set of names" -- see class_body_installed_names below.
+  CLASS_BODY_INSTALLER_SENDS = {
+    'alias_method' => :alias,
+    'attr_reader' => :reader,
+    'attr_writer' => :writer,
+    'attr_accessor' => :accessor
+  }.freeze
+
+  # RUNTIME_DEF_DEVIRT_GUARD: opcodes that provably touch no method table at
+  # all, so a class body made only of these (plus the two cases handled
+  # explicitly above) has a fully-known installed-name set. Deliberately a
+  # tiny allowlist rather than a denylist: an opcode nobody thought about
+  # lands in the "unknown" bucket, which is the safe side.
+  CLASS_BODY_INERT_OPS = %w[LOADSYM MOVE LOADNIL LOADSELF ENTER JMP RETURN].freeze
+
+  # RUNTIME_DEF_DEVIRT_GUARD: the `n` literal-Symbol arguments a class-body
+  # send at `idx` was handed, read off the `LOADSYM R(dest+k) :name`
+  # instructions that must immediately precede it -- the shape mrbc emits
+  # for `alias_method :a, :b` / `attr_accessor :x`. nil for anything less
+  # than a complete literal set (a computed symbol, a splat, a symbol that
+  # came from somewhere this backward scan can't see), the same "only a
+  # statically-certain fact counts" discipline every other backward scan in
+  # this file uses.
+  def literal_symbol_args(irep, idx, dest, n)
+    return [] if n.zero?
+    return nil if idx < n
+
+    # Deliberately the n instructions IMMEDIATELY before the send, each
+    # loading its own argument register in ascending order -- not a loose
+    # backward search for "the last LOADSYM that wrote this register".
+    # A loose search would have to prove nothing in between clobbered the
+    # register (a MOVE is in CLASS_BODY_INERT_OPS and could), whereas an
+    # exact contiguous match needs no such proof: there is nothing in
+    # between. This is the shape mrbc actually emits --
+    #
+    #   000 LOADSYM R2 :_probe_update
+    #   003 LOADSYM R3 :update
+    #   006 SSEND   R1 :alias_method  n=2
+    #
+    # -- and anything else falls out as nil, i.e. "installed names unknown",
+    # which is the safe side.
+    (1..n).map do |k|
+      insn = irep.instructions[idx - n + k - 1]
+      return nil unless insn && insn.op == 'LOADSYM'
+
+      m = insn.args.to_s.match(/\AR(\d+)\s+:(\S+)\z/)
+      return nil unless m && m[1].to_i == dest + k
+
+      m[2]
+    end
+  end
+
+  # RUNTIME_DEF_DEVIRT_GUARD: every method name an EXEC-opened class body
+  # installs, or nil meaning "cannot be bounded".
+  #
+  # This exists because of a real, differential-test-caught bug, not a
+  # theoretical one. Installing a method on an object's SINGLETON class at
+  # runtime is invisible to `mrb_obj_class`, which src/class.c defines as
+  # `mrb_class_real(mrb_class(mrb, obj))` -- it walks PAST MRB_TT_SCLASS and
+  # returns the underlying class. Every class-identity devirtualization in
+  # this file (MONO's unguarded direct call, POLY_SMALL_N's
+  # `mrb_obj_class(...) == C` chain, TYPED, the ivar-accessor inlines) is
+  # therefore blind to a singleton method: it happily calls the CLASS's
+  # implementation for a receiver whose singleton class overrides it.
+  #
+  # Before this mechanism existed that was unreachable from compiled code
+  # for a method that does its own patching, because such a method never
+  # compiled at all (the EXEC/SCLASS/SDEF `#error` left it on the
+  # interpreter). Compiling it is exactly what re-opens the hole, so
+  # closing it belongs here. Measured, not assumed -- a minimal
+  # `class << a; alias_method :_orig, :shared_name; def shared_name; ...;
+  # end; end` followed by `a.shared_name` in the same method returned the
+  # UNPATCHED string under compilation and the patched one under
+  # interpretation, purely because of POLY_SMALL_N's own class check.
+  #
+  # The fix is name-scoped rather than a blanket "turn devirtualization off
+  # in this method": only a name this method might install at runtime is
+  # unsafe to bind statically, and for the real shapes that set is small and
+  # exactly known. Both real sites in this closed world keep every one of
+  # their existing devirtualized call sites as a result (`effect_probe`
+  # installs `update`/`_probe_update` and devirtualizes neither;
+  # `audio_probe` installs `read` and devirtualizes neither).
+  #
+  # nil ("unknown") is returned for any body this cannot fully account for,
+  # and blocks devirtualization of EVERY name in the enclosing method. That
+  # still COMPILES the method, just entirely dynamically -- strictly better
+  # than refusing it, and still exactly as correct.
+  #
+  # NOTE on scope, deliberately: this guards the method that does the
+  # patching. A devirtualized call site in some OTHER compiled method can
+  # still miss a runtime singleton patch -- but that is true of this
+  # compiler today, unchanged, whether the patching method runs compiled or
+  # interpreted, so it is not something this mechanism introduces or can
+  # close on its own.
+  def class_body_installed_names(body)
+    names = Set.new
+    body.instructions.each_with_index do |insn, idx|
+      case insn.op
+      when 'TDEF'
+        m = insn.args.match(/\AR\d+\s+:(\S+)\s+I\[\d+\]\z/)
+        return nil unless m
+
+        names << m[1]
+      when 'SSEND', 'SSEND0'
+        m = insn.args.match(/\AR(\d+)\s+:(\S+?)(?:\s+n=(\d+))?\z/)
+        return nil unless m
+
+        kind = CLASS_BODY_INSTALLER_SENDS[m[2]]
+        return nil unless kind
+
+        syms = literal_symbol_args(body, idx, m[1].to_i, m[3].to_i)
+        return nil unless syms && !syms.empty?
+
+        case kind
+        # `alias_method(new_name, old_name)` installs the FIRST argument;
+        # the second is only READ (src/class.c's mrb_alias_method).
+        when :alias then names << syms.first
+        when :reader then names.merge(syms)
+        when :writer then names.merge(syms.map { |s| "#{s}=" })
+        when :accessor then names.merge(syms).merge(syms.map { |s| "#{s}=" })
+        end
+      else
+        return nil unless CLASS_BODY_INERT_OPS.include?(insn.op)
+      end
+    end
+    names
+  end
+
+  # RUNTIME_DEF_DEVIRT_GUARD: the complete set of names this METHOD may
+  # install at runtime -- every SDEF's own name plus every EXEC-opened class
+  # body's contribution -- or nil if any one body could not be bounded.
+  def runtime_installed_names_for(irep, exec_regions)
+    names = Set.new
+    irep.instructions.each do |insn|
+      next unless insn.op == 'SDEF'
+
+      m = insn.args.match(/\AR\d+\s+:(\S+)\s+I\[\d+\]\z/)
+      return nil unless m
+
+      names << m[1]
+    end
+    exec_regions.each do |region|
+      body_names = class_body_installed_names(region[:block_irep])
+      return nil unless body_names
+
+      names.merge(body_names)
+    end
+    names
+  end
+
+  # RUNTIME_DEF_DEVIRT_GUARD: may a call to `name` be bound statically in
+  # the method currently being compiled? False for every method that does no
+  # runtime patching at all (@runtime_installed_names nil), which is all but
+  # two in this whole closed world -- so this changes nothing anywhere else.
+  def devirt_blocked_name?(name)
+    return false unless @runtime_installed_names
+    return true if @runtime_installed_names == :unknown
+
+    @runtime_installed_names.include?(name.to_s)
+  end
+
+  # RUNTIME_DEF_DEVIRT_GUARD: the marker kinds that are REAL dynamic
+  # dispatch -- the receiver's own runtime method lookup decides, so a
+  # runtime singleton patch is honoured automatically and there is nothing
+  # to guard.
+  #
+  # Everything else this file can print as `// KIND :name` is treated as a
+  # static binding by the audit below. That polarity is deliberate:
+  # devirtualization markers are added to this file regularly, and a new one
+  # that nobody remembered to list here lands on the SAFE side (audited, and
+  # at worst costing one method its compilation) rather than shipping an
+  # unguarded static bind.
+  RUNTIME_DEF_DYNAMIC_MARKERS = %w[
+    POLY SPLAT KEYWORD_HASH_POSITIONAL EXPLICIT_BLOCK_ARG
+    BLOCK_FALLBACK LAMBDA_FALLBACK SDEF_FALLBACK TDEF_FALLBACK
+    SCLASS_FALLBACK
+  ].freeze
+
+  # RUNTIME_DEF_DEVIRT_GUARD: the belt-and-braces half of the guard.
+  #
+  # devirt_blocked_name? already refuses to devirtualize a runtime-installed
+  # name at the two selectors that actually produced the bug
+  # (monomorphic_target, poly_small_n_targets). This re-reads the FINISHED
+  # generated text of the method -- the exact thing that would ship -- and
+  # turns any remaining static bind of a blocked name into an ordinary
+  # `#error`, which SKIP_UNSUPPORTED then drops, leaving the method on the
+  # interpreter exactly as it was before this mechanism existed.
+  #
+  # Reading the emitted text rather than re-deriving the decision is the
+  # whole point: it cannot drift from what the code generator actually did,
+  # so a devirtualization path that does NOT run through either gated
+  # selector still cannot silently ship a wrong bind. Returns "" -- costing
+  # nothing and changing nothing -- for every method that installs no
+  # methods at runtime.
+  def runtime_def_devirt_audit(code)
+    return '' unless @runtime_installed_names
+
+    offenders = code.scan(%r{^\s*// ([A-Z][A-Z_0-9]*) :(\S+?)(?:\s|,|$)}).reject do |kind, _name|
+      RUNTIME_DEF_DYNAMIC_MARKERS.include?(kind)
+    end.select { |_kind, name| devirt_blocked_name?(name) }
+    return '' if offenders.empty?
+
+    offenders.uniq.map do |kind, name|
+      "  #error #{kind} devirtualization of :#{name}, which this method installs on a runtime " \
+        "singleton class -- not in this prototype's supported subset\n"
+    end.join
+  end
+
+  def sdef_fallback_region(insn, irep)
+    runtime_def_region(insn, irep, 'sdef_fallback')
+  end
+
+  # RUNTIME_DEF_FALLBACK_SUPPORT: the shared install snippet for SDEF and
+  # TDEF -- the one line that actually mutates a live method table.
+  #
+  # `mrb_define_method_id(M, tc, mid, fn, MRB_ARGS_REQ(n))` is proven
+  # equivalent to what OP_SDEF/OP_TDEF really do, checked against
+  # src/class.c's own mrb_define_method_raw rather than assumed:
+  #
+  #   * VISIBILITY. The VM installs with MRB_METHOD_VDEFAULT_FL; this
+  #     installs with MRB_METHOD_PUBLIC_FL. Those resolve to the SAME thing
+  #     here, because mrb_define_method_raw resolves VDEFAULT itself and its
+  #     very first branch is `/* singleton methods are always public */ if
+  #     (c->tt == MRB_TT_SCLASS) MRB_SET_VISIBILITY_FLAGS(flags,
+  #     MRB_METHOD_PUBLIC_FL);`. Every target class this mechanism ever
+  #     installs onto is a singleton class by construction -- SDEF's is
+  #     `mrb_singleton_class(...)` by definition, and TDEF's is only ever
+  #     reached from an SCLASS-opened body (see the exec_fallback gate) --
+  #     so the VDEFAULT path this code skips would have produced PUBLIC
+  #     anyway. Note this is NOT true of a TDEF in an ordinary `class Foo`
+  #     body, where VDEFAULT consults the enclosing `private`/`public`
+  #     scope; that is one of the reasons EXEC support here is confined to
+  #     the SCLASS shape.
+  #   * THE FORCED-PRIVATE NAMES. `initialize`/`initialize_copy`/
+  #     `respond_to_missing?` are forced private by mrb_define_method_raw
+  #     unconditionally, BEFORE the visibility branch above and regardless
+  #     of the flag passed in -- and `mrb_define_method_id` funnels into
+  #     that same mrb_define_method_raw. So those three names get identical
+  #     treatment on both paths with nothing needed here.
+  #   * ARITY. MRB_ARGS_REQ(n) matches the `mrb_get_args(M, "o"*n, ...)` the
+  #     compiled entry wrapper performs, and runtime_def_body_safe? has
+  #     already refused every non-mandatory-only ENTER.
+  #
+  # THE method_added HOOK is the one thing `mrb_define_method_id` does NOT
+  # do and OP_SDEF/OP_TDEF do: each of them runs `mrb_method_added(mrb, tc,
+  # mid)` right after installing. That function is declared in
+  # include/mruby/internal.h, NOT exported as MRB_API, so generated code
+  # cannot call it -- but it is three lines of src/class.c and every piece
+  # it needs IS public:
+  #
+  #   added = (c->tt == MRB_TT_SCLASS) ? singleton_method_added : method_added;
+  #   recv  = (c->tt == MRB_TT_SCLASS) ? mrb_iv_get(.., c, __attached__) : c;
+  #   if (!mrb_func_basic_p(mrb, recv, added, mrb_do_nothing))
+  #     mrb_funcall_argv(mrb, recv, added, 1, &sym);
+  #
+  # Only the SCLASS arm is ever needed here: every target class this
+  # mechanism installs onto is a singleton class, by the same construction
+  # the VISIBILITY proof above relies on.
+  #
+  # The `mrb_func_basic_p` guard is DROPPED rather than reproduced, and that
+  # is a real equivalence rather than a shortcut. `mrb_do_nothing`
+  # (src/class.c) is literally `{ return mrb_nil_value(); }`, and it is what
+  # mruby's own method table installs for BasicObject#singleton_method_added
+  # (src/class.c's MRB_MT_ENTRY table). So the guard's only job is to SKIP a
+  # call to a function that provably does nothing -- calling it anyway
+  # produces the identical program state, just without the optimization.
+  # Every other outcome is unchanged: a program that really has overridden
+  # the hook gets it invoked exactly as the interpreter would.
+  #
+  # Neither the guard nor `mrb_do_nothing` is exported, so reproducing the
+  # skip would have meant reaching into VM internals; this way the whole
+  # mechanism stays on public API with no closed-world assumption about
+  # whether anything overrides the hook at all. (An earlier revision of this
+  # code instead REFUSED to compile whenever the closed-world registry knew
+  # a definition of either hook name -- which turned out to refuse
+  # everything, because mruby's own core C sources define both names, as
+  # `mrb_do_nothing`, and the NATIVE_SRCS scan correctly sees them. That
+  # false positive is exactly what this approach removes.)
+  #
+  # `mrb_funcall_argv` is the same public entry point mrb_method_added
+  # itself uses, and it deliberately performs no visibility check -- which
+  # matters, because both hooks are installed MRB_MT_PRIVATE.
+  #
+  # What is NOT identical, and is inherent to this whole compiler rather
+  # than to this mechanism: the installed body is a cfunc method, not a
+  # bytecode RProc, so it has no irep for introspection to walk. Every
+  # method bc2cpp compiles already has exactly that property.
+  def emit_runtime_def_install(target_class_expr, region, fn_name, indent)
+    tc_var = "bc2cpp_def_tc_#{region[:block_addr]}"
+    mid_var = "bc2cpp_def_mid_#{region[:block_addr]}"
+    sym_var = "bc2cpp_def_sym_#{region[:block_addr]}"
+    out = String.new
+    # Bound to a local first: `target_class_expr` can be a real call with a
+    # real side effect (SDEF's own `mrb_singleton_class`, which CREATES the
+    # singleton class if the object doesn't have one yet), and the hook call
+    # below needs the very same class the install used.
+    out << "#{indent}struct RClass* #{tc_var} = #{target_class_expr};\n"
+    out << "#{indent}mrb_sym #{mid_var} = mrb_intern_cstr(M, \"#{region[:name]}\");\n"
+    out << "#{indent}mrb_define_method_id(M, #{tc_var}, #{mid_var}, #{fn_name}, " \
+           "MRB_ARGS_REQ(#{region[:mand]}));\n"
+    out << "#{indent}mrb_value #{sym_var} = mrb_symbol_value(#{mid_var});\n"
+    out << "#{indent}mrb_funcall_argv(M, mrb_iv_get(M, mrb_obj_value(#{tc_var}), " \
+           "mrb_intern_cstr(M, \"__attached__\")), mrb_intern_cstr(M, \"singleton_method_added\"), " \
+           "1, &#{sym_var});\n"
+    # Both opcodes leave the defined method's NAME, as a Symbol, in their own
+    # `a` register (src/vm.c: `regs[a] = mrb_symbol_value(mid);`) -- the value
+    # a real `def` expression evaluates to. Written AFTER the hook call, the
+    # same order vm.c uses. Emitted whenever the enclosing irep actually HAS
+    # that register: `private def foo...` and a bare `def` used as a statement
+    # disassemble identically up to this point, so the write is not something
+    # this file can decide to skip by looking at the `def` alone.
+    #
+    # It CAN be skipped -- and must be -- when the register is past the end of
+    # the enclosing irep's own declared `nregs`, which is a real thing mrbc
+    # emits rather than a defensive guess. A class body whose only statement
+    # is a `def` disassembles as:
+    #
+    #   irep ... nregs=1 nlocals=1 pools=0 syms=1 reps=1 ilen=6
+    #     000 TDEF  R1  :who  I[0]
+    #     004 RETURN  R0
+    #
+    # -- `nregs=1`, so R0 is the only register that exists, yet the TDEF names
+    # R1. The interpreter gets away with it because OP_EXEC's own
+    # `stack_extend(mrb, irep->nregs)` leaves slack above the declared count,
+    # but compiled code declares exactly `nregs` C++ locals (emit_proc_
+    # fallback_fn's own preamble), so emitting the write would name a variable
+    # that does not exist -- a hard g++ error, which is exactly how this was
+    # found.
+    #
+    # Dropping the write is not merely convenient, it is provably lossless:
+    # mrbc's own register allocator sets `nregs` to bound every register the
+    # irep can still READ, so a register at or beyond it is dead by
+    # construction -- nothing in this body can observe the value. (Confirmed
+    # against the disassembly above: the very next instruction returns R0 and
+    # R1 is never read.)
+    if region[:dest_reg] < region[:enclosing_nregs].to_i
+      out << "#{indent}r#{region[:dest_reg]} = #{sym_var};\n"
+    else
+      out << "#{indent}(void)#{sym_var}; // R#{region[:dest_reg]} is past the enclosing irep's " \
+             "nregs=#{region[:enclosing_nregs]} -- dead by construction, see above\n"
+    end
+    out
+  end
+
+  # SDEF_FALLBACK: `def archive.read(name); @entries[name]; end` -- one
+  # method installed on ONE runtime object's real singleton class.
+  #
+  # src/vm.c's OP_SDEF is `struct RClass *tc = mrb_class_ptr(mrb_singleton_
+  # class(mrb, regs[a]));` followed by the install. `mrb_singleton_class` is
+  # public MRB_API and is the raising wrapper around mrb_singleton_class_ptr
+  # (`if (c == NULL) mrb_raise(mrb, E_TYPE_ERROR, "can't define singleton")`)
+  # -- so spelling it exactly the way vm.c does, rather than reaching for
+  # the non-raising `_ptr` variant, keeps the real TypeError for a receiver
+  # that cannot have a singleton class (an Integer, a Symbol, a Float).
+  #
+  # Note what this case does NOT need, and why it is strictly simpler than
+  # the EXEC/SCLASS one below: there is no arbitrary class BODY to execute.
+  # The receiver is an ordinary value already sitting in a register, the
+  # method body is a single child irep compiled like any other, and the
+  # whole translation is "take that object's singleton class, install".
+  # No RProc, no env capture, no new VM call frame.
+  def emit_sdef_fallback_glue(region, fn_name)
+    out = String.new
+    out << "  // SDEF_FALLBACK :#{region[:name]} -- singleton method body compiled as a standalone cfunc, " \
+           "installed on the receiver's real runtime singleton class\n"
+    out << "  {\n"
+    out << emit_runtime_def_install("mrb_class_ptr(mrb_singleton_class(M, r#{region[:dest_reg]}))",
+                                     region, fn_name, '    ')
+    out << "  }\n"
+    out
+  end
+
+  # TDEF_FALLBACK: a `def` inside an EXEC-opened class body. src/vm.c's
+  # OP_TDEF installs onto `check_target_class(mrb)`, this frame's own
+  # target class. Inside a body entered by OP_EXEC that is provably the same
+  # object as `self` (see emit_proc_fallback_fn's own self_source comment for
+  # the `recv`/`c` identity straight out of OP_EXEC), and `self` is something
+  # compiled code genuinely holds -- so `mrb_class_ptr(self)` is an exact
+  # translation of check_target_class here, not an approximation.
+  #
+  # check_target_class's own failure mode (`if (!tc) goto L_RAISE`, a
+  # "no class/module to add method" RuntimeError) cannot arise on this path:
+  # it only returns NULL for a frame with no target class at all, and this
+  # frame's was supplied explicitly by emit_exec_fallback_glue below.
+  def emit_tdef_fallback_glue(region, fn_name)
+    out = String.new
+    out << "  // TDEF_FALLBACK :#{region[:name]} -- `def` inside a class-reopen body, compiled as a standalone " \
+           "cfunc, installed on this body's own target class (== self, per OP_EXEC)\n"
+    out << "  {\n"
+    out << emit_runtime_def_install('mrb_class_ptr(self)', region, fn_name, '    ')
+    out << "  }\n"
+    out
+  end
+
+  # SCLASS_FALLBACK + EXEC_FALLBACK: `class << Graphics; alias_method
+  # :_probe_update, :update; def update; ...; end; end` sitting in the
+  # middle of an ordinary method body -- the real shape at
+  # `RGSS.singleton#effect_probe` (mruby-rgss/mrblib/lib.rb).
+  #
+  # Recognizes exactly one bytecode shape: an `SCLASS Ra` immediately
+  # followed by an `EXEC Ra I[c]` on the SAME register. That is what mrbc
+  # emits for a `class << expr ... end` and nothing else emits it --
+  # codegen.c's NODE_SCLASS arm evaluates the receiver, emits OP_SCLASS on
+  # its register, then OP_EXEC on that same register with the body's own
+  # child irep. Requiring adjacency AND register identity means an SCLASS
+  # whose result is used for anything else (there is no such shape today,
+  # but the guard costs nothing) keeps its honest `#error`.
+  #
+  # Deliberately NOT extended to `CLASS`/`MODULE`+`EXEC` (an ordinary
+  # `class Foo ... end` nested in a method body), even though the EXEC half
+  # would translate identically. Two reasons, both real:
+  #   * A TDEF in a NON-singleton class body resolves its VDEFAULT
+  #     visibility against the enclosing `private`/`public` scope
+  #     (src/class.c's mrb_define_method_raw), which the plain
+  #     `mrb_define_method_id` install used here does not reproduce. The
+  #     SCLASS shape sidesteps that entirely because singleton methods are
+  #     unconditionally public -- see emit_runtime_def_install's own proof.
+  #   * CLASS/MODULE also CREATE a constant, which this compiler's
+  #     closed-world registry has no way to learn about.
+  # Neither shape occurs in this closed world today; both keep their
+  # existing `#error`.
+  #
+  # The body itself is compiled by the same emit_proc_fallback_fn every
+  # BLOCK_FALLBACK body goes through, so everything that already works
+  # inside a block body -- ordinary sends (which is what `alias_method`,
+  # `attr_reader`, `attr_accessor`, `include`, `private` and friends all
+  # are), nested blocks, rescue regions, the all-or-nothing contract --
+  # works inside a class-reopen body with no further code. `def` is the one
+  # thing a class body can contain that a block body cannot, and that is
+  # exactly what the TDEF pass in emit_proc_fallback_fn adds.
+  def recognize_exec_fallback_regions(irep)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless insn.op == 'SCLASS'
+
+      nxt = irep.instructions[idx + 1]
+      next unless nxt && nxt.op == 'EXEC'
+
+      reg = insn.args[/\AR(\d+)\z/, 1]
+      m = nxt.args.match(/\AR(\d+)\s+I\[(\d+)\]\z/)
+      next unless reg && m && m[1] == reg
+
+      child_label = irep.reps[m[2].to_i]
+      next unless child_label
+
+      child = @ireps[child_label]
+      next unless child
+
+      regions << { block_irep: child, block_addr: insn.addr, exec_addr: nxt.addr,
+                   kind: 'exec_fallback', self_source: :receiver, dest_reg: reg.to_i }
+    end
+    regions
+  end
+
+  # SCLASS_FALLBACK + EXEC_FALLBACK call-site glue -- the two opcodes
+  # translated together, because the singleton class OP_SCLASS computes is
+  # the only thing OP_EXEC then consumes.
+  #
+  #   OP_SCLASS: `regs[a] = mrb_singleton_class(mrb, regs[a]);` -- spelled
+  #   verbatim, raising wrapper included, exactly as in emit_sdef_fallback_
+  #   glue above.
+  #
+  #   OP_EXEC: builds an RProc over the class body with MRB_PROC_SCOPE, sets
+  #   its target class to that singleton class, and pushes a call frame
+  #   whose self is the same value. `mrb_yield_with_class` (public MRB_API,
+  #   src/vm.c) is mruby's own entry point for precisely that: its
+  #   yield_with_attr does `ci->u.target_class = c; ci->proc = p;` and, for
+  #   a cfunc proc, `ci->stack[0] = self; val = MRB_PROC_CFUNC(p)(mrb,
+  #   self);`. So the frame the class body runs in has the same self and the
+  #   same target class the interpreter's own OP_EXEC frame would have.
+  #   Using it rather than calling the compiled function directly is what
+  #   makes `private`/`public`/`module_function` inside a reopen body see
+  #   the right scope: src/class.c's find_visibility_scope reads
+  #   `mrb_vm_ci_target_class(ci)`, which only exists because this frame was
+  #   pushed properly.
+  #
+  # The MRB_PROC_SCOPE flag itself has no analogue to set on a cfunc proc
+  # and needs none. Its two real consumers are check_visibility_break
+  # (src/class.c), which treats a SCOPE proc and a proc with no `upper`
+  # identically -- both return TRUE, "this frame is the visibility scope" --
+  # and a cfunc proc built by mrb_proc_new_cfunc has `upper == NULL`; and
+  # OP_RETURN's own scope-unwinding, which never runs because there is no
+  # bytecode frame here to unwind.
+  #
+  # EXEC's own result value needs no special handling: cipush/OP_RETURN
+  # leave the class body's return value in `regs[a]`, and mrb_yield_with_
+  # class returns exactly that value, so one assignment reproduces it.
+  def emit_exec_fallback_glue(region, fn_name)
+    dest_reg = region[:dest_reg]
+    sc_var = "bc2cpp_sclass_#{region[:block_addr]}"
+    proc_var = "bc2cpp_exec_proc_#{region[:block_addr]}"
+    out = String.new
+    out << "  // SCLASS_FALLBACK + EXEC_FALLBACK -- `class << recv` body compiled as a standalone cfunc, " \
+           "executed against the real runtime singleton class (self == target class, per OP_EXEC)\n"
+    out << "  {\n"
+    out << "    mrb_value #{sc_var} = mrb_singleton_class(M, r#{dest_reg});\n"
+    out << "    struct RProc* #{proc_var} = mrb_proc_new_cfunc(M, #{fn_name});\n"
+    out << "    r#{dest_reg} = mrb_yield_with_class(M, mrb_obj_value(#{proc_var}), 0, NULL, " \
+           "#{sc_var}, mrb_class_ptr(#{sc_var}));\n"
     out << "  }\n"
     out
   end
