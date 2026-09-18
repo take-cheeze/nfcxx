@@ -11222,6 +11222,68 @@ class CodeGen
     'SCLASS', 'TCLASS', 'DEBUG', 'STOP'
   ].freeze
 
+  # The members of FIXNUM_PROOF_STEP_OVER_OPS whose leading `R<n>` operand is
+  # READ, never written -- the one place the shared "does this instruction write
+  # `reg`?" test (`fixnum_proof_writes_reg?`) cannot simply ask whether the
+  # first operand names `reg`.
+  #
+  # Verified against 3rd/mruby's own sources, both halves:
+  #   * `include/mruby/ops.h` gives all three the `BS` format --
+  #     `OPCODE(JMPIF, BS) /* if R[a] pc+=b */`, `OPCODE(JMPNOT, BS)
+  #     /* if !R[a] pc+=b */`, `OPCODE(JMPNIL, BS) /* if R[a]==nil pc+=b */` --
+  #     so the register really is operand `a` and `codedump.c` prints it first
+  #     (`"JMPIF\t\tR%d\t%03d"`), which is exactly why the leading-operand regex
+  #     matches them at all.
+  #   * `src/vm.c`'s own handlers confirm the format tag is not the whole story
+  #     and that the register is genuinely read-only: `CASE(OP_JMPIF, BS)` is
+  #     `if (mrb_test(regs[a])) { ci->pc += (int16_t)b; JUMP; } NEXT;`, and
+  #     `OP_JMPNOT`/`OP_JMPNIL` differ only in the predicate (`!mrb_test`,
+  #     `mrb_nil_p`). No arm assigns to `regs[a]` or to any other register, and
+  #     none of the three predicates is a conversion that could write back.
+  #
+  # Treating them as writes was not unsound -- it merely ENDED the backward walk
+  # at an instruction `fixnum_proof_source?` cannot classify, so the walk refused
+  # instead of continuing to the real reaching definition(s). That is the single
+  # shape `a && 5`, `a || 7` and `h&.size || 3` all compile to: the condition
+  # register IS the result register, so the branch sits squarely between the
+  # literal write and the arithmetic use. An earlier round's refusal
+  # instrumentation (tagging every `proven_fixnum_operand?` refusal with its
+  # cause across a whole-program run) counted 281 queries blocked here whose
+  # OTHER operand already proved.
+  #
+  # The realized whole-program yield is much smaller than that 281, and the gap
+  # is the point rather than a disappointment: a blocked query only costs a real
+  # call site when BOTH operands would otherwise prove and the site is actually
+  # emitted, and the same register is usually re-proved through several
+  # independent queries. Measured for real (SKIP_UNSUPPORTED=1, whole program):
+  # 14875 -> 14869 `mrb_funcall`/`mrb_funcall_with_block` call sites (-6: four
+  # `/`, one `>`, one `<=`), and FIXNUM_RETURN_PROOF 49 -> 53 names -- the four
+  # new ones (`battle_x`, `battle_y`, `faceset_index`, `price`) being exactly
+  # the `@db_row.battle_x || 0` / `it.price || 0` shape described above.
+  #
+  # This is deliberately ONLY about the write test. These three opcodes remain in
+  # FIXNUM_PROOF_STEP_OVER_OPS (they are still steppable), and they remain real
+  # branch sources in `fixnum_proof_edge_sources` / `fixnum_proof_preds` -- the
+  # region-dominance and reaching-definition machinery needs their control-flow
+  # edges exactly as before, and nothing here touches that.
+  FIXNUM_PROOF_READONLY_REG_OPS = Set['JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+
+  # Does `insn` write the register numbered `reg`? The shared test both the
+  # single-path backward walk and the JOIN_REACHING_DEFS worklist use.
+  #
+  # For every FIXNUM_PROOF_STEP_OVER_OPS member except the three above, the
+  # leading `R<n>` operand codedump.c prints IS the destination -- that is
+  # precisely the property the whitelist was audited for. A `false` here means
+  # "cannot write `reg`", so the caller keeps walking; over-reporting a write
+  # only ever costs a proof, but under-reporting one would be a wrong answer,
+  # which is why this stays a three-name exception list rather than anything
+  # inferred.
+  def fixnum_proof_writes_reg?(insn, reg)
+    return false if FIXNUM_PROOF_READONLY_REG_OPS.include?(insn.op)
+
+    !(insn.args =~ /\AR#{reg}\b/).nil?
+  end
+
   # How many nested "this operand is itself a proven arithmetic result" hops
   # source 4 above may take. Deliberately small: a real `(a + b) * (c - d)`
   # needs two, and an unbounded walk would turn a linear codegen pass into a
@@ -11434,7 +11496,7 @@ class CodeGen
       # than walk past it.
       return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
 
-      if j < idx && insn.args =~ /\AR#{cur}\b/
+      if j < idx && fixnum_proof_writes_reg?(insn, cur)
         if insn.op == 'MOVE'
           # `regs[a] = regs[b]` -- keep scanning, now for whatever wrote the
           # SOURCE register, exactly as trace_new_target's own walk does.
@@ -11620,7 +11682,7 @@ class CodeGen
         return false if ctx[:protected].include?(insn.addr)
         return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
 
-        if insn.args =~ /\AR#{r}\b/
+        if fixnum_proof_writes_reg?(insn, r)
           if insn.op == 'MOVE'
             src = insn.args.scan(/R(\d+)/).flatten[1]
             return false unless src
