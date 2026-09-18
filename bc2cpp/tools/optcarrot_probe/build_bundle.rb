@@ -2,9 +2,9 @@
 # frozen_string_literal: true
 
 # Assembles a single runnable mruby script from the 3rd/optcarrot submodule
-# (patched -- see below) plus this directory's shims.rb and runner_tail.rb.
-# See README.md for why this exists and what each piece does; not committed
-# to the repo since it's fully mechanical to regenerate.
+# (real, unpatched upstream source -- see README.md) plus this directory's
+# shims.rb and runner_tail.rb. Not committed to the repo since it's fully
+# mechanical to regenerate.
 #
 # mruby has no `require`/`load`, so optcarrot's own require_relative-based
 # file layout can't be used as-is: this walks the exact same 9 files in the
@@ -14,6 +14,14 @@
 # it themselves), stripping every require_relative line since the
 # concatenation IS the loading.
 #
+# Running the bundle also needs 3rd/mruby patched with
+# patches/mruby-module-function-scope.patch (applied here, idempotent) --
+# without it, optcarrot's own driver.rb/palette.rb/driver/misc.rb (bare
+# `module_function`) fail to load with a NoMethodError vendored mruby never
+# implemented that scope form for. See that patch's own preamble, and
+# ../../cmake/build-mruby.cmake, which applies it to the project's real
+# mruby build the same way.
+#
 # Usage: build_bundle.rb OUT_FILE
 
 require 'fileutils'
@@ -22,7 +30,8 @@ require 'open3'
 ROOT = File.expand_path('../..', __dir__)
 PROBE_DIR = __dir__
 OPTCARROT_DIR = File.join(ROOT, '3rd/optcarrot')
-PATCH = File.join(ROOT, 'patches/optcarrot-module-function-scope.patch')
+MRUBY_DIR = File.join(ROOT, '3rd/mruby')
+MODFUNC_PATCH = File.join(ROOT, 'patches/mruby-module-function-scope.patch')
 APPLY_SCRIPT = File.join(ROOT, 'scripts/apply_mruby_patch.bash')
 
 out_file = ARGV[0] or abort "usage: #{$PROGRAM_NAME} OUT_FILE"
@@ -31,7 +40,11 @@ unless Dir.exist?(File.join(OPTCARROT_DIR, 'lib'))
   abort "#{OPTCARROT_DIR} is empty -- run `git submodule update --init 3rd/optcarrot` first"
 end
 
-system(APPLY_SCRIPT, OPTCARROT_DIR, PATCH, exception: true)
+unless Dir.exist?(File.join(MRUBY_DIR, 'include'))
+  abort "#{MRUBY_DIR} is empty -- run `git submodule update --init 3rd/mruby` first"
+end
+
+system(APPLY_SCRIPT, MRUBY_DIR, MODFUNC_PATCH, exception: true)
 
 # Real require_relative order from 3rd/optcarrot/lib/optcarrot.rb, with
 # opt.rb spliced in where cpu.rb's and ppu.rb's own require_relative "opt"
