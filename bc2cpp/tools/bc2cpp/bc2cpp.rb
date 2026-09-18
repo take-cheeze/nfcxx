@@ -18998,7 +18998,48 @@ class CodeGen
     callee_irep = @ireps.fetch(target.irep)
     kw_table = keyword_arg_table(callee_irep)
     return nil unless kw_table
-    return nil unless n == mandatory_arity(callee_irep)
+    # KEYWORD_CALLSITE_OPTIONAL_POSITIONAL_SUPPORT: the callee's own real
+    # positional arity is a RANGE, [mand, mand + opt], not a single number
+    # -- the exact same widening CALLSITE_OPTIONAL_ARG_SUPPORT already made
+    # to compile_send's own (no-keyword) MONO guard, applied to the keyword
+    # path, which was still demanding an exact `n == mandatory_arity` match
+    # and so refused every keyword call site whose callee declares even one
+    # `= default` positional. `optional_arity` is 0 for a pure-mandatory
+    # callee, so this collapses back to the original exact-match check
+    # unchanged for every call site this path already compiled.
+    #
+    # Why this is sound, read straight out of 3rd/mruby/src/vm.c's own
+    # `CASE(OP_ENTER, W)` for the both-`opt`-and-`kw` shape rather than
+    # assumed: keyword arguments and positional arguments never interact
+    # at all once `kd` (`MRB_ASPEC_KEY(a) > 0 || MRB_ASPEC_KDICT(a)`) is
+    # set. `OP_SEND`'s own prologue packs this site's `nk` (sym, value)
+    # pairs into a single Hash stored at `regs[mrb_ci_kidx(ci)]` and sets
+    # `ci->nk = CALL_MAXARGS`, leaving `ci->n` -- the `argc` OP_ENTER then
+    # reads -- counting POSITIONALS ONLY. The `!kd` arm that folds a
+    # trailing kdict back into the positional list (`ci->n++; argc++`) is
+    # unreachable here by construction, because `keyword_arg_table` above
+    # already required ENTER's own `kw` field to be positive. So OP_ENTER's
+    # optional-slot resolution is a pure function of `argc` alone:
+    # `len = m1 + o + r + m2` (here `r == m2 == 0`, both required zero by
+    # keyword_arg_table), the strict check admits exactly
+    # `m1 <= argc <= len`, and the initializer skip is `ci->pc +=
+    # (argc - m1 - m2) * 3` when `argc < len` / `ci->pc += o * 3` when
+    # `argc == len` -- i.e. jump-table entry `argc - m1` in both arms.
+    # That index IS `bc2cpp_given_opt`, which the callee's already-emitted
+    # `emit_optional_dispatch` switch consumes, so the call site's own
+    # statically-known `n - t_mand` reproduces the VM's own choice exactly.
+    #
+    # `optional_arg_table`'s jump targets are required to have actually
+    # RESOLVED (not just `opt` positive) before trusting that switch: that
+    # table returns `[opt, nil, nil]` for an ENTER whose `opt` field is
+    # nonzero but whose real following bytecode isn't the recognized
+    # `opt + 1` consecutive JMP shape, and `bc2cpp_given_opt` only means
+    # what this path needs it to mean when the dispatch switch it feeds
+    # was genuinely emitted. A safe miss (nil, honest #error) otherwise.
+    t_mand = mandatory_arity(callee_irep)
+    t_opt = optional_arity(callee_irep)
+    return nil unless n.between?(t_mand, t_mand + t_opt)
+    return nil if t_opt.positive? && !optional_arg_table(callee_irep)[1]
     return nil unless (kw_names - kw_table.map { |k| k[:name] }).empty?
 
     # Every required keyword must be present at the call site --
@@ -19044,7 +19085,43 @@ class CodeGen
       val = ci ? kw_val_exprs[ci] : 'mrb_nil_value()'
       kw[:required] ? [val] : [val, ci ? '1' : '0']
     end
-    call = "r#{d} = #{impl}(M, #{([recv] + argv + kw_args).join(', ')});"
+    # KEYWORD_CALLSITE_OPTIONAL_POSITIONAL_SUPPORT: `_impl`'s own real
+    # positional parameter list always has room for the callee's FULL
+    # `mand + opt` count (compile_method's own `total_args = mand + opt`),
+    # followed by one `mrb_int bc2cpp_given_opt` when `opt` is positive,
+    # and only THEN the keyword parameters -- that exact order, confirmed
+    # against this program's own real generated signature for the four
+    # `:deal_attack` sites this enables:
+    #
+    #   mrb_value Game__Battle_deal_attack_impl(mrb_state* M, mrb_value self,
+    #       mrb_value b, mrb_value target, mrb_value swing_index,
+    #       mrb_int bc2cpp_given_opt,
+    #       mrb_value bc2cpp_kwarg_charged, mrb_int bc2cpp_kw_given_charged)
+    #
+    # So the padding has to be spliced in BEFORE `kw_args`, never appended
+    # after it -- appending would shift every keyword argument one slot and
+    # land `bc2cpp_given_opt`'s integer literal in an `mrb_value` parameter,
+    # the identical class of hard g++ error KEYWORD_CALLSITE_ARITY_FIX
+    # (just above) already had to fix once for the required-keyword flag.
+    #
+    # `mrb_nil_value()` is the same placeholder compile_send's own
+    # CALLSITE_OPTIONAL_ARG_SUPPORT branch and compile_method's own entry
+    # wrapper both already use for an omitted optional: never read, because
+    # the callee's own `bc2cpp_given_opt` switch jumps straight into that
+    # slot's default-value code, which overwrites the register first.
+    # Measured on this program's real closed world: all four enabled sites
+    # pass `n == t_mand + t_opt` (a literal `0`/`1` swing_index), so the
+    # padding array is empty at every one of them today and only the
+    # `bc2cpp_given_opt` literal is actually new -- the padding is kept
+    # because an omitting call site is a legal shape the VM accepts, and
+    # silently emitting a short argument list for one would be a g++ error
+    # rather than the safe miss this file's gates are built to produce.
+    opt_args = []
+    if t_opt.positive?
+      opt_args = Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
+      opt_args << (argv.size - t_mand).to_s
+    end
+    call = "r#{d} = #{impl}(M, #{([recv] + argv + opt_args + kw_args).join(', ')});"
     note = "  // MONO :#{name} -> #{target.owner}##{target.name} (keyword call), direct C++ call (no mrb_funcall)\n"
     "#{note}  #{call}\n"
   end
