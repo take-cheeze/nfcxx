@@ -4592,11 +4592,65 @@ NATIVE_CONSTRUCT_TARGETS = {
 # every one of them -- listing any of these here would be a silent no-op
 # (the `init_ok` check below would just never pass), not a real unlock, so
 # they stay off this table rather than padding it with dead entries.
+# KEYWORD_DIRECT_CONSTRUCT_SUPPORT: `Game::MoveRoute` (last below) is a
+# genuinely DIFFERENT sub-shape from every entry before it -- its own
+# `#initialize` declares REAL KEYWORD parameters, so `pure_mandatory_arity?`
+# refuses it and the non-keyword construct path above provably can never
+# fire for it at all. It is listed in this same table (rather than a second,
+# parallel one) because the four-part soundness gate this table exists to
+# gate is identical for both paths; only the ARGUMENT PASSING differs, and
+# compile_keyword_direct_construct's own extra keyword-table checks sit on
+# top of that shared gate rather than replacing it. Adding it here therefore
+# cannot change any already-compiled `.new` site.
+#
+#   Game::MoveRoute#initialize(commands, repeat: true, skippable: false)
+#     -- `ENTER 1:0:0:0:2:0:0:0` (real `mrbc -v` disassembly), i.e. one
+#        mandatory positional plus two ALL-OPTIONAL keywords, `opt == 0`.
+#        2 real call sites, both `n=1|nk=2`:
+#        mruby-rpg2k/mrblib/scene/map.rb:4757 (RPG2k::Scene::Map#
+#        apply_move_request) and :5084 (#restore_player_route).
+#
+# FOUR further classes were investigated as candidates for this same new
+# path and deliberately left OUT, each for a real, measured reason -- not
+# overlooked, and not padding this table with entries that could never fire
+# (the same discipline the "deliberately left OUT" note above already
+# applies to Game::Vehicle and friends):
+#
+#   Game::Battle -- 1 site, mruby-rpg2k/mrblib/scene/battle.rb:178
+#     (RPG2k::Scene::Battle#start, `n=10|nk=3`). Its real ENTER is
+#     `2:8:0:0:3:0:0:0`: two mandatory positionals plus EIGHT OPTIONAL ones
+#     alongside the three keywords. mandatory_and_keyword_only_arity?
+#     correctly refuses `opt != 0` (see its own comment: an optional
+#     positional carries an extra generated `_impl` slot a construct site
+#     passing only the mandatory ones would leave unfilled -- a hard g++
+#     error, not a safe miss). Supporting the combined optional-positional
+#     plus keyword construct is a real, separate piece of work.
+#
+#   RPG2k::Scene::Map / RPG2k::Scene::MapViewer / RPG2k::Scene::ChipsetEditor
+#     -- 5 sites between them (main.rb:876/884/1218, debug_menu.rb:323/333).
+#     Every one of their `#initialize`s passes this path's own keyword gate
+#     cleanly (confirmed by instrumenting a real whole-program run), but
+#     `trace_new_target` resolves their call sites' receivers to the
+#     LEXICALLY-WRITTEN constant path -- `"Scene::Map"`, `"Scene::MapViewer"`,
+#     `"Scene::ChipsetEditor"` -- never the fully-qualified `RPG2k::`-prefixed
+#     owner name the registry keys on, because those sites sit inside
+#     `module RPG2k` and write the constant relative to it. That is a real,
+#     PRE-EXISTING constant-resolution limitation of trace_new_target
+#     entirely independent of keywords, and it cannot be papered over by
+#     simply listing the short names here: the registry lookup below would
+#     then find no `#initialize` at all. Nor can `"Scene::X"` be rewritten to
+#     `"RPG2k::Scene::X"` unconditionally -- a real `RPG2k3::Scene` module
+#     exists in this same program, so a bare `Scene::` reference is genuinely
+#     ambiguous without real lexical-nesting resolution. Left as honest
+#     `#error` sites; resolving them needs that separate trace_new_target
+#     work, which would also affect every existing non-keyword construct
+#     site and so does not belong in this change.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
                                Game::Screen Game::ChipSet Game::Interpreter
                                RPG2k::Scene::Menu RPG2k::Scene::DebugMenu
-                               RPG2k::Scene::ItemMenu Game::NumberInput].freeze
+                               RPG2k::Scene::ItemMenu Game::NumberInput
+                               Game::MoveRoute].freeze
 
 # NATIVE_ARG_TARGETS: an explicit, human-vetted "Owner#name" allowlist that
 # gates a THIRD, separate, additive calling-convention mechanism -- moving
@@ -6228,6 +6282,43 @@ def mandatory_arity(irep)
   return 0 unless enter
 
   enter.args.split(':').first.to_i
+end
+
+# KEYWORD_DIRECT_CONSTRUCT_SUPPORT: does this ENTER declare ONLY mandatory
+# positionals plus real KEYWORD parameters -- `kw` non-zero, and every one
+# of opt/rest/post/kwrest/block/noblock zero? The keyword-aware sibling of
+# pure_mandatory_arity? just above, which requires `kw` to be zero TOO and
+# so can never match a keyword-declaring `#initialize` at all (exactly why
+# DIRECT_CONSTRUCT_TARGETS' own existing non-keyword construct path silently
+# refuses every class this gate is for -- a real, measured property, not an
+# assumption: all five classes this round adds to that table have a
+# keyword-declaring `#initialize`, so the pre-existing path provably cannot
+# fire for any of them and this addition can only ever enable the NEW path
+# below, never change the behavior of an already-compiled construct site).
+#
+# ENTER's own eight dumped fields are REQ:OPT:REST:POST:KEY:KDICT:BLOCK:
+# NOBLOCK, read directly from 3rd/mruby/src/codedump.c's own OP_ENTER case
+# (the same order pure_mandatory_arity?/keyword_arg_table already parse) --
+# e.g. `Game::MoveRoute#initialize(commands, repeat: true, skippable:
+# false)` dumps `ENTER 1:0:0:0:2:0:0:0` in a real `mrbc -v` disassembly.
+#
+# `opt` is deliberately required to be ZERO here, unlike keyword_arg_table's
+# own OPTIONAL_KEYWORD_COMBINED_SUPPORT widening: a direct construct emits
+# exactly one C++ argument per positional parameter, and compile_method's own
+# signature builder gives an OPTIONAL positional an extra `mrb_int given`
+# slot of its own that a call site passing only the mandatory ones would
+# leave unfilled -- a hard g++ "too few arguments" error, not a silent miss.
+# Every real class this round covers is `opt == 0` (verified against their
+# own real generated `_impl` signatures), so refusing the combined shape
+# outright costs nothing real and keeps this gate provably argument-exact.
+def mandatory_and_keyword_only_arity?(irep)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return false unless enter
+
+  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  _mand, opt, rest, post, kw, kwrest, block, noblock = fields
+  kw.to_i.positive? && opt.to_i.zero? && rest.to_i.zero? && post.to_i.zero? &&
+    kwrest.to_i.zero? && block.to_i.zero? && noblock.to_i.zero?
 end
 
 # BLOCK_CFUNC_FALLBACK_SUPPORT: is this block's own child irep safe to
@@ -16139,6 +16230,21 @@ class CodeGen
                                   kw_names: kw_names, kw_val_exprs: kw_val_regs.map { |r| "r#{r}" })
     return direct if direct
 
+    # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: compile_keyword_call just declined,
+    # and for a `:new` call site it ALWAYS will -- `:new` has no compiled
+    # MONO target at all (it is native `Class#new`), so the keywords a
+    # `Foo.new(a, k: v)` site carries belong to the target class's own
+    # `#initialize`, not to `:new`. Tried before the Hash-as-trailing-
+    # positional fallback below because these are REAL keyword calls (the
+    # callee genuinely declares the parameters), which that fallback's own
+    # gate correctly refuses outright.
+    construct = compile_keyword_direct_construct(
+      irep: irep, idx: idx, owner_def: owner_def, self_implicit: self_implicit,
+      name: name, d: d, n: n, recv: recv, argv: argv, kw_names: kw_names,
+      kw_val_exprs: kw_val_regs.map { |r| "r#{r}" }
+    )
+    return construct if construct
+
     # KEYWORD_HASH_POSITIONAL_SUPPORT: compile_keyword_call just declined
     # (see below for the exact reasons this round measured), but a large
     # share of the call sites it declines aren't real keyword calls AT ALL
@@ -16146,6 +16252,183 @@ class CodeGen
     compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
                                          argv: argv, kw_sym_regs: kw_sym_regs,
                                          kw_val_regs: kw_val_regs, kw_names: kw_names)
+  end
+
+  # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: a `Foo.new(a, b, k1: v1, k2: v2)` call
+  # site whose target class `Foo` is a known, vetted DIRECT_CONSTRUCT_TARGETS
+  # entry AND whose own `#initialize` really does declare the keyword
+  # parameters this site supplies, matched BY NAME.
+  #
+  # This is the `:new` half of the standing splat/keyword `#error` bucket,
+  # and it is a genuinely different mechanism from its two neighbours:
+  #
+  #   * compile_keyword_call (above) can never fire here. It resolves the
+  #     CALLED name via monomorphic_target, and the called name is `:new` --
+  #     native `Class#new`, which has no compiled `_impl` at all and declares
+  #     no keywords of its own. The keywords belong one level down, to the
+  #     TARGET CLASS's `#initialize`, which only trace_new_target can find.
+  #   * compile_keyword_hash_positional_send (below) must not fire here
+  #     either, and correctly does not: its whole soundness argument is that
+  #     the callee declares NO keyword parameters, so vm.c's `OP_ENTER`
+  #     `kd == 0` arm turns the packed Hash into one trailing POSITIONAL
+  #     argument. Here `kd == 1` -- these are real keyword parameters, taking
+  #     vm.c's real `KEY_P`/`KARG` path -- so Hash-as-trailing-positional
+  #     would be silently, badly wrong (the callee would receive an extra
+  #     positional it has no parameter for, and no keyword values at all).
+  #
+  # So this path emits a REAL keyword-respecting construct: the same
+  # runtime-guarded `bc2cpp_direct_alloc` + `_impl` shape compile_send's own
+  # non-keyword DIRECT_CONSTRUCT_TARGETS branch already emits, with
+  # compile_keyword_call's own already-shipped `(value, given)` keyword
+  # argument builder reused verbatim for the trailing parameters.
+  #
+  # The gate is compile_send's own four-part DIRECT_CONSTRUCT_TARGETS gate
+  # with `pure_mandatory_arity?` swapped for the keyword-aware
+  # `mandatory_and_keyword_only_arity?`, plus three additions:
+  #
+  #   a. EXACT-NAME keyword matching (`kw_names - table_names` empty), never
+  #      a count match -- two same-arity keyword sets with different names
+  #      are completely different calls, and silently passing v1 as k2 would
+  #      be exactly the kind of quiet miscompile this file's gates exist to
+  #      prevent. Every REQUIRED keyword must also be present at the site
+  #      (the interpreter raises ArgumentError otherwise, so compiling a
+  #      call that drops one would be wrong) -- the identical pair of checks
+  #      compile_keyword_call already makes, reused unchanged.
+  #   b. A whole-program "no class ANYWHERE in the closed world defines a
+  #      custom `self.new` or `self.allocate`" check, on top of this table's
+  #      own per-class one. Three of this round's five new entries
+  #      (RPG2k::Scene::Map/MapViewer/ChipsetEditor) are real SUBCLASSES
+  #      (`< Base`), unlike every pre-existing plain-`Object`-subclass entry,
+  #      and an INHERITED custom `self.new` would defeat a direct construct
+  #      just as completely as one declared on the class itself. Asking the
+  #      whole-program question needs no ancestor-chain resolution at all and
+  #      covers every possible ancestor by construction -- strictly stronger
+  #      than walking @superclass_of, whose entries are legitimately absent
+  #      for a computed superclass expression (see resolve_superclass_ref),
+  #      which would have forced a safe-miss refusal for exactly those three.
+  #      Measured: the real closed world contains ZERO `def self.new` and
+  #      ZERO `def self.allocate`, so this costs nothing today; if one is
+  #      ever added, this whole path shuts off and every site falls back to
+  #      the honest `#error`, which is the correct direction to fail.
+  #   c. `#initialize`'s own return value is discarded, exactly as the
+  #      non-keyword branch already does -- real Ruby `.new` always returns
+  #      the newly allocated object, never whatever `#initialize` returned.
+  #
+  # Returns nil (a safe miss -- caller falls through) the moment anything
+  # above doesn't hold.
+  def compile_keyword_direct_construct(irep:, idx:, owner_def:, self_implicit:,
+                                       name:, d:, n:, recv:, argv:, kw_names:, kw_val_exprs:)
+    return nil unless name == 'new' && !self_implicit && irep && idx
+
+    known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner)
+    return nil unless known && DIRECT_CONSTRUCT_TARGETS.include?(known)
+
+    # 1/2: no custom `self.new`/`self.allocate` -- on this exact class (the
+    # same "X.singleton" pseudo-owner build_registry registers every
+    # def-self.x/class<<self method under), and, see (b) above, nowhere in
+    # the closed world at all, which is what really covers an inherited one.
+    no_custom_new = @registry['new'].none? { |md| md.owner == "#{known}.singleton" }
+    no_custom_allocate = @registry['allocate'].none? { |md| md.owner == "#{known}.singleton" }
+    return nil unless no_custom_new && no_custom_allocate
+
+    none_anywhere = (@registry['new'] + @registry['allocate'])
+                    .none? { |md| md.owner.to_s.end_with?('.singleton') }
+    return nil unless none_anywhere
+
+    # 3: `#initialize` must be a real, compiling, mandatory-positionals-plus-
+    # keywords-only leaf whose mandatory arity matches THIS call site's own
+    # positional count exactly.
+    init_def = @registry['initialize'].find { |md| md.owner == known }
+    return nil unless init_def&.irep
+
+    init_irep = @ireps.fetch(init_def.irep)
+    return nil unless mandatory_and_keyword_only_arity?(init_irep)
+    return nil unless compiles_clean?(init_def.irep)
+    return nil unless n == mandatory_arity(init_irep)
+
+    # (a): exact keyword-NAME match, plus every required keyword supplied.
+    kw_table = keyword_arg_table(init_irep)
+    return nil unless kw_table
+    return nil unless (kw_names - kw_table.map { |k| k[:name] }).empty?
+
+    required = kw_table.select { |k| k[:required] }.map { |k| k[:name] }
+    return nil unless (required - kw_names).empty?
+
+    # 4: same ONLY_OWNERS/OTHER_OWNERS emission-eligibility guard every other
+    # devirtualizing path applies -- an owner this run doesn't itself emit
+    # (and no other gem exposes) has no real `_impl`/class-accessor symbol.
+    owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
+    return nil unless owner_emitted
+
+    @direct_construct_used << known
+    accessor = direct_construct_class_fn(known)
+    init_impl = cpp_name(known, 'initialize') + '_impl'
+    # Identical `(value, given)` construction to compile_keyword_call's own
+    # (see KEYWORD_CALLSITE_ARITY_FIX there for why a REQUIRED keyword
+    # carries no presence flag at all, and an optional one always does).
+    kw_args = kw_table.flat_map do |kw|
+      ci = kw_names.index(kw[:name])
+      val = ci ? kw_val_exprs[ci] : 'mrb_nil_value()'
+      kw[:required] ? [val] : [val, ci ? '1' : '0']
+    end
+    note = "  // MONO :new -> #{known}, direct compiled construct with real KEYWORD arguments " \
+           "(bc2cpp_direct_alloc + #{init_impl}) -- skips Class#new's own allocate+initialize " \
+           "dispatch chain entirely; #{known}#initialize's own return value is discarded (real " \
+           "Ruby .new always returns the new object, never whatever #initialize itself returns).\n" \
+           "  // The keywords here are REAL keyword parameters of #{known}#initialize (matched by " \
+           "NAME against its own KEY_P/KARG table, not by count), passed as the same explicit " \
+           "(value, given) pairs its compiled _impl signature already declares -- NOT packed into " \
+           "a trailing positional Hash, which is only correct for a callee declaring no keywords " \
+           "at all (vm.c OP_ENTER's own kd == 0 arm; see compile_keyword_hash_positional_send).\n" \
+           "  // Runtime-guarded exactly the way the non-keyword direct-construct path is: " \
+           "#{known} could have been reassigned at the constant level since #{accessor}'s own " \
+           "class was captured at gem-init, so #{recv} (this call site's own already-resolved " \
+           "receiver) is compared against it rather than trusted outright, falling back to " \
+           "ordinary mrb_funcall if they differ.\n"
+    # The guard-miss arm needs care that the non-keyword direct-construct
+    # path never did. `mrb_funcall` CANNOT carry keywords -- mruby 4.0.0's
+    # own vm.c sets `ci->nk = 0` for it, and (confirmed by reading OP_ENTER
+    # directly, 3rd/mruby/src/vm.c) there is NO trailing-Hash-to-keywords
+    # conversion on the `kd == 1` side: a keyword-declaring callee reached
+    # through funcall simply sees `kdict` stay nil. So "just funcall it"
+    # would SILENTLY DROP every keyword here, which for these five classes
+    # (whose keywords are all optional) would not even raise -- it would
+    # quietly construct with default values instead. That is exactly the
+    # class of silent miscompile this file's gates exist to prevent, so it
+    # is not what this emits.
+    #
+    # Instead the miss arm packs the keyword pairs into one Hash and passes
+    # it as a trailing positional -- which is precisely what the VM's own
+    # OP_SEND does before OP_ENTER ever gets to decide what it means
+    # (`hash_new_from_regs`, packed unconditionally, knowing nothing about
+    # the callee; see compile_keyword_hash_positional_send's own comment and
+    # the real vm.c quote there). It is therefore the most faithful spelling
+    # available for a receiver whose real class is, by definition of having
+    # missed this guard, no longer statically known, and it is exactly
+    # correct whenever that class declares no keywords.
+    #
+    # This arm is in any case unreachable short of a real constant-level
+    # reassignment (`Game::MoveRoute = SomethingElse`) between gem-init and
+    # this call: `#{recv}` is this site's own already-resolved GETCONST
+    # result, so an ordinary subclass receiver never lands here (it would
+    # have come from a different constant, which trace_new_target resolves
+    # separately). The keys are re-interned from the same literal symbol
+    # names literal_symbol_write already PROVED each key register holds, so
+    # this Hash is built from static facts, not from re-reading registers.
+    kw_hash = String.new
+    kw_hash << "    mrb_value bc2cpp_kwh = mrb_hash_new_capa(M, #{kw_names.size});\n"
+    kw_names.each_with_index do |kn, k|
+      kw_hash << "    mrb_hash_set(M, bc2cpp_kwh, " \
+                 "mrb_symbol_value(mrb_intern_cstr(M, \"#{kn}\")), #{kw_val_exprs[k]});\n"
+    end
+    "#{note}" \
+      "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
+      "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
+      "    #{init_impl}(M, #{(["r#{d}"] + argv + kw_args).join(', ')});\n" \
+      "  } else {\n" \
+      "#{kw_hash}" \
+      "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}" \
+      "  }\n"
   end
 
   # KEYWORD_HASH_POSITIONAL_SUPPORT: a `SEND`/`SSEND` call site carrying
