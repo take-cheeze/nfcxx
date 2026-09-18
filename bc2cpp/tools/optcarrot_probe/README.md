@@ -5,7 +5,7 @@ A scoping investigation, not a shipped tool: how much of
 used as a Ruby-implementation benchmark) runs under this project's own
 vendored mruby, as a candidate stress test for `tools/bc2cpp`. It does not
 touch the RPG engine's build, gems, or bc2cpp's own closed-world registry --
-except for one real mruby core fix (see point 4 below), which does.
+except for two real mruby core fixes (points 4 and 5 below), which do.
 
 optcarrot's own source lives in the `3rd/optcarrot` submodule (real upstream
 history, its own `LICENSE`) rather than a bundled copy in this directory.
@@ -69,24 +69,76 @@ Getting there took:
    stub, since CRuby's true semantics require installing a *second* method
    (a public singleton copy) alongside the original, not just resolving one
    more visibility state.
+5. **A second real mruby core fix**, `../../patches/mruby-parser-dump-back-nth-ref.patch`,
+   also wired into `cmake/build-mruby.cmake`. `mrbc -v`'s own parse-tree dump
+   printed garbage -- including, for optcarrot's real
+   `lib/optcarrot/opt.rb:74` (`$1`/`$'`), an invalid UTF-8 byte -- for a
+   `$&`/`` $` ``/`$'`/`$+`/`$1`/`$2`/... node, because its debug-print code
+   read a raw AST-node pointer as if it were the node's own stored value
+   instead of the real field (`node_to_int(tree)` vs. `back_ref_node(tree)
+   ->type`/`nth_ref_node(tree)->nth` -- see the patch's own preamble).
+   Debug-dump-only (mrb_parser_dump is never called from the real compiler
+   path, so this changes no compiled bytecode), but `tools/bc2cpp/bc2cpp.rb`
+   reads exactly that dump text and crashed outright on it -- this is what
+   `bc2cpp_probe.rb` (below) needed to run at all. Same mrbtest verification
+   as point 4.
 
 Confirmed *not* a problem: the default (non-`--opt`) code path -- the actual
 CPU/PPU emulation hot loop -- never calls `eval`/`send`/`define_method`; those
 only appear behind optcarrot's own `--opt` runtime-codegen feature, which
 this probe doesn't enable and a bc2cpp target wouldn't need either.
 
-## Still open (not started)
+## bc2cpp coverage
 
-Whether/how much of optcarrot's method bodies bc2cpp itself can actually
-compile is unmeasured. bc2cpp is currently wired into this project's own 3
-gems' `mrbgem.rake` files for its whole-program closed-world method registry;
-pointing it at optcarrot means feeding it a new standalone source set, then
-seeing how it lands against its real limits: no top-level/class-body
-compilation (not a problem here -- only method bodies need it), no
-splat/keyword-arg send sites, and only partial block/`SENDB` support (today
-limited to specific inlined patterns like `.times`/`.each`/`.collect`/`.sort`)
-against optcarrot's actual method shapes (`CPU#run`'s dispatch table,
-`PPU#run`'s pixel loop).
+`bc2cpp_probe.rb` runs `tools/bc2cpp/bc2cpp.rb` against optcarrot's own real
+source (`3rd/optcarrot/lib`, unmodified) as its own standalone closed
+world -- entirely separate from bc2cpp's real registry (the RPG engine's own
+3 compiled gems), same NATIVE_SRCS/FOREIGN_RUBY_SRCS inputs
+`scripts/bc2cpp_coverage_report.rb` feeds the real one, and the same
+method-level attempted/compiled-clean/`#error`-reason parsing logic reused
+directly from that script.
+
+**Result, with zero bc2cpp code changes: 353/383 methods (92.2%) compile
+clean.** Both of the actual hot-path entry points compile clean with real
+devirtualization already firing -- `CPU#run` (the fetch/dispatch loop) gets
+a direct C++ call for `do_clock`, proven monomorphic program-wide
+(`LEXICAL_SELF`); `PPU#run` (the pixel-rendering loop, itself built on a
+`Fiber` internally) correctly falls back to real dynamic dispatch only where
+the receiver's class genuinely isn't known (`POLY :loglevel`) and to a
+wrapped-cfunc block fallback for its one `Fiber.new { ... }` block.
+
+The remaining 30 errored methods, by `#error` reason:
+
+```
+    15  unhandled opcode BLOCK
+    15  unhandled opcode SENDB
+    12  unhandled opcode SUPER
+     7  unhandled opcode ARGARY
+     4  SEND/SSEND has a splat and/or keyword argument list (n=...)
+     2  unhandled opcode INTERN
+     1  unhandled opcode EXCEPT
+    56  total (a method can carry more than one #error)
+```
+
+(counts sum to more than 30 because one method can hit more than one
+unsupported construct). Mostly concentrated in two places, neither on the
+hot path: the `--opt` runtime-codegen machinery itself
+(`CodeOptimizationHelper`/`OptimizedCodeBuilder` -- string-building,
+`gsub`/regex-heavy methods that were never going to be AOT-compilable
+candidates, `--opt` being metaprogrammed source generation by design), and
+the APU channel classes' (`Noise`/`Pulse`/`Triangle`) `#initialize`/`#reset`
+calling `super` into a shared `Oscillator` base -- `SUPER` is a real,
+scoped, well-understood bc2cpp gap (`docs/bc2cpp_coverage.txt`'s own
+`#error` breakdown for the real project shows the same 5 unhandled `SUPER`
+cases), not something optcarrot-specific.
+
+Not yet attempted: actually adding bc2cpp support for any of these opcodes,
+or checking whether the 353 "compiled clean" methods produce *correct*
+output (this only confirms bc2cpp's own compiler accepted them without a
+`#error`, the same bar `docs/bc2cpp_coverage.txt`'s own numbers measure for
+the real project -- not that the generated C++ was run and its output
+checked against CRuby/mruby's own, the way the headless-benchmark checksum
+above verifies the *interpreted* path).
 
 ## Files
 
@@ -103,11 +155,19 @@ against optcarrot's actual method shapes (`CPU#run`'s dispatch table,
 - `shims.rb` -- the 5 stdlib shims, prepended to the bundle.
 - `runner_tail.rb` -- headless `Optcarrot::NES.new(...).run` driver, appended
   to the bundle.
+- `bc2cpp_probe.rb` -- runs `tools/bc2cpp/bc2cpp.rb` against optcarrot's real
+  source as its own closed world and prints the method-level coverage
+  breakdown above (`MRBC=path/to/host/mrbc ruby
+  tools/optcarrot_probe/bc2cpp_probe.rb`). Self-applies
+  `patches/mruby-parser-dump-back-nth-ref.patch` to `3rd/mruby` as a safety
+  net, same caveat as `build_bundle.rb`'s own patch step (only actually
+  fixes anything if MRBC hasn't been built yet from this checkout).
 - `mruby_build_config.rb` -- the `MRUBY_CONFIG` used to build a probe-only
   `mruby`/`mrbc` host binary (full-core gembox + `mruby-onig-regexp`). Not
   part of the project's real build.
-- `../../patches/mruby-module-function-scope.patch` -- see point 4 above;
-  this one *is* part of the project's real build.
+- `../../patches/mruby-module-function-scope.patch`,
+  `../../patches/mruby-parser-dump-back-nth-ref.patch` -- see points 4 and 5
+  above; both *are* part of the project's real build.
 
 ## Reproducing
 
@@ -117,10 +177,15 @@ git submodule update --init --depth 1 3rd/mruby 3rd/mruby-onig-regexp 3rd/optcar
 # (otherwise mruby-onig-regexp falls back to a slow bundled onigmo build)
 
 ./scripts/apply_mruby_patch.bash 3rd/mruby "$(pwd)/patches/mruby-module-function-scope.patch"
+./scripts/apply_mruby_patch.bash 3rd/mruby "$(pwd)/patches/mruby-parser-dump-back-nth-ref.patch"
 cd 3rd/mruby
 MRUBY_CONFIG=$(pwd)/../../tools/optcarrot_probe/mruby_build_config.rb rake -j"$(nproc)"
 cd -
 
+# Run the actual emulation (needs both patches above):
 ruby tools/optcarrot_probe/build_bundle.rb /tmp/full_probe.rb
 ./3rd/mruby/bin/mruby /tmp/full_probe.rb 3rd/optcarrot/examples/Lan_Master.nes 180
+
+# bc2cpp coverage (needs only the parser-dump patch above):
+MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/bc2cpp_probe.rb
 ```
