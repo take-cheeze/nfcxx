@@ -103,9 +103,9 @@ directly from that script. The full report lives at
 any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
 tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
-**Result: 362/383 methods (94.5%) compile clean**, up from an initial
-92.2% baseline (measured with zero bc2cpp code changes) after two real
-`tools/bc2cpp/bc2cpp.rb` fixes landed alongside this probe (both verified
+**Result: 380/383 methods (99.2%) compile clean**, up from an initial
+92.2% baseline (measured with zero bc2cpp code changes) after three real
+`tools/bc2cpp/bc2cpp.rb` fixes landed alongside this probe (all verified
 inert for the real project -- see below):
 
 1. **`SUPER_TARGETS` gained 5 entries**: `Optcarrot::APU::{Pulse,Triangle,
@@ -122,6 +122,7 @@ inert for the real project -- see below):
    disassembles to `SUPER Ra n=*` (a zsuper forwarding multiple explicit
    params via an ARGARY-built array) -- a real, different, still-
    unimplemented opcode shape, not a fact this allowlist gates at all.
+   (Superseded for that zsuper shape by ADR 0159's general `SUPER` support.)
 2. **A new `INTERN` opcode case**, unconditional (unlike `SUPER_TARGETS`,
    no whole-program fact to verify -- `OP_INTERN` is a pure, always-safe
    in-place String->Symbol conversion, `src/vm.c`'s own `mrb_ensure_
@@ -129,6 +130,24 @@ inert for the real project -- see below):
    dynamically (`:"#{...}"`-shaped); this is a genuine new bc2cpp
    capability, not optcarrot-specific, so it's unconditional the same way
    the pre-existing `STRCAT` case is.
+3. **`BLOCK_FALLBACK_UPVAR_SAFE_METHODS` gained 12 entries**:
+   `gsub gsub! sub sub! scan` (String), `each_value` (Hash), `with_index`
+   (Enumerator), `step` (Numeric), `zip` (Enumerable/Enumerator). Each is a
+   synchronous, never-stores-the-block receiver (same shape as every existing
+   entry), so a block that captures an enclosing-method upvar passed to one of
+   them is safe to compile through the same cfunc-backed-RProc fallback
+   `each`/`map`/`flat_map` already use. This claims every remaining
+   `BLOCK`/`SENDB` region in the probe (`CodeOptimizationHelper`'s and
+   `OptimizedCodeBuilder`'s `gsub`/`scan`/`sub`/`map.with_index` codegen
+   methods, `Config::Parser#find_option`'s `each_value`, `PPU::OptimizedCodeBuilder#
+   parse_clock_handlers`'s `step`), so BLOCK_FALLBACK coverage goes 49 -> 72
+   and the whole `unhandled opcode BLOCK`/`SENDB` bucket drops to zero. Safety
+   was checked the way the list's own comments demand: a whole-program grep
+   found no `def` of any of these names in this project's own sources that
+   stores its block, `mruby-enum-lazy` (the `Lazy#zip`/`Lazy#with_index` twin)
+   is not built, and `scripts/bc2cpp_coverage_report.rb`'s real-project output
+   is **byte-identical** with and without the change. See that array's own
+   comment for the per-name argument.
 
 Both hot-path entry points compile clean with real devirtualization already
 firing -- `CPU#run` (the fetch/dispatch loop) gets a direct C++ call for
@@ -138,29 +157,26 @@ falls back to real dynamic dispatch only where the receiver's class
 genuinely isn't known (`POLY :loglevel`) and to a wrapped-cfunc block
 fallback for its one `Fiber.new { ... }` block.
 
-The remaining 21 errored methods, by `#error` reason
+The remaining 3 errored methods (5 `#error` markers), by reason
 (`docs/optcarrot_bc2cpp_coverage.txt` has the full, current breakdown):
 
 ```
-    12  unhandled opcode BLOCK
-    12  unhandled opcode SENDB
-     7  unhandled opcode ARGARY
-     7  unhandled opcode SUPER
      4  SEND/SSEND has a splat and/or keyword argument list (n=...)
      1  unhandled opcode EXCEPT
-    43  total (a method can carry more than one #error)
+     5  total (a method can carry more than one #error)
 ```
 
-Mostly concentrated in the `--opt` runtime-codegen machinery itself
-(`CodeOptimizationHelper`/`OptimizedCodeBuilder` -- string-building,
-`gsub`/regex-heavy methods that were never going to be AOT-compilable
-candidates, `--opt` being metaprogrammed source generation by design). The
-remaining `SUPER` count is exactly the `SUPER Ra n=*` zsuper-with-multiple-
-params shape described above (`#initialize`/`#poke_0`/`#poke_3`), tied to
-the `ARGARY` count -- a real, scoped, larger codegen feature, not attempted
-here. `docs/bc2cpp_coverage.txt`'s own `#error` breakdown for the real
-project shows the same `BLOCK`/`SENDB`/`SUPER` opcode gaps, so none of
-these are optcarrot-specific.
+`PPU#initialize` (`reset(mapping: false)`, `PPU#reset(opt = {})` -- keyword
+pairs onto an optional-positional callee, a real intersection of
+KEYWORD_HASH_POSITIONAL_SUPPORT and an optional arg) and
+`PPU::OptimizedCodeBuilder#batch_render_pixels` (`expand_methods(fastpath,
+render_pixel: gen(...))`, same shape onto `expand_methods`'s own optional
+`meths`) are both the "callee declares no keyword but takes an optional
+positional" case this round's gates deliberately refuse to guess about.
+`NES#run` carries a keyword call on the dynamic foreign `StackProf.start`
+receiver plus a `rescue => e` `EXCEPT` opcode. All are the same
+`SEND`/`EXCEPT` opcode gaps `docs/bc2cpp_coverage.txt`'s own breakdown
+shows for the real project, so none are optcarrot-specific.
 
 **Verifying "no regression to the real project"**: both fixes above touch
 shared code (`tools/bc2cpp/bc2cpp.rb`), so before landing either, this
@@ -179,13 +195,15 @@ for comparison -- which was tried first and produces spurious diffs
 (different `mrbc` binary, not a real behavior change) rather than genuinely
 mismatching output.
 
-Not yet attempted: checking whether the 362 "compiled clean" methods
+Not yet attempted: checking whether the 380 "compiled clean" methods
 produce *correct* output (this only confirms bc2cpp's own compiler accepted
 them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
 numbers measure for the real project -- not that the generated C++ was run
 and its output checked against CRuby/mruby's own, the way the
 headless-benchmark checksum above verifies the *interpreted* path), or
-adding support for `BLOCK`/`SENDB`/`ARGARY`/splat-kwarg `SEND`/`EXCEPT`.
+widening keyword-callsite support past its current MONO/exact-arity gates
+(the last 3 errored methods are all `SEND ... nk=` keyword calls onto an
+optional-positional or genuinely POLY/foreign callee) and `EXCEPT`.
 
 ## Files
 
