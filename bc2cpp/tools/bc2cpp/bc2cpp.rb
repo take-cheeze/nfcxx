@@ -9660,6 +9660,109 @@ class CodeGen
     Array(@included_modules[owner]).empty?
   end
 
+  # ZSUPER_GENERAL_SUPPORT: the shape a bare `super` (zsuper) that forwards the
+  # CURRENT method's own arguments to a COMPILED Ruby superclass method -- the
+  # case BOTH the SUPER_TARGETS fixed-count path (`super x, y`, `SUPER ... n=N`)
+  # and the ZSUPER_NATIVE path (`super` reaching a native mruby method,
+  # `zsuper_native_kind`) leave on today's honest `#error`. mrbc's own
+  # codegen_zsuper (3rd/mruby/mrbgems/mruby-compiler/core/codegen.c) emits a
+  # fixed pair, confirmed against real `mrbc -v` of optcarrot's APU sites:
+  #
+  #   ARGARY R(a+1)  m1:0:0:0 (0)   # packs the CURRENT frame's regs[1..m1]
+  #   SUPER  R(a)    n=*            # superes ci->mid, reading that array
+  #
+  # `vm.c`'s OP_ARGARY with `lv==0` copies `regs + 1` into the array, so the
+  # forwarded positional arguments really ARE the current method's own parameter
+  # registers r1..rm1 -- exactly what a direct `_impl` call reproduces as
+  # `Super#name_impl(M, self, r1, ..., rm1)`. `idx` may name EITHER half of the
+  # pair (the ARGARY, so its arm can suppress the dead array build, or the SUPER,
+  # so its arm can emit the call); both resolve to the same pair and answer, so
+  # the two arms can never disagree -- the discipline zsuper_native_kind holds.
+  #
+  # Unlike the allowlisted SUPER_TARGETS fixed path, EVERY fact here is re-checked
+  # mechanically per site from the bytecode -- no hand-written name list:
+  def zsuper_forward_plan(owner_def, irep, idx)
+    return nil unless owner_def && irep && idx
+
+    instructions = irep.instructions
+
+    # (1) The two really are the adjacent ARGARY + SUPER pair mrbc emits, at the
+    # exact register relationship OP_SUPER/OP_ARGARY give them (`SUPER R(a)` +
+    # `ARGARY R(a+1)`). Never trust "an ARGARY somewhere near a SUPER"; a real
+    # EXT1/EXT2/EXT3 interposed between them declines (both operands here are far
+    # too small to ever need one).
+    argary_idx = instructions[idx]&.op == 'ARGARY' ? idx : idx - 1
+    return nil if argary_idx.negative?
+
+    argary = instructions[argary_idx]
+    super_insn = instructions[argary_idx + 1]
+    return nil unless argary && super_insn
+    return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
+
+    # (2) The SUPER is the `n=*` (CALL_MAXARGS) zsuper splat shape -- not the
+    # fixed-count `n=N` SUPER_TARGETS handles, and not the keyword/`nk=` variant
+    # whose extra registers vm.c's OP_ARGARY pushes only when its `kd` bit is set.
+    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+
+    # (3) The ARGARY operand is the plain positional-only current-frame forward
+    # `m1:0:0:0 (0)`: no rest (r), no post-mandatory (m2), no keyword dict (kd),
+    # and lv==0 so OP_ARGARY copies THIS frame's regs[1..m1] (a non-zero lv copies
+    # an OUTER scope's env instead). m1 is the forwarded count.
+    am = argary.args.match(/\AR(\d+)\s+(\d+):(\d):(\d+):(\d)\s+\((\d+)\)/)
+    return nil unless am
+
+    argary_dest = am[1]
+    m = am[2].to_i
+    return nil unless am[3].to_i.zero? && am[4].to_i.zero? && am[5].to_i.zero? && am[6].to_i.zero?
+    return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
+
+    # (4) OP_SUPER reads the array at regs[a+1] and OP_ARGARY wrote it at its own
+    # dest, so ARGARY's dest must be exactly SUPER's dest + 1.
+    super_dest = super_insn.args[/^R(\d+)/, 1]
+    return nil unless argary_dest && super_dest
+    return nil unless argary_dest.to_i == super_dest.to_i + 1
+
+    # (5) The CURRENT method's ENTER really declares exactly m mandatory
+    # positional args and nothing else -- no optional/rest/post/keyword/kdict, and
+    # no block parameter. mrbc's own src/codedump.c prints ENTER as
+    # REQ:OPT:REST:POST:KEY:KDICT:BLOCK:NOBLOCK; requiring fields 2..7 all zero and
+    # REQ==m is what makes regs[1..m] the WHOLE forwarded list (with REST/KEY/
+    # KDICT/OPT/POST all 0 the method's parameters ARE regs[1..m]) and proves there
+    # is no block parameter for zsuper to forward.
+    enter = instructions.find { |i| i.op == 'ENTER' }
+    return nil unless enter
+
+    em = enter.args.match(/\A(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+)/)
+    return nil unless em
+    return nil unless em[2..7].all? { |x| x.to_i.zero? }
+    return nil unless em[1].to_i == m
+
+    # (6) The target: the same-named method on the class's OWN registered
+    # superclass, present, bytecode-defined and compiles clean. compiles_clean? is
+    # what makes a caller passing a block to THIS method unobservable (a clean
+    # `_impl` has no block parameter and never yields), so -- unlike the
+    # allowlisted SUPER_TARGETS fixed path -- this needs NO caller-site block grep.
+    # super_reaches_superclass? (ANCESTOR_MIXINS_SUPPORT) proves no `include`d
+    # module sits between this class and that superclass.
+    superclass = @superclass_of[owner_def.owner]
+    return nil unless superclass.is_a?(String)
+    return nil unless super_reaches_superclass?(owner_def)
+
+    target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
+    return nil unless target_def && target_def.irep && compiles_clean?(target_def.irep)
+
+    { target_def: target_def, m: m }
+  end
+
+  # ZSUPER_GENERAL_SUPPORT: the replacement body for a recognized zsuper pair --
+  # a direct `_impl` call into the superclass method forwarding the current
+  # method's own parameter registers r1..m, exactly the registers vm.c's OP_ARGARY
+  # (lv==0) copies into the discarded array. `d_reg` is the SUPER's destination.
+  def compile_zsuper_forward(target_def, d_reg, m)
+    args = (1..m).map { |i| ", r#{i}" }.join
+    "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args});\n"
+  end
+
   # SUPER_SUPPORT: the real target a `super`/`super(...)` inside
   # `owner_def`'s own method reaches -- the same-named MethodDef on
   # `owner_def.owner`'s own registered superclass -- but ONLY when
@@ -20100,23 +20203,26 @@ class CodeGen
       # block parameter of its own to forward in the first place (see
       # SUPER_TARGETS' own comment), and every real target this ever
       # fires for was independently checked to need none. `super_target`
-      # itself is gated on the SUPER_TARGETS allowlist -- see its own
-      # comment for the whole-program facts this depends on that this
-      # opcode alone has no way to re-verify at codegen time.
-      target_def = super_target(owner_def)
-      dest, nstr = a.split(/\s+/, 2)
-      d_reg = dest[/^R(\d+)/, 1]
-      n = nstr && nstr[/^n=(\d+)$/, 1]
-      zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
-      if target_def && d_reg && n
-        args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
-        "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
-      elsif zsuper_kind && d_reg
-        compile_zsuper_native(zsuper_kind, d_reg)
-      else
-        "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
-      end
-    when 'ARGARY'
+       # itself is gated on the SUPER_TARGETS allowlist -- see its own
+       # comment for the whole-program facts this depends on that this
+       # opcode alone has no way to re-verify at codegen time.
+       target_def = super_target(owner_def)
+       dest, nstr = a.split(/\s+/, 2)
+       d_reg = dest[/^R(\d+)/, 1]
+       n = nstr && nstr[/^n=(\d+)$/, 1]
+       zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
+       zsuper_plan = reg_offset.zero? && zsuper_kind.nil? ? zsuper_forward_plan(owner_def, irep, idx) : nil
+       if target_def && d_reg && n
+         args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+         "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
+       elsif zsuper_kind && d_reg
+         compile_zsuper_native(zsuper_kind, d_reg)
+       elsif zsuper_plan && d_reg
+         compile_zsuper_forward(zsuper_plan[:target_def], d_reg, zsuper_plan[:m])
+       else
+         "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
+       end
+     when 'ARGARY'
       # ZSUPER_NATIVE_SUPPORT: the array this opcode builds is the argument
       # list for the `SUPER ... n=*` on the very next line, and nothing else
       # ever reads it (mrbc emits the pair together and the SUPER consumes
@@ -20137,6 +20243,11 @@ class CodeGen
       # the same honest `#error` it always produced.
       if reg_offset.zero? && zsuper_native_kind(owner_def, irep, idx)
         "  // #{insn.raw.strip} (zsuper argument array not built -- consumed by the SUPER below)\n"
+      elsif reg_offset.zero? && zsuper_forward_plan(owner_def, irep, idx)
+        # ZSUPER_GENERAL_SUPPORT: same dead-array suppression, for the general
+        # zsuper-forward pair whose SUPER arm emits a direct superclass `_impl`
+        # call from the ORIGINAL registers instead of reading this array.
+        "  // #{insn.raw.strip} (zsuper argument array not built -- forwarded to the superclass _impl below)\n"
       else
         "  #error unhandled opcode ARGARY -- not in this prototype's supported subset\n"
       end
