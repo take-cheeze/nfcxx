@@ -13372,11 +13372,61 @@ class CodeGen
     true
   end
 
+  # LOADI_FIXNUM_RANGE: the narrowest Fixnum range across every target this
+  # project ships (host/desktop/wasm/wio/psp -- generated code is per-build,
+  # but this proof runs once, in the host diagnostic, so it must hold for
+  # the narrowest of them). `mrb_int` is 32-bit on the cross targets
+  # (Emscripten/Wio/PSP) and word boxing (the default -- no build in
+  # build_config.rb selects nan-boxing) tags one bit, so
+  # MRB_FIXNUM_MIN/MAX there are (INT32_MIN>>1)..(INT32_MAX>>1):
+  # -1073741824..1073741823 (3rd/mruby/include/mruby/boxing_word.h,
+  # confirmed against TYPED_FIXABLE in include/mruby/numeric.h).
+  #
+  # Why a load-immediate needs a range check at all: every LOADI form
+  # EXCEPT LOADI32 executes SET_FIXNUM_VALUE (3rd/mruby/src/vm.c) -- a
+  # Fixnum by construction. LOADI32 executes SET_INT_VALUE, i.e.
+  # `mrb_boxing_int_value` (3rd/mruby/src/etc.c), which returns a heap
+  # RInteger whenever the literal is not FIXABLE -- and LOADI32 really
+  # does carry literals past the 32-bit Fixnum bound (confirmed with the
+  # real host mrbc: `z = 2000000000` emits `LOADI32 R4 2000000000`).
+  # The old blanket `start_with?('LOADI')` terminal therefore proved a
+  # Fixnum for a value that is a heap Integer on every 32-bit target --
+  # and the proof's own codegen emits a bare `mrb_fixnum()` (a raw
+  # bit-shift, no check) for it, i.e. silent UB, not a missed
+  # optimization. Latent, not live: the program's own largest literals
+  # are +-9999999 (Game::Variables' RPG2003 clamp), 100x inside the
+  # bound, so gating changes nothing measured -- it just makes the
+  # terminal sound for literals this program does not yet contain.
+  LOADI_FIXNUM_MIN = -1_073_741_824
+  LOADI_FIXNUM_MAX = 1_073_741_823
+
+  # A LOADI* instruction's own literal, or nil when it cannot be read.
+  # Disassembly shape (confirmed against real `mrbc -v`): the value is
+  # the second whitespace-separated token (`LOADI32\tR1\t9999999\t;
+  # R1:x` -- the trailing `; R1:x` local-name comment, when present, is
+  # a third token and never disturbs the split). LOADINEG prints the
+  # already-negated value (`LOADINEG R2 -5`).
+  def loadi_literal(insn)
+    tok = insn.args.split(/\s+/)[1]
+    tok && tok.match?(/\A-?\d+\z/) ? tok.to_i : nil
+  end
+
+  def loadi_proven_fixnum?(insn)
+    # LOADI8/LOADI16/LOADINEG/LOADI_n only ever carry values inside
+    # +-2^15 -- FIXABLE on every shipped target by a 2^15 margin, so no
+    # magnitude check is needed (and none could fail). Only LOADI32's
+    # own INT32-wide range can exceed the narrowest Fixnum bound.
+    return true unless insn.op == 'LOADI32'
+
+    lit = loadi_literal(insn)
+    !lit.nil? && lit >= LOADI_FIXNUM_MIN && lit <= LOADI_FIXNUM_MAX
+  end
+
   # Classify the one instruction the backward scan found writing `reg` -- the
   # four proof sources from the header above (MOVE is handled by the caller,
   # since it continues the walk rather than terminating it).
   def fixnum_proof_source?(irep, j, insn, reg, owner_def, depth)
-    return true if insn.op.start_with?('LOADI')
+    return loadi_proven_fixnum?(insn) if insn.op.start_with?('LOADI')
 
     case insn.op
     when 'GETIV'
