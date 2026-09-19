@@ -7391,13 +7391,49 @@ end
 # identical): `return cache[key] if cache.key?(key); cache[key] = yield`
 # -- plain synchronous single yield (or none at all on a cache hit),
 # never stored, both real definitions read directly.
+#
+# `gsub`/`gsub!`/`sub`/`sub!`/`scan` (String, 3rd/mruby/mrblib/string.rb's own
+# `def` wrappers over `string.c`'s native `string_gsub_subst`/`mrb_string_scan`)
+# and `each_value` (Hash, 3rd/mruby/mrblib/hash.rb): all yield their block once
+# per match / per element from inside an ordinary C loop and never store it --
+# the same synchronous shape as every entry above. Admitted while widening the
+# optcarrot scoping probe (`tools/optcarrot_probe`, which reaches them via
+# `opt.rb`'s/`config.rb`'s `code.gsub(/re/) { ... }` and `OPTIONS.each_value`
+# sites); a whole-program grep found NO `def` of any of these five in this
+# project's own mrblib/native sources, so `String`/`Hash`'s own core
+# definitions are the only reachable ones, and the real project's own
+# `scripts/bc2cpp_coverage_report.rb` output is BYTE-IDENTICAL before and after
+# (its two real `.each_value {}` sites capture no upvar, so they were already
+# claimed via the empty-capture-set path).
+#
+# `with_index` (Enumerator, 3rd/mruby/mrbgems/mruby-enumerator): `map.with_index
+# { |x, i| ... }` -- `Enumerator#with_index` runs `each` synchronously and calls
+# the block once per element, never stores it. `mruby-enum-lazy` is NOT built
+# (see `flat_map`'s own note), so no Lazy `#with_index` variant is reachable.
+#
+# `step` (Integer/Float, 3rd/mruby/mrblib/numeric.rb): `a.step(b, s) { |i| ... }`
+# -- a plain `while`/`for` loop yielding once per value, never stored. This name
+# is shared with four DOMAIN `def step` methods in this project
+# (mruby-rpg2k/mrblib/game/battle.rb, mruby-rpg2k/mrblib/game.rb x2,
+# mruby-wolf/mrblib/interpreter.rb); all four are block-arity-0 (no `&block`
+# parameter) and none `.step {`/`.step do` call site exists program-wide, so the
+# gate never fires for them and they can never receive a captured block. Verified
+# inert: the real coverage report is byte-identical with and without this entry.
+#
+# `zip` (Enumerable/Enumerator, mruby-enum-ext/mruby-enumerator): `a.zip(b)
+# {|x, y| ... }` yields one tuple synchronously per element, never stores it. It
+# has a block-storing `Enumerator::Lazy#zip` sibling (mruby-enum-lazy) exactly
+# like `flat_map`'s Lazy twin, and is admitted on the identical grounds:
+# `mruby-enum-lazy` is not built, so only the synchronous Enumerable/Enumerator
+# definitions are reachable. Re-verify both before ever adding that gem.
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
   find find_index any? all? none? count index sort_by
   _rgss_native_sort _rgss_native_sort! loop each_char
   page_field section open new reduce inject each_with_object downto
-  auto_battle_best_target cached_bitmap flat_map
+  auto_battle_best_target cached_bitmap flat_map gsub gsub! scan zip each_value
+  sub sub! with_index step
 ].freeze
 
 # DEEP_UPVAR_CAPTURE_SUPPORT: the `collect_block_upvars(...).nil?` gate
