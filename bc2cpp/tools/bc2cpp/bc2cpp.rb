@@ -290,6 +290,31 @@ def build_registry(ireps, root_label)
   # resolve_superclass_ref's own comment; never guessed). MODULE has no
   # superclass at all, so only ever populated from a real CLASS opcode.
   superclass_of = {}
+  # ANCESTOR_MIXINS_SUPPORT: real class name -> every module the class's OWN
+  # body really `include`s, in source order (a `class C; include M1; include
+  # M2; end` records ["M1", "M2"] under "C"), plus the parallel `prepend`
+  # table. `super`/`super(...)` soundness (SUPER_SUPPORT, see that block's own
+  # comment) depends on a whole-program fact compile_insn cannot re-derive
+  # from a single opcode: that no `include`d module sits BETWEEN the caller
+  # class and its declared superclass (mruby's own `mrb_classSuper`-driven
+  # method search would land on such a module's same-named method first, not
+  # the superclass). Until now that fact was asserted per-entry in the
+  # human-vetted SUPER_TARGETS table; this table makes it re-derivable, so a
+  # `super` can be gated on a real scan instead of a hand-written name list.
+  # Only the self-implicit `include M` / `prepend M` form (mrbc's own
+  # `SSEND/SSEND0 R(self) :include n=1` preceded by a GETCONST/GETMCNST of the
+  # module constant, confirmed against real `mrbc -v` of both this program's
+  # and optcarrot's `include`s) is recognized here; anything this walk sees
+  # but cannot fully resolve (an explicit receiver, a computed module, more
+  # than one argument) lands in `unknown_mixins` so a `super` in that owner
+  # declines rather than trusting an incomplete chain -- never a wrong guess,
+  # exactly this file's standing bar. `prepended_modules` is recorded for the
+  # same scan's completeness: a `prepend`ed module sits ABOVE the class in the
+  # ancestor chain, so it never intervenes between a method and its own
+  # `super`, and is deliberately NOT consulted by the intervening-module check.
+  included_modules = {}
+  prepended_modules = {}
+  unknown_mixins = Set.new
   # CONST_CONTAINER_SUPPORT: real, fully-qualified constant name (e.g.
   # "Game::Vehicle::TYPES") -> 'Array'/'Hash'/'Range' when every real
   # SETCONST site for that exact name (there is almost always exactly
@@ -832,6 +857,35 @@ def build_registry(ireps, root_label)
         # operator name, so a future reader never has to wonder why the two
         # differ.
         name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        if %w[include prepend].include?(name)
+          # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M`
+          # inside THIS class/module body. build_registry only ever recurses a
+          # `walk` for a real CLASS/MODULE/SCLASS-opened body (never a method
+          # body), so `namespace` is exactly the owner being mixed into. The
+          # module constant is resolved by the same cautious backward walk
+          # resolve_superclass_ref already uses for a superclass ref (mrbc
+          # emits `GETCONST R(a+1) M` immediately before `SSEND R(a) :include
+          # n=1`, confirmed against real `mrbc -v` of both this program's own
+          # two `include Enumerable`s and optcarrot's two `include
+          # CodeOptimizationHelper`). Anything this arm sees but cannot fully
+          # resolve -- an explicit receiver (plain SEND, not the self-implicit
+          # SSEND/SSEND0 form), more than one module argument, or a module
+          # constant that is not a plain GETCONST/GETMCNST path -- flags the
+          # owner in `unknown_mixins` rather than guessing, so a `super` there
+          # declines instead of trusting an ancestor chain we never fully read.
+          mixin_owner = namespace || 'Object'
+          self_reg = insn.args[/^R(\d+)/, 1]
+          mixin_n = insn.args[/n=(\d+)/, 1]&.to_i
+          recognized = %w[SSEND SSEND0].include?(insn.op) && mixin_n == 1 && self_reg
+          mod = recognized ? resolve_superclass_ref(irep, idx, (self_reg.to_i + 1).to_s, namespace) : nil
+          if recognized && mod.is_a?(String)
+            table = name == 'include' ? included_modules : prepended_modules
+            (table[mixin_owner] ||= []) << mod
+          else
+            unknown_mixins << mixin_owner
+          end
+          next
+        end
         next unless %w[private protected public attr_reader attr_writer attr_accessor
                        module_function].include?(name)
 
@@ -1124,7 +1178,7 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
-  [registry, superclass_of, container_constants.compact]
+  [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins]
 end
 
 # SUPER_SUPPORT: resolve a real `class X < SUPER_EXPR`'s own SUPER_EXPR to
@@ -7936,7 +7990,8 @@ class CodeGen
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
                  hash_element_layout = {}, integer_constants = Set.new,
                  foreign_method_names = nil, outside_tokens = nil,
-                 native_name_sources = nil, analysis_only: false)
+                  native_name_sources = nil, included_modules = {}, prepended_modules = {},
+                  unknown_mixins = Set.new, analysis_only: false)
     @ireps = ireps
     # ENTRY_ARG_CALLSITE_PROOF: every identifier-shaped token appearing
     # anywhere in NATIVE_SRCS or FOREIGN_RUBY_SRCS (outside_world_tokens,
@@ -8035,6 +8090,15 @@ class CodeGen
     # resolve_superclass_ref result, see that function's comment. The
     # only real consumer is compile_insn's own SUPER case.
     @superclass_of = superclass_of
+    # ANCESTOR_MIXINS_SUPPORT: build_registry's own re-derivable read of every
+    # `include`/`prepend` in the closed world (see that block's own comment).
+    # `prepended_modules` is captured for completeness of the scan but is
+    # deliberately never consulted by `super`'s intervening-module check -- a
+    # prepended module sits ABOVE the class in the ancestor chain, so it can
+    # never come between a method and its own `super`.
+    @included_modules = included_modules
+    @prepended_modules = prepended_modules
+    @unknown_mixins = unknown_mixins
     # irep label -> Annotations::Annotation (Annotations.extract's own
     # result) -- previously computed at the top level only to feed
     # IvarLayout.analyze's own opaque-argument fallback, never threaded
@@ -9563,14 +9627,50 @@ class CodeGen
     nil
   end
 
+  # ANCESTOR_MIXINS_SUPPORT: is a `super`/`super(...)` inside `owner_def.owner`'s
+  # own `name` provable to land on `owner_def.owner`'s DECLARED superclass --
+  # i.e. is there provably no `include`d module sitting between the class and
+  # that superclass (mruby's own method search walks the real ancestor chain
+  # [class, <included modules newest-first>, superclass, ...], so such a module
+  # defining `name` would be met before the superclass)? Re-derived from
+  # build_registry's own whole-world mixin scan, never asserted by hand.
+  #
+  # Deliberately CONSERVATIVE: this declines whenever the owner carries ANY
+  # plain `include` at all, without trying to name the included modules. The
+  # reason is a real, standing constant-scope gap in this file's own resolution
+  # (shared with resolve_superclass_ref): inside a class body a bare module ref
+  # `include M` is resolved relative to the CLASS (`"Foo::M"`), but build_registry
+  # names that module's OWN methods by the module's own qualified owner (`"M"`
+  # for a top-level `module M`), so a `super` could never be proven safe by
+  # matching included-module owners -- and getting that match wrong is the
+  # UNSOUND direction (silently devirtualizing a `super` a module would really
+  # intercept). Declining on any include is the safe direction, exactly this
+  # file's standing "no wrong guess, ever" bar; a class with no plain includes
+  # (every SUPER_TARGETS entry today, every optcarrot zsuper site) trivially
+  # reaches. `@included_modules`/`@unknown_mixins` record the resolved module
+  # names for a future round that first fixes the constant-scope naming; only
+  # PRESENCE is consulted here.
+  #
+  # A `prepend`ed module sits ABOVE the class in the chain and is therefore
+  # never met by `super`, so `@prepended_modules` is intentionally NOT consulted.
+  def super_reaches_superclass?(owner_def)
+    owner = owner_def.owner
+    return false if @unknown_mixins.include?(owner)
+
+    Array(@included_modules[owner]).empty?
+  end
+
   # SUPER_SUPPORT: the real target a `super`/`super(...)` inside
   # `owner_def`'s own method reaches -- the same-named MethodDef on
   # `owner_def.owner`'s own registered superclass -- but ONLY when
   # `owner_def`'s own "Owner#name" is in the SUPER_TARGETS allowlist
   # (see that constant's own top comment for the whole-program facts
   # this gates on that this function alone can't re-verify: no real
-  # caller of THIS method ever passes a block, and no `include`/
-  # `prepend` sits between `owner_def.owner` and its own superclass).
+  # caller of THIS method ever passes a block). The second fact SUPER_SUPPORT
+  # used to assert here -- no `include`/`prepend` sits between `owner_def.owner`
+  # and its own superclass -- is now re-derived every call by
+  # super_reaches_superclass? (ANCESTOR_MIXINS_SUPPORT) from the whole-world
+  # mixin scan, not hand-asserted.
   # Unlike monomorphic_target (name-based, any owner), this is always
   # relative to one exact owner's own declared superclass -- never a
   # whole-program name search -- so a target here can be POLY by name
@@ -9582,6 +9682,11 @@ class CodeGen
 
     superclass = @superclass_of[owner_def.owner]
     return nil unless superclass.is_a?(String)
+    # ANCESTOR_MIXINS_SUPPORT: the "no include/prepend sits between the class
+    # and its superclass" fact SUPER_SUPPORT used to assert per-entry in the
+    # allowlist is now re-derived from the whole-world mixin scan, so an entry
+    # only ever compiles while that scan still proves the chain is clean.
+    return nil unless super_reaches_superclass?(owner_def)
 
     target_def = @registry[owner_def.name].find { |d| d.owner == superclass }
     return nil unless target_def && target_def.irep
@@ -22139,7 +22244,7 @@ if $PROGRAM_NAME == __FILE__
   order = dfs_order(ireps, root_label)
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
-  registry, superclass_of, container_constants = build_registry(ireps, root_label)
+  registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
   # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
@@ -22583,7 +22688,8 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
-                    integer_constants, foreign_methods, outside_tokens, native_name_sources)
+                    integer_constants, foreign_methods, outside_tokens, native_name_sources,
+                    included_modules, prepended_modules, unknown_mixins)
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
