@@ -16,9 +16,13 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-PPU_FIBER_BOUNDARY_METHODS = %w[
-  initialize update vsync sync run dispose main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks
-].freeze
+FIBER_BOUNDARY_METHODS = {
+  'Optcarrot::NES' => %w[run step dispose],
+  'Optcarrot::CPU' => %w[run],
+  'Optcarrot::PPU' => %w[
+    initialize update vsync sync run dispose main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks
+  ]
+}.freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -100,7 +104,7 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
-    next if owner == 'Optcarrot::PPU' && PPU_FIBER_BOUNDARY_METHODS.include?(name)
+    next if FIBER_BOUNDARY_METHODS.fetch(owner, []).include?(name)
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
@@ -218,7 +222,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} methods (PPU Fiber boundary methods remain interpreted)"
+  puts "bc2cpp installed #{count} methods (NES/CPU/PPU Fiber boundary methods remain interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -245,7 +249,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. PPU#initialize, Fiber-resuming methods, the main loop, and yield methods remain interpreted so Fiber is created and never resumes or yields across a generated C function frame; other PPU methods are compiled.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose, CPU#run, and PPU Fiber creation/resume/loop/yield methods remain interpreted so Fiber never resumes or yields across a generated C function frame; other CPU and PPU methods are compiled.'
     end
   end
 
