@@ -65,7 +65,10 @@ def run_benchmark(label, command, chdir: nil)
   options = chdir ? { chdir: chdir } : {}
   output, status = Open3.capture2e(*command, **options)
   elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-  raise "#{label} benchmark failed (#{status.exitstatus}):\n#{output}" unless status.success?
+  unless status.success?
+    result = status.signaled? ? "signal #{status.termsig}" : "exit #{status.exitstatus}"
+    raise "#{label} benchmark failed (#{result}, #{status.inspect}):\n#{output}"
+  end
 
   checksum = output[/^checksum: (\d+)$/, 1]
   raise "#{label} benchmark did not print a checksum:\n#{output}" unless checksum
