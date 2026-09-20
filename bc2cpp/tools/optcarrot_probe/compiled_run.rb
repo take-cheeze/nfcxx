@@ -107,6 +107,7 @@ def emit_register(diagnostics, out_dir)
     # mruby crashes when generated C++ methods run on the PPU Fiber path,
     # including accessors outside the explicit resume/yield methods.
     next if owner == 'Optcarrot::PPU'
+    next if owner == 'Optcarrot::CPU'
     next if FIBER_BOUNDARY_METHODS.fetch(owner, []).include?(name)
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
@@ -225,7 +226,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} methods (NES/CPU Fiber boundaries and all PPU methods remain interpreted)"
+  puts "bc2cpp installed #{count} methods (CPU/PPU methods and NES Fiber boundaries remain interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -252,7 +253,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose and CPU Fiber callbacks remain interpreted. All PPU methods remain interpreted because generated C++ methods crash on optcarrot’s Fiber path.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. All CPU and PPU methods and NES#run/#step/#dispose remain interpreted; other compiled methods stay outside the Fiber path.'
     end
   end
 

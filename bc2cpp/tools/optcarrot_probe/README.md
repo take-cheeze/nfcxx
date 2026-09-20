@@ -309,13 +309,13 @@ cleanly:
   instance variables when an embedded layout overlaps an inheritance chain.
 
 With those fixes, the 180-frame run completes with checksum `59662`, matching
-the interpreted run and CRuby. The probe compiles CPU methods outside the
-Fiber caller chain, while leaving `NES#run`, `#step`, `#dispose`, and the
-CPU-to-PPU resume callbacks interpreted. CI showed that compiling any PPU
-method causes mruby to crash on this Fiber-driven target, including methods
-outside the explicit Fiber creation, resume, and yield functions. The probe
-therefore leaves all PPU methods interpreted. The benchmark still uses
-upstream PPU logic; only the method registration set changes. It runs the same ROM and
+the interpreted run and CRuby. The probe leaves all CPU and PPU methods, as
+well as `NES#run`, `#step`, and `#dispose`, interpreted so no generated C
+function runs on the emulator's Fiber caller path. CI showed SIGSEGVs even
+after excluding the explicit Fiber boundaries and Fiber-called PPU methods;
+keeping both hot owners interpreted is the current safe boundary. The
+benchmark still uses upstream emulation logic; only the method registration
+set changes. It runs the same ROM and
 checksums under all three systems; CRuby omits only the mruby-specific
 compatibility shims.
 
