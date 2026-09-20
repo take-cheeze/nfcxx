@@ -18,9 +18,11 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Timing (180 frames): CRuby ~3.8s (~54 fps) vs. this mruby interpreter
-~37.3s (~4.8-6 fps) -- roughly 10x slower on the plain interpreter, which is
-the gap a bc2cpp-style AOT compiler would aim to close.
+Recorded 180-frame wall times from the comparative runner: CRuby 3.15s
+(57.1 frames/s), interpreted mruby 26.87s (6.7 frames/s), and bc2cpp 33.00s
+(5.5 frames/s). All three produce checksum `59662`. Timings vary by machine;
+CI publishes each run's numbers and relative slowdown in the job summary.
+The compiled result is currently slower than interpreted mruby.
 
 Getting there took:
 
@@ -307,12 +309,52 @@ cleanly:
 With those fixes, the 180-frame run completes with checksum `59662`, matching
 the interpreted run and CRuby. The probe compiles 300 methods and leaves
 `Optcarrot::PPU` interpreted: its `Fiber.new` block cannot be created from
-bc2cpp's C function backed block. The recorded debug build took 33.83 seconds
-(optcarrot reported 5.58 FPS), versus 25.28 seconds (9.56 reported FPS) for
-interpreted mruby. A later run through the reproducible helper took 32.51
-seconds. This verifies correctness, but shows no speedup yet; the next
-optimization work should target generated-call overhead and a safe path
-through PPU's Fiber-based loop.
+bc2cpp's C function backed block. In the comparative run above, compiled
+mruby took 33.00 seconds versus 26.87 seconds for interpreted mruby. This
+verifies correctness, but shows no speedup yet. The benchmark runs the same
+upstream source and runner under all three systems; CRuby omits only the
+mruby-specific compatibility shims.
+
+## Profiling notes
+
+`perf` sampling is unavailable in the current environment (`perf_event_paranoid`
+is 4), so I profiled both mruby modes with GCC `gprof` instead:
+
+```
+GPROF=1 GPROF_OUTPUT=/tmp/optcarrot-gprof MRBC=3rd/mruby/build/host/bin/mrbc \
+  ruby tools/optcarrot_probe/compiled_run.rb 180
+```
+
+The instrumented runs took 54.24 seconds interpreted and 67.79 seconds with
+bc2cpp. `-pg` roughly doubles runtime, so those absolute times are profiler
+overhead; the relative result is close to the uninstrumented run. The
+interpreted profile spent 34.2% in `mrb_vm_exec`, 13.8% in GC's
+`gc_gray_rescan`, and 16.7% in ivar lookup (`iv_bsearch_idx`). The bc2cpp
+profile spent 20.8% in `mrb_vm_exec`, 34.0% in `gc_gray_rescan`, and 11.0% in
+`iv_bsearch_idx`. `mrb_funcall_with_block` calls rose from 547K to 17.2M,
+and `mrb_vm_exec` calls rose from about 363K to 3.04M with bc2cpp. `CPU#run`
+itself accounted for only 0.13% of sampled time.
+
+This points to two limits: the PPU's Fiber-driven hot loop stays interpreted,
+and compiled methods still cross into mruby through dynamic and block-carrying
+calls. Those crossings leave substantial VM activity and coincide with much
+more GC time, outweighing the bytecode dispatch removed from the compiled CPU
+path. The profile is a direction, not a precise causal split: gprof sampling
+and instrumentation are coarse, and the gprof build disables inlining only
+for generated C++ methods to keep them visible; mruby's C runtime keeps its
+normal optimization settings in both profiles.
+
+The first concrete dispatch target is `CPU#run`: each opcode executes
+`send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
+`mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
+million times in the instrumented 180-frame run. Overall, `mrb_funcall_argv`
+is called 13.6 million times and `mrb_funcall_with_block` 17.2 million times
+in the compiled profile. A useful first optimization experiment is to avoid
+re-entering the generic VM dispatcher for this known opcode table, while
+preserving the table's argument and method lookup semantics. The profile also
+shows 6.1 million `mrb_ary_splat` calls and a rise in GC gray rescans from
+1,586 to 3,455; these are additional measurements to revisit after dispatch
+overhead is reduced, not proof that it causes the GC increase.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.
@@ -370,4 +412,6 @@ MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/bc2cpp_probe.rb
 MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb
 # Run the compiled headless checksum benchmark in a temporary build:
 MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb
+# Profile both mruby modes with gprof (requires GCC/binutils gprof):
+GPROF=1 GPROF_OUTPUT=/tmp/optcarrot-gprof MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb 180
 ```

@@ -59,6 +59,22 @@ def run_bc2cpp(sources, env)
   [stdout, stderr]
 end
 
+def run_benchmark(label, command, chdir: nil)
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  options = chdir ? { chdir: chdir } : {}
+  output, status = Open3.capture2e(*command, **options)
+  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+  raise "#{label} benchmark failed (#{status.exitstatus}):\n#{output}" unless status.success?
+
+  checksum = output[/^checksum: (\d+)$/, 1]
+  raise "#{label} benchmark did not print a checksum:\n#{output}" unless checksum
+
+  fps = output[/^fps: ([\d.]+)$/, 1]
+  puts "#{label}: #{format('%.2f s (%.2f frames/s)', elapsed, FRAMES / elapsed)}; " \
+       "reported fps=#{fps || 'n/a'}, checksum=#{checksum}"
+  { label: label, seconds: elapsed, checksum: checksum, reported_fps: fps }
+end
+
 def owner_class_expr(owner)
   singleton = owner.end_with?('.singleton')
   parts = owner.sub(/\.singleton\z/, '').split('::')
@@ -146,33 +162,98 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       spec.add_dependency 'mruby-onig-regexp'
     end
   RUBY
+  profiling = ENV['GPROF'] == '1'
+  interpreted_target = profiling ? 'optcarrotinterpretedprofile' : 'optcarrotinterpreted'
+  compiled_target = profiling ? 'optcarrotcompiledprofile' : 'optcarrotcompiled'
   config = File.join(temp, 'mruby_build_config.rb')
   File.write(config, <<~RUBY)
-    MRuby::Build.new('optcarrotcompiled') do |conf|
-      conf.toolchain
-      conf.gembox 'full-core'
-      conf.gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
-      conf.gem #{gem_dir.dump}
-      conf.enable_debug
+    base = proc do
+      toolchain
+      gembox 'full-core'
+      gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
+      enable_debug
+    end
+    MRuby::Build.new(#{interpreted_target.dump}) do
+      instance_eval(&base)
+      if #{profiling}
+        cc.flags << '-pg'
+        linker.flags << '-pg'
+      end
+    end
+    MRuby::Build.new(#{compiled_target.dump}) do
+      instance_eval(&base)
+      gem #{gem_dir.dump}
+      if #{profiling}
+        cc.flags << '-pg'
+        cxx.flags << %w(-pg -fno-inline)
+        linker.flags << '-pg'
+      end
     end
   RUBY
-  rake_env = { 'MRUBY_CONFIG' => config }
+  # CI exports LD=ld for native project builds. mruby's host mrbc link must
+  # go through the compiler driver so libc is added; raw ld omits it.
+  rake_env = { 'MRUBY_CONFIG' => config, 'LD' => nil }
   output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..]}" unless status.success?
 
-  bundle = File.join(temp, 'optcarrot_compiled.rb')
+  bundle = File.join(temp, 'optcarrot.rb')
+  cruby_bundle = File.join(temp, 'optcarrot_cruby.rb')
+  compiled_bundle = File.join(temp, 'optcarrot_compiled.rb')
   system(RbConfig.ruby, File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), bundle, exception: true)
+  system({ 'OPTCARROT_NO_SHIMS' => '1' }, RbConfig.ruby,
+         File.join(ROOT, 'tools/optcarrot_probe/build_bundle.rb'), cruby_bundle, exception: true)
   source = File.read(bundle)
   raise 'optcarrot runner insertion point not found' unless source.sub!(/^nes = Optcarrot::NES\.new\(/, "OptcarrotProbe.install!\nnes = Optcarrot::NES.new(")
+  File.write(compiled_bundle, source)
 
-  File.write(bundle, source)
-  binary = File.join(MRUBY, 'build/optcarrotcompiled/bin/mruby')
+  interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
+  compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
   puts "bc2cpp installed #{count} methods (PPU remains interpreted)"
-  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  output, status = Open3.capture2e(binary, bundle, ROM, FRAMES.to_s)
-  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-  print output
-  raise "compiled optcarrot failed (#{status.exitstatus})" unless status.success?
+  benchmarks = []
+  benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
+  profile_dir = File.join(temp, 'profile')
+  interpreted_profile_dir = File.join(profile_dir, 'interpreted')
+  compiled_profile_dir = File.join(profile_dir, 'compiled')
+  FileUtils.mkdir_p([interpreted_profile_dir, compiled_profile_dir]) if profiling
+  benchmarks << run_benchmark('mruby interpreter', [interpreted_binary, bundle, ROM, FRAMES.to_s],
+                              chdir: (interpreted_profile_dir if profiling))
+  benchmarks << run_benchmark('mruby + bc2cpp', [compiled_binary, compiled_bundle, ROM, FRAMES.to_s],
+                              chdir: (compiled_profile_dir if profiling))
+  checksums = benchmarks.map { |result| result[:checksum] }.uniq
+  raise "benchmark checksums differ: #{benchmarks.map { |result| "#{result[:label]}=#{result[:checksum]}" }.join(', ')}" unless checksums.size == 1
 
-  puts format('wall time: %.2f s (%.2f frames/s)', elapsed, FRAMES / elapsed)
+  if (summary_path = ENV['GITHUB_STEP_SUMMARY']) && !summary_path.empty?
+    File.open(summary_path, 'a') do |summary|
+      summary.puts "## Optcarrot benchmark (#{FRAMES} frames)", '',
+                   '| Runtime | Wall time | Wall fps | Optcarrot fps | Checksum |',
+                   '| --- | ---: | ---: | ---: | ---: |'
+      benchmarks.each do |result|
+        summary.puts format('| %s | %.2f s | %.2f | %s | %s |', result[:label], result[:seconds],
+                            FRAMES / result[:seconds], result[:reported_fps] || 'n/a', result[:checksum])
+      end
+      summary.puts '', 'All three runtimes produced the same checksum.'
+      summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
+                          benchmarks[1][:seconds] / benchmarks[0][:seconds],
+                          benchmarks[2][:seconds] / benchmarks[1][:seconds])
+      summary.puts 'The bc2cpp build leaves `Optcarrot::PPU` interpreted because its Fiber block cannot be created from the generated C function backed block.'
+    end
+  end
+
+  if profiling
+    [['mruby interpreter', interpreted_binary, interpreted_profile_dir],
+     ['mruby + bc2cpp', compiled_binary, compiled_profile_dir]].each do |label, binary, directory|
+      profile_data = File.join(directory, 'gmon.out')
+      raise "gprof output not found at #{profile_data}" unless File.file?(profile_data)
+
+      profile, status = Open3.capture2e('gprof', binary, profile_data)
+      raise "gprof failed (#{status.exitstatus}):\n#{profile[-4000..]}" unless status.success?
+
+      if (profile_path = ENV['GPROF_OUTPUT']) && !profile_path.empty?
+        suffix = label == 'mruby interpreter' ? 'mruby-interpreter' : 'mruby-bc2cpp'
+        File.write("#{profile_path}.#{suffix}.txt", profile)
+      end
+      puts "\ngprof profile for #{label} (instrumented build; top entries):"
+      puts profile.lines.first(55).join
+    end
+  end
 end

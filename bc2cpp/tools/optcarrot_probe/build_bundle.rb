@@ -22,6 +22,7 @@
 # ../../cmake/build-mruby.cmake, which applies it to the project's real
 # mruby build the same way.
 #
+# Set OPTCARROT_NO_SHIMS=1 to make a CRuby bundle using upstream APIs directly.
 # Usage: build_bundle.rb OUT_FILE
 
 require 'fileutils'
@@ -66,7 +67,9 @@ FILES = %w[
 ].map { |f| File.join(LIB, f) }
 
 File.open(out_file, 'w') do |out|
-  out.write(File.read(File.join(PROBE_DIR, 'shims.rb')))
+  unless ENV['OPTCARROT_NO_SHIMS'] == '1'
+    out.write(File.read(File.join(PROBE_DIR, 'shims.rb')))
+  end
   FILES.each do |f|
     File.foreach(f) do |line|
       out.write(line) unless line =~ /^\s*require_relative\b/
