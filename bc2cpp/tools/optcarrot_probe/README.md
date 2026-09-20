@@ -314,8 +314,9 @@ peek/poke methods, while leaving the emulator entry path and Fiber creation,
 resume bridges, lifecycle methods, the main loop, and its helpers interpreted.
 `NES#run` calls `step`, which reaches `CPU#run`, `PPU#sync`, and `PPU#run`
 before resuming its Fiber; `CPU#vsync` also calls `PPU#sync` at the frame
-boundary. CI showed that compiling PPU helpers invoked from the Fiber loop can
-still crash mruby even when those explicit resume and yield bridges remain
+boundary. The small CPU callbacks used by PPU methods in the Fiber also remain
+interpreted. CI showed that compiling PPU helpers invoked from the Fiber loop
+can still crash mruby even when the explicit resume and yield bridges remain
 interpreted. The compiled benchmark still uses upstream PPU logic; only the
 method registration set changes. The benchmark runs the same ROM and
 checksums under all three systems; CRuby omits only the mruby-specific

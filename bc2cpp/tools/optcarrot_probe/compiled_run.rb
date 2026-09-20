@@ -18,7 +18,10 @@ FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 FIBER_BOUNDARY_METHODS = {
   'Optcarrot::NES' => %w[run step dispose],
-  'Optcarrot::CPU' => %w[run vsync],
+  'Optcarrot::CPU' => %w[
+    run vsync current_clock next_frame_clock next_frame_clock= do_nmi
+    fetch sprite_dma steal_clocks odd_clock? update
+  ],
   'Optcarrot::PPU' => %w[
     initialize update vsync sync run dispose main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks
   ]
@@ -256,7 +259,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose, CPU#run/#vsync, and the PPU Fiber loop and helpers remain interpreted to avoid generated C frames in the Fiber path; PPU setup and CPU-facing peek/poke methods are compiled.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose, the CPU#run/#vsync path and PPU callbacks, and the PPU Fiber loop and helpers remain interpreted; PPU setup and CPU-facing peek/poke methods are compiled.'
     end
   end
 
