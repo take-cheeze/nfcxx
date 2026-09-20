@@ -16,6 +16,7 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
+PPU_FIBER_BOUNDARY_METHODS = %w[run main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks].freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -94,6 +95,8 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
+    next if owner == 'Optcarrot::PPU' && PPU_FIBER_BOUNDARY_METHODS.include?(name)
+
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
     [entry, owner, name, extra.include?('[private')]
@@ -145,7 +148,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
-  end.uniq.reject { |owner| owner == 'Optcarrot::PPU' || owner.start_with?('Optcarrot::PPU::') }
+  end.uniq.reject { |owner| owner.start_with?('Optcarrot::PPU::') }
   compiled_cpp, diagnostics = run_bc2cpp(sources, base_env.merge(
     'OUT_DIR' => temp,
     'ONLY_OWNERS' => owners.join(',')
@@ -190,6 +193,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       end
     end
   RUBY
+  system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY,
+         File.join(ROOT, 'patches/mruby-module-function-scope.patch'), exception: true)
   # CI exports LD=ld for native project builds. mruby's host mrbc link must
   # go through the compiler driver so libc is added; raw ld omits it.
   rake_env = { 'MRUBY_CONFIG' => config, 'LD' => nil }
@@ -208,7 +213,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} methods (PPU remains interpreted)"
+  puts "bc2cpp installed #{count} methods (PPU Fiber boundary methods remain interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -235,7 +240,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The bc2cpp build leaves `Optcarrot::PPU` interpreted because its Fiber block cannot be created from the generated C function backed block.'
+      summary.puts 'PPU#run, #main_loop, and the four Fiber yield methods remain interpreted so Fiber never yields across a generated C function frame; other PPU methods are compiled.'
     end
   end
 

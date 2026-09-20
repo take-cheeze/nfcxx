@@ -18,11 +18,13 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Recorded 180-frame wall times from the comparative runner: CRuby 3.15s
-(57.1 frames/s), interpreted mruby 26.87s (6.7 frames/s), and bc2cpp 33.00s
-(5.5 frames/s). All three produce checksum `59662`. Timings vary by machine;
-CI publishes each run's numbers and relative slowdown in the job summary.
-The compiled result is currently slower than interpreted mruby.
+Latest local 180-frame wall times from the comparative runner: CRuby 3.13s
+(57.5 frames/s), interpreted mruby 26.92s (6.7 frames/s), and bc2cpp 29.72s
+(6.1 frames/s). All three produce checksum `59662`. Timings vary by machine;
+CI publishes each run's numbers and relative slowdown in the job summary. The
+compiled result is still slower than interpreted mruby, but compiling PPU
+helpers reduced the compiled time from 30.53s in a same-machine control run
+with the PPU wholly interpreted to 29.72s here.
 
 Getting there took:
 
@@ -307,13 +309,15 @@ cleanly:
   instance variables when an embedded layout overlaps an inheritance chain.
 
 With those fixes, the 180-frame run completes with checksum `59662`, matching
-the interpreted run and CRuby. The probe compiles 300 methods and leaves
-`Optcarrot::PPU` interpreted: its `Fiber.new` block cannot be created from
-bc2cpp's C function backed block. In the comparative run above, compiled
-mruby took 33.00 seconds versus 26.87 seconds for interpreted mruby. This
-verifies correctness, but shows no speedup yet. The benchmark runs the same
-upstream source and runner under all three systems; CRuby omits only the
-mruby-specific compatibility shims.
+the interpreted run and CRuby. The probe now compiles PPU methods while
+leaving the Fiber lifecycle methods (`run`, `main_loop`, and the four
+`wait_*` yield points) registered as interpreted methods. mruby rejects a
+Fiber yield when a C function frame is active inside the fiber, so keeping
+the loop and its yield calls in bytecode lets compiled PPU helpers return
+before each yield. The compiled benchmark still uses upstream PPU logic; only
+the method registration set changes. The benchmark runs the same ROM and
+checksums under all three systems; CRuby omits only the mruby-specific
+compatibility shims.
 
 ## Profiling notes
 
