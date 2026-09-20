@@ -1557,6 +1557,86 @@ module IntegerConstants
     names
   end
 
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the constant-DEFINITION
+  # forms of poison source 3, read out of the NATIVE_SRCS text with a
+  # correctly BOUNDED window (`[^;]{0,200}` -- args run to the call's own
+  # `;`). It deliberately does NOT reuse `native_const_names` above: that
+  # scan's trailing lazy `.{0,200}?` quantifier matches ZERO characters
+  # (measured, not inferred -- its sub-scans only ever see the bare call
+  # prefix, so its quoted-name and MRB_SYM arms contribute nothing). That is
+  # a real latent bug, but INTEGER_CONSTANT_PROOF's measured numbers depend
+  # on the function that uses it, so it is left untouched here and belongs
+  # on its own measured round. The universe this feeds MUST NOT inherit the
+  # miss, because a missed definition is the UNSOUND direction for a
+  # never-defined proof. What it reads:
+  #   * mrb_define_const / mrb_define_global_const (+ _id forms) -- quoted
+  #     name or an MRB_SYM-family token;
+  #   * mrb_const_set -- the direct API, for a constant not spelled through
+  #     any define_* wrapper;
+  #   * mrb_define_class / mrb_define_module (+ _id/_under variants) --
+  #     OP_CLASS/OP_MODULE is not the only way a class name becomes a
+  #     constant; src/class.c's own mrb_define_class_id does its own
+  #     const_set, and every mruby core class (Array, GC, ...) is born this
+  #     way in the very C files NATIVE_SRCS feeds this scan.
+  # All deliberately over-broad (any capitalized word / MRB_SYM token within
+  # the call's own argument list), the same direction foreign_const_names
+  # below already trades: over-collecting only ever COSTS a proof.
+  def self.native_defined_const_names(paths)
+    names = Set.new
+    Array(paths).each do |path|
+      src = begin
+        File.read(path, encoding: 'UTF-8')
+      rescue StandardError
+        next
+      end
+      src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+      src.scan(/mrb_const_set\s*\([^;]{0,200}/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+      src.scan(/mrb_define_(?:class|module)(?:_[a-z_]*)?\s*\([^;]{0,200}/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+    end
+    names
+  end
+
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the whole-closed-world
+  # universe of constant names with at least one VISIBLE definition: SETCONST
+  # /SETMCNST/CLASS/MODULE opcodes across every scanned irep (bytecode form,
+  # the same three opcode poison sources IntegerConstants.analyze walks),
+  # native definitions (native_defined_const_names above), and foreign Ruby
+  # sources (the already-verified foreign_const_names text scan). Anything
+  # invisible to ALL of it (a `const_set` computed at runtime, a `require`d
+  # gem outside NATIVE_SRCS, an eval'd string) -- the documented residual
+  # holes of compile_keyword_never_defined_const_send's own comment.
+  def self.defined_name_universe(ireps, native_paths, foreign_paths)
+    names = Set.new
+    ireps.each_value do |irep|
+      irep.instructions.each do |insn|
+        case insn.op
+        when 'SETCONST'
+          names << insn.args[/\A(\S+)/, 1]
+        when 'SETMCNST'
+          names << insn.args[/::(\S+)/, 1]
+        when 'CLASS', 'MODULE'
+          names << insn.args[/:(\S+)/, 1]
+        end
+      end
+    end
+    names.delete(nil)
+    names.merge(native_defined_const_names(native_paths))
+    names.merge(foreign_const_names(foreign_paths))
+    names
+  end
+
   # Poison source 4 -- a textual constant-assignment scan, deliberately
   # broader than it strictly needs to be (any `NAME =` at the start of a
   # line, whatever the right-hand side). Over-collecting here can only ever
@@ -20963,10 +21043,21 @@ class CodeGen
     # back to the lexical-self narrowing (KEYWORD_HASH_LEXICAL_SELF_SUPPORT,
     # its comment) when the name-based every-def gate declines -- the same
     # pair LEXICAL_SELF_KEYWORD_SUPPORT threads into compile_keyword_call.
-    compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
-                                         argv: argv, kw_sym_regs: kw_sym_regs,
-                                         kw_val_regs: kw_val_regs, kw_names: kw_names,
-                                         self_implicit: self_implicit, owner_def: owner_def)
+    hashpos = compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
+                                                   argv: argv, kw_sym_regs: kw_sym_regs,
+                                                   kw_val_regs: kw_val_regs, kw_names: kw_names,
+                                                   self_implicit: self_implicit, owner_def: owner_def)
+    return hashpos if hashpos
+
+    # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: every keyword-free proof
+    # above declined (a real def of the name exists, its ENTER is invisible
+    # or its arity does not fit), but this site's RECEIVER provably never
+    # exists at runtime -- see compile_keyword_never_defined_const_send's
+    # own comment. Tried last so it can never pre-empt an existing path.
+    compile_keyword_never_defined_const_send(name: name, d: d, n: n, nk: nk, irep: irep, idx: idx,
+                                             argv: argv, kw_sym_regs: kw_sym_regs,
+                                             kw_val_regs: kw_val_regs, kw_names: kw_names,
+                                             self_implicit: self_implicit)
   end
 
   # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: a `Foo.new(a, b, k1: v1, k2: v2)` call
@@ -21495,6 +21586,133 @@ class CodeGen
              "  // :#{kw_names[k]}\n"
     end
     out << "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}"
+    out << "  }\n"
+    out
+  end
+
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the memoized closed-world
+  # universe of defined constant names (IntegerConstants.defined_name_universe
+  # -- same ENV gate as INTEGER_CONSTANT_PROOF's own skip-outright rule: a
+  # missing NATIVE_SRCS/FOREIGN_RUBY_SRCS means the picture is knowingly
+  # incomplete, so no proof runs at all rather than one run half-informed).
+  def keyword_never_defined_universe
+    return @keyword_never_defined_universe if defined?(@keyword_never_defined_universe)
+
+    @keyword_never_defined_universe =
+      if ENV['NATIVE_SRCS'] && ENV['FOREIGN_RUBY_SRCS']
+        IntegerConstants.defined_name_universe(@ireps, Shellwords.split(ENV['NATIVE_SRCS']),
+                                               Shellwords.split(ENV['FOREIGN_RUBY_SRCS']))
+      end
+  end
+
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: a keyword SEND whose
+  # receiver is the value of a bare capitalized constant that is DEFINED
+  # NOWHERE in the closed world. Both keyword-free proofs above need a callee
+  # argument spec to fold against and honestly decline when one cannot be
+  # seen -- but they are answering a question this site does not need asked,
+  # because the send is DYNAMICALLY UNREACHABLE, and the proof is a chain of
+  # three closed-world facts, each read from machinery this file already
+  # trusts:
+  #
+  #   1. NEVER-DEFINED: the receiver's constant name is absent from
+  #      IntegerConstants.defined_name_universe -- every definition form a
+  #      constant can arrive through in this program: SETCONST/SETMCNST/
+  #      CLASS/MODULE opcodes across every scanned irep, the native
+  #      mrb_define_const/mrb_const_set/mrb_define_class/mrb_define_module
+  #      text scan, and the foreign-source `NAME =`/class/module scan.
+  #   2. UNREACHABLE SEND: compile_insn compiles such a GETCONST to the
+  #      bc2cpp_const_try scope chain, whose final arm is the real
+  #      mrb_const_get against Object -- and mruby's own src/variable.c
+  #      mrb_const_get raises NameError for a name no scope in the chain
+  #      defines (the same chain every never-defined `Foo` read in this
+  #      program already compiles to, and the only reason a `defined?`-free
+  #      optional integration hook like this one works in Ruby at all is the
+  #      guard ABOVE it -- see 3). So step 1 alone makes the GETCONST raise
+  #      every time it executes.
+  #   3. THIS SEND IS BEHIND IT: the backward scan (the house pattern,
+  #      literal_symbol_write's own) shows the receiver register's FIRST
+  #      write before the call is that GETCONST and only that GETCONST
+  #      (any other first writer, or no writer, is a safe miss), and no
+  #      jump/catch-handler target lands strictly between the GETCONST and
+  #      the send -- so no control-flow edge reaches the send without
+  #      executing the GETCONST (which raised) first. Control can only ever
+  #      enter an irep at its own start, so cross-irep entries cannot slip
+  #      in mid-range either.
+  # The emitted dispatch is therefore never executed; what it emits is the
+  # faithful OP_SEND shape anyway (keyword pairs packed by vm.c's own
+  # unconditional hash_new_from_regs into ONE trailing positional Hash, then
+  # the ordinary dynamic dispatch) so a hypothetical proof break shows a
+  # wrong-but-well-formed send, never a mispacked argument list. Dispatch
+  # stays `mrb_funcall` -- no devirt, no marker-vs-runtime-def interaction to
+  # reason about (a runtime-installed def could change WHAT the send finds,
+  # but nothing runs this far to observe it).
+  #
+  # Holes, stated and MEASURED rather than assumed (the closed-world
+  # assumption every whole-program gate here already shares): a name built at
+  # runtime (`const_set`) or installed by a source outside the scanned set
+  # (`require`d gem not in NATIVE_SRCS, an `eval`'d string) escapes the
+  # universe scan. `grep -rn const_set` across 3rd/mruby/mrblib, mruby
+  # mrbgems' Ruby sources and 3rd/optcarrot/lib: no uses. optcarrot's own
+  # `eval`s (cpu.rb/ppu.rb, codegen of handlers) sit on the `--opt` build
+  # path only -- already documented as outside the probe's default-compile
+  # scope in tools/optcarrot_probe/README.md -- and none define constants.
+  # The real shape this exists for: optcarrot probe's `NES#run` --
+  # `046 GETCONST R3 StackProf` ... `072 SEND R3 :start n=0|nk=3`, guarding
+  # the optional stackprof integration (`if @conf.stackprof_mode`), with
+  # `StackProf` defined nowhere in that closed world.
+  def compile_keyword_never_defined_const_send(name:, d:, n:, nk:, irep:, idx:, argv:,
+                                               kw_sym_regs:, kw_val_regs:, kw_names:,
+                                               self_implicit:)
+    return nil if self_implicit
+    return nil unless nk.positive?
+
+    universe = keyword_never_defined_universe
+    return nil if universe.nil?
+
+    send_insn = irep.instructions[idx]
+    return nil unless send_insn && send_insn.op == 'SEND'
+
+    recv_reg = d.to_i
+    write = nil
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      # A write to the receiver register ends the scan -- it must be the
+      # constant read itself (same first-writer rule literal_symbol_write
+      # uses for the keyword keys).
+      next unless insn.args =~ /^R#{recv_reg}\b/
+
+      write = insn
+      break
+    end
+    return nil unless write && write.op == 'GETCONST'
+
+    const_name = write.args[/^R\d+\s+(\S+)/, 1]
+    return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
+    return nil if universe.include?(const_name)
+
+    # No jump target, and no raise-handler entry, may land strictly inside
+    # (write, send] -- such an edge would reach the send WITHOUT executing
+    # the GETCONST that proves it dead.
+    blocked = jump_targets(irep)
+    irep.catch_handlers&.each { |ch| blocked << ch.target }
+    return nil if blocked.any? { |t| t > write.addr && t <= send_insn.addr }
+
+    out = String.new
+    out << "  // KEYWORD_NEVER_DEFINED_CONST :#{name} (n=#{n}|nk=#{nk}) -- receiver is the value of " \
+           "GETCONST `#{const_name}` (addr #{write.addr}), a constant with NO definition anywhere in this " \
+           "closed world (no SETCONST/SETMCNST, no CLASS/MODULE, no native mrb_define_const/const_set/" \
+           "define_class/define_module, no foreign-source assignment), so that GETCONST's own scope-chain " \
+           "raises NameError and this send is dynamically unreachable -- no jump or handler entry lands " \
+           "between the two. The keyword packing and real dynamic dispatch emitted below are the " \
+           "faithful OP_SEND shape for a call that cannot execute.\n"
+    out << "  {\n"
+    out << "    mrb_value bc2cpp_kwh = mrb_hash_new_capa(M, #{nk});\n"
+    nk.times do |k|
+      out << "    mrb_hash_set(M, bc2cpp_kwh, r#{kw_sym_regs[k]}, r#{kw_val_regs[k]});" \
+             "  // :#{kw_names[k]}\n"
+    end
+    out << "    #{dynamic_dispatch_line(d, "r#{d}", name, argv + ['bc2cpp_kwh'])}"
     out << "  }\n"
     out
   end
