@@ -243,7 +243,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'PPU#initialize, #run, #main_loop, and the four Fiber yield methods remain interpreted so Fiber is created and never yields across a generated C function frame; other PPU methods are compiled.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. PPU#initialize, #run, #main_loop, and the four Fiber yield methods remain interpreted so Fiber is created and never yields across a generated C function frame; other PPU methods are compiled.'
     end
   end
 

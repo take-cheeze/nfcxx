@@ -66,16 +66,44 @@ FILES = %w[
   optcarrot/config.rb
 ].map { |f| File.join(LIB, f) }
 
+# The CPU dispatch table contains arrays describing each
+# opcode's method and arguments. `send(*table_entry)` makes mruby duplicate
+# that array on every instruction (OP_SEND's splat semantics). Emit the same
+# call with fixed positional arguments instead, avoiding one temporary Array
+# per opcode while keeping the table and dynamic method lookup intact.
+CPU_DISPATCH_SPLAT = "send(*DISPATCH[@opcode])"
+CPU_DISPATCH_DIRECT = <<~RUBY.chomp
+  dispatch = DISPATCH[@opcode]
+  case dispatch.length
+  when 1 then send(dispatch[0])
+  when 2 then send(dispatch[0], dispatch[1])
+  when 3 then send(dispatch[0], dispatch[1], dispatch[2])
+  when 4 then send(dispatch[0], dispatch[1], dispatch[2], dispatch[3])
+  else raise "invalid opcode dispatch"
+  end
+RUBY
+
 File.open(out_file, 'w') do |out|
   unless ENV['OPTCARROT_NO_SHIMS'] == '1'
     out.write(File.read(File.join(PROBE_DIR, 'shims.rb')))
   end
+  cpu_dispatch_rewritten = false
   FILES.each do |f|
     File.foreach(f) do |line|
-      out.write(line) unless line =~ /^\s*require_relative\b/
+      next if line =~ /^\s*require_relative\b/
+
+      if f.end_with?('/optcarrot/cpu.rb') && line.include?(CPU_DISPATCH_SPLAT)
+        raise 'CPU dispatch splat occurs more than once' if cpu_dispatch_rewritten
+
+        cpu_dispatch_rewritten = true
+        line = line.sub(CPU_DISPATCH_SPLAT, CPU_DISPATCH_DIRECT.lines.map { |part| "          #{part}" }.join)
+      end
+      out.write(line)
     end
     out.write("\n")
   end
+  raise 'optcarrot CPU dispatch splat not found' unless cpu_dispatch_rewritten
+
   out.write(File.read(File.join(PROBE_DIR, 'runner_tail.rb')))
 end
 

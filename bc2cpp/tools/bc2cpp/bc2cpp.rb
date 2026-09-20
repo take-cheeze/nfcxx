@@ -2661,15 +2661,11 @@ end
 # direct call fire on a nil receiver. Defining the claim this way keeps
 # it exactly true instead of approximately true.
 #
-# `ret_class` is deliberately NOT wired into `trace_new_target` this
-# round, only into ArrayElementLayout's own value tracer (see
-# `element_value_class`). It would be sound there too (every consumer of
-# that function already runtime-guards), but it would change the TYPED
-# devirtualization decision at every call site in the program at once,
-# which is a much larger blast radius than one round should mix into a
-# new mechanism's own measurement. Named follow-up, recorded here rather
-# than left implicit: "ELEMENT_CLASS_SUPPORT: promote `ret_class` to a
-# trace_new_target terminal".
+# `ret_class` also feeds the guarded TYPED devirtualization tracer. This
+# is a terminal proof only when the exact receiver class and exact method
+# definition are known; nil and subclasses still take the existing
+# runtime-dispatch fallback. GETIDX/GETIDX0 are included because mrbc
+# emits those for `receiver[index]` instead of SEND :[].
 class ElementAnnotations
   Annotation = Struct.new(:element, :ret_class, keyword_init: true)
 
@@ -6705,7 +6701,8 @@ def lexically_resolve_construct_target(written, owner)
 end
 
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
-                      class_layout: nil, registry: nil, container_constants: nil)
+                      class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
+                      known_owners: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -6726,6 +6723,26 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     case insn.op
     when 'MOVE'
       reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'GETIDX', 'GETIDX0'
+      return nil unless element_annotations && class_layout && registry
+
+      # GETIDX overwrites its receiver register in place. GETIDX0 has a
+      # distinct destination and receiver, so recover that source register.
+      recv_reg = if insn.op == 'GETIDX'
+                   reg
+                 else
+                   insn.args.scan(/R(\d+)/).flatten[1]
+                 end
+      return nil unless recv_reg
+
+      recv_class = trace_new_target(irep, i, recv_reg, ivar_classes, mand, arg_classes, owner: owner,
+                                     class_layout: class_layout, registry: registry,
+                                     container_constants: container_constants,
+                                     element_annotations: element_annotations,
+                                     known_owners: known_owners)
+      recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
+      md = registry['[]']&.find { |candidate| candidate.owner == recv_class && candidate.irep }
+      return md && element_annotations[md.irep]&.ret_class
     when 'SEND0', 'SEND'
       return nil if resolving_new || !path.empty?
 
@@ -6781,7 +6798,9 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
         return trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
                                  class_layout: class_layout, registry: registry,
-                                 container_constants: container_constants)
+                                 container_constants: container_constants,
+                                 element_annotations: element_annotations,
+                                 known_owners: known_owners)
       else
         # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
         # `name` isn't `new`, so this can never join the fresh-`.new`
@@ -6809,9 +6828,6 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # zero args, src/vm.c's OP_SEND0 hardcodes c=0 -- same fact
         # compile_send's own `n_match` comment already established) so a
         # nil match here still correctly means n=0.
-        n_match = insn.args.match(/n=(\d+|\*)/)
-        return nil if n_match && n_match[1] != '0'
-
         # This SEND's own receiver was whatever last wrote `reg` strictly
         # BEFORE this instruction's own index `i` -- the exact same "SEND
         # overwrites its receiver register with the result, in place"
@@ -6829,8 +6845,21 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # way the un-recursive scan above already terminates on its own.
         recv_class = trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
                                        class_layout: class_layout, registry: registry,
-                                       container_constants: container_constants)
+                                       container_constants: container_constants,
+                                       element_annotations: element_annotations,
+                                       known_owners: known_owners)
         return nil unless recv_class
+        recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
+
+        if element_annotations
+          annotated = registry[name]&.find do |md|
+            md.owner == recv_class && md.irep && element_annotations[md.irep]&.ret_class
+          end
+          return element_annotations[annotated.irep].ret_class if annotated
+        end
+
+        n_match = insn.args.match(/n=(\d+|\*)/)
+        return nil if n_match && n_match[1] != '0'
 
         # `registry[name]` is already sliced to real MethodDefs literally
         # named `name` -- a real attr_writer's own MethodDef is always
@@ -6920,7 +6949,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
 
       ivar = insn.args[/@(\w+)/, 1]
-      return ivar_classes && ivar_classes[ivar]
+      klass = ivar_classes && ivar_classes[ivar]
+      return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
     when 'ARRAY', 'ARRAY2'
       # EACH_BLOCK_SUPPORT: an array literal (`items = [1, 2, 3]`) always
       # creates a real Array -- confirmed directly against
@@ -8465,6 +8495,7 @@ class CodeGen
     # keeps the honest #error.
     @blk_param_level = 0
     @registry = registry
+    @known_owners = Set.new(registry.values.flatten.map(&:owner))
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
     # (unrecognized/computed expression) -- build_registry's own
@@ -13633,13 +13664,11 @@ class CodeGen
   # `proven_array_source`'s own ARRAY-literal/core-Array-return-method
   # chase, Hash-only via the former since no HASH-literal/core-Hash-return
   # scan exists yet -- a real, narrower gap, not a soundness concern, just
-  # fewer real Hash receivers provable this way today). No new tracing
-  # logic: a new call site for logic this file already ships and relies on
-  # elsewhere. Returns `'Array'`, `'Hash'`, or nil (not statically
-  # provable, or provably something else) -- compile_insn's own GETIDX/
-  # GETIDX0/SETIDX cases keep their full three-way runtime-checked
-  # fallback unchanged for the nil case, so a miss here costs nothing but
-  # the missed fast path, never a wrong answer.
+  # fewer real Hash receivers provable this way today). It also returns an
+  # exact custom class when the registry has a compiled `[]` body, allowing
+  # GETIDX/GETIDX0 to reuse compile_send's guarded TYPED lowering. Callers
+  # interested only in built-in containers still match only Array/Hash;
+  # all other cases retain their existing dynamic fallback.
   #
   # `idx.nil?` still bails immediately -- `trace_new_target`'s backward scan
   # needs a real position to start from. BLOCK_BODY_INDEX_SUPPORT: that used
@@ -13661,10 +13690,37 @@ class CodeGen
     ivar_classes = @class_layout[owner_def.owner]
     traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_def.owner,
                                class_layout: @class_layout, registry: @registry,
-                               container_constants: @container_constants)
+                               container_constants: @container_constants,
+                               element_annotations: @element_annotations,
+                               known_owners: @known_owners)
+    traced = resolve_owner_name(traced, { owner: owner_def.owner, known_owners: @known_owners }) if traced
     return traced if %w[Array Hash].include?(traced)
+    return traced if traced && @registry['[]']&.any? { |md| md.owner == traced && md.irep }
 
     proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
+  end
+
+  # INDEX_SEND_DEVIRT: GETIDX/GETIDX0 normally lower to builtin container
+  # paths plus a dynamic `[]` fallback. When that fallback's receiver has
+  # an exact compiled user-class definition, reuse compile_send's existing
+  # guarded TYPED call and retain its Ruby dispatch fallback. Accept only a
+  # TYPED result here; a MONO result would discard the GETIDX path's dynamic
+  # container semantics for unproven runtime receivers.
+  def compile_typed_index_send(irep, idx, owner_def, dest_reg, receiver_reg, index_expr, reg_offset, receiver_class,
+                               fallback_code)
+    return nil unless owner_def && idx && receiver_class
+    return nil unless @registry['[]']&.any? { |md| md.owner == receiver_class && md.irep }
+
+    saved_hint = @elem_class_hint
+    code = compile_send("R#{dest_reg} :[] n=1", self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{receiver_reg}", call_arguments: [index_expr],
+                        trace_idx: idx, trace_reg_offset: reg_offset,
+                        trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
+    return code if code.include?('TYPED :[] ->')
+
+    @elem_class_hint = saved_hint
+    nil
   end
 
   # ---------------------------------------------------------------------------
@@ -19866,26 +19922,25 @@ class CodeGen
       end
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
       compile_cmp(insn.op, a, irep, idx, owner_def, reg_offset)
-    # BLOCK_BODY_INDEX_SUPPORT: compile_send is deliberately STILL handed a
-    # nil `idx` inside an inlined block body, the one place this round leaves
-    # exactly as it found it. The proofs above ask about the one or two
-    # register numbers this case has already extracted, so `unshift_proof_reg`
-    # can translate each of them on its own and every one of them is only ever
-    # read; compile_send instead re-parses `args` itself, derives a whole
+    # BLOCK_BODY_INDEX_SUPPORT: compile_send keeps its ordinary `idx` nil
+    # inside shifted block bodies. The TYPED receiver tracer gets a separate
+    # read-only `trace_idx`/register-offset pair below; the other call-site
+    # scans still decline because they re-parse `args` themselves, derive a whole
     # `r<d>..r<d+n>` receiver/argument window from it, and hands those raw
     # numbers to six different backward scans -- two of which
     # (compile_keyword_send, compile_splat_send) hand REGISTER LISTS back out
     # to be printed straight into the generated C++, so they would need the
     # shift re-applied on the way out as well as removed on the way in.
-    # Threading the offset through only the four read-only scans was tried and
-    # measured on the real whole-program build: it moved 18 call sites between
-    # the POLY-marked and not-yet-attempted buckets and removed exactly zero
-    # of them, so it is not carried here. `idx` nil keeps every one of those
-    # paths declining on its own `irep && idx` guard, exactly as before.
+    # `trace_new_target` needs only the receiver register and instruction
+    # index, both of which can be safely unshifted, so it is the one scan that
+    # now receives this separate proof context. Keyword/splat dispatch and
+    # other scans keep the previous nil-index behavior.
     when 'SEND0', 'SEND'
-      compile_send(a, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def)
+      compile_send(a, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                   trace_idx: idx, trace_reg_offset: reg_offset)
     when 'SSEND0', 'SSEND'
-      compile_send(a, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def)
+      compile_send(a, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                   trace_idx: idx, trace_reg_offset: reg_offset)
     when 'BLKPUSH'
       # BLKPUSH_YIELD_SUPPORT: `BLKPUSH Ra m1:r:m2:kd (lv)` (real disasm,
       # confirmed via a fresh `mrbc -v` of `def foo(a,b); yield(a,b); end`:
@@ -20419,7 +20474,8 @@ class CodeGen
       # has to fall through to the real `[]=` -- `bc2cpp_ary_entry` only
       # ever handles a fixnum index).
       d, s = regs(a, 2)
-      case static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      case index_class
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -20441,7 +20497,7 @@ class CodeGen
           }
         CPP
       else
-        <<~CPP
+        fallback = <<~CPP
           if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
           } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
@@ -20453,6 +20509,8 @@ class CodeGen
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
           }
         CPP
+        typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
+        typed || fallback
       end
     when 'GETIDX0'
       # "GETIDX0 R7 R4[0]" -- R[a] = R[b][0] (real OP_GETIDX0 semantics,
@@ -20473,7 +20531,8 @@ class CodeGen
       # GETIDX above, applied to `s` (the receiver here, not `d` -- see
       # this opcode's own separate dest/src register pair).
       d, s = regs(a, 2)
-      case static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      index_class = static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      case index_class
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -20493,7 +20552,7 @@ class CodeGen
           }
         CPP
       else
-        <<~CPP
+        fallback = <<~CPP
           if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
             r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
           } else if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
@@ -20502,6 +20561,9 @@ class CodeGen
             r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
           }
         CPP
+        typed = compile_typed_index_send(irep, idx, owner_def, d, s, 'mrb_fixnum_value(0)', reg_offset,
+                                         index_class, fallback)
+        typed || fallback
       end
     when 'SETIDX'
       # "SETIDX R4 (R5) (R6)" -- R[a][R[a+1]] = R[a+2], then R[a] = R[a+2]
@@ -22269,7 +22331,8 @@ class CodeGen
   end
 
   def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil,
-                   call_receiver: nil, call_arguments: nil)
+                   call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
+                   trace_reg_offset: 0, typed_fallback: nil)
     # ELEMENT_CLASS_SUPPORT: consume-and-clear. The hint is published by
     # with_element_hint for exactly the one instruction being translated
     # right now, and taking it down here (before ANY other work, including
@@ -22999,7 +23062,9 @@ class CodeGen
     via_element = false
     ivar_accessor_target = nil
     known_class = nil
-    if target.nil? && !self_implicit && irep && idx
+    if target.nil? && !self_implicit && irep && (idx || trace_idx)
+      proof_idx = idx || trace_idx
+      proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
@@ -23012,21 +23077,18 @@ class CodeGen
       # trace_new_target's own top comment for the full mechanism. Both
       # are already real CodeGen instance state (`initialize`, above), no
       # new plumbing needed to reach them from here.
-      known_class = trace_new_target(irep, idx, d, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
-                                      class_layout: @class_layout, registry: @registry)
+      known_class = trace_new_target(irep, proof_idx, proof_reg, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
+                                      class_layout: @class_layout, registry: @registry,
+                                      element_annotations: @element_annotations,
+                                      known_owners: @known_owners)
     end
     # ELEMENT_CLASS_SUPPORT: the same TYPED/IVAR_ACCESSOR resolution, fed
-    # by a fact the backward scan above structurally cannot reach. Inside
-    # an inlined block body the receiver is the loop-element register,
-    # which no instruction in that body ever writes (the EMITTER binds it,
-    # right outside the translated instruction stream), so trace_new_target
-    # has nothing to find -- and in fact never even runs there, because
-    # compile_insn still hands compile_send a nil `idx` for an inlined block
-    # body (see BLOCK_BODY_INDEX_SUPPORT's own note at that SEND/SSEND case
-    # for why this one delegation keeps the old bail while the fixnum and
-    # indexable proofs no longer do). The hint published by with_element_hint
-    # carries exactly the missing piece: "this receiver is element N of an
-    # array whose element class is X".
+    # by a fact the backward scan above structurally cannot reach. When the
+    # receiver is an inlined-loop parameter, no instruction writes that
+    # register, so trace_new_target still has nothing to find; the hint
+    # published by with_element_hint supplies that fact. Other block-local
+    # values, including indexed reads through an annotated `[]`, can now use
+    # the separate trace index above.
     #
     # Placed AFTER the ordinary trace on purpose, as a strict fallback:
     # `known_class` is only ever nil here (the two sources are mutually
@@ -23184,10 +23246,11 @@ class CodeGen
         traced_note = via_element ? "inlined block element of Array<#{target.owner}>" : "receiver traced to #{target.owner}"
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
+        fallback = typed_fallback || dynamic_dispatch_line(d, recv, name, argv)
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
-          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "    #{fallback}" \
           "  }\n"
       elsif lexical_self
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
