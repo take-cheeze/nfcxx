@@ -277,17 +277,40 @@ actually recognizes (`Game::Battle#deal_attack`, `RGSS#audio_probe`) has a
 jump onto its handler address, which is why the diff is empty rather than
 merely small.
 
-Not yet attempted: checking whether the 383 "compiled clean" methods
-produce *correct* output (this only confirms bc2cpp's own compiler accepted
-them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
-numbers measure for the real project -- not that the generated C++ was run
-and its output checked against CRuby/mruby's own, the way the
-headless-benchmark checksum above verifies the *interpreted* path). The
-keyword `SEND` whose receiver's class the closed world cannot see at all
-(`NES#run`'s `StackProf.start`) is closed by point 7's unreachability
-proof -- not by packing against a callee (no def to prove keyword-free)
-nor by a keyword-carrying C-API call (mruby 4.0.0 has no such API --
-`mrb_funcall` sets `ci->nk = 0`), neither of which can be sound there.
+## Compiled runtime check
+
+An executable probe now installs bc2cpp's generated methods into a separate
+mruby build and compares optcarrot's checksum. The first run exposed two
+runtime correctness gaps despite all methods compiling cleanly:
+
+- A C function backed block with two parameters raised on mruby's
+  `Hash#each`, which passes one `[key, value]` array. bc2cpp now applies the
+  same array destructuring and lenient argument handling as an ordinary
+  multi-parameter block.
+- A base and subclass could each get a separate embedded ivar struct, but an
+  mruby object has only one `DATA_PTR`. Their generated initializers replaced
+  one struct pointer with the other. bc2cpp now keeps both layouts in normal
+  instance variables when an embedded layout overlaps an inheritance chain.
+
+With those fixes, the headless 180-frame run completes and returns checksum
+`59662`, matching the interpreted run and CRuby. The runtime probe compiles
+300 methods and leaves `Optcarrot::PPU` interpreted: its `Fiber.new` block
+cannot be created from bc2cpp's C function backed block. On this debug
+configuration the compiled run took 33.83 seconds (optcarrot reported
+5.58 FPS), versus 25.28 seconds (9.56 reported FPS) for interpreted mruby.
+This verifies correctness, but shows no speedup yet; the next optimization
+work should target generated-call overhead and a safe path through PPU's
+Fiber-based loop.
+
+The compiler also now includes `mruby/numeric.h` in generated C++, required
+for its integer and float conversion helpers.
+
+The remaining keyword `SEND` whose receiver's class the closed world cannot
+see at all (`NES#run`'s `StackProf.start`) is still closed by point 7's
+unreachability proof -- not by packing against a callee (no def to prove
+keyword-free) nor by a keyword-carrying C-API call (mruby 4.0.0 has no such
+API -- `mrb_funcall` sets `ci->nk = 0`), neither of which can be sound
+there.
 
 ## Files
 
