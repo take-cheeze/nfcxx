@@ -4685,6 +4685,24 @@ NATIVE_CONSTRUCT_TARGETS = {
   'Tone' => { fn: 'rgss_tone_new_direct', class_fn: 'rgss_native_tone_class', arity: 4, arg_type: :float },
   'Color' => { fn: 'rgss_color_new_direct', class_fn: 'rgss_native_color_class', arity: 4, arg_type: :float },
   'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4, arg_type: :int },
+  # Bitmap (124 real `Bitmap.new` sites, ~105 of them the 2-Integer-arg
+  # size shape): `bmp_init_size` (mruby-rgss/src/lib.cxx) is
+  # `mrb_get_args(M, "ii", ...)` then `alloc_obj(M, self, w, h,
+  # ARGB8888)` -- `rgss_bitmap_new_direct` reproduces exactly that.
+  # Unlike the three entries above (whose every real call site passes
+  # the unboxed type, so `mrb_as_*` raising on a mistyped argument IS
+  # the correct behavior), Bitmap's own Ruby `initialize(f, s)` sends
+  # String first arguments down the file-load path -- legitimate calls
+  # this entry must NOT raise on. Hence `type_guard: :int`: the call
+  # site checks `mrb_integer_p` on every argument first and falls back
+  # to ordinary `mrb_funcall` (the file path, or the genuine TypeError
+  # the interpreter raises for a mistyped size shape) whenever any of
+  # them isn't Integer-tagged -- the same "trust the proof to pick the
+  # fast path, still verify at runtime" shape every other guarded
+  # devirtualization in this file already uses, just keyed on argument
+  # tags rather than the receiver's class.
+  'Bitmap' => { fn: 'rgss_bitmap_new_direct', class_fn: 'rgss_native_bitmap_class', arity: 2, arg_type: :int,
+                type_guard: :int },
 }.freeze
 
 # Generalizes NATIVE_CONSTRUCT_TARGETS' own "MONO :new -> direct native
@@ -19558,7 +19576,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19572,7 +19590,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "+", 1, r#{s});
+            #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19586,7 +19604,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19600,7 +19618,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "-", 1, r#{s});
+            #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19621,7 +19639,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "*", 1, r#{s});
+            #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19656,7 +19674,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "/", 1, r#{s});
+            #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -20426,7 +20444,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -20447,7 +20465,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -20749,13 +20767,37 @@ class CodeGen
       return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
     end
 
+    # OP_CMP uses a real dynamic send for non-Fixnum operands. Forward those
+    # sends through compile_send's existing MONO/TYPED resolver so compiled
+    # operator methods can be called directly. EQ keeps its historical path
+    # because mruby's EQ opcode has identity and Symbol fast paths that a
+    # direct method call would bypass.
+    fallback = if op == 'EQ'
+                 "r#{d} = mrb_funcall(M, r#{d}, \"#{sym}\", 1, r#{s});\n"
+               else
+                 compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+               end
+
     <<~CPP
       if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
         r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));
       } else {
-        r#{d} = mrb_funcall(M, r#{d}, "#{sym}", 1, r#{s});
+        #{fallback}
       }
     CPP
+  end
+
+  # Operator opcodes fall back to an ordinary one-argument method send
+  # whenever their built-in fast path does not apply. Reuse compile_send's
+  # MONO/TYPED resolution; ADDI/SUBI's immediate is passed as an expression
+  # so this does not borrow a register that may still be live.
+  def compile_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
+    argument = arg_reg ? "r#{arg_reg}" : arg_expr
+    send_args = "R#{dest_reg} :#{name} n=1"
+    send = compile_send(send_args, self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{dest_reg}", call_arguments: [argument])
+    send.lines.map { |line| "  #{line}" }.join
   end
 
   # KEYWORD_CALLSITE_SUPPORT: compile a `SEND`/`SSEND` call site that
@@ -21951,7 +21993,8 @@ class CodeGen
     end
   end
 
-  def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
+  def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil,
+                   call_receiver: nil, call_arguments: nil)
     # ELEMENT_CLASS_SUPPORT: consume-and-clear. The hint is published by
     # with_element_hint for exactly the one instruction being translated
     # right now, and taking it down here (before ANY other work, including
@@ -22116,8 +22159,8 @@ class CodeGen
     end
 
     n = n_match ? n_match[1].to_i : 0
-    recv = self_implicit ? 'self' : "r#{d}"
-    argv = (1..n).map { |k| "r#{d.to_i + k}" }
+    recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
+    argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
 
     # LITERAL_EQQ_SUPPORT: `case x; when LITERAL ... end`'s own desugared
     # `LITERAL === x` (a `:===` SEND whose own receiver is a bare literal
@@ -22250,8 +22293,29 @@ class CodeGen
         # this change; moving them here changes nothing observable (same
         # TypeError-raising for a bad argument), it only changes which
         # side of the call spells them out.
-        unbox = native[:arg_type] == :int ? 'mrb_as_int' : 'mrb_as_float'
-        unboxed_argv = argv.map { |a| "#{unbox}(M, #{a})" }
+        #
+        # `type_guard` (Bitmap only, see that entry): instead of
+        # unboxing-unconditionally (which RAISES on a mistyped argument),
+        # check every argument's Integer tag first and fall back to
+        # ordinary `mrb_funcall` when any check fails. The fallback is
+        # load-bearing: a String first argument is Bitmap's own
+        # legitimate file-load shape, not an error. `mrb_integer()`
+        # (not `mrb_as_int()`) reads the value past the tag check --
+        # the same check-then-read shape GETIDX's own Array fast path
+        # already uses (`mrb_integer_p` guard, `mrb_integer` read).
+        if native[:type_guard] == :int
+          arg_checks = argv.map { |a| "mrb_integer_p(#{a})" }.join(' && ')
+          unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
+          guard = "mrb_class_ptr(#{recv}) == #{native[:class_fn]}() && #{arg_checks}"
+          note_extra = " Argument tags checked first (#{arg_checks}), " \
+                       "falling back to ordinary dispatch for any other shape -- " \
+                       "see that entry's own `type_guard` comment."
+        else
+          unbox = native[:arg_type] == :int ? 'mrb_as_int' : 'mrb_as_float'
+          unboxed_argv = argv.map { |a| "#{unbox}(M, #{a})" }
+          guard = "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
+          note_extra = ''
+        end
         note = "  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own " \
                "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n" \
                "  // Runtime-guarded: #{known} could have been reassigned at the constant level (e.g. " \
@@ -22259,13 +22323,13 @@ class CodeGen
                "-- #{recv} is whatever this method's own existing GETCONST resolution chain above just " \
                "produced, so a reassignment there is already reflected in it; falls back to ordinary " \
                "mrb_funcall (whatever #{recv} now actually is) rather than misconstruct if it doesn't " \
-               "match the real native class. #{native[:fn]}'s own parameters are native mrb_int/" \
+               "match the real native class.#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/" \
                "mrb_float, not mrb_value, so this call site unboxes each argument register with the " \
-               "same #{unbox} that function used to call internally, and passes mrb_class_ptr(#{recv}) " \
+               "same #{native[:type_guard] ? 'mrb_integer (past the tag check above)' : unbox} that function used to call internally, and passes mrb_class_ptr(#{recv}) " \
                "straight through (already computed for the guard just above -- no second, redundant " \
                "mrb_class_ptr call needed).\n"
         return "#{note}" \
-               "  if (mrb_class_ptr(#{recv}) == #{native[:class_fn]}()) {\n" \
+               "  if (#{guard}) {\n" \
                "    r#{d} = #{native[:fn]}(M, mrb_class_ptr(#{recv}), #{unboxed_argv.join(', ')});\n" \
                "  } else {\n" \
                "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
