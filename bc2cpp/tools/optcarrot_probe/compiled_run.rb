@@ -21,17 +21,8 @@ FIBER_BOUNDARY_METHODS = {
   'Optcarrot::CPU' => %w[
     run vsync current_clock next_frame_clock next_frame_clock= do_nmi
     fetch sprite_dma steal_clocks odd_clock? update
-  ],
-  'Optcarrot::PPU' => %w[
-    initialize update vsync sync run dispose main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks
   ]
 }.freeze
-PPU_METHODS_OUTSIDE_FIBER = %w[
-  reset set_chr_mem nametables= setup_frame
-  poke_2000 poke_2001 peek_2002 poke_2003 poke_2004 peek_2004
-  poke_2005 poke_2006 poke_2007 peek_2007 poke_2xxx peek_2xxx
-  peek_3000 poke_4014 peek_4014
-].freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -113,7 +104,9 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
-    next if owner == 'Optcarrot::PPU' && !PPU_METHODS_OUTSIDE_FIBER.include?(name)
+    # mruby crashes when generated C++ methods run on the PPU Fiber path,
+    # including accessors outside the explicit resume/yield methods.
+    next if owner == 'Optcarrot::PPU'
     next if FIBER_BOUNDARY_METHODS.fetch(owner, []).include?(name)
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
@@ -232,7 +225,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} methods (NES/CPU/PPU Fiber boundary methods remain interpreted)"
+  puts "bc2cpp installed #{count} methods (NES/CPU Fiber boundaries and all PPU methods remain interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -259,7 +252,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose, the CPU#run/#vsync path and PPU callbacks, and the PPU Fiber loop and helpers remain interpreted; PPU setup and CPU-facing peek/poke methods are compiled.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose and CPU Fiber callbacks remain interpreted. All PPU methods remain interpreted because generated C++ methods crash on optcarrot’s Fiber path.'
     end
   end
 
