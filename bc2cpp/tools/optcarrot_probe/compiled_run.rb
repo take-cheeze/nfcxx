@@ -20,6 +20,9 @@ ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 # through CPU/APU/mapper callbacks. Keep compiled execution limited to setup
 # classes until generated C functions are safe across mruby Fiber switches.
 FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
+# This initializer runs while NES is assembled, before its emulator Fibers
+# start; including it exercises the generated mapper slice-write fast paths.
+FIBER_SAFE_SETUP_METHODS = { 'Optcarrot::ROM' => %w[initialize] }.freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -103,7 +106,7 @@ def emit_register(diagnostics, out_dir)
     entry, owner, name, extra = match.captures
     # The CI runtime benchmark still SIGSEGVs with CPU/PPU methods excluded,
     # showing that other emulator runtime owners are reached on the Fiber path.
-    next unless FIBER_SAFE_OWNERS.include?(owner)
+    next unless FIBER_SAFE_OWNERS.include?(owner) || FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
@@ -248,7 +251,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Only setup methods are compiled; emulator runtime methods remain interpreted because CI reproduced SIGSEGVs when compiled methods ran on the PPU Fiber path.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods and ROM#initialize are compiled; emulator runtime methods remain interpreted because CI reproduced SIGSEGVs when compiled methods ran on the PPU Fiber path.'
     end
   end
 
