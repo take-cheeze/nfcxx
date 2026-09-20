@@ -9218,19 +9218,23 @@ class CodeGen
   # 3rd/mruby/src/range.c). `to_s`/`length`/`first`/`dup`/`===` are the
   # entries that AREN'T "one real native implementation" -- see each
   # one's own `*_TYPE_TAG_DISPATCH` comment in
-  # compile_native_primitive_send.
+  # compile_native_primitive_send. `empty?` is handled by a separate
+  # per-class guard below because its name also has a bytecode definition.
   #
-  # `push`/`size`/`empty?`/`<<` were investigated this round too (each has
-  # a real, safely-reproducible native body -- see this round's own
-  # changelog) but deliberately NOT added here: this exact program's own
+  # `push`/`size`/`<<` were investigated this round too (each has a real,
+  # safely-reproducible native body) but deliberately NOT added here: this
+  # exact program's own
   # whole-program registry shows each one genuinely collided with a real
   # bytecode override somewhere in the closed world (`RPG2k#push`,
-  # `Game::Party#size`, `Game::MoveRoute#empty?`,
-  # `RGSS::ErrorReport::Tee#<<`), confirmed directly against the live
-  # registry (not assumed) -- `native_only_mono?` correctly refuses all
-  # four every time, so an entry for any of them would be real, dead,
+  # `Game::Party#size`, `RGSS::ErrorReport::Tee#<<`), confirmed directly
+  # against the live registry (not assumed) -- `native_only_mono?`
+  # correctly refuses all three every time, so an entry for any of them
+  # would be real, dead,
   # never-reached code today. Left out rather than shipped inert; revisit
-  # if a future edit to any of those four classes removes the collision.
+  # if a future edit removes one of those collisions.
+  # `empty?` also collides with `Game::MoveRoute#empty?`, so it uses the
+  # separate exact-built-in-class guard below instead of this name-wide
+  # table gate.
   #
   # `clear` was investigated too but excluded: `RGSS::ErrorReport`'s own
   # `class << self; def clear; ...; end; end` (mruby-rgss/mrblib/
@@ -9238,7 +9242,7 @@ class CodeGen
   # correctly refuses on every time -- confirmed against the live
   # registry (`RGSS::ErrorReport.singleton#clear` shows up as a second
   # def alongside the native placeholder), not assumed. Would be dead
-  # code today, same reasoning as `push`/`size`/`empty?`/`<<` above.
+  # code today, same reasoning as `push`/`size`/`<<` above.
   #
   # `include?`/`member?` were investigated too and also excluded, for the
   # same "individually sound, but real bytecode override collides"
@@ -9294,8 +9298,27 @@ class CodeGen
     defs && defs.size == 1 && defs.first.irep.nil?
   end
 
+  # `empty?` has real, separate native bodies on Array, Hash, and String,
+  # while unrelated Ruby classes in this closed world also define the same
+  # name. Permit only exact built-in receivers, and only when the registry
+  # proves no Ruby definition replaced one of those classes' own methods.
+  # A prepend can sit ahead of the native method, so decline the fast path
+  # for any base class with a known or unresolved prepend.
+  def builtin_container_empty_send_safe?
+    return @builtin_container_empty_send_safe if defined?(@builtin_container_empty_send_safe)
+
+    defs = @registry['empty?']
+    builtins = %w[Array Hash String]
+    @builtin_container_empty_send_safe = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                          defs.none? { |d| builtins.include?(d.owner) } &&
+                                          builtins.none? do |owner|
+                                            !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
+                                          end
+  end
+
   # Emits the guarded direct C++ implementation for one
-  # NATIVE_PRIMITIVE_SEND_ARITY name -- see compile_send's own call site
+  # NATIVE_PRIMITIVE_SEND_ARITY name or the specialized container `empty?`
+  # path -- see compile_send's own call site
   # (right above `target = monomorphic_target(name)`) for the full
   # per-method soundness citations against the real 3rd/mruby source;
   # kept here, rather than inlined at that call site, purely to keep
@@ -9304,6 +9327,41 @@ class CodeGen
   # snippet per name.
   def compile_native_primitive_send(name, d, recv, argv)
     case name
+    when 'empty?'
+      # The registered Array/Hash/String implementations all test the
+      # container's length. Exact class checks preserve subclasses and
+      # singleton overrides; the compile-time gate also rejects a Ruby
+      # override on the base class or a prepend ahead of it.
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      <<~CPP
+          // empty? -- exact built-in containers only; keep dynamic dispatch for overrides
+          switch (mrb_type(#{recv})) {
+          case MRB_TT_ARRAY:
+            if (mrb_obj_ptr(#{recv})->c == M->array_class) {
+              r#{d} = mrb_bool_value(ARY_LEN(mrb_ary_ptr(#{recv})) == 0);
+            } else {
+              #{fallback.chomp}
+            }
+            break;
+          case MRB_TT_HASH:
+            if (mrb_obj_ptr(#{recv})->c == M->hash_class) {
+              r#{d} = mrb_bool_value(mrb_hash_empty_p(M, #{recv}));
+            } else {
+              #{fallback.chomp}
+            }
+            break;
+          case MRB_TT_STRING:
+            if (mrb_obj_ptr(#{recv})->c == M->string_class) {
+              r#{d} = mrb_bool_value(RSTR_LEN(mrb_str_ptr(#{recv})) == 0);
+            } else {
+              #{fallback.chomp}
+            }
+            break;
+          default:
+            #{fallback.chomp}
+            break;
+          }
+      CPP
     when '!'
       "  // ! -- native primitive, no lookup needed\n" \
       "  r#{d} = mrb_bool_value(!mrb_test(#{recv}));\n"
@@ -22773,6 +22831,10 @@ class CodeGen
     # substituting it would be a silent behavior change. Left as
     # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
     # below.
+    if name == 'empty?' && n.zero? && builtin_container_empty_send_safe?
+      return compile_native_primitive_send(name, d, recv, argv)
+    end
+
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name)
       return compile_native_primitive_send(name, d, recv, argv)
     end
