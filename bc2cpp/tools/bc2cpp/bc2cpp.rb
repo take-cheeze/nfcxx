@@ -19496,7 +19496,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19510,7 +19510,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "+", 1, r#{s});
+            #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19524,7 +19524,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19538,7 +19538,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "-", 1, r#{s});
+            #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19559,7 +19559,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "*", 1, r#{s});
+            #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -19594,7 +19594,7 @@ class CodeGen
           if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "/", 1, r#{s});
+            #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -20364,7 +20364,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "+", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -20385,7 +20385,7 @@ class CodeGen
           if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "-", 1, mrb_fixnum_value(#{lit}));
+            #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
         CPP
       end
@@ -20687,13 +20687,37 @@ class CodeGen
       return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
     end
 
+    # OP_CMP uses a real dynamic send for non-Fixnum operands. Forward those
+    # sends through compile_send's existing MONO/TYPED resolver so compiled
+    # operator methods can be called directly. EQ keeps its historical path
+    # because mruby's EQ opcode has identity and Symbol fast paths that a
+    # direct method call would bypass.
+    fallback = if op == 'EQ'
+                 "r#{d} = mrb_funcall(M, r#{d}, \"#{sym}\", 1, r#{s});\n"
+               else
+                 compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+               end
+
     <<~CPP
       if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
         r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));
       } else {
-        r#{d} = mrb_funcall(M, r#{d}, "#{sym}", 1, r#{s});
+        #{fallback}
       }
     CPP
+  end
+
+  # Operator opcodes fall back to an ordinary one-argument method send
+  # whenever their built-in fast path does not apply. Reuse compile_send's
+  # MONO/TYPED resolution; ADDI/SUBI's immediate is passed as an expression
+  # so this does not borrow a register that may still be live.
+  def compile_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
+    argument = arg_reg ? "r#{arg_reg}" : arg_expr
+    send_args = "R#{dest_reg} :#{name} n=1"
+    send = compile_send(send_args, self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{dest_reg}", call_arguments: [argument])
+    send.lines.map { |line| "  #{line}" }.join
   end
 
   # KEYWORD_CALLSITE_SUPPORT: compile a `SEND`/`SSEND` call site that
@@ -21751,7 +21775,8 @@ class CodeGen
     end
   end
 
-  def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil)
+  def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil,
+                   call_receiver: nil, call_arguments: nil)
     # ELEMENT_CLASS_SUPPORT: consume-and-clear. The hint is published by
     # with_element_hint for exactly the one instruction being translated
     # right now, and taking it down here (before ANY other work, including
@@ -21916,8 +21941,8 @@ class CodeGen
     end
 
     n = n_match ? n_match[1].to_i : 0
-    recv = self_implicit ? 'self' : "r#{d}"
-    argv = (1..n).map { |k| "r#{d.to_i + k}" }
+    recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
+    argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
 
     # LITERAL_EQQ_SUPPORT: `case x; when LITERAL ... end`'s own desugared
     # `LITERAL === x` (a `:===` SEND whose own receiver is a bare literal
