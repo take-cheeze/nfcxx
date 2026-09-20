@@ -20287,7 +20287,10 @@ class CodeGen
       # uses), and String with an Integer/String/Range index (mrb_str_aref
       # -- see below); anything else (Range#[], or a class overriding #[])
       # falls back to the real method the interpreter itself would call --
-      # never unsound, just without the in-VM fast path. `r<d>` (the
+      # never unsound, just without the in-VM fast path. Array/Hash/String
+      # fast paths additionally require the exact base class, matching
+      # vm.c's guard and preserving subclass or singleton `[]` overrides.
+      # `r<d>` (the
       # receiver) is read by every branch before any of them writes it, the
       # same "read before overwrite" safety AREF/HASH/ARRAY's own codegen
       # already relies on.
@@ -20309,27 +20312,23 @@ class CodeGen
       # Reproduces the real VM's own index-type gate exactly (`case
       # MRB_TT_INTEGER: case MRB_TT_STRING: case MRB_TT_RANGE:` -- anything
       # else, e.g. a Regexp, falls through to `default: break` there too,
-      # same as this codegen's own `mrb_funcall` fallback). Does NOT
-      # reproduce the real VM's own additional `ary->c != mrb->array_class`
-      # (Array)/`obj_ptr(va)->c != mrb->string_class` (String) exact-class
-      # guard (rejects an Array/String/Hash subclass or singleton
-      # overriding `[]`) -- a real, pre-existing gap this codegen's own
-      # Array/Hash arms already shared before this round touched String at
-      # all, left alone here rather than fixed as a drive-by (this
-      # project's own established mrblib never subclasses Array/String/
-      # Hash to override `[]`, so it costs nothing in practice today, but
-      # it is a real gap, not a proven-safe simplification).
+      # same as this codegen's own `mrb_funcall` fallback). The emitted
+      # exact-class checks below match vm.c's additional guards for Array,
+      # Hash, and String, so subclasses and singleton overrides use Ruby
+      # dispatch.
       #
       # GETIDX_STATIC_RECEIVER_SUPPORT: when `static_indexable_class`
       # proves the receiver Array or Hash ahead of time (the exact same
       # whole-program facts `.each`/`.map`/... inlining already trusts,
       # just asked at this new call site), skip straight to a single
       # cheap type-checked fast path instead of the full four-way runtime
-      # gate below -- still a real `mrb_raise` on a mismatch (defense in
-      # depth against a wrong trace, the same "trust the proof to pick
-      # the fast path, still verify at runtime" shape emit_each_inline's
-      # own `#each` receiver check already established), never a silent
-      # wrong answer. A proven Hash needs no index-type branch at all
+      # gate below -- still a real `mrb_raise` for a non-container tag
+      # (defense in depth against a wrong trace, the same "trust the proof
+      # to pick the fast path, still verify at runtime" shape emit_each_
+      # inline's own `#each` receiver check already established), never a
+      # silent wrong answer. Subclasses use Ruby dispatch to preserve
+      # overridden `[]`/`[]=` methods. A proven Hash needs no index-type
+      # branch at all
       # (`mrb_hash_get` already accepts any key type); a proven Array
       # still needs the `mrb_integer_p` check (a Range/other index still
       # has to fall through to the real `[]=` -- `bc2cpp_ary_entry` only
@@ -20339,7 +20338,9 @@ class CodeGen
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
-          if (mrb_integer_p(r#{s})) {
+          if (mrb_obj_ptr(r#{d})->c != M->array_class) {
+            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+          } else if (mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
           } else {
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
@@ -20348,15 +20349,20 @@ class CodeGen
       when 'Hash'
         <<~CPP
           if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
-          r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+          if (mrb_obj_ptr(r#{d})->c == M->hash_class) {
+            r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+          }
         CPP
       else
         <<~CPP
-          if (mrb_array_p(r#{d}) && mrb_integer_p(r#{s})) {
+          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
-          } else if (mrb_hash_p(r#{d})) {
+          } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
             r#{d} = mrb_hash_get(M, r#{d}, r#{s});
-          } else if (mrb_string_p(r#{d}) && (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
+          } else if (mrb_string_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->string_class &&
+                     (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
             r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
           } else {
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
@@ -20370,7 +20376,7 @@ class CodeGen
       # from GETIDX above, with its own separate dest/src register pair
       # (`BB` operand shape) rather than GETIDX's in-place a/a+1 pair, and
       # no index register at all since the index is always the literal 0.
-      # Same Array/Hash fast paths as GETIDX (mrb_ary_ref -- same public,
+      # Same exact-class Array/Hash fast paths as GETIDX (mrb_ary_ref -- same public,
       # bounds-checked API, an empty array correctly yielding nil; a Hash
       # via mrb_hash_get with a literal Fixnum(0) key), falling back to a
       # real `[]` send with a literal 0 argument for anything else --
@@ -20386,18 +20392,26 @@ class CodeGen
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
-          r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
+          if (mrb_obj_ptr(r#{s})->c == M->array_class) {
+            r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
+          } else {
+            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+          }
         CPP
       when 'Hash'
         <<~CPP
           if (!mrb_hash_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
-          r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+          if (mrb_obj_ptr(r#{s})->c == M->hash_class) {
+            r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+          } else {
+            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+          }
         CPP
       else
         <<~CPP
-          if (mrb_array_p(r#{s})) {
+          if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
             r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
-          } else if (mrb_hash_p(r#{s})) {
+          } else if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
             r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
           } else {
             r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
@@ -20412,7 +20426,7 @@ class CodeGen
       # the underlying method itself returns). Same Array/Hash fast paths as
       # GETIDX above (mrb_ary_set/mrb_hash_set, the same public APIs ARRAY/
       # HASH's own codegen already uses), falling back to a real `[]=` send
-      # for anything else -- there the assigned-back value is whatever that
+      # for anything else, including container subclasses -- there the assigned-back value is whatever that
       # real method returns, matching the interpreter's own SENDB-based
       # fallback exactly (no explicit regs[a]=vc override on that path
       # either, confirmed reading vm.c's own setidx_fallback).
@@ -20430,7 +20444,9 @@ class CodeGen
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
-          if (mrb_integer_p(r#{idx_reg})) {
+          if (mrb_obj_ptr(r#{d})->c != M->array_class) {
+            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+          } else if (mrb_integer_p(r#{idx_reg})) {
             mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
             r#{d} = r#{val};
           } else {
@@ -20440,15 +20456,19 @@ class CodeGen
       when 'Hash'
         <<~CPP
           if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
-          mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
-          r#{d} = r#{val};
+          if (mrb_obj_ptr(r#{d})->c == M->hash_class) {
+            mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
+            r#{d} = r#{val};
+          } else {
+            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+          }
         CPP
       else
         <<~CPP
-          if (mrb_array_p(r#{d}) && mrb_integer_p(r#{idx_reg})) {
+          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{idx_reg})) {
             mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
             r#{d} = r#{val};
-          } else if (mrb_hash_p(r#{d})) {
+          } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
             mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
             r#{d} = r#{val};
           } else {
