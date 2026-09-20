@@ -310,9 +310,10 @@ cleanly:
 
 With those fixes, the 180-frame run completes with checksum `59662`, matching
 the interpreted run and CRuby. CI still showed SIGSEGVs after excluding CPU,
-PPU, and the explicit NES Fiber boundaries, so the probe now compiles only
-setup methods on `Optcarrot::Config` and `Optcarrot::Opt`. Emulator runtime
-classes remain interpreted until generated C functions are safe across mruby
+PPU, and the explicit NES Fiber boundaries, so the probe compiles setup
+methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus
+`Optcarrot::ROM#initialize` before emulator Fibers start. Emulator runtime
+methods remain interpreted until generated C functions are safe across mruby
 Fiber switches. The benchmark still uses upstream emulation logic; only the
 method registration set changes. It runs the same ROM and checksums under all
 three systems; CRuby omits only the mruby-specific compatibility shims.
@@ -351,10 +352,10 @@ The first concrete dispatch target is `CPU#run`: each opcode executes
 `mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
 million times in the instrumented 180-frame run. Overall, `mrb_funcall_argv`
 is called 13.6 million times and `mrb_funcall_with_block` 17.2 million times
-in the compiled profile. A useful first optimization experiment is to avoid
-re-entering the generic VM dispatcher for this known opcode table, while
-preserving the table's argument and method lookup semantics. The profile also
-shows 6.1 million `mrb_ary_splat` calls and a rise in GC gray rescans from
+in the compiled profile. A generated 256-way opcode case was tested and
+discarded: on this machine, the 180-frame interpreted run slowed from about
+25 seconds to 65 seconds. The profile also shows 6.1 million
+`mrb_ary_splat` calls and a rise in GC gray rescans from
 1,586 to 3,455; these are additional measurements to revisit after dispatch
 overhead is reduced, not proof that it causes the GC increase.
 
@@ -369,6 +370,14 @@ machine, so this change targets allocation and GC pressure rather than a
 measurable speedup. bc2cpp already sends a runtime splat's backing array
 directly to `mrb_funcall_argv`, so its compiled CPU path does not gain this
 allocation reduction.
+
+bc2cpp also lowers the mapper's three-argument `Array#[]=` slice writes to
+the public `mrb_ary_splice` API when the receiver is an exact Array and both
+indices are fixnums. All other receiver and index shapes keep Ruby dispatch.
+The runtime guard preserves Array subclasses and index coercion, and the
+generated method returns the replacement value just like `Array#[]=`. The
+coverage report counts these emitted fast paths so upstream source changes
+remain visible.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.

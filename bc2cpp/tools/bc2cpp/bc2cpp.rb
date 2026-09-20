@@ -2563,7 +2563,9 @@ class ClassAnnotations
   # actually has (`registry.values.flatten.map(&:owner).uniq`) -- gates a
   # token being treated as a class hint on it actually being a class
   # bc2cpp knows about, not just any capitalized word that happens to
-  # appear in a comment.
+  # appear in a comment. `Array<Klass>` is read as the outer `Array` here;
+  # ElementAnnotations independently gates the inner class and supplies it
+  # only to the array-element analysis.
   def self.extract(ireps, registry, known_owners)
     result = {}
     file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
@@ -2586,7 +2588,12 @@ class ClassAnnotations
         m = Annotations::COMMENT_RE.match(lines[idx])
         next unless m
 
-        args = m[1].split(',').map { |t| t.strip if known_owners.include?(t.strip) }
+        args = m[1].split(',').map do |token|
+          token = token.strip
+          array_arg = /\AArray<([A-Za-z_][\w:]*)>\z/.match(token)
+          token = 'Array' if array_arg && known_owners.include?('Array') && known_owners.include?(array_arg[1])
+          token if known_owners.include?(token)
+        end
         next if args.all?(&:nil?)
 
         result[irep.label] = Annotation.new(args: args)
@@ -2599,12 +2606,16 @@ end
 
 # ---------------------------------------------------------------------------
 # Step 6f-ter: ELEMENT_CLASS_SUPPORT -- the third independent reader of the
-# very same `# bc2cpp: (...) -> T` magic comment, this one claiming
-# something neither of the two above can express: "this method returns an
-# Array every element of which is exactly this one real class".
+# very same `# bc2cpp: (...) -> T` magic comment. It records element classes
+# both for array results (`-> Array<Klass>`) and typed array arguments
+# (`Array<Klass>` in an argument slot), which the previous two readers
+# cannot express.
 #
 #   # bc2cpp: () -> Array<Game::Actor>
 #   def stat_targets(cmd)
+#
+#   # bc2cpp: (Array<Game::Actor>)
+#   def initialize(actors)
 #
 # Why a separate reader rather than another Annotations::TYPES entry, the
 # same reasoning ClassAnnotations' own comment already gives for argument
@@ -2667,7 +2678,7 @@ end
 # runtime-dispatch fallback. GETIDX/GETIDX0 are included because mrbc
 # emits those for `receiver[index]` instead of SEND :[].
 class ElementAnnotations
-  Annotation = Struct.new(:element, :ret_class, keyword_init: true)
+  Annotation = Struct.new(:element, :ret_class, :arg_elements, keyword_init: true)
 
   # `-> Array<Game::Actor>` / `-> Array<RPG2k::Window>`: one `::`-joined
   # class path inside the angle brackets, matched against the exact same
@@ -2677,6 +2688,7 @@ class ElementAnnotations
   # `Array<Foo, Bar>` (a heterogeneous claim this mechanism deliberately
   # cannot express) simply doesn't match and contributes nothing.
   ELEMENT_RE = /\AArray<([A-Za-z_][\w:]*)>\z/
+  ARG_ELEMENT_RE = ELEMENT_RE
   RET_CLASS_RE = /\A([A-Za-z_][\w:]*)\z/
 
   # Tokens that already mean something to `Annotations::TYPES` and must
@@ -2691,7 +2703,8 @@ class ElementAnnotations
   NON_CLASS_RET_TOKENS = (Annotations::TYPES.keys + ['Array']).uniq.freeze
 
   # irep label -> Annotation, for every real `def` whose annotation
-  # comment carries a recognized element or return-class token.
+  # comment carries a recognized array-element argument, array-element
+  # result, or return-class token.
   def self.extract(ireps, registry, known_owners)
     result = {}
     file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
@@ -2712,19 +2725,27 @@ class ElementAnnotations
         next if idx < 0
 
         m = Annotations::COMMENT_RE.match(lines[idx])
-        next unless m && m[2]
+        next unless m
 
-        tok = m[2]
+        arg_elements = m[1].split(',').map do |arg|
+          em = ARG_ELEMENT_RE.match(arg.strip)
+          em && known_owners.include?(em[1]) ? em[1] : nil
+        end
+
         element = nil
         ret_class = nil
-        if (em = ELEMENT_RE.match(tok))
-          element = em[1] if known_owners.include?(em[1])
-        elsif !NON_CLASS_RET_TOKENS.include?(tok) && (rm = RET_CLASS_RE.match(tok))
-          ret_class = rm[1] if known_owners.include?(rm[1])
+        if m[2]
+          tok = m[2]
+          if (em = ELEMENT_RE.match(tok))
+            element = em[1] if known_owners.include?(em[1])
+          elsif !NON_CLASS_RET_TOKENS.include?(tok) && (rm = RET_CLASS_RE.match(tok))
+            ret_class = rm[1] if known_owners.include?(rm[1])
+          end
         end
-        next unless element || ret_class
+        next unless element || ret_class || arg_elements.any?
 
-        result[irep.label] = Annotation.new(element: element, ret_class: ret_class)
+        result[irep.label] = Annotation.new(element: element, ret_class: ret_class,
+                                            arg_elements: arg_elements)
       end
     end
 
@@ -3502,6 +3523,13 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       return nil
     end
   end
+  # A method argument with an explicit `Array<Klass>` claim is an element
+  # source only when the backward walk reaches that untouched incoming
+  # argument register. The caller's array type is checked separately by
+  # ClassAnnotations; consumers still guard every element's exact class.
+  pos = reg.to_i
+  return ctx[:arg_elements][pos - 1] if ctx[:arg_elements] && pos.between?(1, ctx[:mand])
+
   nil
 end
 
@@ -4167,16 +4195,17 @@ class ArrayElementLayout
           # and its ivar hints carry straight over; its parameters are not
           # method arguments, so `mand`/`arg_classes` are zeroed for the
           # nested ireps exactly the way block_return_class zeroes them.
-          sweep = [[label, mand_of(ireps, label), class_annotations[label]&.args]]
-          nested_block_labels(ireps, label).each { |bl| sweep << [bl, 0, nil] }
+          sweep = [[label, mand_of(ireps, label), class_annotations[label]&.args,
+                    element_annotations[label]&.arg_elements]]
+          nested_block_labels(ireps, label).each { |bl| sweep << [bl, 0, nil, nil] }
 
-          sweep.each do |(cur_label, mand, arg_classes)|
+          sweep.each do |(cur_label, mand, arg_classes, arg_elements)|
             irep = ireps.fetch(cur_label)
             ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
                     class_annotations: class_annotations, element_annotations: element_annotations,
                     known_owners: known_owners, subclassed: subclassed,
                     ivar_classes: (class_layout[owner] || {}), mand: mand,
-                    arg_classes: arg_classes, elements: elements,
+                    arg_classes: arg_classes, arg_elements: arg_elements, elements: elements,
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
 
             irep.instructions.each_with_index do |insn, idx|
@@ -22968,6 +22997,27 @@ class CodeGen
     # below.
     if name == 'size' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash])
       return compile_native_primitive_send(name, d, recv, argv)
+    end
+
+    if name == '[]=' && n == 3 && builtin_container_send_safe?(name, %w[Array])
+      # Array slice writes occur in optcarrot's mapper when PRG/CHR banks
+      # change. The public mrb_ary_splice API implements the native body for
+      # this three-argument form. Restrict the fast path to exact Arrays and
+      # fixnum start/length values; all coercion, subclass, and non-Array
+      # behavior stays on Ruby dispatch. Array#[]= returns the assigned
+      # replacement object, while mrb_ary_splice returns the receiver.
+      start, length, replacement = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_SLICE_WRITE :[]= -- exact Array and fixnum indices only; preserve coercion and overrides
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
+            mrb_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
+            r#{d} = #{replacement};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
     end
 
     if name == 'empty?' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash String])
