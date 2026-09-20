@@ -379,6 +379,14 @@ generated method returns the replacement value just like `Array#[]=`. The
 coverage report counts these emitted fast paths so upstream source changes
 remain visible.
 
+The ROM loader's two-argument `Array#slice!` calls also have a guarded fast
+path for an exact, unfrozen Array, a zero start, and a nonnegative fixnum
+length. It copies the removed prefix with `mrb_ary_new_from_values`, removes
+it with `mrb_ary_splice`, and returns the copied Array. Frozen receivers,
+subclasses, and all other index shapes retain Ruby dispatch. The coverage
+report counts these sites too. These calls run while loading the ROM, so the
+optimization targets setup dispatch overhead rather than frame time.
+
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.
 

@@ -23016,6 +23016,25 @@ class CodeGen
       CPP
     end
 
+    if name == 'slice!' && n == 2 && builtin_container_send_safe?(name, %w[Array])
+      start, length = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PREFIX_SLICE_WRITE :slice! -- exact Array, zero start, nonnegative fixnum length
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              !mrb_frozen_p(mrb_obj_ptr(#{recv})) && mrb_fixnum_p(#{start}) &&
+              mrb_fixnum(#{start}) == 0 && mrb_fixnum_p(#{length}) && mrb_fixnum(#{length}) >= 0) {
+            mrb_int bc2cpp_slice_len = mrb_fixnum(#{length});
+            mrb_int bc2cpp_array_len = RARRAY_LEN(#{recv});
+            if (bc2cpp_slice_len > bc2cpp_array_len) bc2cpp_slice_len = bc2cpp_array_len;
+            r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_len, RARRAY_PTR(#{recv}));
+            mrb_ary_splice(M, #{recv}, 0, bc2cpp_slice_len, mrb_undef_value());
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if name == 'empty?' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash String])
       return compile_native_primitive_send(name, d, recv, argv)
     end
