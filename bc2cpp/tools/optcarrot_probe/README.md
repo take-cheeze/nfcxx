@@ -98,8 +98,9 @@ compiled gems), same NATIVE_SRCS/FOREIGN_RUBY_SRCS inputs
 `scripts/bc2cpp_coverage_report.rb` feeds the real one, and the same
 method-level attempted/compiled-clean/`#error`-reason parsing logic reused
 directly from that script. The full report lives at
-`docs/optcarrot_bc2cpp_coverage.txt`, the same convention
-`docs/bc2cpp_coverage.txt` sets for the real project -- regenerate it after
+`docs/optcarrot_bc2cpp_coverage.txt`, a tracked standalone report for this
+probe. The real project's report is published in the CI job summary to avoid
+generated-file conflicts -- regenerate it after
 any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
 tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
@@ -263,7 +264,7 @@ namespaced, so this diff is byte-identical by construction; `INTERN`'s new
 support diffed identical too (the real project's own code doesn't
 currently build any symbol dynamically). This sidesteps needing this
 sandbox to reproduce the real project's exact pinned toolchain (its own
-`gperf`/`bison` versions) just to regenerate `docs/bc2cpp_coverage.txt`
+`gperf`/`bison` versions) just to regenerate the real-project coverage report
 for comparison -- which was tried first and produces spurious diffs
 (different `mrbc` binary, not a real behavior change) rather than genuinely
 mismatching output. Points 5, 6 and 7 were verified the same way, one step
@@ -279,7 +280,7 @@ merely small.
 
 Not yet attempted: checking whether the 383 "compiled clean" methods
 produce *correct* output (this only confirms bc2cpp's own compiler accepted
-them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
+them without a `#error`, the same bar the real-project coverage report's own
 numbers measure for the real project -- not that the generated C++ was run
 and its output checked against CRuby/mruby's own, the way the
 headless-benchmark checksum above verifies the *interpreted* path). The
