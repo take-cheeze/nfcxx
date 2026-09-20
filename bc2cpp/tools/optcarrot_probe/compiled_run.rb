@@ -235,7 +235,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The bc2cpp build leaves `Optcarrot::PPU` interpreted because its Fiber block cannot be created from the generated C function backed block.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. The bc2cpp build leaves `Optcarrot::PPU` interpreted because its Fiber block cannot be created from the generated C function backed block.'
     end
   end
 
