@@ -97,11 +97,10 @@ entirely separate from bc2cpp's real registry (the RPG engine's own 3
 compiled gems), same NATIVE_SRCS/FOREIGN_RUBY_SRCS inputs
 `scripts/bc2cpp_coverage_report.rb` feeds the real one, and the same
 method-level attempted/compiled-clean/`#error`-reason parsing logic reused
-directly from that script. The full report lives at
-`docs/optcarrot_bc2cpp_coverage.txt`, a tracked standalone report for this
-probe. The real project's report is published in the CI job summary to avoid
-generated-file conflicts -- regenerate it after
-any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
+directly from that script. CI publishes the full report in the build job
+summary alongside the real project's report, keeping generated coverage
+output out of git. To print it locally after a bc2cpp.rb change, run
+`MRBC=path/to/host/mrbc ruby
 tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
 **Result: 383/383 methods (100.0%) compile clean**, up from an initial
@@ -227,8 +226,7 @@ genuinely isn't known (`POLY :loglevel`) and to a wrapped-cfunc block
 fallback for its one `Fiber.new { ... }` block.
 
 No errored methods remain: 383/383 compile clean (100.0%), zero `#error`
-markers (`docs/optcarrot_bc2cpp_coverage.txt` has the full, current
-breakdown). The last site to close was `NES#run`'s
+markers. The last site to close was `NES#run`'s
 `StackProf.start(mode:, out:, raw:)` keyword call on a receiver this
 closed world knows nothing about (`StackProf` is loaded by a runtime
 `require "stackprof"` that mruby can never service) -- closed by point 7
@@ -290,6 +288,35 @@ proof -- not by packing against a callee (no def to prove keyword-free)
 nor by a keyword-carrying C-API call (mruby 4.0.0 has no such API --
 `mrb_funcall` sets `ci->nk = 0`), neither of which can be sound there.
 
+## Compiled runtime check
+
+`compiled_run.rb` builds an isolated mruby binary with bc2cpp's generated
+methods installed, then runs the same headless checksum benchmark. The first
+run exposed two runtime correctness gaps despite all methods compiling
+cleanly:
+
+- A C function backed block with two parameters raised on mruby's `Hash#each`,
+  which passes one `[key, value]` array. bc2cpp now applies the same array
+  destructuring and lenient argument handling as an ordinary multi-parameter
+  block.
+- A base and subclass could each get a separate embedded ivar struct, but an
+  mruby object has only one `DATA_PTR`. Their generated initializers replaced
+  one struct pointer with the other. bc2cpp now keeps both layouts in normal
+  instance variables when an embedded layout overlaps an inheritance chain.
+
+With those fixes, the 180-frame run completes with checksum `59662`, matching
+the interpreted run and CRuby. The probe compiles 300 methods and leaves
+`Optcarrot::PPU` interpreted: its `Fiber.new` block cannot be created from
+bc2cpp's C function backed block. The recorded debug build took 33.83 seconds
+(optcarrot reported 5.58 FPS), versus 25.28 seconds (9.56 reported FPS) for
+interpreted mruby. A later run through the reproducible helper took 32.51
+seconds. This verifies correctness, but shows no speedup yet; the next
+optimization work should target generated-call overhead and a safe path
+through PPU's Fiber-based loop.
+
+The compiler also includes `mruby/numeric.h` in generated C++, required for
+its integer and float conversion helpers.
+
 ## Files
 
 - `build_bundle.rb` -- assembles a single runnable mruby script: applies
@@ -315,6 +342,8 @@ nor by a keyword-carrying C-API call (mruby 4.0.0 has no such API --
 - `mruby_build_config.rb` -- the `MRUBY_CONFIG` used to build a probe-only
   `mruby`/`mrbc` host binary (full-core gembox + `mruby-onig-regexp`). Not
   part of the project's real build.
+- `compiled_run.rb` -- builds an isolated bc2cpp-enabled mruby and runs the
+  headless checksum benchmark; build artifacts stay in a temporary directory.
 - `../../patches/mruby-module-function-scope.patch`,
   `../../patches/mruby-parser-dump-back-nth-ref.patch` -- see points 4 and 5
   above; both *are* part of the project's real build.
@@ -338,4 +367,7 @@ ruby tools/optcarrot_probe/build_bundle.rb /tmp/full_probe.rb
 
 # bc2cpp coverage (needs only the parser-dump patch above):
 MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/bc2cpp_probe.rb
+MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb
+# Run the compiled headless checksum benchmark in a temporary build:
+MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb
 ```

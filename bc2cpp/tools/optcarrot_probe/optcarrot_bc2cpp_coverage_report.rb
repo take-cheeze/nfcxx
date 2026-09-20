@@ -15,7 +15,8 @@
 # MRBC must be built from a 3rd/mruby checkout with
 # patches/mruby-parser-dump-back-nth-ref.patch applied -- see
 # tools/optcarrot_probe/bc2cpp_probe.rb's own header for why.
-# Writes docs/optcarrot_bc2cpp_coverage.txt in place.
+# Writes the report to stdout. Set BC2CPP_COVERAGE_REPORT_PATH to capture it
+# in a file; CI publishes it in the build job summary.
 
 require 'shellwords'
 require 'open3'
@@ -27,7 +28,7 @@ require_relative '../bc2cpp/compiled_gems'
 
 BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
 MRBC = ENV['MRBC'] || 'mrbc'
-REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH'] || File.join(ROOT, 'docs/optcarrot_bc2cpp_coverage.txt')
+REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']
 OPTCARROT_LIB = File.join(ROOT, '3rd/optcarrot/lib')
 MRUBY_DIR = File.join(ROOT, '3rd/mruby')
 PARSER_DUMP_PATCH = File.join(ROOT, 'patches/mruby-parser-dump-back-nth-ref.patch')
@@ -206,5 +207,9 @@ dispatch_counts.sort_by { |name, n| [-n, name] }.first(30).each_with_index do |(
   report << format("  %2d. %5d  :%s\n", i + 1, n, name)
 end
 
-File.write(REPORT_PATH, report)
-puts "wrote #{REPORT_PATH}"
+if REPORT_PATH
+  File.write(REPORT_PATH, report)
+  puts "wrote #{REPORT_PATH}"
+else
+  print report
+end

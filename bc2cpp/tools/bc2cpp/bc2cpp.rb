@@ -6305,7 +6305,8 @@ SUPER_TARGETS = Set[
   # the real disassembly (`SUPER R2 n=0`/`SUPER R2 n=0`, not assumed from
   # source text), the exact already-supported RPG2k3::Scene::Battle shape
   # above, into `Optcarrot::APU::Oscillator#reset`/`#active?`, which
-  # already compiles clean (docs/optcarrot_bc2cpp_coverage.txt). Checked,
+  # already compiles clean (tools/optcarrot_probe/README.md; current counts
+  # are published in the CI job summary). Checked,
   # not assumed: grepped every real `.reset`/`.active?` call site across
   # the whole closed world (3rd/optcarrot/lib) -- none pass a block
   # literal; and the whole closed world has exactly two real `include`s
@@ -8687,7 +8688,30 @@ class CodeGen
   # closed for call sites two follow-ups up in docs/adr/0139; this is the
   # identical fix applied to the embedding gate instead.
   def drop_unsafe_embeddings(ivar_layout)
+    embedding_owners = ivar_layout.keys.to_set
+    subclass_of = lambda do |klass, ancestor|
+      seen = Set.new
+      superclass = @superclass_of[klass]
+      while superclass.is_a?(String) && !seen.include?(superclass)
+        return true if superclass == ancestor
+
+        seen << superclass
+        superclass = @superclass_of[superclass]
+      end
+      false
+    end
+
     ivar_layout.each_with_object({}) do |(owner, ivars), out|
+      # Each Ruby object has only one DATA_PTR. If a base and subclass both
+      # embed ivars, their generated initializers would overwrite that
+      # pointer with different struct layouts. Keep both layouts in the
+      # ordinary ivar table unless we can represent the whole inheritance
+      # chain with one shared struct.
+      inherited_layout = embedding_owners.any? do |other|
+        other != owner && (subclass_of.call(owner, other) || subclass_of.call(other, owner))
+      end
+      next if inherited_layout
+
       init = @registry['initialize']&.find { |d| d.owner == owner }
       next unless init && pure_mandatory_arity?(@ireps.fetch(init.irep)) && compiles_clean?(init.irep)
 
@@ -10330,7 +10354,19 @@ class CodeGen
   end
 
   def embedding_classes
-    @ivar_layout.keys
+    owners = @ivar_layout.keys.to_set
+    @superclass_of.each do |klass, superclass|
+      next unless superclass.is_a?(String) && !klass.end_with?('.singleton')
+
+      seen = Set.new
+      while superclass.is_a?(String) && !seen.include?(superclass)
+        break if @ivar_layout.key?(superclass) && owners.add?(klass)
+
+        seen << superclass
+        superclass = @superclass_of[superclass]
+      end
+    end
+    owners.to_a.sort
   end
 
   def struct_name(owner)
@@ -18220,6 +18256,25 @@ class CodeGen
     call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
     if mand.zero?
       out << "  return #{impl_name}(M, #{call_args});\n"
+    elsif (region[:kind] || 'block_fallback') == 'block_fallback' && mand > 1
+      # Ordinary blocks are lenient about their argument count, and mruby's
+      # Hash#each passes a single [key, value] Array to the block. The
+      # interpreter expands that Array for a multi-parameter block; a C
+      # function-backed Proc does not, so reproduce that adjustment here.
+      out << "  mrb_value* bc2cpp_argv;\n"
+      out << "  mrb_int bc2cpp_argc;\n"
+      out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+      arg_names.each { |a| out << "  mrb_value #{a};\n" }
+      out << "  if (bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) {\n"
+      arg_names.each_with_index do |a, i|
+        out << "    #{a} = mrb_ary_ref(M, bc2cpp_argv[0], #{i});\n"
+      end
+      out << "  } else {\n"
+      arg_names.each_with_index do |a, i|
+        out << "    #{a} = bc2cpp_argc > #{i} ? bc2cpp_argv[#{i}] : mrb_nil_value();\n"
+      end
+      out << "  }\n"
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
     else
       arg_names.each { |a| out << "  mrb_value #{a};\n" }
       fmt = 'o' * mand
@@ -23687,6 +23742,7 @@ if $PROGRAM_NAME == __FILE__
   # reproduce flo_to_i's own real NaN/Infinity guard and truncation-
   # toward-zero, nothing else here already pulls this in.
   puts '#include <math.h>'
+  puts '#include <mruby/numeric.h>'
   puts '#include <mruby/string.h>'
   puts '#include <mruby/variable.h>'
   puts '#include <mruby/data.h>'
