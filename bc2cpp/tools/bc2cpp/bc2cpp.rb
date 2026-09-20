@@ -9894,7 +9894,11 @@ class CodeGen
     defs = @registry[name]
     return false unless defs && defs.size == 1 && defs.first.irep
 
-    @annotations[defs.first.irep]&.ret == :array
+    label = defs.first.irep
+    # `Array<Klass>` makes the stronger claim that this result is an Array;
+    # it must also open the same block-inlining gate as plain `Array`, with
+    # `annotated_element_return` supplying the element class.
+    @annotations[label]&.ret == :array || !@element_annotations[label]&.element.nil?
   end
 
   # ELEMENT_CLASS_SUPPORT: the same MONO-keyed annotation lookup
