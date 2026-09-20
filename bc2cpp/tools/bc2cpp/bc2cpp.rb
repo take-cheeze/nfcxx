@@ -22995,6 +22995,27 @@ class CodeGen
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
+    if name == '[]=' && n == 3 && builtin_container_send_safe?(name, %w[Array])
+      # Array slice writes occur in optcarrot's mapper when PRG/CHR banks
+      # change. The public mrb_ary_splice API implements the native body for
+      # this three-argument form. Restrict the fast path to exact Arrays and
+      # fixnum start/length values; all coercion, subclass, and non-Array
+      # behavior stays on Ruby dispatch. Array#[]= returns the assigned
+      # replacement object, while mrb_ary_splice returns the receiver.
+      start, length, replacement = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_SLICE_WRITE :[]= -- exact Array and fixnum indices only; preserve coercion and overrides
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
+            mrb_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
+            r#{d} = #{replacement};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if name == 'empty?' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash String])
       return compile_native_primitive_send(name, d, recv, argv)
     end
