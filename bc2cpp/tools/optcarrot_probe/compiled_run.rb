@@ -23,6 +23,12 @@ FIBER_BOUNDARY_METHODS = {
     initialize update vsync sync run dispose main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks
   ]
 }.freeze
+PPU_METHODS_OUTSIDE_FIBER = %w[
+  reset set_chr_mem nametables= setup_frame
+  poke_2000 poke_2001 peek_2002 poke_2003 poke_2004 peek_2004
+  poke_2005 poke_2006 poke_2007 peek_2007 poke_2xxx peek_2xxx
+  peek_3000 poke_4014 peek_4014
+].freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -104,6 +110,7 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
+    next if owner == 'Optcarrot::PPU' && !PPU_METHODS_OUTSIDE_FIBER.include?(name)
     next if FIBER_BOUNDARY_METHODS.fetch(owner, []).include?(name)
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
@@ -249,7 +256,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose, CPU#run, and PPU Fiber creation/resume/loop/yield methods remain interpreted so Fiber never resumes or yields across a generated C function frame; other CPU and PPU methods are compiled.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. NES#run/#step/#dispose, CPU#run/#vsync, and the PPU Fiber loop and helpers remain interpreted to avoid generated C frames in the Fiber path; PPU setup and CPU-facing peek/poke methods are compiled.'
     end
   end
 
