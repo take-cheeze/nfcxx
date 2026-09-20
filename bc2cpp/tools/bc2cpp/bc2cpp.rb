@@ -1835,6 +1835,183 @@ def extract_native_call_names(src_paths)
 end
 
 # ---------------------------------------------------------------------------
+# NATIVE_CONSTRUCT_SCHEMA_AUDIT: derive each NATIVE_CONSTRUCT_TARGETS
+# row's own (arity, arg_type) from the native source itself -- the
+# library writer's own `mrb_get_args` format string, which they already
+# write -- and check it against the hand-maintained row, rather than
+# trusting the row alone.
+#
+# Why this exists: the row's `arity: 4` and lib.cxx's own `mrb_get_args`
+# are two hands typing the same fact. The audit passes when every row
+# arity lies within the format's admitted range and the types agree --
+# a row narrower than reality (Tone's own `"|ffff"` admits 0-4 while
+# the row pins 4) is the sound-conservative posture every gate in this
+# file already takes (missed sites, never wrong calls), so it stays
+# `:ok`. A row WIDER than reality (an arity the format never admits)
+# or a type disagreement is a real, possibly-unsound drift and gets a
+# loud MISMATCH line instead of a silent assumption. No libclang, no
+# new dependency, no include paths: three regexes over the same
+# NATIVE_SRCS text this file already reads, plus one brace-matcher for
+# the init function body. Deliberately audit-only (diagnostic section,
+# never consulted by codegen): promoting the scrape to source-of-truth
+# is a separate, later step once this audit has stayed green for a
+# round.
+#
+# Soundness direction, carefully: every failure mode here is a safe
+# miss (`:unresolved`), never a wrong derivation. A lambda init
+# (Rect's own `[](...) -> V` -- no symbol to reference), a Ruby-defined
+# init (Bitmap's own mrblib `def initialize`, invisible to NATIVE_SRCS
+# by construction), a missing format string, an unrecognized format
+# character, or a non-uniform argument type each resolve to
+# `:unresolved` -- the entry simply isn't audited, exactly like every
+# other backward-scan guard in this file. Only a fully-resolved
+# derivation is ever compared, so a `MISMATCH` line always means a real,
+# read-off-the-source disagreement, never a parse artifact.
+# ---------------------------------------------------------------------------
+module NativeConstructSchema
+  # `mrb_get_args` single-character format specifiers, mapped to the same
+  # three type tokens NATIVE_CONSTRUCT_TARGETS' own `arg_type` uses.
+  # `i` alone means int-coerced; everything else a call site passes
+  # through untouched is `:object` (the same `else argv` shape
+  # compile_send's own unboxing already uses). `*` (rest) and `&`
+  # (block) carry no fixed-arity meaning here and are dropped from the
+  # type list (they contribute no position); anything outside this set
+  # (a struct-format `A`, a keyword `:`...) refuses the whole derivation
+  # -- an unrecognized shape is `:unresolved`, never guessed.
+  FORMAT_TYPES = {
+    'i' => :int, 'f' => :float,
+    'o' => :object, 'n' => :object, 's' => :object, 'S' => :object,
+    'c' => :object, 'b' => :object, 'z' => :object, 'p' => :object,
+    'C' => :object, 'a' => :object, 'A' => :object, 'Z' => :object,
+  }.freeze
+
+  # Derive `([min_arity, max_arity], uniform_type)` from one format
+  # string, or nil. `"|o"` -> ([0, 1], :object); `"ii"` -> ([2, 2],
+  # :int); `"i|ii"` -> ([1, 3], :int). Non-uniform types (`"io"`) and
+  # unrecognized characters are nil -- the current codegen's own
+  # single-`arg_type`-per-entry shape cannot express them either, so
+  # there is nothing to audit against.
+  def self.derive(format)
+    return nil unless format =~ /\A[|oifnscbzpCaAZ*!&]*\z/
+
+    pre, post = format.split('|', 2)
+    req = post.nil? ? pre : pre + post
+    min = pre.delete('*&').length
+    max = post.nil? ? min : min + post.delete('*&').length
+    types = req.delete('*&').chars.map { |c| FORMAT_TYPES[c] }
+    return nil if types.any?(&:nil?) || types.uniq.size > 1
+
+    [[min, max], types.first || :object]
+  end
+
+  # The brace-matched body of C++ function `fn` in `src`, or nil.
+  # String/char literals and both comment shapes are skipped so a `}`
+  # inside any of them never ends the match early; a second definition
+  # of the same name is never searched (first match wins -- these are
+  # all file-static single definitions in practice, and a wrong-body
+  # match can only ever produce a loud MISMATCH, never a silent
+  # miscompile, since this module never feeds codegen).
+  def self.fn_body(src, fn)
+    idx = 0
+    loop do
+      i = src.index(fn, idx)
+      return nil unless i
+
+      rest = src[i..]
+      m = rest.match(/\A#{Regexp.escape(fn)}\s*\([^)]*\)\s*\{/)
+      if m
+        depth = 0
+        j = i + m[0].length - 1
+        start = j
+        in_str = nil
+        in_line = false
+        in_block = false
+        prev = nil
+        src[start..].each_char.with_index do |ch, k|
+          nxt = src[start + k + 1]
+          if in_line
+            in_line = false if ch == "\n"
+          elsif in_block
+            in_block = false if prev == '*' && ch == '/'
+          elsif in_str
+            in_str = nil if ch == in_str && prev != '\\'
+          elsif ch == '"' || ch == "'"
+            in_str = ch
+          elsif ch == '/' && nxt == '/'
+            in_line = true
+          elsif ch == '/' && nxt == '*'
+            in_block = true
+          elsif ch == '{'
+            depth += 1
+          elsif ch == '}'
+            depth -= 1
+            return src[start..(start + k)] if depth.zero?
+          end
+          prev = ch
+        end
+        return nil
+      end
+      idx = i + 1
+    end
+  end
+
+  # Scrape `(init_fn, format)` for native class `klass` across every
+  # native source: the class variable via `mrb_define_class_under(M,
+  # <scope>, "Klass", ...)`, the init function via `mrb_define_method(M,
+  # <var>, "initialize", FN, ...)`, the format via the first
+  # `mrb_get_args(M, "FMT", ...)` in FN's own body. Returns [fn, fmt]
+  # or nil (`:unresolved` -- see this module's own header for why every
+  # miss is safe).
+  def self.scrape(native_paths, klass)
+    Array(native_paths).each do |path|
+      src = begin
+        File.read(path, encoding: 'UTF-8')
+      rescue StandardError
+        next
+      end
+      cm = src.match(/(\w+)\s*=\s*mrb_define_class_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"#{Regexp.escape(klass)}"/)
+      next unless cm
+
+      im = src.match(/mrb_define_method\s*\(\s*\w+\s*,\s*#{Regexp.escape(cm[1])}\s*,\s*"initialize"\s*,\s*(\w+)/)
+      next unless im
+
+      body = fn_body(src, im[1])
+      next unless body
+
+      fm = body.match(/mrb_get_args\s*\(\s*\w+\s*,\s*"([^"]*)"/)
+      next unless fm
+
+      return [im[1], fm[1]]
+    end
+    nil
+  end
+
+  # Audit one NATIVE_CONSTRUCT_TARGETS row against the scrape: `:ok`
+  # (every row arity within the derived range AND the types agree),
+  # `:mismatch` (a real disagreement, with details), or `:unresolved`
+  # (safe miss -- see this module's own header).
+  def self.audit(native_paths, klass, row)
+    scraped = scrape(native_paths, klass)
+    return [:unresolved, 'no (init_fn, format) scraped'] unless scraped
+
+    fn, fmt = scraped
+    derived = derive(fmt)
+    return [:unresolved, "#{fn} format #{fmt.inspect} underivable"] unless derived
+
+    (range, type) = derived
+    arities = Array(row[:arity])
+    unless arities.all? { |a| a.between?(range[0], range[1]) }
+      return [:mismatch, "#{fn} format #{fmt.inspect} admits #{range[0]}..#{range[1]}, row pins #{arities.inspect}"]
+    end
+    unless row[:arg_type] == type
+      return [:mismatch, "#{fn} format #{fmt.inspect} is #{type.inspect}, row says #{row[:arg_type].inspect}"]
+    end
+
+    [:ok, "#{fn} #{fmt.inspect}"]
+  end
+end
+
+# ---------------------------------------------------------------------------
 # Step 6b: ivar-embedding analysis -- which instance variables can be lifted
 # out of the dynamic ivar table (`iv_tbl`) and stored as real typed C struct
 # fields on an RData payload instead.
@@ -22447,6 +22624,16 @@ if $PROGRAM_NAME == __FILE__
     end
     warn "== native method names (#{native_names.size} from NATIVE_SRCS, #{flipped.size} flipped a MONO name to POLY) =="
     flipped.sort.each { |n| warn "  FLIP :#{n}" }
+    warn ''
+    # NATIVE_CONSTRUCT_SCHEMA_AUDIT (see that module's own header):
+    # audit-only, never consulted by codegen. Skipped entirely without
+    # NATIVE_SRCS -- no native text to scrape means nothing to audit
+    # against, and proving nothing is always the safe direction.
+    warn '== native construct schema audit (row vs scraped mrb_get_args) =='
+    NATIVE_CONSTRUCT_TARGETS.sort.each do |klass, row|
+      verdict, detail = NativeConstructSchema.audit(native_paths, klass, row)
+      warn "  #{verdict.to_s.upcase}  #{klass}  (#{detail})"
+    end
     warn ''
   end
 
