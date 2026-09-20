@@ -16,6 +16,10 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
+# The emulator's runtime classes are reachable from its PPU Fiber, directly or
+# through CPU/APU/mapper callbacks. Keep compiled execution limited to setup
+# classes until generated C functions are safe across mruby Fiber switches.
+FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -64,7 +68,10 @@ def run_benchmark(label, command, chdir: nil)
   options = chdir ? { chdir: chdir } : {}
   output, status = Open3.capture2e(*command, **options)
   elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-  raise "#{label} benchmark failed (#{status.exitstatus}):\n#{output}" unless status.success?
+  unless status.success?
+    result = status.signaled? ? "signal #{status.termsig}" : "exit #{status.exitstatus}"
+    raise "#{label} benchmark failed (#{result}, #{status.inspect}):\n#{output}"
+  end
 
   checksum = output[/^checksum: (\d+)$/, 1]
   raise "#{label} benchmark did not print a checksum:\n#{output}" unless checksum
@@ -94,6 +101,10 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
+    # The CI runtime benchmark still SIGSEGVs with CPU/PPU methods excluded,
+    # showing that other emulator runtime owners are reached on the Fiber path.
+    next unless FIBER_SAFE_OWNERS.include?(owner)
+
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
     [entry, owner, name, extra.include?('[private')]
@@ -145,7 +156,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
-  end.uniq.reject { |owner| owner == 'Optcarrot::PPU' || owner.start_with?('Optcarrot::PPU::') }
+  end.uniq.reject { |owner| owner.start_with?('Optcarrot::PPU::') }
   compiled_cpp, diagnostics = run_bc2cpp(sources, base_env.merge(
     'OUT_DIR' => temp,
     'ONLY_OWNERS' => owners.join(',')
@@ -190,6 +201,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       end
     end
   RUBY
+  system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY,
+         File.join(ROOT, 'patches/mruby-module-function-scope.patch'), exception: true)
   # CI exports LD=ld for native project builds. mruby's host mrbc link must
   # go through the compiler driver so libc is added; raw ld omits it.
   rake_env = { 'MRUBY_CONFIG' => config, 'LD' => nil }
@@ -208,7 +221,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} methods (PPU remains interpreted)"
+  puts "bc2cpp installed #{count} setup methods (emulator runtime remains interpreted for Fiber safety)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -235,7 +248,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. The bc2cpp build leaves `Optcarrot::PPU` interpreted because its Fiber block cannot be created from the generated C function backed block.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Only setup methods are compiled; emulator runtime methods remain interpreted because CI reproduced SIGSEGVs when compiled methods ran on the PPU Fiber path.'
     end
   end
 
