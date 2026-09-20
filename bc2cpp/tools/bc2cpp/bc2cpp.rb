@@ -13665,10 +13665,10 @@ class CodeGen
   # chase, Hash-only via the former since no HASH-literal/core-Hash-return
   # scan exists yet -- a real, narrower gap, not a soundness concern, just
   # fewer real Hash receivers provable this way today). It also returns an
-  # exact custom class when the registry has a compiled `[]` body, allowing
-  # GETIDX/GETIDX0 to reuse compile_send's guarded TYPED lowering. Callers
-  # interested only in built-in containers still match only Array/Hash;
-  # all other cases retain their existing dynamic fallback.
+  # exact custom class when the registry has a compiled `[]` or `[]=` body,
+  # allowing index operations to reuse compile_send's guarded TYPED lowering.
+  # Callers interested only in built-in containers still match only
+  # Array/Hash; all other cases retain their existing dynamic fallback.
   #
   # `idx.nil?` still bails immediately -- `trace_new_target`'s backward scan
   # needs a real position to start from. BLOCK_BODY_INDEX_SUPPORT: that used
@@ -13695,7 +13695,9 @@ class CodeGen
                                known_owners: @known_owners)
     traced = resolve_owner_name(traced, { owner: owner_def.owner, known_owners: @known_owners }) if traced
     return traced if %w[Array Hash].include?(traced)
-    return traced if traced && @registry['[]']&.any? { |md| md.owner == traced && md.irep }
+    return traced if traced && %w[[] []=].any? do |name|
+      @registry[name]&.any? { |md| md.owner == traced && md.irep }
+    end
 
     proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
   end
@@ -13718,6 +13720,23 @@ class CodeGen
                         trace_idx: idx, trace_reg_offset: reg_offset,
                         trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
     return code if code.include?('TYPED :[] ->')
+
+    @elem_class_hint = saved_hint
+    nil
+  end
+
+  def compile_typed_index_write(irep, idx, owner_def, receiver_reg, index_reg, value_reg, reg_offset, receiver_class,
+                                fallback_code)
+    return nil unless owner_def && idx && receiver_class
+    return nil unless @registry['[]=']&.any? { |md| md.owner == receiver_class && md.irep }
+
+    saved_hint = @elem_class_hint
+    code = compile_send("R#{receiver_reg} :[]= n=2", self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{receiver_reg}", call_arguments: ["r#{index_reg}", "r#{value_reg}"],
+                        trace_idx: idx, trace_reg_offset: reg_offset,
+                        trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
+    return code if code.include?('TYPED :[]= ->')
 
     @elem_class_hint = saved_hint
     nil
@@ -20587,7 +20606,8 @@ class CodeGen
       # with the index REGISTER instead, silently breaking the trace for
       # every SETIDX site the moment it ran.
       d, idx_reg, val = regs(a, 3)
-      case static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      case index_class
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -20611,7 +20631,7 @@ class CodeGen
           }
         CPP
       else
-        <<~CPP
+        fallback = <<~CPP
           if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{idx_reg})) {
             mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
             r#{d} = r#{val};
@@ -20622,6 +20642,8 @@ class CodeGen
             r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
           }
         CPP
+        typed = compile_typed_index_write(irep, idx, owner_def, d, idx_reg, val, reg_offset, index_class, fallback)
+        typed || fallback
       end
     when 'GETGV'
       # "GETGV R4 $stderr" -- R[a] = mrb_gv_get(M, sym) (real OP_GETGV
