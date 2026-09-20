@@ -3042,9 +3042,16 @@ end
 # construction instead of by three separate authors each copying the
 # other two correctly forever.
 def closed_world_mrblib_srcs(gems_root)
-  Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
+  # Sorted: Dir[] returns filesystem order (ext4 vs APFS disagree), and
+  # bc2cpp's own capped fixed-point sweeps converge order-dependently --
+  # the same files in a different ARGV order flip real devirtualization
+  # counts (measured: 70 POLY marks). Canonical order here makes every
+  # consumer (the coverage report, each *-compiled mrbgem.rake build)
+  # agree on every filesystem; the analyses' own order-sensitivity is a
+  # separate, real bug (loop-until-stable), not papered over by this.
+  (Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
     Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
-    Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]
+    Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort
 end
 
 # INTEGER_CONSTANT_PROOF: every Ruby source that is compiled into the same

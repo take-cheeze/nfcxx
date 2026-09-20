@@ -1557,6 +1557,86 @@ module IntegerConstants
     names
   end
 
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the constant-DEFINITION
+  # forms of poison source 3, read out of the NATIVE_SRCS text with a
+  # correctly BOUNDED window (`[^;]{0,200}` -- args run to the call's own
+  # `;`). It deliberately does NOT reuse `native_const_names` above: that
+  # scan's trailing lazy `.{0,200}?` quantifier matches ZERO characters
+  # (measured, not inferred -- its sub-scans only ever see the bare call
+  # prefix, so its quoted-name and MRB_SYM arms contribute nothing). That is
+  # a real latent bug, but INTEGER_CONSTANT_PROOF's measured numbers depend
+  # on the function that uses it, so it is left untouched here and belongs
+  # on its own measured round. The universe this feeds MUST NOT inherit the
+  # miss, because a missed definition is the UNSOUND direction for a
+  # never-defined proof. What it reads:
+  #   * mrb_define_const / mrb_define_global_const (+ _id forms) -- quoted
+  #     name or an MRB_SYM-family token;
+  #   * mrb_const_set -- the direct API, for a constant not spelled through
+  #     any define_* wrapper;
+  #   * mrb_define_class / mrb_define_module (+ _id/_under variants) --
+  #     OP_CLASS/OP_MODULE is not the only way a class name becomes a
+  #     constant; src/class.c's own mrb_define_class_id does its own
+  #     const_set, and every mruby core class (Array, GC, ...) is born this
+  #     way in the very C files NATIVE_SRCS feeds this scan.
+  # All deliberately over-broad (any capitalized word / MRB_SYM token within
+  # the call's own argument list), the same direction foreign_const_names
+  # below already trades: over-collecting only ever COSTS a proof.
+  def self.native_defined_const_names(paths)
+    names = Set.new
+    Array(paths).each do |path|
+      src = begin
+        File.read(path, encoding: 'UTF-8')
+      rescue StandardError
+        next
+      end
+      src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+      src.scan(/mrb_const_set\s*\([^;]{0,200}/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+      src.scan(/mrb_define_(?:class|module)(?:_[a-z_]*)?\s*\([^;]{0,200}/m) do
+        seg = Regexp.last_match(0)
+        seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
+        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
+      end
+    end
+    names
+  end
+
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the whole-closed-world
+  # universe of constant names with at least one VISIBLE definition: SETCONST
+  # /SETMCNST/CLASS/MODULE opcodes across every scanned irep (bytecode form,
+  # the same three opcode poison sources IntegerConstants.analyze walks),
+  # native definitions (native_defined_const_names above), and foreign Ruby
+  # sources (the already-verified foreign_const_names text scan). Anything
+  # invisible to ALL of it (a `const_set` computed at runtime, a `require`d
+  # gem outside NATIVE_SRCS, an eval'd string) -- the documented residual
+  # holes of compile_keyword_never_defined_const_send's own comment.
+  def self.defined_name_universe(ireps, native_paths, foreign_paths)
+    names = Set.new
+    ireps.each_value do |irep|
+      irep.instructions.each do |insn|
+        case insn.op
+        when 'SETCONST'
+          names << insn.args[/\A(\S+)/, 1]
+        when 'SETMCNST'
+          names << insn.args[/::(\S+)/, 1]
+        when 'CLASS', 'MODULE'
+          names << insn.args[/:(\S+)/, 1]
+        end
+      end
+    end
+    names.delete(nil)
+    names.merge(native_defined_const_names(native_paths))
+    names.merge(foreign_const_names(foreign_paths))
+    names
+  end
+
   # Poison source 4 -- a textual constant-assignment scan, deliberately
   # broader than it strictly needs to be (any `NAME =` at the start of a
   # line, whatever the right-hand side). Over-collecting here can only ever
@@ -1726,7 +1806,18 @@ def extract_native_method_names(src_paths)
   # below (regex alternation order) or "MRB_SYM_Q(empty)" would match SYM
   # against "SYM" alone and then fail on the unconsumed "_Q(empty)".
   Array(src_paths).each do |path|
-    src = File.read(path, encoding: 'UTF-8')
+    # A path that doesn't exist (an uninitialized git submodule -- this
+    # file's own NATIVE_SRCS lists every submodule path unconditionally,
+    # and a checkout may legitimately lack some) contributes nothing:
+    # skipping it can only ever cost a missed proof or a missed
+    # MONO->POLY flip, never a wrong one. Rescued broadly (not just
+    # Errno::ENOENT) to match every other native-source reader in this
+    # file; a path that exists but can't be read is equally unusable.
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
     # Handles both single-line and the far more common multi-line call shape
     # (`mrb_define_method(\n M, rect, "initialize",\n ...);`) -- the regex
     # just doesn't care where the newlines fall between arguments.
@@ -1826,7 +1917,16 @@ end
 def extract_native_call_names(src_paths)
   names = Set.new
   Array(src_paths).each do |path|
-    src = File.read(path, encoding: 'UTF-8')
+    # Same missing-path skip as extract_native_method_names above --
+    # an uninitialized submodule contributes nothing, never a wrong
+    # answer. (A missed *call* name only ever costs a "never called"
+    # diagnostic line, not a codegen decision, so this direction is
+    # doubly safe.)
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
     src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
       names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end
@@ -4585,7 +4685,10 @@ end
 # modeled here), so a call site passing a different argument count (e.g.
 # a bare `Tone.new` relying on all-default 0s) just misses this path and
 # falls back to ordinary dynamic dispatch, same as any other unmodeled
-# shape in this file.
+# shape in this file. An Array here (e.g. Sprite's `[0, 1]`) lists every
+# real fixed-arity shape separately -- the emission gate matches any one
+# of them exactly, same rule, just several accepted counts instead of
+# one (see compile_send's own comment at the gate).
 #
 # `arg_type` (:int/:float, uniform across all of one class's own arguments
 # -- Rect's own fields are all mrb_int, Color/Tone's own are all mrb_float,
@@ -4602,13 +4705,29 @@ end
 # for a bad argument, mrb_state* M has no notion of a calling-frame
 # boundary to cross), only which side of the call spells them out.
 NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss_tone_new_direct', class_fn: 'rgss_native_tone_class', arity: 4, arg_type: :float },
-  'Color' => { fn: 'rgss_color_new_direct', class_fn: 'rgss_native_color_class', arity: 4, arg_type: :float },
-  'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4, arg_type: :int },
+  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', arity: 4, arg_type: :float },
+  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', arity: 4, arg_type: :float },
+  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', arity: 4, arg_type: :int },
+  # Sprite (31 real `Sprite.new` sites): `spr_init` (mruby-rgss/src/
+  # lib.cxx) is `mrb_get_args(M, "|o", &vp)` -- zero or one argument, the
+  # viewport (or nil for none) -- then a fixed four-step body
+  # (`lv_canvas_create(parent_object(M, vp))`, `wrap_lv_obj`,
+  # `register_zobj`, `@viewport` ivar store). `rgss::sprite_new_direct`
+  # (namespace `rgss` at file scope in lib.cxx, declared in include/
+  # rgss_construct.hxx) reproduces exactly that body with the
+  # already-unboxed viewport value; `mrb_get_args`' own "|o" never
+  # coerces or raises for any input, so no TypeError behavior exists to
+  # preserve. Both real shapes (`Sprite.new` and `Sprite.new(viewport)`)
+  # are admitted -- same rule as every other entry, just two accepted
+  # counts. The runtime class-identity guard is the same one every other
+  # entry already carries (a reassigned `Sprite` constant falls back to
+  # ordinary `mrb_funcall`).
+  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', arity: [0, 1],
+                arg_type: :object },
   # Bitmap (124 real `Bitmap.new` sites, ~105 of them the 2-Integer-arg
   # size shape): `bmp_init_size` (mruby-rgss/src/lib.cxx) is
   # `mrb_get_args(M, "ii", ...)` then `alloc_obj(M, self, w, h,
-  # ARGB8888)` -- `rgss_bitmap_new_direct` reproduces exactly that.
+  # ARGB8888)` -- `rgss::bitmap_new_direct` reproduces exactly that.
   # Unlike the three entries above (whose every real call site passes
   # the unboxed type, so `mrb_as_*` raising on a mistyped argument IS
   # the correct behavior), Bitmap's own Ruby `initialize(f, s)` sends
@@ -4621,7 +4740,7 @@ NATIVE_CONSTRUCT_TARGETS = {
   # fast path, still verify at runtime" shape every other guarded
   # devirtualization in this file already uses, just keyed on argument
   # tags rather than the receiver's class.
-  'Bitmap' => { fn: 'rgss_bitmap_new_direct', class_fn: 'rgss_native_bitmap_class', arity: 2, arg_type: :int,
+  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', arity: 2, arg_type: :int,
                 type_guard: :int },
 }.freeze
 
@@ -10459,20 +10578,28 @@ class CodeGen
   # `_impl` declarations -- this only ever declares them, never defines
   # them; the definitions reach this translation unit at link time the
   # same way any other cross-file C++ call in this project's native gems
-  # already does. `extern "C"`, matching lib.cxx's own definitions exactly
-  # (see that file's own comment on why: each one sits inside lib.cxx's
-  # top-level anonymous namespace, and only an `extern "C"` declaration
-  # escapes that namespace's own internal linkage) -- a plain C++-linkage
-  # declaration here would silently mangle a different symbol name than
-  # the real (extern "C") one lib.cxx defines and fail to link; caught
-  # exactly this way building the very first real caller (RGSS::Sprite's
-  # own #tone/#color/#src_rect).
+  # already does. (This comment used to mandate `extern "C"` decls to
+  # match lib.cxx's own anonymous-namespace definitions -- that whole
+  # arrangement is gone: the entry points now live in namespace `rgss`
+  # at file scope, declared once in include/rgss_construct.hxx, and this
+  # emitter just includes that header. Kept as a warning for anyone
+  # tempted to re-spell the signatures here instead: don't -- the
+  # header is the single source of truth.)
   #
   # Parameter types have to match lib.cxx's own real (native, not
   # mrb_value) signature exactly, one real C++ overload-resolution/linkage
   # concern, not just documentation -- see that file's own comment on
   # these three functions for why `klass` is `RClass*` and every other
   # parameter is `arg_type`'s own native C++ type (`mrb_int`/`mrb_float`).
+  #
+  # The declarations come from include/rgss_construct.hxx itself (one
+  # `#include`, never re-spelled here): the header is the single source
+  # of truth for these signatures, so a future entry only touches the
+  # header, lib.cxx, and NATIVE_CONSTRUCT_TARGETS -- never this emitter.
+  # The three `*-compiled` mrbgem.rake files each add repo `include/` to
+  # `cxx.include_paths` (the same wiring mruby-mvjs already uses for
+  # rgss_bitmap.hxx) so the generated TU, #included into register.cxx,
+  # resolves it.
   def emit_native_construct_decls
     return '' unless @native_construct_used.any?
 
@@ -10482,16 +10609,11 @@ class CodeGen
     out << "// directly in place of Class#new's own allocate+initialize\n"
     out << "// dispatch when a `.new` call site's receiver is provably one of\n"
     out << "// these native DataType<T>-backed classes (compile_send's own\n"
-    out << "// \"MONO :new -> direct native construct\" path).\n"
-    out << "extern \"C\" {\n"
-    @native_construct_used.sort.each do |known|
-      native = NATIVE_CONSTRUCT_TARGETS.fetch(known)
-      out << "RClass* #{native[:class_fn]}(void);\n"
-      native_type = native[:arg_type] == :int ? 'mrb_int' : 'mrb_float'
-      params = (['mrb_state*', 'RClass*'] + [native_type] * native[:arity]).join(', ')
-      out << "mrb_value #{native[:fn]}(#{params});\n"
-    end
-    out << "}\n"
+    out << "// \"MONO :new -> direct native construct\" path). Declared in\n"
+    out << "// include/rgss_construct.hxx, defined in namespace `rgss` at\n"
+    out << "// file scope in lib.cxx -- plain C++ linkage both sides, no\n"
+    out << "// `extern \"C\"` anywhere.\n"
+    out << "#include \"rgss_construct.hxx\"\n"
     out << "\n"
     out
   end
@@ -21005,10 +21127,21 @@ class CodeGen
     # back to the lexical-self narrowing (KEYWORD_HASH_LEXICAL_SELF_SUPPORT,
     # its comment) when the name-based every-def gate declines -- the same
     # pair LEXICAL_SELF_KEYWORD_SUPPORT threads into compile_keyword_call.
-    compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
-                                         argv: argv, kw_sym_regs: kw_sym_regs,
-                                         kw_val_regs: kw_val_regs, kw_names: kw_names,
-                                         self_implicit: self_implicit, owner_def: owner_def)
+    hashpos = compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
+                                                   argv: argv, kw_sym_regs: kw_sym_regs,
+                                                   kw_val_regs: kw_val_regs, kw_names: kw_names,
+                                                   self_implicit: self_implicit, owner_def: owner_def)
+    return hashpos if hashpos
+
+    # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: every keyword-free proof
+    # above declined (a real def of the name exists, its ENTER is invisible
+    # or its arity does not fit), but this site's RECEIVER provably never
+    # exists at runtime -- see compile_keyword_never_defined_const_send's
+    # own comment. Tried last so it can never pre-empt an existing path.
+    compile_keyword_never_defined_const_send(name: name, d: d, n: n, nk: nk, irep: irep, idx: idx,
+                                             argv: argv, kw_sym_regs: kw_sym_regs,
+                                             kw_val_regs: kw_val_regs, kw_names: kw_names,
+                                             self_implicit: self_implicit)
   end
 
   # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: a `Foo.new(a, b, k1: v1, k2: v2)` call
@@ -21610,6 +21743,133 @@ class CodeGen
     dynamic_dispatch_line(d, recv, name, ext_argv)
   end
 
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the memoized closed-world
+  # universe of defined constant names (IntegerConstants.defined_name_universe
+  # -- same ENV gate as INTEGER_CONSTANT_PROOF's own skip-outright rule: a
+  # missing NATIVE_SRCS/FOREIGN_RUBY_SRCS means the picture is knowingly
+  # incomplete, so no proof runs at all rather than one run half-informed).
+  def keyword_never_defined_universe
+    return @keyword_never_defined_universe if defined?(@keyword_never_defined_universe)
+
+    @keyword_never_defined_universe =
+      if ENV['NATIVE_SRCS'] && ENV['FOREIGN_RUBY_SRCS']
+        IntegerConstants.defined_name_universe(@ireps, Shellwords.split(ENV['NATIVE_SRCS']),
+                                               Shellwords.split(ENV['FOREIGN_RUBY_SRCS']))
+      end
+  end
+
+  # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: a keyword SEND whose
+  # receiver is the value of a bare capitalized constant that is DEFINED
+  # NOWHERE in the closed world. Both keyword-free proofs above need a callee
+  # argument spec to fold against and honestly decline when one cannot be
+  # seen -- but they are answering a question this site does not need asked,
+  # because the send is DYNAMICALLY UNREACHABLE, and the proof is a chain of
+  # three closed-world facts, each read from machinery this file already
+  # trusts:
+  #
+  #   1. NEVER-DEFINED: the receiver's constant name is absent from
+  #      IntegerConstants.defined_name_universe -- every definition form a
+  #      constant can arrive through in this program: SETCONST/SETMCNST/
+  #      CLASS/MODULE opcodes across every scanned irep, the native
+  #      mrb_define_const/mrb_const_set/mrb_define_class/mrb_define_module
+  #      text scan, and the foreign-source `NAME =`/class/module scan.
+  #   2. UNREACHABLE SEND: compile_insn compiles such a GETCONST to the
+  #      bc2cpp_const_try scope chain, whose final arm is the real
+  #      mrb_const_get against Object -- and mruby's own src/variable.c
+  #      mrb_const_get raises NameError for a name no scope in the chain
+  #      defines (the same chain every never-defined `Foo` read in this
+  #      program already compiles to, and the only reason a `defined?`-free
+  #      optional integration hook like this one works in Ruby at all is the
+  #      guard ABOVE it -- see 3). So step 1 alone makes the GETCONST raise
+  #      every time it executes.
+  #   3. THIS SEND IS BEHIND IT: the backward scan (the house pattern,
+  #      literal_symbol_write's own) shows the receiver register's FIRST
+  #      write before the call is that GETCONST and only that GETCONST
+  #      (any other first writer, or no writer, is a safe miss), and no
+  #      jump/catch-handler target lands strictly between the GETCONST and
+  #      the send -- so no control-flow edge reaches the send without
+  #      executing the GETCONST (which raised) first. Control can only ever
+  #      enter an irep at its own start, so cross-irep entries cannot slip
+  #      in mid-range either.
+  # The emitted dispatch is therefore never executed; what it emits is the
+  # faithful OP_SEND shape anyway (keyword pairs packed by vm.c's own
+  # unconditional hash_new_from_regs into ONE trailing positional Hash, then
+  # the ordinary dynamic dispatch) so a hypothetical proof break shows a
+  # wrong-but-well-formed send, never a mispacked argument list. Dispatch
+  # stays `mrb_funcall` -- no devirt, no marker-vs-runtime-def interaction to
+  # reason about (a runtime-installed def could change WHAT the send finds,
+  # but nothing runs this far to observe it).
+  #
+  # Holes, stated and MEASURED rather than assumed (the closed-world
+  # assumption every whole-program gate here already shares): a name built at
+  # runtime (`const_set`) or installed by a source outside the scanned set
+  # (`require`d gem not in NATIVE_SRCS, an `eval`'d string) escapes the
+  # universe scan. `grep -rn const_set` across 3rd/mruby/mrblib, mruby
+  # mrbgems' Ruby sources and 3rd/optcarrot/lib: no uses. optcarrot's own
+  # `eval`s (cpu.rb/ppu.rb, codegen of handlers) sit on the `--opt` build
+  # path only -- already documented as outside the probe's default-compile
+  # scope in tools/optcarrot_probe/README.md -- and none define constants.
+  # The real shape this exists for: optcarrot probe's `NES#run` --
+  # `046 GETCONST R3 StackProf` ... `072 SEND R3 :start n=0|nk=3`, guarding
+  # the optional stackprof integration (`if @conf.stackprof_mode`), with
+  # `StackProf` defined nowhere in that closed world.
+  def compile_keyword_never_defined_const_send(name:, d:, n:, nk:, irep:, idx:, argv:,
+                                               kw_sym_regs:, kw_val_regs:, kw_names:,
+                                               self_implicit:)
+    return nil if self_implicit
+    return nil unless nk.positive?
+
+    universe = keyword_never_defined_universe
+    return nil if universe.nil?
+
+    send_insn = irep.instructions[idx]
+    return nil unless send_insn && send_insn.op == 'SEND'
+
+    recv_reg = d.to_i
+    write = nil
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn
+      # A write to the receiver register ends the scan -- it must be the
+      # constant read itself (same first-writer rule literal_symbol_write
+      # uses for the keyword keys).
+      next unless insn.args =~ /^R#{recv_reg}\b/
+
+      write = insn
+      break
+    end
+    return nil unless write && write.op == 'GETCONST'
+
+    const_name = write.args[/^R\d+\s+(\S+)/, 1]
+    return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
+    return nil if universe.include?(const_name)
+
+    # No jump target, and no raise-handler entry, may land strictly inside
+    # (write, send] -- such an edge would reach the send WITHOUT executing
+    # the GETCONST that proves it dead.
+    blocked = jump_targets(irep)
+    irep.catch_handlers&.each { |ch| blocked << ch.target }
+    return nil if blocked.any? { |t| t > write.addr && t <= send_insn.addr }
+
+    out = String.new
+    out << "  // KEYWORD_NEVER_DEFINED_CONST :#{name} (n=#{n}|nk=#{nk}) -- receiver is the value of " \
+           "GETCONST `#{const_name}` (addr #{write.addr}), a constant with NO definition anywhere in this " \
+           "closed world (no SETCONST/SETMCNST, no CLASS/MODULE, no native mrb_define_const/const_set/" \
+           "define_class/define_module, no foreign-source assignment), so that GETCONST's own scope-chain " \
+           "raises NameError and this send is dynamically unreachable -- no jump or handler entry lands " \
+           "between the two. The keyword packing and real dynamic dispatch emitted below are the " \
+           "faithful OP_SEND shape for a call that cannot execute.\n"
+    out << "  {\n"
+    out << "    mrb_value bc2cpp_kwh = mrb_hash_new_capa(M, #{nk});\n"
+    nk.times do |k|
+      out << "    mrb_hash_set(M, bc2cpp_kwh, r#{kw_sym_regs[k]}, r#{kw_val_regs[k]});" \
+             "  // :#{kw_names[k]}\n"
+    end
+    out << "    #{dynamic_dispatch_line(d, "r#{d}", name, argv + ['bc2cpp_kwh'])}"
+    out << "  }\n"
+    out
+  end
+
   # SPLAT_UNROLL_SUPPORT: "what argument expressions does the literal
   # Array built at `reg` (traced backward from just before `idx`, MOVE
   # chains followed) actually hold?" -- the register-LIST analogue of
@@ -22133,8 +22393,11 @@ class CodeGen
       # Exact-arity-only (see NATIVE_CONSTRUCT_TARGETS' own comment) -- a
       # call site passing a different argument count just isn't this
       # shape, falls through to ordinary POLY dynamic dispatch below like
-      # any other unmodeled variant.
-      if native && n == native[:arity]
+      # any other unmodeled variant. `arity` may also be an Array, for a
+      # native #initialize with several real fixed-arity shapes (each
+      # element an exact count, matched the same way -- see that table's
+      # own comment).
+      if native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
         @native_construct_used << known
         # `fn`'s own real C++ signature takes native mrb_int/mrb_float
         # parameters, not mrb_value (mruby-rgss/src/lib.cxx's own comment
@@ -22143,7 +22406,17 @@ class CodeGen
         # mrb_as_float calls that function used to make internally before
         # this change; moving them here changes nothing observable (same
         # TypeError-raising for a bad argument), it only changes which
-        # side of the call spells them out.
+        # side of the call spells them out. `:object` (Sprite) needs no
+        # unboxing at all -- the viewport value passes through as a plain
+        # `mrb_value`, exactly as `spr_init`'s own "|o" receives it. A
+        # 0-argument call site passes an explicit `mrb_nil_value()` for the
+        # missing viewport -- matching what the ordinary `mrb_get_args(M,
+        # "|o", &vp)` dispatch produces for the same call (`vp` stays its
+        # own nil initializer) -- because the callee's own C++ signature
+        # always takes the full max-arity parameter list (see
+        # include/rgss_construct.hxx): a call with fewer arguments than
+        # parameters would be a hard g++ arity-mismatch error, never a
+        # silent default-fill.
         #
         # `type_guard` (Bitmap only, see that entry): instead of
         # unboxing-unconditionally (which RAISES on a mistyped argument),
@@ -22162,11 +22435,23 @@ class CodeGen
                        "falling back to ordinary dispatch for any other shape -- " \
                        "see that entry's own `type_guard` comment."
         else
-          unbox = native[:arg_type] == :int ? 'mrb_as_int' : 'mrb_as_float'
-          unboxed_argv = argv.map { |a| "#{unbox}(M, #{a})" }
+          unboxed_argv = case native[:arg_type]
+                         when :int then argv.map { |a| "mrb_as_int(M, #{a})" }
+                         when :float then argv.map { |a| "mrb_as_float(M, #{a})" }
+                         else argv
+                         end
+          unboxed_argv = ['mrb_nil_value()'] if unboxed_argv.empty?
           guard = "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
           note_extra = ''
         end
+        # `:object` (Sprite) takes no unboxing, and `type_guard` (Bitmap)
+        # unboxes past its tag check instead, so the note's own "unboxes
+        # each argument" sentence only applies to :int/:float.
+        unbox_phrase = case native[:arg_type]
+                       when :int then 'unboxes each argument register with the same mrb_as_int that function used to call internally'
+                       when :float then 'unboxes each argument register with the same mrb_as_float that function used to call internally'
+                       else 'passes each argument register straight through as mrb_value'
+                       end
         note = "  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own " \
                "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n" \
                "  // Runtime-guarded: #{known} could have been reassigned at the constant level (e.g. " \
@@ -22175,8 +22460,8 @@ class CodeGen
                "produced, so a reassignment there is already reflected in it; falls back to ordinary " \
                "mrb_funcall (whatever #{recv} now actually is) rather than misconstruct if it doesn't " \
                "match the real native class.#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/" \
-               "mrb_float, not mrb_value, so this call site unboxes each argument register with the " \
-               "same #{native[:type_guard] ? 'mrb_integer (past the tag check above)' : unbox} that function used to call internally, and passes mrb_class_ptr(#{recv}) " \
+               "mrb_float, not mrb_value (except :object, passed straight through), so this call site #{unbox_phrase}, " \
+               "and passes mrb_class_ptr(#{recv}) " \
                "straight through (already computed for the guard just above -- no second, redundant " \
                "mrb_class_ptr call needed).\n"
         return "#{note}" \
