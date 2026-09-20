@@ -356,6 +356,18 @@ shows 6.1 million `mrb_ary_splat` calls and a rise in GC gray rescans from
 1,586 to 3,455; these are additional measurements to revisit after dispatch
 overhead is reduced, not proof that it causes the GC increase.
 
+`build_bundle.rb` now rewrites this one call in the generated optcarrot bundle
+to dispatch by fixed positional arity (one through four). mruby's
+`mrb_ary_splat` duplicates Array inputs, so this removes one temporary Ruby
+Array from each interpreted CPU opcode while preserving the dispatch table
+and dynamic `send` lookup. The rewrite fails if upstream changes or removes
+the expected call. The 180-frame interpreted run still returns checksum
+`59662`; the observed optcarrot FPS was 8.89 before and 8.91 after on this
+machine, so this change targets allocation and GC pressure rather than a
+measurable speedup. bc2cpp already sends a runtime splat's backing array
+directly to `mrb_funcall_argv`, so its compiled CPU path does not gain this
+allocation reduction.
+
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.
 
