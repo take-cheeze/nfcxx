@@ -310,12 +310,13 @@ cleanly:
 
 With those fixes, the 180-frame run completes with checksum `59662`, matching
 the interpreted run and CRuby. The probe now compiles PPU methods while
-leaving the Fiber lifecycle methods (`run`, `main_loop`, and the four
-`wait_*` yield points) registered as interpreted methods. mruby rejects a
-Fiber yield when a C function frame is active inside the fiber, so keeping
-the loop and its yield calls in bytecode lets compiled PPU helpers return
-before each yield. The compiled benchmark still uses upstream PPU logic; only
-the method registration set changes. The benchmark runs the same ROM and
+leaving `initialize` and the Fiber lifecycle methods (`run`, `main_loop`, and
+the four `wait_*` yield points) registered as interpreted methods.
+`initialize` creates the Fiber, and mruby rejects a Fiber yield when a C
+function frame is active inside it, so keeping Fiber creation, the loop, and
+its yield calls in bytecode lets compiled PPU helpers return before each
+yield. The compiled benchmark still uses upstream PPU logic; only the method
+registration set changes. The benchmark runs the same ROM and
 checksums under all three systems; CRuby omits only the mruby-specific
 compatibility shims.
 

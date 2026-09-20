@@ -16,7 +16,7 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-PPU_FIBER_BOUNDARY_METHODS = %w[run main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks].freeze
+PPU_FIBER_BOUNDARY_METHODS = %w[initialize run main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks].freeze
 
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -240,7 +240,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'PPU#run, #main_loop, and the four Fiber yield methods remain interpreted so Fiber never yields across a generated C function frame; other PPU methods are compiled.'
+      summary.puts 'PPU#initialize, #run, #main_loop, and the four Fiber yield methods remain interpreted so Fiber is created and never yields across a generated C function frame; other PPU methods are compiled.'
     end
   end
 
