@@ -18,7 +18,7 @@ FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 FIBER_BOUNDARY_METHODS = {
   'Optcarrot::NES' => %w[run step dispose],
-  'Optcarrot::CPU' => %w[run],
+  'Optcarrot::CPU' => %w[run vsync],
   'Optcarrot::PPU' => %w[
     initialize update vsync sync run dispose main_loop wait_frame wait_zero_clocks wait_one_clock wait_two_clocks
   ]

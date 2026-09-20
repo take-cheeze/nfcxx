@@ -313,8 +313,9 @@ the interpreted run and CRuby. The probe now compiles PPU methods while
 leaving the emulator entry path and Fiber creation, resume bridges, lifecycle
 methods, and four `wait_*` yield points registered as interpreted methods.
 `NES#run` calls `step`, which reaches `CPU#run`, `PPU#sync`, and `PPU#run`
-before resuming its Fiber; compiling any caller would keep a generated C
-function frame active during the Fiber resume and yield. `PPU#initialize`
+before resuming its Fiber; `CPU#vsync` also calls `PPU#sync` at the frame
+boundary. Compiling any caller would keep a generated C function frame active
+during the Fiber resume and yield. `PPU#initialize`
 creates the Fiber, `#dispose` resumes it at shutdown, and `#main_loop` yields
 through the `wait_*` methods. mruby cannot safely create, resume, or yield a
 Fiber across a generated C function frame. Keeping those methods and the loop
