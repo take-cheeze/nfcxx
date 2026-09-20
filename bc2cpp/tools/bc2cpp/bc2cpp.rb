@@ -23024,11 +23024,12 @@ class CodeGen
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
               !mrb_frozen_p(mrb_obj_ptr(#{recv})) && mrb_fixnum_p(#{start}) &&
               mrb_fixnum(#{start}) == 0 && mrb_fixnum_p(#{length}) && mrb_fixnum(#{length}) >= 0) {
+            mrb_value bc2cpp_slice_receiver = #{recv};
             mrb_int bc2cpp_slice_len = mrb_fixnum(#{length});
-            mrb_int bc2cpp_array_len = RARRAY_LEN(#{recv});
+            mrb_int bc2cpp_array_len = RARRAY_LEN(bc2cpp_slice_receiver);
             if (bc2cpp_slice_len > bc2cpp_array_len) bc2cpp_slice_len = bc2cpp_array_len;
-            r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_len, RARRAY_PTR(#{recv}));
-            mrb_ary_splice(M, #{recv}, 0, bc2cpp_slice_len, mrb_undef_value());
+            r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_len, RARRAY_PTR(bc2cpp_slice_receiver));
+            mrb_ary_splice(M, bc2cpp_slice_receiver, 0, bc2cpp_slice_len, mrb_undef_value());
           } else {
             #{fallback.chomp}
           }
