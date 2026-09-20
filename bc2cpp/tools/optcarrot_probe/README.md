@@ -309,15 +309,13 @@ cleanly:
   instance variables when an embedded layout overlaps an inheritance chain.
 
 With those fixes, the 180-frame run completes with checksum `59662`, matching
-the interpreted run and CRuby. The probe leaves all CPU and PPU methods, as
-well as `NES#run`, `#step`, and `#dispose`, interpreted so no generated C
-function runs on the emulator's Fiber caller path. CI showed SIGSEGVs even
-after excluding the explicit Fiber boundaries and Fiber-called PPU methods;
-keeping both hot owners interpreted is the current safe boundary. The
-benchmark still uses upstream emulation logic; only the method registration
-set changes. It runs the same ROM and
-checksums under all three systems; CRuby omits only the mruby-specific
-compatibility shims.
+the interpreted run and CRuby. CI still showed SIGSEGVs after excluding CPU,
+PPU, and the explicit NES Fiber boundaries, so the probe now compiles only
+setup methods on `Optcarrot::Config` and `Optcarrot::Opt`. Emulator runtime
+classes remain interpreted until generated C functions are safe across mruby
+Fiber switches. The benchmark still uses upstream emulation logic; only the
+method registration set changes. It runs the same ROM and checksums under all
+three systems; CRuby omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
