@@ -1,12 +1,16 @@
-class File
-  def self.binread(path)
-    IO.read(path, mode: "rb")
+unless File.respond_to?(:binread)
+  class File
+    def self.binread(path)
+      IO.read(path, mode: "rb")
+    end
   end
 end
 
-class Integer
-  def [](i)
-    (self >> i) & 1
+unless 0.respond_to?(:[])
+  class Integer
+    def [](i)
+      (self >> i) & 1
+    end
   end
 end
 
@@ -26,9 +30,11 @@ class IdentityHashShim
   end
 end
 
-class Hash
-  def compare_by_identity
-    IdentityHashShim.new
+unless {}.respond_to?(:compare_by_identity)
+  class Hash
+    def compare_by_identity
+      IdentityHashShim.new
+    end
   end
 end
 
@@ -43,10 +49,12 @@ module Process
   end
 end
 
-class String
-  def sum(n = 16)
-    total = 0
-    each_byte { |b| total += b }
-    n <= 0 ? total : total & ((1 << n) - 1)
+unless "".respond_to?(:sum)
+  class String
+    def sum(n = 16)
+      total = 0
+      each_byte { |b| total += b }
+      n <= 0 ? total : total & ((1 << n) - 1)
+    end
   end
 end
