@@ -6145,7 +6145,7 @@ NATIVE_ARG_TARGETS = Set[
 # above -- is a fact about this program today, re-checked per future
 # entry, never a standing assumption.
 #
-# A further whole-program survey (docs/bc2cpp_coverage.txt's own 7-strong
+# A further whole-program survey (the CI-published coverage report's own 7-strong
 # `#error unhandled opcode SUPER` count) found exactly 7 remaining sites,
 # individually re-checked, not assumed from any prior entry's shape:
 #
@@ -6263,7 +6263,7 @@ NATIVE_ARG_TARGETS = Set[
 #   all, so this splat shape is outside the supported subset on its own
 #   terms, independent of the target. (b) all 4 additionally carry their
 #   own `#error unhandled opcode ARGARY` (exactly the 4 ARGARY markers in
-#   docs/bc2cpp_coverage.txt), so each would stay on the interpreter even
+#   whole-program coverage report), so each would stay on the interpreter even
 #   if SUPER alone were somehow satisfied.
 #
 #   `LCF::Array1D` is also the live illustration of the module hazard the
@@ -6305,7 +6305,8 @@ SUPER_TARGETS = Set[
   # the real disassembly (`SUPER R2 n=0`/`SUPER R2 n=0`, not assumed from
   # source text), the exact already-supported RPG2k3::Scene::Battle shape
   # above, into `Optcarrot::APU::Oscillator#reset`/`#active?`, which
-  # already compiles clean (docs/optcarrot_bc2cpp_coverage.txt). Checked,
+  # already compiles clean (tools/optcarrot_probe/README.md; current counts
+  # are published in the CI job summary). Checked,
   # not assumed: grepped every real `.reset`/`.active?` call site across
   # the whole closed world (3rd/optcarrot/lib) -- none pass a block
   # literal; and the whole closed world has exactly two real `include`s
@@ -9056,11 +9057,12 @@ class CodeGen
   # none. Measured real whole-program fan-out for the actual top dynamic-
   # dispatch names first, not assumed: `width` has 5 real owners, `term`/
   # `party`/`size`/`repeat?`/`db` have 2-3, `dispose` has 16 -- so this is
-  # gated on a small, bounded owner count (`POLY_SMALL_N_MAX`) rather than
-  # attempted unconditionally; past that point a linear chain of runtime
-  # class checks stops being clearly cheaper than mruby's own real method-
-  # table hash lookup, and the code-size cost (one whole extra `if` branch
-  # per owner) keeps growing regardless.
+  # gated on a bounded owner count (`POLY_SMALL_N_MAX`) rather than attempted
+  # unconditionally; past that point a linear chain of runtime class checks
+  # stops being clearly cheaper than mruby's own real method-table hash
+  # lookup, and the code-size cost (one whole extra `if` branch per owner)
+  # keeps growing regardless. The bound covers the observed 16-owner
+  # `dispose` family while leaving the 21-owner `update` family dynamic.
   #
   # Real C++ virtual dispatch (a vtable) was considered and rejected for
   # this whole problem, not just scoped smaller: every mruby object is an
@@ -9088,7 +9090,7 @@ class CodeGen
   # `@only_owners`/`@other_owners` emission-eligibility gate every other
   # devirtualization path here already uses (no `_impl` exists for an
   # owner this run isn't emitting).
-  POLY_SMALL_N_MAX = 5
+  POLY_SMALL_N_MAX = 16
 
   def poly_small_n_targets(name, n)
     # RUNTIME_DEF_DEVIRT_GUARD: same gate as monomorphic_target above, and
@@ -21663,6 +21665,40 @@ class CodeGen
   # this really is an ordinary positional call, so unlike a real keyword
   # call there is no obstacle to that follow-up at all.
   #
+  # KEYWORD_HASH_DEVIRT_SUPPORT: that follow-up, now built. Once the Hash
+  # is packed, the call is an ordinary positional send of `total = n + 1`
+  # arguments, so every positional devirtualization this file already
+  # knows applies unchanged -- tried in the same order compile_send
+  # itself uses, MONO first, then the POLY_SMALL_N runtime-class-checked
+  # chain:
+  #   - MONO: `monomorphic_target` (RUNTIME_DEF guard, one bytecode def,
+  #     compiles clean -- all reused verbatim) plus the callee-shape
+  #     checks the positional MONO path also makes: pure-mandatory-or-
+  #     optional arity, `total` inside `[mand, mand + opt]` (the trailing
+  #     Hash fills a mandatory or optional slot exactly the way
+  #     CALLSITE_OPTIONAL_ARG_SUPPORT already models for a caller-
+  #     supplied optional), the ONLY_OWNERS emission gate, and no
+  #     NATIVE_ARG_TARGETS-typed positions (this path does no call-site
+  #     unboxing -- a NATIVE_ARG callee would need `mrb_as_int` splices
+  #     this emitter does not build; declining is today's behavior).
+  #     The optional-positional padding (`mrb_nil_value()` placeholders
+  #     plus the trailing `bc2cpp_given_opt` literal) is spliced exactly
+  #     the way compile_keyword_call's own KEYWORD_CALLSITE_OPTIONAL_
+  #     POSITIONAL_SUPPORT already does for the same callee shape.
+  #   - POLY_SMALL_N: `compile_poly_small_n` reused verbatim with the
+  #     Hash appended and effective arity `total` -- its own candidate
+  #     filter (pure-mandatory, exact arity, clean, emitted, no native
+  #     args) already encodes everything this path needs, and its
+  #     `mrb_funcall` fallback already passes the same extended argv.
+  # TYPED is deliberately absent: it needs irep/idx/owner_def trace
+  # context this function does not receive, and every real site this
+  # round measured resolves under MONO or POLY_SMALL_N already -- see
+  # this method's own comment for the shape that would motivate
+  # threading it through.
+  # A distinct `KEYWORD_HASH_DEVIRT` marker (never bare `MONO`/`POLY`)
+  # so the generated text stays auditable per mechanism, the same
+  # marker discipline every other path in this file already follows.
+  #
   # Returns the emitted C++, or nil for "not this shape" (the caller keeps
   # the honest #error). Never guesses.
   def compile_keyword_hash_positional_send(name:, d:, recv:, n:, nk:, argv:, kw_sym_regs:,
@@ -21723,9 +21759,44 @@ class CodeGen
       out << "    mrb_hash_set(M, bc2cpp_kwh, r#{kw_sym_regs[k]}, r#{kw_val_regs[k]});" \
              "  // :#{kw_names[k]}\n"
     end
-    out << "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}"
+    out << "    #{keyword_hash_devirt_line(name: name, d: d, recv: recv, argv: argv, total: total)}"
     out << "  }\n"
     out
+  end
+
+  # KEYWORD_HASH_DEVIRT_SUPPORT's own dispatch tail: given the packed-Hash
+  # call `(recv, *argv, bc2cpp_kwh)` of effective arity `total`, try MONO,
+  # then the POLY_SMALL_N chain, else the same dynamic dispatch this path
+  # always emitted. Factored out of compile_keyword_hash_positional_send
+  # itself (rather than inlined there) so the two resolutions read as one
+  # ordered list instead of nesting three levels deep inside the Hash
+  # prologue builder.
+  def keyword_hash_devirt_line(name:, d:, recv:, argv:, total:)
+    ext_argv = argv + ['bc2cpp_kwh']
+    target = monomorphic_target(name)
+    if target
+      t_irep = @ireps.fetch(target.irep)
+      t_mand = mandatory_arity(t_irep)
+      t_opt = optional_arity(t_irep)
+      if pure_mandatory_or_optional_arity?(t_irep) &&
+         total.between?(t_mand, t_mand + t_opt) &&
+         native_arg_types(target, t_mand).compact.empty? &&
+         (!@only_owners || @only_owners.include?(target.owner) || @other_owners&.include?(target.owner))
+        impl = cpp_name(target.owner, target.name) + '_impl'
+        call_argv = ext_argv.dup
+        if t_opt.positive?
+          call_argv += Array.new(t_mand + t_opt - ext_argv.size, 'mrb_nil_value()')
+          call_argv << (ext_argv.size - t_mand).to_s
+        end
+        return "  // KEYWORD_HASH_DEVIRT :#{name} -> #{target.owner}##{target.name} (MONO, trailing-Hash " \
+               "positional, direct C++ call, no mrb_funcall)\n" \
+               "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      end
+    end
+    chained = compile_poly_small_n(name, d, recv, ext_argv, total)
+    return chained.sub('POLY_SMALL_N', 'KEYWORD_HASH_DEVIRT/POLY_SMALL_N') if chained
+
+    dynamic_dispatch_line(d, recv, name, ext_argv)
   end
 
   # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the memoized closed-world
