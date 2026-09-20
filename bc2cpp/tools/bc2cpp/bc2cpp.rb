@@ -1726,7 +1726,18 @@ def extract_native_method_names(src_paths)
   # below (regex alternation order) or "MRB_SYM_Q(empty)" would match SYM
   # against "SYM" alone and then fail on the unconsumed "_Q(empty)".
   Array(src_paths).each do |path|
-    src = File.read(path, encoding: 'UTF-8')
+    # A path that doesn't exist (an uninitialized git submodule -- this
+    # file's own NATIVE_SRCS lists every submodule path unconditionally,
+    # and a checkout may legitimately lack some) contributes nothing:
+    # skipping it can only ever cost a missed proof or a missed
+    # MONO->POLY flip, never a wrong one. Rescued broadly (not just
+    # Errno::ENOENT) to match every other native-source reader in this
+    # file; a path that exists but can't be read is equally unusable.
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
     # Handles both single-line and the far more common multi-line call shape
     # (`mrb_define_method(\n M, rect, "initialize",\n ...);`) -- the regex
     # just doesn't care where the newlines fall between arguments.
@@ -1826,7 +1837,16 @@ end
 def extract_native_call_names(src_paths)
   names = Set.new
   Array(src_paths).each do |path|
-    src = File.read(path, encoding: 'UTF-8')
+    # Same missing-path skip as extract_native_method_names above --
+    # an uninitialized submodule contributes nothing, never a wrong
+    # answer. (A missed *call* name only ever costs a "never called"
+    # diagnostic line, not a codegen decision, so this direction is
+    # doubly safe.)
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
     src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
       names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end
@@ -4585,7 +4605,10 @@ end
 # modeled here), so a call site passing a different argument count (e.g.
 # a bare `Tone.new` relying on all-default 0s) just misses this path and
 # falls back to ordinary dynamic dispatch, same as any other unmodeled
-# shape in this file.
+# shape in this file. An Array here (e.g. Sprite's `[0, 1]`) lists every
+# real fixed-arity shape separately -- the emission gate matches any one
+# of them exactly, same rule, just several accepted counts instead of
+# one (see compile_send's own comment at the gate).
 #
 # `arg_type` (:int/:float, uniform across all of one class's own arguments
 # -- Rect's own fields are all mrb_int, Color/Tone's own are all mrb_float,
@@ -4602,13 +4625,29 @@ end
 # for a bad argument, mrb_state* M has no notion of a calling-frame
 # boundary to cross), only which side of the call spells them out.
 NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss_tone_new_direct', class_fn: 'rgss_native_tone_class', arity: 4, arg_type: :float },
-  'Color' => { fn: 'rgss_color_new_direct', class_fn: 'rgss_native_color_class', arity: 4, arg_type: :float },
-  'Rect' => { fn: 'rgss_rect_new_direct', class_fn: 'rgss_native_rect_class', arity: 4, arg_type: :int },
+  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', arity: 4, arg_type: :float },
+  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', arity: 4, arg_type: :float },
+  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', arity: 4, arg_type: :int },
+  # Sprite (31 real `Sprite.new` sites): `spr_init` (mruby-rgss/src/
+  # lib.cxx) is `mrb_get_args(M, "|o", &vp)` -- zero or one argument, the
+  # viewport (or nil for none) -- then a fixed four-step body
+  # (`lv_canvas_create(parent_object(M, vp))`, `wrap_lv_obj`,
+  # `register_zobj`, `@viewport` ivar store). `rgss::sprite_new_direct`
+  # (namespace `rgss` at file scope in lib.cxx, declared in include/
+  # rgss_construct.hxx) reproduces exactly that body with the
+  # already-unboxed viewport value; `mrb_get_args`' own "|o" never
+  # coerces or raises for any input, so no TypeError behavior exists to
+  # preserve. Both real shapes (`Sprite.new` and `Sprite.new(viewport)`)
+  # are admitted -- same rule as every other entry, just two accepted
+  # counts. The runtime class-identity guard is the same one every other
+  # entry already carries (a reassigned `Sprite` constant falls back to
+  # ordinary `mrb_funcall`).
+  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', arity: [0, 1],
+                arg_type: :object },
   # Bitmap (124 real `Bitmap.new` sites, ~105 of them the 2-Integer-arg
   # size shape): `bmp_init_size` (mruby-rgss/src/lib.cxx) is
   # `mrb_get_args(M, "ii", ...)` then `alloc_obj(M, self, w, h,
-  # ARGB8888)` -- `rgss_bitmap_new_direct` reproduces exactly that.
+  # ARGB8888)` -- `rgss::bitmap_new_direct` reproduces exactly that.
   # Unlike the three entries above (whose every real call site passes
   # the unboxed type, so `mrb_as_*` raising on a mistyped argument IS
   # the correct behavior), Bitmap's own Ruby `initialize(f, s)` sends
@@ -4621,7 +4660,7 @@ NATIVE_CONSTRUCT_TARGETS = {
   # fast path, still verify at runtime" shape every other guarded
   # devirtualization in this file already uses, just keyed on argument
   # tags rather than the receiver's class.
-  'Bitmap' => { fn: 'rgss_bitmap_new_direct', class_fn: 'rgss_native_bitmap_class', arity: 2, arg_type: :int,
+  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', arity: 2, arg_type: :int,
                 type_guard: :int },
 }.freeze
 
@@ -10459,20 +10498,28 @@ class CodeGen
   # `_impl` declarations -- this only ever declares them, never defines
   # them; the definitions reach this translation unit at link time the
   # same way any other cross-file C++ call in this project's native gems
-  # already does. `extern "C"`, matching lib.cxx's own definitions exactly
-  # (see that file's own comment on why: each one sits inside lib.cxx's
-  # top-level anonymous namespace, and only an `extern "C"` declaration
-  # escapes that namespace's own internal linkage) -- a plain C++-linkage
-  # declaration here would silently mangle a different symbol name than
-  # the real (extern "C") one lib.cxx defines and fail to link; caught
-  # exactly this way building the very first real caller (RGSS::Sprite's
-  # own #tone/#color/#src_rect).
+  # already does. (This comment used to mandate `extern "C"` decls to
+  # match lib.cxx's own anonymous-namespace definitions -- that whole
+  # arrangement is gone: the entry points now live in namespace `rgss`
+  # at file scope, declared once in include/rgss_construct.hxx, and this
+  # emitter just includes that header. Kept as a warning for anyone
+  # tempted to re-spell the signatures here instead: don't -- the
+  # header is the single source of truth.)
   #
   # Parameter types have to match lib.cxx's own real (native, not
   # mrb_value) signature exactly, one real C++ overload-resolution/linkage
   # concern, not just documentation -- see that file's own comment on
   # these three functions for why `klass` is `RClass*` and every other
   # parameter is `arg_type`'s own native C++ type (`mrb_int`/`mrb_float`).
+  #
+  # The declarations come from include/rgss_construct.hxx itself (one
+  # `#include`, never re-spelled here): the header is the single source
+  # of truth for these signatures, so a future entry only touches the
+  # header, lib.cxx, and NATIVE_CONSTRUCT_TARGETS -- never this emitter.
+  # The three `*-compiled` mrbgem.rake files each add repo `include/` to
+  # `cxx.include_paths` (the same wiring mruby-mvjs already uses for
+  # rgss_bitmap.hxx) so the generated TU, #included into register.cxx,
+  # resolves it.
   def emit_native_construct_decls
     return '' unless @native_construct_used.any?
 
@@ -10482,16 +10529,11 @@ class CodeGen
     out << "// directly in place of Class#new's own allocate+initialize\n"
     out << "// dispatch when a `.new` call site's receiver is provably one of\n"
     out << "// these native DataType<T>-backed classes (compile_send's own\n"
-    out << "// \"MONO :new -> direct native construct\" path).\n"
-    out << "extern \"C\" {\n"
-    @native_construct_used.sort.each do |known|
-      native = NATIVE_CONSTRUCT_TARGETS.fetch(known)
-      out << "RClass* #{native[:class_fn]}(void);\n"
-      native_type = native[:arg_type] == :int ? 'mrb_int' : 'mrb_float'
-      params = (['mrb_state*', 'RClass*'] + [native_type] * native[:arity]).join(', ')
-      out << "mrb_value #{native[:fn]}(#{params});\n"
-    end
-    out << "}\n"
+    out << "// \"MONO :new -> direct native construct\" path). Declared in\n"
+    out << "// include/rgss_construct.hxx, defined in namespace `rgss` at\n"
+    out << "// file scope in lib.cxx -- plain C++ linkage both sides, no\n"
+    out << "// `extern \"C\"` anywhere.\n"
+    out << "#include \"rgss_construct.hxx\"\n"
     out << "\n"
     out
   end
@@ -22064,8 +22106,11 @@ class CodeGen
       # Exact-arity-only (see NATIVE_CONSTRUCT_TARGETS' own comment) -- a
       # call site passing a different argument count just isn't this
       # shape, falls through to ordinary POLY dynamic dispatch below like
-      # any other unmodeled variant.
-      if native && n == native[:arity]
+      # any other unmodeled variant. `arity` may also be an Array, for a
+      # native #initialize with several real fixed-arity shapes (each
+      # element an exact count, matched the same way -- see that table's
+      # own comment).
+      if native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
         @native_construct_used << known
         # `fn`'s own real C++ signature takes native mrb_int/mrb_float
         # parameters, not mrb_value (mruby-rgss/src/lib.cxx's own comment
@@ -22074,7 +22119,17 @@ class CodeGen
         # mrb_as_float calls that function used to make internally before
         # this change; moving them here changes nothing observable (same
         # TypeError-raising for a bad argument), it only changes which
-        # side of the call spells them out.
+        # side of the call spells them out. `:object` (Sprite) needs no
+        # unboxing at all -- the viewport value passes through as a plain
+        # `mrb_value`, exactly as `spr_init`'s own "|o" receives it. A
+        # 0-argument call site passes an explicit `mrb_nil_value()` for the
+        # missing viewport -- matching what the ordinary `mrb_get_args(M,
+        # "|o", &vp)` dispatch produces for the same call (`vp` stays its
+        # own nil initializer) -- because the callee's own C++ signature
+        # always takes the full max-arity parameter list (see
+        # include/rgss_construct.hxx): a call with fewer arguments than
+        # parameters would be a hard g++ arity-mismatch error, never a
+        # silent default-fill.
         #
         # `type_guard` (Bitmap only, see that entry): instead of
         # unboxing-unconditionally (which RAISES on a mistyped argument),
@@ -22093,11 +22148,23 @@ class CodeGen
                        "falling back to ordinary dispatch for any other shape -- " \
                        "see that entry's own `type_guard` comment."
         else
-          unbox = native[:arg_type] == :int ? 'mrb_as_int' : 'mrb_as_float'
-          unboxed_argv = argv.map { |a| "#{unbox}(M, #{a})" }
+          unboxed_argv = case native[:arg_type]
+                         when :int then argv.map { |a| "mrb_as_int(M, #{a})" }
+                         when :float then argv.map { |a| "mrb_as_float(M, #{a})" }
+                         else argv
+                         end
+          unboxed_argv = ['mrb_nil_value()'] if unboxed_argv.empty?
           guard = "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
           note_extra = ''
         end
+        # `:object` (Sprite) takes no unboxing, and `type_guard` (Bitmap)
+        # unboxes past its tag check instead, so the note's own "unboxes
+        # each argument" sentence only applies to :int/:float.
+        unbox_phrase = case native[:arg_type]
+                       when :int then 'unboxes each argument register with the same mrb_as_int that function used to call internally'
+                       when :float then 'unboxes each argument register with the same mrb_as_float that function used to call internally'
+                       else 'passes each argument register straight through as mrb_value'
+                       end
         note = "  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own " \
                "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n" \
                "  // Runtime-guarded: #{known} could have been reassigned at the constant level (e.g. " \
@@ -22106,8 +22173,8 @@ class CodeGen
                "produced, so a reassignment there is already reflected in it; falls back to ordinary " \
                "mrb_funcall (whatever #{recv} now actually is) rather than misconstruct if it doesn't " \
                "match the real native class.#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/" \
-               "mrb_float, not mrb_value, so this call site unboxes each argument register with the " \
-               "same #{native[:type_guard] ? 'mrb_integer (past the tag check above)' : unbox} that function used to call internally, and passes mrb_class_ptr(#{recv}) " \
+               "mrb_float, not mrb_value (except :object, passed straight through), so this call site #{unbox_phrase}, " \
+               "and passes mrb_class_ptr(#{recv}) " \
                "straight through (already computed for the guard just above -- no second, redundant " \
                "mrb_class_ptr call needed).\n"
         return "#{note}" \
