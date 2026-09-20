@@ -1726,7 +1726,18 @@ def extract_native_method_names(src_paths)
   # below (regex alternation order) or "MRB_SYM_Q(empty)" would match SYM
   # against "SYM" alone and then fail on the unconsumed "_Q(empty)".
   Array(src_paths).each do |path|
-    src = File.read(path, encoding: 'UTF-8')
+    # A path that doesn't exist (an uninitialized git submodule -- this
+    # file's own NATIVE_SRCS lists every submodule path unconditionally,
+    # and a checkout may legitimately lack some) contributes nothing:
+    # skipping it can only ever cost a missed proof or a missed
+    # MONO->POLY flip, never a wrong one. Rescued broadly (not just
+    # Errno::ENOENT) to match every other native-source reader in this
+    # file; a path that exists but can't be read is equally unusable.
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
     # Handles both single-line and the far more common multi-line call shape
     # (`mrb_define_method(\n M, rect, "initialize",\n ...);`) -- the regex
     # just doesn't care where the newlines fall between arguments.
@@ -1826,7 +1837,16 @@ end
 def extract_native_call_names(src_paths)
   names = Set.new
   Array(src_paths).each do |path|
-    src = File.read(path, encoding: 'UTF-8')
+    # Same missing-path skip as extract_native_method_names above --
+    # an uninitialized submodule contributes nothing, never a wrong
+    # answer. (A missed *call* name only ever costs a "never called"
+    # diagnostic line, not a codegen decision, so this direction is
+    # doubly safe.)
+    src = begin
+      File.read(path, encoding: 'UTF-8')
+    rescue StandardError
+      next
+    end
     src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
       names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end
