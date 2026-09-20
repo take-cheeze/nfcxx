@@ -9218,23 +9218,24 @@ class CodeGen
   # 3rd/mruby/src/range.c). `to_s`/`length`/`first`/`dup`/`===` are the
   # entries that AREN'T "one real native implementation" -- see each
   # one's own `*_TYPE_TAG_DISPATCH` comment in
-  # compile_native_primitive_send. `empty?` is handled by a separate
-  # per-class guard below because its name also has a bytecode definition.
+  # compile_native_primitive_send. `empty?` and `size` use separate
+  # per-class guards below because each name also has a bytecode definition.
   #
-  # `push`/`size`/`<<` were investigated this round too (each has a real,
+  # `push`/`<<` were investigated this round too (each has a real,
   # safely-reproducible native body) but deliberately NOT added here: this
   # exact program's own
   # whole-program registry shows each one genuinely collided with a real
   # bytecode override somewhere in the closed world (`RPG2k#push`,
-  # `Game::Party#size`, `RGSS::ErrorReport::Tee#<<`), confirmed directly
-  # against the live registry (not assumed) -- `native_only_mono?`
-  # correctly refuses all three every time, so an entry for any of them
+  # `RGSS::ErrorReport::Tee#<<`), confirmed directly against the live
+  # registry (not assumed) -- `native_only_mono?` correctly refuses both
+  # every time, so an entry for either
   # would be real, dead,
   # never-reached code today. Left out rather than shipped inert; revisit
-  # if a future edit removes one of those collisions.
-  # `empty?` also collides with `Game::MoveRoute#empty?`, so it uses the
-  # separate exact-built-in-class guard below instead of this name-wide
-  # table gate.
+  # if a future edit removes one of those collisions. `size` collides
+  # with `Game::Party#size`, and `empty?` with `Game::MoveRoute#empty?`;
+  # both use separate exact-built-in-class guards below instead of this
+  # name-wide table gate. `size` excludes String because its native body
+  # depends on the private, build-flag-sensitive `RSTRING_CHAR_LEN` macro.
   #
   # `clear` was investigated too but excluded: `RGSS::ErrorReport`'s own
   # `class << self; def clear; ...; end; end` (mruby-rgss/mrblib/
@@ -9242,7 +9243,7 @@ class CodeGen
   # correctly refuses on every time -- confirmed against the live
   # registry (`RGSS::ErrorReport.singleton#clear` shows up as a second
   # def alongside the native placeholder), not assumed. Would be dead
-  # code today, same reasoning as `push`/`size`/`<<` above.
+  # code today, same reasoning as `push`/`<<` above.
   #
   # `include?`/`member?` were investigated too and also excluded, for the
   # same "individually sound, but real bytecode override collides"
@@ -9298,27 +9299,27 @@ class CodeGen
     defs && defs.size == 1 && defs.first.irep.nil?
   end
 
-  # `empty?` has real, separate native bodies on Array, Hash, and String,
-  # while unrelated Ruby classes in this closed world also define the same
-  # name. Permit only exact built-in receivers, and only when the registry
-  # proves no Ruby definition replaced one of those classes' own methods.
-  # A prepend can sit ahead of the native method, so decline the fast path
-  # for any base class with a known or unresolved prepend.
-  def builtin_container_empty_send_safe?
-    return @builtin_container_empty_send_safe if defined?(@builtin_container_empty_send_safe)
+  # `empty?` and `size` have unrelated Ruby overrides elsewhere in the
+  # program. Permit per-class fast paths only for exact built-in receivers,
+  # with a native registration present and no Ruby replacement on those
+  # classes. A prepend can sit ahead of the native method, so decline the
+  # fast path for any base class with a known or unresolved prepend.
+  def builtin_container_send_safe?(name, builtins)
+    @builtin_container_send_safe ||= {}
+    cache_key = [name, builtins]
+    return @builtin_container_send_safe[cache_key] if @builtin_container_send_safe.key?(cache_key)
 
-    defs = @registry['empty?']
-    builtins = %w[Array Hash String]
-    @builtin_container_empty_send_safe = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
-                                          defs.none? { |d| builtins.include?(d.owner) } &&
-                                          builtins.none? do |owner|
-                                            !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
-                                          end
+    defs = @registry[name]
+    @builtin_container_send_safe[cache_key] = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                              defs.none? { |d| builtins.include?(d.owner) } &&
+                                              builtins.none? do |owner|
+                                                !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
+                                              end
   end
 
   # Emits the guarded direct C++ implementation for one
-  # NATIVE_PRIMITIVE_SEND_ARITY name or the specialized container `empty?`
-  # path -- see compile_send's own call site
+  # NATIVE_PRIMITIVE_SEND_ARITY name or the specialized container `empty?`/
+  # `size` paths -- see compile_send's own call site
   # (right above `target = monomorphic_target(name)`) for the full
   # per-method soundness citations against the real 3rd/mruby source;
   # kept here, rather than inlined at that call site, purely to keep
@@ -9327,6 +9328,32 @@ class CodeGen
   # snippet per name.
   def compile_native_primitive_send(name, d, recv, argv)
     case name
+    when 'size'
+      # Array and Hash use safe length APIs. String#size needs the private
+      # RSTRING_CHAR_LEN macro and stays on ordinary dispatch.
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      <<~CPP
+          // size -- exact base Array/Hash only; preserve overrides and String semantics
+          switch (mrb_type(#{recv})) {
+          case MRB_TT_ARRAY:
+            if (mrb_obj_ptr(#{recv})->c == M->array_class) {
+              r#{d} = mrb_int_value(M, ARY_LEN(mrb_ary_ptr(#{recv})));
+            } else {
+              #{fallback.chomp}
+            }
+            break;
+          case MRB_TT_HASH:
+            if (mrb_obj_ptr(#{recv})->c == M->hash_class) {
+              r#{d} = mrb_int_value(M, mrb_hash_size(M, #{recv}));
+            } else {
+              #{fallback.chomp}
+            }
+            break;
+          default:
+            #{fallback.chomp}
+            break;
+          }
+      CPP
     when 'empty?'
       # The registered Array/Hash/String implementations all test the
       # container's length. Exact class checks preserve subclasses and
@@ -22804,12 +22831,11 @@ class CodeGen
     #     value rather than a proven-safe simplification.
     #   - `first`: `mrb_ary_first` (Array, optional-arg form) vs
     #     `range_beg` (Range, real separate ARGS_NONE-only registration).
-    #     Only Range is handled directly -- see compile_native_primitive_
-    #     send's own FIRST_TYPE_TAG_DISPATCH comment for why Array is
-    #     excluded despite having a single real implementation: its own
-    #     body reads `mrb_get_argc(mrb)` to pick between its two real
-    #     behaviors, which would read the WRONG call frame's argument
-    #     count if called directly from here.
+    #     Both zero-argument forms are handled directly -- Array's result is
+    #     reproduced under an exact-class guard because its helper reads
+    #     `mrb_get_argc(mrb)`, which would observe the wrong call frame.
+    #     See compile_native_primitive_send's FIRST_TYPE_TAG_DISPATCH
+    #     comment for the guard and the `first(n)` arity fallback.
     #   - `dup`: exactly two real native registrations found (confirmed
     #     via a full grep across every native source this project's own
     #     closed world can see, not just 3rd/mruby/src) -- `mrb_obj_dup`
@@ -22831,7 +22857,11 @@ class CodeGen
     # substituting it would be a silent behavior change. Left as
     # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
     # below.
-    if name == 'empty?' && n.zero? && builtin_container_empty_send_safe?
+    if name == 'size' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash])
+      return compile_native_primitive_send(name, d, recv, argv)
+    end
+
+    if name == 'empty?' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash String])
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
