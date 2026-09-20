@@ -103,8 +103,8 @@ directly from that script. The full report lives at
 any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
 tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
-**Result: 381/383 methods (99.5%) compile clean**, up from an initial
-92.2% baseline (measured with zero bc2cpp code changes) after four real
+**Result: 382/383 methods (99.7%) compile clean**, up from an initial
+92.2% baseline (measured with zero bc2cpp code changes) after six real
 `tools/bc2cpp/bc2cpp.rb` fixes landed alongside this probe (all verified
 inert for the real project -- see below):
 
@@ -152,13 +152,53 @@ inert for the real project -- see below):
    `pure_mandatory_arity?` to a new `keyword_hash_positional_callee?`, so a
    keyword call site whose callee declares NO keyword params but does take an
    `= default` optional positional compiles too. The trailing-Hash-as-positional
-   translation is sound for any callee whose ENTER `kd == 0` (vm.c OP_ENTER's own
-   arm), so an `opt` slot is fine -- the packed Hash simply lands in it, exactly
-   as Ruby hands `foo(k: v)` to `def foo(a, b = 1)`; only the callee's key/kdict
-   fields and an out-of-range positional count are refused. This closes
-   `PPU::OptimizedCodeBuilder#batch_render_pixels`'s
-   `expand_methods(fastpath, render_pixel: gen(...))`; real-project
-   `scripts/bc2cpp_coverage_report.rb` output stays byte-identical.
+    translation is sound for any callee whose ENTER `kd == 0` (vm.c OP_ENTER's own
+    arm), so an `opt` slot is fine -- the packed Hash simply lands in it, exactly
+    as Ruby hands `foo(k: v)` to `def foo(a, b = 1)`; only the callee's key/kdict
+    fields and an out-of-range positional count are refused. This closes
+    `PPU::OptimizedCodeBuilder#batch_render_pixels`'s
+    `expand_methods(fastpath, render_pixel: gen(...))`; real-project
+    `scripts/bc2cpp_coverage_report.rb` output stays byte-identical.
+ 5. **`ENSURE_DISPATCH_MERGE_SUPPORT`**: `recognize_ensure_region` now accepts
+    one jump shape it used to reject outright -- one from *inside* the
+    protected range whose target is exactly the handler's own address.
+    That's mrbc's `dispatch` tail-merge: when the protected body's last
+    statement is conditional, its branch's normal exit jumps onto the
+    ensure region (`NES#run`'s `if ... end` right before `ensure dispose
+    end` compiles to `117 JMP 122` against `catch type: ensure begin: 0004
+    end: 0122 target: 0122`). On the VM such a jump runs the ensure body
+    inline and continues past the RAISEIF; the RAII model's exact
+    equivalent is `goto L<raiseif_addr>` -- leaving the guard scope (which
+    runs the ensure body) and landing on a label compile_method now emits
+    just after it, which the suppressed handler range would otherwise have
+    left dangling. Jumping *out* of a C++ scope via `goto` is legal and
+    runs the destructor (only jumping in is not), and the remap is keyed
+    on the irep object, so a nested block's same-numbered child-irep
+    address can never be re-pointed. Jumps from outside the range onto the
+    handler address are now explicitly rejected (previously they slipped
+    through the crossing test's parity check toward exactly such a dangling
+    label; mrbc never emits one). This closes `NES#run`'s
+    `unhandled opcode EXCEPT` -- `NES#run` itself still stays one honest
+    `#error` short of compiling, for its foreign `StackProf.start` keyword
+    site named in the remaining-gaps paragraph below.
+ 6. **`KEYWORD_HASH_LEXICAL_SELF_SUPPORT`**: when KEYWORD_HASH_POSITIONAL's
+    every-registry-def gate declines -- optcarrot's `PPU#initialize`'s
+    `reset(mapping: false)` is exactly the `:close_message` case its own
+    comment describes: every *other* `#reset` in the closed world (NES/CPU/
+    APU/Pads) is 0-arg, so no 1-positional arity agrees program-wide -- the
+    path retries against the single def this site can actually reach: an
+    implicit-self send inside a `PPU` method whose owner `lexical_self_
+    keyword_target` proves subclass-free, compiled-clean and not
+    runtime-installed can only ever reach `PPU#reset`, which IS a clean
+    `def reset(opt = {})`. The `mrb_funcall(self, "reset", 1, hash)` that
+    gets emitted resolves at runtime to exactly the def that was proven
+    reachable. Same selector and guards as LEXICAL_SELF_KEYWORD_SUPPORT,
+    applied to the hash-as-trailing-positional path; `PPU#initialize`
+    compiles clean (and, secondarily, newly shipping it unpoisons
+    ClassLayout's `@vram_addr_inc`-style fixnum embedding across the PPU
+    methods -- the probe's dynamic-dispatch site count actually *drops*
+    114→107 for `:==`), and the report's method-level coverage goes
+    381→382.
 
 Both hot-path entry points compile clean with real devirtualization already
 firing -- `CPU#run` (the fetch/dispatch loop) gets a direct C++ call for
@@ -168,26 +208,23 @@ falls back to real dynamic dispatch only where the receiver's class
 genuinely isn't known (`POLY :loglevel`) and to a wrapped-cfunc block
 fallback for its one `Fiber.new { ... }` block.
 
-The remaining 2 errored methods (3 `#error` markers), by reason
+The one remaining errored method (1 `#error` marker), by reason
 (`docs/optcarrot_bc2cpp_coverage.txt` has the full, current breakdown):
 
 ```
-     2  SEND/SSEND has a splat and/or keyword argument list (n=...)
-     1  unhandled opcode EXCEPT
-     3  total (a method can carry more than one #error)
+     1  SEND/SSEND has a splat and/or keyword argument list (n=...)
+     1  total
 ```
 
-`NES#run` carries a keyword call on the dynamic foreign `StackProf.start`
-receiver plus a `rescue => e` `EXCEPT` opcode. `PPU#initialize`'s
-`reset(mapping: false)` is a keyword call onto the POLY name `#reset`, whose
-other program-wide defs (`NES/CPU/APU/…#reset`) are 0-arg, so no single
-trailing-positional-Hash arity is sound for every possible receiver -- the
-same POLY-defs-disagree case the KEYWORD_HASH_POSITIONAL gate exists to
-refuse (`self`'s own class here is provably PPU, so a lexical-self-resolved
-keyword-hash path could close it, but that resolution does not exist yet).
-Both are the same keyword-`SEND`/`EXCEPT` opcode gaps
-`docs/bc2cpp_coverage.txt`'s own breakdown shows for the real project, so
-neither is optcarrot-specific.
+`NES#run`'s marker is its `StackProf.start(mode:, out:, raw:)` keyword call
+on a receiver this closed world knows nothing about (`StackProf` is loaded
+by a runtime `require "stackprof"` that mruby can never service). Packing
+the keyword pairs into a trailing positional Hash would be sound only if
+the (never-existing, here) callee declared no keyword parameters, and mruby
+4.0.0's C API has no keyword-carrying funcall to reach an unknown callee
+faithfully otherwise -- so this stays the honest `#error`, not an
+optcarrot-specific guess. (Its former `EXCEPT` marker and `PPU#initialize`'s
+whole keyword site are closed by points 5 and 6 above.)
 
 A third fix closed the two keyword sites whose callee is keyword-free but
 takes an `= default` optional positional (`PPU#initialize`'s sibling
@@ -215,19 +252,28 @@ sandbox to reproduce the real project's exact pinned toolchain (its own
 `gperf`/`bison` versions) just to regenerate `docs/bc2cpp_coverage.txt`
 for comparison -- which was tried first and produces spurious diffs
 (different `mrbc` binary, not a real behavior change) rather than genuinely
-mismatching output.
+mismatching output. Points 5 and 6 were verified the same way, one step
+stronger: not just the stats report but the REAL project's full raw
+whole-program diagnostic (both runs' stdout and stderr, and the
+`SKIP_UNSUPPORTED=1` shipped run's compiled-method set) diffed byte-
+identical with and without the change. Both new paths are reject-then-
+retry additions by construction -- they only ever run where the existing
+gates already said no -- and neither ensure region the real project
+actually recognizes (`Game::Battle#deal_attack`, `RGSS#audio_probe`) has a
+jump onto its handler address, which is why the diff is empty rather than
+merely small.
 
-Not yet attempted: checking whether the 381 "compiled clean" methods
+Not yet attempted: checking whether the 382 "compiled clean" methods
 produce *correct* output (this only confirms bc2cpp's own compiler accepted
 them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
 numbers measure for the real project -- not that the generated C++ was run
 and its output checked against CRuby/mruby's own, the way the
-headless-benchmark checksum above verifies the *interpreted* path), or
-giving KEYWORD_HASH_POSITIONAL_SUPPORT a lexical-self-resolved variant (the
-last 2 errored methods are `PPU#initialize`'s `self.reset(mapping: false)`, a
-POLY-name keyword call where `self`'s own class is provably PPU but the
-name-based gate can only see disagreeing `#reset` arities, and `NES#run`'s
-foreign `StackProf.start` call) and `EXCEPT`.
+headless-benchmark checksum above verifies the *interpreted* path). The
+one still-open shape this probe points at is a keyword `SEND` whose
+receiver's class the closed world cannot see at all (`NES#run`'s
+`StackProf.start`), where neither the hash-as-positional gate (no def to
+prove keyword-free) nor any keyword-carrying C-API call (mruby 4.0.0 has no
+such API -- `mrb_funcall` sets `ci->nk = 0`) can be sound.
 
 ## Files
 
