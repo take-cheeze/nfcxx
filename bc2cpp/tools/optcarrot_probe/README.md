@@ -360,4 +360,12 @@ ruby tools/optcarrot_probe/build_bundle.rb /tmp/full_probe.rb
 
 # bc2cpp coverage (needs only the parser-dump patch above):
 MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/bc2cpp_probe.rb
+
+# Build an isolated bc2cpp-enabled mruby and run the 180-frame checksum benchmark:
+MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb
 ```
+
+`compiled_run.rb` performs a clean temporary build and leaves the generated
+gem and runner outside the repository. Pass a frame count and ROM path to
+override the defaults. It requires the module-function patch too, because the
+normal optcarrot bundle uses that mruby feature.
