@@ -103,8 +103,8 @@ directly from that script. The full report lives at
 any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
 tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
-**Result: 382/383 methods (99.7%) compile clean**, up from an initial
-92.2% baseline (measured with zero bc2cpp code changes) after six real
+**Result: 383/383 methods (100.0%) compile clean**, up from an initial
+92.2% baseline (measured with zero bc2cpp code changes) after seven real
 `tools/bc2cpp/bc2cpp.rb` fixes landed alongside this probe (all verified
 inert for the real project -- see below):
 
@@ -199,6 +199,23 @@ inert for the real project -- see below):
     methods -- the probe's dynamic-dispatch site count actually *drops*
     114→107 for `:==`), and the report's method-level coverage goes
     381→382.
+7. **`KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT`**: when every
+    keyword-free proof declines -- optcarrot's `NES#run`'s
+    `StackProf.start(mode:, out:, raw:)` is the case the remaining-gap
+    paragraph below used to name: every `#start` def in the closed world
+    is one this site cannot reach, so no arity agrees -- the path proves
+    the site dynamically unreachable instead. `StackProf` is defined
+    NOWHERE in this closed world (no SETCONST/SETMCNST, no CLASS/MODULE,
+    no native `mrb_define_const`/`const_set`/`define_class`/
+    `define_module`, no foreign-source assignment -- the closed-world
+    universe `IntegerConstants.defined_name_universe`), so the GETCONST
+    the receiver register provably holds raises NameError before the send
+    can execute (no jump or handler entry lands between the two), and what
+    gets emitted is the faithful OP_SEND shape anyway (keyword pairs
+    packed into one trailing positional Hash, ordinary dynamic dispatch)
+    so a hypothetical proof break shows a wrong-but-well-formed send.
+    Tried last so it can never pre-empt an existing path; the report's
+    method-level coverage goes 382→383, i.e. 100%.
 
 Both hot-path entry points compile clean with real devirtualization already
 firing -- `CPU#run` (the fetch/dispatch loop) gets a direct C++ call for
@@ -208,23 +225,20 @@ falls back to real dynamic dispatch only where the receiver's class
 genuinely isn't known (`POLY :loglevel`) and to a wrapped-cfunc block
 fallback for its one `Fiber.new { ... }` block.
 
-The one remaining errored method (1 `#error` marker), by reason
-(`docs/optcarrot_bc2cpp_coverage.txt` has the full, current breakdown):
-
-```
-     1  SEND/SSEND has a splat and/or keyword argument list (n=...)
-     1  total
-```
-
-`NES#run`'s marker is its `StackProf.start(mode:, out:, raw:)` keyword call
-on a receiver this closed world knows nothing about (`StackProf` is loaded
-by a runtime `require "stackprof"` that mruby can never service). Packing
-the keyword pairs into a trailing positional Hash would be sound only if
-the (never-existing, here) callee declared no keyword parameters, and mruby
+No errored methods remain: 383/383 compile clean (100.0%), zero `#error`
+markers (`docs/optcarrot_bc2cpp_coverage.txt` has the full, current
+breakdown). The last site to close was `NES#run`'s
+`StackProf.start(mode:, out:, raw:)` keyword call on a receiver this
+closed world knows nothing about (`StackProf` is loaded by a runtime
+`require "stackprof"` that mruby can never service) -- closed by point 7
+above, which proves the send dynamically unreachable rather than packing
+against a callee that does not exist. Packing the keyword pairs into a
+trailing positional Hash would have been sound only if the
+(never-existing, here) callee declared no keyword parameters, and mruby
 4.0.0's C API has no keyword-carrying funcall to reach an unknown callee
-faithfully otherwise -- so this stays the honest `#error`, not an
-optcarrot-specific guess. (Its former `EXCEPT` marker and `PPU#initialize`'s
-whole keyword site are closed by points 5 and 6 above.)
+faithfully otherwise -- neither of those routes was taken; the
+unreachability proof was. (`NES#run`'s former `EXCEPT` marker and
+`PPU#initialize`'s whole keyword site were closed by points 5 and 6.)
 
 A third fix closed the two keyword sites whose callee is keyword-free but
 takes an `= default` optional positional (`PPU#initialize`'s sibling
@@ -252,28 +266,28 @@ sandbox to reproduce the real project's exact pinned toolchain (its own
 `gperf`/`bison` versions) just to regenerate `docs/bc2cpp_coverage.txt`
 for comparison -- which was tried first and produces spurious diffs
 (different `mrbc` binary, not a real behavior change) rather than genuinely
-mismatching output. Points 5 and 6 were verified the same way, one step
+mismatching output. Points 5, 6 and 7 were verified the same way, one step
 stronger: not just the stats report but the REAL project's full raw
 whole-program diagnostic (both runs' stdout and stderr, and the
 `SKIP_UNSUPPORTED=1` shipped run's compiled-method set) diffed byte-
-identical with and without the change. Both new paths are reject-then-
+identical with and without the change. All three new paths are reject-then-
 retry additions by construction -- they only ever run where the existing
 gates already said no -- and neither ensure region the real project
 actually recognizes (`Game::Battle#deal_attack`, `RGSS#audio_probe`) has a
 jump onto its handler address, which is why the diff is empty rather than
 merely small.
 
-Not yet attempted: checking whether the 382 "compiled clean" methods
+Not yet attempted: checking whether the 383 "compiled clean" methods
 produce *correct* output (this only confirms bc2cpp's own compiler accepted
 them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
 numbers measure for the real project -- not that the generated C++ was run
 and its output checked against CRuby/mruby's own, the way the
 headless-benchmark checksum above verifies the *interpreted* path). The
-one still-open shape this probe points at is a keyword `SEND` whose
-receiver's class the closed world cannot see at all (`NES#run`'s
-`StackProf.start`), where neither the hash-as-positional gate (no def to
-prove keyword-free) nor any keyword-carrying C-API call (mruby 4.0.0 has no
-such API -- `mrb_funcall` sets `ci->nk = 0`) can be sound.
+keyword `SEND` whose receiver's class the closed world cannot see at all
+(`NES#run`'s `StackProf.start`) is closed by point 7's unreachability
+proof -- not by packing against a callee (no def to prove keyword-free)
+nor by a keyword-carrying C-API call (mruby 4.0.0 has no such API --
+`mrb_funcall` sets `ci->nk = 0`), neither of which can be sound there.
 
 ## Files
 
