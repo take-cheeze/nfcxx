@@ -321,7 +321,7 @@ mruby-specific compatibility shims.
 is 4), so I profiled both mruby modes with GCC `gprof` instead:
 
 ```
-GPROF=1 GPROF_OUTPUT=/tmp/optcarrot-gprof MRBC=3rd/mruby/bin/mrbc \
+GPROF=1 GPROF_OUTPUT=/tmp/optcarrot-gprof MRBC=3rd/mruby/build/host/bin/mrbc \
   ruby tools/optcarrot_probe/compiled_run.rb 180
 ```
 
@@ -343,6 +343,18 @@ path. The profile is a direction, not a precise causal split: gprof sampling
 and instrumentation are coarse, and the gprof build disables inlining only
 for generated C++ methods to keep them visible; mruby's C runtime keeps its
 normal optimization settings in both profiles.
+
+The first concrete dispatch target is `CPU#run`: each opcode executes
+`send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
+`mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
+million times in the instrumented 180-frame run. Overall, `mrb_funcall_argv`
+is called 13.6 million times and `mrb_funcall_with_block` 17.2 million times
+in the compiled profile. A useful first optimization experiment is to avoid
+re-entering the generic VM dispatcher for this known opcode table, while
+preserving the table's argument and method lookup semantics. The profile also
+shows 6.1 million `mrb_ary_splat` calls and a rise in GC gray rescans from
+1,586 to 3,455; these are additional measurements to revisit after dispatch
+overhead is reduced, not proof that it causes the GC increase.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.

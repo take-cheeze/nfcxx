@@ -190,7 +190,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       end
     end
   RUBY
-  rake_env = { 'MRUBY_CONFIG' => config }
+  # CI exports LD=ld for native project builds. mruby's host mrbc link must
+  # go through the compiler driver so libc is added; raw ld omits it.
+  rake_env = { 'MRUBY_CONFIG' => config, 'LD' => nil }
   output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..]}" unless status.success?
 
