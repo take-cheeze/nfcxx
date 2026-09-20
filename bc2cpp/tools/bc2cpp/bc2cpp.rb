@@ -6949,7 +6949,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
 
       ivar = insn.args[/@(\w+)/, 1]
-      return ivar_classes && ivar_classes[ivar]
+      klass = ivar_classes && ivar_classes[ivar]
+      return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
     when 'ARRAY', 'ARRAY2'
       # EACH_BLOCK_SUPPORT: an array literal (`items = [1, 2, 3]`) always
       # creates a real Array -- confirmed directly against
@@ -13663,13 +13664,11 @@ class CodeGen
   # `proven_array_source`'s own ARRAY-literal/core-Array-return-method
   # chase, Hash-only via the former since no HASH-literal/core-Hash-return
   # scan exists yet -- a real, narrower gap, not a soundness concern, just
-  # fewer real Hash receivers provable this way today). No new tracing
-  # logic: a new call site for logic this file already ships and relies on
-  # elsewhere. Returns `'Array'`, `'Hash'`, or nil (not statically
-  # provable, or provably something else) -- compile_insn's own GETIDX/
-  # GETIDX0/SETIDX cases keep their full three-way runtime-checked
-  # fallback unchanged for the nil case, so a miss here costs nothing but
-  # the missed fast path, never a wrong answer.
+  # fewer real Hash receivers provable this way today). It also returns an
+  # exact custom class when the registry has a compiled `[]` body, allowing
+  # GETIDX/GETIDX0 to reuse compile_send's guarded TYPED lowering. Callers
+  # interested only in built-in containers still match only Array/Hash;
+  # all other cases retain their existing dynamic fallback.
   #
   # `idx.nil?` still bails immediately -- `trace_new_target`'s backward scan
   # needs a real position to start from. BLOCK_BODY_INDEX_SUPPORT: that used
@@ -13691,10 +13690,37 @@ class CodeGen
     ivar_classes = @class_layout[owner_def.owner]
     traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_def.owner,
                                class_layout: @class_layout, registry: @registry,
-                               container_constants: @container_constants)
+                               container_constants: @container_constants,
+                               element_annotations: @element_annotations,
+                               known_owners: @known_owners)
+    traced = resolve_owner_name(traced, { owner: owner_def.owner, known_owners: @known_owners }) if traced
     return traced if %w[Array Hash].include?(traced)
+    return traced if traced && @registry['[]']&.any? { |md| md.owner == traced && md.irep }
 
     proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
+  end
+
+  # INDEX_SEND_DEVIRT: GETIDX/GETIDX0 normally lower to builtin container
+  # paths plus a dynamic `[]` fallback. When that fallback's receiver has
+  # an exact compiled user-class definition, reuse compile_send's existing
+  # guarded TYPED call and retain its Ruby dispatch fallback. Accept only a
+  # TYPED result here; a MONO result would discard the GETIDX path's dynamic
+  # container semantics for unproven runtime receivers.
+  def compile_typed_index_send(irep, idx, owner_def, dest_reg, receiver_reg, index_expr, reg_offset, receiver_class,
+                               fallback_code)
+    return nil unless owner_def && idx && receiver_class
+    return nil unless @registry['[]']&.any? { |md| md.owner == receiver_class && md.irep }
+
+    saved_hint = @elem_class_hint
+    code = compile_send("R#{dest_reg} :[] n=1", self_implicit: false, irep: irep,
+                        idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                        call_receiver: "r#{receiver_reg}", call_arguments: [index_expr],
+                        trace_idx: idx, trace_reg_offset: reg_offset,
+                        trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
+    return code if code.include?('TYPED :[] ->')
+
+    @elem_class_hint = saved_hint
+    nil
   end
 
   # ---------------------------------------------------------------------------
@@ -20448,7 +20474,8 @@ class CodeGen
       # has to fall through to the real `[]=` -- `bc2cpp_ary_entry` only
       # ever handles a fixnum index).
       d, s = regs(a, 2)
-      case static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      case index_class
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -20470,7 +20497,7 @@ class CodeGen
           }
         CPP
       else
-        <<~CPP
+        fallback = <<~CPP
           if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
           } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
@@ -20482,6 +20509,8 @@ class CodeGen
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
           }
         CPP
+        typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
+        typed || fallback
       end
     when 'GETIDX0'
       # "GETIDX0 R7 R4[0]" -- R[a] = R[b][0] (real OP_GETIDX0 semantics,
@@ -20502,7 +20531,8 @@ class CodeGen
       # GETIDX above, applied to `s` (the receiver here, not `d` -- see
       # this opcode's own separate dest/src register pair).
       d, s = regs(a, 2)
-      case static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      index_class = static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      case index_class
       when 'Array'
         <<~CPP
           if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
@@ -20522,7 +20552,7 @@ class CodeGen
           }
         CPP
       else
-        <<~CPP
+        fallback = <<~CPP
           if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
             r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
           } else if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
@@ -20531,6 +20561,9 @@ class CodeGen
             r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
           }
         CPP
+        typed = compile_typed_index_send(irep, idx, owner_def, d, s, 'mrb_fixnum_value(0)', reg_offset,
+                                         index_class, fallback)
+        typed || fallback
       end
     when 'SETIDX'
       # "SETIDX R4 (R5) (R6)" -- R[a][R[a+1]] = R[a+2], then R[a] = R[a+2]
@@ -22298,7 +22331,8 @@ class CodeGen
   end
 
   def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil,
-                   call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_reg_offset: 0)
+                   call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
+                   trace_reg_offset: 0, typed_fallback: nil)
     # ELEMENT_CLASS_SUPPORT: consume-and-clear. The hint is published by
     # with_element_hint for exactly the one instruction being translated
     # right now, and taking it down here (before ANY other work, including
@@ -23030,7 +23064,7 @@ class CodeGen
     known_class = nil
     if target.nil? && !self_implicit && irep && (idx || trace_idx)
       proof_idx = idx || trace_idx
-      proof_reg = unshift_proof_reg(d, trace_reg_offset)
+      proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
       cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
@@ -23212,10 +23246,11 @@ class CodeGen
         traced_note = via_element ? "inlined block element of Array<#{target.owner}>" : "receiver traced to #{target.owner}"
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
+        fallback = typed_fallback || dynamic_dispatch_line(d, recv, name, argv)
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
-          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+          "    #{fallback}" \
           "  }\n"
       elsif lexical_self
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
