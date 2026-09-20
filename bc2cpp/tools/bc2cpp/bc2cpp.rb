@@ -11364,6 +11364,26 @@ class CodeGen
       if ok
         prefix_at[ensure_region[:begin_addr]] = open_glue
         prefix_at[ensure_region[:except_addr]] = "  } // ensure guard leaves scope: runs the ensure body\n"
+        # ENSURE_DISPATCH_MERGE_SUPPORT: the recognizer accepted jumps that
+        # land exactly on the handler's own address (recognize_ensure_region's
+        # own comment has the real shape and the vm.c semantics). In compiled
+        # code their one-to-one equivalent is "leave the guard scope (which
+        # runs the ensure body -- exactly what landing on EXCEPT did) and
+        # continue past the folded-away handler", i.e. `goto L<raiseif_addr>`.
+        # Two things make that well-formed: the remap below, applied per
+        # compile_insn jump target for THIS irep only (keyed on the irep
+        # object, so a nested block's child irep compiled during the same loop
+        # can never have one of its own numeric addresses silently re-pointed);
+        # and this label, emitted as a prefix at the RAISEIF address itself --
+        # the loop's own label channel (`targets`) cannot carry it, because
+        # every address in the suppressed handler range is skipped before the
+        # label line is reached. Jumping OUT of the guard scope via `goto` is
+        # legal C++ and runs the guard's destructor (only jumping IN is not),
+        # which is precisely what makes this the faithful landing point.
+        unless ensure_region[:except_jump_srcs].empty?
+          prefix_at[ensure_region[:raiseif_addr]] = "  L#{ensure_region[:raiseif_addr]}:;\n"
+          @ensure_except_remaps = { irep => { ensure_region[:except_addr] => ensure_region[:raiseif_addr] } }
+        end
         # EXCEPT, the ensure body, and the terminating RAISEIF are all
         # folded into the guard above -- none of them is emitted inline.
         suppressed.merge((ensure_region[:except_addr]..ensure_region[:raiseif_addr]).to_a)
@@ -11378,6 +11398,7 @@ class CodeGen
       out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
     end
     @blk_param_name = nil
+    @ensure_except_remaps = nil
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     if needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
@@ -11779,11 +11800,34 @@ class CodeGen
     end
   end
 
+  # ENSURE_DISPATCH_MERGE_SUPPORT: compile_method's own per-method remap of
+  # a jump target that lands exactly on a recognized ensure region's handler
+  # address (recognize_ensure_region/compile_method's own comments carry the
+  # full argument). nil outside compile_method's body loop (hence the `&.`),
+  # and keyed on the irep OBJECT, not an address: a nested block's child irep
+  # whose own jump happens to name the same numeric address compiles through
+  # this same compile_insn during the same loop and must keep its own target.
+  # Only JMP/JMPNOT/JMPIF/JMPNIL consult it -- an irep with a catch handler
+  # never compiles JMPUW at all (jmpuw_is_plain_jump?).
+  def ensure_remapped_jump_target(irep, target)
+    return target unless target && @ensure_except_remaps
+
+    map = @ensure_except_remaps[irep]
+    map ? map.fetch(target, target) : target
+  end
+
   # ENSURE_RAII_SUPPORT: recognize a single real `begin BODY ensure
   # ENSURE_BODY end` construct and return
-  # {begin_addr:, except_addr:, raiseif_addr:, body_insns:} -- or nil,
-  # which keeps the honest `#error unhandled opcode EXCEPT` this file
-  # already emits. compile_method is the only caller.
+  # {begin_addr:, except_addr:, raiseif_addr:, body_insns:, except_jump_srcs:}
+  # -- or nil, which keeps the honest `#error unhandled opcode EXCEPT` this
+  # file already emits. compile_method is the only caller. `except_jump_srcs`
+  # is the (possibly empty) set of instruction addresses whose jump lands
+  # exactly on the handler's own target from INSIDE the protected range --
+  # mrbc's `dispatch` tail-merge of the protected body's last statement
+  # onto the ensure region, accepted and remapped by the
+  # ENSURE_DISPATCH_MERGE_SUPPORT block inside this method's own crossing
+  # check below (see that comment for the real shape and compile_method's
+  # own emitting side of it).
   #
   # The real, always-generated shape (confirmed against fresh `mrbc -v`
   # disassembly of BOTH real sites in this program -- Game::Battle
@@ -11865,13 +11909,54 @@ class CodeGen
     # C++), while one that jumped out of it would run the ensure at a
     # point the bytecode never intended. Jumps wholly inside the range,
     # and jumps wholly outside it, are both fine.
+    #
+    # ENSURE_DISPATCH_MERGE_SUPPORT: one accepted exception -- a jump from
+    # INSIDE the protected range whose target is exactly `t` (the handler's
+    # own target, which `end_addr == target` above makes identical to
+    # `ch.end_addr`). This is mrbc's `dispatch` tail-merge: when the LAST
+    # statement of the protected body is a conditional, its branch's own
+    # normal (non-raising) exit jumps onto the ensure region instead of
+    # falling through. Confirmed against fresh `mrbc -v` disassembly of a
+    # real site (optcarrot's lib/optcarrot/nes.rb `NES#run`, whose `if ...
+    # end` right before the method-level `ensure dispose end` compiles to):
+    #
+    #   catch type: ensure   begin: 0004 end: 0122 target: 0122
+    #     ...
+    #     93 117 JMP              122    <- the merged branch exit
+    #     93 120 LOADNIL   R3      (nil) <- the branch's other (fall-in) arm
+    #     93 122 EXCEPT    R5
+    #     96 124 SSEND0    R6      :dispose
+    #     96 127 RAISEIF   R5
+    #     96 129 RETURN    R3
+    #
+    # On the real VM landing on `t` executes EXCEPT (a plain nil-load on the
+    # normally-executing path -- the same fact every already-accepted
+    # fall-through into `t` relies on, e.g. the fall-in arm at 120 above),
+    # runs the ensure body inline, no-ops through RAISEIF and continues at
+    # R+. The RAII model's exact equivalent of "run the ensure body, then
+    # continue past it" is LEAVING the guard scope and landing on the label
+    # just after it, so these jumps are recorded here and remapped to
+    # `raiseif_addr` by compile_method's own ENSURE_DISPATCH_MERGE_SUPPORT
+    # block (which also emits that label, since suppressing the handler
+    # range would otherwise leave the `goto` dangling -- a hard g++ error,
+    # not a silent miss). A jump from OUTSIDE the range onto `t` stays
+    # rejected outright: it would skip the protected body while still
+    # running its ensure -- a shape mrbc's own codegen never emits -- and
+    # compiled code carries no label at `t` for one to land on anyway.
     inside = ->(a) { a >= b && a < ch.end_addr }
+    except_jump_srcs = []
     irep.instructions.each do |i|
       jt = ensure_jump_target(i)
       next unless jt
       # The ensure body itself was already checked above, on its own
       # (stricter) rule.
       next if i.addr > t && i.addr < raiseif.addr
+      if jt == t
+        return nil unless inside.call(i.addr)
+
+        except_jump_srcs << i.addr
+        next
+      end
       return nil if inside.call(i.addr) != inside.call(jt)
     end
     # An optional-argument jump table (ENTER's own dispatch, which
@@ -11880,7 +11965,8 @@ class CodeGen
     # built out of real `JMP` instructions in this same irep, so the
     # crossing test just above has already covered every one of its
     # targets.
-    { begin_addr: b, except_addr: t, raiseif_addr: raiseif.addr, body_insns: body }
+    { begin_addr: b, except_addr: t, raiseif_addr: raiseif.addr, body_insns: body,
+      except_jump_srcs: except_jump_srcs }
   end
 
   # ENSURE_RAII_SUPPORT: build the opening half of a recognized ensure
@@ -19697,7 +19783,7 @@ class CodeGen
       # zero-padded string here produced a `goto L018;` with no matching
       # label (`L18:` was what actually got emitted), a real
       # compile-time "label not found" bug caught by building this.
-      target = a.strip[/\d+/].to_i
+      target = ensure_remapped_jump_target(irep, a.strip[/\d+/].to_i)
       "  goto L#{target};\n"
     when 'JMPUW'
       # JMPUW_SUPPORT: a `break`/`next`/`redo`/`retry` jump. Identical to
@@ -19713,11 +19799,11 @@ class CodeGen
       end
     when 'JMPNOT'
       reg = a[/^R(\d+)/, 1]
-      target = jmp_target_after_reg(a)
+      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
       "  if (!mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPIF'
       reg = a[/^R(\d+)/, 1]
-      target = jmp_target_after_reg(a)
+      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
       "  if (mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPNIL'
       # "JMPNIL R3 024" -- OP_JMPNIL's own real shape (src/vm.c): jump if
@@ -19726,7 +19812,7 @@ class CodeGen
       # emits for `x.nil? ? a : b` / `x || y`-shaped nil-specific tests,
       # e.g. `@opacity.nil? ? 255 : @opacity`).
       reg = a[/^R(\d+)/, 1]
-      target = jmp_target_after_reg(a)
+      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
       "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
     when 'GETCONST'
       # "GETCONST R4 Integer" -- a bare top-level/lexical constant lookup.
@@ -20872,10 +20958,15 @@ class CodeGen
     # KEYWORD_HASH_POSITIONAL_SUPPORT: compile_keyword_call just declined
     # (see below for the exact reasons this round measured), but a large
     # share of the call sites it declines aren't real keyword calls AT ALL
-    # -- they only look like one in the disassembly.
+    # -- they only look like one in the disassembly. The `self_implicit`/
+    # `owner_def` pair it now also receives is what lets that path fall
+    # back to the lexical-self narrowing (KEYWORD_HASH_LEXICAL_SELF_SUPPORT,
+    # its comment) when the name-based every-def gate declines -- the same
+    # pair LEXICAL_SELF_KEYWORD_SUPPORT threads into compile_keyword_call.
     compile_keyword_hash_positional_send(name: name, d: d, recv: recv, n: n, nk: nk,
                                          argv: argv, kw_sym_regs: kw_sym_regs,
-                                         kw_val_regs: kw_val_regs, kw_names: kw_names)
+                                         kw_val_regs: kw_val_regs, kw_names: kw_names,
+                                         self_implicit: self_implicit, owner_def: owner_def)
   end
 
   # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: a `Foo.new(a, b, k1: v1, k2: v2)` call
@@ -21313,6 +21404,26 @@ class CodeGen
   #     `argc == 14` / `argc == 15` arms pack arguments into an Array
   #     instead, a different shape this does not model.
   #
+  # KEYWORD_HASH_LEXICAL_SELF_SUPPORT: when that every-registry-def gate
+  # fails -- the `:close_message`-style case above, or optcarrot probe's
+  # `Optcarrot::PPU#initialize`'s own `reset(mapping: false)` (disassembles
+  # to `SEND :reset n=0|nk=1`; every OTHER `#reset` in that closed world --
+  # NES/CPU/APU/Pads -- is 0-arg, so no 1-positional arity agrees with all
+  # of them program-wide, exactly why the gate exists) -- one more sound
+  # question can still decide THIS site: an implicit-self send inside a
+  # method of class C, where `lexical_self_keyword_target` has proven C has
+  # no subclass anywhere in the closed world and C's own def of this name is
+  # compiled clean, can only ever reach C's def, however many unrelated
+  # classes disagree under the same name. The gate then runs against THAT
+  # def alone -- `keyword_hash_positional_callee?(C's irep, n + 1)` -- and
+  # the emitted `mrb_funcall(self, name, n + 1, hash)` resolves at runtime
+  # to exactly the def that was proven reachable, so the POLY-ness of the
+  # name costs nothing. Same selector, same guards (implicit-self-only,
+  # `devirt_blocked_name?`, no-subclass, compiles-clean) and same reasoning
+  # LEXICAL_SELF_KEYWORD_SUPPORT already applies on the real-keyword side;
+  # the emitted text keeps the `KEYWORD_HASH_POSITIONAL` marker kind (a
+  # dynamic bind, per RUNTIME_DEF_DYNAMIC_MARKERS), only its prose differs.
+  #
   # Deliberately dynamic-dispatch-only (`mrb_funcall`, never a devirtualized
   # MONO/TYPED direct `_impl` call), the same scoping choice SPLAT_UNROLL_
   # SUPPORT's own plain-positional case already documents and for the same
@@ -21326,7 +21437,7 @@ class CodeGen
   # Returns the emitted C++, or nil for "not this shape" (the caller keeps
   # the honest #error). Never guesses.
   def compile_keyword_hash_positional_send(name:, d:, recv:, n:, nk:, argv:, kw_sym_regs:,
-                                           kw_val_regs:, kw_names:)
+                                           kw_val_regs:, kw_names:, self_implicit:, owner_def:)
     # vm.c's own `if (argc < 14)` arm -- see this method's own comment.
     return nil unless nk.positive? && n < 14
 
@@ -21344,15 +21455,39 @@ class CodeGen
 
       keyword_hash_positional_callee?(callee_irep, total)
     end
-    return nil unless all_keyword_free
 
-    owners = defs.map(&:owner).join(', ')
+    # KEYWORD_HASH_LEXICAL_SELF_SUPPORT: the name-based gate above declined;
+    # retry the whole question against the ONE def this implicit-self site
+    # can actually reach (see this method's own comment for the full
+    # argument). A nil -- or a def of that name the owner does not itself
+    # declare, or one that fails the same callee gate -- is the safe miss,
+    # exactly the honest `#error` this path always was.
+    lexical_self = nil
+    unless all_keyword_free
+      lexical_self = lexical_self_keyword_target(name, self_implicit: self_implicit, owner_def: owner_def)
+      return nil unless lexical_self
+
+      callee_irep = @ireps[lexical_self.irep]
+      return nil unless callee_irep && keyword_hash_positional_callee?(callee_irep, total)
+    end
+
     out = String.new
-    out << "  // KEYWORD_HASH_POSITIONAL :#{name} (n=#{n}|nk=#{nk}) -- every real def of this name " \
-           "(#{owners}) declares NO keyword parameters and accepts #{total} positional arguments, " \
-           "so real src/vm.c OP_ENTER (`if (!kd) { ... ci->n++; argc++; }`) delivers the " \
-           "#{nk} keyword pair(s) as ONE ordinary trailing positional Hash, exactly as built here by " \
-           "OP_SEND's own hash_new_from_regs. Not a keyword call at runtime at all.\n"
+    if lexical_self
+      out << "  // KEYWORD_HASH_POSITIONAL :#{name} (n=#{n}|nk=#{nk}) -- POLY name program-wide, but this " \
+             "is an implicit-self call inside a #{lexical_self.owner} method and #{lexical_self.owner} has " \
+             "NO SUBCLASS anywhere in this closed world, so the only def this send can reach is " \
+             "#{lexical_self.owner}##{name}, which declares NO keyword parameters and accepts #{total} " \
+             "positional arguments; real src/vm.c OP_ENTER (`if (!kd) { ... ci->n++; argc++; }`) delivers " \
+             "the #{nk} keyword pair(s) to exactly it as ONE ordinary trailing positional Hash, as built " \
+             "here by OP_SEND's own hash_new_from_regs. Not a keyword call at runtime at all.\n"
+    else
+      owners = defs.map(&:owner).join(', ')
+      out << "  // KEYWORD_HASH_POSITIONAL :#{name} (n=#{n}|nk=#{nk}) -- every real def of this name " \
+             "(#{owners}) declares NO keyword parameters and accepts #{total} positional arguments, " \
+             "so real src/vm.c OP_ENTER (`if (!kd) { ... ci->n++; argc++; }`) delivers the " \
+             "#{nk} keyword pair(s) as ONE ordinary trailing positional Hash, exactly as built here by " \
+             "OP_SEND's own hash_new_from_regs. Not a keyword call at runtime at all.\n"
+    end
     out << "  {\n"
     out << "    mrb_value bc2cpp_kwh = mrb_hash_new_capa(M, #{nk});\n"
     nk.times do |k|
