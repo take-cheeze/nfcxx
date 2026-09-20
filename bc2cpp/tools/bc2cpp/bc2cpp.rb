@@ -9027,10 +9027,13 @@ class CodeGen
 
   # POLY_SMALL_N_SUPPORT: a genuinely POLY name (monomorphic_target's own
   # `defs.size == 1` gate already failed) can still often be devirtualized
-  # -- not to ONE direct call the way MONO/TYPED are, but to a real
-  # runtime-class-checked CHAIN of them, one `if` per known real owner,
-  # falling back to ordinary `mrb_funcall` only for a receiver matching
-  # none. Measured real whole-program fan-out for the actual top dynamic-
+  # -- not to ONE unguarded direct call the way MONO does, but to one or
+  # more runtime-class-checked direct calls, one `if` per eligible real
+  # owner, falling back to ordinary `mrb_funcall` for every other class.
+  # A single eligible target is useful too: other definitions may be
+  # native-only, unclean, or filtered from this run, and the fallback keeps
+  # all those cases correct. Measured real whole-program fan-out for the
+  # actual top dynamic-
   # dispatch names first, not assumed: `width` has 5 real owners, `term`/
   # `party`/`size`/`repeat?`/`db` have 2-3, `dispose` has 16 -- so this is
   # gated on a bounded owner count (`POLY_SMALL_N_MAX`) rather than attempted
@@ -9112,7 +9115,7 @@ class CodeGen
 
       true
     end
-    return nil unless candidates.size.between?(2, POLY_SMALL_N_MAX)
+    return nil unless candidates.size.between?(1, POLY_SMALL_N_MAX)
 
     candidates
   end
