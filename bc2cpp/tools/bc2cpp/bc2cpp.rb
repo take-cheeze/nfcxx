@@ -21610,6 +21610,40 @@ class CodeGen
   # this really is an ordinary positional call, so unlike a real keyword
   # call there is no obstacle to that follow-up at all.
   #
+  # KEYWORD_HASH_DEVIRT_SUPPORT: that follow-up, now built. Once the Hash
+  # is packed, the call is an ordinary positional send of `total = n + 1`
+  # arguments, so every positional devirtualization this file already
+  # knows applies unchanged -- tried in the same order compile_send
+  # itself uses, MONO first, then the POLY_SMALL_N runtime-class-checked
+  # chain:
+  #   - MONO: `monomorphic_target` (RUNTIME_DEF guard, one bytecode def,
+  #     compiles clean -- all reused verbatim) plus the callee-shape
+  #     checks the positional MONO path also makes: pure-mandatory-or-
+  #     optional arity, `total` inside `[mand, mand + opt]` (the trailing
+  #     Hash fills a mandatory or optional slot exactly the way
+  #     CALLSITE_OPTIONAL_ARG_SUPPORT already models for a caller-
+  #     supplied optional), the ONLY_OWNERS emission gate, and no
+  #     NATIVE_ARG_TARGETS-typed positions (this path does no call-site
+  #     unboxing -- a NATIVE_ARG callee would need `mrb_as_int` splices
+  #     this emitter does not build; declining is today's behavior).
+  #     The optional-positional padding (`mrb_nil_value()` placeholders
+  #     plus the trailing `bc2cpp_given_opt` literal) is spliced exactly
+  #     the way compile_keyword_call's own KEYWORD_CALLSITE_OPTIONAL_
+  #     POSITIONAL_SUPPORT already does for the same callee shape.
+  #   - POLY_SMALL_N: `compile_poly_small_n` reused verbatim with the
+  #     Hash appended and effective arity `total` -- its own candidate
+  #     filter (pure-mandatory, exact arity, clean, emitted, no native
+  #     args) already encodes everything this path needs, and its
+  #     `mrb_funcall` fallback already passes the same extended argv.
+  # TYPED is deliberately absent: it needs irep/idx/owner_def trace
+  # context this function does not receive, and every real site this
+  # round measured resolves under MONO or POLY_SMALL_N already -- see
+  # this method's own comment for the shape that would motivate
+  # threading it through.
+  # A distinct `KEYWORD_HASH_DEVIRT` marker (never bare `MONO`/`POLY`)
+  # so the generated text stays auditable per mechanism, the same
+  # marker discipline every other path in this file already follows.
+  #
   # Returns the emitted C++, or nil for "not this shape" (the caller keeps
   # the honest #error). Never guesses.
   def compile_keyword_hash_positional_send(name:, d:, recv:, n:, nk:, argv:, kw_sym_regs:,
@@ -21670,9 +21704,44 @@ class CodeGen
       out << "    mrb_hash_set(M, bc2cpp_kwh, r#{kw_sym_regs[k]}, r#{kw_val_regs[k]});" \
              "  // :#{kw_names[k]}\n"
     end
-    out << "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}"
+    out << "    #{keyword_hash_devirt_line(name: name, d: d, recv: recv, argv: argv, total: total)}"
     out << "  }\n"
     out
+  end
+
+  # KEYWORD_HASH_DEVIRT_SUPPORT's own dispatch tail: given the packed-Hash
+  # call `(recv, *argv, bc2cpp_kwh)` of effective arity `total`, try MONO,
+  # then the POLY_SMALL_N chain, else the same dynamic dispatch this path
+  # always emitted. Factored out of compile_keyword_hash_positional_send
+  # itself (rather than inlined there) so the two resolutions read as one
+  # ordered list instead of nesting three levels deep inside the Hash
+  # prologue builder.
+  def keyword_hash_devirt_line(name:, d:, recv:, argv:, total:)
+    ext_argv = argv + ['bc2cpp_kwh']
+    target = monomorphic_target(name)
+    if target
+      t_irep = @ireps.fetch(target.irep)
+      t_mand = mandatory_arity(t_irep)
+      t_opt = optional_arity(t_irep)
+      if pure_mandatory_or_optional_arity?(t_irep) &&
+         total.between?(t_mand, t_mand + t_opt) &&
+         native_arg_types(target, t_mand).compact.empty? &&
+         (!@only_owners || @only_owners.include?(target.owner) || @other_owners&.include?(target.owner))
+        impl = cpp_name(target.owner, target.name) + '_impl'
+        call_argv = ext_argv.dup
+        if t_opt.positive?
+          call_argv += Array.new(t_mand + t_opt - ext_argv.size, 'mrb_nil_value()')
+          call_argv << (ext_argv.size - t_mand).to_s
+        end
+        return "  // KEYWORD_HASH_DEVIRT :#{name} -> #{target.owner}##{target.name} (MONO, trailing-Hash " \
+               "positional, direct C++ call, no mrb_funcall)\n" \
+               "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      end
+    end
+    chained = compile_poly_small_n(name, d, recv, ext_argv, total)
+    return chained.sub('POLY_SMALL_N', 'KEYWORD_HASH_DEVIRT/POLY_SMALL_N') if chained
+
+    dynamic_dispatch_line(d, recv, name, ext_argv)
   end
 
   # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: the memoized closed-world
