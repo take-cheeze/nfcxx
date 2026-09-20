@@ -103,8 +103,8 @@ directly from that script. The full report lives at
 any bc2cpp.rb change with `MRBC=path/to/host/mrbc ruby
 tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb`.
 
-**Result: 380/383 methods (99.2%) compile clean**, up from an initial
-92.2% baseline (measured with zero bc2cpp code changes) after three real
+**Result: 381/383 methods (99.5%) compile clean**, up from an initial
+92.2% baseline (measured with zero bc2cpp code changes) after four real
 `tools/bc2cpp/bc2cpp.rb` fixes landed alongside this probe (all verified
 inert for the real project -- see below):
 
@@ -142,12 +142,23 @@ inert for the real project -- see below):
    methods, `Config::Parser#find_option`'s `each_value`, `PPU::OptimizedCodeBuilder#
    parse_clock_handlers`'s `step`), so BLOCK_FALLBACK coverage goes 49 -> 72
    and the whole `unhandled opcode BLOCK`/`SENDB` bucket drops to zero. Safety
-   was checked the way the list's own comments demand: a whole-program grep
-   found no `def` of any of these names in this project's own sources that
-   stores its block, `mruby-enum-lazy` (the `Lazy#zip`/`Lazy#with_index` twin)
-   is not built, and `scripts/bc2cpp_coverage_report.rb`'s real-project output
-   is **byte-identical** with and without the change. See that array's own
-   comment for the per-name argument.
+    was checked the way the list's own comments demand: a whole-program grep
+    found no `def` of any of these names in this project's own sources that
+    stores its block, `mruby-enum-lazy` (the `Lazy#zip`/`Lazy#with_index` twin)
+    is not built, and `scripts/bc2cpp_coverage_report.rb`'s real-project output
+    is **byte-identical** with and without the change. See that array's own
+    comment for the per-name argument.
+4. **KEYWORD_HASH_POSITIONAL_SUPPORT's own gate relaxed** off
+   `pure_mandatory_arity?` to a new `keyword_hash_positional_callee?`, so a
+   keyword call site whose callee declares NO keyword params but does take an
+   `= default` optional positional compiles too. The trailing-Hash-as-positional
+   translation is sound for any callee whose ENTER `kd == 0` (vm.c OP_ENTER's own
+   arm), so an `opt` slot is fine -- the packed Hash simply lands in it, exactly
+   as Ruby hands `foo(k: v)` to `def foo(a, b = 1)`; only the callee's key/kdict
+   fields and an out-of-range positional count are refused. This closes
+   `PPU::OptimizedCodeBuilder#batch_render_pixels`'s
+   `expand_methods(fastpath, render_pixel: gen(...))`; real-project
+   `scripts/bc2cpp_coverage_report.rb` output stays byte-identical.
 
 Both hot-path entry points compile clean with real devirtualization already
 firing -- `CPU#run` (the fetch/dispatch loop) gets a direct C++ call for
@@ -157,26 +168,37 @@ falls back to real dynamic dispatch only where the receiver's class
 genuinely isn't known (`POLY :loglevel`) and to a wrapped-cfunc block
 fallback for its one `Fiber.new { ... }` block.
 
-The remaining 3 errored methods (5 `#error` markers), by reason
+The remaining 2 errored methods (3 `#error` markers), by reason
 (`docs/optcarrot_bc2cpp_coverage.txt` has the full, current breakdown):
 
 ```
-     4  SEND/SSEND has a splat and/or keyword argument list (n=...)
+     2  SEND/SSEND has a splat and/or keyword argument list (n=...)
      1  unhandled opcode EXCEPT
-     5  total (a method can carry more than one #error)
+     3  total (a method can carry more than one #error)
 ```
 
-`PPU#initialize` (`reset(mapping: false)`, `PPU#reset(opt = {})` -- keyword
-pairs onto an optional-positional callee, a real intersection of
-KEYWORD_HASH_POSITIONAL_SUPPORT and an optional arg) and
-`PPU::OptimizedCodeBuilder#batch_render_pixels` (`expand_methods(fastpath,
-render_pixel: gen(...))`, same shape onto `expand_methods`'s own optional
-`meths`) are both the "callee declares no keyword but takes an optional
-positional" case this round's gates deliberately refuse to guess about.
 `NES#run` carries a keyword call on the dynamic foreign `StackProf.start`
-receiver plus a `rescue => e` `EXCEPT` opcode. All are the same
-`SEND`/`EXCEPT` opcode gaps `docs/bc2cpp_coverage.txt`'s own breakdown
-shows for the real project, so none are optcarrot-specific.
+receiver plus a `rescue => e` `EXCEPT` opcode. `PPU#initialize`'s
+`reset(mapping: false)` is a keyword call onto the POLY name `#reset`, whose
+other program-wide defs (`NES/CPU/APU/…#reset`) are 0-arg, so no single
+trailing-positional-Hash arity is sound for every possible receiver -- the
+same POLY-defs-disagree case the KEYWORD_HASH_POSITIONAL gate exists to
+refuse (`self`'s own class here is provably PPU, so a lexical-self-resolved
+keyword-hash path could close it, but that resolution does not exist yet).
+Both are the same keyword-`SEND`/`EXCEPT` opcode gaps
+`docs/bc2cpp_coverage.txt`'s own breakdown shows for the real project, so
+neither is optcarrot-specific.
+
+A third fix closed the two keyword sites whose callee is keyword-free but
+takes an `= default` optional positional (`PPU#initialize`'s sibling
+`expand_methods(code, mdefs, meths = …)` at
+`batch_render_pixels`): KEYWORD_HASH_POSITIONAL_SUPPORT's own gate was
+relaxed off `pure_mandatory_arity?` to `keyword_hash_positional_callee?`,
+which only requires ENTER's key/kdict fields (the real `kd == 0` vm.c's
+OP_ENTER keys on) to be zero plus `total` inside the callee's accepted
+positional range. The packed Hash then lands in the callee's next free
+positional slot exactly as Ruby hands `foo(k: v)` to `def foo(a, b = 1)`.
+Real-project `scripts/bc2cpp_coverage_report.rb` output stays byte-identical.
 
 **Verifying "no regression to the real project"**: both fixes above touch
 shared code (`tools/bc2cpp/bc2cpp.rb`), so before landing either, this
@@ -195,15 +217,17 @@ for comparison -- which was tried first and produces spurious diffs
 (different `mrbc` binary, not a real behavior change) rather than genuinely
 mismatching output.
 
-Not yet attempted: checking whether the 380 "compiled clean" methods
+Not yet attempted: checking whether the 381 "compiled clean" methods
 produce *correct* output (this only confirms bc2cpp's own compiler accepted
 them without a `#error`, the same bar `docs/bc2cpp_coverage.txt`'s own
 numbers measure for the real project -- not that the generated C++ was run
 and its output checked against CRuby/mruby's own, the way the
 headless-benchmark checksum above verifies the *interpreted* path), or
-widening keyword-callsite support past its current MONO/exact-arity gates
-(the last 3 errored methods are all `SEND ... nk=` keyword calls onto an
-optional-positional or genuinely POLY/foreign callee) and `EXCEPT`.
+giving KEYWORD_HASH_POSITIONAL_SUPPORT a lexical-self-resolved variant (the
+last 2 errored methods are `PPU#initialize`'s `self.reset(mapping: false)`, a
+POLY-name keyword call where `self`'s own class is provably PPU but the
+name-based gate can only see disagreeing `#reset` arities, and `NES#run`'s
+foreign `StackProf.start` call) and `EXCEPT`.
 
 ## Files
 
