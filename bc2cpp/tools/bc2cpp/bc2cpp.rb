@@ -9475,27 +9475,27 @@ class CodeGen
       # `mrb_funcall`, untouched, same as any other arity mismatch
       # elsewhere in this file.
       #
-      # Only MRB_TT_RANGE is handled directly: `range_beg` (registered
+      # For MRB_TT_ARRAY, reproduce `mrb_ary_first`'s zero-argument body
+      # directly instead of calling it: its `mrb_get_argc()` would read the
+      # caller's frame here. Require exact base-Array identity after the
+      # type check so subclasses and singleton classes retain Ruby dispatch
+      # and any `first` override. The whole-program native-only gate above
+      # proves no compiled bytecode definition of `first` competes here.
+      #
+      # MRB_TT_RANGE is also handled directly: `range_beg` (registered
       # under `first`, ARGS_NONE -- a real, separate 0-arg-only
       # registration, not the same function as Array's optional-arg one)
       # is exactly `mrb_range_beg(mrb, range)`, a real public macro
       # (`RANGE_BEG(mrb_range_ptr(mrb, r))`) with no VM state touched at
-      # all. MRB_TT_ARRAY is deliberately excluded even though `first` has
-      # a single, real, named implementation there too (`mrb_ary_first`):
-      # its own body calls `mrb_get_argc(mrb)` to decide which of its two
-      # real behaviors to run (bare `x.first` vs `x.first(n)`) -- calling
-      # it directly from here would read the WRONG call frame's argument
-      # count (this call site's own caller, not "0"), the exact same
-      # stale-call-info-frame trap monomorphic_target's own comment
-      # already warns about for an arbitrary native function, just for
-      # `mrb_get_argc` instead of `mrb_get_args`. Everything else,
-      # Array included, falls through to ordinary `mrb_funcall`.
-      "  // first -- native primitive, runtime-guarded (only Range is handled\n" \
+      # all. Everything else falls through to ordinary `mrb_funcall`.
+      "  // first -- native primitive, runtime-guarded for Range and exact Array\n" \
       "  // directly -- see compile_native_primitive_send's own\n" \
-      "  // FIRST_TYPE_TAG_DISPATCH comment for why Array is deliberately left\n" \
-      "  // to ordinary dispatch despite having a single real implementation)\n" \
+      "  // FIRST_TYPE_TAG_DISPATCH comment for Array's zero-arg expression)\n" \
       "  if (mrb_range_p(#{recv})) {\n" \
       "    r#{d} = mrb_range_beg(M, #{recv});\n" \
+      "  } else if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {\n" \
+      "    struct RArray* bc2cpp_first_array = mrb_ary_ptr(#{recv});\n" \
+      "    r#{d} = ARY_LEN(bc2cpp_first_array) > 0 ? ARY_PTR(bc2cpp_first_array)[0] : mrb_nil_value();\n" \
       "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
       "  }\n"
