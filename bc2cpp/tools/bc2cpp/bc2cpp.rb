@@ -6145,7 +6145,7 @@ NATIVE_ARG_TARGETS = Set[
 # above -- is a fact about this program today, re-checked per future
 # entry, never a standing assumption.
 #
-# A further whole-program survey (docs/bc2cpp_coverage.txt's own 7-strong
+# A further whole-program survey (the CI-published coverage report's own 7-strong
 # `#error unhandled opcode SUPER` count) found exactly 7 remaining sites,
 # individually re-checked, not assumed from any prior entry's shape:
 #
@@ -6263,7 +6263,7 @@ NATIVE_ARG_TARGETS = Set[
 #   all, so this splat shape is outside the supported subset on its own
 #   terms, independent of the target. (b) all 4 additionally carry their
 #   own `#error unhandled opcode ARGARY` (exactly the 4 ARGARY markers in
-#   docs/bc2cpp_coverage.txt), so each would stay on the interpreter even
+#   whole-program coverage report), so each would stay on the interpreter even
 #   if SUPER alone were somehow satisfied.
 #
 #   `LCF::Array1D` is also the live illustration of the module hazard the
@@ -9033,11 +9033,12 @@ class CodeGen
   # none. Measured real whole-program fan-out for the actual top dynamic-
   # dispatch names first, not assumed: `width` has 5 real owners, `term`/
   # `party`/`size`/`repeat?`/`db` have 2-3, `dispose` has 16 -- so this is
-  # gated on a small, bounded owner count (`POLY_SMALL_N_MAX`) rather than
-  # attempted unconditionally; past that point a linear chain of runtime
-  # class checks stops being clearly cheaper than mruby's own real method-
-  # table hash lookup, and the code-size cost (one whole extra `if` branch
-  # per owner) keeps growing regardless.
+  # gated on a bounded owner count (`POLY_SMALL_N_MAX`) rather than attempted
+  # unconditionally; past that point a linear chain of runtime class checks
+  # stops being clearly cheaper than mruby's own real method-table hash
+  # lookup, and the code-size cost (one whole extra `if` branch per owner)
+  # keeps growing regardless. The bound covers the observed 16-owner
+  # `dispose` family while leaving the 21-owner `update` family dynamic.
   #
   # Real C++ virtual dispatch (a vtable) was considered and rejected for
   # this whole problem, not just scoped smaller: every mruby object is an
@@ -9065,7 +9066,7 @@ class CodeGen
   # `@only_owners`/`@other_owners` emission-eligibility gate every other
   # devirtualization path here already uses (no `_impl` exists for an
   # owner this run isn't emitting).
-  POLY_SMALL_N_MAX = 5
+  POLY_SMALL_N_MAX = 16
 
   def poly_small_n_targets(name, n)
     # RUNTIME_DEF_DEVIRT_GUARD: same gate as monomorphic_target above, and

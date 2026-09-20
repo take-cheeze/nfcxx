@@ -130,7 +130,7 @@ report << "optcarrot bc2cpp coverage report\n"
 report << "(tools/optcarrot_probe/optcarrot_bc2cpp_coverage_report.rb; optcarrot's\n"
 report << " own real source as its own standalone closed world -- a scoping probe,\n"
 report << " entirely separate from the real project's mruby-lcf/rgss/rpg2k registry\n"
-report << " docs/bc2cpp_coverage.txt measures. See tools/optcarrot_probe/README.md.)\n\n"
+report << " the CI job summary reports for the real project. See tools/optcarrot_probe/README.md.)\n\n"
 
 report << "compiled entry points (clean, zero #error): #{clean_names.size}\n"
 report << "  from bytecode: #{clean_names.size - synthesized_count}\n"
