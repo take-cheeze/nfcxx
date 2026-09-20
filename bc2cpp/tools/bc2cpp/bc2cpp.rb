@@ -6972,6 +6972,36 @@ def mandatory_arity(irep)
   enter.args.split(':').first.to_i
 end
 
+# KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: is this def a safe callee for a
+# call site carrying `nk` keyword pairs that get packed into ONE trailing Hash
+# and appended as an ordinary positional (see compile_keyword_hash_positional_send
+# for the full vm.c OP_SEND/OP_ENTER argument) receiving `total` positional
+# arguments (the n positionals plus that packed Hash)?
+#
+# This replaces the `pure_mandatory_arity?` this gate used to lean on, which
+# demanded EVERY ENTER field be zero -- one field stricter than the shape
+# actually needs. The trailing-Hash translation is sound for any callee whose
+# ENTER declares `kd == 0` (`MRB_ASPEC_KEY == 0 && MRB_ASPEC_KDICT == 0`), the
+# ONLY thing src/vm.c's OP_ENTER `if (!kd) { ci->n++; argc++; }` arm keys on, so
+# an `= default` optional positional (opt > 0) is fine: the packed Hash just
+# lands in the next free positional slot, exactly as real Ruby hands `foo(k: v)`
+# to `def foo(a, b = 1)` (b receives the Hash). `total.between?(mand, mand + opt)`
+# mirrors only the argc range the VM would ACCEPT without raising, so a Ruby call
+# site that would itself raise never becomes a silently-passing C++ call.
+# rest/post/block/noblock stay excluded -- `*rest`/`&blk` shift where the trailing
+# Hash lands in a way this call-site-local codegen does not model -- the same
+# exclusions mandatory_optional_and_keyword_arity? keeps. ENTER's own eight dumped
+# fields are REQ:OPT:REST:POST:KEY:KDICT:BLOCK:NOBLOCK (3rd/mruby/src/codedump.c).
+def keyword_hash_positional_callee?(irep, total)
+  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  return false unless enter
+
+  mand, opt, rest, post, kw, kdict, block, noblock =
+    enter.args.split(':').map { |f| f[/\d+/].to_i }
+  kw.zero? && kdict.zero? && rest.zero? && post.zero? && block.zero? && noblock.zero? &&
+    total.between?(mand, mand + opt)
+end
+
 # KEYWORD_DIRECT_CONSTRUCT_SUPPORT: does this ENTER declare mandatory
 # positionals (optionally followed by real OPTIONAL positionals) plus real
 # KEYWORD parameters -- `kw` non-zero, and every one of rest/post/kwrest/
@@ -21075,19 +21105,23 @@ class CodeGen
   # does not support keyword arguments */` is not a limitation here, it is
   # exactly the state OP_ENTER would have produced anyway.
   #
-  # The soundness gate is `pure_mandatory_arity?` + an exact
-  # `mandatory_arity == n + 1` match on EVERY def the closed-world registry
-  # knows for this name:
-  #   - `pure_mandatory_arity?` requires ENTER's opt/rest/post/kw/kwrest/
-  #     block fields to ALL be zero (see that function), so it already
-  #     proves `MRB_ASPEC_KEY == 0 && MRB_ASPEC_KDICT == 0`, i.e. exactly
-  #     the `kd == 0` the vm.c arm above turns on. It is deliberately used
-  #     rather than a narrower hand-rolled kw/kwrest check: a callee with
-  #     optional/rest arguments would also need this call site to reason
-  #     about WHERE the appended Hash lands among them, which this round
-  #     does not attempt.
-  #   - `mandatory_arity == n + 1` is the "+1" the `ci->n++` above performs,
-  #     checked against the real signature rather than assumed to fit.
+  # The soundness gate is `keyword_hash_positional_callee?(irep, n + 1)` on
+  # EVERY def the closed-world registry knows for this name:
+  #   - it requires ENTER's key/kdict fields to be zero (so `MRB_ASPEC_KEY == 0
+  #     && MRB_ASPEC_KDICT == 0`, exactly the `kd == 0` the vm.c arm above turns
+  #     on) and rest/post/block/noblock to be zero, leaving only an optional
+  #     `= default` positional count. KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT
+  #     widened this off `pure_mandatory_arity?`'s all-fields-zero demand: a
+  #     trailing `= default` optional positional is NOT a hazard for the
+  #     trailing-Hash translation -- the VM just binds the packed Hash to the
+  #     next free slot (mandatory, else optional) exactly as it binds
+  #     `foo(k: v)`'s Hash to `def foo(a, b = 1)`'s own `b`. What still IS a
+  #     hazard and stays excluded is a `*rest`/`&blk` callee, where the trailing
+  #     Hash's landing slot is not statically fixed.
+  #   - `total.between?(mand, mand + opt)` is the "+1" the `ci->n++` above
+  #     performs, checked against the real signature: the exact argc range OP_ENTER
+  #     accepts without raising, so a Ruby call site that would raise never
+  #     becomes a silently-passing C++ call.
   #   - Requiring it of EVERY registry def (not just a MONO one) is what
   #     makes the emitted DYNAMIC dispatch sound: `mrb_funcall` resolves the
   #     real method at runtime, so every def that could possibly answer this
@@ -21131,15 +21165,15 @@ class CodeGen
       callee_irep = @ireps[t.irep]
       next false unless callee_irep
 
-      pure_mandatory_arity?(callee_irep) && mandatory_arity(callee_irep) == total
+      keyword_hash_positional_callee?(callee_irep, total)
     end
     return nil unless all_keyword_free
 
     owners = defs.map(&:owner).join(', ')
     out = String.new
     out << "  // KEYWORD_HASH_POSITIONAL :#{name} (n=#{n}|nk=#{nk}) -- every real def of this name " \
-           "(#{owners}) takes #{total} mandatory positional arguments and declares NO keyword " \
-           "parameters, so real src/vm.c OP_ENTER (`if (!kd) { ... ci->n++; argc++; }`) delivers the " \
+           "(#{owners}) declares NO keyword parameters and accepts #{total} positional arguments, " \
+           "so real src/vm.c OP_ENTER (`if (!kd) { ... ci->n++; argc++; }`) delivers the " \
            "#{nk} keyword pair(s) as ONE ordinary trailing positional Hash, exactly as built here by " \
            "OP_SEND's own hash_new_from_regs. Not a keyword call at runtime at all.\n"
     out << "  {\n"
