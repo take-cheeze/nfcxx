@@ -21429,6 +21429,9 @@ class CodeGen
     # VM's OP_EQ order), so it takes the same resolver as the other
     # comparisons and stores the `==` method's own result like OP_CMP does.
     fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+    # String/Symbol `==` are generated from their C wrappers; the resolver
+    # fallback above stays the `else` for every other receiver.
+    fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == 'EQ'
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
     no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
@@ -21469,6 +21472,35 @@ class CodeGen
     else
       "  // Numeric tag pair handling mirrors the pinned mruby OP_CMP.\n#{numeric_dispatch}"
     end
+  end
+
+  # EQ's non-numeric operands used to reach `mrb_funcall` every time the
+  # identity shortcut missed -- i.e. on every FALSE String or Symbol
+  # comparison (`@mode == :menu`, `name == "x"`). `==` is registered by
+  # several built-in classes; the exact-class generator derives the ones whose
+  # C wrapper is a single public-API expression (String#== is
+  # `mrb_str_equal`, Symbol#== is `mrb_obj_equal`) and this emits them behind
+  # the same per-class guards every other generated expression uses. The
+  # identity/dispatch statement stays the fallback for every other receiver.
+  # Returns nil when nothing was generated or a Ruby definition/prepend could
+  # sit in front of the built-in (builtin_class_send_safe?).
+  def generated_eq_dispatch(d, s, identity_dispatch)
+    entries = @native_registered_expressions['==']
+    return unless entries && !entries.empty? && entries.all? { |entry| entry[:arity] == 1 }
+    return unless builtin_class_send_safe?('==', entries.map { |entry| entry[:owner][:class_name] }.uniq)
+
+    # One if/else-if chain rather than compile_native_registered_expression's
+    # switch: that form repeats the fallback statement in every case, which
+    # would add an `mrb_funcall` site per generated class to every EQ.
+    recv = "r#{d}"
+    chain = entries.map do |entry|
+      owner = entry[:owner]
+      guard = "mrb_type(#{recv}) == #{owner[:tag]}"
+      guard += " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}" unless %w[Float Symbol].include?(owner[:class_name])
+      expression = entry[:expression].gsub('recv', recv).gsub('BC2CPP_ARG0', "r#{s}")
+      "  if (#{guard}) {\n    r#{d} = #{expression};\n  } else "
+    end.join
+    "  // == -- generated from native registrations and C method bodies\n#{chain}{\n#{identity_dispatch}  }\n"
   end
 
   # Operator opcodes fall back to an ordinary one-argument method send
