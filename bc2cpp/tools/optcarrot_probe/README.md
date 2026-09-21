@@ -409,6 +409,10 @@ method is uncontested; non-Fixnums retain Ruby dispatch. There are 418 such
 arithmetic sites. The report also finds 118 Fixnum `<`, `<=`, `>`, and `>=`
 comparisons, which use direct C comparisons under the same guarded dispatch
 fallback.
+Fixnum `>>` sends use direct signed shifts when both operands are Fixnums and
+the Integer method is uncontested; left-shift overflow and other operand types
+keep Ruby dispatch so mruby can produce its normal bignum or error result. The
+coverage report finds 54 such sites.
 The frame-boundary `PPU#setup_frame` also reuses the exact pixel Array's
 backing storage across frames; other exact-Array `clear` sites lower to
 `mrb_ary_clear` under the same exact-class guard.

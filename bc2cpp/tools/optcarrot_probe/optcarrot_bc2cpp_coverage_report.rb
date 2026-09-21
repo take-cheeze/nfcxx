@@ -202,6 +202,7 @@ array_push_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_PUSH :<</).size
 array_clear_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_CLEAR :clear/).size
 array_clear_reuse_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_CLEAR_RETAIN :clear/).size
 fixnum_binary_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_BINARY :(?:%|&|\||\^)/).size
+fixnum_shift_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_SHIFT :>>/).size
 fixnum_compare_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_COMPARE :(?:<|<=|>|>=)/).size
 fixnum_arithmetic_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_ARITHMETIC :(?:\+|-|\*)/).size
 
@@ -215,6 +216,7 @@ report << "  guarded exact-Array pushes lowered to mrb_ary_push: #{array_push_fa
 report << "  guarded exact-Array clear calls lowered to mrb_ary_clear: #{array_clear_fast_paths}\n"
 report << "  PPU frame-buffer clears retaining backing storage: #{array_clear_reuse_fast_paths}\n"
 report << "  guarded Fixnum modulo/bitwise sends lowered to C arithmetic: #{fixnum_binary_fast_paths}\n"
+report << "  guarded Fixnum right shifts lowered to C arithmetic: #{fixnum_shift_fast_paths}\n"
 report << "  guarded Fixnum comparisons lowered to C comparisons: #{fixnum_compare_fast_paths}\n"
 report << "  guarded Fixnum +, -, * sends lowered to mruby numeric helpers: #{fixnum_arithmetic_fast_paths}\n"
 report << "distinct dynamically-dispatched method names: #{dispatch_counts.size}\n"

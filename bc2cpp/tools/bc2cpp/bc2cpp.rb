@@ -23146,6 +23146,56 @@ class CodeGen
       CPP
     end
 
+    if name == '>>' && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
+      value, width = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases retain Ruby dispatch
+          {
+          mrb_bool bc2cpp_shift_fast = FALSE;
+          mrb_int bc2cpp_shift_result = 0;
+          if (mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})) {
+            mrb_int bc2cpp_shift_value = mrb_fixnum(#{value});
+            mrb_int bc2cpp_shift_width = mrb_fixnum(#{width});
+            if (bc2cpp_shift_width == 0) {
+              bc2cpp_shift_result = bc2cpp_shift_value;
+              bc2cpp_shift_fast = TRUE;
+            } else if (bc2cpp_shift_width > 0) {
+              if (bc2cpp_shift_width >= MRB_INT_BIT - 1) {
+                bc2cpp_shift_result = bc2cpp_shift_value < 0 ? -1 : 0;
+              } else {
+                bc2cpp_shift_result = bc2cpp_shift_value >> bc2cpp_shift_width;
+              }
+              bc2cpp_shift_fast = TRUE;
+            } else if (bc2cpp_shift_width != MRB_INT_MIN) {
+              if (bc2cpp_shift_value == 0) {
+                bc2cpp_shift_fast = TRUE;
+              } else {
+                mrb_int bc2cpp_left_width = -bc2cpp_shift_width;
+                if (bc2cpp_left_width <= MRB_INT_BIT - 1 &&
+                    !(bc2cpp_shift_value > 0 && bc2cpp_shift_value > (MRB_INT_MAX >> bc2cpp_left_width)) &&
+                    !(bc2cpp_shift_value < 0 && bc2cpp_shift_value < (MRB_INT_MIN >> bc2cpp_left_width))) {
+                  if (bc2cpp_left_width == MRB_INT_BIT - 1) {
+                    bc2cpp_shift_result = MRB_INT_MIN;
+                  } else if (bc2cpp_shift_value > 0) {
+                    bc2cpp_shift_result = bc2cpp_shift_value << bc2cpp_left_width;
+                  } else {
+                    bc2cpp_shift_result = bc2cpp_shift_value * ((mrb_int)1 << bc2cpp_left_width);
+                  }
+                  bc2cpp_shift_fast = TRUE;
+                }
+              }
+            }
+          }
+          if (bc2cpp_shift_fast) {
+            r#{d} = mrb_fixnum_value(bc2cpp_shift_result);
+          } else {
+            #{fallback.chomp}
+          }
+          }
+      CPP
+    end
+
     if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
