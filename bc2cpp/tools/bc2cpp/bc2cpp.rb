@@ -23105,6 +23105,20 @@ class CodeGen
       CPP
     end
 
+    if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
+      left, right = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
+      return <<~CPP
+          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison with Ruby fallback
+          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+            r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if name == 'slice!' && n == 2 && builtin_container_send_safe?(name, %w[Array])
       start, length = argv
       fallback = dynamic_dispatch_line(d, recv, name, argv)
