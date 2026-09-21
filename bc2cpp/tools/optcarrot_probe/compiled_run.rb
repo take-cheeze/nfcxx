@@ -17,15 +17,35 @@ MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 # Optcarrot::CPU/PPU/NES were once excluded here because compiled methods
-# reached from the PPU Fiber could crash. That is no longer reproducible: all
-# three now run the full 180-frame headless benchmark compiled, repeatedly,
-# with the same checksum as the interpreted and CRuby runs (see
-# tools/optcarrot_probe/README.md's "Compiled runtime check" section). The
-# crash is presumed fixed by intervening bc2cpp correctness fixes (e.g. the
-# embedded-ivar-struct-per-subclass fix noted there) rather than root-caused
-# directly, so keep re-verifying the checksum here rather than assuming safety
-# forever holds.
-FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt Optcarrot::CPU Optcarrot::PPU Optcarrot::NES].freeze
+# reached from the PPU Fiber could crash. CPU and NES are confirmed safe (see
+# tools/optcarrot_probe/README.md's "Compiled runtime check" section) and stay
+# compiled. Optcarrot::PPU itself is deliberately NOT in this list right now
+# -- re-checking it (as part of the gc_gray_rescan investigation this file's
+# own history references) found a real, 100%-reproducible failure, not the
+# old SIGSEGV: `PPU#run`'s `@fiber ||= Fiber.new { ... }` compiles through the
+# same BLOCK_FALLBACK path every other block literal uses (`bc2cpp.rb`'s
+# `emit_block_fallback_glue`), which wraps the block body as a cfunc-backed
+# RProc via `mrb_proc_new_cfunc_with_env` -- correct for `each`/`map`/`sub`/...
+# (none of which care whether the RProc they're handed is cfunc- or
+# bytecode-backed), but `Fiber.new` is not one of those: mruby's own
+# `init_fiber` (3rd/mruby/mrbgems/mruby-fiber/src/fiber.c) checks
+# `MRB_PROC_CFUNC_P(p)` and unconditionally raises `FiberError: tried to
+# create Fiber from C defined method` rather than dereference a `body.irep`
+# that a cfunc-backed proc doesn't have. This is deterministic C logic, not a
+# timing- or memory-layout-dependent crash: every run of the 180-frame
+# benchmark with PPU compiled hits it the instant `PPU#run` is first called
+# -- confirmed both under GPROF=1 and with a plain, non-gprof
+# `compiled_run.rb` run, and by reading the generated C++ directly (the
+# `// BLOCK_FALLBACK :new` comment bc2cpp itself emits right above the
+# `mrb_proc_new_cfunc_with_env` call that becomes `Fiber.new`'s block
+# argument). Fixing it needs bc2cpp to emit a real, bytecode-backed Proc
+# specifically for a block passed to `Fiber.new` (or to recognize that call
+# shape and keep the containing method interpreted instead of devirtualizing
+# into it) -- a bc2cpp.rb code-generation change, out of this file's own
+# scope. Re-enabling `Optcarrot::PPU` here
+# needs that fix landed and the same re-verification `Optcarrot::CPU`/`NES`
+# got, not just re-adding the name.
+FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt Optcarrot::CPU Optcarrot::NES].freeze
 # ROM loading and initialization run while NES is assembled, before emulator
 # Fibers start; these methods exercise the generated loader fast paths.
 FIBER_SAFE_SETUP_METHODS = {
@@ -33,8 +53,12 @@ FIBER_SAFE_SETUP_METHODS = {
   'Optcarrot::ROM.singleton' => %w[load]
 }.freeze
 # These methods run synchronously outside the PPU Fiber's execution path.
+# 'Optcarrot::PPU' => %w[setup_frame] used to live here (PPU#setup_frame runs
+# outside the Fiber, so it was always fine on its own) but is redundant now
+# that Optcarrot::PPU is entirely excluded from ONLY_OWNERS above -- it never
+# gets a compiled entry point to match against, so keeping the row here would
+# be a silent no-op.
 FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
-  'Optcarrot::PPU' => %w[setup_frame],
   # NES#step calls Video#tick after CPU#run and all PPU Fiber resumes return.
   'Optcarrot::Video' => %w[tick],
   # NES#step calls APU#vsync after PPU#vsync returns; its audio clock update
@@ -116,6 +140,50 @@ def owner_class_expr(owner)
 end
 
 def emit_register(diagnostics, out_dir)
+  # A class in `embeds` gets its whole instance type switched to
+  # MRB_TT_DATA (an opaque embedded ivar struct in place of the ordinary
+  # ivar table) for EVERY instance, program-wide -- MRB_SET_INSTANCE_TT is
+  # a class-level flag, not a per-call-site choice. Once that flag is set,
+  # ANY method of that class that still runs interpreted is unsound: the
+  # interpreter's OP_SETIV/OP_GETIV only ever reads/writes the ordinary
+  # `obj->iv` table (src/variable.c), which has no idea the real ivars now
+  # live in the struct bc2cpp's own compiled methods read via DATA_PTR(self)
+  # -- and a compiled method reached from Fiber-safe code (e.g. NES#reset's
+  # devirtualized call into APU#reset) reads that struct through DATA_PTR
+  # unconditionally, with no fallback. If that class's own #initialize
+  # never ran compiled (never called mrb_data_init on this instance),
+  # DATA_PTR(self) is still the zeroed pointer mrb_obj_alloc leaves behind,
+  # so the very first such read is a null-pointer dereference -- confirmed
+  # by reproducing it here: `Optcarrot::APU` is embeddable (ivars proven
+  # embeddable program-wide) but was never in FIBER_SAFE_OWNERS, so
+  # `APU.new`'s dynamic-dispatch `#initialize` (SPLAT `n=*`, not eligible
+  # for DIRECT_CONSTRUCT devirtualization) ran the ordinary interpreted
+  # bytecode, leaving DATA_PTR null; `NES#reset`'s devirtualized, direct
+  # C++ call into `Optcarrot__APU_reset_impl` then dereferenced it and
+  # segfaulted (`gdb bt`: Optcarrot__APU_reset_impl, called directly from
+  # Optcarrot__NES_reset_impl, no mrb_funcall/mrb_vm_exec frame in between
+  # -- SIGSEGV on `DATA_PTR(self)->cycles_ratecounter = ...`). This
+  # reproduced in the plain (non-GPROF) 180-frame run too, so it is not a
+  # profiling-build artifact: the "no longer reproducible" claim in
+  # README.md's "Compiled runtime check" section no longer holds against
+  # this bc2cpp.rb, presumably because the ivar-embedding proof (a
+  # separate, actively-developed piece of bc2cpp) newly covers
+  # Optcarrot::APU/APU::DMC/Pad, which it evidently didn't when that claim
+  # was last verified.
+  #
+  # The fix: whenever a class needs MRB_TT_DATA, install ALL of its own
+  # compiled methods too (matching how FIBER_SAFE_OWNERS already installs
+  # every one of CPU/PPU/NES/Config/Opt's methods), not just whichever
+  # ones happen to be Fiber-safety-listed -- so every instance of an
+  # embedded class is always constructed AND always operated on through
+  # the same compiled, struct-aware code, and the ordinary interpreter
+  # never touches its ivars at all. This is computed from `embeds` itself
+  # (the same diagnostics section MRB_SET_INSTANCE_TT is emitted from), so
+  # it tracks whichever classes bc2cpp's ivar-embedding analysis decides
+  # to embed automatically, rather than a hand-maintained list that can
+  # silently fall out of sync with that analysis the way FIBER_SAFE_OWNERS
+  # just did.
+  embeds = section_lines(diagnostics, 'classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA)')
   rows = section_lines(diagnostics, 'compiled entry points').filter_map do |line|
     match = line.match(/^\s*(\w+) \/ \w+\s+\(([^#]+)#([^,]+), arity \d+\)(.*)$/)
     next unless match
@@ -123,13 +191,12 @@ def emit_register(diagnostics, out_dir)
     entry, owner, name, extra = match.captures
     safe_setup = FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
     safe_frame_boundary = FIBER_SAFE_FRAME_BOUNDARY_METHODS.fetch(owner, []).include?(name)
-    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup || safe_frame_boundary
+    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup || safe_frame_boundary || embeds.include?(owner)
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
     [entry, owner, name, extra.include?('[private')]
   end
-  embeds = section_lines(diagnostics, 'classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA)')
 
   File.open(File.join(out_dir, 'register.cxx'), 'w') do |file|
     file.puts '#include <mruby.h>'
@@ -174,9 +241,19 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources)
   }
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
+  # Excludes Optcarrot::PPU itself, not just its nested helper classes: a
+  # devirtualized call (a direct C++ call from one compiled method's body
+  # into another's) reaches a compiled `_impl` function regardless of
+  # whether that method is ever registered via FIBER_SAFE_OWNERS/emit_register
+  # below -- registration only controls Ruby-level dispatch, not whole-program
+  # devirtualization. So leaving `Optcarrot::PPU` itself in ONLY_OWNERS would
+  # still compile (and let other compiled code devirtualize into)
+  # `Optcarrot__PPU_run_impl`, hitting the FIBER_SAFE_OWNERS comment's own
+  # FiberError even though PPU is no longer "installed." See that comment for
+  # the full mechanism.
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
-  end.uniq.reject { |owner| owner.start_with?('Optcarrot::PPU::') }
+  end.uniq.reject { |owner| owner.start_with?('Optcarrot::PPU') }
   compiled_cpp, diagnostics = run_bc2cpp(sources, base_env.merge(
     'OUT_DIR' => temp,
     'ONLY_OWNERS' => owners.join(',')

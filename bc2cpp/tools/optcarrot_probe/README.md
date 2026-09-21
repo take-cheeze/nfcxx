@@ -348,6 +348,68 @@ compiling, kept for clarity), and the post-Fiber `Optcarrot::Video#tick` and
 `Optcarrot::APU#flush_sound`/`#vsync` hooks. `Optcarrot::Video` and
 `Optcarrot::APU` stay interpreted apart from those two hooks.
 
+**Update (gc_gray_rescan investigation session)**: re-running this exact
+configuration to reproduce the gray_rescan numbers cited below found two real,
+100%-reproducible regressions in this bc2cpp.rb/mruby state -- distinct from
+the historical SIGSEGV this section spent so much text re-verifying wasn't
+happening, and distinct from each other:
+
+1. **A null-`DATA_PTR` segfault**, `gdb`-confirmed at `Optcarrot::APU#reset`'s
+   `((Optcarrot__APU_ivars*)DATA_PTR(self))->cycles_ratecounter = ...`. bc2cpp's
+   whole-program ivar-embedding analysis now proves `Optcarrot::APU`'s (and
+   `APU::DMC`'s) ivars embeddable, so `emit_register`'s `embeds` list applies
+   `MRB_SET_INSTANCE_TT(APU_class, MRB_TT_DATA)` to every `APU` instance --
+   but `Optcarrot::APU#initialize` was never in `FIBER_SAFE_OWNERS` (`APU`
+   itself never was, only its `flush_sound`/`vsync` frame-boundary hooks), so
+   `APU.new`'s dynamic-dispatch `#initialize` call ran the ordinary
+   interpreted bytecode, which has no notion of the embedded struct and never
+   calls `mrb_data_init`. `DATA_PTR(self)` stays the null pointer
+   `mrb_obj_alloc` leaves it at, and `NES#reset`'s devirtualized (direct C++,
+   no dynamic dispatch, so registration status never entered into it) call
+   into the compiled `Optcarrot__APU_reset_impl` dereferences it immediately.
+   **Fixed** in `compiled_run.rb`: `emit_register` now installs every
+   compiled method of any class the `embeds` diagnostic names, not just
+   `FIBER_SAFE_OWNERS`' hand-picked subset, so an embedded class's instances
+   are always constructed (and always operated on) through compiled,
+   struct-aware code -- the same invariant `FIBER_SAFE_OWNERS` already gave
+   `CPU`/`PPU`/`NES` by installing all of their own methods together, just
+   computed from the same source bc2cpp's own embedding proof already
+   is, instead of tracked by hand.
+2. **A always-raising `FiberError`** once (1) stopped masking it: `PPU#run`'s
+   `@fiber ||= Fiber.new { ... }` compiles its block through the same
+   `BLOCK_FALLBACK` path every other block literal uses
+   (`emit_block_fallback_glue`), wrapping it as a cfunc-backed `RProc` via
+   `mrb_proc_new_cfunc_with_env` -- fine for `each`/`map`/`sub`/... (none
+   check the RProc's own kind), but mruby's `Fiber.new`
+   (`mrbgems/mruby-fiber/src/fiber.c`'s `init_fiber`) explicitly checks
+   `MRB_PROC_CFUNC_P(p)` and raises `FiberError: tried to create Fiber from C
+   defined method` rather than dereference a `body.irep` a cfunc-backed proc
+   doesn't have. Deterministic C logic, not a timing-dependent crash: every
+   180-frame run with `PPU` compiled hits it the instant `PPU#run` first
+   runs, gprof build or not. **Not fixed** -- needs bc2cpp to emit a real,
+   bytecode-backed `Proc` for a block specifically passed to `Fiber.new` (or
+   to recognize that shape and decline to devirtualize into the method that
+   creates it), a `tools/bc2cpp/bc2cpp.rb` code-generation change out of this
+   session's own scope. `compiled_run.rb` excludes `Optcarrot::PPU` from
+   `ONLY_OWNERS` entirely again (not just from `FIBER_SAFE_OWNERS` --
+   devirtualization reaches a compiled `_impl` regardless of whether
+   `emit_register` ever installs it, so leaving `PPU` compiled-but-
+   uninstalled would not have avoided this) until that lands and gets the
+   same re-verification `CPU`/`NES` did above.
+
+With both changes, `compiled_run.rb`'s 180-frame run is back to completing
+cleanly (`Optcarrot::Config`, `Optcarrot::Opt`, `Optcarrot::CPU`,
+`Optcarrot::NES`, `Optcarrot::APU`, `Optcarrot::APU::DMC`, `Optcarrot::Pad`,
+and `Optcarrot::ROM` compiled and installed -- 198 methods locally, vs. this
+section's earlier ~92% baseline and the since-lost "all three" figures above
+-- `Optcarrot::PPU`/`Optcarrot::Video` interpreted), checksum `59662` on all
+three runtimes, same as every number in this file. It is neither confirmation
+nor contradiction of this section's own "all three run compiled" claim above
+for `Optcarrot::PPU` specifically -- that configuration is currently broken
+by bug 2, full stop, regardless of bug 1 -- so treat this section's own
+PPU-compiled numbers as historical (true when written, not currently
+reproducible) rather than re-verified.
+
 Compiling the actual hot path does not yet make it faster: the latest local
 180-frame run measured CRuby 4.82s, interpreted mruby 59.60s, and bc2cpp
 67.09s (all three checksum `59662`), i.e. bc2cpp is now about 12.6% slower
@@ -434,6 +496,90 @@ discarded: on this machine, the 180-frame interpreted run slowed from about
 `mrb_ary_splat` calls and a rise in GC gray rescans from
 1,586 to 3,455; these are additional measurements to revisit after dispatch
 overhead is reduced, not proof that it causes the GC increase.
+
+**`gc_gray_rescan` root cause (gc_gray_rescan investigation session)**:
+traced with a fresh gprof run and `gprof -q`'s call graph (not just the flat
+profile) against this exact tree, in the reduced-but-working configuration
+the "Compiled runtime check" section's own Update paragraph above landed
+(`Optcarrot::PPU` interpreted, everything else -- including `CPU`'s opcode
+dispatch loop -- compiled): `gc_gray_rescan` calls rose 1,237 -> 3,495 and its
+share of sampled time 8.10% -> 31.64%, becoming the single hottest function in
+the compiled profile, ahead of `mrb_vm_exec` itself (46.65% -> 27.93% of time,
+but its own *call count* rose 362,821 -> 3,029,982 -- 8.3x more re-entries
+into the VM despite less total bytecode work, matching the interpreted-vs-
+compiled `mrb_funcall_with_block` gap this file already measured
+elsewhere: 547K -> 17.2M in an earlier, PPU-included run). This is the
+mechanism, read directly from `3rd/mruby/src/gc.c` and confirmed against the
+call graph, not inferred from the flat profile alone:
+
+- `gc_gray_rescan` only runs when the fixed 1,024-slot `gray_stack`
+  (`MRB_GRAY_STACK_SIZE`) overflows during marking (`add_gray_list`,
+  `gc.c`): once full, every further object due to turn gray sets
+  `gray_overflow` instead, and the *next* drain has to fall back to a full,
+  unbounded scan of every heap page looking for gray objects
+  (`gc_gray_rescan` itself) rather than popping the stack. The call graph
+  confirms this is not a one-shot cost: `gc_gray_rescan` runs 3,389 times
+  from just 5,227 `incremental_marking_phase` calls and 817
+  `root_scan_phase` calls -- multiple full-heap rescans per GC cycle, not one.
+- `mrb_gc_protect` -- the call that leaves a value in the GC's fixed-growth
+  "arena" root set (`gc.c`'s `gc_arena_keep`/`gc_protect`) -- is called
+  111,759,292 times in the compiled profile (not even in interpreted's own
+  top 50, i.e. under ~9M there: a well over 12x rise). The call graph traces
+  most of that rise to exactly the crossings above: `mrb_funcall_with_block`
+  (mruby's own C API every non-devirtualized bc2cpp call site --
+  `dynamic_dispatch_line`'s `mrb_funcall`, `compile_dynamic_splat_send`'s
+  `mrb_funcall_argv`, `emit_block_fallback_glue`'s own calls -- ultimately
+  funnels through) protects its own return value on every call
+  (12,554,060 calls contribute that many `mrb_gc_protect` calls directly),
+  and each such call that reaches a non-cfunc method re-enters `mrb_vm_exec`
+  recursively, whose own bytecode -- OP_ARRAY/OP_STRING/OP_HASH literal
+  construction, mostly -- calls `mrb_gc_protect` on every literal it builds
+  (94,264,629 of the 111.7M calls trace to `mrb_vm_exec` directly).
+- The reason this inflates `gc_gray_rescan` specifically, not just GC time in
+  general: `root_scan_phase` marks the *entire* arena in one synchronous pass
+  (`for (i=0,e=gc->arena_idx; i<e; i++) mrb_gc_mark(mrb, gc->arena[i])`,
+  `gc.c`) with no draining in between, exactly like it marks the live VM
+  register stack (`mark_context_stack`). mruby's interpreter keeps the arena
+  bounded to roughly one call's worth of garbage at a time: `mrb_vm_exec`'s
+  own `CASE(OP_SEND...)` handler calls `mrb_gc_arena_shrink` (`vm.c`) right
+  after *every* cfunc-target call returns, restoring the arena to that one
+  `mrb_vm_exec` invocation's own entry baseline. A devirtualized call from
+  one compiled method directly into another's `_impl` function (a plain C++
+  call, no VM crossing at all) gets no such shrink -- nothing resets the
+  arena between one `mrb_funcall`/`mrb_funcall_argv` call and the next inside
+  a hot, self-contained loop like `CPU#run`'s `send(*DISPATCH[@opcode])`
+  dispatch (about 1.77M calls in the earlier, 180-frame instrumented run),
+  so garbage the interpreter would have reclaimed after every single send
+  instead accumulates across the whole compiled method's own execution,
+  growing the arena and, with it, how much a synchronous root-scan pass finds
+  gray at once -- past the 1,024-slot stack, into `gc_gray_rescan`.
+- This is architecturally inherent to how bc2cpp represents a compiled
+  method's own registers (plain `mrb_value` C++ locals -- `mrb_value r0 =
+  self;` and so on in the generated code, confirmed by reading it directly --
+  never part of `mrb->c->stbase`, the VM's own rooted register stack) and
+  therefore to why the arena has to do this rooting job at all for them: it
+  is not a bug in any one call site, it is the necessary cost of leaving the
+  VM's own register-stack rooting behind. **No fix was attempted.** The one
+  design that would bound it -- bracket every generated method body with its
+  own `mrb_gc_arena_save`/`_restore` (mirroring `mrb_vm_exec`'s own cfunc
+  epilogue, shrinking to the method's own entry baseline and re-protecting
+  only its actual return value at every exit) -- is plausible and would touch
+  only `tools/bc2cpp/bc2cpp.rb`'s method prologue/epilogue emission, but this
+  file's own `bc2cpp_ensure_guard` comment already documents exactly the
+  failure mode that makes this genuinely risky to ship without exhaustive
+  verification: a wrong arena shrink drops a register some other, not-yet-
+  executed part of the same method still needs, and the resulting corruption
+  is "silent, load-dependent" -- it showed up only once enough allocation
+  happened to make a GC actually fire at the wrong moment, not on every run
+  or even most runs. Getting this right needs proving no live register (not
+  just the return value) depends on an arena entry above the shrink point at
+  every one of a method's exits, which needs real liveness analysis this
+  session did not attempt, plus `MRB_GC_STRESS`-style exhaustive testing (a
+  GC on every allocation) rather than the single-seed checksum check this
+  probe otherwise relies on -- out of this session's own time budget. Whether
+  the wall-clock win from bounding the arena would even exceed
+  `iv_bsearch_idx`'s already-identified, separately-tracked cost (see the
+  Update paragraph just above) is also unmeasured.
 
 `build_bundle.rb` now rewrites this one call in the generated optcarrot bundle
 to dispatch by fixed positional arity (one through four). mruby's
