@@ -9634,6 +9634,20 @@ class CodeGen
             #{fallback.chomp}
           }
       CPP
+    when 'key?'
+      # mrb_hash_key_p is Hash-specific and casts through mrb_hash_ptr
+      # without checking the receiver tag. Exact base Hash preserves
+      # subclass/singleton overrides; every other value keeps Ruby lookup.
+      key = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      <<~CPP
+          // HASH_KEY_P :key? -- exact base Hash only; preserve overrides and non-Hash errors
+          if (mrb_hash_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->hash_class) {
+            r#{d} = mrb_bool_value(mrb_hash_key_p(M, #{recv}, #{key}));
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
     when 'to_s'
       # TO_S_TYPE_TAG_DISPATCH: unlike every other name above (one native
       # implementation total, whole-program-uncontested), `to_s` is the
@@ -23466,6 +23480,10 @@ class CodeGen
             #{fallback.chomp}
           }
       CPP
+    end
+
+    if name == 'key?' && n == 1 && builtin_class_send_safe?(name, %w[Hash])
+      return compile_native_primitive_send(name, d, recv, argv)
     end
 
     # Try the call site's existing TYPED receiver proof before lowering
