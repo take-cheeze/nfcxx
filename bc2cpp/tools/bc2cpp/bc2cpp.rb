@@ -18048,17 +18048,18 @@ class CodeGen
   end
 
   # BLOCK_FALLBACK_ELEMENT_SUPPORT: carry an exact element class into the
-  # standalone cfunc only for a block passed to Array#each or
-  # Array#each_with_index. Reuse the same Array receiver proof and element
-  # scan as the inline loop recognizer; all other iterators and untyped arrays
-  # keep dynamic dispatch. each_with_index yields the element as argument 1
-  # and the index as argument 2, so only its exact two-parameter block shape
-  # is accepted.
+  # standalone cfunc only for known Array iterators with a proven yield shape.
+  # Reuse the same Array receiver proof and element scan as the inline loop
+  # recognizer; all other iterators and untyped arrays keep dynamic dispatch.
   def block_fallback_array_element_class(irep, region, owner_name)
-    return nil unless irep && %w[each each_with_index].include?(region[:name]) && region[:n].zero? &&
-                       !region[:self_implicit]
-    expected_arity = region[:name] == 'each' ? 1 : 2
-    return nil unless mandatory_arity(region[:block_irep]) == expected_arity
+    return nil unless irep && !region[:self_implicit]
+    expected_shape = case region[:name]
+                     when 'each' then [0, 1]
+                     when 'each_with_index' then [0, 2]
+                     when 'each_with_object' then [1, 2]
+                     end
+    return nil unless expected_shape && region[:n] == expected_shape[0]
+    return nil unless mandatory_arity(region[:block_irep]) == expected_shape[1]
 
     idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
     return nil unless idx
