@@ -312,12 +312,12 @@ With those fixes, the 180-frame run completes with checksum `59662`, matching
 the interpreted run and CRuby. CI still showed SIGSEGVs after excluding CPU,
 PPU, and the explicit NES Fiber boundaries, so the probe compiles setup
 methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus
-`Optcarrot::ROM#initialize` before emulator Fibers start. It also compiles
-seven non-yielding PPU leaf methods; each returns before `main_loop` reaches
-its next Fiber yield. Other emulator runtime methods remain interpreted. The
-benchmark still uses upstream emulation logic; only the method registration
-set changes. It runs the same ROM and checksums under all three systems; CRuby
-omits only the mruby-specific compatibility shims.
+`Optcarrot::ROM#initialize` before emulator Fibers start. Emulator runtime
+methods remain interpreted: CI reproduced a SIGSEGV when selected PPU leaf
+methods ran on the Fiber path, even though those methods return before the next
+yield. The benchmark still uses upstream emulation logic; only the method
+registration set changes. It runs the same ROM and checksums under all three
+systems; CRuby omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
@@ -395,14 +395,9 @@ definitions. Subclasses, non-Fixnums, zero divisors, and other unhandled
 shapes retain Ruby dispatch. Modulo uses Ruby's sign correction and handles
 the minimum-integer/`-1` overflow case. The current Optcarrot report finds 57
 Array pushes and 235 Fixnum modulo/and sites suitable for these guards.
-`PPU#render_pixel` is included in the runtime leaf whitelist so the benchmark
-executes these fast paths inside the PPU Fiber.
-
-In one local 180-frame comparison, compiling the seven selected PPU leaves
-changed bc2cpp wall time from 30.63 s to 29.98 s and reported emulator FPS
-from 6.07 to 6.12, with checksum `59662` in both runs. This is a modest,
-single-run measurement; use CI's checksum as the correctness gate and treat
-the timing as directional.
+The coverage report identifies candidates across the standalone Optcarrot
+closed world; runtime PPU methods are not installed in the benchmark while
+the Fiber crash remains unresolved.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.

@@ -16,19 +16,12 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-# The emulator's runtime classes are reachable from its PPU Fiber, directly or
-# through CPU/APU/mapper callbacks. Keep runtime registration restricted to
-# individually selected methods that return before a Fiber yield.
+# Emulator runtime methods remain interpreted because compiled methods reached
+# from the PPU Fiber can crash, even when those methods do not yield.
 FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
 # This initializer runs while NES is assembled, before its emulator Fibers
 # start; including it exercises the generated mapper slice-write fast paths.
 FIBER_SAFE_SETUP_METHODS = { 'Optcarrot::ROM' => %w[initialize] }.freeze
-# This leaf runs inside the PPU Fiber but returns before main_loop reaches its
-# next yield. It has no Fiber calls or block callbacks of its own.
-FIBER_SAFE_RUNTIME_METHODS = {
-  'Optcarrot::PPU' => %w[load_tiles fetch_name fetch_attr scroll_clock_x evaluate_sprites_even evaluate_sprites_odd render_pixel]
-}.freeze
-
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
@@ -109,11 +102,8 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
-    # The CI runtime benchmark still SIGSEGVs with CPU/PPU methods excluded,
-    # showing that other emulator runtime owners are reached on the Fiber path.
     safe_setup = FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
-    safe_runtime = FIBER_SAFE_RUNTIME_METHODS.fetch(owner, []).include?(name)
-    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup || safe_runtime
+    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
@@ -231,7 +221,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} methods (including seven PPU Fiber-safe leaves)"
+  puts "bc2cpp installed #{count} setup methods (emulator runtime remains interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -258,7 +248,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM#initialize, and seven non-yielding PPU leaves are compiled; the PPU Fiber loop and other emulator runtime methods remain interpreted.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods and ROM#initialize are compiled; emulator runtime methods remain interpreted because compiled methods reached from the PPU Fiber can crash.'
     end
   end
 
