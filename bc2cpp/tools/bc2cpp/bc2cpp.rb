@@ -2563,9 +2563,10 @@ class ClassAnnotations
   # actually has (`registry.values.flatten.map(&:owner).uniq`) -- gates a
   # token being treated as a class hint on it actually being a class
   # bc2cpp knows about, not just any capitalized word that happens to
-  # appear in a comment. `Array<Klass>` is read as the outer `Array` here;
+  # appear in a comment. `Array<Klass>` and `Hash<Klass>` are read as their
+  # outer container class here;
   # ElementAnnotations independently gates the inner class and supplies it
-  # only to the array-element analysis.
+  # to container-element analysis.
   def self.extract(ireps, registry, known_owners)
     result = {}
     file_lines = Hash.new { |h, path| h[path] = File.readlines(path, encoding: 'UTF-8') }
@@ -2590,8 +2591,9 @@ class ClassAnnotations
 
         args = m[1].split(',').map do |token|
           token = token.strip
-          array_arg = /\AArray<([A-Za-z_][\w:]*)>\z/.match(token)
-          token = 'Array' if array_arg && known_owners.include?('Array') && known_owners.include?(array_arg[1])
+          container_arg = /\A(Array|Hash)<([A-Za-z_][\w:]*)>\z/.match(token)
+          token = container_arg[1] if container_arg && known_owners.include?(container_arg[1]) &&
+                                      known_owners.include?(container_arg[2])
           token if known_owners.include?(token)
         end
         next if args.all?(&:nil?)
@@ -2678,7 +2680,7 @@ end
 # runtime-dispatch fallback. GETIDX/GETIDX0 are included because mrbc
 # emits those for `receiver[index]` instead of SEND :[].
 class ElementAnnotations
-  Annotation = Struct.new(:element, :ret_class, :arg_elements, keyword_init: true)
+  Annotation = Struct.new(:element, :ret_class, :arg_elements, :arg_containers, keyword_init: true)
 
   # `-> Array<Game::Actor>` / `-> Array<RPG2k::Window>`: one `::`-joined
   # class path inside the angle brackets, matched against the exact same
@@ -2688,7 +2690,7 @@ class ElementAnnotations
   # `Array<Foo, Bar>` (a heterogeneous claim this mechanism deliberately
   # cannot express) simply doesn't match and contributes nothing.
   ELEMENT_RE = /\AArray<([A-Za-z_][\w:]*)>\z/
-  ARG_ELEMENT_RE = ELEMENT_RE
+  ARG_ELEMENT_RE = /\A(?:Array|Hash)<([A-Za-z_][\w:]*)>\z/
   RET_CLASS_RE = /\A([A-Za-z_][\w:]*)\z/
 
   # Tokens that already mean something to `Annotations::TYPES` and must
@@ -2731,6 +2733,10 @@ class ElementAnnotations
           em = ARG_ELEMENT_RE.match(arg.strip)
           em && known_owners.include?(em[1]) ? em[1] : nil
         end
+        arg_containers = m[1].split(',').map do |arg|
+          cm = /\A(Array|Hash)<([A-Za-z_][\w:]*)>\z/.match(arg.strip)
+          cm && known_owners.include?(cm[2]) ? cm[1] : nil
+        end
 
         element = nil
         ret_class = nil
@@ -2745,7 +2751,7 @@ class ElementAnnotations
         next unless element || ret_class || arg_elements.any?
 
         result[irep.label] = Annotation.new(element: element, ret_class: ret_class,
-                                            arg_elements: arg_elements)
+                                            arg_elements: arg_elements, arg_containers: arg_containers)
       end
     end
 
@@ -6770,6 +6776,29 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      element_annotations: element_annotations,
                                      known_owners: known_owners)
       recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
+      # An explicitly annotated Hash<Klass> parameter is also a safe source
+      # for indexed values. Follow only plain MOVE aliases back to the
+      # untouched incoming argument register; any computed/reassigned
+      # receiver stops the proof. GETIDX itself retains its normal Hash and
+      # subclass dispatch guards at code generation time.
+      arg_reg = recv_reg
+      (i - 1).downto(0) do |j|
+        prior = irep.instructions[j]
+        next unless prior.args[/^R(\d+)/, 1] == arg_reg
+        if prior.op == 'MOVE'
+          arg_reg = prior.args.scan(/R(\d+)/).flatten[1]
+          break unless arg_reg
+        else
+          arg_reg = nil
+          break
+        end
+      end
+      arg_pos = arg_reg&.to_i
+      if recv_class == 'Hash' && arg_pos && arg_pos.between?(1, mand) &&
+         element_annotations[irep.label]&.arg_containers&.[](arg_pos - 1) == 'Hash'
+        annotated_value = element_annotations[irep.label]&.arg_elements&.[](arg_pos - 1)
+        return annotated_value if annotated_value
+      end
       md = registry['[]']&.find { |candidate| candidate.owner == recv_class && candidate.irep }
       return md && element_annotations[md.irep]&.ret_class
     when 'SEND0', 'SEND'
