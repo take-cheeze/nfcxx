@@ -19,19 +19,18 @@ checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
 Latest local 180-frame wall times from the comparative runner: CRuby ~4.9s,
-interpreted mruby ~59s, and bc2cpp ~60-67s (varies by machine); CI publishes
-each run's numbers and relative slowdown in the job summary. All three
-produce checksum `59662`. `compiled_run.rb` compiles and installs only
-`Optcarrot::Config`/`Optcarrot::Opt` plus the `Optcarrot::ROM` setup methods
-(24 methods) -- `Optcarrot::CPU`/`PPU`/`NES`/`Video`/`APU` were compiled and
-installed for a while (see "Compiled runtime check" below for the numbers
-from that period), but that reintroduced a real, CI-reproducible SIGSEGV a
-short local smoke run does not exercise long enough to hit; see that
-section's own "Update (CI SIGSEGV investigation)" for the bc2cpp
-code-generation bug this was bisected down to and why those five classes are
-excluded again. Getting the emulator's own compiled hot path back needs that
-bug (and the separate `PPU`/`Fiber.new` one, also documented there) fixed
-first.
+interpreted mruby ~59-60s, and bc2cpp ~63-67s (varies by machine); CI
+publishes each run's numbers and relative slowdown in the job summary. All
+three produce checksum `59662`. `compiled_run.rb` compiles and installs
+`Optcarrot::Config`, `Optcarrot::Opt`, `Optcarrot::CPU`, `Optcarrot::NES`, the
+`Optcarrot::ROM` setup methods, and the post-Fiber `Optcarrot::Video#tick`/
+`Optcarrot::APU#flush_sound`/`#vsync` hooks. `Optcarrot::PPU` alone stays
+excluded, for its own separate, unrelated `Fiber.new` bug (see "Compiled
+runtime check" below). The other four were excluded too for a while, for a
+real, CI-reproducible SIGSEGV in bc2cpp's own generated code for
+`Array#last` -- see that section's own "Update (ARY_PTR/ARY_LEN root cause)"
+for the actual bc2cpp code-generation bug this was root-caused and fixed to,
+and why they are back.
 
 Getting there took:
 
@@ -451,6 +450,47 @@ re-verifying, not a partial fix -- re-enabling any of `CPU`/`NES`/`Video`/
 evidence. Treat every "all three"/"all five compiled" number and claim above
 in this section as historical only, same caveat as bug 2's paragraph.
 
+**Update (ARY_PTR/ARY_LEN root cause)**: the `Optcarrot::Video#tick` SIGSEGV
+above is now root-caused and fixed, not just worked around. The crash was in
+`tools/bc2cpp/native_expression_devirt.rb`'s
+`exact_array_no_argument_element_expression` -- the code that turns a real
+mruby C method body like `mrb_ary_last` (`struct RArray *a = mrb_ary_ptr(self);
+... return ARY_PTR(a)[ARY_LEN(a) - 1];`) into a single call-site C++
+expression for `Array#last`/`Array#first`. It independently re-substituted
+the wrapper's own local `a` everywhere it was used instead of materializing
+it once, the way the real C body does, so the assembled expression for
+`#last` called `mrb_ary_ptr(recv)` three times over in one statement (once
+for the `> 0` length guard, once for the `- 1` index, once more hardcoded for
+the `ARY_PTR` base), each expansion re-nesting the `ARY_EMBED_P`/`ARY_LEN`/
+`ARY_PTR` macros' own embed-vs-heap ternary on top of the last. `gdb`, reading
+a real `-O0` build of the generated `.cpp` at the crash, found the array's
+own `RArray` struct (`flags`/`len`/`capa`/`ptr`) completely intact at every
+checkpoint, including inside the crashing statement's own `mrb_val_union`
+calls -- but GCC's code generation for that specific triply-nested ternary
+tree left one code path (the one skipping the now-redundant middle
+computation) reading an uninitialized callee-saved register instead of a
+freshly computed pointer: a genuine compiler-facing code-generation defect,
+triggered by the redundant, repeated call shape itself, not by anything
+Fiber-, devirtualization-, or ivar-embedding-related (reproduced identically
+at `-O0`, with and without `-fno-strict-aliasing`, and under
+AddressSanitizer, ruling out an earlier guess that this was an
+optimization-level-dependent stale-register-cache artifact). `Array#first`
+has the same latent two-call shape (its index is the literal `0`, so no
+second `ARY_LEN`) and never reproduced a crash in this same probe, but
+nothing in the C++ standard promises repeated calls to an equivalent
+expression get merged, so the fix hoists both: the generated expression now
+materializes `mrb_ary_ptr(recv)` into a single local via a GNU statement
+expression and reuses it, exactly like the real C body does, instead of
+re-deriving it per use (`hoist_repeated_receiver_array_pointer` in
+`native_expression_devirt.rb`). With that landed, a fresh
+`tools/optcarrot_probe/compiled_run.rb` run compiles and installs
+`Optcarrot::CPU`/`Optcarrot::NES`/`Optcarrot::Video`/`Optcarrot::APU` again
+(`Optcarrot::PPU` stays out for its own, separate, still-unfixed `Fiber.new`
+bug above) and completes the full 180-frame `nes.run` loop with checksum
+`59662` on all three runtimes, repeatedly -- not a shorter smoke run. Treat
+this paragraph, not the "back to compiling only Config/Opt" paragraph above
+it, as the current state.
+
 Compiling the actual hot path does not yet make it faster: the latest local
 180-frame run measured CRuby 4.82s, interpreted mruby 59.60s, and bc2cpp
 67.09s (all three checksum `59662`), i.e. bc2cpp is now about 12.6% slower
@@ -676,10 +716,10 @@ output and sample buffers also retain capacity; the exact-Array `concat` site
 copies into the persistent output Array with `mrb_ary_splice` instead of
 replacing it with a shared buffer.
 The coverage report identifies candidates across the standalone Optcarrot
-closed world; `Optcarrot::PPU`'s methods reached while its Fiber runs are now
-compiled and installed too (see "Compiled runtime check" below) -- `Video` and
-`APU` besides their two frame-boundary hooks are the classes that remain
-interpreted.
+closed world; `Optcarrot::CPU` and `Optcarrot::NES` are compiled and
+installed (see "Compiled runtime check" below) -- `Optcarrot::PPU` stays
+interpreted (its own, separate `Fiber.new` bug), and `Video`/`APU` besides
+their two frame-boundary hooks are the classes that remain interpreted too.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.
