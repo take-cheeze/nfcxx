@@ -389,12 +389,13 @@ report counts these sites too. These calls run while loading the ROM, so the
 optimization targets setup dispatch overhead rather than frame time.
 
 The compiler also lowers `Array#<<` to `mrb_ary_push` for exact Arrays when
-the native method is uncontested, and lowers `%`/`&` sends when both operands
-are Fixnums and the closed-world method registry contains only native
-definitions. Subclasses, non-Fixnums, zero divisors, and other unhandled
-shapes retain Ruby dispatch. Modulo uses Ruby's sign correction and handles
-the minimum-integer/`-1` overflow case. The current Optcarrot report finds 57
-Array pushes and 235 Fixnum modulo/and sites suitable for these guards.
+the native method is uncontested, and lowers `%`/`&`/`|`/`^` sends when both
+operands are Fixnums and the closed-world method registry contains only
+native definitions. Subclasses, non-Fixnums, zero divisors, and other
+unhandled shapes retain Ruby dispatch. Modulo uses Ruby's sign correction and
+handles the minimum-integer/`-1` overflow case. The current Optcarrot report
+finds 57 Array pushes and 340 Fixnum arithmetic sites suitable for these
+guards, including 105 bitwise OR/XOR sites.
 The coverage report identifies candidates across the standalone Optcarrot
 closed world; runtime PPU methods are not installed in the benchmark while
 the Fiber crash remains unresolved.

@@ -23074,7 +23074,7 @@ class CodeGen
       CPP
     end
 
-    if ['%', '&'].include?(name) && n == 1 && native_only_mono?(name)
+    if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       operation = if name == '%'
@@ -23092,7 +23092,8 @@ class CodeGen
                       }
                     CPP
                   else
-                    "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) & mrb_fixnum(#{right}));"
+                    operator = { '&' => '&', '|' => '|', '^' => '^' }.fetch(name)
+                    "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));"
                   end
       return <<~CPP
           // FIXNUM_BINARY :#{name} -- fixnum-only native semantics with Ruby fallback
