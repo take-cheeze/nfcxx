@@ -23096,7 +23096,7 @@ class CodeGen
           // ARRAY_CONCAT_COPY :concat -- APU output buffer; preserve exact-Array capacity without sharing
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
               mrb_array_p(#{source}) && mrb_obj_ptr(#{source})->c == M->array_class &&
-              #{recv} != #{source} && ARY_LEN(mrb_ary_ptr(#{recv})) == 0) {
+              mrb_obj_ptr(#{recv}) != mrb_obj_ptr(#{source}) && ARY_LEN(mrb_ary_ptr(#{recv})) == 0) {
             r#{d} = mrb_ary_splice(M, #{recv}, 0, 0, #{source});
           } else {
             #{fallback.chomp}
