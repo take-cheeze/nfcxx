@@ -23060,6 +23060,50 @@ class CodeGen
       CPP
     end
 
+    if name == '<<' && n == 1 && builtin_container_send_safe?(name, %w[Array])
+      value = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+            mrb_ary_push(M, #{recv}, #{value});
+            r#{d} = #{recv};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if ['%', '&'].include?(name) && n == 1 && native_only_mono?(name)
+      left, right = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      operation = if name == '%'
+                    <<~CPP.chomp
+                      mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
+                      mrb_int bc2cpp_mod_right = mrb_fixnum(#{right});
+                      if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
+                        r#{d} = mrb_fixnum_value(0);
+                      } else {
+                        mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;
+                        if ((bc2cpp_mod_left < 0) != (bc2cpp_mod_right < 0) && bc2cpp_mod_value != 0) {
+                          bc2cpp_mod_value += bc2cpp_mod_right;
+                        }
+                        r#{d} = mrb_fixnum_value(bc2cpp_mod_value);
+                      }
+                    CPP
+                  else
+                    "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) & mrb_fixnum(#{right}));"
+                  end
+      return <<~CPP
+          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics with Ruby fallback
+          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}) {
+            #{operation}
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if name == 'slice!' && n == 2 && builtin_container_send_safe?(name, %w[Array])
       start, length = argv
       fallback = dynamic_dispatch_line(d, recv, name, argv)
