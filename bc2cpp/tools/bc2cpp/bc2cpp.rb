@@ -3652,6 +3652,14 @@ def send_element_class(irep, i, reg, insn, ctx, depth)
     return block_return_class(block_irep, ctx, depth + 1)
   end
 
+  if block_carrying && name == 'filter_map' && argc.zero?
+    block_irep = adjacent_block_irep(irep, i, reg, ctx)
+    return nil unless block_irep
+
+    input_class = array_element_source_scan(irep, i - 1, reg, ctx, depth + 1)
+    return filter_map_block_return_class(block_irep, ctx, depth + 1, input_class)
+  end
+
   # CHAINED_ACCESSOR_SUPPORT, element dimension: `@state.party.actors` --
   # a plain `attr_reader` read whose receiver is itself traceable to an
   # exact class. Identical three-part check to trace_new_target's own
@@ -3740,6 +3748,57 @@ def block_return_class(block_irep, ctx, depth)
   # fallback unreachable) rather than left to misread a block param as an
   # annotated method argument.
   irep_return_class(block_irep, ctx.merge(arg_classes: nil, mand: 0), depth)
+end
+
+# ELEMENT_CLASS_SUPPORT: `filter_map` keeps only truthy block results, so
+# literal nil/false exits do not make its output heterogeneous. All
+# remaining RETURN values still need to prove the same known class; unknown
+# returns, breaks and non-local returns keep the element type unknown.
+def filter_map_block_return_class(block_irep, ctx, depth, input_class)
+  return nil if depth > 8
+
+  found = nil
+  subctx = ctx.merge(arg_classes: nil, mand: 0)
+  block_irep.instructions.each_with_index do |insn, i|
+    case insn.op
+    when 'RETURN'
+      reg = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      previous = i.positive? ? block_irep.instructions[i - 1] : nil
+      if previous && %w[LOADNIL LOADFALSE].include?(previous.op) && previous.args[/^R(\d+)/, 1] == reg
+        next
+      end
+
+      klass = element_value_class(block_irep, i, reg, subctx, depth + 1)
+      klass ||= input_class if block_mandatory_param_source?(block_irep, i, reg)
+      return nil unless klass && ctx[:known_owners].include?(klass)
+      return nil if found && found != klass
+
+      found = klass
+    when 'RETNIL', 'RETFALSE'
+      # Both are discarded by filter_map's own truthiness check.
+      next
+    when 'RETTRUE', 'BREAK', 'RETURN_BLK'
+      return nil
+    end
+  end
+  found
+end
+
+def block_mandatory_param_source?(irep, idx, reg)
+  enter = irep.instructions.find { |insn| insn.op == 'ENTER' }
+  mandatory = enter ? enter.args.split(':').first.to_i : 0
+  return false if mandatory.zero?
+
+  current = reg
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn.args[/^R(\d+)/, 1] == current
+    return false unless insn.op == 'MOVE'
+
+    current = insn.args.scan(/R(\d+)/).flatten[1]
+    return false unless current
+  end
+  current.to_i.between?(1, mandatory)
 end
 
 # ELEMENT_CLASS_SUPPORT: trace a register to a real class name the
