@@ -475,7 +475,37 @@ module NativeExpressionDevirt
     index = substitute_expression(index, state_arg, self_arg, locals)
     return unless condition && index
 
-    "(#{condition}) ? (ARY_PTR(mrb_ary_ptr(recv))[#{index}]) : (mrb_nil_value())"
+    element_expression = "(#{condition}) ? (ARY_PTR(mrb_ary_ptr(recv))[#{index}]) : (mrb_nil_value())"
+    hoist_repeated_receiver_array_pointer(element_expression)
+  end
+
+  # BC2CPP_ARY_PTR_HOIST: `condition` and `index` above each independently
+  # re-inline the wrapper's own `struct RArray *a = mrb_ary_ptr(self);`
+  # local (substitute_expression has no memory across the two calls), so
+  # the assembled expression calls the real, public `mrb_ary_ptr` two or
+  # three times over -- once per use of `a` in the original C body -- for
+  # what mruby's own array.c computes exactly once into `a` and reuses.
+  # `#last`'s own shape (`ARY_LEN(a)` read once for the `> 0` guard, again
+  # for the `- 1` index) is the three-call case; confirmed via gdb against
+  # a real -O0 AOT build of this exact generated shape
+  # (Optcarrot::Video#tick's compiled `#last`, see this repo's own
+  # tools/optcarrot_probe/) that GCC's code generation for the resulting
+  # triply-nested ARY_EMBED_P ternary tree can leave a call-site register
+  # uninitialized on the branch that skips the (redundant) middle
+  # computation -- a real SIGSEGV on a live array, not a theoretical
+  # concern. `#first`'s own two-call shape (index is the literal `0`, no
+  # second ARY_LEN) never reproduced a crash in that same probe, but nothing
+  # about the C++ standard promises repeated calls to the same pure
+  # expression get merged, so it is hoisted here too rather than trusted to
+  # keep being lucky. A GNU statement expression materializes the pointer
+  # once and lets every use share it, exactly like the real C body does;
+  # every toolchain this project actually compiles generated C++ with
+  # (g++, Emscripten's clang++) accepts it, and neither is invoked with
+  # -pedantic-errors (see build_config.rb's own conf.cxx.flags).
+  def hoist_repeated_receiver_array_pointer(expression, call: 'mrb_ary_ptr(recv)', local: 'bc2cpp_ary_ptr')
+    return expression if expression.scan(call).length <= 1
+
+    "({ struct RArray *#{local} = #{call}; #{expression.gsub(call, local)}; })"
   end
 
   def mruby_core_root(paths)
