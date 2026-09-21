@@ -413,7 +413,9 @@ overflow-aware numeric helpers when both operands are Fixnums and the Integer
 method is uncontested; non-Fixnums retain Ruby dispatch. There are 418 such
 arithmetic sites. The report also finds 118 Fixnum `<`, `<=`, `>`, and `>=`
 comparisons, which use direct C comparisons under the same guarded dispatch
-fallback.
+fallback. Non-Fixnum `==` fallbacks first use mruby's public `mrb_obj_eq`
+identity/type shortcut before Ruby dispatch, matching the interpreter and
+avoiding a method call when the operands already compare equal at that level.
 Fixnum `>>` sends use direct signed shifts when both operands are Fixnums and
 the Integer method is uncontested; left-shift overflow and other operand types
 keep Ruby dispatch so mruby can produce its normal bignum or error result. The
