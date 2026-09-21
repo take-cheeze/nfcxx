@@ -11051,6 +11051,29 @@ class CodeGen
         return mrb_const_get(M, ctx->scope, ctx->name);
       }
       static mrb_value bc2cpp_const_try(mrb_state* M, mrb_value scope, mrb_sym name, mrb_bool* ok) {
+        // A miss is the common case (most scopes in the chain do not define the
+        // name), and mrb_const_get reports one by raising NameError, which
+        // allocates an exception, its message and a backtrace before
+        // mrb_protect_error swallows it -- measured at ~70k allocations/s in the
+        // RPG2k map scene. Answer the miss without raising: walk the same
+        // ancestor chain const_get_nohook does (3rd/mruby/src/variable.c: the
+        // scope and its superclasses/included modules, skipping a prepended
+        // origin, stopping before Object) using the public defined_at test, and
+        // only call mrb_const_get once the name is known to be there. It also
+        // stops running a user const_missing on an intermediate scope, which
+        // Ruby's lexical lookup never does.
+        if (mrb_type(scope) == MRB_TT_CLASS || mrb_type(scope) == MRB_TT_MODULE || mrb_type(scope) == MRB_TT_SCLASS) {
+          for (struct RClass* c = mrb_class_ptr(scope); c;) {
+            if (!MRB_FLAG_TEST(c, MRB_FL_CLASS_IS_PREPENDED) && mrb_const_defined_at(M, mrb_obj_value(c), name)) {
+              *ok = TRUE;
+              return mrb_const_get(M, scope, name);
+            }
+            c = c->super;
+            if (c == M->object_class) break;
+          }
+          *ok = FALSE;
+          return mrb_nil_value();
+        }
         Bc2cppConstLookupCtx ctx{scope, name};
         mrb_bool err = FALSE;
         mrb_value result = mrb_protect_error(M, bc2cpp_const_lookup_body, &ctx, &err);
