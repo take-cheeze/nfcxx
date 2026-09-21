@@ -253,6 +253,8 @@ module NativeExpressionDevirt
                          "#{function}(M, recv)"
                        elsif function == 'mrb_ary_push_m' && arity == 1
                          exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
+                       elsif %w[mrb_ary_first mrb_ary_last].include?(function) && arity.zero?
+                         exact_array_no_argument_element_expression(body, state_arg, self_arg) if body
                        else
                          exact_class_return_expression(body, state_arg, self_arg, arity: arity) if body
                        end
@@ -415,6 +417,11 @@ module NativeExpressionDevirt
     # a separate one-argument branch that is equivalent to this public helper
     # call. Other argument counts retain the wrapper's bulk append logic.
     return 1 if function == 'mrb_ary_push_m' && name == 'push' && aspec.strip == 'MRB_ARGS_ANY()'
+    # Array#first / #last take an optional count, but their C wrappers start
+    # with a self-contained `mrb_get_argc(mrb) == 0` branch. Only that
+    # zero-argument call shape is generated; a count keeps ordinary dispatch.
+    return 0 if %w[mrb_ary_first mrb_ary_last].include?(function) && %w[first last].include?(name) &&
+                aspec.strip == 'MRB_ARGS_OPT(1)'
 
     nil
   end
@@ -425,6 +432,40 @@ module NativeExpressionDevirt
     return unless body.match?(prefix)
 
     '(mrb_ary_push(M, recv, (BC2CPP_ARG0)), recv)'
+  end
+
+  # Array#first / #last: derive the zero-argument branch
+  #   if (mrb_get_argc(mrb) == 0) { if (COND) return ARY_PTR(a)[INDEX]; return mrb_nil_value(); }
+  # after the wrapper's leading local declarations. COND and INDEX go through
+  # substitute_expression, so they may only use the allowed length/macro
+  # vocabulary; any other body shape is declined and keeps dynamic dispatch.
+  def exact_array_no_argument_element_expression(body, state_arg, self_arg)
+    body = body.gsub(%r{/\*.*?\*/|//[^\n]*}, ' ').strip
+    branch = /\bif\s*\(\s*mrb_get_argc\s*\(\s*#{Regexp.escape(state_arg)}\s*\)\s*==\s*0\s*\)\s*\{\s*
+              if\s*\((.+?)\)\s*return\s+ARY_PTR\s*\(\s*(\w+)\s*\)\s*\[(.+?)\]\s*;\s*
+              return\s+mrb_nil_value\s*\(\s*\)\s*;\s*\}/mx
+    match = body.match(branch)
+    return unless match
+
+    locals = {}
+    match.pre_match.split(';').map(&:strip).reject(&:empty?).each do |statement|
+      declaration = statement.match(/\A(?:struct\s+RArray\s*\*|mrb_int)\s*(\w+)(?:\s*=\s*(.+))?\z/m)
+      return unless declaration
+
+      local, initializer = declaration.captures
+      return if locals.key?(local)
+
+      locals[local] = initializer && substitute_expression(initializer, state_arg, self_arg, locals)
+      return if initializer && !locals[local]
+    end
+    condition, array, index = match.captures
+    return unless locals[array] == 'mrb_ary_ptr(recv)'
+
+    condition = substitute_expression(condition, state_arg, self_arg, locals)
+    index = substitute_expression(index, state_arg, self_arg, locals)
+    return unless condition && index
+
+    "(#{condition}) ? (ARY_PTR(mrb_ary_ptr(recv))[#{index}]) : (mrb_nil_value())"
   end
 
   def mruby_core_root(paths)
