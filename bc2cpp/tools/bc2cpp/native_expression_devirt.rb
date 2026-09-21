@@ -18,7 +18,7 @@ module NativeExpressionDevirt
     mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
     mrb_hash_get
     mrb_str_ptr mrb_range_beg mrb_range_end mrb_range_excl_p mrb_float mrb_float_value mrb_fixnum_value mrb_nil_value
-    mrb_as_int mrb_ary_entry isfinite isinf isnan signbit
+    mrb_as_int mrb_ary_entry mrb_str_equal mrb_obj_equal isfinite isinf isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
   # private to string.c (and calls a private UTF-8 helper), so generated C++
@@ -156,6 +156,15 @@ module NativeExpressionDevirt
       end
       source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
+      end
+      # class.c boots BasicObject/Object/Module/Class through boot_defclass and
+      # only names them afterwards, so their method tables (`==`, `equal?`, ...)
+      # would otherwise have an unknown owner, which disables every name they
+      # share with a built-in class. Read the names off the source's own
+      # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
+      booted = source.scan(/(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+      source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
+        class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
       end
       source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
