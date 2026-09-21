@@ -3784,7 +3784,9 @@ def resolve_owner_name(name, ctx)
   return nil unless name
 
   known = ctx[:known_owners]
-  return name if known.include?(name)
+  # Core containers can be real annotation targets even when this closed
+  # world contains no bytecode method owned by the core class itself.
+  return name if known.include?(name) || %w[Array Hash].include?(name)
   # Already namespace-qualified and still unknown: there is no lexical
   # search that could rescue it, so this is a real miss.
   return nil if name.include?('::')
@@ -6738,7 +6740,7 @@ end
 
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
-                      known_owners: nil)
+                      known_owners: nil, capture_hints: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -6775,14 +6777,14 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      class_layout: class_layout, registry: registry,
                                      container_constants: container_constants,
                                      element_annotations: element_annotations,
-                                     known_owners: known_owners)
-      recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
+                                     known_owners: known_owners, capture_hints: capture_hints)
       # An explicitly annotated Hash<Klass> parameter is also a safe source
       # for indexed values. Follow only plain MOVE aliases back to the
       # untouched incoming argument register; any computed/reassigned
       # receiver stops the proof. GETIDX itself retains its normal Hash and
       # subclass dispatch guards at code generation time.
       arg_reg = recv_reg
+      captured_reg = nil
       (i - 1).downto(0) do |j|
         prior = irep.instructions[j]
         next unless prior.args[/^R(\d+)/, 1] == arg_reg
@@ -6790,15 +6792,26 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
           arg_reg = prior.args.scan(/R(\d+)/).flatten[1]
           break unless arg_reg
         else
+          upvar = prior.args.split(/\s+/) if prior.op == 'GETUPVAR'
+          captured_reg = prior.args[/^R(\d+)/, 1].to_i if upvar && upvar[2] == '0'
           arg_reg = nil
           break
         end
       end
+      # The ordinary backwards trace can stop at a block's GETUPVAR before
+      # identifying the captured container. The callsite hint is already
+      # constrained to an annotated Hash argument, so recover its class here.
+      recv_class ||= capture_hints&.dig(irep.label, captured_reg, :container_class) if captured_reg
+      recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
       arg_pos = arg_reg&.to_i
       if recv_class == 'Hash' && arg_pos && arg_pos.between?(1, mand) &&
          element_annotations[irep.label]&.arg_containers&.[](arg_pos - 1) == 'Hash'
         annotated_value = element_annotations[irep.label]&.arg_elements&.[](arg_pos - 1)
         return annotated_value if annotated_value
+      end
+      if recv_class == 'Hash' && captured_reg
+        captured_value = capture_hints&.dig(irep.label, captured_reg, :element_class)
+        return captured_value if captured_value
       end
       md = registry['[]']&.find { |candidate| candidate.owner == recv_class && candidate.irep }
       return md && element_annotations[md.irep]&.ret_class
@@ -6859,7 +6872,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                  class_layout: class_layout, registry: registry,
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
-                                 known_owners: known_owners)
+                                 known_owners: known_owners, capture_hints: capture_hints)
       else
         # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
         # `name` isn't `new`, so this can never join the fresh-`.new`
@@ -6906,7 +6919,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                        class_layout: class_layout, registry: registry,
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
-                                       known_owners: known_owners)
+                                       known_owners: known_owners, capture_hints: capture_hints)
         return nil unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
@@ -7010,6 +7023,14 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       ivar = insn.args[/@(\w+)/, 1]
       klass = ivar_classes && ivar_classes[ivar]
       return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
+    when 'GETUPVAR'
+      return nil if resolving_new || !path.empty?
+
+      dst, _upvar, level = insn.args.split(/\s+/)
+      return nil unless level == '0'
+
+      capture_class = capture_hints&.dig(irep.label, dst[/\d+/].to_i, :container_class)
+      capture_class
     when 'ARRAY', 'ARRAY2'
       # EACH_BLOCK_SUPPORT: an array literal (`items = [1, 2, 3]`) always
       # creates a real Array -- confirmed directly against
@@ -8517,6 +8538,11 @@ class CodeGen
     # else, so every call site outside an inlined block behaves exactly as
     # it did before this existed.
     @elem_class_hint = nil
+    # INLINE_BLOCK_CAPTURE_HINTS: captured Hash<Klass> arguments proved at
+    # the exact enclosing block call site, keyed by block irep and the
+    # GETUPVAR destination register. Scoped by emit_each_inline while that
+    # body is translated; nil in ordinary methods and nested blocks.
+    @block_hash_capture_hints = nil
     # UPVAR_CAPTURE_SUPPORT: the outer-register set currently capturable
     # by pointer, set by emit_proc_fallback_fn around exactly one
     # BLOCK_FALLBACK body-compile loop and consulted by compile_insn's own
@@ -13771,7 +13797,7 @@ class CodeGen
                                class_layout: @class_layout, registry: @registry,
                                container_constants: @container_constants,
                                element_annotations: @element_annotations,
-                               known_owners: @known_owners)
+                               known_owners: @known_owners, capture_hints: @block_hash_capture_hints)
     traced = resolve_owner_name(traced, { owner: owner_def.owner, known_owners: @known_owners }) if traced
     return traced if %w[Array Hash].include?(traced)
     return traced if traced && %w[[] []=].any? do |name|
@@ -16006,6 +16032,63 @@ class CodeGen
   #     enclosing function, register index `b` already names one of its
   #     own real `r<b>` variables directly -- no offset applied, unlike
   #     every other register reference in this same instruction stream.
+  # INLINE_BLOCK_CAPTURE_HINTS: a block GETUPVAR can retain a Hash<Klass>
+  # hint only when the enclosing method's exact SENDB site captures an
+  # untouched mandatory Hash<Klass> argument. The generated Hash index and
+  # typed method call still carry their normal runtime guards and Ruby
+  # fallbacks, so this proof adds fast paths without changing dispatch.
+  def inline_hash_capture_hints(host_irep, region)
+    block_irep = region[:block_irep]
+    return {} if block_irep.instructions.any? { |insn| %w[SETUPVAR BLOCK SENDB SSENDB].include?(insn.op) }
+
+    call_idx = host_irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
+    return {} unless call_idx
+
+    enter = host_irep.instructions.find { |insn| insn.op == 'ENTER' }
+    mandatory = enter ? enter.args.split(':').first.to_i : 0
+    elements = @element_annotations[host_irep.label]
+    return {} unless elements
+
+    captures = {}
+    block_irep.instructions.each do |insn|
+      next unless insn.op == 'GETUPVAR'
+
+      dst, upvar, level = insn.args.split(/\s+/)
+      next unless level == '0'
+
+      reg = upvar
+      (call_idx - 1).downto(0) do |i|
+        prior = host_irep.instructions[i]
+        next unless prior.args[/^R(\d+)/, 1] == reg
+
+        if prior.op == 'MOVE'
+          reg = prior.args.scan(/R(\d+)/).flatten[1]
+          break unless reg
+        else
+          reg = nil
+          break
+        end
+      end
+      arg_pos = reg&.to_i
+      next unless arg_pos && arg_pos.between?(1, mandatory)
+      next unless elements.arg_containers&.[](arg_pos - 1) == 'Hash'
+
+      element_class = elements.arg_elements&.[](arg_pos - 1)
+      next unless element_class
+
+      captures[dst[/\d+/].to_i] = { container_class: 'Hash', element_class: element_class }
+    end
+    captures.empty? ? {} : { block_irep.label => captures }
+  end
+
+  def with_block_hash_capture_hints(hints)
+    previous = @block_hash_capture_hints
+    @block_hash_capture_hints = hints
+    yield
+  ensure
+    @block_hash_capture_hints = previous
+  end
+
   # ELEMENT_CLASS_SUPPORT: publish "the receiver of THIS instruction is the
   # loop element, whose class is `elem_class`" for exactly the one
   # instruction about to be translated, then take it straight back down.
@@ -16573,18 +16656,21 @@ class CodeGen
     bc2cpp_saved_nested = @inline_nested
     @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
     body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
+    capture_hints = inline_hash_capture_hints(irep, region)
+    with_block_hash_capture_hints(capture_hints) do
+      block_irep.instructions.each_with_index do |insn, i|
+        next if insn.op == 'ENTER'
 
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      # ELEMENT_CLASS_SUPPORT: the block's own single mandatory parameter
-      # is R1 in its own register numbering (mandatory_arity == 1, checked
-      # by this region's own recognizer), and this emitter binds exactly
-      # that register to `mrb_ary_ref(...)` below -- so R1 IS the loop
-      # element for the whole body.
-      with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
-        body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                break_dest: dest_reg, break_label: break_label, idx: i)
+        body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+        # ELEMENT_CLASS_SUPPORT: the block's own single mandatory parameter
+        # is R1 in its own register numbering (mandatory_arity == 1, checked
+        # by this region's own recognizer), and this emitter binds exactly
+        # that register to `mrb_ary_ref(...)` below -- so R1 IS the loop
+        # element for the whole body.
+        with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
+          body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                                  break_dest: dest_reg, break_label: break_label, idx: i)
+        end
       end
     end
     # INLINE_NESTED_BLOCK_SUPPORT: consume-and-clear, BEFORE the early
@@ -23428,7 +23514,8 @@ class CodeGen
       known_class = trace_new_target(irep, proof_idx, proof_reg, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
                                       class_layout: @class_layout, registry: @registry,
                                       element_annotations: @element_annotations,
-                                      known_owners: @known_owners)
+                                      known_owners: @known_owners,
+                                      capture_hints: @block_hash_capture_hints)
     end
     # ELEMENT_CLASS_SUPPORT: the same TYPED/IVAR_ACCESSOR resolution, fed
     # by a fact the backward scan above structurally cannot reach. When the
