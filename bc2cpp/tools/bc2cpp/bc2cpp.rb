@@ -9298,7 +9298,7 @@ class CodeGen
   # right above compile_send's own `target = monomorphic_target(name)`
   # line, for the full soundness writeup) knows how to inline directly,
   # mapped to the exact real mandatory arity a call site must match --
-  # `!`/`nil?`/`class`/`object_id`/`keys`/`to_s`/`length`/`first`/`dup`
+  # `!`/`nil?`/`class`/`object_id`/`keys`/`values`/`to_s`/`length`/`first`/`dup`
   # take no arguments, `is_a?`/`kind_of?`/`equal?`/`===`/`!=` take exactly
   # one (confirmed against each one's own real MRB_ARGS_NONE()/
   # MRB_ARGS_REQ(1) registration in 3rd/mruby/src/kernel.c /
@@ -9360,6 +9360,7 @@ class CodeGen
   # closed world and fires for real.
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
+                                   'values' => 0,
                                    'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
                                    '===' => 1, '!=' => 1, 'to_i' => 0 }.freeze
 
@@ -9532,6 +9533,21 @@ class CodeGen
       "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
       "  }\n"
+    when 'values'
+      # mrb_hash_values (mruby/hash.h) is the public native body for
+      # Hash#values, but like mrb_hash_keys it casts through mrb_hash_ptr
+      # without checking the receiver tag. Require an exact base Hash so a
+      # subclass override keeps ordinary Ruby lookup; all other receiver
+      # types also stay on that path.
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      <<~CPP
+          // HASH_VALUES :values -- exact base Hash only; preserve subclass overrides and non-Hash errors
+          if (mrb_hash_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->hash_class) {
+            r#{d} = mrb_hash_values(M, #{recv});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
     when 'to_s'
       # TO_S_TYPE_TAG_DISPATCH: unlike every other name above (one native
       # implementation total, whole-program-uncontested), `to_s` is the
