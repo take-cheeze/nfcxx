@@ -9462,7 +9462,7 @@ class CodeGen
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'values' => 0,
                                    'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
-                                   '===' => 1, '!=' => 1, 'to_i' => 0 }.freeze
+                                   '===' => 1, '!=' => 1, 'to_i' => 0, 'respond_to?' => 1 }.freeze
 
   # Whole-program soundness gate shared by every NATIVE_PRIMITIVE_SEND_
   # ARITY name: `name` must resolve in the registry to EXACTLY ONE def,
@@ -9519,6 +9519,24 @@ class CodeGen
     return compile_native_registered_expression(name, d, recv, argv) if @native_registered_expressions.key?(name)
 
     case name
+    when 'respond_to?'
+      # Kernel#respond_to? converts its name with mrb_obj_to_sym, then calls
+      # mrb_respond_to. Its remaining behavior matters on a miss: it invokes
+      # respond_to_missing? when that hook is overridden. Answer successful
+      # lookups directly and retain the original method call on misses. The
+      # arity and native-only registry gates at compile_send ensure this is
+      # only used for a one-argument call to the unmodified core method.
+      method_name = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      <<~CPP
+          // respond_to? -- answer native hits directly; preserve missing-hook behavior on misses
+          mrb_sym bc2cpp_respond_to_id#{d} = mrb_obj_to_sym(M, #{method_name});
+          if (mrb_respond_to(M, #{recv}, bc2cpp_respond_to_id#{d})) {
+            r#{d} = mrb_true_value();
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
     when '!'
       expression = @native_expression_devirt[name]
       if expression
@@ -23294,15 +23312,13 @@ class CodeGen
     #     table with no `mrb_funcall` fallback arm at all, because there
     #     is no third real implementation left to miss.
     #
-    # Deliberately excludes `respond_to?` (also POLY-native, also a
-    # high-count name): real `Kernel#respond_to?`
-    # (3rd/mruby/src/kernel.c's own `obj_respond_to`) takes an optional
-    # `include_private` argument and falls back to a real
-    # `respond_to_missing?` method call when the name isn't found --
-    # `mrb_respond_to()`, the obvious native helper, does neither, so
-    # substituting it would be a silent behavior change. Left as
-    # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
-    # below.
+    # `respond_to?` uses a separate positive-only fast path in
+    # compile_native_primitive_send: the one-argument form converts with
+    # mrb_obj_to_sym and returns true directly only when mrb_respond_to finds
+    # the method. A miss keeps ordinary Ruby dispatch so the optional
+    # respond_to_missing? hook runs; the two-argument include_private form
+    # remains ordinary dispatch too. See that case's own comment for the
+    # semantic boundary.
     if name == '[]' && n == 2 && builtin_class_send_safe?(name, %w[Array])
       start, length = argv
       fallback = dynamic_dispatch_line(d, recv, name, argv)
