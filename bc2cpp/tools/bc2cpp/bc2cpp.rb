@@ -23221,6 +23221,41 @@ class CodeGen
     # substituting it would be a silent behavior change. Left as
     # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
     # below.
+    if name == '[]' && n == 2 && builtin_class_send_safe?(name, %w[Array])
+      start, length = argv
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_SLICE_READ :[] -- exact Array and Fixnum slice only; preserve coercion and overrides
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length}) &&
+              !ARY_SHARED_P(mrb_ary_ptr(#{recv})) && mrb_fixnum(#{length}) >= 0 &&
+              mrb_fixnum(#{length}) <= 10) {
+            mrb_int bc2cpp_slice_start = mrb_fixnum(#{start});
+            mrb_int bc2cpp_slice_length = mrb_fixnum(#{length});
+            mrb_int bc2cpp_slice_array_length = RARRAY_LEN(#{recv});
+            if (bc2cpp_slice_start < 0 && bc2cpp_slice_start >= -bc2cpp_slice_array_length) {
+              bc2cpp_slice_start += bc2cpp_slice_array_length;
+            }
+            if (bc2cpp_slice_start < 0 || bc2cpp_slice_array_length < bc2cpp_slice_start ||
+                bc2cpp_slice_length < 0) {
+              r#{d} = mrb_nil_value();
+            } else {
+              if (bc2cpp_slice_length > bc2cpp_slice_array_length - bc2cpp_slice_start) {
+                bc2cpp_slice_length = bc2cpp_slice_array_length - bc2cpp_slice_start;
+              }
+              if (bc2cpp_slice_length == 0) {
+                r#{d} = mrb_ary_new(M);
+              } else {
+                r#{d} = mrb_ary_new_from_values(M, bc2cpp_slice_length,
+                    RARRAY_PTR(#{recv}) + bc2cpp_slice_start);
+              }
+            }
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if name == 'size' && n.zero? && builtin_class_send_safe?(name, %w[Array Hash])
       return compile_native_primitive_send(name, d, recv, argv)
     end

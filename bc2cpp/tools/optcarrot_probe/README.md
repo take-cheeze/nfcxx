@@ -94,6 +94,13 @@ this probe doesn't enable and a bc2cpp target wouldn't need either.
 
 ## bc2cpp coverage
 
+The generated Optcarrot build lowers two-argument `Array#[]` sends to a
+guarded Array copy when runtime checks confirm an exact, unshared base Array
+and a Fixnum slice length from 0 through 10. This matches mruby's own copy
+path; larger or shared slices retain Ruby dispatch and mruby's shared-storage
+optimization. Other receiver types, index types, and arities also retain Ruby
+dispatch; the CI coverage report counts the emitted sites.
+
 `bc2cpp_probe.rb`/`optcarrot_bc2cpp_coverage_report.rb` run
 `tools/bc2cpp/bc2cpp.rb` against optcarrot's own real source
 (`3rd/optcarrot/lib`, unmodified) as its own standalone closed world --
