@@ -393,14 +393,35 @@ profile spent 20.8% in `mrb_vm_exec`, 34.0% in `gc_gray_rescan`, and 11.0% in
 and `mrb_vm_exec` calls rose from about 363K to 3.04M with bc2cpp. `CPU#run`
 itself accounted for only 0.13% of sampled time.
 
-This points to two limits: the PPU's Fiber-driven hot loop stays interpreted,
-and compiled methods still cross into mruby through dynamic and block-carrying
-calls. Those crossings leave substantial VM activity and coincide with much
-more GC time, outweighing the bytecode dispatch removed from the compiled CPU
-path. The profile is a direction, not a precise causal split: gprof sampling
-and instrumentation are coarse, and the gprof build disables inlining only
-for generated C++ methods to keep them visible; mruby's C runtime keeps its
-normal optimization settings in both profiles.
+This pointed to two limits: the PPU's Fiber-driven hot loop stayed
+interpreted, and compiled methods still crossed into mruby through dynamic and
+block-carrying calls. Those crossings left substantial VM activity and
+coincided with much more GC time, outweighing the bytecode dispatch removed
+from the compiled CPU path. The profile is a direction, not a precise causal
+split: gprof sampling and instrumentation are coarse, and the gprof build
+disables inlining only for generated C++ methods to keep them visible;
+mruby's C runtime keeps its normal optimization settings in both profiles.
+
+**Update, with `Optcarrot::CPU`/`PPU`/`NES` all compiled** (see "Compiled
+runtime check" above): a fresh instrumented 180-frame run measured 108.54s
+interpreted and 131.74s compiled (both checksum `59662`). The two profiles
+are now far more alike than before, which is itself the finding: compiling
+the PPU Fiber loop did not narrow the gap. `mrb_vm_exec` fell from 45.9% to
+40.4% (real bytecode dispatch removed, as expected), but `iv_bsearch_idx`
+stayed essentially flat at 14.3% -> 11.2% of *sampled time* while its *call
+count* barely moved (354.2M -> 364.6M -- compiling these classes did not
+reduce how often their ivars get looked up, because it did not make more of
+their ivars embeddable). `gc_gray_rescan` rose 8.5% -> 11.9%. This matches
+`tools/optcarrot_probe/bc2cpp_probe.rb`'s own `== ivar embedding ==` output
+directly: of `Optcarrot::CPU`'s and `Optcarrot::PPU`'s real instance
+variables (registers, scroll/palette/rendering state -- dozens between the
+two), only `CPU#@clk_total` and 9 `PPU#@...` fields are proven embeddable;
+everything else (`CPU#@a`/`@x`/`@y`/`@s`/`@p`/`@pc`/register file, PPU's
+buffers and per-scanline state, ...) still goes through mruby's ordinary
+ivar table, compiled code included. Embedding more of that state -- widening
+`IvarLayout`'s proof to cover whatever currently poisons it to OPAQUE/UNKNOWN
+for these two classes -- is the concrete next target this measurement points
+at, not further dispatch-shape experiments on `CPU#run` itself.
 
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
