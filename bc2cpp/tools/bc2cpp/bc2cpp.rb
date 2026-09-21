@@ -2186,7 +2186,7 @@ class IvarLayout
             # against actual game source; the toy example's own SETIV sites
             # never happened to have a trailing comment.
             src_reg = insn.args[/R(\d+)/, 1]
-            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations)
+            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations, registry)
             before = types[klass][ivar]
             merged = join(before, inferred)
             if merged != before
@@ -2245,7 +2245,8 @@ class IvarLayout
   # last wrote `reg`, following MOVE chains, until a type-determining
   # opcode (or the top of this straight-line method body, in which case
   # `reg` is an opaque incoming argument -- unknown).
-  def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil)
+  def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil,
+                       registry = nil)
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       case insn.op
@@ -2288,6 +2289,33 @@ class IvarLayout
 
         other_ivar = insn.args[/@(\w+)/, 1]
         return known_ivar_types[other_ivar] || UNKNOWN
+      when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+
+        # FIXNUM_BINOP_EMBED_SUPPORT: %, &, |, and ^ never promote a Fixnum
+        # result to Bignum -- mirrors compile_send's own FIXNUM_BINARY
+        # guarded fast path (`mrb_fixnum_value(mrb_fixnum(left) OP
+        # mrb_fixnum(right))`, no overflow check at all), unlike +/-/*'s
+        # own overflow-aware mrb_num_add/_sub/_mul helpers or <<'s own
+        # overflow fallback to Ruby dispatch (see that codegen's own
+        # comments) -- neither of those is safe to embed this way. This is
+        # sound only when BOTH operands are themselves proven Fixnum at
+        # this exact call site (the same backward trace, recursed on the
+        # receiver and the one argument register) AND no program-wide
+        # override of the operator exists anywhere in the closed world
+        # (native_only_mono? below -- the same "exactly one definition,
+        # and it is native" guarantee compile_send's own guarded fast path
+        # already requires before emitting that same fast path).
+        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        n = insn.args[/n=(\d+)/, 1]
+        if registry && %w[% & | ^].include?(name) && n == '1' && native_only_mono?(registry, name)
+          arg_reg = (d.to_i + 1).to_s
+          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+          right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+          return :fixnum if left == :fixnum && right == :fixnum
+        end
+        return UNKNOWN
       else
         # Any other opcode's destination register: nearly every mruby
         # opcode's first operand is its Rd (SEND, STRING, GETCONST,
@@ -2344,6 +2372,20 @@ class IvarLayout
       return t if t
     end
     UNKNOWN
+  end
+
+  # Same registry-driven guarantee CodeGen#native_only_mono? already makes
+  # for its own guarded FIXNUM_BINARY fast path -- duplicated rather than
+  # shared because that one reads CodeGen's own `@registry` instance state
+  # (and this file's own established precedent, e.g. the four independent
+  # copies of the SEND-name-extraction regex above, already tolerates this
+  # exact kind of small, behavior-identical duplication across pipeline
+  # stages). `registry[name]` on this file's own `Hash.new { |h, k| h[k] =
+  # [] }` registry never returns nil, so `defs.first` below is always safe
+  # once `defs.size == 1` holds.
+  def self.native_only_mono?(registry, name)
+    defs = registry[name]
+    defs.size == 1 && defs.first.irep.nil?
   end
 end
 
