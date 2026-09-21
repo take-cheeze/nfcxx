@@ -16,14 +16,24 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-# The emulator's runtime classes are reachable from its PPU Fiber, directly or
-# through CPU/APU/mapper callbacks. Keep compiled execution limited to setup
-# classes until generated C functions are safe across mruby Fiber switches.
+# Emulator runtime methods remain interpreted because compiled methods reached
+# from the PPU Fiber can crash, even when those methods do not yield.
 FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
-# This initializer runs while NES is assembled, before its emulator Fibers
-# start; including it exercises the generated mapper slice-write fast paths.
-FIBER_SAFE_SETUP_METHODS = { 'Optcarrot::ROM' => %w[initialize] }.freeze
-
+# ROM loading and initialization run while NES is assembled, before emulator
+# Fibers start; these methods exercise the generated loader fast paths.
+FIBER_SAFE_SETUP_METHODS = {
+  'Optcarrot::ROM' => %w[initialize],
+  'Optcarrot::ROM.singleton' => %w[load]
+}.freeze
+# These methods run synchronously outside the PPU Fiber's execution path.
+FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
+  'Optcarrot::PPU' => %w[setup_frame],
+  # NES#step calls Video#tick after CPU#run and all PPU Fiber resumes return.
+  'Optcarrot::Video' => %w[tick],
+  # NES#step calls APU#vsync after PPU#vsync returns; its audio clock update
+  # and sample bookkeeping stay outside the PPU Fiber execution path.
+  'Optcarrot::APU' => %w[flush_sound vsync]
+}.freeze
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
@@ -104,9 +114,9 @@ def emit_register(diagnostics, out_dir)
     next unless match
 
     entry, owner, name, extra = match.captures
-    # The CI runtime benchmark still SIGSEGVs with CPU/PPU methods excluded,
-    # showing that other emulator runtime owners are reached on the Fiber path.
-    next unless FIBER_SAFE_OWNERS.include?(owner) || FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
+    safe_setup = FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
+    safe_frame_boundary = FIBER_SAFE_FRAME_BOUNDARY_METHODS.fetch(owner, []).include?(name)
+    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup || safe_frame_boundary
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
@@ -224,7 +234,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} setup methods (emulator runtime remains interpreted for Fiber safety)"
+  puts "bc2cpp installed #{count} setup methods (emulator runtime remains interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -251,7 +261,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods and ROM#initialize are compiled; emulator runtime methods remain interpreted because CI reproduced SIGSEGVs when compiled methods ran on the PPU Fiber path.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, ROM#initialize, PPU#setup_frame, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are compiled; emulator methods reached from the PPU Fiber remain interpreted because compiled methods on that path can crash.'
     end
   end
 

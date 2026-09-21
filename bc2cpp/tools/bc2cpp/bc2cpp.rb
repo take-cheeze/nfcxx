@@ -9395,17 +9395,17 @@ class CodeGen
   # with a native registration present and no Ruby replacement on those
   # classes. A prepend can sit ahead of the native method, so decline the
   # fast path for any base class with a known or unresolved prepend.
-  def builtin_container_send_safe?(name, builtins)
-    @builtin_container_send_safe ||= {}
+  def builtin_class_send_safe?(name, builtins)
+    @builtin_class_send_safe ||= {}
     cache_key = [name, builtins]
-    return @builtin_container_send_safe[cache_key] if @builtin_container_send_safe.key?(cache_key)
+    return @builtin_class_send_safe[cache_key] if @builtin_class_send_safe.key?(cache_key)
 
     defs = @registry[name]
-    @builtin_container_send_safe[cache_key] = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
-                                              defs.none? { |d| builtins.include?(d.owner) } &&
-                                              builtins.none? do |owner|
-                                                !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
-                                              end
+    @builtin_class_send_safe[cache_key] = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                          defs.none? { |d| builtins.include?(d.owner) } &&
+                                          builtins.none? do |owner|
+                                            !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
+                                          end
   end
 
   # Emits the guarded direct C++ implementation for one
@@ -23077,11 +23077,11 @@ class CodeGen
     # substituting it would be a silent behavior change. Left as
     # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
     # below.
-    if name == 'size' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash])
+    if name == 'size' && n.zero? && builtin_class_send_safe?(name, %w[Array Hash])
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
-    if name == '[]=' && n == 3 && builtin_container_send_safe?(name, %w[Array])
+    if name == '[]=' && n == 3 && builtin_class_send_safe?(name, %w[Array])
       # Array slice writes occur in optcarrot's mapper when PRG/CHR banks
       # change. The public mrb_ary_splice API implements the native body for
       # this three-argument form. Restrict the fast path to exact Arrays and
@@ -23102,7 +23102,174 @@ class CodeGen
       CPP
     end
 
-    if name == 'slice!' && n == 2 && builtin_container_send_safe?(name, %w[Array])
+    if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
+      left, right = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      helper = { '+' => 'mrb_num_add', '-' => 'mrb_num_sub', '*' => 'mrb_num_mul' }.fetch(name)
+      return <<~CPP
+          // FIXNUM_ARITHMETIC :#{name} -- exact Fixnums use mruby's overflow-aware numeric helper
+          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+            r#{d} = #{helper}(M, #{left}, #{right});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
+      value = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+            mrb_ary_push(M, #{recv}, #{value});
+            r#{d} = #{recv};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == 'concat' && n == 1 && owner_def&.owner == 'Optcarrot::APU' && owner_def.name == 'flush_sound' &&
+       builtin_class_send_safe?(name, %w[Array])
+      source = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_CONCAT_COPY :concat -- APU output buffer; preserve exact-Array capacity without sharing
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_array_p(#{source}) && mrb_obj_ptr(#{source})->c == M->array_class &&
+              mrb_obj_ptr(#{recv}) != mrb_obj_ptr(#{source}) && ARY_LEN(mrb_ary_ptr(#{recv})) == 0) {
+            r#{d} = mrb_ary_splice(M, #{recv}, 0, 0, #{source});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == 'clear' && n.zero? && builtin_class_send_safe?(name, %w[Array])
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      retain_frame_capacity = (owner_def&.owner == 'Optcarrot::PPU' && owner_def.name == 'setup_frame') ||
+                              (owner_def&.owner == 'Optcarrot::APU' && owner_def.name == 'flush_sound')
+      if retain_frame_capacity
+        return <<~CPP
+            // ARRAY_CLEAR_RETAIN :clear -- frame/audio buffer; clear length but reuse backing storage
+            if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+              struct RArray *bc2cpp_frame_pixels = mrb_ary_ptr(#{recv});
+              mrb_ary_modify(M, bc2cpp_frame_pixels);
+              ARY_SET_LEN(bc2cpp_frame_pixels, 0);
+              r#{d} = #{recv};
+            } else {
+              #{fallback.chomp}
+            }
+        CPP
+      end
+
+      return <<~CPP
+          // ARRAY_CLEAR :clear -- exact Array only; preserve subclass and override dispatch
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+            r#{d} = mrb_ary_clear(M, #{recv});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
+      left, right = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      operation = if name == '%'
+                    <<~CPP.chomp
+                      mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
+                      mrb_int bc2cpp_mod_right = mrb_fixnum(#{right});
+                      if (bc2cpp_mod_left == MRB_INT_MIN && bc2cpp_mod_right == -1) {
+                        r#{d} = mrb_fixnum_value(0);
+                      } else {
+                        mrb_int bc2cpp_mod_value = bc2cpp_mod_left % bc2cpp_mod_right;
+                        if ((bc2cpp_mod_left < 0) != (bc2cpp_mod_right < 0) && bc2cpp_mod_value != 0) {
+                          bc2cpp_mod_value += bc2cpp_mod_right;
+                        }
+                        r#{d} = mrb_fixnum_value(bc2cpp_mod_value);
+                      }
+                    CPP
+                  else
+                    operator = { '&' => '&', '|' => '|', '^' => '^' }.fetch(name)
+                    "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));"
+                  end
+      return <<~CPP
+          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics with Ruby fallback
+          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}) {
+            #{operation}
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == '>>' && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
+      value, width = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases retain Ruby dispatch
+          {
+          mrb_bool bc2cpp_shift_fast = FALSE;
+          mrb_int bc2cpp_shift_result = 0;
+          if (mrb_fixnum_p(#{value}) && mrb_fixnum_p(#{width})) {
+            mrb_int bc2cpp_shift_value = mrb_fixnum(#{value});
+            mrb_int bc2cpp_shift_width = mrb_fixnum(#{width});
+            if (bc2cpp_shift_width == 0) {
+              bc2cpp_shift_result = bc2cpp_shift_value;
+              bc2cpp_shift_fast = TRUE;
+            } else if (bc2cpp_shift_width > 0) {
+              if (bc2cpp_shift_width >= MRB_INT_BIT - 1) {
+                bc2cpp_shift_result = bc2cpp_shift_value < 0 ? -1 : 0;
+              } else {
+                bc2cpp_shift_result = bc2cpp_shift_value >> bc2cpp_shift_width;
+              }
+              bc2cpp_shift_fast = TRUE;
+            } else if (bc2cpp_shift_width != MRB_INT_MIN) {
+              if (bc2cpp_shift_value == 0) {
+                bc2cpp_shift_fast = TRUE;
+              } else {
+                mrb_int bc2cpp_left_width = -bc2cpp_shift_width;
+                if (bc2cpp_left_width <= MRB_INT_BIT - 1 &&
+                    !(bc2cpp_shift_value > 0 && bc2cpp_shift_value > (MRB_INT_MAX >> bc2cpp_left_width)) &&
+                    !(bc2cpp_shift_value < 0 && bc2cpp_shift_value < (MRB_INT_MIN >> bc2cpp_left_width))) {
+                  if (bc2cpp_left_width == MRB_INT_BIT - 1) {
+                    bc2cpp_shift_result = MRB_INT_MIN;
+                  } else if (bc2cpp_shift_value > 0) {
+                    bc2cpp_shift_result = bc2cpp_shift_value << bc2cpp_left_width;
+                  } else {
+                    bc2cpp_shift_result = bc2cpp_shift_value * ((mrb_int)1 << bc2cpp_left_width);
+                  }
+                  bc2cpp_shift_fast = TRUE;
+                }
+              }
+            }
+          }
+          if (bc2cpp_shift_fast) {
+            r#{d} = mrb_fixnum_value(bc2cpp_shift_result);
+          } else {
+            #{fallback.chomp}
+          }
+          }
+      CPP
+    end
+
+    if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
+      left, right = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
+      return <<~CPP
+          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison with Ruby fallback
+          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+            r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == 'slice!' && n == 2 && builtin_class_send_safe?(name, %w[Array])
       start, length = argv
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
@@ -23127,7 +23294,7 @@ class CodeGen
     # target is proven, the final fallback below still uses this intrinsic,
     # preserving exact Array/Hash/String fast paths.
     builtin_empty_send = name == 'empty?' && n.zero? &&
-                         builtin_container_send_safe?(name, %w[Array Hash String])
+                         builtin_class_send_safe?(name, %w[Array Hash String])
 
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name)
       return compile_native_primitive_send(name, d, recv, argv)

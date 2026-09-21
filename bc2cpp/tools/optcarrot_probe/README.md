@@ -311,12 +311,26 @@ cleanly:
 With those fixes, the 180-frame run completes with checksum `59662`, matching
 the interpreted run and CRuby. CI still showed SIGSEGVs after excluding CPU,
 PPU, and the explicit NES Fiber boundaries, so the probe compiles setup
-methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus
-`Optcarrot::ROM#initialize` before emulator Fibers start. Emulator runtime
-methods remain interpreted until generated C functions are safe across mruby
-Fiber switches. The benchmark still uses upstream emulation logic; only the
-method registration set changes. It runs the same ROM and checksums under all
-three systems; CRuby omits only the mruby-specific compatibility shims.
+methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
+`Optcarrot::ROM.singleton#load` and `Optcarrot::ROM#initialize` setup methods
+before emulator Fibers start. It also compiles `Optcarrot::PPU#setup_frame`,
+which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber,
+and the base `Optcarrot::Video#tick` that runs after CPU and PPU Fiber work
+returns to `NES#step`. It also compiles `Optcarrot::APU#vsync` and its
+`flush_sound` helper; both run after `PPU#vsync` returns to `NES#step`, outside
+the PPU Fiber execution path. `APU#vsync` performs the frame's audio clock and
+sample bookkeeping.
+Its exact-Array `clear` send uses `mrb_ary_clear` with Ruby dispatch fallback
+for other receiver classes, except that this one frame-buffer clear resets the
+Array length after `mrb_ary_modify` and retains its capacity for the next
+frame. The pixel Array is synchronously consumed by `Video#tick` before the
+next `NES#step`, and mruby's GC scans only the live Array length. Methods
+reached while the PPU Fiber is running remain interpreted: CI
+reproduced a SIGSEGV when selected PPU leaf
+methods ran on the Fiber path, even though those methods return before the next
+yield. The benchmark still uses upstream emulation logic; only the method
+registration set changes. It runs the same ROM and checksums under all three
+systems; CRuby omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
@@ -386,6 +400,33 @@ it with `mrb_ary_splice`, and returns the copied Array. Frozen receivers,
 subclasses, and all other index shapes retain Ruby dispatch. The coverage
 report counts these sites too. These calls run while loading the ROM, so the
 optimization targets setup dispatch overhead rather than frame time.
+
+The compiler also lowers `Array#<<` to `mrb_ary_push` for exact Arrays when
+the native method is uncontested, and lowers `%`/`&`/`|`/`^` sends when both
+operands are Fixnums and the closed-world method registry contains only
+native definitions. Subclasses, non-Fixnums, zero divisors, and other
+unhandled shapes retain Ruby dispatch. Modulo uses Ruby's sign correction and
+handles the minimum-integer/`-1` overflow case. The current Optcarrot report
+finds 57 Array pushes and 340 modulo/bitwise sites, including 105 bitwise
+OR/XOR sites. It also lowers Fixnum `+`, `-`, and `*` sends through mruby's
+overflow-aware numeric helpers when both operands are Fixnums and the Integer
+method is uncontested; non-Fixnums retain Ruby dispatch. There are 418 such
+arithmetic sites. The report also finds 118 Fixnum `<`, `<=`, `>`, and `>=`
+comparisons, which use direct C comparisons under the same guarded dispatch
+fallback.
+Fixnum `>>` sends use direct signed shifts when both operands are Fixnums and
+the Integer method is uncontested; left-shift overflow and other operand types
+keep Ruby dispatch so mruby can produce its normal bignum or error result. The
+coverage report finds 54 such sites.
+The frame-boundary `PPU#setup_frame` also reuses the exact pixel Array's
+backing storage across frames; other exact-Array `clear` sites lower to
+`mrb_ary_clear` under the same exact-class guard. In `APU#flush_sound`, the
+output and sample buffers also retain capacity; the exact-Array `concat` site
+copies into the persistent output Array with `mrb_ary_splice` instead of
+replacing it with a shared buffer.
+The coverage report identifies candidates across the standalone Optcarrot
+closed world; other methods reached while the PPU Fiber runs remain
+interpreted while the Fiber crash remains unresolved.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.
