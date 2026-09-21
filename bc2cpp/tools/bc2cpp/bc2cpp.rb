@@ -21235,14 +21235,11 @@ class CodeGen
 
   # EQ/LT/LE/GT/GE all share OP_CMP's own real shape (src/vm.c): a fixnum-
   # fixnum fast path compares directly and produces a real C++ bool
-  # converted to mrb_value; anything else falls back to the actual method
-  # (`mrb_funcall` with the operator's own name), which reaches the exact
-  # same method resolution the interpreter's own fallback SEND would -- a
-  # deliberate simplification for EQ specifically (the real VM short-
-  # circuits object identity and a Symbol-vs-anything-else compare before
-  # ever reaching this fallback), but never *unsound*: mrb_funcall("==")
-  # against an unoverridden class already falls back to identity equality
-  # on its own, so the observable result is identical either way.
+  # converted to mrb_value. For EQ's other operand shapes, the fallback
+  # preserves mrb_equal's object-equality shortcut with mrb_obj_eq before
+  # dispatching `==`. This both avoids a method call for equal immediate or
+  # identical object values and preserves the VM rule that `x == x` is true
+  # even when the object's overridden `==` method would return false.
   # FIXNUM_OPERAND_PROOF: `irep`/`idx`/`owner_def` are threaded through purely
   # so this can ask the same "are BOTH operands provably Fixnum here" question
   # ADD/SUB/MUL/DIV now ask -- when they are, the whole runtime check and its
@@ -21260,11 +21257,13 @@ class CodeGen
 
     # OP_CMP uses a real dynamic send for non-Fixnum operands. Forward those
     # sends through compile_send's existing MONO/TYPED resolver so compiled
-    # operator methods can be called directly. EQ keeps its historical path
-    # because mruby's EQ opcode has identity and Symbol fast paths that a
-    # direct method call would bypass.
+    # operator methods can be called directly. EQ keeps a dedicated fallback
+    # so mrb_equal's identity/type check runs before Ruby dispatch, while the
+    # actual method still handles mixed numeric values and overrides.
     fallback = if op == 'EQ'
-                 "r#{d} = mrb_funcall(M, r#{d}, \"#{sym}\", 1, r#{s});\n"
+                 "  // EQ_IDENTITY :== -- match mrb_equal's identity/type shortcut before Ruby dispatch\n" \
+                   "  r#{d} = mrb_bool_value(mrb_obj_eq(M, r#{d}, r#{s}) || " \
+                   "mrb_test(mrb_funcall(M, r#{d}, \"#{sym}\", 1, r#{s})));\n"
                else
                  compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
                end

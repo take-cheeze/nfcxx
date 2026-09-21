@@ -205,6 +205,7 @@ array_concat_copy_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_CONCAT_COPY 
 fixnum_binary_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_BINARY :(?:%|&|\||\^)/).size
 fixnum_shift_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_SHIFT :>>/).size
 fixnum_compare_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_COMPARE :(?:<|<=|>|>=)/).size
+equal_identity_fast_paths = @shipped_stdout.scan(/^\s*\/\/ EQ_IDENTITY :==/).size
 fixnum_arithmetic_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_ARITHMETIC :(?:\+|-|\*)/).size
 
 report << "-- dynamic dispatch remaining (real shipped build, SKIP_UNSUPPORTED=1) --\n"
@@ -220,6 +221,7 @@ report << "  exact-Array APU audio-buffer concatenations retaining capacity: #{a
 report << "  guarded Fixnum modulo/bitwise sends lowered to C arithmetic: #{fixnum_binary_fast_paths}\n"
 report << "  guarded Fixnum right shifts lowered to C arithmetic: #{fixnum_shift_fast_paths}\n"
 report << "  guarded Fixnum comparisons lowered to C comparisons: #{fixnum_compare_fast_paths}\n"
+report << "  equality fallbacks with mruby object-identity short-circuit: #{equal_identity_fast_paths}\n"
 report << "  guarded Fixnum +, -, * sends lowered to mruby numeric helpers: #{fixnum_arithmetic_fast_paths}\n"
 report << "distinct dynamically-dispatched method names: #{dispatch_counts.size}\n"
 report << "top 30 dynamically-dispatched method names:\n"
