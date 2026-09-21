@@ -394,10 +394,13 @@ operands are Fixnums and the closed-world method registry contains only
 native definitions. Subclasses, non-Fixnums, zero divisors, and other
 unhandled shapes retain Ruby dispatch. Modulo uses Ruby's sign correction and
 handles the minimum-integer/`-1` overflow case. The current Optcarrot report
-finds 57 Array pushes and 340 Fixnum arithmetic sites suitable for these
-guards, including 105 bitwise OR/XOR sites. It also lowers `<`, `<=`, `>`, and
-`>=` when both operands are Fixnums and the native method is uncontested;
-mixed numeric types and all other receivers retain Ruby dispatch.
+finds 57 Array pushes and 340 modulo/bitwise sites, including 105 bitwise
+OR/XOR sites. It also lowers Fixnum `+`, `-`, and `*` sends through mruby's
+overflow-aware numeric helpers when both operands are Fixnums and the Integer
+method is uncontested; non-Fixnums retain Ruby dispatch. There are 418 such
+arithmetic sites. The report also finds 118 Fixnum `<`, `<=`, `>`, and `>=`
+comparisons, which use direct C comparisons under the same guarded dispatch
+fallback.
 The coverage report identifies candidates across the standalone Optcarrot
 closed world; runtime PPU methods are not installed in the benchmark while
 the Fiber crash remains unresolved.

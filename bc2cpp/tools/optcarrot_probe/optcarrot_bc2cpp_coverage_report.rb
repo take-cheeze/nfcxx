@@ -201,6 +201,7 @@ array_prefix_slice_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_PREFIX_SLIC
 array_push_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_PUSH :<</).size
 fixnum_binary_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_BINARY :(?:%|&|\||\^)/).size
 fixnum_compare_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_COMPARE :(?:<|<=|>|>=)/).size
+fixnum_arithmetic_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_ARITHMETIC :(?:\+|-|\*)/).size
 
 report << "-- dynamic dispatch remaining (real shipped build, SKIP_UNSUPPORTED=1) --\n"
 report << "total mrb_funcall/mrb_funcall_with_block call sites: #{total_dispatch}\n"
@@ -211,6 +212,7 @@ report << "  guarded exact-Array prefix slice! calls lowered to array APIs: #{ar
 report << "  guarded exact-Array pushes lowered to mrb_ary_push: #{array_push_fast_paths}\n"
 report << "  guarded Fixnum modulo/bitwise sends lowered to C arithmetic: #{fixnum_binary_fast_paths}\n"
 report << "  guarded Fixnum comparisons lowered to C comparisons: #{fixnum_compare_fast_paths}\n"
+report << "  guarded Fixnum +, -, * sends lowered to mruby numeric helpers: #{fixnum_arithmetic_fast_paths}\n"
 report << "distinct dynamically-dispatched method names: #{dispatch_counts.size}\n"
 report << "top 30 dynamically-dispatched method names:\n"
 dispatch_counts.sort_by { |name, n| [-n, name] }.first(30).each_with_index do |(name, n), i|

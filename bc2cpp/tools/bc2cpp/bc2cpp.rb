@@ -9364,17 +9364,17 @@ class CodeGen
   # with a native registration present and no Ruby replacement on those
   # classes. A prepend can sit ahead of the native method, so decline the
   # fast path for any base class with a known or unresolved prepend.
-  def builtin_container_send_safe?(name, builtins)
-    @builtin_container_send_safe ||= {}
+  def builtin_class_send_safe?(name, builtins)
+    @builtin_class_send_safe ||= {}
     cache_key = [name, builtins]
-    return @builtin_container_send_safe[cache_key] if @builtin_container_send_safe.key?(cache_key)
+    return @builtin_class_send_safe[cache_key] if @builtin_class_send_safe.key?(cache_key)
 
     defs = @registry[name]
-    @builtin_container_send_safe[cache_key] = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
-                                              defs.none? { |d| builtins.include?(d.owner) } &&
-                                              builtins.none? do |owner|
-                                                !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
-                                              end
+    @builtin_class_send_safe[cache_key] = defs && defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                          defs.none? { |d| builtins.include?(d.owner) } &&
+                                          builtins.none? do |owner|
+                                            !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
+                                          end
   end
 
   # Emits the guarded direct C++ implementation for one
@@ -23035,11 +23035,11 @@ class CodeGen
     # substituting it would be a silent behavior change. Left as
     # ordinary POLY `mrb_funcall`, exactly like today; no entry for it
     # below.
-    if name == 'size' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash])
+    if name == 'size' && n.zero? && builtin_class_send_safe?(name, %w[Array Hash])
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
-    if name == '[]=' && n == 3 && builtin_container_send_safe?(name, %w[Array])
+    if name == '[]=' && n == 3 && builtin_class_send_safe?(name, %w[Array])
       # Array slice writes occur in optcarrot's mapper when PRG/CHR banks
       # change. The public mrb_ary_splice API implements the native body for
       # this three-argument form. Restrict the fast path to exact Arrays and
@@ -23060,7 +23060,21 @@ class CodeGen
       CPP
     end
 
-    if name == '<<' && n == 1 && builtin_container_send_safe?(name, %w[Array])
+    if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
+      left, right = recv, argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      helper = { '+' => 'mrb_num_add', '-' => 'mrb_num_sub', '*' => 'mrb_num_mul' }.fetch(name)
+      return <<~CPP
+          // FIXNUM_ARITHMETIC :#{name} -- exact Fixnums use mruby's overflow-aware numeric helper
+          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+            r#{d} = #{helper}(M, #{left}, #{right});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
@@ -23119,7 +23133,7 @@ class CodeGen
       CPP
     end
 
-    if name == 'slice!' && n == 2 && builtin_container_send_safe?(name, %w[Array])
+    if name == 'slice!' && n == 2 && builtin_class_send_safe?(name, %w[Array])
       start, length = argv
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
@@ -23139,7 +23153,7 @@ class CodeGen
       CPP
     end
 
-    if name == 'empty?' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash String])
+    if name == 'empty?' && n.zero? && builtin_class_send_safe?(name, %w[Array Hash String])
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
