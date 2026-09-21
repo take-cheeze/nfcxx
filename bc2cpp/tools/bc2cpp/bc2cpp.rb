@@ -23122,9 +23122,12 @@ class CodeGen
       CPP
     end
 
-    if name == 'empty?' && n.zero? && builtin_container_send_safe?(name, %w[Array Hash String])
-      return compile_native_primitive_send(name, d, recv, argv)
-    end
+    # Try the call site's existing TYPED receiver proof before lowering
+    # empty? through the built-in container switch. When no compiled Ruby
+    # target is proven, the final fallback below still uses this intrinsic,
+    # preserving exact Array/Hash/String fast paths.
+    builtin_empty_send = name == 'empty?' && n.zero? &&
+                         builtin_container_send_safe?(name, %w[Array Hash String])
 
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name)
       return compile_native_primitive_send(name, d, recv, argv)
@@ -23504,6 +23507,8 @@ class CodeGen
           "  }\n"
       end
     else
+      return compile_native_primitive_send(name, d, recv, argv) if builtin_empty_send
+
       poly_small_n = compile_poly_small_n(name, d, recv, argv, n)
       return poly_small_n if poly_small_n
 
