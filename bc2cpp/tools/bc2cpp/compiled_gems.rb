@@ -20,6 +20,23 @@
 # generated output (that would be a circular Rake dependency; only the
 # final C++ compile of register.cxx needs both gems' generated files to
 # already exist, which mrbgem.rake wires as a `file` dependency, not this).
+# EMBED_WIRED: the classes whose embedded-ivar layout is actually wired at
+# runtime. An embedded class keeps its ivars in an RData struct, so it is only
+# sound when the class is MRB_TT_DATA and *every* method that touches those
+# ivars is an installed compiled method, #initialize included (it allocates the
+# struct). The compiled gems' register.cxx installs methods by hand and does not
+# cover every compiled entry point (474 of 2141 for mruby-rpg2k-compiled), so
+# the generator's own analysis alone over-embeds: it embedded Game::Actor while
+# Actor#initialize stayed the interpreted one, and the first compiled accessor
+# then dereferenced a NULL DATA_PTR. bc2cpp.rb's driver passes this list to
+# CodeGen.wired_embeddings; a class outside it keeps its ivars in the ordinary
+# table. Add a class here only together with its register.cxx wiring for
+# #initialize and every compiled method that touches an embedded ivar.
+BC2CPP_WIRED_EMBEDDINGS = %w[
+  Game::Screen Game::Transition Game::Map Game::ChipSet Game::Switches
+  Game::Interpreter RPG2k::Scene::VehicleWorld LCF::EventCommand LCF::MoveCommand
+].freeze
+
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
     # LCF::MoveCommand (docs/adr/0139's own follow-up, mruby-lcf/mrblib/
