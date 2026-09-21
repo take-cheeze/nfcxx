@@ -18041,9 +18041,37 @@ class CodeGen
 
       regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
                    block_irep: block_irep, name: name, n: n,
-                   self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk }
+                   self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk,
+                   parent_irep: irep }
     end
     regions
+  end
+
+  # BLOCK_FALLBACK_ELEMENT_SUPPORT: carry an exact element class into the
+  # standalone cfunc only for a block passed to `Array#each`. Reuse the same
+  # Array receiver proof and element scan as the inline loop recognizer; all
+  # other iterators and untyped arrays keep dynamic dispatch.
+  def block_fallback_array_element_class(irep, region, owner_name)
+    return nil unless irep && region[:name] == 'each' && region[:n].zero? && !region[:self_implicit]
+    return nil unless mandatory_arity(region[:block_irep]) == 1
+
+    idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
+    return nil unless idx
+
+    insn = irep.instructions[idx]
+    return nil unless insn.op == 'SENDB'
+
+    mand = mandatory_arity(irep)
+    ivar_classes = @class_layout[owner_name] || {}
+    arg_classes = @class_annotations[irep.label]&.args
+    recv_class = trace_new_target(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes,
+                                  owner: owner_name, class_layout: @class_layout, registry: @registry,
+                                  container_constants: @container_constants,
+                                  element_annotations: @element_annotations, known_owners: known_owner_set)
+    recv_class = proven_array_source(irep, idx, region[:dest_reg]) unless recv_class == 'Array'
+    return nil unless recv_class == 'Array'
+
+    proven_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the block/
@@ -18367,12 +18395,19 @@ class CodeGen
     # otherwise target, while `block_addr` (suppressed WITH a glue_at
     # entry) keeps one, since real code starts exactly there.
     targets = jump_targets(block_irep) - (nested_suppressed - nested_glue_at.keys)
+    elem_class = block_fallback_array_element_class(region[:parent_irep], region, d.owner)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
 
       body << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      body << (nested_glue_at[insn.addr] || compile_insn(insn, block_irep, d, idx))
+      if nested_glue_at.key?(insn.addr)
+        body << nested_glue_at[insn.addr]
+      else
+        with_element_hint(block_irep, insn, idx, '1', elem_class) do
+          body << compile_insn(insn, block_irep, d, idx)
+        end
+      end
     end
     @block_fallback_upvars = nil
     @block_fallback_active = false
