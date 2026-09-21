@@ -9475,11 +9475,10 @@ class CodeGen
     defs && defs.size == 1 && defs.first.irep.nil?
   end
 
-  # `empty?` and `size` have unrelated Ruby overrides elsewhere in the
-  # program. Permit per-class fast paths only for exact built-in receivers,
-  # with a native registration present and no Ruby replacement on those
-  # classes. A prepend can sit ahead of the native method, so decline the
-  # fast path for any base class with a known or unresolved prepend.
+  # Permit per-class fast paths only for exact built-in receivers, with a
+  # native registration present and no Ruby replacement on those classes.
+  # A prepend can sit ahead of the native method, so decline the fast path
+  # for any base class with a known or unresolved prepend.
   def builtin_class_send_safe?(name, builtins)
     @builtin_class_send_safe ||= {}
     cache_key = [name, builtins]
@@ -23289,6 +23288,20 @@ class CodeGen
               mrb_fixnum_p(#{start}) && mrb_fixnum_p(#{length})) {
             mrb_ary_splice(M, #{recv}, mrb_fixnum(#{start}), mrb_fixnum(#{length}), #{replacement});
             r#{d} = #{replacement};
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
+    if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array])
+      value = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+            mrb_ary_push(M, #{recv}, #{value});
+            r#{d} = #{recv};
           } else {
             #{fallback.chomp}
           }
