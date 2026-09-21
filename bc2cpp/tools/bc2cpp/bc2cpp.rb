@@ -2447,7 +2447,7 @@ class ArgTypes
             # aren't tracked at this point) -- a GETIV-sourced argument
             # value traces to UNKNOWN, a safe under-approximation (never
             # wrongly infers Fixnum), not a wrong one.
-            t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {})
+            t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {}, nil, 0, nil, nil, registry)
             arg_types[k - 1] = IvarLayout.join(arg_types[k - 1], t)
           end
         end
