@@ -18,13 +18,21 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Latest local 180-frame wall times from the comparative runner: CRuby 3.13s
-(57.5 frames/s), interpreted mruby 26.92s (6.7 frames/s), and bc2cpp 29.72s
-(6.1 frames/s). All three produce checksum `59662`. Timings vary by machine;
+Latest local 180-frame wall times from the comparative runner: CRuby 4.82s
+(37.3 frames/s), interpreted mruby 59.60s (3.0 frames/s), and bc2cpp 67.09s
+(2.7 frames/s). All three produce checksum `59662`. Timings vary by machine;
 CI publishes each run's numbers and relative slowdown in the job summary. The
-compiled result is still slower than interpreted mruby, but compiling PPU
-helpers reduced the compiled time from 30.53s in a same-machine control run
-with the PPU wholly interpreted to 29.72s here.
+compiled result is still slower than interpreted mruby, and by a slightly
+wider relative margin than before: a same-machine, same-session run of the
+prior configuration (`Optcarrot::Config`/`Optcarrot::Opt` plus setup methods
+only, 60 frames) measured bc2cpp about 7.0% slower than interpreted mruby;
+this configuration measures about 12.6% slower. `compiled_run.rb` now
+compiles and installs `Optcarrot::CPU`, `Optcarrot::PPU` (the whole Fiber-driven
+pixel-rendering loop included), and `Optcarrot::NES` -- previously excluded on
+suspicion of a Fiber-path crash that is no longer reproducible, see "Compiled
+runtime check" below -- but the dispatch and ivar-lookup overhead that
+dominates their runtime is not removed by compiling them, so this is not yet a
+speedup.
 
 Getting there took:
 
@@ -316,28 +324,54 @@ cleanly:
   instance variables when an embedded layout overlaps an inheritance chain.
 
 With those fixes, the 180-frame run completes with checksum `59662`, matching
-the interpreted run and CRuby. CI still showed SIGSEGVs after excluding CPU,
-PPU, and the explicit NES Fiber boundaries, so the probe compiles setup
-methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
-`Optcarrot::ROM.singleton#load` and `Optcarrot::ROM#initialize` setup methods
-before emulator Fibers start. It also compiles `Optcarrot::PPU#setup_frame`,
-which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber,
-and the base `Optcarrot::Video#tick` that runs after CPU and PPU Fiber work
-returns to `NES#step`. It also compiles `Optcarrot::APU#vsync` and its
-`flush_sound` helper; both run after `PPU#vsync` returns to `NES#step`, outside
-the PPU Fiber execution path. `APU#vsync` performs the frame's audio clock and
-sample bookkeeping.
-Its exact-Array `clear` send uses `mrb_ary_clear` with Ruby dispatch fallback
-for other receiver classes, except that this one frame-buffer clear resets the
-Array length after `mrb_ary_modify` and retains its capacity for the next
-frame. The pixel Array is synchronously consumed by `Video#tick` before the
-next `NES#step`, and mruby's GC scans only the live Array length. Methods
-reached while the PPU Fiber is running remain interpreted: CI
-reproduced a SIGSEGV when selected PPU leaf
-methods ran on the Fiber path, even though those methods return before the next
-yield. The benchmark still uses upstream emulation logic; only the method
-registration set changes. It runs the same ROM and checksums under all three
-systems; CRuby omits only the mruby-specific compatibility shims.
+the interpreted run and CRuby.
+
+CI once showed SIGSEGVs when `Optcarrot::CPU`, `Optcarrot::PPU`, and the
+explicit `Optcarrot::NES` Fiber boundaries ran compiled, so the probe used to
+compile only `Optcarrot::Config`/`Optcarrot::Opt` plus a handful of setup and
+frame-boundary methods, and left CPU's opcode dispatch and the whole PPU Fiber
+loop interpreted. That is no longer reproducible: the same three classes --
+CPU (`#run` and every `op_*` opcode handler), PPU (`#run`, the Fiber body
+itself, `#sync`, and every helper it reaches), and NES (`#run`/`#step`
+/`#dispose`, the Fiber's creator and resumer) -- now run the full 180-frame
+headless benchmark compiled, individually and together, repeatedly, with the
+same `59662` checksum as the interpreted and CRuby runs every time. `bc2cpp`
+gained many correctness fixes since the SIGSEGVs were last observed (the two
+above, plus everything landed since -- see `git log` on
+`tools/bc2cpp/bc2cpp.rb`); no single change was bisected as the fix, so this
+is a re-verified fact, not a root-caused one. `compiled_run.rb` now compiles
+all five: `Optcarrot::Config`, `Optcarrot::Opt`, `Optcarrot::CPU`,
+`Optcarrot::PPU`, `Optcarrot::NES`, plus the same
+`Optcarrot::ROM.singleton#load`/`Optcarrot::ROM#initialize` setup methods,
+`Optcarrot::PPU#setup_frame` (now redundant with the rest of `PPU` also
+compiling, kept for clarity), and the post-Fiber `Optcarrot::Video#tick` and
+`Optcarrot::APU#flush_sound`/`#vsync` hooks. `Optcarrot::Video` and
+`Optcarrot::APU` stay interpreted apart from those two hooks.
+
+Compiling the actual hot path does not yet make it faster: the latest local
+180-frame run measured CRuby 4.82s, interpreted mruby 59.60s, and bc2cpp
+67.09s (all three checksum `59662`), i.e. bc2cpp is now about 12.6% slower
+than interpreted mruby rather than the roughly 10% it was before CPU/PPU/NES
+were included. `CPU#run`'s own dispatch (`send(*DISPATCH[@opcode])`) is
+inherently data-driven -- the opcode table maps to a different bound method
+per NES instruction, so bc2cpp correctly keeps it as a real `mrb_funcall`
+rather than guessing a fixed target -- and a fair share of CPU/PPU's own
+instance variables are not proven embeddable (mixed/opaque types), so their
+compiled bodies still pay `mrb_iv_get`'s `iv_bsearch_idx` the same way the
+interpreter does. Compiling more of the real program is still valuable on its
+own terms (the stated goal of this probe is exercising bc2cpp against a real,
+non-toy Ruby program), and it is a prerequisite for any future ivar-embedding
+work on CPU/PPU to matter at all -- but it is not, by itself, the source of a
+wall-clock win. The exact-Array `clear` fast path, retained capacity, and
+frame-buffer reuse notes below are unaffected by this change; they already
+applied to the newly-compiled methods' bodies once those bodies started
+running.
+
+The pixel Array is synchronously consumed by `Video#tick` before the next
+`NES#step`, and mruby's GC scans only the live Array length. The benchmark
+still uses upstream emulation logic; only the method registration set
+changes. It runs the same ROM and checksums under all three systems; CRuby
+omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
@@ -359,14 +393,35 @@ profile spent 20.8% in `mrb_vm_exec`, 34.0% in `gc_gray_rescan`, and 11.0% in
 and `mrb_vm_exec` calls rose from about 363K to 3.04M with bc2cpp. `CPU#run`
 itself accounted for only 0.13% of sampled time.
 
-This points to two limits: the PPU's Fiber-driven hot loop stays interpreted,
-and compiled methods still cross into mruby through dynamic and block-carrying
-calls. Those crossings leave substantial VM activity and coincide with much
-more GC time, outweighing the bytecode dispatch removed from the compiled CPU
-path. The profile is a direction, not a precise causal split: gprof sampling
-and instrumentation are coarse, and the gprof build disables inlining only
-for generated C++ methods to keep them visible; mruby's C runtime keeps its
-normal optimization settings in both profiles.
+This pointed to two limits: the PPU's Fiber-driven hot loop stayed
+interpreted, and compiled methods still crossed into mruby through dynamic and
+block-carrying calls. Those crossings left substantial VM activity and
+coincided with much more GC time, outweighing the bytecode dispatch removed
+from the compiled CPU path. The profile is a direction, not a precise causal
+split: gprof sampling and instrumentation are coarse, and the gprof build
+disables inlining only for generated C++ methods to keep them visible;
+mruby's C runtime keeps its normal optimization settings in both profiles.
+
+**Update, with `Optcarrot::CPU`/`PPU`/`NES` all compiled** (see "Compiled
+runtime check" above): a fresh instrumented 180-frame run measured 108.54s
+interpreted and 131.74s compiled (both checksum `59662`). The two profiles
+are now far more alike than before, which is itself the finding: compiling
+the PPU Fiber loop did not narrow the gap. `mrb_vm_exec` fell from 45.9% to
+40.4% (real bytecode dispatch removed, as expected), but `iv_bsearch_idx`
+stayed essentially flat at 14.3% -> 11.2% of *sampled time* while its *call
+count* barely moved (354.2M -> 364.6M -- compiling these classes did not
+reduce how often their ivars get looked up, because it did not make more of
+their ivars embeddable). `gc_gray_rescan` rose 8.5% -> 11.9%. This matches
+`tools/optcarrot_probe/bc2cpp_probe.rb`'s own `== ivar embedding ==` output
+directly: of `Optcarrot::CPU`'s and `Optcarrot::PPU`'s real instance
+variables (registers, scroll/palette/rendering state -- dozens between the
+two), only `CPU#@clk_total` and 9 `PPU#@...` fields are proven embeddable;
+everything else (`CPU#@a`/`@x`/`@y`/`@s`/`@p`/`@pc`/register file, PPU's
+buffers and per-scanline state, ...) still goes through mruby's ordinary
+ivar table, compiled code included. Embedding more of that state -- widening
+`IvarLayout`'s proof to cover whatever currently poisons it to OPAQUE/UNKNOWN
+for these two classes -- is the concrete next target this measurement points
+at, not further dispatch-shape experiments on `CPU#run` itself.
 
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
@@ -434,8 +489,10 @@ output and sample buffers also retain capacity; the exact-Array `concat` site
 copies into the persistent output Array with `mrb_ary_splice` instead of
 replacing it with a shared buffer.
 The coverage report identifies candidates across the standalone Optcarrot
-closed world; other methods reached while the PPU Fiber runs remain
-interpreted while the Fiber crash remains unresolved.
+closed world; `Optcarrot::PPU`'s methods reached while its Fiber runs are now
+compiled and installed too (see "Compiled runtime check" below) -- `Video` and
+`APU` besides their two frame-boundary hooks are the classes that remain
+interpreted.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.

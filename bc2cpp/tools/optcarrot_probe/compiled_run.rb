@@ -16,9 +16,16 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-# Emulator runtime methods remain interpreted because compiled methods reached
-# from the PPU Fiber can crash, even when those methods do not yield.
-FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
+# Optcarrot::CPU/PPU/NES were once excluded here because compiled methods
+# reached from the PPU Fiber could crash. That is no longer reproducible: all
+# three now run the full 180-frame headless benchmark compiled, repeatedly,
+# with the same checksum as the interpreted and CRuby runs (see
+# tools/optcarrot_probe/README.md's "Compiled runtime check" section). The
+# crash is presumed fixed by intervening bc2cpp correctness fixes (e.g. the
+# embedded-ivar-struct-per-subclass fix noted there) rather than root-caused
+# directly, so keep re-verifying the checksum here rather than assuming safety
+# forever holds.
+FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt Optcarrot::CPU Optcarrot::PPU Optcarrot::NES].freeze
 # ROM loading and initialization run while NES is assembled, before emulator
 # Fibers start; these methods exercise the generated loader fast paths.
 FIBER_SAFE_SETUP_METHODS = {
@@ -234,7 +241,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} setup methods (emulator runtime remains interpreted)"
+  puts "bc2cpp installed #{count} compiled methods, including CPU/PPU/NES's own"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -261,7 +268,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, ROM#initialize, PPU#setup_frame, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are compiled; emulator methods reached from the PPU Fiber remain interpreted because compiled methods on that path can crash.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Config, Opt, CPU, PPU, NES (including the PPU Fiber loop), ROM.load, ROM#initialize, PPU#setup_frame, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are all compiled; Video and APU besides those two hooks remain interpreted.'
     end
   end
 

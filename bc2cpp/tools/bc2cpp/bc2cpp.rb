@@ -9530,11 +9530,15 @@ class CodeGen
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       <<~CPP
           // respond_to? -- answer native hits directly; preserve missing-hook behavior on misses
-          mrb_sym bc2cpp_respond_to_id#{d} = mrb_obj_to_sym(M, #{method_name});
-          if (mrb_respond_to(M, #{recv}, bc2cpp_respond_to_id#{d})) {
-            r#{d} = mrb_true_value();
-          } else {
-            #{fallback.chomp}
+          {
+            // Braced so the symbol neither redeclares across sends that reuse
+            // register #{d} nor sits between a goto and its label.
+            mrb_sym bc2cpp_respond_to_id = mrb_obj_to_sym(M, #{method_name});
+            if (mrb_respond_to(M, #{recv}, bc2cpp_respond_to_id)) {
+              r#{d} = mrb_true_value();
+            } else {
+              #{fallback.chomp}
+            }
           }
       CPP
     when '!'
