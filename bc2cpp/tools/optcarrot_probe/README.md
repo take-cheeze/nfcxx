@@ -314,13 +314,15 @@ PPU, and the explicit NES Fiber boundaries, so the probe compiles setup
 methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
 `Optcarrot::ROM.singleton#load` and `Optcarrot::ROM#initialize` setup methods
 before emulator Fibers start. It also compiles `Optcarrot::PPU#setup_frame`,
-which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber.
+which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber,
+and the base `Optcarrot::Video#tick` that runs after CPU and PPU Fiber work
+returns to `NES#step`.
 Its exact-Array `clear` send uses `mrb_ary_clear` with Ruby dispatch fallback
 for other receiver classes, except that this one frame-buffer clear resets the
 Array length after `mrb_ary_modify` and retains its capacity for the next
 frame. The pixel Array is synchronously consumed by `Video#tick` before the
-next `NES#step`, and mruby's GC scans only the live Array length. Emulator
-runtime methods remain interpreted: CI
+next `NES#step`, and mruby's GC scans only the live Array length. Methods
+reached while the PPU Fiber is running remain interpreted: CI
 reproduced a SIGSEGV when selected PPU leaf
 methods ran on the Fiber path, even though those methods return before the next
 yield. The benchmark still uses upstream emulation logic; only the method
