@@ -30,8 +30,9 @@ FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
   'Optcarrot::PPU' => %w[setup_frame],
   # NES#step calls Video#tick after CPU#run and all PPU Fiber resumes return.
   'Optcarrot::Video' => %w[tick],
-  # APU#vsync calls flush_sound after PPU#vsync returns to NES#step.
-  'Optcarrot::APU' => %w[flush_sound]
+  # NES#step calls APU#vsync after PPU#vsync returns; its audio clock update
+  # and sample bookkeeping stay outside the PPU Fiber execution path.
+  'Optcarrot::APU' => %w[flush_sound vsync]
 }.freeze
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
@@ -260,7 +261,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, ROM#initialize, PPU#setup_frame, and the post-Fiber Video#tick and APU#flush_sound hooks are compiled; emulator methods reached from the PPU Fiber remain interpreted because compiled methods on that path can crash.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, ROM#initialize, PPU#setup_frame, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are compiled; emulator methods reached from the PPU Fiber remain interpreted because compiled methods on that path can crash.'
     end
   end
 

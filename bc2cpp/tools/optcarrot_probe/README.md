@@ -316,8 +316,10 @@ methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
 before emulator Fibers start. It also compiles `Optcarrot::PPU#setup_frame`,
 which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber,
 and the base `Optcarrot::Video#tick` that runs after CPU and PPU Fiber work
-returns to `NES#step`. It also compiles `Optcarrot::APU#flush_sound`, called
-only by `APU#vsync` after `PPU#vsync` returns to `NES#step`.
+returns to `NES#step`. It also compiles `Optcarrot::APU#vsync` and its
+`flush_sound` helper; both run after `PPU#vsync` returns to `NES#step`, outside
+the PPU Fiber execution path. `APU#vsync` performs the frame's audio clock and
+sample bookkeeping.
 Its exact-Array `clear` send uses `mrb_ary_clear` with Ruby dispatch fallback
 for other receiver classes, except that this one frame-buffer clear resets the
 Array length after `mrb_ary_modify` and retains its capacity for the next
