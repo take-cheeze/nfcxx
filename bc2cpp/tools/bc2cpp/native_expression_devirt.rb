@@ -2,10 +2,10 @@
 
 # Extracts a deliberately small set of direct-call expressions from mruby's
 # C method implementations. This is not a C-to-C++ translator: it accepts
-# only supported zero-argument or single-required-argument registrations with
-# a return expression, optionally preceded by simple local statements, whose
-# calls are safe to invoke from the generated call site. Anything else remains
-# on ordinary Ruby dispatch.
+# supported zero-argument or single-required-argument registrations with a
+# safe return expression, plus public frame-independent C implementations
+# that can be called directly. Anything else remains on ordinary Ruby
+# dispatch.
 module NativeExpressionDevirt
   PURE_CALLS = %w[mrb_bool_value mrb_test mrb_true_value mrb_false_value mrb_nil_value mrb_nil_p].freeze
   # These expressions have a proven receiver-independent meaning for every
@@ -22,6 +22,10 @@ module NativeExpressionDevirt
   # private to string.c (and calls a private UTF-8 helper), so generated C++
   # must leave String#size on ordinary dispatch.
   CLASS_EXPRESSION_MACROS = %w[ARY_LEN RSTR_LEN RSTRING_LEN].freeze
+  PUBLIC_API_HEADERS = %w[
+    mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h
+    mruby/string.h mruby/throw.h mruby/variable.h
+  ].freeze
   module_function
 
   def analyze(paths)
@@ -119,6 +123,8 @@ module NativeExpressionDevirt
     implementations = Hash.new { |hash, function| hash[function] = [] }
     opaque_owners = Hash.new { |hash, name| hash[name] = [] }
     target_classes = %w[Array Hash String Float Symbol Range].to_set
+    mruby_root = mruby_core_root(paths)
+    public_mrb_value_functions = public_mrb_value_functions(mruby_root)
 
     Array(paths).each do |path|
       next unless File.file?(path)
@@ -143,6 +149,9 @@ module NativeExpressionDevirt
         class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
       source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+        class_variables[variable] ||= { field: nil, class_name: class_name }
+      end
+      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       tags = {}
@@ -225,7 +234,12 @@ module NativeExpressionDevirt
         body, = brace_body(source, opening)
         arities.each do |arity|
           key = [function, arity]
-          expression = if function == 'mrb_ary_push_m' && arity == 1
+          expression = if arity.zero? && mruby_root && path.start_with?(File.join(mruby_root, '3rd/mruby') + '/') &&
+                          public_mrb_value_functions.include?(function) &&
+                          public_api_method_definition?(source, function, state_arg, self_arg) &&
+                          body && !frame_dependent_body?(body)
+                         "#{function}(M, recv)"
+                       elsif function == 'mrb_ary_push_m' && arity == 1
                          exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
                        else
                          exact_class_return_expression(body, state_arg, self_arg, arity: arity) if body
@@ -399,6 +413,32 @@ module NativeExpressionDevirt
     return unless body.match?(prefix)
 
     '(mrb_ary_push(M, recv, (BC2CPP_ARG0)), recv)'
+  end
+
+  def mruby_core_root(paths)
+    Array(paths).filter_map do |path|
+      match = path.match(%r{\A(.+)/3rd/mruby/})
+      match && match[1]
+    end.first
+  end
+
+  def public_mrb_value_functions(root)
+    return Set.new unless root
+
+    include_dir = File.join(root, '3rd/mruby/include')
+    headers = PUBLIC_API_HEADERS.map { |relative| File.join(include_dir, relative) }.select { |path| File.file?(path) }
+    headers.uniq.flat_map do |header|
+      File.read(header, encoding: 'UTF-8').scan(/\bMRB_API\s+mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*mrb_value\s+\w+\s*\)\s*;/)
+    end.flatten.to_set
+  end
+
+  def public_api_method_definition?(source, function, state_arg, self_arg)
+    source.match?(/\bMRB_API\s+mrb_value\s+#{Regexp.escape(function)}\s*\(\s*mrb_state\s*\*\s*#{Regexp.escape(state_arg)}\s*,\s*mrb_value\s+#{Regexp.escape(self_arg)}\s*\)\s*\{/)
+  end
+
+  def frame_dependent_body?(body)
+    normalized = body.gsub(%r{/\*.*?\*/|//[^\n]*}, ' ')
+    normalized.match?(/\bmrb_get_\w+\s*\(|\b\w+\s*->\s*c\s*->\s*(?:ci|stack)\b/)
   end
 
   def macro_calls(source, macro)

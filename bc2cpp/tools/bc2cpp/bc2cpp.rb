@@ -8573,7 +8573,9 @@ class CodeGen
     # ordinary Ruby dispatch.
     @native_expression_devirt = native_expression_devirt
     # NATIVE_CONTAINER_DEVIRT: class-specific expressions generated from
-    # mruby's ROM registration owner, instance tag, and simple C method body.
+    # mruby's ROM registration owner, instance tag, and C method body. This
+    # includes direct calls to public C method implementations whose source
+    # has no VM-frame reads.
     @native_registered_expressions = native_registered_expressions
     # INTEGER_CONSTANT_PROOF: the set of bare constant names every definition
     # in this whole program agrees is an integer literal (IntegerConstants.
@@ -10018,6 +10020,9 @@ class CodeGen
       owner = entry[:owner]
       expression = entry[:expression].gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
+      source_comment = if name == 'clear' && owner[:class_name] == 'Array' && expression.include?('mrb_ary_clear')
+                         '// ARRAY_CLEAR :clear -- generated from mruby core C'
+                       end
       class_check = if %w[Float Symbol].include?(owner[:class_name])
                       "r#{d} = #{expression};"
                     else
@@ -10028,8 +10033,9 @@ class CodeGen
                           #{fallback.chomp}
                         }
                       CPP
-                    end
+      end
       <<~CPP
+        #{source_comment}
         case #{owner[:tag]}:
           #{class_check.gsub("\n", "\n  ")}
           break;
@@ -23428,15 +23434,6 @@ class CodeGen
             }
         CPP
       end
-
-      return <<~CPP
-          // ARRAY_CLEAR :clear -- exact Array only; preserve subclass and override dispatch
-          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
-            r#{d} = mrb_ary_clear(M, #{recv});
-          } else {
-            #{fallback.chomp}
-          }
-      CPP
     end
 
     if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
