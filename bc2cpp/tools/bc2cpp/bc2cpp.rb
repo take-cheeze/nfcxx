@@ -10012,6 +10012,7 @@ class CodeGen
     entries = @native_registered_expressions[name]
     fallback = dynamic_dispatch_line(d, recv, name, argv)
     return fallback unless entries && !entries.empty?
+    return fallback unless entries.all? { |entry| entry[:arity] == argv.length }
 
     cases = entries.map do |entry|
       owner = entry[:owner]

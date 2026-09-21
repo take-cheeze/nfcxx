@@ -15,7 +15,7 @@ module NativeExpressionDevirt
     '!' => 'mrb_bool_value(!mrb_test(recv))',
   }.freeze
   CLASS_EXPRESSION_CALLS = %w[
-    mrb_bool_value mrb_int_value mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
+    mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
     mrb_str_ptr mrb_range_beg mrb_range_end mrb_float mrb_float_value isfinite isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
@@ -170,7 +170,7 @@ module NativeExpressionDevirt
 
         owners = Array(table_owners[table]).uniq
         owner = owners.one? ? owners.first : nil
-        registrations[name] << { function: function.strip, arity: safe_arity(aspec), owner: owner }
+        registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner }
       end
 
       %w[mrb_define_method_id mrb_define_private_method_id mrb_define_class_method_id
@@ -225,7 +225,12 @@ module NativeExpressionDevirt
         body, = brace_body(source, opening)
         arities.each do |arity|
           key = [function, arity]
-          implementations[key] << (body && exact_class_return_expression(body, state_arg, self_arg, arity: arity))
+          expression = if function == 'mrb_ary_push_m' && arity == 1
+                         exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
+                       else
+                         exact_class_return_expression(body, state_arg, self_arg, arity: arity) if body
+                       end
+          implementations[key] << expression
         end
       end
     end
@@ -377,11 +382,23 @@ module NativeExpressionDevirt
     aspec.strip == 'MRB_ARGS_NONE()'
   end
 
-  def safe_arity(aspec)
+  def safe_arity(aspec, function, name)
     return 0 if no_args?(aspec)
     return 1 if aspec.strip == 'MRB_ARGS_REQ(1)'
+    # Array#push accepts any number of arguments, but its core C wrapper has
+    # a separate one-argument branch that is equivalent to this public helper
+    # call. Other argument counts retain the wrapper's bulk append logic.
+    return 1 if function == 'mrb_ary_push_m' && name == 'push' && aspec.strip == 'MRB_ARGS_ANY()'
 
     nil
+  end
+
+  def exact_array_push_one_argument_expression(body, state_arg, self_arg)
+    body = body.gsub(%r{/\*.*?\*/|//[^\n]*}, ' ').strip
+    prefix = /\Amrb_int\s+argc\s*=\s*mrb_get_argc\s*\(\s*#{Regexp.escape(state_arg)}\s*\)\s*;\s*if\s*\(\s*argc\s*==\s*1\s*\)\s*\{\s*mrb_ary_push\s*\(\s*#{Regexp.escape(state_arg)}\s*,\s*#{Regexp.escape(self_arg)}\s*,\s*mrb_get_argv\s*\(\s*#{Regexp.escape(state_arg)}\s*\)\s*\[\s*0\s*\]\s*\)\s*;\s*return\s+#{Regexp.escape(self_arg)}\s*;\s*\}/m
+    return unless body.match?(prefix)
+
+    '(mrb_ary_push(M, recv, (BC2CPP_ARG0)), recv)'
   end
 
   def macro_calls(source, macro)
