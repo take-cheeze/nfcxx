@@ -1303,6 +1303,8 @@ def resolve_mrb_sym_token(macro, name)
   end
 end
 
+require_relative 'native_expression_devirt'
+
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
 # can only ever resolve to an Integer -- FIXNUM_OPERAND_PROOF's own fifth
@@ -8541,7 +8543,7 @@ class CodeGen
                  hash_element_layout = {}, integer_constants = Set.new,
                  foreign_method_names = nil, outside_tokens = nil,
                   native_name_sources = nil, included_modules = {}, prepended_modules = {},
-                  unknown_mixins = Set.new, analysis_only: false)
+                  unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {})
     @ireps = ireps
     # ENTRY_ARG_CALLSITE_PROOF: every identifier-shaped token appearing
     # anywhere in NATIVE_SRCS or FOREIGN_RUBY_SRCS (outside_world_tokens,
@@ -8563,6 +8565,12 @@ class CodeGen
     # names and @outside_tokens treat their own nil -- prove nothing, decline
     # every site -- rather than assume an unscanned native world is empty.
     @native_name_sources = native_name_sources
+    # NATIVE_EXPRESSION_DEVIRT: a proven single-expression implementation
+    # for a zero-argument C method, extracted from its registration and body.
+    # Only the tiny allowlisted pure-expression subset in
+    # native_expression_devirt.rb is accepted; all other C methods remain
+    # ordinary Ruby dispatch.
+    @native_expression_devirt = native_expression_devirt
     # INTEGER_CONSTANT_PROOF: the set of bare constant names every definition
     # in this whole program agrees is an integer literal (IntegerConstants.
     # analyze, above). Read only by fixnum_proof_source?'s own GETCONST/
@@ -9565,8 +9573,13 @@ class CodeGen
           }
       CPP
     when '!'
-      "  // ! -- native primitive, no lookup needed\n" \
-      "  r#{d} = mrb_bool_value(!mrb_test(#{recv}));\n"
+      expression = @native_expression_devirt[name]
+      if expression
+        "  // ! -- generated from mruby's registered C implementation\n" \
+          "  r#{d} = #{expression.gsub('recv', recv)};\n"
+      else
+        "  r#{d} = mrb_funcall(M, #{recv}, \"!\", 0);\n"
+      end
     when 'nil?'
       "  // nil? -- native primitive, no lookup needed\n" \
       "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
@@ -24022,8 +24035,13 @@ if $PROGRAM_NAME == __FILE__
   # just means the registry stays exactly as unsound as it always was with
   # respect to that native gem, same as before this existed.
   native_name_sources = nil
+  native_expression_devirt = {}
   if ENV['NATIVE_SRCS']
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
+    native_expression_devirt = NativeExpressionDevirt.analyze(native_paths)
+    warn "== generated native C-expression devirtualizations (#{native_expression_devirt.size}) =="
+    native_expression_devirt.sort.each { |name, expression| warn "  C_EXPR :#{name}  (#{expression})" }
+    warn ''
     # ZSUPER_NATIVE_SUPPORT: the per-name source map is the scan, and the
     # flat name set below is derived from its own keys -- so NATIVE_SRCS is
     # still read exactly once, and the two can never disagree about which
@@ -24218,7 +24236,8 @@ if $PROGRAM_NAME == __FILE__
   array_return_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                    annotations, superclass_of, {}, {}, container_constants, {},
                                    Set.new, foreign_methods, nil, nil,
-                                   analysis_only: true).array_return_names
+                                   analysis_only: true,
+                                   native_expression_devirt: native_expression_devirt).array_return_names
   class_poison_reason = {}
   class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
                                          annotated_array_return, poison_reason: class_poison_reason,
@@ -24469,7 +24488,8 @@ if $PROGRAM_NAME == __FILE__
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
                     integer_constants, foreign_methods, outside_tokens, native_name_sources,
-                    included_modules, prepended_modules, unknown_mixins)
+                    included_modules, prepended_modules, unknown_mixins,
+                    native_expression_devirt: native_expression_devirt)
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
