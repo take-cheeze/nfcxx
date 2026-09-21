@@ -316,7 +316,8 @@ methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
 before emulator Fibers start. It also compiles `Optcarrot::PPU#setup_frame`,
 which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber,
 and the base `Optcarrot::Video#tick` that runs after CPU and PPU Fiber work
-returns to `NES#step`.
+returns to `NES#step`. It also compiles `Optcarrot::APU#flush_sound`, called
+only by `APU#vsync` after `PPU#vsync` returns to `NES#step`.
 Its exact-Array `clear` send uses `mrb_ary_clear` with Ruby dispatch fallback
 for other receiver classes, except that this one frame-buffer clear resets the
 Array length after `mrb_ary_modify` and retains its capacity for the next
@@ -417,10 +418,13 @@ keep Ruby dispatch so mruby can produce its normal bignum or error result. The
 coverage report finds 54 such sites.
 The frame-boundary `PPU#setup_frame` also reuses the exact pixel Array's
 backing storage across frames; other exact-Array `clear` sites lower to
-`mrb_ary_clear` under the same exact-class guard.
+`mrb_ary_clear` under the same exact-class guard. In `APU#flush_sound`, the
+output and sample buffers also retain capacity; the exact-Array `concat` site
+copies into the persistent output Array with `mrb_ary_splice` instead of
+replacing it with a shared buffer.
 The coverage report identifies candidates across the standalone Optcarrot
-closed world; other runtime PPU methods are not installed in the benchmark
-while the Fiber crash remains unresolved.
+closed world; other methods reached while the PPU Fiber runs remain
+interpreted while the Fiber crash remains unresolved.
 
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.

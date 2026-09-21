@@ -23088,12 +23088,29 @@ class CodeGen
       CPP
     end
 
+    if name == 'concat' && n == 1 && owner_def&.owner == 'Optcarrot::APU' && owner_def.name == 'flush_sound' &&
+       builtin_class_send_safe?(name, %w[Array])
+      source = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_CONCAT_COPY :concat -- APU output buffer; preserve exact-Array capacity without sharing
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class &&
+              mrb_array_p(#{source}) && mrb_obj_ptr(#{source})->c == M->array_class &&
+              #{recv} != #{source} && ARY_LEN(mrb_ary_ptr(#{recv})) == 0) {
+            r#{d} = mrb_ary_splice(M, #{recv}, 0, 0, #{source});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if name == 'clear' && n.zero? && builtin_class_send_safe?(name, %w[Array])
       fallback = dynamic_dispatch_line(d, recv, name, argv)
-      retain_frame_capacity = owner_def&.owner == 'Optcarrot::PPU' && owner_def.name == 'setup_frame'
+      retain_frame_capacity = (owner_def&.owner == 'Optcarrot::PPU' && owner_def.name == 'setup_frame') ||
+                              (owner_def&.owner == 'Optcarrot::APU' && owner_def.name == 'flush_sound')
       if retain_frame_capacity
         return <<~CPP
-            // ARRAY_CLEAR_RETAIN :clear -- PPU frame buffer; clear length but reuse its backing storage
+            // ARRAY_CLEAR_RETAIN :clear -- frame/audio buffer; clear length but reuse backing storage
             if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
               struct RArray *bc2cpp_frame_pixels = mrb_ary_ptr(#{recv});
               mrb_ary_modify(M, bc2cpp_frame_pixels);
