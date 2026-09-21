@@ -2564,7 +2564,8 @@ class ClassAnnotations
   # token being treated as a class hint on it actually being a class
   # bc2cpp knows about, not just any capitalized word that happens to
   # appear in a comment. `Array<Klass>` and `Hash<Klass>` are read as their
-  # outer container class here;
+  # built-in outer container class here, even when the closed-world registry
+  # has no method definition for that core class;
   # ElementAnnotations independently gates the inner class and supplies it
   # to container-element analysis.
   def self.extract(ireps, registry, known_owners)
@@ -2592,9 +2593,9 @@ class ClassAnnotations
         args = m[1].split(',').map do |token|
           token = token.strip
           container_arg = /\A(Array|Hash)<([A-Za-z_][\w:]*)>\z/.match(token)
-          token = container_arg[1] if container_arg && known_owners.include?(container_arg[1]) &&
+          token = container_arg[1] if container_arg && %w[Array Hash].include?(container_arg[1]) &&
                                       known_owners.include?(container_arg[2])
-          token if known_owners.include?(token)
+          token if known_owners.include?(token) || %w[Array Hash].include?(token)
         end
         next if args.all?(&:nil?)
 
@@ -20607,12 +20608,9 @@ class CodeGen
       # proves the receiver Array or Hash ahead of time (the exact same
       # whole-program facts `.each`/`.map`/... inlining already trusts,
       # just asked at this new call site), skip straight to a single
-      # cheap type-checked fast path instead of the full four-way runtime
-      # gate below -- still a real `mrb_raise` for a non-container tag
-      # (defense in depth against a wrong trace, the same "trust the proof
-      # to pick the fast path, still verify at runtime" shape emit_each_
-      # inline's own `#each` receiver check already established), never a
-      # silent wrong answer. Subclasses use Ruby dispatch to preserve
+      # cheap guarded fast path instead of the full four-way runtime gate
+      # below. A wrong annotation or stale hint still falls back to the
+      # original Ruby `[]` dispatch; subclasses use Ruby dispatch to preserve
       # overridden `[]`/`[]=` methods. A proven Hash needs no index-type
       # branch at all
       # (`mrb_hash_get` already accepts any key type); a proven Array
@@ -20624,10 +20622,7 @@ class CodeGen
       case index_class
       when 'Array'
         <<~CPP
-          if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
-          if (mrb_obj_ptr(r#{d})->c != M->array_class) {
-            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
-          } else if (mrb_integer_p(r#{s})) {
+          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
           } else {
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
@@ -20635,8 +20630,7 @@ class CodeGen
         CPP
       when 'Hash'
         <<~CPP
-          if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
-          if (mrb_obj_ptr(r#{d})->c == M->hash_class) {
+          if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
             r#{d} = mrb_hash_get(M, r#{d}, r#{s});
           } else {
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
@@ -20681,8 +20675,7 @@ class CodeGen
       case index_class
       when 'Array'
         <<~CPP
-          if (!mrb_array_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
-          if (mrb_obj_ptr(r#{s})->c == M->array_class) {
+          if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
             r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
           } else {
             r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
@@ -20690,8 +20683,7 @@ class CodeGen
         CPP
       when 'Hash'
         <<~CPP
-          if (!mrb_hash_p(r#{s})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
-          if (mrb_obj_ptr(r#{s})->c == M->hash_class) {
+          if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
             r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
           } else {
             r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
@@ -20737,10 +20729,7 @@ class CodeGen
       case index_class
       when 'Array'
         <<~CPP
-          if (!mrb_array_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Array receiver for statically-proven indexed access"); }
-          if (mrb_obj_ptr(r#{d})->c != M->array_class) {
-            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
-          } else if (mrb_integer_p(r#{idx_reg})) {
+          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{idx_reg})) {
             mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
             r#{d} = r#{val};
           } else {
@@ -20749,8 +20738,7 @@ class CodeGen
         CPP
       when 'Hash'
         <<~CPP
-          if (!mrb_hash_p(r#{d})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "bc2cpp: expected Hash receiver for statically-proven indexed access"); }
-          if (mrb_obj_ptr(r#{d})->c == M->hash_class) {
+          if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
             mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
             r#{d} = r#{val};
           } else {
