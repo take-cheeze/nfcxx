@@ -16,6 +16,7 @@ module NativeExpressionDevirt
   }.freeze
   CLASS_EXPRESSION_CALLS = %w[
     mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
+    mrb_hash_get
     mrb_str_ptr mrb_range_beg mrb_range_end mrb_float mrb_float_value mrb_as_int mrb_ary_entry isfinite isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
@@ -192,8 +193,10 @@ module NativeExpressionDevirt
         registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner }
       end
 
-      %w[mrb_define_method_id mrb_define_private_method_id mrb_define_class_method_id
-         mrb_define_module_function_id mrb_define_singleton_method_id].each do |macro|
+      # Singleton/class methods live on the class object's method table and
+      # cannot shadow the same name in an instance receiver's method lookup.
+      # Only instance registration forms belong in this ambiguity set.
+      %w[mrb_define_method_id mrb_define_private_method_id].each do |macro|
         macro_calls(source, macro).each do |arguments|
           next unless arguments.length == 5
 
@@ -201,8 +204,7 @@ module NativeExpressionDevirt
           opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
         end
       end
-      %w[mrb_define_method mrb_define_private_method mrb_define_class_method
-         mrb_define_module_function mrb_define_singleton_method].each do |macro|
+      %w[mrb_define_method mrb_define_private_method].each do |macro|
         macro_calls(source, macro).each do |arguments|
           next unless arguments.length == 5 && arguments[2].start_with?('"')
 
