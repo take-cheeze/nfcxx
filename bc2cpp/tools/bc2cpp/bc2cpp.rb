@@ -2283,6 +2283,45 @@ class IvarLayout
         # arithmetic ops (see CodeGen#compile_insn) -- their *destination*
         # register holds a Fixnum on the fast path taken in this prototype.
         return :fixnum
+      when 'SUB', 'MUL'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+
+        # FIXNUM_SUBMUL_EMBED_SUPPORT: unlike ADD/ADDI just above (trusted
+        # unconditionally, a narrower pre-existing claim this file already
+        # ships and this change does not touch), SUB and MUL are recognized
+        # here only with a full recursive proof on both operands. Real
+        # mruby's OP_SUB/OP_MUL (src/vm.c's own OP_MATH macro) dispatch on
+        # BOTH operands' runtime types -- a Float combination produces a
+        # Float, not a Fixnum -- so trusting the opcode alone the way
+        # ADD/ADDI does would be unsound here. Once both operands are
+        # themselves proven Fixnum (recursively, the same backward trace),
+        # `mrb_fixnum_p` is unconditionally true at this site, so
+        # compile_insn's own generated fast path (`r_d = mrb_fixnum_value(
+        # mrb_fixnum(r_d) OP mrb_fixnum(r_s))`) is the only branch ever
+        # reached -- always Fixnum-tagged. A numeric overflow could still
+        # make the *value* wrong (the same pre-existing, unguarded risk
+        # ADD/ADDI's own fast path already has), but the ivar's *type*
+        # stays sound, which is all embedding needs -- and SETIV's own
+        # generated write for an embedded ivar re-checks the runtime type
+        # before storing into the struct field, raising TypeError rather
+        # than corrupting memory, if this proof were ever somehow wrong.
+        s = insn.args[/\(R(\d+)\)/, 1]
+        if s
+          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+          right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+          return :fixnum if left == :fixnum && right == :fixnum
+        end
+        return UNKNOWN
+      when 'SUBI'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+
+        # Same FIXNUM_SUBMUL_EMBED_SUPPORT reasoning as SUB/MUL above,
+        # applied to the immediate form: only the destination register's
+        # own prior value needs proving (the literal operand is a Fixnum
+        # by construction, same as ADDI's own FIXNUM_OPERAND_PROOF).
+        return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry)
       when 'GETIV'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
