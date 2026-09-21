@@ -267,7 +267,26 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     'MRBC' => MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
     'NATIVE_SRCS' => Shellwords.join(native_sources),
-    'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources)
+    'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources),
+    # Every other real bc2cpp build integration in this repo sets this
+    # (mruby-lcf-compiled/mrbgem.rake, mruby-rgss-compiled/mrbgem.rake,
+    # mruby-rpg2k-compiled/mrbgem.rake, tools/bc2cpp/wio_registered_methods.rb,
+    # even this same directory's own optcarrot_bc2cpp_coverage_report.rb for
+    # its "shipped" run) -- this file was the one holdout, and it cost a real
+    # CI failure: a method inside one of the still-compiled classes
+    # (Config/Opt/ROM) hit bc2cpp's honest `#error unhandled opcode
+    # BLOCK`/`SENDB` marker (an unmodeled block/`send`-with-block construct
+    # bc2cpp can't safely translate), which -- without SKIP_UNSUPPORTED=1 --
+    # bc2cpp leaves *in* the generated C++ instead of quietly dropping the
+    # one method, turning an isolated, already-documented "this method stays
+    # interpreted" fallback into a hard C++ compile failure for the whole
+    # probe. With it set, exactly as everywhere else in this codebase, that
+    # one method silently falls back to interpreted bytecode (still correct
+    # -- optcarrot's checksum only depends on behavior, not on which methods
+    # got compiled) and the build no longer depends on every reachable
+    # method inside a compiled class happening to fit bc2cpp's supported
+    # subset.
+    'SKIP_UNSUPPORTED' => '1'
   }
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
   # Excludes these five classes themselves, not just PPU's nested helper
