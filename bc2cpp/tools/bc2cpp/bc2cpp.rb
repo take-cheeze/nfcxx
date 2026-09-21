@@ -9295,7 +9295,28 @@ class CodeGen
     defs = @registry[name]
     return nil unless defs && defs.size >= 2
 
+    # An owner with two definitions of this name (an attr_reader later
+    # redefined by a `def`, or the reverse) never joins the chain: which one
+    # is live depends on definition order, and the first `if` to match would
+    # otherwise win regardless.
+    repeated_owners = defs.group_by(&:owner).select { |_, group| group.size > 1 }.keys
     candidates = defs.select do |t|
+      next false if repeated_owners.include?(t.owner)
+
+      # POLY_SMALL_N_ACCESSOR: a real attr_reader/attr_writer/attr_accessor
+      # definition (MethodDef kind :ivar_accessor -- see that field's own
+      # comment) has no irep and no `_impl`, so it used to keep the whole
+      # name on plain `mrb_funcall` (`db`, `name`, `hp`, `id`, ... -- every
+      # name backed by two or more accessors and no other bytecode def).
+      # It joins the chain as a bare mrb_iv_get/mrb_iv_set behind the same
+      # exact-class guard IVAR_ACCESSOR_DEVIRT already uses; the shape
+      # check is the accessor's real arity (0 for a reader, 1 for a
+      # writer). It needs no ONLY_OWNERS gate, having no emitted function.
+      if t.kind == :ivar_accessor && t.irep.nil?
+        next false if t.owner.end_with?('.singleton')
+
+        next n == (name.end_with?('=') ? 1 : 0)
+      end
       next false unless t.irep
       # SINGLETON_OWNER_EXCLUSION: a `.singleton`-suffixed owner (bc2cpp's
       # own naming for `def self.foo`/`class << self` methods) can never
@@ -9338,9 +9359,21 @@ class CodeGen
     return nil unless candidates
 
     branches = candidates.map do |target|
-      impl = cpp_name(target.owner, target.name) + '_impl'
       check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
-      call = "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+      call = if target.kind == :ivar_accessor && target.irep.nil?
+               # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
+               # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c); the writer
+               # returns the assigned value, not the ivar read back.
+               if name.end_with?('=')
+                 "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{name[0..-2]}\"), #{argv.first});\n    " \
+                   "r#{d} = #{argv.first};"
+               else
+                 "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
+               end
+             else
+               impl = cpp_name(target.owner, target.name) + '_impl'
+               "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+             end
       "if (#{check}) {\n    #{call}\n  } else "
     end
     owners_note = candidates.map(&:owner).join(', ')
