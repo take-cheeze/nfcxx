@@ -17,7 +17,8 @@ module NativeExpressionDevirt
   CLASS_EXPRESSION_CALLS = %w[
     mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
     mrb_hash_get
-    mrb_str_ptr mrb_range_beg mrb_range_end mrb_float mrb_float_value mrb_as_int mrb_ary_entry isfinite isnan signbit
+    mrb_str_ptr mrb_range_beg mrb_range_end mrb_range_excl_p mrb_float mrb_float_value mrb_fixnum_value mrb_nil_value
+    mrb_as_int mrb_ary_entry isfinite isinf isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
   # private to string.c (and calls a private UTF-8 helper), so generated C++
@@ -333,7 +334,7 @@ module NativeExpressionDevirt
     if arity == 1
       body = body.gsub(/\bmrb_get_arg1\s*\(\s*#{Regexp.escape(state_arg)}\s*\)/, 'BC2CPP_ARG0')
     end
-    conditional = body.match(/\A(.*?)if\s*\((.+?)\)\s*return\s+(.+?)\s*;\s*return\s+(.+?)\s*;\s*\z/m)
+    conditional = body.match(/\A(.*?)if\s*\((.+?)\)\s*\{?\s*return\s+(.+?)\s*;\s*\}?\s*return\s+(.+?)\s*;\s*\z/m)
     match = conditional || body.match(/\A(.*?)return\s+(.+?)\s*;\s*\z/m)
     return unless match
 
