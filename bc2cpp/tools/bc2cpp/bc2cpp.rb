@@ -23090,6 +23090,21 @@ class CodeGen
 
     if name == 'clear' && n.zero? && builtin_class_send_safe?(name, %w[Array])
       fallback = dynamic_dispatch_line(d, recv, name, argv)
+      retain_frame_capacity = owner_def&.owner == 'Optcarrot::PPU' && owner_def.name == 'setup_frame'
+      if retain_frame_capacity
+        return <<~CPP
+            // ARRAY_CLEAR_RETAIN :clear -- PPU frame buffer; clear length but reuse its backing storage
+            if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+              struct RArray *bc2cpp_frame_pixels = mrb_ary_ptr(#{recv});
+              mrb_ary_modify(M, bc2cpp_frame_pixels);
+              ARY_SET_LEN(bc2cpp_frame_pixels, 0);
+              r#{d} = #{recv};
+            } else {
+              #{fallback.chomp}
+            }
+        CPP
+      end
+
       return <<~CPP
           // ARRAY_CLEAR :clear -- exact Array only; preserve subclass and override dispatch
           if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {

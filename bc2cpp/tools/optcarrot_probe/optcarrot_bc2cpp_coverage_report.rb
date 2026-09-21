@@ -200,6 +200,7 @@ array_slice_write_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_SLICE_WRITE 
 array_prefix_slice_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_PREFIX_SLICE_WRITE :slice!/).size
 array_push_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_PUSH :<</).size
 array_clear_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_CLEAR :clear/).size
+array_clear_reuse_fast_paths = @shipped_stdout.scan(/^\s*\/\/ ARRAY_CLEAR_RETAIN :clear/).size
 fixnum_binary_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_BINARY :(?:%|&|\||\^)/).size
 fixnum_compare_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_COMPARE :(?:<|<=|>|>=)/).size
 fixnum_arithmetic_fast_paths = @shipped_stdout.scan(/^\s*\/\/ FIXNUM_ARITHMETIC :(?:\+|-|\*)/).size
@@ -212,6 +213,7 @@ report << "  guarded exact-Array slice writes lowered to mrb_ary_splice: #{array
 report << "  guarded exact-Array prefix slice! calls lowered to array APIs: #{array_prefix_slice_fast_paths}\n"
 report << "  guarded exact-Array pushes lowered to mrb_ary_push: #{array_push_fast_paths}\n"
 report << "  guarded exact-Array clear calls lowered to mrb_ary_clear: #{array_clear_fast_paths}\n"
+report << "  PPU frame-buffer clears retaining backing storage: #{array_clear_reuse_fast_paths}\n"
 report << "  guarded Fixnum modulo/bitwise sends lowered to C arithmetic: #{fixnum_binary_fast_paths}\n"
 report << "  guarded Fixnum comparisons lowered to C comparisons: #{fixnum_compare_fast_paths}\n"
 report << "  guarded Fixnum +, -, * sends lowered to mruby numeric helpers: #{fixnum_arithmetic_fast_paths}\n"

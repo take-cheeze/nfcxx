@@ -316,7 +316,11 @@ methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
 before emulator Fibers start. It also compiles `Optcarrot::PPU#setup_frame`,
 which `NES#step` calls synchronously before `CPU#run` can resume the PPU Fiber.
 Its exact-Array `clear` send uses `mrb_ary_clear` with Ruby dispatch fallback
-for other receiver classes. Emulator runtime methods remain interpreted: CI
+for other receiver classes, except that this one frame-buffer clear resets the
+Array length after `mrb_ary_modify` and retains its capacity for the next
+frame. The pixel Array is synchronously consumed by `Video#tick` before the
+next `NES#step`, and mruby's GC scans only the live Array length. Emulator
+runtime methods remain interpreted: CI
 reproduced a SIGSEGV when selected PPU leaf
 methods ran on the Fiber path, even though those methods return before the next
 yield. The benchmark still uses upstream emulation logic; only the method
@@ -405,8 +409,9 @@ method is uncontested; non-Fixnums retain Ruby dispatch. There are 418 such
 arithmetic sites. The report also finds 118 Fixnum `<`, `<=`, `>`, and `>=`
 comparisons, which use direct C comparisons under the same guarded dispatch
 fallback.
-The frame-boundary `PPU#setup_frame` also contributes exact-Array `clear`
-sites lowered to `mrb_ary_clear` under the same exact-class guard.
+The frame-boundary `PPU#setup_frame` also reuses the exact pixel Array's
+backing storage across frames; other exact-Array `clear` sites lower to
+`mrb_ary_clear` under the same exact-class guard.
 The coverage report identifies candidates across the standalone Optcarrot
 closed world; other runtime PPU methods are not installed in the benchmark
 while the Fiber crash remains unresolved.
