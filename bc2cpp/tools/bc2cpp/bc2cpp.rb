@@ -21424,16 +21424,11 @@ class CodeGen
     # `MRB_NO_FLOAT` builds compile out both the VM's float arms and ours.
     # OP_CMP uses a real dynamic send for non-numeric operands. Forward those
     # sends through compile_send's existing MONO/TYPED resolver so compiled
-    # operator methods can be called directly. EQ keeps a dedicated fallback
-    # so mrb_equal's identity/type check runs before Ruby dispatch, while the
-    # actual method still handles mixed numeric values and overrides.
-    fallback = if op == 'EQ'
-                 "  // EQ_IDENTITY :== -- match mrb_equal's identity/type shortcut before Ruby dispatch\n" \
-                   "  r#{d} = mrb_bool_value(mrb_obj_eq(M, r#{d}, r#{s}) || " \
-                   "mrb_test(mrb_funcall(M, r#{d}, \"#{sym}\", 1, r#{s})));\n"
-               else
-                 compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
-               end
+    # operator methods can be called directly. EQ reaches this fallback only
+    # after the outer mrb_obj_eq identity shortcut has already failed (the
+    # VM's OP_EQ order), so it takes the same resolver as the other
+    # comparisons and stores the `==` method's own result like OP_CMP does.
+    fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
     no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
@@ -21463,6 +21458,9 @@ class CodeGen
       <<~CPP
         if (mrb_obj_eq(M, r#{d}, r#{s})) {
           r#{d} = mrb_true_value();
+        } else if (mrb_symbol_p(r#{d})) {
+          // OP_EQ: a symbol receiver that is not identical is unequal, no send.
+          r#{d} = mrb_false_value();
         } else {
           // Numeric tag pair handling mirrors the pinned mruby OP_CMP.
           #{numeric_dispatch}
