@@ -311,9 +311,10 @@ cleanly:
 With those fixes, the 180-frame run completes with checksum `59662`, matching
 the interpreted run and CRuby. CI still showed SIGSEGVs after excluding CPU,
 PPU, and the explicit NES Fiber boundaries, so the probe compiles setup
-methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus
-`Optcarrot::ROM#initialize` before emulator Fibers start. Emulator runtime
-methods remain interpreted: CI reproduced a SIGSEGV when selected PPU leaf
+methods on `Optcarrot::Config` and `Optcarrot::Opt`, plus the
+`Optcarrot::ROM.singleton#load` and `Optcarrot::ROM#initialize` setup methods
+before emulator Fibers start. Emulator runtime methods remain interpreted: CI
+reproduced a SIGSEGV when selected PPU leaf
 methods ran on the Fiber path, even though those methods return before the next
 yield. The benchmark still uses upstream emulation logic; only the method
 registration set changes. It runs the same ROM and checksums under all three

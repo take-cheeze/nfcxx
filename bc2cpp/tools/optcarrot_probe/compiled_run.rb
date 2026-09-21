@@ -19,9 +19,12 @@ ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 # Emulator runtime methods remain interpreted because compiled methods reached
 # from the PPU Fiber can crash, even when those methods do not yield.
 FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
-# This initializer runs while NES is assembled, before its emulator Fibers
-# start; including it exercises the generated mapper slice-write fast paths.
-FIBER_SAFE_SETUP_METHODS = { 'Optcarrot::ROM' => %w[initialize] }.freeze
+# ROM loading and initialization run while NES is assembled, before emulator
+# Fibers start; these methods exercise the generated loader fast paths.
+FIBER_SAFE_SETUP_METHODS = {
+  'Optcarrot::ROM' => %w[initialize],
+  'Optcarrot::ROM.singleton' => %w[load]
+}.freeze
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
@@ -248,7 +251,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods and ROM#initialize are compiled; emulator runtime methods remain interpreted because compiled methods reached from the PPU Fiber can crash.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, and ROM#initialize are compiled; emulator runtime methods remain interpreted because compiled methods reached from the PPU Fiber can crash.'
     end
   end
 
