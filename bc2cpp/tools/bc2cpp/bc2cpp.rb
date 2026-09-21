@@ -21329,8 +21329,9 @@ class CodeGen
     end
   end
 
-  # EQ/LT/LE/GT/GE all share OP_CMP's own real shape (src/vm.c): a fixnum-
-  # fixnum fast path compares directly and produces a real C++ bool
+  # EQ/LT/LE/GT/GE all share OP_CMP's own real shape (3rd/mruby/src/vm.c):
+  # Integer/Integer and, when floats are enabled, Integer/Float, Float/Integer,
+  # and Float/Float operands compare directly and produce a real C++ bool
   # converted to mrb_value. For EQ's other operand shapes, the fallback
   # preserves mrb_equal's object-equality shortcut with mrb_obj_eq before
   # dispatching `==`. This both avoids a method call for equal immediate or
@@ -21351,7 +21352,17 @@ class CodeGen
       return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
     end
 
-    # OP_CMP uses a real dynamic send for non-Fixnum operands. Forward those
+    # OP_CMP's `MRB_TT_INTEGER` is the full built-in Integer tag (not the
+    # narrower Fixnum proof above), and its float-enabled arm also compares
+    # all three Integer/Float combinations natively. Mirror those exact type
+    # pairs. The tag checks must precede mrb_integer/mrb_float: like the VM's
+    # accessors, those functions are only valid for their matching value tag.
+    #
+    # EQ is special: OP_EQ performs its object-identity shortcut before
+    # reaching OP_CMP. Keep that observable ordering, including for NaN and
+    # symbols, while using native numeric comparison only after identity fails.
+    # `MRB_NO_FLOAT` builds compile out both the VM's float arms and ours.
+    # OP_CMP uses a real dynamic send for non-numeric operands. Forward those
     # sends through compile_send's existing MONO/TYPED resolver so compiled
     # operator methods can be called directly. EQ keeps a dedicated fallback
     # so mrb_equal's identity/type check runs before Ruby dispatch, while the
@@ -21364,13 +21375,42 @@ class CodeGen
                  compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
                end
 
-    <<~CPP
-      if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-        r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));
-      } else {
+    integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
+    no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
+    numeric_dispatch = <<~CPP
+      if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+      #ifdef MRB_NO_FLOAT
+        r#{d} = mrb_bool_value(#{no_float_accessor});
+      #else
+        r#{d} = mrb_bool_value(#{integer_accessor});
+      #endif
+      }
+      #ifndef MRB_NO_FLOAT
+      else if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+        r#{d} = mrb_bool_value(mrb_integer(r#{d}) #{sym} mrb_float(r#{s}));
+      } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+        r#{d} = mrb_bool_value(mrb_float(r#{d}) #{sym} mrb_integer(r#{s}));
+      } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+        r#{d} = mrb_bool_value(mrb_float(r#{d}) #{sym} mrb_float(r#{s}));
+      }
+      #endif
+      else {
         #{fallback}
       }
     CPP
+
+    if op == 'EQ'
+      <<~CPP
+        if (mrb_obj_eq(M, r#{d}, r#{s})) {
+          r#{d} = mrb_true_value();
+        } else {
+          // Numeric tag pair handling mirrors the pinned mruby OP_CMP.
+          #{numeric_dispatch}
+        }
+      CPP
+    else
+      "  // Numeric tag pair handling mirrors the pinned mruby OP_CMP.\n#{numeric_dispatch}"
+    end
   end
 
   # Operator opcodes fall back to an ordinary one-argument method send
