@@ -16,55 +16,84 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-# Optcarrot::CPU/PPU/NES were once excluded here because compiled methods
-# reached from the PPU Fiber could crash. CPU and NES are confirmed safe (see
-# tools/optcarrot_probe/README.md's "Compiled runtime check" section) and stay
-# compiled. Optcarrot::PPU itself is deliberately NOT in this list right now
-# -- re-checking it (as part of the gc_gray_rescan investigation this file's
-# own history references) found a real, 100%-reproducible failure, not the
-# old SIGSEGV: `PPU#run`'s `@fiber ||= Fiber.new { ... }` compiles through the
+# Optcarrot::CPU/PPU/NES/Video/APU are deliberately NOT in this list.
+# `Optcarrot::PPU` never has been, for its own reason (below). The other four
+# were added over several commits (see git history around "Compile Optcarrot
+# CPU/PPU/NES in the bc2cpp probe" and "Compile Optcarrot base video frame
+# hook") on the strength of a README.md "Compiled runtime check" that turned
+# out not to exercise the real, PPU-Fiber-driven `nes.run` frame loop for
+# long enough -- registering any of them reintroduces a real, CI-reproducible
+# SIGSEGV, confirmed down to a single class with nothing else involved:
+# `Optcarrot::Video#tick` alone (just `Optcarrot::Config`/`Optcarrot::Opt`
+# plus the setup methods below also compiled -- no `CPU`/`NES`/`PPU`/`APU`)
+# crashes a plain, un-devirtualized, interpreter-to-registered-compiled-
+# method call (`gdb bt`: `Optcarrot__Video_tick_impl` called directly from
+# `mrb_vm_exec`, no devirtualization chain, no Fiber resume in between). It
+# takes exactly four `Video#tick` calls to reproduce, every time: `@times`
+# (a plain, non-embedded Array ivar) grows by one element per call, and
+# mruby's own embedded-array storage
+# (`MRB_ARY_EMBED_LEN_MAX == sizeof(void*)*3/sizeof(mrb_value) == 3` on this
+# word-boxed 64-bit build) holds the first three elements inline; the fourth
+# push is what forces mruby's `mrb_ary_push`/`ary_expand_capa` to de-embed
+# the array onto the heap. `gdb`, reading the live process at the crash,
+# confirms `@times`' own `RArray` is completely intact at that moment (valid
+# `flags`/`len`/`capa`/`ptr`, real word-boxed floats at the pointed-to
+# address) -- the fault is `bc2cpp`'s own generated code for the `.last`
+# ternary (`ARY_LEN(mrb_ary_ptr(r3)) > 0 ? ARY_PTR(mrb_ary_ptr(r3))[...] :
+# nil`) reading a *stale* value out of a register (`r13` in the build this
+# was diagnosed against) that an earlier `mrb_val_union(r3)` call had cached
+# for the embed-vs-heap branch, while a *different*, freshly issued
+# `mrb_val_union(r3)` call for the same `r3` in the same statement (feeding
+# a different register) correctly returns the array's real, current,
+# non-null pointer moments later. `mrb_val_union` is a pure, side-effect-free
+# reinterpret-cast (`mruby/boxing_word.h`), so two calls with the same input
+# must return the same bits; getting a stale zero from one of them and the
+# correct pointer from the other, for the identical expression, points to a
+# real bc2cpp code-generation defect in how the embedded-vs-heap array branch
+# gets cached and reused across what should be equivalent re-evaluations --
+# not (as earlier revisions of this comment guessed) anything specific to
+# devirtualization, Fiber adjacency, this session's own ivar-embedding
+# changes (reproduces with the pre-session bc2cpp.rb too), `Optcarrot::APU`
+# being compiled (reproduces with it excluded), or
+# `patches/mruby-nomemoryerror-reentrant-alloc.patch` (reproduces with and
+# without it applied). Fixing it needs a bc2cpp.rb change to that ARY_LEN/
+# ARY_PTR codegen (or an audit of every other place it reuses a cached
+# `mrb_val_union` result across a call boundary) and re-verification against
+# the real 180-frame `nes.run` loop, not just a short smoke check -- out of
+# this file's own scope. Re-enabling `Optcarrot::CPU`/`Optcarrot::NES`/
+# `Optcarrot::Video`/`Optcarrot::APU`/`Optcarrot::PPU` here needs that fix
+# landed first, not just re-adding the names. `Optcarrot::PPU` itself
+# additionally has its own, separately diagnosed and unrelated failure --
+# re-checking it (as part of the gc_gray_rescan investigation this file's own
+# history references) found a real, 100%-reproducible failure, not the old
+# SIGSEGV: `PPU#run`'s `@fiber ||= Fiber.new { ... }` compiles through the
 # same BLOCK_FALLBACK path every other block literal uses (`bc2cpp.rb`'s
 # `emit_block_fallback_glue`), which wraps the block body as a cfunc-backed
-# RProc via `mrb_proc_new_cfunc_with_env` -- correct for `each`/`map`/`sub`/...
-# (none of which care whether the RProc they're handed is cfunc- or
+# RProc via `mrb_proc_new_cfunc_with_env` -- correct for `each`/`map`/
+# `sub`/... (none of which care whether the RProc they're handed is cfunc- or
 # bytecode-backed), but `Fiber.new` is not one of those: mruby's own
 # `init_fiber` (3rd/mruby/mrbgems/mruby-fiber/src/fiber.c) checks
 # `MRB_PROC_CFUNC_P(p)` and unconditionally raises `FiberError: tried to
 # create Fiber from C defined method` rather than dereference a `body.irep`
-# that a cfunc-backed proc doesn't have. This is deterministic C logic, not a
-# timing- or memory-layout-dependent crash: every run of the 180-frame
-# benchmark with PPU compiled hits it the instant `PPU#run` is first called
-# -- confirmed both under GPROF=1 and with a plain, non-gprof
-# `compiled_run.rb` run, and by reading the generated C++ directly (the
-# `// BLOCK_FALLBACK :new` comment bc2cpp itself emits right above the
-# `mrb_proc_new_cfunc_with_env` call that becomes `Fiber.new`'s block
-# argument). Fixing it needs bc2cpp to emit a real, bytecode-backed Proc
-# specifically for a block passed to `Fiber.new` (or to recognize that call
-# shape and keep the containing method interpreted instead of devirtualizing
-# into it) -- a bc2cpp.rb code-generation change, out of this file's own
-# scope. Re-enabling `Optcarrot::PPU` here
-# needs that fix landed and the same re-verification `Optcarrot::CPU`/`NES`
-# got, not just re-adding the name.
-FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt Optcarrot::CPU Optcarrot::NES].freeze
+# that a cfunc-backed proc doesn't have; that needs its own separate bc2cpp
+# fix (a real, bytecode-backed Proc for a block passed to `Fiber.new`).
+FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt].freeze
 # ROM loading and initialization run while NES is assembled, before emulator
 # Fibers start; these methods exercise the generated loader fast paths.
 FIBER_SAFE_SETUP_METHODS = {
   'Optcarrot::ROM' => %w[initialize],
   'Optcarrot::ROM.singleton' => %w[load]
 }.freeze
-# These methods run synchronously outside the PPU Fiber's execution path.
-# 'Optcarrot::PPU' => %w[setup_frame] used to live here (PPU#setup_frame runs
-# outside the Fiber, so it was always fine on its own) but is redundant now
-# that Optcarrot::PPU is entirely excluded from ONLY_OWNERS above -- it never
-# gets a compiled entry point to match against, so keeping the row here would
-# be a silent no-op.
-FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
-  # NES#step calls Video#tick after CPU#run and all PPU Fiber resumes return.
-  'Optcarrot::Video' => %w[tick],
-  # NES#step calls APU#vsync after PPU#vsync returns; its audio clock update
-  # and sample bookkeeping stay outside the PPU Fiber execution path.
-  'Optcarrot::APU' => %w[flush_sound vsync]
-}.freeze
+# 'Optcarrot::PPU' => %w[setup_frame] and 'Optcarrot::Video' => %w[tick] /
+# 'Optcarrot::APU' => %w[flush_sound vsync] used to live here. PPU's own row
+# has been redundant since PPU was excluded from ONLY_OWNERS entirely (see
+# the FiberError above -- it never gets a compiled entry point to match
+# against). Video's and APU's rows are gone because those two classes are
+# now excluded from ONLY_OWNERS too, for the SIGSEGV documented above --
+# keeping either row would again be a silent no-op, and re-adding a row here
+# alone would not be enough to re-enable them (ONLY_OWNERS controls
+# compilation; this hash only controls registration of what's compiled).
+FIBER_SAFE_FRAME_BOUNDARY_METHODS = {}.freeze
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
@@ -241,19 +270,24 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources)
   }
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
-  # Excludes Optcarrot::PPU itself, not just its nested helper classes: a
-  # devirtualized call (a direct C++ call from one compiled method's body
-  # into another's) reaches a compiled `_impl` function regardless of
-  # whether that method is ever registered via FIBER_SAFE_OWNERS/emit_register
-  # below -- registration only controls Ruby-level dispatch, not whole-program
-  # devirtualization. So leaving `Optcarrot::PPU` itself in ONLY_OWNERS would
-  # still compile (and let other compiled code devirtualize into)
-  # `Optcarrot__PPU_run_impl`, hitting the FIBER_SAFE_OWNERS comment's own
-  # FiberError even though PPU is no longer "installed." See that comment for
-  # the full mechanism.
+  # Excludes these five classes themselves, not just PPU's nested helper
+  # classes: a devirtualized call (a direct C++ call from one compiled
+  # method's body into another's) reaches a compiled `_impl` function
+  # regardless of whether that method is ever registered via
+  # FIBER_SAFE_OWNERS/emit_register below -- registration only controls
+  # Ruby-level dispatch, not whole-program devirtualization. So leaving any
+  # of them in ONLY_OWNERS would still compile (and let other compiled code
+  # devirtualize into) their `_impl`s, hitting the FIBER_SAFE_OWNERS
+  # comment's own SIGSEGV/FiberError even though none of them are
+  # "installed." See that comment for the full mechanism and the evidence
+  # behind each exclusion.
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
-  end.uniq.reject { |owner| owner.start_with?('Optcarrot::PPU') }
+  end.uniq.reject do |owner|
+    owner.start_with?('Optcarrot::PPU') || owner.start_with?('Optcarrot::CPU') ||
+      owner.start_with?('Optcarrot::NES') || owner.start_with?('Optcarrot::Video') ||
+      owner.start_with?('Optcarrot::APU')
+  end
   compiled_cpp, diagnostics = run_bc2cpp(sources, base_env.merge(
     'OUT_DIR' => temp,
     'ONLY_OWNERS' => owners.join(',')

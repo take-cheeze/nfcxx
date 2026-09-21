@@ -18,21 +18,20 @@ using its real, unmodified upstream source, and produces the exact same
 checksum as unmodified CRuby (`59662`), so the emulation itself is
 behaviorally correct, not just crash-free.
 
-Latest local 180-frame wall times from the comparative runner: CRuby 4.82s
-(37.3 frames/s), interpreted mruby 59.60s (3.0 frames/s), and bc2cpp 67.09s
-(2.7 frames/s). All three produce checksum `59662`. Timings vary by machine;
-CI publishes each run's numbers and relative slowdown in the job summary. The
-compiled result is still slower than interpreted mruby, and by a slightly
-wider relative margin than before: a same-machine, same-session run of the
-prior configuration (`Optcarrot::Config`/`Optcarrot::Opt` plus setup methods
-only, 60 frames) measured bc2cpp about 7.0% slower than interpreted mruby;
-this configuration measures about 12.6% slower. `compiled_run.rb` now
-compiles and installs `Optcarrot::CPU`, `Optcarrot::PPU` (the whole Fiber-driven
-pixel-rendering loop included), and `Optcarrot::NES` -- previously excluded on
-suspicion of a Fiber-path crash that is no longer reproducible, see "Compiled
-runtime check" below -- but the dispatch and ivar-lookup overhead that
-dominates their runtime is not removed by compiling them, so this is not yet a
-speedup.
+Latest local 180-frame wall times from the comparative runner: CRuby ~4.9s,
+interpreted mruby ~59s, and bc2cpp ~60-67s (varies by machine); CI publishes
+each run's numbers and relative slowdown in the job summary. All three
+produce checksum `59662`. `compiled_run.rb` compiles and installs only
+`Optcarrot::Config`/`Optcarrot::Opt` plus the `Optcarrot::ROM` setup methods
+(24 methods) -- `Optcarrot::CPU`/`PPU`/`NES`/`Video`/`APU` were compiled and
+installed for a while (see "Compiled runtime check" below for the numbers
+from that period), but that reintroduced a real, CI-reproducible SIGSEGV a
+short local smoke run does not exercise long enough to hit; see that
+section's own "Update (CI SIGSEGV investigation)" for the bc2cpp
+code-generation bug this was bisected down to and why those five classes are
+excluded again. Getting the emulator's own compiled hot path back needs that
+bug (and the separate `PPU`/`Fiber.new` one, also documented there) fixed
+first.
 
 Getting there took:
 
@@ -409,6 +408,48 @@ for `Optcarrot::PPU` specifically -- that configuration is currently broken
 by bug 2, full stop, regardless of bug 1 -- so treat this section's own
 PPU-compiled numbers as historical (true when written, not currently
 reproducible) rather than re-verified.
+
+**Update (CI SIGSEGV investigation)**: the "confirmed safe" `Optcarrot::CPU`/
+`NES` claim above, and the `Optcarrot::Video`/`APU` frame-boundary hooks it
+was extended with, did not hold up against CI's own 180-frame run -- CI
+started failing with a plain SIGSEGV in this job. Re-running the exact CI
+configuration reproduced it locally, `gdb`-confirmed a null `DATA_PTR` inside
+`Optcarrot__APU_vsync_impl`/`Optcarrot__APU_clock_frame_counter_impl` called
+directly from `Optcarrot__NES_step_impl` -- a different symptom from bug 1
+above (that one is fixed and stays fixed), reached only through `NES#run`'s
+real, Fiber-driven multi-frame loop, which the shorter local smoke checks
+this section otherwise relies on do not exercise long enough to hit.
+Excluding `Optcarrot::APU` from `ONLY_OWNERS` (matching how `Optcarrot::PPU`
+is already excluded) did not fix it: with `Optcarrot::APU` also excluded, the
+same 180-frame run instead segfaults inside `Optcarrot__Video_tick_impl`
+(`@times.last` on a plain, non-embedded Array ivar) -- and bisecting that
+crash down (see the long comment on `FIBER_SAFE_OWNERS` in
+`compiled_run.rb`) found it reproduces from `Optcarrot::Video` *alone*, no
+`CPU`/`NES`/`PPU`/`APU` compiled at all, no devirtualization involved: a
+plain interpreter call into the registered, compiled `Video#tick` crashes on
+its 4th invocation every time, exactly when mruby's own embedded-array
+storage (3 elements inline on this word-boxed 64-bit build) overflows onto
+the heap -- `gdb` traced it to bc2cpp's generated `ARY_LEN`/`ARY_PTR` codegen
+for `Array#last` reading a stale cached pointer from one `mrb_val_union(r3)`
+call while a different call for the identical `r3`, moments later, correctly
+returns the array's real, current pointer; that is a bc2cpp code-generation
+defect, not anything specific to Fiber adjacency, this repo's ivar-embedding
+work, or `patches/mruby-nomemoryerror-reentrant-alloc.patch` (checked and
+ruled out, along with the pre-session `bc2cpp.rb`, as explained in
+`compiled_run.rb`'s own comment). `compiled_run.rb` now excludes
+`Optcarrot::CPU`/`NES`/`Video`/`APU` from `ONLY_OWNERS` too, alongside the
+already-excluded `Optcarrot::PPU` -- back to compiling only
+`Optcarrot::Config`/`Optcarrot::Opt` plus the `Optcarrot::ROM` setup methods
+(24 methods), which the full 180-frame run completes cleanly with checksum
+`59662` on all three runtimes, repeatedly. This is a real regression in scope
+from the "all five compiled" state this section spent a lot of text
+re-verifying, not a partial fix -- re-enabling any of `CPU`/`NES`/`Video`/
+`APU`/`PPU` needs the underlying bc2cpp codegen bug (and the separate
+`PPU`/`Fiber.new` one) fixed first, and re-verified against the real
+180-frame `nes.run` loop specifically, not a shorter smoke run -- see
+`compiled_run.rb`'s own comment on `FIBER_SAFE_OWNERS` for the full
+evidence. Treat every "all three"/"all five compiled" number and claim above
+in this section as historical only, same caveat as bug 2's paragraph.
 
 Compiling the actual hot path does not yet make it faster: the latest local
 180-frame run measured CRuby 4.82s, interpreted mruby 59.60s, and bc2cpp
