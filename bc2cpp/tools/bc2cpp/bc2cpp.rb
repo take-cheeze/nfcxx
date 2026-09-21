@@ -23088,6 +23088,18 @@ class CodeGen
       CPP
     end
 
+    if name == 'clear' && n.zero? && builtin_class_send_safe?(name, %w[Array])
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return <<~CPP
+          // ARRAY_CLEAR :clear -- exact Array only; preserve subclass and override dispatch
+          if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+            r#{d} = mrb_ary_clear(M, #{recv});
+          } else {
+            #{fallback.chomp}
+          }
+      CPP
+    end
+
     if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)

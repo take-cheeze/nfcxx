@@ -25,6 +25,10 @@ FIBER_SAFE_SETUP_METHODS = {
   'Optcarrot::ROM' => %w[initialize],
   'Optcarrot::ROM.singleton' => %w[load]
 }.freeze
+# NES#step calls setup_frame synchronously before CPU#run can resume the PPU Fiber.
+FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
+  'Optcarrot::PPU' => %w[setup_frame]
+}.freeze
 abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
@@ -106,7 +110,8 @@ def emit_register(diagnostics, out_dir)
 
     entry, owner, name, extra = match.captures
     safe_setup = FIBER_SAFE_SETUP_METHODS.fetch(owner, []).include?(name)
-    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup
+    safe_frame_boundary = FIBER_SAFE_FRAME_BOUNDARY_METHODS.fetch(owner, []).include?(name)
+    next unless FIBER_SAFE_OWNERS.include?(owner) || safe_setup || safe_frame_boundary
 
     raise "cannot register protected method #{owner}##{name}" if extra.include?('[protected')
 
@@ -251,7 +256,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, and ROM#initialize are compiled; emulator runtime methods remain interpreted because compiled methods reached from the PPU Fiber can crash.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Setup methods, ROM.load, ROM#initialize, and PPU#setup_frame at its pre-Fiber frame boundary are compiled; emulator runtime methods remain interpreted because compiled methods reached from the PPU Fiber can crash.'
     end
   end
 
