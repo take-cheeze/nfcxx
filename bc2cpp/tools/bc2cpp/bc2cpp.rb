@@ -9386,7 +9386,28 @@ class CodeGen
     defs = @registry[name]
     return nil unless defs && defs.size >= 2
 
+    # An owner with two definitions of this name (an attr_reader later
+    # redefined by a `def`, or the reverse) never joins the chain: which one
+    # is live depends on definition order, and the first `if` to match would
+    # otherwise win regardless.
+    repeated_owners = defs.group_by(&:owner).select { |_, group| group.size > 1 }.keys
     candidates = defs.select do |t|
+      next false if repeated_owners.include?(t.owner)
+
+      # POLY_SMALL_N_ACCESSOR: a real attr_reader/attr_writer/attr_accessor
+      # definition (MethodDef kind :ivar_accessor -- see that field's own
+      # comment) has no irep and no `_impl`, so it used to keep the whole
+      # name on plain `mrb_funcall` (`db`, `name`, `hp`, `id`, ... -- every
+      # name backed by two or more accessors and no other bytecode def).
+      # It joins the chain as a bare mrb_iv_get/mrb_iv_set behind the same
+      # exact-class guard IVAR_ACCESSOR_DEVIRT already uses; the shape
+      # check is the accessor's real arity (0 for a reader, 1 for a
+      # writer). It needs no ONLY_OWNERS gate, having no emitted function.
+      if t.kind == :ivar_accessor && t.irep.nil?
+        next false if t.owner.end_with?('.singleton')
+
+        next n == (name.end_with?('=') ? 1 : 0)
+      end
       next false unless t.irep
       # SINGLETON_OWNER_EXCLUSION: a `.singleton`-suffixed owner (bc2cpp's
       # own naming for `def self.foo`/`class << self` methods) can never
@@ -9429,9 +9450,21 @@ class CodeGen
     return nil unless candidates
 
     branches = candidates.map do |target|
-      impl = cpp_name(target.owner, target.name) + '_impl'
-      check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
-      call = "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+      check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+      call = if target.kind == :ivar_accessor && target.irep.nil?
+               # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
+               # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c); the writer
+               # returns the assigned value, not the ivar read back.
+               if name.end_with?('=')
+                 "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{name[0..-2]}\"), #{argv.first});\n    " \
+                   "r#{d} = #{argv.first};"
+               else
+                 "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
+               end
+             else
+               impl = cpp_name(target.owner, target.name) + '_impl'
+               "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+             end
       "if (#{check}) {\n    #{call}\n  } else "
     end
     owners_note = candidates.map(&:owner).join(', ')
@@ -17877,7 +17910,7 @@ class CodeGen
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     target.each_with_index do |d, i|
       impl = cpp_name(d.owner, d.name) + '_impl'
-      check = "mrb_class_ptr(#{const_chain_value_expr(d.owner)}) == mrb_obj_class(M, #{elem_expr})"
+      check = "#{owner_class_ptr_expr(d.owner)} == mrb_obj_class(M, #{elem_expr})"
       out << (i.zero? ? '      ' : '      else ')
       out << "if (#{check}) { #{result_var} = #{impl}(M, #{elem_expr}); }\n"
     end
@@ -17900,7 +17933,7 @@ class CodeGen
     out << "// POLY &:#{sym} (#{target.size} defs) -- per-element exact-class guard chain, mrb_funcall fallback\n"
     target.each_with_index do |d, i|
       impl = cpp_name(d.owner, d.name) + '_impl'
-      check = "mrb_class_ptr(#{const_chain_value_expr(d.owner)}) == mrb_obj_class(M, #{elem_expr})"
+      check = "#{owner_class_ptr_expr(d.owner)} == mrb_obj_class(M, #{elem_expr})"
       out << (i.zero? ? '      ' : '      else ')
       out << "if (#{check}) { #{impl}(M, #{elem_expr}); }\n"
     end
@@ -21584,16 +21617,14 @@ class CodeGen
     # `MRB_NO_FLOAT` builds compile out both the VM's float arms and ours.
     # OP_CMP uses a real dynamic send for non-numeric operands. Forward those
     # sends through compile_send's existing MONO/TYPED resolver so compiled
-    # operator methods can be called directly. EQ keeps a dedicated fallback
-    # so mrb_equal's identity/type check runs before Ruby dispatch, while the
-    # actual method still handles mixed numeric values and overrides.
-    fallback = if op == 'EQ'
-                 "  // EQ_IDENTITY :== -- match mrb_equal's identity/type shortcut before Ruby dispatch\n" \
-                   "  r#{d} = mrb_bool_value(mrb_obj_eq(M, r#{d}, r#{s}) || " \
-                   "mrb_test(mrb_funcall(M, r#{d}, \"#{sym}\", 1, r#{s})));\n"
-               else
-                 compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
-               end
+    # operator methods can be called directly. EQ reaches this fallback only
+    # after the outer mrb_obj_eq identity shortcut has already failed (the
+    # VM's OP_EQ order), so it takes the same resolver as the other
+    # comparisons and stores the `==` method's own result like OP_CMP does.
+    fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+    # String/Symbol `==` are generated from their C wrappers; the resolver
+    # fallback above stays the `else` for every other receiver.
+    fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == 'EQ'
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
     no_float_accessor = "mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s})"
@@ -21623,6 +21654,9 @@ class CodeGen
       <<~CPP
         if (mrb_obj_eq(M, r#{d}, r#{s})) {
           r#{d} = mrb_true_value();
+        } else if (mrb_symbol_p(r#{d})) {
+          // OP_EQ: a symbol receiver that is not identical is unequal, no send.
+          r#{d} = mrb_false_value();
         } else {
           // Numeric tag pair handling mirrors the pinned mruby OP_CMP.
           #{numeric_dispatch}
@@ -21631,6 +21665,35 @@ class CodeGen
     else
       "  // Numeric tag pair handling mirrors the pinned mruby OP_CMP.\n#{numeric_dispatch}"
     end
+  end
+
+  # EQ's non-numeric operands used to reach `mrb_funcall` every time the
+  # identity shortcut missed -- i.e. on every FALSE String or Symbol
+  # comparison (`@mode == :menu`, `name == "x"`). `==` is registered by
+  # several built-in classes; the exact-class generator derives the ones whose
+  # C wrapper is a single public-API expression (String#== is
+  # `mrb_str_equal`, Symbol#== is `mrb_obj_equal`) and this emits them behind
+  # the same per-class guards every other generated expression uses. The
+  # identity/dispatch statement stays the fallback for every other receiver.
+  # Returns nil when nothing was generated or a Ruby definition/prepend could
+  # sit in front of the built-in (builtin_class_send_safe?).
+  def generated_eq_dispatch(d, s, identity_dispatch)
+    entries = @native_registered_expressions['==']
+    return unless entries && !entries.empty? && entries.all? { |entry| entry[:arity] == 1 }
+    return unless builtin_class_send_safe?('==', entries.map { |entry| entry[:owner][:class_name] }.uniq)
+
+    # One if/else-if chain rather than compile_native_registered_expression's
+    # switch: that form repeats the fallback statement in every case, which
+    # would add an `mrb_funcall` site per generated class to every EQ.
+    recv = "r#{d}"
+    chain = entries.map do |entry|
+      owner = entry[:owner]
+      guard = "mrb_type(#{recv}) == #{owner[:tag]}"
+      guard += " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}" unless %w[Float Symbol].include?(owner[:class_name])
+      expression = entry[:expression].gsub('recv', recv).gsub('BC2CPP_ARG0', "r#{s}")
+      "  if (#{guard}) {\n    r#{d} = #{expression};\n  } else "
+    end.join
+    "  // == -- generated from native registrations and C method bodies\n#{chain}{\n#{identity_dispatch}  }\n"
   end
 
   # Operator opcodes fall back to an ordinary one-argument method send
@@ -24068,7 +24131,7 @@ class CodeGen
                                                     "#{native_positions.join(', ')} unboxed here to match " \
                                                     "#{impl}'s own native argument type)"
       if typed
-        check = "mrb_class_ptr(#{const_chain_value_expr(target.owner)}) == mrb_obj_class(M, #{recv})"
+        check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
         # ELEMENT_CLASS_SUPPORT: same codegen, different provenance -- the
         # tag says which fact proved the receiver so a reader of the
         # generated file can tell an ordinary traced receiver from an
@@ -24127,7 +24190,7 @@ class CodeGen
       # ordinary `mrb_funcall` (which correctly dispatches to whatever
       # `name` actually resolves to on the real receiver) otherwise.
       owner = ivar_accessor_target.owner
-      check = "mrb_class_ptr(#{const_chain_value_expr(owner)}) == mrb_obj_class(M, #{recv})"
+      check = "#{owner_class_ptr_expr(owner)} == mrb_obj_class(M, #{recv})"
       # ELEMENT_CLASS_SUPPORT: see the TYPED branch above -- same tag, same
       # reason, so both provenances stay greppable in generated output.
       traced_note = via_element ? "inlined block element of Array<#{owner}>" : "receiver traced to #{owner}"
@@ -24191,6 +24254,54 @@ class CodeGen
     lexical_scope_path(owner).reduce('mrb_obj_value(M->object_class)') do |expr, seg|
       "mrb_const_get(M, #{expr}, mrb_intern_cstr(M, \"#{seg}\"))"
     end
+  end
+
+  # OWNER_CLASS_CACHE: the RClass* for `owner`, as a call to a per-owner
+  # helper (emit_owner_class_cache) instead of re-running the chained
+  # mrb_const_get + mrb_intern_cstr on every guard. Every TYPED/POLY_SMALL_N
+  # guard compares against this pointer, so those lookups used to sit on the
+  # hot path of each devirtualized call.
+  def owner_class_ptr_expr(owner)
+    @owner_class_cache ||= {}
+    slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size, chain: const_chain_value_expr(owner) })
+    "bc2cpp_owner_class_#{slot[:index]}(M)"
+  end
+
+  # File-scope cache emitted ahead of the compiled bodies. A plain static per
+  # owner, not per mrb_state -- the same "one live VM at a time" contract
+  # mruby-rpg2k-compiled's g_direct_construct_* globals document -- but
+  # additionally keyed on the state pointer so two VMs alternating still
+  # resolve correctly, and reset by the gem's own gem_final (via
+  # bc2cpp_reset_owner_classes) so a later mrb_open never sees a stale
+  # pointer left by a closed VM that reused the address. Only a successful
+  # lookup is stored: a constant that is not defined yet still raises
+  # NameError from the same mrb_const_get as before. Like GETCONST's own
+  # pre-cache codegen this does not notice a later reassignment of the
+  # constant, matching the existing g_direct_construct_* behaviour.
+  def emit_owner_class_cache
+    entries = (@owner_class_cache || {}).values
+    out = +"// OWNER_CLASS_CACHE -- see bc2cpp.rb's own owner_class_ptr_expr comment.\n"
+    out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
+    out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
+    out << "static void bc2cpp_reset_owner_classes() {\n" \
+           "  bc2cpp_owner_class_state = nullptr;\n" \
+           "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
+           "}\n"
+    entries.each do |slot|
+      i = slot[:index]
+      out << <<~CPP
+        static inline struct RClass* bc2cpp_owner_class_#{i}(mrb_state* M) {
+          if (bc2cpp_owner_class_state != M) {
+            bc2cpp_reset_owner_classes();
+            bc2cpp_owner_class_state = M;
+          }
+          struct RClass* c = bc2cpp_owner_class_slots[#{i}];
+          if (!c) c = bc2cpp_owner_class_slots[#{i}] = mrb_class_ptr(#{slot[:chain]});
+          return c;
+        }
+      CPP
+    end
+    out
   end
 
   def dynamic_dispatch_line(d, recv, name, argv)
@@ -24993,6 +25104,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
   print gen.emit_instance_tt_setup
+  print gen.emit_owner_class_cache
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
