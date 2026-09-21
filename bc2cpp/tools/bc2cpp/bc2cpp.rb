@@ -8605,6 +8605,13 @@ end
 #     could not prove monomorphic.
 # ---------------------------------------------------------------------------
 class CodeGen
+  # EMBED_WIRED (compiled_gems.rb's BC2CPP_WIRED_EMBEDDINGS): nil leaves the
+  # embedding analysis unrestricted, which is what the unit checks that build a
+  # CodeGen directly want; the driver sets it for a real gem build.
+  class << self
+    attr_accessor :wired_embeddings
+  end
+
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym' }.freeze
 
   # box/check/unbox/err for each embeddable primitive type's GETIV/SETIV
@@ -8981,6 +8988,8 @@ class CodeGen
         other != owner && (subclass_of.call(owner, other) || subclass_of.call(other, owner))
       end
       next if inherited_layout
+
+      next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
       init = @registry['initialize']&.find { |d| d.owner == owner }
       next unless init && pure_mandatory_arity?(@ireps.fetch(init.irep)) && compiles_clean?(init.irep)
@@ -10770,6 +10779,48 @@ class CodeGen
     owners.to_a.sort
   end
 
+  # INSTANCE_TT_SETUP: every class embedding_classes lists stores its ivars in
+  # an RData payload, so its instances must be allocated as MRB_TT_DATA -- the
+  # generated GETIV/SETIV and each `_ivars` initializer assume it, and
+  # mrb_data_init asserts otherwise. That used to be a hand-kept list of
+  # MRB_SET_INSTANCE_TT calls in each register.cxx, which drifted from the
+  # analysis (20 classes embedded, 9 wired) and made the desktop
+  # RPGMAKER_BC2CPP build abort at RPG2k.new. This emits one setup function
+  # covering exactly embedding_classes. A class whose constant is not defined
+  # yet is skipped rather than raising: each compiled gem calls the function at
+  # its own gem_init, and a class defined by a gem initialised later is picked
+  # up by that gem's call (mruby-rpg2k-compiled runs after mruby-rpg2k, so it
+  # sees every RPG2k class). The call is idempotent.
+  def emit_instance_tt_setup
+    out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
+    out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
+    out << "  static const char* const paths[][6] = {\n"
+    embedding_classes.each do |klass|
+      next if klass.end_with?('.singleton')
+
+      segments = klass.split('::')
+      raise "INSTANCE_TT_SETUP: #{klass} nests deeper than 5 levels" if segments.size > 5
+
+      out << "    { #{(segments.map { |seg| "\"#{seg}\"" } + ['nullptr']).join(', ')} },\n"
+    end
+    out << "    { nullptr },\n  };\n"
+    out << <<~CPP
+      for (const auto& path : paths) {
+        if (!path[0]) break;
+        mrb_value scope = mrb_obj_value(M->object_class);
+        bool found = true;
+        for (int i = 0; path[i]; ++i) {
+          mrb_sym name = mrb_intern_cstr(M, path[i]);
+          if (!mrb_const_defined_at(M, scope, name)) { found = false; break; }
+          scope = mrb_const_get(M, scope, name);
+        }
+        if (found && mrb_type(scope) == MRB_TT_CLASS) MRB_SET_INSTANCE_TT(mrb_class_ptr(scope), MRB_TT_DATA);
+      }
+    CPP
+    out << "}\n"
+    out
+  end
+
   def struct_name(owner)
     sanitize("#{owner}_ivars")
   end
@@ -11517,7 +11568,7 @@ class CodeGen
     # was -- a `return` or any other real statement still works
     # identically inside a `try` block as outside one; only an actual
     # `throw` changes what happens next.
-    out << "  try {\n" if needs_return_catch
+    out << "  Bc2cppVmMark bc2cpp_ret_mark = bc2cpp_vm_mark(M);\n  try {\n" if needs_return_catch
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     # A native-typed argument's own register still holds a plain mrb_value
     # like every other VM register in this whole function (see this file's
@@ -11983,6 +12034,7 @@ class CodeGen
     out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
     if needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
+      out << "    bc2cpp_vm_restore(M, bc2cpp_ret_mark);\n"
       out << "    return bc2cpp_ret.value;\n"
       out << "  }\n"
     end
@@ -18964,7 +19016,7 @@ class CodeGen
     # rather than conditionally. A block with no BREAK at all simply never
     # throws bc2cpp_block_break, so this catch clause never fires for it
     # -- functionally identical to today's own bare call.
-    out << "    try {\n"
+    out << "    Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n    try {\n"
     if argv.empty?
       out << "      r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
              "mrb_obj_value(#{rproc_var}));\n"
@@ -18974,6 +19026,7 @@ class CodeGen
              "#{argv.size}, bc2cpp_blk_argv_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
     end
     out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
+    out << "      bc2cpp_vm_restore(M, bc2cpp_brk_mark);\n"
     out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
     out << "    }\n"
     out << "  }\n"
@@ -19063,7 +19116,7 @@ class CodeGen
     out = String.new
     out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr forwarded directly as the block " \
            "(mrb_funcall_with_block's own ensure_block coerces Symbol/Proc/anything with #to_proc), dynamic dispatch\n"
-    out << "  try {\n"
+    out << "  {\n  Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n  try {\n"
     if region[:n] == '*'
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: R(dest+1) is already a
       # real, fully-built Array by construction (see recognize_explicit_
@@ -19084,7 +19137,9 @@ class CodeGen
       end
     end
     out << "  } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
+    out << "    bc2cpp_vm_restore(M, bc2cpp_brk_mark);\n"
     out << "    r#{dest_reg} = bc2cpp_brk.value;\n"
+    out << "  }\n"
     out << "  }\n"
     out
   end
@@ -20735,14 +20790,26 @@ class CodeGen
       # ARYSPLAT themselves) falls through to the generic #error below,
       # exactly LOADL's own established narrow-scope precedent for an
       # out-of-model opcode variant.
+      #
+      # ARRAY2_OPERAND_FORM: the pinned mruby's OP_ARRAY2 (a, b, c) is
+      # disassembled under the SAME `ARRAY` mnemonic with a source register:
+      # `ARRAY Rd Rs N` (src/codedump.c: "ARRAY\tR%d\tR%d\t%d") builds
+      # Rd = [Rs .. Rs+N-1]. mrbc emits it for `local = [literal]`, so this is
+      # every such assignment. The 2-operand regex below does not match `Rs`,
+      # which used to turn n into 0 and silently compile the literal to an
+      # empty Array (quarters = [[nil, nil], [nil, nil]] became `[]`, and the
+      # desktop RPGMAKER_BC2CPP build then failed with `undefined method
+      # '[]=' for NilClass` starting a new game). Handle it explicitly.
       d = a[/^R(\d+)/, 1].to_i
-      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      three = a.match(/^R\d+\s+R(\d+)\s+(\d+)/)
+      src = three ? three[1].to_i : d
+      n = three ? three[2].to_i : a[/^R\d+\s+(\d+)/, 1].to_i
       if n.zero?
         "  r#{d} = mrb_ary_new(M);\n"
       else
         out = String.new
         out << "  {\n"
-        out << "    mrb_value elems[] = { #{(0...n).map { |i| "r#{d + i}" }.join(', ')} };\n"
+        out << "    mrb_value elems[] = { #{(0...n).map { |i| "r#{src + i}" }.join(', ')} };\n"
         out << "    r#{d} = mrb_ary_new_from_values(M, #{n}, elems);\n"
         out << "  }\n"
         out
@@ -24324,6 +24391,8 @@ if $PROGRAM_NAME == __FILE__
   # exact. The layouts this probe is not given ({} for element/hash-element,
   # an empty integer-constant set, nil outside-tokens) are all inputs
   # `compute_array_return_names` never reads.
+  require_relative 'compiled_gems'
+  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS
   array_return_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                    annotations, superclass_of, {}, {}, container_constants, {},
                                    Set.new, foreign_methods, nil, nil,
@@ -24577,6 +24646,7 @@ if $PROGRAM_NAME == __FILE__
       outside_world_tokens(native_paths + foreign_ruby_srcs)
     end
   warn ''
+  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
                     integer_constants, foreign_methods, outside_tokens, native_name_sources,
@@ -24698,6 +24768,38 @@ if $PROGRAM_NAME == __FILE__
   # makes that true for free, no discriminant field needed). Same
   # unconditional-emission tradeoff as bc2cpp_block_break just above.
   puts 'struct bc2cpp_method_return { mrb_value value; };'
+  # VM_UNWIND_RESTORE: bc2cpp_block_break / bc2cpp_method_return are foreign
+  # C++ exceptions, which mruby's own MRB_TRY/MRB_CATCH (`catch (mrb_jmpbuf*)`)
+  # does not intercept. When one unwinds through real VM frames -- a compiled
+  # block that `return`s or `break`s out of a Ruby-defined iterator such as
+  # `each` -- mrb_vm_exec/mrb_funcall_with_block never run their own cleanup:
+  # mrb->jmp is left pointing at a dead stack frame and the callinfo stack keeps
+  # every frame pushed since. The desktop RPGMAKER_BC2CPP build then aborts in
+  # mrb_vm_run's `c->ci == c->cibase || ...` assertion (and would corrupt the
+  # stack without it). Every catch site therefore takes a mark before its
+  # `try` and restores it here, mirroring what mrb_protect_error does for an
+  # mruby exception: reset mrb->jmp and pop the leftover callinfos, unsharing
+  # each popped frame's env exactly as the VM's own cipop does.
+  puts <<~'CPP'
+    struct Bc2cppVmMark { struct mrb_jmpbuf* jmp; ptrdiff_t ci_index; };
+    static inline Bc2cppVmMark bc2cpp_vm_mark(mrb_state* M) {
+      return { M->jmp, M->c->ci - M->c->cibase };
+    }
+    static void bc2cpp_vm_restore(mrb_state* M, const Bc2cppVmMark& mark) {
+      M->jmp = mark.jmp;
+      struct mrb_context* c = M->c;
+      while (c->ci - c->cibase > mark.ci_index) {
+        mrb_callinfo* ci = c->ci;
+        mrb_vm_ci_env_clear(M, ci);
+        struct RProc* blk = ci->blk;
+        if (blk && !MRB_PROC_STRICT_P(blk) && MRB_PROC_ENV(blk) == mrb_vm_ci_env(&ci[-1])) {
+          blk->flags |= MRB_PROC_ORPHAN;
+        }
+        c->ci--;
+      }
+      if (M->errinfo && (c->ci - c->cibase) < M->errinfo_ci_depth) M->errinfo = NULL;
+    }
+  CPP
   # ENSURE_RAII_SUPPORT: the one runtime piece a recognized `ensure`
   # region needs (recognize_ensure_region / emit_ensure_guard_open). A
   # real Ruby `ensure` has to run on EVERY exit from its protected range;
@@ -24845,6 +24947,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
+  print gen.emit_instance_tt_setup
   compiled.each { |m| print m[:code] }
 
   # Write this run's own cross-TU declarations header, so a *different*
