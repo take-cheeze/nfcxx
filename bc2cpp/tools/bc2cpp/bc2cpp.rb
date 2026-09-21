@@ -1304,6 +1304,7 @@ def resolve_mrb_sym_token(macro, name)
 end
 
 require_relative 'native_expression_devirt'
+require_relative 'symbol_cache'
 
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
@@ -9921,6 +9922,27 @@ class CodeGen
       # tag not listed here, correctly fall through to `default:`'s
       # ordinary `mrb_funcall`.
       arg = argv.first
+      # EQQ_INTEGER_FAST: `case cmd.code when Cmd::SHOW_MESSAGE ...` compiles to one
+      # `===` per arm, and for an Integer receiver mrb_equal does not stop at
+      # mrb_obj_eq: when the values differ it still runs the full `funcall("==")`,
+      # because Integer#== is not the basic identity method. That was every
+      # non-matching arm -- ~5,500 executed funcalls in 40s of the RPG2k map scene,
+      # nearly all of the steady-state dynamic dispatch. Two Integers are decided
+      # here, natively, whenever no Ruby-defined Integer#== could be observed (the
+      # same closed-world gate the other built-in fast paths use); a mixed
+      # Integer/Float or bigint argument keeps going through mrb_equal.
+      integer_case =
+        if builtin_class_send_safe?('==', %w[Integer])
+          "  case MRB_TT_INTEGER:\n" \
+            "    if (mrb_integer_p(#{arg})) {\n" \
+            "      r#{d} = mrb_bool_value(mrb_integer(#{recv}) == mrb_integer(#{arg}));\n" \
+            "      break;\n" \
+            "    }\n" \
+            "    r#{d} = mrb_bool_value(mrb_equal(M, #{recv}, #{arg}));\n" \
+            "    break;\n"
+        else
+          "  case MRB_TT_INTEGER:\n"
+        end
       "  // === -- native primitive, runtime-guarded per real receiver type\n" \
       "  // (see compile_native_primitive_send's own EQQ_TYPE_TAG_DISPATCH\n" \
       "  // comment for why MRB_TT_DATA/MRB_TT_PROC and everything else fall\n" \
@@ -9953,7 +9975,7 @@ class CodeGen
       "    r#{d} = mrb_bool_value(bc2cpp_eqq_r#{d});\n" \
       "    break;\n" \
       "  }\n" \
-      "  case MRB_TT_INTEGER:\n" \
+      "#{integer_case}" \
       "  case MRB_TT_FLOAT:\n" \
       "  case MRB_TT_STRING:\n" \
       "  case MRB_TT_SYMBOL:\n" \
@@ -24971,6 +24993,11 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
   print gen.emit_instance_tt_setup
+  # SYMBOL_CACHE: rewrite every function first, so the table is complete before
+  # it is printed ahead of the code that uses it.
+  symbol_table = SymbolCache::Table.new
+  compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
+  print SymbolCache.emit(symbol_table)
   compiled.each { |m| print m[:code] }
 
   # Write this run's own cross-TU declarations header, so a *different*
