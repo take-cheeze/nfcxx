@@ -10015,12 +10015,14 @@ class CodeGen
 
     cases = entries.map do |entry|
       owner = entry[:owner]
+      expression = entry[:expression].gsub('recv', recv)
+      expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
       class_check = if %w[Float Symbol].include?(owner[:class_name])
-                      "r#{d} = #{entry[:expression].gsub('recv', recv)};"
+                      "r#{d} = #{expression};"
                     else
                       <<~CPP.chomp
                         if (mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}) {
-                          r#{d} = #{entry[:expression].gsub('recv', recv)};
+                          r#{d} = #{expression};
                         } else {
                           #{fallback.chomp}
                         }
@@ -23551,7 +23553,8 @@ class CodeGen
       CPP
     end
 
-    if name == 'key?' && n == 1 && builtin_class_send_safe?(name, %w[Hash])
+    if name == 'key?' && n == 1 && !@native_registered_expressions.key?(name) &&
+       builtin_class_send_safe?(name, %w[Hash])
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
@@ -23560,7 +23563,7 @@ class CodeGen
     # C registrations and implementations.
     native_expression_entries = @native_registered_expressions[name]
     native_expression_owners = native_expression_entries&.map { |entry| entry[:owner][:class_name] }&.uniq
-    builtin_native_expression_send = n.zero? && native_expression_entries &&
+    builtin_native_expression_send = native_expression_entries && native_expression_entries.all? { |entry| entry[:arity] == n } &&
                                      builtin_class_send_safe?(name, native_expression_owners)
 
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name) &&

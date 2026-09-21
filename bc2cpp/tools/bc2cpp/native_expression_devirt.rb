@@ -2,9 +2,10 @@
 
 # Extracts a deliberately small set of direct-call expressions from mruby's
 # C method implementations. This is not a C-to-C++ translator: it accepts
-# only zero-argument registrations with one return expression, optionally
-# preceded by simple local initializers, whose calls are known pure value
-# helpers. Anything else remains on ordinary Ruby dispatch.
+# only supported zero-argument or single-required-argument registrations with
+# a return expression, optionally preceded by simple local statements, whose
+# calls are safe to invoke from the generated call site. Anything else remains
+# on ordinary Ruby dispatch.
 module NativeExpressionDevirt
   PURE_CALLS = %w[mrb_bool_value mrb_test mrb_true_value mrb_false_value mrb_nil_value mrb_nil_p].freeze
   # These expressions have a proven receiver-independent meaning for every
@@ -14,7 +15,7 @@ module NativeExpressionDevirt
     '!' => 'mrb_bool_value(!mrb_test(recv))',
   }.freeze
   CLASS_EXPRESSION_CALLS = %w[
-    mrb_bool_value mrb_int_value mrb_ary_ptr mrb_hash_size mrb_hash_empty_p
+    mrb_bool_value mrb_int_value mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
     mrb_str_ptr mrb_range_beg mrb_range_end mrb_float mrb_float_value isfinite isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
@@ -169,7 +170,7 @@ module NativeExpressionDevirt
 
         owners = Array(table_owners[table]).uniq
         owner = owners.one? ? owners.first : nil
-        registrations[name] << { function: function.strip, no_args: no_args?(aspec), owner: owner }
+        registrations[name] << { function: function.strip, arity: safe_arity(aspec), owner: owner }
       end
 
       %w[mrb_define_method_id mrb_define_private_method_id mrb_define_class_method_id
@@ -207,7 +208,9 @@ module NativeExpressionDevirt
 
     end
 
-    needed_functions = registrations.values.flat_map { |entries| entries.map { |entry| entry[:function] } }.to_set
+    needed_arities = registrations.values.flatten(1).filter_map do |entry|
+      [entry[:function], entry[:arity]] unless entry[:arity].nil?
+    end.to_set
     function_pattern = /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
     Array(paths).each do |path|
       next unless File.file?(path)
@@ -215,11 +218,15 @@ module NativeExpressionDevirt
       source = File.read(path, encoding: 'UTF-8')
       source.to_enum(:scan, function_pattern).each do
         function, state_arg, self_arg = Regexp.last_match.captures
-        next unless needed_functions.include?(function)
+        arities = needed_arities.select { |candidate, _arity| candidate == function }.map(&:last)
+        next if arities.empty?
 
         opening = Regexp.last_match.end(0) - 1
         body, = brace_body(source, opening)
-        implementations[function] << (body && exact_class_return_expression(body, state_arg, self_arg))
+        arities.each do |arity|
+          key = [function, arity]
+          implementations[key] << (body && exact_class_return_expression(body, state_arg, self_arg, arity: arity))
+        end
       end
     end
 
@@ -240,17 +247,22 @@ module NativeExpressionDevirt
       relevant = entries.select { |entry| target_classes.include?(entry[:owner][:class_name]) }
       generated = relevant.group_by { |entry| entry[:owner][:class_name] }.filter_map do |_class_name, class_entries|
         next unless class_entries.all? do |entry|
-          entry[:no_args] && entry[:owner][:field] && entry[:owner][:tag] &&
-            implementations.key?(entry[:function]) && implementations[entry[:function]].all?
+          !entry[:arity].nil? && entry[:owner][:field] && entry[:owner][:tag] &&
+            implementations.key?([entry[:function], entry[:arity]]) &&
+            implementations[[entry[:function], entry[:arity]]].all?
         end
 
-        expressions = class_entries.flat_map { |entry| implementations[entry[:function]] }.uniq
+        arities = class_entries.map { |entry| entry[:arity] }.uniq
+        next unless arities.one?
+
+        arity = arities.first
+        expressions = class_entries.flat_map { |entry| implementations[[entry[:function], arity]] }.uniq
         next unless expressions.one?
 
         owner = class_entries.first[:owner]
         next unless class_entries.all? { |entry| entry[:owner] == owner }
 
-        { owner: owner, expression: expressions.first }
+        { owner: owner, expression: expressions.first, arity: arity }
       end
       result[name] = generated unless generated.empty?
     end
@@ -283,25 +295,45 @@ module NativeExpressionDevirt
     entries
   end
 
-  def exact_class_return_expression(body, state_arg, self_arg)
+  def exact_class_return_expression(body, state_arg, self_arg, arity: 0)
     body = body.gsub(%r{/\*.*?\*/|//[^\n]*}, ' ').strip
+    if arity == 1
+      body = body.gsub(/\bmrb_get_arg1\s*\(\s*#{Regexp.escape(state_arg)}\s*\)/, 'BC2CPP_ARG0')
+    end
     conditional = body.match(/\A(.*?)if\s*\((.+?)\)\s*return\s+(.+?)\s*;\s*return\s+(.+?)\s*;\s*\z/m)
     match = conditional || body.match(/\A(.*?)return\s+(.+?)\s*;\s*\z/m)
     return unless match
 
     statements = match[1].split(';').map(&:strip).reject(&:empty?)
     locals = {}
+    side_effects = []
     statements.each do |statement|
-      declaration = statement.match(/\A(?:struct\s+\w+|mrb_int|mrb_float)\s*\*?\s*(\w+)\s*=\s*(.+)\z/m)
-      return unless declaration
+      if statement.match?(/\A#{Regexp.escape(state_arg)}->c->ci->mid\s*=\s*0\z/)
+        return unless arity == 1 && side_effects.empty? && locals.values.compact.all? { |value| value == 'BC2CPP_ARG0' }
 
-      local, initializer = declaration.captures
-      return unless locals[local].nil?
+        side_effects << 'M->c->ci->mid = 0'
+        next
+      end
 
-      locals[local] = substitute_expression(initializer, state_arg, self_arg, locals)
-      return unless locals[local]
+      declaration = statement.match(/\A(?:struct\s+\w+|mrb_int|mrb_float|mrb_value|mrb_bool)\s*\*?\s*(\w+)(?:\s*=\s*(.+))?\z/m)
+      if declaration
+        local, initializer = declaration.captures
+        return if locals.key?(local)
+
+        locals[local] = initializer && substitute_expression(initializer, state_arg, self_arg, locals)
+        return if initializer && !locals[local]
+      else
+        assignment = statement.match(/\A(\w+)\s*=\s*(.+)\z/m)
+        return unless assignment
+
+        local, expression = assignment.captures
+        return unless locals.key?(local) && locals[local].nil?
+
+        locals[local] = substitute_expression(expression, state_arg, self_arg, locals)
+        return unless locals[local]
+      end
     end
-    if conditional
+    expression = if conditional
       condition = substitute_expression(match[2], state_arg, self_arg, locals)
       when_true = substitute_expression(match[3], state_arg, self_arg, locals)
       when_false = substitute_expression(match[4], state_arg, self_arg, locals)
@@ -311,16 +343,22 @@ module NativeExpressionDevirt
     else
       substitute_expression(match[2], state_arg, self_arg, locals)
     end
+    return unless expression
+    return expression if side_effects.empty?
+
+    "(#{(side_effects + [expression]).join(', ')})"
   end
 
   def substitute_expression(expression, state_arg, self_arg, locals)
     expression = expression.gsub(/\b#{Regexp.escape(state_arg)}\b/, 'M')
                            .gsub(/\b#{Regexp.escape(self_arg)}\b/, 'recv')
-    locals.each { |name, value| expression = expression.gsub(/\b#{Regexp.escape(name)}\b/, "(#{value})") }
+    locals.each do |name, value|
+      expression = expression.gsub(/\b#{Regexp.escape(name)}\b/, "(#{value})") if value
+    end
     tokens = expression.scan(/[A-Za-z_]\w*|\d+|&&|\|\||==|!=|<=|>=|\S/)
     return if tokens.empty?
     return unless expression.gsub(/[A-Za-z_]\w*|\d+|\s+|&&|\|\||==|!=|<=|>=|[!~(),?:+\-*\/%<>&|^]/, '').empty?
-    allowed = %w[M recv] + CLASS_EXPRESSION_CALLS + CLASS_EXPRESSION_MACROS
+    allowed = %w[M recv BC2CPP_ARG0] + CLASS_EXPRESSION_CALLS + CLASS_EXPRESSION_MACROS
     return if tokens.each_with_index.any? do |token, index|
       next false unless token.match?(/\A[A-Za-z_]/)
 
@@ -337,6 +375,13 @@ module NativeExpressionDevirt
 
   def no_args?(aspec)
     aspec.strip == 'MRB_ARGS_NONE()'
+  end
+
+  def safe_arity(aspec)
+    return 0 if no_args?(aspec)
+    return 1 if aspec.strip == 'MRB_ARGS_REQ(1)'
+
+    nil
   end
 
   def macro_calls(source, macro)
