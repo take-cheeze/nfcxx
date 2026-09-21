@@ -18048,18 +18048,20 @@ class CodeGen
   end
 
   # BLOCK_FALLBACK_ELEMENT_SUPPORT: carry an exact element class into the
-  # standalone cfunc only for known Array iterators with a proven yield shape.
-  # Reuse the same Array receiver proof and element scan as the inline loop
-  # recognizer; all other iterators and untyped arrays keep dynamic dispatch.
-  def block_fallback_array_element_class(irep, region, owner_name)
+  # standalone cfunc only for a known Array or Hash iterator with a proven
+  # yield shape. Reuse the existing receiver and element proofs; other
+  # iterators and untyped containers keep dynamic dispatch.
+  def block_fallback_element_class(irep, region, owner_name)
     return nil unless irep && !region[:self_implicit]
-    expected_shape = case region[:name]
-                     when 'each' then [0, 1]
-                     when 'each_with_index' then [0, 2]
-                     when 'each_with_object' then [1, 2]
-                     end
-    return nil unless expected_shape && region[:n] == expected_shape[0]
-    return nil unless mandatory_arity(region[:block_irep]) == expected_shape[1]
+
+    shape = case region[:name]
+            when 'each' then [:array, 0, 1]
+            when 'each_with_index' then [:array, 0, 2]
+            when 'each_with_object' then [:array, 1, 2]
+            when 'each_value' then [:hash, 0, 1]
+            end
+    return nil unless shape && region[:n] == shape[1]
+    return nil unless mandatory_arity(region[:block_irep]) == shape[2]
 
     idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
     return nil unless idx
@@ -18073,11 +18075,17 @@ class CodeGen
     recv_class = trace_new_target(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes,
                                   owner: owner_name, class_layout: @class_layout, registry: @registry,
                                   container_constants: @container_constants,
-                                  element_annotations: @element_annotations, known_owners: known_owner_set)
-    recv_class = proven_array_source(irep, idx, region[:dest_reg]) unless recv_class == 'Array'
-    return nil unless recv_class == 'Array'
+                                  element_annotations: @element_annotations)
+    if shape[0] == :array
+      recv_class = proven_array_source(irep, idx, region[:dest_reg]) unless recv_class == 'Array'
+      return nil unless recv_class == 'Array'
 
-    proven_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
+      proven_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
+    else
+      return nil unless recv_class == 'Hash'
+
+      proven_hash_element_class(irep, idx, region[:dest_reg], ivar_classes, mand, arg_classes, owner_name)
+    end
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: the block/
@@ -18401,7 +18409,7 @@ class CodeGen
     # otherwise target, while `block_addr` (suppressed WITH a glue_at
     # entry) keeps one, since real code starts exactly there.
     targets = jump_targets(block_irep) - (nested_suppressed - nested_glue_at.keys)
-    elem_class = block_fallback_array_element_class(region[:parent_irep], region, d.owner)
+    elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
       next if nested_suppressed.include?(insn.addr) && !nested_glue_at.key?(insn.addr)
