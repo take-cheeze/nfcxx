@@ -17,7 +17,7 @@ module NativeExpressionDevirt
   CLASS_EXPRESSION_CALLS = %w[
     mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
     mrb_hash_get
-    mrb_str_ptr mrb_range_beg mrb_range_end mrb_float mrb_float_value isfinite isnan signbit
+    mrb_str_ptr mrb_range_beg mrb_range_end mrb_float mrb_float_value mrb_as_int mrb_ary_entry isfinite isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
   # private to string.c (and calls a private UTF-8 helper), so generated C++
@@ -27,6 +27,10 @@ module NativeExpressionDevirt
     mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h
     mruby/string.h mruby/throw.h mruby/variable.h
   ].freeze
+  BUILTIN_CLASS_TAGS = {
+    'Array' => 'MRB_TT_ARRAY', 'Hash' => 'MRB_TT_HASH', 'String' => 'MRB_TT_STRING',
+    'Float' => 'MRB_TT_FLOAT', 'Symbol' => 'MRB_TT_SYMBOL', 'Range' => 'MRB_TT_RANGE',
+  }.freeze
   module_function
 
   def analyze(paths)
@@ -123,7 +127,7 @@ module NativeExpressionDevirt
     registrations = Hash.new { |hash, name| hash[name] = [] }
     implementations = Hash.new { |hash, function| hash[function] = [] }
     opaque_owners = Hash.new { |hash, name| hash[name] = [] }
-    target_classes = %w[Array Hash String Float Symbol Range].to_set
+    target_classes = BUILTIN_CLASS_TAGS.keys.to_set
     mruby_root = mruby_core_root(paths)
     public_mrb_value_functions = public_mrb_value_functions(mruby_root)
 
@@ -170,7 +174,13 @@ module NativeExpressionDevirt
         end
         tag = tags[variable]
         table_owners[table] ||= []
-        table_owners[table] << (class_info && class_info.merge(tag: tag))
+        # Core mrbgems often attach ROM methods to an existing built-in via
+        # `mrb->array_class` without repeating the core's
+        # `MRB_SET_INSTANCE_TT` declaration in the gem source. Recover that
+        # closed set of tag values from the built-in class name; custom class
+        # owners still require a tag declaration in their own source.
+        resolved_tag = tag || (class_info && BUILTIN_CLASS_TAGS[class_info[:class_name]])
+        table_owners[table] << (class_info && class_info.merge(tag: resolved_tag))
       end
 
       rom_entries(source).each do |table, arguments|
