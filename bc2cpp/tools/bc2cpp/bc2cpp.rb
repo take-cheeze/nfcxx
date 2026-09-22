@@ -273,6 +273,113 @@ def merge!(ireps, order, blocks, block_files = [], block_catches = [])
   end
 end
 
+# STRUCT_MEMBERS_ANALYSIS: `Const = Struct.new(:a, :b, ..., keyword_init: ...)`,
+# with or without a trailing `do ... end` block, assigns array index i to
+# member i (0-based, in the literal's own declared order -- confirmed by
+# reading 3rd/mruby/mrbgems/mruby-struct/src/struct.c directly:
+# mrb_struct_init_with_args/mrb_struct_init_with_keywords both write
+# mrb_ary_set(mrb, self, i, ...) for the i-th member of the SAME __members__
+# list struct_aref_sym/struct_aref_int scan at every `[]`/named-accessor call,
+# regardless of keyword_init; and MRB_TT_STRUCT's own value.h entry -- `f(
+# MRB_TT_STRUCT, struct RArray, "Struct")` -- confirms a Struct instance
+# really is array-backed storage, RARRAY_PTR/RARRAY_LEN valid on it directly,
+# same as RSTRUCT_PTR/RSTRUCT_LEN's own #define in struct.c).
+#
+# Detects one `SEND(B)?/SSEND(B)?` `Struct.new(...)` call site (build_registry
+# own `insn`/`idx`/`irep` at the point of that call, `namespace` its own
+# enclosing lexical scope) and returns `[owner, [member_name_strings, in
+# declared order]]`, or nil for anything not confidently recognized -- an
+# anonymous Struct with no SETCONST naming it, a receiver that is not a bare
+# `Struct` GETCONST, a member list whose own LOADSYM backward scan does not
+# land on exactly the expected count. A miss here only ever means a later
+# GETIDX fast path keeps ordinary dynamic dispatch for that owner, never a
+# wrong member/index -- same "safe miss, never a wrong guess" discipline
+# every other backward scan in this file already follows.
+#
+# Two real bytecode shapes for the member-name argument list, both handled:
+# few members (n <= CALL_MAXARGS, mrbgems/mruby-compiler/core/codegen.c) sit
+# in consecutive LOADSYM-loaded registers immediately before the call itself;
+# more (MapEventState's own 28, MessageState's own 23) trip mrbc's own splat
+# convention (`n=*`), packing the same consecutive LOADSYMs into one ARRAY
+# first (confirmed directly against a real `mrbc -v` disassembly of both
+# shapes) -- exactly the shape the SENDB case below already scans for the
+# block-taking form, generalized here to work with or without a block and
+# with or without the splat.
+def detect_struct_new_members(irep, idx, insn, namespace)
+  name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+  return nil unless name == 'new'
+
+  d = insn.args[/^R(\d+)/, 1]
+  return nil unless d
+
+  struct_recv = false
+  (idx - 1).downto(0) do |i|
+    prev = irep.instructions[i]
+    pd = prev.args[/^R(\d+)/, 1]
+    next unless pd == d
+
+    struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
+    break
+  end
+  return nil unless struct_recv
+
+  # This Struct's own name: a SETCONST right after the call, on the same
+  # register -- see the SENDB case's own comment on why an unnamed
+  # (non-SETCONST-following) Struct.new is left unrecognized instead of
+  # guessed at.
+  next_insn = irep.instructions[idx + 1]
+  struct_name = if next_insn && next_insn.op == 'SETCONST'
+                  sc_name, sc_reg = next_insn.args.split(/\s+/, 2)
+                  sc_name if sc_reg == "R#{d}"
+                end
+  return nil unless struct_name
+
+  owner = namespace ? "#{namespace}::#{struct_name}" : struct_name
+
+  scan_from = idx - 1
+  if %w[SENDB SSENDB].include?(insn.op)
+    return nil unless irep.instructions[scan_from]&.op == 'BLOCK'
+
+    scan_from -= 1
+  end
+
+  # Struct.new's only real keyword is `keyword_init:`, never itself a member
+  # -- skip its (key, value) register pair, whatever it is, before looking
+  # for the member-name arguments.
+  nk = insn.args[/nk=(\d+)/, 1].to_i
+  scan_from -= 2 * nk
+  return nil if scan_from < 0 && nk.positive?
+
+  pos = insn.args[/n=(\*|\d+)/, 1]
+  return nil unless pos
+
+  if pos == '*'
+    array_insn = scan_from >= 0 ? irep.instructions[scan_from] : nil
+    return nil unless array_insn&.op == 'ARRAY'
+
+    n = array_insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+    return nil unless n
+
+    scan_from -= 1
+  else
+    n = pos.to_i
+    return nil if n.zero?
+  end
+
+  members = []
+  i = scan_from
+  while i >= 0 && members.size < n
+    prev = irep.instructions[i]
+    break unless prev.op == 'LOADSYM'
+
+    members.unshift(prev.args[/:(\S+)/, 1])
+    i -= 1
+  end
+  return nil unless members.size == n && members.all?
+
+  [owner, members]
+end
+
 # ---------------------------------------------------------------------------
 # Step 6: whole-program class/method registry, walking the tree from the
 # root: CLASS/EXEC pairs define classes and recurse into their class-body
@@ -329,6 +436,10 @@ def build_registry(ireps, root_label)
   # shape is a pure one-shot syntactic fact, never dependent on another
   # constant already being resolved, unlike an ivar's class hint.
   container_constants = {}
+  # STRUCT_MEMBERS_ANALYSIS's own result table: real, fully-qualified Struct
+  # owner name (e.g. "RPG2k::Scene::Map::MapEventState") -> its member names,
+  # in declared (== storage index) order. See that function's own comment.
+  struct_member_lists = {}
 
   walk = lambda do |label, namespace|
     irep = ireps.fetch(label)
@@ -857,6 +968,16 @@ def build_registry(ireps, root_label)
         # operator name, so a future reader never has to wonder why the two
         # differ.
         name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        if name == 'new'
+          # STRUCT_MEMBERS_ANALYSIS: `Const = Struct.new(:a, :b, ...)` with no
+          # trailing block -- MapEventState/MessageState/ShopState/
+          # ShopQuantity's own real shape (mruby-rpg2k/mrblib/scene/map.rb).
+          # Additive only: never affects any other `.new` call's own
+          # registration below, since detect_struct_new_members returns nil
+          # for anything but a bare, SETCONST-named `Struct.new(...)`.
+          found = detect_struct_new_members(irep, idx, insn, namespace)
+          struct_member_lists[found[0]] = found[1] if found
+        end
         if %w[include prepend].include?(name)
           # ANCESTOR_MIXINS_SUPPORT: a self-implicit `include M`/`prepend M`
           # inside THIS class/module body. build_registry only ever recurses a
@@ -1052,6 +1173,13 @@ def build_registry(ireps, root_label)
           end
         end
       when 'SENDB'
+        # STRUCT_MEMBERS_ANALYSIS: same detection as the plain SEND case
+        # above, generalized to also recognize this block-taking form (e.g.
+        # Game::Battle::Combatant below) -- additive only, independent of
+        # this case's own pre-existing member/DEF registration further down.
+        found = detect_struct_new_members(irep, idx, insn, namespace)
+        struct_member_lists[found[0]] = found[1] if found
+
         # `SomeConst = Struct.new(:a, :b, ...) do ... end` -- an explicit-
         # receiver send-with-block, invisible to this walk in TWO distinct
         # ways at once: no CLASS/MODULE opcode ever fires for a Struct.new
@@ -1178,7 +1306,8 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
-  [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins]
+  [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
+   struct_member_lists]
 end
 
 # SUPER_SUPPORT: resolve a real `class X < SUPER_EXPR`'s own SUPER_EXPR to
@@ -1305,6 +1434,7 @@ end
 
 require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
+require_relative 'const_site_cache'
 
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
@@ -1540,6 +1670,120 @@ module IntegerConstants
       j -= 1
     end
     nil
+  end
+
+  # INTEGER_CONSTANT_VALUE_PROOF: IntegerConstants.analyze above proves a bare
+  # name always binds A Fixnum; this proves it always binds the SAME Fixnum,
+  # so a GETCONST/GETMCNST reading it can be replaced with that literal value
+  # outright, skipping the runtime lookup entirely -- the actual win, not just
+  # the type fact. Sound for the identical reason resolve_integral's own
+  # induction is: every real assignment to an admitted name executes one of
+  # its classified definitions, and if EVERY one of those (transitively
+  # through aliases) resolves to the same number, every run ever binds that
+  # same number to it, whichever definition ran. `admitted` is
+  # IntegerConstants.analyze's own returned Set -- only names already proven
+  # Fixnum-only are considered, so this never has to re-derive any of that
+  # proof's own poison sources (CLASS/MODULE collision, native, foreign).
+  #
+  # A name whose own alias graph cycles with no literal at its base (the one
+  # case resolve_integral's own comment says is admitted only vacuously,
+  # because no real run ever reaches either assignment) resolves to nil here
+  # via ordinary cycle detection -- not memoized as a global fact, since a
+  # cycle is a property of the PATH, not the name: a name reached once via a
+  # cyclic path and once via a real one must still resolve on the real path.
+  def self.analyze_values(ireps, admitted)
+    return {} if admitted.empty?
+
+    defs = Hash.new { |h, k| h[k] = [] }
+    ireps.each_value do |irep|
+      entries = const_entry_addrs(irep)
+      irep.instructions.each_with_index do |insn, i|
+        next unless insn.op == 'SETCONST' || insn.op == 'SETMCNST'
+
+        name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.args[/::(\S+)/, 1]
+        next unless name && admitted.include?(name)
+
+        src = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten.last
+        defs[name] << (src && literal_value_kind(irep, i, src, entries))
+      end
+    end
+
+    memo = {}
+    resolve = lambda do |name, visiting|
+      return memo[name] if memo.key?(name)
+      return nil if visiting.include?(name)
+
+      kinds = defs[name]
+      next nil if kinds.empty? || kinds.any?(&:nil?)
+
+      seen = visiting + [name]
+      values = kinds.map { |k| k[0] == :literal ? k[1] : resolve.call(k[1], seen) }
+      result = values.any?(&:nil?) || values.uniq.size != 1 ? nil : values.first
+      memo[name] = result
+      result
+    end
+
+    admitted.each_with_object({}) do |name, out|
+      value = resolve.call(name, Set.new)
+      out[name] = value unless value.nil?
+    end
+  end
+
+  # const_source_kind's own exact backward walk, except a LOADI* writer
+  # returns the actual decoded value (`[:literal, N]`) instead of the bare
+  # `:literal` symbol -- everything else (MOVE-following, the alias cases,
+  # every nil-returning refusal, the label barrier) is identical on purpose,
+  # so this proof runs over exactly the same source shapes the kind proof
+  # already validated, never a looser set of them.
+  def self.literal_value_kind(irep, idx, reg, entries)
+    cur = reg.to_s
+    j = idx - 1
+    while j >= 0
+      insn = irep.instructions[j]
+      return nil unless insn
+      return nil if entries.include?(insn.addr)
+
+      if insn.args =~ /\AR#{cur}\b/
+        if insn.op.start_with?('LOADI')
+          value = loadi_value(insn)
+          return value.nil? ? nil : [:literal, value]
+        end
+
+        case insn.op
+        when 'MOVE'
+          src = insn.args.scan(/R(\d+)/).flatten[1]
+          return nil unless src
+
+          cur = src
+        when 'GETCONST'
+          n = insn.args.split(/\s+/)[1]
+          return n && [:alias, n]
+        when 'GETMCNST'
+          n = insn.args[/::(\S+)/, 1]
+          return n && [:alias, n]
+        else
+          return nil
+        end
+      end
+      j -= 1
+    end
+    nil
+  end
+
+  # loadi_literal/loadi_proven_fixnum?'s own decode+32-bit-range check
+  # (CodeGen, near LOADI_FIXNUM_MIN/MAX), duplicated as a plain function here:
+  # this module has no CodeGen instance to call them on, and both are pure
+  # functions of one instruction. LOADI8/16/NEG/_n stay inside the same
+  # +-2^15 margin those constants document; only LOADI32 needs the bound
+  # check, so a value outside it is refused (nil) rather than trusted.
+  def self.loadi_value(insn)
+    tok = insn.args.split(/\s+/)[1]
+    return nil unless tok&.match?(/\A-?\d+\z/)
+
+    value = tok.to_i
+    return nil if insn.op == 'LOADI32' && !value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+
+    value
   end
 
   # Poison source 3 -- see the header above for the three real call forms.
@@ -8650,8 +8894,14 @@ class CodeGen
   # EMBED_WIRED (compiled_gems.rb's BC2CPP_WIRED_EMBEDDINGS): nil leaves the
   # embedding analysis unrestricted, which is what the unit checks that build a
   # CodeGen directly want; the driver sets it for a real gem build.
+  #
+  # struct_members: STRUCT_MEMBERS_ANALYSIS's own result (build_registry's own
+  # last return value) -- real, fully-qualified Struct owner name -> its
+  # member names in declared (== storage index) order. nil (unset, the
+  # default) means "prove nothing", same as stable_class_constants; a unit
+  # check that wants the GETIDX Struct fast path sets a literal Hash directly.
   class << self
-    attr_accessor :wired_embeddings
+    attr_accessor :wired_embeddings, :stable_class_constants, :struct_members, :integer_constant_values
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
@@ -9554,6 +9804,61 @@ class CodeGen
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
            "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
     "#{note}  #{branches.join}{\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+  end
+
+  # Bounded the same way POLY_SMALL_N_MAX is (past this point a linear
+  # runtime-class chain is no longer clearly cheaper than the fallback it
+  # replaces), but far smaller in practice: at most a handful of this whole
+  # program's own Struct.new owners ever share one exact member name.
+  STRUCT_INDEX_MAX = 8
+
+  # STRUCT_INDEX_CACHE: `event[:page]` (`event` an as-yet-unknown-class
+  # receiver, `:page` a compile-time literal Symbol argument to GETIDX --
+  # `event`/`this_event`/`p[:event]` throughout mruby-rpg2k/mrblib/scene/
+  # map.rb) used to pay a full `mrb_funcall(M, recv, "[]", 1, key)` on every
+  # call: Struct's own native `[]` (mrb_struct_aref, 3rd/mruby/mrbgems/
+  # mruby-struct/src/struct.c) is a real C method, invisible to
+  # compile_poly_small_n's own registry-of-compiled-methods chain, and it
+  # itself pays a linear struct_aref_sym scan over the receiver's own
+  # `__members__` list on every single call, real or devirtualized. But the
+  # member's own storage index for a KNOWN struct owner (`
+  # STRUCT_MEMBERS_ANALYSIS`, `CodeGen.struct_members`) is exactly as
+  # constant as `:page`'s own literal spelling here -- there is nothing left
+  # to look up at runtime at all once both the receiver's exact class and
+  # the argument's exact Symbol are known. Skips straight to the read
+  # `struct_aref_sym`/mrb_struct_init_with_(keywords|args) themselves
+  # perform (RARRAY_PTR/RARRAY_LEN -- valid directly on a Struct instance,
+  # see that analysis' own comment) behind an exact-class guard per
+  # candidate owner, bounds-checked exactly like struct_aref_sym's own `i <
+  # plen ? ptr[i] : nil` (a struct initialized with fewer positional
+  # arguments than it declares members is real, already-defensively-handled
+  # behavior in mruby's own C, not a hypothetical this codegen invents a new
+  # case for).
+  #
+  # Only ever reached from GETIDX's own INDEX_CHAIN tail (see that case's
+  # own comment) -- a literal key that names no known struct's own member,
+  # or a non-literal (variable/computed) key, leaves this whole branch out
+  # and keeps the existing Array/Hash/String chain and its own dynamic
+  # fallback exactly as before; never a wrong guess, same as every other
+  # backward-scan-gated fast path in this file.
+  def compile_struct_literal_index_read(irep, idx, s, d)
+    return nil unless CodeGen.struct_members && !CodeGen.struct_members.empty?
+
+    literal = trace_eqq_literal_receiver(irep, idx, s)
+    return nil unless literal && literal[:type] == :symbol
+
+    candidates = CodeGen.struct_members.filter_map do |owner, members|
+      i = members.index(literal[:name])
+      [owner, i] if i
+    end
+    return nil if candidates.empty? || candidates.size > STRUCT_INDEX_MAX
+
+    candidates.map do |owner, i|
+      "else if (mrb_type(r#{d}) == MRB_TT_STRUCT && " \
+        "mrb_obj_ptr(r#{d})->c == #{owner_class_ptr_expr(owner)}) {\n" \
+        "    r#{d} = (#{i} < RARRAY_LEN(r#{d})) ? RARRAY_PTR(r#{d})[#{i}] : mrb_nil_value();\n" \
+        "  } "
+    end.join
   end
 
   # LITERAL_EQQ_SUPPORT's own soundness gate -- a LIVE re-check against
@@ -10929,6 +11234,65 @@ class CodeGen
   # its own gem_init, and a class defined by a gem initialised later is picked
   # up by that gem's call (mruby-rpg2k-compiled runs after mruby-rpg2k, so it
   # sees every RPG2k class). The call is idempotent.
+  # OWNER_METHOD_REGISTRATION: a hand-written register.cxx used to be the only
+  # place a compiled entry point became a real, callable Ruby method -- and it
+  # drifted from the generator's own analysis (BC2CPP_WIRED_EMBEDDINGS's own
+  # comment: 474 of 2141 rpg2k entries were never installed, so an unembedded
+  # interpreted fallback read nil out of a struct compiled code had already
+  # written into). This generates the registration itself for every compiled
+  # entry of the given `owners`, from exactly the data compile_method already
+  # derived the entry wrapper's own mrb_get_args call from (mand/opt/rest/
+  # keywords/block, in :aspec) -- it cannot independently drift from what the
+  # wrapper actually binds, the way a hand-copied MRB_ARGS_* literal could.
+  # Idempotent with a hand registration of the same name and function: mruby's
+  # own mrb_define_method just overwrites the method table entry, so calling
+  # this after or before an identical hand call is a no-op either way (see
+  # this method's own call site in the driver for the "after" it actually uses,
+  # so a *different* hand registration for the same name -- there should be
+  # none among embedded owners, see bc2cpp_wired_embedding_check.rb -- would
+  # still be decided by whichever call happens to run last).
+  #
+  # :protected is skipped, uninstalled (mruby has no mrb_define_protected_
+  # method; registering it mrb_define_method would make it public, a real
+  # behavior change -- same reasoning compile_all's own driver-side warning
+  # about this already gives, and confirmed no compiled entry anywhere in this
+  # project is ever actually :protected). A `.singleton` owner registers on the
+  # plain class object via mrb_define_class_method; mruby has no private
+  # class-method registration API either, so a private singleton entry (none
+  # exist today) is skipped the same way.
+  def emit_owner_registrations(compiled, owners)
+    by_owner = compiled.group_by { |m| m[:owner] }
+    targets = owners.select { |o| by_owner.key?(o) }
+
+    # Always emitted, even with an empty body, so every compiled gem's own
+    # gem_init can call it unconditionally -- a gem that owns none of `owners`
+    # (e.g. mruby-rgss-compiled, today) still defines a real, harmless no-op
+    # rather than needing a build-time #ifdef around the call site.
+    out = +"// OWNER_METHOD_REGISTRATION -- see bc2cpp.rb's own emit_owner_registrations comment.\n"
+    out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
+    targets.each do |owner|
+      singleton = owner.end_with?('.singleton')
+      var = "bc2cpp_owner_reg_#{sanitize(owner)}"
+      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      by_owner[owner].each do |m|
+        fn = if singleton
+               m[:visibility] == :private ? nil : 'mrb_define_class_method'
+             elsif m[:visibility] == :private
+               'mrb_define_private_method'
+             elsif m[:visibility] == :public
+               'mrb_define_method'
+             end
+        unless fn
+          out << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
+          next
+        end
+        out << "  #{fn}(M, #{var}, #{c_string_literal(m[:name])}, #{m[:entry]}, #{m[:aspec]});\n"
+      end
+    end
+    out << "}\n\n"
+    out
+  end
+
   def emit_instance_tt_setup
     out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
     out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
@@ -11008,7 +11372,7 @@ class CodeGen
 
       CPP
       { label: "synth:#{owner}##{ivar}", owner: owner, name: ivar, entry: entry, impl: impl,
-        arity: 0, arg_c_types: [], code: code, visibility: :public }
+        arity: 0, arg_c_types: [], aspec: 'MRB_ARGS_NONE()', code: code, visibility: :public }
     when :writer
       impl = "#{base}_eq_impl"
       entry = "#{base}_eq"
@@ -11039,7 +11403,7 @@ class CodeGen
 
       CPP
       { label: "synth:#{owner}##{ivar}=", owner: owner, name: "#{ivar}=", entry: entry, impl: impl,
-        arity: 1, arg_c_types: ['mrb_value'], code: code, visibility: :public }
+        arity: 1, arg_c_types: ['mrb_value'], aspec: 'MRB_ARGS_REQ(1)', code: code, visibility: :public }
     end
   end
 
@@ -12470,8 +12834,18 @@ class CodeGen
       arg_c_types << 'mrb_value'
       arg_c_types << 'mrb_int' unless kw[:required]
     end
+    # REGISTRATION_ASPEC: the mrb_aspec a registration of this entry needs, built
+    # from the very variables the wrapper above was generated from (mand/opt/rest/
+    # keywords/block), so it cannot drift from the arguments the wrapper actually
+    # binds. The count of keywords is all an aspec can carry (mruby has no
+    # required-keyword field); the wrapper itself enforces which are required.
+    aspec = mand.zero? && opt.to_i.zero? && !has_rest && !kw_table && !needs_blk_param && !has_blk ? ['MRB_ARGS_NONE()'] : ["MRB_ARGS_REQ(#{mand})"]
+    aspec << "MRB_ARGS_OPT(#{opt})" if opt.to_i.positive?
+    aspec << 'MRB_ARGS_REST()' if has_rest
+    aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
+    aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-      arity: arg_names.size, arg_c_types: arg_c_types,
+      arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
       code: out, visibility: d.visibility }
   end
 
@@ -20879,30 +21253,31 @@ class CodeGen
       # never caught by any #error check (this compiles and links fine).
       d = a[/^R(\d+)/, 1]
       name = a[/^R\d+\s+(\S+)/, 1]
-      owner_path = lexical_scope_path(owner_def.owner)
-      if owner_path == ['Object']
-        "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
-      else
-        @const_lookup_helper_used = true
-        out = String.new
-        out << "  {\n"
-        scope_vars = []
-        current = 'mrb_obj_value(M->object_class)'
-        owner_path.each_with_index do |seg, i|
-          out << "    mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
-          scope_vars << "scope#{i}"
-          current = "scope#{i}"
-        end
-        out << "    mrb_bool ok = FALSE;\n"
-        out << "    mrb_value r#{d}_tmp = mrb_nil_value();\n"
-        scope_vars.reverse_each do |sv|
-          out << "    if (!ok) r#{d}_tmp = bc2cpp_const_try(M, #{sv}, mrb_intern_cstr(M, \"#{name}\"), &ok);\n"
-        end
-        out << "    if (!ok) r#{d}_tmp = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
-        out << "    r#{d} = r#{d}_tmp;\n"
-        out << "  }\n"
-        out
+      # INTEGER_CONSTANT_VALUE_PROOF: a name IntegerConstants.analyze_values
+      # proved always binds this exact number needs no lookup at all -- not
+      # even a cached one, since the value never changes for the life of the
+      # program, only what register holds it. Checked first: a name can
+      # never be admitted here AND by StableClassConstants below (this proof
+      # poisons on CLASS/MODULE, that one requires it), so the two never
+      # compete for the same name.
+      if (value = self.class.integer_constant_values&.[](name))
+        return "  r#{d} = mrb_fixnum_value(#{value});\n"
       end
+
+      owner_path = lexical_scope_path(owner_def.owner)
+      if self.class.stable_class_constants&.include?(name)
+        # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
+        # (lexical scope, name); it runs the ordinary lookup until it finds a
+        # class/module, then returns the stored value.
+        @const_site_cache ||= {}
+        key = [owner_path, name]
+        unless @const_site_cache.key?(key)
+          @const_site_cache[key] = { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path) }
+        end
+        return "  r#{d} = bc2cpp_cconst_#{@const_site_cache[key][:index]}(M);\n"
+      end
+
+      const_lookup_block(d, name, owner_path)
     when 'OCLASS'
       # OCLASS_SUPPORT: "OCLASS R3" -- real `::Foo` root-scope constant
       # syntax (`::File.open(...)`, `LCF::File#save_to`'s own real body)
@@ -20925,6 +21300,19 @@ class CodeGen
       # read the named constant off of it, and overwrite the same register.
       d = a[/^R(\d+)/, 1]
       name = a[/::(\w+)\s*$/, 1]
+      # INTEGER_CONSTANT_VALUE_PROOF: same substitution as GETCONST's own
+      # case above -- see that comment. R<d> already holds the resolved
+      # owning scope from the immediately preceding GETCONST/GETMCNST; its
+      # own instruction still runs and still raises if that scope does not
+      # exist, this just skips USING the value once it is at hand, so the
+      # dominant real hot GETMCNST shape (`Cmd::SHOW_MESSAGE`-style event
+      # command dispatch: hundreds of these per frame, one per `case
+      # cmd.code when Cmd::X` arm scanned) costs nothing at all rather than
+      # one mrb_const_get / iv_get search apiece.
+      if (value = self.class.integer_constant_values&.[](name))
+        return "  r#{d} = mrb_fixnum_value(#{value});\n"
+      end
+
       "  r#{d} = mrb_const_get(M, r#{d}, mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'HASH'
       # "HASH R2 22" -- build a Hash from N key/value pairs held in 2N
@@ -21181,6 +21569,10 @@ class CodeGen
         # nil (no compiled candidate, or a blocked name) keeps the funcall.
         tail = compile_poly_small_n('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
         tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
+        # STRUCT_INDEX_CACHE -- see that method's own comment. A miss (no
+        # literal Symbol key, or no known Struct owner declares that member)
+        # is simply an empty string, leaving this whole `else if` chain out.
+        struct_read = compile_struct_literal_index_read(irep, idx, s, d)
         fallback = <<~CPP
           if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
@@ -21189,7 +21581,7 @@ class CodeGen
           } else if (mrb_string_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->string_class &&
                      (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
             r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
-          } else {
+          } #{struct_read}else {
             #{tail}
           }
         CPP
@@ -24309,7 +24701,54 @@ class CodeGen
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
                "no runtime check)#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      elsif @ivar_layout.key?(target.owner)
+        # MONO_EMBED_GUARD: `monomorphic_target`'s own "exactly one COMPILED
+        # bytecode definition of this bare name anywhere in the program"
+        # proof says nothing about method_missing -- a class that answers a
+        # name only through method_missing (LCF::Array1D/Array2D's own
+        # schema-driven field access, mruby-lcf/mrblib/lcf.rb) never adds an
+        # entry to @registry[name] at all, so it is invisible to that count
+        # and MONO would otherwise call `impl` directly on a receiver that
+        # was never proven to be `target.owner`. Ordinarily that just reads/
+        # writes the wrong object's own iv_tbl entry -- wrong, but memory-
+        # safe. It stops being memory-safe the moment `target.owner` embeds
+        # ANY ivar as a real struct field: GETIV/SETIV for an embedded field
+        # cast `DATA_PTR(self)` (RDATA(self)->data) unconditionally, and a
+        # receiver that is not really an RData of this shape (an ordinary
+        # RObject, e.g. an Array1D row) makes that a real out-of-bounds/
+        # type-confused read, not merely a wrong answer -- caught for real
+        # reproducing Game::Actor#faceset_index: `@db_row.faceset_index`
+        # (an Array1D method_missing call, never Game::Actor) targeted
+        # Game::Actor's own compiled accessor because `faceset_index` had
+        # exactly one COMPILED definition program-wide, and
+        # `((Game__Actor_ivars*)DATA_PTR(self))->faceset_index` then read
+        # through a receiver that was never a Game::Actor at all -- a real,
+        # reproduced crash. Guard every MONO call into an embedding class,
+        # not just the specific methods that happen to touch a field today:
+        # precisely proving "this exact compiled body never reaches a
+        # DATA_PTR dereference, even transitively" is a much deeper
+        # reachability question than this gate is willing to get wrong in
+        # the unsafe direction, and the file's own established pattern
+        # (`typed`, just above) already pays this same one-compare cost for
+        # every other receiver-uncertain devirtualized call.
+        check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+        note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
+               "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
+               "direct C++ call, mrb_funcall fallback#{native_note}\n"
+        fallback = dynamic_dispatch_line(d, recv, name, argv)
+        "#{note}  if (#{check}) {\n" \
+          "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
+          "  } else {\n" \
+          "    #{fallback}" \
+          "  }\n"
       else
+        # target.owner embeds no ivar at all, so this callee's own GETIV/
+        # SETIV codegen never casts DATA_PTR(self) regardless of what self
+        # really is (embed_type(target.owner, ...) is nil for every ivar
+        # here) -- a wrong receiver reads/writes the wrong object's own
+        # iv_tbl entry, memory-safe (if semantically wrong) exactly as
+        # every other unguarded MONO call already was before this file
+        # tracked ivar embedding at all. No guard needed.
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
@@ -24462,6 +24901,73 @@ class CodeGen
     out
   end
 
+  # The uncached GETCONST lookup: resolve the owner's lexical scope chain, probe
+  # each scope innermost-first, fall back to Object. `d` is the destination
+  # register number (a string). Used inline, and as the slow path of a
+  # CONST_SITE_CACHE helper (which passes d = "0").
+  def const_lookup_block(d, name, owner_path)
+    if owner_path == ['Object']
+      "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+    else
+      @const_lookup_helper_used = true
+      out = String.new
+      out << "  {\n"
+      scope_vars = []
+      current = 'mrb_obj_value(M->object_class)'
+      owner_path.each_with_index do |seg, i|
+        out << "    mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
+        scope_vars << "scope#{i}"
+        current = "scope#{i}"
+      end
+      out << "    mrb_bool ok = FALSE;\n"
+      out << "    mrb_value r#{d}_tmp = mrb_nil_value();\n"
+      scope_vars.reverse_each do |sv|
+        out << "    if (!ok) r#{d}_tmp = bc2cpp_const_try(M, #{sv}, mrb_intern_cstr(M, \"#{name}\"), &ok);\n"
+      end
+      out << "    if (!ok) r#{d}_tmp = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+      out << "    r#{d} = r#{d}_tmp;\n"
+      out << "  }\n"
+      out
+    end
+  end
+
+  # File-scope state and helpers for CONST_SITE_CACHE. Each helper returns the
+  # constant's class or module, running the full lookup only until that first
+  # succeeds (a failed lookup still raises from the same code and stores
+  # nothing). Only a class/module value is stored. Keyed on the mrb_state* with
+  # its own reset, dropped by each compiled gem's gem_final via
+  # bc2cpp_reset_const_site_cache(); always emitted so gem_final can call it.
+  def emit_const_site_cache
+    entries = (@const_site_cache || {}).values
+    count = [entries.size, 1].max
+    out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb.\n"
+    out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
+    out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
+    out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    out << "static void bc2cpp_reset_const_site_cache() {\n" \
+           "  bc2cpp_cconst_state = nullptr;\n" \
+           "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "}\n"
+    entries.each do |slot|
+      i = slot[:index]
+      out << "static mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
+             "  if (bc2cpp_cconst_state != M) {\n" \
+             "    bc2cpp_reset_const_site_cache();\n" \
+             "    bc2cpp_cconst_state = M;\n" \
+             "  }\n" \
+             "  if (bc2cpp_cconst_have[#{i}]) return bc2cpp_cconst_slots[#{i}];\n" \
+             "  mrb_value r0 = mrb_nil_value();\n"
+      out << slot[:body].lines.map { |l| "  #{l}" }.join
+      out << "  if (mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE) {\n" \
+             "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
+             "    bc2cpp_cconst_have[#{i}] = true;\n" \
+             "  }\n" \
+             "  return r0;\n" \
+             "}\n"
+    end
+    out
+  end
+
   def dynamic_dispatch_line(d, recv, name, argv)
     if argv.empty?
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
@@ -24491,7 +24997,8 @@ if $PROGRAM_NAME == __FILE__
   order = dfs_order(ireps, root_label)
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
-  registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins = build_registry(ireps, root_label)
+  registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
+    struct_member_lists = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
   # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
@@ -24608,6 +25115,10 @@ if $PROGRAM_NAME == __FILE__
   else
     integer_constants.sort.each { |n| warn "  CONST #{n}" }
   end
+
+  integer_constant_values = IntegerConstants.analyze_values(ireps, integer_constants)
+  warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
+  integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
 
   ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants)
   warn ''
@@ -24991,6 +25502,13 @@ if $PROGRAM_NAME == __FILE__
   # CodeGen this driver builds first -- same env var, same reasoning, kept in
   # sync here for the real CodeGen actually used to emit code.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
+                                    StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
+  warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
+  CodeGen.struct_members = struct_member_lists
+  warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
+  CodeGen.integer_constant_values = integer_constant_values
+  CodeGen.stable_class_constants.sort.each { |n| warn "  STABLE_CLASS #{n}" }
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
                     integer_constants, foreign_methods, outside_tokens, native_name_sources,
@@ -25296,11 +25814,14 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_forward_decls(compiled)
   print gen.emit_instance_tt_setup
   print gen.emit_owner_class_cache
+  print gen.emit_owner_registrations(compiled, BC2CPP_WIRED_EMBEDDINGS)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
+  const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   print SymbolCache.emit(symbol_table)
+  print const_site_cache_code
   compiled.each { |m| print m[:code] }
 
   # Write this run's own cross-TU declarations header, so a *different*
