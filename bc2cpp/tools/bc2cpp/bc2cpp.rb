@@ -9384,7 +9384,15 @@ class CodeGen
     return nil if devirt_blocked_name?(name)
 
     defs = @registry[name]
-    return nil unless defs && defs.size >= 2
+    # LONE_ACCESSOR_CHAIN: a name whose only definition in the closed world is a
+    # plain attr_reader/attr_writer (`indent`/`code` on LCF::EventCommand, ~85
+    # executed funcalls per RPG2k map frame) cannot be MONO -- an accessor has no
+    # bytecode -- and used to fall to POLY, because a chain needed two candidates.
+    # The receiver can still be any class (mruby-rpgxp/rpgvx/wolf define their own
+    # `code`/`indent`, and a receiver whose type is not traced is anything), so it
+    # stays an exact-class guarded chain with the funcall fallback: one candidate.
+    lone_accessor = defs && defs.size == 1 && defs.first.kind == :ivar_accessor && defs.first.irep.nil?
+    return nil unless defs && (defs.size >= 2 || lone_accessor)
 
     # An owner with two definitions of this name (an attr_reader later
     # redefined by a `def`, or the reverse) never joins the chain: which one
@@ -9405,8 +9413,18 @@ class CodeGen
       # writer). It needs no ONLY_OWNERS gate, having no emitted function.
       if t.kind == :ivar_accessor && t.irep.nil?
         next false if t.owner.end_with?('.singleton')
+        next false unless n == (name.end_with?('=') ? 1 : 0)
 
-        next n == (name.end_with?('=') ? 1 : 0)
+        # EMBEDDED_ACCESSOR_CHAIN: an embedded ivar lives in the RData struct, not
+        # the ivar table, so mrb_iv_get would read nil. Its reader/writer is the
+        # synthesized `<Owner>_<ivar>[_eq]_impl`, which is only callable when the
+        # compiled gem that emits it is this one or one whose declarations are in
+        # scope; otherwise leave the candidate out (the funcall reaches the
+        # registered synthesized method).
+        if embedded_accessor?(t.owner, name)
+          next false if @only_owners && !@only_owners.include?(t.owner) && !@other_owners&.include?(t.owner)
+        end
+        next true
       end
       next false unless t.irep
       # SINGLETON_OWNER_EXCLUSION: a `.singleton`-suffixed owner (bc2cpp's
@@ -9445,6 +9463,15 @@ class CodeGen
     candidates
   end
 
+  # True when `owner`'s ivar behind accessor `name` (a reader `code`, or a writer
+  # `code=`) is embedded in the RData struct and therefore served by a synthesized
+  # accessor pair (ATTR_STRUCT_DEVIRT, emit_ivar_accessor_pair) instead of the
+  # native attr_reader/attr_writer.
+  def embedded_accessor?(owner, name)
+    writer = name.end_with?('=')
+    @synthesize_accessor_for.include?([owner, name.chomp('='), writer ? :writer : :reader])
+  end
+
   def compile_poly_small_n(name, d, recv, argv, n)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
@@ -9455,8 +9482,16 @@ class CodeGen
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c); the writer
                # returns the assigned value, not the ivar read back.
-               if name.end_with?('=')
-                 "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{name[0..-2]}\"), #{argv.first});\n    " \
+               ivar = name.chomp('=')
+               if embedded_accessor?(target.owner, name)
+                 base = "#{sanitize(target.owner)}_#{sanitize(ivar)}"
+                 if name.end_with?('=')
+                   "r#{d} = #{base}_eq_impl(M, #{recv}, #{argv.first});"
+                 else
+                   "r#{d} = #{base}_impl(M, #{recv});"
+                 end
+               elsif name.end_with?('=')
+                 "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{argv.first});\n    " \
                    "r#{d} = #{argv.first};"
                else
                  "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
@@ -21072,6 +21107,13 @@ class CodeGen
           }
         CPP
       else
+        # INDEX_CHAIN: the tail of an untyped `x[i]` was a bare funcall, so a
+        # receiver whose class is one of the program's own `#[]` definitions
+        # (Game::Variables, LCF::Array1D, ...) paid full dynamic dispatch. Send it
+        # through the same exact-class chain any other one-argument send gets;
+        # nil (no compiled candidate, or a blocked name) keeps the funcall.
+        tail = compile_poly_small_n('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
+        tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
         fallback = <<~CPP
           if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
@@ -21081,7 +21123,7 @@ class CodeGen
                      (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
             r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
           } else {
-            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+            #{tail}
           }
         CPP
         typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
@@ -23663,6 +23705,45 @@ class CodeGen
       CPP
     end
 
+    # INTEGER_LSHIFT: `bits << n` on two immediate Integers (~25 executed funcalls
+    # per RPG2k map frame). Uses mrb_num_shift, the same kernel Integer#<< itself
+    # calls (3rd/mruby/src/numeric.c int_lshift), so a shift by zero, of zero,
+    # negative counts and the shift-width limit behave identically. What int_lshift
+    # would do beyond that -- MRB_INT_MIN counts, and overflow, which mruby turns
+    # into a bigint or a RangeError -- is never done from C here: those calls take
+    # the ordinary dispatch. That also keeps a 32-bit mrb_int build free of bigint
+    # values handed back to C. Emitted next to the exact-Array push arm, so a site
+    # that used to be ARRAY_PUSH-only still is when Integer#<< has a Ruby override.
+    if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Integer])
+      value = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv).chomp
+      array_arm = ''
+      if builtin_class_send_safe?(name, %w[Array])
+        array_arm = <<~CPP
+            // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
+            if (mrb_array_p(#{recv}) && mrb_obj_ptr(#{recv})->c == M->array_class) {
+              mrb_ary_push(M, #{recv}, #{value});
+              r#{d} = #{recv};
+            } else\x20
+        CPP
+      end
+      return <<~CPP
+          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers; overflow keeps ordinary dispatch
+          if (mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN) {
+            mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
+            if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
+              r#{d} = #{recv};
+            } else if (mrb_num_shift(M, bc2cpp_shl_v, bc2cpp_shl_w, &bc2cpp_shl_out)) {
+              r#{d} = mrb_int_value(M, bc2cpp_shl_out);
+            } else {
+              #{fallback}
+            }
+          } else {
+            #{fallback}
+          }
+      CPP
+    end
+
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
@@ -25073,6 +25154,8 @@ if $PROGRAM_NAME == __FILE__
   # at all, matching the real signature exactly (3rd/mruby/include/mruby/
   # internal.h's own declaration).
   puts 'extern "C" mrb_value mrb_str_aref(mrb_state*, mrb_value, mrb_value, mrb_value);'
+  # INTEGER_LSHIFT's kernel: exported by numeric.c but declared in no public header.
+  puts 'extern "C" mrb_bool mrb_num_shift(mrb_state*, mrb_int, mrb_int, mrb_int*);'
   # DIV_FASTPATH_SUPPORT: same `mruby/internal.h`-has-no-C-linkage-guard
   # situation as `mrb_str_aref` just above -- `DIV`'s own compile_insn
   # case calls this directly (mruby.h's own `mrb_int` typedef is already
