@@ -54,6 +54,17 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   LCF::EventCommand LCF::MoveCommand Game::Interpreter Game::Transition Game::Map
   Game::State RPG2k RPG2k::Scene::Map::LRUBitmapCache Game::Timer LCF::Tree
   RPG2k::Window
+  RPG2k::Scene::Map Game::Battle Game::Battle.singleton RPG2k::Scene::Battle
+  RPG2k3::Scene::Battle Game::Actor Game::Party Game::Party.singleton
+  Game::Actors Game::Shop Game::Enemy Game::Troop Game::EnemyAi
+  Game::TextReveal Game::MessageConfig Game::NumberInput
+  Game::States.singleton Game::Message.singleton Game::ChipsetLayout.singleton
+  Game::EventPage.singleton Game::BattlePage.singleton Game::State.singleton
+  RPG2k::Scene::Base RPG2k::Scene::ChipsetEditor RPG2k::Scene::DebugMenu
+  RPG2k::Scene::EquipMenu RPG2k::Scene::GameOver RPG2k::Scene::ItemMenu
+  RPG2k::Scene::MapViewer RPG2k::Scene::Menu RPG2k::Scene::Order
+  RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu RPG2k::Scene::StatusMenu
+  RPG2k::Scene::Title
 ].freeze
 
 BC2CPP_COMPILED_GEMS = {
