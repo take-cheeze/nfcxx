@@ -2668,8 +2668,8 @@ class IvarLayout
         return :fixnum if name && fixnum_return_names&.include?(name)
 
         return UNKNOWN
-      when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR'
-        # READ_ONLY_OPCODE_SKIP: these eight opcodes all print their lone
+      when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'
+        # READ_ONLY_OPCODE_SKIP: these nine opcodes all print their lone
         # register operand as the disassembly's own first `R%d` token (`RETURN
         # R%d`, `JMPNOT R%d %03d`, ...), the same shape the generic `else`
         # branch below treats as "some instruction we don't specifically
@@ -2679,10 +2679,10 @@ class IvarLayout
         # (`RETURN`: "return R[a]"; `RETURN_BLK`: "return R[a]"; `BREAK`:
         # "break R[a]"; `JMPIF`: "if R[a] pc+=b"; `JMPNOT`: "if !R[a]
         # pc+=b"; `JMPNIL`: "if R[a]==nil pc+=b"; `RAISEIF`: "raise(R[a]) if
-        # R[a]"; `MATCHERR`: "raise NoMatchingPatternError unless R[a]" --
-        # none assigns anything to R[a]) and against `src/codedump.c`'s own
-        # print calls for each (`fprintf(out, "RETURN\tR%d\t", a)` and
-        # so on), never guessed at.
+        # R[a]"; `MATCHERR`: "raise NoMatchingPatternError unless R[a]";
+        # `SETUPVAR`: "uvset(b,c,R[a])" -- none assigns anything to R[a])
+        # and against `src/codedump.c`'s own print calls for each
+        # (`fprintf(out, "RETURN\tR%d\t", a)` and so on), never guessed at.
         #
         # A real gap this closes, demonstrated with a standalone repro (a
         # class with a `pure_mandatory_arity?` `#initialize`, isolated from
@@ -2718,14 +2718,38 @@ class IvarLayout
         # matter the moment that separate optional-argument gap closes, for
         # `RPG2k::Window` and for any future class with the same shape.
         #
-        # `SETUPVAR` and `RESCUE` have the same read-only-first-token shape
-        # (checked against the same two files) but are deliberately left out
-        # of this list: `SETUPVAR`'s register interacts with the enclosing
-        # method's own upvar bookkeeping this file already treats specially
-        # elsewhere (`subtree_upvar_written_regs`), and `RESCUE` writes a
-        # SECOND register (`R[b] = R[a].isa?(R[b])`) this naive single-token
-        # regex can't see -- both deserve their own, separately-verified
-        # follow-up rather than being folded into this one.
+        # `SETUPVAR` (`uvset(b,c,R[a])`, ops.h) joins this arm too: its lone
+        # `R%d` token (`a`, confirmed against codedump.c's own `SETUPVAR\t
+        # R%d\t%d\t%d` format string) is a same-frame, read-only SOURCE --
+        # `b`/`c` are plain decimal upvar-slot/level operands, never printed
+        # with an `R` prefix, naming a register in an ANCESTOR frame, not
+        # this irep's own `reg`. The caution this comment used to raise
+        # about `subtree_upvar_written_regs` doesn't actually apply on
+        # inspection: that function walks a parent irep's CHILDREN looking
+        # for `SETUPVAR`'s own second field (`b`, the slot index in the
+        # PARENT's register space) to build a "written by a nested closure"
+        # set for a wholly separate mechanism (FIXNUM_OPERAND_PROOF); when
+        # trace_type walks the SAME irep a `SETUPVAR` sits in, that
+        # instruction's only register token is its own frame's `a`, disjoint
+        # from the `b` the other mechanism reads out of a different irep
+        # entirely. Verified against a real compiled closure (`f = lambda {
+        # x = y }`): from inside the block's own irep, `SETUPVAR R2 2 0`
+        # only ever reads that block's own R2; the register it writes
+        # belongs to the enclosing method's irep, a file this trace never
+        # opens.
+      when 'RESCUE'
+        # `R[b] = R[a].isa?(R[b])` (ops.h); `RESCUE\tR%d\tR%d` (codedump.c)
+        # -- unlike every arm above, this one prints TWO `R%d` tokens, and
+        # the real write lands on the SECOND (`b`), not the first the way
+        # every other arm here assumes. `a` (first token) is a pure read,
+        # exactly as read-only as the opcodes above; `b` is a genuine write
+        # (a fresh boolean, discarding whatever it held before) and must
+        # stop this trace at `UNKNOWN` the same way the generic `else`
+        # below does for any other real writer -- treating `b` as read-only
+        # would silently skip past an actual assignment.
+        a, b = insn.args.scan(/R(\d+)/).flatten
+        return UNKNOWN if b == reg
+        next unless a == reg
       else
         # Any other opcode's destination register: nearly every mruby
         # opcode's first operand is its Rd (SEND, STRING, GETCONST,
@@ -7268,6 +7292,27 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   # described above -- gating GETMCNST/GETCONST on one of those two.
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
+
+    if insn.op == 'RESCUE'
+      # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (ops.h);
+      # `RESCUE\tR%d\tR%d` (codedump.c) -- see IvarLayout.trace_type's own
+      # `when 'RESCUE'` arm for the full ops.h/codedump.c justification.
+      # `a` (first token) is read-only; `b` (second token) is a genuine
+      # write. Checked here, BEFORE the hoisted `d == reg` filter just
+      # below: that filter only ever extracts the FIRST `R%d` token, so
+      # without this early check a trace of `reg == b` would never even
+      # reach a `case`/`when` at all -- silently treated as "no instruction
+      # here touches reg" and left to fall through to whatever the walk
+      # finds next, rather than correctly stopping at a real write. This
+      # was a pre-existing gap (RESCUE has never been specially handled),
+      # not something this change introduces.
+      a, b = insn.args.scan(/R(\d+)/).flatten
+      next unless [a, b].include?(reg)
+      return nil if b == reg
+
+      next
+    end
+
     d = insn.args[/^R(\d+)/, 1]
     next unless d == reg
 
@@ -7716,25 +7761,28 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
       path.unshift(const_name)
       return path.join('::')
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR'
-      # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart): the exact same eight
-      # opcodes IvarLayout.trace_type special-cased above (see that arm's own
-      # comment for the confirmed-against-ops.h/codedump.c justification) --
-      # each only READS its lone `R%d` operand, never writes it, so this
-      # backward walk must skip past it and keep looking for whoever last
-      # actually wrote `reg`, the same way it already skips a `MOVE` whose
-      # destination doesn't match. Left un-mirrored here, an early `return`/
-      # guard clause sharing a register slot with a later, unrelated write
-      # would wrongly stop this trace at UNKNOWN -- the identical false
-      # negative ADR 0188 fixed for ivar embedding, but for ClassLayout's
-      # (and, via the same shared helper, ArrayElementLayout's/
-      # HashElementLayout's) class-hint resolution instead. A whole-program
-      # scan of every SETIV/GETIDX-terminal register history in this closed
-      # world found no site currently hitting this arm (the one real
+    when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'
+      # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart): the exact same nine
+      # opcodes IvarLayout.trace_type special-cases above (see that arm's own
+      # comment for the confirmed-against-ops.h/codedump.c justification,
+      # SETUPVAR included) -- each only READS its lone `R%d` operand, never
+      # writes it, so this backward walk must skip past it and keep looking
+      # for whoever last actually wrote `reg`, the same way it already skips
+      # a `MOVE` whose destination doesn't match. Left un-mirrored here, an
+      # early `return`/guard clause (or a closure reading an outer local)
+      # sharing a register slot with a later, unrelated write would wrongly
+      # stop this trace at UNKNOWN -- the identical false negative ADR 0188
+      # fixed for ivar embedding, but for ClassLayout's (and, via the same
+      # shared helper, ArrayElementLayout's/HashElementLayout's) class-hint
+      # resolution instead. RESCUE joins this same fix, but as its own `if`
+      # above the hoisted register filter, not this list -- see that
+      # branch's own comment for why. A whole-program scan of every
+      # SETIV/GETIDX-terminal register history in this closed world found no
+      # site currently hitting either arm (the one real RETURN/JMP/...
       # instance, `RPG2k::Window#pause=`, is IvarLayout's own bool-typed
-      # ivar, not a class hint) -- shipped anyway as the same "strictly
-      # fewer false UNKNOWNs, never a wrong answer" precision fix, not a
-      # currently-measurable win.
+      # ivar, not a class hint; SETUPVAR/RESCUE have zero sites either way)
+      # -- shipped anyway as the same "strictly fewer false UNKNOWNs, never
+      # a wrong answer" precision fix, not a currently-measurable win.
     else
       return nil
     end
@@ -16853,12 +16901,60 @@ class CodeGen
   # recognizer above (upgraded here to the shared proven_array_source
   # gate: static trace + chained rule + `-> Array` annotations).
   # Per-method semantics live in emit_sort_inline.
-  # `sort_by!`/`uniq!` (bang, in-place) stay out -- mutating the
-  # receiver in place needs aliasing analysis this round doesn't do; a
-  # follow-up. `max`/`min`/`max_by`/`min_by` (2 sites, `uniq`-adjacent)
-  # stay out too -- same loop-with-key shape as `find`, trivially a
-  # follow-up on this machinery, but not this round. Arity mismatches
-  # keep the honest `#error`, same as every recognizer above.
+  # `sort_by!`/`uniq!` (bang, in-place) stay out. Investigated once already:
+  # `emit_sort_inline`'s own passes never touch the receiver's real `RArray`
+  # (every temporary is a fresh `mrb_ary_new`, confirmed reading the function
+  # body directly), so a sound in-place strategy exists and is not even novel
+  # -- it is exactly how mruby's own stdlib implements both bang forms today
+  # (`3rd/mruby/mrbgems/mruby-enum-ext/mrblib/enum.rb`'s `sort_by!` is `self
+  # .replace(self.sort_by(&block))`; `mruby-array-ext/mrblib/array.rb`'s
+  # `uniq!` builds a scratch result and only replaces on a size change,
+  # nil otherwise) -- and `Array#replace`'s own real primitive,
+  # `mrb_ary_replace` (`3rd/mruby/src/array.c`), is a single atomic bulk
+  # copy/adopt with no per-element write any other holder of a reference to
+  # the receiver could observe half-done. So the fix here would just be:
+  # keep this recognizer's existing three passes (key/decorate/sort) exactly
+  # as they are, and in `emit_sort_inline`'s materialize step, for a `!`
+  # method, replace the receiver's contents via that same primitive and set
+  # the destination register to the receiver itself (bang forms return
+  # `self`, `uniq!` returns `nil` when nothing was removed) instead of
+  # rebinding to a new array. Not implemented because a whole-program scan
+  # of the closed world (mruby-rpg2k/lcf/rgss `mrblib`, plus every foreign
+  # `mrblib` bc2cpp reasons about) found **zero** real `.sort_by! { }`/
+  # `.uniq! { }` call sites -- nothing to validate an untested code path this
+  # deep in an AOT compiler against, so it stays a documented follow-up
+  # rather than being shipped speculatively. Re-run the same scan before
+  # picking this up; a real call site appearing is the trigger to implement
+  # it, not a bigger backlog. `max`/`min`/`max_by`/`min_by` stay out too --
+  # investigated once already, disassembly confirmed the register layout is
+  # identical to `sort`/`sort_by` (block arity is all that determines the
+  # shape, not the method name: `max`/`min` take a 2-arg comparator like
+  # `sort`, `max_by`/`min_by` a 1-arg key block like `sort_by`), and the
+  # real with-block semantics are known (`3rd/mruby/mrblib/enum.rb`'s
+  # `max`/`min`: the block is NEVER invoked for the first element, tested
+  # via a plain `block.call(candidate, current_best) > 0`/`< 0`, not
+  # `mrb_cmp`; `mruby-enum-ext/mrblib/enum.rb`'s `max_by`/`min_by`: the
+  # block DOES run on the first element to seed the running key, tested via
+  # a plain `>`/`<` on the raw return value -- ties keep the first-seen
+  # element in both families, empty array is `nil`). Structurally `max_by`/
+  # `min_by` are the "loop-with-key shape as find" this comment used to
+  # claim for all four; `max`/`min`'s 2-arg comparator is really an
+  # `emit_accum_inline`-style single-pass fold instead, and is soundly
+  # inlinable despite sharing `sort`'s comparator arity because it only
+  # ever needs n-1 calls (one pass), not `sort`'s O(n log n) -- the reason
+  # `sort`-with-a-comparator stays rejected in `emit_sort_inline` does not
+  # transfer to `max`/`min`. None of this closes a real gap today, though:
+  # the "2 sites" this comment used to count (`scripts/rpg2k_scene_check
+  # .rb`, `scripts/rpg2k_testbed_logic_check.rb`) are CRuby test-harness
+  # code, never part of `closed_world_mrblib_srcs` -- outside anything
+  # bc2cpp actually compiles -- and a full grep of the real closed world
+  # (mruby-rpg2k/lcf/rgss `mrblib`) found zero block-form call sites for
+  # any of the four. Admitting them to `SORT_BLOCK_METHODS` would be sound
+  # but entirely inert on the real program, so -- same reasoning as
+  # `sort_by!`/`uniq!` just above -- left as a documented follow-up rather
+  # than shipped speculatively; re-run the grep before picking this up.
+  # Arity mismatches keep the honest `#error`, same as every recognizer
+  # above.
   SORT_BLOCK_METHODS = %w[sort sort_by uniq].freeze
 
   def recognize_sort_regions(irep, owner_name, mand, ivar_classes, arg_classes)
