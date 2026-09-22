@@ -52,6 +52,7 @@
 BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
   LCF::EventCommand LCF::MoveCommand Game::Interpreter Game::Transition Game::Map
+  Game::State RPG2k RPG2k::Scene::Map::LRUBitmapCache Game::Timer LCF::Tree
 ].freeze
 
 BC2CPP_COMPILED_GEMS = {
