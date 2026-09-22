@@ -758,6 +758,77 @@ whatever symbol-table work that dispatch does) entirely. Tracing exactly
 which 3 methods those are, and whether they're actually hot, is the next
 step to turn "plausible" into "confirmed" -- not attempted this session.
 
+**Correction (the 3-accessor mechanism above is wrong)**: traced exactly
+which 3 methods those are, as promised above, and none of them run at
+all in this benchmark. `Optcarrot::Pad#buttons`/`#buttons=`'s only real
+callers are `Pad#press`/`#release` (`pad.rb`'s own `@pads[pad].buttons
+|= 1 << btn` / `&= ~(...)`), which this probe's own headless driver
+(`runner_tail.rb`) never reaches -- it constructs `Optcarrot::NES.new`
+with `input: :none`, so zero input events are ever generated across all
+180 frames. `Optcarrot::CPU#ppu_sync=`'s only real caller anywhere in
+`3rd/optcarrot/lib` is `optcarrot/mapper/mmc3.rb`'s `@cpu.ppu_sync =
+true` -- and `mapper/mmc3.rb` is not in this probe's own 11-file source
+list (`compiled_run.rb`'s own `sources` array), so that call site isn't
+even part of the compiled program, let alone executed. All 3
+synthesized accessors have exactly zero executions this benchmark ever
+takes, confirmed by grepping the loaded source tree rather than assumed
+-- they cannot be the source of a 355.9M-call difference in anything.
+
+The real mechanism, found by comparing `emit_register`'s own `rows`
+(the methods it actually installs via `mrb_define_method`) between the
+two configurations directly, rather than reasoning about `embeds`
+secondhand: `BC2CPP_SELF_REGISTERING`'s dominant effect was never really
+about ivar embedding at all -- it's that `emit_register`'s own
+registration filter (`FIBER_SAFE_OWNERS.include?(owner) || safe_setup ||
+safe_frame_boundary || embeds.include?(owner)`, this file's own comment
+above) uses `embeds.include?(owner)` as one of its four ways for a
+method to qualify, and `embeds` is *empty* whenever
+`BC2CPP_SELF_REGISTERING` is unset -- because `embeds` is computed from
+the exact same `BC2CPP_WIRED_EMBEDDINGS`-gated diagnostic this whole
+change targets. Disabled, only whatever a class's `FIBER_SAFE_*` entry
+explicitly lists gets registered; every other method of that class keeps
+running as plain interpreted bytecode, not because it failed to compile,
+but because nothing ever called `mrb_define_method` to install the
+compiled version over it. Counted directly (excluding `Optcarrot::PPU`,
+which the real benchmark always excludes via its own separate
+`ONLY_OWNERS` step regardless of this env var): disabled installs 151
+real methods total; enabled installs 199 -- 48 more, concentrated
+exactly where `FIBER_SAFE_OWNERS`/`FIBER_SAFE_SETUP_METHODS`/
+`FIBER_SAFE_FRAME_BOUNDARY_METHODS` never reached:
+
+- `Optcarrot::ROM`: 1 method (`initialize`) -> 10 (adds `peek_6000`/
+  `poke_6000` -- the cartridge-space memory access path the CPU's own
+  `fetch`/`store` reach on every out-of-RAM address -- plus `init`,
+  `load_battery`, `parse_header`, `reset`, `save_battery`, `vsync`,
+  `inspect`).
+- `Optcarrot::Pad`: 0 methods -> 7 (the entire class, including its own
+  `peek`/`poke`/`poll_state` -- unexercised by this particular `input:
+  :none` benchmark run, per the correction above, but real for any run
+  that does drive input).
+- `Optcarrot::APU`: 2 methods (`flush_sound`, `vsync`, both already
+  covered by `FIBER_SAFE_FRAME_BOUNDARY_METHODS`) -> 20 (adds `do_clock`,
+  `clock_dma`, `clock_dmc`, `clock_frame_counter`, `clock_frame_irq`,
+  `clock_oscillators`, `proceed`, `peek_4015`, `peek_40xx`, `poke_4015`,
+  `poke_4017`, `reset`, `reset_mapping`, `update`, `update_delta`,
+  `update_latency`, `initialize`, `inspect` -- the entire per-cycle audio
+  processing path).
+- `Optcarrot::APU::DMC`: 0 methods -> 13 (the entire class).
+
+So the 16.1% symbol-table-traffic drop and the 6.2% wall-clock win are
+both far more directly explained by "48 more real, previously-
+interpreted hot-path methods -- including the ROM read path every
+CPU memory access can reach and the entirety of APU's audio clocking --
+now run as compiled C++ instead of through the interpreter's own `SEND`
+dispatch" than by anything involving ivar embedding or synthesized
+accessors. This also means this PR's own original framing (centered on
+3 embedded `CPU` ivars) undersold its real effect: the ivar embedding is
+real and independently useful, but registration completeness for whole
+classes was always the bigger win sitting in the same diagnostic gate.
+Still not run through `gprof -q`'s call graph to prove the *exact*
+causal chain from "more compiled methods" to "less symbol-table
+traffic" rather than merely correlating -- that remains the honest next
+step.
+
 **Why `CPU`'s own register file stays unembedded**: the "next concrete
 target" this section's own earlier revision named -- `@a`/`@x`/`@y`/`@s`/
 `@p`/`@pc` (real names: `@_a`/`@_x`/`@_y`/`@_sp`/`@_pc`, plus the split
