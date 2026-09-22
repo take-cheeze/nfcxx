@@ -25204,7 +25204,28 @@ if $PROGRAM_NAME == __FILE__
   # an empty integer-constant set, nil outside-tokens) are all inputs
   # `compute_array_return_names` never reads.
   require_relative 'compiled_gems'
-  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS
+  # BC2CPP_SELF_REGISTERING: EMBED_WIRED's own allowlist (compiled_gems.rb's
+  # BC2CPP_WIRED_EMBEDDINGS) exists because the real compiled gems' own
+  # register.cxx is hand-written and does not install every compiled entry
+  # point of an embedding class by construction -- an unregistered one keeps
+  # running interpreted, reading the ordinary ivar table while a compiled
+  # sibling writes the embedded struct, and sees nil (see that constant's own
+  # comment for the real, shipped bug this caused). A caller whose OWN
+  # register.cxx-equivalent is generated FROM the exact same `embeds`/
+  # `compiled entry points` diagnostic this driver already prints -- so
+  # "compiled and embeddable" and "installed" are the same fact by
+  # construction, with no hand-maintenance gap possible -- doesn't have that
+  # problem and can say so here, skipping the allowlist and letting every
+  # class `IvarLayout`/`drop_unsafe_embeddings` themselves already proved
+  # safe actually embed. `drop_unsafe_embeddings`'s OTHER checks (every
+  # accessor compiles clean, no native attr_reader/writer collision) still
+  # run unconditionally either way; this only ever removes the extra,
+  # hand-maintenance-specific allowlist gate. tools/optcarrot_probe/
+  # compiled_run.rb sets this: its own emit_register already installs every
+  # compiled method of any class its own `embeds` diagnostic names (see that
+  # function's own comment), the identical guarantee BC2CPP_WIRED_EMBEDDINGS
+  # exists to provide by hand for the real gems.
+  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   array_return_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                    annotations, superclass_of, {}, {}, container_constants, {},
                                    Set.new, foreign_methods, nil, nil,
@@ -25430,7 +25451,10 @@ if $PROGRAM_NAME == __FILE__
       outside_world_tokens(native_paths + foreign_ruby_srcs)
     end
   warn ''
-  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS
+  # BC2CPP_SELF_REGISTERING: see the identical guard above, on the probing
+  # CodeGen this driver builds first -- same env var, same reasoning, kept in
+  # sync here for the real CodeGen actually used to emit code.
+  CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
                                     StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
