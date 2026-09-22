@@ -548,6 +548,37 @@ project's history; a clean, idle-machine before/after (`PPU` excluded vs.
 this fix's partial inclusion) is the honest next step before trusting
 either number, not something this paragraph will guess at.
 
+**Update (clean-machine re-measurement)**: done, on a genuinely idle
+machine (load 0.3-1.2 throughout, one brief dip to 1.9 between runs from
+an unrelated process that finished before the second run started).
+Scratch copies only, `tools/optcarrot_probe/compiled_run.rb` itself
+untouched -- Run A restored the old `.reject { |owner| owner.start_with?(
+'Optcarrot::PPU') }` line onto a scratch copy (simulating the pre-fix
+baseline); Run B ran a scratch copy of the current, landed file
+unmodified. Confirmed the only diff between the two scratch files was
+that one line.
+
+| | Run A: `PPU` excluded (old) | Run B: `PPU` included (this fix) | delta |
+|---|---|---|---|
+| compiled methods | 198 | 232 | +34 |
+| CRuby | 7.06s (25.51 fps) | 7.16s (25.14 fps) | +0.10s |
+| mruby interpreter | 70.80s (2.54 fps) | 71.86s (2.50 fps) | +1.06s (+1.5%) |
+| mruby + bc2cpp | 78.20s (2.30 fps) | 78.33s (2.30 fps) | +0.13s (+0.17%) |
+
+Checksum `59662` on all three runtimes, both runs. Verdict: compiling
+`PPU`'s fiber-safe 34 extra methods is wall-clock *neutral* for `mruby +
+bc2cpp` -- +0.17%, well inside run-to-run noise, neither a real speedup
+nor a real slowdown. The earlier, separately-flagged observation that
+`mruby + bc2cpp` runs slower than the plain mruby interpreter for this
+whole probe is now confirmed as real, not noise, in both configurations:
+~7.4s (10.5%) slower in Run A, ~6.5s (9.0%) slower in Run B, consistently.
+That gap predates this session's own work by a long margin -- this file's
+own intro already put it at roughly 10% ("CRuby ~4.9s, interpreted mruby
+~59-60s, and bc2cpp ~63-67s") before `CPU`/`NES` even compiled, and at
+12.6% once they did ("CRuby 4.82s, interpreted mruby 59.60s, and bc2cpp
+67.09s") -- and is a separate, larger open question this specific change
+neither caused nor closed.
+
 **Update (CI SIGSEGV investigation)**: the "confirmed safe" `Optcarrot::CPU`/
 `NES` claim above, and the `Optcarrot::Video`/`APU` frame-boundary hooks it
 was extended with, did not hold up against CI's own 180-frame run -- CI
