@@ -25431,7 +25431,8 @@ if $PROGRAM_NAME == __FILE__
     end
   warn ''
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS
-  CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
+  CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
+                                    StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
