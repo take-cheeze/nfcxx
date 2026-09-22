@@ -21621,7 +21621,14 @@ class CodeGen
     # after the outer mrb_obj_eq identity shortcut has already failed (the
     # VM's OP_EQ order), so it takes the same resolver as the other
     # comparisons and stores the `==` method's own result like OP_CMP does.
-    fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+    # For EQ the generated chain below already answers String/Symbol, so its
+    # fallback send must not repeat the registered-expression switch.
+    @suppress_native_expression_send = sym if op == 'EQ'
+    begin
+      fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+    ensure
+      @suppress_native_expression_send = nil
+    end
     # String/Symbol `==` are generated from their C wrappers; the resolver
     # fallback above stays the `else` for every other receiver.
     fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == 'EQ'
@@ -23836,6 +23843,9 @@ class CodeGen
     # fallback below uses the exact-class expressions generated from native
     # C registrations and implementations.
     native_expression_entries = @native_registered_expressions[name]
+    # EQ_CHAIN_FALLBACK: compile_cmp wraps this send in its own String/Symbol chain
+    # (generated_eq_dispatch), so the send must not emit that switch a second time.
+    native_expression_entries = nil if @suppress_native_expression_send == name
     native_expression_owners = native_expression_entries&.map { |entry| entry[:owner][:class_name] }&.uniq
     builtin_native_expression_send = native_expression_entries && native_expression_entries.all? { |entry| entry[:arity] == n } &&
                                      builtin_class_send_safe?(name, native_expression_owners)
