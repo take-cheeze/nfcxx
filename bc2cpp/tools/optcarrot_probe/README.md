@@ -707,6 +707,57 @@ real measurement right now. Re-measuring on a quiet machine, the same
 caveat that PR's own author gave their part of this exact story, is the
 honest next step here too, not a number this paragraph will guess at.
 
+**Update (clean-machine re-measurement)**: done, on a genuinely idle
+4-core box (load average 0.15-0.92 throughout, confirmed via `uptime`
+before starting) rather than guessed at. Same method as the corrupted
+runs above -- `GPROF=1` against this exact `compiled_run.rb`, changing
+only `BC2CPP_SELF_REGISTERING` between the two -- but this time the
+profiles came back clean: `sigalrm_handler`/`mrb_mruby_task_gem_final`
+are ordinary small entries near the bottom of the flat profile (0.03-
+0.14% self-time), not 40-48% of it, confirming the earlier corruption
+really was machine contention and not a flaw in the measurement itself.
+Both runs still checksum `59662`.
+
+The `iv_bsearch_idx` call-count identity from the corrupted runs
+*reproduced exactly* on the clean machine: 376,884,519 in both the
+`BC2CPP_SELF_REGISTERING=0` and `=1` runs, down to the identical
+318,027,773/58,856,746 caller-edge split. That rules out "it was noise"
+as the explanation -- it is a real, deterministic fact that this specific
+change does not move that specific counter, most likely because
+`iv_bsearch_idx`'s 376M calls are dominated by ivars/classes this change
+never touches (`Video`/`PPU`'s own dynamic ivars, or other machinery
+entirely), not by the 3 fields (`@clk_total`/`@jammed`/`@ppu_sync`) this
+change actually embeds on `CPU`. Nobody has yet isolated which call sites
+those 376M calls actually come from -- that would need `gprof -q`'s call
+graph (the same tool the `gc_gray_rescan` investigation below used), not
+attempted this session.
+
+Despite that, wall-clock *did* move, consistently: the bc2cpp run took
+287.99s disabled vs. 270.14s enabled (-6.2%), while the CRuby and
+interpreted-mruby runs (neither of which this env var touches) stayed
+within 1-3% of each other, the expected run-to-run noise band -- so the
+6.2% bc2cpp delta is attributable to the change, not noise. The
+mechanism is not `iv_bsearch_idx`, per the paragraph above; the flat
+profile's other real (non-noise-band) delta is `sym_check`/`mrb_packed_
+int_decode`/`symtbl_get_ptr`/`symtbl_is_literal` -- four functions in
+mruby's packed-symbol-table decode path, all moving together (as they
+should; they are one call chain) from about 2,212,743,000 calls disabled
+to about 1,856,817,000 enabled, a 355.9M-call, 16.1% drop, reproducible
+and far outside noise. `mrb_vm_exec`'s own call count (3,016,234) and
+`gc_gray_rescan`'s (2,879) were identical between both runs, so this
+isn't a change in how much bytecode ran or how the GC behaved -- it is
+specifically less symbol-table traffic. A plausible mechanism, not yet
+confirmed: the coverage report's `synthesized accessor overrides
+(ATTR_STRUCT_DEVIRT)` count goes 0 (disabled) -> 3 (enabled) -- 3 extra
+struct-aware accessor methods `CodeGen#emit_ivar_accessor_pair` only
+synthesizes once embedding is actually active (see `drop_unsafe_
+embeddings`'s own `natively_exposed?`/`synthesizable_accessor_only?`
+machinery) -- and if any of those 3 sit on `CPU#run`'s own hot path, a
+synthesized direct accessor bypasses the ordinary `SEND` dispatch (and
+whatever symbol-table work that dispatch does) entirely. Tracing exactly
+which 3 methods those are, and whether they're actually hot, is the next
+step to turn "plausible" into "confirmed" -- not attempted this session.
+
 **Why `CPU`'s own register file stays unembedded**: the "next concrete
 target" this section's own earlier revision named -- `@a`/`@x`/`@y`/`@s`/
 `@p`/`@pc` (real names: `@_a`/`@_x`/`@_y`/`@_sp`/`@_pc`, plus the split
