@@ -647,6 +647,160 @@ of it lands on a struct field here -- every newly-recognized SETIV/GETIV
 source still has to compile to *some* correct code, struct-backed or
 not), run repeatedly against the real, non-scratch `compiled_run.rb`.
 
+**Update (BC2CPP_SELF_REGISTERING session)**: the correction above's own
+root cause -- `BC2CPP_WIRED_EMBEDDINGS` gating every embedding
+unconditionally, for every `bc2cpp.rb` invocation including this probe's
+own -- is now fixed for this probe specifically, not just documented.
+That allowlist exists because the REAL compiled gems' hand-written
+`register.cxx` does not install every compiled entry point of an
+embedding class by construction (see that constant's own comment for the
+real, shipped bug this caused). This file's own `emit_register`, above,
+never had that gap: it already installs every compiled method of any
+owner its own `embeds` diagnostic names, computed from the exact same
+diagnostic bc2cpp.rb itself prints -- "embeddable" and "installed" were
+always the same fact here, by construction, the identical guarantee a
+concurrent session's own `emit_owner_registrations` mechanism now
+provides by generation for the real gems (see `docs/adr/0185`-adjacent
+work). `compiled_run.rb` now sets `BC2CPP_SELF_REGISTERING=1`, which
+tells bc2cpp.rb's driver to skip the allowlist entirely for this
+invocation (nothing in this closed world was ever on it anyway) and let
+every ivar `IvarLayout`/`drop_unsafe_embeddings` themselves already
+proved safe actually embed -- those two checks (every accessor compiles
+clean, no native `attr_reader`/`writer` collision) still run
+unconditionally either way; only the extra, hand-maintenance-specific
+allowlist gate is removed.
+
+Confirmed against the real generated code from this exact, current
+`compiled_run.rb` (`KEEP_TEMP=... MRBC=... ruby tools/optcarrot_probe/
+compiled_run.rb`): `Optcarrot::CPU` now has a real `Optcarrot__CPU_ivars`
+struct (`@clk_total` as `mrb_int`, `@jammed`/`@ppu_sync` as the `:bool`
+type from the session above), with real `DATA_PTR` reads/writes at
+`CPU#run`'s own call sites -- `@ppu_sync`'s own struct read appears at
+both places `cpu.rb` checks it (`@ppu.sync(@clk) if @ppu_sync`).
+`Optcarrot::ROM`, `Pad`, `APU`, and `APU::DMC` also gain real embedded
+structs the same way. `Optcarrot::PPU`'s own ivars (`@run`/`@vblank`/
+`@hclk`/`@scanline`/... from the session above) are still inert -- not
+because of `BC2CPP_WIRED_EMBEDDINGS` any more, but because `PPU` itself
+stays out of `ONLY_OWNERS` entirely, for its own separate, still-open
+`Fiber.new` bug (see "Compiled runtime check" above); embedding an
+ivar of a class with zero compiled entry points has nothing to attach
+to. The full 180-frame `nes.run` loop checksums `59662` on CRuby,
+interpreted mruby, and bc2cpp alike, run repeatedly.
+
+**What this does *not* establish**: a measured wall-clock improvement.
+`gprof` runs taken in this same session, with and without this change,
+both landed in a machine state clearly under heavy external contention --
+`sigalrm_handler` (the profiler's own timer-signal handler) and a single
+`mrb_mruby_task_gem_final` call each showing 40-48% of "self time" is not
+real application work, it is corrupted sampling from a shared, busy
+machine, the same caveat a concurrent session's own PR raised about this
+identical environment ("measurements were taken across several runs on a
+shared machine (other agents building concurrently)"). The *disabled*
+control run (`BC2CPP_SELF_REGISTERING=0` against this same, current
+`compiled_run.rb`) was equally corrupted and equally slow, which is what
+rules this out as a regression from the change itself rather than
+environment noise -- but it also means neither run's absolute numbers,
+nor their `iv_bsearch_idx` call counts (identical between the two runs,
+which is itself suspicious given real, confirmed new struct accesses at
+`CPU#run`'s own hot path -- not yet explained), should be trusted as a
+real measurement right now. Re-measuring on a quiet machine, the same
+caveat that PR's own author gave their part of this exact story, is the
+honest next step here too, not a number this paragraph will guess at.
+
+**Update (clean-machine re-measurement)**: done, on a genuinely idle
+4-core box (load average 0.15-0.92 throughout, confirmed via `uptime`
+before starting) rather than guessed at. Same method as the corrupted
+runs above -- `GPROF=1` against this exact `compiled_run.rb`, changing
+only `BC2CPP_SELF_REGISTERING` between the two -- but this time the
+profiles came back clean: `sigalrm_handler`/`mrb_mruby_task_gem_final`
+are ordinary small entries near the bottom of the flat profile (0.03-
+0.14% self-time), not 40-48% of it, confirming the earlier corruption
+really was machine contention and not a flaw in the measurement itself.
+Both runs still checksum `59662`.
+
+The `iv_bsearch_idx` call-count identity from the corrupted runs
+*reproduced exactly* on the clean machine: 376,884,519 in both the
+`BC2CPP_SELF_REGISTERING=0` and `=1` runs, down to the identical
+318,027,773/58,856,746 caller-edge split. That rules out "it was noise"
+as the explanation -- it is a real, deterministic fact that this specific
+change does not move that specific counter, most likely because
+`iv_bsearch_idx`'s 376M calls are dominated by ivars/classes this change
+never touches (`Video`/`PPU`'s own dynamic ivars, or other machinery
+entirely), not by the 3 fields (`@clk_total`/`@jammed`/`@ppu_sync`) this
+change actually embeds on `CPU`. Nobody has yet isolated which call sites
+those 376M calls actually come from -- that would need `gprof -q`'s call
+graph (the same tool the `gc_gray_rescan` investigation below used), not
+attempted this session.
+
+Despite that, wall-clock *did* move, consistently: the bc2cpp run took
+287.99s disabled vs. 270.14s enabled (-6.2%), while the CRuby and
+interpreted-mruby runs (neither of which this env var touches) stayed
+within 1-3% of each other, the expected run-to-run noise band -- so the
+6.2% bc2cpp delta is attributable to the change, not noise. The
+mechanism is not `iv_bsearch_idx`, per the paragraph above; the flat
+profile's other real (non-noise-band) delta is `sym_check`/`mrb_packed_
+int_decode`/`symtbl_get_ptr`/`symtbl_is_literal` -- four functions in
+mruby's packed-symbol-table decode path, all moving together (as they
+should; they are one call chain) from about 2,212,743,000 calls disabled
+to about 1,856,817,000 enabled, a 355.9M-call, 16.1% drop, reproducible
+and far outside noise. `mrb_vm_exec`'s own call count (3,016,234) and
+`gc_gray_rescan`'s (2,879) were identical between both runs, so this
+isn't a change in how much bytecode ran or how the GC behaved -- it is
+specifically less symbol-table traffic. A plausible mechanism, not yet
+confirmed: the coverage report's `synthesized accessor overrides
+(ATTR_STRUCT_DEVIRT)` count goes 0 (disabled) -> 3 (enabled) -- 3 extra
+struct-aware accessor methods `CodeGen#emit_ivar_accessor_pair` only
+synthesizes once embedding is actually active (see `drop_unsafe_
+embeddings`'s own `natively_exposed?`/`synthesizable_accessor_only?`
+machinery) -- and if any of those 3 sit on `CPU#run`'s own hot path, a
+synthesized direct accessor bypasses the ordinary `SEND` dispatch (and
+whatever symbol-table work that dispatch does) entirely. Tracing exactly
+which 3 methods those are, and whether they're actually hot, is the next
+step to turn "plausible" into "confirmed" -- not attempted this session.
+
+**Why `CPU`'s own register file stays unembedded**: the "next concrete
+target" this section's own earlier revision named -- `@a`/`@x`/`@y`/`@s`/
+`@p`/`@pc` (real names: `@_a`/`@_x`/`@_y`/`@_sp`/`@_pc`, plus the split
+flag register `@_p_c`/`@_p_d`/`@_p_i`/`@_p_nz`/`@_p_v`) -- traced by hand
+against `3rd/optcarrot/lib/optcarrot/cpu.rb` and `IvarLayout.trace_type`
+(`tools/bc2cpp/bc2cpp.rb`) directly, rather than guessed at: these ivars do
+have plenty of purely-Fixnum SETIV sites (`#reset`'s `@_a = @_x = @_y = 0`,
+the flag-register literals right after it), but every one of them also has
+at least one site like `cpu.rb`'s `@_p_nz = @_a = @data` or
+`@_pc = peek16(RESET_VECTOR)`, where the source is `GETIV @data`/a `SEND`
+result rather than a literal or proven arithmetic. `IvarLayout.trace_type`
+already *does* follow a `GETIV` of another ivar (walks to
+`known_ivar_types[other_ivar]`, part of the same 10-pass fixed point that
+lets one embeddable ivar's proof feed another's) -- the trace isn't
+missing that case. It fails here because `@data`/`@addr` are themselves
+never provably Fixnum: their own SETIV sites include `@data = fetch(@_pc)`,
+a plain `SEND`, and `IvarLayout.trace_type`'s `SEND` case only trusts a
+closed, guarded set of operator names (`%`/`&`/`|`/`^`, `native_only_mono?`)
+-- it has no general "this method is proven to always return Fixnum" case.
+That proof *does* exist elsewhere in this file -- `CodeGen#compute_fixnum_
+return_names` (`FIXNUM_RETURN_PROOF`, printed in the coverage report) -- but
+it is computed by `CodeGen` itself, from `@ivar_layout` among other inputs,
+strictly *after* `IvarLayout.analyze` has already run and returned; feeding
+it back into `IvarLayout.trace_type`'s `SEND` case would need restructuring
+the two into one shared fixed point (`IvarLayout` proving ivars,
+`FIXNUM_RETURN_PROOF` proving methods, each feeding the other, iterated to
+convergence) rather than the current one-directional pipeline. That is a
+real, buildable next step -- not attempted this session, since it changes
+a load-bearing whole-program analysis shared by every compiled gem in the
+real project, not just this probe, and deserves its own session with room
+to verify it doesn't regress any of the three real compiled gems.
+Confirmed directly against this exact tree (`BC2CPP_SELF_REGISTERING=1`
+coverage report, `grep CPU` over the `== ivar embedding ==` section): only
+`@clk_total` (`fixnum`), `@jammed`, and `@ppu_sync` (`bool`) are `CPU`'s
+embedded ivars today; the register file is absent from that list entirely,
+landing instead in the (differently-purposed) `CLASS_CANDIDATE`
+devirtualization-hint list further down the same diagnostic output, not in
+any "poisoned, here's why" list -- `IvarLayout.analyze` only ever returns
+successfully-typed ivars, so a failed trace leaves no direct trace of
+*why* in the diagnostic output; the reasoning above came from reading
+`cpu.rb`'s own SETIV sites against `trace_type`'s cases by hand, not from
+a tool that reports failures.
+
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
 `mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
