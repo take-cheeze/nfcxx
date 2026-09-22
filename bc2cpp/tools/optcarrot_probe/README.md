@@ -408,6 +408,83 @@ by bug 2, full stop, regardless of bug 1 -- so treat this section's own
 PPU-compiled numbers as historical (true when written, not currently
 reproducible) rather than re-verified.
 
+**Update (FIBER_NEW_BLOCK_UNSAFE_SUPPORT session)**: bug 2's own "needs
+bc2cpp to emit a real, bytecode-backed Proc... (or to recognize that shape
+and decline to devirtualize into the method that creates it)" is now half
+done -- the second, narrower option, not the first. `tools/bc2cpp/bc2cpp.rb`'s
+`recognize_block_fallback_regions` (the generic `BLOCK_FALLBACK` recognizer
+every block-carrying call site not otherwise special-cased goes through)
+now refuses to admit a `Fiber.new { ... }` call site as a region at all: a
+bare `GETCONST ... Fiber` feeding an explicit-receiver `SENDB :new`,
+matched by the same short backward-register-walk `IvarLayout.trace_type`
+already uses elsewhere in this file. An unclaimed `BLOCK`/`SENDB` pair
+falls through unchanged to `compile_insn`'s pre-existing, honest `#error
+unhandled opcode BLOCK` -- so `SKIP_UNSUPPORTED=1`'s own established "a
+method whose generated code contains a `#error` marker anywhere is dropped
+whole" mechanism now does exactly what emitting a real bytecode-backed Proc
+would have done, with none of the new machinery that would need (embedding
+raw irep binary data into the generated program, getting mruby's binary
+irep format exactly right across every target this compiler ships to).
+Verified directly: with `BC2CPP_SELF_REGISTERING=1` and `PPU` scanned as
+part of the whole program, `Optcarrot::PPU#run` -- and *only* `PPU#run` --
+now carries the `#error` marker (`optcarrot_bc2cpp_coverage_report.rb`'s
+own count: 1 of 383 methods left on the interpreter, down from 0 before
+this change only because this is the first time `PPU` was ever scanned
+with `BC2CPP_SELF_REGISTERING=1` at all); all 15 `scripts/bc2cpp_*_check.rb`
+static checks still pass, and the real project's own 3 compiled gems are
+unaffected (no `Fiber.new` call site exists anywhere in
+`mruby-lcf-compiled`/`mruby-rgss-compiled`/`mruby-rpg2k-compiled`'s own
+`mrblib`, confirmed by grep, so this is currently a no-op there -- a
+defensive fix for whenever/if that pattern ever appears, not something
+with observable effect on the real project today).
+
+That alone is **not enough** to let `compiled_run.rb` re-admit `Optcarrot::
+PPU` to `ONLY_OWNERS`, though -- tried it, against this exact fix, and hit
+a *second*, different crash: `resuming dead fiber (FiberError)`, thrown
+from `PPU#run`'s own (now correctly interpreted) `@fiber.resume` call.
+Root cause, traced by hand rather than assumed: fixing only the `Fiber.new`
+call site leaves `main_loop` (the fiber body's own real payload) and
+everything IT calls -- `wait_frame`/`wait_zero_clocks`/`wait_one_clock`/
+`wait_two_clocks` at minimum, and transitively whatever those reach --
+fully compiled and devirtualized, since none of THEM contain the one
+shape this fix recognizes. So the fiber's own execution now crosses from
+its interpreted, bytecode-backed body into native, VM-invisible compiled
+code before it ever reaches a `Fiber.yield` call. `PPU#sync`/`#vsync`
+(also compiled) reach `PPU#run` -- the method that owns `@fiber.resume` --
+only through dynamic dispatch (`run` isn't itself compiled), which is a
+`mrb_funcall`-shaped call from mruby's own perspective; `fiber_resume`
+(`mrbgems/mruby-fiber/src/fiber.c`) checks exactly this
+(`mrb->c->ci->cci > 0`) to decide whether to resume the fiber through its
+`vmexec`-reentrant path (`mrb_vm_exec(mrb, c->ci->proc, c->ci->pc)`,
+called synchronously from inside `fiber_switch` itself) rather than the
+ordinary suspend-and-return path -- and that reentrant path is where
+something breaks: not at `Fiber.yield` itself (`mrb_fiber_yield` never
+calls `fiber_check_cfunc`, unlike `fiber_switch`, so a yield crossing a
+compiled frame is never rejected outright), but silently enough that a
+*later* `.resume` call finds the fiber already `MRB_FIBER_TERMINATED`
+rather than raising anything at the actual moment of corruption. This
+exact `mrb_funcall`-from-compiled-`CPU`-into-interpreted-`PPU#sync`-into-
+bare-`run` shape already existed, unaffected, in every prior successful
+180-frame run this whole session (`PPU` was always fully excluded, so
+`main_loop` and everything downstream of it was always ALSO interpreted,
+keeping the whole fiber-body-to-`Fiber.yield` chain free of any compiled
+frame) -- the newly-compiled `main_loop`/`wait_*` chain is the one real
+difference, and the evidence points there, though this has not been
+confirmed with a `gdb`/call-graph trace the way the `ARY_PTR`/`ARY_LEN`
+root cause above was.
+
+So the real fix needs to keep the *entire* reachable graph from the fiber
+body down to every `Fiber.yield` call site off the compiled/devirtualized
+path -- `main_loop` and its own transitive callees, not just the `Fiber.
+new` construction -- which is a substantially larger and riskier change
+than this session's own scope (it would need either a whole-program
+reachability analysis from every `Fiber.yield`/`Fiber#resume` site back to
+its owning `Fiber.new`, or a much more general "some Ruby-level
+suspend/resume boundary exists here, never devirtualize across it"
+primitive). `compiled_run.rb` still excludes `Optcarrot::PPU` from
+`ONLY_OWNERS` entirely -- this session's own fix is real, tested, and safe
+to keep, but does not by itself unlock `PPU`.
+
 **Update (CI SIGSEGV investigation)**: the "confirmed safe" `Optcarrot::CPU`/
 `NES` claim above, and the `Optcarrot::Video`/`APU` frame-boundary hooks it
 was extended with, did not hold up against CI's own 180-frame run -- CI
