@@ -839,14 +839,19 @@ BC2CPP_COMPILED_GEMS = {
     # move-route Face/Turn sub-command helpers). Not itself subclassed
     # anywhere in this codebase -- Game::Vehicle is deliberately plain
     # data, not a Character -- and every real construction site goes
-    # through the plain constructor. 14 of its own 16 real
-    # bytecode-defined methods compile clean, needing no new opcode work
-    # at all. The 2 gaps are both the same established non-mandatory-
-    # arity shape as every other non-embedding target above: #initialize
-    # (`x = 0, y = 0, direction = 2`, three optional arguments) and
-    # #front_tile (`dir = @direction`, one optional argument reading an
-    # ivar as its own default). #initialize never compiling means this
-    # class's own provably-typed ivars stay unembedded too -- including
+    # through the plain constructor. At the time of this round, 14 of its
+    # own 16 real bytecode-defined methods compiled clean, needing no new
+    # opcode work at all. The 2 gaps were both the same established
+    # non-mandatory-arity shape as every other non-embedding target above:
+    # #initialize (`x = 0, y = 0, direction = 2`, three optional
+    # arguments) and #front_tile (`dir = @direction`, one optional
+    # argument reading an ivar as its own default) -- #front_tile itself
+    # was later found to have zero real call sites anywhere in this
+    # project (docs/adr/0193's own reachability scan) or in its own tests/
+    # check scripts, and its `def` was deleted outright (a different round
+    # from this one); Game::Character compiles 15 real methods today, with
+    # #initialize as its one remaining gap. #initialize never compiling
+    # means this class's own provably-typed ivars stay unembedded too -- including
     # @last_move_direction, whose own #move_diagonal site
     # (`@last_move_direction = [horizontal, vertical]`) writes a real
     # Array, not a Fixnum, so even the raw per-ivar EMBED analysis (before
