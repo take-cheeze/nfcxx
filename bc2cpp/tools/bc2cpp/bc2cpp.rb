@@ -3546,8 +3546,13 @@ class ClassLayout
   # `ret_proof` argument. nil (the default) keeps byte-identical behavior for
   # every caller that does not opt in, and is also what the driver's own FIRST,
   # probing pass passes -- see that call site for the stratification argument.
+  # RETCLASS_SELF_CALL_SUPPORT: `ret_class_proof`, when supplied, is
+  # CodeGen#compute_class_return_names' own whole-program result, handed
+  # straight through to `trace_new_target` as its own identically-named
+  # argument -- the object-reference sibling of `array_ret_proof`, threaded
+  # through the same two-level stratification for the same reason.
   def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil,
-                    poison_reason: nil, array_ret_proof: nil)
+                    poison_reason: nil, array_ret_proof: nil, ret_class_proof: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
 
@@ -3585,7 +3590,8 @@ class ClassLayout
             # re-filtering it on every single SETIV site in this sweep.
             found = trace_new_target(irep, idx, src_reg, known_so_far, mand, arg_classes, owner: owner,
                                       class_layout: classes, registry: registry,
-                                      container_constants: container_constants)
+                                      container_constants: container_constants,
+                                      ret_class_proof: ret_class_proof)
             # CORE_ARRAY_CHAIN: when the fresh-`.new`/literal trace misses,
             # ask the SAME chained fresh-Array question the block
             # recognizers already ask of a block receiver -- see
@@ -7277,7 +7283,7 @@ end
 
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
-                      known_owners: nil, capture_hints: nil)
+                      known_owners: nil, capture_hints: nil, ret_class_proof: nil)
   path = []
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
@@ -7335,7 +7341,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      class_layout: class_layout, registry: registry,
                                      container_constants: container_constants,
                                      element_annotations: element_annotations,
-                                     known_owners: known_owners, capture_hints: capture_hints)
+                                     known_owners: known_owners, capture_hints: capture_hints,
+                                     ret_class_proof: ret_class_proof)
       # An explicitly annotated Hash<Klass> parameter is also a safe source
       # for indexed values. Follow only plain MOVE aliases back to the
       # untouched incoming argument register; any computed/reassigned
@@ -7430,7 +7437,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                  class_layout: class_layout, registry: registry,
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
-                                 known_owners: known_owners, capture_hints: capture_hints)
+                                 known_owners: known_owners, capture_hints: capture_hints,
+                                 ret_class_proof: ret_class_proof)
       else
         # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
         # `name` isn't `new`, so this can never join the fresh-`.new`
@@ -7477,7 +7485,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                        class_layout: class_layout, registry: registry,
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
-                                       known_owners: known_owners, capture_hints: capture_hints)
+                                       known_owners: known_owners, capture_hints: capture_hints,
+                                       ret_class_proof: ret_class_proof)
         return nil unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
@@ -7534,6 +7543,41 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
         return hint
       end
+    when 'SSEND0', 'SSEND'
+      # RETCLASS_SELF_CALL_SUPPORT: a bare, implicit-receiver call
+      # (`foo(...)`) has no receiver register to trace at all -- this can
+      # never join the fresh-`.new`/chained-accessor logic the explicit-
+      # receiver `SEND0`/`SEND` case above handles (a bare `new(...)` here
+      # would dispatch to an instance method literally named `new` if one
+      # exists, never `Class#new`, so `resolving_new`'s own class-name-path
+      # machinery is irrelevant to this opcode by construction). The ONLY
+      # evidence source is `ret_class_proof` (compute_class_return_names'
+      # own whole-program result, threaded through exactly like
+      # ARRAY_RETURN_PROOF's own `ret_proof`) -- nil for every caller that
+      # doesn't opt in, keeping this a strict, additive no-op otherwise. The
+      # same `resolving_new || !path.empty?` guard the SEND0/SEND case opens
+      # with applies here too, for the same reason: never contribute to a
+      # `.new`-chain's own class-name-path resolution.
+      return nil if resolving_new || !path.empty?
+      return nil unless ret_class_proof
+
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      return nil unless name
+
+      # EXPLICIT RETURN, not a bare trailing expression: this `when` sits
+      # inside the `(idx - 1).downto(0) do |i| ... end` loop's own block,
+      # so evaluating `ret_class_proof.call(name)` as the branch's last
+      # expression only produces the BLOCK's value for this one iteration
+      # -- it does not exit `trace_new_target` itself, and the loop simply
+      # continues backward past this instruction (confirmed the hard way:
+      # without `return`, a resolved name traced correctly at this point,
+      # then kept walking to ENTER and fell through to the "never written"
+      # tail, silently discarding the real answer). Every other genuinely
+      # TERMINAL case in this same `case` (`GETMCNST`/`GETCONST`'s own
+      # `return path.join('::')`, `RESCUE`'s `return UNKNOWN`-equivalent,
+      # ...) already spells `return` explicitly for the identical reason;
+      # this one needs it just as much.
+      return ret_class_proof.call(name)
     when 'SENDB'
       # BLOCK_CARRYING_NEW: `Klass.new(...) { block }` -- e.g.
       # `Array.new(@base_raw.size) { |i| ... }`, mruby-array-ext's own
@@ -9347,6 +9391,12 @@ class CodeGen
     end
     if analysis_only
       compute_array_return_names
+      # RETCLASS_SELF_CALL_SUPPORT: computed in the same probing pass, from
+      # the same level-0 @class_layout, for the identical reason
+      # compute_array_return_names is -- see the driver's own stratification
+      # comment (ARRAY_RETURN_IVAR_HINT) for the full argument, which applies
+      # verbatim here.
+      compute_class_return_names
       return
     end
     @ivar_layout = drop_unsafe_embeddings(ivar_layout) # class_name -> {ivar_name => :fixnum}
@@ -9359,6 +9409,12 @@ class CodeGen
     # returning method is never a Fixnum-returning one), so there is nothing
     # for an alternation to converge on and running it once is exact.
     compute_array_return_names
+    # RETCLASS_SELF_CALL_SUPPORT: recomputed here against the FINAL
+    # @class_layout, exactly like compute_array_return_names just above --
+    # the probing pass only ever fed ClassLayout.analyze's own level-2 table;
+    # this is the richer set real codegen and the whole-program diagnostic
+    # actually see.
+    compute_class_return_names
     # ENTRY_ARG_CALLSITE_PROOF <-> FIXNUM_RETURN_PROOF alternation. Each of
     # the two is a greatest fixpoint that is sound GIVEN the other's current
     # set is sound (see compute_entry_arg_fixnum's own header for the joint
@@ -9391,59 +9447,55 @@ class CodeGen
   # Embedding an ivar as a real struct field only works if the struct is
   # actually *allocated* first -- compile_method's own mrb_data_init call,
   # emitted only for a compiled `#initialize`. A class whose own
-  # `#initialize` this compiler can't compile (optional/rest/keyword args,
-  # same constraint as pure_mandatory_arity? everywhere else, or no
-  # `#initialize` of its own at all -- relying on an ancestor's) never gets
-  # that allocation, so any *other* compiled method's GETIV/SETIV for that
-  # class would read/write DATA_PTR(self) on an object that's still a plain
-  # MRB_TT_OBJECT -- garbage or a crash, not just a missed optimization.
-  # Caught wiring up a second real target (Game::Picture, docs/adr/0139's
-  # own follow-up): its 11 real embeddable ivars are all correctly inferred
-  # by IvarLayout, but #initialize takes optional arguments and was never
-  # going to compile -- embedding them anyway would have been a real,
-  # silent memory-safety bug the very first time a compiled #step or
-  # #update ran against a real (interpreter-allocated, MRB_TT_OBJECT)
-  # Game::Picture instance.
+  # `#initialize` this compiler can't compile at all (an opcode it has
+  # never modeled anywhere in the body, or no `#initialize` of its own --
+  # relying on an ancestor's) never gets that allocation, so any *other*
+  # compiled method's GETIV/SETIV for that class would read/write
+  # DATA_PTR(self) on an object that's still a plain MRB_TT_OBJECT --
+  # garbage or a crash, not just a missed optimization. Caught wiring up a
+  # second real target (Game::Picture, docs/adr/0139's own follow-up): its
+  # 11 real embeddable ivars are all correctly inferred by IvarLayout, but
+  # at the time this guard was written #initialize's optional arguments
+  # meant it could never compile at all -- embedding them anyway would have
+  # been a real, silent memory-safety bug the very first time a compiled
+  # #step or #update ran against a real (interpreter-allocated,
+  # MRB_TT_OBJECT) Game::Picture instance.
   #
-  # pure_mandatory_arity? alone is NOT enough, a real gap this guard's
-  # own arity-only check missed -- caught building Game::Party (this
-  # round): `Game::Actor#initialize` genuinely has pure mandatory arity
-  # (2 required args, no opts -- confirmed against real disassembly, `ENTER
-  # 2:0:0:0:0:0:0:0`), so the old check let 7 real provably-Fixnum
+  # An arity check ALONE is not enough either way, a real gap a plain
+  # pure_mandatory_arity? guard missed -- caught building Game::Party: `Game
+  # ::Actor#initialize` genuinely has pure mandatory arity (2 required
+  # args, no opts -- confirmed against real disassembly, `ENTER
+  # 2:0:0:0:0:0:0:0`), so an arity-only check let 7 real provably-Fixnum
   # Game::Actor ivars (@id, @exp, @level, @class_id, @faceset_index,
   # @face_index, @battler_animation_override) straight through -- but the
   # method's own body still ends in a real `@equipment.each { |eq| ... }`
   # (BLOCK/SENDB), an opcode this compiler has never modeled, so it can
   # never actually compile and never runs its own mrb_data_init call
-  # either way. The already-shipped mruby-rpg2k-compiled/src/register.cxx
-  # (docs/adr/0139's own Game::Actor follow-up) confirms this was REAL,
-  # not hypothetical: replaying its own exact bc2cpp invocation (whole
-  # closed world, ONLY_OWNERS including Game::Actor, no other change) shows
-  # 16 real, already-registered methods (`faceset_index`, `set_faceset`,
-  # `restore_class`, `set_class_id`, `curve_row`, `gain_exp`,
-  # `exp_to_next`, `next_level_exp`, `change_level_by`, `change_param`,
-  # `battler_animation_id`, `class_battle_commands`, `double_hand?`,
-  # `equipment_fixed?`, `force_ai?`, `strong_defence?`) whose own GETIV/
-  # SETIV codegen -- built from the very same (unfiltered) ivar_layout this
-  # method is supposed to be the *only* gate on -- dereferences
-  # `DATA_PTR(self)` for one of the 7 ivars above, yet
-  # `mruby-rpg2k-compiled/src/register.cxx` never calls
-  # `MRB_SET_INSTANCE_TT(actor, MRB_TT_DATA)` (confirmed: no such call
-  # exists anywhere in that file's own Game::Actor registration block,
-  # since nothing there ever suspected embedding was live for this class).
-  # So every real `Game::Actor.new(...)` stays a plain `MRB_TT_OBJECT`, and
-  # any of those 16 real, already-registered methods reading
-  # `faceset_index`/`class_id`/`exp`/`level`/etc. off `self` would
-  # dereference an `RData` payload that was never allocated: real
-  # undefined behavior (garbage or a segfault, not a diagnostic), live in
-  # the actual merged build today, every time one of them runs.
-  # compiles_clean? -- a real compile_method(label) call, checked for a
-  # #error marker, the exact same test SKIP_UNSUPPORTED itself uses (see
-  # its own comment) -- is the only way to answer "does #initialize's own
-  # body actually finish compiling", the same real gap
-  # compiles_clean?/compile_send's own MONO-devirtualization fix already
-  # closed for call sites two follow-ups up in docs/adr/0139; this is the
-  # identical fix applied to the embedding gate instead.
+  # either way. `compiles_clean?` -- a real compile_method(label) call,
+  # checked for a #error marker, the exact same test SKIP_UNSUPPORTED
+  # itself uses (see its own comment) -- is the only way to answer "does
+  # #initialize's own body actually finish compiling", and is BOTH
+  # necessary and sufficient on its own: compile_method's own mrb_data_init
+  # emission (see its own comment, "self is a bare, freshly allocated
+  # MRB_TT_DATA shell") is unconditional whenever the owner has an
+  # embedded-ivar layout and the method is named `initialize` -- it carries
+  # no arity condition of its own, sits before ANY bytecode-derived control
+  # flow (the optional-arg dispatch switch included, emit_optional_dispatch
+  # -- confirmed against real generated code for a 0-mandatory/4-optional
+  # `RPG2k::Window#initialize` and a mandatory+optional+keyword-combined
+  # `Game::Battle#initialize`), and a real whole-closed-world before/after
+  # regenerate-and-diff (removing a redundant pure_mandatory_arity? conjunct
+  # that used to sit alongside this call) showed exactly what that
+  # unconditional placement predicts: 10 more real classes (`RPG2k::Window`,
+  # `Game::Battle`, `Game::Enemy`, `Game::Party`, `Game::TextReveal`,
+  # `RPG2k::Scene::Map`/`MapViewer`/`ChipsetEditor`/`EquipMenu`/`SkillMenu`
+  # -- 77 ivars total) safely gain real embedding, zero classes lose it,
+  # and zero new `#error` markers appear anywhere in the program. `SUPER`'s
+  # own codegen and every OTHER pure_mandatory_arity? caller in this file
+  # call a target's `_impl` directly, bypassing the entry wrapper that
+  # supplies the optional/keyword dispatch parameters -- a real,
+  # independent reason THEY still need pure-mandatory arity, unrelated to
+  # and unaffected by this one.
   def drop_unsafe_embeddings(ivar_layout)
     embedding_owners = ivar_layout.keys.to_set
     subclass_of = lambda do |klass, ancestor|
@@ -9472,7 +9524,7 @@ class CodeGen
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
       init = @registry['initialize']&.find { |d| d.owner == owner }
-      next unless init && pure_mandatory_arity?(@ireps.fetch(init.irep)) && compiles_clean?(init.irep)
+      next unless init && compiles_clean?(init.irep)
 
       # A per-owner #initialize gate alone isn't enough: an ivar only
       # embeds safely if *every* read/write of it goes through this
@@ -16388,6 +16440,113 @@ class CodeGen
       end
     end
     true
+  end
+
+  # RETCLASS_SELF_CALL_SUPPORT: the object-reference analogue of
+  # ARRAY_RETURN_PROOF -- "every real return path of this MONO method holds
+  # an instance of exactly THIS class" (not just "an Array"), so a plain
+  # implicit-receiver self-call (`SSEND0`/`SSEND`, never modeled as class-hint
+  # evidence at all before this) can feed ClassLayout.analyze's own SETIV arm
+  # the same way `@x = []`/`@x = Klass.new` already do. Same MONO admission
+  # rule as ARRAY_RETURN_PROOF/FIXNUM_RETURN_PROOF (compute_array_return_names'
+  # own header: exactly one real definition anywhere in the closed world, none
+  # in the foreign mrblib set either -- no other receiver could ever reach a
+  # different body, so which subclass's `self` happens to make the call is
+  # irrelevant), and the identical `array_return_analyzable?`/
+  # `straightline_return_reg?` guards, reused verbatim rather than re-derived:
+  # the "does this body's own instruction list really contain every return
+  # path, with no catch handler/nonlocal exit/join hiding one" question is
+  # type-independent.
+  #
+  # UNLIKE ARRAY_RETURN_PROOF, the provable fact isn't a fixed target (Array):
+  # different candidates prove different classes, and one candidate's own
+  # proof can depend on ANOTHER'S (a self-call chain, `def a; b; end; def b;
+  # Foo.new; end`). ARRAY_RETURN_PROOF's own fixpoint shape (start with every
+  # syntactically-eligible candidate ASSUMED true, shrink on disproof) only
+  # works for a binary property with one fixed target; this instead GROWS
+  # from empty (no candidate assumed to prove anything), adding a name only
+  # once every one of its own real return sites independently traces to the
+  # SAME class -- the same "prove upward from evidence" shape
+  # ClassLayout.analyze's own outer sweep already uses for ivar hints. Always
+  # terminates: the set only ever grows, bounded by the finite candidate
+  # count, so at most that many iterations ever do real work.
+  def class_return_sites_proven(d, ret_class_proof)
+    irep = @ireps[d.irep]
+    return nil unless irep
+
+    ivar_classes = @class_layout[d.owner]
+    arg_classes = @class_annotations[irep.label]&.args
+    mand = mandatory_arity(irep)
+    targets = jump_targets(irep)
+
+    proven = nil
+    irep.instructions.each_with_index do |insn, idx|
+      case insn.op
+      when 'RETURN'
+        reg = insn.args[/\AR(\d+)/, 1]
+        return nil unless reg
+        return nil unless straightline_return_reg?(irep, idx, reg, targets)
+
+        klass = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: d.owner,
+                                  class_layout: @class_layout, registry: @registry,
+                                  container_constants: @container_constants,
+                                  ret_class_proof: ret_class_proof)
+        return nil unless klass
+        return nil if proven && proven != klass
+
+        proven = klass
+      when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
+        return nil
+      end
+    end
+    proven
+  end
+
+  # RETCLASS_SELF_CALL_SUPPORT's own whole-program fixpoint. Candidate
+  # selection is byte-for-byte compute_array_return_names' own two admission
+  # rules (MONO, not in the foreign mrblib set), and `array_return_analyzable?`
+  # is reused verbatim for the same structural reason `class_return_sites_
+  # proven` above reuses `straightline_return_reg?`.
+  def compute_class_return_names
+    @class_return_names = {}
+    return @class_return_names unless @foreign_method_names
+
+    cand = {}
+    @registry.each do |name, defs|
+      next unless defs.size == 1
+
+      d = defs.first
+      next if @foreign_method_names.include?(name)
+      next unless d.irep
+
+      irep = @ireps[d.irep]
+      next unless irep && array_return_analyzable?(irep)
+
+      cand[name] = d
+    end
+
+    proven = {}
+    ret_class_proof = ->(n) { proven[n] }
+    loop do
+      changed = false
+      cand.each do |name, d|
+        next if proven.key?(name)
+
+        klass = class_return_sites_proven(d, ret_class_proof)
+        next unless klass
+
+        proven[name] = klass
+        changed = true
+      end
+      break unless changed
+    end
+    @class_return_names = proven
+  end
+
+  # RETCLASS_SELF_CALL_SUPPORT's own result, for the whole-program diagnostic
+  # and for ClassLayout.analyze's own driver call site.
+  def class_return_names
+    @class_return_names || {}
   end
 
   # ARRAY_RETURN_PROOF's own CONTROL-FLOW guard, and the one place this
@@ -25789,16 +25948,22 @@ if $PROGRAM_NAME == __FILE__
   # function's own comment), the identical guarantee BC2CPP_WIRED_EMBEDDINGS
   # exists to provide by hand for the real gems.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  array_return_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
-                                   annotations, superclass_of, {}, {}, container_constants, {},
-                                   Set.new, foreign_methods, nil, nil,
-                                   analysis_only: true,
-                                   native_expression_devirt: native_expression_devirt,
-                                   native_registered_expressions: native_registered_expressions).array_return_names
+  return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
+                                    annotations, superclass_of, {}, {}, container_constants, {},
+                                    Set.new, foreign_methods, nil, nil,
+                                    analysis_only: true,
+                                    native_expression_devirt: native_expression_devirt,
+                                    native_registered_expressions: native_registered_expressions)
+  array_return_probe = return_names_probe.array_return_names
+  # RETCLASS_SELF_CALL_SUPPORT: computed from the same level-0 probe as
+  # array_return_probe just above, same stratification, same reason -- see
+  # ClassLayout.analyze's own `ret_class_proof` header.
+  class_return_probe = return_names_probe.class_return_names
   class_poison_reason = {}
   class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
                                          annotated_array_return, poison_reason: class_poison_reason,
-                                         array_ret_proof: ->(n) { array_return_probe.include?(n) })
+                                         array_ret_proof: ->(n) { array_return_probe.include?(n) },
+                                         ret_class_proof: ->(n) { class_return_probe[n] })
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
