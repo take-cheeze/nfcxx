@@ -24,26 +24,34 @@
 # runtime. An embedded class keeps its ivars in an RData struct, so it is only
 # sound when the class is MRB_TT_DATA and *every* method that touches those
 # ivars is an installed compiled method, #initialize included (it allocates the
-# struct). The compiled gems' register.cxx installs methods by hand and does not
-# cover every compiled entry point (474 of 2141 for mruby-rpg2k-compiled), so
-# the generator's own analysis alone over-embeds: it embedded Game::Actor while
-# Actor#initialize stayed the interpreted one, and the first compiled accessor
-# then dereferenced a NULL DATA_PTR. bc2cpp.rb's driver passes this list to
-# CodeGen.wired_embeddings; a class outside it keeps its ivars in the ordinary
-# table. Add a class here only together with its register.cxx wiring for
-# #initialize and every compiled method that touches an embedded ivar.
+# struct) -- "compiles clean" and "is the method that actually runs" have to be
+# the same fact, or an interpreted fallback of a compiled-but-unregistered
+# method reads the ordinary iv_tbl (always empty for an embedded ivar, which
+# lives in the RData struct instead -- 3rd/mruby/include/mruby/data.h keeps
+# `iv`/`data` as two entirely separate fields) and sees nil.
 #
-# Game::Interpreter (25 unregistered entry points, #update among them),
-# Game::Transition (4) and Game::Map (2) are NOT listed: their compiled methods
-# write the embedded struct while an unregistered one falls back to the
-# interpreted body, which reads the ordinary ivar table and sees nil. In the
-# desktop build that was `nil >= x` inside Scene::Map#step_parallel (swallowed by
-# its `rescue StandardError`), i.e. every Parallel Process silently dead.
-# scripts/bc2cpp_wired_embedding_check.rb enforces "every compiled entry point of
-# a listed class is installed by its register.cxx".
+# That equivalence used to depend on a hand-written register.cxx, which
+# drifted from the generator's own analysis: 474 of 2141 rpg2k entry points
+# were never installed, among them Game::Interpreter#update, so `Game::Actor`
+# was embedded while `#initialize` stayed interpreted (a compiled accessor
+# then dereferenced a NULL DATA_PTR), and Game::Interpreter/Transition/Map had
+# to be dropped here entirely -- in the desktop build that was `nil >= x`
+# inside Scene::Map#step_parallel (swallowed by its own `rescue
+# StandardError`), i.e. every Parallel Process silently dead.
+#
+# bc2cpp.rb's driver now generates the registration itself (OWNER_METHOD_
+# REGISTRATION, tools/bc2cpp/bc2cpp.rb's own emit_owner_registrations) for
+# every entry this list's classes have in `compiled` -- which, by
+# compile_all's own #error-filtering partition, is exactly every entry that
+# compiles clean -- so the equivalence holds by construction, not by keeping a
+# hand-written file in sync. register.cxx calls it once, right after
+# bc2cpp_set_instance_tts, from every compiled gem's own gem_init.
+# scripts/bc2cpp_wired_embedding_check.rb verifies it against the real
+# generated output (a hand mrb_define_method for the same name/aspec, where
+# one still exists, counts too).
 BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
-  LCF::EventCommand LCF::MoveCommand
+  LCF::EventCommand LCF::MoveCommand Game::Interpreter Game::Transition Game::Map
 ].freeze
 
 BC2CPP_COMPILED_GEMS = {
