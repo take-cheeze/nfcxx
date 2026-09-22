@@ -647,6 +647,66 @@ of it lands on a struct field here -- every newly-recognized SETIV/GETIV
 source still has to compile to *some* correct code, struct-backed or
 not), run repeatedly against the real, non-scratch `compiled_run.rb`.
 
+**Update (BC2CPP_SELF_REGISTERING session)**: the correction above's own
+root cause -- `BC2CPP_WIRED_EMBEDDINGS` gating every embedding
+unconditionally, for every `bc2cpp.rb` invocation including this probe's
+own -- is now fixed for this probe specifically, not just documented.
+That allowlist exists because the REAL compiled gems' hand-written
+`register.cxx` does not install every compiled entry point of an
+embedding class by construction (see that constant's own comment for the
+real, shipped bug this caused). This file's own `emit_register`, above,
+never had that gap: it already installs every compiled method of any
+owner its own `embeds` diagnostic names, computed from the exact same
+diagnostic bc2cpp.rb itself prints -- "embeddable" and "installed" were
+always the same fact here, by construction, the identical guarantee a
+concurrent session's own `emit_owner_registrations` mechanism now
+provides by generation for the real gems (see `docs/adr/0185`-adjacent
+work). `compiled_run.rb` now sets `BC2CPP_SELF_REGISTERING=1`, which
+tells bc2cpp.rb's driver to skip the allowlist entirely for this
+invocation (nothing in this closed world was ever on it anyway) and let
+every ivar `IvarLayout`/`drop_unsafe_embeddings` themselves already
+proved safe actually embed -- those two checks (every accessor compiles
+clean, no native `attr_reader`/`writer` collision) still run
+unconditionally either way; only the extra, hand-maintenance-specific
+allowlist gate is removed.
+
+Confirmed against the real generated code from this exact, current
+`compiled_run.rb` (`KEEP_TEMP=... MRBC=... ruby tools/optcarrot_probe/
+compiled_run.rb`): `Optcarrot::CPU` now has a real `Optcarrot__CPU_ivars`
+struct (`@clk_total` as `mrb_int`, `@jammed`/`@ppu_sync` as the `:bool`
+type from the session above), with real `DATA_PTR` reads/writes at
+`CPU#run`'s own call sites -- `@ppu_sync`'s own struct read appears at
+both places `cpu.rb` checks it (`@ppu.sync(@clk) if @ppu_sync`).
+`Optcarrot::ROM`, `Pad`, `APU`, and `APU::DMC` also gain real embedded
+structs the same way. `Optcarrot::PPU`'s own ivars (`@run`/`@vblank`/
+`@hclk`/`@scanline`/... from the session above) are still inert -- not
+because of `BC2CPP_WIRED_EMBEDDINGS` any more, but because `PPU` itself
+stays out of `ONLY_OWNERS` entirely, for its own separate, still-open
+`Fiber.new` bug (see "Compiled runtime check" above); embedding an
+ivar of a class with zero compiled entry points has nothing to attach
+to. The full 180-frame `nes.run` loop checksums `59662` on CRuby,
+interpreted mruby, and bc2cpp alike, run repeatedly.
+
+**What this does *not* establish**: a measured wall-clock improvement.
+`gprof` runs taken in this same session, with and without this change,
+both landed in a machine state clearly under heavy external contention --
+`sigalrm_handler` (the profiler's own timer-signal handler) and a single
+`mrb_mruby_task_gem_final` call each showing 40-48% of "self time" is not
+real application work, it is corrupted sampling from a shared, busy
+machine, the same caveat a concurrent session's own PR raised about this
+identical environment ("measurements were taken across several runs on a
+shared machine (other agents building concurrently)"). The *disabled*
+control run (`BC2CPP_SELF_REGISTERING=0` against this same, current
+`compiled_run.rb`) was equally corrupted and equally slow, which is what
+rules this out as a regression from the change itself rather than
+environment noise -- but it also means neither run's absolute numbers,
+nor their `iv_bsearch_idx` call counts (identical between the two runs,
+which is itself suspicious given real, confirmed new struct accesses at
+`CPU#run`'s own hot path -- not yet explained), should be trusted as a
+real measurement right now. Re-measuring on a quiet machine, the same
+caveat that PR's own author gave their part of this exact story, is the
+honest next step here too, not a number this paragraph will guess at.
+
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
 `mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
