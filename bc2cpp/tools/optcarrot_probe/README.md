@@ -707,6 +707,49 @@ real measurement right now. Re-measuring on a quiet machine, the same
 caveat that PR's own author gave their part of this exact story, is the
 honest next step here too, not a number this paragraph will guess at.
 
+**Why `CPU`'s own register file stays unembedded**: the "next concrete
+target" this section's own earlier revision named -- `@a`/`@x`/`@y`/`@s`/
+`@p`/`@pc` (real names: `@_a`/`@_x`/`@_y`/`@_sp`/`@_pc`, plus the split
+flag register `@_p_c`/`@_p_d`/`@_p_i`/`@_p_nz`/`@_p_v`) -- traced by hand
+against `3rd/optcarrot/lib/optcarrot/cpu.rb` and `IvarLayout.trace_type`
+(`tools/bc2cpp/bc2cpp.rb`) directly, rather than guessed at: these ivars do
+have plenty of purely-Fixnum SETIV sites (`#reset`'s `@_a = @_x = @_y = 0`,
+the flag-register literals right after it), but every one of them also has
+at least one site like `cpu.rb`'s `@_p_nz = @_a = @data` or
+`@_pc = peek16(RESET_VECTOR)`, where the source is `GETIV @data`/a `SEND`
+result rather than a literal or proven arithmetic. `IvarLayout.trace_type`
+already *does* follow a `GETIV` of another ivar (walks to
+`known_ivar_types[other_ivar]`, part of the same 10-pass fixed point that
+lets one embeddable ivar's proof feed another's) -- the trace isn't
+missing that case. It fails here because `@data`/`@addr` are themselves
+never provably Fixnum: their own SETIV sites include `@data = fetch(@_pc)`,
+a plain `SEND`, and `IvarLayout.trace_type`'s `SEND` case only trusts a
+closed, guarded set of operator names (`%`/`&`/`|`/`^`, `native_only_mono?`)
+-- it has no general "this method is proven to always return Fixnum" case.
+That proof *does* exist elsewhere in this file -- `CodeGen#compute_fixnum_
+return_names` (`FIXNUM_RETURN_PROOF`, printed in the coverage report) -- but
+it is computed by `CodeGen` itself, from `@ivar_layout` among other inputs,
+strictly *after* `IvarLayout.analyze` has already run and returned; feeding
+it back into `IvarLayout.trace_type`'s `SEND` case would need restructuring
+the two into one shared fixed point (`IvarLayout` proving ivars,
+`FIXNUM_RETURN_PROOF` proving methods, each feeding the other, iterated to
+convergence) rather than the current one-directional pipeline. That is a
+real, buildable next step -- not attempted this session, since it changes
+a load-bearing whole-program analysis shared by every compiled gem in the
+real project, not just this probe, and deserves its own session with room
+to verify it doesn't regress any of the three real compiled gems.
+Confirmed directly against this exact tree (`BC2CPP_SELF_REGISTERING=1`
+coverage report, `grep CPU` over the `== ivar embedding ==` section): only
+`@clk_total` (`fixnum`), `@jammed`, and `@ppu_sync` (`bool`) are `CPU`'s
+embedded ivars today; the register file is absent from that list entirely,
+landing instead in the (differently-purposed) `CLASS_CANDIDATE`
+devirtualization-hint list further down the same diagnostic output, not in
+any "poisoned, here's why" list -- `IvarLayout.analyze` only ever returns
+successfully-typed ivars, so a failed trace leaves no direct trace of
+*why* in the diagnostic output; the reasoning above came from reading
+`cpu.rb`'s own SETIV sites against `trace_type`'s cases by hand, not from
+a tool that reports failures.
+
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
 `mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
