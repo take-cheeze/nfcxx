@@ -1672,6 +1672,120 @@ module IntegerConstants
     nil
   end
 
+  # INTEGER_CONSTANT_VALUE_PROOF: IntegerConstants.analyze above proves a bare
+  # name always binds A Fixnum; this proves it always binds the SAME Fixnum,
+  # so a GETCONST/GETMCNST reading it can be replaced with that literal value
+  # outright, skipping the runtime lookup entirely -- the actual win, not just
+  # the type fact. Sound for the identical reason resolve_integral's own
+  # induction is: every real assignment to an admitted name executes one of
+  # its classified definitions, and if EVERY one of those (transitively
+  # through aliases) resolves to the same number, every run ever binds that
+  # same number to it, whichever definition ran. `admitted` is
+  # IntegerConstants.analyze's own returned Set -- only names already proven
+  # Fixnum-only are considered, so this never has to re-derive any of that
+  # proof's own poison sources (CLASS/MODULE collision, native, foreign).
+  #
+  # A name whose own alias graph cycles with no literal at its base (the one
+  # case resolve_integral's own comment says is admitted only vacuously,
+  # because no real run ever reaches either assignment) resolves to nil here
+  # via ordinary cycle detection -- not memoized as a global fact, since a
+  # cycle is a property of the PATH, not the name: a name reached once via a
+  # cyclic path and once via a real one must still resolve on the real path.
+  def self.analyze_values(ireps, admitted)
+    return {} if admitted.empty?
+
+    defs = Hash.new { |h, k| h[k] = [] }
+    ireps.each_value do |irep|
+      entries = const_entry_addrs(irep)
+      irep.instructions.each_with_index do |insn, i|
+        next unless insn.op == 'SETCONST' || insn.op == 'SETMCNST'
+
+        name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.args[/::(\S+)/, 1]
+        next unless name && admitted.include?(name)
+
+        src = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten.last
+        defs[name] << (src && literal_value_kind(irep, i, src, entries))
+      end
+    end
+
+    memo = {}
+    resolve = lambda do |name, visiting|
+      return memo[name] if memo.key?(name)
+      return nil if visiting.include?(name)
+
+      kinds = defs[name]
+      next nil if kinds.empty? || kinds.any?(&:nil?)
+
+      seen = visiting + [name]
+      values = kinds.map { |k| k[0] == :literal ? k[1] : resolve.call(k[1], seen) }
+      result = values.any?(&:nil?) || values.uniq.size != 1 ? nil : values.first
+      memo[name] = result
+      result
+    end
+
+    admitted.each_with_object({}) do |name, out|
+      value = resolve.call(name, Set.new)
+      out[name] = value unless value.nil?
+    end
+  end
+
+  # const_source_kind's own exact backward walk, except a LOADI* writer
+  # returns the actual decoded value (`[:literal, N]`) instead of the bare
+  # `:literal` symbol -- everything else (MOVE-following, the alias cases,
+  # every nil-returning refusal, the label barrier) is identical on purpose,
+  # so this proof runs over exactly the same source shapes the kind proof
+  # already validated, never a looser set of them.
+  def self.literal_value_kind(irep, idx, reg, entries)
+    cur = reg.to_s
+    j = idx - 1
+    while j >= 0
+      insn = irep.instructions[j]
+      return nil unless insn
+      return nil if entries.include?(insn.addr)
+
+      if insn.args =~ /\AR#{cur}\b/
+        if insn.op.start_with?('LOADI')
+          value = loadi_value(insn)
+          return value.nil? ? nil : [:literal, value]
+        end
+
+        case insn.op
+        when 'MOVE'
+          src = insn.args.scan(/R(\d+)/).flatten[1]
+          return nil unless src
+
+          cur = src
+        when 'GETCONST'
+          n = insn.args.split(/\s+/)[1]
+          return n && [:alias, n]
+        when 'GETMCNST'
+          n = insn.args[/::(\S+)/, 1]
+          return n && [:alias, n]
+        else
+          return nil
+        end
+      end
+      j -= 1
+    end
+    nil
+  end
+
+  # loadi_literal/loadi_proven_fixnum?'s own decode+32-bit-range check
+  # (CodeGen, near LOADI_FIXNUM_MIN/MAX), duplicated as a plain function here:
+  # this module has no CodeGen instance to call them on, and both are pure
+  # functions of one instruction. LOADI8/16/NEG/_n stay inside the same
+  # +-2^15 margin those constants document; only LOADI32 needs the bound
+  # check, so a value outside it is refused (nil) rather than trusted.
+  def self.loadi_value(insn)
+    tok = insn.args.split(/\s+/)[1]
+    return nil unless tok&.match?(/\A-?\d+\z/)
+
+    value = tok.to_i
+    return nil if insn.op == 'LOADI32' && !value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+
+    value
+  end
+
   # Poison source 3 -- see the header above for the three real call forms.
   def self.native_const_names(paths)
     names = Set.new
@@ -8787,7 +8901,7 @@ class CodeGen
   # default) means "prove nothing", same as stable_class_constants; a unit
   # check that wants the GETIDX Struct fast path sets a literal Hash directly.
   class << self
-    attr_accessor :wired_embeddings, :stable_class_constants, :struct_members
+    attr_accessor :wired_embeddings, :stable_class_constants, :struct_members, :integer_constant_values
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
@@ -21139,6 +21253,17 @@ class CodeGen
       # never caught by any #error check (this compiles and links fine).
       d = a[/^R(\d+)/, 1]
       name = a[/^R\d+\s+(\S+)/, 1]
+      # INTEGER_CONSTANT_VALUE_PROOF: a name IntegerConstants.analyze_values
+      # proved always binds this exact number needs no lookup at all -- not
+      # even a cached one, since the value never changes for the life of the
+      # program, only what register holds it. Checked first: a name can
+      # never be admitted here AND by StableClassConstants below (this proof
+      # poisons on CLASS/MODULE, that one requires it), so the two never
+      # compete for the same name.
+      if (value = self.class.integer_constant_values&.[](name))
+        return "  r#{d} = mrb_fixnum_value(#{value});\n"
+      end
+
       owner_path = lexical_scope_path(owner_def.owner)
       if self.class.stable_class_constants&.include?(name)
         # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
@@ -21175,6 +21300,19 @@ class CodeGen
       # read the named constant off of it, and overwrite the same register.
       d = a[/^R(\d+)/, 1]
       name = a[/::(\w+)\s*$/, 1]
+      # INTEGER_CONSTANT_VALUE_PROOF: same substitution as GETCONST's own
+      # case above -- see that comment. R<d> already holds the resolved
+      # owning scope from the immediately preceding GETCONST/GETMCNST; its
+      # own instruction still runs and still raises if that scope does not
+      # exist, this just skips USING the value once it is at hand, so the
+      # dominant real hot GETMCNST shape (`Cmd::SHOW_MESSAGE`-style event
+      # command dispatch: hundreds of these per frame, one per `case
+      # cmd.code when Cmd::X` arm scanned) costs nothing at all rather than
+      # one mrb_const_get / iv_get search apiece.
+      if (value = self.class.integer_constant_values&.[](name))
+        return "  r#{d} = mrb_fixnum_value(#{value});\n"
+      end
+
       "  r#{d} = mrb_const_get(M, r#{d}, mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'HASH'
       # "HASH R2 22" -- build a Hash from N key/value pairs held in 2N
@@ -24931,6 +25069,10 @@ if $PROGRAM_NAME == __FILE__
     integer_constants.sort.each { |n| warn "  CONST #{n}" }
   end
 
+  integer_constant_values = IntegerConstants.analyze_values(ireps, integer_constants)
+  warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
+  integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
+
   ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants)
   warn ''
   warn '== ivar embedding =='
@@ -25293,6 +25435,8 @@ if $PROGRAM_NAME == __FILE__
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
+  CodeGen.integer_constant_values = integer_constant_values
+  CodeGen.stable_class_constants.sort.each { |n| warn "  STABLE_CLASS #{n}" }
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
                     integer_constants, foreign_methods, outside_tokens, native_name_sources,
