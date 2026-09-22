@@ -485,6 +485,69 @@ primitive). `compiled_run.rb` still excludes `Optcarrot::PPU` from
 `ONLY_OWNERS` entirely -- this session's own fix is real, tested, and safe
 to keep, but does not by itself unlock `PPU`.
 
+**Update (FIBER_REACHABILITY_UNSAFE_SUPPORT session)**: `PPU` is unlocked
+now, for real, with a real end-to-end pass of the 180-frame benchmark to
+show for it -- not just a static coverage-report count. Two things landed
+in `tools/bc2cpp/bc2cpp.rb`, both required, verified by removing each in
+turn and re-testing:
+
+1. `calls_fiber_yield?` -- a method whose own bytecode directly calls
+   `Fiber.yield` (a bare `GETCONST Fiber` feeding a plain `SEND`/`SEND0`
+   `:yield` -- confirmed via a fresh `mrbc -v`: unlike `Fiber.new`, this
+   opcode shape carries no `BLOCK` at all, so it was never caught by the
+   `Fiber.new` fix above and compiled successfully into an ordinary
+   dynamic-dispatch `mrb_funcall`-style call reaching `mrb_fiber_yield`
+   directly from whatever native frame happened to be running) is refused
+   compilation, the same `#error`-stub shape `compile_method` already uses
+   for its own "has non-mandatory arguments" rejection.
+2. `compute_fiber_unsafe_methods` -- tried (1) alone first, expecting it
+   to be enough alongside the earlier `Fiber.new` fix. It was not: `PPU`
+   with only `run`/`wait_frame`/`wait_zero_clocks`/`wait_one_clock`/
+   `wait_two_clocks` excluded (five methods -- the `Fiber.new` site and its
+   four direct `Fiber.yield` callers) still crashed the real 180-frame
+   benchmark with the identical `resuming dead fiber (FiberError)`
+   documented above. `main_loop` -- compiled, calling those four through
+   ordinary bare self-sends -- was still sitting between the fiber's entry
+   point and every yield. So this computes the full transitive closure:
+   starting from every `Fiber.new { block }` call site's own block body,
+   found by a whole-program scan (not gated to one method, unlike the
+   `Fiber.new` fix's own recognizer), follow every bare/self-implicit send
+   (`SSEND`/`SSEND0`/`SSENDB`, which Ruby resolves to `self`
+   unambiguously) to another method of the SAME owner class, and refuse
+   every method reached this way, however many hops out. Scoped to same-
+   owner self-sends specifically because every real call inside this
+   closed world's one Fiber body already has that shape -- see that
+   method's own comment for the honest limit (an explicit-receiver call
+   crossing OUT of the fiber's own class is out of scope, a real gap only
+   if such a call itself reaches a `Fiber.yield`, which none does here).
+
+Confirmed against this exact tree: the closure reaches 36 of `PPU`'s own
+75 methods (`main_loop` itself, everything it calls to actually render a
+scanline -- `open_name`/`open_attr`/`open_pattern`/`fetch_*`/
+`evaluate_sprites_*`/`render_pixel`/`batch_render_eight_pixels`/
+`load_tiles`/`preload_tiles`/`scroll_*`/`vblank_*`/`update_enabled_flags*`/
+`boot`, plus the 4 direct `Fiber.yield` callers and `run` itself), leaving
+the other ~38 (`sync`, `vsync`, `setup_frame`, `active?`,
+`monitor_a12_rising_edge`, `make_sure_invariants`, accessors, ...)
+eligible to compile. All 15 `scripts/bc2cpp_*_check.rb` static checks
+still pass. `compiled_run.rb`'s own `ONLY_OWNERS` no longer excludes
+`Optcarrot::PPU` at all -- the whole-class exclusion that comment used to
+carry is now redundant with the exact, per-method one `bc2cpp.rb` itself
+enforces. The real 180-frame benchmark (`KEEP_TEMP=...
+MRBC=... ruby tools/optcarrot_probe/compiled_run.rb`) now completes
+end-to-end with `Optcarrot::PPU` partially compiled, checksum `59662` on
+all three runtimes, run repeatedly -- the crash this whole thread started
+from does not reproduce.
+
+Wall-clock is not yet cleanly measured: the one run taken so far
+(`bc2cpp installed 232 compiled methods`, `mruby + bc2cpp` at 76.41s vs.
+the plain interpreter's 70.36s -- bc2cpp *slower*) happened on a machine
+showing moderate load (0.6-0.8 on 4 cores) at the time, the same caveat
+that has corrupted more than one gprof/timing run earlier in this
+project's history; a clean, idle-machine before/after (`PPU` excluded vs.
+this fix's partial inclusion) is the honest next step before trusting
+either number, not something this paragraph will guess at.
+
 **Update (CI SIGSEGV investigation)**: the "confirmed safe" `Optcarrot::CPU`/
 `NES` claim above, and the `Optcarrot::Video`/`APU` frame-boundary hooks it
 was extended with, did not hold up against CI's own 180-frame run -- CI

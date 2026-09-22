@@ -16,21 +16,30 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
-# Optcarrot::PPU is deliberately NOT in this list -- re-checking it (as part
-# of the gc_gray_rescan investigation this file's own history references)
-# found a real, 100%-reproducible failure: `PPU#run`'s `@fiber ||= Fiber.new
-# { ... }` compiles through the same BLOCK_FALLBACK path every other block
-# literal uses (`bc2cpp.rb`'s `emit_block_fallback_glue`), which wraps the
-# block body as a cfunc-backed RProc via `mrb_proc_new_cfunc_with_env` --
-# correct for `each`/`map`/`sub`/... (none of which care whether the RProc
-# they're handed is cfunc- or bytecode-backed), but `Fiber.new` is not one of
-# those: mruby's own `init_fiber` (3rd/mruby/mrbgems/mruby-fiber/src/fiber.c)
-# checks `MRB_PROC_CFUNC_P(p)` and unconditionally raises `FiberError: tried
-# to create Fiber from C defined method` rather than dereference a
-# `body.irep` that a cfunc-backed proc doesn't have; that needs its own
-# separate bc2cpp fix (a real, bytecode-backed Proc for a block passed to
-# `Fiber.new`), out of this file's own scope. Re-enabling `Optcarrot::PPU`
-# here needs that fix landed first, not just re-adding the name.
+# Optcarrot::PPU used to be entirely excluded here (a real, 100%-
+# reproducible FiberError -- `PPU#run`'s `@fiber ||= Fiber.new { ... }`
+# compiled its block through the same BLOCK_FALLBACK path every other block
+# literal uses, wrapping it as a cfunc-backed RProc mruby's own `init_fiber`
+# (3rd/mruby/mrbgems/mruby-fiber/src/fiber.c) explicitly rejects). Fixed in
+# `tools/bc2cpp/bc2cpp.rb` two ways, both required: FIBER_NEW_BLOCK_UNSAFE_
+# SUPPORT refuses to compile the `Fiber.new { block }` call site itself
+# (falls back to interpreted, exactly like any other unsupported
+# construct), and FIBER_REACHABILITY_UNSAFE_SUPPORT refuses to compile
+# every method transitively reachable (via same-owner self-sends) from
+# that block's own body, down to and including every `Fiber.yield` call
+# site -- verified necessary, not just sufficient-looking on paper: the
+# narrower fix alone (only the `Fiber.new` site) still crashed the real
+# 180-frame benchmark with a second FiberError (`resuming dead fiber`),
+# traced to mruby's own `vmexec`-reentrant fiber-resume path getting
+# confused by ANY native, VM-invisible compiled frame between the fiber's
+# entry point and wherever it actually yields, not only the frame that
+# happens to call `Fiber.yield` directly. See both SUPPORT comments in
+# `bc2cpp.rb` and `tools/optcarrot_probe/README.md` for the full mechanism.
+# `Optcarrot::PPU` is back in `ONLY_OWNERS` below now that both fixes are
+# landed; its own fiber-body-reachable methods (`main_loop` and everything
+# it calls, `run` itself) still compile to an honest `#error` and stay
+# interpreted, same as always -- only the REST of PPU's own methods
+# (`sync`/`vsync`/accessors/setup) newly compile.
 #
 # CPU/NES/Video/APU used to be excluded here too, for a real,
 # CI-reproducible SIGSEGV that took several rounds to root-cause: every
@@ -70,8 +79,14 @@ ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 # GNU statement expression and reuses it, exactly like the real C body does,
 # instead of re-deriving it per use. With that landed, CPU/NES/Video/APU
 # compile and run the full 180-frame `nes.run` loop clean (matching CRuby's
-# and the plain mruby interpreter's checksum) and are back in this list;
-# `Optcarrot::PPU` stays out for its own, unrelated FiberError above.
+# and the plain mruby interpreter's checksum) and are back in this list.
+# `Optcarrot::PPU` is not added here even now that its own FiberError above
+# is fixed: `emit_register`'s own `rows` filter below already installs every
+# compiled method of any class `embeds` names (see that function's own
+# comment), and `Optcarrot::PPU` is such a class (its own ivars prove
+# embeddable under BC2CPP_SELF_REGISTERING) -- adding it to this
+# hand-maintained list too would be a redundant no-op, not a behavior
+# change.
 FIBER_SAFE_OWNERS = %w[Optcarrot::Config Optcarrot::Opt Optcarrot::CPU Optcarrot::NES].freeze
 # ROM loading and initialization run while NES is assembled, before emulator
 # Fibers start; these methods exercise the generated loader fast paths.
@@ -304,18 +319,22 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     'BC2CPP_SELF_REGISTERING' => '1'
   }
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
-  # Excludes Optcarrot::PPU itself, not just its nested helper classes: a
-  # devirtualized call (a direct C++ call from one compiled method's body
-  # into another's) reaches a compiled `_impl` function regardless of
-  # whether that method is ever registered via FIBER_SAFE_OWNERS/
-  # emit_register below -- registration only controls Ruby-level dispatch,
-  # not whole-program devirtualization. So leaving PPU in ONLY_OWNERS would
-  # still compile (and let other compiled code devirtualize into) its
-  # `_impl`s, hitting the FIBER_SAFE_OWNERS comment's own FiberError even
-  # though it is never "installed." See that comment for the full mechanism.
+  # Optcarrot::PPU used to be excluded here entirely -- a devirtualized call
+  # (a direct C++ call from one compiled method's body into another's)
+  # reaches a compiled `_impl` function regardless of whether that method is
+  # ever registered via FIBER_SAFE_OWNERS/emit_register below, so leaving
+  # PPU in ONLY_OWNERS while any of its own methods still hit the FiberError
+  # documented above (and in bc2cpp.rb's own FIBER_NEW_BLOCK_UNSAFE_SUPPORT/
+  # FIBER_REACHABILITY_UNSAFE_SUPPORT) would compile straight into it. Now
+  # that bc2cpp.rb itself refuses to compile the fiber-unsafe subset of
+  # PPU's own methods (an honest `#error`, same mechanism SKIP_UNSUPPORTED
+  # already relies on for every other unmodeled construct), PPU no longer
+  # needs a whole-class exclusion here -- the per-method one bc2cpp.rb now
+  # enforces is exact where this blunter, whole-class one was only
+  # conservative.
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
-  end.uniq.reject { |owner| owner.start_with?('Optcarrot::PPU') }
+  end.uniq
   compiled_cpp, diagnostics = run_bc2cpp(sources, base_env.merge(
     'OUT_DIR' => temp,
     'ONLY_OWNERS' => owners.join(',')
@@ -380,7 +399,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} compiled methods, including CPU/NES/Video/APU's own (not PPU)"
+  puts "bc2cpp installed #{count} compiled methods, including CPU/NES/Video/APU's own and " \
+       "PPU's own fiber-safe subset (main_loop and everything reachable from it stay interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')

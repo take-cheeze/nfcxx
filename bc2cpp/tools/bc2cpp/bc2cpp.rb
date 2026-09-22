@@ -9041,6 +9041,14 @@ class CodeGen
     @blk_param_level = 0
     @registry = registry
     @known_owners = Set.new(registry.values.flatten.map(&:owner))
+    # FIBER_REACHABILITY_UNSAFE_SUPPORT: computed here, early, because
+    # drop_unsafe_embeddings below (line ~8921) already calls compile_method
+    # (via compiles_clean?) for every method in the program -- @fiber_
+    # unsafe_methods has to exist before that first call reaches compile_
+    # method's own check. See compute_fiber_unsafe_methods' own comment for
+    # what this actually computes and why FIBER_YIELD_UNSAFE_SUPPORT alone
+    # (calls_fiber_yield?, below) was verified insufficient.
+    compute_fiber_unsafe_methods
     # SUPER_SUPPORT: real class name -> its own declared superclass name
     # (String), :none (no explicit superclass -- real Object), or absent
     # (unrecognized/computed expression) -- build_registry's own
@@ -12040,6 +12048,19 @@ class CodeGen
       # or a devirtualized direct call) actually pass it.
       code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
              "#error #{d.owner}##{d.name} has non-mandatory arguments (optional/rest/keyword/block) -- not in this prototype's supported subset\n\n"
+      return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
+               arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
+    end
+
+    if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label)
+      # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: see
+      # those methods' own comments -- never compile a method that directly
+      # calls Fiber.yield, or one reachable (directly or transitively,
+      # through same-owner self-sends) from a Fiber.new block's own body.
+      # Same early-#error stub shape as the arity rejection just above.
+      reason = calls_fiber_yield?(irep) ? 'calls Fiber.yield directly' : 'is reachable from a Fiber.new block'
+      code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
+             "#error #{d.owner}##{d.name} #{reason} -- not in this prototype's supported subset\n\n"
       return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
                arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
     end
@@ -18851,17 +18872,20 @@ class CodeGen
   # `GETMCNST` -- idiomatic Ruby, and every real call site in this closed
   # world, always references mruby's own top-level `Fiber` class by its
   # bare name, never a namespaced path) written into the exact register
-  # this `SENDB` reads as its receiver, found by the same short backward
-  # walk `IvarLayout.trace_type` uses elsewhere in this file: only `MOVE`
-  # is followed through, any other write to the register stops the walk
-  # and answers false. A miss here (an indirect receiver, a differently-
+  # the call reads as its receiver, found by the same short backward walk
+  # `IvarLayout.trace_type` uses elsewhere in this file: only `MOVE` is
+  # followed through, any other write to the register stops the walk and
+  # answers false. A miss here (an indirect receiver, a differently-
   # shaped load, a real user class that happens to also be named `Fiber`
   # under some namespace) is always SAFE, never a new risk -- the call site
-  # just falls through to today's ordinary `BLOCK_FALLBACK` path, exactly
-  # as it always has for every call site this check does not recognize.
-  def fiber_new_receiver?(irep, block_idx, dest_reg)
+  # just falls through to whatever it would otherwise have done, exactly
+  # as it always has for every call site either of this method's own two
+  # callers does not recognize. Named generically (not `fiber_new_
+  # receiver?`) because `calls_fiber_yield?` below reuses it verbatim for
+  # a plain `SEND`'s own receiver, not just `Fiber.new`'s `SENDB`.
+  def fiber_const_receiver?(irep, call_idx, dest_reg)
     reg = dest_reg
-    (block_idx - 1).downto(0) do |i|
+    (call_idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       case insn.op
       when 'MOVE'
@@ -18880,6 +18904,207 @@ class CodeGen
       end
     end
     false
+  end
+
+  # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` -- unlike `Fiber.new { block
+  # }` above, this is a plain `SEND`/`SEND0` (no `BLOCK` operand at all,
+  # confirmed via a fresh `mrbc -v` disassembly: `GETCONST R2 Fiber` +
+  # `SEND R2 :yield n=1` / `SEND0 R2 :yield`), so it already compiles
+  # successfully through bc2cpp's ordinary dynamic-dispatch codegen --
+  # nothing recognizes `:yield` as special, so it becomes an ordinary
+  # `mrb_funcall`-style call reaching mruby's own `fiber_yield`/
+  # `mrb_fiber_yield` (`mrbgems/mruby-fiber/src/fiber.c`) directly from
+  # whatever native C++ frame this compiled method's own body happens to
+  # be running in.
+  #
+  # Confirmed unsafe empirically, not by inspection alone: excluding only
+  # the `Fiber.new` construction site (`fiber_const_receiver?`'s other
+  # caller, above) and recompiling `Optcarrot::PPU`'s own `main_loop`/
+  # `wait_frame`/`wait_zero_clocks`/`wait_one_clock`/`wait_two_clocks` --
+  # the fiber body's own real payload, all of which reach `Fiber.yield`
+  # directly -- still crashed the real 180-frame benchmark with
+  # `FiberError: resuming dead fiber`, a *different* failure from the one
+  # excluding `Fiber.new` alone already fixed. Traced to mruby's own
+  # `vmexec`-reentrant fiber-resume path (`fiber_switch`/`fiber_resume` in
+  # `fiber.c`) getting confused once a native, VM-invisible compiled frame
+  # sits between the fiber's own entry point and wherever it actually
+  # yields -- see `tools/optcarrot_probe/README.md` for the full traced
+  # mechanism.
+  #
+  # The fix is the same shape as `Fiber.new`'s own: a method whose own
+  # bytecode directly calls `Fiber.yield` is refused compilation entirely
+  # (an early `#error` stub, the same shape `compile_method`'s own "has
+  # non-mandatory arguments" rejection already returns) rather than left
+  # to compile into code that is syntactically fine but unsound at
+  # runtime. Deliberately scoped to DIRECT calls only, not a full whole-
+  # program reachability closure from every `Fiber.new`'s own block body
+  # forward -- see `compile_method`'s own call site for what that would
+  # still need to cover (a `Fiber.yield` reached only transitively,
+  # through another compiled method that itself calls neither `Fiber.new`
+  # nor `Fiber.yield` directly, is not caught by this) and why this
+  # narrower fix was the one actually verified end-to-end this session.
+  def calls_fiber_yield?(irep)
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SEND SEND0].include?(insn.op)
+
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      next unless name == 'yield'
+
+      dest_reg = insn.args[/^R(\d+)/, 1]
+      next unless dest_reg
+      next unless fiber_const_receiver?(irep, idx, dest_reg)
+
+      return true
+    end
+    false
+  end
+
+  # FIBER_REACHABILITY_UNSAFE_SUPPORT: FIBER_YIELD_UNSAFE_SUPPORT
+  # (calls_fiber_yield? above) refuses a method that DIRECTLY calls
+  # `Fiber.yield` -- verified, empirically, NOT sufficient on its own.
+  # Excluding `Optcarrot::PPU#run` (`Fiber.new`) and its 4 direct
+  # `Fiber.yield` callers (`wait_frame`/`wait_zero_clocks`/`wait_one_clock`/
+  # `wait_two_clocks`) and recompiling the real 180-frame Optcarrot
+  # benchmark still crashed with the identical `resuming dead fiber
+  # (FiberError)`. `main_loop` -- the fiber body's own real payload,
+  # compiled, calling those 4 methods through ordinary bare self-sends --
+  # still sat, compiled, between the fiber's own entry point and every
+  # yield, which is evidently just as unsound as `Fiber.yield` itself
+  # living in compiled code (see tools/optcarrot_probe/README.md for the
+  # full traced mechanism: mruby's own `vmexec`-reentrant fiber-resume path
+  # getting confused by ANY native, VM-invisible frame in that chain, not
+  # only the one that happens to call `Fiber.yield` itself).
+  #
+  # This computes the full transitive closure instead: starting from every
+  # `Fiber.new { block }` call site's own block body (found the same way
+  # `recognize_block_fallback_regions`' own gate finds one, scanned across
+  # the WHOLE program here rather than one method at a time), follow every
+  # bare/self-implicit send (`SSEND`/`SSEND0`/`SSENDB` -- a call written
+  # without an explicit receiver, which Ruby resolves to `self`
+  # unambiguously) to another method of the SAME owner class, and refuse
+  # to compile every method reached this way, however many hops out.
+  #
+  # Deliberately scoped to same-owner self-sends only, not a general
+  # whole-program call graph: every real call inside a Fiber body in this
+  # closed world (`main_loop` calling `open_name`/`wait_two_clocks`/...,
+  # `run` calling `@fiber.resume`, ...) already has this exact shape,
+  # since a Fiber body is ordinary instance-method code written within one
+  # class. An explicit-receiver call (`@cpu.something`) crossing OUT of
+  # the fiber's own class is out of scope here -- a real gap if such a
+  # call itself eventually reaches a `Fiber.yield`, but no such call
+  # exists anywhere in this closed world, and missing one here is safe in
+  # the direction that matters: the method in question simply stays
+  # eligible to compile, at worst reproducing the exact crash this whole
+  # mechanism exists to prevent (loud and immediate, the same FiberError
+  # already documented), never a silent wrong answer from a false proof.
+  def compute_fiber_unsafe_methods
+    by_owner_name = {} # [owner, name] -> irep label, registered methods only
+    irep_owner = {} # irep label -> owner, registered methods AND every block nested inside them
+    @registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.irep
+
+        by_owner_name[[d.owner, d.name]] = d.irep
+        irep_owner[d.irep] = d.owner
+      end
+    end
+
+    # A block always shares its enclosing method's self/owner in real
+    # Ruby, so propagating each registered method's own owner down through
+    # its own nested block ireps (irep.reps, transitively) is exact, not a
+    # guess -- this is what lets a Fiber.new seed found several block
+    # levels deep (not this closed world's own shape today, but not
+    # assumed away either) resolve to the right owner below.
+    propagate = irep_owner.keys.dup
+    until propagate.empty?
+      label = propagate.shift
+      irep = @ireps[label]
+      next unless irep
+
+      owner = irep_owner[label]
+      (irep.reps || []).each do |child_label|
+        next unless child_label
+        next if irep_owner.key?(child_label)
+
+        irep_owner[child_label] = owner
+        propagate << child_label
+      end
+    end
+
+    seeds = []
+    @ireps.each_value do |irep|
+      irep.instructions.each_with_index do |insn, idx|
+        next unless insn.op == 'BLOCK'
+
+        paired = irep.instructions[idx + 1]
+        next unless paired && paired.op == 'SENDB'
+        next unless paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'new'
+
+        dest_reg = paired.args[/^R(\d+)/, 1]
+        next unless dest_reg && fiber_const_receiver?(irep, idx, dest_reg)
+
+        block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+        next unless block_irep_idx
+
+        block_label = irep.reps[block_irep_idx.to_i]
+        seeds << block_label if block_label
+      end
+    end
+
+    unsafe = Set.new
+    # SEEDS_MULTIPLE_OWNERS_SUPPORT: resolved per seed, not against one
+    # shared owner -- a second Fiber.new under a different class must
+    # never be mis-attributed to the first one's owner.
+    queue = seeds.flat_map do |label|
+      seed_irep = @ireps[label]
+      next [] unless seed_irep
+
+      owner = irep_owner[label]
+      next [] unless owner
+
+      self_call_targets(seed_irep).filter_map { |name| by_owner_name[[owner, name]] }
+    end
+    until queue.empty?
+      label = queue.shift
+      next unless unsafe.add?(label)
+
+      irep = @ireps[label]
+      next unless irep
+
+      owner = irep_owner[label]
+      next unless owner
+
+      self_call_targets(irep).each do |name|
+        target = by_owner_name[[owner, name]]
+        queue << target if target
+      end
+    end
+    @fiber_unsafe_methods = unsafe
+  end
+
+  # Every bare/self-implicit send name (`SSEND`/`SSEND0`/`SSENDB`) reachable
+  # from `irep`, INCLUDING every send inside its own nested block ireps
+  # (`irep.reps`, recursively) -- a nested block literal (`341.step(589, 8)
+  # do ... end`'s own body) is never independently compiled or dispatched;
+  # its instructions are part of whichever top-level method contains it, so
+  # a self-send buried inside one has to be found here too, not just at the
+  # top level, or compute_fiber_unsafe_methods above would silently miss a
+  # real call the fiber body actually makes.
+  def self_call_targets(irep, seen = Set.new.compare_by_identity)
+    return [] unless seen.add?(irep)
+
+    names = []
+    irep.instructions.each do |insn|
+      next unless %w[SSEND SSEND0 SSENDB].include?(insn.op)
+
+      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      names << name if name
+    end
+    (irep.reps || []).each do |child_label|
+      child = child_label && @ireps[child_label]
+      names.concat(self_call_targets(child, seen)) if child
+    end
+    names
   end
 
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
@@ -18922,7 +19147,7 @@ class CodeGen
 
       # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: see that method's own comment --
       # never admit `Fiber.new { ... }` as a BLOCK_FALLBACK region.
-      next if paired.op == 'SENDB' && name == 'new' && fiber_new_receiver?(irep, idx, dest_reg)
+      next if paired.op == 'SENDB' && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
 
       block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
       next unless block_irep_idx
