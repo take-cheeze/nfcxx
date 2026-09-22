@@ -1043,6 +1043,34 @@ successfully-typed ivars, so a failed trace leaves no direct trace of
 `cpu.rb`'s own SETIV sites against `trace_type`'s cases by hand, not from
 a tool that reports failures.
 
+**Update (FIXNUM_RETURN_IVAR_HINT session)**: acted on the "real, buildable
+next step" named just above -- but stratified, not a full joint fixpoint,
+mirroring `ClassLayout`/`ARRAY_RETURN_PROOF`'s own existing
+`ARRAY_RETURN_IVAR_HINT` two-level shape (that call site's own header
+explicitly rejects a full alternation as unjustified extra machinery for
+the measured payoff; the same argument applies here). See ADR 0187 for the
+full mechanism. Verified this exact tree's `optcarrot_bc2cpp_coverage_
+report.rb` output is byte-identical before and after -- `CPU`'s own
+register file still does not embed, and now with a confirmed reason rather
+than a guess: `fetch`/`peek16`/`peek` (what `@data`/`@addr`/`@_pc` actually
+trace back to) read through `NES`'s own per-address memory-mapper dispatch
+(`@fetch[addr]`/`@store[addr]`, an Array of per-device callables looked up
+by address, then called) -- genuinely `POLY` across optcarrot's different
+mapper classes, not `MONO`, so `FIXNUM_RETURN_PROOF`'s own admission rule 1
+(`@registry[N]` holds exactly one real-bytecode definition) correctly
+refuses them regardless of this change. The gap this change actually closes
+needs a bare, whole-program-unique method name; `CPU`'s own memory access
+path is dispatched by runtime address instead, a fundamentally different,
+receiver-class-aware devirtualization problem this change does not attempt.
+The change is not a no-op elsewhere, though: the real project's own 3
+compiled gems gain 5 embedded ivars this way (`Game::Screen#@fade_frames`,
+`Game::Interpreter#@battle_indent`/`@choice_indent`/`@inn_indent`/
+`@shop_indent`), confirmed directly against the real regenerated code
+(`grep _ivars`/`DATA_PTR`), with all 22 `scripts/bc2cpp_*_check.rb` static
+checks (including `bc2cpp_wired_embedding_check.rb`'s own per-class
+installed-entry-point count for both affected, already-wired classes)
+still passing.
+
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
 `mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
