@@ -2668,6 +2668,64 @@ class IvarLayout
         return :fixnum if name && fixnum_return_names&.include?(name)
 
         return UNKNOWN
+      when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR'
+        # READ_ONLY_OPCODE_SKIP: these eight opcodes all print their lone
+        # register operand as the disassembly's own first `R%d` token (`RETURN
+        # R%d`, `JMPNOT R%d %03d`, ...), the same shape the generic `else`
+        # branch below treats as "some instruction we don't specifically
+        # model just wrote reg" -- but every one of them only READS that
+        # register, confirmed directly against this repo's own pinned
+        # `3rd/mruby` (831da26b) `include/mruby/ops.h`'s own comments
+        # (`RETURN`: "return R[a]"; `RETURN_BLK`: "return R[a]"; `BREAK`:
+        # "break R[a]"; `JMPIF`: "if R[a] pc+=b"; `JMPNOT`: "if !R[a]
+        # pc+=b"; `JMPNIL`: "if R[a]==nil pc+=b"; `RAISEIF`: "raise(R[a]) if
+        # R[a]"; `MATCHERR`: "raise NoMatchingPatternError unless R[a]" --
+        # none assigns anything to R[a]) and against `src/codedump.c`'s own
+        # print calls for each (`fprintf(out, "RETURN\tR%d\t", a)` and
+        # so on), never guessed at.
+        #
+        # A real gap this closes, demonstrated with a standalone repro (a
+        # class with a `pure_mandatory_arity?` `#initialize`, isolated from
+        # this file's own registry noise): `v = v ? true : false; return v
+        # if v == @flag; @flag = v; v` -- an early `RETURN R1` (the `return
+        # v if ...` guard) sits, in bytecode program order, between the
+        # ternary's own `LOADFALSE`/`MOVE` chain that provably types `v` as
+        # `:bool` and the `SETIV @flag R1` that reads it. Before this case
+        # existed, the backward walk from that `SETIV` hit `RETURN R1`
+        # first, matched `d == reg`, and stopped -- UNKNOWN -- even though
+        # that `RETURN` never executes on the path that actually reaches the
+        # `SETIV` at all (it is a *later*, alternate exit sharing the same
+        # register slot), and even if it did run, it never writes R1 either
+        # way. Skipping straight past a genuine non-writer and continuing
+        # the backward search is exactly as sound as skipping past a `MOVE`
+        # whose destination register does not match `reg` -- the walk keeps
+        # looking for whoever last actually wrote the register, which this
+        # opcode provably never did.
+        #
+        # `RPG2k::Window#pause=` (mruby-rpg2k/mrblib/main.rb) has this exact
+        # shape for `@pause`, and IvarLayout's own raw analysis now types it
+        # `:bool` -- confirmed in the whole-program diagnostic -- but that
+        # proof does NOT reach the real generated struct: `RPG2k::Window#
+        # initialize(x = 0, y = 0, width = 0, height = 0)` has four optional
+        # arguments, and `drop_unsafe_embeddings` separately requires an
+        # embedding owner's own `#initialize` to be `pure_mandatory_arity?`
+        # (the struct's `mrb_data_init` has to run on every real construction
+        # path, which this compiler only emits for a pure-mandatory
+        # `#initialize` today) -- the same well-documented, still-open gap
+        # `docs/adr/0139` repeats for many other classes. This case is still
+        # worth shipping on its own: it is a real, sound precision fix
+        # (strictly fewer false UNKNOWNs, never a wrong answer) that will
+        # matter the moment that separate optional-argument gap closes, for
+        # `RPG2k::Window` and for any future class with the same shape.
+        #
+        # `SETUPVAR` and `RESCUE` have the same read-only-first-token shape
+        # (checked against the same two files) but are deliberately left out
+        # of this list: `SETUPVAR`'s register interacts with the enclosing
+        # method's own upvar bookkeeping this file already treats specially
+        # elsewhere (`subtree_upvar_written_regs`), and `RESCUE` writes a
+        # SECOND register (`R[b] = R[a].isa?(R[b])`) this naive single-token
+        # regex can't see -- both deserve their own, separately-verified
+        # follow-up rather than being folded into this one.
       else
         # Any other opcode's destination register: nearly every mruby
         # opcode's first operand is its Rd (SEND, STRING, GETCONST,
