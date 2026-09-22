@@ -24309,7 +24309,54 @@ class CodeGen
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
                "no runtime check)#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+      elsif @ivar_layout.key?(target.owner)
+        # MONO_EMBED_GUARD: `monomorphic_target`'s own "exactly one COMPILED
+        # bytecode definition of this bare name anywhere in the program"
+        # proof says nothing about method_missing -- a class that answers a
+        # name only through method_missing (LCF::Array1D/Array2D's own
+        # schema-driven field access, mruby-lcf/mrblib/lcf.rb) never adds an
+        # entry to @registry[name] at all, so it is invisible to that count
+        # and MONO would otherwise call `impl` directly on a receiver that
+        # was never proven to be `target.owner`. Ordinarily that just reads/
+        # writes the wrong object's own iv_tbl entry -- wrong, but memory-
+        # safe. It stops being memory-safe the moment `target.owner` embeds
+        # ANY ivar as a real struct field: GETIV/SETIV for an embedded field
+        # cast `DATA_PTR(self)` (RDATA(self)->data) unconditionally, and a
+        # receiver that is not really an RData of this shape (an ordinary
+        # RObject, e.g. an Array1D row) makes that a real out-of-bounds/
+        # type-confused read, not merely a wrong answer -- caught for real
+        # reproducing Game::Actor#faceset_index: `@db_row.faceset_index`
+        # (an Array1D method_missing call, never Game::Actor) targeted
+        # Game::Actor's own compiled accessor because `faceset_index` had
+        # exactly one COMPILED definition program-wide, and
+        # `((Game__Actor_ivars*)DATA_PTR(self))->faceset_index` then read
+        # through a receiver that was never a Game::Actor at all -- a real,
+        # reproduced crash. Guard every MONO call into an embedding class,
+        # not just the specific methods that happen to touch a field today:
+        # precisely proving "this exact compiled body never reaches a
+        # DATA_PTR dereference, even transitively" is a much deeper
+        # reachability question than this gate is willing to get wrong in
+        # the unsafe direction, and the file's own established pattern
+        # (`typed`, just above) already pays this same one-compare cost for
+        # every other receiver-uncertain devirtualized call.
+        check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+        note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
+               "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
+               "direct C++ call, mrb_funcall fallback#{native_note}\n"
+        fallback = dynamic_dispatch_line(d, recv, name, argv)
+        "#{note}  if (#{check}) {\n" \
+          "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
+          "  } else {\n" \
+          "    #{fallback}" \
+          "  }\n"
       else
+        # target.owner embeds no ivar at all, so this callee's own GETIV/
+        # SETIV codegen never casts DATA_PTR(self) regardless of what self
+        # really is (embed_type(target.owner, ...) is nil for every ivar
+        # here) -- a wrong receiver reads/writes the wrong object's own
+        # iv_tbl entry, memory-safe (if semantically wrong) exactly as
+        # every other unguarded MONO call already was before this file
+        # tracked ivar embedding at all. No guard needed.
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
         "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
