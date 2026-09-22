@@ -34,77 +34,39 @@
 # to touch a singleton-owned entry (today, strip_wio_bc2cpp_stubs.rb
 # always refuses one -- see that file's own comment on why DEFS/SCLASS
 # span-finding is out of scope for this round's bounded proof).
+#
+# NEVER_CALLED_EXCLUSION: a compiled entry point that
+# tools/bc2cpp/never_called_registrations.rb's own safety rule marks both
+# never-called and safe to stop registering is left out of this TSV
+# entirely, never printed as "registered" -- scripts/
+# bc2cpp_prune_never_called_registrations.rb is what actually deletes such
+# an entry's register.cxx line, and once that has run, compile_all can
+# still happily recompile the method (bc2cpp.rb has no way to know
+# register.cxx stopped calling it) while nothing installs a real C++
+# override for it any more. Printing it here anyway would make
+# strip_wio_bc2cpp_stubs.rb delete the one real implementation that
+# method still has -- its own interpreted bytecode body -- for a live
+# correctness regression on the narrow chance this file's own static
+# analysis missed a real call site. The same filter this file's own
+# probe run already needs for that exclusion is reused directly, rather
+# than run twice: see never_called_registrations.rb's own header comment
+# for why the exclusion itself is scoped the way it is.
 
-require 'open3'
 require 'shellwords'
-require 'tmpdir'
 require_relative 'compiled_gems'
+require_relative 'never_called_registrations'
 
 gem_name, repo_root, mrbc = ARGV
 unless gem_name && repo_root && mrbc
   raise ArgumentError, "usage: #{$PROGRAM_NAME} <gem-name> <repo-root> <mrbc-path>"
 end
 
-this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name) do
-  raise "wio_registered_methods: no such compiled gem #{gem_name.inspect} in " \
-        'tools/bc2cpp/compiled_gems.rb'
-end
-other_gems = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
-target_owners = this_gem[:owners]
-other_owners = other_gems.values.flat_map { |g| g[:owners] }
-closed_world_srcs = closed_world_mrblib_srcs(repo_root)
-# mruby-rgss/src/*.cxx is the one closed-world native source every
-# *-compiled gem's own mrbgem.rake feeds in today (see e.g.
-# mruby-rpg2k-compiled/mrbgem.rake's own NATIVE_SRCS computation) --
-# mirrored verbatim here rather than reading it back out of any one
-# gem's own mrbgem.rake, so this script has no Rake/mrbgem.rake
-# dependency of its own.
-native_srcs = Dir["#{repo_root}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{repo_root}/3rd/mruby") +
-              external_gem_native_srcs(repo_root)
+err = NeverCalledRegistrations.run_bc2cpp(gem_name, repo_root, mrbc)
+never_called = NeverCalledRegistrations.parse_never_called_names(err)
 
-bc2cpp = File.expand_path('bc2cpp.rb', __dir__)
+NeverCalledRegistrations.parse_compiled_entries(err).each do |m|
+  next if never_called.include?("#{m[:owner]}##{m[:name]}") && NeverCalledRegistrations.safe_to_unregister?(m[:owner])
 
-Dir.mktmpdir('bc2cpp_registered_probe') do |tmp|
-  env = {
-    'MRBC' => mrbc,
-    'OUT_SYMBOL' => 'wio_registered_probe',
-    'OUT_DIR' => tmp,
-    'ONLY_OWNERS' => target_owners.join(','),
-    'OTHER_OWNERS' => other_owners.join(','),
-    'NATIVE_SRCS' => Shellwords.join(native_srcs),
-    'SKIP_UNSUPPORTED' => '1',
-  }
-  cmd = [RbConfig.ruby, bc2cpp, *closed_world_srcs]
-  _out, err, status = Open3.capture3(env, *cmd)
-  unless status.success?
-    warn err
-    raise "wio_registered_methods: #{gem_name}'s own bc2cpp.rb run failed (see stderr above)"
-  end
-
-  in_section = false
-  err.each_line do |line|
-    if line.start_with?('== compiled entry points ==')
-      in_section = true
-      next
-    elsif line.start_with?('==')
-      in_section = false
-      next
-    end
-    next unless in_section
-
-    m = line.match(/\(([^#]+)#([^,]+), arity (\d+)\)(.*)$/)
-    next unless m
-
-    owner, name, arity, rest = m.captures
-    visibility =
-      if rest.include?('[private')
-        'private'
-      elsif rest.include?('[protected')
-        'protected'
-      else
-        'public'
-      end
-    singleton = owner.end_with?('.singleton') ? '1' : '0'
-    puts [owner, name, arity, visibility, singleton].join("\t")
-  end
+  singleton = m[:owner].end_with?('.singleton') ? '1' : '0'
+  puts [m[:owner], m[:name], m[:arity], m[:visibility], singleton].join("\t")
 end
