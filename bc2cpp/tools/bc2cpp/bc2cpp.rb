@@ -25535,7 +25535,7 @@ class CodeGen
   # hot path of each devirtualized call.
   def owner_class_ptr_expr(owner)
     @owner_class_cache ||= {}
-    slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size, chain: const_chain_value_expr(owner) })
+    slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size })
     "bc2cpp_owner_class_#{slot[:index]}(M)"
   end
 
@@ -25545,13 +25545,17 @@ class CodeGen
   # additionally keyed on the state pointer so two VMs alternating still
   # resolve correctly, and reset by the gem's own gem_final (via
   # bc2cpp_reset_owner_classes) so a later mrb_open never sees a stale
-  # pointer left by a closed VM that reused the address. Only a successful
-  # lookup is stored: a constant that is not defined yet still raises
-  # NameError from the same mrb_const_get as before. Like GETCONST's own
-  # pre-cache codegen this does not notice a later reassignment of the
-  # constant, matching the existing g_direct_construct_* behaviour.
+  # pointer left by a closed VM that reused the address. Every caller is a
+  # class-equality guard with a dynamic-dispatch fallback, so a class that is
+  # not defined in this process yields nullptr (the guard is simply false)
+  # instead of raising NameError: an RGSS-only run never defines the RPG2k
+  # runtime's `Game`, and a POLY_SMALL_N chain naming Game::Map used to raise
+  # for any receiver that fell past the RGSS branches. nullptr is not cached,
+  # so a class defined later is still found. Like GETCONST's own pre-cache
+  # codegen this does not notice a later reassignment of the constant,
+  # matching the existing g_direct_construct_* behaviour.
   def emit_owner_class_cache
-    entries = (@owner_class_cache || {}).values
+    entries = (@owner_class_cache || {}).to_a
     out = +"// OWNER_CLASS_CACHE -- see bc2cpp.rb's own owner_class_ptr_expr comment.\n"
     out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
     out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
@@ -25559,8 +25563,22 @@ class CodeGen
            "  bc2cpp_owner_class_state = nullptr;\n" \
            "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
            "}\n"
-    entries.each do |slot|
+    unless entries.empty?
+      out << <<~CPP
+        static struct RClass* bc2cpp_owner_class_lookup(mrb_state* M, const char* const* path, int n) {
+          mrb_value v = mrb_obj_value(M->object_class);
+          for (int i = 0; i < n; ++i) {
+            mrb_sym s = mrb_intern_cstr(M, path[i]);
+            if (!mrb_const_defined(M, v, s)) return nullptr;
+            v = mrb_const_get(M, v, s);
+          }
+          return mrb_class_ptr(v);
+        }
+      CPP
+    end
+    entries.each do |owner, slot|
       i = slot[:index]
+      path = lexical_scope_path(owner)
       out << <<~CPP
         static inline struct RClass* bc2cpp_owner_class_#{i}(mrb_state* M) {
           if (bc2cpp_owner_class_state != M) {
@@ -25568,7 +25586,10 @@ class CodeGen
             bc2cpp_owner_class_state = M;
           }
           struct RClass* c = bc2cpp_owner_class_slots[#{i}];
-          if (!c) c = bc2cpp_owner_class_slots[#{i}] = mrb_class_ptr(#{slot[:chain]});
+          if (!c) {
+            static const char* const path[] = {#{path.map { |seg| "\"#{seg}\"" }.join(', ')}};
+            c = bc2cpp_owner_class_slots[#{i}] = bc2cpp_owner_class_lookup(M, path, #{path.size});
+          }
           return c;
         }
       CPP
