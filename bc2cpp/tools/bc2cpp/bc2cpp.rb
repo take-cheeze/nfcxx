@@ -18442,6 +18442,72 @@ class CodeGen
     needs.uniq.sort
   end
 
+  # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: `Fiber.new { ... }`/`Fiber.new do ... end`
+  # must never be compiled through the generic BLOCK_FALLBACK path below --
+  # mruby's own `Fiber#initialize` (`mrbgems/mruby-fiber/src/fiber.c`'s
+  # `init_fiber`) explicitly checks `MRB_PROC_CFUNC_P(p)` and raises
+  # `FiberError` for exactly the kind of cfunc-backed `RProc` `emit_rproc_
+  # construction` builds -- confirmed the real, 100%-reproducible crash
+  # `tools/optcarrot_probe/README.md`'s own "Compiled runtime check" section
+  # documents for `Optcarrot::PPU#run`'s `@fiber ||= Fiber.new { ... }`.
+  # Patching that check alone would not help: mruby's own Fiber resume/
+  # yield machinery works by saving/restoring a bytecode program counter
+  # into the proc's own irep (`fiber_switch`'s `mrb_vm_exec(mrb, c->ci->proc,
+  # c->ci->pc)`, and `init_fiber` itself reads `p->body.irep->nregs` before
+  # that) -- a cfunc-backed proc has no irep and no PC to resume, so
+  # removing the check would trade one raised `FiberError` for a null-
+  # pointer dereference two lines earlier in `init_fiber`. There is no safe
+  # way to hand `Fiber.new` a cfunc-backed proc at all.
+  #
+  # Recognized here by refusing to admit this shape as a region in the
+  # first place, so the `BLOCK`/`SENDB` pair falls through unclaimed to the
+  # identical, already-proven-safe path every other genuinely unsupported
+  # construct already takes (see the `BLOCK`/`SENDB`/`SSENDB` case in the
+  # main instruction switch: an unclaimed pair reaches `compile_insn`, which
+  # has no case for either opcode and emits the honest `#error unhandled
+  # opcode BLOCK`). `SKIP_UNSUPPORTED=1` then drops the whole containing
+  # method back to interpreted, exactly like any other unmodeled opcode --
+  # `PPU#run` keeps running through the ordinary mruby VM, which already
+  # handles a real, bytecode-backed block literal correctly (this is
+  # exactly how it behaved before bc2cpp ever attempted to compile `PPU` at
+  # all), while devirtualization can still reach every OTHER compiled `PPU`
+  # method fine, since none of them contain this one dangerous shape.
+  #
+  # Matched narrowly and conservatively: a bare `GETCONST ... Fiber` (never
+  # `GETMCNST` -- idiomatic Ruby, and every real call site in this closed
+  # world, always references mruby's own top-level `Fiber` class by its
+  # bare name, never a namespaced path) written into the exact register
+  # this `SENDB` reads as its receiver, found by the same short backward
+  # walk `IvarLayout.trace_type` uses elsewhere in this file: only `MOVE`
+  # is followed through, any other write to the register stops the walk
+  # and answers false. A miss here (an indirect receiver, a differently-
+  # shaped load, a real user class that happens to also be named `Fiber`
+  # under some namespace) is always SAFE, never a new risk -- the call site
+  # just falls through to today's ordinary `BLOCK_FALLBACK` path, exactly
+  # as it always has for every call site this check does not recognize.
+  def fiber_new_receiver?(irep, block_idx, dest_reg)
+    reg = dest_reg
+    (block_idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      case insn.op
+      when 'MOVE'
+        d, s = insn.args.scan(/R(\d+)/).flatten
+        next unless d == reg
+
+        reg = s
+      when 'GETCONST'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+
+        return insn.args.split(/\s+/)[1] == 'Fiber'
+      else
+        d = insn.args[/^R(\d+)/, 1]
+        return false if d == reg
+      end
+    end
+    false
+  end
+
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
     regions = []
     irep.instructions.each_with_index do |insn, idx|
@@ -18479,6 +18545,10 @@ class CodeGen
 
       name = paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       next unless name
+
+      # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: see that method's own comment --
+      # never admit `Fiber.new { ... }` as a BLOCK_FALLBACK region.
+      next if paired.op == 'SENDB' && name == 'new' && fiber_new_receiver?(irep, idx, dest_reg)
 
       block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
       next unless block_irep_idx
