@@ -2151,7 +2151,7 @@ class IvarLayout
   # Annotation, from Annotations.extract -- same "only ever adds" property,
   # and (unlike arg_types) reaches `#initialize` too, see Annotations'
   # own comment.
-  def self.analyze(ireps, registry, arg_types = {}, annotations = {})
+  def self.analyze(ireps, registry, arg_types = {}, annotations = {}, integer_constants = nil)
     # class_name -> irep labels of every leaf method owned by that class.
     # `d.irep` is nil for a synthetic native MethodDef (extract_native_
     # method_names's own merge into the registry) -- no bytecode body
@@ -2187,7 +2187,8 @@ class IvarLayout
             # against actual game source; the toy example's own SETIV sites
             # never happened to have a trailing comment.
             src_reg = insn.args[/R(\d+)/, 1]
-            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations, registry)
+            inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations, registry,
+                                   integer_constants)
             before = types[klass][ivar]
             merged = join(before, inferred)
             if merged != before
@@ -2247,7 +2248,7 @@ class IvarLayout
   # opcode (or the top of this straight-line method body, in which case
   # `reg` is an opaque incoming argument -- unknown).
   def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil,
-                       registry = nil)
+                       registry = nil, integer_constants = nil)
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       case insn.op
@@ -2275,6 +2276,46 @@ class IvarLayout
       when 'LOADNIL'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
+
+        return UNKNOWN
+      when 'LOADTRUE', 'LOADFALSE'
+        # BOOL_EMBED_SUPPORT: a literal `true`/`false` source (`@x = true`,
+        # the LOADT/LOADF opcodes' own real disassembly names) -- just as
+        # safe to embed as LOADSYM's own :symbol case just above: mruby's
+        # boolean tags (MRB_TT_TRUE/MRB_TT_FALSE) are immediate values in
+        # every boxing representation this project targets (word, no-float,
+        # nan), never a GC-tracked heap object, so a raw `mrb_bool` struct
+        # field needs no GC-reachability keep-alive any more than a plain
+        # `mrb_int`/`mrb_sym` field already doesn't. See CodeGen::TYPE_OPS's
+        # own `:bool` entry for the box/check/unbox this feeds.
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+
+        return :bool
+      when 'GETCONST', 'GETMCNST'
+        # INTEGER_CONST_EMBED_SUPPORT: `@x = SOME_CONST` embeds as Fixnum
+        # exactly when IntegerConstants.analyze has already proven, whole-
+        # program, that every real definition of that bare constant name is
+        # an integer literal (or an alias chain that bottoms out at one) --
+        # the same proof `compile_insn`'s own GETCONST/GETMCNST fixnum fast
+        # path already trusts (see this file's own `@integer_constants`
+        # comment there). `integer_constants` is nil in every caller that
+        # never ran that whole-program scan (ArgTypes' own call site, which
+        # has no ivar/const context to offer) -- `&.include?` then always
+        # answers false, the same "prove nothing without the scan" posture
+        # every other out-of-closed-world gate in this file already takes.
+        # GETCONST's own real disassembly is register-first, bare name
+        # second (`"GETCONST\tR%d\t%s"`, codedump.c); GETMCNST's scoped form
+        # (`Inner::DEPTH`) keys on the same bare name after `::`, since the
+        # scope register's own runtime value is never modeled here -- see
+        # IntegerConstants.analyze's own header for why the proof has to
+        # hold for every same-named constant program-wide, not just this
+        # one lexical scope, before either opcode can trust it.
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+
+        name = insn.op == 'GETCONST' ? insn.args.split(/\s+/)[1] : insn.args[/::(\S+)/, 1]
+        return :fixnum if name && integer_constants&.include?(name)
 
         return UNKNOWN
       when 'ADD', 'ADDI'
@@ -2309,8 +2350,8 @@ class IvarLayout
         # than corrupting memory, if this proof were ever somehow wrong.
         s = insn.args[/\(R(\d+)\)/, 1]
         if s
-          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry)
-          right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants)
+          right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants)
           return :fixnum if left == :fixnum && right == :fixnum
         end
         return UNKNOWN
@@ -2322,7 +2363,7 @@ class IvarLayout
         # applied to the immediate form: only the destination register's
         # own prior value needs proving (the literal operand is a Fixnum
         # by construction, same as ADDI's own FIXNUM_OPERAND_PROOF).
-        return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+        return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants)
       when 'GETIV'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
@@ -2351,8 +2392,8 @@ class IvarLayout
         n = insn.args[/n=(\d+)/, 1]
         if registry && %w[% & | ^].include?(name) && n == '1' && native_only_mono?(registry, name)
           arg_reg = (d.to_i + 1).to_s
-          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry)
-          right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry)
+          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants)
+          right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants)
           return :fixnum if left == :fixnum && right == :fixnum
         end
         return UNKNOWN
@@ -8613,7 +8654,7 @@ class CodeGen
     attr_accessor :wired_embeddings
   end
 
-  C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym' }.freeze
+  C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
 
   # box/check/unbox/err for each embeddable primitive type's GETIV/SETIV
   # codegen (see IvarLayout.trace_type's own LOADSYM comment for why a raw
@@ -8621,10 +8662,17 @@ class CodeGen
   # as `mrb_int` already is: mruby's own symbol table
   # (3rd/mruby/src/symbol.c) is never swept per-symbol, only freed in bulk
   # at mrb_close, so a `mrb_sym` field needs no GC-reachability keep-alive
-  # any more than a plain integer does).
+  # any more than a plain integer does). `:bool`'s own `check` has no single
+  # real mruby macro to call the way `mrb_integer_p`/`mrb_symbol_p` do --
+  # true and false are two separate type tags (MRB_TT_TRUE/MRB_TT_FALSE),
+  # each with its own real public macro (`mrb_true_p`/`mrb_false_p`,
+  # mruby/value.h) -- so `bc2cpp_bool_p` (emit_bool_check_helper below) is a
+  # tiny generated OR of the two, emitted once per file and only when at
+  # least one embedded `:bool` ivar actually needs it.
   TYPE_OPS = {
     fixnum: { box: 'mrb_fixnum_value', check: 'mrb_integer_p', unbox: 'mrb_integer', err: 'Integer' },
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
+    bool: { box: 'mrb_bool_value', check: 'bc2cpp_bool_p', unbox: 'mrb_true_p', err: 'boolean' },
   }.freeze
 
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
@@ -11071,6 +11119,25 @@ class CodeGen
         if (n < 0 || len <= n) return mrb_nil_value();
         return ARY_PTR(a)[n];
       }
+
+    CPP
+  end
+
+  # TYPE_OPS' own `:bool` `check` entry, `bc2cpp_bool_p` -- same "scan the
+  # already-generated code for the literal call, only emit if used" shape as
+  # emit_ary_entry_helper just above (rather than a dedicated instance flag
+  # threaded through compile_insn/emit_ivar_accessor_pair, both of which
+  # already call `TYPE_OPS.fetch(:bool)[:check]` unconditionally whenever
+  # `embed_type` says `:bool` -- easier to grep the result for its one
+  # generated name than to plumb a new flag to both call sites). `mrb_true_p`/
+  # `mrb_false_p` (mruby/value.h) are the two real public predicates for
+  # mruby's own two boolean type tags (MRB_TT_TRUE/MRB_TT_FALSE) -- there is
+  # no single combined macro, so this is a real function, not a `#define`.
+  def emit_bool_check_helper(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_bool_p(') }
+
+    <<~CPP
+      static inline mrb_bool bc2cpp_bool_p(mrb_value v) { return mrb_true_p(v) || mrb_false_p(v); }
 
     CPP
   end
@@ -24425,7 +24492,43 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
-  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations)
+  # INTEGER_CONST_EMBED_SUPPORT / ARRAY_RETURN_IVAR_HINT: `foreign_ruby_srcs`/
+  # `foreign_methods`/`integer_constants` are computed here, above
+  # IvarLayout.analyze, for two independent reasons now: IvarLayout's own
+  # GETCONST/GETMCNST case (see trace_type's own INTEGER_CONST_EMBED_SUPPORT
+  # comment) needs `integer_constants` to embed a `@x = SOME_INT_CONST`
+  # ivar, and ClassLayout's own probing pass (further below) needs
+  # `foreign_methods` for ARRAY_RETURN_PROOF. `native_paths` is already
+  # whatever NATIVE_SRCS named (nil when it wasn't passed at all -- the
+  # established no-NATIVE_SRCS diagnostic mode); FOREIGN_RUBY_SRCS is its
+  # Ruby-side twin (`foreign_mrblib_srcs`, compiled_gems.rb). Omitting either
+  # one only ever REMOVES poison/proof, i.e. makes both analyses less
+  # permissive than a real build -- so when either is missing, both skip
+  # outright and prove/embed nothing extra, rather than run against a
+  # knowingly incomplete picture. Both are pure reads of ENV and of files on
+  # disk with no dependency on anything between the old and new positions,
+  # and neither produces any diagnostic output on its own (INTEGER_CONSTANT_
+  # PROOF's own `warn` block, moved down here with it, still prints in the
+  # same relative order right before `== ivar embedding ==` instead of after
+  # `== annotation candidates ==` -- every diagnostic consumer looks up a
+  # section by its own header text, never by position, so this is silent).
+  foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
+  foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
+
+  integer_constants =
+    if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
+      IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
+    else
+      Set.new
+    end
+  warn "== integer-valued constants proven (INTEGER_CONSTANT_PROOF) =="
+  if integer_constants.empty?
+    warn '  (none)'
+  else
+    integer_constants.sort.each { |n| warn "  CONST #{n}" }
+  end
+
+  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants)
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?
@@ -24489,8 +24592,6 @@ if $PROGRAM_NAME == __FILE__
   # Without FOREIGN_RUBY_SRCS this stays nil and compute_array_return_names
   # proves nothing, so the probe below is simply vacuous rather than
   # optimistic -- the established no-FOREIGN_RUBY_SRCS diagnostic mode.
-  foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
-  foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
 
   # ---------------------------------------------------------------------------
   # ARRAY_RETURN_IVAR_HINT: ClassLayout and ARRAY_RETURN_PROOF are MUTUALLY
@@ -24769,34 +24870,6 @@ if $PROGRAM_NAME == __FILE__
   # `annotations` (computed above, previously fed only to IvarLayout.analyze)
   # also now drives NATIVE_ARG_TARGETS' own native-argument calling
   # convention -- see that constant's own comment.
-  # INTEGER_CONSTANT_PROOF: needs the same two out-of-bytecode inputs its own
-  # poison sources 3 and 4 describe. `native_paths` is already whatever
-  # NATIVE_SRCS named (nil when it wasn't passed at all -- the established
-  # no-NATIVE_SRCS diagnostic mode); FOREIGN_RUBY_SRCS is its Ruby-side twin
-  # (`foreign_mrblib_srcs`, compiled_gems.rb). Omitting either one only ever
-  # REMOVES poison, i.e. would make this less conservative than a real build
-  # -- so when either is missing the analysis is skipped outright and no
-  # constant is proven at all, rather than run against a knowingly incomplete
-  # picture. That keeps a bare `ruby bc2cpp.rb foo.rb` exploration honest
-  # instead of quietly more optimistic than the code that actually ships.
-  # ARRAY_RETURN_IVAR_HINT: `foreign_ruby_srcs`/`foreign_methods` are computed
-  # further up now (ClassLayout's own probing pass needs ARRAY_RETURN_PROOF,
-  # which needs the foreign-method poison set) -- both are pure reads of ENV
-  # and of files on disk with no dependency on anything between the old and
-  # new positions, and neither produces any diagnostic output, so the hoist
-  # leaves this run's stderr byte-identical.
-  integer_constants =
-    if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
-      IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
-    else
-      Set.new
-    end
-  warn "== integer-valued constants proven (INTEGER_CONSTANT_PROOF) =="
-  if integer_constants.empty?
-    warn '  (none)'
-  else
-    integer_constants.sort.each { |n| warn "  CONST #{n}" }
-  end
   # FIXNUM_RETURN_PROOF: same out-of-closed-world poison gate INTEGER_CONSTANT_
   # PROOF uses right above -- without FOREIGN_RUBY_SRCS this analysis would be
   # strictly more optimistic than a real build, so it is skipped entirely
@@ -25109,6 +25182,7 @@ if $PROGRAM_NAME == __FILE__
   puts ''
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
+  print gen.emit_bool_check_helper(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls

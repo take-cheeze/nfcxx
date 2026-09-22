@@ -566,6 +566,44 @@ ivar table, compiled code included. Embedding more of that state -- widening
 for these two classes -- is the concrete next target this measurement points
 at, not further dispatch-shape experiments on `CPU#run` itself.
 
+**Update (ivar-embedding widening session)**: acted on that target.
+`IvarLayout`'s backward SETIV trace (`tools/bc2cpp/bc2cpp.rb`) recognized
+only `LOADI*` (Fixnum literal), `LOADSYM` (Symbol literal), `ADD`/`ADDI`
+(trusted unconditionally), and a narrow, fully-proven `SUB`/`MUL`/`%`/`&`/
+`|`/`^` set -- every SETIV site not shaped like one of those poisoned the
+whole ivar to UNKNOWN forever (`IvarLayout.join`'s own all-sites-must-agree
+semantics), and reading the disassembly directly for `Optcarrot::CPU`/`PPU`
+found two large, completely safe classes of site this missed: a literal
+`@flag = true`/`@flag = false` (no case at all -- fell through to the
+generic "unrecognized opcode" UNKNOWN branch), and `@x = SOME_CONST` for a
+constant this file's own `IntegerConstants` whole-program pass had *already*
+proven always integer-valued for a different purpose (`INTEGER_CONSTANT_
+PROOF`, used by `compile_insn`'s own GETCONST/GETMCNST fast path) but that
+`IvarLayout` never consulted. Both are now recognized: a new `:bool`
+embeddable type (a real `mrb_bool` struct field, boxed/unboxed through
+mruby's own public `mrb_bool_value`/`mrb_true_p`/`mrb_false_p` -- no single
+combined "is this a real boolean" macro exists, so a tiny generated
+`bc2cpp_bool_p` OR of the two ships alongside, emitted once per file and
+only when actually used), and a `GETCONST`/`GETMCNST` case that embeds as
+`:fixnum` exactly when `integer_constants.include?(name)` already holds
+(threaded into `IvarLayout.analyze` for the first time; previously only
+`CodeGen` itself consumed that proof).
+
+Whole-program `ivar embedding (EMBED)` in the real project's own combined
+coverage report (`scripts/bc2cpp_coverage_report.rb`) goes 115 -> 216 --
+100.0% method-level coverage and zero `#error` markers unchanged, confirmed
+byte-identical against every one of this repo's own `bc2cpp_*_check.rb`
+static-analysis checks before and after. In this probe specifically, newly
+embedded fields include several `Optcarrot::PPU` rendering-enable flags
+(`@run`, `@vblank`, `@vblanking`, `@sp_overflow`, `@sp_zero_hit`, `:bool`)
+and more `CPU`/`PPU` clock-cycle counters (`@hclk`, `@scanline`, `:fixnum`,
+via the constant proof) that were previously OPAQUE -- exactly the ivars
+`iv_bsearch_idx` (17.7% of sampled time, 376.9M calls, in the profile just
+above) was paying to look up dynamically on every single access, compiled
+code included. The full 180-frame `nes.run` loop still checksums `59662` on
+CRuby, interpreted mruby, and bc2cpp alike, run repeatedly against the real,
+non-scratch `compiled_run.rb`.
+
 The first concrete dispatch target is `CPU#run`: each opcode executes
 `send(*DISPATCH[@opcode])`. bc2cpp emits that dynamic splat as
 `mrb_funcall_argv`, and the compiled `CPU_run_impl` reaches it about 1.77
