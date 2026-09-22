@@ -1305,6 +1305,7 @@ end
 
 require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
+require_relative 'const_site_cache'
 
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
@@ -8651,7 +8652,7 @@ class CodeGen
   # embedding analysis unrestricted, which is what the unit checks that build a
   # CodeGen directly want; the driver sets it for a real gem build.
   class << self
-    attr_accessor :wired_embeddings
+    attr_accessor :wired_embeddings, :stable_class_constants
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
@@ -20880,29 +20881,19 @@ class CodeGen
       d = a[/^R(\d+)/, 1]
       name = a[/^R\d+\s+(\S+)/, 1]
       owner_path = lexical_scope_path(owner_def.owner)
-      if owner_path == ['Object']
-        "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
-      else
-        @const_lookup_helper_used = true
-        out = String.new
-        out << "  {\n"
-        scope_vars = []
-        current = 'mrb_obj_value(M->object_class)'
-        owner_path.each_with_index do |seg, i|
-          out << "    mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
-          scope_vars << "scope#{i}"
-          current = "scope#{i}"
+      if self.class.stable_class_constants&.include?(name)
+        # CONST_SITE_CACHE: see tools/bc2cpp/const_site_cache.rb. One helper per
+        # (lexical scope, name); it runs the ordinary lookup until it finds a
+        # class/module, then returns the stored value.
+        @const_site_cache ||= {}
+        key = [owner_path, name]
+        unless @const_site_cache.key?(key)
+          @const_site_cache[key] = { index: @const_site_cache.size, body: const_lookup_block('0', name, owner_path) }
         end
-        out << "    mrb_bool ok = FALSE;\n"
-        out << "    mrb_value r#{d}_tmp = mrb_nil_value();\n"
-        scope_vars.reverse_each do |sv|
-          out << "    if (!ok) r#{d}_tmp = bc2cpp_const_try(M, #{sv}, mrb_intern_cstr(M, \"#{name}\"), &ok);\n"
-        end
-        out << "    if (!ok) r#{d}_tmp = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
-        out << "    r#{d} = r#{d}_tmp;\n"
-        out << "  }\n"
-        out
+        return "  r#{d} = bc2cpp_cconst_#{@const_site_cache[key][:index]}(M);\n"
       end
+
+      const_lookup_block(d, name, owner_path)
     when 'OCLASS'
       # OCLASS_SUPPORT: "OCLASS R3" -- real `::Foo` root-scope constant
       # syntax (`::File.open(...)`, `LCF::File#save_to`'s own real body)
@@ -24462,6 +24453,73 @@ class CodeGen
     out
   end
 
+  # The uncached GETCONST lookup: resolve the owner's lexical scope chain, probe
+  # each scope innermost-first, fall back to Object. `d` is the destination
+  # register number (a string). Used inline, and as the slow path of a
+  # CONST_SITE_CACHE helper (which passes d = "0").
+  def const_lookup_block(d, name, owner_path)
+    if owner_path == ['Object']
+      "  r#{d} = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+    else
+      @const_lookup_helper_used = true
+      out = String.new
+      out << "  {\n"
+      scope_vars = []
+      current = 'mrb_obj_value(M->object_class)'
+      owner_path.each_with_index do |seg, i|
+        out << "    mrb_value scope#{i} = mrb_const_get(M, #{current}, mrb_intern_cstr(M, \"#{seg}\"));\n"
+        scope_vars << "scope#{i}"
+        current = "scope#{i}"
+      end
+      out << "    mrb_bool ok = FALSE;\n"
+      out << "    mrb_value r#{d}_tmp = mrb_nil_value();\n"
+      scope_vars.reverse_each do |sv|
+        out << "    if (!ok) r#{d}_tmp = bc2cpp_const_try(M, #{sv}, mrb_intern_cstr(M, \"#{name}\"), &ok);\n"
+      end
+      out << "    if (!ok) r#{d}_tmp = mrb_const_get(M, mrb_obj_value(M->object_class), mrb_intern_cstr(M, \"#{name}\"));\n"
+      out << "    r#{d} = r#{d}_tmp;\n"
+      out << "  }\n"
+      out
+    end
+  end
+
+  # File-scope state and helpers for CONST_SITE_CACHE. Each helper returns the
+  # constant's class or module, running the full lookup only until that first
+  # succeeds (a failed lookup still raises from the same code and stores
+  # nothing). Only a class/module value is stored. Keyed on the mrb_state* with
+  # its own reset, dropped by each compiled gem's gem_final via
+  # bc2cpp_reset_const_site_cache(); always emitted so gem_final can call it.
+  def emit_const_site_cache
+    entries = (@const_site_cache || {}).values
+    count = [entries.size, 1].max
+    out = +"// CONST_SITE_CACHE -- see tools/bc2cpp/const_site_cache.rb.\n"
+    out << "static mrb_state* bc2cpp_cconst_state = nullptr;\n"
+    out << "static mrb_value bc2cpp_cconst_slots[#{count}];\n"
+    out << "static bool bc2cpp_cconst_have[#{count}] = {};\n"
+    out << "static void bc2cpp_reset_const_site_cache() {\n" \
+           "  bc2cpp_cconst_state = nullptr;\n" \
+           "  for (bool& h : bc2cpp_cconst_have) h = false;\n" \
+           "}\n"
+    entries.each do |slot|
+      i = slot[:index]
+      out << "static mrb_value bc2cpp_cconst_#{i}(mrb_state* M) {\n" \
+             "  if (bc2cpp_cconst_state != M) {\n" \
+             "    bc2cpp_reset_const_site_cache();\n" \
+             "    bc2cpp_cconst_state = M;\n" \
+             "  }\n" \
+             "  if (bc2cpp_cconst_have[#{i}]) return bc2cpp_cconst_slots[#{i}];\n" \
+             "  mrb_value r0 = mrb_nil_value();\n"
+      out << slot[:body].lines.map { |l| "  #{l}" }.join
+      out << "  if (mrb_type(r0) == MRB_TT_CLASS || mrb_type(r0) == MRB_TT_MODULE) {\n" \
+             "    bc2cpp_cconst_slots[#{i}] = r0;\n" \
+             "    bc2cpp_cconst_have[#{i}] = true;\n" \
+             "  }\n" \
+             "  return r0;\n" \
+             "}\n"
+    end
+    out
+  end
+
   def dynamic_dispatch_line(d, recv, name, argv)
     if argv.empty?
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
@@ -24967,6 +25025,8 @@ if $PROGRAM_NAME == __FILE__
     end
   warn ''
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS
+  CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
+  warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
                     integer_constants, foreign_methods, outside_tokens, native_name_sources,
@@ -25276,7 +25336,9 @@ if $PROGRAM_NAME == __FILE__
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
+  const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   print SymbolCache.emit(symbol_table)
+  print const_site_cache_code
   compiled.each { |m| print m[:code] }
 
   # Write this run's own cross-TU declarations header, so a *different*
