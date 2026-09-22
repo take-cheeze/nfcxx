@@ -7716,6 +7716,25 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
       path.unshift(const_name)
       return path.join('::')
+    when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR'
+      # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart): the exact same eight
+      # opcodes IvarLayout.trace_type special-cased above (see that arm's own
+      # comment for the confirmed-against-ops.h/codedump.c justification) --
+      # each only READS its lone `R%d` operand, never writes it, so this
+      # backward walk must skip past it and keep looking for whoever last
+      # actually wrote `reg`, the same way it already skips a `MOVE` whose
+      # destination doesn't match. Left un-mirrored here, an early `return`/
+      # guard clause sharing a register slot with a later, unrelated write
+      # would wrongly stop this trace at UNKNOWN -- the identical false
+      # negative ADR 0188 fixed for ivar embedding, but for ClassLayout's
+      # (and, via the same shared helper, ArrayElementLayout's/
+      # HashElementLayout's) class-hint resolution instead. A whole-program
+      # scan of every SETIV/GETIDX-terminal register history in this closed
+      # world found no site currently hitting this arm (the one real
+      # instance, `RPG2k::Window#pause=`, is IvarLayout's own bool-typed
+      # ivar, not a class hint) -- shipped anyway as the same "strictly
+      # fewer false UNKNOWNs, never a wrong answer" precision fix, not a
+      # currently-measurable win.
     else
       return nil
     end
