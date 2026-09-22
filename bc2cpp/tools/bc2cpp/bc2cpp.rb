@@ -10929,6 +10929,65 @@ class CodeGen
   # its own gem_init, and a class defined by a gem initialised later is picked
   # up by that gem's call (mruby-rpg2k-compiled runs after mruby-rpg2k, so it
   # sees every RPG2k class). The call is idempotent.
+  # OWNER_METHOD_REGISTRATION: a hand-written register.cxx used to be the only
+  # place a compiled entry point became a real, callable Ruby method -- and it
+  # drifted from the generator's own analysis (BC2CPP_WIRED_EMBEDDINGS's own
+  # comment: 474 of 2141 rpg2k entries were never installed, so an unembedded
+  # interpreted fallback read nil out of a struct compiled code had already
+  # written into). This generates the registration itself for every compiled
+  # entry of the given `owners`, from exactly the data compile_method already
+  # derived the entry wrapper's own mrb_get_args call from (mand/opt/rest/
+  # keywords/block, in :aspec) -- it cannot independently drift from what the
+  # wrapper actually binds, the way a hand-copied MRB_ARGS_* literal could.
+  # Idempotent with a hand registration of the same name and function: mruby's
+  # own mrb_define_method just overwrites the method table entry, so calling
+  # this after or before an identical hand call is a no-op either way (see
+  # this method's own call site in the driver for the "after" it actually uses,
+  # so a *different* hand registration for the same name -- there should be
+  # none among embedded owners, see bc2cpp_wired_embedding_check.rb -- would
+  # still be decided by whichever call happens to run last).
+  #
+  # :protected is skipped, uninstalled (mruby has no mrb_define_protected_
+  # method; registering it mrb_define_method would make it public, a real
+  # behavior change -- same reasoning compile_all's own driver-side warning
+  # about this already gives, and confirmed no compiled entry anywhere in this
+  # project is ever actually :protected). A `.singleton` owner registers on the
+  # plain class object via mrb_define_class_method; mruby has no private
+  # class-method registration API either, so a private singleton entry (none
+  # exist today) is skipped the same way.
+  def emit_owner_registrations(compiled, owners)
+    by_owner = compiled.group_by { |m| m[:owner] }
+    targets = owners.select { |o| by_owner.key?(o) }
+
+    # Always emitted, even with an empty body, so every compiled gem's own
+    # gem_init can call it unconditionally -- a gem that owns none of `owners`
+    # (e.g. mruby-rgss-compiled, today) still defines a real, harmless no-op
+    # rather than needing a build-time #ifdef around the call site.
+    out = +"// OWNER_METHOD_REGISTRATION -- see bc2cpp.rb's own emit_owner_registrations comment.\n"
+    out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
+    targets.each do |owner|
+      singleton = owner.end_with?('.singleton')
+      var = "bc2cpp_owner_reg_#{sanitize(owner)}"
+      out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
+      by_owner[owner].each do |m|
+        fn = if singleton
+               m[:visibility] == :private ? nil : 'mrb_define_class_method'
+             elsif m[:visibility] == :private
+               'mrb_define_private_method'
+             elsif m[:visibility] == :public
+               'mrb_define_method'
+             end
+        unless fn
+          out << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
+          next
+        end
+        out << "  #{fn}(M, #{var}, #{c_string_literal(m[:name])}, #{m[:entry]}, #{m[:aspec]});\n"
+      end
+    end
+    out << "}\n\n"
+    out
+  end
+
   def emit_instance_tt_setup
     out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
     out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
@@ -11008,7 +11067,7 @@ class CodeGen
 
       CPP
       { label: "synth:#{owner}##{ivar}", owner: owner, name: ivar, entry: entry, impl: impl,
-        arity: 0, arg_c_types: [], code: code, visibility: :public }
+        arity: 0, arg_c_types: [], aspec: 'MRB_ARGS_NONE()', code: code, visibility: :public }
     when :writer
       impl = "#{base}_eq_impl"
       entry = "#{base}_eq"
@@ -11039,7 +11098,7 @@ class CodeGen
 
       CPP
       { label: "synth:#{owner}##{ivar}=", owner: owner, name: "#{ivar}=", entry: entry, impl: impl,
-        arity: 1, arg_c_types: ['mrb_value'], code: code, visibility: :public }
+        arity: 1, arg_c_types: ['mrb_value'], aspec: 'MRB_ARGS_REQ(1)', code: code, visibility: :public }
     end
   end
 
@@ -12470,8 +12529,18 @@ class CodeGen
       arg_c_types << 'mrb_value'
       arg_c_types << 'mrb_int' unless kw[:required]
     end
+    # REGISTRATION_ASPEC: the mrb_aspec a registration of this entry needs, built
+    # from the very variables the wrapper above was generated from (mand/opt/rest/
+    # keywords/block), so it cannot drift from the arguments the wrapper actually
+    # binds. The count of keywords is all an aspec can carry (mruby has no
+    # required-keyword field); the wrapper itself enforces which are required.
+    aspec = mand.zero? && opt.to_i.zero? && !has_rest && !kw_table && !needs_blk_param && !has_blk ? ['MRB_ARGS_NONE()'] : ["MRB_ARGS_REQ(#{mand})"]
+    aspec << "MRB_ARGS_OPT(#{opt})" if opt.to_i.positive?
+    aspec << 'MRB_ARGS_REST()' if has_rest
+    aspec << "MRB_ARGS_KEY(#{kw_table.size}, 0)" if kw_table
+    aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-      arity: arg_names.size, arg_c_types: arg_c_types,
+      arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
       code: out, visibility: d.visibility }
   end
 
@@ -25272,6 +25341,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_forward_decls(compiled)
   print gen.emit_instance_tt_setup
   print gen.emit_owner_class_cache
+  print gen.emit_owner_registrations(compiled, BC2CPP_WIRED_EMBEDDINGS)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
