@@ -65,6 +65,9 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   RPG2k::Scene::MapViewer RPG2k::Scene::Menu RPG2k::Scene::Order
   RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu RPG2k::Scene::StatusMenu
   RPG2k::Scene::Title
+  LCF::Sections LCF::Array1D LCF::Array2D LCF::File
+  RGSS::ErrorReport::Tee RGSS::Bitmap Array
+  RGSS.singleton RGSS::ErrorReport.singleton RGSS::Input.singleton
 ].freeze
 
 BC2CPP_COMPILED_GEMS = {
