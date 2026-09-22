@@ -32,9 +32,18 @@
 # CodeGen.wired_embeddings; a class outside it keeps its ivars in the ordinary
 # table. Add a class here only together with its register.cxx wiring for
 # #initialize and every compiled method that touches an embedded ivar.
+#
+# Game::Interpreter (25 unregistered entry points, #update among them),
+# Game::Transition (4) and Game::Map (2) are NOT listed: their compiled methods
+# write the embedded struct while an unregistered one falls back to the
+# interpreted body, which reads the ordinary ivar table and sees nil. In the
+# desktop build that was `nil >= x` inside Scene::Map#step_parallel (swallowed by
+# its `rescue StandardError`), i.e. every Parallel Process silently dead.
+# scripts/bc2cpp_wired_embedding_check.rb enforces "every compiled entry point of
+# a listed class is installed by its register.cxx".
 BC2CPP_WIRED_EMBEDDINGS = %w[
-  Game::Screen Game::Transition Game::Map Game::ChipSet Game::Switches
-  Game::Interpreter RPG2k::Scene::VehicleWorld LCF::EventCommand LCF::MoveCommand
+  Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
+  LCF::EventCommand LCF::MoveCommand
 ].freeze
 
 BC2CPP_COMPILED_GEMS = {
