@@ -12791,7 +12791,27 @@ class CodeGen
     # swallow the outer one's already-accumulated file-scope code.
     bc2cpp_saved_inline_pre = @inline_nested_pre
     @inline_nested_pre = String.new
+    # RESCUE_INLINE_BLOCK_FIX: every inlined-loop pass below (times, each,
+    # each_index, hash each, each_key, range each, &:sym, collect, accum,
+    # sort) must skip a region whose own addresses the RESCUE loop above
+    # already claimed. That range is compiled into the extracted try body
+    # (whose own emit_block_fallback_glue_pass claims the call there, as a
+    # real dynamic dispatch); in THIS function its addresses are skipped
+    # except where they carry glue_at code, so a loop registered at its
+    # block_addr is emitted right after the rescue glue -- on the path only
+    # an exception reaches. There it re-runs the block, and its receiver
+    # register holds whatever that path left in it (the exception object
+    # itself when it is the EXCEPT register), not the value the recognizer's
+    # Array/Integer proof traced through the try body's instructions. Caught
+    # live: RPG2k#start_new_game's `@scenes.each` raised
+    # "bc2cpp: expected Array receiver for inlined #each" instead of
+    # reaching its own `rescue StandardError`
+    # (scripts/bc2cpp_rescue_inline_block_check.rb).
+    rescue_claimed = suppressed.dup
+    in_rescue = ->(*addrs) { addrs.any? { |a| rescue_claimed.include?(a) } }
     recognize_times_regions(irep).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_times_inline(region, irep, d)
       next unless inlined
 
@@ -12810,6 +12830,8 @@ class CodeGen
     each_ctx_ivar = @class_layout[d.owner]
     each_ctx_args = @class_annotations[irep.label]&.args
     recognize_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_each_inline(region, irep, d)
       next unless inlined
 
@@ -12822,6 +12844,8 @@ class CodeGen
     # (`:each_index`, never `:each`) so no collision with the Array
     # #each recognizer just above.
     recognize_each_index_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_each_index_inline(region, irep, d)
       next unless inlined
 
@@ -12835,6 +12859,8 @@ class CodeGen
     # exclusive receiver-class gates -- see that recognizer's own
     # comment).
     recognize_hash_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_hash_each_inline(region, irep, d)
       next unless inlined
 
@@ -12847,6 +12873,8 @@ class CodeGen
     # `:each`) so no collision with the Hash #each recognizer just
     # above.
     recognize_each_key_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_each_key_inline(region, irep, d)
       next unless inlined
 
@@ -12857,6 +12885,8 @@ class CodeGen
     # regions. Same gate shape (Range, not Array), same all-or-nothing
     # contract.
     recognize_range_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_range_each_inline(region, irep, d)
       next unless inlined
 
@@ -12864,6 +12894,8 @@ class CodeGen
       glue_at[region[:block_addr]] = inlined
     end
     recognize_sym_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:sym_addr], region[:sendb_addr])
+
       inlined = emit_sym_inline(region, irep, d)
       next unless inlined
 
@@ -12875,6 +12907,8 @@ class CodeGen
     # blocks). Same Array gate, same all-or-nothing contract -- a dirty
     # body or a missed gate falls through to honest `#error` stubs.
     recognize_collect_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_collect_inline(region, irep, d)
       next unless inlined
 
@@ -12885,6 +12919,8 @@ class CodeGen
     # regions (`any?`/`all?`/`none?`/`count` literal blocks,
     # `reduce`/`inject(init)` folds). Same gate, same contract.
     recognize_accum_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_accum_inline(region, irep, d)
       next unless inlined
 
@@ -12896,6 +12932,8 @@ class CodeGen
     # recognized-and-rejected inside the emitter). Same gate, same
     # contract.
     recognize_sort_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
+      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+
       inlined = emit_sort_inline(region, irep, d)
       next unless inlined
 
