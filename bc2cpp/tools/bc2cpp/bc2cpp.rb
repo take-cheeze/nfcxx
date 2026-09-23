@@ -10253,6 +10253,121 @@ class CodeGen
     end.join
   end
 
+  # OUTLINED_INDEX_OPS (docs/adr/0216): the generic part of an untyped
+  # GETIDX/GETIDX0/SETIDX -- the exact-class Array/Hash(/String) fast paths
+  # and, for GETIDX, INDEX_CHAIN's POLY_SMALL_N `#[]` chain with its by-name
+  # fallback -- used to be spelled out inline at every site: about 500 bytes
+  # of -Os code each, at ~1,500 GETIDX sites in the RPG2k gem alone. None of
+  # it depends on the site (POLY_SMALL_N's candidates are a function of the
+  # name and arity), so it is emitted once per generated file as a static
+  # helper and each site calls it, the way SYMBOL_CACHE's bc2cpp_send
+  # replaced the per-site funcall (docs/adr/0209). Only the site-specific
+  # parts stay inline: STRUCT_INDEX_CACHE's branches for a literal Symbol
+  # key (ahead of the call -- a Struct's type tag can never match the
+  # Array/Hash/String arms, so the order is unobservable) and the TYPED/
+  # static-receiver paths, which keep calling this as their fallback.
+  INDEX_HELPERS = {
+    'getidx' => 'mrb_value recv, mrb_value key',
+    'getidx0' => 'mrb_value recv',
+    'setidx' => 'mrb_value recv, mrb_value idx, mrb_value val'
+  }.freeze
+
+  # `dst = bc2cpp_<kind>(M, args...);`, building the helper on first use.
+  def outlined_index_call(kind, dst, *args)
+    index_helper_code(kind)
+    "#{dst} = bc2cpp_#{kind}(M, #{args.join(', ')});\n"
+  end
+
+  # GETIDX's generic tail: the helper call, after any STRUCT_INDEX_CACHE
+  # branches. nil when this method installs `[]` at runtime
+  # (RUNTIME_DEF_DEVIRT_GUARD): its chain must then skip POLY_SMALL_N, which
+  # the shared helper does not, so the caller keeps the inline form.
+  def outlined_getidx_code(d, s, struct_read)
+    return nil if devirt_blocked_name?('[]')
+
+    call = outlined_index_call('getidx', "r#{d}", "r#{d}", "r#{s}")
+    return call if struct_read.nil? || struct_read.empty?
+
+    "#{struct_read.delete_prefix('else ')}else {\n  #{call}}\n"
+  end
+
+  # The helper's C++ definition, built once per run. Built against top-level
+  # method state (with_fresh_method_state), so the enclosing method's own
+  # RUNTIME_DEF_DEVIRT_GUARD cannot leak into the shared chain. Building it
+  # here, during compilation, also allocates POLY_SMALL_N's OWNER_CLASS_CACHE
+  # slots before emit_owner_class_cache prints the table.
+  def index_helper_code(kind)
+    @index_helper_code ||= {}
+    @index_helper_code[kind] ||= with_fresh_method_state { build_index_helper(kind) }
+  end
+
+  def build_index_helper(kind)
+    body = case kind
+           when 'getidx'
+             # INDEX_CHAIN's tail, with the result in r0 (the name
+             # compile_poly_small_n spells as `r<d>`).
+             tail = compile_poly_small_n('[]', 0, 'recv', ['key'], 1) ||
+                    "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"
+             <<~CPP.chomp + "\n#{tail}  return r0;\n"
+               if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {
+                 return bc2cpp_ary_entry(M, recv, mrb_integer(key));
+               } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
+                 return mrb_hash_get(M, recv, key);
+               } else if (mrb_string_p(recv) && mrb_obj_ptr(recv)->c == M->string_class &&
+                          (mrb_integer_p(key) || mrb_string_p(key) || mrb_range_p(key))) {
+                 return mrb_str_aref(M, recv, key, mrb_undef_value());
+               }
+               mrb_value r0 = mrb_nil_value();
+             CPP
+           when 'getidx0'
+             <<~CPP
+               if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class) {
+                 return bc2cpp_ary_entry(M, recv, 0);
+               } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
+                 return mrb_hash_get(M, recv, mrb_fixnum_value(0));
+               }
+               return mrb_funcall(M, recv, "[]", 1, mrb_fixnum_value(0));
+             CPP
+           when 'setidx'
+             # The fast paths leave the assigned value in the register, the
+             # fallback whatever `[]=` returned (vm.c's OP_SETIDX).
+             <<~CPP
+               if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(idx)) {
+                 mrb_ary_set(M, recv, mrb_integer(idx), val);
+                 return val;
+               } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
+                 mrb_hash_set(M, recv, idx, val);
+                 return val;
+               }
+               return mrb_funcall(M, recv, "[]=", 2, idx, val);
+             CPP
+           end
+    "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
+      "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
+      "#{body.gsub(/^(?=.)/, '  ')}}\n\n"
+  end
+
+  # The helpers `codes` (generated C++ texts, or compiled entries' hashes)
+  # call, in INDEX_HELPERS order. A helper built for a method that was then
+  # dropped (a probe, or an unsupported method) is not emitted.
+  def index_helpers_used(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    INDEX_HELPERS.keys.select do |kind|
+      @index_helper_code&.key?(kind) && texts.any? { |t| t.include?("bc2cpp_#{kind}(M,") }
+    end
+  end
+
+  # File-scope definitions of the helpers `codes` call; '' when none.
+  def emit_index_helpers(codes)
+    index_helpers_used(codes).map { |kind| @index_helper_code.fetch(kind) }.join
+  end
+
+  # How many sites call each helper, for the stderr summary.
+  def index_helper_site_counts(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    INDEX_HELPERS.keys.to_h { |kind| [kind, texts.sum { |t| t.scan(/= bc2cpp_#{kind}\(M,/).size }] }
+  end
+
   # LITERAL_EQQ_SUPPORT's own soundness gate -- a LIVE re-check against
   # THIS run's own @registry, not a comment trusting a fact that was true
   # the day it was written. Both `#==` and `#===` have to still be
@@ -12029,7 +12144,9 @@ class CodeGen
   # against the real output instead of a flag threaded through every one
   # of this file's own ~20 emission call sites individually).
   def emit_ary_entry_helper(compiled)
-    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_ary_entry(') }
+    # OUTLINED_INDEX_OPS' GETIDX/GETIDX0 helpers call it too.
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_ary_entry(') } ||
+                     emit_index_helpers(compiled).include?('bc2cpp_ary_entry(')
 
     <<~CPP
       static inline mrb_value bc2cpp_ary_entry(mrb_state*, mrb_value ary, mrb_int n) {
@@ -22716,29 +22833,32 @@ class CodeGen
           }
         CPP
       else
-        # INDEX_CHAIN: the tail of an untyped `x[i]` was a bare funcall, so a
-        # receiver whose class is one of the program's own `#[]` definitions
-        # (Game::Variables, LCF::Array1D, ...) paid full dynamic dispatch. Send it
-        # through the same exact-class chain any other one-argument send gets;
-        # nil (no compiled candidate, or a blocked name) keeps the funcall.
-        tail = compile_poly_small_n('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
-        tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
         # STRUCT_INDEX_CACHE -- see that method's own comment. A miss (no
         # literal Symbol key, or no known Struct owner declares that member)
         # is simply an empty string, leaving this whole `else if` chain out.
         struct_read = compile_struct_literal_index_read(irep, idx, s, d)
-        fallback = <<~CPP
-          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
-            r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
-          } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-            r#{d} = mrb_hash_get(M, r#{d}, r#{s});
-          } else if (mrb_string_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->string_class &&
-                     (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
-            r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
-          } #{struct_read}else {
-            #{tail}
-          }
-        CPP
+        fallback = outlined_getidx_code(d, s, struct_read)
+        unless fallback
+          # INDEX_CHAIN: the tail of an untyped `x[i]` was a bare funcall, so a
+          # receiver whose class is one of the program's own `#[]` definitions
+          # (Game::Variables, LCF::Array1D, ...) paid full dynamic dispatch. Send it
+          # through the same exact-class chain any other one-argument send gets;
+          # nil (no compiled candidate, or a blocked name) keeps the funcall.
+          tail = compile_poly_small_n('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
+          tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
+          fallback = <<~CPP
+            if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
+              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+            } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
+              r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+            } else if (mrb_string_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->string_class &&
+                       (mrb_integer_p(r#{s}) || mrb_string_p(r#{s}) || mrb_range_p(r#{s}))) {
+              r#{d} = mrb_str_aref(M, r#{d}, r#{s}, mrb_undef_value());
+            } #{struct_read}else {
+              #{tail}
+            }
+          CPP
+        end
         typed = compile_typed_index_send(irep, idx, owner_def, d, d, "r#{s}", reg_offset, index_class, fallback)
         typed || fallback
       end
@@ -22780,15 +22900,8 @@ class CodeGen
           }
         CPP
       else
-        fallback = <<~CPP
-          if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
-            r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
-          } else if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
-            r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
-          } else {
-            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
-          }
-        CPP
+        # OUTLINED_INDEX_OPS: the Array/Hash/funcall chain is bc2cpp_getidx0.
+        fallback = outlined_index_call('getidx0', "r#{d}", "r#{s}")
         typed = compile_typed_index_send(irep, idx, owner_def, d, s, 'mrb_fixnum_value(0)', reg_offset,
                                          index_class, fallback)
         typed || fallback
@@ -22836,17 +22949,8 @@ class CodeGen
           }
         CPP
       else
-        fallback = <<~CPP
-          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{idx_reg})) {
-            mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
-            r#{d} = r#{val};
-          } else if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-            mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
-            r#{d} = r#{val};
-          } else {
-            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
-          }
-        CPP
+        # OUTLINED_INDEX_OPS: the Array/Hash/funcall chain is bc2cpp_setidx.
+        fallback = outlined_index_call('setidx', "r#{d}", "r#{d}", "r#{idx_reg}", "r#{val}")
         typed = compile_typed_index_write(irep, idx, owner_def, d, idx_reg, val, reg_offset, index_class, fallback)
         typed || fallback
       end
@@ -27172,8 +27276,14 @@ if $PROGRAM_NAME == __FILE__
     warn ''
   end
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
+  # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
+  # bc2cpp_send too), ahead of every function that calls them.
+  index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
+  warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
+  warn ''
   print SymbolCache.emit(symbol_table)
   print const_site_cache_code
+  print index_helpers_code
   compiled.each { |m| print m[:code] }
 
   # Write this run's own cross-TU declarations header, so a *different*
