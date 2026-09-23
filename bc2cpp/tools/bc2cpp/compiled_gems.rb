@@ -69,6 +69,15 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   RGSS::ErrorReport::Tee RGSS::Bitmap Array
   RGSS.singleton RGSS::ErrorReport.singleton RGSS::Input.singleton
   RGSS::Audio.singleton RGSS::Graphics.singleton
+  # docs/adr/0215: the mruby-rpg2k record classes that replaced Structs.
+  RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState
+  RPG2k::Scene::Map::ShopState RPG2k::Scene::Map::ShopQuantity
+  Game::Interpreter::NameInputRequest Game::Interpreter::InnRequest
+  Game::Interpreter::ShopRequest Game::Interpreter::BattleRequest
+  Game::Interpreter::KeyInputRequest Game::Interpreter::KeyInputAccepted
+  Game::Interpreter::DiagnosticPosition Game::CommonEvent::CommonEventRecord
+  Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
+  Game::Message::ScanResult
 ].freeze
 
 # EMBED_IVAR_LIMITS: a wired owner listed here embeds only these ivars. Game::State
@@ -2410,7 +2419,16 @@ BC2CPP_COMPILED_GEMS = {
                Game::WindowCursor.singleton Game::Message.singleton
                Game::EventPage.singleton Game::CharSet.singleton
                Game::Backdrop.singleton RPG2k::Scene.singleton
-               RPG2k::Scene::Map::LRUBitmapCache],
+               RPG2k::Scene::Map::LRUBitmapCache
+               # docs/adr/0215: the record classes that replaced Structs.
+               RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState
+               RPG2k::Scene::Map::ShopState RPG2k::Scene::Map::ShopQuantity
+               Game::Interpreter::NameInputRequest Game::Interpreter::InnRequest
+               Game::Interpreter::ShopRequest Game::Interpreter::BattleRequest
+               Game::Interpreter::KeyInputRequest Game::Interpreter::KeyInputAccepted
+               Game::Interpreter::DiagnosticPosition Game::CommonEvent::CommonEventRecord
+               Game::Message::Segment Game::Message::SpeedMarker Game::Message::PauseMarker
+               Game::Message::ScanResult],
     out_symbol: 'rpg2k_compiled',
   },
   'mruby-rgss-compiled' => {
