@@ -9111,8 +9111,12 @@ class CodeGen
   # member names in declared (== storage index) order. nil (unset, the
   # default) means "prove nothing", same as stable_class_constants; a unit
   # check that wants the GETIDX Struct fast path sets a literal Hash directly.
+  #
+  # embed_ivar_limits: owner -> the only ivars it may embed (compiled_gems.rb's
+  # BC2CPP_EMBED_IVAR_LIMITS); nil or an absent owner means no cap.
   class << self
-    attr_accessor :wired_embeddings, :stable_class_constants, :struct_members, :integer_constant_values
+    attr_accessor :wired_embeddings, :embed_ivar_limits, :stable_class_constants, :struct_members,
+                  :integer_constant_values
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
@@ -9538,6 +9542,8 @@ class CodeGen
 
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
+      limit = self.class.embed_ivar_limits&.[](owner)
+      ivars = ivars.select { |name, _| limit.include?(name) } if limit
       init = @registry['initialize']&.find { |d| d.owner == owner }
       next unless init && compiles_clean?(init.irep)
 
@@ -11552,11 +11558,30 @@ class CodeGen
 
     @probing << label
     begin
-      result = compile_method(label)
+      result = with_fresh_method_state { compile_method(label) }
       @clean_cache[label] = !result[:code].include?('#error')
     ensure
       @probing.delete(label)
     end
+  end
+
+  # Every ivar one compile_method call sets and clears for itself, with its
+  # top-level value. A probe runs mid-way through another method's compile.
+  METHOD_COMPILE_STATE = {
+    :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
+    :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
+    :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
+    :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil
+  }.freeze
+
+  # Runs a nested compile against top-level state, then restores the caller's
+  # state, so neither compile sees or clobbers the other's (ADR 0202).
+  def with_fresh_method_state
+    saved = METHOD_COMPILE_STATE.keys.map { |ivar| instance_variable_get(ivar) }
+    METHOD_COMPILE_STATE.each { |ivar, initial| instance_variable_set(ivar, initial) }
+    yield
+  ensure
+    METHOD_COMPILE_STATE.keys.zip(saved).each { |ivar, value| instance_variable_set(ivar, value) } if saved
   end
 
   def embed_type(owner, ivar)
@@ -26283,6 +26308,7 @@ if $PROGRAM_NAME == __FILE__
   # function's own comment), the identical guarantee BC2CPP_WIRED_EMBEDDINGS
   # exists to provide by hand for the real gems.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  CodeGen.embed_ivar_limits = BC2CPP_EMBED_IVAR_LIMITS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
                                     Set.new, foreign_methods, nil, nil,
@@ -26517,6 +26543,7 @@ if $PROGRAM_NAME == __FILE__
   # CodeGen this driver builds first -- same env var, same reasoning, kept in
   # sync here for the real CodeGen actually used to emit code.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  CodeGen.embed_ivar_limits = BC2CPP_EMBED_IVAR_LIMITS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
                                     StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="

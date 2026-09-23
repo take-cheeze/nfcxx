@@ -71,6 +71,14 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   RGSS::Audio.singleton RGSS::Graphics.singleton
 ].freeze
 
+# EMBED_IVAR_LIMITS: a wired owner listed here embeds only these ivars. Game::State
+# keeps the three it embedded before ADR 0202: its other ivars are written through
+# attr writers from code IvarLayout does not type-check (load/from_lsd), so lift
+# this only after a real save/load run.
+BC2CPP_EMBED_IVAR_LIMITS = {
+  'Game::State' => %w[bgm_looped encounter_total save_count]
+}.freeze
+
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
     # LCF::MoveCommand (docs/adr/0139's own follow-up, mruby-lcf/mrblib/
