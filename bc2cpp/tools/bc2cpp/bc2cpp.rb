@@ -10107,12 +10107,62 @@ class CodeGen
     !@only_owners || @only_owners.include?(owner) || @other_owners&.include?(owner) || false
   end
 
+  POLY_SMALL_N_INHERITED_MAX = 16
+
+  # INHERITED_GUARD: closed-world strict subclasses of `owner` whose instances'
+  # lookup of `name` provably ends at `owner`'s own def: no class on the way
+  # defines it or mixes anything in, and nothing aliases/undefines the name.
+  def inheriting_subclasses(name, owner)
+    installed = symbol_installed_names
+    return [] if installed.nil? || installed.include?(name)
+    return [] unless Array(@prepended_modules[owner]).empty? && !@unknown_mixins.include?(owner)
+    # A native def outside mruby's core (which only touches core classes) could
+    # sit on a subclass; without the source map any native def declines.
+    natives = @native_name_sources ? @native_name_sources.fetch(name, []) : nil
+    if natives.nil?
+      return [] if @registry.fetch(name, []).any? { |md| md.owner == '<native>' }
+    elsif natives.any? { |path| !path.match?(%r{/3rd/mruby/(?:src|mrbgems)/}) }
+      return []
+    end
+
+    def_owners = @registry.fetch(name, []).map(&:owner).to_set
+    mixed = lambda do |klass|
+      !Array(@included_modules[klass]).empty? || !Array(@prepended_modules[klass]).empty? ||
+        @unknown_mixins.include?(klass)
+    end
+    @superclass_of.keys.sort.select do |klass|
+      next false unless strict_subclass?(klass, owner)
+
+      k = klass
+      k = @superclass_of[k] until k == owner || def_owners.include?(k) || mixed.call(k)
+      k == owner
+    end.first(POLY_SMALL_N_INHERITED_MAX)
+  end
+
   def compile_poly_small_n(name, d, recv, argv, n)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
 
+    inherited = candidates.to_h do |t|
+      subs = inheriting_subclasses(name, t.owner)
+      # An accessor's storage is the owner's; skip a subclass that embeds the ivar itself.
+      if t.kind == :ivar_accessor && t.irep.nil?
+        subs = subs.reject do |s|
+          k = s
+          k = @superclass_of[k] until k == t.owner || embed_type(k, name.chomp('='))
+          k != t.owner
+        end
+      end
+      [t.owner, subs]
+    end
+    # INHERITED_GUARD: a subclass that inherits a candidate's def joins its
+    # branch; the receiver's class is then read once instead of per compare.
+    hoist = inherited.values.any?(&:any?)
+    recv_class = hoist ? 'bc2cpp_recv_class' : "mrb_obj_class(M, #{recv})"
     branches = candidates.map do |target|
-      check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+      check = ([target.owner] + inherited[target.owner]).map do |owner|
+        "#{owner_class_ptr_expr(owner)} == #{recv_class}"
+      end.join(' || ')
       call = if target.kind == :ivar_accessor && target.irep.nil?
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c), or the
@@ -10128,7 +10178,12 @@ class CodeGen
     owners_note = candidates.map(&:owner).join(', ')
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
            "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
-    "#{note}  #{branches.join}{\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+    chain = "#{branches.join}{\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+    return "#{note}  #{chain}" unless hoist
+
+    subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
+    "#{note}  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" \
+      "  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
   end
 
   # Bounded the same way POLY_SMALL_N_MAX is (past this point a linear
@@ -11085,6 +11140,33 @@ class CodeGen
     owner
   end
 
+  # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
+  # subclassed class (a module never is), and X's own singleton def wins lookup.
+  def lexical_self_singleton_owner(owner_def)
+    return nil unless owner_def && self_class(owner_def)
+
+    owner = owner_def.owner
+    return nil unless owner&.end_with?('.singleton')
+
+    base = owner.delete_suffix('.singleton')
+    # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
+    return nil if base == 'Object' || subclassed_set.include?(base)
+    return nil unless Array(@prepended_modules[owner]).empty?
+    return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
+
+    owner
+  end
+
+  # The one irep def `name` has on that singleton owner (module_function copies
+  # have no irep; a second def would make "which one is live" order-dependent).
+  def lexical_self_singleton_def(name, owner_def)
+    owner = lexical_self_singleton_owner(owner_def)
+    return nil unless owner
+
+    defs = (@registry[name] || []).select { |md| md.owner == owner }
+    defs.size == 1 && defs.first.irep ? defs.first : nil
+  end
+
   # LEXICAL_SELF_KEYWORD_SUPPORT: the keyword-call-site selector built on
   # `lexical_self_owner` above, playing exactly the role `monomorphic_target`
   # plays for compile_keyword_call today -- "which single, compiled MethodDef
@@ -11166,9 +11248,11 @@ class CodeGen
     return nil if devirt_blocked_name?(name)
 
     lex_owner = lexical_self_owner(owner_def)
-    return nil unless lex_owner
-
-    candidate = @registry[name]&.find { |md| md.owner == lex_owner }
+    candidate = if lex_owner
+                  @registry[name]&.find { |md| md.owner == lex_owner }
+                else
+                  lexical_self_singleton_def(name, owner_def)
+                end
     return nil unless candidate&.irep
     return nil unless compiles_clean?(candidate.irep)
 
@@ -25483,8 +25567,10 @@ class CodeGen
     lexical_self_ivar_accessor = nil
     if target.nil? && self_implicit
       lex_owner = lexical_self_owner(owner_def)
-      if lex_owner
-        lex_candidate = @registry[name]&.find { |md| md.owner == lex_owner }
+      # SINGLETON_LEXICAL_SELF: only the irep branch below; accessors stay dynamic.
+      singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
+      if lex_owner || singleton_candidate
+        lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
         if lex_candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(lex_candidate.irep)) &&
            compiles_clean?(lex_candidate.irep) &&
            n.between?(mandatory_arity(@ireps.fetch(lex_candidate.irep)),
