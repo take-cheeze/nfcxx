@@ -3,6 +3,31 @@
 # CodeGen: compile_method and jump targets.
 
 class CodeGen
+  # One inlined-loop kind (ADR 0152): `recognize`/`emit` are CodeGen methods,
+  # `anchor` is the region key the glue lands at (with :sendb_addr, the
+  # addresses claimed and checked against the rescue range), and `context`
+  # says the recognizer takes (owner, mand, ivar layout, annotated args).
+  InlineLoopPass = Struct.new(:recognize, :emit, :anchor, :context)
+
+  # The order is part of the output: emitters append nested cfunc code
+  # (@inline_nested_pre) in pass order, and a later pass would overwrite an
+  # earlier one's glue at a shared address (the recognizers' receiver and
+  # method-name gates keep regions disjoint). Every pass skips rescue-claimed
+  # regions (#1909, RESCUE_INLINE_BLOCK_FIX in compile_method).
+  INLINE_LOOP_PASSES = [
+    InlineLoopPass.new(:recognize_times_regions, :emit_times_inline, :block_addr, false), # BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_each_regions, :emit_each_inline, :block_addr, true), # EACH_BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_each_index_regions, :emit_each_index_inline, :block_addr, true), # EACH_INDEX_SUPPORT
+    InlineLoopPass.new(:recognize_hash_each_regions, :emit_hash_each_inline, :block_addr, true), # HASH_EACH_SUPPORT
+    InlineLoopPass.new(:recognize_each_key_regions, :emit_each_key_inline, :block_addr, true), # EACH_KEY_SUPPORT
+    InlineLoopPass.new(:recognize_range_each_regions, :emit_range_each_inline, :block_addr, true), # INTERP_UNLOCK
+    # `&:sym` has no BLOCK instruction; its glue replaces the symbol load.
+    InlineLoopPass.new(:recognize_sym_regions, :emit_sym_inline, :sym_addr, true), # EACH_BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_collect_regions, :emit_collect_inline, :block_addr, true), # MAP_BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_accum_regions, :emit_accum_inline, :block_addr, true), # ACCUM_BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_sort_regions, :emit_sort_inline, :block_addr, true) # SORT_BLOCK_SUPPORT
+  ].freeze
+
   def compile_method(label)
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
@@ -194,9 +219,9 @@ class CodeGen
                                                       extra_field_values: saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
     end
 
-    # BLOCK_SUPPORT: a recognized `.times` region replaces BLOCK and SENDB with one
-    # inlined loop at the BLOCK address. An unclean body (nil) leaves both to the
-    # normal loop, which emits `#error`.
+    # BLOCK_SUPPORT: each INLINE_LOOP_PASSES region replaces its anchor and SENDB
+    # with one inlined loop at the anchor. A failed gate or an unclean body (nil)
+    # leaves both to the normal loop, which emits `#error`.
     # INLINE_NESTED_BLOCK_SUPPORT: file-scope code for cfuncs backing blocks nested
     # inside inlined loops (inline_nested_block_pass). It must land at file scope
     # ahead of this function, like block_fallback_pre/rescue_pre. Saved and
@@ -205,117 +230,27 @@ class CodeGen
     # not drop the outer one's code.
     bc2cpp_saved_inline_pre = @inline_nested_pre
     @inline_nested_pre = String.new
-    # RESCUE_INLINE_BLOCK_FIX: every inlined-loop pass below must skip regions
+    # RESCUE_INLINE_BLOCK_FIX: the inlined-loop passes below must skip regions
     # whose addresses the rescue loop above already claimed. That range lives in
     # the extracted try body; here, a loop registered at its block_addr would be
     # emitted after the rescue glue, on the exception-only path, with its receiver
     # register holding whatever that path left (possibly the exception), not the
     # value the recognizer proved (scripts/bc2cpp_rescue_inline_block_check.rb).
     rescue_claimed = suppressed.dup
-    in_rescue = ->(*addrs) { addrs.any? { |a| rescue_claimed.include?(a) } }
-    recognize_times_regions(irep).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_times_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-
-    # EACH_BLOCK_SUPPORT: `ary.each` and `&:sym` regions. The Array gate is in the
-    # recognizers; a failed check or unclean body leaves the opcodes to `#error`.
     each_ctx_ivar = @class_layout[d.owner]
     each_ctx_args = @class_annotations[irep.label]&.args
-    recognize_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
+    INLINE_LOOP_PASSES.each do |pass|
+      ctx = pass.context ? [d.owner, mand, each_ctx_ivar, each_ctx_args] : []
+      send(pass.recognize, irep, *ctx).each do |region|
+        anchor = region[pass.anchor]
+        next if rescue_claimed.include?(anchor) || rescue_claimed.include?(region[:sendb_addr])
 
-      inlined = emit_each_inline(region, irep, d)
-      next unless inlined
+        inlined = send(pass.emit, region, irep, d)
+        next unless inlined
 
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    # EACH_INDEX_SUPPORT: `ary.each_index { |i| }` regions; same contract.
-    recognize_each_index_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_each_index_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    # HASH_EACH_SUPPORT: `hash.each { |k, v| }` regions; the receiver-class gates
-    # make it exclusive with the Array `each` recognizer.
-    recognize_hash_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_hash_each_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    # EACH_KEY_SUPPORT: `hash.each_key { |k| }` regions; same contract.
-    recognize_each_key_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_each_key_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    # INTERP_UNLOCK: Range#each regions; same contract.
-    recognize_range_each_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_range_each_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    recognize_sym_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:sym_addr], region[:sendb_addr])
-
-      inlined = emit_sym_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:sym_addr] << region[:sendb_addr]
-      glue_at[region[:sym_addr]] = inlined
-    end
-    # MAP_BLOCK_SUPPORT: map/select/reject/find/each_with_index regions.
-    recognize_collect_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_collect_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    # ACCUM_BLOCK_SUPPORT: any?/all?/none?/count and reduce/inject(init) regions.
-    recognize_accum_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_accum_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
-    end
-    # SORT_BLOCK_SUPPORT: sort_by/uniq key blocks (sort comparators are rejected
-    # inside the emitter).
-    recognize_sort_regions(irep, d.owner, mand, each_ctx_ivar, each_ctx_args).each do |region|
-      next if in_rescue.call(region[:block_addr], region[:sendb_addr])
-
-      inlined = emit_sort_inline(region, irep, d)
-      next unless inlined
-
-      suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = inlined
+        suppressed << anchor << region[:sendb_addr]
+        glue_at[anchor] = inlined
+      end
     end
 
     # BLOCK_CFUNC_FALLBACK_SUPPORT: the catch-all, run last, for BLOCK/SENDB pairs
