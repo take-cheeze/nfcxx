@@ -11490,18 +11490,43 @@ class CodeGen
   # behavior change -- same reasoning compile_all's own driver-side warning
   # about this already gives, and confirmed no compiled entry anywhere in this
   # project is ever actually :protected). A `.singleton` owner registers on the
-  # plain class object via mrb_define_class_method; mruby has no private
-  # class-method registration API either, so a private singleton entry (none
-  # exist today) is skipped the same way.
+  # plain class object via mrb_define_class_method; a private singleton entry
+  # goes through `bc2cpp_define_private_class_method` instead (emitted below,
+  # only when at least one target actually needs it) -- see that helper's own
+  # comment for why mruby needing no `mrb_define_private_class_method` of its
+  # own doesn't mean this can't be done with its existing public API.
   def emit_owner_registrations(compiled, owners)
     by_owner = compiled.group_by { |m| m[:owner] }
     targets = owners.select { |o| by_owner.key?(o) }
+
+    # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
+    # mrb_define_method_raw (src/class.c) only forces a singleton-class method
+    # public while its visibility is still the MT_VDEFAULT sentinel, so setting
+    # MRB_METHOD_PRIVATE_FL first keeps it private -- public MRB_API only, no
+    # submodule patch.
+    needs_private_class_method = targets.any? do |o|
+      o.end_with?('.singleton') && by_owner[o].any? { |m| m[:visibility] == :private }
+    end
 
     # Always emitted, even with an empty body, so every compiled gem's own
     # gem_init can call it unconditionally -- a gem that owns none of `owners`
     # (e.g. mruby-rgss-compiled, today) still defines a real, harmless no-op
     # rather than needing a build-time #ifdef around the call site.
     out = +"// OWNER_METHOD_REGISTRATION -- see bc2cpp.rb's own emit_owner_registrations comment.\n"
+    if needs_private_class_method
+      out << <<~CPP
+        static void bc2cpp_define_private_class_method(mrb_state* M, struct RClass* c, const char* name, mrb_func_t func, mrb_aspec aspec) {
+          int ai = mrb_gc_arena_save(M);
+          struct RClass* sc = mrb_singleton_class_ptr(M, mrb_obj_value(c));
+          mrb_method_t m;
+          MRB_METHOD_FROM_FUNC(m, func);
+          m.flags |= aspec;
+          MRB_METHOD_SET_VISIBILITY(m, MRB_METHOD_PRIVATE_FL);
+          mrb_define_method_raw(M, sc, mrb_intern_cstr(M, name), m);
+          mrb_gc_arena_restore(M, ai);
+        }
+      CPP
+    end
     out << "static void bc2cpp_register_owner_methods(mrb_state* M) {\n"
     targets.each do |owner|
       singleton = owner.end_with?('.singleton')
@@ -11509,7 +11534,7 @@ class CodeGen
       out << "  struct RClass* #{var} = mrb_class_ptr(#{const_chain_value_expr(owner)});\n"
       by_owner[owner].each do |m|
         fn = if singleton
-               m[:visibility] == :private ? nil : 'mrb_define_class_method'
+               m[:visibility] == :private ? 'bc2cpp_define_private_class_method' : 'mrb_define_class_method'
              elsif m[:visibility] == :private
                'mrb_define_private_method'
              elsif m[:visibility] == :public

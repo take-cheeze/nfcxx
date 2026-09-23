@@ -68,6 +68,7 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   LCF::Sections LCF::Array1D LCF::Array2D LCF::File
   RGSS::ErrorReport::Tee RGSS::Bitmap Array
   RGSS.singleton RGSS::ErrorReport.singleton RGSS::Input.singleton
+  RGSS::Audio.singleton RGSS::Graphics.singleton
 ].freeze
 
 BC2CPP_COMPILED_GEMS = {
