@@ -7586,7 +7586,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # `return path.join('::')`, `RESCUE`'s `return UNKNOWN`-equivalent,
       # ...) already spells `return` explicitly for the identical reason;
       # this one needs it just as much.
-      return ret_class_proof.call(name)
+      # `owner`: CodeGen#self_call_reaches_def? (never method_missing).
+      return ret_class_proof.call(name, owner)
     when 'SENDB'
       # BLOCK_CARRYING_NEW: `Klass.new(...) { block }` -- e.g.
       # `Array.new(@base_raw.size) { |i| ... }`, mruby-array-ext's own
@@ -16628,11 +16629,7 @@ class CodeGen
   # own header: exactly one real definition anywhere in the closed world, none
   # in the foreign mrblib set either -- no other receiver could ever reach a
   # different body, so which subclass's `self` happens to make the call is
-  # irrelevant), and the identical `array_return_analyzable?`/
-  # `straightline_return_reg?` guards, reused verbatim rather than re-derived:
-  # the "does this body's own instruction list really contain every return
-  # path, with no catch handler/nonlocal exit/join hiding one" question is
-  # type-independent.
+  # irrelevant). RETCLASS_NILABLE_JOIN widens this to agreeing POLY names.
   #
   # UNLIKE ARRAY_RETURN_PROOF, the provable fact isn't a fixed target (Array):
   # different candidates prove different classes, and one candidate's own
@@ -16646,6 +16643,9 @@ class CodeGen
   # ClassLayout.analyze's own outer sweep already uses for ivar hints. Always
   # terminates: the set only ever grows, bounded by the finite candidate
   # count, so at most that many iterations ever do real work.
+  #
+  # RETCLASS_NILABLE_JOIN (ADR 0199): the fact is "K or nil", the contract every
+  # ClassLayout hint already has (NIL_TOLERANT_JOIN), so a nil source is no evidence.
   def class_return_sites_proven(d, ret_class_proof)
     irep = @ireps[d.irep]
     return nil unless irep
@@ -16653,63 +16653,197 @@ class CodeGen
     ivar_classes = @class_layout[d.owner]
     arg_classes = @class_annotations[irep.label]&.args
     mand = mandatory_arity(irep)
-    dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
     proven = nil
     irep.instructions.each_with_index do |insn, idx|
       case insn.op
-      when 'RETURN'
+      # RETURN_BLK in a method body is a plain return (methods are strict procs).
+      when 'RETURN', 'RETURN_BLK'
         reg = insn.args[/\AR(\d+)/, 1]
         return nil unless reg
-        return nil unless straightline_return_reg?(irep, idx, reg)
 
-        klass = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: d.owner,
-                                  class_layout: @class_layout, registry: @registry,
-                                  container_constants: @container_constants,
-                                  ret_class_proof: ret_class_proof, dominated: dominated)
-        return nil unless klass
-        return nil if proven && proven != klass
+        sources = return_value_sources(irep, idx, reg)
+        return nil unless sources
 
-        proven = klass
-      when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
+        sources.each do |src|
+          next if src == :nil
+
+          writer, r = src
+          # The writer itself is a reaching definition already; every deeper
+          # hop (a `.new`/`.dup`/accessor receiver) must dominate (ADR 0198).
+          dominated = lambda do |w_idx, use_idx, hop_reg|
+            (w_idx == writer && use_idx == writer + 1) || return_write_dominates?(irep, w_idx, use_idx, hop_reg)
+          end
+          klass = trace_new_target(irep, writer + 1, r, ivar_classes, mand, arg_classes, owner: d.owner,
+                                    class_layout: @class_layout, registry: @registry,
+                                    container_constants: @container_constants,
+                                    ret_class_proof: ret_class_proof, dominated: dominated)
+          return nil unless klass
+          return nil if proven && proven != klass
+
+          proven = klass
+        end
+      when 'RETNIL'
+        next
+      when 'BREAK', 'RETSELF', 'RETTRUE', 'RETFALSE', 'STOP'
         return nil
       end
     end
     proven
   end
 
-  # RETCLASS_SELF_CALL_SUPPORT's own whole-program fixpoint. Candidate
-  # selection is byte-for-byte compute_array_return_names' own two admission
-  # rules (MONO, not in the foreign mrblib set), and `array_return_analyzable?`
-  # is reused verbatim for the same structural reason `class_return_sites_
-  # proven` above reuses `straightline_return_reg?`.
+  # A Ruby callee's frame starts at R(a), so it may overwrite every register above a.
+  RETURN_SOURCE_CALLS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC'].freeze
+
+  # RETCLASS_NILABLE_JOIN: the definitions of `reg` reaching `idx` (`:nil` or
+  # `[writer_idx, reg]`), or nil if a path is unaccounted for. JOIN_REACHING_DEFS'
+  # walk and barriers with ADR 0198's level-aware block-write barrier, minus the
+  # protected range (a codegen concern, not a value one).
+  def return_value_sources(irep, idx, reg)
+    preds = fixnum_proof_preds(irep)
+    return nil unless preds
+
+    ctx = fixnum_proof_ctx(irep)
+    block_written = own_upvar_written_regs(irep)
+    out = []
+    seen = Set.new
+    work = [[idx, reg.to_s]]
+    until work.empty?
+      state = work.pop
+      next unless seen.add?(state)
+      return nil if seen.size > FIXNUM_PROOF_REACHING_MAX_STATES
+
+      i, r = state
+      return nil if block_written.include?(r)
+      return nil if ctx[:catch_targets].include?(irep.instructions[i].addr)
+
+      ps = preds[i]
+      return nil if ps.nil? || ps.empty?
+
+      ps.each do |p|
+        return nil if p.negative?
+
+        insn = irep.instructions[p]
+        # vm.c only falls through a `RAISEIF Ra` when regs[a] is nil.
+        if insn.op == 'RAISEIF'
+          if insn.args[/\AR(\d+)/, 1] == r
+            out << :nil
+          else
+            work << [p, r]
+          end
+          next
+        end
+        return nil unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
+        return nil if RETURN_SOURCE_CALLS.include?(insn.op) && insn.args[/\AR(\d+)/, 1].to_i < r.to_i
+
+        if !fixnum_proof_writes_reg?(insn, r)
+          work << [p, r]
+        elsif insn.op == 'MOVE'
+          src = insn.args.scan(/R(\d+)/).flatten[1]
+          return nil unless src
+
+          work << [p, src]
+        elsif insn.op == 'LOADNIL'
+          out << :nil
+        else
+          out << [p, r]
+        end
+      end
+    end
+    out
+  end
+
+  # array_return_analyzable?, but a rescue handler is allowed: its entry is a
+  # barrier return_value_sources never crosses. `ensure` stays refused.
+  def class_return_analyzable?(irep)
+    return false unless (irep.catch_handlers || []).all? { |h| h.type == :rescue }
+    return false if subtree_has_nonlocal_exit?(irep)
+
+    irep.instructions.any? { |i| i.op == 'RETURN' || i.op == 'RETURN_BLK' }
+  end
+
+  # Sends that can give a name a body (or remove one) the registry does not list.
+  NAME_INSTALLER_SENDS = %w[alias_method define_method undef_method remove_method].freeze
+
+  # Names the closed world aliases, defines by Symbol or undefines; nil when some
+  # such call's names are not literal (or the installer itself is a Symbol).
+  def symbol_installed_names
+    return @symbol_installed_names if defined?(@symbol_installed_names)
+
+    names = Set.new
+    @ireps.each_value do |irep|
+      irep.instructions.each_with_index do |insn, idx|
+        operands = entry_arg_operands(insn)
+        case insn.op
+        when 'ALIAS', 'UNDEF'
+          operands.scan(ENTRY_ARG_NAME_RE) { |m| names << m[0] }
+        when 'LOADSYM'
+          return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(operands[ENTRY_ARG_NAME_RE, 1])
+        when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
+          m = operands.match(/\AR(\d+)\s+:(\S+?)(?:\s+n=(\S+))?\s*\z/)
+          next unless m && NAME_INSTALLER_SENDS.include?(m[2])
+
+          syms = m[3]&.match?(/\A\d+\z/) && literal_symbol_args(irep, idx, m[1].to_i, m[3].to_i)
+          return @symbol_installed_names = nil unless syms && !syms.empty?
+
+          names.merge(syms)
+        end
+      end
+    end
+    @symbol_installed_names = names
+  end
+
+  # A self-call from `owner` never reaches method_missing when `owner`'s own
+  # superclass chain defines `name`; anything found earlier is a registry def too.
+  def self_call_reaches_def?(name, owner)
+    def_owners = @registry.fetch(name, []).map(&:owner)
+    seen = Set.new
+    o = owner
+    while o.is_a?(String) && seen.add?(o)
+      return true if def_owners.include?(o)
+
+      o = @superclass_of[o]
+    end
+    false
+  end
+
+  # The fact ClassLayout.analyze consumes at a self-call SETIV site.
+  def class_return_for_self_call(name, owner)
+    klass = class_return_names[name]
+    klass if klass && self_call_reaches_def?(name, owner)
+  end
+
+  # RETCLASS_SELF_CALL_SUPPORT's own whole-program fixpoint. Every registry def
+  # of the name needs a bytecode body (no native/attr_*); a POLY name is admitted
+  # when all of its defs prove the same class, since a self-call may reach any.
   def compute_class_return_names
     @class_return_names = {}
     return @class_return_names unless @foreign_method_names
 
+    installed = symbol_installed_names
+    return @class_return_names unless installed
+
     cand = {}
     @registry.each do |name, defs|
-      next unless defs.size == 1
-
-      d = defs.first
       next if @foreign_method_names.include?(name)
-      next unless d.irep
+      next if installed.include?(name)
+      next unless defs.all? { |d| d.irep && @ireps[d.irep] && class_return_analyzable?(@ireps[d.irep]) }
 
-      irep = @ireps[d.irep]
-      next unless irep && array_return_analyzable?(irep)
-
-      cand[name] = d
+      cand[name] = defs
     end
 
     proven = {}
-    ret_class_proof = ->(n) { proven[n] }
+    ret_class_proof = lambda do |n, owner|
+      proven[n] if self_call_reaches_def?(n, owner)
+    end
     loop do
       changed = false
-      cand.each do |name, d|
+      cand.each do |name, defs|
         next if proven.key?(name)
 
-        klass = class_return_sites_proven(d, ret_class_proof)
-        next unless klass
+        classes = defs.map { |d| class_return_sites_proven(d, ret_class_proof) }
+        klass = classes.first
+        next unless klass && classes.all? { |c| c == klass }
 
         proven[name] = klass
         changed = true
@@ -26159,12 +26293,11 @@ if $PROGRAM_NAME == __FILE__
   # RETCLASS_SELF_CALL_SUPPORT: computed from the same level-0 probe as
   # array_return_probe just above, same stratification, same reason -- see
   # ClassLayout.analyze's own `ret_class_proof` header.
-  class_return_probe = return_names_probe.class_return_names
   class_poison_reason = {}
   class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
                                          annotated_array_return, poison_reason: class_poison_reason,
                                          array_ret_proof: ->(n) { array_return_probe.include?(n) },
-                                         ret_class_proof: ->(n) { class_return_probe[n] })
+                                         ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) })
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
