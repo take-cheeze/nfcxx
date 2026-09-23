@@ -10810,6 +10810,44 @@ class CodeGen
     end
   end
 
+  # INTEGER_UNARY: an Integer runs Numeric#-@ (`0 - self`), Numeric#zero? (`self == 0`),
+  # both Ruby in libmruby, and int_round (`self`); see docs/adr/0200.
+  INTEGER_UNARY_OPS = {
+    '-@' => ['mrb_int_value(M, -mrb_integer(%<r>s))', ' && mrb_integer(%<r>s) != MRB_INT_MIN'],
+    'zero?' => ['mrb_bool_value(mrb_integer(%<r>s) == 0)', ''],
+    'round' => ['%<r>s', '']
+  }.freeze
+
+  def compile_integer_unary(name, n, d, recv, argv)
+    value, extra_guard = INTEGER_UNARY_OPS[name]
+    return nil unless value && n.zero? && native_only_mono?(name) && integer_ancestry_native?(name)
+
+    <<~CPP
+        // INTEGER_UNARY :#{name} -- Integer receiver computed inline; anything else keeps the dispatch
+        if (mrb_integer_p(#{recv})#{format(extra_guard, r: recv)}) {
+          r#{d} = #{format(value, r: recv)};
+        } else {
+          #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+        }
+    CPP
+  end
+
+  # builtin_class_send_safe? over Integer's ancestry and every module mixed into it.
+  def integer_ancestry_native?(name)
+    owners = %w[Integer Numeric Comparable]
+    queue = owners.dup
+    until queue.empty?
+      owner = queue.shift
+      (Array(@included_modules[owner]) + Array(@prepended_modules[owner])).each do |mod|
+        next if owners.include?(mod)
+
+        owners << mod
+        queue << mod
+      end
+    end
+    builtin_class_send_safe?(name, owners)
+  end
+
   # Emit a generated native expression behind a runtime type-tag guard. Heap
   # objects also require their exact built-in class pointer; Float and Symbol
   # are immediate values and use only their unambiguous type tags.
@@ -24919,6 +24957,9 @@ class CodeGen
           }
       CPP
     end
+
+    integer_unary = compile_integer_unary(name, n, d, recv, argv)
+    return integer_unary if integer_unary
 
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
