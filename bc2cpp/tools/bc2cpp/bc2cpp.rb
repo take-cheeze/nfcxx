@@ -25699,9 +25699,19 @@ class CodeGen
     out
   end
 
+  # mruby's variadic mrb_funcall/mrb_funcall_id copy into a fixed
+  # MRB_FUNCALL_ARGC_MAX array and raise "Too long arguments" past it.
+  FUNCALL_ARGC_MAX = 16
+
   def dynamic_dispatch_line(d, recv, name, argv)
     if argv.empty?
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
+    elsif argv.size > FUNCALL_ARGC_MAX
+      # A literal-sized splat unrolls one argument per element
+      # (Game::Battle.from_actor's 22-field `Combatant.new(*[...])`).
+      # mrb_funcall_argv has no such cap: it packs 15+ into a splat itself.
+      "{ mrb_value bc2cpp_argv[] = { #{argv.join(', ')} }; " \
+        "r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_lit(M, \"#{name}\"), #{argv.size}, bc2cpp_argv); }\n"
     else
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", #{argv.size}, #{argv.join(', ')});\n"
     end
