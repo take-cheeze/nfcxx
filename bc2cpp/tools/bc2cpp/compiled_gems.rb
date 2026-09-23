@@ -366,3 +366,39 @@ def bc2cpp_closed_world_env(spec, repo_root)
   { 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => spec.build.name,
     'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }) }
 end
+
+# HOT_ONLY (ADR 0214): compile only hot_methods.txt's methods on flash-limited
+# builds. Opt-in from build_config.rb like Bc2cppClosedWorldOption.
+BC2CPP_HOT_METHODS_PATH = File.expand_path('hot_methods.txt', __dir__)
+
+module Bc2cppHotOnlyOption
+  def enable_bc2cpp_hot_only
+    @bc2cpp_hot_only = true
+  end
+
+  def bc2cpp_hot_only?
+    @bc2cpp_hot_only == true
+  end
+end
+
+# BC2CPP_HOT_ONLY=1/0 forces the mode either way. Otherwise all compiled gems must
+# agree: they call each other's `_impl`s (OTHER_OWNERS), so mixing modes would
+# reference functions never emitted.
+def bc2cpp_hot_only_build?(build, env: ENV)
+  return true if env['BC2CPP_HOT_ONLY'] == '1'
+  return false if env['BC2CPP_HOT_ONLY'] == '0'
+
+  compiled = build.gems.select { |g| BC2CPP_COMPILED_GEMS.key?(g.name) }
+  modes = compiled.to_h { |g| [g.name, g.respond_to?(:bc2cpp_hot_only?) && g.bc2cpp_hot_only?] }
+  if modes.values.uniq.size > 1
+    raise "BC2CPP_HOT_ONLY: the compiled gems of build '#{build.name}' disagree " \
+          "(#{modes.map { |n, m| "#{n}=#{m}" }.join(', ')})"
+  end
+
+  modes.values.first == true
+end
+
+# The hot-method list for a hot-only build, {} otherwise.
+def bc2cpp_hot_only_env(spec, env: ENV)
+  bc2cpp_hot_only_build?(spec.build, env: env) ? { 'BC2CPP_HOT_METHODS' => BC2CPP_HOT_METHODS_PATH } : {}
+end

@@ -9,7 +9,10 @@ class CodeGen
   # real (memoized) is the only way to answer without duplicating compile_insn's
   # opcode list. A label already being probed reports "not known clean" (safe
   # direction), so mutually recursive MONO methods just keep mrb_funcall.
+  # HOT_ONLY: an excluded method answers false before compiling, so every direct
+  # call and embedding gated here treats it as an unsupported body (ADR 0214).
   def compiles_clean?(label)
+    return false if hot_only_excluded?(label)
     return @clean_cache[label] if @clean_cache.key?(label)
     return false if @probing.include?(label)
 
@@ -80,9 +83,18 @@ class CodeGen
   # skipped: static_dispatch_registrations.rb proved no runtime lookup reaches
   # them, so the wrapper is dead, and with no dynamic lookup there is no
   # interpreted fallback to read iv_tbl.
+  # HOT_ONLY: with any exclusion, `unregistered` entries are registered again --
+  # the 0203 proof assumes every caller is compiled, and an excluded caller
+  # looks the name up dynamically (ADR 0214).
   def emit_owner_registrations(compiled, owners, unregistered: STATIC_DISPATCH_UNREGISTERED)
     by_owner = compiled.group_by { |m| m[:owner] }
     targets = owners.select { |o| by_owner.key?(o) }
+    if hot_only_active?
+      restored = compiled.select { |m| !owners.include?(m[:owner]) && unregistered.include?("#{m[:owner]}##{m[:name]}") }
+      by_owner = by_owner.merge(restored.group_by { |m| m[:owner] }) { |_, _, mine| mine }
+      targets += restored.map { |m| m[:owner] }.uniq
+      unregistered = Set.new
+    end
 
     # PRIVATE_CLASS_METHOD_SUPPORT: mruby has no mrb_define_private_class_method.
     # mrb_define_method_raw (src/class.c) only forces a singleton-class method
@@ -470,7 +482,59 @@ class CodeGen
     # compile_method runs. compile_method never assigns them.
     leaves = @owner_of.keys
     leaves = leaves.select { |l| only_owners.include?(@owner_of.fetch(l).owner) } if only_owners
+    # HOT_ONLY: excluded methods get no `_impl`, entry or declaration (ADR 0214).
+    leaves = leaves.reject { |l| hot_only_excluded?(l) }
     leaves.map { |label| compile_method(label) }
+  end
+
+  # HOT_ONLY (ADR 0214): did BC2CPP_HOT_METHODS leave irep `label` out?
+  def hot_only_excluded?(label)
+    excluded = self.class.hot_only_excluded
+    excluded ? excluded.include?(label) : false
+  end
+
+  def hot_only_active?
+    excluded = self.class.hot_only_excluded
+    excluded ? !excluded.empty? : false
+  end
+
+  # HOT_ONLY: register.cxx still names uncompiled entries. Each becomes a constant
+  # of an empty type whose registration overloads are no-ops, so the bytecode
+  # `def` stays the method; exact-type overloading keeps real entries unaffected
+  # (ADR 0214). Empty when nothing is excluded.
+  def emit_hot_only_registration_stubs(compiled, only_owners: nil)
+    return '' unless hot_only_active?
+
+    real = compiled.to_set { |m| m[:entry] }
+    # Every uncompiled method, not only excluded ones: a listed method whose
+    # keyword/`super` target is excluded comes out `#error` too.
+    entries = @owner_of.each_with_object(Set.new) do |(_label, d), out|
+      next if only_owners && !only_owners.include?(d.owner)
+
+      entry = cpp_name(d.owner, d.name)
+      out << entry unless real.include?(entry)
+    end
+    # Synthesized accessors exist only while their ivar embeds; when an exclusion
+    # drops the embedding, the native attr_* (reading iv_tbl) must stay.
+    @registry.each_value do |defs|
+      defs.each do |d|
+        next unless d.kind == :ivar_accessor && d.irep.nil? && !d.owner.end_with?('.singleton')
+        next if only_owners && !only_owners.include?(d.owner)
+
+        base = "#{sanitize(d.owner)}_#{sanitize(d.name.chomp('='))}"
+        entry = d.name.end_with?('=') ? "#{base}_eq" : base
+        entries << entry unless real.include?(entry)
+      end
+    end
+    out = +"// HOT_ONLY (docs/adr/0214): #{entries.size} entry points of this gem are not compiled and stay bytecode.\n"
+    out << "struct bc2cpp_hot_only_excluded {};\n"
+    %w[mrb_define_method mrb_define_private_method mrb_define_class_method].each do |fn|
+      out << "static inline void #{fn}(mrb_state*, struct RClass*, const char*, bc2cpp_hot_only_excluded, " \
+             "mrb_aspec) {}\n"
+    end
+    entries.sort.each { |e| out << "[[maybe_unused]] static constexpr bc2cpp_hot_only_excluded #{e}{};\n" }
+    out << "\n"
+    out
   end
 
   # Forward declarations first: a direct call can target a method defined later

@@ -24,9 +24,11 @@ class CodeGen
   # storage order); nil proves nothing.
   # embed_ivar_limits: owner -> the only ivars it may embed
   # (BC2CPP_EMBED_IVAR_LIMITS); nil or an absent owner means no cap.
+  # hot_only_excluded: irep labels BC2CPP_HOT_METHODS leaves out (ADR 0214); nil
+  # or empty excludes nothing. Class-level so every probing CodeGen sees it.
   class << self
     attr_accessor :wired_embeddings, :embed_ivar_limits, :stable_class_constants, :struct_members,
-                  :integer_constant_values
+                  :integer_constant_values, :hot_only_excluded
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
