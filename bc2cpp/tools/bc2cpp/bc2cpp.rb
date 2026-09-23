@@ -1011,6 +1011,13 @@ def build_registry(ireps, root_label)
                        module_function].include?(name)
 
         n = insn.args[/n=(\d+)/, 1].to_i
+        # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
+        packed = insn.args.include?('n=*')
+        if packed
+          arr = idx.positive? && irep.instructions[idx - 1]
+          n = arr && arr.op == 'ARRAY' ? arr.args[/R\d+\s+(\d+)/, 1].to_i : -1
+          raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
+        end
         # `private :a, :b, ...` / `attr_reader :a, :b, ...` -- the n Symbol
         # arguments are LOADSYM'd into consecutive registers immediately
         # before this send (real code always emits them right before, no
@@ -1018,7 +1025,7 @@ def build_registry(ireps, root_label)
         # collecting them. Shared by both branches below.
         collect_loadsym_names = lambda do
           names = []
-          (idx - 1).downto(0) do |i|
+          (idx - (packed ? 2 : 1)).downto(0) do |i|
             break if names.size >= n
 
             prev = irep.instructions[i]
@@ -1055,24 +1062,8 @@ def build_registry(ireps, root_label)
           # seen) has zero real occurrences anywhere in the whole closed
           # world (confirmed by grep), so it's simply left unhandled here,
           # same as every other narrow, no-real-instance gap in this file --
-          # always safe, just a missed case. The 16-name call site itself
-          # hits a real, already-documented, pre-existing limit this same
-          # collect_loadsym_names helper shares with attr_reader's own
-          # 15-argument Game::Enemy call site (see that finding's own
-          # comment, several rounds up): confirmed directly against the real
-          # disassembly, 16 Symbol arguments is enough to tip mrbc's own
-          # argument-count encoding from a literal `n=16` into the `n=*`
-          # CALL_MAXARGS splat sentinel (`SSEND R1 :module_function n=*`,
-          # vs. the 6-name call site's own plain `n=6`) -- outside
-          # collect_loadsym_names' own `n=(\d+)`-only counting, so this fix
-          # silently registers nothing for that one call site's own 16
-          # names, the exact same safe-under-approximation shape (never
-          # wrongly narrows, just misses a registration) the attr_reader
-          # finding already established, not a new gap this fix introduces.
-          # Not worth generalizing collect_loadsym_names to the `n=*` shape
-          # here either, for the same reason already given there: real,
-          # separate work, and neither call site is exploitable today
-          # regardless (see the owner-not-emitted check below).
+          # always safe, just a missed case. The 16-name call is packed
+          # (`n=*`); collect_loadsym_names reads it through its ARRAY.
           #
           # Real mruby semantics confirmed by reading 3rd/mruby/src/class.c's
           # own mrb_mod_module_function directly, not assumed from CRuby's
