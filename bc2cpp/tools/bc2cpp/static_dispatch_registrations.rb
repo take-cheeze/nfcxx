@@ -109,9 +109,85 @@ module StaticDispatchRegistrations
 
   # Every C string literal in `src` that is not the name argument of a
   # registration call, with comments dropped first.
-  def c_literals(src)
+  def c_literals(src, exempt: Set.new)
     body = src.gsub(REGISTRATION_CALL, '').gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '')
-    body.scan(/"((?:[^"\\\n]|\\.)*)"/).map { |(s)| unescape(s) }
+    table = nil
+    body = body.sub(SYM_TABLE) { table = Regexp.last_match(1); '' }
+    names = body.scan(STRING_LITERAL).map { |(s)| unescape(s) }
+    names + (table ? table.scan(STRING_LITERAL).map { |(s)| unescape(s) }.reject { |n| exempt.include?(n) } : [])
+  end
+
+  STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
+  # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`.
+  SYM_TABLE = /bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m
+  # MONO_EMBED_GUARD's shape (bc2cpp.rb): an exact-class check around the
+  # direct `_impl` call, and a by-name `mrb_funcall_id` for every other class.
+  EMBED_GUARD_FALLBACK = %r{
+    //\ MONO_EMBED_GUARD\ :(\S+)\ ->\ (\S+)\#\S+\ [^\n]*\n
+    \s*if\ \([^\n]*\)\ \{\n
+    (?:(?!\s*//\ MONO_EMBED_GUARD)[^\n]*\n){0,12}?
+    \s*\}\ else\ \{\n
+    \s*r\d+\ =\ mrb_funcall_id\(M,\ [^,]+,\ bc2cpp_sym\(M,\ (\d+)\)
+  }x
+
+  # EMBED_GUARD_FALLBACK (docs/adr/0206): the names in `src`'s symbol table
+  # whose every use is the by-name fallback of a MONO_EMBED_GUARD for that
+  # same method, on an owner nothing subclasses. The fallback runs only when
+  # the receiver's class is not exactly the owner; with no subclass anywhere,
+  # such a receiver's method lookup never reaches the owner's method table, so
+  # it cannot need the owner's registration -- it finds the name on its own
+  # class or raises NoMethodError, registered or not. Such a use is therefore
+  # not a dynamic lookup of the owner's method.
+  def embed_guard_fallback_only(src, subclassed)
+    table = src[SYM_TABLE, 1] or return Set.new
+    names = table.scan(STRING_LITERAL).map { |(s)| unescape(s) }
+    uses = Hash.new(0)
+    src.scan(/bc2cpp_sym\(M, (\d+)\)/) { |(i)| uses[i.to_i] += 1 }
+    guarded = Hash.new(0)
+    src.scan(EMBED_GUARD_FALLBACK) do |name, owner, idx|
+      i = idx.to_i
+      next unless names[i] == name
+      next if owner.end_with?('.singleton') || subclassed?(owner, subclassed)
+
+      guarded[i] += 1
+    end
+    guarded.select { |i, n| n == uses[i] }.keys.to_set { |i| names[i] }
+  end
+
+  # Every class path something could subclass, conservatively: each
+  # superclass in the closed world, plus any constant path written after `<`,
+  # inside `Class.new(`, or anywhere in an `mrb_define_class*` call, in any
+  # scanned source. A written path may be relative, so an owner counts as
+  # subclassed when it equals one or ends with `::` plus one (`< Base` inside
+  # `RPG2k::Scene` blocks every `...::Base`).
+  def subclassed_paths(repo_root, superclass_of)
+    found = superclass_of.values.grep(String).to_set
+    ruby, native = outside_world_files(repo_root)
+    (closed_world_mrblib_srcs(repo_root) + ruby).each do |f|
+      text = File.read(f, encoding: 'BINARY')
+      text.scan(/(?:<\s*|Class\.new\(\s*)(?:::)?((?:[A-Z]\w*::)*[A-Z]\w*)/) { |(n)| found << n }
+      # A superclass the scan cannot name (`Class.new(klass)`) could be any.
+      found << ANY_CLASS if text.match?(/Class\.new\(\s*[a-z_@$]/)
+    end
+    native.each do |f|
+      text = File.read(f, encoding: 'BINARY')
+      next unless text.match?(DEFINE_CLASS)
+
+      # Native code names a Ruby superclass by string (`mrb_class_get(M,
+      # "Foo")`), possibly far from the define call: any capitalized string
+      # literal in a file that defines classes counts, as does every
+      # capitalized identifier in the define call itself.
+      text.scan(/#{DEFINE_CLASS}[^;]*/) { |call| call.scan(/\b([A-Z]\w*)\b/) { |(n)| found << n } }
+      text.scan(/"([A-Z]\w*(?:::[A-Z]\w*)*)"/) { |(n)| found << n }
+    end
+    found
+  end
+
+  ANY_CLASS = :any
+  DEFINE_CLASS = /\bmrb_define_class(?:_under)?(?:_id)?\(/
+
+  def subclassed?(owner, paths)
+    paths.include?(ANY_CLASS) || paths.any? { |p| owner == p || owner.end_with?("::#{p}") }
   end
 
   def registrations(src)
@@ -128,7 +204,8 @@ module StaticDispatchRegistrations
       ireps, root = parse_c_dump(c_src, 'static_dispatch_probe')
       blocks, files, catches = parse_disasm_blocks(disasm)
       merge!(ireps, dfs_order(ireps, root), blocks, files, catches)
-      [ireps, build_registry(ireps, root).first]
+      registry, superclass_of = build_registry(ireps, root)
+      [ireps, registry, superclass_of]
     end
   end
 
@@ -187,7 +264,8 @@ module StaticDispatchRegistrations
       [gem, { gen: out, entries: NeverCalledRegistrations.parse_compiled_entries(err),
               hand: File.read(File.join(repo_root, gem, 'src', 'register.cxx'), encoding: 'UTF-8') }]
     end
-    ireps, registry = closed_world(repo_root, mrbc)
+    ireps, registry, superclass_of = closed_world(repo_root, mrbc)
+    subclassed = subclassed_paths(repo_root, superclass_of)
 
     # Candidates: compiled entries still registered, plus ones already
     # unregistered by this mechanism (so re-running the proof after the
@@ -235,7 +313,10 @@ module StaticDispatchRegistrations
         fragments << s if s.match?(FRAGMENT)
       end
     end
-    runs.each_value { |r| dynamic.merge(c_literals(r[:gen])).merge(c_literals(r[:hand])) }
+    runs.each_value do |r|
+      dynamic.merge(c_literals(r[:gen], exempt: embed_guard_fallback_only(r[:gen], subclassed)))
+             .merge(c_literals(r[:hand]))
+    end
     dynamic.merge(outside_world_tokens(repo_root))
 
     # Which bytecode can run. No method body -- compiled or not -- runs as
