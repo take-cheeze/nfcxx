@@ -37,7 +37,9 @@ module NeverCalledRegistrations
   end
 
   # Same run as `run_bc2cpp`, returning [generated C++ (stdout), stderr].
-  def run_bc2cpp_full(gem_name, repo_root, mrbc)
+  # `hot_methods`: a hot-only build's list (ADR 0214). nil runs the full compile
+  # and clears any inherited BC2CPP_HOT_METHODS, so these analyses never see one.
+  def run_bc2cpp_full(gem_name, repo_root, mrbc, hot_methods: nil)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name) do
       raise "never_called_registrations: no such compiled gem #{gem_name.inspect} in " \
             'tools/bc2cpp/compiled_gems.rb'
@@ -61,6 +63,7 @@ module NeverCalledRegistrations
         'OTHER_OWNERS' => other_gems.values.flat_map { |g| g[:owners] }.join(','),
         'NATIVE_SRCS' => Shellwords.join(native_srcs),
         'SKIP_UNSUPPORTED' => '1',
+        'BC2CPP_HOT_METHODS' => hot_methods,
       }
       cmd = [RbConfig.ruby, bc2cpp, *closed_world_srcs]
       out, err, status = Open3.capture3(env, *cmd)

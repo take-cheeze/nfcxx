@@ -34,6 +34,7 @@ require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
 require_relative 'closed_world'
+require_relative 'hot_methods'
 
 require_relative 'integer_constants'
 require_relative 'native_construct_schema'
@@ -120,6 +121,19 @@ if $PROGRAM_NAME == __FILE__
     mono = defs.size == 1
     owners = defs.map(&:owner).join(', ')
     warn "  #{mono ? 'MONO' : 'POLY'}  :#{name}  (#{defs.size} def#{'s' unless defs.size == 1}: #{owners})"
+  end
+
+  # HOT_ONLY (ADR 0214): set before the first CodeGen, since the probes' embedding
+  # and return proofs depend on which bodies compile. Every gem's run reads the
+  # same list and registry, so all agree on which `_impl`s exist.
+  if ENV['BC2CPP_HOT_METHODS']
+    hot_methods = HotMethods.load(ENV['BC2CPP_HOT_METHODS'])
+    CodeGen.hot_only_excluded = HotMethods.excluded_labels(registry, hot_methods)
+    bytecode_methods = registry.values.flatten.count(&:irep)
+    warn ''
+    warn "== hot-only (BC2CPP_HOT_METHODS): #{hot_methods.size} listed, #{CodeGen.hot_only_excluded.size} of " \
+         "#{bytecode_methods} bytecode methods excluded =="
+    HotMethods.stale(registry, hot_methods).each { |k| warn "  STALE #{k}" }
   end
 
   arg_types = ArgTypes.analyze(ireps, registry)
@@ -593,6 +607,19 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # HOT_ONLY: listed methods that still did not compile run as bytecode; name
+  # them so a profile regeneration can see it.
+  if hot_methods
+    compiled_keys = compiled.to_set { |m| "#{m[:owner]}##{m[:name]}" }
+    lost = registry.values.flatten.select do |d|
+      d.irep && (!only_owners || only_owners.include?(d.owner)) && hot_methods.include?(HotMethods.key(d)) &&
+        !compiled_keys.include?(HotMethods.key(d))
+    end
+    warn ''
+    warn "== hot-only: listed but not compiled (#{lost.size}) =="
+    lost.map { |d| HotMethods.key(d) }.uniq.sort.each { |k| warn "  NOT_COMPILED #{k}" }
+  end
+
   puts '#include <mruby.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
@@ -759,6 +786,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_instance_tt_setup
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, BC2CPP_WIRED_EMBEDDINGS)
+  print gen.emit_hot_only_registration_stubs(compiled, only_owners: only_owners)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
