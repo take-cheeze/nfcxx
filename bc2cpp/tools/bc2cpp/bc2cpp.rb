@@ -12494,8 +12494,10 @@ class CodeGen
       suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
       suppressed << region[:except_addr]
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
-      rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types)
-      glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types)
+      saved = rescue_entry_saved_fields(irep, region)
+      rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved)
+      glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
+                                                      extra_field_values: saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
     end
 
     # BLOCK_SUPPORT: same suppressed-address/glue-at mechanism as RESCUE_
@@ -14158,6 +14160,21 @@ class CodeGen
   # block-carrying call nested in here forward one of them a level
   # further. Passed straight through to the block-fallback pass below and
   # to any nested rescue body lifted out of this one.
+  # A top-level region's ctx carries only `self` and the method's raw
+  # arguments, which is its whole live-in state only when begin_addr is the
+  # first instruction after ENTER. recognize_rescue_regions also admits a
+  # region entered by an explicit branch landing on begin_addr -- an
+  # optional argument's default (`def drive_battle(it = @interpreter)`,
+  # where r1 is the default, not the raw nil parameter) or an `if ...;
+  # return; end` guard -- and then any register may already hold a value.
+  # Capture the whole register file by value in that case, the way
+  # NESTED_RESCUE_SUPPORT already does for a nested region.
+  def rescue_entry_saved_fields(irep, region)
+    return [] if irep.instructions.all? { |insn| insn.addr >= region[:begin_addr] || insn.op == 'ENTER' }
+
+    (1...irep.nregs).map { |i| { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' } }
+  end
+
   def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
                            available_upvars: [])
     ctx_struct = "#{try_name}_Ctx"
@@ -14276,8 +14293,11 @@ class CodeGen
     # recomputed.
     saved_regs = (1...irep.nregs).to_a
     nested_saved_fields = saved_regs.map { |i| { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' } }
-    nested_extra_fields = extra_fields + nested_saved_fields
-    nested_extra_values = extra_fields.map { |f| f[:name] } + saved_regs.map { |i| "r#{i}" }
+    # This body's own saved-register fields (rescue_entry_saved_fields) are
+    # superseded by the fresh capture, not inherited twice.
+    inherited_fields = extra_fields.reject { |f| f[:name].start_with?('bc2cpp_saved_r') }
+    nested_extra_fields = inherited_fields + nested_saved_fields
+    nested_extra_values = inherited_fields.map { |f| f[:name] } + saved_regs.map { |i| "r#{i}" }
     nested_rescue_regions.each_with_index do |nregion, ni|
       # (already pre-claimed into local_suppressed above, before the
       # block-fallback pass ran -- not re-merged here.)
@@ -14306,6 +14326,12 @@ class CodeGen
         # value `_impl`'s own real `self` had at begin_addr.
         out << "  mrb_value self = ctx->self;\n"
         out << "  mrb_value r0 = self;\n"
+      elsif (saved = extra_fields.find { |f| f[:name] == "bc2cpp_saved_r#{i}" })
+        # A saved-register capture (a nested region's, or a top-level
+        # region entered after other code ran -- rescue_entry_saved_fields)
+        # is the register's real value at begin_addr, so it wins over the
+        # raw argument, which an optional default may have replaced.
+        out << "  mrb_value r#{i} = #{saved[:name]};\n"
       elsif i <= arg_names.size
         a = arg_names[i - 1]
         t = arg_native_types[i - 1]
@@ -14315,18 +14341,7 @@ class CodeGen
                   "  mrb_value r#{i} = ctx->#{a};\n"
                 end
       else
-        # NESTED_RESCUE_SUPPORT: a saved-register capture field (see this
-        # method's own nested-extraction pass above) takes priority over
-        # the ordinary nil default -- this register's real value at the
-        # point the enclosing region's own nested rescue was reached,
-        # already restored into a same-named local by the `extra_fields`
-        # loop above, exactly like `bc2cpp_upvar_N` already is.
-        saved = extra_fields.find { |f| f[:name] == "bc2cpp_saved_r#{i}" }
-        out << if saved
-                  "  mrb_value r#{i} = #{saved[:name]};\n"
-                else
-                  "  mrb_value r#{i} = mrb_nil_value();\n"
-                end
+        out << "  mrb_value r#{i} = mrb_nil_value();\n"
       end
     end
     body_targets = jump_targets(irep).select { |t| t >= region[:begin_addr] && t <= region[:end_addr] } -
@@ -20014,10 +20029,13 @@ class CodeGen
       # calls) is about to emit references to.
       extra_fields = upvar_regs.map { |(l, b)| { name: upvar_var_name(l, b), c_type: 'mrb_value*' } }
       extra_fields += [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] if needs_blk
+      saved = rescue_entry_saved_fields(block_irep, rregion)
       nested_pre << emit_rescue_try_body(try_name, rregion, block_irep, d, arg_names, Array.new(arg_names.size),
-                                          extra_fields: extra_fields, available_upvars: upvar_regs)
-      nested_glue_at[rregion[:begin_addr]] = emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
-                                                                extra_field_values: extra_fields.map { |f| f[:name] })
+                                          extra_fields: extra_fields + saved, available_upvars: upvar_regs)
+      nested_glue_at[rregion[:begin_addr]] =
+        emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
+                         extra_field_values: extra_fields.map { |f| f[:name] } +
+                                             saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
     end
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: same `targets - (suppressed -
