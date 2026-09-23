@@ -47,8 +47,7 @@ module SymbolCache
     code.gsub(INTERN) { "bc2cpp_sym(M, #{table.index_for(Regexp.last_match(1))})" }
   end
 
-  # `mrb_funcall(M, RECV, "name", N, ...)` -> `mrb_funcall_id(M, RECV,
-  # bc2cpp_sym(M, i), N, ...)`. RECV is an arbitrary C++ expression, so the
+  # `mrb_funcall(M, RECV, "name", N, ...)` -> `bc2cpp_send(M, RECV, i, N, ...)`. RECV is an arbitrary C++ expression, so the
   # receiver is delimited with a bracket/quote-aware scan; a call whose name is
   # not a plain string literal is left alone.
   def rewrite_funcalls(code, table)
@@ -62,8 +61,7 @@ module SymbolCache
         # The receiver may itself contain a funcall; rewrite it first so its
         # names take their slots before this call's own.
         receiver = rewrite_funcalls(code[head_end...recv_end], table)
-        out << code[pos...start] << "mrb_funcall_id(M, #{receiver}, " \
-                                    "bc2cpp_sym(M, #{table.index_for(name[1])}),"
+        out << code[pos...start] << "bc2cpp_send(M, #{receiver}, #{table.index_for(name[1])},"
         pos = recv_end + name[0].length
       else
         out << code[pos...head_end]
@@ -71,6 +69,21 @@ module SymbolCache
       end
     end
     out << code[pos..]
+  end
+
+  # The symbol index of every `bc2cpp_send(M, RECV, i, ...)` in `code`, found
+  # with the same receiver scan the rewrite uses (RECV may nest sends).
+  def send_indices(code)
+    found = []
+    pos = 0
+    while (start = code.index(/\bbc2cpp_send\(M,\s*/, pos))
+      head_end = Regexp.last_match.end(0)
+      recv_end = expression_end(code, head_end)
+      idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*,/, 1]
+      found << idx.to_i if idx
+      pos = head_end
+    end
+    found
   end
 
   # Index of the top-level `,` (or closing `)`) ending the expression that
@@ -124,6 +137,17 @@ module SymbolCache
         mrb_sym s = bc2cpp_syms[i];
         if (!s) s = bc2cpp_syms[i] = mrb_intern_cstr(M, bc2cpp_sym_names[i]);
         return s;
+      }
+      // mrb_funcall_id with the symbol lookup folded in, so a dynamic call site is one
+      // call. Same argc limit and error as mruby's (MRB_FUNCALL_ARGC_MAX, src/vm.c).
+      static mrb_value bc2cpp_send(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+        mrb_value argv[16];
+        if (argc > 16) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "ArgumentError")), "Too long arguments. (limit=16)");
+        va_list ap;
+        va_start(ap, argc);
+        for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+        va_end(ap);
+        return mrb_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
 
     CPP
