@@ -91,61 +91,111 @@ class CodeGen
     nested
   end
 
+  # INLINE_NESTED_BLOCK_SUPPORT: the compiled body of one inlined block, or nil
+  # if any instruction is unclean (a loop is never emitted partially; the caller
+  # then leaves BLOCK/SENDB as `#error`). Nested block calls are claimed first
+  # (inline_nested_block_pass) and consumed by compile_block_body_insn through
+  # `@inline_nested`, which is saved and restored, not cleared: compile_method is
+  # re-entrant (compiles_clean? -> monomorphic_target -> compile_send ->
+  # compile_insn can re-enter it from the body loop), and clearing would disarm
+  # an enclosing body's map. The nested cfunc code reaches @inline_nested_pre
+  # only on success; a failed region would leave it unreferenced.
+  # `break_label` wires BREAK to the destination register; `result_var` and
+  # `broke_flag` select compile_collect_body_insn; `elem_reg` is the block
+  # register bound to the loop element (ELEMENT_CLASS_SUPPORT); `hash_capture`
+  # scopes inline_hash_capture_hints over the instructions only, not the nested
+  # pass.
+  def compile_inline_block_body(region, irep, d, iter_label, break_label: nil, result_var: nil, broke_flag: nil,
+                                elem_reg: nil, hash_capture: false)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    break_dest = break_label ? region[:dest_reg] : nil
+    label_prefix = "LBLK#{region[:block_addr]}_"
+    compile_insn = lambda do |insn, i|
+      if result_var
+        compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                  result_var: result_var, break_dest: break_dest, break_label: break_label,
+                                  broke_flag: broke_flag, idx: i)
+      else
+        compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
+                                break_dest: break_dest, break_label: break_label, idx: i)
+      end
+    end
+
+    saved_nested = @inline_nested
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
+    body = String.new
+    compile_all = lambda do
+      block_irep.instructions.each_with_index do |insn, i|
+        next if insn.op == 'ENTER'
+
+        body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+        code = if elem_reg
+                 with_element_hint(block_irep, insn, i, elem_reg, region[:elem_class]) { compile_insn.call(insn, i) }
+               else
+                 compile_insn.call(insn, i)
+               end
+        body << '  ' << code
+      end
+    end
+    if hash_capture
+      with_block_hash_capture_hints(inline_hash_capture_hints(irep, region), &compile_all)
+    else
+      compile_all.call
+    end
+    nested_pre = @inline_nested.pre
+    @inline_nested = saved_nested
+    return nil if body.include?('#error')
+
+    @inline_nested_pre << nested_pre
+    body
+  end
+
+  # The declarations opening every iteration: block registers reset to nil, as
+  # a fresh block activation would be, and R0 (the block's self, never
+  # renumbered) aliased to `self`, which GETIV/SETIV codegen names directly.
+  def inline_block_frame(block_irep, offset)
+    out = String.new
+    (1...block_irep.nregs).each { |i| out << "      mrb_value r#{i + offset} = mrb_nil_value();\n" }
+    out << "      mrb_value r#{offset} = self;\n"
+  end
+
+  # Not E_TYPE_ERROR: that macro hardcodes `mrb`; generated code names it `M`.
+  def inline_raise(exc_class, message)
+    "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"bc2cpp: #{message}\");"
+  end
+
+  # A tripwire, not a fallback: the recognizer's gate should make it unreachable,
+  # and mrb_funcall cannot pass a block (why ADR 0147 rejected proc-wrapping).
+  def inline_receiver_guard(predicate, recv_expr, expected)
+    "    if (!#{predicate}(#{recv_expr})) { #{inline_raise('TypeError', "expected #{expected}")} }\n"
+  end
+
+  # SSENDB (a self-receiver call) iterates `self`, not a register.
+  def inline_recv_expr(region) = region[:ssendb] ? 'self' : "r#{region[:dest_reg]}"
+
   # BLOCK_SUPPORT: the inlined loop for one `.times` region, or nil if the body
-  # is not clean (never emitted partially; the caller then leaves BLOCK/SENDB as
-  # `#error`).
-  # `offset` (the method's nregs) keeps block registers apart. R0 (the block's
-  # self, the method's self) is aliased to `self`, which GETIV/SETIV codegen
-  # names directly. Other block registers are reset to nil at the top of EVERY
-  # iteration, as a fresh block activation would be.
+  # is not clean. `offset` (the method's nregs) keeps block registers apart.
   def emit_times_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
     dest_reg = region[:dest_reg]
     param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    body = String.new
-    iter_label = "Lbc2cpp_times_iter_#{region[:block_addr]}"
-    # INLINE_NESTED_BLOCK_SUPPORT: claim nested block calls before compiling the
-    # body (inline_nested_block_pass); compile_block_body_insn consumes
-    # `@inline_nested`. Saved and restored, not cleared: compile_method is
-    # re-entrant (compiles_clean? -> monomorphic_target -> compile_send ->
-    # compile_insn can re-enter it from this body loop), and clearing would disarm
-    # an enclosing body's map.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix, idx: i)
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return so the ivar
-    # never outlives this loop. The nested cfunc code goes to compile_method only
-    # on success; a failed region would leave it unreferenced.
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_times_iter_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label)
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    # Not E_TYPE_ERROR: that macro hardcodes `mrb`; generated code names it `M`.
-    out << "    if (!mrb_integer_p(r#{dest_reg})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Integer receiver for inlined #times\"); }\n"
-    out << "    mrb_int bc2cpp_times_n_#{region[:block_addr]} = mrb_integer(r#{dest_reg});\n"
-    out << "    for (mrb_int bc2cpp_times_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_times_i_#{region[:block_addr]} < bc2cpp_times_n_#{region[:block_addr]}; " \
-           "++bc2cpp_times_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{region[:block_addr]});\n"
+    out << inline_receiver_guard('mrb_integer_p', "r#{dest_reg}", 'Integer receiver for inlined #times')
+    out << "    mrb_int bc2cpp_times_n_#{addr} = mrb_integer(r#{dest_reg});\n"
+    out << "    for (mrb_int bc2cpp_times_i_#{addr} = 0; " \
+           "bc2cpp_times_i_#{addr} < bc2cpp_times_n_#{addr}; " \
+           "++bc2cpp_times_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -159,62 +209,32 @@ class CodeGen
   #   - LIVE length: `i < RARRAY_LEN(recv)` every iteration, as array.c does;
   #     Array#each visits elements pushed during iteration. Elements via
   #     mrb_ary_ref.
-  #   - An mrb_array_p raise-guard (a tripwire; the recognizer's gate should
-  #     make it unreachable). Not an mrb_funcall fallback: mrb_funcall cannot
-  #     pass a block (the reason ADR 0147 rejected proc-wrapping). Unproven
-  #     sites stay interpreted.
+  #   - An mrb_array_p guard (inline_receiver_guard). Unproven sites stay
+  #     interpreted.
   #   - BREAK wired (break_dest/break_label). A completed loop leaves the
   #     receiver in the destination, which is what Array#each returns.
   def emit_each_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
-    dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_each_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_each_end_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    capture_hints = inline_hash_capture_hints(irep, region)
-    with_block_hash_capture_hints(capture_hints) do
-      block_irep.instructions.each_with_index do |insn, i|
-        next if insn.op == 'ENTER'
-
-        body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-        # ELEMENT_CLASS_SUPPORT: the block's single parameter R1 is bound to the
-        # element below, so R1 is the loop element.
-        with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
-          body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                  break_dest: dest_reg, break_label: break_label, idx: i)
-        end
-      end
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_each_iter_#{addr}"
+    break_label = "Lbc2cpp_each_end_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: the block's single parameter R1 is bound to the
+    # element below, so R1 is the loop element.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, elem_reg: '1',
+                                                                  hash_capture: true)
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined #each\"); }\n"
-    out << "    for (mrb_int bc2cpp_each_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_each_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
-           "++bc2cpp_each_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{region[:block_addr]});\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each')
+    out << "    for (mrb_int bc2cpp_each_i_#{addr} = 0; " \
+           "bc2cpp_each_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_each_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -229,46 +249,22 @@ class CodeGen
   def emit_each_index_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
-    dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_eachidx_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_eachidx_end_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                              break_dest: dest_reg, break_label: break_label, idx: i)
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_eachidx_iter_#{addr}"
+    break_label = "Lbc2cpp_eachidx_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined #each_index\"); }\n"
-    out << "    for (mrb_int bc2cpp_eachidx_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_eachidx_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
-           "++bc2cpp_eachidx_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_eachidx_i_#{region[:block_addr]});\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, 'Array receiver for inlined #each_index')
+    out << "    for (mrb_int bc2cpp_eachidx_i_#{addr} = 0; " \
+           "bc2cpp_eachidx_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_eachidx_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_eachidx_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -284,61 +280,33 @@ class CodeGen
   #     iteration cannot affect the loop.
   #   - Key and value are assigned directly to the block's R1/R2 (as the
   #     reduce/inject fold does).
-  # An mrb_hash_p raise-guard; BREAK wired; returns the receiver.
+  # An mrb_hash_p guard; BREAK wired; returns the receiver.
   def emit_hash_each_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
-    dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     key_reg = 1 + offset
     val_reg = 2 + offset # the block's own two mandatory args, R1/R2 in its own numbering.
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_heach_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_heach_end_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      # HASH_ELEMENT_SUPPORT: R2 is bound to the value below, so R2 is the loop value
-      # (values only; see HashElementLayout).
-      with_element_hint(block_irep, insn, i, '2', region[:elem_class]) do
-        body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                 break_dest: dest_reg, break_label: break_label, idx: i)
-      end
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_heach_iter_#{addr}"
+    break_label = "Lbc2cpp_heach_end_#{addr}"
+    # HASH_ELEMENT_SUPPORT: R2 is bound to the value below, so R2 is the loop value
+    # (values only; see HashElementLayout).
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, elem_reg: '2')
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_hash_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Hash receiver for inlined #each\"); }\n"
-    out << "    mrb_value bc2cpp_heach_keys_#{region[:block_addr]} = mrb_hash_keys(M, #{recv_expr});\n"
-    out << "    mrb_value bc2cpp_heach_vals_#{region[:block_addr]} = mrb_hash_values(M, #{recv_expr});\n"
-    out << "    mrb_int bc2cpp_heach_len_#{region[:block_addr]} = mrb_hash_size(M, #{recv_expr});\n"
-    out << "    for (mrb_int bc2cpp_heach_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_heach_i_#{region[:block_addr]} < bc2cpp_heach_len_#{region[:block_addr]}; " \
-           "++bc2cpp_heach_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_keys_#{region[:block_addr]}, " \
-           "bc2cpp_heach_i_#{region[:block_addr]});\n"
-    out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{region[:block_addr]}, " \
-           "bc2cpp_heach_i_#{region[:block_addr]});\n"
+    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each')
+    out << "    mrb_value bc2cpp_heach_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
+    out << "    mrb_value bc2cpp_heach_vals_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
+    out << "    mrb_int bc2cpp_heach_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_heach_i_#{addr} = 0; " \
+           "bc2cpp_heach_i_#{addr} < bc2cpp_heach_len_#{addr}; " \
+           "++bc2cpp_heach_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_keys_#{addr}, bc2cpp_heach_i_#{addr});\n"
+    out << "      r#{val_reg} = bc2cpp_ary_entry(M, bc2cpp_heach_vals_#{addr}, bc2cpp_heach_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -353,49 +321,24 @@ class CodeGen
   def emit_each_key_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
-    dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     key_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_ekey_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_ekey_end_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                               break_dest: dest_reg, break_label: break_label, idx: i)
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_ekey_iter_#{addr}"
+    break_label = "Lbc2cpp_ekey_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_hash_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Hash receiver for inlined #each_key\"); }\n"
-    out << "    mrb_value bc2cpp_ekey_keys_#{region[:block_addr]} = mrb_hash_keys(M, #{recv_expr});\n"
-    out << "    mrb_int bc2cpp_ekey_len_#{region[:block_addr]} = mrb_hash_size(M, #{recv_expr});\n"
-    out << "    for (mrb_int bc2cpp_ekey_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_ekey_i_#{region[:block_addr]} < bc2cpp_ekey_len_#{region[:block_addr]}; " \
-           "++bc2cpp_ekey_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero? # R0: the block's own `self` -- aliased below, never renumbered.
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
-    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{region[:block_addr]}, " \
-           "bc2cpp_ekey_i_#{region[:block_addr]});\n"
+    out << inline_receiver_guard('mrb_hash_p', recv_expr, 'Hash receiver for inlined #each_key')
+    out << "    mrb_value bc2cpp_ekey_keys_#{addr} = mrb_hash_keys(M, #{recv_expr});\n"
+    out << "    mrb_int bc2cpp_ekey_len_#{addr} = mrb_hash_size(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_ekey_i_#{addr} = 0; " \
+           "bc2cpp_ekey_i_#{addr} < bc2cpp_ekey_len_#{addr}; " \
+           "++bc2cpp_ekey_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{key_reg} = bc2cpp_ary_entry(M, bc2cpp_ekey_keys_#{addr}, bc2cpp_ekey_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
@@ -418,52 +361,28 @@ class CodeGen
   def emit_range_each_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
-    dest_reg = region[:dest_reg]
-    recv = "r#{dest_reg}"
+    recv = "r#{region[:dest_reg]}"
     param_reg = 1 + offset
     addr = region[:block_addr]
-
-    label_prefix = "LBLK#{addr}_"
     iter_label = "Lbc2cpp_range_iter_#{addr}"
     break_label = "Lbc2cpp_range_end_#{addr}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      body << '  ' << compile_block_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                              break_dest: dest_reg, break_label: break_label, idx: i)
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_range_p(#{recv})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Range receiver for inlined #each\"); }\n"
+    out << inline_receiver_guard('mrb_range_p', recv, 'Range receiver for inlined #each')
     out << "    mrb_value bc2cpp_range_b_#{addr} = mrb_range_beg(M, #{recv});\n"
     out << "    mrb_value bc2cpp_range_e_#{addr} = mrb_range_end(M, #{recv});\n"
-    out << "    if (!mrb_integer_p(bc2cpp_range_b_#{addr}) || !mrb_integer_p(bc2cpp_range_e_#{addr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: non-Integer Range#each left to interpreter\"); }\n"
+    out << "    if (!mrb_integer_p(bc2cpp_range_b_#{addr}) || !mrb_integer_p(bc2cpp_range_e_#{addr})) { " \
+           "#{inline_raise('TypeError', 'non-Integer Range#each left to interpreter')} }\n"
     out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(bc2cpp_range_b_#{addr});\n"
     out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(bc2cpp_range_e_#{addr});\n"
     out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
     out << "    for (mrb_int bc2cpp_range_i_#{addr} = bc2cpp_range_a_#{addr}; " \
            "bc2cpp_range_x_#{addr} ? bc2cpp_range_i_#{addr} < bc2cpp_range_z_#{addr} : bc2cpp_range_i_#{addr} <= bc2cpp_range_z_#{addr}; " \
            "++bc2cpp_range_i_#{addr}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero?
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
+    out << inline_block_frame(block_irep, offset)
     out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_range_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
@@ -488,64 +407,38 @@ class CodeGen
     block_irep = region[:block_irep]
     offset = irep.nregs
     dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     meth = region[:method_name]
     param_reg = 1 + offset
     param2_reg = 2 + offset # each_with_index's own index arg, R2 in block numbering.
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_collect_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_collect_end_#{region[:block_addr]}"
-    result_var = "bc2cpp_collect_v_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      # ELEMENT_CLASS_SUPPORT: R1 is the element for every admitted method;
-      # each_with_index's R2 (the index) is not hinted.
-      with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
-        body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                  result_var: result_var, break_dest: dest_reg,
-                                                  break_label: break_label,
-                                                  broke_flag: "bc2cpp_collect_broke_#{region[:block_addr]}", idx: i)
-      end
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_collect_iter_#{addr}"
+    break_label = "Lbc2cpp_collect_end_#{addr}"
+    result_var = "bc2cpp_collect_v_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: R1 is the element for every admitted method;
+    # each_with_index's R2 (the index) is not hinted.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: "bc2cpp_collect_broke_#{addr}", elem_reg: '1')
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
-    out << "    mrb_value bc2cpp_collect_acc_#{region[:block_addr]} = mrb_ary_new(M);\n" if %w[map select reject flat_map filter_map].include?(meth)
-    out << "    mrb_value bc2cpp_collect_found_#{region[:block_addr]} = mrb_nil_value();\n" if meth == 'find'
-    out << "    mrb_bool bc2cpp_collect_broke_#{region[:block_addr]} = FALSE;\n" if meth != 'each_with_index'
-    out << "    for (mrb_int bc2cpp_collect_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_collect_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
-           "++bc2cpp_collect_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero?
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
+    out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject flat_map filter_map].include?(meth)
+    out << "    mrb_value bc2cpp_collect_found_#{addr} = mrb_nil_value();\n" if meth == 'find'
+    out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index'
+    out << "    for (mrb_int bc2cpp_collect_i_#{addr} = 0; " \
+           "bc2cpp_collect_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_collect_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{region[:block_addr]});\n"
-    out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{region[:block_addr]});\n" if meth == 'each_with_index'
+    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_collect_i_#{addr});\n"
+    out << "      r#{param2_reg} = mrb_fixnum_value(bc2cpp_collect_i_#{addr});\n" if meth == 'each_with_index'
     out << body
     out << "      #{iter_label}:;\n"
     case meth
     when 'map'
-      out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
+      out << "      mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
     when 'flat_map'
       # INTERP_UNLOCK: mruby's flat_map (mruby-enum-ext enum.rb) pushes a yielded
       # value whole unless it responds to `each`, else pushes its elements (one
@@ -555,24 +448,24 @@ class CodeGen
       # So yielding a non-Array each-responder raises here where the VM would
       # expand it: a deliberate narrowing (the game's flat_map blocks yield Arrays).
       out << "      if (mrb_test(mrb_funcall(M, #{result_var}, \"respond_to?\", 1, mrb_symbol_value(mrb_intern_cstr(M, \"each\"))))) {\n"
-      out << "      if (!mrb_array_p(#{result_var})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: flat_map yielded non-Array\"); }\n"
-      out << "      mrb_int bc2cpp_collect_fm_n_#{region[:block_addr]} = RARRAY_LEN(#{result_var});\n"
-      out << "      for (mrb_int bc2cpp_collect_fm_i_#{region[:block_addr]} = 0; bc2cpp_collect_fm_i_#{region[:block_addr]} < bc2cpp_collect_fm_n_#{region[:block_addr]}; ++bc2cpp_collect_fm_i_#{region[:block_addr]}) {\n"
-      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, bc2cpp_ary_entry(M, #{result_var}, bc2cpp_collect_fm_i_#{region[:block_addr]}));\n"
+      out << "      if (!mrb_array_p(#{result_var})) { #{inline_raise('TypeError', 'flat_map yielded non-Array')} }\n"
+      out << "      mrb_int bc2cpp_collect_fm_n_#{addr} = RARRAY_LEN(#{result_var});\n"
+      out << "      for (mrb_int bc2cpp_collect_fm_i_#{addr} = 0; bc2cpp_collect_fm_i_#{addr} < bc2cpp_collect_fm_n_#{addr}; ++bc2cpp_collect_fm_i_#{addr}) {\n"
+      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, bc2cpp_ary_entry(M, #{result_var}, bc2cpp_collect_fm_i_#{addr}));\n"
       out << "      }\n"
       out << "      } else {\n"
-      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
+      out << "        mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
       out << "      }\n"
     when 'select'
-      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, r#{param_reg});\n"
+      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, r#{param_reg});\n"
     when 'reject'
-      out << "      if (!mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, r#{param_reg});\n"
+      out << "      if (!mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, r#{param_reg});\n"
     when 'find'
-      out << "      if (mrb_test(#{result_var})) { bc2cpp_collect_found_#{region[:block_addr]} = r#{param_reg}; goto #{break_label}; }\n"
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_collect_found_#{addr} = r#{param_reg}; goto #{break_label}; }\n"
     when 'filter_map'
       # filter_map pushes the block's RESULT when truthy (Enumerable#filter_map
       # reassigns `x = blk.call(*x)` before `ary.push x if x`).
-      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{region[:block_addr]}, #{result_var});\n"
+      out << "      if (mrb_test(#{result_var})) mrb_ary_push(M, bc2cpp_collect_acc_#{addr}, #{result_var});\n"
     end
     out << "    }\n"
     out << "    #{break_label}:;\n"
@@ -582,12 +475,12 @@ class CodeGen
     # elements are popped during iteration. each_with_index needs neither the flag
     # nor the assignment.
     if meth != 'each_with_index'
-      out << "    if (!bc2cpp_collect_broke_#{region[:block_addr]}) {\n"
+      out << "    if (!bc2cpp_collect_broke_#{addr}) {\n"
       case meth
       when 'map', 'select', 'reject', 'flat_map', 'filter_map'
-        out << "    r#{dest_reg} = bc2cpp_collect_acc_#{region[:block_addr]};\n"
+        out << "    r#{dest_reg} = bc2cpp_collect_acc_#{addr};\n"
       when 'find'
-        out << "    r#{dest_reg} = bc2cpp_collect_found_#{region[:block_addr]};\n"
+        out << "    r#{dest_reg} = bc2cpp_collect_found_#{addr};\n"
       end
       out << "    }\n"
     end
@@ -609,96 +502,71 @@ class CodeGen
     block_irep = region[:block_irep]
     offset = irep.nregs
     dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     meth = region[:method_name]
     is_fold = !region[:init_reg].nil?
     param_reg = 1 + offset
     param2_reg = 2 + offset
-    acc_var = "bc2cpp_accum_acc_#{region[:block_addr]}"
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_accum_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_accum_end_#{region[:block_addr]}"
-    result_var = "bc2cpp_accum_v_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      # ELEMENT_CLASS_SUPPORT: predicates take the element in R1; a fold takes the
-      # accumulator in R1 and the element in R2. Read from the same `is_fold` flag
-      # as the binding below.
-      with_element_hint(block_irep, insn, i, is_fold ? '2' : '1', region[:elem_class]) do
-        body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                  result_var: result_var, break_dest: dest_reg,
-                                                  break_label: break_label,
-                                                  broke_flag: "bc2cpp_accum_broke_#{region[:block_addr]}", idx: i)
-      end
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
+    addr = region[:block_addr]
+    acc_var = "bc2cpp_accum_acc_#{addr}"
+    iter_label = "Lbc2cpp_accum_iter_#{addr}"
+    break_label = "Lbc2cpp_accum_end_#{addr}"
+    result_var = "bc2cpp_accum_v_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: predicates take the element in R1; a fold takes the
+    # accumulator in R1 and the element in R2. Read from the same `is_fold` flag
+    # as the binding below.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: "bc2cpp_accum_broke_#{addr}",
+                                                                  elem_reg: is_fold ? '2' : '1')
+    return nil unless body
 
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
-    out << "    mrb_bool bc2cpp_accum_broke_#{region[:block_addr]} = FALSE;\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
+    out << "    mrb_bool bc2cpp_accum_broke_#{addr} = FALSE;\n"
     case meth
     when 'any?'
-      out << "    mrb_value bc2cpp_accum_res_#{region[:block_addr]} = mrb_false_value();\n"
+      out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_false_value();\n"
     when 'all?', 'none?'
-      out << "    mrb_value bc2cpp_accum_res_#{region[:block_addr]} = mrb_true_value();\n"
+      out << "    mrb_value bc2cpp_accum_res_#{addr} = mrb_true_value();\n"
     when 'count'
-      out << "    mrb_int bc2cpp_accum_n_#{region[:block_addr]} = 0;\n"
+      out << "    mrb_int bc2cpp_accum_n_#{addr} = 0;\n"
     when 'reduce', 'inject'
       out << "    mrb_value #{acc_var} = r#{region[:init_reg]};\n"
     end
-    out << "    for (mrb_int bc2cpp_accum_i_#{region[:block_addr]} = 0; " \
-           "bc2cpp_accum_i_#{region[:block_addr]} < RARRAY_LEN(#{recv_expr}); " \
-           "++bc2cpp_accum_i_#{region[:block_addr]}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero?
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
+    out << "    for (mrb_int bc2cpp_accum_i_#{addr} = 0; " \
+           "bc2cpp_accum_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
+           "++bc2cpp_accum_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     if is_fold
       out << "      r#{param_reg} = #{acc_var};\n"
-      out << "      r#{param2_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+      out << "      r#{param2_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
     else
-      out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{region[:block_addr]});\n"
+      out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_accum_i_#{addr});\n"
     end
     out << body
     out << "      #{iter_label}:;\n"
     case meth
     when 'any?'
-      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{region[:block_addr]} = mrb_true_value(); goto #{break_label}; }\n"
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_true_value(); goto #{break_label}; }\n"
     when 'all?'
-      out << "      if (!mrb_test(#{result_var})) { bc2cpp_accum_res_#{region[:block_addr]} = mrb_false_value(); goto #{break_label}; }\n"
+      out << "      if (!mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_false_value(); goto #{break_label}; }\n"
     when 'none?'
-      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{region[:block_addr]} = mrb_false_value(); goto #{break_label}; }\n"
+      out << "      if (mrb_test(#{result_var})) { bc2cpp_accum_res_#{addr} = mrb_false_value(); goto #{break_label}; }\n"
     when 'count'
-      out << "      if (mrb_test(#{result_var})) ++bc2cpp_accum_n_#{region[:block_addr]};\n"
+      out << "      if (mrb_test(#{result_var})) ++bc2cpp_accum_n_#{addr};\n"
     when 'reduce', 'inject'
       out << "      #{acc_var} = #{result_var};\n"
     end
     out << "    }\n"
     out << "    #{break_label}:;\n"
-    out << "    if (!bc2cpp_accum_broke_#{region[:block_addr]}) {\n"
+    out << "    if (!bc2cpp_accum_broke_#{addr}) {\n"
     case meth
     when 'any?', 'all?', 'none?'
-      out << "    r#{dest_reg} = bc2cpp_accum_res_#{region[:block_addr]};\n"
+      out << "    r#{dest_reg} = bc2cpp_accum_res_#{addr};\n"
     when 'count'
-      out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_accum_n_#{region[:block_addr]});\n"
+      out << "    r#{dest_reg} = mrb_fixnum_value(bc2cpp_accum_n_#{addr});\n"
     when 'reduce', 'inject'
       out << "    r#{dest_reg} = #{acc_var};\n"
     end
@@ -746,7 +614,7 @@ class CodeGen
   # Live length and mrb_array_p guard as in emit_each_inline.
   def emit_sym_inline(region, _irep, _d)
     dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     meth = region[:method_name]
     sym = region[:sym_name]
     return nil unless SYM_BLOCK_METHODS.include?(meth)
@@ -755,7 +623,7 @@ class CodeGen
     end_label = "Lbc2cpp_sym_end_#{region[:sym_addr]}"
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined &:#{sym}\"); }\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined &:#{sym}")
     case meth
     when 'map', 'select', 'reject'
       out << "    mrb_value bc2cpp_sym_acc_#{region[:sym_addr]} = mrb_ary_new(M);\n"
@@ -895,53 +763,26 @@ class CodeGen
     block_irep = region[:block_irep]
     offset = irep.nregs
     dest_reg = region[:dest_reg]
-    recv_expr = region[:ssendb] ? 'self' : "r#{dest_reg}"
+    recv_expr = inline_recv_expr(region)
     meth = region[:method_name]
     param_reg = 1 + offset
-
-    label_prefix = "LBLK#{region[:block_addr]}_"
-    iter_label = "Lbc2cpp_sort_iter_#{region[:block_addr]}"
-    break_label = "Lbc2cpp_sort_end_#{region[:block_addr]}"
-    result_var = "bc2cpp_sort_v_#{region[:block_addr]}"
-    body = String.new
-    # INLINE_NESTED_BLOCK_SUPPORT: save/claim/restore as in emit_times_inline.
-    bc2cpp_saved_nested = @inline_nested
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
-    block_irep.instructions.each_with_index do |insn, i|
-      next if insn.op == 'ENTER'
-
-      body << "    #{label_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
-      # ELEMENT_CLASS_SUPPORT: a sort_by/uniq key block takes the element as R1.
-      with_element_hint(block_irep, insn, i, '1', region[:elem_class]) do
-        body << '  ' << compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
-                                                  result_var: result_var, break_dest: dest_reg,
-                                                  break_label: break_label,
-                                                  broke_flag: "bc2cpp_sort_broke_#{region[:block_addr]}", idx: i)
-      end
-    end
-    # INLINE_NESTED_BLOCK_SUPPORT: restore before the early return (see
-    # emit_times_inline).
-    bc2cpp_nested_pre = @inline_nested.pre
-    @inline_nested = bc2cpp_saved_nested
-    return nil if body.include?('#error')
-
-    @inline_nested_pre << bc2cpp_nested_pre
-
     addr = region[:block_addr]
+    iter_label = "Lbc2cpp_sort_iter_#{addr}"
+    break_label = "Lbc2cpp_sort_end_#{addr}"
+    result_var = "bc2cpp_sort_v_#{addr}"
+    # ELEMENT_CLASS_SUPPORT: a sort_by/uniq key block takes the element as R1.
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, result_var: result_var,
+                                                                  broke_flag: "bc2cpp_sort_broke_#{addr}", elem_reg: '1')
+    return nil unless body
+
     out = String.new
     out << "  {\n"
-    out << "    if (!mrb_array_p(#{recv_expr})) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: expected Array receiver for inlined ##{meth}\"); }\n"
+    out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
     out << "    mrb_bool bc2cpp_sort_broke_#{addr} = FALSE;\n"
     out << "    mrb_int bc2cpp_sort_n_#{addr} = RARRAY_LEN(#{recv_expr});\n"
     out << "    mrb_value bc2cpp_sort_keys_#{addr} = mrb_ary_new_capa(M, bc2cpp_sort_n_#{addr});\n"
     out << "    for (mrb_int bc2cpp_sort_i_#{addr} = 0; bc2cpp_sort_i_#{addr} < RARRAY_LEN(#{recv_expr}); ++bc2cpp_sort_i_#{addr}) {\n"
-    (0...block_irep.nregs).each do |i|
-      next if i.zero?
-
-      out << "      mrb_value r#{i + offset} = mrb_nil_value();\n"
-    end
-    out << "      mrb_value r#{offset} = self;\n"
+    out << inline_block_frame(block_irep, offset)
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
     out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_sort_i_#{addr});\n"
     out << body
@@ -980,7 +821,7 @@ class CodeGen
     out << "        mrb_value bc2cpp_sort_kb_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 0);\n"
     out << "        mrb_value bc2cpp_sort_ib_#{addr} = bc2cpp_ary_entry(M, bc2cpp_sort_tmp_#{addr}, 1);\n"
     out << "        mrb_int bc2cpp_sort_c_#{addr} = mrb_cmp(M, bc2cpp_sort_kb_#{addr}, bc2cpp_sort_ka_#{addr});\n"
-    out << "        if (bc2cpp_sort_c_#{addr} == -2) { mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"ArgumentError\")), \"bc2cpp: sort_by comparison failed\"); }\n"
+    out << "        if (bc2cpp_sort_c_#{addr} == -2) { #{inline_raise('ArgumentError', 'sort_by comparison failed')} }\n"
     out << "        if (bc2cpp_sort_c_#{addr} == 0) { bc2cpp_sort_c_#{addr} = (mrb_integer(bc2cpp_sort_ib_#{addr}) < mrb_integer(bc2cpp_sort_ia_#{addr})) ? -1 : 1; }\n"
     out << "        if (bc2cpp_sort_c_#{addr} >= 0) break;\n"
     out << "        mrb_ary_set(M, bc2cpp_sort_pairs_#{addr}, bc2cpp_sort_b_#{addr} + 1, bc2cpp_sort_pa_#{addr});\n"
