@@ -2358,6 +2358,10 @@ module NativeConstructSchema
   end
 end
 
+# Opcodes that print a READ-only register as their first `R<n>` operand --
+# see IvarLayout.trace_type's own `when *READ_ONLY_OPCODE_SKIP` arm.
+READ_ONLY_OPCODE_SKIP = %w[RETURN RETURN_BLK BREAK JMPIF JMPNOT JMPNIL RAISEIF MATCHERR SETUPVAR].freeze
+
 # ---------------------------------------------------------------------------
 # Step 6b: ivar-embedding analysis -- which instance variables can be lifted
 # out of the dynamic ivar table (`iv_tbl`) and stored as real typed C struct
@@ -2668,7 +2672,7 @@ class IvarLayout
         return :fixnum if name && fixnum_return_names&.include?(name)
 
         return UNKNOWN
-      when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'
+      when *READ_ONLY_OPCODE_SKIP
         # READ_ONLY_OPCODE_SKIP: these nine opcodes all print their lone
         # register operand as the disassembly's own first `R%d` token (`RETURN
         # R%d`, `JMPNOT R%d %03d`, ...), the same shape the generic `else`
@@ -7281,10 +7285,13 @@ def lexically_resolve_construct_target(written, owner)
   hits.first
 end
 
+# `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
+# accept every hop, so no hop can skip past a join (ADR 0198).
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
-                      known_owners: nil, capture_hints: nil, ret_class_proof: nil)
+                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, dominated: nil)
   path = []
+  use = idx
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
   # resolving a `.new` call's own receiver* -- never on their own. A bare
   # `@position = POS_BOTTOM` (a plain Integer constant, no `.new` in
@@ -7322,6 +7329,12 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     d = insn.args[/^R(\d+)/, 1]
     next unless d == reg
 
+    if dominated && !READ_ONLY_OPCODE_SKIP.include?(insn.op)
+      return nil unless dominated.call(i, use, reg)
+
+      use = i
+    end
+
     case insn.op
     when 'MOVE'
       reg = insn.args.scan(/R(\d+)/).flatten[1]
@@ -7342,7 +7355,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      container_constants: container_constants,
                                      element_annotations: element_annotations,
                                      known_owners: known_owners, capture_hints: capture_hints,
-                                     ret_class_proof: ret_class_proof)
+                                     ret_class_proof: ret_class_proof, dominated: dominated)
       # An explicitly annotated Hash<Klass> parameter is also a safe source
       # for indexed values. Follow only plain MOVE aliases back to the
       # untouched incoming argument register; any computed/reassigned
@@ -7438,7 +7451,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
                                  known_owners: known_owners, capture_hints: capture_hints,
-                                 ret_class_proof: ret_class_proof)
+                                 ret_class_proof: ret_class_proof, dominated: dominated)
       else
         # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
         # `name` isn't `new`, so this can never join the fresh-`.new`
@@ -7486,7 +7499,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
                                        known_owners: known_owners, capture_hints: capture_hints,
-                                       ret_class_proof: ret_class_proof)
+                                       ret_class_proof: ret_class_proof, dominated: dominated)
         return nil unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
@@ -7805,7 +7818,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
       path.unshift(const_name)
       return path.join('::')
-    when 'RETURN', 'RETURN_BLK', 'BREAK', 'JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'
+    when *READ_ONLY_OPCODE_SKIP
       # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart): the exact same nine
       # opcodes IvarLayout.trace_type special-cases above (see that arm's own
       # comment for the confirmed-against-ops.h/codedump.c justification,
@@ -7840,6 +7853,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   # genuinely different real method, so pooling them would be unsound;
   # ClassAnnotations sits on one real irep by construction instead, same
   # reasoning as Annotations' own comment).
+  return nil if dominated && !dominated.call(-1, use, reg)
+
   pos = reg.to_i
   return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
 
@@ -10003,6 +10018,37 @@ class CodeGen
     @synthesize_accessor_for.include?([owner, name.chomp('='), writer ? :writer : :reader])
   end
 
+  # EMBEDDED_ACCESSOR_DEVIRT: whether an attr_reader/writer devirtualization
+  # (LEXICAL_SELF_IVAR_ACCESSOR, IVAR_ACCESSOR_DEVIRT) can serve `owner`'s
+  # accessor `name` at all. A plain accessor is a bare mrb_iv_get/mrb_iv_set;
+  # an embedded one must go through the synthesized `<Owner>_<ivar>[_eq]_impl`
+  # (the ivar table holds nil -- Game::Actor#id read that way broke every
+  # RPG2003 battle's strike count), which is only callable from this gem or
+  # one whose declarations are in scope, the same rule
+  # EMBEDDED_ACCESSOR_CHAIN applies.
+  def embedded_accessor_reachable?(owner, name)
+    return true unless embedded_accessor?(owner, name)
+
+    !@only_owners || @only_owners.include?(owner) || @other_owners&.include?(owner) || false
+  end
+
+  # The C++ statement for accessor `name` on `owner` with receiver `recv`,
+  # into r<d>: the synthesized embedded accessor when there is one, else the
+  # bare iv_tbl access attr_reader/attr_writer really are.
+  def ivar_accessor_access(owner, name, d, recv, argv)
+    ivar = name.chomp('=')
+    if embedded_accessor?(owner, name)
+      base = "#{sanitize(owner)}_#{sanitize(ivar)}"
+      return "r#{d} = #{base}_eq_impl(M, #{recv}, #{argv.first});" if name.end_with?('=')
+
+      "r#{d} = #{base}_impl(M, #{recv});"
+    elsif name.end_with?('=')
+      "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{argv.first});\n    r#{d} = #{argv.first};"
+    else
+      "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
+    end
+  end
+
   def compile_poly_small_n(name, d, recv, argv, n)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
@@ -10013,20 +10059,7 @@ class CodeGen
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c); the writer
                # returns the assigned value, not the ivar read back.
-               ivar = name.chomp('=')
-               if embedded_accessor?(target.owner, name)
-                 base = "#{sanitize(target.owner)}_#{sanitize(ivar)}"
-                 if name.end_with?('=')
-                   "r#{d} = #{base}_eq_impl(M, #{recv}, #{argv.first});"
-                 else
-                   "r#{d} = #{base}_impl(M, #{recv});"
-                 end
-               elsif name.end_with?('=')
-                 "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{argv.first});\n    " \
-                   "r#{d} = #{argv.first};"
-               else
-                 "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
-               end
+               ivar_accessor_access(target.owner, name, d, recv, argv)
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
                "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
@@ -10793,6 +10826,44 @@ class CodeGen
       "    break;\n" \
       "  }\n"
     end
+  end
+
+  # INTEGER_UNARY: an Integer runs Numeric#-@ (`0 - self`), Numeric#zero? (`self == 0`),
+  # both Ruby in libmruby, and int_round (`self`); see docs/adr/0200.
+  INTEGER_UNARY_OPS = {
+    '-@' => ['mrb_int_value(M, -mrb_integer(%<r>s))', ' && mrb_integer(%<r>s) != MRB_INT_MIN'],
+    'zero?' => ['mrb_bool_value(mrb_integer(%<r>s) == 0)', ''],
+    'round' => ['%<r>s', '']
+  }.freeze
+
+  def compile_integer_unary(name, n, d, recv, argv)
+    value, extra_guard = INTEGER_UNARY_OPS[name]
+    return nil unless value && n.zero? && native_only_mono?(name) && integer_ancestry_native?(name)
+
+    <<~CPP
+        // INTEGER_UNARY :#{name} -- Integer receiver computed inline; anything else keeps the dispatch
+        if (mrb_integer_p(#{recv})#{format(extra_guard, r: recv)}) {
+          r#{d} = #{format(value, r: recv)};
+        } else {
+          #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+        }
+    CPP
+  end
+
+  # builtin_class_send_safe? over Integer's ancestry and every module mixed into it.
+  def integer_ancestry_native?(name)
+    owners = %w[Integer Numeric Comparable]
+    queue = owners.dup
+    until queue.empty?
+      owner = queue.shift
+      (Array(@included_modules[owner]) + Array(@prepended_modules[owner])).each do |mod|
+        next if owners.include?(mod)
+
+        owners << mod
+        queue << mod
+      end
+    end
+    builtin_class_send_safe?(name, owners)
   end
 
   # Emit a generated native expression behind a runtime type-tag guard. Heap
@@ -16465,7 +16536,7 @@ class CodeGen
     ivar_classes = @class_layout[d.owner]
     arg_classes = @class_annotations[irep.label]&.args
     mand = mandatory_arity(irep)
-    targets = jump_targets(irep)
+    dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
     irep.instructions.each_with_index do |insn, idx|
       case insn.op
@@ -16473,8 +16544,9 @@ class CodeGen
         # `"RETURN\tR%d"` -- the returned register is the first operand.
         reg = insn.args[/\AR(\d+)/, 1]
         return false unless reg
-        return false unless straightline_return_reg?(irep, idx, reg, targets)
-        return false unless proven_array_operand?(irep, idx, reg, d.owner, mand, ivar_classes, arg_classes)
+        return false unless straightline_return_reg?(irep, idx, reg)
+        return false unless proven_array_operand?(irep, idx, reg, d.owner, mand, ivar_classes, arg_classes,
+                                                  dominated: dominated)
       when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
         return false
       end
@@ -16517,7 +16589,7 @@ class CodeGen
     ivar_classes = @class_layout[d.owner]
     arg_classes = @class_annotations[irep.label]&.args
     mand = mandatory_arity(irep)
-    targets = jump_targets(irep)
+    dominated = ->(w_idx, use_idx, r) { return_write_dominates?(irep, w_idx, use_idx, r) }
 
     proven = nil
     irep.instructions.each_with_index do |insn, idx|
@@ -16525,12 +16597,12 @@ class CodeGen
       when 'RETURN'
         reg = insn.args[/\AR(\d+)/, 1]
         return nil unless reg
-        return nil unless straightline_return_reg?(irep, idx, reg, targets)
+        return nil unless straightline_return_reg?(irep, idx, reg)
 
         klass = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: d.owner,
                                   class_layout: @class_layout, registry: @registry,
                                   container_constants: @container_constants,
-                                  ret_class_proof: ret_class_proof)
+                                  ret_class_proof: ret_class_proof, dominated: dominated)
         return nil unless klass
         return nil if proven && proven != klass
 
@@ -16622,78 +16694,72 @@ class CodeGen
   # unsound, and a second ivar-returning `||` arm somewhere else would have
   # been a real wrong answer.)
   #
-  # THE RULE. Walking backward from the RETURN, following MOVE chains
-  # exactly the way the two predicates themselves do, the instruction that
-  # writes the returned register must be reached WITHOUT ever stepping PAST
-  # an instruction whose address is a jump target. An instruction that is
-  # itself a jump target is fine to land on (control arriving there really
-  # does execute it); what is refused is looking further back THROUGH one,
-  # because control can enter the body at that address having executed none
-  # of what lies below it. `jump_targets` supplies exactly those addresses,
-  # and it is complete here: `array_return_analyzable?` has already refused
-  # any irep with catch handlers, which are the only other way into the
-  # middle of a body.
-  #
-  # NO EXEMPTION for a register the body never writes (an incoming argument,
-  # which `trace_new_target` can still resolve through a magic-comment class
-  # annotation). Falling off the front of the walk is refused outright: the
-  # exemption would be sound on its own terms, but telling "never written
-  # anywhere" apart from "not written below this RETURN" needs a real
-  # writes-this-register predicate, and the disassembly's own "first R<n> is
-  # the destination" convention is not one (`RETURN R1` and `SETIV @x R1`
-  # both print a SOURCE first). It is worth nothing measurable here anyway --
-  # `-> Array` class annotations on an opaque argument are not a shape this
-  # program currently uses -- so this stays the strictly conservative form.
-  #
-  # WHAT THIS GUARD DOES NOT COVER, stated honestly: the two predicates'
-  # own DEEPER walks -- trace_new_target continuing from a `SEND :new`
-  # through its GETCONST/GETMCNST class path, from a chained accessor or
-  # `.dup` into its own receiver -- still walk linearly past this point.
-  # Those steps are resolving SUB-EXPRESSIONS of the producer instruction
-  # this guard already located (the receiver of a send, the qualifying
-  # segments of one constant path), and mrbc emits each of those
-  # contiguously, immediately ahead of the instruction that consumes them,
-  # with no join interposed: a jump target landing between `GETCONST R1
-  # Array` and `SEND R1 :new` would mean control could reach that send with
-  # no receiver in R1 at all, which is not code mrbc generates. The guard
-  # is placed where the measured hazard actually was -- a conditional at
-  # STATEMENT level feeding one register into one RETURN.
-  def straightline_return_reg?(irep, idx, reg, targets)
+  # THE RULE (ADR 0198). Walking backward from the RETURN, following MOVE
+  # chains exactly the way the two predicates themselves do, every write
+  # found must DOMINATE the instruction that reads it (`return_write_
+  # dominates?`), and the same test is handed to trace_new_target as
+  # `dominated:` so its deeper hops (a `.new`/`.dup`/accessor receiver, which
+  # can be a local assigned on either side of an `if`) are held to it too.
+  # A plain "only one writer" count is NOT enough: method entry is a second,
+  # invisible definition (nil for a local, the caller's value for an
+  # argument), so `x = Foo.new if c; bar; x` must be refused. Falling off the
+  # front of this walk is still refused outright.
+  def straightline_return_reg?(irep, idx, reg)
     r = reg
-    # The RETURN INSTRUCTION ITSELF is the join in the shape that motivated
-    # this guard: mrbc compiles `@extensions || EXTENSIONS` so that the
-    # truthy arm's `JMPIF` lands directly ON the `RETURN`, leaving the
-    # `GETCONST` as the RETURN's immediate textual predecessor and the
-    # `GETIV` reachable only by a path that skips it. Checking only the
-    # instructions strictly BELOW the RETURN misses that entirely (measured:
-    # `extensions` survived a first version of this guard that did), so the
-    # RETURN's own address is checked first.
-    return false if targets.include?(irep.instructions[idx].addr)
-
+    use = idx
     (idx - 1).downto(0) do |i|
       pin = irep.instructions[i]
-      if pin.args[/^R(\d+)/, 1] == r
-        # Following a MOVE means continuing further back on the SOURCE
-        # register, so this instruction being a join is just as fatal as any
-        # other instruction the walk has to look through.
-        if pin.op == 'MOVE'
-          return false if targets.include?(pin.addr)
+      next if READ_ONLY_OPCODE_SKIP.include?(pin.op) || pin.args[/^R(\d+)/, 1] != r
+      # proven_array_source_scan steps over BLOCK, so it must not end this walk.
+      return false if pin.op == 'BLOCK'
+      return false unless return_write_dominates?(irep, i, use, r)
+      return true unless pin.op == 'MOVE'
 
-          src = pin.args.scan(/R(\d+)/).flatten[1]
-          return false unless src
+      r = pin.args.scan(/R(\d+)/).flatten[1]
+      return false unless r
 
-          r = src
-          next
-        end
-        return true
-      end
-      # Not a writer of `r`, so the walk has to keep going back -- only
-      # valid while control cannot enter the body here.
-      return false if targets.include?(pin.addr)
+      use = i
     end
-    # Fell off the front of the body without ever finding a writer -- see
-    # "NO EXEMPTION" above.
     false
+  end
+
+  # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on
+  # every path? FIXNUM_OPERAND_PROOF's own region test, over its audited
+  # step-over whitelist (a hidden writer such as RESCUE/APOST refuses).
+  def return_write_dominates?(irep, w_idx, use_idx, reg)
+    ctx = fixnum_proof_ctx(irep)
+    return false if own_upvar_written_regs(irep).include?(reg)
+
+    stepped = ((w_idx + 1)...use_idx).all? do |k|
+      op = irep.instructions[k].op
+      FIXNUM_PROOF_STEP_OVER_OPS.include?(op) || op.start_with?('LOADI')
+    end
+    stepped && fixnum_proof_region_ok?(irep, ctx, w_idx, use_idx)
+  end
+
+  # Registers of `irep` ITSELF that a nested block writes: unlike
+  # subtree_upvar_written_regs, a SETUPVAR `depth` blocks down counts only
+  # when its level is `depth - 1` (vm.c's `uvenv` walks that many uppers).
+  def own_upvar_written_regs(irep)
+    @own_upvar_written_regs ||= {}
+    @own_upvar_written_regs[irep.label] ||= collect_own_upvar_writes(irep, 1, Set.new)
+  end
+
+  def collect_own_upvar_writes(irep, depth, acc)
+    (irep.reps || []).each do |label|
+      child = @ireps[label]
+      next unless child
+
+      child.instructions.each do |insn|
+        next unless insn.op == 'SETUPVAR'
+
+        _src, b, lv = insn.args.split(/\s+/)
+        # An unparsable level is kept: over-collecting only costs a proof.
+        acc << b if b =~ /\A\d+\z/ && !(lv =~ /\A\d+\z/ && lv.to_i != depth - 1)
+      end
+      collect_own_upvar_writes(child, depth + 1, acc)
+    end
+    acc
   end
 
   # "Is register `reg` at position `idx` of `irep` provably an Array?" --
@@ -16701,10 +16767,10 @@ class CodeGen
   # receiver register, factored out so the two can never drift apart on a
   # soundness-critical question (the same sharing argument
   # proven_array_source's own comment already makes).
-  def proven_array_operand?(irep, idx, reg, owner_name, mand, ivar_classes, arg_classes)
+  def proven_array_operand?(irep, idx, reg, owner_name, mand, ivar_classes, arg_classes, dominated: nil)
     traced = trace_new_target(irep, idx, reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                class_layout: @class_layout, registry: @registry,
-                               container_constants: @container_constants)
+                               container_constants: @container_constants, dominated: dominated)
     return true if traced == 'Array'
 
     !proven_array_source(irep, idx, reg).nil?
@@ -24928,6 +24994,9 @@ class CodeGen
       CPP
     end
 
+    integer_unary = compile_integer_unary(name, n, d, recv, argv)
+    return integer_unary if integer_unary
+
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
@@ -25183,7 +25252,8 @@ class CodeGen
                       mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
           target = lex_candidate
           lexical_self = true
-        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
+        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0) &&
+              embedded_accessor_reachable?(lex_candidate.owner, name)
           # LEXICAL_SELF_IVAR_ACCESSOR: the ivar_accessor-kind analogue of
           # the branch just above -- see IVAR_ACCESSOR_DEVIRT's own
           # comment (below) for why an attr_reader/writer candidate can
@@ -25287,7 +25357,7 @@ class CodeGen
         target = candidate
         typed = true
       elsif candidate&.kind == :ivar_accessor &&
-            n == (name.end_with?('=') ? 1 : 0)
+            n == (name.end_with?('=') ? 1 : 0) && embedded_accessor_reachable?(candidate.owner, name)
         # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
         # will -- build_registry's own attr_reader/writer/accessor case
         # registers it that way on purpose, see MethodDef's own `kind`
@@ -25485,14 +25555,13 @@ class CodeGen
                "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall, no runtime " \
                "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
                "3rd/mruby/src/class.c citation this reproduces exactly.\n"
-        "#{note}  mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
-          "  r#{d} = #{val};\n"
+        "#{note}  #{ivar_accessor_access(owner, name, d, recv, [val]).sub("\n    ", "\n  ")}\n"
       else
         note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (self, statically #{owner}), " \
                "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall, no runtime " \
                "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
                "3rd/mruby/src/class.c citation this reproduces exactly.\n"
-        "#{note}  r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n"
+        "#{note}  #{ivar_accessor_access(owner, name, d, recv, argv)}\n"
       end
     elsif ivar_accessor_target
       # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
@@ -25518,8 +25587,7 @@ class CodeGen
                "citation this reproduces exactly (attr_writer's own mrb_iv_set then returning the " \
                "assigned value, never the ivar read back).\n"
         "#{note}  if (#{check}) {\n" \
-          "    mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
-          "    r#{d} = #{val};\n" \
+          "    #{ivar_accessor_access(owner, name, d, recv, [val])}\n" \
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
@@ -25529,7 +25597,7 @@ class CodeGen
                "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
                "citation this reproduces exactly.\n"
         "#{note}  if (#{check}) {\n" \
-          "    r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n" \
+          "    #{ivar_accessor_access(owner, name, d, recv, argv)}\n" \
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
@@ -25707,9 +25775,19 @@ class CodeGen
     out
   end
 
+  # mruby's variadic mrb_funcall/mrb_funcall_id copy into a fixed
+  # MRB_FUNCALL_ARGC_MAX array and raise "Too long arguments" past it.
+  FUNCALL_ARGC_MAX = 16
+
   def dynamic_dispatch_line(d, recv, name, argv)
     if argv.empty?
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
+    elsif argv.size > FUNCALL_ARGC_MAX
+      # A literal-sized splat unrolls one argument per element
+      # (Game::Battle.from_actor's 22-field `Combatant.new(*[...])`).
+      # mrb_funcall_argv has no such cap: it packs 15+ into a splat itself.
+      "{ mrb_value bc2cpp_argv[] = { #{argv.join(', ')} }; " \
+        "r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_lit(M, \"#{name}\"), #{argv.size}, bc2cpp_argv); }\n"
     else
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", #{argv.size}, #{argv.join(', ')});\n"
     end
