@@ -55,6 +55,7 @@
 require 'shellwords'
 require_relative 'compiled_gems'
 require_relative 'never_called_registrations'
+require_relative 'static_dispatch_unregistered'
 
 gem_name, repo_root, mrbc = ARGV
 unless gem_name && repo_root && mrbc
@@ -65,7 +66,12 @@ err = NeverCalledRegistrations.run_bc2cpp(gem_name, repo_root, mrbc)
 never_called = NeverCalledRegistrations.parse_never_called_names(err)
 
 NeverCalledRegistrations.parse_compiled_entries(err).each do |m|
-  next if never_called.include?("#{m[:owner]}##{m[:name]}") && NeverCalledRegistrations.safe_to_unregister?(m[:owner])
+  key = "#{m[:owner]}##{m[:name]}"
+  # A STATIC_DISPATCH_UNREGISTERED name (docs/adr/0203) stays in this list
+  # even though nothing registers it: no runtime lookup can ever reach it, so
+  # its bytecode `def` is dead in every build and still safe to strip.
+  next if never_called.include?(key) && NeverCalledRegistrations.safe_to_unregister?(m[:owner]) &&
+          !STATIC_DISPATCH_UNREGISTERED.include?(key)
 
   singleton = m[:owner].end_with?('.singleton') ? '1' : '0'
   puts [m[:owner], m[:name], m[:arity], m[:visibility], singleton].join("\t")

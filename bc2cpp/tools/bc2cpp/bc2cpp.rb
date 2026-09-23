@@ -1435,6 +1435,7 @@ end
 require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
+require_relative 'static_dispatch_unregistered'
 
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
@@ -2820,9 +2821,13 @@ class IvarLayout
   # exact kind of small, behavior-identical duplication across pipeline
   # stages). `registry[name]` on this file's own `Hash.new { |h, k| h[k] =
   # [] }` registry never returns nil, so `defs.first` below is always safe
-  # once `defs.size == 1` holds.
+  # once `defs.size == 1` holds. Read with `fetch`, not `[]`: the default
+  # proc would insert `name`, and analyze calls this while iterating that
+  # same registry ("can't add a new key into hash during iteration" once a
+  # traced name has no def at all -- e.g. after docs/adr/0203 dropped the
+  # register.cxx lines the native scan used to find it in).
   def self.native_only_mono?(registry, name)
-    defs = registry[name]
+    defs = registry.fetch(name) { return false }
     defs.size == 1 && defs.first.irep.nil?
   end
 end
@@ -9074,7 +9079,10 @@ def collect_static_call_target_names(ireps)
   ireps.each_value do |irep|
     (irep.instructions || []).each do |insn|
       case insn.op
-      when 'SEND0', 'SEND', 'SSEND0', 'SSEND', 'LOADSYM'
+      # SENDB/SSENDB: a call passing a block (`foo { ... }`, `foo(&blk)`) --
+      # missing here until docs/adr/0203, so a method only ever called with a
+      # block used to read as "never called".
+      when 'SEND0', 'SEND', 'SSEND0', 'SSEND', 'SENDB', 'SSENDB', 'LOADSYM'
         name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
         names << name if name
       else
@@ -11566,7 +11574,15 @@ class CodeGen
   # only when at least one target actually needs it) -- see that helper's own
   # comment for why mruby needing no `mrb_define_private_class_method` of its
   # own doesn't mean this can't be done with its existing public API.
-  def emit_owner_registrations(compiled, owners)
+  #
+  # STATIC_DISPATCH_UNREGISTRATION (docs/adr/0203): an entry named in
+  # `unregistered` is skipped -- proven by tools/bc2cpp/static_dispatch_
+  # registrations.rb that no runtime lookup can ever reach its name, so every
+  # real caller already goes straight to its `_impl` and the `mrb_get_args`
+  # wrapper registered here would only ever be dead weight. Dropping it also
+  # keeps this owner's embedding sound: with no dynamic lookup there is no
+  # interpreted fallback left to read the plain iv_tbl.
+  def emit_owner_registrations(compiled, owners, unregistered: STATIC_DISPATCH_UNREGISTERED)
     by_owner = compiled.group_by { |m| m[:owner] }
     targets = owners.select { |o| by_owner.key?(o) }
 
@@ -11613,6 +11629,10 @@ class CodeGen
              end
         unless fn
           out << "  // #{owner}##{m[:name]} left unregistered (:#{m[:visibility]} has no safe registration call).\n"
+          next
+        end
+        if unregistered.include?("#{owner}##{m[:name]}")
+          out << "  // #{owner}##{m[:name]} left unregistered: statically dispatched only (docs/adr/0203).\n"
           next
         end
         out << "  #{fn}(M, #{var}, #{c_string_literal(m[:name])}, #{m[:entry]}, #{m[:aspec]});\n"

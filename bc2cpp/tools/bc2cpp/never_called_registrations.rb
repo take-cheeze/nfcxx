@@ -53,6 +53,11 @@ module NeverCalledRegistrations
   # stderr -- both the "== compiled entry points ==" and the "== never
   # called ==" sections live in that same stream.
   def run_bc2cpp(gem_name, repo_root, mrbc)
+    run_bc2cpp_full(gem_name, repo_root, mrbc)[1]
+  end
+
+  # Same run as `run_bc2cpp`, returning [generated C++ (stdout), stderr].
+  def run_bc2cpp_full(gem_name, repo_root, mrbc)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name) do
       raise "never_called_registrations: no such compiled gem #{gem_name.inspect} in " \
             'tools/bc2cpp/compiled_gems.rb'
@@ -81,12 +86,12 @@ module NeverCalledRegistrations
         'SKIP_UNSUPPORTED' => '1',
       }
       cmd = [RbConfig.ruby, bc2cpp, *closed_world_srcs]
-      _out, err, status = Open3.capture3(env, *cmd)
+      out, err, status = Open3.capture3(env, *cmd)
       unless status.success?
         warn err
         raise "never_called_registrations: #{gem_name}'s own bc2cpp.rb run failed (see stderr above)"
       end
-      err
+      [out, err]
     end
   end
 
