@@ -3,76 +3,46 @@
 # STATIC_DISPATCH_UNREGISTRATION: the sound form of "a devirtualized method
 # does not need its mrb_define_method registration" (docs/adr/0203).
 #
-# A `register.cxx` / generated `bc2cpp_register_owner_methods` line exists
-# only so mruby's own dynamic method-table lookup can find the compiled
-# method. docs/adr/0198 rejected dropping it on the grounds that "every call
-# site devirtualized" is a per-call-site property no existing pass tracked,
-# and that interpreted callers still dispatch dynamically. This file does not
-# try to prove devirtualization per call site at all. It asks a strictly
-# stronger, name-level question with a default of "dynamic": is there ANY
-# place a runtime lookup of this method name could come from? A name is only
-# eligible when every one of these comes back empty:
+# A registration exists only so mruby's dynamic method-table lookup can find
+# the compiled method. docs/adr/0198 rejected dropping it because "every call
+# site devirtualized" is a per-call-site property no pass tracked. This file
+# asks a stronger, name-level question with a default of "dynamic": can ANY
+# runtime lookup of this name happen? A name is eligible only when all of
+# these come back empty:
 #
-#   1. Bytecode that can run. A method body -- compiled or not -- only runs
-#      as bytecode after a dynamic lookup of its own name (a direct C++ call
-#      targets `_impl`, never bytecode). A body whose compiled override stays
-#      registered can only do so during mrblib load, before its gem_init
-#      installs the override -- so for those only a load-phase lookup counts
-#      (load_phase: seeded from the root and class bodies, receiver-aware,
-#      since no engine object exists at load unless load-time code builds
-#      one -- it falls back to a receiver-blind cascade if any does). So: the
-#      root and class-body ireps, every block/lambda irep inside a registered
-#      compiled method (bc2cpp may keep one as a bytecode proc), and the body
-#      (and blocks) of any other method whose name is dynamic -- to a
-#      fixpoint. Every SEND/SEND0/SSEND/SSEND0/SENDB/SSENDB and LOADSYM name
-#      in those counts, plus the operator names the implicit-dispatch
-#      opcodes (ADD, GETIDX, ...) stand for.
-#   2. Compiled code's own dynamic dispatch. Every string literal in the
-#      generated C++ of all three compiled gems -- this is where a guarded
-#      direct call's `mrb_funcall_id` fallback, a POLY dispatch, a symbol
-#      literal, or a runtime redefinition guard interns the name, so the
-#      name showing up here at all (outside its own registration call)
-#      counts, no matter why.
-#   3. `super`. The enclosing method's name for every SUPER op anywhere.
-#   4. Names built at runtime. Every string-pool literal in the closed world:
-#      the literal itself, and -- because `"#{field}="`/`"#{type}_x"` are
-#      real, present shapes -- any name that starts or ends with a pool
-#      literal of two or more identifier characters, or that ends in `=`/`?`/
-#      `!` when its base name is itself dynamic.
-#   5. Everything outside the closed world bc2cpp.rb never parses: mruby's
-#      own core and core-gem mrblib (Enumerable calls `each`, Comparable
-#      calls `<=>`, ...), the three external gems, every other maker gem's
-#      mrblib (mruby-rpgxp/rpgvx/wolf/mvjs -- the gap docs/adr/0195 found),
-#      every gem's own test/ (mrbtest runs inside the built VM), scripts/,
-#      tools/ (except tools/bc2cpp itself), and every native C/C++ source in
-#      this repository or the vendored mruby tree (src/, app/, include/,
-#      mruby-*/src/ -- the top-level src/*.cxx gap docs/adr/0195 found --
-#      3rd/mruby/src, core gem src). These are scanned as plain text: every
-#      identifier token counts, plus MRB_SYM_Q/_B/_E(x) as x?/x!/x=.
-#   6. mruby's own implicit protocol names (ALWAYS_DYNAMIC below), as a
-#      belt-and-braces backstop for (5).
+#   1. Bytecode that can run (see "Which bytecode can run" in `analyze` and
+#      `load_phase`): the root and class bodies, blocks inside registered
+#      compiled methods, and bodies of other dynamic names, to a fixpoint.
+#      Every SEND*/LOADSYM name counts, plus the operator names implicit-
+#      dispatch opcodes (ADD, GETIDX, ...) stand for.
+#   2. Compiled code's own dynamic dispatch: every string literal in the
+#      generated C++ of all three gems (a guarded call's `mrb_funcall_id`
+#      fallback, POLY dispatch, a symbol literal, a redefinition guard),
+#      outside the name's own registration call.
+#   3. `super`: the enclosing method's name for every SUPER op.
+#   4. Names built at runtime: every string-pool literal, plus any name that
+#      starts or ends with a pool literal of two or more identifier characters
+#      (`"#{field}="`), or ends in `=`/`?`/`!` with a dynamic base name.
+#   5. Everything outside the closed world, scanned as plain text: mruby core
+#      and core-gem mrblib (Enumerable calls `each`, ...), the external gems,
+#      every other maker gem's mrblib and every native source (both gaps from
+#      docs/adr/0195), every gem's test/, scripts/, tools/ (except
+#      tools/bc2cpp). Every identifier counts, plus MRB_SYM_Q/_B/_E(x).
+#   6. mruby's implicit protocol names (ALWAYS_DYNAMIC), as a backstop for 5.
 #
-# Only owners in the internal RPG2000/2003 namespaces
-# (NeverCalledRegistrations::SAFE_UNREGISTER_OWNER_RE) are considered:
-# mruby-rgss-compiled's classes are the RGSS scripting API an RPG Maker XP
-# game's own Data/Scripts.rxdata calls, which no scan here can see.
+# Only internal RPG2000/2003 owners (NeverCalledRegistrations::
+# SAFE_UNREGISTER_OWNER_RE) qualify: RGSS classes are the scripting API a
+# game's Data/Scripts.rxdata calls.
 #
-# What remains is a name nothing can look up at runtime: every real caller
-# reaches it through a direct `Owner_name_impl(...)` call in generated C++,
-# which does not consult the method table. Dropping its registration lets
-# `-Wl,--gc-sections` discard the `mrb_get_args` wrapper (the registration
-# was its only reference), and the registration call and name string with it.
-# The method's interpreted `def` stays exactly as stripped or unstripped as
-# before (strip_wio_bc2cpp_stubs.rb still lists it) -- nothing dispatches to
-# either.
+# What remains is reached only through direct `Owner_name_impl(...)` calls, so
+# dropping the registration lets `-Wl,--gc-sections` discard the mrb_get_args
+# wrapper and the name string. The interpreted `def` is unaffected.
 #
-# Residual risk, stated plainly: a method name assembled at runtime from data
-# that never appears as a literal or fragment anywhere in any scanned source
-# (e.g. read out of a game file and then `send`) would be missed. Nothing in
-# this codebase does that for an RPG2000/2003-internal class today; the
-# regression check (scripts/bc2cpp_static_dispatch_check.rb) re-proves every
-# listed name on every run, so a later change that adds a dynamic reference
-# fails CI instead of shipping a NoMethodError.
+# Residual risk: a name assembled at runtime from data that appears nowhere as
+# a literal or fragment (read from a game file, then `send`) would be missed.
+# Nothing does that for an RPG2000/2003-internal class today, and
+# scripts/bc2cpp_static_dispatch_check.rb re-proves every listed name on every
+# run, so a new dynamic reference fails CI instead of shipping a NoMethodError.
 require 'fileutils'
 require 'set'
 require 'tmpdir'

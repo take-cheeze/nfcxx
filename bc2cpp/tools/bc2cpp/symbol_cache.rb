@@ -1,12 +1,10 @@
 # frozen_string_literal: true
 
-# SYMBOL_CACHE: every ivar/constant/method name and symbol literal in generated
-# C++ used to be spelled `mrb_intern_cstr(M, "name")` (or `mrb_funcall(M, r,
-# "name", ...)`, which interns the same way inside mruby), so each execution
-# paid a presym binary search plus a symbol-table hash lookup. A stack sample of
-# the desktop RPGMAKER_BC2CPP build on the RPG2k map scene put ~33% of busy time
-# there, almost all of it in Game::Interpreter#execute's command switch (a symbol
-# literal or constant chain per `when` arm).
+# SYMBOL_CACHE: generated C++ used to spell every ivar/constant/method name and
+# symbol literal as `mrb_intern_cstr(M, "name")` (or a `mrb_funcall(M, r,
+# "name", ...)`, which interns the same way), paying a presym binary search plus
+# a symbol-table lookup per execution -- hot in Game::Interpreter#execute's
+# command switch.
 #
 # This rewrites the finished C++ of every compiled function so each distinct
 # literal is interned once per VM and read from a file-scope table afterwards.
