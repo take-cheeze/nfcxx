@@ -79,6 +79,7 @@ require 'tmpdir'
 require_relative 'compiled_gems'
 require_relative 'never_called_registrations'
 require_relative 'static_dispatch_unregistered'
+require_relative 'symbol_cache'
 
 module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
@@ -118,16 +119,17 @@ module StaticDispatchRegistrations
   end
 
   STRING_LITERAL = /"((?:[^"\\\n]|\\.)*)"/
-  # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`.
+  # symbol_cache.rb's interned-name table; every use is `bc2cpp_sym(M, <index>)`
+  # or the index argument of `bc2cpp_send(M, recv, <index>, ...)`.
   SYM_TABLE = /bc2cpp_sym_names\[\d+\] = \{\n(.*?)^\};/m
   # MONO_EMBED_GUARD's shape (bc2cpp.rb): an exact-class check around the
-  # direct `_impl` call, and a by-name `mrb_funcall_id` for every other class.
+  # direct `_impl` call, and a by-name `bc2cpp_send` for every other class.
   EMBED_GUARD_FALLBACK = %r{
     //\ MONO_EMBED_GUARD\ :(\S+)\ ->\ (\S+)\#\S+\ [^\n]*\n
     \s*if\ \([^\n]*\)\ \{\n
     (?:(?!\s*//\ MONO_EMBED_GUARD)[^\n]*\n){0,12}?
     \s*\}\ else\ \{\n
-    \s*r\d+\ =\ mrb_funcall_id\(M,\ [^,]+,\ bc2cpp_sym\(M,\ (\d+)\)
+    \s*r\d+\ =\ bc2cpp_send\(M,\ [^,]+,\ (\d+),
   }x
 
   # EMBED_GUARD_FALLBACK (docs/adr/0206): the names in `src`'s symbol table
@@ -143,6 +145,7 @@ module StaticDispatchRegistrations
     names = table.scan(STRING_LITERAL).map { |(s)| unescape(s) }
     uses = Hash.new(0)
     src.scan(/bc2cpp_sym\(M, (\d+)\)/) { |(i)| uses[i.to_i] += 1 }
+    SymbolCache.send_indices(src).each { |i| uses[i] += 1 }
     guarded = Hash.new(0)
     src.scan(EMBED_GUARD_FALLBACK) do |name, owner, idx|
       i = idx.to_i
