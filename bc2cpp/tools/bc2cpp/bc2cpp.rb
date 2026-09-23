@@ -10003,6 +10003,37 @@ class CodeGen
     @synthesize_accessor_for.include?([owner, name.chomp('='), writer ? :writer : :reader])
   end
 
+  # EMBEDDED_ACCESSOR_DEVIRT: whether an attr_reader/writer devirtualization
+  # (LEXICAL_SELF_IVAR_ACCESSOR, IVAR_ACCESSOR_DEVIRT) can serve `owner`'s
+  # accessor `name` at all. A plain accessor is a bare mrb_iv_get/mrb_iv_set;
+  # an embedded one must go through the synthesized `<Owner>_<ivar>[_eq]_impl`
+  # (the ivar table holds nil -- Game::Actor#id read that way broke every
+  # RPG2003 battle's strike count), which is only callable from this gem or
+  # one whose declarations are in scope, the same rule
+  # EMBEDDED_ACCESSOR_CHAIN applies.
+  def embedded_accessor_reachable?(owner, name)
+    return true unless embedded_accessor?(owner, name)
+
+    !@only_owners || @only_owners.include?(owner) || @other_owners&.include?(owner) || false
+  end
+
+  # The C++ statement for accessor `name` on `owner` with receiver `recv`,
+  # into r<d>: the synthesized embedded accessor when there is one, else the
+  # bare iv_tbl access attr_reader/attr_writer really are.
+  def ivar_accessor_access(owner, name, d, recv, argv)
+    ivar = name.chomp('=')
+    if embedded_accessor?(owner, name)
+      base = "#{sanitize(owner)}_#{sanitize(ivar)}"
+      return "r#{d} = #{base}_eq_impl(M, #{recv}, #{argv.first});" if name.end_with?('=')
+
+      "r#{d} = #{base}_impl(M, #{recv});"
+    elsif name.end_with?('=')
+      "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{argv.first});\n    r#{d} = #{argv.first};"
+    else
+      "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
+    end
+  end
+
   def compile_poly_small_n(name, d, recv, argv, n)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
@@ -10013,20 +10044,7 @@ class CodeGen
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
                # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c); the writer
                # returns the assigned value, not the ivar read back.
-               ivar = name.chomp('=')
-               if embedded_accessor?(target.owner, name)
-                 base = "#{sanitize(target.owner)}_#{sanitize(ivar)}"
-                 if name.end_with?('=')
-                   "r#{d} = #{base}_eq_impl(M, #{recv}, #{argv.first});"
-                 else
-                   "r#{d} = #{base}_impl(M, #{recv});"
-                 end
-               elsif name.end_with?('=')
-                 "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{argv.first});\n    " \
-                   "r#{d} = #{argv.first};"
-               else
-                 "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
-               end
+               ivar_accessor_access(target.owner, name, d, recv, argv)
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
                "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
@@ -25165,7 +25183,8 @@ class CodeGen
                       mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
           target = lex_candidate
           lexical_self = true
-        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
+        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0) &&
+              embedded_accessor_reachable?(lex_candidate.owner, name)
           # LEXICAL_SELF_IVAR_ACCESSOR: the ivar_accessor-kind analogue of
           # the branch just above -- see IVAR_ACCESSOR_DEVIRT's own
           # comment (below) for why an attr_reader/writer candidate can
@@ -25269,7 +25288,7 @@ class CodeGen
         target = candidate
         typed = true
       elsif candidate&.kind == :ivar_accessor &&
-            n == (name.end_with?('=') ? 1 : 0)
+            n == (name.end_with?('=') ? 1 : 0) && embedded_accessor_reachable?(candidate.owner, name)
         # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
         # will -- build_registry's own attr_reader/writer/accessor case
         # registers it that way on purpose, see MethodDef's own `kind`
@@ -25467,14 +25486,13 @@ class CodeGen
                "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall, no runtime " \
                "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
                "3rd/mruby/src/class.c citation this reproduces exactly.\n"
-        "#{note}  mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
-          "  r#{d} = #{val};\n"
+        "#{note}  #{ivar_accessor_access(owner, name, d, recv, [val]).sub("\n    ", "\n  ")}\n"
       else
         note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (self, statically #{owner}), " \
                "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall, no runtime " \
                "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
                "3rd/mruby/src/class.c citation this reproduces exactly.\n"
-        "#{note}  r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n"
+        "#{note}  #{ivar_accessor_access(owner, name, d, recv, argv)}\n"
       end
     elsif ivar_accessor_target
       # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
@@ -25500,8 +25518,7 @@ class CodeGen
                "citation this reproduces exactly (attr_writer's own mrb_iv_set then returning the " \
                "assigned value, never the ivar read back).\n"
         "#{note}  if (#{check}) {\n" \
-          "    mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{val});\n" \
-          "    r#{d} = #{val};\n" \
+          "    #{ivar_accessor_access(owner, name, d, recv, [val])}\n" \
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
@@ -25511,7 +25528,7 @@ class CodeGen
                "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
                "citation this reproduces exactly.\n"
         "#{note}  if (#{check}) {\n" \
-          "    r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));\n" \
+          "    #{ivar_accessor_access(owner, name, d, recv, argv)}\n" \
           "  } else {\n" \
           "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
           "  }\n"
