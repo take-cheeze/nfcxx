@@ -53,6 +53,11 @@ module NeverCalledRegistrations
   # stderr -- both the "== compiled entry points ==" and the "== never
   # called ==" sections live in that same stream.
   def run_bc2cpp(gem_name, repo_root, mrbc)
+    run_bc2cpp_full(gem_name, repo_root, mrbc)[1]
+  end
+
+  # Same run as `run_bc2cpp`, returning [generated C++ (stdout), stderr].
+  def run_bc2cpp_full(gem_name, repo_root, mrbc)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name) do
       raise "never_called_registrations: no such compiled gem #{gem_name.inspect} in " \
             'tools/bc2cpp/compiled_gems.rb'
@@ -81,12 +86,12 @@ module NeverCalledRegistrations
         'SKIP_UNSUPPORTED' => '1',
       }
       cmd = [RbConfig.ruby, bc2cpp, *closed_world_srcs]
-      _out, err, status = Open3.capture3(env, *cmd)
+      out, err, status = Open3.capture3(env, *cmd)
       unless status.success?
         warn err
         raise "never_called_registrations: #{gem_name}'s own bc2cpp.rb run failed (see stderr above)"
       end
-      err
+      [out, err]
     end
   end
 
@@ -173,5 +178,20 @@ module NeverCalledRegistrations
   # today".
   def registered_in_source?(register_src, entry)
     register_src.match?(registration_line_pattern(entry))
+  end
+
+  # The C++ entry-point identifiers any `mrb_define_(private_|class_)?method`
+  # or generated `bc2cpp_define_private_class_method` call installs, across
+  # the gem's hand register.cxx and bc2cpp.rb's own generated
+  # bc2cpp_register_owner_methods -- the same shape
+  # scripts/bc2cpp_wired_embedding_check.rb matches. A name argument may be
+  # a string literal or a macro/variable; the function is always the fourth.
+  # Comments are dropped first: register.cxx quotes calls in prose.
+  INSTALL_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*[^,]+,\s*(?:"[^"]*"|\S+)\s*,\s*(\w+)\s*,/m
+
+  def installed_entries(*sources)
+    sources.flat_map do |src|
+      src.gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '').scan(INSTALL_CALL).flatten
+    end.to_set
   end
 end
