@@ -9691,13 +9691,29 @@ class CodeGen
     # nested compile, so this collision was never reachable there).
     @registry.values.each do |defs|
       defs.each do |d|
-        next unless d.owner == owner && d.irep
+        next unless d.irep
+
+        # A subclass's own GETIV/SETIV addresses its own (struct-less) layout,
+        # so it would reach iv_tbl even when compiled: never embed then.
+        return false if d.owner != owner && strict_subclass?(d.owner, owner) && irep_subtree_touches_ivar?(d.irep, ivar_name)
+        next unless d.owner == owner
 
         touches = irep_subtree_touches_ivar?(d.irep, ivar_name)
         return false if touches && !compiles_clean?(d.irep)
       end
     end
     true
+  end
+
+  def strict_subclass?(klass, ancestor)
+    seen = Set.new
+    superclass = @superclass_of[klass]
+    while superclass.is_a?(String) && seen.add?(superclass)
+      return true if superclass == ancestor
+
+      superclass = @superclass_of[superclass]
+    end
+    false
   end
 
   # Recursively checks a method's own top-level irep *and every irep nested
@@ -9961,16 +9977,10 @@ class CodeGen
         next false if t.owner.end_with?('.singleton')
         next false unless n == (name.end_with?('=') ? 1 : 0)
 
-        # EMBEDDED_ACCESSOR_CHAIN: an embedded ivar lives in the RData struct, not
-        # the ivar table, so mrb_iv_get would read nil. Its reader/writer is the
-        # synthesized `<Owner>_<ivar>[_eq]_impl`, which is only callable when the
-        # compiled gem that emits it is this one or one whose declarations are in
-        # scope; otherwise leave the candidate out (the funcall reaches the
-        # registered synthesized method).
-        if embedded_accessor?(t.owner, name)
-          next false if @only_owners && !@only_owners.include?(t.owner) && !@other_owners&.include?(t.owner)
-        end
-        next true
+        # EMBEDDED_ACCESSOR_CHAIN: an embedded ivar is only reachable through its
+        # synthesized accessor, which IVAR_ACCESS uses when it is linkable from
+        # here; otherwise leave the candidate out (the funcall reaches it).
+        next !ivar_accessor_call_code(t.owner, 'recv', name, 0, ['arg']).nil?
       end
       next false unless t.irep
       # SINGLETON_OWNER_EXCLUSION: a `.singleton`-suffixed owner (bc2cpp's
@@ -10018,35 +10028,71 @@ class CodeGen
     @synthesize_accessor_for.include?([owner, name.chomp('='), writer ? :writer : :reader])
   end
 
-  # EMBEDDED_ACCESSOR_DEVIRT: whether an attr_reader/writer devirtualization
-  # (LEXICAL_SELF_IVAR_ACCESSOR, IVAR_ACCESSOR_DEVIRT) can serve `owner`'s
-  # accessor `name` at all. A plain accessor is a bare mrb_iv_get/mrb_iv_set;
-  # an embedded one must go through the synthesized `<Owner>_<ivar>[_eq]_impl`
-  # (the ivar table holds nil -- Game::Actor#id read that way broke every
-  # RPG2003 battle's strike count), which is only callable from this gem or
-  # one whose declarations are in scope, the same rule
-  # EMBEDDED_ACCESSOR_CHAIN applies.
-  def embedded_accessor_reachable?(owner, name)
-    return true unless embedded_accessor?(owner, name)
+  # IVAR_ACCESS: the only emitter of ivar access on `recv`, an object of exact
+  # class `klass` (nil: unknown). GETIV/SETIV and every devirtualized accessor go
+  # through here, so an embedded ivar never touches iv_tbl, where it reads nil.
+  # `self_of_klass` means `recv` is self inside klass's own compiled body, whose
+  # struct is always in this file. Returns nil when only dispatch can reach it.
+  def ivar_get_code(klass, recv, ivar, dst, self_of_klass: false)
+    type = ivar_embed_type(klass, ivar)
+    return "#{dst} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"));" if type.nil?
+    return nil if type == :unknown
 
-    !@only_owners || @only_owners.include?(owner) || @other_owners&.include?(owner) || false
+    if self_of_klass
+      "#{dst} = #{TYPE_OPS.fetch(type)[:box]}(((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar});"
+    elsif embedded_accessor_linkable?(klass, ivar)
+      "#{dst} = #{sanitize(klass)}_#{sanitize(ivar)}_impl(M, #{recv});"
+    end
   end
 
-  # The C++ statement for accessor `name` on `owner` with receiver `recv`,
-  # into r<d>: the synthesized embedded accessor when there is one, else the
-  # bare iv_tbl access attr_reader/attr_writer really are.
-  def ivar_accessor_access(owner, name, d, recv, argv)
-    ivar = name.chomp('=')
-    if embedded_accessor?(owner, name)
-      base = "#{sanitize(owner)}_#{sanitize(ivar)}"
-      return "r#{d} = #{base}_eq_impl(M, #{recv}, #{argv.first});" if name.end_with?('=')
+  # IVAR_ACCESS's write half: the statement storing `src` into @ivar, or nil.
+  # Same rules as ivar_get_code. With `dst`, it also leaves `src` (attr_writer's
+  # return value) in `dst`.
+  def ivar_set_code(klass, recv, ivar, src, self_of_klass: false, dst: nil, indent: '  ')
+    type = ivar_embed_type(klass, ivar)
+    tail = dst ? "\n#{indent}#{dst} = #{src};" : ''
+    return "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{src});#{tail}" if type.nil?
+    return nil if type == :unknown
 
-      "r#{d} = #{base}_impl(M, #{recv});"
-    elsif name.end_with?('=')
-      "mrb_iv_set(M, #{recv}, mrb_intern_cstr(M, \"@#{ivar}\"), #{argv.first});\n    r#{d} = #{argv.first};"
-    else
-      "r#{d} = mrb_iv_get(M, #{recv}, mrb_intern_cstr(M, \"@#{name}\"));"
+    if self_of_klass
+      unless src.match?(/\A\w+\z/)
+        store = ivar_set_code(klass, recv, ivar, 'bc2cpp_iv_val', self_of_klass: true, indent: indent)
+        return "{ mrb_value bc2cpp_iv_val = #{src}; #{store} }#{tail}"
+      end
+
+      ops = TYPE_OPS.fetch(type)
+      # Guarded: an uncompiled writer could still store another type. (Not
+      # E_TYPE_ERROR: that macro hardcodes `mrb`; generated code names it `M`.)
+      "if (!#{ops[:check]}(#{src})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
+        "#{indent}((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar} = #{ops[:unbox]}(#{src});#{tail}"
+    elsif embedded_accessor_linkable?(klass, "#{ivar}=")
+      "#{dst ? "#{dst} = " : ''}#{sanitize(klass)}_#{sanitize(ivar)}_eq_impl(M, #{recv}, #{src});"
     end
+  end
+
+  # IVAR_ACCESS for an attr_reader/attr_writer call `name` on `recv`: the
+  # statements leaving the call's value in r<d>, or nil.
+  def ivar_accessor_call_code(klass, recv, name, d, argv, self_of_klass: false, indent: '  ')
+    ivar = name.chomp('=')
+    return ivar_get_code(klass, recv, ivar, "r#{d}", self_of_klass: self_of_klass) unless name.end_with?('=')
+
+    ivar_set_code(klass, recv, ivar, argv.first, self_of_klass: self_of_klass, dst: "r#{d}", indent: indent)
+  end
+
+  # nil: an ordinary iv_tbl ivar. :unknown: `klass` is not known but some class
+  # embeds an ivar of this name, so iv_tbl may be the wrong storage.
+  def ivar_embed_type(klass, ivar)
+    return embed_type(klass, ivar) if klass
+
+    @ivar_layout.each_value.any? { |ivars| ivars.key?(ivar) } ? :unknown : nil
+  end
+
+  # The synthesized accessor (reader `name`, writer `name=`) exists and is
+  # defined by this file or declared by another compiled gem's header.
+  def embedded_accessor_linkable?(owner, name)
+    return false unless embedded_accessor?(owner, name)
+
+    !@only_owners || @only_owners.include?(owner) || @other_owners&.include?(owner) || false
   end
 
   def compile_poly_small_n(name, d, recv, argv, n)
@@ -10057,9 +10103,10 @@ class CodeGen
       check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
       call = if target.kind == :ivar_accessor && target.irep.nil?
                # POLY_SMALL_N_ACCESSOR: attr_reader/attr_writer are a bare
-               # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c); the writer
-               # returns the assigned value, not the ivar read back.
-               ivar_accessor_access(target.owner, name, d, recv, argv)
+               # mrb_iv_get / mrb_iv_set (3rd/mruby/src/class.c), or the
+               # synthesized accessor for an embedded ivar; the writer returns
+               # the assigned value, not the ivar read back.
+               ivar_accessor_call_code(target.owner, recv, name, d, argv, indent: '    ')
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
                "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
@@ -10990,6 +11037,12 @@ class CodeGen
     @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
   end
 
+  # The class whose instance `self` is while compiling `owner_def`'s code, or nil
+  # inside a runtime-def/EXEC body, whose self is whatever receiver mruby passes.
+  def self_class(owner_def)
+    @self_class_unknown ? nil : owner_def.owner
+  end
+
   # LEXICAL_SELF_SUPPORT: compile_send's own call-dispatch analogue of
   # self_receiver_class (top-level function, above) -- "is `self` inside a
   # method of `owner_def.owner` provably an instance of exactly that
@@ -11010,7 +11063,7 @@ class CodeGen
   # to satisfy this one caller would be a bigger, riskier change than one
   # small parallel function reusing the same two already-memoized sets.
   def lexical_self_owner(owner_def)
-    return nil unless owner_def
+    return nil unless owner_def && self_class(owner_def)
 
     owner = owner_def.owner
     return nil if owner.nil? || owner.end_with?('.singleton')
@@ -19823,7 +19876,17 @@ class CodeGen
   # both glue emitters: it captures the enclosing method's own real
   # `self` C++ variable into that exact slot at RProc-construction time,
   # the one place this compiler actually knows the correct value.
+  # A runtime-def/EXEC body's self is its receiver, not an instance of d.owner
+  # (nested blocks inherit that), so self-ivar codegen must not assume d.owner.
   def emit_proc_fallback_fn(region, d, fn_prefix = nil)
+    saved_self_class_unknown = @self_class_unknown
+    @self_class_unknown = saved_self_class_unknown || runtime_def_fallback_kind?(region[:kind])
+    emit_proc_fallback_fn_body(region, d, fn_prefix)
+  ensure
+    @self_class_unknown = saved_self_class_unknown
+  end
+
+  def emit_proc_fallback_fn_body(region, d, fn_prefix)
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
     arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
@@ -21583,33 +21646,30 @@ class CodeGen
     when 'GETIV'
       d = a[/^R(\d+)/, 1]
       ivar = a[/@(\w+)/, 1]
-      if (type = embed_type(owner_def.owner, ivar))
-        sname = struct_name(owner_def.owner)
-        box = TYPE_OPS.fetch(type)[:box]
-        note = "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n"
-        "#{note}  r#{d} = #{box}(((#{sname}*)DATA_PTR(self))->#{ivar});\n"
+      klass = self_class(owner_def)
+      code = ivar_get_code(klass, 'self', ivar, "r#{d}", self_of_klass: true)
+      type = embed_type(klass, ivar) if klass
+      if code.nil?
+        "  #error GETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
+      elsif type
+        "  // @#{ivar} embedded (#{type}) -- direct struct field read, no mrb_iv_get\n  #{code}\n"
       else
-        "  r#{d} = mrb_iv_get(M, self, mrb_intern_cstr(M, \"@#{ivar}\"));\n"
+        "  #{code}\n"
       end
     when 'SETIV'
       ivar = a[/@(\w+)/, 1]
       # See the matching comment in IvarLayout.analyze -- not `$`-anchored,
       # a trailing "; R1:name" local-variable comment breaks that.
       s = a[/R(\d+)/, 1]
-      if (type = embed_type(owner_def.owner, ivar))
-        sname = struct_name(owner_def.owner)
-        ops = TYPE_OPS.fetch(type)
-        note = "  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n"
-        # Optimistic but guarded: the whole-program analysis proved every
-        # *compiled* write site is this type, but it can't see writes from
-        # outside this program (reflection, a future uncompiled caller) --
-        # so this checks rather than blindly trusting its own analysis.
-        # Not E_TYPE_ERROR: that macro hardcodes the identifier `mrb`, and
-        # every generated function here names its mrb_state* parameter `M`.
-        "#{note}  if (!#{ops[:check]}(r#{s})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
-          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(r#{s});\n"
+      klass = self_class(owner_def)
+      code = ivar_set_code(klass, 'self', ivar, "r#{s}", self_of_klass: true)
+      type = embed_type(klass, ivar) if klass
+      if code.nil?
+        "  #error SETIV @#{ivar}: self's class is unknown here and some class embeds @#{ivar}\n"
+      elsif type
+        "  // @#{ivar} embedded (#{type}) -- direct struct field write, no mrb_iv_set\n  #{code}\n"
       else
-        "  mrb_iv_set(M, self, mrb_intern_cstr(M, \"@#{ivar}\"), r#{s});\n"
+        "  #{code}\n"
       end
     when 'ADDI'
       d = a[/^R(\d+)/, 1]
@@ -25252,15 +25312,14 @@ class CodeGen
                       mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
           target = lex_candidate
           lexical_self = true
-        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0) &&
-              embedded_accessor_reachable?(lex_candidate.owner, name)
+        elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
           # LEXICAL_SELF_IVAR_ACCESSOR: the ivar_accessor-kind analogue of
           # the branch just above -- see IVAR_ACCESSOR_DEVIRT's own
           # comment (below) for why an attr_reader/writer candidate can
           # never satisfy the ordinary `.irep`-based branch. Same
           # certain-not-traced guarantee applies here too: no runtime
-          # `mrb_class_ptr` guard needed, straight to `mrb_iv_get`/
-          # `mrb_iv_set`.
+          # `mrb_class_ptr` guard needed; IVAR_ACCESS picks iv_tbl or the
+          # embedded struct.
           lexical_self_ivar_accessor = lex_candidate
         end
       end
@@ -25357,7 +25416,8 @@ class CodeGen
         target = candidate
         typed = true
       elsif candidate&.kind == :ivar_accessor &&
-            n == (name.end_with?('=') ? 1 : 0) && embedded_accessor_reachable?(candidate.owner, name)
+            n == (name.end_with?('=') ? 1 : 0) &&
+            ivar_accessor_call_code(candidate.owner, recv, name, d, argv)
         # IVAR_ACCESSOR_DEVIRT: `candidate` has no `.irep` at all (never
         # will -- build_registry's own attr_reader/writer/accessor case
         # registers it that way on purpose, see MethodDef's own `kind`
@@ -25376,7 +25436,9 @@ class CodeGen
         # `mandatory_arity`/`pure_mandatory_arity?` don't apply (there is
         # no irep to ask), but a real attr_reader/writer call site can
         # never have any other shape, so this is the complete, correct
-        # check on its own, not an approximation.
+        # check on its own, not an approximation. An EMBEDDED ivar is the
+        # exception to "bare iv_tbl": IVAR_ACCESS (ivar_accessor_call_code)
+        # picks the storage, and nil there leaves the call to dispatch.
         ivar_accessor_target = candidate
       end
     end
@@ -25546,23 +25608,17 @@ class CodeGen
       # analogue of IVAR_ACCESSOR_DEVIRT below, with the same
       # lexical_self_owner certainty LEXICAL_SELF's own comment (above)
       # already established: no runtime `mrb_class_ptr` guard, no
-      # `mrb_funcall` fallback, straight to iv_tbl.
+      # `mrb_funcall` fallback. Storage (iv_tbl or the embedded struct) comes
+      # from IVAR_ACCESS.
       owner = lexical_self_ivar_accessor.owner
-      if name.end_with?('=')
-        ivar = name[0..-2]
-        val = argv.first
-        note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (self, statically #{owner}), " \
-               "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall, no runtime " \
-               "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
-               "3rd/mruby/src/class.c citation this reproduces exactly.\n"
-        "#{note}  #{ivar_accessor_access(owner, name, d, recv, [val]).sub("\n    ", "\n  ")}\n"
-      else
-        note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{name} (self, statically #{owner}), " \
-               "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall, no runtime " \
-               "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
-               "3rd/mruby/src/class.c citation this reproduces exactly.\n"
-        "#{note}  #{ivar_accessor_access(owner, name, d, recv, argv)}\n"
-      end
+      ivar = name.chomp('=')
+      storage = embed_type(owner, ivar) ? 'embedded struct field' : 'mrb_iv_get/mrb_iv_set'
+      kind = name.end_with?('=') ? 'attr_writer' : 'attr_reader'
+      note = "  // LEXICAL_SELF_IVAR_ACCESSOR :#{name} -> #{owner}#@#{ivar} (self, statically #{owner}), " \
+             "#{kind} devirtualized to a direct #{storage} access (no _impl, no mrb_funcall, no runtime " \
+             "check) -- see MethodDef's own kind: :ivar_accessor comment for the real " \
+             "3rd/mruby/src/class.c citation this reproduces exactly.\n"
+      "#{note}  #{ivar_accessor_call_code(owner, recv, name, d, argv, self_of_klass: true)}\n"
     elsif ivar_accessor_target
       # IVAR_ACCESSOR_DEVIRT's own codegen -- see the `elsif candidate&.kind
       # == :ivar_accessor` branch above for the full soundness writeup.
@@ -25578,30 +25634,22 @@ class CodeGen
       # ELEMENT_CLASS_SUPPORT: see the TYPED branch above -- same tag, same
       # reason, so both provenances stay greppable in generated output.
       traced_note = via_element ? "inlined block element of Array<#{owner}>" : "receiver traced to #{owner}"
-      if name.end_with?('=')
-        ivar = name[0..-2]
-        val = argv.first
-        note = "  // IVAR_ACCESSOR#{via_element ? '/ELEMENT' : ''} :#{name} -> #{owner}#@#{ivar} (#{traced_note}), " \
-               "attr_writer devirtualized to a direct mrb_iv_set (no _impl, no mrb_funcall) -- see " \
-               "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
-               "citation this reproduces exactly (attr_writer's own mrb_iv_set then returning the " \
-               "assigned value, never the ivar read back).\n"
-        "#{note}  if (#{check}) {\n" \
-          "    #{ivar_accessor_access(owner, name, d, recv, [val])}\n" \
-          "  } else {\n" \
-          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-          "  }\n"
-      else
-        note = "  // IVAR_ACCESSOR#{via_element ? '/ELEMENT' : ''} :#{name} -> #{owner}#@#{name} (#{traced_note}), " \
-               "attr_reader devirtualized to a direct mrb_iv_get (no _impl, no mrb_funcall) -- see " \
-               "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
-               "citation this reproduces exactly.\n"
-        "#{note}  if (#{check}) {\n" \
-          "    #{ivar_accessor_access(owner, name, d, recv, argv)}\n" \
-          "  } else {\n" \
-          "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-          "  }\n"
-      end
+      ivar = name.chomp('=')
+      # An embedded ivar goes through its synthesized accessor (IVAR_ACCESS).
+      storage = if embed_type(owner, ivar) then 'synthesized struct accessor'
+                elsif name.end_with?('=') then 'mrb_iv_set'
+                else 'mrb_iv_get'
+                end
+      kind = name.end_with?('=') ? 'attr_writer' : 'attr_reader'
+      note = "  // IVAR_ACCESSOR#{via_element ? '/ELEMENT' : ''} :#{name} -> #{owner}#@#{ivar} (#{traced_note}), " \
+             "#{kind} devirtualized to a direct #{storage} (no mrb_funcall) -- see " \
+             "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
+             "citation this reproduces exactly (a writer yields the assigned value).\n"
+      "#{note}  if (#{check}) {\n" \
+        "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
+        "  } else {\n" \
+        "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+        "  }\n"
     else
       return compile_native_primitive_send(name, d, recv, argv) if builtin_native_expression_send
 
