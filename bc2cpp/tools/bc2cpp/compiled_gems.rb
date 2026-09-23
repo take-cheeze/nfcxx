@@ -3148,3 +3148,115 @@ def foreign_mrblib_srcs(gems_root)
     Dir["#{gems_root}/3rd/mruby-onig-regexp/mrblib/**/*.rb"] +
     Dir["#{gems_root}/3rd/mruby-stringio/mrblib/**/*.rb"]
 end
+
+# CLOSED_WORLD (docs/adr/0210): the builds that ship RPG2000/2003 only
+# (build_config.rb's single_format_only). Their games carry no Ruby, so the
+# only Ruby that can run is the closed world plus the build's own gems.
+BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix].freeze
+# Gems that load or define Ruby at runtime; any of them opens the world.
+BC2CPP_OPEN_WORLD_GEMS = %w[
+  mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding
+  mruby-bin-mirb mruby-bin-mruby mruby-bin-debugger
+].freeze
+# The gems whose mrblib is the closed world itself.
+BC2CPP_CLOSED_WORLD_GEMS = %w[mruby-rpg2k mruby-lcf mruby-rgss].freeze
+# Each closed-world target's own native host sources (the firmware/executable).
+BC2CPP_CLOSED_WORLD_HOST_SRCS = { 'wio' => 'app/wio/src', 'maix' => 'app/wio/src', 'psp' => 'app/psp' }.freeze
+# mruby-compiler entry points that turn a string or file into running Ruby.
+BC2CPP_SOURCE_LOADER_CALL = /\b(?:mrb_load_n?string(?:_cxt)?|mrb_load_file(?:_cxt)?|mrb_load_exec|
+                               mrb_parse_n?string|mrb_parse_file|mrb_load_detect_file_cxt)\s*\(([^;]*)/mx
+BC2CPP_NATIVE_GLOB = '*.{c,cc,cpp,cxx,h,hh,hpp,hxx,inc}'
+
+# Opt-in from build_config.rb (`conf.gem ... { enable_bc2cpp_closed_world }`).
+module Bc2cppClosedWorldOption
+  def enable_bc2cpp_closed_world
+    @bc2cpp_closed_world = true
+  end
+
+  def bc2cpp_closed_world?
+    @bc2cpp_closed_world == true
+  end
+end
+
+# The top-level arguments of a C call, given the text after its `(`.
+def bc2cpp_c_call_args(text)
+  args = [+'']
+  depth = 0
+  text.scan(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[()\[\]{}]|,|[^"'()\[\]{},]+/m) do |tok|
+    depth += 1 if '([{'.include?(tok)
+    depth -= 1 if ')]}'.include?(tok)
+    break if depth.negative?
+
+    tok == ',' && depth.zero? ? args << +'' : args.last << tok
+  end
+  args
+end
+
+def bc2cpp_host_native_srcs(build_name, repo_root)
+  host = BC2CPP_CLOSED_WORLD_HOST_SRCS[build_name]
+  host ? Dir["#{repo_root}/#{host}/**/#{BC2CPP_NATIVE_GLOB}"].sort : []
+end
+
+# Why `gems` ({name => dir}, the build's real gem list) cannot be treated as a
+# closed world; empty when it can.
+def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cpp_host_native_srcs(build_name, repo_root))
+  errors = []
+  unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name)
+    errors << "build '#{build_name}' is not one of #{BC2CPP_CLOSED_WORLD_BUILDS.join('/')}"
+  end
+  missing = BC2CPP_CLOSED_WORLD_GEMS - gems.keys
+  errors << "gem list lacks #{missing.join(', ')}" unless missing.empty?
+  (gems.keys & BC2CPP_OPEN_WORLD_GEMS).each { |name| errors << "#{name} loads or defines Ruby at runtime" }
+  # Without mruby-compiler no source string can be compiled at all; with it,
+  # every host call must compile a fixed literal that defines nothing.
+  if gems.key?('mruby-compiler')
+    host_srcs.each do |path|
+      text = File.read(path, encoding: 'BINARY')
+      text.scan(BC2CPP_SOURCE_LOADER_CALL) do |(args)|
+        source = bc2cpp_c_call_args(args)[1].to_s.strip
+        literal = source[/\A"((?:[^"\\]|\\.)*)"\z/m, 1] ||
+                  (source.match?(/\A\w+\z/) && text[/\bchar\s+#{source}\s*\[\s*\]\s*=\s*"((?:[^"\\]|\\.)*)"\s*;/, 1])
+        next if literal && !literal.match?(/\b(?:def|class|module|alias|undef|define_\w+|attr\w*|include|extend|
+                                                 prepend|\w*eval|send|__send__|load|require|Struct|const_set|
+                                                 remove_const|method_missing)\b/x)
+
+        errors << "#{path.delete_prefix("#{repo_root}/")} runs a non-literal Ruby source (#{source})"
+      end
+    end
+  end
+  errors
+end
+
+# The native and Ruby sources outside the closed world that share its VM on a
+# closed-world build: mruby core, every other gem's src and mrblib, the
+# closed-world gems' own native src, and the target's host sources.
+def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
+  native = Dir["#{repo_root}/3rd/mruby/src/**/#{BC2CPP_NATIVE_GLOB}"] +
+           Dir["#{repo_root}/include/**/#{BC2CPP_NATIVE_GLOB}"] +
+           bc2cpp_host_native_srcs(build_name, repo_root)
+  ruby = Dir["#{repo_root}/3rd/mruby/mrblib/**/*.rb"]
+  gems.each do |name, dir|
+    next if BC2CPP_COMPILED_GEMS.key?(name)
+
+    native += Dir["#{dir}/{src,core}/**/#{BC2CPP_NATIVE_GLOB}"]
+    ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name)
+  end
+  [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
+end
+
+# The extra bc2cpp environment for `spec`'s build: the closed-world switch and
+# its gem list when build_config.rb enabled it, {} otherwise. Called from the
+# codegen task, once every gem (dependencies included) is in the build.
+def bc2cpp_closed_world_env(spec, repo_root)
+  return {} unless spec.bc2cpp_closed_world?
+
+  require 'shellwords'
+  gems = spec.build.gems.to_h { |g| [g.name, File.expand_path(g.dir)] }
+  errors = bc2cpp_closed_world_violations(spec.build.name, gems, repo_root)
+  unless errors.empty?
+    raise "#{spec.name}: BC2CPP_CLOSED_WORLD refused for build '#{spec.build.name}':\n  #{errors.join("\n  ")}"
+  end
+
+  { 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => spec.build.name,
+    'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }) }
+end

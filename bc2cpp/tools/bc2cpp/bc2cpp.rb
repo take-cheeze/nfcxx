@@ -440,8 +440,13 @@ def build_registry(ireps, root_label)
   # owner name (e.g. "RPG2k::Scene::Map::MapEventState") -> its member names,
   # in declared (== storage index) order. See that function's own comment.
   struct_member_lists = {}
+  # CLOSED_WORLD: every CLASS opcode's superclass ref (nil when unresolved) and
+  # whether its outer was implicit, plus every irep this walk visited.
+  class_decls = Hash.new { |h, k| h[k] = [] }
+  walked = Set.new
 
   walk = lambda do |label, namespace|
+    walked << label
     irep = ireps.fetch(label)
     # Track which register currently holds "the class/module/singleton-class
     # most recently opened by CLASS/MODULE/SCLASS", so a same-register EXEC
@@ -581,6 +586,8 @@ def build_registry(ireps, root_label)
           superclass_reg = (reg[/\d+/].to_i + 1).to_s
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
           superclass_of[pending_name] = resolved if resolved
+          outer_nil = resolve_superclass_ref(irep, idx, reg[/\d+/], nil) == :none
+          class_decls[pending_name] << { super: resolved, outer_nil: outer_nil }
         end
       when 'SCLASS'
         # "SCLASS R1" -- OP_SCLASS's own real shape (src/codedump.c:
@@ -1298,7 +1305,7 @@ def build_registry(ireps, root_label)
 
   walk.call(root_label, nil)
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists]
+   struct_member_lists, class_decls, walked]
 end
 
 # SUPER_SUPPORT: resolve a real `class X < SUPER_EXPR`'s own SUPER_EXPR to
@@ -1428,6 +1435,7 @@ require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
+require_relative 'closed_world'
 
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
@@ -9152,8 +9160,10 @@ class CodeGen
                  foreign_method_names = nil, outside_tokens = nil,
                   native_name_sources = nil, included_modules = {}, prepended_modules = {},
                   unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {},
-                  native_registered_expressions: {})
+                  native_registered_expressions: {}, closed_world: nil)
     @ireps = ireps
+    # CLOSED_WORLD: a ClosedWorld (closed_world.rb) when BC2CPP_CLOSED_WORLD=1.
+    @closed_world = closed_world
     # ENTRY_ARG_CALLSITE_PROOF: every identifier-shaped token appearing
     # anywhere in NATIVE_SRCS or FOREIGN_RUBY_SRCS (outside_world_tokens,
     # above). nil means neither scan ran, which would make that mechanism
@@ -10139,7 +10149,7 @@ class CodeGen
     end.first(POLY_SMALL_N_INHERITED_MAX)
   end
 
-  def compile_poly_small_n(name, d, recv, argv, n)
+  def compile_poly_small_n(name, d, recv, argv, n, closed_world_site: nil)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
 
@@ -10178,7 +10188,9 @@ class CodeGen
     owners_note = candidates.map(&:owner).join(', ')
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
            "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
-    chain = "#{branches.join}{\n    #{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+    listed = candidates.flat_map { |t| [t.owner] + inherited[t.owner] }
+    fallback = guarded_fallback_line(d, recv, name, argv, listed, closed_world_site)
+    chain = "#{branches.join}{\n    #{fallback}  }\n"
     return "#{note}  #{chain}" unless hoist
 
     subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
@@ -25805,7 +25817,9 @@ class CodeGen
         traced_note = via_element ? "inlined block element of Array<#{target.owner}>" : "receiver traced to #{target.owner}"
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
-        fallback = typed_fallback || dynamic_dispatch_line(d, recv, name, argv)
+        fallback = typed_fallback ||
+                   guarded_fallback_line(d, recv, name, argv, [target.owner],
+                                         closed_world_site(recv, irep, idx, owner_def))
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
@@ -25846,11 +25860,21 @@ class CodeGen
         # the unsafe direction, and the file's own established pattern
         # (`typed`, just above) already pays this same one-compare cost for
         # every other receiver-uncertain devirtualized call.
+        cw_site = closed_world_site(recv, irep, idx, owner_def)
+        # CLOSED_WORLD_SELF: LEXICAL_SELF's reasoning for a MONO target. Self is
+        # kind_of the owner and the closed world proves it has no subclass, so
+        # the guard can only be true.
+        if cw_site && cw_site[:self_owner] == target.owner && @closed_world.exact_class?(target.owner)
+          note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self, exactly " \
+                 "#{target.owner}: no subclass in the closed world), direct C++ call#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
         check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
                "direct C++ call, mrb_funcall fallback#{native_note}\n"
-        fallback = dynamic_dispatch_line(d, recv, name, argv)
+        fallback = guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
@@ -25910,15 +25934,17 @@ class CodeGen
              "#{kind} devirtualized to a direct #{storage} (no mrb_funcall) -- see " \
              "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
              "citation this reproduces exactly (a writer yields the assigned value).\n"
+      fallback = guarded_fallback_line(d, recv, name, argv, [owner], closed_world_site(recv, irep, idx, owner_def))
       "#{note}  if (#{check}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
         "  } else {\n" \
-        "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+        "    #{fallback}" \
         "  }\n"
     else
       return compile_native_primitive_send(name, d, recv, argv) if builtin_native_expression_send
 
-      poly_small_n = compile_poly_small_n(name, d, recv, argv, n)
+      poly_small_n = compile_poly_small_n(name, d, recv, argv, n,
+                                          closed_world_site: closed_world_site(recv, irep, idx, owner_def))
       return poly_small_n if poly_small_n
 
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
@@ -25988,12 +26014,15 @@ class CodeGen
            "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
            "}\n"
     unless entries.empty?
+      # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
+      # the registry means, never a same-named constant found through ancestry.
+      defined = @closed_world ? 'mrb_const_defined_at' : 'mrb_const_defined'
       out << <<~CPP
         static struct RClass* bc2cpp_owner_class_lookup(mrb_state* M, const char* const* path, int n) {
           mrb_value v = mrb_obj_value(M->object_class);
           for (int i = 0; i < n; ++i) {
             mrb_sym s = mrb_intern_cstr(M, path[i]);
-            if (!mrb_const_defined(M, v, s)) return nullptr;
+            if (!#{defined}(M, v, s)) return nullptr;
             v = mrb_const_get(M, v, s);
           }
           return mrb_class_ptr(v);
@@ -26106,6 +26135,38 @@ class CodeGen
     end
   end
 
+  # CLOSED_WORLD: the else arm of a receiver-class guard chain listing
+  # `listed`. `site` is closed_world_site's result, nil for a chain this does
+  # not model. A proven fallback raises what dispatch would (bc2cpp_nomethod);
+  # a refused one keeps dispatch and names the reason for the summary.
+  def guarded_fallback_line(d, recv, name, argv, listed, site)
+    dispatch = dynamic_dispatch_line(d, recv, name, argv)
+    return dispatch unless @closed_world && site
+
+    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : @closed_world.refusal(name, listed, site[:self_owner],
+                                                                          symbol_installed_names)
+    return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
+
+    args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
+    "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args});\n"
+  end
+
+  # CLOSED_WORLD: the facts guarded_fallback_line needs about a call site --
+  # the enclosing owner when the receiver is provably that method's own self.
+  def closed_world_site(recv, irep, idx, owner_def)
+    return nil unless @closed_world
+
+    self_owner = owner_def && self_class(owner_def)
+    unless recv == 'self'
+      reg = recv[/\Ar(\d+)\z/, 1]
+      prev = reg && irep && idx&.positive? && irep.instructions[idx - 1]
+      self_loaded = prev && prev.op == 'LOADSELF' && prev.args[/\AR(\d+)/, 1] == reg &&
+                    fixnum_proof_preds(irep)&.fetch(idx, nil).to_a == [idx - 1]
+      self_owner = nil unless self_loaded
+    end
+    { self_owner: self_owner }
+  end
+
   def regs(args_text, count)
     args_text.scan(/R(\d+)/).flatten.first(count)
   end
@@ -26128,7 +26189,7 @@ if $PROGRAM_NAME == __FILE__
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
-    struct_member_lists = build_registry(ireps, root_label)
+    struct_member_lists, class_decls, walked_ireps = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: shell-word-separated list of C/C++ source files (e.g.
   # mruby-rgss/src/*.cxx) to scan for mrb_define_method-family call sites --
@@ -26730,12 +26791,34 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # CLOSED_WORLD (docs/adr/0210): only for a build whose real gem list
+  # (BC2CPP_BUILD_GEMS, from the compiled gem's own codegen task) passes
+  # compiled_gems.rb's check; the scan reads that build's own sources.
+  closed_world = nil
+  if ENV['BC2CPP_CLOSED_WORLD'] == '1'
+    repo_root = File.expand_path('../..', __dir__)
+    build_name = ENV['BC2CPP_BUILD_NAME'].to_s
+    build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS'].to_s).to_h { |kv| kv.split('=', 2) }
+    errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root)
+    abort "bc2cpp: BC2CPP_CLOSED_WORLD refused for build '#{build_name}':\n  #{errors.join("\n  ")}" unless errors.empty?
+
+    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+    closed_world = ClosedWorld.new(ireps: ireps, registry: registry, class_decls: class_decls, walked: walked_ireps,
+                                   native_paths: outside_native, ruby_paths: outside_ruby)
+    warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
+         "#{outside_ruby.size} Ruby outside sources) =="
+    warn "  global refusal: #{closed_world.global_refusal || 'none'}"
+    warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    warn ''
+  end
+
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
                     element_layout, element_annotations, container_constants, hash_element_layout,
                     integer_constants, foreign_methods, outside_tokens, native_name_sources,
                     included_modules, prepended_modules, unknown_mixins,
                     native_expression_devirt: native_expression_devirt,
-                    native_registered_expressions: native_registered_expressions)
+                    native_registered_expressions: native_registered_expressions,
+                    closed_world: closed_world)
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
@@ -27040,6 +27123,16 @@ if $PROGRAM_NAME == __FILE__
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
+  if closed_world
+    kept = Hash.new(0)
+    compiled.each { |m| m[:code].scan(%r{/\* CLOSED_WORLD kept: (\w+) \*/}) { |(r)| kept[r] += 1 } }
+    converted = compiled.sum { |m| m[:code].scan(/\bbc2cpp_nomethod\(M,/).size }
+    dropped = compiled.sum { |m| m[:code].scan(%r{^\s*// CLOSED_WORLD_SELF :}).size }
+    warn "== closed world fallbacks: #{dropped} guards dropped, #{converted} bc2cpp_nomethod, " \
+         "#{kept.values.sum} kept dispatching =="
+    kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
+    warn ''
+  end
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   print SymbolCache.emit(symbol_table)
   print const_site_cache_code

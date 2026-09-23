@@ -19,8 +19,12 @@ module SymbolCache
 
   # Symbols found so far, in first-seen order: C string literal => index.
   class Table
+    # CLOSED_WORLD: set once a bc2cpp_nomethod call is rewritten, so emit adds it.
+    attr_accessor :nomethod_used
+
     def initialize
       @index = {}
+      @nomethod_used = false
     end
 
     def index_for(literal)
@@ -50,18 +54,23 @@ module SymbolCache
   # `mrb_funcall(M, RECV, "name", N, ...)` -> `bc2cpp_send(M, RECV, i, N, ...)`. RECV is an arbitrary C++ expression, so the
   # receiver is delimited with a bracket/quote-aware scan; a call whose name is
   # not a plain string literal is left alone.
+  # CLOSED_WORLD's `bc2cpp_nomethod_named(M, RECV, "name"...)` becomes
+  # `bc2cpp_nomethod(M, RECV, i...)` the same way.
   def rewrite_funcalls(code, table)
     out = +''
     pos = 0
-    while (start = code.index(/\bmrb_funcall\(M,\s*/, pos))
+    while (start = code.index(/\b(mrb_funcall|bc2cpp_nomethod_named)\(M,\s*/, pos))
+      nomethod = Regexp.last_match(1) == 'bc2cpp_nomethod_named'
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
-      name = recv_end && code[recv_end..].match(/\A,\s*(#{STRING})\s*,/)
+      name = recv_end && code[recv_end..].match(nomethod ? /\A,\s*(#{STRING})(?=\s*[,)])/ : /\A,\s*(#{STRING})\s*,/)
       if name
         # The receiver may itself contain a funcall; rewrite it first so its
         # names take their slots before this call's own.
         receiver = rewrite_funcalls(code[head_end...recv_end], table)
-        out << code[pos...start] << "bc2cpp_send(M, #{receiver}, #{table.index_for(name[1])},"
+        index = table.index_for(name[1])
+        table.nomethod_used = true if nomethod
+        out << code[pos...start] << (nomethod ? "bc2cpp_nomethod(M, #{receiver}, #{index}" : "bc2cpp_send(M, #{receiver}, #{index},")
         pos = recv_end + name[0].length
       else
         out << code[pos...head_end]
@@ -71,15 +80,16 @@ module SymbolCache
     out << code[pos..]
   end
 
-  # The symbol index of every `bc2cpp_send(M, RECV, i, ...)` in `code`, found
-  # with the same receiver scan the rewrite uses (RECV may nest sends).
+  # The symbol index of every `bc2cpp_send(M, RECV, i, ...)` (and
+  # `bc2cpp_nomethod(M, RECV, i...)`) in `code`, found with the same receiver
+  # scan the rewrite uses (RECV may nest sends).
   def send_indices(code)
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_send\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
-      idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*,/, 1]
+      idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*[,)]/, 1]
       found << idx.to_i if idx
       pos = head_end
     end
@@ -149,7 +159,34 @@ module SymbolCache
         va_end(ap);
         return mrb_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
-
+      #{table.nomethod_used ? NOMETHOD : ''}
     CPP
   end
+
+  # CLOSED_WORLD (docs/adr/0210): the else arm of a guard chain proven to list
+  # every class that answers the name, on a receiver with no method_missing.
+  # mruby's own dispatch can only raise NoMethodError there; running it keeps
+  # the error (message, args, call-depth and memory limits) exactly the same.
+  NOMETHOD = <<~CPP
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
+      mrb_sym mid = bc2cpp_sym(M, i);
+      mrb_funcall_argv(M, recv, mid, argc, argv);
+      // Unreachable while the proof holds; raise rather than run on.
+      mrb_method_missing(M, mid, recv, mrb_ary_new_from_values(M, argc, argv));
+    }
+    // Typed as returning so GCC keeps the call site in place: a known-noreturn
+    // call is moved to the end of its function, which costs more than it saves.
+    [[gnu::noipa]] static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i) {
+      bc2cpp_nomethod_argv(M, recv, i, 0, nullptr);
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_nomethod(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      bc2cpp_nomethod_argv(M, recv, i, argc, argv);
+    }
+  CPP
+  private_constant :NOMETHOD
 end
