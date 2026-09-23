@@ -1427,6 +1427,7 @@ require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
+require_relative 'unique_class_names'
 
 # ---------------------------------------------------------------------------
 # INTEGER_CONSTANT_PROOF: the set of bare constant names this whole program
@@ -7285,7 +7286,7 @@ end
 # accept every hop, so no hop can skip past a join (ADR 0198).
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
-                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, dominated: nil)
+                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, dominated: nil, canonical: true)
   path = []
   use = idx
   # GETCONST/GETMCNST are only ever valid class-name evidence *while
@@ -7351,7 +7352,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      container_constants: container_constants,
                                      element_annotations: element_annotations,
                                      known_owners: known_owners, capture_hints: capture_hints,
-                                     ret_class_proof: ret_class_proof, dominated: dominated)
+                                     ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
       # An explicitly annotated Hash<Klass> parameter is also a safe source
       # for indexed values. Follow only plain MOVE aliases back to the
       # untouched incoming argument register; any computed/reassigned
@@ -7447,7 +7448,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
                                  known_owners: known_owners, capture_hints: capture_hints,
-                                 ret_class_proof: ret_class_proof, dominated: dominated)
+                                 ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
       else
         # CHAINED_ACCESSOR_SUPPORT (see this function's own top comment):
         # `name` isn't `new`, so this can never join the fresh-`.new`
@@ -7495,7 +7496,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
                                        known_owners: known_owners, capture_hints: capture_hints,
-                                       ret_class_proof: ret_class_proof, dominated: dominated)
+                                       ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
         return nil unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
@@ -7812,6 +7813,11 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       written = ([const_name] + path).join('::')
       resolved = lexically_resolve_construct_target(written, owner)
       return resolved if resolved
+      # UNIQUE_CLASS_NAME: construct-target callers (canonical: false) key their
+      # tables by the written name.
+      if canonical && path.empty? && (unique = UniqueClassNames.resolve(const_name, owner))
+        return unique
+      end
 
       path.unshift(const_name)
       return path.join('::')
@@ -23599,7 +23605,8 @@ class CodeGen
                                        name:, d:, n:, recv:, argv:, kw_names:, kw_val_exprs:)
     return nil unless name == 'new' && !self_implicit && irep && idx
 
-    known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner)
+    known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
+                             canonical: false)
     return nil unless known && DIRECT_CONSTRUCT_TARGETS.include?(known)
 
     # 1/2: no custom `self.new`/`self.allocate` -- on this exact class (the
@@ -24778,7 +24785,8 @@ class CodeGen
     # so checking them here is redundant with checking self_implicit, but
     # kept explicit since trace_new_target needs both regardless.
     if name == 'new' && !self_implicit && irep && idx
-      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner)
+      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
+                               canonical: false)
       native = known && NATIVE_CONSTRUCT_TARGETS[known]
       # Exact-arity-only (see NATIVE_CONSTRUCT_TARGETS' own comment) -- a
       # call site passing a different argument count just isn't this
@@ -24878,7 +24886,8 @@ class CodeGen
     # `known` fell through to nil there -- a harmless, cheap re-walk of a
     # single straight-line instruction range, not a correctness concern).
     if name == 'new' && !self_implicit && irep && idx
-      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner)
+      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
+                               canonical: false)
       if known && DIRECT_CONSTRUCT_TARGETS.include?(known)
         init_def = @registry['initialize'].find { |md| md.owner == known }
         # The full four-part soundness gate DIRECT_CONSTRUCT_TARGETS' own
@@ -26137,6 +26146,13 @@ if $PROGRAM_NAME == __FILE__
   # section by its own header text, never by position, so this is silent).
   foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
   foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
+
+  # UNIQUE_CLASS_NAME: set before the first ClassLayout pass, since every
+  # trace_new_target caller reads it.
+  UniqueClassNames.table = UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
+  UniqueClassNames.object_mixins = Array(included_modules['Object'])
+  warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
+  UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
 
   integer_constants =
     if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
