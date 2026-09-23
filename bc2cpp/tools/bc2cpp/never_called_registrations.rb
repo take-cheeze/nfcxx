@@ -179,4 +179,19 @@ module NeverCalledRegistrations
   def registered_in_source?(register_src, entry)
     register_src.match?(registration_line_pattern(entry))
   end
+
+  # The C++ entry-point identifiers any `mrb_define_(private_|class_)?method`
+  # or generated `bc2cpp_define_private_class_method` call installs, across
+  # the gem's hand register.cxx and bc2cpp.rb's own generated
+  # bc2cpp_register_owner_methods -- the same shape
+  # scripts/bc2cpp_wired_embedding_check.rb matches. A name argument may be
+  # a string literal or a macro/variable; the function is always the fourth.
+  # Comments are dropped first: register.cxx quotes calls in prose.
+  INSTALL_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*[^,]+,\s*(?:"[^"]*"|\S+)\s*,\s*(\w+)\s*,/m
+
+  def installed_entries(*sources)
+    sources.flat_map do |src|
+      src.gsub(%r{/\*.*?\*/}m, '').gsub(%r{//[^\n]*}, '').scan(INSTALL_CALL).flatten
+    end.to_set
+  end
 end
