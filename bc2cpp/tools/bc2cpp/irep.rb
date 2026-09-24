@@ -77,9 +77,10 @@ def parse_c_dump(c_src, symbol)
     lvs[label] = names
   end
 
-  # reps arrays: static const mrb_irep *SYM_reps_N[k] = { &SYM_irep_A, &SYM_irep_B, ... };
+  # reps arrays: static const mrb_irep *const SYM_reps_N[k] = { &SYM_irep_A, &SYM_irep_B, ... };
+  # (`*const` since patches/mruby-cdump-const-reps.patch; the bare form is still accepted.)
   reps = {}
-  c_src.scan(/static const mrb_irep \*#{Regexp.escape(symbol)}_reps_(\d+)\[\d+\] = \{(.*?)\n\};/m) do |label, body|
+  c_src.scan(/static const mrb_irep \*(?:const )?#{Regexp.escape(symbol)}_reps_(\d+)\[\d+\] = \{(.*?)\n\};/m) do |label, body|
     children = body.scan(/&#{Regexp.escape(symbol)}_irep_(\d+)/).map { |m| m[0] }
     reps[label] = children
   end
