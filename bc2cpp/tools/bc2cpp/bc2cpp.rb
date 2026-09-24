@@ -785,6 +785,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
   print gen.emit_instance_tt_setup
+  gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, BC2CPP_WIRED_EMBEDDINGS)
   print gen.emit_hot_only_registration_stubs(compiled, only_owners: only_owners)
@@ -824,9 +825,13 @@ if $PROGRAM_NAME == __FILE__
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
   warn ''
+  poly_table_sites = gen.poly_table_site_counts(compiled)
+  warn "== poly table dispatch: #{poly_table_sites.map { |t, n| "#{t} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
+  warn ''
   print SymbolCache.emit(symbol_table)
   print const_site_cache_code
   print index_helpers_code
+  print gen.emit_poly_tables(compiled)
   compiled.each { |m| print m[:code] }
 
   # This run's cross-TU declarations header, for other gems'

@@ -9,8 +9,8 @@ class CodeGen
   # the fallback covers native, unclean or filtered definitions.
   # Bounded by POLY_SMALL_N_MAX: past that a linear chain of class compares is
   # no longer clearly cheaper than mruby's method-table lookup, and code size
-  # keeps growing. 16 covers the `dispose` family and leaves `update` (21)
-  # dynamic.
+  # keeps growing. 16 covers the `dispose` family; POLY_TABLE
+  # (compile_poly_table) takes the names past it, such as `update`.
   # C++ vtables are not an option: mruby objects are tagged mrb_values, not C++
   # polymorphic instances; the mrb_obj_class chain reuses the TYPED/IVAR_ACCESSOR
   # trust model.
@@ -20,6 +20,13 @@ class CodeGen
   POLY_SMALL_N_MAX = 16
 
   def poly_small_n_targets(name, n)
+    candidates = poly_candidates(name, n)
+    candidates if candidates && candidates.size <= POLY_SMALL_N_MAX
+  end
+
+  # Every definition of `name` a runtime-class-checked direct call can reach
+  # for an `n`-argument send, uncapped; nil when there is none.
+  def poly_candidates(name, n)
     # RUNTIME_DEF_DEVIRT_GUARD: same gate as monomorphic_target. The chain's
     # `mrb_obj_class(M, recv) == Widget` guard still matches an object whose
     # singleton class was just given its own `shared_name`.
@@ -71,9 +78,7 @@ class CodeGen
 
       true
     end
-    return nil unless candidates.size.between?(1, POLY_SMALL_N_MAX)
-
-    candidates
+    candidates unless candidates.empty?
   end
 
   # True when `owner`'s ivar behind accessor `name` (a reader `code`, or a writer
@@ -184,11 +189,9 @@ class CodeGen
     end.first(POLY_SMALL_N_INHERITED_MAX)
   end
 
-  def compile_poly_small_n(name, d, recv, argv, n, closed_world_site: nil)
-    candidates = poly_small_n_targets(name, n)
-    return nil unless candidates
-
-    inherited = candidates.to_h do |t|
+  # INHERITED_GUARD's subclasses per candidate owner.
+  def poly_inherited(name, candidates)
+    candidates.to_h do |t|
       subs = inheriting_subclasses(name, t.owner)
       # An accessor's storage is the owner's; skip a subclass that embeds the ivar itself.
       if t.kind == :ivar_accessor && t.irep.nil?
@@ -200,6 +203,13 @@ class CodeGen
       end
       [t.owner, subs]
     end
+  end
+
+  def compile_poly_small_n(name, d, recv, argv, n, closed_world_site: nil)
+    candidates = poly_small_n_targets(name, n)
+    return nil unless candidates
+
+    inherited = poly_inherited(name, candidates)
     # INHERITED_GUARD: a subclass that inherits a candidate's def joins its
     # branch; the receiver's class is then read once instead of per compare.
     hoist = inherited.values.any?(&:any?)
@@ -231,6 +241,165 @@ class CodeGen
     subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
     "#{note}  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" \
       "  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
+  end
+
+  # POLY_TABLE (ADR 0227): a name with more than POLY_SMALL_N_MAX candidates
+  # gets one file-scope table of {owner, `_impl`} rows shared by every site,
+  # instead of a per-site chain. The site looks the receiver's class up and
+  # calls the `_impl` it finds; any other class takes the same guarded fallback
+  # as a POLY_SMALL_N chain. Bounded by POLY_TABLE_MAX to keep a scan short.
+  POLY_TABLE_MAX = 64
+  # Entries in each table's memo of recent lookups (a power of two).
+  POLY_TABLE_MEMO = 8
+
+  def compile_poly_table(name, d, recv, argv, n, closed_world_site: nil)
+    candidates = poly_candidates(name, n)
+    return nil unless candidates && candidates.size.between?(POLY_SMALL_N_MAX + 1, POLY_TABLE_MAX)
+
+    # POLY_SMALL_N_ACCESSOR candidates have no `_impl` to point at; their
+    # classes are left out of the table and reach the fallback.
+    candidates = candidates.reject { |t| t.kind == :ivar_accessor && t.irep.nil? }
+    return nil if candidates.size <= POLY_SMALL_N_MAX
+
+    table = poly_table(name, n, candidates)
+    return nil if table[:entries].empty?
+
+    fn_type = "mrb_value (*)(#{(['mrb_state*'] + Array.new(n + 1, 'mrb_value')).join(', ')})"
+    note = "  // POLY_TABLE :#{name} -> #{table[:symbol]} (#{candidates.size} known real definitions, " \
+           "#{table[:entries].size} classes), runtime-class lookup then direct C++ call, mrb_funcall fallback " \
+           "for any other class\n"
+    fallback = guarded_fallback_line(d, recv, name, argv, table[:entries].map(&:first), closed_world_site)
+    "#{note}  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), " \
+      "#{table[:symbol]})) {\n" \
+      "    r#{d} = reinterpret_cast<#{fn_type}>(bc2cpp_pfn)(M, #{([recv] + argv).join(', ')});\n" \
+      "  } else {\n" \
+      "    #{fallback}" \
+      "  }\n"
+  end
+
+  # One table per distinct entry list, since the candidates can differ
+  # between sites of one name. An INHERITED_GUARD subclass gets its own row.
+  # Built outside the enclosing method's state, as index_helper_code is.
+  def poly_table(name, n, candidates)
+    @poly_tables ||= {}
+    with_fresh_method_state do
+      inherited = poly_inherited(name, candidates)
+      entries = candidates.flat_map do |t|
+        impl = cpp_name(t.owner, t.name) + '_impl'
+        ([t.owner] + inherited[t.owner]).map { |owner| [owner, impl] }
+      end
+      # POLY_TABLE_NO_CLASS_ROW: bc2cpp_poly_lookup rejects a Class/Module
+      # receiver before scanning, so neither may be a row (the fallback
+      # reaches such a def instead).
+      entries = entries.reject { |owner, _| %w[Class Module].include?(owner) }
+      @poly_tables[[name, n, entries]] ||= { name: name, entries: entries,
+                                             symbol: "bc2cpp_poly_table_#{@poly_tables.size}" }
+    end
+  end
+
+  # OWNER_CLASS_CACHE slots and memo space for the tables the final `codes`
+  # use, taken only now so a dropped table takes none and no other slot is
+  # renumbered. Must run before emit_owner_class_cache.
+  def reserve_poly_table_slots(codes)
+    @poly_tables_emitted = poly_tables_used(codes)
+    @poly_tables_emitted.each_with_index do |t, i|
+      t[:getters] = t[:entries].map { |owner, _| owner_class_fn_name(owner) }
+      t[:slots] = t[:entries].map { |owner, _| @owner_class_cache.fetch(owner)[:index] }
+      t[:memo] = i * POLY_TABLE_MEMO
+    end
+  end
+
+  # POLY_TABLE_MEMO: remembers recent lookups, misses included, per table. A
+  # hit's key is an owner class, trusted exactly as its OWNER_CLASS_CACHE slot
+  # is; a stale miss (a freed class's address reused) only sends that class
+  # to the fallback, which is always correct. Cleared with that cache, since
+  # a later VM can reuse the addresses. Declared inside emit_owner_class_cache
+  # for that reason; '' without a table.
+  def poly_table_memo_decl
+    return '' if @poly_tables_emitted.nil? || @poly_tables_emitted.empty?
+
+    <<~CPP
+      // POLY_TABLE_MEMO -- see codegen_ivar_poly.rb's poly_table_memo_decl.
+      typedef void (*bc2cpp_poly_fn)(void);
+      struct bc2cpp_poly_memo {
+        struct RClass* c;
+        bc2cpp_poly_fn fn;
+      };
+      static bc2cpp_poly_memo bc2cpp_poly_memos[#{@poly_tables_emitted.size * POLY_TABLE_MEMO}];
+    CPP
+  end
+
+  # The tables `codes` reference, with the shared lookup ahead of them; ''
+  # when none. Printed after OWNER_CLASS_CACHE and the `_impl` declarations.
+  def emit_poly_tables(codes)
+    used = poly_tables_used(codes)
+    return '' if used.empty?
+
+    out = +<<~CPP
+      // POLY_TABLE -- see codegen_ivar_poly.rb's compile_poly_table.
+      struct bc2cpp_poly_entry {
+        struct RClass* (*owner)(mrb_state*);
+        bc2cpp_poly_fn fn;
+        int slot;
+      };
+      struct bc2cpp_poly_table {
+        const bc2cpp_poly_entry* rows;
+        int n;
+        bc2cpp_poly_memo* memo;
+      };
+      // A row compares against its resolved OWNER_CLASS_CACHE slot and runs
+      // the getter only while that slot is empty. Out of line: one copy per
+      // file is the point of the table.
+      [[gnu::noinline]] static bc2cpp_poly_fn bc2cpp_poly_lookup(mrb_state* M, struct RClass* c, const bc2cpp_poly_table& t) {
+        // `Graphics.update`: a class or module receiver is never a row
+        // (POLY_TABLE_NO_CLASS_ROW), so skip the scan.
+        if (c == M->class_class || c == M->module_class) return nullptr;
+        if (bc2cpp_owner_class_state != M) {
+          bc2cpp_reset_owner_classes();
+          bc2cpp_owner_class_state = M;
+        }
+        uintptr_t h = reinterpret_cast<uintptr_t>(c);
+        bc2cpp_poly_memo& m = t.memo[((h >> 4) ^ (h >> 10)) & #{POLY_TABLE_MEMO - 1}];
+        if (m.c == c) return m.fn;
+        bc2cpp_poly_fn fn = nullptr;
+        for (int i = 0; i < t.n; ++i) {
+          struct RClass* k = bc2cpp_owner_class_slots[t.rows[i].slot];
+          if (k == c || (!k && t.rows[i].owner(M) == c)) {
+            fn = t.rows[i].fn;
+            break;
+          }
+        }
+        m.c = c;
+        m.fn = fn;
+        return fn;
+      }
+    CPP
+    used.each do |table|
+      rows = "#{table[:symbol]}_rows"
+      out << "// POLY_TABLE :#{table[:name]}\n"
+      out << "static const bc2cpp_poly_entry #{rows}[] = {\n"
+      table[:entries].zip(table.fetch(:getters), table.fetch(:slots)).each do |(owner, impl), getter, slot|
+        out << "  {#{getter}, reinterpret_cast<bc2cpp_poly_fn>(#{impl}), #{slot}},  // #{owner}\n"
+      end
+      out << "};\n"
+      out << "static const bc2cpp_poly_table #{table[:symbol]} = {#{rows}, #{table[:entries].size}, " \
+             "bc2cpp_poly_memos + #{table.fetch(:memo)}};\n"
+    end
+    out << "\n"
+  end
+
+  # Tables built for a method that was then dropped are not emitted.
+  def poly_tables_used(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    (@poly_tables || {}).values.select { |t| texts.any? { |text| text.include?("#{t[:symbol]})) {") } }
+  end
+
+  # Sites per table name, for the stderr summary.
+  def poly_table_site_counts(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    poly_tables_used(codes).to_h do |t|
+      ["#{t[:name]} (#{t[:symbol]}, #{t[:entries].size} classes)", texts.sum { |text| text.scan("#{t[:symbol]})) {").size }]
+    end
   end
 
   # Bounded like POLY_SMALL_N_MAX; few Struct owners share a member name.

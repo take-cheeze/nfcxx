@@ -769,9 +769,10 @@ class CodeGen
     else
       return compile_native_primitive_send(name, d, recv, argv) if builtin_native_expression_send
 
-      poly_small_n = compile_poly_small_n(name, d, recv, argv, n,
-                                          closed_world_site: closed_world_site(recv, irep, idx, owner_def))
-      return poly_small_n if poly_small_n
+      cw_site = closed_world_site(recv, irep, idx, owner_def)
+      poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
+             compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
+      return poly if poly
 
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
       "#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
@@ -793,9 +794,14 @@ class CodeGen
   # (emit_owner_class_cache) instead of repeating mrb_const_get + mrb_intern_cstr
   # in every TYPED/POLY_SMALL_N guard on the hot path.
   def owner_class_ptr_expr(owner)
+    "#{owner_class_fn_name(owner)}(M)"
+  end
+
+  # The cache getter itself, for a table that stores it (POLY_TABLE).
+  def owner_class_fn_name(owner)
     @owner_class_cache ||= {}
     slot = (@owner_class_cache[owner] ||= { index: @owner_class_cache.size })
-    "bc2cpp_owner_class_#{slot[:index]}(M)"
+    "bc2cpp_owner_class_#{slot[:index]}"
   end
 
   # File-scope cache emitted ahead of the compiled bodies. A static per owner,
@@ -811,9 +817,12 @@ class CodeGen
     out = +"// OWNER_CLASS_CACHE -- see bc2cpp.rb's own owner_class_ptr_expr comment.\n"
     out << "static mrb_state* bc2cpp_owner_class_state = nullptr;\n"
     out << "static struct RClass* bc2cpp_owner_class_slots[#{[entries.size, 1].max}] = {};\n"
+    memo = poly_table_memo_decl
+    out << memo
     out << "static void bc2cpp_reset_owner_classes() {\n" \
            "  bc2cpp_owner_class_state = nullptr;\n" \
            "  for (struct RClass*& c : bc2cpp_owner_class_slots) c = nullptr;\n" \
+           "#{memo.empty? ? '' : "  for (bc2cpp_poly_memo& m : bc2cpp_poly_memos) m = {};\n"}" \
            "}\n"
     unless entries.empty?
       # CLOSED_WORLD: a guard whose else arm raises must name exactly the class
