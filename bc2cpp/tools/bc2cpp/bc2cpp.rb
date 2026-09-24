@@ -34,6 +34,7 @@ require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
 require_relative 'closed_world'
+require_relative 'nomethod_reviewed'
 require_relative 'hot_methods'
 
 require_relative 'integer_constants'
@@ -800,6 +801,22 @@ if $PROGRAM_NAME == __FILE__
          "#{kept.values.sum} kept dispatching =="
     kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
     warn ''
+    # NOMETHOD_REVIEWED (docs/adr/0226): a dead fallback nobody reviewed fails
+    # the gem build here, not in a later check.
+    nomethod_sites = NomethodReviewed.sites(compiled)
+    warn "== closed world nomethod sites: #{nomethod_sites.size} =="
+    nomethod_sites.each { |s| warn "  NOMETHOD #{s[:key]}#{' [self]' if s[:self_receiver]}" }
+    warn ''
+    violations = NomethodReviewed.violations(nomethod_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
+    unless violations.empty?
+      msg = "bc2cpp: #{violations.size} closed-world NOMETHOD_REVIEWED violation(s) (docs/adr/0226):\n  " \
+            "#{violations.join("\n  ")}\n" \
+            'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
+            'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp_nomethod_reviewed_update.rb).'
+      abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
+
+      warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
+    end
   end
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become

@@ -950,7 +950,10 @@ class CodeGen
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
-    "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args});\n"
+    # The marker outlives SymbolCache's rewrite of the name; bc2cpp.rb reads it
+    # to hold every such site to NOMETHOD_REVIEWED (ADR 0226).
+    marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?)
+    "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
   end
 
   # CLOSED_WORLD: the facts guarded_fallback_line needs about a call site --
