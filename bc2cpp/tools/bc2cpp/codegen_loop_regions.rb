@@ -626,6 +626,140 @@ class CodeGen
     nil
   end
 
+  # PROFILER_SECTION_SUPPORT: inline `RGSS::Profiler.section("name") { ... }`
+  # and `RGSS::Profiler.frame { ... }` as the same shape every other inline pass
+  # uses -- one BLOCK instruction immediately before a block-carrying send --
+  # but with NO receiver gate. Both names are the native profiling primitives in
+  # mruby-rgss/src/profiler.cxx (prof_section/prof_frame): they take a block,
+  # time it, and return the block's value, with an explicit `!g_enabled` fast
+  # path that is a bare yield.
+  #
+  # What the emitter actually does with them is NOT "time the body by hand":
+  # profiler_section_begin/profiler_section_end/profiler_frame_begin/
+  # profiler_frame_end (include/profiler.hxx) are public primitives that already
+  # encapsulate the enabled test, the clock read, the aggregation and the
+  # Chrome-trace write, and are documented no-ops when profiling is disabled
+  # (section_end returns immediately on a zero start stamp). So the emitted code
+  # calls the two primitives around the inlined body and the native
+  # `if (!g_enabled) return mrb_yield_argv(...)` branch collapses into them --
+  # which is the same trade the shipping code already makes in
+  # mruby-rgss/src/lib.cxx, where ProfilerScope times gfx.zorder/gfx.lvgl/
+  # gfx.invalidate in the same per-frame hot path.
+  #
+  # The receiver is matched structurally instead of through trace_new_target: a
+  # GETCONST/GETMCNST pair naming RGSS::Profiler, which is exactly what the real
+  # call sites compile to (`GETCONST R2 RGSS` + `GETMCNST R2 (R2)::Profiler`).
+  # A receiver that reaches these names by any other route -- a constant
+  # rebound to something else, a local alias, a subclass -- is simply not
+  # matched and keeps today's BLOCK_FALLBACK.
+  #
+  # The section NAME must be a String pool literal, because the C primitive
+  # takes `const char*` and only promises to copy it during the call
+  # (profiler_section_end stores it into a std::string map key immediately).
+  # Every real call site passes a literal ("map.render", "scene.update", ...),
+  # so a computed name is declined rather than approximated: materializing an
+  # arbitrary mrb_value name per call would add an allocation per frame for no
+  # benefit. `frame` takes no name, so it is admitted unconditionally.
+  #
+  # No BREAK: `break` out of an inlined region has no meaning here (the native
+  # path mrb_yield_argv's the block, so a `break` in it is already a LOCAL jump
+  # mruby's VM resolves against the sending frame's tag -- an enclosing loop of
+  # the Ruby method, not the section), and refusing it is what the other
+  # inlined-loop passes do too. `next` (a block return) and a method `return`
+  # (RETURN_BLK, already a plain C++ return in every inline body) are fine.
+  PROFILER_SECTION_NAMES = { 'section' => 1, 'frame' => 0 }.freeze
+
+  def recognize_profiler_section_regions(irep)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless insn.op == 'SENDB' && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      meth = name&.sub(/\A:/, '')
+      want_argc = PROFILER_SECTION_NAMES[meth]
+      next unless want_argc && nstr == "n=#{want_argc}"
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      next unless dest_reg
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      # The block proc register is the one AFTER the arguments (vm.c OP_SENDB):
+      # dest+1 for :frame (no arguments at all), dest+2 for :section, whose name
+      # is argument 0 and is written into dest+1 first. Getting this wrong is
+      # what a plain "dest+1" check from the collection passes assumes.
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless block_reg == (dest_reg.to_i + 1 + want_argc).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
+
+      # The receiver must be the literal constant path RGSS::Profiler (see
+      # profiler_section_receiver?), and a :section's name must be a String pool
+      # literal (see profiler_section_literal?). Everything else keeps today's
+      # BLOCK_FALLBACK.
+      next unless profiler_section_receiver?(irep, idx, dest_reg, meth)
+
+      section_name = meth == 'section' ? profiler_section_literal(irep, idx, (dest_reg.to_i + 1).to_s) : nil
+      next if meth == 'section' && section_name.nil?
+
+      upvars = block_upvar_needs(block_irep)
+      # A block whose captures cannot be modelled, or which breaks out, stays on
+      # the fallback: `break` here has no inlined target, and the nested break
+      # scan needs the same available_upvars the emitter would supply.
+      next if upvars.nil?
+      nbrk = inline_nested_region_has_break?({ block_irep: block_irep, upvars: upvars }, upvars)
+      next if nbrk
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
+                   block_irep: block_irep, method_name: meth, section_name: section_name }
+    end
+    regions
+  end
+
+  # Is `reg` the literal constant path RGSS::Profiler at this call? `idx` is the
+  # SENDB's index, so the BLOCK is at idx-1. The pair
+  # `GETCONST R<r> RGSS` + `GETMCNST R<r> (R<r>)::Profiler` ends immediately
+  # before the BLOCK for :frame, and one STRING earlier for :section (whose
+  # name argument is written in between), so both positions are tried.
+  # Anything else -- a local alias, a rebased constant, a different receiver
+  # answering `section` -- is not matched and keeps today's BLOCK_FALLBACK.
+  def profiler_section_receiver?(irep, idx, reg, meth)
+    receiver_pair_before?(irep, idx - 1, reg) || (meth == 'section' && receiver_pair_before?(irep, idx - 2, reg))
+  end
+
+  # The two-instruction `GETCONST R<r> RGSS` / `GETMCNST R<r> (R<r>)::Profiler`
+  # occupying the two slots immediately before index `block_idx` (the BLOCK).
+  def receiver_pair_before?(irep, block_idx, reg)
+    mcnst = irep.instructions[block_idx - 1]
+    return false unless mcnst && mcnst.op == 'GETMCNST'
+    return false unless mcnst.args =~ /\AR#{reg}\s+\(R#{reg}\)::Profiler\z/
+
+    const = irep.instructions[block_idx - 2]
+    const && const.op == 'GETCONST' && const.args == "R#{reg}\tRGSS"
+  end
+
+  # The String pool literal for :section's name argument, or nil. The VM wrote
+  # that argument (register dest+1) with a `STRING R<n> L[k]` pool load placed
+  # between the receiver pair and the BLOCK. The search is bounded to exactly
+  # those two instructions, so a STRING left over from an earlier statement in
+  # the method can never be mistaken for this call's name.
+  def profiler_section_literal(irep, idx, reg)
+    insn = irep.instructions[idx - 2]
+    return nil unless insn && insn.op == 'STRING' && insn.args[/^R(\d+)/, 1] == reg
+
+    pool_idx = insn.args[/L\[(\d+)\]/, 1]
+    return nil unless pool_idx
+
+    entry = irep.pool.fetch(pool_idx.to_i)
+    entry if entry.is_a?(String)
+  end
+
   # SORT_BLOCK_SUPPORT: inline sort_by (1-arg key), sort (2-arg comparator) and
   # uniq (1-arg key), with the proven_array_source gate. Semantics in
   # emit_sort_inline.

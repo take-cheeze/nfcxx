@@ -773,6 +773,19 @@ if $PROGRAM_NAME == __FILE__
   # Declared as internal.h does, `mrb_noreturn` included, so g++ treats the
   # following RETURN as unreachable.
   puts 'extern "C" mrb_noreturn void mrb_method_missing(mrb_state*, mrb_sym, mrb_value, mrb_value);'
+  # PROFILER_SECTION_SUPPORT: emit_profiler_section_inline calls the native
+  # profiling primitives directly (profiler_section_begin/_end, frame_begin/
+  # _end) instead of building an RProc for RGSS::Profiler.section/frame and
+  # dispatching mrb_funcall_with_block to them. Those primitives are this
+  # project's own public C++ API, declared in include/profiler.hxx -- which
+  # deliberately does not include <mruby.h>, so it can be pulled in here without
+  # pulling mruby twice. The include is emitted ONLY when some compiled body
+  # actually inlined a section/frame, so a gem with no such site (every non-rpg2k
+  # gem) keeps byte-identical output and pays nothing.
+  if compiled.any? { |m| m[:code].include?('profiler_section_begin()') ||
+                          m[:code].include?('profiler_frame_begin()') }
+    puts '#include "profiler.hxx"'
+  end
   # OTHER_DECLS_HEADER: other gems' *_decls.h paths to #include, so calls to
   # OTHER_OWNERS targets are declared.
   if ENV['OTHER_DECLS_HEADER']
