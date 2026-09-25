@@ -76,7 +76,7 @@ if $PROGRAM_NAME == __FILE__
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
-    struct_member_lists, class_decls, walked_ireps = build_registry(ireps, root_label)
+    struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels = build_registry(ireps, root_label)
 
   # NATIVE_SRCS: C/C++ sources to scan for mrb_define_method-family calls (see
   # extract_native_method_names). Without it the registry cannot see native
@@ -262,7 +262,8 @@ if $PROGRAM_NAME == __FILE__
   # Level 2.
   # ---------------------------------------------------------------------------
   class_layout_probe = ClassLayout.known(
-    ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return)
+    ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return,
+                        module_body_ivar_labels: module_body_ivar_labels)
   )
   # Built just far enough to answer array_return_names (see CodeGen#initialize's
   # `analysis_only`); the inputs it is not given are never read by
@@ -290,7 +291,8 @@ if $PROGRAM_NAME == __FILE__
   class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
                                          annotated_array_return, poison_reason: class_poison_reason,
                                          array_ret_proof: ->(n) { array_return_probe.include?(n) },
-                                         ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) })
+                                         ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) },
+                                         module_body_ivar_labels: module_body_ivar_labels)
   class_layout = ClassLayout.known(class_layout_raw)
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='

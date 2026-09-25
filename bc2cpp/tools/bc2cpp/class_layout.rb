@@ -143,9 +143,12 @@ class ClassLayout
   # also what the driver's first probing pass passes; see that call site for
   # the stratification.
   def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil,
-                    poison_reason: nil, array_ret_proof: nil, ret_class_proof: nil)
+                    poison_reason: nil, array_ret_proof: nil, ret_class_proof: nil, module_body_ivar_labels: {})
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
+    module_body_ivar_labels.each do |owner, labels|
+      labels.each { |label| methods_of[owner] << label if ireps[label] }
+    end
 
     classes = Hash.new { |h, k| h[k] = {} } # owner -> {ivar_name => class_name or UNKNOWN}
 

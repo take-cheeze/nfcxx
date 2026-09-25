@@ -273,6 +273,36 @@ class CodeGen
     out
   end
 
+  def emit_hash_each_value_inline(region, irep, d)
+    block_irep = region[:block_irep]
+    offset = irep.nregs
+    recv_expr = inline_recv_expr(region)
+    value_reg = 1 + offset
+    addr = region[:block_addr]
+    iter_label = "Lbc2cpp_heval_iter_#{addr}"
+    break_label = "Lbc2cpp_heval_end_#{addr}"
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, elem_reg: '1')
+    return nil unless body
+
+    out = String.new
+    out << "  {\n"
+    out << "    if (!mrb_hash_p(#{recv_expr}) || mrb_obj_ptr(#{recv_expr})->c != M->hash_class) {\n"
+    out << "      #{inline_raise('TypeError', 'expected exact Hash receiver for inlined #each_value')}\n"
+    out << "    }\n"
+    out << "    mrb_value bc2cpp_heval_values_#{addr} = mrb_hash_values(M, #{recv_expr});\n"
+    out << "    for (mrb_int bc2cpp_heval_i_#{addr} = 0; " \
+           "bc2cpp_heval_i_#{addr} < RARRAY_LEN(bc2cpp_heval_values_#{addr}); " \
+           "++bc2cpp_heval_i_#{addr}) {\n"
+    out << inline_block_frame(block_irep, offset)
+    out << "      r#{value_reg} = bc2cpp_ary_entry(M, bc2cpp_heval_values_#{addr}, bc2cpp_heval_i_#{addr});\n"
+    out << body
+    out << "      #{iter_label}:;\n"
+    out << "    }\n"
+    out << "    #{break_label}:;\n"
+    out << "  }\n"
+    out
+  end
+
   # HASH_EACH_SUPPORT: the inlined loop for `hash.each` (nil if not clean).
   # Differences from emit_each_inline (mrblib/hash.rb):
   #   - SNAPSHOT: Hash#each takes keys/values/size once. mrb_hash_keys and
