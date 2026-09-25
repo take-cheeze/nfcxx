@@ -26,6 +26,14 @@ class CodeGen
     InlineLoopPass.new(:recognize_sym_regions, :emit_sym_inline, :sym_addr, true), # EACH_BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_collect_regions, :emit_collect_inline, :block_addr, true), # MAP_BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_accum_regions, :emit_accum_inline, :block_addr, true), # ACCUM_BLOCK_SUPPORT
+    # PROFILER_SECTION_SUPPORT: `RGSS::Profiler.section("n") { ... }` /
+    # `Profiler.frame { ... }` -- a native block-taking method, not a loop, but
+    # the same BLOCK+block-send shape and the same suppress-and-glue mechanism.
+    # Placed before recognize_sort_regions: its gate is a literal receiver path
+    # plus a literal name, so the two cannot claim the same site, and keeping the
+    # passes in a fixed order is what the emitters' shared nested-pre buffer
+    # depends on.
+    InlineLoopPass.new(:recognize_profiler_section_regions, :emit_profiler_section_inline, :block_addr, false),
     InlineLoopPass.new(:recognize_sort_regions, :emit_sort_inline, :block_addr, true) # SORT_BLOCK_SUPPORT
   ].freeze
 

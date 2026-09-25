@@ -91,6 +91,51 @@ class CodeGen
     nested
   end
 
+  # Two nested-claim passes over the same body, merged into the one
+  # InlineNested the body compiler reads. `pre` is the file-scope code backing
+  # cfunc bodies, so it concatenates; the suppressed set and the glue map are
+  # disjoint by address (an ordinary block region and a section/frame region
+  # cannot both claim the same BLOCK), so a merge never overwrites a claim.
+  def merge_inline_nested(a, b)
+    return b if a.pre.empty? && a.suppressed.empty?
+    return a if b.pre.empty? && b.suppressed.empty?
+
+    InlineNested.new(a.pre + b.pre, a.suppressed + b.suppressed, a.glue.merge(b.glue))
+  end
+
+  # PROFILER_SECTION_SUPPORT, nested case: a `Profiler.section`/`Profiler.frame`
+  # block that sits INSIDE another inlined region's body (the real shapes are
+  # RPG2k#main_loop, whose whole loop body is one `Profiler.frame` wrapping two
+  # `Profiler.section` blocks, and Scene::Map#draw_map_animation, likewise).
+  #
+  # The same claim machinery as inline_nested_block_pass, but the claimed region
+  # is inlined in place rather than compiled as a standalone cfunc: the outer
+  # region is already being emitted into this function, so the nested section
+  # becomes two profiler primitive calls around its own inlined body. Registers
+  # are shifted by the OUTER region's offset plus the outer block's own frame, so
+  # the nested body keeps addressing the right locals.
+  def inline_nested_profiler_pass(block_irep, irep, d, offset, outer_addr, outer_block_irep)
+    regions = recognize_profiler_section_regions(block_irep)
+    return InlineNested.none if regions.empty?
+
+    nested = InlineNested.none
+    inner_offset = offset + outer_block_irep.nregs
+    regions.each do |nregion|
+      nested_upvars = block_upvar_needs(nregion[:block_irep])
+      next if nested_upvars.nil?
+      next if inline_nested_region_has_break?({ block_irep: nregion[:block_irep], upvars: nested_upvars },
+                                               nested_upvars)
+
+      inlined = emit_profiler_section_inline(nregion, block_irep, d, reg_offset: inner_offset,
+                                                               dest_offset: offset, pre: nested.pre)
+      next unless inlined
+
+      nested.suppressed << nregion[:block_addr] << nregion[:sendb_addr]
+      nested.glue[nregion[:block_addr]] = inlined
+    end
+    nested
+  end
+
   # INLINE_NESTED_BLOCK_SUPPORT: the compiled body of one inlined block, or nil
   # if any instruction is unclean (a loop is never emitted partially; the caller
   # then leaves BLOCK/SENDB as `#error`). Nested block calls are claimed first
@@ -609,6 +654,181 @@ class CodeGen
     out << "    }\n"
     out << "  }\n"
     out
+  end
+
+  # PROFILER_SECTION_SUPPORT: the inlined `RGSS::Profiler.section("name") { ... }`
+  # / `RGSS::Profiler.frame { ... }` region (nil if not clean).
+  #
+  # mruby-rgss/src/profiler.cxx's prof_section is exactly this: yield the block,
+  # return its value, and time the span. The timing itself is NOT reimplemented
+  # here -- profiler_section_begin/profiler_section_end (and the frame pair) are
+  # public primitives from include/profiler.hxx that already own the enabled
+  # test, the clock, the aggregation and the trace write, and are no-ops when
+  # profiling is off (section_end returns immediately on a zero stamp). So the
+  # native `if (!g_enabled) return mrb_yield_argv(...)` fast path collapses into
+  # calling the two primitives.
+  #
+  # The body becomes its OWN static function, called DIRECTLY. That is what
+  # makes this a removal rather than a relocation: compared with
+  # BLOCK_FALLBACK there is no mrb_proc_new_cfunc_with_env, no RProc, no
+  # mrb_funcall_with_block, no by-name dispatch, and no separate
+  # `try`/catch around the call. It is also the only shape that compiles: a
+  # method body's own `goto` for its ENTER/optional-argument dispatch (e.g.
+  # `goto L19` in Scene::Map#initialize) jumps forward across whatever the
+  # straight-line body declares, and C++ forbids a jump that crosses an
+  # initialization. A braced in-place body would sit between that goto and its
+  # label and fail to compile; a separate function has its own frame and its
+  # own label namespace, exactly like the block-fallback cfuncs it replaces.
+  #
+  # The NAME is emitted as a C string literal, not an mrb_value: the primitive
+  # takes `const char*` and copies it into its aggregation map during the call
+  # (so a static literal is exactly what the header asks for), which also drops
+  # the name-register GETIDX and mrb_string_value_cstr the block-fallback path
+  # paid on every call.
+  def emit_profiler_section_inline(region, irep, d, reg_offset: nil, dest_offset: nil, pre: nil)
+    block_irep = region[:block_irep]
+    dest = (dest_offset || 0) + region[:dest_reg].to_i
+    addr = region[:block_addr]
+    meth = region[:method_name]
+    fn_name = "#{cpp_name(d.owner, d.name)}_profiler_#{meth}_#{addr}"
+    # File-scope code for the body function. The top-level pass has no buffer of
+    # its own, so it lands in @inline_nested_pre (already wired ahead of this
+    # function); the nested pass passes its own buffer, because that body's file
+    # code is collected by the enclosing compile_inline_block_body.
+    pre ||= @inline_nested_pre
+    # The body is a STANDALONE function, so its frame starts at r0 exactly like a
+    # block-fallback cfunc: r0 is the block's self, the rest are nil, and a
+    # level-0 capture arrives as a `mrb_value*` parameter, dereferenced once at
+    # the top into the `bc2cpp_upvar_*` name the body reads. That is what lets a
+    # method-level `goto` in the caller jump across this call: nothing here is
+    # declared in the caller's scope.
+    body = compile_profiler_section_body(region, irep, d, 0, "#{fn_name}_tail", "#{fn_name}_v",
+                                         "LBLK#{addr}_", pre)
+    return nil unless body
+
+    pre << "// PROFILER_SECTION_INLINE :#{region[:section_name] || meth} -- " \
+            "the profiling body compiled inline and called directly\n"
+    # A level-0 capture is the enclosing method's own register. The body reads
+    # it as a plain `r<n>` (compile_block_body_insn's GETUPVAR arm), so the
+    # capture arrives as a parameter under a name that CANNOT collide with the
+    # block's own frame -- the frame is declared r0..r<nregs-1> below and a
+    # capture index can be inside that range -- and is copied in only for
+    # registers the frame does not already declare.
+    upvars = block_upvar_needs(block_irep) || []
+    params = upvars.each_with_index.map { |(_level, index), i| "mrb_value bc2cpp_prof_up_#{i}" }
+    pre << "static mrb_value #{fn_name}(mrb_state* M, mrb_value self" \
+           "#{params.map { |p| ", #{p}" }.join}) {\n"
+    pre << "  mrb_value r0 = self;\n"
+    (1...block_irep.nregs).each { |i| pre << "  mrb_value r#{i} = mrb_nil_value();\n" }
+    # A capture whose register lies OUTSIDE the block's own frame has no
+    # declaration here, so declare it and bind it; one inside the frame is
+    # already declared, and binding it after the frame's nil-initializer is
+    # exactly right (the block's own register 0 is `self`, which no capture uses).
+    upvars.each_with_index do |(_level, index), i|
+      pre << "  mrb_value r#{index} = bc2cpp_prof_up_#{i};\n" if index >= block_irep.nregs
+      next if index.positive? && index < block_irep.nregs
+
+      pre << "  r#{index} = bc2cpp_prof_up_#{i};\n"
+    end
+    # The block's tail value, which the call site returns: the `next`/tail stores
+    # it here, and the call assigns it to the SENDB destination. Declared with
+    # the frame so the body's own jumps never cross an initialization.
+    pre << "  mrb_value #{fn_name}_v = mrb_nil_value();\n"
+    pre << body
+    # The call site assigns this function's return to the SENDB destination, and
+    # mrb_yield_argv returned the block's own value, so the tail label must
+    # return it (not a bare nil, which would silently drop every section's value
+    # -- exactly the shape `map = Profiler.section(...) { load_map }` depends on).
+    pre << "  #{fn_name}_tail:;\n"
+    pre << "  return #{fn_name}_v;\n"
+    pre << "}\n\n"
+
+    out = String.new
+    call_args = upvars.map { |level, index| ", r#{index}" }.join
+    if meth == 'section'
+      out << "  {\n"
+      out << "    uint64_t bc2cpp_prof_start_#{addr} = profiler_section_begin();\n"
+      out << "    r#{dest} = #{fn_name}(M, self#{call_args});\n"
+      out << "    profiler_section_end(#{c_string_literal(region[:section_name])}, bc2cpp_prof_start_#{addr});\n"
+      out << "  }\n"
+    else
+      out << "  profiler_frame_begin();\n"
+      out << "  r#{dest} = #{fn_name}(M, self#{call_args});\n"
+      out << "  profiler_frame_end();\n"
+    end
+    out
+  end
+
+  # PROFILER_SECTION_SUPPORT: one inlined section/frame body.
+  #
+  # Same shape as compile_block_body_insn, with the ordinary return forms
+  # (`next`, with or without a value, and the implicit tail) storing into
+  # result_var and jumping to the tail label instead of an iteration end.
+  # RETURN_BLK is deliberately NOT special-cased: a `return` out of the block
+  # returns from the enclosing METHOD, and prof_section's own
+  # `mrb_yield_argv` then never reaches its profiler_section_end either -- so
+  # letting it compile to a plain C++ return reproduces the native behavior
+  # exactly, closing primitive included. A nested region is claimed by
+  # inline_nested_block_pass, as in every other inline body; an unclaimable one
+  # leaves `#error` here, which the emitter turns into "no inlining" and the
+  # site keeps its BLOCK_FALLBACK.
+  def compile_profiler_section_body(region, irep, d, offset, tail_label, result_var, body_label_prefix, pre)
+    block_irep = region[:block_irep]
+    # The body's own jump targets, in the containing region's label namespace.
+    # A top-level section owns `LBLK<its own block_addr>_`; a nested one reuses
+    # the OUTER body's namespace, because its irep is the outer block's and its
+    # labels are already claimed there.
+    body_prefix = body_label_prefix
+
+    saved_nested = @inline_nested
+    saved_blk_param_name = @blk_param_name
+    saved_blk_param_level = @blk_param_level
+    @blk_param_name = nil
+    @blk_param_level = 0
+    # Nested regions inside this body, of both kinds: an ordinary block
+    # (inline_nested_block_pass) and another section/frame
+    # (inline_nested_profiler_pass). Both are claimed here so the body can be
+    # emitted at all -- an unclaimed BLOCK would leave `#error` and abandon the
+    # whole region.
+    nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    nested = merge_inline_nested(nested, inline_nested_profiler_pass(block_irep, irep, d, offset,
+                                                                       region[:block_addr], block_irep))
+    @inline_nested = nested
+    body_targets = @inline_nested.targets(jump_targets(block_irep))
+    body = String.new
+    block_irep.instructions.each_with_index do |insn, i|
+      next if insn.op == 'ENTER'
+
+      # `L<addr>:;` -- the colon makes it a label and the trailing semicolon the
+      # null statement mrbc's disassembly implies, the same spelling every other
+      # emitter in this compiler uses.
+      body << "  #{body_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
+      code = case insn.op
+             when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
+               r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
+               store = case insn.op
+                       when 'RETURN' then "r#{r.to_i + offset}"
+                       when 'RETNIL' then 'mrb_nil_value()'
+                       when 'RETFALSE' then 'mrb_false_value()'
+                       when 'RETTRUE' then 'mrb_true_value()'
+                       end
+               "  #{result_var} = #{store};\n  goto #{tail_label};\n"
+             else
+               compile_block_body_insn(insn, block_irep, d, offset, tail_label, body_prefix, idx: i)
+             end
+      body << '  ' << code
+    end
+    nested_pre = @inline_nested.pre
+    @inline_nested = saved_nested
+    @blk_param_name = saved_blk_param_name
+    @blk_param_level = saved_blk_param_level
+    return nil if body.include?('#error') || nested_pre.include?('#error')
+
+    # This body's own nested functions are emitted at file scope ahead of the
+    # function they belong to, into the same buffer the caller uses for this
+    # region's file-scope code.
+    pre << nested_pre
+    body
   end
 
   # MAP_BLOCK_SUPPORT: compile_block_body_insn, except the ordinary return forms
