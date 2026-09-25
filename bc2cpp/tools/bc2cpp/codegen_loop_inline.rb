@@ -106,7 +106,7 @@ class CodeGen
   # scopes inline_hash_capture_hints over the instructions only, not the nested
   # pass.
   def compile_inline_block_body(region, irep, d, iter_label, break_label: nil, result_var: nil, broke_flag: nil,
-                                elem_reg: nil, hash_capture: false)
+                                elem_reg: nil, hash_capture: false, forwarded_blk: false)
     block_irep = region[:block_irep]
     offset = irep.nregs
     break_dest = break_label ? region[:dest_reg] : nil
@@ -123,6 +123,10 @@ class CodeGen
     end
 
     saved_nested = @inline_nested
+    saved_blk_param_name = @blk_param_name
+    saved_blk_param_level = @blk_param_level
+    @blk_param_name = 'bc2cpp_blk' if forwarded_blk
+    @blk_param_level = 1 if forwarded_blk
     @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
     body_targets = @inline_nested.targets(jump_targets(block_irep))
     body = String.new
@@ -146,6 +150,8 @@ class CodeGen
     end
     nested_pre = @inline_nested.pre
     @inline_nested = saved_nested
+    @blk_param_name = saved_blk_param_name
+    @blk_param_level = saved_blk_param_level
     return nil if body.include?('#error')
 
     @inline_nested_pre << nested_pre
@@ -184,7 +190,7 @@ class CodeGen
     param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
     addr = region[:block_addr]
     iter_label = "Lbc2cpp_times_iter_#{addr}"
-    body = compile_inline_block_body(region, irep, d, iter_label)
+    body = compile_inline_block_body(region, irep, d, iter_label, forwarded_blk: region[:needs_blk])
     return nil unless body
 
     out = String.new
