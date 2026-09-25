@@ -450,13 +450,20 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     path = File.join(ROOT, 'patches', patch)
     system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)
   end
-  # CI exports LD=ld for native project builds. mruby's host mrbc link must go
-  # through the compiler driver so libc is added; raw ld omits it. The whole
-  # environment is forwarded (rake needs PATH/CC and friends) with LD REMOVED:
-  # `'LD' => nil` would set it to the EMPTY STRING instead, leaving mruby's link
-  # command blank -- a real failure here, "sh: 1: -o: not found".
+  # nix's dev shell exports LD=ld, and mruby's Linker takes its command
+  # straight from the environment (build/command.rb:193, `ENV['LD'] || 'ld'`).
+  # Raw `ld` adds no -lc and no startfiles, so the host mrbc's link dies with
+  # "undefined reference to symbol 'fgetc@@GLIBC_2.2.5' ... DSO missing from
+  # command line" -- in the base interpreted build, before any of the two
+  # targets this file is about.
+  #
+  # Deleting LD is NOT the fix: mruby's default is plain `ld` too, so removing
+  # it reproduces the same broken link. (`'LD' => nil` in a spawn env is worse
+  # still -- that sets the EMPTY STRING, leaving mruby's link command blank,
+  # "sh: 1: -o: not found".) The linker has to go through the compiler driver,
+  # which is what adds libc: LD=CC, the same `cc` the compile half already uses.
   rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
-  rake_env.delete('LD')
+  rake_env['LD'] = rake_env['CC'] || 'cc'
   output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..]}" unless status.success?
 
