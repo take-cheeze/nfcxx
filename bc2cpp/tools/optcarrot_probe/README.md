@@ -1266,7 +1266,13 @@ its integer and float conversion helpers.
 git submodule update --init --depth 1 3rd/mruby 3rd/mruby-onig-regexp 3rd/optcarrot
 # Needs oniguruma headers -- on Debian/Ubuntu: apt-get install libonig-dev
 # (otherwise mruby-onig-regexp falls back to a slow bundled onigmo build)
+# Also needs gperf (the vendored mruby regenerates its keyword table with it)
+# and a C++ driver for the generated gem.
 
+# The probe applies the mruby patches its generated code needs itself (its
+# VM_UNWIND_RESTORE helper reads mrb_state::errinfo, which only
+# patches/mruby-dollar-bang-scoped.patch adds), so a bare host mrbc is enough
+# to RUN the bundle below; only the manual b/c2cpp runs need these two:
 ./scripts/apply_mruby_patch.bash 3rd/mruby "$(pwd)/patches/mruby-module-function-scope.patch"
 ./scripts/apply_mruby_patch.bash 3rd/mruby "$(pwd)/patches/mruby-parser-dump-back-nth-ref.patch"
 cd 3rd/mruby
@@ -1285,3 +1291,29 @@ MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb
 # Profile both mruby modes with gprof (requires GCC/binutils gprof):
 GPROF=1 GPROF_OUTPUT=/tmp/optcarrot-gprof MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb 180
 ```
+
+## Integer-or-nil A/B (ADR 0232)
+
+`compiled_run.rb` also accepts `OPTCARROT_FIXNUM_NIL_IVARS`, an exact
+`Owner#@ivar` list, to A/B the tagged Integer-or-nil embedding against
+the control in the same build:
+
+```
+OPTCARROT_FIXNUM_NIL_IVARS='Optcarrot::CPU#@opcode' \
+  MRBC=3rd/mruby/bin/mrbc ruby tools/optcarrot_probe/compiled_run.rb 180
+```
+
+`Optcarrot::CPU#@opcode` is the one field here a declaration can reach
+and the sweep cannot: it is written nil in `#initialize` and otherwise
+only by `@opcode = fetch(@_pc)`, whose value comes through the NES
+per-address `@fetch[addr]` callable table and is opaque to the analysis.
+
+Measured outcome: with `@opcode` embedded, the linked binary's `.text`
+is **byte-identical** to the control (2,319,680 bytes both) and the
+180-frame wall times are within run-to-run noise. That is the point worth
+recording: ivar access is not this benchmark's bottleneck. `iv_bsearch_idx`
+is unchanged by embedding either (244 embedded ivars across 50 classes
+with or without it), and the dominant compiled-mode cost is the GC
+arena -- `gc_gray_rescan` at 31.6% of sampled time, from arena growth
+across devirtualized calls that never re-enter `mrb_vm_exec`. The union
+is infrastructure for nilable scalars, not an FPS win here.

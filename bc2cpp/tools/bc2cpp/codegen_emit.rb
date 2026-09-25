@@ -221,12 +221,26 @@ class CodeGen
         arity: 0, arg_c_types: [], aspec: 'MRB_ARGS_NONE()', code: code, visibility: :public }
     when :writer
       impl = "#{base}_eq_impl"
+      # The reader's entry wrapper is already `#{base}`, so a writer that
+      # reused it emitted the SAME function twice -- a hard C++ redefinition
+      # for every embedded ivar with both attr_reader and attr_writer. The
+      # `_eq` suffix is the convention emit_hot_only_registration_stubs and
+      # bc2cpp_hot_profile.rb already compute for a writer (base_eq/base_eq_impl).
       entry = "#{base}_eq"
+      # NILABLE_EMBED_SUPPORT: a tagged field stores through its setter helper;
+      # the check below still runs first, so a refused value leaves the field
+      # unchanged and the assigned value (not the field) is returned.
+      store =
+        if NULLABLE_TYPES.include?(type)
+          "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar}, arg);\n"
+        else
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);\n"
+        end
       code = <<~CPP
         // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
         // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment). Same
-        // guarded check-then-unbox as SETIV's own embedded-ivar codegen
+        // guarded check-then-store as SETIV's own embedded-ivar codegen
         // (compile_insn's own SETIV case) -- the whole-program analysis
         // proved every *compiled* write site is this type, but an
         // external caller (this accessor's own whole reason to exist) is
@@ -237,7 +251,7 @@ class CodeGen
         // MethodDef's own kind: :ivar_accessor comment for the citation).
         mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
           if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "@#{ivar}: expected #{ops[:err]}");
-          ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);
+        #{store.chomp}
           return arg;
         }
 
@@ -248,6 +262,7 @@ class CodeGen
         }
 
       CPP
+
       { label: "synth:#{owner}##{ivar}=", owner: owner, name: "#{ivar}=", entry: entry, impl: impl,
         arity: 1, arg_c_types: ['mrb_value'], aspec: 'MRB_ARGS_REQ(1)', code: code, visibility: :public }
     end
@@ -268,6 +283,7 @@ class CodeGen
   # hybrid mruby-rgss/src/lib.cxx uses.
   def emit_structs
     out = String.new
+    out << emit_nullable_structs
     @ivar_layout.each do |owner, ivars|
       # As compile_all's only_owners filter: no struct for a class this run does not
       # emit (it would be dead code and an unused-static warning).
@@ -281,6 +297,39 @@ class CodeGen
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
     end
     out
+  end
+
+  # NILABLE_EMBED_SUPPORT: the tagged Integer-or-nil payload and its three
+  # helpers, emitted ahead of every owner struct and only when a field uses
+  # them. `present` is first and mrb_calloc zeroes the whole struct, so a fresh
+  # instance reads nil before its first SETIV -- the same observable state as
+  # an absent ivar. Both arms are immediates, so nothing here is a GC root and
+  # no mrb_gc_mark/write barrier is involved.
+  #
+  # `mrb_fixnum_p`, not `mrb_integer_p`: a heap-backed Bignum is an MRB_TT_INTEGER
+  # on a non-word-boxed target, and storing one in an mrb_int would truncate it
+  # silently. The check refuses it and the caller's TypeError does the rest.
+  def emit_nullable_structs
+    return '' unless @ivar_layout.any? { |_, ivars| ivars.any? { |_, t| NULLABLE_TYPES.include?(t) } }
+
+    <<~CPP
+      // NILABLE_EMBED_SUPPORT: a tagged Integer-or-nil ivar field. Immediate-only
+      // by construction, so it needs no GC rooting; see IvarLayout::FIXNUM_NIL.
+      struct Bc2cppFixnumOrNil { mrb_bool present; mrb_int value; };
+      static inline mrb_bool bc2cpp_fixnum_or_nil_p(mrb_value v) {
+        return mrb_nil_p(v) || mrb_fixnum_p(v);
+      }
+      static inline mrb_value bc2cpp_fixnum_or_nil_box(const Bc2cppFixnumOrNil& f) {
+        return f.present ? mrb_fixnum_value(f.value) : mrb_nil_value();
+      }
+      // Store only after bc2cpp_fixnum_or_nil_p, so a rejected value leaves the
+      // field exactly as it was (the caller's check raises before this runs).
+      static inline void bc2cpp_fixnum_or_nil_set(Bc2cppFixnumOrNil* f, mrb_value v) {
+        if (mrb_nil_p(v)) { f->present = FALSE; f->value = 0; }
+        else { f->present = TRUE; f->value = mrb_fixnum(v); }
+      }
+
+    CPP
   end
 
   # ARY_ENTRY_INLINE: a same-TU copy of mrb_ary_entry (src/array.c):

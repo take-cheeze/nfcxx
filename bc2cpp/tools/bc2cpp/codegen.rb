@@ -31,18 +31,33 @@ class CodeGen
                   :integer_constant_values, :hot_only_excluded
   end
 
-  C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool' }.freeze
+  C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
+             fixnum_nil: 'Bc2cppFixnumOrNil' }.freeze
 
   # box/check/unbox/err per embeddable type for GETIV/SETIV codegen. An mrb_sym
   # field needs no GC keep-alive (see IvarLayout.trace_type's LOADSYM arm).
   # `:bool` has no single check macro (MRB_TT_TRUE/MRB_TT_FALSE are separate
   # tags), so bc2cpp_bool_p (emit_bool_check_helper) ORs mrb_true_p/mrb_false_p;
   # emitted only when an embedded :bool needs it.
+  #
+  # NILABLE_EMBED_SUPPORT: a tagged pair still fills `box`/`check`/`err` -- the
+  # three every consumer uses -- but has no `unbox`: storing one is
+  # `bc2cpp_fixnum_or_nil_set`, not an assignment, so the two write sites check
+  # `unbox` and route to the setter instead (ivar_set_code,
+  # emit_ivar_accessor_pair). `check` uses mrb_fixnum_p, so a heap Bignum can
+  # never be truncated into the field's mrb_int.
   TYPE_OPS = {
     fixnum: { box: 'mrb_fixnum_value', check: 'mrb_integer_p', unbox: 'mrb_integer', err: 'Integer' },
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
     bool: { box: 'mrb_bool_value', check: 'bc2cpp_bool_p', unbox: 'mrb_true_p', err: 'boolean' },
+    fixnum_nil: { box: 'bc2cpp_fixnum_or_nil_box', check: 'bc2cpp_fixnum_or_nil_p',
+                  err: 'Integer or nil' }
   }.freeze
+
+  # The types whose storage is a generated struct rather than a scalar, so
+  # `emit_structs` must emit that struct first and `emit_nullable_helpers` its
+  # box/check/unbox. Kept beside TYPE_OPS so the two cannot drift.
+  NULLABLE_TYPES = %i[fixnum_nil].freeze
 
   def initialize(ireps, registry, ivar_layout, class_layout = {}, class_annotations = {}, annotations = {},
                  superclass_of = {}, element_layout = {}, element_annotations = {}, container_constants = {},
@@ -384,7 +399,13 @@ class CodeGen
   # C++ type for a native_arg_types slot: C_TYPE.fetch(t) or mrb_value. No
   # `:array` arm on purpose: an Array token in argument position raises KeyError
   # (fail loud). Return-type gates read `.ret` directly.
+  # NILABLE_EMBED_SUPPORT: `:fixnum_nil` has a C_TYPE entry (emit_structs needs
+  # it) but must never reach here: an argument is boxed into an mrb_value
+  # register by TYPE_OPS[:box], which is a value-producing call, not a
+  # by-reference field. Refused loudly rather than silently mistyped.
   def native_c_type(t)
+    raise "NILABLE_EMBED_SUPPORT: #{t} cannot be a native argument type" if CodeGen::NULLABLE_TYPES.include?(t)
+
     t ? C_TYPE.fetch(t) : 'mrb_value'
   end
 

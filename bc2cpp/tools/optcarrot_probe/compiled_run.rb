@@ -168,6 +168,19 @@ def run_benchmark(label, command, chdir: nil)
   { label: label, seconds: elapsed, checksum: checksum, reported_fps: fps }
 end
 
+# The .text a linked mruby actually contains, so a comparison is a code-size
+# measurement and not a guess from the generated C++ (ADR 0216's rule). `size -A`
+# prints one "section size" per line; absent (non-ELF host) is nil, not 0.
+def text_size(binary)
+  output, status = Open3.capture2e('size', '-A', binary)
+  return nil unless status.success?
+
+  line = output.lines.find { |l| l.start_with?('.text') }
+  line && line.split[1].to_i
+rescue Errno::ENOENT
+  nil
+end
+
 def owner_class_expr(owner)
   singleton = owner.end_with?('.singleton')
   parts = owner.sub(/\.singleton\z/, '').split('::')
@@ -273,6 +286,9 @@ end
 
 Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   scan_dir = File.join(temp, 'scan')
+  # The gem's src/ dir holds both the generated C++ and register.cxx. Created
+  # here (and register.cxx touched below, before the gem is added to a build)
+  # because mruby discovers a gem's sources by globbing src/ at add time.
   output_dir = File.join(temp, 'gem', 'src')
   FileUtils.mkdir_p(scan_dir)
   FileUtils.mkdir_p(output_dir)
@@ -318,7 +334,21 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # unconditionally, since this file was first written.
     'BC2CPP_SELF_REGISTERING' => '1'
   }
-  _scan_cpp, scan_diagnostics = run_bc2cpp(sources, base_env.merge('OUT_DIR' => scan_dir))
+  # NILABLE_EMBED_EXPERIMENT: OPTIN set only for the A/B run, so the default
+  # three-mode benchmark and the CI job below are untouched. It adds a SECOND
+  # compiled target from the same sources, differing only in one thing: bc2cpp is
+  # told `Optcarrot::CPU#@opcode` is Integer-or-nil (NILABLE_EMBED_SUPPORT), so
+  # that one field embeds as a tagged payload instead of living in iv_tbl.
+  # CPU#@opcode is written nil in #initialize (cpu.rb:59) and a fetched
+  # instruction byte before every dispatch (cpu.rb:930 -> 940), so it is read
+  # and written on the hottest loop in the program. The declaration is a
+  # reviewed assertion, not a proof; the generated writer still raises TypeError
+  # on a non-Integer/non-nil value, and a wrong declaration costs correctness,
+  # not memory safety.
+  nullable = !ENV['OPTCARROT_FIXNUM_NIL_IVARS'].to_s.empty?
+  nullable_ivars = ENV['OPTCARROT_FIXNUM_NIL_IVARS'].to_s
+  scan_env = nullable ? base_env.merge('FIXNUM_NIL_IVARS' => nullable_ivars) : base_env
+  _scan_cpp, scan_diagnostics = run_bc2cpp(sources, scan_env.merge('OUT_DIR' => scan_dir))
   # Optcarrot::PPU used to be excluded here entirely -- a devirtualized call
   # (a direct C++ call from one compiled method's body into another's)
   # reaches a compiled `_impl` function regardless of whether that method is
@@ -335,7 +365,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
   end.uniq
-  compiled_cpp, diagnostics = run_bc2cpp(sources, base_env.merge(
+  compiled_cpp, diagnostics = run_bc2cpp(sources, scan_env.merge(
     'OUT_DIR' => temp,
     'ONLY_OWNERS' => owners.join(',')
   ))
@@ -344,6 +374,15 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   count = emit_register(diagnostics, output_dir)
 
   gem_dir = File.join(temp, 'gem')
+  # mruby's Gem::Specification#setup globs `src/*.{c,cc,cpp,cxx}` (gem.rb's own
+  # srcs_to_objs) when the gem is added, and only then turns on C++ exception
+  # compilation if it found any. So the translation unit has to EXIST before
+  # `gem #{gem_dir}` below -- emit_register writes the real contents into this
+  # same path, and an empty placeholder is enough to get the object registered.
+  # Without it the build died at "Don't know how to build task
+  # .../optcarrot-compiled/src/register.o".
+  FileUtils.mkdir_p(output_dir)
+  FileUtils.touch(File.join(output_dir, 'register.cxx'))
   File.write(File.join(gem_dir, 'mrbgem.rake'), <<~RUBY)
     MRuby::Gem::Specification.new('optcarrot-compiled') do |spec|
       spec.license = 'MIT'
@@ -371,6 +410,18 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     end
     MRuby::Build.new(#{compiled_target.dump}) do
       instance_eval(&base)
+      # The compiled gem's only source is C++ (register.cxx), and its generated
+      # code raises real C++ exceptions (its own bc2cpp_ensure_guard /
+      # bc2cpp_block_break), so the build needs MRB_USE_CXX_EXCEPTION and the
+      # C++ compiler's rules for an OUT-OF-TREE gem. mruby only turns that on by
+      # itself for a gem whose src/ it scans (load_gems.rb: `cxx_srcs = Dir.glob
+      # ...; enable_cxx_exception unless cxx_srcs.empty?`), and
+      # Gem::Specification#setup_compilers defines a non-core gem's rules from
+      # the compilers it is given (gem.rb:98). Doing it here, before
+      # `gem #{gem_dir}`, is what makes .../src/register.o buildable at all;
+      # without it the build stops at "Don't know how to build task
+      # .../optcarrot-compiled/src/register.o".
+      enable_cxx_exception
       gem #{gem_dir.dump}
       if #{profiling}
         cc.flags << '-pg'
@@ -379,11 +430,33 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       end
     end
   RUBY
-  system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY,
-         File.join(ROOT, 'patches/mruby-module-function-scope.patch'), exception: true)
-  # CI exports LD=ld for native project builds. mruby's host mrbc link must
-  # go through the compiler driver so libc is added; raw ld omits it.
-  rake_env = { 'MRUBY_CONFIG' => config, 'LD' => nil }
+  # The generated C++ depends on this repo's own mruby patches, not just on
+  # upstream mruby: bc2cpp's VM_UNWIND_RESTORE helper reads
+  # `M->errinfo`/`M->errinfo_ci_depth`, which only patches/mruby-dollar-bang-
+  # scoped.patch adds to mrb_state (cmake/build-mruby.cmake applies it for the
+  # real build). Applying only the module-function patch -- what this used to
+  # do -- left `register.cxx` uncompilable ("'mrb_state' has no member named
+  # 'errinfo'"), so the probe could not link at all. Same set the real build
+  # uses, so the probe's mruby is the mruby bc2cpp is written against.
+  %w[
+    mruby-colon3-assign-setmcnst.patch
+    mruby-dollar-bang-scoped.patch
+    mruby-defined-keyword.patch
+    mruby-module-function-scope.patch
+    mruby-parser-dump-back-nth-ref.patch
+    mruby-nomemoryerror-reentrant-alloc.patch
+    mruby-gc-type-live-counts.patch
+  ].each do |patch|
+    path = File.join(ROOT, 'patches', patch)
+    system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)
+  end
+  # CI exports LD=ld for native project builds. mruby's host mrbc link must go
+  # through the compiler driver so libc is added; raw ld omits it. The whole
+  # environment is forwarded (rake needs PATH/CC and friends) with LD REMOVED:
+  # `'LD' => nil` would set it to the EMPTY STRING instead, leaving mruby's link
+  # command blank -- a real failure here, "sh: 1: -o: not found".
+  rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
+  rake_env.delete('LD')
   output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
   raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..]}" unless status.success?
 
@@ -409,8 +482,19 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   FileUtils.mkdir_p([interpreted_profile_dir, compiled_profile_dir]) if profiling
   benchmarks << run_benchmark('mruby interpreter', [interpreted_binary, bundle, ROM, FRAMES.to_s],
                               chdir: (interpreted_profile_dir if profiling))
-  benchmarks << run_benchmark('mruby + bc2cpp', [compiled_binary, compiled_bundle, ROM, FRAMES.to_s],
-                              chdir: (compiled_profile_dir if profiling))
+  core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
+  compiled_result = run_benchmark(core_label, [compiled_binary, compiled_bundle, ROM, FRAMES.to_s],
+                                  chdir: (compiled_profile_dir if profiling))
+  benchmarks << compiled_result
+  # The A/B size figure, when the experiment ran: this binary's own .text, so
+  # the cost of the tagged field is a measurement of the artifact that was
+  # benchmarked rather than an estimate from generated C++.
+  if nullable
+    bytes = text_size(compiled_binary)
+    puts "nullable @opcode .text: #{bytes ? format('%d bytes', bytes) : 'unavailable'}" \
+         " (binary #{File.size(compiled_binary)} bytes)"
+    compiled_result[:text_bytes] = bytes
+  end
   checksums = benchmarks.map { |result| result[:checksum] }.uniq
   raise "benchmark checksums differ: #{benchmarks.map { |result| "#{result[:label]}=#{result[:checksum]}" }.join(', ')}" unless checksums.size == 1
 
