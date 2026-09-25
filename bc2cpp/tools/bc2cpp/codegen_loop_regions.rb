@@ -136,6 +136,45 @@ class CodeGen
     regions
   end
 
+  def recognize_hash_each_value_regions(irep, owner_name, mand, ivar_classes, arg_classes)
+    regions = []
+    irep.instructions.each_with_index do |insn, idx|
+      next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
+
+      dest, name, nstr = insn.args.split(/\s+/, 3)
+      next unless name == ':each_value' && nstr == 'n=0'
+
+      block_insn = irep.instructions[idx - 1]
+      next unless block_insn && block_insn.op == 'BLOCK'
+
+      dest_reg = dest[/^R(\d+)/, 1]
+      block_reg = block_insn.args[/^R(\d+)/, 1]
+      next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
+
+      block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
+      next unless block_irep_idx
+
+      block_label = irep.reps[block_irep_idx.to_i]
+      block_irep = block_label && @ireps[block_label]
+      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+
+      if insn.op == 'SSENDB'
+        next unless owner_name == 'Hash'
+      else
+        traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants)
+        next unless traced == 'Hash'
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
+                   ssendb: insn.op == 'SSENDB',
+                   elem_class: region_hash_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                        owner_name) }
+    end
+    regions
+  end
+
   # EACH_INDEX_SUPPORT: inline `ary.each_index { |i| ... }`. Array#each_index
   # (mrblib/array.rb):
   #
@@ -519,7 +558,9 @@ class CodeGen
 
   # INTERP_UNLOCK: inline `r.each { |id| ... }` for a receiver tracing to Range
   # (a RANGE_INC/RANGE_EXC literal or `range(cmd)` below). Same adjacency and
-  # 1-arg gate as recognize_each_regions. No SSENDB: no game class is a Range.
+  # 1-arg gate as recognize_each_regions; zero-arg blocks are also admitted
+  # because Range#each yields the same counter to either form. No SSENDB: no
+  # game class is a Range.
   def recognize_range_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
     irep.instructions.each_with_index do |insn, idx|
@@ -540,7 +581,7 @@ class CodeGen
 
       block_label = irep.reps[block_irep_idx.to_i]
       block_irep = block_label && @ireps[block_label]
-      next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      next unless block_irep && [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
 
       traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                  container_constants: @container_constants)

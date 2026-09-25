@@ -121,6 +121,7 @@ def build_registry(ireps, root_label)
   # CLOSED_WORLD: every CLASS opcode's superclass ref (nil when unresolved) and
   # whether its outer was implicit, plus every irep this walk visited.
   class_decls = Hash.new { |h, k| h[k] = [] }
+  module_body_ivar_labels = Hash.new { |h, k| h[k] = [] }
   walked = Set.new
 
   walk = lambda do |label, namespace|
@@ -135,6 +136,7 @@ def build_registry(ireps, root_label)
     pending_reg = nil
     pending_name = nil
     pending_idx = nil
+    pending_ivar_owner = nil
     # `private`/`protected`/`public` tracking, scoped to this body. A bare call
     # (n=0) switches the mode for later defs; a call with Symbol arguments marks
     # already-defined methods without changing the mode. Getting visibility wrong
@@ -189,8 +191,12 @@ def build_registry(ireps, root_label)
         reg, name = insn.args.split(/\s+/, 2)
         pending_reg = reg
         pending_idx = idx
+        pending_ivar_owner = nil
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
         pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
+        if insn.op == 'MODULE'
+          pending_ivar_owner = "#{pending_name}.singleton"
+        end
         # SUPER_SUPPORT: OP_CLASS is `R[a] = newclass(R[a], Syms[b], R[a+1])`
         # (mruby/ops.h, vm.c), and the superclass expression is evaluated right before
         # it, so resolve_superclass_ref walks back from this CLASS.
@@ -212,6 +218,7 @@ def build_registry(ireps, root_label)
         recv = resolve_singleton_receiver.call(reg, idx)
         pending_reg = reg
         pending_idx = idx
+        pending_ivar_owner = nil
         # "X.singleton" is a pseudo-owner, never a real constant path, so ONLY_OWNERS
         # can never select it. nil (unrecognized receiver) keeps EXEC from recursing.
         pending_name = recv ? "#{recv}.singleton" : nil
@@ -234,10 +241,14 @@ def build_registry(ireps, root_label)
         reg, irep_ref = insn.args.split(/\s+/, 2)
         idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
         child_label = irep.reps[idx2]
-        walk.call(child_label, pending_name) if reg == pending_reg && pending_name && idx == pending_idx + 1
+        if reg == pending_reg && pending_name && idx == pending_idx + 1
+          module_body_ivar_labels[pending_ivar_owner] << child_label if pending_ivar_owner
+          walk.call(child_label, pending_name)
+        end
         pending_reg = nil
         pending_name = nil
         pending_idx = nil
+        pending_ivar_owner = nil
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
         _reg, name, irep_ref = insn.args.split(/\s+/, 3)
@@ -510,7 +521,7 @@ def build_registry(ireps, root_label)
 
   walk.call(root_label, nil)
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists, class_decls, walked]
+   struct_member_lists, class_decls, walked, module_body_ivar_labels]
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back
