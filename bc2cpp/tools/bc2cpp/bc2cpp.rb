@@ -198,10 +198,21 @@ if $PROGRAM_NAME == __FILE__
   warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
 
+  # FIXNUM_NIL_DECLARATION: a reviewed "Owner#@ivar" list for the nullable
+  # embedding (NILABLE_EMBED_SUPPORT). Opt-in per field, never inferred --
+  # see IvarLayout's own comment for the Array-concatenation hole that makes
+  # inference unsound. Passed to BOTH IvarLayout passes below.
+  fixnum_nil_ivars = ENV['FIXNUM_NIL_IVARS'].to_s
+  unless fixnum_nil_ivars.empty?
+    warn ''
+    warn "== nullable Integer-or-nil ivars declared (FIXNUM_NIL_DECLARATION): #{fixnum_nil_ivars} =="
+  end
+
   # FIXNUM_RETURN_IVAR_HINT: Level 0 IvarLayout (no FIXNUM_RETURN_PROOF evidence).
   # The `== ivar embedding ==` diagnostic is printed later from the final
   # (Level 2) table, so this call is silent.
-  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants)
+  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants, nil,
+                                   fixnum_nil_ivars)
 
   known_owners = registry.values.flatten.map(&:owner).uniq
   class_annotations = ClassAnnotations.extract(ireps, registry, known_owners)
@@ -520,7 +531,8 @@ if $PROGRAM_NAME == __FILE__
                                     analysis_only: :fixnum_return,
                                     native_expression_devirt: native_expression_devirt,
                                     native_registered_expressions: native_registered_expressions).fixnum_return_names
-  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants, fixnum_return_probe)
+  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants, fixnum_return_probe,
+                                   fixnum_nil_ivars)
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?

@@ -20,12 +20,52 @@ READ_ONLY_OPCODE_SKIP = %w[RETURN RETURN_BLK BREAK JMPIF JMPNOT JMPNIL RAISEIF M
 # known first, so all methods are swept until the type map stops changing.
 class IvarLayout
   UNKNOWN = :unknown
+  # NILABLE_EMBED_SUPPORT: `@x = nil` is evidence of one more concrete value, not
+  # of an unreadable one. The join below widens it into FIXNUM_NIL rather than
+  # poisoning the field, which is what kept every nilable ivar in iv_tbl.
+  NIL = :nil_literal
+  # The only nullable embeddable type: Integer or nil. Both arms are immediates,
+  # so the payload needs no GC rooting (see CodeGen::C_TYPE).
+  FIXNUM_NIL = :fixnum_nil
+
+  # A field declared for an embedding type is claimed by one analysis only; the
+  # caller-supplied declaration names it explicitly (see bc2cpp.rb's
+  # FIXNUM_NIL_DECLARATION), so a claimed field that the sweep cannot type at
+  # all is the declaration's own claim, not a silent inference.
+  EMBEDDABLE = %i[fixnum symbol bool fixnum_nil].freeze
+
+  # A field that widens to FIXNUM_NIL is claimed by the ordinary join, like
+  # every other concrete type here. FIXNUM_NIL_DECLARATION (the env var) no
+  # longer gates it -- it is an additional allowance for a field the sweep
+  # cannot type at all, kept because it is how the Optcarrot probe names a
+  # field whose only Fixnum write is an opaque send. A field the sweep CAN
+  # type is now inferred either way.
+  def self.fixnum_nil_fields(declaration)
+    # NOT String#split, for either separator: Ruby splits on a whitespace-
+    # delimited "#" COMMENT marker, so both split(',') and split('#', 2)
+    # silently drop the "@ivar" from "Owner#@ivar" and leave just the owner
+    # (measured, not assumed). Scan for the literal separator instead.
+    (declaration || '').scan(/[^,]+/).each_with_object(Hash.new { |h, k| h[k] = Set.new }) do |entry, out|
+      entry = entry.strip
+      next if entry.empty?
+
+      at = entry.index('#')
+      next unless at
+
+      owner = entry[0...at]
+      ivar = entry[(at + 1)..]
+      next if owner.empty? || ivar.to_s.empty?
+
+      out[owner] << ivar.delete_prefix('@')
+    end
+  end
 
   # `arg_types` (ArgTypes.analyze) and `annotations` (Annotations.extract) can
   # only make more ivars embeddable, never fewer. Annotations also reach
   # #initialize, which ArgTypes cannot.
   def self.analyze(ireps, registry, arg_types = {}, annotations = {}, integer_constants = nil,
-                    fixnum_return_names = nil)
+                    fixnum_return_names = nil, fixnum_nil = {})
+    fixnum_nil = self.fixnum_nil_fields(fixnum_nil) if fixnum_nil.is_a?(String)
     # class -> labels of its leaf methods. Native MethodDefs have no irep and are
     # skipped.
     methods_of = Hash.new { |h, k| h[k] = [] }
@@ -36,6 +76,13 @@ class IvarLayout
     registry.each_value { |defs| defs.each { |d| def_of_irep[d.irep] = d if d.irep } }
 
     types = Hash.new { |h, k| h[k] = {} } # class_name -> {ivar_name => type or UNKNOWN}
+    # FIXNUM_NIL_DECLARATION: the set of concrete types a field was ever SEEN to
+    # hold, kept separately from `types` because `types` stores UNKNOWN once a
+    # single arm is unreadable -- and a later nil write must still be able to
+    # read that back as "Integer or nil" on a declared field. Joining
+    # in-place made the answer depend on which SETIV the sweep visited first
+    # (measured: the opaque-send fixture embedded only on one order).
+    seen = Hash.new { |h, k| h[k] = {} }
 
     10.times do
       changed = false
@@ -54,7 +101,29 @@ class IvarLayout
             inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations, registry,
                                    integer_constants, fixnum_return_names)
             before = types[klass][ivar]
-            merged = join(before, inferred)
+            # NILABLE_EMBED_SUPPORT: inferred, like every other concrete type
+            # here -- a field written only Integers and nil widens by the
+            # ordinary join, with no declaration.
+            #
+            # FIXNUM_NIL_DECLARATION additionally lets a DECLARED field survive
+            # a contribution trace_type cannot READ -- the Optcarrot
+            # CPU#@opcode shape, whose only Fixnum write is `fetch(@_pc)`. A
+            # declaration supplies the Integer half in that one case.
+            #
+            # It must NOT excuse a contribution the analysis can read and finds
+            # to be something else. That distinction is the whole safety
+            # argument, and it is why the ADD arm now recurses into both
+            # operands (see that arm's comment): without that, `ary + ary`
+            # reads UNKNOWN here and a declaration would admit the Array field
+            # as Integer-or-nil. `readable_but_other` is exactly the set the
+            # analysis has already resolved to a different concrete type.
+            unreadable = inferred == UNKNOWN && !readable_but_other(irep, idx, src_reg)
+            seen[klass][ivar] = infer_join(seen[klass][ivar], inferred) if inferred != UNKNOWN
+            merged = if fixnum_nil[klass]&.include?(ivar) && unreadable
+                       join(seen[klass][ivar] || NIL, :fixnum)
+                     else
+                       join(before, inferred)
+                     end
             if merged != before
               types[klass][ivar] = merged
               changed = true
@@ -63,11 +132,14 @@ class IvarLayout
         end
       end
       break unless changed
+
     end
 
-    # Only embeddable (non-UNKNOWN) entries matter to codegen.
+    # Only embeddable (non-UNKNOWN) entries matter to codegen. NIL is excluded by
+    # EMBEDDABLE, not by an UNKNOWN test: a nil-only field has a known type and
+    # simply has no storage representation (NILABLE_EMBED_SUPPORT).
     types.each_with_object({}) do |(klass, ivars), out|
-      embeddable = ivars.reject { |_, t| t == UNKNOWN }
+      embeddable = ivars.select { |_, t| EMBEDDABLE.include?(t) }
       out[klass] = embeddable unless embeddable.empty?
     end
   end
@@ -77,12 +149,95 @@ class IvarLayout
   # methods, so dropping an UNKNOWN because a concrete type arrived first would
   # make the result order-dependent and unsound (it wrongly embedded ivars in
   # Game::Screen and Game::State; see ADR 0139).
+  #
+  # NILABLE_EMBED_SUPPORT: the one non-unanimous join is NIL against
+  # :fixnum, in either order, producing FIXNUM_NIL: both values are immediates,
+  # so the pair is representable. A nil-only field stays NIL, which is not
+  # embeddable (C_TYPE has no entry), so `@x = nil` alone still leaves it in
+  # iv_tbl. Everything else that disagrees still poisons.
   def self.join(a, b)
-    return b if a.nil?
-    return UNKNOWN if b == UNKNOWN || b.nil?
-    return UNKNOWN if a != b
+    return b if a.nil?                       # no fact yet
+    return UNKNOWN if a == UNKNOWN || b.nil?
+    return UNKNOWN if b == UNKNOWN
+    return a if a == b                      # the ordinary agreement
+    return FIXNUM_NIL if nullable_pair?(a, b)
 
-    a
+    UNKNOWN
+  end
+
+  # `join` without the UNKNOWN stickiness, for the `seen` table only: it keeps
+  # the CONCRETE types a field was ever written with, so a declared field can be
+  # re-read as "Integer or nil" after an unreadable arm has already poisoned
+  # `types`. The result is never used as an embedding decision on its own.
+  def self.infer_join(a, b)
+    return b if a.nil?
+    return a if b.nil?
+    return a if a == b
+    return FIXNUM_NIL if nullable_pair?(a, b)
+
+    UNKNOWN
+  end
+
+  # FIXNUM_NIL_DECLARATION's safety test: is this SETIV's source a value the
+  # analysis could READ and resolved to something that is NOT a Fixnum? Such a
+  # site contradicts a fixnum_nil claim outright and must keep poisoning, while
+  # an unreadable one (an opaque send, a call whose result the analysis cannot
+  # type) is exactly what the declaration exists to tolerate.
+  #
+  # Deliberately coarse and conservative: it returns true only for a site whose
+  # value the analysis positively resolved to a non-Fixnum, so a false "readable"
+  # can only cost an embedding, never admit a wrong one.
+  def self.readable_but_other(irep, idx, src_reg)
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      case insn.op
+      when 'MOVE'
+        d, s = insn.args.scan(/R(\d+)/).flatten
+        next unless d == src_reg
+
+        src_reg = s
+      when /^LOADI/
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == src_reg
+
+        return false # a literal Integer: readable, and a Fixnum
+      when 'LOADNIL'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == src_reg
+
+        return false # nil: legal in the type
+      when 'LOADSYM', 'LOADTRUE', 'LOADFALSE', 'STRING', 'ARRAY', 'ARRAY2', 'HASH', 'RANGE_INC', 'RANGE_EXC'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == src_reg
+
+        return true # positively another kind of value
+      when 'ADD', 'ADDI', 'SUB', 'SUBI', 'MUL', 'DIV'
+        # An arithmetic site is a Fixnum only when its operands prove (see the
+        # ADD arm); it was refused here, so the value is not readable.
+        next
+      else
+        d = insn.args[/^R(\d+)/, 1]
+        return false if d == src_reg # an unmodeled writer: unreadable, not "other"
+
+        next
+      end
+    end
+    false
+  end
+
+  # NILABLE_EMBED_SUPPORT: the only disagreeing pairs that are still
+  # representable, since nil and an mrb_int are both immediates. Commutative
+  # in both arguments and absorbing on both sides, so the sweep's method order
+  # cannot change the answer -- the same property `join`'s sticky-UNKNOWN rule
+  # above exists to guarantee (ADR 0139).
+  NULLABLE_PAIRS = [
+    %i[fixnum nil_literal].freeze,
+    %i[fixnum_nil nil_literal].freeze,
+    %i[fixnum fixnum_nil].freeze
+  ].freeze
+
+  def self.nullable_pair?(a, b)
+    NULLABLE_PAIRS.any? { |left, right| (a == left && b == right) || (a == right && b == left) }
   end
 
   # Walk back from `idx` for the last writer of `reg`, following MOVEs, until a
@@ -112,7 +267,10 @@ class IvarLayout
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
 
-        return UNKNOWN
+        # NILABLE_EMBED_SUPPORT: nil is a concrete value, so it is a contribution
+        # the join can widen (NIL + :fixnum -> FIXNUM_NIL) instead of the UNKNOWN
+        # this used to return, which poisoned every nilable ivar.
+        return NIL
       when 'LOADTRUE', 'LOADFALSE'
         # BOOL_EMBED_SUPPORT: LOADT/LOADF. true/false are immediates in every boxing
         # this project targets (word, no-float, nan), so an mrb_bool field needs no GC
@@ -134,12 +292,40 @@ class IvarLayout
         return :fixnum if name && integer_constants&.include?(name)
 
         return UNKNOWN
-      when 'ADD', 'ADDI'
+      when 'ADDI'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
-        # ADD/ADDI's destination holds a Fixnum on this prototype's fast path (see
-        # CodeGen#compile_insn).
-        return :fixnum
+        # ADDI is `+= <literal>`: OP_ADDI is a plain integer add on the
+        # destination, so it keeps the destination's own type. When the
+        # destination is not known to be a Fixnum the value is not one either
+        # (`1 + []` would not reach here, but `@x = @y += 1` with an Array
+        # `@y` would), so trace the destination rather than assume.
+        return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+      when 'ADD'
+        d = insn.args[/^R(\d+)/, 1]
+        next unless d == reg
+        # ADD is `+`, which is Integer#+ ONLY when both operands are Integers;
+        # for two Arrays it is Array#+ and yields an Array. This is the same
+        # rule codegen_insn's own ADD arm uses before it emits the bare
+        # `mrb_fixnum_value(a + b)` fast path (codegen_insn.rb:177,
+        # proven_fixnum_pair?), so inference here and the emitted fast path
+        # cannot disagree.
+        #
+        # This is what makes inferred fixnum_nil sound. Returning an
+        # unconditional :fixnum here was a real pre-existing hole -- it typed
+        # `ary + ary` as a Fixnum -- which stayed invisible only because a
+        # nilable field's nil write used to poison the join (RPG2k::Scene::
+        # EquipMenu#@candidates, `@candidates = real + [[0, 0]]`, hit it once
+        # NILABLE_EMBED_SUPPORT stopped poisoning). A nonnil Array field
+        # still escapes through some other writer's own evidence, so this
+        # arm is a missed embedding, not a wrong one.
+        s = insn.args[/\(R(\d+)\)/, 1]
+        if s
+          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+          right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+          return :fixnum if left == :fixnum && right == :fixnum
+        end
+        return UNKNOWN
       when 'SUB', 'MUL'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
@@ -168,7 +354,12 @@ class IvarLayout
         next unless d == reg
 
         other_ivar = insn.args[/@(\w+)/, 1]
-        return known_ivar_types[other_ivar] || UNKNOWN
+        known = known_ivar_types[other_ivar]
+        # EMBED_TYPE_SAFETY: a nilable (or unknown) source is not a concrete
+        # scalar, so it never propagates a type to the copy (NILABLE_EMBED_SUPPORT).
+        return known if EMBEDDABLE.include?(known)
+
+        return UNKNOWN
       when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
         d = insn.args[/^R(\d+)/, 1]
         next unless d == reg
