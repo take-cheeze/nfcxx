@@ -37,7 +37,15 @@ class CodeGen
       block_irep = block_label && @ireps[block_label]
       next unless block_irep && mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
 
-      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep }
+      needs_blk = block_blk_needs(block_irep)
+      if needs_blk.nil? || (!needs_blk.empty? &&
+         (needs_blk != [1] || !pure_mandatory_arity?(irep) || !(block_irep.reps || []).empty? ||
+          !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?('times')))
+        next
+      end
+
+      regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
+                   block_irep: block_irep, needs_blk: needs_blk == [1] }
     end
     regions
   end
