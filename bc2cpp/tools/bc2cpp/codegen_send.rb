@@ -195,6 +195,17 @@ class CodeGen
         t_opt = init_irep ? optional_arity(init_irep) : nil
         arity_ok = init_irep && n.between?(t_mand, t_mand + t_opt) && compiles_clean?(init_def.irep)
         arity_ok &&= !t_opt.positive? || optional_arg_table(init_irep)[1]
+        # KEYWORD_INITIALIZE_STAYS_KEYWORDED: this arm emits a POSITIONAL call --
+        # real arguments, optional padding, then bc2cpp_given_opt. An #initialize
+        # that also declares KEYWORDS has its _impl widened to take them as
+        # trailing (value, given) pairs (see compile_keyword_direct_construct's
+        # own note), so a positional call here would be a compile error for a
+        # too-few-argument call, and, where the arity happened to line up, would
+        # silently drop the keyword values. Those classes belong to
+        # compile_keyword_direct_construct, which matches keywords BY NAME and
+        # pads positionals itself. Relaxing the arity test must not widen the
+        # positional arm past the classes it can express.
+        arity_ok &&= !mandatory_optional_and_keyword_arity?(init_irep) if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
           owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)

@@ -61,9 +61,16 @@ NATIVE_CONSTRUCT_TARGETS = {
 # direct call bypasses the visibility lookup, as Class#new does.
 # Receivers written relative to the enclosing module (`Scene::Map` inside
 # `module RPG2k`) are resolved by lexically_resolve_construct_target, which
-# only returns members of this table and refuses cross-level ambiguity.
-# Classes whose #initialize has `= default` arguments and no keywords
-# (Game::Vehicle, Game::Character, ...) are omitted: they could never fire.
+# prefers a member of this table and otherwise falls back to the set of classes
+# the closed world DEFINES (LEXICAL_CONSTRUCT_RESOLUTION), refusing
+# cross-level ambiguity either way.
+#
+# Classes whose #initialize has keywords only (Game::Vehicle, Game::Character,
+# ...) are still omitted: compile_send's positional arm does not handle them, and
+# compile_keyword_direct_construct is reached from a different call shape.
+# An #initialize with `= default` POSITIONAL arguments is no longer a reason to
+# omit a class -- POSITIONAL_OPTIONAL_CONSTRUCT pads the omitted positionals and
+# passes bc2cpp_given_opt, so the defaults stay inside mruby's own _impl.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
                                Game::Screen Game::ChipSet Game::Interpreter
@@ -72,6 +79,7 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::MoveRoute RPG2k::Scene::Map
                                RPG2k::Scene::MapViewer
                                RPG2k::Scene::ChipsetEditor
+                               RPG2k::Window
                                Game::Battle].freeze
 
 # NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
