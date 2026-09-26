@@ -412,26 +412,34 @@ class CodeGen
   # Owner names are constant paths ("Game::Actor"); `::` is not valid in a C++
   # identifier, so every generated name goes through this.
   #
-  # INJECTIVE_MANGLE: a valid C identifier character passes through, and every
-  # other character -- `_` included, so `A_B` cannot collide with `A<B` -- becomes
-  # `_` plus its two-digit lowercase hex code point. Injective, and no valid C++
-  # identifier can contain a bare `_3c`-style run the mangler would produce
-  # otherwise, so it also cannot collide with a hand-written name.
+  # INJECTIVE_MANGLE: `[A-Za-z0-9_]` passes through unchanged; every other
+  # character becomes `$` plus its two-digit lowercase hex code point.
   #
-  # This was NOT injective before: collapsing each run to a single `_` made
-  # `Hash#<` and `Hash#>` both `Hash__`, and `Hash#==`/`Hash#<=`/`Hash#>=`/
-  # `Hash#!=` all `Hash___`. compile_all emits one `_impl` per registry leaf and
-  # cpp_name derives the symbol from that pair, so any two colliding leaves emit
-  # the same C++ function and the translation unit fails to compile
-  # ("redefinition of `mrb_value Hash___impl(...)`"). It stayed hidden because
-  # no emitted owner had two operator-named methods: mruby-hash-ext's Hash
-  # comparison methods reached the registry only once core mrblib entered the
-  # closed world, and with a per-gem ONLY_OWNERS allowlist they were filtered out
-  # anyway.
+  # `$` is the separator because a Ruby method or class name cannot contain one,
+  # so no literal name can ever produce the `$3c` that `<` produces, and the
+  # mapping is injective by construction. An earlier revision used `_` as the
+  # escape character, which is NOT injective: `Array_<` and the legal Ruby name
+  # `Array__3c` both sanitize to `Array__3c`. A still earlier revision escaped
+  # `_` itself, which is injective but pushed every separator from 1 to 3
+  # characters and took the longest symbol in this program to 97 characters,
+  # past C++'s 63-significant-character guarantee.
+  #
+  # `$` is a legal C++ identifier character, so the result is still a valid
+  # identifier -- and one no hand-written identifier in the tree can imitate,
+  # since none of them contain `$`.
+  #
+  # This was NOT injective at all before: collapsing each run to a single `_`
+  # made `Hash#<` and `Hash#>` both `Hash__`, and `Hash#==`/`Hash#<=`/
+  # `Hash#>=`/`Hash#!=` all `Hash___`. compile_all emits one `_impl` per
+  # registry leaf and cpp_name derives the symbol from that pair, so any two
+  # colliding leaves emit the same C++ function and the translation unit fails
+  # to compile ("redefinition of `mrb_value Hash___impl(...)`"). It stayed
+  # hidden because no emitted owner had two operator-named methods:
+  # mruby-hash-ext's Hash comparison methods reached the registry only once
+  # core mrblib entered the closed world, and with a per-gem ONLY_OWNERS
+  # allowlist they were filtered out anyway.
   def sanitize(s)
-    s.each_char.map { |c|
-      c.match?(/[A-Za-z0-9]/) ? c : format('_%02x', c.ord)
-    }.join
+    s.gsub(/[^a-zA-Z0-9_]/) { |c| format('$%02x', c.ord) }
   end
 
   # Lexical scope segments (innermost last) for a bare constant in a def body,
