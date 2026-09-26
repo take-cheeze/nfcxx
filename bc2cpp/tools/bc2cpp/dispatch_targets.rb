@@ -646,6 +646,32 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
       path.unshift(const_name)
       return path.join('::')
+    when 'JMPNOT', 'JMPIF'
+      # CONTAINER_PHI_MERGE: `x || []` / `x && {}` writes a container literal
+      # into `reg` on ONE side of the branch, so the register has two incoming
+      # definitions and the walk would otherwise keep going past the literal
+      # to an older, unrelated write (or off the top of the body to the
+      # argument). ADR 0191 added this opcode to READ_ONLY_OPCODE_SKIP, which is
+      # correct for soundness of the skip but loses the literal: ADR 0191
+      # verified that had zero measurable effect, because no `x || []` receiver
+      # was reachable then.
+      #
+      # The merge is admitted ONLY when the other (branch-taken) side is
+      # provably the same container class, or provably nil:
+      #   * LOADNIL, so the two arms are `nil` and the literal;
+      #   * another literal of the same class, so both arms agree.
+      # Anything else -- a GETIV with no class fact, an opaque SEND result, a
+      # GETIDX whose element class is unresolved -- is REFUSED, not merged.
+      # That is the whole safety argument, and it matters more here than in the
+      # TYPED send path: this fact feeds the block recognizers' `traced ==
+      # 'Array'` GATE, which has no runtime fallback (a wrong fact emits a loop
+      # over a register that is not an Array), so a wrong merge would not
+      # degrade to mrb_funcall as a wrong TYPED fact does.
+      merged = container_phi_merge(irep, i, reg)
+      return merged if merged
+
+      # Unproven: fall through to the READ_ONLY_OPCODE_SKIP behaviour ADR 0191
+      # established, which is to keep walking backwards past this read.
     when *READ_ONLY_OPCODE_SKIP
       # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart; ADR 0188, ADR 0191): skip
       # opcodes that only read their `R%d` operand, as IvarLayout.trace_type does.
@@ -662,6 +688,53 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   pos = reg.to_i
   return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
 
+  nil
+end
+
+# CONTAINER_PHI_MERGE: the class a register provably holds across a
+# `JMPNOT`/`JMPIF` that has a container literal on its fall-through arm, or nil
+# when the other arm is not provably the same class (or nil).
+#
+# `at` is the branch instruction's index; `reg` the branch's operand. The
+# literal is the instruction immediately after it. The value the jump KEEPS is
+# whatever wrote `reg` earlier, so that older writer is the side that has to
+# agree, and proving it is the deliberately conservative half of this rule.
+#
+# Soundness matters more here than in the TYPED send path. A TYPED fact is
+# checked at runtime (`mrb_obj_class(M, recv) == owner_class_ptr`) and a wrong
+# one costs a failed compare; the block recognizers instead GATE on
+# `traced == 'Array'` and then emit `RARRAY_LEN`/`RARRAY_PTR` with no runtime
+# check at all. So this returns a class only when the register cannot hold
+# anything but that container class or nil at the merge point:
+#   * LOADNIL -- the other arm is nil, which no inlined receiver ever is;
+#   * a literal of the SAME class -- both arms agree.
+# An older GETIV with no class fact, an opaque SEND result, or a GETIDX whose
+# element class is unresolved is refused, not merged.
+def container_phi_merge(irep, at, reg)
+  lit = irep.instructions[at + 1]
+  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.args[/^R(\d+)/, 1] == reg
+
+  lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
+  (at - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn.args[/^R(\d+)/, 1] == reg
+
+    case insn.op
+    when 'MOVE'
+      src = insn.args.scan(/R(\d+)/).flatten[1]
+      return nil unless src
+
+      reg = src
+      next
+    when 'LOADNIL'
+      return lit_class
+    when 'ARRAY', 'ARRAY2'
+      return 'Array' if lit_class == 'Array'
+    when 'HASH'
+      return 'Hash' if lit_class == 'Hash'
+    end
+    return nil
+  end
   nil
 end
 
