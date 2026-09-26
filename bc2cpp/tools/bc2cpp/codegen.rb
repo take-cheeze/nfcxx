@@ -412,34 +412,49 @@ class CodeGen
   # Owner names are constant paths ("Game::Actor"); `::` is not valid in a C++
   # identifier, so every generated name goes through this.
   #
-  # INJECTIVE_MANGLE: `[A-Za-z0-9_]` passes through unchanged; every other
-  # character becomes `$` plus its two-digit lowercase hex code point.
+  # INJECTIVE_MANGLE: the two structural characters of a name -- the `::` in a
+  # constant path and the `.` in a `.singleton` pseudo-owner -- still become a
+  # single `_`, exactly as they always have, so every symbol the tree already
+  # spells out (`Game__Actor_update`, `Widget_singleton_make`,
+  # `bc2cpp_owner_reg_Widget_singleton`) is unchanged. Every OTHER character
+  # becomes `$` plus its two-digit lowercase hex code point.
   #
-  # `$` is the separator because a Ruby method or class name cannot contain one,
-  # so no literal name can ever produce the `$3c` that `<` produces, and the
-  # mapping is injective by construction. An earlier revision used `_` as the
-  # escape character, which is NOT injective: `Array_<` and the legal Ruby name
-  # `Array__3c` both sanitize to `Array__3c`. A still earlier revision escaped
-  # `_` itself, which is injective but pushed every separator from 1 to 3
-  # characters and took the longest symbol in this program to 97 characters,
-  # past C++'s 63-significant-character guarantee.
+  # The split is what makes this injective while keeping the diff to a minimum.
+  # Under run-collapse, `<` `>` `&` `|` `^` `+` `-` `*` `/` `%` `!` `~` all became
+  # `_`, `<=` `>=` `==` `!=` `<<` `>>` `[]` `**` `+@` `-@` `=~` `!~` all became
+  # `__`, and `===` `<=>` `[]=` all became `___`. A Ruby method name can contain
+  # none of `:` or `.`, so nothing else in the program can produce the `$3c` that
+  # `<` produces, and no legal name can forge it: `Array__3c` sanitizes to
+  # `Array__3c` (its `_`s pass through) while `Array_<` sanitizes to
+  # `Array_$3c`.
   #
-  # `$` is a legal C++ identifier character, so the result is still a valid
-  # identifier -- and one no hand-written identifier in the tree can imitate,
-  # since none of them contain `$`.
+  # An earlier revision escaped `_` as well, which is injective but pushed every
+  # separator from 1 to 3 characters and took the longest symbol in this program
+  # to 97 characters, past C++'s 63-significant-character guarantee. Another let
+  # `.` through unescaped, which is wrong: `.` is not a legal C++ identifier
+  # character, and codegen_emit's owner-local is
+  # `bc2cpp_owner_reg_#{sanitize(owner)}`, so `Widget.singleton` produced
+  # `bc2cpp_owner_reg_Widget.singleton` and the C++ build failed to parse it.
   #
-  # This was NOT injective at all before: collapsing each run to a single `_`
-  # made `Hash#<` and `Hash#>` both `Hash__`, and `Hash#==`/`Hash#<=`/
-  # `Hash#>=`/`Hash#!=` all `Hash___`. compile_all emits one `_impl` per
-  # registry leaf and cpp_name derives the symbol from that pair, so any two
-  # colliding leaves emit the same C++ function and the translation unit fails
-  # to compile ("redefinition of `mrb_value Hash___impl(...)`"). It stayed
-  # hidden because no emitted owner had two operator-named methods:
-  # mruby-hash-ext's Hash comparison methods reached the registry only once
-  # core mrblib entered the closed world, and with a per-gem ONLY_OWNERS
-  # allowlist they were filtered out anyway.
+  # `$` is a legal C++ identifier character, so every result is still a valid
+  # identifier, and none of them can collide with a hand-written name in the tree
+  # because none of those contain `$`.
+  #
+  # This was NOT injective at all before: mruby-hash-ext's Hash#< and Hash#>
+  # both became `Hash__`, and Hash#==/#<=/#>=/#!= all became `Hash___`, so
+  # compile_all -- which emits one `_impl` per registry leaf and derives the
+  # symbol from cpp_name(owner, name) -- emitted the same C++ function twice and
+  # the translation unit failed ("redefinition of `mrb_value Hash___impl(...)`").
+  # It stayed hidden because no emitted owner had two operator-named methods:
+  # mruby-hash-ext's Hash comparison methods reached the registry only once core
+  # mrblib entered the closed world, and with a per-gem ONLY_OWNERS allowlist
+  # they were filtered out anyway.
+  STRUCTURAL_NAME_CHARS = ':.'.freeze
+
   def sanitize(s)
-    s.gsub(/[^a-zA-Z0-9_]/) { |c| format('$%02x', c.ord) }
+    s.gsub(/[^a-zA-Z0-9_]/) { |c|
+      STRUCTURAL_NAME_CHARS.include?(c) ? '_' : format('$%02x', c.ord)
+    }
   end
 
   # Lexical scope segments (innermost last) for a bare constant in a def body,
