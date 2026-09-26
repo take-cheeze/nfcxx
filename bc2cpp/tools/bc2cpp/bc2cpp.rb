@@ -34,6 +34,7 @@ require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
 require_relative 'construct_class_names'
+require_relative 'annotation_contradictions'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
 require_relative 'hot_methods'
@@ -586,6 +587,28 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     gen.fixnum_return_names.sort.each { |n| warn "  RET #{n}" }
+  end
+  warn ''
+  # RBS_SEED_CONTRADICTION: a hand-written `# bc2cpp:` annotation that disagrees
+  # with a type the analysis PROVED is a build error, Spinel's rule for a
+  # representable RBS signature ("an assertion, not a hint"). Without it a typo
+  # in an annotation costs an optimization in silence, which is the same class
+  # of failure as a stale registration. Only a concrete inferred type can
+  # contradict: UNKNOWN is an absent fact, not a conflicting one, so an
+  # annotation that merely failed to apply still passes.
+  contradictions = AnnotationContradictions.find(ireps, registry, annotations, arg_types,
+                                                gen.fixnum_return_names)
+  warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='
+  if contradictions.empty?
+    warn '  (none)'
+  else
+    contradictions.each do |owner, name, pos, declared, got|
+      where = pos == :return ? 'return' : "position #{pos + 1}"
+      warn "  CONTRADICTION #{owner}##{name} #{where}: annotation says #{declared.inspect}, " \
+           "inference proved #{got.inspect}"
+    end
+    abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{contradictions.size} annotation(s) disagree with a " \
+          "proved type (see above). Fix the annotation, or the code it claims to describe."
   end
   warn ''
   # ARRAY_RETURN_PROOF listing, one line per name like the one above, so the
