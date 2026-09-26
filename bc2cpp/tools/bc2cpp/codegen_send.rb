@@ -206,6 +206,23 @@ class CodeGen
         # pads positionals itself. Relaxing the arity test must not widen the
         # positional arm past the classes it can express.
         arity_ok &&= !mandatory_optional_and_keyword_arity?(init_irep) if arity_ok
+        # NATIVE_ARG_TYPES_STAY_BOXED: an #initialize in NATIVE_ARG_TARGETS with
+        # an ArgTypes annotation has its `_impl` narrowed to mrb_int/mrb_float
+        # parameters (compile_method's signature, via native_arg_types), and the
+        # UNBOXING lives in the entry wrapper's `mrb_get_args("i")`, not in the
+        # `_impl`. A direct call bypasses that wrapper, so passing the mrb_value
+        # register straight through is a type error:
+        #
+        #   RPG2k__Scene__Map__LRUBitmapCache_initialize_impl(M, r2, r3);
+        #                                                    ^ cannot convert
+        #                                                      mrb_value to mrb_int
+        #
+        # Unboxing here is possible (mrb_integer with the same nil-raise the
+        # wrapper would do) but is a second, separate proof, and the wrapper's
+        # nil-guard is what the annotation's own comment relies on. Refusing is
+        # the sound and small answer: such a class keeps its dynamic dispatch
+        # until a path that unboxes properly exists.
+        arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
           owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)

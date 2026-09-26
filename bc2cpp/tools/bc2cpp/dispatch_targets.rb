@@ -67,10 +67,19 @@ NATIVE_CONSTRUCT_TARGETS = {
 #
 # Classes whose #initialize has keywords only (Game::Vehicle, Game::Character,
 # ...) are still omitted: compile_send's positional arm does not handle them, and
-# compile_keyword_direct_construct is reached from a different call shape.
-# An #initialize with `= default` POSITIONAL arguments is no longer a reason to
-# omit a class -- POSITIONAL_OPTIONAL_CONSTRUCT pads the omitted positionals and
-# passes bc2cpp_given_opt, so the defaults stay inside mruby's own _impl.
+# compile_keyword_direct_construct is reached from a different call shape. An
+# #initialize with `= default` POSITIONAL arguments is no longer a reason to omit
+# a class -- POSITIONAL_OPTIONAL_CONSTRUCT pads the omitted positionals and passes
+# bc2cpp_given_opt, so the defaults stay inside mruby's own _impl.
+#
+# LISTING_GRANTS_NOTHING: an entry here only lets lexically_resolve_construct_target
+# CONSIDER the class. compile_send still re-checks all four gates on every run --
+# no custom self.new/self.allocate, an #initialize that compiles clean, a call
+# count inside [mand, mand+opt], and the owner emitted -- so a class listed here
+# that fails any of them simply keeps its dynamic dispatch. That is why the
+# entries below can be broad: they were derived from the build's own registry
+# (every class with a compiled #initialize that this gem emits) rather than
+# hand-picked, and the measurement decides which of them actually fire.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
                                Game::Screen Game::ChipSet Game::Interpreter
@@ -80,7 +89,39 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                RPG2k::Scene::MapViewer
                                RPG2k::Scene::ChipsetEditor
                                RPG2k::Window
-                               Game::Battle].freeze
+                               Game::Battle
+                               Game::Actor Game::Actors Game::Battle::Combatant
+                               Game::Character
+                               Game::CommonEvent::CommonEventRecord
+                               Game::Enemy Game::EnemyAction Game::EnemyAi
+                               Game::Interpreter::BattleRequest
+                               Game::Interpreter::DiagnosticPosition
+                               Game::Interpreter::InnRequest
+                               Game::Interpreter::KeyInputAccepted
+                               Game::Interpreter::KeyInputRequest
+                               Game::Interpreter::NameInputRequest
+                               Game::Interpreter::ShopRequest
+                               Game::Message::PauseMarker
+                               Game::Message::ScanResult
+                               Game::Message::Segment
+                               Game::Message::SpeedMarker
+                               Game::Party Game::Picture Game::Rng
+                               Game::Shop Game::State Game::TextReveal
+                               Game::Troop Game::Variables Game::Vehicle
+                               Game::Weather
+                               RPG2k RPG2k::Scene::Base RPG2k::Scene::Battle
+                               RPG2k::Scene::EquipMenu
+                               RPG2k::Scene::EventResolver
+                               RPG2k::Scene::GameOver
+                               RPG2k::Scene::Map::LRUBitmapCache
+                               RPG2k::Scene::Map::MapEventState
+                               RPG2k::Scene::Map::MessageState
+                               RPG2k::Scene::Map::ShopQuantity
+                               RPG2k::Scene::Map::ShopState
+                               RPG2k::Scene::MapWorld RPG2k::Scene::Order
+                               RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu
+                               RPG2k::Scene::StatusMenu RPG2k::Scene::Title
+                               RPG2k::Scene::VehicleWorld].freeze
 
 # NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
 # "Owner#name" allowlist that moves a compiled method's mandatory argument
