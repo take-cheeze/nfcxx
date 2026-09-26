@@ -576,6 +576,12 @@ class CodeGen
       end
     end
     out = +"// HOT_ONLY (docs/adr/0214): #{entries.size} entry points of this gem are not compiled and stay bytecode.\n"
+    # BC2CPP_HOT_ONLY_STUBS: the self-describing mode signal. A hand-written
+    # register.cxx #includes this generated file, so it can test this macro to
+    # tell the two builds apart without a second build flag -- the two cannot
+    # drift, because this is emitted only on the hot-only path, and the no-op
+    # mrb_define_* overloads immediately below exist only here.
+    out << "#define BC2CPP_HOT_ONLY_STUBS 1\n"
     out << "struct bc2cpp_hot_only_excluded {};\n"
     %w[mrb_define_method mrb_define_private_method mrb_define_class_method].each do |fn|
       out << "static inline void #{fn}(mrb_state*, struct RClass*, const char*, bc2cpp_hot_only_excluded, " \
