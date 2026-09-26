@@ -411,8 +411,27 @@ class CodeGen
 
   # Owner names are constant paths ("Game::Actor"); `::` is not valid in a C++
   # identifier, so every generated name goes through this.
+  #
+  # INJECTIVE_MANGLE: a valid C identifier character passes through, and every
+  # other character -- `_` included, so `A_B` cannot collide with `A<B` -- becomes
+  # `_` plus its two-digit lowercase hex code point. Injective, and no valid C++
+  # identifier can contain a bare `_3c`-style run the mangler would produce
+  # otherwise, so it also cannot collide with a hand-written name.
+  #
+  # This was NOT injective before: collapsing each run to a single `_` made
+  # `Hash#<` and `Hash#>` both `Hash__`, and `Hash#==`/`Hash#<=`/`Hash#>=`/
+  # `Hash#!=` all `Hash___`. compile_all emits one `_impl` per registry leaf and
+  # cpp_name derives the symbol from that pair, so any two colliding leaves emit
+  # the same C++ function and the translation unit fails to compile
+  # ("redefinition of `mrb_value Hash___impl(...)`"). It stayed hidden because
+  # no emitted owner had two operator-named methods: mruby-hash-ext's Hash
+  # comparison methods reached the registry only once core mrblib entered the
+  # closed world, and with a per-gem ONLY_OWNERS allowlist they were filtered out
+  # anyway.
   def sanitize(s)
-    s.gsub(/[^a-zA-Z0-9_]/, '_')
+    s.each_char.map { |c|
+      c.match?(/[A-Za-z0-9]/) ? c : format('_%02x', c.ord)
+    }.join
   end
 
   # Lexical scope segments (innermost last) for a bare constant in a def body,
