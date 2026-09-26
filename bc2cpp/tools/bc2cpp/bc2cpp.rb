@@ -33,6 +33,7 @@ require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
+require_relative 'construct_class_names'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
 require_relative 'hot_methods'
@@ -180,6 +181,15 @@ if $PROGRAM_NAME == __FILE__
   UniqueClassNames.object_mixins = Array(included_modules['Object'])
   warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
   UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
+
+  # LEXICAL_CONSTRUCT_RESOLUTION: the class/module names the closed world
+  # DEFINES, so `lexically_resolve_construct_target` can resolve a bare
+  # `Window.new` inside `class RPG2k` to RPG2k::Window (a fact about the
+  # program) without that resolving to an admission (which stays with
+  # compile_send's four live gates). Set next to UniqueClassNames because both
+  # read the same CLASS/MODULE walk and must agree on what the bytecode defines.
+  ConstructClassNames.table = ConstructClassNames.analyze(ireps, root_label)
+  warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
 
   integer_constants =
     if ENV['NATIVE_SRCS'] && foreign_ruby_srcs

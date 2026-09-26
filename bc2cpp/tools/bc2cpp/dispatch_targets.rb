@@ -348,9 +348,27 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # Owner prefixes equal Module.nesting only for nested (not compact `class
 # A::B`) definitions; the closed world has no compact ones. Lexical scope only;
 # the cref's ancestors are not searched.
-# Soundness: only returns an existing DIRECT_CONSTRUCT_TARGETS entry; a match
-# at more than one level is ambiguous and returns nil; no owner returns nil;
-# nil falls back to the written path (dynamic dispatch / `#error`).
+# Soundness: only returns a name the closed world DEFINES; a match at more than
+# one level is ambiguous and returns nil; no owner returns nil; nil falls back to
+# the written path (dynamic dispatch / `#error`).
+#
+# LEXICAL_CONSTRUCT_RESOLUTION: this used to accept only a
+# DIRECT_CONSTRUCT_TARGETS entry, so a bare `Window.new` inside `class RPG2k`
+# resolved to nothing -- not because the name is ambiguous, but because the
+# RESOLVER's table was the allowlist rather than the set of classes that exist.
+# `Window` has two bindings program-wide (RGSS::Window and RPG2k::Window), so
+# UniqueClassNames refuses it outright, yet inside `module RPG2k` only
+# RPG2k::Window is reachable: mruby-rpg2k/mrblib/main.rb's own comment records
+# that "Every use is inside `class RPG2k`, so the bare name still resolves here".
+#
+# The table is therefore split in two. RESOLUTION still decides only WHICH class
+# the name denotes -- an unambiguous fact about the program. ADMISSION (whether
+# that class may be devirtualized) stays with compile_send's four live gates:
+# no custom `self.new`/`self.allocate`, an #initialize that compiles clean with
+# pure mandatory arity, a matching argument count, and the owner being emitted.
+# Listing a class in DIRECT_CONSTRUCT_TARGETS therefore still grants nothing; it
+# only stops the resolver from looking. Widening the resolution cannot make an
+# unsound call, because a class that fails any gate simply stays dynamic.
 def lexically_resolve_construct_target(written, owner)
   return nil if written.nil? || written.empty?
   return nil if owner.nil?
@@ -361,13 +379,23 @@ def lexically_resolve_construct_target(written, owner)
   hits = []
   nesting.length.downto(1) do |n|
     candidate = "#{nesting.first(n).join('::')}::#{written}"
-    hits << candidate if DIRECT_CONSTRUCT_TARGETS.include?(candidate)
+    hits << candidate if construct_resolution_known?(candidate)
   end
 
   # Ambiguous across nesting levels: refuse (see above).
   return nil if hits.length > 1
 
   hits.first
+end
+
+# Does the closed world define `name` as a class or module? A bare name
+# (no `::`) is not a definition on its own -- it is only ever reached through a
+# nesting prefix -- so it is refused here and left to the written path.
+def construct_resolution_known?(name)
+  return false unless name.include?('::')
+  return true if DIRECT_CONSTRUCT_TARGETS.include?(name)
+
+  (ConstructClassNames.table || {}).include?(name)
 end
 
 # `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
