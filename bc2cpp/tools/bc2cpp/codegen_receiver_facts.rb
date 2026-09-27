@@ -87,6 +87,40 @@ class CodeGen
     nil
   end
 
+  # Diagnostic-only: identify the nearest producer behind an unresolved
+  # receiver, following register copies without changing the type proof.
+  def receiver_trace_origin(irep, idx, dest_reg)
+    return 'receiver_unavailable' unless irep && idx && dest_reg
+
+    reg = dest_reg.to_s
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next if insn.op == 'BLOCK' || READ_ONLY_OPCODE_SKIP.include?(insn.op)
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      if insn.op == 'MOVE'
+        reg = insn.args.scan(/R(\d+)/).flatten[1]
+        return 'move_without_source' unless reg
+
+        next
+      end
+
+      return case insn.op
+             when 'GETIV' then 'get_ivar'
+             when 'GETIDX', 'GETIDX0' then 'indexed_result'
+             when 'GETUPVAR' then 'captured_upvar'
+             when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+             when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
+             when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
+             else "write_#{insn.op.downcase}"
+             end
+    end
+
+    return 'self_register' if reg == '0'
+
+    'incoming_or_unwritten_register'
+  end
+
   def stable_standard_constructor_class?(klass)
     @closed_world&.stable_class_constant?(klass) && @closed_world.standard_constructor_lookup? &&
       exact_constructor_chain?(klass)

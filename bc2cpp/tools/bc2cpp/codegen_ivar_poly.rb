@@ -84,7 +84,7 @@ class CodeGen
   # POLY_DIAGNOSTICS: definition-level exclusion counts attached to each
   # emitted polymorphic call site. They explain table coverage; they do not
   # claim that every excluded definition is reachable at that particular site.
-  def poly_diagnostic(name, n, path, candidates, receiver: 'runtime_class')
+  def poly_diagnostic(name, n, path, candidates, receiver: 'runtime_class', origin: nil)
     @poly_diagnostic_reason_cache ||= {}
     cache_key = [name, n, candidates.map(&:object_id)]
     reasons = @poly_diagnostic_reason_cache[cache_key]
@@ -129,7 +129,7 @@ class CodeGen
     end
     excluded = reasons.sort_by { |reason, _| reason.to_s }.map { |reason, count| "#{reason}=#{count}" }.join(',')
     "  // POLY_DIAG path=#{path} receiver=#{receiver} name=#{name.inspect} arity=#{n} candidates=#{candidates.size} " \
-      "excluded=#{excluded.empty? ? 'none' : excluded}\n"
+      "excluded=#{excluded.empty? ? 'none' : excluded}#{" origin=#{origin}" if origin}\n"
   end
 
   # True when `owner`'s ivar behind accessor `name` (a reader `code`, or a writer

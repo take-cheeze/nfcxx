@@ -923,7 +923,11 @@ class CodeGen
                       else
                         'receiver_class_unavailable'
                       end
-      diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact)
+      receiver_origin = if receiver_fact == 'receiver_class_unresolved'
+                          receiver_trace_origin(irep, idx || trace_idx,
+                                               unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset))
+                        end
+      diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
       "#{diag}#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
     end
