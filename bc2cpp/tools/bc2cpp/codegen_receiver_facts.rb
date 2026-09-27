@@ -164,9 +164,9 @@ class CodeGen
   # SYM_DEVIRT: resolve a `&:sym` target inside emit_sym_inline. Returns
   # [:mono, def], [:poly, defs] or nil, applying compile_send's MONO guards
   # (pure-mandatory arity, arity 0 since recognize_sym_regions requires n=0,
-  # ONLY_OWNERS/OTHER_OWNERS). POLY needs a per-element class guard per
-  # candidate and is capped at SYM_DEVIRT_CHAIN_CAP. Anything else keeps
-  # mrb_funcall.
+  # ONLY_OWNERS/OTHER_OWNERS). POLY needs a per-element exact-class guard for
+  # each direct or closed-world-proven inherited implementation and is capped
+  # at SYM_DEVIRT_CHAIN_CAP. Anything else keeps mrb_funcall.
   SYM_DEVIRT_CHAIN_CAP = 4
 
   def sym_call_target(sym)
@@ -187,7 +187,23 @@ class CodeGen
     return nil unless usable.size == defs.size && !usable.empty?
 
     return [:mono, usable.first] if usable.size == 1
-    return [:poly, usable] if usable.size <= SYM_DEVIRT_CHAIN_CAP
+    return nil if usable.size > SYM_DEVIRT_CHAIN_CAP
+
+    # Each inherited entry is keyed by the exact receiver class, not its
+    # ancestor implementation owner; emission therefore retains lookup's
+    # runtime-class check and shares the caller's closed-world hierarchy proof.
+    branches = usable.map { |definition| { guard_owner: definition.owner, definition: definition } }
+    if @closed_world
+      (@superclass_of.keys + known_owner_set.to_a).uniq.each do |receiver_class|
+        next if receiver_class.end_with?('.singleton') || branches.any? { |b| b[:guard_owner] == receiver_class }
+
+        target = closed_world_inherited_target(sym, receiver_class)
+        next unless target && usable.include?(target)
+
+        branches << { guard_owner: receiver_class, definition: target }
+      end
+    end
+    return [:poly, branches] if branches.size <= SYM_DEVIRT_CHAIN_CAP
 
     nil
   end

@@ -327,7 +327,9 @@ end
 # TYPED devirtualization everywhere.
 def traced_owner(irep, idx, reg, ctx)
   cls = trace_new_target(irep, idx, reg, ctx[:ivar_classes], ctx[:mand], ctx[:arg_classes],
-                         owner: ctx[:owner], class_layout: ctx[:class_layout], registry: ctx[:registry])
+                         owner: ctx[:owner], class_layout: ctx[:class_layout], registry: ctx[:registry],
+                         known_owners: ctx[:known_owners], container_constants: ctx[:container_constants],
+                         element_annotations: ctx[:element_annotations])
   resolve_owner_name(cls, ctx)
 end
 
@@ -419,7 +421,42 @@ end
 def class_scoped_return_class(recv_class, name, ctx, depth)
   return nil if depth > 8
 
-  md = ctx[:registry][name]&.find { |m| m.owner == recv_class && m.irep }
+  defs = ctx[:registry][name] || []
+  direct_defs = defs.select { |m| m.owner == recv_class }
+  return nil if direct_defs.size > 1
+  return nil if direct_defs.any? && !direct_defs.first.irep
+
+  md = direct_defs.first if direct_defs.first&.irep
+  unless md
+    # Inherited lookup is useful when another class makes this name globally
+    # polymorphic. Require a closed-world proof and a fully known, mixin-free
+    # ancestry; otherwise Ruby's lookup order may differ from this walk.
+    world = ctx[:closed_world]
+    return nil unless world&.inherited_lookup_safe?(name, recv_class)
+
+    seen = Set.new
+    owner = recv_class
+    loop do
+      return nil unless seen.add?(owner)
+      return nil if [ctx[:included_modules], ctx[:prepended_modules], ctx[:unknown_mixins]].any? do |mixins|
+        next false unless mixins
+
+        entries = mixins.respond_to?(:key?) ? mixins[owner] : (mixins.include?(owner) ? [owner] : [])
+        !entries.to_a.empty?
+      end
+
+      owner = ctx[:superclass_of][owner]
+      break unless owner.is_a?(String)
+
+      inherited_defs = defs.select { |m| m.owner == owner }
+      unless inherited_defs.empty?
+        return nil unless inherited_defs.size == 1 && inherited_defs.first.irep
+
+        md = inherited_defs.first
+        break
+      end
+    end
+  end
   return nil unless md
 
   ann = ctx[:element_annotations][md.irep]&.ret_class
@@ -578,7 +615,8 @@ class ArrayElementLayout
   #   :opaque -- some site could not be traced: a candidate for an annotation.
   # nil (the default) changes nothing.
   def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, superclass_of = {},
-                    poison_reason: nil)
+                    poison_reason: nil, closed_world: nil, included_modules: {}, prepended_modules: {},
+                    unknown_mixins: {})
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     # Registry classes, used by resolve_owner_name for bare GETCONST tokens.
@@ -624,6 +662,9 @@ class ArrayElementLayout
             ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
                     class_annotations: class_annotations, element_annotations: element_annotations,
                     known_owners: known_owners, subclassed: subclassed,
+                    closed_world: closed_world, superclass_of: superclass_of,
+                    included_modules: included_modules, prepended_modules: prepended_modules,
+                    unknown_mixins: unknown_mixins,
                     ivar_classes: (class_layout[owner] || {}), mand: mand,
                     arg_classes: arg_classes, arg_elements: arg_elements, elements: elements,
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }
@@ -814,7 +855,8 @@ class HashElementLayout
   # after it) lets `@h[k] = @roster[i]` resolve; empty means such chains poison.
   # ANY_OPAQUE_SUPPORT: `poison_reason` as in ArrayElementLayout.analyze.
   def self.analyze(ireps, registry, class_layout, class_annotations, element_annotations, array_elements = {},
-                    superclass_of = {}, poison_reason: nil)
+                    superclass_of = {}, poison_reason: nil, closed_world: nil, included_modules: {},
+                    prepended_modules: {}, unknown_mixins: {})
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     known_owners = Set.new(registry.values.flatten.map(&:owner))
@@ -849,6 +891,9 @@ class HashElementLayout
             ctx = { owner: owner, registry: registry, class_layout: class_layout, ireps: ireps,
                     class_annotations: class_annotations, element_annotations: element_annotations,
                     known_owners: known_owners, subclassed: subclassed,
+                    closed_world: closed_world, superclass_of: superclass_of,
+                    included_modules: included_modules, prepended_modules: prepended_modules,
+                    unknown_mixins: unknown_mixins,
                     ivar_classes: (class_layout[owner] || {}), mand: mand,
                     arg_classes: arg_classes, elements: array_elements, hash_elements: hash_elements,
                     annotated_element: annotated_element, annotated_ret_class: annotated_ret_class }

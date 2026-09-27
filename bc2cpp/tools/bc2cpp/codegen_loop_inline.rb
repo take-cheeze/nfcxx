@@ -962,11 +962,12 @@ class CodeGen
     end
 
     out = String.new
-    out << "// POLY &:#{sym} (#{target.size} defs) -- per-element exact-class guard chain, mrb_funcall fallback\n"
+    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, mrb_funcall fallback\n"
     out << "      mrb_value #{result_var} = mrb_nil_value();\n"
-    target.each_with_index do |d, i|
+    target.each_with_index do |branch, i|
+      d = branch[:definition]
       impl = cpp_name(d.owner, d.name) + '_impl'
-      check = "#{owner_class_ptr_expr(d.owner)} == mrb_obj_class(M, #{elem_expr})"
+      check = "#{owner_class_ptr_expr(branch[:guard_owner])} == mrb_obj_class(M, #{elem_expr})"
       out << (i.zero? ? '      ' : '      else ')
       out << "if (#{check}) { #{result_var} = #{impl}(M, #{elem_expr}); }\n"
     end
@@ -986,10 +987,11 @@ class CodeGen
     end
 
     out = String.new
-    out << "// POLY &:#{sym} (#{target.size} defs) -- per-element exact-class guard chain, mrb_funcall fallback\n"
-    target.each_with_index do |d, i|
+    out << "// POLY &:#{sym} (#{target.size} class cases) -- per-element exact-class guard chain, mrb_funcall fallback\n"
+    target.each_with_index do |branch, i|
+      d = branch[:definition]
       impl = cpp_name(d.owner, d.name) + '_impl'
-      check = "#{owner_class_ptr_expr(d.owner)} == mrb_obj_class(M, #{elem_expr})"
+      check = "#{owner_class_ptr_expr(branch[:guard_owner])} == mrb_obj_class(M, #{elem_expr})"
       out << (i.zero? ? '      ' : '      else ')
       out << "if (#{check}) { #{impl}(M, #{elem_expr}); }\n"
     end

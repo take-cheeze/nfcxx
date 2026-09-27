@@ -17,6 +17,7 @@ class ClosedWorld
   BOOT_CLASSES = %w[BasicObject Object Module Class Kernel].freeze
   # Sends that define methods the registry walk may not attribute to an owner.
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
+  MIXIN_SENDS = %w[include prepend extend].freeze
   # Sends that rebind a constant a guard chain resolves.
   CONST_REBINDERS = %w[const_set remove_const].freeze
   # Constants whose `.new` makes a class (or members) the registry cannot see.
@@ -206,6 +207,15 @@ class ClosedWorld
   def scan_send(irep, insns, idx, insn)
     name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
     global!(:dynamic_install) if CONST_REBINDERS.include?(name)
+    if MIXIN_SENDS.include?(name)
+      # Class-body include/prepend is separately represented by build_registry
+      # (or marked unknown_mixins); runtime mixin changes are not.
+      class_body_mixin = %w[include prepend].include?(name) && @walked.include?(irep.label) &&
+                         insn.op.start_with?('SSEND')
+      global!(:dynamic_mixin) unless class_body_mixin
+
+      return
+    end
     return unless INSTALLER_SENDS.include?(name)
 
     n = insn.args[/n=(\d+)/, 1]&.to_i

@@ -81,6 +81,26 @@ if $PROGRAM_NAME == __FILE__
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels = build_registry(ireps, root_label)
 
+  # CLOSED_WORLD (docs/adr/0210): construct this before return/element
+  # analysis, which uses its method-lookup proof for inherited return classes.
+  closed_world = nil
+  if ENV['BC2CPP_CLOSED_WORLD'] == '1'
+    repo_root = File.expand_path('../..', __dir__)
+    build_name = ENV['BC2CPP_BUILD_NAME'].to_s
+    build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS'].to_s).to_h { |kv| kv.split('=', 2) }
+    errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root)
+    abort "bc2cpp: BC2CPP_CLOSED_WORLD refused for build '#{build_name}':\n  #{errors.join("\n  ")}" unless errors.empty?
+
+    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
+    closed_world = ClosedWorld.new(ireps: ireps, registry: registry, class_decls: class_decls, walked: walked_ireps,
+                                   native_paths: outside_native, ruby_paths: outside_ruby)
+    warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
+         "#{outside_ruby.size} Ruby outside sources) =="
+    warn "  global refusal: #{closed_world.global_refusal || 'none'}"
+    warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
+    warn ''
+  end
+
   # NATIVE_SRCS: C/C++ sources to scan for mrb_define_method-family calls (see
   # extract_native_method_names). Without it the registry cannot see native
   # definitions.
@@ -398,7 +418,9 @@ if $PROGRAM_NAME == __FILE__
   element_poison_reason = {}
   element_raw = ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
                                            element_annotations, superclass_of,
-                                           poison_reason: element_poison_reason)
+                                           poison_reason: element_poison_reason,
+                                           closed_world: closed_world, included_modules: included_modules,
+                                           prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   element_layout = ArrayElementLayout.known(element_raw)
   warn ''
   warn '== known-array-element-class hints (guarded devirtualization only) =='
@@ -457,7 +479,9 @@ if $PROGRAM_NAME == __FILE__
   hash_poison_reason = {}
   hash_element_raw = HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
                                                element_annotations, element_raw, superclass_of,
-                                               poison_reason: hash_poison_reason)
+                                               poison_reason: hash_poison_reason,
+                                               closed_world: closed_world, included_modules: included_modules,
+                                               prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
   hash_element_layout = HashElementLayout.known(hash_element_raw)
   warn ''
   warn '== known-hash-element-class hints (guarded devirtualization only) =='
@@ -573,27 +597,6 @@ if $PROGRAM_NAME == __FILE__
     ivar_layout.each do |klass, ivars|
       ivars.each { |name, type| warn "  EMBED  #{klass}#@#{name}  (#{type})" }
     end
-  end
-
-  # CLOSED_WORLD (docs/adr/0210): only for a build whose real gem list
-  # (BC2CPP_BUILD_GEMS, from the compiled gem's own codegen task) passes
-  # compiled_gems.rb's check; the scan reads that build's own sources.
-  closed_world = nil
-  if ENV['BC2CPP_CLOSED_WORLD'] == '1'
-    repo_root = File.expand_path('../..', __dir__)
-    build_name = ENV['BC2CPP_BUILD_NAME'].to_s
-    build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS'].to_s).to_h { |kv| kv.split('=', 2) }
-    errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root)
-    abort "bc2cpp: BC2CPP_CLOSED_WORLD refused for build '#{build_name}':\n  #{errors.join("\n  ")}" unless errors.empty?
-
-    outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
-    closed_world = ClosedWorld.new(ireps: ireps, registry: registry, class_decls: class_decls, walked: walked_ireps,
-                                   native_paths: outside_native, ruby_paths: outside_ruby)
-    warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
-         "#{outside_ruby.size} Ruby outside sources) =="
-    warn "  global refusal: #{closed_world.global_refusal || 'none'}"
-    warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
-    warn ''
   end
 
   gen = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations, superclass_of,
