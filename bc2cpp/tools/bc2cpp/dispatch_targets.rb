@@ -679,6 +679,38 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
       const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      written = ([const_name] + path).join('::')
+
+      # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
+      # RELATIVE constant -- inside `module LCF`, `EventCommand.new` is
+      # `GETCONST EventCommand`, not `GETMCNST LCF` + `GETMCNST EventCommand`.
+      # This arm used to fall straight through to the written path for that
+      # shape, so a relative `Klass.new` named no class at all.
+      #
+      # Every OTHER opcode here refuses under `resolving_new` (`return nil if
+      # resolving_new`), because during a `.new` chain the register belongs to
+      # the class expression, not to the object: `Klass.new` must not read
+      # `@x = SOME_INT_CONST` as an Integer receiver, and `Klass.new` must not
+      # read `[1,2].map` as an Array receiver. A constant is different in kind --
+      # it is a class NAME, not a value -- so resolving it is the point of the
+      # walk. The safety test is therefore that the name must BE a class the
+      # closed world defines, checked against `known_owners` (the registry's own
+      # owner set, as resolve_owner_name and UniqueClassNames also use). A
+      # non-class constant like POS_BOTTOM is not in that set, so it still
+      # resolves to nothing and the old behaviour is unchanged for it.
+      #
+      # Ambiguity is refused exactly as lexically_resolve_construct_target
+      # refuses it: a bare name that could fall through to a same-named
+      # top-level constant is not resolved unless it names a class uniquely, so
+      # this can only turn a nil into a class, never into the wrong one.
+      if resolving_new && owner && known_owners
+        nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
+        hit = nesting.length.downto(1).filter_map do |n|
+          candidate = "#{nesting.first(n).join('::')}::#{written}"
+          candidate if known_owners.include?(candidate)
+        end
+        return hit.first if hit.size == 1
+      end
 
       # CONST_CONTAINER_SUPPORT: without `resolving_new` this chain is the receiver
       # of an ordinary call (`Game::Vehicle::TYPES.each`), and the useful fact is
