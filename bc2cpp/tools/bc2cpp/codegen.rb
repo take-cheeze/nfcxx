@@ -274,14 +274,6 @@ class CodeGen
       end
       next if inherited_layout
 
-      # An embedded base layout is allocated by its #initialize. A known
-      # subclass override can skip that initializer, leaving inherited slot
-      # accesses with a null or incompatible DATA_PTR.
-      overridden_by_subclass = @superclass_of.any? do |klass, _superclass|
-        subclass_of.call(klass, owner) && (@registry['initialize'] || []).any? { |d| d.owner == klass }
-      end
-      next if overridden_by_subclass
-
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
       init = @registry['initialize']&.find { |d| d.owner == owner }
@@ -304,8 +296,43 @@ class CodeGen
         @synthesize_accessor_for << [owner, name, :writer] if writer_native
         false
       end
+
+      next if safe.empty?
+
+      @superclass_of.each_key do |klass|
+        next unless subclass_of.call(klass, owner)
+
+        initializers = (@registry['initialize'] || []).select { |d| d.owner == klass }
+        next if initializers.empty?
+
+        has_super = initializers.one? && initializers.first.irep &&
+                    @ireps.fetch(initializers.first.irep).instructions.any? { |insn| insn.op == 'SUPER' }
+        unless has_super
+          raise "bc2cpp storage error: #{klass}#initialize must call super " \
+                "to inherit embedded ivars from #{owner}"
+        end
+
+        # A later or conditional super is legal Ruby, but cannot prove that
+        # inherited storage exists before the initializer's earlier work.
+        next if initializer_starts_with_super?(initializers.first)
+
+        safe = {}
+        break
+      end
+
       out[owner] = safe unless safe.empty?
     end
+  end
+
+  def initializer_starts_with_super?(definition)
+    return false unless definition.irep
+
+    irep = @ireps[definition.irep]
+    return false unless irep
+
+    first = irep.instructions.find { |insn| !%w[ENTER LINE NOP MOVE].include?(insn.op) }
+    first&.op == 'SUPER' && super_reaches_superclass?(definition) &&
+      Array(@prepended_modules[definition.owner]).empty?
   end
 
   # Is `name` on `owner` exposed by a native (irep-nil) accessor that uses
