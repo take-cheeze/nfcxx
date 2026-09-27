@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'call_site_index'
+
 # Step 6c-bis: whole-program CALL-SITE CLASS inference.
 #
 # ArgTypes does this for the :fixnum/:symbol lattice, using
@@ -32,7 +34,8 @@
 #     inference feed a fixed point that ADR 0139's order-independence argument
 #     was written about, for no proven benefit.
 class ClassArgTypes
-  def self.analyze(ireps, registry, owner_of, class_layout = {}, container_constants = nil)
+  def self.analyze(ireps, registry, owner_of, class_layout = {}, container_constants = nil, call_sites: nil)
+    call_sites ||= CallSiteIndex.build(ireps)
     types = {}
     # Private, default-proc-free copies at every level the tracer indexes. Two
     # separate tables are affected, and the second one is the subtle one:
@@ -64,32 +67,24 @@ class ClassArgTypes
 
       arg_classes = Array.new(mand)
       conflicts = Array.new(mand, false)
-      ireps.each_value do |caller_irep|
-        caller_irep.instructions.each_with_index do |insn, idx|
-          next unless %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-          # Same charset as compile_send's name extraction (so operator names match).
-          next unless insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == name
+      call_sites.fetch(name, []).each do |caller_irep, idx, d, n|
+        next unless n == mand # a real call site to a MONO name matches its arity.
 
-          d = insn.args[/^R(\d+)/, 1].to_i
-          n = insn.args[/n=(\d+)/, 1].to_i
-          next unless n == mand # a real call site to a MONO name matches its arity.
+        caller_owner = owner_of[caller_irep.label]
+        (1..mand).each do |k|
+          found = trace_new_target(caller_irep, idx, (d + k).to_s, {}, mand, nil,
+                                   owner: caller_owner, class_layout: layout_snapshot,
+                                   registry: registry_snapshot,
+                                   container_constants: container_constants)
+          next if found.nil? || found.to_s.empty?
 
-          caller_owner = owner_of[caller_irep.label]
-          (1..mand).each do |k|
-            found = trace_new_target(caller_irep, idx, (d + k).to_s, {}, mand, nil,
-                                     owner: caller_owner, class_layout: layout_snapshot,
-                                     registry: registry_snapshot,
-                                     container_constants: container_constants)
-            next if found.nil? || found.to_s.empty?
-
-            slot = k - 1
-            # A second, DIFFERENT class at the same position is genuine
-            # heterogeneity, not evidence: record nothing for that slot.
-            if arg_classes[slot] && arg_classes[slot] != found
-              conflicts[slot] = true
-            else
-              arg_classes[slot] ||= found
-            end
+          slot = k - 1
+          # A second, DIFFERENT class at the same position is genuine
+          # heterogeneity, not evidence: record nothing for that slot.
+          if arg_classes[slot] && arg_classes[slot] != found
+            conflicts[slot] = true
+          else
+            arg_classes[slot] ||= found
           end
         end
       end

@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
+require_relative 'call_site_index'
+
 # Steps 6c-6f-ter: call-site argument types and `# bc2cpp:` annotations.
+
 
 # ---------------------------------------------------------------------------
 # Step 6c: whole-program call-site argument-type inference. For a MONO name
@@ -9,7 +12,8 @@
 # POLY names are skipped: their call sites may target different methods.
 # Feeds IvarLayout's incoming-argument fallback.
 class ArgTypes
-  def self.analyze(ireps, registry)
+  def self.analyze(ireps, registry, call_sites: nil)
+    call_sites ||= CallSiteIndex.build(ireps)
     types = {}
 
     registry.each do |name, defs|
@@ -22,22 +26,14 @@ class ArgTypes
       next if mand.zero?
 
       arg_types = Array.new(mand)
-      ireps.each_value do |caller_irep|
-        caller_irep.instructions.each_with_index do |insn, idx|
-          next unless %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
-          # Same charset as compile_send's name extraction (so operator names match).
-          next unless insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == name
+      call_sites.fetch(name, []).each do |caller_irep, idx, d, n|
+        next unless n == mand # a real call site to a MONO name matches its one definition's arity.
 
-          d = insn.args[/^R(\d+)/, 1].to_i
-          n = insn.args[/n=(\d+)/, 1].to_i
-          next unless n == mand # a real call site to a MONO name always matches its one definition's arity.
-
-          (1..mand).each do |k|
-            # No caller ivar context here: a GETIV-sourced argument traces to UNKNOWN,
-            # which is safe.
-            t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {}, nil, 0, nil, nil, registry)
-            arg_types[k - 1] = IvarLayout.join(arg_types[k - 1], t)
-          end
+        (1..mand).each do |k|
+          # No caller ivar context here: a GETIV-sourced argument traces to UNKNOWN,
+          # which is safe.
+          t = IvarLayout.trace_type(caller_irep, idx, (d + k).to_s, {}, nil, 0, nil, nil, registry)
+          arg_types[k - 1] = IvarLayout.join(arg_types[k - 1], t)
         end
       end
 

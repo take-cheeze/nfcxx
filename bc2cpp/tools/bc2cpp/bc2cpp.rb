@@ -72,6 +72,24 @@ if $PROGRAM_NAME == __FILE__
 
   symbol = ENV['OUT_SYMBOL'] || File.basename(srcs.first, '.rb').gsub(/[^a-zA-Z0-9_]/, '_')
   out_dir = ENV['OUT_DIR'] || File.dirname(srcs.first)
+  profile_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  profile_last = profile_started
+  profile_phase = lambda do |name|
+    next unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
+
+    now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    warn format('BC2CPP_TIME %-32s %8.3fs (total %8.3fs)', name, now - profile_last, now - profile_started)
+    profile_last = now
+  end
+  profile_call = lambda do |name, &block|
+    next block.call unless ENV['BC2CPP_PROFILE_TIMINGS'] == '1'
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    value = block.call
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    warn format('BC2CPP_DETAIL %-40s %8.3fs', name, elapsed)
+    value
+  end
 
   c_src, disasm_text = run_mrbc(srcs, symbol, out_dir)
   ireps, root_label = parse_c_dump(c_src, symbol)
@@ -80,6 +98,7 @@ if $PROGRAM_NAME == __FILE__
   merge!(ireps, order, blocks, block_files, block_catches)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels = build_registry(ireps, root_label)
+  profile_phase.call('mrbc + parse + registry')
 
   # CLOSED_WORLD (docs/adr/0210): construct this before return/element
   # analysis, which uses its method-lookup proof for inherited return classes.
@@ -139,6 +158,7 @@ if $PROGRAM_NAME == __FILE__
     end
     warn ''
   end
+  profile_phase.call('closed world + native scans')
 
   warn '== whole-program method registry =='
   registry.sort.each do |name, defs|
@@ -160,7 +180,10 @@ if $PROGRAM_NAME == __FILE__
     HotMethods.stale(registry, hot_methods).each { |k| warn "  STALE #{k}" }
   end
 
-  arg_types = ArgTypes.analyze(ireps, registry)
+  call_sites = profile_call.call('CallSiteIndex.build') { CallSiteIndex.build(ireps) }
+  arg_types = profile_call.call('ArgTypes.analyze') do
+    ArgTypes.analyze(ireps, registry, call_sites: call_sites)
+  end
   warn ''
   warn '== call-site argument-type inference (MONO names only) =='
   inferred_any = false
@@ -174,7 +197,7 @@ if $PROGRAM_NAME == __FILE__
   end
   warn '  (none inferred)' unless inferred_any
 
-  annotations = Annotations.extract(ireps, registry)
+  annotations = profile_call.call('Annotations.extract') { Annotations.extract(ireps, registry) }
   warn ''
   warn '== magic-comment annotations (# bc2cpp: (T, ...) -> T) =='
   if annotations.empty?
@@ -195,11 +218,15 @@ if $PROGRAM_NAME == __FILE__
   # rather than run on a knowingly incomplete picture. Diagnostic consumers find
   # sections by header text, not position.
   foreign_ruby_srcs = ENV['FOREIGN_RUBY_SRCS'] ? Shellwords.split(ENV['FOREIGN_RUBY_SRCS']) : nil
-  foreign_methods = foreign_ruby_srcs ? foreign_method_names(foreign_ruby_srcs) : nil
+  foreign_methods = if foreign_ruby_srcs
+                      profile_call.call('foreign_method_names') { foreign_method_names(foreign_ruby_srcs) }
+                    end
 
   # UNIQUE_CLASS_NAME: set before the first ClassLayout pass, since every
   # trace_new_target caller reads it.
-  UniqueClassNames.table = UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
+  UniqueClassNames.table = profile_call.call('UniqueClassNames.analyze') do
+    UniqueClassNames.analyze(ireps, root_label, native_paths, foreign_ruby_srcs)
+  end
   UniqueClassNames.object_mixins = Array(included_modules['Object'])
   warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
   UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
@@ -210,12 +237,14 @@ if $PROGRAM_NAME == __FILE__
   # program) without that resolving to an admission (which stays with
   # compile_send's four live gates). Set next to UniqueClassNames because both
   # read the same CLASS/MODULE walk and must agree on what the bytecode defines.
-  ConstructClassNames.table = ConstructClassNames.analyze(ireps, root_label)
+  ConstructClassNames.table = profile_call.call('ConstructClassNames.analyze') do
+    ConstructClassNames.analyze(ireps, root_label)
+  end
   warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
 
   integer_constants =
     if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
-      IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
+      profile_call.call('IntegerConstants.analyze') { IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs) }
     else
       Set.new
     end
@@ -226,7 +255,10 @@ if $PROGRAM_NAME == __FILE__
     integer_constants.sort.each { |n| warn "  CONST #{n}" }
   end
 
-  integer_constant_values = IntegerConstants.analyze_values(ireps, integer_constants)
+  integer_constant_values = profile_call.call('IntegerConstants.analyze_values') do
+    IntegerConstants.analyze_values(ireps, integer_constants)
+  end
+  profile_phase.call('global facts + annotations')
   warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
 
@@ -243,11 +275,16 @@ if $PROGRAM_NAME == __FILE__
   # FIXNUM_RETURN_IVAR_HINT: Level 0 IvarLayout (no FIXNUM_RETURN_PROOF evidence).
   # The `== ivar embedding ==` diagnostic is printed later from the final
   # (Level 2) table, so this call is silent.
-  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants, nil,
-                                   fixnum_nil_ivars)
+  ivar_layout = profile_call.call('IvarLayout.analyze initial') do
+    IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants, nil,
+                       fixnum_nil_ivars)
+  end
+  profile_phase.call('initial ivar layout')
 
   known_owners = registry.values.flatten.map(&:owner).uniq
-  class_annotations = ClassAnnotations.extract(ireps, registry, known_owners)
+  class_annotations = profile_call.call('ClassAnnotations.extract') do
+    ClassAnnotations.extract(ireps, registry, known_owners)
+  end
   warn ''
   warn '== magic-comment class annotations (# bc2cpp: (ClassName, ...)) =='
   if class_annotations.empty?
@@ -304,10 +341,12 @@ if $PROGRAM_NAME == __FILE__
   # proves less. The real CodeGen still recomputes ARRAY_RETURN_PROOF against
   # Level 2.
   # ---------------------------------------------------------------------------
-  class_layout_probe = ClassLayout.known(
-    ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return,
-                        module_body_ivar_labels: module_body_ivar_labels)
-  )
+  class_layout_probe = profile_call.call('ClassLayout.analyze probe') do
+    ClassLayout.known(
+      ClassLayout.analyze(ireps, registry, class_annotations, container_constants, annotated_array_return,
+                          module_body_ivar_labels: module_body_ivar_labels)
+    )
+  end
   # Built just far enough to answer array_return_names (see CodeGen#initialize's
   # `analysis_only`); the inputs it is not given are never read by
   # compute_array_return_names.
@@ -326,16 +365,19 @@ if $PROGRAM_NAME == __FILE__
                                     analysis_only: true,
                                     native_expression_devirt: native_expression_devirt,
                                     native_registered_expressions: native_registered_expressions)
-  array_return_probe = return_names_probe.array_return_names
+  array_return_probe = profile_call.call('CodeGen.array_return_names probe') { return_names_probe.array_return_names }
   # RETCLASS_SELF_CALL_SUPPORT: from the same Level-0 probe as
   # array_return_probe (see ClassLayout.analyze's `ret_class_proof`).
   class_poison_reason = {}
-  class_layout_raw = ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
-                                         annotated_array_return, poison_reason: class_poison_reason,
-                                         array_ret_proof: ->(n) { array_return_probe.include?(n) },
-                                         ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) },
-                                         module_body_ivar_labels: module_body_ivar_labels)
+  class_layout_raw = profile_call.call('ClassLayout.analyze final') do
+    ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
+                        annotated_array_return, poison_reason: class_poison_reason,
+                        array_ret_proof: ->(n) { array_return_probe.include?(n) },
+                        ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) },
+                        module_body_ivar_labels: module_body_ivar_labels)
+  end
   class_layout = ClassLayout.known(class_layout_raw)
+  profile_phase.call('class layout fixed-point passes')
   # Step 6c-bis: the same call-site inference ArgTypes does, for the class-name
   # lattice. Its only consumer is RBS_SEED_CONTRADICTION below -- a class
   # annotation is otherwise consumed purely as a SEED into ClassLayout above, so
@@ -344,8 +386,10 @@ if $PROGRAM_NAME == __FILE__
   # order-independence argument (docs/adr/0139) must not grow a new input.
   owner_of_registry = {}
   registry.each_value { |defs| defs.each { |d| owner_of_registry[d.irep] = d.owner if d.irep } }
-  class_arg_types = ClassArgTypes.analyze(ireps, registry, owner_of_registry,
-                                          class_layout, container_constants)
+  class_arg_types = profile_call.call('ClassArgTypes.analyze') do
+    ClassArgTypes.analyze(ireps, registry, owner_of_registry, class_layout, container_constants,
+                          call_sites: call_sites)
+  end
   warn ''
   warn '== call-site CLASS inference (MONO names only) =='
   if class_arg_types.empty?
@@ -400,7 +444,9 @@ if $PROGRAM_NAME == __FILE__
 
   # ELEMENT_CLASS_SUPPORT: after ClassLayout (only proven-Array ivars are swept)
   # and ClassAnnotations (argument class hints are terminals).
-  element_annotations = ElementAnnotations.extract(ireps, registry, known_owners)
+  element_annotations = profile_call.call('ElementAnnotations.extract') do
+    ElementAnnotations.extract(ireps, registry, known_owners)
+  end
   warn ''
   warn '== magic-comment element annotations (# bc2cpp: ... -> Array<Klass> / -> Klass) =='
   if element_annotations.empty?
@@ -416,11 +462,13 @@ if $PROGRAM_NAME == __FILE__
 
   # ANY_OPAQUE_SUPPORT: as class_poison_reason.
   element_poison_reason = {}
-  element_raw = ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
-                                           element_annotations, superclass_of,
-                                           poison_reason: element_poison_reason,
-                                           closed_world: closed_world, included_modules: included_modules,
-                                           prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+  element_raw = profile_call.call('ArrayElementLayout.analyze') do
+    ArrayElementLayout.analyze(ireps, registry, class_layout, class_annotations,
+                               element_annotations, superclass_of,
+                               poison_reason: element_poison_reason,
+                               closed_world: closed_world, included_modules: included_modules,
+                               prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+  end
   element_layout = ArrayElementLayout.known(element_raw)
   warn ''
   warn '== known-array-element-class hints (guarded devirtualization only) =='
@@ -477,12 +525,15 @@ if $PROGRAM_NAME == __FILE__
   # known-element array resolve (see HashElementLayout.analyze).
   # ANY_OPAQUE_SUPPORT: as class_poison_reason.
   hash_poison_reason = {}
-  hash_element_raw = HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
-                                               element_annotations, element_raw, superclass_of,
-                                               poison_reason: hash_poison_reason,
-                                               closed_world: closed_world, included_modules: included_modules,
-                                               prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+  hash_element_raw = profile_call.call('HashElementLayout.analyze') do
+    HashElementLayout.analyze(ireps, registry, class_layout, class_annotations,
+                              element_annotations, element_raw, superclass_of,
+                              poison_reason: hash_poison_reason,
+                              closed_world: closed_world, included_modules: included_modules,
+                              prepended_modules: prepended_modules, unknown_mixins: unknown_mixins)
+  end
   hash_element_layout = HashElementLayout.known(hash_element_raw)
+  profile_phase.call('array/hash element layouts')
   warn ''
   warn '== known-hash-element-class hints (guarded devirtualization only) =='
   if hash_element_layout.empty?
@@ -557,8 +608,10 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
-                                    StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
+  CodeGen.stable_class_constants = profile_call.call('StableClassConstants.analyze') do
+    StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
+      StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
+  end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
@@ -581,14 +634,17 @@ if $PROGRAM_NAME == __FILE__
   # iterated further, for the reasons given for ARRAY_RETURN_IVAR_HINT; the real
   # CodeGen recomputes FIXNUM_RETURN_PROOF against Level 2.
   # ---------------------------------------------------------------------------
-  fixnum_return_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations,
-                                    superclass_of, element_layout, element_annotations, container_constants,
-                                    hash_element_layout, integer_constants, foreign_methods, outside_tokens,
-                                    native_name_sources, included_modules, prepended_modules, unknown_mixins,
-                                    analysis_only: :fixnum_return,
-                                    native_expression_devirt: native_expression_devirt,
-                                    native_registered_expressions: native_registered_expressions).fixnum_return_names
-  ivar_layout = IvarLayout.all(ireps, registry)
+  fixnum_return_probe = profile_call.call('CodeGen.fixnum_return_names probe') do
+    CodeGen.new(ireps, registry, ivar_layout, class_layout, class_annotations, annotations,
+                superclass_of, element_layout, element_annotations, container_constants,
+                hash_element_layout, integer_constants, foreign_methods, outside_tokens,
+                native_name_sources, included_modules, prepended_modules, unknown_mixins,
+                analysis_only: :fixnum_return,
+                native_expression_devirt: native_expression_devirt,
+                native_registered_expressions: native_registered_expressions).fixnum_return_names
+  end
+  ivar_layout = profile_call.call('IvarLayout.all final') { IvarLayout.all(ireps, registry) }
+  profile_phase.call('return/fixnum proofs + final ivars')
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?
@@ -665,8 +721,11 @@ if $PROGRAM_NAME == __FILE__
   # OTHER_OWNERS: classes another gem's run compiles and exposes (with
   # OTHER_DECLS_HEADER); see compile_send.
   other_owners = ENV['OTHER_OWNERS']&.split(',')
-  compiled = gen.compile_all(only_owners: only_owners, other_owners: other_owners)
+  compiled = profile_call.call('CodeGen.compile_all') do
+    gen.compile_all(only_owners: only_owners, other_owners: other_owners)
+  end
   compiled += gen.emit_synthesized_accessors(only_owners: only_owners)
+  profile_phase.call('compile all methods')
 
   # SKIP_UNSUPPORTED=1 drops methods containing `#error` from the output; they
   # stay interpreted. CLI exploration keeps the markers visible; real builds
@@ -923,6 +982,7 @@ if $PROGRAM_NAME == __FILE__
   # This run's cross-TU declarations header, for other gems'
   # OTHER_DECLS_HEADER (see emit_decls_header). Always written.
   File.write(File.join(out_dir, "#{symbol}_decls.h"), gen.emit_decls_header(compiled))
+  profile_phase.call('C++ emission + symbol rewrite')
 
   warn ''
   warn '== compiled entry points =='
@@ -983,4 +1043,5 @@ if $PROGRAM_NAME == __FILE__
   else
     never_called.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
   end
+  profile_phase.call('diagnostics + sidecar writes')
 end
