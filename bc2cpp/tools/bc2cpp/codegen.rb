@@ -274,6 +274,14 @@ class CodeGen
       end
       next if inherited_layout
 
+      # An embedded base layout is allocated by its #initialize. A known
+      # subclass override can skip that initializer, leaving inherited slot
+      # accesses with a null or incompatible DATA_PTR.
+      overridden_by_subclass = @superclass_of.any? do |klass, _superclass|
+        subclass_of.call(klass, owner) && (@registry['initialize'] || []).any? { |d| d.owner == klass }
+      end
+      next if overridden_by_subclass
+
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
       init = @registry['initialize']&.find { |d| d.owner == owner }
