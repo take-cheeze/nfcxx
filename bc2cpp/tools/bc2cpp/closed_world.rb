@@ -44,6 +44,7 @@ class ClosedWorld
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
+    @outside_ruby_names = Set.new
     # Per outside file that could reach a class: the constant names it spells.
     @touch_sets = []
     @unknown_defs = Set.new
@@ -82,6 +83,15 @@ class ClosedWorld
   # Is every instance whose class descends from `owner` exactly an `owner`?
   def exact_class?(owner)
     !@global_refusal && !opaque?(owner) && descendants(owner).empty?
+  end
+
+  # OWNERLESS_NATIVE_DISPATCH: class-independent native bodies may bypass
+  # method lookup only when the closed inputs prove there is no competing Ruby
+  # definition or unresolved dynamic installation for the same name.
+  def ownerless_native_dispatch_safe?(name)
+    return false if @global_refusal || @unknown_defs.include?(name) || @outside_ruby_names.include?(name)
+
+    @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
   private
@@ -138,6 +148,7 @@ class ClosedWorld
     ruby_names = foreign_method_names(paths)
     global!(:outside_method_missing) if ruby_names.include?('method_missing')
     global!(:outside_respond_to_missing) if ruby_names.include?('respond_to_missing?')
+    @outside_ruby_names.merge(ruby_names)
     @outside_names.merge(ruby_names)
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')

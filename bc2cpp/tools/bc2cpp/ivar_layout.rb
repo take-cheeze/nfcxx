@@ -1,14 +1,16 @@
 # frozen_string_literal: true
 
-# Step 6b: which ivars embed into typed C struct fields.
+# Step 6b: which statically named ivars use compiler-managed RData slots.
 
 # Opcodes that print a READ-only register as their first `R<n>` operand --
 # see IvarLayout.trace_type's own `when *READ_ONLY_OPCODE_SKIP` arm.
 READ_ONLY_OPCODE_SKIP = %w[RETURN RETURN_BLK BREAK JMPIF JMPNOT JMPNIL RAISEIF MATCHERR SETUPVAR].freeze
 
 # ---------------------------------------------------------------------------
-# Step 6b: ivar embedding: which ivars can move out of iv_tbl into typed C
-# struct fields on an RData payload.
+# Step 6b: ivar embedding: which ivars can move out of iv_tbl into C struct
+# fields on an RData payload. `all` builds the universal mrb_value
+# layout used by generated code; `analyze` remains the narrower type proof
+# consumed by arithmetic and return analysis.
 #
 # An ivar is embeddable as type T when EVERY SETIV of it, in every method of
 # every class (closed world), traces (through MOVEs, within one method body)
@@ -57,6 +59,31 @@ class IvarLayout
       next if owner.empty? || ivar.to_s.empty?
 
       out[owner] << ivar.delete_prefix('@')
+    end
+  end
+
+  # Every statically named instance variable uses an mrb_value slot in the
+  # compiler-managed RData payload. Dynamic names keep the ordinary iv_tbl.
+  def self.all(ireps, registry)
+    ivars = Hash.new { |h, owner| h[owner] = Set.new }
+    registry.each_value do |defs|
+      defs.each do |d|
+        next if d.owner.end_with?('.singleton')
+
+        if d.irep
+          ireps.fetch(d.irep).instructions.each do |insn|
+            next unless %w[GETIV SETIV].include?(insn.op)
+
+            name = insn.args[/@(\w+)/, 1]
+            ivars[d.owner] << name if name
+          end
+        elsif d.kind == :ivar_accessor
+          ivars[d.owner] << d.name.chomp('=')
+        end
+      end
+    end
+    ivars.each_with_object({}) do |(owner, names), layout|
+      layout[owner] = names.to_a.sort.to_h { |name| [name, :value] } unless names.empty?
     end
   end
 

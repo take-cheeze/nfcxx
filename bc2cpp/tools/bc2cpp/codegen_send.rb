@@ -597,7 +597,7 @@ class CodeGen
     builtin_native_expression_send = native_expression_entries && native_expression_entries.all? { |entry| entry[:arity] == n } &&
                                      builtin_class_send_safe?(name, native_expression_owners)
 
-    if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && native_only_mono?(name) &&
+    if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && ownerless_native_dispatch_safe?(name) &&
        !@native_registered_expressions.key?(name)
       return compile_native_primitive_send(name, d, recv, argv)
     end
@@ -841,8 +841,37 @@ class CodeGen
              compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
       return poly if poly
 
+      candidates = poly_candidates(name, n) || []
+      definitions = @registry[name] || []
+      lone_accessor = definitions.size == 1 && definitions.first.kind == :ivar_accessor && definitions.first.irep.nil?
+      path = if devirt_blocked_name?(name)
+               'dynamic_runtime_definition_guard'
+             elsif definitions.empty?
+               'dynamic_no_registered_definition'
+             elsif definitions.size < 2 && !lone_accessor
+               'dynamic_single_registered_definition'
+             elsif candidates.size > POLY_TABLE_MAX
+               'dynamic_candidate_limit'
+             elsif candidates.size > POLY_SMALL_N_MAX &&
+                   candidates.reject { |candidate| candidate.kind == :ivar_accessor && candidate.irep.nil? }.size <= POLY_SMALL_N_MAX
+               'dynamic_table_threshold'
+             else
+               'dynamic_no_complete_candidate_set'
+             end
+      receiver_fact = if self_implicit
+                        'implicit_self_unresolved'
+                      elsif via_element
+                        'element_class_hint'
+                      elsif known_class
+                        'traced_class_no_direct_target'
+                      elsif idx || trace_idx
+                        'receiver_class_unresolved'
+                      else
+                        'receiver_class_unavailable'
+                      end
+      diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      "#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
+      "#{diag}#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
     end
   end
 

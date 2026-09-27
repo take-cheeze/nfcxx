@@ -300,7 +300,6 @@ if $PROGRAM_NAME == __FILE__
   # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
   # run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.embed_ivar_limits = BC2CPP_EMBED_IVAR_LIMITS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
                                     Set.new, foreign_methods, nil, nil,
@@ -534,7 +533,6 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
-  CodeGen.embed_ivar_limits = BC2CPP_EMBED_IVAR_LIMITS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   CodeGen.stable_class_constants = StableClassConstants.analyze(ireps, native_paths, foreign_ruby_srcs) |
                                     StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
@@ -566,8 +564,7 @@ if $PROGRAM_NAME == __FILE__
                                     analysis_only: :fixnum_return,
                                     native_expression_devirt: native_expression_devirt,
                                     native_registered_expressions: native_registered_expressions).fixnum_return_names
-  ivar_layout = IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants, fixnum_return_probe,
-                                   fixnum_nil_ivars)
+  ivar_layout = IvarLayout.all(ireps, registry)
   warn ''
   warn '== ivar embedding =='
   if ivar_layout.empty?
@@ -694,6 +691,7 @@ if $PROGRAM_NAME == __FILE__
   end
 
   puts '#include <mruby.h>'
+  puts '#include <stddef.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
   puts '#include <mruby/numeric.h>'

@@ -53,6 +53,14 @@ class CodeGen
     @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
   end
 
+  # Prefer the whole-program hierarchy when it is available: the partial
+  # superclass map omits classes whose superclass expression did not resolve.
+  def exact_receiver_class?(owner)
+    return @closed_world.exact_class?(owner) if @closed_world
+
+    !subclassed_set.include?(owner)
+  end
+
   # The class whose instance `self` is while compiling `owner_def`'s code, or nil
   # inside a runtime-def/EXEC body, whose self is whatever receiver mruby passes.
   def self_class(owner_def)
@@ -68,7 +76,7 @@ class CodeGen
     owner = owner_def.owner
     return nil if owner.nil? || owner.end_with?('.singleton')
     return nil unless known_owner_set.include?(owner)
-    return nil if subclassed_set.include?(owner)
+    return nil unless exact_receiver_class?(owner)
 
     owner
   end
@@ -83,7 +91,7 @@ class CodeGen
 
     base = owner.delete_suffix('.singleton')
     # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
-    return nil if base == 'Object' || subclassed_set.include?(base)
+    return nil if base == 'Object' || !exact_receiver_class?(base)
     return nil unless Array(@prepended_modules[owner]).empty?
     return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
 
@@ -109,11 +117,8 @@ class CodeGen
   # singleton class can shadow even a known self's method); the LEXICAL_SELF
   # marker is not in RUNTIME_DEF_DYNAMIC_MARKERS, so the text audit still
   # applies. Arity/keyword-shape checks stay in compile_keyword_call.
-  # Limit: subclassed_set comes from @superclass_of, which has no entry for an
-  # unresolvable superclass expression, so such a subclass would not mark its
-  # parent. The closed world has none (every superclass resolves, no
-  # Class.new), and the same limit applies to LEXICAL_SELF and
-  # self_receiver_class.
+  # With a closed-world scan, exact_receiver_class? includes subclasses whose
+  # superclass expression the local resolver could not identify.
   # nil for explicit-receiver sends.
   def lexical_self_keyword_target(name, self_implicit:, owner_def:)
     return nil unless self_implicit
@@ -134,7 +139,7 @@ class CodeGen
   def element_ctx(ivar_classes, mand, arg_classes, owner_name)
     { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
       class_annotations: @class_annotations, element_annotations: @element_annotations,
-      known_owners: known_owner_set, subclassed: subclassed_set,
+      known_owners: known_owner_set, subclassed: subclassed_set, closed_world: @closed_world,
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },
@@ -149,7 +154,7 @@ class CodeGen
   def hash_element_ctx(ivar_classes, mand, arg_classes, owner_name)
     { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
       class_annotations: @class_annotations, element_annotations: @element_annotations,
-      known_owners: known_owner_set, subclassed: subclassed_set,
+      known_owners: known_owner_set, subclassed: subclassed_set, closed_world: @closed_world,
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout, hash_elements: @hash_element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },

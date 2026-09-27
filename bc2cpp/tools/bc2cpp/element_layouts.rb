@@ -442,7 +442,12 @@ def self_receiver_class(ctx)
   owner = ctx[:owner]
   return nil if owner.nil? || owner.end_with?('.singleton')
   return nil unless ctx[:known_owners].include?(owner)
-  return nil if ctx[:subclassed].include?(owner)
+  closed_world = ctx[:closed_world]
+  if closed_world
+    return nil unless closed_world.exact_class?(owner)
+  else
+    return nil if ctx[:subclassed].include?(owner)
+  end
 
   owner
 end

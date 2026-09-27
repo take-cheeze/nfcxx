@@ -204,12 +204,14 @@ class CodeGen
     when :reader
       impl = "#{base}_impl"
       entry = base
+      field = "((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}"
+      value = type == :value ? "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})" : "#{ops[:box]}(#{field})"
       code = <<~CPP
         // #{owner}##{ivar} -- synthesized attr_reader override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
         // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment).
         mrb_value #{impl}(mrb_state* M, mrb_value self) {
-          return #{ops[:box]}(((#{sname}*)DATA_PTR(self))->#{ivar});
+          return #{value};
         }
 
         static mrb_value #{entry}(mrb_state* M, mrb_value self) {
@@ -233,9 +235,18 @@ class CodeGen
       store =
         if NULLABLE_TYPES.include?(type)
           "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar}, arg);\n"
+        elsif type == :value
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
+            "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
         else
           "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);\n"
         end
+      guard = if type == :value
+                ''
+              else
+                "if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), " \
+                  "\"@#{ivar}: expected #{ops[:err]}\");"
+              end
       code = <<~CPP
         // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
@@ -250,8 +261,9 @@ class CodeGen
         // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
         // MethodDef's own kind: :ivar_accessor comment for the citation).
         mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
-          if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "@#{ivar}: expected #{ops[:err]}");
+          #{guard}
         #{store.chomp}
+          #{guard}
           return arg;
         }
 
@@ -278,9 +290,9 @@ class CodeGen
     pairs.sort.filter_map { |owner, ivar, which| emit_ivar_accessor_pair(owner, ivar, which) }
   end
 
-  # One C struct + mrb_data_type per class with embeddable ivars. Other ivars
-  # stay in iv_tbl: RData has both `data` and `iv` (mruby/data.h), the same
-  # hybrid mruby-rgss/src/lib.cxx uses.
+  # One mrb_value slot + mrb_data_type marker per statically named ivar. The
+  # marker lets mruby's normal ivar APIs and GC find slots; dynamic names remain
+  # in RData's ordinary iv_tbl.
   def emit_structs
     out = String.new
     out << emit_nullable_structs
@@ -290,7 +302,7 @@ class CodeGen
       next if @only_owners && !@only_owners.include?(owner)
 
       out << "struct #{struct_name(owner)} {\n"
-      ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{name};\n" }
+      ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{ivar_field_name(name)};\n" }
       out << "};\n"
       # NON_POD_MEMBER_SUPPORT: placement-destroy before mrb_free. The struct is
       # allocated with mrb_calloc and released by mrb_free, which is a bare
@@ -318,8 +330,14 @@ class CodeGen
       out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
       out << "  mrb_free(mrb, p);\n"
       out << "}\n"
+      out << "static const mrb_data_ivar #{sanitize(owner)}_ivar_slots[] = {\n"
+      ivars.each_key do |name|
+        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}) },\n"
+      end
+      out << "};\n"
       out << "static const mrb_data_type #{type_var(owner)} = " \
-             "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
+             "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \
+             "#{sanitize(owner)}_ivar_slots, #{ivars.size}, sizeof(#{struct_name(owner)}) };\n\n"
     end
     out
   end

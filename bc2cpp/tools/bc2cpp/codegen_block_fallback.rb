@@ -756,8 +756,7 @@ class CodeGen
       prev = idx.positive? ? irep.instructions[idx - 1] : nil
       next if prev && prev.op == 'BLOCK'
 
-      # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`, e.g.
-      # `__send__(name, *args, &block)` in RGSS::ErrorReport::Tee#method_missing.
+      # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
       # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
       # and the block is in R(dest+2).
       n_match = insn.args.match(/n=(\d+|\*)(?:\s|$)/)

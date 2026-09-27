@@ -50,6 +50,13 @@ class CodeGen
     defs && defs.size == 1 && defs.first.irep.nil?
   end
 
+  # OWNERLESS_NATIVE_DISPATCH: preserve the existing open-world primitive gate;
+  # closed-world builds additionally prove no external Ruby definition or
+  # dynamic installer can replace this method.
+  def ownerless_native_dispatch_safe?(name)
+    native_only_mono?(name) && (!@closed_world || @closed_world.ownerless_native_dispatch_safe?(name))
+  end
+
   # Permit per-class fast paths only for exact built-in receivers, with a
   # native registration present and no Ruby replacement on those classes.
   # A prepend can sit ahead of the native method, so decline the fast path

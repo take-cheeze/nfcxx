@@ -81,6 +81,57 @@ class CodeGen
     candidates unless candidates.empty?
   end
 
+  # POLY_DIAGNOSTICS: definition-level exclusion counts attached to each
+  # emitted polymorphic call site. They explain table coverage; they do not
+  # claim that every excluded definition is reachable at that particular site.
+  def poly_diagnostic(name, n, path, candidates, receiver: 'runtime_class')
+    @poly_diagnostic_reason_cache ||= {}
+    cache_key = [name, n, candidates.map(&:object_id)]
+    reasons = @poly_diagnostic_reason_cache[cache_key]
+    unless reasons
+      defs = @registry[name] || []
+      reasons = Hash.new(0)
+      if devirt_blocked_name?(name)
+        reasons[:runtime_definition_guard] += defs.size
+      elsif defs.size < 2 && !(defs.size == 1 && defs.first.kind == :ivar_accessor && defs.first.irep.nil?)
+        reasons[defs.empty? ? :no_registered_definition : :single_registered_definition] += 1
+      else
+        eligible = candidates.map(&:object_id).to_set
+        repeated = defs.group_by(&:owner).select { |_owner, group| group.size > 1 }.keys
+        defs.each do |target|
+          next if eligible.include?(target.object_id)
+
+          reason = if repeated.include?(target.owner)
+                     :redefined_owner
+                   elsif target.owner.end_with?('.singleton')
+                     :singleton_owner
+                   elsif target.kind == :ivar_accessor
+                     n == (name.end_with?('=') ? 1 : 0) ? :accessor_unlinkable : :arity
+                   elsif !target.irep
+                     :native_or_uncompiled
+                   elsif !compiles_clean?(target.irep)
+                     :unclean
+                   elsif !pure_mandatory_arity?(@ireps.fetch(target.irep))
+                     :unsupported_arity
+                   elsif n != mandatory_arity(@ireps.fetch(target.irep))
+                     :arity
+                   elsif !native_arg_types(target, n).compact.empty?
+                     :native_argument
+                   elsif @only_owners && !@only_owners.include?(target.owner) && !@other_owners&.include?(target.owner)
+                     :owner_not_emitted
+                   else
+                     :not_in_candidate_set
+                   end
+          reasons[reason] += 1
+        end
+      end
+      @poly_diagnostic_reason_cache[cache_key] = reasons
+    end
+    excluded = reasons.sort_by { |reason, _| reason.to_s }.map { |reason, count| "#{reason}=#{count}" }.join(',')
+    "  // POLY_DIAG path=#{path} receiver=#{receiver} name=#{name.inspect} arity=#{n} candidates=#{candidates.size} " \
+      "excluded=#{excluded.empty? ? 'none' : excluded}\n"
+  end
+
   # True when `owner`'s ivar behind accessor `name` (a reader `code`, or a writer
   # `code=`) is embedded in the RData struct and therefore served by a synthesized
   # accessor pair (ATTR_STRUCT_DEVIRT, emit_ivar_accessor_pair) instead of the
@@ -101,7 +152,9 @@ class CodeGen
     return nil if type == :unknown
 
     if self_of_klass
-      "#{dst} = #{TYPE_OPS.fetch(type)[:box]}(((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar});"
+      field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+      value = type == :value ? "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})" : "#{TYPE_OPS.fetch(type)[:box]}(#{field})"
+      "#{dst} = #{value};"
     elsif embedded_accessor_linkable?(klass, ivar)
       "#{dst} = #{sanitize(klass)}_#{sanitize(ivar)}_impl(M, #{recv});"
     end
@@ -120,6 +173,12 @@ class CodeGen
       unless src.match?(/\A\w+\z/)
         store = ivar_set_code(klass, recv, ivar, 'bc2cpp_iv_val', self_of_klass: true, indent: indent)
         return "{ mrb_value bc2cpp_iv_val = #{src}; #{store} }#{tail}"
+      end
+
+      if type == :value
+        field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
+        return "#{indent}#{field} = #{src};\n#{indent}mrb_field_write_barrier_value(M, " \
+               "(struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
       end
 
       ops = TYPE_OPS.fetch(type)
@@ -150,12 +209,12 @@ class CodeGen
     ivar_set_code(klass, recv, ivar, argv.first, self_of_klass: self_of_klass, dst: "r#{d}", indent: indent)
   end
 
-  # nil: an ordinary iv_tbl ivar. :unknown: `klass` is not known but some class
-  # embeds an ivar of this name, so iv_tbl may be the wrong storage.
+  # nil: use the runtime ivar API, which routes through an RData slot descriptor
+  # when present and falls back to iv_tbl for dynamic names.
   def ivar_embed_type(klass, ivar)
     return embed_type(klass, ivar) if klass
 
-    @ivar_layout.each_value.any? { |ivars| ivars.key?(ivar) } ? :unknown : nil
+    nil
   end
 
   # The synthesized accessor (reader `name`, writer `name=`) exists and is
@@ -240,15 +299,16 @@ class CodeGen
       "if (#{check}) {\n    #{call}\n  } else "
     end
     owners_note = candidates.map(&:owner).join(', ')
+    diag = poly_diagnostic(name, n, 'chain', candidates)
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
            "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
     listed = candidates.flat_map { |t| [t.owner] + inherited[t.owner] }
     fallback = guarded_fallback_line(d, recv, name, argv, listed, closed_world_site)
     chain = "#{branches.join}{\n    #{fallback}  }\n"
-    return "#{note}  #{chain}" unless hoist
+    return "#{diag}#{note}  #{chain}" unless hoist
 
     subs = inherited.flat_map { |owner, list| list.map { |s| "#{s} < #{owner}" } }
-    "#{note}  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" \
+    "#{diag}#{note}  // INHERITED_GUARD :#{name} -- also #{subs.join(', ')}\n" \
       "  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
   end
 
@@ -273,12 +333,13 @@ class CodeGen
     table = poly_table(name, n, candidates)
     return nil if table[:entries].empty?
 
+    diag = poly_diagnostic(name, n, 'table', candidates)
     fn_type = "mrb_value (*)(#{(['mrb_state*'] + Array.new(n + 1, 'mrb_value')).join(', ')})"
     note = "  // POLY_TABLE :#{name} -> #{table[:symbol]} (#{candidates.size} known real definitions, " \
            "#{table[:entries].size} classes), runtime-class lookup then direct C++ call, mrb_funcall fallback " \
            "for any other class\n"
     fallback = guarded_fallback_line(d, recv, name, argv, table[:entries].map(&:first), closed_world_site)
-    "#{note}  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), " \
+    "#{diag}#{note}  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), " \
       "#{table[:symbol]})) {\n" \
       "    r#{d} = reinterpret_cast<#{fn_type}>(bc2cpp_pfn)(M, #{([recv] + argv).join(', ')});\n" \
       "  } else {\n" \
