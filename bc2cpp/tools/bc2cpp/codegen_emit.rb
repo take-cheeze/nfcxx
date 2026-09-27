@@ -292,7 +292,19 @@ class CodeGen
       out << "struct #{struct_name(owner)} {\n"
       ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{name};\n" }
       out << "};\n"
-      out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) { mrb_free(mrb, p); }\n"
+      # NON_POD_MEMBER_SUPPORT: placement-destroy before mrb_free. The struct is
+      # allocated with mrb_calloc and released by mrb_free, which is a bare
+      # `mrb_basic_alloc_func(p, 0)` -- a plain free() that runs NO member
+      # destructor. Every C_TYPE entry today is POD (mrb_int / mrb_sym / mrb_bool
+      # and the tagged Bc2cppFixnumOrNil), so nothing leaks and the explicit
+      # destructor call below compiles to the same code; it is emitted anyway so
+      # that adding a non-POD field type later cannot leak silently. `delete p`
+      # would be wrong: the memory comes from mruby's arena/page allocator, not
+      # operator new.
+      out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) {\n"
+      out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
+      out << "  mrb_free(mrb, p);\n"
+      out << "}\n"
       out << "static const mrb_data_type #{type_var(owner)} = " \
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
     end
