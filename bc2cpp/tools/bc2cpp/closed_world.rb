@@ -85,6 +85,18 @@ class ClosedWorld
     !@global_refusal && !opaque?(owner) && descendants(owner).empty?
   end
 
+  # A runtime exact-class guard needs a stable constant, but unlike
+  # exact_class? it does not require the class to have no subclasses.
+  def stable_class_constant?(owner)
+    !@global_refusal && !opaque?(owner)
+  end
+
+  # Inherited dispatch additionally needs every possible method installer for
+  # this name to be represented in the registry.
+  def inherited_lookup_safe?(name, owner)
+    stable_class_constant?(owner) && !@unknown_defs.include?(name) && !@outside_names.include?(name)
+  end
+
   # OWNERLESS_NATIVE_DISPATCH: class-independent native bodies may bypass
   # method lookup only when the closed inputs prove there is no competing Ruby
   # definition or unresolved dynamic installation for the same name.

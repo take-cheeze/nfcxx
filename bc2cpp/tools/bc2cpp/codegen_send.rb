@@ -650,6 +650,8 @@ class CodeGen
     # every hit gets a runtime mrb_obj_class check with an mrb_funcall fallback.
     typed = false
     via_element = false
+    inherited_typed = false
+    typed_guard_class = nil
     ivar_accessor_target = nil
     known_class = nil
     if target.nil? && !self_implicit && irep && (idx || trace_idx)
@@ -687,6 +689,7 @@ class CodeGen
                     mandatory_arity(@ireps.fetch(candidate.irep)) + optional_arity(@ireps.fetch(candidate.irep)))
         target = candidate
         typed = true
+        typed_guard_class = known_class
       elsif candidate&.kind == :ivar_accessor &&
             n == (name.end_with?('=') ? 1 : 0) &&
             ivar_accessor_call_code(candidate.owner, recv, name, d, argv)
@@ -697,6 +700,18 @@ class CodeGen
         # suffix), which is the complete check. For an embedded ivar IVAR_ACCESS
         # (ivar_accessor_call_code) picks the storage; nil leaves the call to dispatch.
         ivar_accessor_target = candidate
+      end
+      if target.nil? && !ivar_accessor_target
+        inherited = closed_world_inherited_target(name, known_class)
+        if inherited&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(inherited.irep)) &&
+           compiles_clean?(inherited.irep) &&
+           n.between?(mandatory_arity(@ireps.fetch(inherited.irep)),
+                      mandatory_arity(@ireps.fetch(inherited.irep)) + optional_arity(@ireps.fetch(inherited.irep)))
+          target = inherited
+          typed = true
+          inherited_typed = true
+          typed_guard_class = known_class
+        end
       end
     end
     # A target whose owner this run does not emit (ONLY_OWNERS) has no `_impl`
@@ -739,14 +754,21 @@ class CodeGen
                                                     "#{native_positions.join(', ')} unboxed here to match " \
                                                     "#{impl}'s own native argument type)"
       if typed
-        check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+        check_owner = typed_guard_class || target.owner
+        check = "#{owner_class_ptr_expr(check_owner)} == mrb_obj_class(M, #{recv})"
         # ELEMENT_CLASS_SUPPORT: the tag records which fact proved the receiver.
-        kind = via_element ? 'ELEMENT' : 'TYPED'
-        traced_note = via_element ? "inlined block element of Array<#{target.owner}>" : "receiver traced to #{target.owner}"
+        kind = inherited_typed ? 'CLOSED_WORLD_TYPED_INHERITED' : (via_element ? 'ELEMENT' : 'TYPED')
+        traced_note = if inherited_typed
+                        "receiver traced to #{check_owner}; closed-world lookup proves inherited #{target.owner}##{target.name}"
+                      elsif via_element
+                        "inlined block element of Array<#{target.owner}>"
+                      else
+                        "receiver traced to #{target.owner}"
+                      end
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         fallback = typed_fallback ||
-                   guarded_fallback_line(d, recv, name, argv, [target.owner],
+                   guarded_fallback_line(d, recv, name, argv, [check_owner],
                                          closed_world_site(recv, irep, idx, owner_def))
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
@@ -872,6 +894,34 @@ class CodeGen
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
       "#{diag}#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
+    end
+  end
+
+  # Prove the first implementation in a receiver's inherited lookup chain. An
+  # exact runtime class guard handles subclasses; this proof only needs a stable
+  # receiver constant and a complete, mixin-free chain up to the defining owner.
+  def closed_world_inherited_target(name, receiver_class)
+    return nil unless @closed_world&.inherited_lookup_safe?(name, receiver_class)
+    return nil if devirt_blocked_name?(name)
+
+    klass = receiver_class
+    seen = Set.new
+    loop do
+      return nil unless seen.add?(klass)
+      return nil if @unknown_mixins.include?(klass) || !Array(@included_modules[klass]).empty? ||
+                    !Array(@prepended_modules[klass]).empty?
+
+      definitions = @registry.fetch(name, []).reject { |definition| definition.owner == '<native>' }
+      here = definitions.select { |definition| definition.owner == klass }
+      unless here.empty?
+        return nil if klass == receiver_class
+        return here.one? && here.first.irep ? here.first : nil
+      end
+
+      superclass = @superclass_of[klass]
+      return nil if superclass.nil? || superclass == :none
+
+      klass = superclass
     end
   end
 
