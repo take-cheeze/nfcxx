@@ -61,6 +61,54 @@ class CodeGen
     !subclassed_set.include?(owner)
   end
 
+  # Exact only for a fresh `Klass.new` whose constant and constructor lookup are
+  # closed-world stable. ClassLayout and argument annotations remain guarded.
+  def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
+    return nil unless stable_standard_constructor_class?(expected_class)
+
+    reg = dest_reg
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      case insn.op
+      when 'MOVE'
+        reg = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless reg
+      when 'SEND', 'SEND0'
+        return nil unless insn.args[/:(\w+)/, 1] == 'new'
+        # The known-class trace already resolved this SEND's constant path;
+        # stability above proves that path still denotes the same class.
+        return expected_class
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  def stable_standard_constructor_class?(klass)
+    @closed_world&.stable_class_constant?(klass) && @closed_world.standard_constructor_lookup? &&
+      exact_constructor_chain?(klass)
+  end
+
+  def exact_constructor_chain?(klass)
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      return false if @unknown_mixins.include?(klass) || @unknown_mixins.include?(singleton)
+      return false unless Array(@included_modules[singleton]).empty? && Array(@prepended_modules[singleton]).empty?
+
+      %w[new allocate].each do |name|
+        return false if (@registry[name] || []).any? do |definition|
+          [klass, singleton, 'Class'].include?(definition.owner) && definition.owner != '<native>'
+        end
+      end
+      klass = @superclass_of[klass]
+    end
+    true
+  end
+
   # The class whose instance `self` is while compiling `owner_def`'s code, or nil
   # inside a runtime-def/EXEC body, whose self is whatever receiver mruby passes.
   def self_class(owner_def)

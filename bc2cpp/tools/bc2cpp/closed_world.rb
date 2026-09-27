@@ -92,6 +92,15 @@ class ClosedWorld
     !@global_refusal && !opaque?(owner)
   end
 
+  # A literal `Klass.new` has an exact-class result only while ordinary
+  # construction is visible: no unresolved installer can replace `new` or
+  # `allocate`, and no outside Ruby file defines either name.
+  def standard_constructor_lookup?
+    !@global_refusal && %w[new allocate].none? do |name|
+      @unknown_defs.include?(name) || @outside_ruby_names.include?(name)
+    end
+  end
+
   # Inherited dispatch additionally needs every possible method installer for
   # this name to be represented in the registry.
   def inherited_lookup_safe?(name, owner)

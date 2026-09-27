@@ -113,10 +113,13 @@ class CodeGen
         # `type_guard` (Bitmap): check every argument's Integer tag and fall back to
         # mrb_funcall if any fails (a String first argument is the file-load form);
         # read with mrb_integer after the check.
+        stable_constructor = stable_standard_constructor_class?(known)
+        class_value = stable_constructor ? "#{native[:class_fn]}()" : "mrb_class_ptr(#{recv})"
+        class_guard = stable_constructor ? nil : "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
         if native[:type_guard] == :int
           arg_checks = argv.map { |a| "mrb_integer_p(#{a})" }.join(' && ')
           unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
-          guard = "mrb_class_ptr(#{recv}) == #{native[:class_fn]}() && #{arg_checks}"
+          guard = [class_guard, arg_checks].compact.join(' && ')
           note_extra = " Argument tags checked first (#{arg_checks}), " \
                        "falling back to ordinary dispatch for any other shape -- " \
                        "see that entry's own `type_guard` comment."
@@ -127,7 +130,7 @@ class CodeGen
                          else argv
                          end
           unboxed_argv = ['mrb_nil_value()'] if unboxed_argv.empty?
-          guard = "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
+          guard = class_guard
           note_extra = ''
         end
         # The note's "unboxes each argument" only applies to :int/:float.
@@ -136,21 +139,21 @@ class CodeGen
                        when :float then 'unboxes each argument register with the same mrb_as_float that function used to call internally'
                        else 'passes each argument register straight through as mrb_value'
                        end
-        note = "  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own " \
-               "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n" \
-               "  // Runtime-guarded: #{known} could have been reassigned at the constant level (e.g. " \
-               "`RGSS::#{known} = SomeOtherClass`) since #{native[:class_fn]}'s own class was registered " \
-               "-- #{recv} is whatever this method's own existing GETCONST resolution chain above just " \
-               "produced, so a reassignment there is already reflected in it; falls back to ordinary " \
-               "mrb_funcall (whatever #{recv} now actually is) rather than misconstruct if it doesn't " \
-               "match the real native class.#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/" \
-               "mrb_float, not mrb_value (except :object, passed straight through), so this call site #{unbox_phrase}, " \
-               "and passes mrb_class_ptr(#{recv}) " \
-               "straight through (already computed for the guard just above -- no second, redundant " \
-               "mrb_class_ptr call needed).\n"
+        note = ["  // MONO :new -> #{known}, direct native construct (mruby-rgss/src/lib.cxx's own ",
+                "#{native[:fn]}) -- skips Class#new's own allocate+initialize dispatch chain entirely.\n",
+                (stable_constructor ?
+                  "  // CLOSED_WORLD_STABLE_CLASS: the class constant and constructor lookup cannot be " \
+                  "reassigned or intercepted, so its identity guard is omitted.\n" :
+                  "  // Runtime-guarded: a reassigned class constant falls back to ordinary mrb_funcall.\n"),
+                "  //#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/",
+                "mrb_float, not mrb_value (except :object, passed straight through), so this call site #{unbox_phrase}, ",
+                "and passes #{class_value} as the exact native class pointer.\n"].join
+        call = "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n"
+        return "#{note}  #{call}" unless guard
+
         return "#{note}" \
                "  if (#{guard}) {\n" \
-               "    r#{d} = #{native[:fn]}(M, mrb_class_ptr(#{recv}), #{unboxed_argv.join(', ')});\n" \
+               "    #{call}" \
                "  } else {\n" \
                "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
                "  }\n"
@@ -229,6 +232,7 @@ class CodeGen
           if owner_emitted
             @direct_construct_used << known
             accessor = direct_construct_class_fn(known)
+            stable_constructor = stable_standard_constructor_class?(known)
             init_impl = cpp_name(known, 'initialize') + '_impl'
             # POSITIONAL_OPTIONAL_CONSTRUCT: pad the omitted optionals, then pass
             # how many were really given, so `_impl`'s jump table substitutes the
@@ -248,21 +252,26 @@ class CodeGen
                          else
                            ''
                          end
-            note = "  // MONO :new -> #{known}, direct compiled construct (bc2cpp_direct_alloc + " \
-                   "#{init_impl}) -- skips Class#new's own allocate+initialize dispatch chain entirely; " \
-                   "#{known}#initialize's own return value is discarded (real Ruby .new always returns " \
-                   "the new object, never whatever #initialize itself returns).\n" \
-                   "  // #{known}#initialize declares arity [#{t_mand}, #{t_mand + t_opt}] and this call " \
-                   "passes #{n}.#{opt_phrase}" \
-                   "  // Runtime-guarded the same way NATIVE_CONSTRUCT_TARGETS' own native-construct path " \
-                   "is (see that block's own comment): #{known} could have been reassigned at the constant " \
-                   "level since #{accessor}'s own class was captured at gem-init, so #{recv} (this call " \
-                   "site's own already-resolved GETCONST/GETMCNST receiver) is compared against it rather " \
-                   "than trusted outright, falling back to ordinary mrb_funcall if they differ.\n"
+            note = ["  // MONO :new -> #{known}, direct compiled construct (bc2cpp_direct_alloc + ",
+                    "#{init_impl}) -- skips Class#new's own allocate+initialize dispatch chain entirely; ",
+                    "#{known}#initialize's own return value is discarded (real Ruby .new always returns ",
+                    "the new object, never whatever #initialize itself returns).\n",
+                    "  // #{known}#initialize declares arity [#{t_mand}, #{t_mand + t_opt}] and this call ",
+                    "passes #{n}.#{opt_phrase}",
+                    (stable_constructor ?
+                      "  // CLOSED_WORLD_STABLE_CLASS: the class constant and constructor lookup cannot be " \
+                      "reassigned or intercepted, so the class identity guard is omitted.\n" :
+                      "  // The class identity guard preserves ordinary dispatch if the constant was rebound.\n")].join
+            if stable_constructor
+              return "#{note}" \
+                     "  r#{d} = bc2cpp_direct_alloc(M, #{accessor}());\n" \
+                     "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
+            end
+
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                   "    #{init_impl}(M, #{([recv] + call_args).join(', ')});\n" \
+                   "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
                    "  } else {\n" \
                    "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
                    "  }\n"
@@ -651,6 +660,7 @@ class CodeGen
     typed = false
     via_element = false
     inherited_typed = false
+    exact_class_dispatch = false
     typed_guard_class = nil
     ivar_accessor_target = nil
     known_class = nil
@@ -668,6 +678,21 @@ class CodeGen
                                       element_annotations: @element_annotations,
                                       known_owners: @known_owners,
                                       capture_hints: @block_hash_capture_hints)
+      exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
+                                                            owner: owner_def&.owner,
+                                                            expected_class: known_class)
+      if exact_class
+        exact_target = closed_world_exact_target(name, exact_class)
+        if exact_target&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(exact_target.irep)) &&
+           compiles_clean?(exact_target.irep) &&
+           n.between?(mandatory_arity(@ireps.fetch(exact_target.irep)),
+                      mandatory_arity(@ireps.fetch(exact_target.irep)) + optional_arity(@ireps.fetch(exact_target.irep)))
+          target = exact_target
+          typed = true
+          exact_class_dispatch = true
+          typed_guard_class = exact_class
+        end
+      end
     end
     # ELEMENT_CLASS_SUPPORT: the same TYPED/IVAR_ACCESSOR resolution fed by the
     # element hint (with_element_hint) for an inlined-loop parameter, which no
@@ -754,6 +779,13 @@ class CodeGen
                                                     "#{native_positions.join(', ')} unboxed here to match " \
                                                     "#{impl}'s own native argument type)"
       if typed
+        if exact_class_dispatch
+          note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
+                 "(fresh #{typed_guard_class}.new; stable class constant and standard constructor), " \
+                 "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
         check_owner = typed_guard_class || target.owner
         check = "#{owner_class_ptr_expr(check_owner)} == mrb_obj_class(M, #{recv})"
         # ELEMENT_CLASS_SUPPORT: the tag records which fact proved the receiver.
@@ -915,6 +947,31 @@ class CodeGen
       here = definitions.select { |definition| definition.owner == klass }
       unless here.empty?
         return nil if klass == receiver_class
+        return here.one? && here.first.irep ? here.first : nil
+      end
+
+      superclass = @superclass_of[klass]
+      return nil if superclass.nil? || superclass == :none
+
+      klass = superclass
+    end
+  end
+
+  # Exact-instance counterpart to closed_world_inherited_target: the receiver
+  # is a proven fresh instance, so its own class method may be selected too.
+  def closed_world_exact_target(name, receiver_class)
+    return nil unless @closed_world&.inherited_lookup_safe?(name, receiver_class)
+    return nil if devirt_blocked_name?(name)
+
+    klass = receiver_class
+    seen = Set.new
+    loop do
+      return nil unless seen.add?(klass)
+      return nil if @unknown_mixins.include?(klass) || !Array(@included_modules[klass]).empty? ||
+                    !Array(@prepended_modules[klass]).empty?
+
+      here = @registry.fetch(name, []).select { |definition| definition.owner == klass }
+      unless here.empty?
         return here.one? && here.first.irep ? here.first : nil
       end
 
