@@ -301,7 +301,20 @@ class CodeGen
       # that adding a non-POD field type later cannot leak silently. `delete p`
       # would be wrong: the memory comes from mruby's arena/page allocator, not
       # operator new.
+      #
+      # NON_POD_MEMBER_SUPPORT (the null guard): mruby tests `d->type &&
+      # d->type->dfree` but never `d->data` (3rd/mruby/src/gc.c), so this runs
+      # with p == NULL for any object whose #initialize raised before its
+      # mrb_data_init -- a bare mrb_free(NULL) was harmless, but
+      # `static_cast<T*>(nullptr)->~T()` is UB as soon as the destructor is
+      # non-trivial, which is the whole point of calling it here. Verified
+      # against real libmruby_core.a: 1000 bare MRB_TT_DATA shells produced
+      # 1000 dfree calls with p == NULL, every one of them at mrb_close (gc_sweep
+      # skips them because the sweep's liveness test never sees them; free_heap
+      # frees every non-MRB_TT_FREE slot unconditionally). Same `if (!p) return;`
+      # the hand-written DataType<T>::free_obj already uses (mruby-rgss/src/lib.cxx).
       out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) {\n"
+      out << "  if (!p) return;\n"
       out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
       out << "  mrb_free(mrb, p);\n"
       out << "}\n"
