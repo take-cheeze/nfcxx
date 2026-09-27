@@ -49,7 +49,7 @@ class CodeGen
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
     bool: { box: 'mrb_bool_value', check: 'bc2cpp_bool_p', unbox: 'mrb_true_p', err: 'boolean' },
     fixnum_nil: { box: 'bc2cpp_fixnum_or_nil_box', check: 'bc2cpp_fixnum_or_nil_p',
-                  err: 'Integer or nil' }
+                  err: 'Integer or nil' },
     value: { box: '', check: '', unbox: '', err: '' },
   }.freeze
 

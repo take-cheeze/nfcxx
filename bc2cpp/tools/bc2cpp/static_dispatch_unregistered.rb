@@ -56,8 +56,6 @@ STATIC_DISPATCH_UNREGISTERED = Set[
   "Game::ChipsetLayout.singleton#upper_quad",
   "Game::EnemyAction#bool_of",
   "Game::EnemyAction#int_of",
-  "Game::EnemyAi#skill_battle_usable?",
-  "Game::EnemyAi#skill_ready?",
   "Game::EventGraphic.singleton#frame_col",
   "Game::Interpreter#actor_operand",
   "Game::Interpreter#diagnostic_position",
