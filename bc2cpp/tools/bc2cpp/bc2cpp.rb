@@ -35,6 +35,7 @@ require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
 require_relative 'construct_class_names'
 require_relative 'annotation_contradictions'
+require_relative 'class_arg_types'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
 require_relative 'hot_methods'
@@ -316,6 +317,29 @@ if $PROGRAM_NAME == __FILE__
                                          ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) },
                                          module_body_ivar_labels: module_body_ivar_labels)
   class_layout = ClassLayout.known(class_layout_raw)
+  # Step 6c-bis: the same call-site inference ArgTypes does, for the class-name
+  # lattice. Its only consumer is RBS_SEED_CONTRADICTION below -- a class
+  # annotation is otherwise consumed purely as a SEED into ClassLayout above, so
+  # a wrong one silently becomes the fact it seeded. This is deliberately NOT
+  # fed back into ClassLayout or IvarLayout: those are fixed points whose
+  # order-independence argument (docs/adr/0139) must not grow a new input.
+  owner_of_registry = {}
+  registry.each_value { |defs| defs.each { |d| owner_of_registry[d.irep] = d.owner if d.irep } }
+  class_arg_types = ClassArgTypes.analyze(ireps, registry, owner_of_registry,
+                                          class_layout, container_constants)
+  warn ''
+  warn '== call-site CLASS inference (MONO names only) =='
+  if class_arg_types.empty?
+    warn '  (none)'
+  else
+    class_arg_types.sort.each do |name, classes|
+      classes.each_with_index do |c, i|
+        next unless c
+
+        warn "  CARG  :#{name}, position #{i + 1}  (#{c})"
+      end
+    end
+  end
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
   if class_layout.empty?
@@ -597,7 +621,8 @@ if $PROGRAM_NAME == __FILE__
   # contradict: UNKNOWN is an absent fact, not a conflicting one, so an
   # annotation that merely failed to apply still passes.
   contradictions = AnnotationContradictions.find(ireps, registry, annotations, arg_types,
-                                                gen.fixnum_return_names)
+                                                gen.fixnum_return_names, class_annotations,
+                                                class_arg_types)
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='
   if contradictions.empty?
     warn '  (none)'
