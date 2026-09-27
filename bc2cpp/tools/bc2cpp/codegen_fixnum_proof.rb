@@ -490,9 +490,16 @@ class CodeGen
   #   (f) method_missing -- only fires when no method is found.
   # The opcodes that can carry a `:name` operand were inventoried:
   # SEND/SEND0/SENDB/SSEND/SSEND0/SSENDB, DEF/SDEF/TDEF, LOADSYM, KARG/KEY_P,
-  # CLASS/MODULE, and ARGARY/BLKPUSH/ENTER/GETMCNST (numeric fields or `::`).
-  # Only the four positional call opcodes are sites; the rest poison. Any other
-  # opcode naming something raises (ENTRY_ARG_CLASSIFIED_OPS), fail-loud.
+  # CLASS/MODULE, ALIAS, and ARGARY/BLKPUSH/ENTER/GETMCNST (numeric fields or
+  # `::`). Only the six positional call opcodes are sites; the rest poison (rule
+  # 7). Any other opcode naming something raises (ENTRY_ARG_CLASSIFIED_OPS),
+  # fail-loud.
+  #
+  # ALIAS is a definition opcode, not a call (vm.c OP_ALIAS:
+  # `mrb_alias_method(mrb, target, irep->syms[a], irep->syms[b])`), so it is in
+  # the same category as DEF/SDEF/TDEF and poisons its name. It became reachable
+  # only when core mrblib entered the closed world: mruby-enum-ext's enum.rb
+  # aliases `append` onto `push` (`:append\tpush`).
   #
   # ADMISSION: (method M named N, argument position k) is admitted only when:
   #   1. @registry[N] has exactly one MethodDef, with a bytecode body.
@@ -549,7 +556,7 @@ class CodeGen
   ENTRY_ARG_CLASSIFIED_OPS = Set[
     'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB',
     'DEF', 'SDEF', 'TDEF', 'LOADSYM', 'KARG', 'KEY_P', 'CLASS', 'MODULE',
-    'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
+    'ALIAS', 'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
   ].freeze
 
   # Same method-name charset as every SEND-name extraction.

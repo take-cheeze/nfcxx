@@ -33,6 +33,9 @@ require_relative 'symbol_cache'
 require_relative 'const_site_cache'
 require_relative 'static_dispatch_unregistered'
 require_relative 'unique_class_names'
+require_relative 'construct_class_names'
+require_relative 'annotation_contradictions'
+require_relative 'class_arg_types'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
 require_relative 'hot_methods'
@@ -181,6 +184,15 @@ if $PROGRAM_NAME == __FILE__
   warn '== bare class names with one definition (UNIQUE_CLASS_NAME) =='
   UniqueClassNames.table.sort.each { |name, full| warn "  UNIQUE_CLASS  #{name}  (#{full})" }
 
+  # LEXICAL_CONSTRUCT_RESOLUTION: the class/module names the closed world
+  # DEFINES, so `lexically_resolve_construct_target` can resolve a bare
+  # `Window.new` inside `class RPG2k` to RPG2k::Window (a fact about the
+  # program) without that resolving to an admission (which stays with
+  # compile_send's four live gates). Set next to UniqueClassNames because both
+  # read the same CLASS/MODULE walk and must agree on what the bytecode defines.
+  ConstructClassNames.table = ConstructClassNames.analyze(ireps, root_label)
+  warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
+
   integer_constants =
     if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
       IntegerConstants.analyze(ireps, native_paths, foreign_ruby_srcs)
@@ -305,6 +317,29 @@ if $PROGRAM_NAME == __FILE__
                                          ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) },
                                          module_body_ivar_labels: module_body_ivar_labels)
   class_layout = ClassLayout.known(class_layout_raw)
+  # Step 6c-bis: the same call-site inference ArgTypes does, for the class-name
+  # lattice. Its only consumer is RBS_SEED_CONTRADICTION below -- a class
+  # annotation is otherwise consumed purely as a SEED into ClassLayout above, so
+  # a wrong one silently becomes the fact it seeded. This is deliberately NOT
+  # fed back into ClassLayout or IvarLayout: those are fixed points whose
+  # order-independence argument (docs/adr/0139) must not grow a new input.
+  owner_of_registry = {}
+  registry.each_value { |defs| defs.each { |d| owner_of_registry[d.irep] = d.owner if d.irep } }
+  class_arg_types = ClassArgTypes.analyze(ireps, registry, owner_of_registry,
+                                          class_layout, container_constants)
+  warn ''
+  warn '== call-site CLASS inference (MONO names only) =='
+  if class_arg_types.empty?
+    warn '  (none)'
+  else
+    class_arg_types.sort.each do |name, classes|
+      classes.each_with_index do |c, i|
+        next unless c
+
+        warn "  CARG  :#{name}, position #{i + 1}  (#{c})"
+      end
+    end
+  end
   warn ''
   warn '== known-ivar-class hints (devirtualization only, never embedded) =='
   if class_layout.empty?
@@ -576,6 +611,29 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     gen.fixnum_return_names.sort.each { |n| warn "  RET #{n}" }
+  end
+  warn ''
+  # RBS_SEED_CONTRADICTION: a hand-written `# bc2cpp:` annotation that disagrees
+  # with a type the analysis PROVED is a build error, Spinel's rule for a
+  # representable RBS signature ("an assertion, not a hint"). Without it a typo
+  # in an annotation costs an optimization in silence, which is the same class
+  # of failure as a stale registration. Only a concrete inferred type can
+  # contradict: UNKNOWN is an absent fact, not a conflicting one, so an
+  # annotation that merely failed to apply still passes.
+  contradictions = AnnotationContradictions.find(ireps, registry, annotations, arg_types,
+                                                gen.fixnum_return_names, class_annotations,
+                                                class_arg_types)
+  warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='
+  if contradictions.empty?
+    warn '  (none)'
+  else
+    contradictions.each do |owner, name, pos, declared, got|
+      where = pos == :return ? 'return' : "position #{pos + 1}"
+      warn "  CONTRADICTION #{owner}##{name} #{where}: annotation says #{declared.inspect}, " \
+           "inference proved #{got.inspect}"
+    end
+    abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{contradictions.size} annotation(s) disagree with a " \
+          "proved type (see above). Fix the annotation, or the code it claims to describe."
   end
   warn ''
   # ARRAY_RETURN_PROOF listing, one line per name like the one above, so the

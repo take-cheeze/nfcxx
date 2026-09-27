@@ -292,7 +292,19 @@ class CodeGen
       out << "struct #{struct_name(owner)} {\n"
       ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{name};\n" }
       out << "};\n"
-      out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) { mrb_free(mrb, p); }\n"
+      # NON_POD_MEMBER_SUPPORT: placement-destroy before mrb_free. The struct is
+      # allocated with mrb_calloc and released by mrb_free, which is a bare
+      # `mrb_basic_alloc_func(p, 0)` -- a plain free() that runs NO member
+      # destructor. Every C_TYPE entry today is POD (mrb_int / mrb_sym / mrb_bool
+      # and the tagged Bc2cppFixnumOrNil), so nothing leaks and the explicit
+      # destructor call below compiles to the same code; it is emitted anyway so
+      # that adding a non-POD field type later cannot leak silently. `delete p`
+      # would be wrong: the memory comes from mruby's arena/page allocator, not
+      # operator new.
+      out << "static void #{sanitize(owner)}_ivars_free(mrb_state* mrb, void* p) {\n"
+      out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
+      out << "  mrb_free(mrb, p);\n"
+      out << "}\n"
       out << "static const mrb_data_type #{type_var(owner)} = " \
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
     end
@@ -576,6 +588,12 @@ class CodeGen
       end
     end
     out = +"// HOT_ONLY (docs/adr/0214): #{entries.size} entry points of this gem are not compiled and stay bytecode.\n"
+    # BC2CPP_HOT_ONLY_STUBS: the self-describing mode signal. A hand-written
+    # register.cxx #includes this generated file, so it can test this macro to
+    # tell the two builds apart without a second build flag -- the two cannot
+    # drift, because this is emitted only on the hot-only path, and the no-op
+    # mrb_define_* overloads immediately below exist only here.
+    out << "#define BC2CPP_HOT_ONLY_STUBS 1\n"
     out << "struct bc2cpp_hot_only_excluded {};\n"
     %w[mrb_define_method mrb_define_private_method mrb_define_class_method].each do |fn|
       out << "static inline void #{fn}(mrb_state*, struct RClass*, const char*, bc2cpp_hot_only_excluded, " \

@@ -55,8 +55,19 @@ module StaticDispatchRegistrations
   GEMS = %w[mruby-rpg2k-compiled mruby-lcf-compiled mruby-rgss-compiled].freeze
   SEND_OPS = %w[SEND SEND0 SSEND SSEND0 SENDB SSENDB LOADSYM].freeze
   NAME_ARG = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
-  REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*(\w+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\w+)\s*,[^;]*\);/m
-  IDENT = /\A[a-z_][A-Za-z0-9_]*[?!=]?\z/
+  # The identifier group accepts `$`: a generated symbol for an operator or
+  # predicate name carries the mangling's `$<hex>` escapes
+  # (`LCF__File_$5b$5d` for `LCF::File#[]`, `Game__Battle_enemy_active$3f` for
+  # `#enemy_active?`). `\w+` stops at the first `$`, so those registrations read
+  # back as a truncated name that matched no owner and counted as an extra
+  # dynamic reference -- which is how a list of provably-unreachable names
+  # (`STATIC_DISPATCH_UNREGISTERED`) suddenly looked reachable.
+  REGISTRATION_CALL = /mrb_define_(?:private_|class_)?method\(\s*M\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*([A-Za-z_][A-Za-z0-9_$]*)\s*,[^;]*\);/m
+  # A Ruby identifier, and -- because a generated C++ symbol may contain the
+  # mangling's `$<hex>` escapes -- a generated one. Kept lowercase-initial and
+  # `$`-accepting so `Game__Battle_enemy_active$3f` is recognized as the
+  # identifier it is rather than as a runtime-built name.
+  IDENT = /\A[a-z_][A-Za-z0-9_$]*[?!=]?\z/
   FRAGMENT = /\A[\w?!=]{2,}\z/
   ALWAYS_DYNAMIC = %w[
     initialize initialize_copy method_missing respond_to_missing? respond_to?

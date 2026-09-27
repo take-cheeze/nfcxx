@@ -61,9 +61,25 @@ NATIVE_CONSTRUCT_TARGETS = {
 # direct call bypasses the visibility lookup, as Class#new does.
 # Receivers written relative to the enclosing module (`Scene::Map` inside
 # `module RPG2k`) are resolved by lexically_resolve_construct_target, which
-# only returns members of this table and refuses cross-level ambiguity.
-# Classes whose #initialize has `= default` arguments and no keywords
-# (Game::Vehicle, Game::Character, ...) are omitted: they could never fire.
+# prefers a member of this table and otherwise falls back to the set of classes
+# the closed world DEFINES (LEXICAL_CONSTRUCT_RESOLUTION), refusing
+# cross-level ambiguity either way.
+#
+# Classes whose #initialize has keywords only (Game::Vehicle, Game::Character,
+# ...) are still omitted: compile_send's positional arm does not handle them, and
+# compile_keyword_direct_construct is reached from a different call shape. An
+# #initialize with `= default` POSITIONAL arguments is no longer a reason to omit
+# a class -- POSITIONAL_OPTIONAL_CONSTRUCT pads the omitted positionals and passes
+# bc2cpp_given_opt, so the defaults stay inside mruby's own _impl.
+#
+# LISTING_GRANTS_NOTHING: an entry here only lets lexically_resolve_construct_target
+# CONSIDER the class. compile_send still re-checks all four gates on every run --
+# no custom self.new/self.allocate, an #initialize that compiles clean, a call
+# count inside [mand, mand+opt], and the owner emitted -- so a class listed here
+# that fails any of them simply keeps its dynamic dispatch. That is why the
+# entries below can be broad: they were derived from the build's own registry
+# (every class with a compiled #initialize that this gem emits) rather than
+# hand-picked, and the measurement decides which of them actually fire.
 DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::Switches Game::Timer Game::MessageConfig
                                Game::Screen Game::ChipSet Game::Interpreter
@@ -72,7 +88,40 @@ DIRECT_CONSTRUCT_TARGETS = %w[Game::Transition Game::Map
                                Game::MoveRoute RPG2k::Scene::Map
                                RPG2k::Scene::MapViewer
                                RPG2k::Scene::ChipsetEditor
-                               Game::Battle].freeze
+                               RPG2k::Window
+                               Game::Battle
+                               Game::Actor Game::Actors Game::Battle::Combatant
+                               Game::Character
+                               Game::CommonEvent::CommonEventRecord
+                               Game::Enemy Game::EnemyAction Game::EnemyAi
+                               Game::Interpreter::BattleRequest
+                               Game::Interpreter::DiagnosticPosition
+                               Game::Interpreter::InnRequest
+                               Game::Interpreter::KeyInputAccepted
+                               Game::Interpreter::KeyInputRequest
+                               Game::Interpreter::NameInputRequest
+                               Game::Interpreter::ShopRequest
+                               Game::Message::PauseMarker
+                               Game::Message::ScanResult
+                               Game::Message::Segment
+                               Game::Message::SpeedMarker
+                               Game::Party Game::Picture Game::Rng
+                               Game::Shop Game::State Game::TextReveal
+                               Game::Troop Game::Variables Game::Vehicle
+                               Game::Weather
+                               RPG2k RPG2k::Scene::Base RPG2k::Scene::Battle
+                               RPG2k::Scene::EquipMenu
+                               RPG2k::Scene::EventResolver
+                               RPG2k::Scene::GameOver
+                               RPG2k::Scene::Map::LRUBitmapCache
+                               RPG2k::Scene::Map::MapEventState
+                               RPG2k::Scene::Map::MessageState
+                               RPG2k::Scene::Map::ShopQuantity
+                               RPG2k::Scene::Map::ShopState
+                               RPG2k::Scene::MapWorld RPG2k::Scene::Order
+                               RPG2k::Scene::SaveLoad RPG2k::Scene::SkillMenu
+                               RPG2k::Scene::StatusMenu RPG2k::Scene::Title
+                               RPG2k::Scene::VehicleWorld].freeze
 
 # NATIVE_ARG_TARGETS (the Set after sanitize_c_ident below): human-vetted
 # "Owner#name" allowlist that moves a compiled method's mandatory argument
@@ -348,9 +397,27 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # Owner prefixes equal Module.nesting only for nested (not compact `class
 # A::B`) definitions; the closed world has no compact ones. Lexical scope only;
 # the cref's ancestors are not searched.
-# Soundness: only returns an existing DIRECT_CONSTRUCT_TARGETS entry; a match
-# at more than one level is ambiguous and returns nil; no owner returns nil;
-# nil falls back to the written path (dynamic dispatch / `#error`).
+# Soundness: only returns a name the closed world DEFINES; a match at more than
+# one level is ambiguous and returns nil; no owner returns nil; nil falls back to
+# the written path (dynamic dispatch / `#error`).
+#
+# LEXICAL_CONSTRUCT_RESOLUTION: this used to accept only a
+# DIRECT_CONSTRUCT_TARGETS entry, so a bare `Window.new` inside `class RPG2k`
+# resolved to nothing -- not because the name is ambiguous, but because the
+# RESOLVER's table was the allowlist rather than the set of classes that exist.
+# `Window` has two bindings program-wide (RGSS::Window and RPG2k::Window), so
+# UniqueClassNames refuses it outright, yet inside `module RPG2k` only
+# RPG2k::Window is reachable: mruby-rpg2k/mrblib/main.rb's own comment records
+# that "Every use is inside `class RPG2k`, so the bare name still resolves here".
+#
+# The table is therefore split in two. RESOLUTION still decides only WHICH class
+# the name denotes -- an unambiguous fact about the program. ADMISSION (whether
+# that class may be devirtualized) stays with compile_send's four live gates:
+# no custom `self.new`/`self.allocate`, an #initialize that compiles clean with
+# pure mandatory arity, a matching argument count, and the owner being emitted.
+# Listing a class in DIRECT_CONSTRUCT_TARGETS therefore still grants nothing; it
+# only stops the resolver from looking. Widening the resolution cannot make an
+# unsound call, because a class that fails any gate simply stays dynamic.
 def lexically_resolve_construct_target(written, owner)
   return nil if written.nil? || written.empty?
   return nil if owner.nil?
@@ -361,13 +428,23 @@ def lexically_resolve_construct_target(written, owner)
   hits = []
   nesting.length.downto(1) do |n|
     candidate = "#{nesting.first(n).join('::')}::#{written}"
-    hits << candidate if DIRECT_CONSTRUCT_TARGETS.include?(candidate)
+    hits << candidate if construct_resolution_known?(candidate)
   end
 
   # Ambiguous across nesting levels: refuse (see above).
   return nil if hits.length > 1
 
   hits.first
+end
+
+# Does the closed world define `name` as a class or module? A bare name
+# (no `::`) is not a definition on its own -- it is only ever reached through a
+# nesting prefix -- so it is refused here and left to the written path.
+def construct_resolution_known?(name)
+  return false unless name.include?('::')
+  return true if DIRECT_CONSTRUCT_TARGETS.include?(name)
+
+  (ConstructClassNames.table || {}).include?(name)
 end
 
 # `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
@@ -602,6 +679,38 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
       const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      written = ([const_name] + path).join('::')
+
+      # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
+      # RELATIVE constant -- inside `module LCF`, `EventCommand.new` is
+      # `GETCONST EventCommand`, not `GETMCNST LCF` + `GETMCNST EventCommand`.
+      # This arm used to fall straight through to the written path for that
+      # shape, so a relative `Klass.new` named no class at all.
+      #
+      # Every OTHER opcode here refuses under `resolving_new` (`return nil if
+      # resolving_new`), because during a `.new` chain the register belongs to
+      # the class expression, not to the object: `Klass.new` must not read
+      # `@x = SOME_INT_CONST` as an Integer receiver, and `Klass.new` must not
+      # read `[1,2].map` as an Array receiver. A constant is different in kind --
+      # it is a class NAME, not a value -- so resolving it is the point of the
+      # walk. The safety test is therefore that the name must BE a class the
+      # closed world defines, checked against `known_owners` (the registry's own
+      # owner set, as resolve_owner_name and UniqueClassNames also use). A
+      # non-class constant like POS_BOTTOM is not in that set, so it still
+      # resolves to nothing and the old behaviour is unchanged for it.
+      #
+      # Ambiguity is refused exactly as lexically_resolve_construct_target
+      # refuses it: a bare name that could fall through to a same-named
+      # top-level constant is not resolved unless it names a class uniquely, so
+      # this can only turn a nil into a class, never into the wrong one.
+      if resolving_new && owner && known_owners
+        nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
+        hit = nesting.length.downto(1).filter_map do |n|
+          candidate = "#{nesting.first(n).join('::')}::#{written}"
+          candidate if known_owners.include?(candidate)
+        end
+        return hit.first if hit.size == 1
+      end
 
       # CONST_CONTAINER_SUPPORT: without `resolving_new` this chain is the receiver
       # of an ordinary call (`Game::Vehicle::TYPES.each`), and the useful fact is

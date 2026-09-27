@@ -171,22 +171,89 @@ class CodeGen
         # owner, see build_registry).
         no_custom_new = @registry['new'].none? { |md| md.owner == "#{known}.singleton" }
         no_custom_allocate = @registry['allocate'].none? { |md| md.owner == "#{known}.singleton" }
-        # 3: #initialize is a compiling, pure-mandatory leaf whose arity matches this
-        # call (the TYPED path's checks); an optional-argument #initialize must never
-        # be skipped past this way.
-        init_ok = init_def&.irep && pure_mandatory_arity?(@ireps.fetch(init_def.irep)) &&
-                  compiles_clean?(init_def.irep) && n == mandatory_arity(@ireps.fetch(init_def.irep))
-        if no_custom_new && no_custom_allocate && init_ok
+        # 3: #initialize is a compiling leaf whose arity range covers this call.
+        #
+        # POSITIONAL_OPTIONAL_CONSTRUCT (this arm): the count used to have to
+        # equal `mandatory_arity`, so an #initialize with `= default` arguments
+        # could never fire -- and the comment above used to say so as a property of
+        # the class ("they could never fire"). It CAN: the compiled `_impl` already
+        # takes `mand + opt` positional registers plus a trailing `bc2cpp_given_opt`,
+        # and its own OP_ENTER jump table substitutes the default when a position
+        # was not supplied. So the call site supplies the real arguments, pads the
+        # rest with placeholders the default code overwrites, and passes
+        # `n - mand` as `bc2cpp_given_opt` -- exactly the shape
+        # compile_keyword_direct_construct already emits for the keyword case
+        # (KEYWORD_CONSTRUCT_OPTIONAL_POSITIONAL_SUPPORT).
+        #
+        # The defaults stay where they are: inside `_impl`, which is mruby's own
+        # compiled body, so a `= 0` or `= nil` default is mruby's own value and
+        # not a value bc2cpp re-derived. Nothing is invented at the call site.
+        # `optional_arg_table` must resolve, which is what proves the jump targets
+        # the jump table is about to take exist.
+        init_irep = init_def&.irep ? @ireps.fetch(init_def.irep) : nil
+        t_mand = init_irep ? mandatory_arity(init_irep) : nil
+        t_opt = init_irep ? optional_arity(init_irep) : nil
+        arity_ok = init_irep && n.between?(t_mand, t_mand + t_opt) && compiles_clean?(init_def.irep)
+        arity_ok &&= !t_opt.positive? || optional_arg_table(init_irep)[1]
+        # KEYWORD_INITIALIZE_STAYS_KEYWORDED: this arm emits a POSITIONAL call --
+        # real arguments, optional padding, then bc2cpp_given_opt. An #initialize
+        # that also declares KEYWORDS has its _impl widened to take them as
+        # trailing (value, given) pairs (see compile_keyword_direct_construct's
+        # own note), so a positional call here would be a compile error for a
+        # too-few-argument call, and, where the arity happened to line up, would
+        # silently drop the keyword values. Those classes belong to
+        # compile_keyword_direct_construct, which matches keywords BY NAME and
+        # pads positionals itself. Relaxing the arity test must not widen the
+        # positional arm past the classes it can express.
+        arity_ok &&= !mandatory_optional_and_keyword_arity?(init_irep) if arity_ok
+        # NATIVE_ARG_TYPES_STAY_BOXED: an #initialize in NATIVE_ARG_TARGETS with
+        # an ArgTypes annotation has its `_impl` narrowed to mrb_int/mrb_float
+        # parameters (compile_method's signature, via native_arg_types), and the
+        # UNBOXING lives in the entry wrapper's `mrb_get_args("i")`, not in the
+        # `_impl`. A direct call bypasses that wrapper, so passing the mrb_value
+        # register straight through is a type error:
+        #
+        #   RPG2k__Scene__Map__LRUBitmapCache_initialize_impl(M, r2, r3);
+        #                                                    ^ cannot convert
+        #                                                      mrb_value to mrb_int
+        #
+        # Unboxing here is possible (mrb_integer with the same nil-raise the
+        # wrapper would do) but is a second, separate proof, and the wrapper's
+        # nil-guard is what the annotation's own comment relies on. Refusing is
+        # the sound and small answer: such a class keeps its dynamic dispatch
+        # until a path that unboxes properly exists.
+        arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
+        if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
           owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
           if owner_emitted
             @direct_construct_used << known
             accessor = direct_construct_class_fn(known)
             init_impl = cpp_name(known, 'initialize') + '_impl'
+            # POSITIONAL_OPTIONAL_CONSTRUCT: pad the omitted optionals, then pass
+            # how many were really given, so `_impl`'s jump table substitutes the
+            # defaults for exactly the omitted positions. Omitted optionals never
+            # reach the entry wrapper, so the value passed here is a placeholder
+            # the default branch overwrites.
+            call_args = argv.dup
+            if t_opt.positive?
+              call_args += Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
+              call_args << (argv.size - t_mand).to_s
+            end
+            opt_phrase = if t_opt.positive?
+                           " #{t_opt} optional parameter(s) omitted at this site are filled by " \
+                           "#{init_impl}'s own OP_ENTER default jump table, which is mruby's own code, " \
+                           "given bc2cpp_given_opt = #{argv.size - t_mand} (positional-only, so no " \
+                           "KEYWORD_CALLSITE_ARITY_FIX adjustment applies).\n"
+                         else
+                           ''
+                         end
             note = "  // MONO :new -> #{known}, direct compiled construct (bc2cpp_direct_alloc + " \
                    "#{init_impl}) -- skips Class#new's own allocate+initialize dispatch chain entirely; " \
                    "#{known}#initialize's own return value is discarded (real Ruby .new always returns " \
                    "the new object, never whatever #initialize itself returns).\n" \
+                   "  // #{known}#initialize declares arity [#{t_mand}, #{t_mand + t_opt}] and this call " \
+                   "passes #{n}.#{opt_phrase}" \
                    "  // Runtime-guarded the same way NATIVE_CONSTRUCT_TARGETS' own native-construct path " \
                    "is (see that block's own comment): #{known} could have been reassigned at the constant " \
                    "level since #{accessor}'s own class was captured at gem-init, so #{recv} (this call " \
@@ -195,7 +262,7 @@ class CodeGen
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
-                   "    #{init_impl}(M, #{([recv] + argv).join(', ')});\n" \
+                   "    #{init_impl}(M, #{([recv] + call_args).join(', ')});\n" \
                    "  } else {\n" \
                    "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
                    "  }\n"

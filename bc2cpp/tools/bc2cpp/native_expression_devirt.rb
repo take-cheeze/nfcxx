@@ -32,6 +32,57 @@ module NativeExpressionDevirt
     'Array' => 'MRB_TT_ARRAY', 'Hash' => 'MRB_TT_HASH', 'String' => 'MRB_TT_STRING',
     'Float' => 'MRB_TT_FLOAT', 'Symbol' => 'MRB_TT_SYMBOL', 'Range' => 'MRB_TT_RANGE',
   }.freeze
+
+  # NAMED_TWIN_CALLS: method name -> the C function mruby itself already calls
+  # underneath the registered wrapper, with the operand supplied explicitly.
+  #
+  # The registered bodies for these names are all FRAME-DEPENDENT: `int_add`,
+  # `flo_add`, `mrb_obj_equal_m` and `mrb_eqq_m` each begin with
+  # `mrb_value other/arg = mrb_get_arg1(mrb);`, which reads the CALLER'S VM
+  # frame. A C++ call site has no frame, so body extraction cannot reduce them
+  # (`frame_dependent_body?`), and the twins below take real parameters, so the
+  # one-value-parameter signature scan does not match them either. That is why
+  # these names stay POLY today despite the underlying function being MRB_API and
+  # exported from libmruby.
+  #
+  # Naming the twin directly sidesteps both gates WITHOUT patching mruby and
+  # WITHOUT reimplementing anything: each of these is the exact function the
+  # wrapper delegates to, so the semantics are mruby's own rather than a copy of
+  # them. Verified against the wrappers:
+  #
+  #   mrb_obj_equal_m  -> mrb_obj_equal (src/class.c). Note the return type:
+  #     mrb_obj_equal is declared `MRB_API mrb_bool` (include/mruby.h), and the
+  #     registered wrapper is exactly `mrb_bool_value(mrb_obj_equal(mrb, self,
+  #     arg))`. Wrapping it again is required, not optional -- assigning the bare
+  #     mrb_bool to an mrb_value register does not compile.
+  #
+  # Only `==` is listed. `+`, `-` and `*` were tried here too, on the theory that
+  # `mrb_num_add`/`mrb_num_sub`/`mrb_num_mul` (src/numops.c) are MRB_API, take
+  # real parameters, and would sidestep the frame-dependent `int_add`/`flo_add`
+  # wrappers -- all true. But they emit ZERO sites: `compile_send` only consults
+  # this table behind `builtin_class_send_safe?`, which requires that no
+  # registered definition of the name be one of the guarded builtins, and for
+  # `+` the registered owner IS Integer (numeric.c's own ROM table), so the gate
+  # can never pass. Those three names also have no POLY left to remove in this
+  # program, so listing them would claim coverage that does not exist.
+  #
+  # `==` reaches the emitter by a different route (the existing comparison
+  # chain), which is why it does fire: 640 Integer sites, +20,308 bytes of .text.
+  # That is a CPU trade, not a flash one -- consistent with every other guarded
+  # devirtualization measured in this build, where a TYPED site costs about 51
+  # source bytes against MONO's 31 because the fallback is always retained.
+  #
+  # `equal?` is deliberately absent: it shares `mrb_obj_equal_m` with `==`, and
+  # admitting the name here would also need `==`'s own ambiguity rules, which
+  # the registration scan above already settles.
+  #
+  # Soundness: the receiver is whatever the call site's exact-class guard proved
+  # (here, exactly Integer -- both the MRB_TT_INTEGER tag and the
+  # mrb->integer_class pointer are checked). `mrb_obj_equal` is total and reads
+  # no VM frame, so no argument can be misread.
+  NAMED_TWIN_CALLS = {
+    '==' => 'mrb_bool_value(mrb_obj_equal(M, recv, BC2CPP_ARG0))',
+  }.freeze
   module_function
 
   def analyze(paths)
@@ -308,7 +359,44 @@ module NativeExpressionDevirt
         { owner: owner, expression: expressions.first, arity: arity }
       end
       result[name] = generated unless generated.empty?
+    end.tap { |built| add_named_twin_calls(names, registrations, opaque_owners, built) }
+  end
+
+  # NAMED_TWIN_CALLS, applied to the per-class map the body scan above built.
+  #
+  # The twin is added for a class the body scan could not reduce, so a
+  # body-derived expression always wins and this never overrides a real one. An
+  # opaque registration for the name (`opaque_owners`) disqualifies it entirely:
+  # that means some owner defines the name outside the ROM tables the scan
+  # understood, and a named expression could then disagree with it.
+  #
+  # `Integer` is admitted even though it is not in BUILTIN_CLASS_TAGS: MRB_SET_
+  # INSTANCE_TT(mrb->integer_class, MRB_TT_INTEGER) is in mruby's own class.c,
+  # which is one of `paths`, so the tag and the `mrb->integer_class` field the
+  # emitted guard uses are the real ones rather than asserted here. The owner is
+  # still required to match a live registration, so this stops applying on its
+  # own if mruby ever stops registering the name on Integer.
+  def add_named_twin_calls(names, registrations, opaque_owners, result)
+    NAMED_TWIN_CALLS.each do |name, expression|
+      next unless names.include?(name)
+      next if opaque_owners[name].any? { |owner| owner.nil? || BUILTIN_CLASS_TAGS.key?(owner) }
+
+      entries = result[name] || []
+      # The twin replaces the frame-dependent wrapper for the NUMERIC receiver
+      # only. `Integer` is taken from the live registration scan rather than
+      # asserted, so if mruby ever stops registering the name on Integer this
+      # stops matching and the name simply keeps its current treatment.
+      owner = integer_owner
+      next unless registrations[name].any? { |entry| entry[:owner] == owner }
+
+      entries << { owner: owner, expression: expression, arity: 1 }
+      result[name] = entries unless entries.empty?
     end
+    result
+  end
+
+  def integer_owner
+    @integer_owner ||= { field: 'integer_class', class_name: 'Integer', tag: 'MRB_TT_INTEGER' }
   end
 
   def rom_entries(source)
