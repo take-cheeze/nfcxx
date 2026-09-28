@@ -453,6 +453,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
                       known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
                       dominated: nil, canonical: true)
+  ir = BytecodeIR.for(irep)
   path = []
   use = idx
   # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
@@ -460,7 +461,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   # `resolving_new` becomes true right after a SEND :new (with an empty `path`),
   # or starts true for the `resolving_new:` caller.
   (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
+    insn = ir.instruction_at(i)&.source
+    return nil unless insn
 
     if insn.op == 'RESCUE'
       # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see

@@ -25,6 +25,7 @@ require 'set'
 
 # Parts split out by scripts/bc2cpp_split.rb, loaded in original definition order.
 require_relative 'irep'
+require_relative 'bytecode_ir'
 require_relative 'registry'
 require_relative 'native_names'
 
