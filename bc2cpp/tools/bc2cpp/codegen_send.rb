@@ -578,6 +578,19 @@ class CodeGen
             }
         CPP
       end
+      if name == 'tone=' &&
+         (traced_class == 'RGSS::Viewport' ||
+          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Viewport')
+        @native_construct_used << 'RGSS::Viewport'
+        return <<~CPP
+            // RGSS Viewport#tone= -- frame-independent native body under exact class identity
+            if (mrb_obj_class(M, #{recv}) == rgss::native_viewport_class()) {
+              r#{d} = rgss::viewport_tone_set_direct(M, #{recv}, #{argv.first});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
     end
 
     # NATIVE_PRIMITIVE_SENDS: inline native primitives at any call site, without
