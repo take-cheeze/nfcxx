@@ -875,11 +875,7 @@ def infer_constructed_constant_classes(ireps, assignment_sites, registry, contai
     irep = ireps[site[:irep]]
     next unless irep
 
-    constructor_idx = site[:idx] - 1
-    constructor = irep.instructions[constructor_idx]
-    next unless constructor && %w[SEND SEND0 SENDB].include?(constructor.op)
-    next unless constructor.args[/^R(\d+)/, 1] == site[:reg]
-    next unless constructor.args[/:[\w+\-*\/<>=!?\[\]&|^~%@]+/, 0] == ':new'
+    next unless assigned_from_new_send?(irep, site[:idx], site[:reg])
 
     klass = trace_new_target(irep, site[:idx], site[:reg], nil, 0, nil, owner: site[:owner],
                              registry: registry, container_constants: container_constants,
@@ -889,6 +885,30 @@ def infer_constructed_constant_classes(ireps, assignment_sites, registry, contai
     inferred[site[:name]] = klass
   end
   inferred
+end
+
+# A SETCONST value may be copied after the constructor send. Follow only plain
+# MOVE aliases; every other write ends the proof, while trace_new_target repeats
+# the walk and proves the class expression itself.
+def assigned_from_new_send?(irep, idx, reg)
+  current = reg.to_s
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
+
+    dst = insn.args[/^R(\d+)/, 1]
+    next unless dst == current
+
+    if insn.op == 'MOVE'
+      current = insn.args.scan(/R(\d+)/).flatten[1]
+      return false unless current
+      next
+    end
+
+    return %w[SEND SEND0 SENDB].include?(insn.op) &&
+           insn.args.match?(/^R#{Regexp.escape(current)}\s+:new\b/)
+  end
+  false
 end
 
 def container_phi_merge(irep, at, reg)
