@@ -540,6 +540,46 @@ class CodeGen
       CPP
     end
 
+    if %w[openness= tone= opacity=].include?(name) && n == 1 && !self_implicit && irep && drawing_proof_idx
+      traced_class = trace_new_target(
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if %w[openness= tone=].include?(name) &&
+         (traced_class == 'RGSS::Window' ||
+          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Window')
+        @native_construct_used << 'RGSS::Window'
+        direct = name == 'openness=' ? 'window_openness_set_direct' : 'window_tone_set_direct'
+        return <<~CPP
+            // RGSS Window##{name} -- frame-independent native body under exact class identity
+            if (mrb_obj_class(M, #{recv}) == rgss::native_window_class()) {
+              r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+      if %w[opacity= tone=].include?(name) &&
+         (traced_class == 'RGSS::Sprite' ||
+          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Sprite')
+        @native_construct_used << 'RGSS::Sprite'
+        direct = name == 'opacity=' ? 'sprite_opacity_set_direct' : 'sprite_tone_set_direct'
+        return <<~CPP
+            // RGSS Sprite##{name} -- frame-independent native body under exact class identity
+            if (mrb_obj_class(M, #{recv}) == rgss::native_sprite_class()) {
+              r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
     # NATIVE_PRIMITIVE_SENDS: inline native primitives at any call site, without
     # receiver-class knowledge. monomorphic_target refuses native-only names
     # (calling an arbitrary C method directly would leave mrb_get_args reading a
