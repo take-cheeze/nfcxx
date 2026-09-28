@@ -401,6 +401,12 @@ class CodeGen
     klass if klass && self_call_reaches_def?(name, owner)
   end
 
+  # An explicit call can reach any registered implementation of its name. The
+  # fixpoint records a class only when every implementation proves that result.
+  def class_return_for_dispatch(name)
+    class_return_names[name]
+  end
+
   # RETCLASS_SELF_CALL_SUPPORT fixpoint. Every registry def of the name needs a
   # bytecode body (no native/attr_*); a POLY name is admitted when all of its
   # defs prove the same class, since a self-call may reach any.

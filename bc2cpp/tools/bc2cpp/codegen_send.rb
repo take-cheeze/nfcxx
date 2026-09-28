@@ -677,7 +677,8 @@ class CodeGen
                                       class_layout: @class_layout, registry: @registry,
                                       element_annotations: @element_annotations,
                                       known_owners: @known_owners,
-                                      capture_hints: @block_hash_capture_hints)
+                                      capture_hints: @block_hash_capture_hints,
+                                      method_return_class: ->(method_name) { class_return_for_dispatch(method_name) })
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)

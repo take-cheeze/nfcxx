@@ -451,7 +451,8 @@ end
 # accept every hop, so no hop can skip past a join (ADR 0198).
 def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
-                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, dominated: nil, canonical: true)
+                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
+                      dominated: nil, canonical: true)
   path = []
   use = idx
   # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
@@ -501,7 +502,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      container_constants: container_constants,
                                      element_annotations: element_annotations,
                                      known_owners: known_owners, capture_hints: capture_hints,
-                                     ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
+                                     ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                     dominated: dominated, canonical: canonical)
       # An annotated Hash<Klass> parameter is a safe source for indexed values.
       # Only plain MOVE aliases back to the untouched argument register count;
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
@@ -561,8 +563,16 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
                                  known_owners: known_owners, capture_hints: capture_hints,
-                                 ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
+                                 ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                 dominated: dominated, canonical: canonical)
       else
+        # A whole-program return proof is receiver-independent only when every
+        # registered implementation of the name agrees on its returned class.
+        # Successful dispatch then has that class regardless of receiver type.
+        if method_return_class && (returned_class = method_return_class.call(name))
+          return returned_class
+        end
+
         # CHAINED_ACCESSOR_SUPPORT (see the header): a non-`new` SEND may be a chained
         # :ivar_accessor read. A no-op unless the caller passes class_layout and
         # registry; `resolving_new` callers already returned above.
@@ -579,7 +589,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
                                        known_owners: known_owners, capture_hints: capture_hints,
-                                       ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
+                                       ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                       dominated: dominated, canonical: canonical)
         return nil unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
