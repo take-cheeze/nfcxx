@@ -85,6 +85,7 @@ class CodeGen
       direct_argv = argv.empty? ? 'NULL' : "bc2cpp_puts_argv_#{d}"
       args_decl = argv.empty? ? '' : "    mrb_value bc2cpp_puts_argv_#{d}[#{n}] = { #{argv.join(', ')} };\n"
       return "  // IO_PUTS_MODEL: calls core IO#puts with explicit arguments after exact runtime target check.\n" \
+             "#ifdef HAVE_MRUBY_IO_GEM\n" \
              "  {\n" \
              "#{args_decl}" \
              "    mrb_value bc2cpp_puts_result_#{d};\n" \
@@ -94,7 +95,10 @@ class CodeGen
              "    } else {\n" \
              "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
              "    }\n" \
-             "  }\n"
+             "  }\n" \
+             "#else\n" \
+             "  #{dynamic_dispatch_line(d, recv, name, argv)}" \
+             "#endif\n"
     end
 
     implicit_new_target = name == 'new' && self_implicit ? implicit_singleton_self_class(owner_def) : nil
@@ -1511,6 +1515,7 @@ class CodeGen
            !@unknown_mixins.include?(singleton_owner) && pure_mandatory_arity?(candidate_irep) &&
            mandatory_arity(candidate_irep) == n && !hot_only_excluded?(candidate_label) &&
            constant_object_candidate_clean?(candidate_label) &&
+           (!copied_module_function || module_function_copy_self_safe?(candidate_irep)) &&
            target &&
            native_arg_types(target, n).compact.empty? &&
            (!@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner))

@@ -287,6 +287,16 @@ class CodeGen
       # plain iv_tbl implementation; mrb_iv_get/mrb_iv_set now route those through
       # the RData slot descriptor too. Interpreted Ruby methods use the same API.
       safe = ivars.reject do |name, _|
+        excluded_access = self.class.hot_only_excluded && @registry.values.flatten.any? do |definition|
+          next false unless definition.irep && self.class.hot_only_excluded.include?(definition.irep)
+          next false unless definition.owner == owner || subclass_of.call(definition.owner, owner)
+
+          irep_subtree_touches_ivar?(definition.irep, name)
+        end
+        # An excluded method reads the ordinary iv_tbl, so no compiled sibling
+        # may move that field into the compiler-managed payload.
+        next true if excluded_access
+
         reader_native = natively_exposed?(owner, name)
         writer_native = natively_exposed?(owner, "#{name}=")
         reader_blocked = reader_native && !synthesizable_accessor_only?(owner, name)

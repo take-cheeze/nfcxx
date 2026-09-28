@@ -233,6 +233,18 @@ class CodeGen
     @constant_object_probe = false
   end
 
+  # A module_function copy shares its instance method's irep but runs with the
+  # module object as self. The instance-owner proof is reusable only when that
+  # body never observes self or creates a block that could capture it.
+  def module_function_copy_self_safe?(irep)
+    return false unless irep
+    return false unless irep.reps.empty?
+
+    irep.instructions.none? do |insn|
+      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.args.match?(/\bR0\b/)
+    end
+  end
+
   def stable_standard_constructor_class?(klass)
     stable_identity = @closed_world && (@closed_world.stable_class_constant?(klass) ||
                                         @closed_world.stable_constant_identity?(klass))
