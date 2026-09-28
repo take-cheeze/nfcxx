@@ -51,6 +51,12 @@ class CodeGen
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_proof_idx = idx || trace_idx
     new_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    drawing_proof_idx = idx || trace_idx
+    drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    drawing_enter = irep&.instructions&.find { |insn| insn.op == 'ENTER' }
+    drawing_mand = drawing_enter ? drawing_enter.args.split(':').first.to_i : 0
+    drawing_arg_classes = owner_def && @class_annotations[irep&.label]&.args
+    drawing_ivar_classes = owner_def && @class_layout[owner_def.owner]
     implicit_new_target = name == 'new' && self_implicit ? implicit_singleton_self_class(owner_def) : nil
     new_target = if implicit_new_target
                    implicit_new_target
@@ -368,16 +374,18 @@ class CodeGen
     # mruby C frame, so direct callers use the frame-independent body and keep
     # the original C wrapper for all ordinary dispatch. The class guard makes
     # a stale or merged receiver trace fall back through normal Ruby lookup.
-    if name == 'bitmap=' && n == 1 && !self_implicit && irep && idx
+    if name == 'bitmap=' && n == 1 && !self_implicit && irep && drawing_proof_idx
       traced_class = trace_new_target(
-        irep, idx, d, nil, 0, nil, owner: owner_def&.owner,
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
         class_layout: @class_layout, registry: @registry,
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
         method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
       )
-      if traced_class == 'RGSS::Sprite'
+      if traced_class == 'RGSS::Sprite' ||
+         UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Sprite'
         @native_construct_used << 'RGSS::Sprite'
         return <<~CPP
             // RGSS Sprite#bitmap= -- frame-independent native body under exact class identity
@@ -390,16 +398,18 @@ class CodeGen
       end
     end
 
-    if name == 'fill_rect' && n == 5 && !self_implicit && irep && idx
+    if name == 'fill_rect' && n == 5 && !self_implicit && irep && drawing_proof_idx
       traced_class = trace_new_target(
-        irep, idx, d, nil, 0, nil, owner: owner_def&.owner,
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
         class_layout: @class_layout, registry: @registry,
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
         method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
       )
-      if traced_class == 'RGSS::Bitmap'
+      if traced_class == 'RGSS::Bitmap' ||
+         UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
         @native_construct_used << 'RGSS::Bitmap'
         return <<~CPP
             // RGSS Bitmap#fill_rect(x, y, w, h, color) -- same C-body under exact class identity
@@ -413,16 +423,18 @@ class CodeGen
       end
     end
 
-    if name == 'blt' && [4, 5].include?(n) && !self_implicit && irep && idx
+    if name == 'blt' && [4, 5].include?(n) && !self_implicit && irep && drawing_proof_idx
       traced_class = trace_new_target(
-        irep, idx, d, nil, 0, nil, owner: owner_def&.owner,
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
         class_layout: @class_layout, registry: @registry,
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
         method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
       )
-      if traced_class == 'RGSS::Bitmap'
+      if traced_class == 'RGSS::Bitmap' ||
+         UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
         @native_construct_used << 'RGSS::Bitmap'
         opacity = n == 4 ? 'mrb_fixnum_value(255)' : argv[4]
         opacity_given = n == 5 ? 'TRUE' : 'FALSE'
