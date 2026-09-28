@@ -15,7 +15,8 @@ module NativeExpressionDevirt
     '!' => 'mrb_bool_value(!mrb_test(recv))',
   }.freeze
   CLASS_EXPRESSION_CALLS = %w[
-    mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
+    mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_concat mrb_ensure_array_type mrb_ary_ptr mrb_hash_size mrb_hash_empty_p
+    mrb_hash_key_p mrb_hash_delete_key
     mrb_hash_get
     mrb_str_ptr mrb_range_beg mrb_range_end mrb_range_excl_p mrb_float mrb_float_value mrb_fixnum_value mrb_nil_value
     mrb_as_int mrb_ary_entry mrb_str_equal mrb_obj_equal isfinite isinf isnan signbit
@@ -271,6 +272,8 @@ module NativeExpressionDevirt
                          "#{function}(M, recv)"
                        elsif function == 'mrb_ary_push_m' && arity == 1
                          exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
+                       elsif function == 'mrb_ary_concat_m' && arity == 1
+                         exact_array_concat_one_argument_expression(body, state_arg, self_arg) if body
                        elsif %w[mrb_ary_first mrb_ary_last].include?(function) && arity.zero?
                          exact_array_no_argument_element_expression(body, state_arg, self_arg) if body
                        else
@@ -487,6 +490,24 @@ module NativeExpressionDevirt
     return unless body.match?(prefix)
 
     '(mrb_ary_push(M, recv, (BC2CPP_ARG0)), recv)'
+  end
+
+  # Array#concat accepts a variable number of arrays. A one-argument call can
+  # use the same public conversion and mutation helpers as its native wrapper;
+  # all other arities stay on dispatch.
+  def exact_array_concat_one_argument_expression(body, state_arg, self_arg)
+    body = body.gsub(%r{/\*.*?\*/|//[^\n]*}, ' ').gsub(/\s+/, ' ').strip
+    expected = [
+      'mrb_value *args;',
+      'mrb_int len;',
+      "mrb_get_args(#{state_arg}, \"*!\", &args, &len);",
+      "for (int i=0; i<len; i++) { mrb_ensure_array_type(#{state_arg}, args[i]); }",
+      "for (int i=0; i<len; i++) { mrb_ary_concat(#{state_arg}, #{self_arg}, args[i]); }",
+      "return #{self_arg};"
+    ].join(' ')
+    return unless body == expected
+
+    '(mrb_ary_concat(M, recv, mrb_ensure_array_type(M, BC2CPP_ARG0)), recv)'
   end
 
   # Array#first / #last: derive the zero-argument branch
