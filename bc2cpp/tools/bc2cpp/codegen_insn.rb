@@ -863,14 +863,21 @@ class CodeGen
     # MONO/TYPED resolver so compiled operator methods are called directly. For
     # EQ the generated chain below already handles String/Symbol, so its fallback
     # must not repeat the registered-expression switch.
-    @suppress_native_expression_send = sym if op == 'EQ'
-    begin
-      fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
-    ensure
-      @suppress_native_expression_send = nil
+    if op == 'EQ' && eqq_literal_devirt_safe?
+      # CLOSED_WORLD_EQUALITY: with no Ruby == override, mrb_equal is the VM's
+      # own equality helper. It keeps native class-specific equality behavior
+      # while avoiding a generated Ruby-send fallback for unmatched receiver tags.
+      fallback = "r#{d} = mrb_bool_value(mrb_equal(M, r#{d}, r#{s}));\n"
+    else
+      @suppress_native_expression_send = sym if op == 'EQ'
+      begin
+        fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+      ensure
+        @suppress_native_expression_send = nil
+      end
     end
-    # String/Symbol `==` come from their C wrappers; the resolver fallback stays
-    # the `else`.
+    # String/Symbol `==` use their registered C bodies; Integer's other numeric
+    # forms and unmatched tags keep mruby's mrb_equal semantics in the fallback.
     fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == 'EQ'
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
