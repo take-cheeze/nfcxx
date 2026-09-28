@@ -91,8 +91,8 @@ module BytecodeIR
       end
       @blocks.each do |block|
         block.successors.each { |successor| @blocks[successor].predecessors << block.id }
-        block.predecessors.freeze
       end
+      @blocks.each { |block| block.predecessors.freeze }
       @blocks.freeze
     end
   end
