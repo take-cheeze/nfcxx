@@ -257,17 +257,25 @@ class CodeGen
       # DIV_FASTPATH_SUPPORT: Integer#/ floors (not C's truncation). int_div
       # (src/numeric.c) calls mrb_div_int_value(mrb, mrb_integer(x), mrb_integer(y))
       # for Integer/Integer, so calling it here reproduces the rounding and the
-      # ZeroDivisionError/overflow raises exactly. Declared `extern "C"` like
-      # mrb_str_aref (mruby/internal.h has no C-linkage guard). Same fixnum/fixnum
-      # guard as ADD/SUB/MUL, mrb_funcall otherwise.
+      # ZeroDivisionError/overflow raises exactly. OP_DIV also handles mixed
+      # Integer/Float pairs directly; preserve those VM paths before dispatching
+      # nonnumeric operands.
       d = a[/^R(\d+)/, 1]
       s = a[/\(R(\d+)\)/, 1]
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
       else
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
+          if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+            r#{d} = mrb_div_int_value(M, mrb_integer(r#{d}), mrb_integer(r#{s}));
+          #ifndef MRB_NO_FLOAT
+          } else if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+            r#{d} = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(r#{d}), mrb_float(r#{s})));
+          } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+            r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), (mrb_float)mrb_integer(r#{s})));
+          } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+            r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), mrb_float(r#{s})));
+          #endif
           } else {
             #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
