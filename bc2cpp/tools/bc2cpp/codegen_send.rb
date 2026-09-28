@@ -528,6 +528,18 @@ class CodeGen
       end
     end
 
+    if name == 'text_size' && n == 1 && !self_implicit
+      @native_construct_used << 'RGSS::Bitmap'
+      return <<~CPP
+          // RGSS Bitmap#text_size -- exact native class guard is sufficient without a static receiver fact
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            r#{d} = rgss::bitmap_text_size_direct(M, #{recv}, #{argv.first});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    end
+
     # NATIVE_PRIMITIVE_SENDS: inline native primitives at any call site, without
     # receiver-class knowledge. monomorphic_target refuses native-only names
     # (calling an arbitrary C method directly would leave mrb_get_args reading a
