@@ -49,6 +49,10 @@ class CodeGen
     n = n_match ? n_match[1].to_i : 0
     recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
+    new_target = if name == 'new' && !self_implicit && irep && idx
+                   trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true,
+                                   owner: owner_def&.owner, canonical: false)
+                 end
 
     # LITERAL_EQQ_SUPPORT: `LITERAL === x` from `case x; when LITERAL` (receiver a
     # literal Fixnum or Symbol, see trace_eqq_literal_receiver) is compiled to
@@ -98,8 +102,7 @@ class CodeGen
     # to a NATIVE_CONSTRUCT_TARGETS class. Never for self_implicit sends; irep/idx
     # are nil exactly then, but are checked because trace_new_target needs them.
     if name == 'new' && !self_implicit && irep && idx
-      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
-                               canonical: false)
+      known = new_target
       native = known && NATIVE_CONSTRUCT_TARGETS[known]
       # Exact arity only (an Array lists several accepted counts); other counts fall
       # through to dynamic dispatch.
@@ -162,10 +165,9 @@ class CodeGen
 
     # DIRECT_CONSTRUCT_TARGETS (see its comment): the compiled-class counterpart of
     # the block above. A separate `if`, so neither can shadow the other (the two
-    # owner sets never overlap); re-running trace_new_target is cheap.
+    # owner sets never overlap).
     if name == 'new' && !self_implicit && irep && idx
-      known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
-                               canonical: false)
+      known = new_target
       if known && DIRECT_CONSTRUCT_TARGETS.include?(known)
         init_def = @registry['initialize'].find { |md| md.owner == known }
         # DIRECT_CONSTRUCT_TARGETS' soundness bar, checked live against this run's
@@ -277,6 +279,30 @@ class CodeGen
                    "  }\n"
           end
         end
+      end
+    end
+
+    # GENERIC_OBJECT_CONSTRUCTION: for any stable class constant with the
+    # standard Class#new/allocate lookup chain, mruby's public mrb_obj_new is
+    # the exact allocate + initialize operation. Unlike the compiled/native
+    # specializations above, it keeps #initialize dynamically dispatched, so
+    # native initializers and arbitrary initialize bodies retain their behavior.
+    # The class-tag guard refuses Modules and any non-class runtime value.
+    # SENDB / keyword sends do not enter this positional compile_send path.
+    if name == 'new' && !self_implicit && irep && idx
+      known = new_target
+      if known && stable_standard_constructor_class?(known)
+        construction = if argv.empty?
+                       "    r#{d} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
+                       else
+                         "    mrb_value bc2cpp_new_args[] = { #{argv.join(', ')} };\n" +
+                           "    r#{d} = mrb_obj_new(M, mrb_class_ptr(#{recv}), #{n}, bc2cpp_new_args);\n"
+                       end
+        note = "  // MONO :new -> #{known}, generic direct object construction via mrb_obj_new; " +
+               "standard Class#new/allocate lookup is proven and #initialize remains ordinary runtime dispatch.\n"
+        guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(known)}"
+        return [note, "  if (#{guard}) {\n", construction,
+                "  } else {\n", "    #{dynamic_dispatch_line(d, recv, name, argv)}", "  }\n"].join
       end
     end
 

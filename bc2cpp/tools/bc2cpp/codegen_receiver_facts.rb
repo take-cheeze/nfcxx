@@ -122,11 +122,19 @@ class CodeGen
   end
 
   def stable_standard_constructor_class?(klass)
-    @closed_world&.stable_class_constant?(klass) && @closed_world.standard_constructor_lookup? &&
-      exact_constructor_chain?(klass)
+    stable_identity = @closed_world && (@closed_world.stable_class_constant?(klass) ||
+                                        @closed_world.stable_constant_identity?(klass))
+    stable_identity && @closed_world.standard_constructor_lookup? && exact_constructor_chain?(klass)
   end
 
   def exact_constructor_chain?(klass)
+    # Every class object's singleton lookup reaches Class after its own
+    # singleton superclass chain. A module mixed into Class can replace new or
+    # allocate for every class object, so reject it even though it is not in
+    # `klass`'s ordinary superclass chain below.
+    return false if @unknown_mixins.include?('Class')
+    return false unless Array(@included_modules['Class']).empty? && Array(@prepended_modules['Class']).empty?
+
     seen = Set.new
     while klass.is_a?(String) && seen.add?(klass)
       singleton = "#{klass}.singleton"
