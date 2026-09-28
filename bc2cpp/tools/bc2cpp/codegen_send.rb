@@ -437,19 +437,47 @@ class CodeGen
     # Frame-independent RGSS entry points need only a native class identity
     # guard. Static tracing may narrow the common cases, but is not required for
     # these wrappers because every other receiver retains ordinary dispatch.
-    if name == 'width' && n.zero? && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+    if %w[width height].include?(name) && n.zero? && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
+      helper = name == 'width' ? 'bitmap_width_direct' : 'bitmap_height_direct'
       fallback = compile_poly_small_n(name, d, recv, argv, n,
                                       closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
                  dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
-          // RGSS Bitmap#width -- exact runtime class proves the native wrapper target
+          // RGSS Bitmap##{name} -- exact runtime class proves the native wrapper target
           if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
-            r#{d} = rgss::bitmap_width_direct(M, #{recv});
+            r#{d} = rgss::#{helper}(M, #{recv});
           } else {
         #{fallback.lines.map { |line| "  #{line}" }.join.chomp}
           }
       CPP
+    elsif %w[disposed? visible].include?(name) && n.zero?
+      owners = NATIVE_WRAPPER_DIRECT_OWNERS.fetch(name).select do |owner|
+        native_wrapper_owner_safe?(name, owner)
+      end
+      unless owners.empty?
+        class_accessors = {
+          'RGSS::Bitmap' => 'native_bitmap_class',
+          'RGSS::Sprite' => 'native_sprite_class',
+          'RGSS::Viewport' => 'native_viewport_class',
+          'RGSS::Plane' => 'native_plane_class',
+          'RGSS::Tilemap' => 'native_tilemap_class',
+          'RGSS::Window' => 'native_window_class'
+        }
+        @native_construct_used.merge(owners)
+        helper = name == 'disposed?' ? 'disposed_direct' : 'visible_direct'
+        branches = owners.map do |owner|
+          "if (mrb_obj_class(M, #{recv}) == rgss::#{class_accessors.fetch(owner)}()) {\n" \
+            "  r#{d} = rgss::#{helper}(M, #{recv});\n} else "
+        end.join
+        fallback = compile_poly_small_n(name, d, recv, argv, n,
+                                        closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+                   dynamic_dispatch_line(d, recv, name, argv)
+        return "  // RGSS ##{name} -- exact native class identities select frame independent wrappers\n" \
+               "  #{branches}{\n" \
+               "#{fallback.lines.map { |line| "  #{line}" }.join}" \
+               "  }\n"
+      end
     elsif name == 'dispose' && n.zero?
       owners = NATIVE_WRAPPER_DIRECT_OWNERS.fetch(name).select do |owner|
         native_wrapper_owner_safe?(name, owner)
