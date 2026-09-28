@@ -1370,7 +1370,22 @@ class CodeGen
         "    #{fallback}" \
         "  }\n"
     else
-      return compile_native_primitive_send(name, d, recv, argv) if builtin_native_expression_send
+      if builtin_native_expression_send
+        exact_entry = if exact_class && known_class
+                        native_expression_entries.find do |entry|
+                          entry[:owner][:class_name] == known_class && entry[:arity] == argv.length
+                        end
+                      end
+        if exact_entry
+          expression = exact_entry[:expression].gsub('recv', recv)
+          expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact_entry[:arity] == 1
+          return "  // CLOSED_WORLD_NATIVE_EXACT :#{name} -> #{known_class} native body; " \
+                 "fresh exact-class receiver, no dispatch fallback\n" \
+                 "  r#{d} = #{expression};\n"
+        end
+
+        return compile_native_primitive_send(name, d, recv, argv)
+      end
 
       if !self_implicit && irep && idx && @closed_world &&
          %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[idx].op)
