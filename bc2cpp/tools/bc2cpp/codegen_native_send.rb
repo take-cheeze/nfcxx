@@ -3,6 +3,22 @@
 # CodeGen: sends devirtualized to native primitives.
 
 class CodeGen
+  # Owner/class pairs for frame-independent wrapper bodies that mirror these
+  # mruby-rgss registrations. Keep exact owners here: NATIVE_SRCS records the
+  # method name globally, while the runtime class guard selects the owner.
+  NATIVE_WRAPPER_DIRECT_OWNERS = {
+    'bitmap=' => %w[RGSS::Sprite],
+    'fill_rect' => %w[RGSS::Bitmap],
+    'blt' => %w[RGSS::Bitmap],
+    'stretch_blt' => %w[RGSS::Bitmap],
+    'draw_text' => %w[RGSS::Bitmap],
+    'copy_blt' => %w[RGSS::Bitmap],
+    'text_size' => %w[RGSS::Bitmap],
+    'openness=' => %w[RGSS::Window],
+    'tone=' => %w[RGSS::Sprite RGSS::Window RGSS::Viewport],
+    'opacity=' => %w[RGSS::Sprite]
+  }.freeze
+
   # LITERAL_EQQ_SUPPORT soundness gate, re-checked against this run's @registry:
   # both `#==` and `#===` must be MONO native. `LITERAL === arg` must reach
   # mrb_eqq_m (src/kernel.c), which calls mrb_equal (src/object.c); mrb_equal
@@ -48,6 +64,19 @@ class CodeGen
   def native_only_mono?(name)
     defs = @registry[name]
     defs && defs.size == 1 && defs.first.irep.nil?
+  end
+
+  # An exact runtime class guard selects a C wrapper only when that owner has
+  # one native registration and no prepended module can take lookup precedence.
+  def native_wrapper_owner_safe?(name, owner)
+    return false unless NATIVE_WRAPPER_DIRECT_OWNERS.fetch(name, []).include?(owner)
+
+    defs = @registry[name]
+    return false unless defs
+
+    defs.any? { |definition| definition.owner == '<native>' && definition.irep.nil? } &&
+      defs.none? { |definition| definition.owner == owner } &&
+      Array(@prepended_modules[owner]).empty?
   end
 
   # OWNERLESS_NATIVE_DISPATCH: preserve the existing open-world primitive gate;

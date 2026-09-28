@@ -370,11 +370,96 @@ class CodeGen
       end
     end
 
+    # Frame-independent RGSS entry points need only a native class identity
+    # guard. Static tracing may narrow the common cases, but is not required for
+    # these wrappers because every other receiver retains ordinary dispatch.
+    if name == 'bitmap=' && n == 1 && native_wrapper_owner_safe?(name, 'RGSS::Sprite')
+      @native_construct_used << 'RGSS::Sprite'
+      return <<~CPP
+          // RGSS Sprite#bitmap= -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_sprite_class()) {
+            r#{d} = rgss::sprite_bitmap_set_direct(M, #{recv}, #{argv.first});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    elsif name == 'fill_rect' && n == 5 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+      @native_construct_used << 'RGSS::Bitmap'
+      return <<~CPP
+          // RGSS Bitmap#fill_rect -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            r#{d} = rgss::bitmap_fill_rect_direct(M, #{recv},
+                #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{argv[4]});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    elsif name == 'blt' && [4, 5].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+      @native_construct_used << 'RGSS::Bitmap'
+      opacity = n == 4 ? 'mrb_fixnum_value(255)' : argv[4]
+      opacity_given = n == 5 ? 'TRUE' : 'FALSE'
+      return <<~CPP
+          // RGSS Bitmap#blt -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            r#{d} = rgss::bitmap_blt_direct(M, #{recv},
+                #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{opacity}, #{opacity_given});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    elsif name == 'stretch_blt' && [3, 4].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+      @native_construct_used << 'RGSS::Bitmap'
+      opacity = n == 3 ? 'mrb_fixnum_value(255)' : argv[3]
+      opacity_given = n == 4 ? 'TRUE' : 'FALSE'
+      return <<~CPP
+          // RGSS Bitmap#stretch_blt -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            r#{d} = rgss::bitmap_stretch_blt_direct(M, #{recv},
+                #{argv[0]}, #{argv[1]}, #{argv[2]}, #{opacity}, #{opacity_given});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    elsif name == 'draw_text' && [2, 3, 5, 6].include?(n) && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+      @native_construct_used << 'RGSS::Bitmap'
+      return <<~CPP
+          // RGSS Bitmap#draw_text -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            mrb_value bc2cpp_draw_text_args[] = { #{argv.join(', ')} };
+            r#{d} = rgss::bitmap_draw_text_direct(M, #{recv}, #{n}, bc2cpp_draw_text_args);
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    elsif name == 'copy_blt' && n == 4 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+      @native_construct_used << 'RGSS::Bitmap'
+      return <<~CPP
+          // RGSS Bitmap#copy_blt -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            r#{d} = rgss::bitmap_copy_blt_direct(M, #{recv},
+                #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    elsif name == 'text_size' && n == 1 && native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
+      @native_construct_used << 'RGSS::Bitmap'
+      return <<~CPP
+          // RGSS Bitmap#text_size -- exact runtime class proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+            r#{d} = rgss::bitmap_text_size_direct(M, #{recv}, #{argv.first});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    end
+
     # RGSS_NATIVE_BITMAP_SET: spr_set_bmp reads its argument from the active
     # mruby C frame, so direct callers use the frame-independent body and keep
     # the original C wrapper for all ordinary dispatch. The class guard makes
     # a stale or merged receiver trace fall back through normal Ruby lookup.
-    if name == 'bitmap=' && n == 1 && !self_implicit && irep && drawing_proof_idx
+    if name == 'bitmap=' && n == 1 && !self_implicit && irep && drawing_proof_idx &&
+       native_wrapper_owner_safe?(name, 'RGSS::Sprite')
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -398,7 +483,8 @@ class CodeGen
       end
     end
 
-    if name == 'fill_rect' && n == 5 && !self_implicit && irep && drawing_proof_idx
+    if name == 'fill_rect' && n == 5 && !self_implicit && irep && drawing_proof_idx &&
+       native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -423,7 +509,8 @@ class CodeGen
       end
     end
 
-    if name == 'blt' && [4, 5].include?(n) && !self_implicit && irep && drawing_proof_idx
+    if name == 'blt' && [4, 5].include?(n) && !self_implicit && irep && drawing_proof_idx &&
+       native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -451,7 +538,8 @@ class CodeGen
       end
     end
 
-    if name == 'stretch_blt' && [3, 4].include?(n) && !self_implicit && irep && drawing_proof_idx
+    if name == 'stretch_blt' && [3, 4].include?(n) && !self_implicit && irep && drawing_proof_idx &&
+       native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -478,7 +566,8 @@ class CodeGen
       end
     end
 
-    if name == 'draw_text' && [2, 3, 5, 6].include?(n) && !self_implicit && irep && drawing_proof_idx
+    if name == 'draw_text' && [2, 3, 5, 6].include?(n) && !self_implicit && irep && drawing_proof_idx &&
+       native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -503,7 +592,8 @@ class CodeGen
       end
     end
 
-    if name == 'copy_blt' && n == 4 && !self_implicit && irep && drawing_proof_idx
+    if name == 'copy_blt' && n == 4 && !self_implicit && irep && drawing_proof_idx &&
+       native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       traced_class = trace_new_target(
         irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
         drawing_arg_classes, owner: owner_def&.owner,
@@ -528,7 +618,8 @@ class CodeGen
       end
     end
 
-    if name == 'text_size' && n == 1 && !self_implicit
+    if name == 'text_size' && n == 1 && !self_implicit &&
+       native_wrapper_owner_safe?(name, 'RGSS::Bitmap')
       @native_construct_used << 'RGSS::Bitmap'
       return <<~CPP
           // RGSS Bitmap#text_size -- exact native class guard is sufficient without a static receiver fact
@@ -552,7 +643,8 @@ class CodeGen
       )
       if %w[openness= tone=].include?(name) &&
          (traced_class == 'RGSS::Window' ||
-          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Window')
+          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Window') &&
+         native_wrapper_owner_safe?(name, 'RGSS::Window')
         @native_construct_used << 'RGSS::Window'
         direct = name == 'openness=' ? 'window_openness_set_direct' : 'window_tone_set_direct'
         return <<~CPP
@@ -566,7 +658,8 @@ class CodeGen
       end
       if %w[opacity= tone=].include?(name) &&
          (traced_class == 'RGSS::Sprite' ||
-          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Sprite')
+          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Sprite') &&
+         native_wrapper_owner_safe?(name, 'RGSS::Sprite')
         @native_construct_used << 'RGSS::Sprite'
         direct = name == 'opacity=' ? 'sprite_opacity_set_direct' : 'sprite_tone_set_direct'
         return <<~CPP
@@ -580,13 +673,52 @@ class CodeGen
       end
       if name == 'tone=' &&
          (traced_class == 'RGSS::Viewport' ||
-          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Viewport')
+          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Viewport') &&
+         native_wrapper_owner_safe?(name, 'RGSS::Viewport')
         @native_construct_used << 'RGSS::Viewport'
         return <<~CPP
             // RGSS Viewport#tone= -- frame-independent native body under exact class identity
             if (mrb_obj_class(M, #{recv}) == rgss::native_viewport_class()) {
               r#{d} = rgss::viewport_tone_set_direct(M, #{recv}, #{argv.first});
             } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
+    if name == 'opacity=' && n == 1 && !self_implicit &&
+       native_wrapper_owner_safe?(name, 'RGSS::Sprite')
+      @native_construct_used << 'RGSS::Sprite'
+      return <<~CPP
+          // RGSS Sprite#opacity= -- exact runtime class identity proves the native wrapper target
+          if (mrb_obj_class(M, #{recv}) == rgss::native_sprite_class()) {
+            r#{d} = rgss::sprite_opacity_set_direct(M, #{recv}, #{argv.first});
+          } else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
+    end
+
+    if name == 'tone=' && n == 1 && !self_implicit
+      tone_targets = [
+        ['RGSS::Sprite', 'native_sprite_class', 'sprite_tone_set_direct'],
+        ['RGSS::Window', 'native_window_class', 'window_tone_set_direct'],
+        ['RGSS::Viewport', 'native_viewport_class', 'viewport_tone_set_direct']
+      ].select { |owner, _class_fn, _direct| native_wrapper_owner_safe?(name, owner) }
+      unless tone_targets.empty?
+        tone_targets.each { |owner, _class_fn, _direct| @native_construct_used << owner }
+        branches = tone_targets.map.with_index do |(_owner, class_fn, direct), i|
+          keyword = i.zero? ? 'if' : 'else if'
+          <<~CPP.chomp
+            #{keyword} (mrb_obj_class(M, #{recv}) == rgss::#{class_fn}()) {
+              r#{d} = rgss::#{direct}(M, #{recv}, #{argv.first});
+            }
+          CPP
+        end.join(' ')
+        return <<~CPP
+            // RGSS tone setters -- exact runtime class identity selects a registered native body
+            #{branches} else {
               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
             }
         CPP
