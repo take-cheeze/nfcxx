@@ -23,7 +23,8 @@
 #
 # CONST_ALIAS_CHAINING: `SCREEN_W = RPG2k::WIDTH` records an alias to the bare
 # name instead of poisoning; resolve_integral settles the graph (see its
-# header for why it must be the greatest fixpoint).
+# header for why it must be the greatest fixpoint). ADD/SUB bytecodes may also
+# combine proven integer constants; their exact result must fit target Fixnum.
 module IntegerConstants
   # `SETCONST NAME R1` / `SETMCNST (R2)::NAME R1` (codedump.c): the name comes
   # first and the source register last, the reverse of GETCONST. print_lv_a may
@@ -52,21 +53,34 @@ module IntegerConstants
     end
     poisoned.merge(native_const_names(native_paths))
     poisoned.merge(foreign_const_names(foreign_paths))
-    resolve_integral(defs, poisoned)
+    admitted = resolve_integral(defs, poisoned)
+    loop do
+      values = analyze_values(ireps, admitted)
+      invalid = admitted.select do |name|
+        defs[name].any? { |kind| kind.is_a?(Array) && kind[0] == :arithmetic } && values[name].nil?
+      end
+      break if invalid.empty?
+
+      invalid.each { |name| poisoned << name }
+      admitted = resolve_integral(defs, poisoned)
+    end
+    admitted
   end
 
   # CONST_ALIAS_CHAINING: the GREATEST fixpoint of "every definition of this bare
-  # name assigns an integer literal or the value of another such name": start
+  # name assigns an integer literal, another such name, or integer ADD/SUB of
+  # such values": start
   # from every classifiable, unpoisoned name and drop names aliasing a dropped
   # one until stable. The least fixpoint would refuse `Scene::Map::TILE =
   # Game::TILE`, which aliases its own bare name.
   #
   # Soundness is an induction on runtime assignment order: each binding of an
-  # admitted name N executes either an integer literal (LOADI*, a Fixnum) or a
-  # read of admitted name M, which must succeed (an unassigned constant raises
-  # NameError), so an earlier binding of M already stored a Fixnum. A cycle with
-  # no literal (`A = B; B = A`) is admitted but can never execute. This needs
-  # every binding to be classified, which the four poison sources guarantee.
+  # admitted name N executes a Fixnum literal, reads another admitted name, or
+  # applies ADD/SUB to admitted integer values. The arithmetic form is retained
+  # only when exact-value analysis proves the result fits the target Fixnum
+  # range. An unassigned alias raises NameError before a value is stored. A
+  # cycle with no literal (`A = B; B = A`) is admitted but can never execute.
+  # Every binding must be classified, which the four poison sources guarantee.
   def self.resolve_integral(defs, poisoned)
     cand = Set.new
     defs.each do |name, kinds|
@@ -77,13 +91,67 @@ module IntegerConstants
     end
     loop do
       dropped = cand.reject do |name|
-        defs[name].all? { |k| k == :literal || cand.include?(k[1]) }
+        defs[name].all? { |kind| integral_kind?(kind, cand) }
       end
       break if dropped.empty?
 
       dropped.each { |n| cand.delete(n) }
     end
+
     cand
+  end
+
+  def self.integral_kind?(kind, candidates)
+    return true if kind == :literal
+    return false unless kind.is_a?(Array)
+
+    case kind[0]
+    when :alias then candidates.include?(kind[1])
+    when :arithmetic
+      integral_operand?(kind[2], candidates) && integral_operand?(kind[3], candidates)
+    else false
+    end
+  end
+
+  def self.integral_operand?(operand, candidates)
+    return true if operand.is_a?(Numeric) || operand == :literal
+    return false unless operand.is_a?(Array)
+
+    case operand[0]
+    when :literal then true
+    when :alias then candidates.include?(operand[1])
+    when :arithmetic then integral_kind?(operand, candidates)
+    else false
+    end
+  end
+
+  def self.source_operand_kind?(operand)
+    operand.is_a?(Numeric) || operand == :literal ||
+      (operand.is_a?(Array) && %i[literal alias arithmetic].include?(operand[0]))
+  end
+
+  def self.value_for_kind(kind, visiting, resolve)
+    case kind[0]
+    when :literal then kind[1]
+    when :alias then resolve.call(kind[1], visiting)
+    when :arithmetic
+      left = value_for_operand(kind[2], visiting, resolve)
+      right = value_for_operand(kind[3], visiting, resolve)
+      return nil if left.nil? || right.nil?
+
+      value = case kind[1]
+              when 'ADD', 'ADDI' then left + right
+              when 'SUB', 'SUBI' then left - right
+              end
+      value if value&.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+    end
+  end
+
+  def self.value_for_operand(operand, visiting, resolve)
+    return operand if operand.is_a?(Numeric)
+    return nil if operand == :literal
+
+    value_for_kind(operand, visiting, resolve)
   end
 
   # Every address control can enter other than by falling through: the targets
@@ -106,8 +174,8 @@ module IntegerConstants
   end
 
   # How is `reg` written at this point of the class body? Returns :literal,
-  # [:alias, NAME] or nil (poison), using the same bounded backward walk as
-  # proven_fixnum_operand?. Any complication returns nil.
+  # [:alias, NAME], an ADD/SUB expression, or nil (poison), using the same
+  # bounded backward walk as proven_fixnum_operand?. Any complication returns nil.
   # The walk must not step over a jump target: `X = cond ? "s" : 1` compiles to
   # JMPNOT/STRING/JMP/LOADI_1/SETCONST, whose nearest backward writer is a LOADI
   # even though the other arm binds a String.
@@ -139,6 +207,22 @@ module IntegerConstants
           # of that name.
           n = insn.args[/::(\S+)/, 1]
           return n && [:alias, n]
+        when 'ADD', 'SUB', 'ADDI', 'SUBI'
+          args = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten
+          left = const_source_kind(irep, j, cur, entries)
+          right = if %w[ADDI SUBI].include?(insn.op)
+                    immediate = insn.args.sub(/;.*\z/m, '').split(/\s+/).last
+                    return nil unless immediate&.match?(/\A-?\d+\z/)
+
+                    immediate.to_i
+                  else
+                    return nil unless args[1]
+
+                    const_source_kind(irep, j, args[1], entries)
+                  end
+          return nil unless source_operand_kind?(left) && source_operand_kind?(right)
+
+          return [:arithmetic, insn.op, left, right]
         else
           return nil
         end
@@ -151,9 +235,9 @@ module IntegerConstants
   # INTEGER_CONSTANT_VALUE_PROOF: analyze proves a bare name always binds a
   # Fixnum; this proves it always binds the SAME Fixnum, so GETCONST/GETMCNST can
   # be replaced by the literal. Sound by resolve_integral's induction: if every
-  # classified definition (through aliases) resolves to one number, every run
-  # binds that number. `admitted` is analyze's Set, so its poison sources are
-  # already applied.
+  # classified definition resolves to one number, every run binds that number.
+  # Arithmetic bytecodes use their integer fast arm for these proven operands;
+  # out-of-range results are rejected. `admitted` already has poison sources.
   # A literal-less alias cycle resolves to nil by cycle detection, not memoized:
   # a cycle is a property of the path, not the name.
   def self.analyze_values(ireps, admitted)
@@ -182,7 +266,7 @@ module IntegerConstants
       next nil if kinds.empty? || kinds.any?(&:nil?)
 
       seen = visiting + [name]
-      values = kinds.map { |k| k[0] == :literal ? k[1] : resolve.call(k[1], seen) }
+      values = kinds.map { |kind| value_for_kind(kind, seen, resolve) }
       result = values.any?(&:nil?) || values.uniq.size != 1 ? nil : values.first
       memo[name] = result
       result
@@ -194,9 +278,8 @@ module IntegerConstants
     end
   end
 
-  # const_source_kind's walk, returning `[:literal, N]` for LOADI*. Everything
-  # else is identical on purpose, so this runs over exactly the shapes the kind
-  # proof validated.
+  # const_source_kind's walk, returning `[:literal, N]` for LOADI* and exact
+  # operand expressions for ADD/SUB. Everything else is refused.
   def self.literal_value_kind(irep, idx, reg, entries)
     cur = reg.to_s
     j = idx - 1
@@ -223,6 +306,22 @@ module IntegerConstants
         when 'GETMCNST'
           n = insn.args[/::(\S+)/, 1]
           return n && [:alias, n]
+        when 'ADD', 'SUB', 'ADDI', 'SUBI'
+          args = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten
+          left = literal_value_kind(irep, j, cur, entries)
+          right = if %w[ADDI SUBI].include?(insn.op)
+                    immediate = insn.args.sub(/;.*\z/m, '').split(/\s+/).last
+                    return nil unless immediate&.match?(/\A-?\d+\z/)
+
+                    immediate.to_i
+                  else
+                    return nil unless args[1]
+
+                    literal_value_kind(irep, j, args[1], entries)
+                  end
+          return nil unless left && right
+
+          return [:arithmetic, insn.op, left, right]
         else
           return nil
         end
