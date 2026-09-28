@@ -78,6 +78,25 @@ class CodeGen
              "  }\n"
     end
 
+    # IO_PUTS_MODEL: mruby-io's public helper checks the actual resolved method
+    # against its registered C body, then calls the same implementation with
+    # explicit argv. Any override, prepend, or non-IO receiver keeps Ruby dispatch.
+    if name == 'puts' && !self_implicit && n <= 14
+      direct_argv = argv.empty? ? 'NULL' : "bc2cpp_puts_argv_#{d}"
+      args_decl = argv.empty? ? '' : "    mrb_value bc2cpp_puts_argv_#{d}[#{n}] = { #{argv.join(', ')} };\n"
+      return "  // IO_PUTS_MODEL: calls core IO#puts with explicit arguments after exact runtime target check.\n" \
+             "  {\n" \
+             "#{args_decl}" \
+             "    mrb_value bc2cpp_puts_result_#{d};\n" \
+             "    if (mrb_io_puts_direct(M, #{recv}, #{n}, #{direct_argv}, " \
+             "&bc2cpp_puts_result_#{d})) {\n" \
+             "      r#{d} = bc2cpp_puts_result_#{d};\n" \
+             "    } else {\n" \
+             "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
+             "    }\n" \
+             "  }\n"
+    end
+
     implicit_new_target = name == 'new' && self_implicit ? implicit_singleton_self_class(owner_def) : nil
     new_target = if implicit_new_target
                    implicit_new_target

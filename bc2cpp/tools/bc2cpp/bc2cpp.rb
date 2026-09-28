@@ -779,6 +779,9 @@ if $PROGRAM_NAME == __FILE__
   # mrb_protect_error for GETCONST's owner-scope-first lookup (core API, not the
   # mruby-error gem).
   puts '#include <mruby/error.h>'
+  # mrb_io_puts_direct models IO#puts with explicit argv and verifies the
+  # runtime method target before bypassing the VM frame wrapper.
+  puts '#include <mruby/io.h>'
   # mrb_proc_new_cfunc for BLOCK_CFUNC_FALLBACK_SUPPORT; this header has a
   # C-linkage guard, so a plain #include is fine.
   puts '#include <mruby/proc.h>'
