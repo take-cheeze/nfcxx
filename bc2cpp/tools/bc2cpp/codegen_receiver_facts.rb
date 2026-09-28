@@ -212,8 +212,10 @@ class CodeGen
     candidates = lexical.length.downto(1).map { |n| "#{lexical.first(n).join('::')}::#{written}" }
     candidates << written
     hits = candidates.uniq.select { |name| ConstructClassNames.table.key?(name) }
-    return hits.first if hits.one?
-    return nil unless hits.empty?
+    # GETCONST follows Ruby's lexical nesting order: the innermost defined
+    # binding shadows outer bindings with the same name. Identity stability
+    # below proves the selected binding cannot be rebound at runtime.
+    return hits.first unless hits.empty?
 
     # A bare native class/module may enter lookup through Object's included
     # modules (for example Input resolving to RGSS::Input). Reuse the existing
