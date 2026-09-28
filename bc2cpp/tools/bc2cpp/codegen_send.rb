@@ -51,7 +51,7 @@ class CodeGen
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_target = if name == 'new' && !self_implicit && irep && idx
                    trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true,
-                                   owner: owner_def&.owner, canonical: false)
+                                   owner: owner_def&.owner)
                  end
 
     # LITERAL_EQQ_SUPPORT: `LITERAL === x` from `case x; when LITERAL` (receiver a
@@ -103,7 +103,10 @@ class CodeGen
     # are nil exactly then, but are checked because trace_new_target needs them.
     if name == 'new' && !self_implicit && irep && idx
       known = new_target
-      native = known && NATIVE_CONSTRUCT_TARGETS[known]
+      native_name = known && UniqueClassNames.table&.key(known)
+      native_name = nil unless native_name && UniqueClassNames.resolve(native_name, owner_def&.owner) == known
+      native = known && (NATIVE_CONSTRUCT_TARGETS[known] ||
+                         (native_name && NATIVE_CONSTRUCT_TARGETS[native_name]))
       # Exact arity only (an Array lists several accepted counts); other counts fall
       # through to dynamic dispatch.
       if native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))

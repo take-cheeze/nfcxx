@@ -723,6 +723,13 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
           candidate if known_owners.include?(candidate)
         end
         return hit.first if hit.size == 1
+        # UNIQUE_CLASS_NAME: a bare constant may be reachable through an
+        # Object-included module (for example Bitmap -> RGSS::Bitmap). Resolve
+        # only names already proven unique and reachable at this lexical site.
+        if path.empty? && hit.empty? && (unique = UniqueClassNames.resolve(const_name, owner)) &&
+           known_owners.include?(unique)
+          return canonical ? unique : const_name
+        end
       end
 
       # CONST_CONTAINER_SUPPORT: without `resolving_new` this chain is the receiver
