@@ -163,18 +163,23 @@ class CodeGen
       end
     end
 
-    # DIRECT_CONSTRUCT_TARGETS (see its comment): the compiled-class counterpart of
-    # the block above. A separate `if`, so neither can shadow the other (the two
-    # owner sets never overlap).
+    # DIRECT_CONSTRUCT_TARGETS plus locally emitted compiled classes: the
+    # compiled-initializer counterpart of the block above. The allowlist keeps
+    # its stable gem-init accessor; other classes use the owner-class cache.
     if name == 'new' && !self_implicit && irep && idx
       known = new_target
-      if known && DIRECT_CONSTRUCT_TARGETS.include?(known)
-        init_def = @registry['initialize'].find { |md| md.owner == known }
+      listed_target = known && DIRECT_CONSTRUCT_TARGETS.include?(known)
+      generic_target = known && !listed_target && @closed_world&.stable_class_constant?(known) &&
+                       stable_standard_constructor_class?(known)
+      if known && (listed_target || generic_target)
+        init_defs = @registry['initialize'].select { |md| md.owner == known }
+        init_def = init_defs.one? ? init_defs.first : nil
         # DIRECT_CONSTRUCT_TARGETS' soundness bar, checked live against this run's
         # registry and ONLY_OWNERS.
         # 1/2: no custom `def self.new`/`def self.allocate` on this class ("X.singleton"
         # owner, see build_registry).
-        no_custom_new = @registry['new'].none? { |md| md.owner == "#{known}.singleton" }
+        no_custom_new = @closed_world&.standard_constructor_lookup? && exact_constructor_chain?(known) &&
+                        @registry['new'].none? { |md| md.owner == "#{known}.singleton" }
         no_custom_allocate = @registry['allocate'].none? { |md| md.owner == "#{known}.singleton" }
         # 3: #initialize is a compiling leaf whose arity range covers this call.
         #
@@ -230,10 +235,19 @@ class CodeGen
         arity_ok &&= native_arg_types(init_def, t_mand).all? { |ty| ty.nil? } if arity_ok
         if no_custom_new && no_custom_allocate && arity_ok
           # 4: the ONLY_OWNERS/OTHER_OWNERS emission guard.
-          owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
+          owner_emitted = if listed_target
+                            !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
+                          else
+                            !@only_owners || @only_owners.include?(known)
+                          end
           if owner_emitted
-            @direct_construct_used << known
-            accessor = direct_construct_class_fn(known)
+            if listed_target
+              @direct_construct_used << known
+              accessor = direct_construct_class_fn(known)
+            else
+              accessor = owner_class_ptr_expr(known)
+            end
+            @direct_alloc_used = true
             stable_constructor = stable_standard_constructor_class?(known)
             init_impl = cpp_name(known, 'initialize') + '_impl'
             # POSITIONAL_OPTIONAL_CONSTRUCT: pad the omitted optionals, then pass
@@ -287,7 +301,8 @@ class CodeGen
     # the exact allocate + initialize operation. Unlike the compiled/native
     # specializations above, it keeps #initialize dynamically dispatched, so
     # native initializers and arbitrary initialize bodies retain their behavior.
-    # The class-tag guard refuses Modules and any non-class runtime value.
+    # The class-identity guard also rejects a receiver whose register came from
+    # another control-flow arm; the trace only proposes `known`.
     # SENDB / keyword sends do not enter this positional compile_send path.
     if name == 'new' && !self_implicit && irep && idx
       known = new_target

@@ -504,16 +504,12 @@ class CodeGen
     "#{sanitize(owner)}_compiled_class"
   end
 
-  # Declarations for DIRECT_CONSTRUCT_TARGETS actually used:
-  # 1. bc2cpp_direct_alloc: a generic replacement for Class#new's allocate step
-  #    (see its body). Defined here, since every consumer needs the same body.
-  # 2. One class-identity accessor per used owner (direct_construct_class_fn),
-  #    defined in the same gem's register.cxx. That file #includes this
-  #    generated code, so both are in one TU and plain C++ linkage matches. A
-  #    cross-gem consumer would need the OTHER_DECLS_HEADER treatment
-  #    (emit_decls_header); none exists yet.
+  # Declarations for direct compiled construction actually used:
+  # 1. bc2cpp_direct_alloc: mirrors mrb_instance_alloc's checks and allocation.
+  # 2. Accessors only for listed targets, defined in the same gem's register.cxx.
+  #    Other local classes use the owner-class cache instead.
   def emit_direct_construct_decls
-    return '' unless @direct_construct_used.any?
+    return '' unless @direct_alloc_used || @direct_construct_used.any?
 
     out = String.new
     out << "// A generic replacement for Class#new's own `self.allocate` step,\n"
@@ -527,21 +523,31 @@ class CodeGen
     out << "// function directly -- just reimplemented here since it is `static`\n"
     out << "// (no external linkage, so this generated file -- a different\n"
     out << "// translation unit -- cannot call it directly) using only the two\n"
-    out << "// PUBLIC mruby APIs that do the same two steps: MRB_INSTANCE_TT(c)\n"
-    out << "// (mruby/class.h) and mrb_obj_alloc (mruby.h). Called directly in\n"
+    out << "// PUBLIC mruby APIs for allocating with MRB_INSTANCE_TT(c) and\n"
+    out << "// mrb_obj_alloc (mruby.h), preserving mrb_instance_alloc's tag and\n"
+    out << "// allocator checks. Called directly in\n"
     out << "// place of Class#new's own real allocate+initialize dispatch chain\n"
-    out << "// when a `.new` call site's receiver is provably one of\n"
-    out << "// DIRECT_CONSTRUCT_TARGETS' own bc2cpp-COMPILED classes\n"
-    out << "// (compile_send's own \"MONO :new -> direct compiled construct\" path)\n"
+    out << "// when a `.new` call site's receiver is a compiled class with a\n"
+    out << "// proven standard constructor chain (compile_send's direct\n"
+    out << "// compiled-construction path).\n"
     out << "// -- #initialize's own already-compiled _impl function is called\n"
     out << "// right after, for its side effects only (its own return value is\n"
     out << "// discarded, never assigned to the result register: real Ruby\n"
     out << "// Class#new always returns the newly allocated object, never\n"
     out << "// whatever #initialize itself returns).\n"
     out << "static inline mrb_value bc2cpp_direct_alloc(mrb_state* M, RClass* c) {\n"
-    out << "  return mrb_obj_value(mrb_obj_alloc(M, MRB_INSTANCE_TT(c), c));\n"
+    out << "  enum mrb_vtype ttype = MRB_INSTANCE_TT(c);\n"
+    out << "  if (c->tt == MRB_TT_SCLASS) mrb_raise(M, E_TYPE_ERROR, \"can't create instance of singleton class\");\n"
+    out << "  if (c == M->nil_class || c == M->false_class) {\n"
+    out << "    mrb_assert(ttype == 0);\n"
+    out << "  } else if (ttype == 0) {\n"
+    out << "    ttype = MRB_TT_OBJECT;\n"
+    out << "  }\n"
+    out << "  if (MRB_UNDEF_ALLOCATOR_P(c)) mrb_raisef(M, E_TYPE_ERROR, \"allocator undefined for %v\", mrb_obj_value(c));\n"
+    out << "  if (ttype <= MRB_TT_CPTR) mrb_raisef(M, E_TYPE_ERROR, \"can't create instance of %v\", mrb_obj_value(c));\n"
+    out << "  return mrb_obj_value(mrb_obj_alloc(M, ttype, c));\n"
     out << "}\n\n"
-    out << "// Class-identity accessor functions DIRECT_CONSTRUCT_TARGETS' own\n"
+    out << "// Class-identity accessors for explicitly listed target classes\n"
     out << "// owners define in their compiled gem's own register.cxx (mirroring\n"
     out << "// NATIVE_CONSTRUCT_TARGETS' own class_fn precedent) -- a real,\n"
     out << "// durable RClass* captured once at that gem's own gem-init time, NOT\n"

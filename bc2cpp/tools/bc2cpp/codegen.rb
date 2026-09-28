@@ -163,6 +163,9 @@ class CodeGen
     # DIRECT_CONSTRUCT_TARGETS actually used; read by
     # emit_direct_construct_decls.
     @direct_construct_used = Set.new
+    # Any direct allocation needs the shared helper; only allowlisted classes
+    # need the gem-init class accessor declared by emit_direct_construct_decls.
+    @direct_alloc_used = false
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
     # ATTR_STRUCT_DEVIRT: [owner, ivar] pairs embedded only because a synthesized
