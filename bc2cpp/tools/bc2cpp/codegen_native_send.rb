@@ -8,6 +8,8 @@ class CodeGen
   # method name globally, while the runtime class guard selects the owner.
   NATIVE_WRAPPER_DIRECT_OWNERS = {
     'bitmap=' => %w[RGSS::Sprite],
+    'clear' => %w[RGSS::Bitmap],
+    'rect' => %w[RGSS::Bitmap RGSS::Viewport],
     'fill_rect' => %w[RGSS::Bitmap],
     'blt' => %w[RGSS::Bitmap],
     'stretch_blt' => %w[RGSS::Bitmap],
@@ -18,10 +20,35 @@ class CodeGen
     'height' => %w[RGSS::Bitmap],
     'disposed?' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window],
     'visible' => %w[RGSS::Sprite RGSS::Viewport RGSS::Plane],
+    'update' => %w[RGSS::Sprite RGSS::Viewport RGSS::Window],
     'dispose' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window],
     'openness=' => %w[RGSS::Window],
     'tone=' => %w[RGSS::Sprite RGSS::Window RGSS::Viewport],
     'opacity=' => %w[RGSS::Sprite]
+  }.freeze
+
+  NATIVE_WRAPPER_ZERO_ARG_DIRECT = {
+    'clear' => { 'RGSS::Bitmap' => 'bitmap_clear_direct' },
+    'rect' => { 'RGSS::Bitmap' => 'bitmap_rect_direct', 'RGSS::Viewport' => 'viewport_rect_direct' },
+    'width' => { 'RGSS::Bitmap' => 'bitmap_width_direct' },
+    'height' => { 'RGSS::Bitmap' => 'bitmap_height_direct' },
+    'disposed?' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window]
+      .to_h { |owner| [owner, 'disposed_direct'] },
+    'visible' => %w[RGSS::Sprite RGSS::Viewport RGSS::Plane].to_h { |owner| [owner, 'visible_direct'] },
+    'update' => {
+      'RGSS::Sprite' => 'sprite_update_direct',
+      'RGSS::Viewport' => 'viewport_update_direct',
+      'RGSS::Window' => 'window_update_direct'
+    }
+  }.freeze
+
+  NATIVE_WRAPPER_CLASS_ACCESSORS = {
+    'RGSS::Bitmap' => 'native_bitmap_class',
+    'RGSS::Sprite' => 'native_sprite_class',
+    'RGSS::Viewport' => 'native_viewport_class',
+    'RGSS::Plane' => 'native_plane_class',
+    'RGSS::Tilemap' => 'native_tilemap_class',
+    'RGSS::Window' => 'native_window_class'
   }.freeze
 
   # LITERAL_EQQ_SUPPORT soundness gate, re-checked against this run's @registry:
