@@ -186,19 +186,6 @@ class CodeGen
     @constant_object_probe = false
   end
 
-  # A module_function copy uses the same body as its module instance method but
-  # receives the module object as `self`. Reuse that body only when it never
-  # observes or forwards self; otherwise the two owners have different runtime
-  # receiver semantics.
-  def module_function_body_self_independent?(irep)
-    return false unless irep
-
-    forbidden = %w[BLOCK EXEC GETIV SETIV LOADSELF SUPER SSEND SSEND0 SSENDB]
-    irep.instructions.none? do |insn|
-      forbidden.include?(insn.op) || insn.args.scan(/R(\d+)/).flatten.include?('0')
-    end
-  end
-
   def stable_standard_constructor_class?(klass)
     stable_identity = @closed_world && (@closed_world.stable_class_constant?(klass) ||
                                         @closed_world.stable_constant_identity?(klass))
@@ -287,6 +274,42 @@ class CodeGen
 
     defs = (@registry[name] || []).select { |md| md.owner == owner }
     defs.size == 1 && defs.first.irep ? defs.first : nil
+  end
+
+  # A compiled module_function copy runs the source body with the module object
+  # as self. Resolve its bare self-calls against that same module's singleton
+  # copies, but only when both copies are emitted in this closed-world build.
+  def lexical_module_function_self_target(name, owner_def)
+    return nil unless owner_def && owner_def.owner.is_a?(String)
+
+    owner = owner_def.owner.delete_suffix('.singleton')
+    singleton_owner = "#{owner}.singleton"
+    return nil unless @closed_world&.stable_constant_identity?(owner)
+    return nil unless @only_owners&.include?(singleton_owner) || @other_owners&.include?(singleton_owner)
+    return nil if @unknown_mixins.include?(singleton_owner) ||
+                  !Array(@included_modules[singleton_owner]).empty? ||
+                  !Array(@prepended_modules[singleton_owner]).empty?
+
+    current_copy = (@registry[owner_def.name] || []).select do |definition|
+      definition.kind == :module_function && definition.owner == singleton_owner &&
+        definition.copy_owner == owner && definition.copy_irep == owner_def.irep
+    end
+    return nil unless current_copy.one?
+
+    copies = (@registry[name] || []).select do |definition|
+      definition.kind == :module_function && definition.owner == singleton_owner &&
+        definition.copy_owner == owner && definition.visibility == :public && definition.copy_irep
+    end
+    return nil unless copies.one?
+
+    copy = copies.first
+    target = (@registry[name] || []).find do |definition|
+      definition.owner == owner && definition.irep == copy.copy_irep
+    end
+    return nil unless target && !hot_only_excluded?(copy.copy_irep)
+    return nil if devirt_blocked_name?(name)
+
+    target
   end
 
   # LEXICAL_SELF_KEYWORD_SUPPORT: monomorphic_target's role for

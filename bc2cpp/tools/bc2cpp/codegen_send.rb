@@ -815,12 +815,22 @@ class CodeGen
     # self_receiver_class). A proven fact, so the direct call needs no runtime
     # guard or fallback, like MONO. Never for an explicit receiver.
     lexical_self = false
+    module_function_self = false
     lexical_self_ivar_accessor = nil
     if target.nil? && self_implicit
+      module_target = lexical_module_function_self_target(name, owner_def)
+      if module_target&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(module_target.irep)) &&
+         compiles_clean?(module_target.irep) &&
+         n.between?(mandatory_arity(@ireps.fetch(module_target.irep)),
+                    mandatory_arity(@ireps.fetch(module_target.irep)) + optional_arity(@ireps.fetch(module_target.irep))) &&
+         native_arg_types(module_target, n).compact.empty?
+        target = module_target
+        module_function_self = true
+      end
       lex_owner = lexical_self_owner(owner_def)
       # SINGLETON_LEXICAL_SELF: only the irep branch below; accessors stay dynamic.
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
-      if lex_owner || singleton_candidate
+      if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
         if lex_candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(lex_candidate.irep)) &&
            compiles_clean?(lex_candidate.irep) &&
@@ -931,7 +941,13 @@ class CodeGen
     # dynamic dispatch, unless another gem emits it (@other_owners; see
     # emit_decls_header).
     if target && @only_owners && !@only_owners.include?(target.owner)
-      target = nil unless @other_owners&.include?(target.owner)
+      copied_owner = "#{target.owner}.singleton"
+      module_function_emitted = @only_owners.include?(copied_owner) &&
+                                (@registry[target.name] || []).any? do |definition|
+                                  definition.kind == :module_function && definition.owner == copied_owner &&
+                                    definition.copy_owner == target.owner && definition.copy_irep == target.irep
+                                end
+      target = nil unless @other_owners&.include?(target.owner) || module_function_emitted
     end
 
     if target
@@ -994,6 +1010,11 @@ class CodeGen
           "  } else {\n" \
           "    #{fallback}" \
           "  }\n"
+      elsif module_function_self
+        note = "  // MODULE_FUNCTION_SELF :#{name} -> #{target.owner}.singleton##{target.name} " \
+               "(the compiled source body runs with its module object as self), direct C++ call " \
+               "(no mrb_funcall, no runtime check)#{native_note}\n"
+        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       elsif lexical_self
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
@@ -1100,7 +1121,7 @@ class CodeGen
            !@unknown_mixins.include?(singleton_owner) && pure_mandatory_arity?(candidate_irep) &&
            mandatory_arity(candidate_irep) == n && !hot_only_excluded?(candidate_label) &&
            constant_object_candidate_clean?(candidate_label) &&
-           target && (!copied_module_function || module_function_body_self_independent?(candidate_irep)) &&
+           target &&
            native_arg_types(target, n).compact.empty? &&
            (!@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner))
           impl = cpp_name(target.owner, target.name) + '_impl'
