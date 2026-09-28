@@ -182,7 +182,10 @@ class CodeGen
       sname = struct_name(d.owner)
       out << "  {\n"
       out << "    #{sname}* embedded = (#{sname}*)mrb_calloc(M, 1, sizeof(#{sname}));\n"
-      embedded_ivars.each_key { |ivar| out << "    embedded->#{ivar_field_name(ivar)} = mrb_undef_value();\n" }
+      embedded_ivars.each do |ivar, type|
+        initial = type == :value ? 'mrb_undef_value()' : '{}'
+        out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+      end
       out << "    mrb_data_init(self, embedded, &#{type_var(d.owner)});\n"
       out << "  }\n"
     end

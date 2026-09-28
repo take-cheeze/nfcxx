@@ -234,12 +234,12 @@ class CodeGen
       # unchanged and the assigned value (not the field) is returned.
       store =
         if NULLABLE_TYPES.include?(type)
-          "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar}, arg);\n"
+          "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}, arg);\n"
         elsif type == :value
           "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
             "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
         else
-          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);\n"
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = #{ops[:unbox]}(arg);\n"
         end
       guard = if type == :value
                 ''

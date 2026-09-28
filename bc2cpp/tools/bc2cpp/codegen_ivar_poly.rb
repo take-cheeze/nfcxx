@@ -189,9 +189,9 @@ class CodeGen
       # check still runs first, so a refused value leaves the field unchanged.
       store =
         if NULLABLE_TYPES.include?(type)
-          "#{indent}bc2cpp_fixnum_or_nil_set(&((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar}, #{src});"
+          "#{indent}bc2cpp_fixnum_or_nil_set(&((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}, #{src});"
         else
-          "#{indent}((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar} = #{ops[:unbox]}(#{src});"
+          "#{indent}((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)} = #{ops[:unbox]}(#{src});"
         end
       "if (!#{ops[:check]}(#{src})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
         "#{store}#{tail}"

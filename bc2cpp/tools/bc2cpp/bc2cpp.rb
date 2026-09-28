@@ -654,7 +654,17 @@ if $PROGRAM_NAME == __FILE__
                 native_expression_devirt: native_expression_devirt,
                 native_registered_expressions: native_registered_expressions).fixnum_return_names
   end
-  ivar_layout = profile_call.call('IvarLayout.all final') { IvarLayout.all(ireps, registry) }
+  all_ivars = profile_call.call('IvarLayout.all final') { IvarLayout.all(ireps, registry) }
+  typed_ivars = profile_call.call('IvarLayout.analyze final') do
+    IvarLayout.analyze(ireps, registry, arg_types, annotations, integer_constants,
+                       fixnum_return_probe, fixnum_nil_ivars)
+  end
+  ivar_layout = {}
+  all_ivars.each do |klass, ivars|
+    ivar_layout[klass] = ivars.to_h do |name, fallback_type|
+      [name, typed_ivars.dig(klass, name) || fallback_type]
+    end
+  end
   profile_phase.call('return/fixnum proofs + final ivars')
   warn ''
   warn '== ivar embedding =='
