@@ -423,7 +423,11 @@ class CodeGen
       "    break;\n" \
       "  }\n" \
       "  case MRB_TT_STRING:\n" \
-      "    r#{d} = mrb_str_to_integer(M, #{recv}, 10, FALSE);\n" \
+      "    if (mrb_obj_ptr(#{recv})->c == M->string_class) {\n" \
+      "      r#{d} = mrb_str_to_integer(M, #{recv}, 10, FALSE);\n" \
+      "    } else {\n" \
+      "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    }\n" \
       "    break;\n" \
       "  default:\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \

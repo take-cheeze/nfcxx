@@ -109,12 +109,14 @@ def build_registry(ireps, root_label)
   included_modules = {}
   prepended_modules = {}
   unknown_mixins = Set.new
-  # CONST_CONTAINER_SUPPORT: qualified constant name -> 'Array'/'Hash'/'Range'
-  # when every SETCONST of that name writes a proven literal_container_class
-  # value. Disagreeing sites poison the name to nil; poisoned entries are
-  # removed before returning. A literal's shape is a one-shot syntactic fact,
-  # so no fixed point is needed (unlike ClassLayout).
+  # Constant value class hints ('Array'/'Hash'/'Range') from assignments whose
+  # every SETCONST site writes a proven literal_container_class value.
+  # Disagreeing or unknown sites poison the name; constructor-based hints are
+  # added later, after closed-world constant proofs become available.
   container_constants = {}
+  # Value-constant type inference consumes these after class names and closed
+  # world facts are available. Keep the write site and lexical namespace here.
+  constant_assignment_sites = []
   # STRUCT_MEMBERS_ANALYSIS result: qualified Struct owner -> member names in
   # storage-index order. See detect_struct_new_members.
   struct_member_lists = {}
@@ -229,6 +231,7 @@ def build_registry(ireps, root_label)
         const_name = insn.args[/^(\S+)/, 1]
         src_reg = insn.args[/R(\d+)/, 1]
         qualified = namespace ? "#{namespace}::#{const_name}" : const_name
+        constant_assignment_sites << { name: qualified, irep: irep.label, idx: idx, reg: src_reg, owner: namespace }
         klass = literal_container_class(irep, idx, src_reg)
         # Two disagreeing (or unresolvable) sites poison the name to nil; never
         # guess which one wins.
@@ -410,14 +413,15 @@ def build_registry(ireps, root_label)
           # `module_function :a, :b` installs a public copy of each instance method on
           # the module's singleton class. In mruby (src/class.c
           # mrb_mod_module_function), unlike CRuby, the instance method stays as it was
-          # (the make-private call is commented out), so only the singleton copy needs a
-          # registry entry. It is added as "Owner.singleton" with irep: nil: the registry
-          # cannot express "two owners, one irep", and irep: nil can only prevent a
-          # direct call, never enable a wrong one. Only the retroactive (n >= 1) form is
-          # handled; the bare mode-switch form does not occur in this closed world.
+          # (the make-private call is commented out). Preserve the copy's source irep
+          # separately: it is not a second method body, and must not replace the
+          # instance method's owner when codegen builds its `_impl`.
           collect_loadsym_names.call.each do |mname|
+            source_owner = namespace || 'Object'
+            source = registry[mname]&.reverse&.find { |d| d.owner == source_owner && d.irep }
             registry[mname] << MethodDef.new(name: mname, owner: "#{namespace || 'Object'}.singleton",
-                                              irep: nil, visibility: :public)
+                                              irep: nil, visibility: :public, kind: :module_function,
+                                              copy_irep: source&.irep, copy_owner: source&.owner)
           end
         else
           # attr_reader/attr_writer/attr_accessor are native, so their accessors get no
@@ -521,7 +525,7 @@ def build_registry(ireps, root_label)
 
   walk.call(root_label, nil)
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists, class_decls, walked, module_body_ivar_labels]
+   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites]
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back

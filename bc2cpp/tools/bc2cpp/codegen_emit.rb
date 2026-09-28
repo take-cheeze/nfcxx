@@ -579,7 +579,16 @@ class CodeGen
     # compile_method reads @only_owners/@other_owners, so both are set before any
     # compile_method runs. compile_method never assigns them.
     leaves = @owner_of.keys
-    leaves = leaves.select { |l| only_owners.include?(@owner_of.fetch(l).owner) } if only_owners
+    if only_owners
+      leaves.select! { |l| only_owners.include?(@owner_of.fetch(l).owner) }
+      # A module_function copy has its own singleton lookup entry but shares its
+      # source body's irep. Emit that body from the module's gem when the copy's
+      # singleton owner is selected; the source module method itself stays bytecode.
+      copied = @registry.values.flatten.filter_map do |d|
+        d.copy_irep if d.kind == :module_function && d.copy_irep && only_owners.include?(d.owner)
+      end
+      leaves |= copied
+    end
     # HOT_ONLY: excluded methods get no `_impl`, entry or declaration (ADR 0214).
     leaves = leaves.reject { |l| hot_only_excluded?(l) }
     leaves.map { |label| compile_method(label) }

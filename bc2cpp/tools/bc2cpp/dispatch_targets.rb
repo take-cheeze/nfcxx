@@ -22,20 +22,26 @@
 # mrb_int/mrb_float; mrb_as_int/mrb_as_float raise the same TypeError they
 # raised inside `fn`.
 NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', arity: 4, arg_type: :float },
-  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', arity: 4, arg_type: :float },
-  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', arity: 4, arg_type: :int },
+  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', class_owner: 'RGSS::Tone',
+              arity: 4, arg_type: :float },
+  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', class_owner: 'RGSS::Color',
+               arity: 4, arg_type: :float },
+  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', class_owner: 'RGSS::Rect',
+              arity: 4, arg_type: :int },
   # Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that
   # rgss::sprite_new_direct (include/rgss_construct.hxx) reproduces. "|o" never
   # coerces or raises, so there is no TypeError behavior to preserve.
-  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', arity: [0, 1],
+  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', class_owner: 'RGSS::Sprite',
+                arity: [0, 1],
                 arg_type: :object },
   # Bitmap: bmp_init_size is `mrb_get_args(M, "ii", ...)` + alloc_obj, which
   # rgss::bitmap_new_direct reproduces. Bitmap#initialize also accepts a String
   # (file load), so `type_guard: :int` checks mrb_integer_p on every argument and
   # falls back to mrb_funcall otherwise.
-  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', arity: 2, arg_type: :int,
-                type_guard: :int },
+  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', class_owner: 'RGSS::Bitmap',
+                arity: 2, arg_type: :int, type_guard: :int },
+  'Table' => { fn: 'rgss::table_new_direct', class_fn: 'rgss::native_table_class', class_owner: 'RGSS::Table',
+               arity: [1, 2, 3], arg_type: :table_dimensions },
 }.freeze
 
 # bc2cpp-COMPILED classes whose `Owner.new` may become bc2cpp_direct_alloc +
@@ -712,17 +718,17 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # non-class constant like POS_BOTTOM is not in that set, so it still
       # resolves to nothing and the old behaviour is unchanged for it.
       #
-      # Ambiguity is refused exactly as lexically_resolve_construct_target
-      # refuses it: a bare name that could fall through to a same-named
-      # top-level constant is not resolved unless it names a class uniquely, so
-      # this can only turn a nil into a class, never into the wrong one.
+      # Ruby and generated constant lookup both search lexical scopes from the
+      # innermost outward. When same-named classes exist at multiple levels,
+      # the first defined binding is the one this site reads; runtime class
+      # identity guards still reject a rebound or merged receiver trace.
       if resolving_new && owner && known_owners
         nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
         hit = nesting.length.downto(1).filter_map do |n|
           candidate = "#{nesting.first(n).join('::')}::#{written}"
           candidate if known_owners.include?(candidate)
         end
-        return hit.first if hit.size == 1
+        return hit.first unless hit.empty?
         # UNIQUE_CLASS_NAME: a bare constant may be reachable through an
         # Object-included module (for example Bitmap -> RGSS::Bitmap). Resolve
         # only names already proven unique and reachable at this lexical site.
@@ -730,6 +736,19 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
            known_owners.include?(unique)
           return canonical ? unique : const_name
         end
+        # Native RGSS constructors have gem-init-captured class accessors even
+        # when native source scanning cannot give their short names a unique
+        # canonical path. Object's RGSS include makes these bare names
+        # reachable; compile_send still requires the runtime receiver class to
+        # match that constructor's captured class before calling it directly.
+        if path.empty? && NATIVE_CONSTRUCT_TARGETS.key?(const_name) &&
+           Array(UniqueClassNames.object_mixins).include?('Object::RGSS')
+          return const_name
+        end
+        # String is a core mruby class whose RClass* is fixed in mrb_state.
+        # Generic construction still checks that identity and the standard
+        # Class#new/allocate chain before bypassing constant dispatch.
+        return const_name if path.empty? && %w[String NameError].include?(const_name)
       end
 
       # CONST_CONTAINER_SUPPORT: without `resolving_new` this chain is the receiver
@@ -839,6 +858,39 @@ end
 #   * a literal of the SAME class -- both arms agree.
 # An older GETIV with no class fact, an opaque SEND result, or a GETIDX whose
 # element class is unresolved is refused, not merged.
+# CLOSED_WORLD_VALUE_CONSTANT: infer the instance class of a single-assignment
+# constant initialized directly by a statically resolved `Klass.new`. The
+# resulting receiver fact remains guarded at dispatch; a custom constructor
+# returning another class therefore takes the ordinary fallback.
+def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world)
+  return {} unless closed_world
+
+  known_owners = Set.new(registry.values.flatten.map(&:owner))
+  inferred = {}
+  assignment_sites.each do |site|
+    next unless closed_world.single_assignment_constant?(site[:name])
+    next unless site[:reg]
+    next if container_constants.key?(site[:name])
+
+    irep = ireps[site[:irep]]
+    next unless irep
+
+    constructor_idx = site[:idx] - 1
+    constructor = irep.instructions[constructor_idx]
+    next unless constructor && %w[SEND SEND0 SENDB].include?(constructor.op)
+    next unless constructor.args[/^R(\d+)/, 1] == site[:reg]
+    next unless constructor.args[/:[\w+\-*\/<>=!?\[\]&|^~%@]+/, 0] == ':new'
+
+    klass = trace_new_target(irep, site[:idx], site[:reg], nil, 0, nil, owner: site[:owner],
+                             registry: registry, container_constants: container_constants,
+                             known_owners: known_owners)
+    next unless klass.is_a?(String) && known_owners.include?(klass)
+
+    inferred[site[:name]] = klass
+  end
+  inferred
+end
+
 def container_phi_merge(irep, at, reg)
   lit = irep.instructions[at + 1]
   return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.args[/^R(\d+)/, 1] == reg

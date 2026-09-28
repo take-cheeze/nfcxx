@@ -78,7 +78,7 @@ BC2CPP_COMPILED_GEMS = {
     # touches no ivar.
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
                LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
-               LCF::Array1D LCF::Array2D StringIO],
+               LCF::Array1D LCF::Array2D LCF.singleton StringIO],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -102,11 +102,10 @@ BC2CPP_COMPILED_GEMS = {
     # - A POLY name in the registry only stops other call sites devirtualizing
     #   into it; it never blocks registering the owner's own method.
     #
-    # `LCF` (the bare module) is deliberately not an owner: its methods compile,
-    # but every call site reaches them as `LCF.read_ber(...)` through the
-    # module_function copy on the singleton class (irep nil, "LCF.singleton"), and
-    # LCF is never included or extended, so an LCF-owned _impl would be
-    # unreachable dead code.
+    # `LCF.singleton` selects module_function copies for selective emission. Their
+    # shared source ireps are emitted as LCF-owned implementations only when the
+    # copy is included in the hot-method set; the module instance methods remain
+    # bytecode and are not registered as compiled replacements.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu

@@ -35,6 +35,7 @@ class ClosedWorld
   NATIVE_CORE = %r{/3rd/mruby/(?:src|mrbgems)/}
   RUBY_DYNAMIC = /\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
+  RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
 
   attr_reader :global_refusal
 
@@ -50,6 +51,11 @@ class ClosedWorld
     @touch_sets = []
     @unknown_defs = Set.new
     @rebound = Set.new
+    @constant_write_counts = Hash.new(0)
+    @class_constant_names = Set.new
+    @deferred_constant_writes = Set.new
+    @dynamic_constant_mutation = false
+    @outside_constant_writes = Set.new
     @dynamic_subclassed = Set.new
     @memo = {}
     @desc_memo = {}
@@ -89,7 +95,41 @@ class ClosedWorld
   # A runtime exact-class guard needs a stable constant, but unlike
   # exact_class? it does not require the class to have no subclasses.
   def stable_class_constant?(owner)
-    !@global_refusal && !opaque?(owner)
+    return false if @global_refusal || !owner.is_a?(String)
+    return !opaque?(owner) if @class_decls.key?(owner)
+
+    # MODULE declarations do not participate in the class hierarchy table, but
+    # their constant identity needs the same closed-world stability proof.
+    return false if owner.include?('.') || owner.include?('<')
+    return false unless ConstructClassNames.table&.key?(owner)
+    return false if @rebound.include?(simple(owner))
+
+    spelled = [owner.split('::').first, simple(owner)].uniq
+    !@touch_sets.any? { |set| spelled.all? { |s| set.include?(s) } }
+  end
+
+  # Constant-object dispatch needs identity stability, not an exact instance
+  # hierarchy. Reopening a class/module changes methods, not its constant value;
+  # the caller separately proves the singleton method lookup is closed.
+  def stable_constant_identity?(owner)
+    return false if @global_refusal || !owner.is_a?(String) || !ConstructClassNames.table&.key?(owner)
+
+    # UNIQUE_CLASS_NAME includes native-defined class/module objects and has
+    # already rejected bytecode, native, and foreign constant reassignment.
+    return true if UniqueClassNames.table&.value?(owner)
+
+    !@rebound.include?(simple(owner))
+  end
+
+  # A value constant is single-assignment only when bytecode has one binding
+  # site, no outside source writes the name, and the name is not a class
+  # declaration. Dynamic constant mutation poisons all such facts.
+  def single_assignment_constant?(name)
+    return false if @dynamic_constant_mutation || !name.is_a?(String)
+
+    simple = name.split('::').last
+    @constant_write_counts[simple] == 1 && !@class_constant_names.include?(simple) &&
+      !@deferred_constant_writes.include?(simple) && !@outside_constant_writes.include?(simple)
   end
 
   # A literal `Klass.new` has an exact-class result only while ordinary
@@ -127,17 +167,42 @@ class ClosedWorld
   def scan_native(paths)
     paths.each do |path|
       # Drop comments, keeping string and char literals (a "//" inside one).
-      text = File.binread(path).gsub(%r{"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|/\*.*?\*/|//[^\n]*}m) do |tok|
+      source = File.binread(path)
+      text = source.gsub(%r{"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|/\*.*?\*/|//[^\n]*}m) do |tok|
         tok.start_with?('/') ? ' ' : tok
       end
       names = Set.new
       dynamic = text.match?(NATIVE_DYNAMIC)
       defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
+      unless path.match?(NATIVE_CORE)
+        source.scan(/\bmrb_(?:const_set|const_remove)\s*\(([^;]*?)\);/m) do |(body)|
+          args = bc2cpp_c_call_args(body)
+          target = args[2].to_s
+          constant = target[/\bmrb_intern_(?:lit|cstr)\s*\(\s*\w+\s*,\s*"(\w+)"/, 1] ||
+                     target[/\bMRB_SYM\((\w+)\)/, 1]
+          if constant
+            names << constant
+            @outside_constant_writes << constant
+          else
+            @dynamic_constant_mutation = true
+          end
+        end
+        source.scan(/\bmrb_define_global_const\s*\(\s*\w+\s*,\s*"([A-Z]\w*)"/) do |m|
+          names << m.first
+          @outside_constant_writes << m.first
+        end
+      end
       text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
         literals = body.scan(C_STRING).flatten
         tokens = body.scan(MRB_SYM_TOKEN_RE).map { |m, n| resolve_mrb_sym_token(m, n) }
         if kind.match?(/\A(?:(?:class|module)(?:_under)?(?:_id)?|(?:global_)?const(?:_id)?)\z/)
           defines_class = true
+          args = bc2cpp_c_call_args(body)
+          positions = kind.match?(/\A(?:class|module)/) ? [1, 2] : [2]
+          positions.each do |position|
+            constant = args[position].to_s[/\bMRB_SYM\((\w+)\)/, 1] || args[position].to_s[/"(\w+)"/, 1]
+            @outside_constant_writes << constant if constant
+          end
           next
         end
         names.merge(literals)
@@ -175,7 +240,9 @@ class ClosedWorld
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
       @touch_sets << text.scan(/\b[A-Z]\w*/).to_set
+      text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
+      @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
       global!(:outside_class_factory) if text.match?(/\b(?:Class|Struct)\.new\b/)
     end
   end
@@ -206,8 +273,14 @@ class ClosedWorld
         when 'GETCONST', 'GETMCNST'
           const = insn.args[/(?:::|\s)(\w+)\s*\z/, 1]
           scan_factory(irep, insns, idx, insn, const) if CLASS_FACTORIES.include?(const)
+        when 'CLASS', 'MODULE'
+          name = insn.args[/:(\S+)/, 1]
+          @class_constant_names << name.split('::').last if name
         when 'SETCONST', 'SETMCNST'
-          @rebound << insn.args[/(?:::|\A)(\w+)\s+R\d+/, 1].to_s
+          name = insn.args[/(?:::|\A)(\w+)\s+R\d+/, 1].to_s
+          @rebound << name
+          @constant_write_counts[name] += 1
+          @deferred_constant_writes << name unless @walked.include?(irep.label)
         end
       end
     end
@@ -215,7 +288,10 @@ class ClosedWorld
 
   def scan_send(irep, insns, idx, insn)
     name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-    global!(:dynamic_install) if CONST_REBINDERS.include?(name)
+    if CONST_REBINDERS.include?(name)
+      @dynamic_constant_mutation = true
+      global!(:dynamic_install)
+    end
     if MIXIN_SENDS.include?(name)
       # Class-body include/prepend is separately represented by build_registry
       # (or marked unknown_mixins); runtime mixin changes are not.

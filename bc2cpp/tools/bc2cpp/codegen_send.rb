@@ -49,9 +49,20 @@ class CodeGen
     n = n_match ? n_match[1].to_i : 0
     recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
-    new_target = if name == 'new' && !self_implicit && irep && idx
-                   trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true,
-                                   owner: owner_def&.owner)
+    new_proof_idx = idx || trace_idx
+    new_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    implicit_new_target = name == 'new' && self_implicit ? implicit_singleton_self_class(owner_def) : nil
+    new_target = if implicit_new_target
+                   implicit_new_target
+                 elsif name == 'new' && !self_implicit && irep && new_proof_idx
+                   trace_new_target(irep, new_proof_idx, new_proof_reg, nil, 0, nil, resolving_new: true,
+                                   owner: owner_def&.owner,
+                                   class_layout: @class_layout, registry: @registry,
+                                   container_constants: @container_constants,
+                                   element_annotations: @element_annotations,
+                                   known_owners: @known_owners,
+                                   capture_hints: @block_hash_capture_hints,
+                                   method_return_class: ->(method_name) { class_return_for_dispatch(method_name) })
                  end
 
     # LITERAL_EQQ_SUPPORT: `LITERAL === x` from `case x; when LITERAL` (receiver a
@@ -98,19 +109,42 @@ class CodeGen
       end
     end
 
-    # Devirtualize `SEND :new` whose receiver traces (GETCONST, at this call site)
-    # to a NATIVE_CONSTRUCT_TARGETS class. Never for self_implicit sends; irep/idx
-    # are nil exactly then, but are checked because trace_new_target needs them.
-    if name == 'new' && !self_implicit && irep && idx
+    # Devirtualize `:new` when either bytecode traces its class constant or the
+    # enclosing singleton method proves that implicit self is the class object.
+    if name == 'new' && irep && new_target
       known = new_target
       native_name = known && UniqueClassNames.table&.key(known)
       native_name = nil unless native_name && UniqueClassNames.resolve(native_name, owner_def&.owner) == known
       native = known && (NATIVE_CONSTRUCT_TARGETS[known] ||
-                         (native_name && NATIVE_CONSTRUCT_TARGETS[native_name]))
+                         (native_name && NATIVE_CONSTRUCT_TARGETS[native_name]) ||
+                         NATIVE_CONSTRUCT_TARGETS.values.find { |row| row[:class_owner] == known })
+      native_owner = native && (native[:class_owner] || known)
+      native_constructor_safe = native && @closed_world&.standard_constructor_lookup? &&
+                                exact_constructor_chain?(native_owner)
       # Exact arity only (an Array lists several accepted counts); other counts fall
       # through to dynamic dispatch.
-      if native && (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
+      if native_constructor_safe &&
+         (native[:arity] == n || (native[:arity].is_a?(Array) && native[:arity].include?(n)))
         @native_construct_used << known
+        if native[:arg_type] == :table_dimensions
+          dims = argv.each_with_index.map { |arg, i| "bc2cpp_table_dim_#{d}_#{i}" }
+          declarations = argv.zip(dims).map { |arg, local| "mrb_int #{local} = mrb_as_int(M, #{arg});" }
+          padded_dims = dims + Array.new(3 - dims.size, '1')
+          call = "r#{d} = #{native[:fn]}(M, #{native[:class_fn]}(), #{n}, #{padded_dims.join(', ')});"
+          class_guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
+          fallback = dynamic_dispatch_line(d, recv, name, argv).chomp
+          return <<~CPP
+              // RGSS Table.new -- integer conversion and allocation match Table#initialize
+              if (#{class_guard}) {
+                {
+                  #{declarations.join("\n  ")}
+                  #{call}
+                }
+              } else {
+                #{fallback}
+              }
+          CPP
+        end
         # `fn` takes native mrb_int/mrb_float, so arguments are unboxed here with the
         # same mrb_as_int/mrb_as_float the function used internally (same TypeError).
         # `:object` (Sprite) passes through; a 0-argument Sprite.new passes an explicit
@@ -119,7 +153,7 @@ class CodeGen
         # `type_guard` (Bitmap): check every argument's Integer tag and fall back to
         # mrb_funcall if any fails (a String first argument is the file-load form);
         # read with mrb_integer after the check.
-        stable_constructor = stable_standard_constructor_class?(known)
+        stable_constructor = stable_standard_constructor_class?(native_owner)
         class_value = stable_constructor ? "#{native[:class_fn]}()" : "mrb_class_ptr(#{recv})"
         class_guard = stable_constructor ? nil : "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
         if native[:type_guard] == :int
@@ -169,7 +203,7 @@ class CodeGen
     # DIRECT_CONSTRUCT_TARGETS plus locally emitted compiled classes: the
     # compiled-initializer counterpart of the block above. The allowlist keeps
     # its stable gem-init accessor; other classes use the owner-class cache.
-    if name == 'new' && !self_implicit && irep && idx
+    if name == 'new' && irep && new_target
       known = new_target
       listed_target = known && DIRECT_CONSTRUCT_TARGETS.include?(known)
       generic_target = known && !listed_target && @closed_world&.stable_class_constant?(known) &&
@@ -307,9 +341,14 @@ class CodeGen
     # The class-identity guard also rejects a receiver whose register came from
     # another control-flow arm; the trace only proposes `known`.
     # SENDB / keyword sends do not enter this positional compile_send path.
-    if name == 'new' && !self_implicit && irep && idx
+    if name == 'new' && irep && new_target
       known = new_target
-      if known && stable_standard_constructor_class?(known)
+      builtin_class_expr = { 'String' => 'M->string_class',
+                             'NameError' => 'mrb_exc_get_id(M, MRB_SYM(NameError))' }[known]
+      generic_constructor_safe = stable_standard_constructor_class?(known) ||
+                                 (builtin_class_expr && @closed_world&.standard_constructor_lookup? &&
+                                  exact_constructor_chain?(known))
+      if known && generic_constructor_safe
         construction = if argv.empty?
                        "    r#{d} = mrb_obj_new(M, mrb_class_ptr(#{recv}), 0, NULL);\n"
                        else
@@ -318,9 +357,85 @@ class CodeGen
                        end
         note = "  // MONO :new -> #{known}, generic direct object construction via mrb_obj_new; " +
                "standard Class#new/allocate lookup is proven and #initialize remains ordinary runtime dispatch.\n"
-        guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(known)}"
+        class_expr = builtin_class_expr || owner_class_ptr_expr(known)
+        guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{class_expr}"
         return [note, "  if (#{guard}) {\n", construction,
                 "  } else {\n", "    #{dynamic_dispatch_line(d, recv, name, argv)}", "  }\n"].join
+      end
+    end
+
+    # RGSS_NATIVE_BITMAP_SET: spr_set_bmp reads its argument from the active
+    # mruby C frame, so direct callers use the frame-independent body and keep
+    # the original C wrapper for all ordinary dispatch. The class guard makes
+    # a stale or merged receiver trace fall back through normal Ruby lookup.
+    if name == 'bitmap=' && n == 1 && !self_implicit && irep && idx
+      traced_class = trace_new_target(
+        irep, idx, d, nil, 0, nil, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if traced_class == 'RGSS::Sprite'
+        @native_construct_used << 'RGSS::Sprite'
+        return <<~CPP
+            // RGSS Sprite#bitmap= -- frame-independent native body under exact class identity
+            if (mrb_obj_class(M, #{recv}) == rgss::native_sprite_class()) {
+              r#{d} = rgss::sprite_bitmap_set_direct(M, #{recv}, #{argv.first});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
+    if name == 'fill_rect' && n == 5 && !self_implicit && irep && idx
+      traced_class = trace_new_target(
+        irep, idx, d, nil, 0, nil, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if traced_class == 'RGSS::Bitmap'
+        @native_construct_used << 'RGSS::Bitmap'
+        return <<~CPP
+            // RGSS Bitmap#fill_rect(x, y, w, h, color) -- same C-body under exact class identity
+            if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+              r#{d} = rgss::bitmap_fill_rect_direct(M, #{recv},
+                  #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{argv[4]});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
+    if name == 'blt' && [4, 5].include?(n) && !self_implicit && irep && idx
+      traced_class = trace_new_target(
+        irep, idx, d, nil, 0, nil, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if traced_class == 'RGSS::Bitmap'
+        @native_construct_used << 'RGSS::Bitmap'
+        opacity = n == 4 ? 'mrb_fixnum_value(255)' : argv[4]
+        opacity_given = n == 5 ? 'TRUE' : 'FALSE'
+        return <<~CPP
+            // RGSS Bitmap#blt -- preserves mruby integer conversion and optional opacity default
+            if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+              r#{d} = rgss::bitmap_blt_direct(M, #{recv},
+                  #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]}, #{opacity},
+                  #{opacity_given});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
       end
     end
 
@@ -646,6 +761,14 @@ class CodeGen
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
+    # TO_I_BUILTIN_TYPE_TAG_DISPATCH: the native registry has class-specific
+    # to_i entries, while compile_native_primitive_send checks each runtime tag
+    # and keeps ordinary dispatch for receiver types it does not implement.
+    if name == 'to_i' && n.zero? &&
+       builtin_class_send_safe?(name, %w[Integer Float String])
+      return compile_native_primitive_send(name, d, recv, argv)
+    end
+
     # Resolve compiled MONO/TYPED targets first; only the final POLY fallback uses
     # the generated native C expressions.
     native_expression_entries = @native_registered_expressions[name]
@@ -725,6 +848,7 @@ class CodeGen
       # multi-level accessor chains (`@state.screen.foo`); see trace_new_target.
       known_class = trace_new_target(irep, proof_idx, proof_reg, ivar_classes, cur_mand, cur_arg_classes, owner: owner_def&.owner,
                                       class_layout: @class_layout, registry: @registry,
+                                      container_constants: @container_constants,
                                       element_annotations: @element_annotations,
                                       known_owners: @known_owners,
                                       capture_hints: @block_hash_capture_hints,
@@ -940,6 +1064,41 @@ class CodeGen
         "  }\n"
     else
       return compile_native_primitive_send(name, d, recv, argv) if builtin_native_expression_send
+
+      if !self_implicit && irep && idx && @closed_world &&
+         %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[idx].op)
+        constant_owner = constant_object_owner(irep, idx,
+                                               unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
+                                               owner_def&.owner)
+        singleton_owner = "#{constant_owner}.singleton" if constant_owner
+        singleton_defs = @registry[name]&.select { |md| md.owner == singleton_owner } if singleton_owner
+        candidate = singleton_defs&.one? ? singleton_defs.first : nil
+        copied_module_function = candidate&.kind == :module_function
+        candidate_label = candidate&.irep || (candidate.copy_irep if copied_module_function)
+        candidate_irep = candidate_label && @ireps.fetch(candidate_label)
+        target = if copied_module_function
+                   @registry[name]&.find do |md|
+                     md.owner == candidate.copy_owner && md.irep == candidate.copy_irep
+                   end
+                 else
+                   candidate
+                 end
+        if candidate && candidate_irep && candidate.visibility == :public && !devirt_blocked_name?(name) &&
+           Array(@included_modules[singleton_owner]).empty? && Array(@prepended_modules[singleton_owner]).empty? &&
+           !@unknown_mixins.include?(singleton_owner) && pure_mandatory_arity?(candidate_irep) &&
+           mandatory_arity(candidate_irep) == n && !hot_only_excluded?(candidate_label) &&
+           constant_object_candidate_clean?(candidate_label) &&
+           target && (!copied_module_function || module_function_body_self_independent?(candidate_irep)) &&
+           native_arg_types(target, n).compact.empty? &&
+           (!@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner))
+          impl = cpp_name(target.owner, target.name) + '_impl'
+          via = copied_module_function ? "module_function copy of #{target.owner}##{target.name}" : "#{candidate.owner}##{candidate.name}"
+          note = "  // CLOSED_WORLD_CONSTANT_OBJECT :#{name} -> #{via} " \
+                 "(stable class/module constant, unique public singleton definition), direct C++ call " \
+                 "without mrb_funcall.\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
+        end
+      end
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||

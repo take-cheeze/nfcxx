@@ -98,7 +98,8 @@ if $PROGRAM_NAME == __FILE__
   blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
   merge!(ireps, order, blocks, block_files, block_catches)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
-    struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels = build_registry(ireps, root_label)
+    struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites =
+    build_registry(ireps, root_label)
   profile_phase.call('mrbc + parse + registry')
 
   # CLOSED_WORLD (docs/adr/0210): construct this before return/element
@@ -239,9 +240,18 @@ if $PROGRAM_NAME == __FILE__
   # compile_send's four live gates). Set next to UniqueClassNames because both
   # read the same CLASS/MODULE walk and must agree on what the bytecode defines.
   ConstructClassNames.table = profile_call.call('ConstructClassNames.analyze') do
-    ConstructClassNames.analyze(ireps, root_label)
+    ConstructClassNames.analyze(ireps, root_label, UniqueClassNames.table.values)
   end
   warn "== defined class/module names (LEXICAL_CONSTRUCT_RESOLUTION): #{ConstructClassNames.table.size} =="
+
+  # CLOSED_WORLD_VALUE_CONSTANT: a single class-constructor assignment is a
+  # guarded receiver hint, not an unconditional claim about the constant value.
+  inferred_constant_classes = profile_call.call('single-assignment value constants') do
+    infer_constructed_constant_classes(ireps, constant_assignment_sites, registry, container_constants, closed_world)
+  end
+  container_constants.merge!(inferred_constant_classes)
+  warn "== single-assignment constructed constants (CLOSED_WORLD_VALUE_CONSTANT): #{inferred_constant_classes.size} =="
+  inferred_constant_classes.sort.each { |name, klass| warn "  CONST_CLASS  #{name}  (#{klass})" }
 
   integer_constants =
     if ENV['NATIVE_SRCS'] && foreign_ruby_srcs
@@ -299,7 +309,7 @@ if $PROGRAM_NAME == __FILE__
   end
 
   warn ''
-  warn '== known container-class constants (Array/Hash/Range-valued, whole program) =='
+  warn '== known constant value classes (whole program) =='
   if container_constants.empty?
     warn '  (none)'
   else

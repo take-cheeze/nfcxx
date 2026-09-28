@@ -12,9 +12,10 @@
 # the resolver's own ambiguity rule decides whether a bare reference is safe.
 #
 # Built from the same CLASS/MODULE walk UniqueClassNames uses
-# (bytecode_class_paths), so the two agree on what the bytecode defines. A
-# statement whose outer scope cannot be recovered is recorded as :unknown and
-# EXCLUDED, since a name that might not exist must not be resolved.
+# (bytecode_class_paths), then extended only with fully-qualified native paths
+# that UniqueClassNames proves stable. A statement whose bytecode outer scope
+# cannot be recovered is recorded as :unknown and EXCLUDED, since a name that
+# might not exist must not be resolved.
 module ConstructClassNames
   class << self
     # full path => true
@@ -23,13 +24,18 @@ module ConstructClassNames
 
   module_function
 
-  def analyze(ireps, root_label)
+  def analyze(ireps, root_label, native_unique_paths = [])
     paths = UniqueClassNames.bytecode_class_paths(ireps, root_label)
     out = {}
     paths.each_value do |fulls|
       fulls.each do |full|
         out[full] = true if full.is_a?(String)
       end
+    end
+    # UNIQUE_CLASS_NAME has already proved these native bindings have one
+    # stable identity across native, bytecode, and foreign Ruby sources.
+    Array(native_unique_paths).each do |full|
+      out[full] = true if full.is_a?(String) && full.include?('::')
     end
     out
   end

@@ -121,10 +121,101 @@ class CodeGen
     'incoming_or_unwritten_register'
   end
 
+  # Resolve a constant expression used as a class/module object, not an
+  # instance of that class. Only a straight-line GETCONST/MOVE trace qualifies:
+  # a branch or other register writer may select a different receiver.
+  def constant_object_owner(irep, idx, dest_reg, lexical_owner)
+    return nil unless @closed_world && ConstructClassNames.table
+
+    reg = dest_reg.to_s
+    path = []
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      return nil if %w[JMP JMPIF JMPNOT ONERR RESCUE EXCEPT BLOCK].include?(insn.op)
+      next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
+      next unless insn.args[/^R(\d+)/, 1] == reg
+
+      case insn.op
+      when 'MOVE'
+        reg = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless reg
+      when 'GETMCNST'
+        segment = insn.args[/::(\w+)/, 1]
+        return nil unless segment
+
+        path.unshift(segment)
+      when 'GETCONST'
+        written = insn.args[/^R\d+\s+(\S+)/, 1]
+        written = ([written] + path).join('::') if written
+        owner = resolve_class_constant_name(written, lexical_owner)
+        stable = owner && (@closed_world.stable_constant_identity?(owner) ||
+                           CodeGen.stable_class_constants&.include?(owner.split('::').last))
+        return owner if stable
+
+        return nil
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
+  def resolve_class_constant_name(written, lexical_owner)
+    return nil unless written && lexical_owner
+
+    lexical = lexical_owner.to_s.delete_suffix('.singleton').split('::')
+    candidates = lexical.length.downto(1).map { |n| "#{lexical.first(n).join('::')}::#{written}" }
+    candidates << written
+    hits = candidates.uniq.select { |name| ConstructClassNames.table.key?(name) }
+    return hits.first if hits.one?
+    return nil unless hits.empty?
+
+    # A bare native class/module may enter lookup through Object's included
+    # modules (for example Input resolving to RGSS::Input). Reuse the existing
+    # whole-program unique-name proof rather than guessing the alias path.
+    unique = UniqueClassNames.resolve(written, lexical_owner)
+    unique if unique && ConstructClassNames.table.key?(unique)
+  end
+
+  def constant_object_candidate_clean?(label)
+    return false if @constant_object_probe
+
+    @constant_object_probe = true
+    compiles_clean?(label)
+  ensure
+    @constant_object_probe = false
+  end
+
+  # A module_function copy uses the same body as its module instance method but
+  # receives the module object as `self`. Reuse that body only when it never
+  # observes or forwards self; otherwise the two owners have different runtime
+  # receiver semantics.
+  def module_function_body_self_independent?(irep)
+    return false unless irep
+
+    forbidden = %w[BLOCK EXEC GETIV SETIV LOADSELF SUPER SSEND SSEND0 SSENDB]
+    irep.instructions.none? do |insn|
+      forbidden.include?(insn.op) || insn.args.scan(/R(\d+)/).flatten.include?('0')
+    end
+  end
+
   def stable_standard_constructor_class?(klass)
     stable_identity = @closed_world && (@closed_world.stable_class_constant?(klass) ||
                                         @closed_world.stable_constant_identity?(klass))
     stable_identity && @closed_world.standard_constructor_lookup? && exact_constructor_chain?(klass)
+  end
+
+  # Inside a class method, bare `new` has the class object as its receiver.
+  # The registry's `.singleton` owner is therefore class-name evidence, but only
+  # for classes the current closed-world build actually emits.
+  def implicit_singleton_self_class(owner_def)
+    owner = owner_def&.owner
+    return nil unless owner.is_a?(String) && owner.end_with?('.singleton')
+
+    klass = owner.delete_suffix('.singleton')
+    return nil if klass.empty? || !@known_owners&.include?(klass)
+
+    klass
   end
 
   def exact_constructor_chain?(klass)
