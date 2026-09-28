@@ -478,6 +478,56 @@ class CodeGen
       end
     end
 
+    if name == 'draw_text' && [2, 3, 5, 6].include?(n) && !self_implicit && irep && drawing_proof_idx
+      traced_class = trace_new_target(
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if traced_class == 'RGSS::Bitmap' ||
+         UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
+        @native_construct_used << 'RGSS::Bitmap'
+        return <<~CPP
+            // RGSS Bitmap#draw_text -- native argument parsing is independent of the caller frame
+            if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+              mrb_value bc2cpp_draw_text_args[] = { #{argv.join(', ')} };
+              r#{d} = rgss::bitmap_draw_text_direct(M, #{recv}, #{n}, bc2cpp_draw_text_args);
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
+    if name == 'copy_blt' && n == 4 && !self_implicit && irep && drawing_proof_idx
+      traced_class = trace_new_target(
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if traced_class == 'RGSS::Bitmap' ||
+         UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
+        @native_construct_used << 'RGSS::Bitmap'
+        return <<~CPP
+            // RGSS Bitmap#copy_blt -- shared pixel body with wrapper-equivalent conversions
+            if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+              r#{d} = rgss::bitmap_copy_blt_direct(M, #{recv},
+                  #{argv[0]}, #{argv[1]}, #{argv[2]}, #{argv[3]});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
     # NATIVE_PRIMITIVE_SENDS: inline native primitives at any call site, without
     # receiver-class knowledge. monomorphic_target refuses native-only names
     # (calling an arbitrary C method directly would leave mrb_get_args reading a
