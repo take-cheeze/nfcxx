@@ -115,6 +115,26 @@ class CodeGen
       end
     end
 
+    # FLOAT_DIV_RECEIVER: LOADL float entries create immediate Float values.
+    # Float#/ is native and unoverridden for this receiver; its core body is
+    # mrb_div_float(mrb_float(self), mrb_as_float(arg)). Complex keeps the
+    # native method's specialized path when that optional feature is enabled.
+    if name == '/' && n == 1 && irep && new_proof_idx &&
+       trace_float_literal_receiver(irep, new_proof_idx, new_proof_reg) &&
+       builtin_class_send_safe?(name, %w[Float])
+      arg = argv.first
+      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, proven by the float pool literal\n" \
+             "  #ifdef MRB_USE_COMPLEX\n" \
+             "  if (mrb_type(#{arg}) == MRB_TT_COMPLEX) {\n" \
+             "    #{fallback}  } else {\n" \
+             "    r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
+             "  }\n" \
+             "  #else\n" \
+             "  r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
+             "  #endif\n"
+    end
+
     # Devirtualize `:new` when either bytecode traces its class constant or the
     # enclosing singleton method proves that implicit self is the class object.
     if name == 'new' && irep && new_target

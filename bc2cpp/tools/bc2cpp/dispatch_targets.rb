@@ -1008,3 +1008,29 @@ def trace_eqq_literal_receiver(irep, idx, reg)
   # "argument is always literal N" fact exists to fall back on.
   nil
 end
+
+# FLOAT_DIV_RECEIVER: an mrbc float pool entry is always an immediate Float, so
+# Float#/ can use its core body without a runtime receiver check. Follow only
+# MOVEs; every other write loses this exact-type proof.
+def trace_float_literal_receiver(irep, idx, reg)
+  return false unless irep && idx && reg
+
+  (idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn.args[/^R(\d+)/, 1] == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      return false unless reg
+    when 'LOADL'
+      pool_idx = insn.args[/L\[(\d+)\]/, 1]
+      entry = pool_idx && irep.pool[pool_idx.to_i]
+      return entry.is_a?(Hash) && entry[:type] == :float
+    else
+      return false
+    end
+  end
+
+  false
+end
