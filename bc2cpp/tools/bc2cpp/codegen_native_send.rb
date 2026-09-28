@@ -78,7 +78,9 @@ class CodeGen
   # expression generated from registered native C methods. The per-method
   # soundness notes are at compile_send's call site.
   def compile_native_primitive_send(name, d, recv, argv)
-    return compile_native_registered_expression(name, d, recv, argv) if @native_registered_expressions.key?(name)
+    if @native_registered_expressions.key?(name) && name != 'to_s'
+      return compile_native_registered_expression(name, d, recv, argv)
+    end
 
     case name
     when 'respond_to?'
@@ -185,25 +187,55 @@ class CodeGen
       #   self) != mrb->string_class ? mrb_str_dup(mrb, self) : self`, reproduced.
       #   MRB_TT_INTEGER: int_to_s is mrb_integer_to_str(mrb, self, 10) for n == 0
       #   (a public MRB_API).
-      # Array/Hash are excluded: mrb_ary_to_s/mrb_hash_to_s start with
-      # `mrb->c->ci->mid = MRB_SYM(inspect);`, which would corrupt the current
-      # frame. Float/Range (static, no public equivalent) and Class/Module
-      # (mrb_mod_to_s is internal.h-only) are excluded too.
-      "  // to_s -- native primitive, runtime-guarded per real receiver type\n" \
-      "  // (only String/Integer are handled directly -- see compile_native_\n" \
-      "  // primitive_send's own TO_S_TYPE_TAG_DISPATCH comment for why Array/\n" \
-      "  // Hash/Float/Range/Class are deliberately left to ordinary dispatch)\n" \
-      "  switch (mrb_type(#{recv})) {\n" \
-      "  case MRB_TT_STRING:\n" \
-      "    r#{d} = mrb_obj_class(M, #{recv}) != M->string_class ? mrb_str_dup(M, #{recv}) : #{recv};\n" \
-      "    break;\n" \
-      "  case MRB_TT_INTEGER:\n" \
-      "    r#{d} = mrb_integer_to_str(M, #{recv}, 10);\n" \
-      "    break;\n" \
-      "  default:\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    break;\n" \
-      "  }\n"
+      # Array/Hash bodies mutate the active frame's method name for recursive
+      # inspect. mrb_inspect enters inspect normally, preserving that behavior;
+      # the exact class and inspect-definition checks retain override dispatch.
+      # Float/Range (no public equivalent) and Class/Module (internal.h-only) stay
+      # on ordinary dispatch.
+      inspect_containers = builtin_class_send_safe?('inspect', %w[Array Hash])
+      container_arms = if inspect_containers
+                         <<~CPP
+                           case MRB_TT_ARRAY:
+                             if (mrb_obj_ptr(#{recv})->c == M->array_class) {
+                               r#{d} = mrb_inspect(M, #{recv});
+                             } else {
+                               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+                             }
+                             break;
+                           case MRB_TT_HASH:
+                             if (mrb_obj_ptr(#{recv})->c == M->hash_class) {
+                               r#{d} = mrb_inspect(M, #{recv});
+                             } else {
+                               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+                             }
+                             break;
+                         CPP
+                       else
+                         ''
+                       end
+      <<~CPP
+          // to_s -- native primitive, runtime-guarded per real receiver type
+          switch (mrb_type(#{recv})) {
+          case MRB_TT_STRING:
+            if (mrb_obj_ptr(#{recv})->c == M->string_class) {
+              r#{d} = #{recv};
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+            break;
+          case MRB_TT_INTEGER:
+            if (mrb_obj_class(M, #{recv}) == M->integer_class) {
+              r#{d} = mrb_integer_to_str(M, #{recv}, 10);
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+            break;
+          #{container_arms}
+          default:
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            break;
+          }
+      CPP
     when 'length'
       # LENGTH_TYPE_TAG_DISPATCH: Array (mrb_ary_size: ARY_LEN) and Hash
       # (mrb_hash_size, public) are handled. String is excluded: mrb_str_size uses

@@ -640,6 +640,12 @@ class CodeGen
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
+    if name == 'to_s' && n.zero? && !devirt_blocked_name?(name) &&
+       builtin_class_send_safe?(name, %w[Array Hash Integer String]) &&
+       builtin_class_send_safe?('inspect', %w[Array Hash])
+      return compile_native_primitive_send(name, d, recv, argv)
+    end
+
     # Resolve compiled MONO/TYPED targets first; only the final POLY fallback uses
     # the generated native C expressions.
     native_expression_entries = @native_registered_expressions[name]
@@ -651,7 +657,7 @@ class CodeGen
                                      builtin_class_send_safe?(name, native_expression_owners)
 
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && ownerless_native_dispatch_safe?(name) &&
-       !@native_registered_expressions.key?(name)
+       (!@native_registered_expressions.key?(name) || name == 'to_s')
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
