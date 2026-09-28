@@ -451,6 +451,33 @@ class CodeGen
       end
     end
 
+    if name == 'stretch_blt' && [3, 4].include?(n) && !self_implicit && irep && drawing_proof_idx
+      traced_class = trace_new_target(
+        irep, drawing_proof_idx, drawing_proof_reg, drawing_ivar_classes, drawing_mand,
+        drawing_arg_classes, owner: owner_def&.owner,
+        class_layout: @class_layout, registry: @registry,
+        container_constants: @container_constants,
+        element_annotations: @element_annotations,
+        known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+      )
+      if traced_class == 'RGSS::Bitmap' ||
+         UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
+        @native_construct_used << 'RGSS::Bitmap'
+        opacity = n == 3 ? 'mrb_fixnum_value(255)' : argv[3]
+        opacity_given = n == 4 ? 'TRUE' : 'FALSE'
+        return <<~CPP
+            // RGSS Bitmap#stretch_blt -- exact receiver identity keeps the native body and conversions
+            if (mrb_obj_class(M, #{recv}) == rgss::native_bitmap_class()) {
+              r#{d} = rgss::bitmap_stretch_blt_direct(M, #{recv},
+                  #{argv[0]}, #{argv[1]}, #{argv[2]}, #{opacity}, #{opacity_given});
+            } else {
+              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            }
+        CPP
+      end
+    end
+
     # NATIVE_PRIMITIVE_SENDS: inline native primitives at any call site, without
     # receiver-class knowledge. monomorphic_target refuses native-only names
     # (calling an arbitrary C method directly would leave mrb_get_args reading a
