@@ -57,6 +57,27 @@ class CodeGen
     drawing_mand = drawing_enter ? drawing_enter.args.split(':').first.to_i : 0
     drawing_arg_classes = owner_def && @class_annotations[irep&.label]&.args
     drawing_ivar_classes = owner_def && @class_layout[owner_def.owner]
+
+    # EXCEPTION_MESSAGE_DIRECT: the rescue recognizer plus the receiver-fact
+    # MOVE-chain proof establishes that `recv` is the caught Exception object.
+    # Match error.c's exc_to_s exactly, including nil/non-string messages and
+    # the lazy String class assignment; the registry gate excludes Ruby overrides.
+    if name == 'message' && n.zero? && !self_implicit && irep && idx &&
+       rescued_exception_message_safe? && rescued_exception_receiver?(irep, idx, d)
+      return "  // EXCEPTION_MESSAGE_DIRECT: recognized rescued Exception; mirrors error.c exc_to_s.\n" \
+             "  {\n" \
+             "    mrb_value bc2cpp_exc_message = mrb_exc_ptr(#{recv})->mesg ? " \
+             "mrb_obj_value(mrb_exc_ptr(#{recv})->mesg) : mrb_nil_value();\n" \
+             "    if (!mrb_string_p(bc2cpp_exc_message)) {\n" \
+             "      r#{d} = mrb_str_new_cstr(M, mrb_obj_classname(M, #{recv}));\n" \
+             "    } else {\n" \
+             "      struct RObject* bc2cpp_exc_message_obj = mrb_obj_ptr(bc2cpp_exc_message);\n" \
+             "      if (!bc2cpp_exc_message_obj->c) bc2cpp_exc_message_obj->c = M->string_class;\n" \
+             "      r#{d} = bc2cpp_exc_message;\n" \
+             "    }\n" \
+             "  }\n"
+    end
+
     implicit_new_target = name == 'new' && self_implicit ? implicit_singleton_self_class(owner_def) : nil
     new_target = if implicit_new_target
                    implicit_new_target

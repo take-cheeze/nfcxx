@@ -3,6 +3,51 @@
 # CodeGen: receiver, owner and super-target facts.
 
 class CodeGen
+  # A rescue handler's exception register stays an Exception value until it is
+  # overwritten. Follow only MOVE aliases back to the recognized EXCEPT.
+  def rescued_exception_receiver?(irep, idx, dest_reg)
+    return false unless irep && !idx.nil?
+
+    addr = irep.instructions[idx]&.addr
+    return false unless addr
+
+    reg = dest_reg.to_s
+    (idx - 1).downto(0) do |i|
+      insn = irep.instructions[i]
+      written = insn.args[/^R(\d+)/, 1]
+      next unless written == reg
+
+      if insn.op == 'MOVE'
+        source = insn.args.scan(/R(\d+)/).flatten[1]
+        return false unless source
+
+        reg = source
+      elsif insn.op == 'EXCEPT'
+        return recognize_rescue_regions(irep).any? do |region|
+          region[:kind] == :rescue_class && region[:exc_reg] == reg &&
+            region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
+        end
+      else
+        return false
+      end
+    end
+    false
+  end
+
+  # `Exception#message` and `#to_s` share exc_to_s in mruby. A rescue proves the
+  # receiver is an exception, but any Ruby instance override or runtime installer
+  # invalidates using that C body directly.
+  def rescued_exception_message_safe?
+    return @rescued_exception_message_safe if defined?(@rescued_exception_message_safe)
+
+    defs = @registry['message'] || []
+    @rescued_exception_message_safe = defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                      defs.all? { |d| d.owner == '<native>' || d.owner.end_with?('.singleton') } &&
+                                      !devirt_blocked_name?('message') &&
+                                      Array(@prepended_modules['Exception']).empty? &&
+                                      !@unknown_mixins.include?('Exception')
+  end
+
   # INTERP_UNLOCK: does MONO method `name` carry a hand-placed `-> Array`
   # annotation? Consumed by proven_array_source's chained rule. MONO-only (an
   # annotation sits on one irep). No compiles_clean? requirement: the fact is
