@@ -14,6 +14,8 @@ class CodeGen
     'draw_text' => %w[RGSS::Bitmap],
     'copy_blt' => %w[RGSS::Bitmap],
     'text_size' => %w[RGSS::Bitmap],
+    'width' => %w[RGSS::Bitmap],
+    'dispose' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window],
     'openness=' => %w[RGSS::Window],
     'tone=' => %w[RGSS::Sprite RGSS::Window RGSS::Viewport],
     'opacity=' => %w[RGSS::Sprite]
