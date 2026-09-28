@@ -163,12 +163,23 @@ class CodeGen
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
       else
+        guarded = guarded_game_integer_immediate('ADD', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+                                                 owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: addition stays inside Fixnum.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_integer_p(r#{d})) {
+          #{guarded_arm}  if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'ADD'
@@ -177,8 +188,18 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('ADD', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -191,6 +212,7 @@ class CodeGen
           } else {
             #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'SUBI'
@@ -199,12 +221,23 @@ class CodeGen
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
+        guarded = guarded_game_integer_immediate('SUB', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+                                                 owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: subtraction stays inside Fixnum.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_integer_p(r#{d})) {
+          #{guarded_arm}  if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'SUB'
@@ -213,8 +246,18 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('SUB', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -227,6 +270,7 @@ class CodeGen
           } else {
             #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'MUL'
@@ -237,8 +281,18 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('MUL', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: the product interval fits Fixnum.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -251,6 +305,7 @@ class CodeGen
           } else {
             #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'DIV'
@@ -265,8 +320,18 @@ class CodeGen
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('DIV', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: quotient fits Fixnum; helper preserves zero errors.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+          #{guarded_arm}  if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
             r#{d} = mrb_div_int_value(M, mrb_integer(r#{d}), mrb_integer(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_FLOAT) {
@@ -279,6 +344,7 @@ class CodeGen
           } else {
             #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'EQ', 'LT', 'LE', 'GT', 'GE'

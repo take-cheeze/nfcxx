@@ -441,6 +441,157 @@ class CodeGen
     end
   end
 
+  # GUARDED_GAME_VARIABLE_RANGE: derive an interval from literals, Game::Variables
+  # reads, and integer arithmetic. Consumers guard actual mrb_values before
+  # unboxing because replace/to_h can bypass Variables#[]=.
+  GAME_VARIABLE_RANGE_MIN = -9_999_999
+  GAME_VARIABLE_RANGE_MAX = 9_999_999
+
+  def guarded_game_integer_range(irep, idx, reg, owner_def, depth = 0)
+    return nil unless irep && idx && reg && owner_def
+    return nil if depth > FIXNUM_PROOF_MAX_DEPTH
+
+    cur = reg.to_s
+    (idx - 1).downto(0) do |j|
+      insn = irep.instructions[j]
+      return nil unless insn && (FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI'))
+      return nil if fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
+      next unless fixnum_proof_writes_reg?(insn, cur)
+
+      if insn.op == 'MOVE'
+        cur = insn.args.scan(/R(\d+)/).flatten[1]
+        return nil unless cur
+        next
+      end
+      return nil unless fixnum_proof_region_ok?(irep, fixnum_proof_ctx(irep), j, idx)
+
+      case insn.op
+      when /^LOADI/
+        value = loadi_literal(insn)
+        return [value, value] if value && value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
+
+        return nil
+      when 'GETIDX', 'GETIDX0', 'SEND', 'SEND0'
+        name = insn.args[/:(\w+|\[\])/, 1]
+        return nil if %w[SEND SEND0].include?(insn.op) && name != '[]'
+        recv = if insn.op == 'GETIDX'
+                 cur
+               else
+                 insn.args.scan(/R(\d+)/).flatten[1]
+               end
+        return nil unless recv && game_variables_index_receiver?(irep, j, recv, owner_def)
+
+        return [GAME_VARIABLE_RANGE_MIN, GAME_VARIABLE_RANGE_MAX]
+      when 'ADD', 'SUB', 'MUL'
+        regs = insn.args.scan(/R(\d+)/).flatten
+        return nil unless regs.size >= 2
+        left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
+        right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
+        return nil unless left && right
+
+        return guarded_integer_binary_range(insn.op, left, right) ||
+          (insn.op == 'MUL' ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
+      when 'ADDI', 'SUBI'
+        literal = insn.args.split(/\s+/).last.to_i
+        left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
+        return nil unless left
+
+        return guarded_integer_binary_range(insn.op == 'ADDI' ? 'ADD' : 'SUB', left, [literal, literal])
+      when 'DIV'
+        regs = insn.args.scan(/R(\d+)/).flatten
+        return nil unless regs.size >= 2
+        left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
+        right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
+        return nil unless left && right
+
+        bound = [left[0].abs, left[1].abs].max
+        return nil if -bound < LOADI_FIXNUM_MIN || bound > LOADI_FIXNUM_MAX
+
+        return [-bound, bound]
+      else
+        nil
+      end
+    end
+    nil
+  end
+
+  def game_variables_index_receiver?(irep, idx, reg, owner_def)
+    return true if static_indexable_class(irep, idx, reg, owner_def) == 'Game::Variables'
+    return false unless owner_def.owner == 'Game::Variables'
+
+    cur = reg.to_s
+    (idx - 1).downto(0) do |j|
+      insn = irep.instructions[j]
+      next unless fixnum_proof_writes_reg?(insn, cur)
+
+      if insn.op == 'MOVE'
+        cur = insn.args.scan(/R(\d+)/).flatten[1]
+        return false unless cur
+        next
+      end
+      return insn.op == 'LOADSELF'
+    end
+    false
+  end
+
+  def guarded_integer_binary_range(op, left, right)
+    values = case op
+             when 'ADD' then [left[0] + right[0], left[1] + right[1]]
+             when 'SUB' then [left[0] - right[1], left[1] - right[0]]
+             when 'MUL'
+               products = [left[0] * right[0], left[0] * right[1], left[1] * right[0], left[1] * right[1]]
+               [products.min, products.max]
+             end
+    return nil unless values && values[0] >= LOADI_FIXNUM_MIN && values[1] <= LOADI_FIXNUM_MAX
+
+    values
+  end
+
+  def guarded_game_integer_pair(op, irep, idx, left_reg, right_reg, owner_def)
+    left = guarded_game_integer_range(irep, idx, left_reg, owner_def)
+    right = guarded_game_integer_range(irep, idx, right_reg, owner_def)
+    return nil unless left && right
+
+    result = if op == 'DIV'
+               bound = [left[0].abs, left[1].abs].max
+               [-bound, bound]
+             else
+               guarded_integer_binary_range(op, left, right)
+             end
+    result = [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] if result.nil? && op == 'MUL'
+    return nil unless result
+    return nil unless result[0] >= LOADI_FIXNUM_MIN && result[1] <= LOADI_FIXNUM_MAX
+
+    range_guard = lambda do |reg, range|
+      "mrb_fixnum_p(r#{reg}) && mrb_fixnum(r#{reg}) >= #{range[0]} && " \
+        "mrb_fixnum(r#{reg}) <= #{range[1]}"
+    end
+    condition = "(#{range_guard.call(left_reg, left)}) && (#{range_guard.call(right_reg, right)})"
+    condition += " && mrb_fixnum(r#{right_reg}) != 0" if op == 'DIV'
+    if op == 'MUL'
+      a = "mrb_fixnum(r#{left_reg})"
+      b = "mrb_fixnum(r#{right_reg})"
+      product_fits = "(#{a} == 0 || #{b} == 0 || " \
+        "(#{a} > 0 ? (#{b} > 0 ? #{a} <= MRB_FIXNUM_MAX / #{b} : #{b} >= MRB_FIXNUM_MIN / #{a}) : " \
+        "(#{b} > 0 ? #{a} >= MRB_FIXNUM_MIN / #{b} : #{a} >= MRB_FIXNUM_MAX / #{b})))"
+      condition += " && #{product_fits}"
+    end
+    { condition: condition,
+      result: result }
+  end
+
+  def guarded_game_integer_immediate(op, irep, idx, reg, literal, owner_def)
+    input = guarded_game_integer_range(irep, idx, reg, owner_def)
+    return nil unless input
+
+    result = guarded_integer_binary_range(op, input, [literal, literal])
+    return nil unless result
+
+    condition = "mrb_fixnum_p(r#{reg}) && mrb_fixnum(r#{reg}) >= #{input[0]} && " \
+      "mrb_fixnum(r#{reg}) <= #{input[1]}"
+    { condition: condition, result: result }
+  end
+
   # Proof source 2: a mandatory argument register of THIS method's own irep whose
   # NATIVE_ARG_TARGETS parameter is mrb_int (boxed by the preamble).
   # `owner_def.irep == irep.label` is load-bearing: compile_insn also runs on a
