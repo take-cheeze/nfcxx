@@ -17,12 +17,34 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   # Nearest instruction at or before index +from+ whose first register operand
   # is +reg+ (digits), i.e. the write a register read at from + 1 sees.
   def last_writer(from, reg)
+    index = last_writer_index(from, reg)
+    index && instructions[index]
+  end
+
+  def last_writer_index(from, reg)
     reg = reg.to_s
     [from, instructions.length - 1].min.downto(0) do |i|
-      insn = instructions[i]
-      return insn if insn.reg == reg
+      return i if instructions[i].reg == reg
     end
     nil
+  end
+
+  # The first non-MOVE instruction writing +reg+ at or before index +from+,
+  # following MOVE copies to their source register. Nil when the register is
+  # never written or a MOVE has no source.
+  def source_writer(from, reg)
+    loop do
+      index = last_writer_index(from, reg)
+      return nil unless index
+
+      insn = instructions[index]
+      return insn unless insn.op == 'MOVE'
+
+      reg = insn.regs[1]
+      return nil unless reg
+
+      from = index - 1
+    end
   end
 
   # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).

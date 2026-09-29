@@ -923,48 +923,21 @@ def container_phi_merge(irep, at, reg)
   return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
-  (at - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn.reg == reg
-
-    case insn.op
-    when 'MOVE'
-      src = insn.regs[1]
-      return nil unless src
-
-      reg = src
-      next
-    when 'LOADNIL'
-      return lit_class
-    when 'ARRAY', 'ARRAY2'
-      return 'Array' if lit_class == 'Array'
-    when 'HASH'
-      return 'Hash' if lit_class == 'Hash'
-    end
-    return nil
+  case irep.source_writer(at - 1, reg)&.op
+  when 'LOADNIL'
+    lit_class
+  when 'ARRAY', 'ARRAY2'
+    'Array' if lit_class == 'Array'
+  when 'HASH'
+    'Hash' if lit_class == 'Hash'
   end
-  nil
 end
 
 # NIL_TOLERANT_JOIN predicate: true only when `reg` at `idx` was just loaded by
 # LOADNIL (following MOVEs). A false negative only falls back to the ordinary
 # join; a false positive would drop real evidence.
 def nil_literal_write?(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.reg
-    next unless d == reg
-
-    case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
-    when 'LOADNIL'
-      return true
-    else
-      return false
-    end
-  end
-  false
+  irep.source_writer(idx - 1, reg)&.op == 'LOADNIL'
 end
 
 # CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` is a fresh
@@ -1010,30 +983,19 @@ end
 # terminals. Follows MOVEs defensively. Returns {type: :fixnum, value: "5"} /
 # {type: :symbol, name: "bar"}, or nil (compile_send keeps POLY dispatch).
 def trace_eqq_literal_receiver(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.reg
-    next unless d == reg
-
-    case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
-    when 'LOADSYM'
-      # Same extraction as LOADSYM's codegen (stops before a local-name comment).
-      name = insn.sym_token
-      return name ? { type: :symbol, name: name } : nil
-    when /^LOADI/
-      # Same two literal shapes as LOADI's codegen.
-      lit = insn.paren_value || insn.imm_operand
-      return lit ? { type: :fixnum, value: lit } : nil
-    else
-      # Anything else writing `reg` means the receiver is not a literal.
-      return nil
-    end
+  insn = irep.source_writer(idx - 1, reg)
+  case insn&.op
+  when 'LOADSYM'
+    # Same extraction as LOADSYM's codegen (stops before a local-name comment).
+    name = insn.sym_token
+    name ? { type: :symbol, name: name } : nil
+  when /^LOADI/
+    # Same two literal shapes as LOADI's codegen.
+    lit = insn.paren_value || insn.imm_operand
+    lit ? { type: :fixnum, value: lit } : nil
   end
-  # Never written: an argument or block-entry register, not a literal. No
-  # "argument is always literal N" fact exists to fall back on.
-  nil
+  # Anything else, or never written (an argument or block-entry register), is
+  # not a literal: no "argument is always literal N" fact exists to fall back on.
 end
 
 # FLOAT_DIV_RECEIVER: an mrbc float pool entry is always an immediate Float, so
@@ -1042,22 +1004,9 @@ end
 def trace_float_literal_receiver(irep, idx, reg)
   return false unless irep && idx && reg
 
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn.reg == reg
+  insn = irep.source_writer(idx - 1, reg)
+  return false unless insn&.op == 'LOADL'
 
-    case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
-      return false unless reg
-    when 'LOADL'
-      pool_idx = insn.pool_index
-      entry = pool_idx && irep.pool[pool_idx.to_i]
-      return entry.is_a?(Hash) && entry[:type] == :float
-    else
-      return false
-    end
-  end
-
-  false
+  entry = insn.pool_index && irep.pool[insn.pool_index]
+  entry.is_a?(Hash) && entry[:type] == :float
 end
