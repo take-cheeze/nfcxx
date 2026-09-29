@@ -49,6 +49,7 @@ class ClosedWorld
     @outside_ruby_names = Set.new
     # Per outside file that could reach a class: the constant names it spells.
     @touch_sets = []
+    @touch_paths = []
     @unknown_defs = Set.new
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
@@ -64,6 +65,25 @@ class ClosedWorld
     scan_closed_world
     build_hierarchy
     build_method_missing
+    warn touch_report.join("\n") if ENV['BC2CPP_TOUCH_REPORT'] == '1'
+  end
+
+  # BC2CPP_TOUCH_REPORT=1: every class the touch analysis makes opaque, the
+  # outside files that touched it and the first lines in each spelling both
+  # halves of the class path, so a coarse touch can be traced to its source.
+  def touch_report
+    lines = ['== class touch report (opaque because an outside file touches it) ==']
+    @class_decls.keys.sort.each do |owner|
+      next if owner.include?('.') || owner.include?('<') || @rebound.include?(simple(owner))
+
+      spelled = [owner.split('::').first, simple(owner)].uniq
+      files = @touch_sets.each_index.select { |i| spelled.all? { |s| @touch_sets[i].include?(s) } }
+      next if files.empty?
+
+      lines << "  #{owner}: #{files.size} file(s)"
+      files.each { |i| lines << "    #{@touch_paths[i]}: #{touch_mentions(@touch_paths[i], spelled).join(' | ')}" }
+    end
+    lines
   end
 
   # nil when a fallback for `name` on a chain listing `listed` can only raise
@@ -248,6 +268,7 @@ class ClosedWorld
       text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
       # A file that defines or rebinds constants may reach any class it names.
       if defines_class
+        @touch_paths << path
         @touch_sets << (text.scan(C_STRING).flatten + text.scan(/MRB_SYM\(([A-Z]\w*)\)/).flatten)
                        .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.to_set
       end
@@ -268,6 +289,7 @@ class ClosedWorld
     @outside_names.merge(ruby_names)
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
+      @touch_paths << path
       @touch_sets << text.scan(/\b[A-Z]\w*/).to_set
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
@@ -437,6 +459,12 @@ class ClosedWorld
   # A class whose instances this analysis can enumerate: declared by a CLASS
   # op, not also created or subclassed outside, never rebound or subclassed
   # dynamically, and named by a plain constant path.
+  def touch_mentions(path, spelled)
+    File.binread(path).lines.each_with_index.filter_map do |line, idx|
+      "L#{idx + 1} #{line.strip[0, 70]}" if spelled.any? { |s| line.match?(/\b#{Regexp.escape(s)}\b/) }
+    end.first(2)
+  end
+
   def opaque?(owner)
     return true if owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
     return true unless @class_decls.key?(owner)
