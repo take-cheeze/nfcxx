@@ -403,9 +403,9 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # Owner prefixes equal Module.nesting only for nested (not compact `class
 # A::B`) definitions; the closed world has no compact ones. Lexical scope only;
 # the cref's ancestors are not searched.
-# Soundness: only returns a name the closed world DEFINES; a match at more than
-# one level is ambiguous and returns nil; no owner returns nil; nil falls back to
-# the written path (dynamic dispatch / `#error`).
+# Soundness: only returns a name the closed world DEFINES; the first matching
+# prefix is the binding Ruby's lexical lookup selects. No owner or no match
+# returns nil and leaves the written path in place.
 #
 # LEXICAL_CONSTRUCT_RESOLUTION: this used to accept only a
 # DIRECT_CONSTRUCT_TARGETS entry, so a bare `Window.new` inside `class RPG2k`
@@ -417,7 +417,7 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # that "Every use is inside `class RPG2k`, so the bare name still resolves here".
 #
 # The table is therefore split in two. RESOLUTION still decides only WHICH class
-# the name denotes -- an unambiguous fact about the program. ADMISSION (whether
+# the name denotes -- a fact about the program. ADMISSION (whether
 # that class may be devirtualized) stays with compile_send's four live gates:
 # no custom `self.new`/`self.allocate`, an #initialize that compiles clean with
 # pure mandatory arity, a matching argument count, and the owner being emitted.
@@ -431,16 +431,12 @@ def lexically_resolve_construct_target(written, owner)
   nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
   return nil if nesting.empty?
 
-  hits = []
   nesting.length.downto(1) do |n|
     candidate = "#{nesting.first(n).join('::')}::#{written}"
-    hits << candidate if construct_resolution_known?(candidate)
+    return candidate if construct_resolution_known?(candidate)
   end
 
-  # Ambiguous across nesting levels: refuse (see above).
-  return nil if hits.length > 1
-
-  hits.first
+  nil
 end
 
 # Does the closed world define `name` as a class or module? A bare name
@@ -741,8 +737,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # canonical path. Object's RGSS include makes these bare names
         # reachable; compile_send still requires the runtime receiver class to
         # match that constructor's captured class before calling it directly.
-        if path.empty? && NATIVE_CONSTRUCT_TARGETS.key?(const_name) &&
-           Array(UniqueClassNames.object_mixins).include?('Object::RGSS')
+        if path.empty? && NATIVE_CONSTRUCT_TARGETS.key?(const_name) && object_includes_rgss?
           return const_name
         end
         # String is a core mruby class whose RClass* is fixed in mrb_state.
@@ -837,6 +832,10 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
   return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
 
   nil
+end
+
+def object_includes_rgss?
+  Array(UniqueClassNames.object_mixins).any? { |mixin| mixin.delete_prefix('Object::') == 'RGSS' }
 end
 
 # CONTAINER_PHI_MERGE: the class a register provably holds across a

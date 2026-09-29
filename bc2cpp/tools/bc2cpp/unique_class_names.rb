@@ -18,8 +18,8 @@ module UniqueClassNames
   class << self
     # bare name => "P::N"; nil (the default) disables canonicalization.
     attr_accessor :table
-    # Modules the closed world includes into Object (build_registry records
-    # `class Object; include RGSS; end` as "Object::RGSS", which is ::RGSS).
+    # Modules the closed world includes into Object; entries may be qualified
+    # as `Object::RGSS` or already normalized to `RGSS`.
     attr_accessor :object_mixins
   end
 
