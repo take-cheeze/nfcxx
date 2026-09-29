@@ -839,7 +839,7 @@ class CodeGen
     block_irep = region[:block_irep]
     return {} if block_irep.instructions.any? { |insn| %w[SETUPVAR BLOCK SENDB SSENDB].include?(insn.op) }
 
-    call_idx = host_irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
+    call_idx = host_irep.index_of_addr(region[:sendb_addr])
     return {} unless call_idx
 
     enter = host_irep.instructions.find { |insn| insn.op == 'ENTER' }

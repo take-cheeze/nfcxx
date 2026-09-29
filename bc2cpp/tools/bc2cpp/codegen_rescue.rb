@@ -87,11 +87,11 @@ class CodeGen
     return nil unless exc_reg
 
     # Find this handler's own terminating `RAISEIF Rx` (same register).
-    after = irep.instructions.select { |i| i.addr > t }
+    after = irep.instructions_at((t + 1)..)
     raiseif = after.find { |i| i.op == 'RAISEIF' && i.regs.first == exc_reg }
     return nil unless raiseif
 
-    body = after.select { |i| i.addr < raiseif.addr }
+    body = irep.instructions_at((t + 1)...raiseif.addr)
     # The ensure body must only fall off its end: a RETURN would have to return
     # from the method, not the destructor's lambda, and BREAK/BLOCK/SENDB/LAMBDA
     # could throw a C++ exception out of a destructor that may already be running
@@ -133,7 +133,7 @@ class CodeGen
       jt = i.branch_target
       next unless jt
       # The ensure body was already checked above with a stricter rule.
-      next if i.addr > t && i.addr < raiseif.addr
+      next if ((t + 1)...raiseif.addr).cover?(i.addr)
       if jt == t
         return nil unless inside.call(i.addr)
 
@@ -310,7 +310,7 @@ class CodeGen
       escapes = irep.instructions.any? do |src|
         tgt = jump_target_of.call(src)
         next false unless tgt
-        if src.addr >= b && src.addr < e
+        if (b...e).cover?(src.addr)
           !(tgt >= b && tgt <= e) # (2): an internal source jumping outside the region
         elsif src.addr < b && tgt == b
           false # legitimate explicit-branch entry into the region, see above
@@ -494,7 +494,7 @@ class CodeGen
     # The handler only runs forward into the join.
     return nil unless join_addr > jmp_i.addr
 
-    body = irep.instructions.select { |i| i.addr >= b && i.addr < e }
+    body = irep.instructions_at(b...e)
     head, *rest = body
     return nil unless head
     case head.op

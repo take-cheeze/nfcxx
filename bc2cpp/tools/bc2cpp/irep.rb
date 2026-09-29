@@ -7,7 +7,18 @@
 MRBC = ENV['MRBC'] || 'mrbc'
 
 Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
-                   :catch_handlers, keyword_init: true)
+                   :catch_handlers, keyword_init: true) do
+  # Instruction whose address is +addr+, as an index into #instructions.
+  def index_of_addr(addr)
+    @addr_index ||= instructions.each_with_index.to_h { |insn, index| [insn.addr, index] }
+    @addr_index[addr]
+  end
+
+  # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).
+  def instructions_at(range)
+    instructions.select { |insn| range.cover?(insn.addr) }
+  end
+end
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
   # Operand text without mrbc's trailing `; R5:name` local-variable comment,
   # which would otherwise be mistaken for the last operand.

@@ -381,7 +381,7 @@ class CodeGen
     return nil unless shape && region[:n] == shape[1]
     return nil unless mandatory_arity(region[:block_irep]) == shape[2]
 
-    idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
+    idx = irep.index_of_addr(region[:sendb_addr])
     return nil unless idx
 
     insn = irep.instructions[idx]
