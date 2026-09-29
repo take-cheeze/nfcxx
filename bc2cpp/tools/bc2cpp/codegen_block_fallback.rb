@@ -18,7 +18,7 @@ class CodeGen
   # catch.
   def block_fallback_region_has_return_blk?(region)
     block_irep = region[:block_irep]
-    return true if block_irep.instructions.any? { |i| i.op == 'RETURN_BLK' }
+    return true if BytecodeIR.for(block_irep).op?('RETURN_BLK')
 
     # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` must be the same set
     # emit_proc_fallback_fn will use for this body; a pre-scan recognizing fewer
@@ -49,9 +49,7 @@ class CodeGen
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
-    irep.instructions.each do |insn|
-      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
-
+    BytecodeIR.for(irep).instructions_with_op('GETUPVAR', 'SETUPVAR').each do |insn|
       upvar_idx, level = insn.upvar_ref
       needs << [level, upvar_idx]
     end
@@ -96,9 +94,7 @@ class CodeGen
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
-    irep.instructions.each do |insn|
-      next unless insn.op == 'BLKPUSH'
-
+    BytecodeIR.for(irep).instructions_with_op('BLKPUSH').each do |insn|
       lv = insn.paren_value
       return nil unless lv
 
@@ -128,26 +124,8 @@ class CodeGen
   # MOVEs only. A miss only means the site is treated as before. Generic name
   # because calls_fiber_yield? reuses it for a plain SEND receiver.
   def fiber_const_receiver?(irep, call_idx, dest_reg)
-    reg = dest_reg
-    (call_idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      case insn.op
-      when 'MOVE'
-        d, s = insn.regs
-        next unless d == reg
-
-        reg = s
-      when 'GETCONST'
-        d = insn.reg
-        next unless d == reg
-
-        return insn.const_name == 'Fiber'
-      else
-        d = insn.reg
-        return false if d == reg
-      end
-    end
-    false
+    writer = irep.source_writer(call_idx - 1, dest_reg)
+    writer&.op == 'GETCONST' && writer.const_name == 'Fiber'
   end
 
   # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` is a plain SEND (`GETCONST R2
@@ -159,9 +137,7 @@ class CodeGen
   # gets an early `#error` stub. Transitive callers are handled by
   # compute_fiber_unsafe_methods.
   def calls_fiber_yield?(irep)
-    irep.instructions.each_with_index do |insn, idx|
-      next unless %w[SEND SEND0].include?(insn.op)
-
+    BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
       name = insn.sym
       next unless name == 'yield'
 
@@ -217,11 +193,8 @@ class CodeGen
 
     seeds = []
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'BLOCK'
-
-        paired = irep.instructions[idx + 1]
-        next unless paired && paired.op == 'SENDB'
+      BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB]) do |insn, paired, sendb_idx|
+        idx = sendb_idx - 1
         next unless paired.sym == 'new'
 
         dest_reg = paired.reg
@@ -270,9 +243,7 @@ class CodeGen
     return [] unless seen.add?(irep)
 
     names = []
-    irep.instructions.each do |insn|
-      next unless %w[SSEND SSEND0 SSENDB].include?(insn.op)
-
+    BytecodeIR.for(irep).instructions_with_op('SSEND', 'SSEND0', 'SSENDB').each do |insn|
       name = insn.sym
       names << name if name
     end
@@ -285,12 +256,8 @@ class CodeGen
 
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
     regions = []
-    irep.instructions.each_with_index do |insn, idx|
-      next unless insn.op == 'BLOCK'
-
-      paired = irep.instructions[idx + 1]
-      next unless paired && %w[SENDB SSENDB].include?(paired.op)
-
+    BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB SSENDB]) do |insn, paired, sendb_idx|
+      idx = sendb_idx - 1
       # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: any fixed positional count
       # (`ary.inject(0) { }`, `ary.each_slice(2) { }`), but never `n=*` (a splat has
       # no static layout) and never a keyword call (`n=3|nk=1`):
@@ -500,8 +467,7 @@ class CodeGen
     # lexical scope the proc was built in, which compiled code cannot see.
     # Runs before the ivars are set, like the nested pass above.
     if region[:kind] == 'exec_fallback'
-      block_irep.instructions.each do |tinsn|
-        next unless tinsn.op == 'TDEF'
+      BytecodeIR.for(block_irep).instructions_with_op('TDEF').each do |tinsn|
         next if nested_suppressed.include?(tinsn.addr)
 
         tregion = tdef_fallback_region(tinsn, block_irep)
@@ -565,7 +531,7 @@ class CodeGen
     end
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.
-    targets = jump_targets(block_irep) - (nested_suppressed - nested_glue_at.keys)
+    targets = BytecodeIR.for(block_irep).branch_target_addrs - (nested_suppressed - nested_glue_at.keys)
     elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
@@ -749,7 +715,7 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op)
 
-      prev = idx.positive? ? irep.instructions[idx - 1] : nil
+      prev = BytecodeIR.for(irep).previous(idx)
       next if prev && prev.op == 'BLOCK'
 
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.

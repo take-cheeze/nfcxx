@@ -63,7 +63,7 @@ class CodeGen
   # block_fallback_region_has_return_blk?).
   def inline_nested_region_has_break?(region, available_upvars)
     block_irep = region[:block_irep]
-    return true if block_irep.instructions.any? { |i| i.op == 'BREAK' }
+    return true if BytecodeIR.for(block_irep).op?('BREAK')
 
     recognize_block_fallback_regions(block_irep, available_upvars: region[:upvars] || available_upvars)
       .any? { |nregion| inline_nested_region_has_break?(nregion, available_upvars) }
@@ -173,7 +173,7 @@ class CodeGen
     @blk_param_name = 'bc2cpp_blk' if forwarded_blk
     @blk_param_level = 1 if forwarded_blk
     @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
+    body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     compile_all = lambda do
       block_irep.instructions.each_with_index do |insn, i|
@@ -794,7 +794,7 @@ class CodeGen
     nested = merge_inline_nested(nested, inline_nested_profiler_pass(block_irep, irep, d, offset,
                                                                        region[:block_addr], block_irep))
     @inline_nested = nested
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
+    body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
