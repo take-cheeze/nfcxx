@@ -165,7 +165,8 @@ module InsnDecoder
         values = sizes.map do |size|
           raise "bc2cpp: iseq overrun at #{pc}" if pc + size > @iseq.bytesize
 
-          value = (0...size).reduce(0) { |acc, k| (acc << 8) | @iseq.getbyte(pc + k) }
+          value = 0
+          size.times { |k| value = (value << 8) | @iseq.getbyte(pc + k) }
           pc += size
           value
         end
@@ -381,7 +382,7 @@ module InsnDecoder
 
       # The disassembly is line-oriented: a pool string with a newline is cut there.
       first = "#{op}#{sep_for(name, values)}#{rest}".split("\n", 2).first
-      insn = Insn.new(lineno: lineno, addr: start, op: op, args: first.sub(/\A#{op}\s*/, '').strip,
+      insn = Insn.new(lineno: lineno, addr: start, op: op, args: first.delete_prefix(op).strip,
                       raw: (format('%5d %03d ', lineno, start) + first).rstrip)
       insn.typed = operands
       insn
