@@ -21,7 +21,7 @@ class ArgTypes
       next unless defs.first.irep # native-only definition -- no bytecode body to walk.
 
       irep = ireps.fetch(defs.first.irep)
-      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      enter = irep.enter
       mand = enter ? enter.enter_fields.first : 0
       next if mand.zero?
 
@@ -82,7 +82,7 @@ class Annotations
         irep = ireps.fetch(d.irep)
         next unless irep.file
 
-        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        enter = irep.enter
         next unless enter
 
         lines = file_lines[irep.file]
@@ -135,7 +135,7 @@ class ClassAnnotations
         irep = ireps.fetch(d.irep)
         next unless irep.file
 
-        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        enter = irep.enter
         next unless enter
 
         lines = file_lines[irep.file]
@@ -216,7 +216,7 @@ class ElementAnnotations
         irep = ireps.fetch(d.irep)
         next unless irep.file
 
-        enter = irep.instructions.find { |i| i.op == 'ENTER' }
+        enter = irep.enter
         next unless enter
 
         lines = file_lines[irep.file]

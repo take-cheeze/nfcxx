@@ -20,6 +20,33 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
     @addr_index[addr]
   end
 
+  # Yields `(insn, index)` for each instruction whose op is one of +ops+.
+  def each_with_op(*ops)
+    instructions.each_with_index do |insn, index|
+      yield insn, index if ops.include?(insn.op)
+    end
+  end
+
+  # The ENTER instruction (nil for a bodyless zero-argument method).
+  def enter
+    instructions.find { |insn| insn.op == 'ENTER' }
+  end
+
+  def enter_index
+    instructions.index { |insn| insn.op == 'ENTER' }
+  end
+
+  # mrbc -v prints EXT1/EXT2/EXT3 as their own lines widening the next
+  # instruction; this is the index of the nearest real opcode at or before
+  # +from+, or -1.
+  EXT_OPS = %w[EXT1 EXT2 EXT3].freeze
+
+  def previous_real_index(from)
+    index = from
+    index -= 1 while index >= 0 && EXT_OPS.include?(instructions[index]&.op)
+    index
+  end
+
   # Nearest instruction at or before index +from+ whose first register operand
   # is +reg+ (digits), i.e. the write a register read at from + 1 sees.
   def last_writer(from, reg)

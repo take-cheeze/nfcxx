@@ -124,10 +124,9 @@ class IvarLayout
         irep_labels.each do |label|
           irep = ireps.fetch(label)
           d = def_of_irep[label]
-          enter = irep.instructions.find { |i| i.op == 'ENTER' }
+          enter = irep.enter
           mand = enter ? enter.enter_fields.first : 0
-          irep.instructions.each_with_index do |insn, idx|
-            next unless insn.op == 'SETIV'
+          irep.each_with_op('SETIV') do |insn, idx|
             ivar = insn.ivar
             # Not `$`-anchored: "SETIV @x R1 ; R1:v" carries a trailing local-name comment
             # whenever the source is a named local.

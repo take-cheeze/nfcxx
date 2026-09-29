@@ -473,9 +473,7 @@ module StaticDispatchRegistrations
       self_kind = if m.nil? then :class
                   else singleton.call(body_of[m][0]) ? :class : :instance
                   end
-      irep.instructions.each_with_index do |insn, idx|
-        next unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
-
+      irep.each_with_op(*(SEND_OPS - ['LOADSYM'])) do |insn, idx|
         name = insn.sym
         next unless name
 

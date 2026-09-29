@@ -267,7 +267,7 @@ def filter_map_block_return_class(block_irep, ctx, depth, input_class)
 end
 
 def block_mandatory_param_source?(irep, idx, reg)
-  enter = irep.instructions.find { |insn| insn.op == 'ENTER' }
+  enter = irep.enter
   mandatory = enter ? enter.enter_fields.first : 0
   return false if mandatory.zero?
 
@@ -311,7 +311,7 @@ end
 
 # ELEMENT_CLASS_SUPPORT: mandatory arity from ENTER, 0 if none.
 def mand_of(ireps, label)
-  enter = ireps.fetch(label).instructions.find { |i| i.op == 'ENTER' }
+  enter = ireps.fetch(label).enter
   enter ? enter.enter_fields.first : 0
 end
 

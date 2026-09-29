@@ -223,9 +223,7 @@ module IntegerConstants
     defs = Hash.new { |h, k| h[k] = [] }
     ireps.each_value do |irep|
       entries = const_entry_addrs(irep)
-      irep.instructions.each_with_index do |insn, i|
-        next unless insn.op == 'SETCONST' || insn.op == 'SETMCNST'
-
+      irep.each_with_op('SETCONST', 'SETMCNST') do |insn, i|
         name = insn.const_name
         next unless name && admitted.include?(name)
 

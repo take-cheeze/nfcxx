@@ -31,7 +31,7 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       next unless init&.irep && pure_mandatory_arity?(ireps.fetch(init.irep))
 
       irep = ireps.fetch(d.irep)
-      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      enter = irep.enter
       mand = enter ? enter.enter_fields.first : 0
       next if mand.zero?
 
@@ -40,9 +40,7 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       end
       seen_pos = Set.new
 
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'SETIV'
-
+      irep.each_with_op('SETIV') do |insn, idx|
         src_reg = insn.regs.first
         pos = opaque_argument_position(irep, idx, src_reg, mand)
         next unless pos
