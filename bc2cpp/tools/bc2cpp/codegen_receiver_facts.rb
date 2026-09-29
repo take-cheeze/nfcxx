@@ -135,6 +135,18 @@ class CodeGen
     return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
                       idx < irep.instructions.length && dest_reg
 
+    written = straight_line_constant_name(irep, idx, dest_reg) || irep.agreed_constant_name(idx, dest_reg.to_s)
+    return nil unless written
+
+    owner = resolve_class_constant_name(written, lexical_owner)
+    stable = owner && (@closed_world.stable_constant_identity?(owner) ||
+                       CodeGen.stable_class_constants&.include?(owner.split('::').last))
+    stable ? owner : nil
+  end
+
+  # The constant the straight-line walk finds when no branch can bypass its
+  # load; nil otherwise (agreed_constant_name then asks every reaching definition).
+  def straight_line_constant_name(irep, idx, dest_reg)
     branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
     return nil unless branch_edges
 
@@ -142,16 +154,11 @@ class CodeGen
                                                      barrier: %w[JMPUW ONERR RESCUE EXCEPT BLOCK])
     return nil unless ref&.root == :const
 
-    written = ref.name
-    written = ([written] + ref.segments).join('::') if written
     # A forward edge from before this write into the send's block could
     # bypass the receiver value; edges from later code already execute it.
     return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
 
-    owner = resolve_class_constant_name(written, lexical_owner)
-    stable = owner && (@closed_world.stable_constant_identity?(owner) ||
-                       CodeGen.stable_class_constants&.include?(owner.split('::').last))
-    stable ? owner : nil
+    ref.name && ([ref.name] + ref.segments).join('::')
   end
 
   def resolve_class_constant_name(written, lexical_owner)

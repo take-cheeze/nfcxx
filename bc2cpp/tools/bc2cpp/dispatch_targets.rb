@@ -452,9 +452,53 @@ def construct_resolution_known?(name)
   (ConstructClassNames.table || {}).include?(name)
 end
 
+# Class of the value `reg` holds at `idx`. The backward walk (trace_new_target_walk)
+# answers first; when it finds nothing, the fact is asked of EVERY definition
+# reaching the read (BytecodeIR.reaching_definitions) and accepted only when
+# each one traces to the same class. Never applied with `dominated:`: RETURN
+# proofs run their own reaching-definition walk (return_value_sources).
+def trace_new_target(irep, idx, reg, *rest, dominated: nil, **opts)
+  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, **opts)
+  return klass if klass || dominated
+
+  trace_new_target_reaching(irep, idx, reg, rest, opts)
+end
+
+# Queries being answered, so a value that flows into its own definition (a
+# loop-carried `x = x.foo`) fails instead of recursing.
+module TraceReaching
+  IN_PROGRESS = Set.new
+end
+
+def trace_new_target_reaching(irep, idx, reg, rest, opts)
+  return nil unless idx&.positive? && reg
+
+  key = [irep.label, idx, reg.to_s, opts[:resolving_new] ? true : false]
+  return nil unless TraceReaching::IN_PROGRESS.add?(key)
+
+  begin
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return nil if defs.nil? || defs.empty?
+
+    ivar_classes, mand, arg_classes = rest
+    classes = defs.map do |definition|
+      if definition.entry?
+        # Register N is argument N for N <= mand; only an annotation names its class.
+        pos = definition.reg.to_i
+        arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)
+      else
+        trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest, dominated: nil, **opts)
+      end
+    end
+    classes.first if classes.first && classes.uniq.size == 1
+  ensure
+    TraceReaching::IN_PROGRESS.delete(key)
+  end
+end
+
 # `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
 # accept every hop, so no hop can skip past a join (ADR 0198).
-def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
                       known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
                       dominated: nil, canonical: true)
