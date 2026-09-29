@@ -22,9 +22,13 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 
   # Yields `(insn, index)` for each instruction whose op is one of +ops+.
   def each_with_op(*ops)
-    instructions.each_with_index do |insn, index|
-      yield insn, index if ops.include?(insn.op)
-    end
+    # Per-op index lists (built once; instructions never change after loading)
+    # merged back into program order.
+    @op_indices ||= instructions.each_with_index.group_by { |insn, _| insn.op }
+                                .transform_values { |pairs| pairs.map(&:last).freeze }.freeze
+    indices = ops.uniq.flat_map { |op| @op_indices.fetch(op, []) }
+    indices.sort! if ops.uniq.size > 1
+    indices.each { |index| yield instructions[index], index }
   end
 
   # The ENTER instruction (nil for a bodyless zero-argument method).

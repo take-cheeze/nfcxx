@@ -45,11 +45,15 @@ module BytecodeIR
     def adjacent_pairs(first_op, second_ops)
       return enum_for(:adjacent_pairs, first_op, second_ops) unless block_given?
 
-      @instructions.each do |instruction|
-        next unless second_ops.include?(instruction.op) && instruction.index.positive?
+      @indices_by_op ||= @instructions.group_by(&:op).transform_values { |list| list.map(&:index).freeze }.freeze
+      indices = second_ops.uniq.flat_map { |op| @indices_by_op.fetch(op, []) }
+      indices.sort! if second_ops.uniq.size > 1
+      indices.each do |index|
+        next unless index.positive?
 
-        first = @instructions[instruction.index - 1].source
-        yield first, instruction.source, instruction.index if first.op == first_op
+        instruction = @instructions[index]
+        first = @instructions[index - 1].source
+        yield first, instruction.source, index if first.op == first_op
       end
     end
 
