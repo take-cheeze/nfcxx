@@ -710,8 +710,8 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # read `[1,2].map` as an Array receiver. A constant is different in kind --
       # it is a class NAME, not a value -- so resolving it is the point of the
       # walk. The safety test is therefore that the name must BE a class the
-      # closed world defines, checked against `known_owners` (the registry's own
-      # owner set, as resolve_owner_name and UniqueClassNames also use). A
+      # closed world defines, checked against its class-name table or the
+      # registry's owner set. A
       # non-class constant like POS_BOTTOM is not in that set, so it still
       # resolves to nothing and the old behaviour is unchanged for it.
       #
@@ -719,18 +719,25 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # innermost outward. When same-named classes exist at multiple levels,
       # the first defined binding is the one this site reads; runtime class
       # identity guards still reject a rebound or merged receiver trace.
-      if resolving_new && owner && known_owners
+      if resolving_new && owner
+        # GETMCNST extends an explicit constant path (`A::B.new`). Once a
+        # path is present it is already rooted at GETCONST's value; prefixing
+        # the caller's lexical owner would invent `Caller::A::B`.
+        if !path.empty? && (known_owners&.include?(written) || construct_resolution_known?(written))
+          return written
+        end
+
         nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
         hit = nesting.length.downto(1).filter_map do |n|
           candidate = "#{nesting.first(n).join('::')}::#{written}"
-          candidate if known_owners.include?(candidate)
+          candidate if known_owners&.include?(candidate) || construct_resolution_known?(candidate)
         end
         return hit.first unless hit.empty?
         # UNIQUE_CLASS_NAME: a bare constant may be reachable through an
         # Object-included module (for example Bitmap -> RGSS::Bitmap). Resolve
         # only names already proven unique and reachable at this lexical site.
         if path.empty? && hit.empty? && (unique = UniqueClassNames.resolve(const_name, owner)) &&
-           known_owners.include?(unique)
+           (known_owners&.include?(unique) || construct_resolution_known?(unique))
           return canonical ? unique : const_name
         end
         # Native RGSS constructors have gem-init-captured class accessors even

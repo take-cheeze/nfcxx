@@ -350,7 +350,7 @@ class CodeGen
           if owner_emitted
             if listed_target
               @direct_construct_used << known
-              accessor = direct_construct_class_fn(known)
+              accessor = "#{direct_construct_class_fn(known)}()"
             else
               accessor = owner_class_ptr_expr(known)
             end
@@ -387,12 +387,12 @@ class CodeGen
                       "  // The class identity guard preserves ordinary dispatch if the constant was rebound.\n")].join
             if stable_constructor
               return "#{note}" \
-                     "  r#{d} = bc2cpp_direct_alloc(M, #{accessor}());\n" \
+                     "  r#{d} = bc2cpp_direct_alloc(M, #{accessor});\n" \
                      "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
             end
 
             return "#{note}" \
-                   "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
+                   "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
                    "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
                    "  } else {\n" \
