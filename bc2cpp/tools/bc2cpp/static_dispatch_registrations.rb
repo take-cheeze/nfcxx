@@ -184,10 +184,7 @@ module StaticDispatchRegistrations
     ENV['MRBC'] = mrbc
     require_relative 'bc2cpp'
     Dir.mktmpdir('bc2cpp_static_dispatch') do |tmp|
-      c_src, disasm = run_mrbc(closed_world_mrblib_srcs(repo_root), 'static_dispatch_probe', tmp)
-      ireps, root = parse_c_dump(c_src, 'static_dispatch_probe')
-      blocks, files, catches = parse_disasm_blocks(disasm)
-      merge!(ireps, dfs_order(ireps, root), blocks, files, catches)
+      ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root), 'static_dispatch_probe', tmp)
       registry, superclass_of = build_registry(ireps, root)
       [ireps, registry, superclass_of]
     end
@@ -318,7 +315,7 @@ module StaticDispatchRegistrations
     sends = lambda do |irep, into|
       grew = false
       irep.instructions.each do |insn|
-        name = if SEND_OPS.include?(insn.op) then insn.args[NAME_ARG, 1]
+        name = if SEND_OPS.include?(insn.op) then insn.sym
                else IMPLICIT_DISPATCH_NAMES[insn.op]
                end
         grew = true if name && into.add?(name)
@@ -373,14 +370,13 @@ module StaticDispatchRegistrations
     return Hash.new(:unknown) if irep.instructions.any? { |i| i.op == 'APOST' }
 
     irep.instructions.each do |insn|
-      args = insn.args.to_s.split(/\s+/)
-      dst = args.first&.then { |a| a[/\AR(\d+)\z/, 1] }
+      dst = insn.reg
       next unless dst
 
       kinds[dst] << case insn.op
-                    when 'GETCONST', 'GETMCNST' then [:const, args[1].to_s.split('::').last]
+                    when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
                     when 'LOADSELF' then :self
-                    when 'MOVE' then [:move, args[1].to_s[/\AR(\d+)\z/, 1]]
+                    when 'MOVE' then [:move, insn.regs[1]]
                     else
                       insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
                     end
@@ -408,10 +404,7 @@ module StaticDispatchRegistrations
     insns = irep.instructions
     starts = Set.new
     insns.each_with_index do |insn, i|
-      if insn.op.start_with?('JMP')
-        target = insn.args.to_s.split(/\s+/).last
-        starts << target.to_i if target.to_s.match?(/\A\d+\z/)
-      end
+      starts << insn.branch_target if insn.op.start_with?('JMP') && insn.branch_target
       starts << insns[i + 1].addr.to_i if insns[i + 1] && (insn.op.start_with?('JMP') || BLOCK_ENDERS.include?(insn.op))
     end
     (irep.catch_handlers || []).each { |h| starts << h.target.to_i }
@@ -420,16 +413,15 @@ module StaticDispatchRegistrations
     kind_of = ->(reg) { local.key?(reg) ? local[reg] : global[reg] }
     insns.map do |insn|
       local = {} if starts.include?(insn.addr.to_i) || insn.op == 'APOST'
-      args = insn.args.to_s.split(/\s+/)
-      reg = args.first.to_s[/\AR(\d+)\z/, 1]
+      reg = insn.reg
       kind = if SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
                insn.op.start_with?('SS') ? :self : kind_of.call(reg)
              end
       if reg
         local[reg] = case insn.op
-                     when 'GETCONST', 'GETMCNST' then [:const, args[1].to_s.split('::').last]
+                     when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
                      when 'LOADSELF' then :self
-                     when 'MOVE' then kind_of.call(args[1].to_s[/\AR(\d+)\z/, 1])
+                     when 'MOVE' then kind_of.call(insn.regs[1])
                      else insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
                      end
       end
@@ -478,10 +470,8 @@ module StaticDispatchRegistrations
       self_kind = if m.nil? then :class
                   else singleton.call(body_of[m][0]) ? :class : :instance
                   end
-      irep.instructions.each_with_index do |insn, idx|
-        next unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
-
-        name = insn.args[NAME_ARG, 1]
+      irep.each_with_op(*(SEND_OPS - ['LOADSYM'])) do |insn, idx|
+        name = insn.sym
         next unless name
 
         names << name
@@ -529,7 +519,7 @@ module StaticDispatchRegistrations
         irep.instructions.each do |insn|
           next unless SEND_OPS.include?(insn.op)
 
-          name = insn.args[NAME_ARG, 1]
+          name = insn.sym
           grew = true if name && names.add?(name)
         end
       end

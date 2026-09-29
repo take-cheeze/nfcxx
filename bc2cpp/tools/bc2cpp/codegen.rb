@@ -22,20 +22,18 @@ class CodeGen
   # unrestricted (unit checks); the driver sets it for a real gem build.
   # struct_members: STRUCT_MEMBERS_ANALYSIS result (Struct owner -> members in
   # storage order); nil proves nothing.
-  # embed_ivar_limits: owner -> the only ivars it may embed
-  # (BC2CPP_EMBED_IVAR_LIMITS); nil or an absent owner means no cap.
   # hot_only_excluded: irep labels BC2CPP_HOT_METHODS leaves out (ADR 0214); nil
   # or empty excludes nothing. Class-level so every probing CodeGen sees it.
   class << self
-    attr_accessor :wired_embeddings, :embed_ivar_limits, :stable_class_constants, :struct_members,
+    attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
                   :integer_constant_values, :hot_only_excluded
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
-             fixnum_nil: 'Bc2cppFixnumOrNil' }.freeze
+             fixnum_nil: 'Bc2cppFixnumOrNil', value: 'mrb_value' }.freeze
 
-  # box/check/unbox/err per embeddable type for GETIV/SETIV codegen. An mrb_sym
-  # field needs no GC keep-alive (see IvarLayout.trace_type's LOADSYM arm).
+  # box/check/unbox/err per specialized type proof. Ordinary embedded ivars use
+  # mrb_value directly so arbitrary Ruby assignments retain their normal behavior.
   # `:bool` has no single check macro (MRB_TT_TRUE/MRB_TT_FALSE are separate
   # tags), so bc2cpp_bool_p (emit_bool_check_helper) ORs mrb_true_p/mrb_false_p;
   # emitted only when an embedded :bool needs it.
@@ -51,7 +49,8 @@ class CodeGen
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
     bool: { box: 'mrb_bool_value', check: 'bc2cpp_bool_p', unbox: 'mrb_true_p', err: 'boolean' },
     fixnum_nil: { box: 'bc2cpp_fixnum_or_nil_box', check: 'bc2cpp_fixnum_or_nil_p',
-                  err: 'Integer or nil' }
+                  err: 'Integer or nil' },
+    value: { box: '', check: '', unbox: '', err: '' },
   }.freeze
 
   # The types whose storage is a generated struct rather than a scalar, so
@@ -164,6 +163,9 @@ class CodeGen
     # DIRECT_CONSTRUCT_TARGETS actually used; read by
     # emit_direct_construct_decls.
     @direct_construct_used = Set.new
+    # Any direct allocation needs the shared helper; only allowlisted classes
+    # need the gem-init class accessor declared by emit_direct_construct_decls.
+    @direct_alloc_used = false
     @clean_cache = {} # irep label -> does compile_method(label) end up #error-free? (memoized -- see compiles_clean?'s own comment)
     @probing = Set.new # recursion guard for compiles_clean? (mutually-MONO-recursive methods)
     # ATTR_STRUCT_DEVIRT: [owner, ivar] pairs embedded only because a synthesized
@@ -253,53 +255,45 @@ class CodeGen
   # callers still need pure arity because they call `_impl` directly, bypassing
   # the entry wrapper.)
   def drop_unsafe_embeddings(ivar_layout)
+    demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout))
+  end
+
+  def select_embeddings(ivar_layout)
     embedding_owners = ivar_layout.keys.to_set
-    subclass_of = lambda do |klass, ancestor|
-      seen = Set.new
-      superclass = @superclass_of[klass]
-      while superclass.is_a?(String) && !seen.include?(superclass)
-        return true if superclass == ancestor
-
-        seen << superclass
-        superclass = @superclass_of[superclass]
-      end
-      false
-    end
-
     ivar_layout.each_with_object({}) do |(owner, ivars), out|
       # One object has one DATA_PTR: a base class and a subclass that both embed
       # would overwrite it with different layouts. Keep both in iv_tbl unless one
       # shared struct covers the whole chain.
       inherited_layout = embedding_owners.any? do |other|
-        other != owner && (subclass_of.call(owner, other) || subclass_of.call(other, owner))
+        other != owner && (strict_subclass?(owner, other) || strict_subclass?(other, owner))
       end
       next if inherited_layout
 
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
-      limit = self.class.embed_ivar_limits&.[](owner)
-      ivars = ivars.select { |name, _| limit.include?(name) } if limit
       init = @registry['initialize']&.find { |d| d.owner == owner }
       next unless init && compiles_clean?(init.irep)
 
-      # Every read/write of an embedded ivar must go through this compiler's
-      # GETIV/SETIV or a replacement it controls. A native attr_reader/attr_writer
-      # (src/class.c, plain mrb_iv_get/mrb_iv_set on iv_tbl) would read nil or write
-      # into iv_tbl (LCF::EventCommand's `attr_reader :code`). build_registry
-      # registers such accessors as synthetic irep-nil MethodDefs, checked here.
-      # ATTR_STRUCT_DEVIRT: a `kind: :ivar_accessor` exposure (and only that; a
-      # Struct member accessor is different storage) can be replaced by
-      # emit_ivar_accessor_pair, registered via register.cxx. mrb_define_method
-      # replaces the class's method-table entry, so dynamic calls (send, unproven
-      # receivers) reach the struct-aware accessor too; IVAR_ACCESSOR_DEVIRT is only
-      # a call-site shortcut on top. Only ivars whose native reader and writer are
-      # all :ivar_accessor qualify.
+      # A native attr_reader/attr_writer can be replaced by a synthesized direct
+      # slot accessor. Other native accessors stay eligible only when they are the
+      # plain iv_tbl implementation; mrb_iv_get/mrb_iv_set now route those through
+      # the RData slot descriptor too. Interpreted Ruby methods use the same API.
       safe = ivars.reject do |name, _|
+        excluded_access = self.class.hot_only_excluded && @registry.values.flatten.any? do |definition|
+          next false unless definition.irep && self.class.hot_only_excluded.include?(definition.irep)
+          next false unless definition.owner == owner || strict_subclass?(definition.owner, owner)
+
+          irep_subtree_touches_ivar?(definition.irep, name)
+        end
+        # An excluded method reads the ordinary iv_tbl, so no compiled sibling
+        # may move that field into the compiler-managed payload.
+        next true if excluded_access
+
         reader_native = natively_exposed?(owner, name)
         writer_native = natively_exposed?(owner, "#{name}=")
         reader_blocked = reader_native && !synthesizable_accessor_only?(owner, name)
         writer_blocked = writer_native && !synthesizable_accessor_only?(owner, "#{name}=")
-        next true if reader_blocked || writer_blocked || !every_accessor_compiles?(owner, name)
+        next true if reader_blocked || writer_blocked
 
         # Synthesize only the accessor that exists natively: adding an `x=` to a class
         # with only `attr_reader :x` would change behavior.
@@ -307,8 +301,92 @@ class CodeGen
         @synthesize_accessor_for << [owner, name, :writer] if writer_native
         false
       end
+
+      next if safe.empty?
+
+      @superclass_of.each_key do |klass|
+        next unless strict_subclass?(klass, owner)
+
+        initializers = (@registry['initialize'] || []).select { |d| d.owner == klass }
+        next if initializers.empty?
+
+        has_super = initializers.one? && initializers.first.irep &&
+                    @ireps.fetch(initializers.first.irep).instructions.any? { |insn| insn.op == 'SUPER' }
+        unless has_super
+          raise "bc2cpp storage error: #{klass}#initialize must call super " \
+                "to inherit embedded ivars from #{owner}"
+        end
+
+        # A later or conditional super is legal Ruby, but cannot prove that
+        # inherited storage exists before the initializer's earlier work.
+        next if initializer_starts_with_super?(initializers.first)
+
+        safe = {}
+        break
+      end
+
       out[owner] = safe unless safe.empty?
     end
+  end
+
+  # TYPED_SLOT_INTERPRETED_ACCESS: a typed slot holds a raw C value, but the
+  # RData ivar descriptor (patches/mruby-rdata-ivar-slots.patch) only
+  # understands mrb_value slots, so a method left on the interpreter would
+  # read/write it as a boxed value. Such an ivar stays a plain :value slot.
+  def demote_typed_ivars_read_by_interpreter(layout)
+    typed = layout.flat_map { |owner, ivars| ivars.filter_map { |name, type| [owner, name] if type != :value } }
+    return layout if typed.empty?
+
+    # A probe compile registers class slots, counters and the like that the
+    # final compile must meet in its own order, so keep only the answers.
+    demoted = without_probe_side_effects do
+      typed.select { |owner, name| interpreted_access?(owner, name) }
+    end
+    return layout if demoted.empty?
+
+    layout.to_h do |owner, ivars|
+      [owner, ivars.to_h { |name, type| [name, demoted.include?([owner, name]) ? :value : type] }]
+    end
+  end
+
+  def interpreted_access?(owner, name)
+    holders = [owner, *Array(@included_modules[owner])]
+    # Snapshot: compiles_clean? reads @registry through its default proc,
+    # which inserts keys.
+    @registry.values.any? do |defs|
+      defs.any? do |d|
+        d.irep &&
+          (holders.include?(d.owner) || strict_subclass?(d.owner, owner)) &&
+          irep_subtree_touches_ivar?(d.irep, name) && !compiles_clean?(d.irep)
+      end
+    end
+  end
+
+  # Shallow-copies every container ivar and restores it afterwards, except
+  # @clean_cache, whose answers stay valid. An ivar the probe created lazily
+  # (`@x ||= {}`) is removed: leaving it would keep the probe's registrations
+  # (e.g. a const-site helper) while the flag that emits their support code
+  # is rolled back.
+  def without_probe_side_effects
+    saved = instance_variables.to_h do |ivar|
+      value = instance_variable_get(ivar)
+      [ivar, value.is_a?(Hash) || value.is_a?(Array) || value.is_a?(Set) ? value.dup : value]
+    end
+    yield
+  ensure
+    (instance_variables - saved.keys - [:@clean_cache]).each { |ivar| remove_instance_variable(ivar) }
+    saved.each { |ivar, value| instance_variable_set(ivar, value) unless ivar == :@clean_cache }
+  end
+
+  def initializer_starts_with_super?(definition)
+    return false unless definition.irep
+
+    irep = @ireps[definition.irep]
+    return false unless irep
+
+    first = irep.instructions.find { |insn| !%w[ENTER LINE NOP MOVE].include?(insn.op) }
+    first&.op == 'SUPER' && super_reaches_superclass?(definition) &&
+      Array(@prepended_modules[definition.owner]).empty?
   end
 
   # Is `name` on `owner` exposed by a native (irep-nil) accessor that uses
@@ -325,57 +403,38 @@ class CodeGen
     (@registry[name] || []).select { |d| d.owner == owner }.all? { |d| d.kind == :ivar_accessor }
   end
 
-  # Every method touching an embedded ivar must compile, not just #initialize.
-  # struct RData (mruby/data.h) has its own `iv` table separate from `data`
-  # (DATA_PTR), so an interpreted method would read/write iv_tbl while compiled
-  # siblings use the struct: two diverging copies of the same ivar (e.g.
-  # Game::Interpreter#update, left interpreted, read nil @frame_steps).
-  def every_accessor_compiles?(owner, ivar_name)
-    # `@registry` auto-vivifies on `[]`, and compiles_clean? below can reach such a
-    # read (natively_exposed?), which would add keys while this loop iterates.
-    # `.values` snapshots the arrays first.
-    @registry.values.each do |defs|
-      defs.each do |d|
-        next unless d.irep
-
-        # A subclass's own GETIV/SETIV addresses its own (struct-less) layout,
-        # so it would reach iv_tbl even when compiled: never embed then.
-        return false if d.owner != owner && strict_subclass?(d.owner, owner) && irep_subtree_touches_ivar?(d.irep, ivar_name)
-        next unless d.owner == owner
-
-        touches = irep_subtree_touches_ivar?(d.irep, ivar_name)
-        return false if touches && !compiles_clean?(d.irep)
-      end
-    end
-    true
-  end
-
   def strict_subclass?(klass, ancestor)
-    seen = Set.new
-    superclass = @superclass_of[klass]
-    while superclass.is_a?(String) && seen.add?(superclass)
-      return true if superclass == ancestor
-
-      superclass = @superclass_of[superclass]
+    # @superclass_of never changes after construction, so each class's strict
+    # ancestors are walked once.
+    @strict_ancestors ||= {}
+    ancestors = @strict_ancestors[klass] ||= begin
+      seen = Set.new
+      superclass = @superclass_of[klass]
+      superclass = @superclass_of[superclass] while superclass.is_a?(String) && seen.add?(superclass)
+      seen
     end
-    false
+    ancestors.include?(ancestor)
   end
 
   # Does this method's irep, or any irep nested in it (block bodies are separate
   # child ireps), touch this ivar? An interpreted method runs its blocks too, so
   # Game::Transition#clip's `rects.each { ... @width ... }` counts even though
-  # its top-level irep never mentions @width. `seen` skips ireps shared by
-  # several call sites.
-  def irep_subtree_touches_ivar?(label, ivar_name, seen = Set.new)
-    return false if seen.include?(label)
+  # its top-level irep never mentions @width.
+  def irep_subtree_touches_ivar?(label, ivar_name)
+    subtree_ivar_names(label).include?(ivar_name)
+  end
 
-    seen << label
-    irep = @ireps.fetch(label)
-    return true if irep.instructions.any? do |insn|
-      (insn.op == 'SETIV' || insn.op == 'GETIV') && insn.args[/@(\w+)/, 1] == ivar_name
+  # Every ivar name a GETIV/SETIV in the irep or a nested one mentions; ireps
+  # are immutable, so each subtree is walked once however many ivars ask.
+  def subtree_ivar_names(label)
+    @subtree_ivar_names ||= {}
+    @subtree_ivar_names[label] ||= begin
+      irep = @ireps.fetch(label)
+      names = Set.new
+      irep.instructions.each { |insn| names << insn.ivar if insn.op == 'SETIV' || insn.op == 'GETIV' }
+      irep.reps.each { |child| names.merge(subtree_ivar_names(child)) }
+      names
     end
-
-    irep.reps.any? { |child| irep_subtree_touches_ivar?(child, ivar_name, seen) }
   end
 
   def cpp_name(owner, name)
@@ -452,9 +511,15 @@ class CodeGen
   STRUCTURAL_NAME_CHARS = ':.'.freeze
 
   def sanitize(s)
-    s.gsub(/[^a-zA-Z0-9_]/) { |c|
+    # Names repeat across thousands of call sites; the result is frozen because
+    # it is shared.
+    (@sanitized ||= {})[s] ||= s.gsub(/[^a-zA-Z0-9_]/) { |c|
       STRUCTURAL_NAME_CHARS.include?(c) ? '_' : format('$%02x', c.ord)
-    }
+    }.freeze
+  end
+
+  def ivar_field_name(name)
+    "ivar_#{sanitize(name)}"
   end
 
   # Lexical scope segments (innermost last) for a bare constant in a def body,

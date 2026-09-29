@@ -204,12 +204,14 @@ class CodeGen
     when :reader
       impl = "#{base}_impl"
       entry = base
+      field = "((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}"
+      value = type == :value ? "(mrb_undef_p(#{field}) ? mrb_nil_value() : #{field})" : "#{ops[:box]}(#{field})"
       code = <<~CPP
         // #{owner}##{ivar} -- synthesized attr_reader override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
         // drop_unsafe_embeddings' own ATTR_STRUCT_DEVIRT comment).
         mrb_value #{impl}(mrb_state* M, mrb_value self) {
-          return #{ops[:box]}(((#{sname}*)DATA_PTR(self))->#{ivar});
+          return #{value};
         }
 
         static mrb_value #{entry}(mrb_state* M, mrb_value self) {
@@ -232,10 +234,19 @@ class CodeGen
       # unchanged and the assigned value (not the field) is returned.
       store =
         if NULLABLE_TYPES.include?(type)
-          "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar}, arg);\n"
+          "  bc2cpp_fixnum_or_nil_set(&((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)}, arg);\n"
+        elsif type == :value
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = arg;\n" \
+            "  mrb_field_write_barrier_value(M, (struct RBasic*)mrb_obj_ptr(self), arg);\n"
         else
-          "  ((#{sname}*)DATA_PTR(self))->#{ivar} = #{ops[:unbox]}(arg);\n"
+          "  ((#{sname}*)DATA_PTR(self))->#{ivar_field_name(ivar)} = #{ops[:unbox]}(arg);\n"
         end
+      guard = if type == :value
+                ''
+              else
+                "if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), " \
+                  "\"@#{ivar}: expected #{ops[:err]}\");"
+              end
       code = <<~CPP
         // #{owner}##{ivar}= -- synthesized attr_writer override (@#{ivar} is
         // embedded; this replaces the plain native accessor -- see
@@ -250,8 +261,9 @@ class CodeGen
         // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
         // MethodDef's own kind: :ivar_accessor comment for the citation).
         mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
-          if (!#{ops[:check]}(arg)) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError")), "@#{ivar}: expected #{ops[:err]}");
+          #{guard}
         #{store.chomp}
+          #{guard}
           return arg;
         }
 
@@ -278,9 +290,30 @@ class CodeGen
     pairs.sort.filter_map { |owner, ivar, which| emit_ivar_accessor_pair(owner, ivar, which) }
   end
 
-  # One C struct + mrb_data_type per class with embeddable ivars. Other ivars
-  # stay in iv_tbl: RData has both `data` and `iv` (mruby/data.h), the same
-  # hybrid mruby-rgss/src/lib.cxx uses.
+  RDATA_IVAR_HASH_EMPTY = 0xFFFF
+
+  # RDATA_IVAR_HASH: open-addressing index (FNV-1a 32 of the "@name", linear
+  # probing, half full) over a descriptor, so rdata_ivar_slot in
+  # patches/mruby-rdata-ivar-slots.patch stops scanning every slot per access.
+  def rdata_ivar_hash(names)
+    raise "too many RData ivar slots (#{names.size})" if names.size >= RDATA_IVAR_HASH_EMPTY
+
+    size = 2
+    size <<= 1 while size < names.size * 2
+    table = Array.new(size, RDATA_IVAR_HASH_EMPTY)
+    names.each_with_index do |name, index|
+      hash = 2_166_136_261
+      name.each_byte { |byte| hash = ((hash ^ byte) * 16_777_619) & 0xffff_ffff }
+      pos = hash & (size - 1)
+      pos = (pos + 1) & (size - 1) until table[pos] == RDATA_IVAR_HASH_EMPTY
+      table[pos] = index
+    end
+    table
+  end
+
+  # One mrb_value slot + mrb_data_type marker per statically named ivar. The
+  # marker lets mruby's normal ivar APIs and GC find slots; dynamic names remain
+  # in RData's ordinary iv_tbl.
   def emit_structs
     out = String.new
     out << emit_nullable_structs
@@ -290,7 +323,7 @@ class CodeGen
       next if @only_owners && !@only_owners.include?(owner)
 
       out << "struct #{struct_name(owner)} {\n"
-      ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{name};\n" }
+      ivars.each { |name, type| out << "  #{C_TYPE.fetch(type)} #{ivar_field_name(name)};\n" }
       out << "};\n"
       # NON_POD_MEMBER_SUPPORT: placement-destroy before mrb_free. The struct is
       # allocated with mrb_calloc and released by mrb_free, which is a bare
@@ -318,8 +351,25 @@ class CodeGen
       out << "  static_cast<#{struct_name(owner)}*>(p)->~#{struct_name(owner)}();\n"
       out << "  mrb_free(mrb, p);\n"
       out << "}\n"
+      out << "static const mrb_data_ivar #{sanitize(owner)}_ivar_slots[] = {\n"
+      # Typed fields hold raw C values, which the descriptor consumers (GC mark,
+      # mrb_iv_get/set) would misread as mrb_value; see interpreted_access?.
+      slots = ivars.select { |_, type| type == :value }.keys
+      slots.each do |name|
+        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}) },\n"
+      end
+      out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
+      out << "};\n"
+      hash_fields = 'nullptr, 0'
+      unless slots.empty?
+        table = rdata_ivar_hash(slots.map { |name| "@#{name}" })
+        out << "static const uint16_t #{sanitize(owner)}_ivar_hash[] = { #{table.join(', ')} };\n"
+        hash_fields = "#{sanitize(owner)}_ivar_hash, #{table.size - 1}"
+      end
       out << "static const mrb_data_type #{type_var(owner)} = " \
-             "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free };\n\n"
+             "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \
+             "#{sanitize(owner)}_ivar_slots, #{slots.size}, sizeof(#{struct_name(owner)}), " \
+             "#{hash_fields} };\n\n"
     end
     out
   end
@@ -385,6 +435,23 @@ class CodeGen
         if (n < 0 || len <= n) return mrb_nil_value();
         return ARY_PTR(a)[n];
       }
+
+    CPP
+  end
+
+  # bc2cpp_integer_recv_p / bc2cpp_integer_operand_p (FIXNUM_ARITHMETIC), emitted
+  # only when the output uses them. A receiver is an Integer when it is a Fixnum
+  # or, where mruby is built with bigints, a heap bigint; the operand may also be
+  # a Float. Those are exactly the operand types Integer#+/-/* (src/numeric.c
+  # int_add/int_sub/int_mul, mrb_num_add/sub/mul) handle without coercion, so the
+  # direct helper call can neither raise a TypeError nor differ from the send.
+  def emit_integer_operand_helpers(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_integer_recv_p(') }
+
+    # mrb_bigint_p / mrb_float_p are FALSE when mruby is built without them.
+    <<~CPP
+      static inline mrb_bool bc2cpp_integer_recv_p(mrb_value v) { return mrb_integer_p(v) || mrb_bigint_p(v); }
+      static inline mrb_bool bc2cpp_integer_operand_p(mrb_value v) { return bc2cpp_integer_recv_p(v) || mrb_float_p(v); }
 
     CPP
   end
@@ -486,16 +553,12 @@ class CodeGen
     "#{sanitize(owner)}_compiled_class"
   end
 
-  # Declarations for DIRECT_CONSTRUCT_TARGETS actually used:
-  # 1. bc2cpp_direct_alloc: a generic replacement for Class#new's allocate step
-  #    (see its body). Defined here, since every consumer needs the same body.
-  # 2. One class-identity accessor per used owner (direct_construct_class_fn),
-  #    defined in the same gem's register.cxx. That file #includes this
-  #    generated code, so both are in one TU and plain C++ linkage matches. A
-  #    cross-gem consumer would need the OTHER_DECLS_HEADER treatment
-  #    (emit_decls_header); none exists yet.
+  # Declarations for direct compiled construction actually used:
+  # 1. bc2cpp_direct_alloc: mirrors mrb_instance_alloc's checks and allocation.
+  # 2. Accessors only for listed targets, defined in the same gem's register.cxx.
+  #    Other local classes use the owner-class cache instead.
   def emit_direct_construct_decls
-    return '' unless @direct_construct_used.any?
+    return '' unless @direct_alloc_used || @direct_construct_used.any?
 
     out = String.new
     out << "// A generic replacement for Class#new's own `self.allocate` step,\n"
@@ -509,21 +572,33 @@ class CodeGen
     out << "// function directly -- just reimplemented here since it is `static`\n"
     out << "// (no external linkage, so this generated file -- a different\n"
     out << "// translation unit -- cannot call it directly) using only the two\n"
-    out << "// PUBLIC mruby APIs that do the same two steps: MRB_INSTANCE_TT(c)\n"
-    out << "// (mruby/class.h) and mrb_obj_alloc (mruby.h). Called directly in\n"
+    out << "// PUBLIC mruby APIs for allocating with MRB_INSTANCE_TT(c) and\n"
+    out << "// mrb_obj_alloc (mruby.h), preserving mrb_instance_alloc's tag and\n"
+    out << "// allocator checks. Called directly in\n"
     out << "// place of Class#new's own real allocate+initialize dispatch chain\n"
-    out << "// when a `.new` call site's receiver is provably one of\n"
-    out << "// DIRECT_CONSTRUCT_TARGETS' own bc2cpp-COMPILED classes\n"
-    out << "// (compile_send's own \"MONO :new -> direct compiled construct\" path)\n"
+    out << "// when a `.new` call site's receiver is a compiled class with a\n"
+    out << "// proven standard constructor chain (compile_send's direct\n"
+    out << "// compiled-construction path).\n"
     out << "// -- #initialize's own already-compiled _impl function is called\n"
     out << "// right after, for its side effects only (its own return value is\n"
     out << "// discarded, never assigned to the result register: real Ruby\n"
     out << "// Class#new always returns the newly allocated object, never\n"
     out << "// whatever #initialize itself returns).\n"
     out << "static inline mrb_value bc2cpp_direct_alloc(mrb_state* M, RClass* c) {\n"
-    out << "  return mrb_obj_value(mrb_obj_alloc(M, MRB_INSTANCE_TT(c), c));\n"
+    out << "  enum mrb_vtype ttype = MRB_INSTANCE_TT(c);\n"
+    out << "  if (c->tt == MRB_TT_SCLASS) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), " \
+           "\"can't create instance of singleton class\");\n"
+    out << "  if (c == M->nil_class || c == M->false_class) {\n"
+    out << "    mrb_assert(ttype == 0);\n"
+    out << "  } else if (ttype == 0) {\n"
+    out << "    ttype = MRB_TT_OBJECT;\n"
+    out << "  }\n"
+    type_error = 'mrb_exc_get_id(M, mrb_intern_lit(M, "TypeError"))'
+    out << "  if (MRB_UNDEF_ALLOCATOR_P(c)) mrb_raisef(M, #{type_error}, \"allocator undefined for %v\", mrb_obj_value(c));\n"
+    out << "  if (ttype <= MRB_TT_CPTR) mrb_raisef(M, #{type_error}, \"can't create instance of %v\", mrb_obj_value(c));\n"
+    out << "  return mrb_obj_value(mrb_obj_alloc(M, ttype, c));\n"
     out << "}\n\n"
-    out << "// Class-identity accessor functions DIRECT_CONSTRUCT_TARGETS' own\n"
+    out << "// Class-identity accessors for explicitly listed target classes\n"
     out << "// owners define in their compiled gem's own register.cxx (mirroring\n"
     out << "// NATIVE_CONSTRUCT_TARGETS' own class_fn precedent) -- a real,\n"
     out << "// durable RClass* captured once at that gem's own gem-init time, NOT\n"
@@ -555,7 +630,16 @@ class CodeGen
     # compile_method reads @only_owners/@other_owners, so both are set before any
     # compile_method runs. compile_method never assigns them.
     leaves = @owner_of.keys
-    leaves = leaves.select { |l| only_owners.include?(@owner_of.fetch(l).owner) } if only_owners
+    if only_owners
+      leaves.select! { |l| only_owners.include?(@owner_of.fetch(l).owner) }
+      # A module_function copy has its own singleton lookup entry but shares its
+      # source body's irep. Emit that body from the module's gem when the copy's
+      # singleton owner is selected; the source module method itself stays bytecode.
+      copied = @registry.values.flatten.filter_map do |d|
+        d.copy_irep if d.kind == :module_function && d.copy_irep && only_owners.include?(d.owner)
+      end
+      leaves |= copied
+    end
     # HOT_ONLY: excluded methods get no `_impl`, entry or declaration (ADR 0214).
     leaves = leaves.reject { |l| hot_only_excluded?(l) }
     leaves.map { |label| compile_method(label) }

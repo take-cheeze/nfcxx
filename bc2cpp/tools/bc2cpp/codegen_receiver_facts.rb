@@ -3,6 +3,42 @@
 # CodeGen: receiver, owner and super-target facts.
 
 class CodeGen
+  # A rescue handler's exception register stays an Exception value until it is
+  # overwritten. Follow only MOVE aliases back to the recognized EXCEPT.
+  def rescued_exception_receiver?(irep, idx, dest_reg)
+    return false unless irep && !idx.nil?
+
+    addr = irep.instructions[idx]&.addr
+    return false unless addr
+
+    # RESCUE reads its first register and writes its second; the caught
+    # exception remains live in the input register for the handler.
+    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %w[RESCUE], barrier: rescue_write, barrier_result: false,
+                                              follow_moves: true) do |insn, _index, exc_reg|
+      next false unless insn.op == 'EXCEPT'
+
+      recognize_rescue_regions(irep).any? do |region|
+        region[:kind] == :rescue_class && region[:exc_reg] == exc_reg &&
+          region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
+      end
+    end || false
+  end
+
+  # `Exception#message` and `#to_s` share exc_to_s in mruby. A rescue proves the
+  # receiver is an exception, but any Ruby instance override or runtime installer
+  # invalidates using that C body directly.
+  def rescued_exception_message_safe?
+    return @rescued_exception_message_safe if defined?(@rescued_exception_message_safe)
+
+    defs = @registry['message'] || []
+    @rescued_exception_message_safe = defs.any? { |d| d.owner == '<native>' && d.irep.nil? } &&
+                                      defs.all? { |d| d.owner == '<native>' || d.owner.end_with?('.singleton') } &&
+                                      !devirt_blocked_name?('message') &&
+                                      Array(@prepended_modules['Exception']).empty? &&
+                                      !@unknown_mixins.include?('Exception')
+  end
+
   # INTERP_UNLOCK: does MONO method `name` carry a hand-placed `-> Array`
   # annotation? Consumed by proven_array_source's chained rule. MONO-only (an
   # annotation sits on one irep). No compiles_clean? requirement: the fact is
@@ -53,6 +89,164 @@ class CodeGen
     @subclassed_set ||= Set.new(@superclass_of.values.select { |v| v.is_a?(String) })
   end
 
+  # Prefer the whole-program hierarchy when it is available: the partial
+  # superclass map omits classes whose superclass expression did not resolve.
+  def exact_receiver_class?(owner)
+    return @closed_world.exact_class?(owner) if @closed_world
+
+    !subclassed_set.include?(owner)
+  end
+
+  # Exact only for a fresh `Klass.new` whose constant and constructor lookup are
+  # closed-world stable. ClassLayout and argument annotations remain guarded.
+  def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
+    return nil unless stable_standard_constructor_class?(expected_class)
+
+    irep.walk_writers(idx - 1, dest_reg, follow_moves: true) do |insn|
+      # The known-class trace already resolved this SEND's constant path;
+      # stability above proves that path still denotes the same class.
+      expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
+    end
+  end
+
+  # Diagnostic-only: identify the nearest producer behind an unresolved
+  # receiver, following register copies without changing the type proof.
+  def receiver_trace_origin(irep, idx, dest_reg)
+    return 'receiver_unavailable' unless irep && idx && dest_reg
+
+    at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], exhausted: at_entry) do |insn|
+      case insn.op
+      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source'
+      when 'GETIV' then 'get_ivar'
+      when 'GETIDX', 'GETIDX0' then 'indexed_result'
+      when 'GETUPVAR' then 'captured_upvar'
+      when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
+      when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
+      else "write_#{insn.op.downcase}"
+      end
+    end
+  end
+
+  # Resolve a constant expression used as a class/module object, not an
+  # instance. A branch edge that can bypass the constant write invalidates it.
+  def constant_object_owner(irep, idx, dest_reg, lexical_owner)
+    return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
+                      idx < irep.instructions.length && dest_reg
+
+    written = straight_line_constant_name(irep, idx, dest_reg) || irep.agreed_constant_name(idx, dest_reg.to_s)
+    return nil unless written
+
+    owner = resolve_class_constant_name(written, lexical_owner)
+    stable = owner && (@closed_world.stable_constant_identity?(owner) ||
+                       CodeGen.stable_class_constants&.include?(owner.split('::').last))
+    stable ? owner : nil
+  end
+
+  # The constant the straight-line walk finds when no branch can bypass its
+  # load; nil otherwise (agreed_constant_name then asks every reaching definition).
+  def straight_line_constant_name(irep, idx, dest_reg)
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
+    return nil unless branch_edges
+
+    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP,
+                                                     barrier: %w[JMPUW ONERR RESCUE EXCEPT BLOCK])
+    return nil unless ref&.root == :const
+
+    # A forward edge from before this write into the send's block could
+    # bypass the receiver value; edges from later code already execute it.
+    return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
+
+    ref.name && ([ref.name] + ref.segments).join('::')
+  end
+
+  def resolve_class_constant_name(written, lexical_owner)
+    return nil unless written && lexical_owner
+
+    lexical = lexical_owner.to_s.delete_suffix('.singleton').split('::')
+    candidates = lexical.length.downto(1).map { |n| "#{lexical.first(n).join('::')}::#{written}" }
+    candidates << written
+    hits = candidates.uniq.select { |name| ConstructClassNames.table.key?(name) }
+    # GETCONST follows Ruby's lexical nesting order: the innermost defined
+    # binding shadows outer bindings with the same name. Identity stability
+    # below proves the selected binding cannot be rebound at runtime.
+    return hits.first unless hits.empty?
+
+    # A bare native class/module may enter lookup through Object's included
+    # modules (for example Input resolving to RGSS::Input). Reuse the existing
+    # whole-program unique-name proof rather than guessing the alias path.
+    unique = UniqueClassNames.resolve(written, lexical_owner)
+    unique if unique && ConstructClassNames.table.key?(unique)
+  end
+
+  def constant_object_candidate_clean?(label)
+    return false if @constant_object_probe
+
+    @constant_object_probe = true
+    compiles_clean?(label)
+  ensure
+    @constant_object_probe = false
+  end
+
+  # A module_function copy shares its instance method's irep but runs with the
+  # module object as self. The instance-owner proof is reusable only when that
+  # body never observes self or creates a block that could capture it.
+  def module_function_copy_self_safe?(irep)
+    return false unless irep
+    return false unless irep.reps.empty?
+
+    irep.instructions.none? do |insn|
+      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.mentions_reg?(0)
+    end
+  end
+
+  def stable_standard_constructor_class?(klass)
+    stable_identity = @closed_world && (@closed_world.stable_class_constant?(klass) ||
+                                        @closed_world.stable_constant_identity?(klass))
+    stable_identity && @closed_world.standard_constructor_lookup? && exact_constructor_chain?(klass)
+  end
+
+  # Inside a class method, bare `new` has the class object as its receiver.
+  # The registry's `.singleton` owner is therefore class-name evidence, but only
+  # for classes the current closed-world build actually emits.
+  def implicit_singleton_self_class(owner_def)
+    owner = owner_def&.owner
+    return nil unless owner.is_a?(String) && owner.end_with?('.singleton')
+
+    klass = owner.delete_suffix('.singleton')
+    return nil if klass.empty? || !@known_owners&.include?(klass)
+
+    klass
+  end
+
+  def exact_constructor_chain?(klass)
+    # Every class object's singleton lookup reaches Class after its own
+    # singleton superclass chain. A module mixed into Class can replace new or
+    # allocate for every class object, so reject it even though it is not in
+    # `klass`'s ordinary superclass chain below.
+    return false if @unknown_mixins.include?('Class')
+    return false unless Array(@included_modules['Class']).empty? && Array(@prepended_modules['Class']).empty?
+
+    seen = Set.new
+    while klass.is_a?(String) && seen.add?(klass)
+      singleton = "#{klass}.singleton"
+      # Instance includes/prepends do not affect the class object's singleton
+      # lookup. Only an unresolved mixin on the singleton owner can intercept
+      # Class#new or #allocate; known singleton mixins are checked below too.
+      return false if @unknown_mixins.include?(singleton)
+      return false unless Array(@included_modules[singleton]).empty? && Array(@prepended_modules[singleton]).empty?
+
+      %w[new allocate].each do |name|
+        return false if (@registry[name] || []).any? do |definition|
+          [klass, singleton, 'Class'].include?(definition.owner) && definition.owner != '<native>'
+        end
+      end
+      klass = @superclass_of[klass]
+    end
+    true
+  end
+
   # The class whose instance `self` is while compiling `owner_def`'s code, or nil
   # inside a runtime-def/EXEC body, whose self is whatever receiver mruby passes.
   def self_class(owner_def)
@@ -68,7 +262,7 @@ class CodeGen
     owner = owner_def.owner
     return nil if owner.nil? || owner.end_with?('.singleton')
     return nil unless known_owner_set.include?(owner)
-    return nil if subclassed_set.include?(owner)
+    return nil unless exact_receiver_class?(owner)
 
     owner
   end
@@ -83,7 +277,7 @@ class CodeGen
 
     base = owner.delete_suffix('.singleton')
     # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
-    return nil if base == 'Object' || subclassed_set.include?(base)
+    return nil if base == 'Object' || !exact_receiver_class?(base)
     return nil unless Array(@prepended_modules[owner]).empty?
     return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
 
@@ -100,6 +294,42 @@ class CodeGen
     defs.size == 1 && defs.first.irep ? defs.first : nil
   end
 
+  # A compiled module_function copy runs the source body with the module object
+  # as self. Resolve its bare self-calls against that same module's singleton
+  # copies, but only when both copies are emitted in this closed-world build.
+  def lexical_module_function_self_target(name, owner_def)
+    return nil unless owner_def && owner_def.owner.is_a?(String)
+
+    owner = owner_def.owner.delete_suffix('.singleton')
+    singleton_owner = "#{owner}.singleton"
+    return nil unless @closed_world&.stable_constant_identity?(owner)
+    return nil unless @only_owners&.include?(singleton_owner) || @other_owners&.include?(singleton_owner)
+    return nil if @unknown_mixins.include?(singleton_owner) ||
+                  !Array(@included_modules[singleton_owner]).empty? ||
+                  !Array(@prepended_modules[singleton_owner]).empty?
+
+    current_copy = (@registry[owner_def.name] || []).select do |definition|
+      definition.kind == :module_function && definition.owner == singleton_owner &&
+        definition.copy_owner == owner && definition.copy_irep == owner_def.irep
+    end
+    return nil unless current_copy.one?
+
+    copies = (@registry[name] || []).select do |definition|
+      definition.kind == :module_function && definition.owner == singleton_owner &&
+        definition.copy_owner == owner && definition.visibility == :public && definition.copy_irep
+    end
+    return nil unless copies.one?
+
+    copy = copies.first
+    target = (@registry[name] || []).find do |definition|
+      definition.owner == owner && definition.irep == copy.copy_irep
+    end
+    return nil unless target && !hot_only_excluded?(copy.copy_irep)
+    return nil if devirt_blocked_name?(name)
+
+    target
+  end
+
   # LEXICAL_SELF_KEYWORD_SUPPORT: monomorphic_target's role for
   # compile_keyword_call, for a POLY name sent with no explicit receiver. `self`
   # in a method of C is a C, and lexical_self_owner has proven no subclass of C
@@ -109,11 +339,8 @@ class CodeGen
   # singleton class can shadow even a known self's method); the LEXICAL_SELF
   # marker is not in RUNTIME_DEF_DYNAMIC_MARKERS, so the text audit still
   # applies. Arity/keyword-shape checks stay in compile_keyword_call.
-  # Limit: subclassed_set comes from @superclass_of, which has no entry for an
-  # unresolvable superclass expression, so such a subclass would not mark its
-  # parent. The closed world has none (every superclass resolves, no
-  # Class.new), and the same limit applies to LEXICAL_SELF and
-  # self_receiver_class.
+  # With a closed-world scan, exact_receiver_class? includes subclasses whose
+  # superclass expression the local resolver could not identify.
   # nil for explicit-receiver sends.
   def lexical_self_keyword_target(name, self_implicit:, owner_def:)
     return nil unless self_implicit
@@ -134,7 +361,7 @@ class CodeGen
   def element_ctx(ivar_classes, mand, arg_classes, owner_name)
     { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
       class_annotations: @class_annotations, element_annotations: @element_annotations,
-      known_owners: known_owner_set, subclassed: subclassed_set,
+      known_owners: known_owner_set, subclassed: subclassed_set, closed_world: @closed_world,
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },
@@ -149,7 +376,7 @@ class CodeGen
   def hash_element_ctx(ivar_classes, mand, arg_classes, owner_name)
     { owner: owner_name, registry: @registry, class_layout: @class_layout, ireps: @ireps,
       class_annotations: @class_annotations, element_annotations: @element_annotations,
-      known_owners: known_owner_set, subclassed: subclassed_set,
+      known_owners: known_owner_set, subclassed: subclassed_set, closed_world: @closed_world,
       ivar_classes: ivar_classes || {}, mand: mand, arg_classes: arg_classes,
       elements: @element_layout, hash_elements: @hash_element_layout,
       annotated_element: ->(n) { annotated_element_return(n) },
@@ -159,9 +386,9 @@ class CodeGen
   # SYM_DEVIRT: resolve a `&:sym` target inside emit_sym_inline. Returns
   # [:mono, def], [:poly, defs] or nil, applying compile_send's MONO guards
   # (pure-mandatory arity, arity 0 since recognize_sym_regions requires n=0,
-  # ONLY_OWNERS/OTHER_OWNERS). POLY needs a per-element class guard per
-  # candidate and is capped at SYM_DEVIRT_CHAIN_CAP. Anything else keeps
-  # mrb_funcall.
+  # ONLY_OWNERS/OTHER_OWNERS). POLY needs a per-element exact-class guard for
+  # each direct or closed-world-proven inherited implementation and is capped
+  # at SYM_DEVIRT_CHAIN_CAP. Anything else keeps mrb_funcall.
   SYM_DEVIRT_CHAIN_CAP = 4
 
   def sym_call_target(sym)
@@ -182,7 +409,23 @@ class CodeGen
     return nil unless usable.size == defs.size && !usable.empty?
 
     return [:mono, usable.first] if usable.size == 1
-    return [:poly, usable] if usable.size <= SYM_DEVIRT_CHAIN_CAP
+    return nil if usable.size > SYM_DEVIRT_CHAIN_CAP
+
+    # Each inherited entry is keyed by the exact receiver class, not its
+    # ancestor implementation owner; emission therefore retains lookup's
+    # runtime-class check and shares the caller's closed-world hierarchy proof.
+    branches = usable.map { |definition| { guard_owner: definition.owner, definition: definition } }
+    if @closed_world
+      (@superclass_of.keys + known_owner_set.to_a).uniq.each do |receiver_class|
+        next if receiver_class.end_with?('.singleton') || branches.any? { |b| b[:guard_owner] == receiver_class }
+
+        target = closed_world_inherited_target(sym, receiver_class)
+        next unless target && usable.include?(target)
+
+        branches << { guard_owner: receiver_class, definition: target }
+      end
+    end
+    return [:poly, branches] if branches.size <= SYM_DEVIRT_CHAIN_CAP
 
     nil
   end
@@ -230,33 +473,33 @@ class CodeGen
 
     # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
     # keyword `nk=` variant.
-    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+    return nil unless super_insn.pure_splat?
 
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
-    am = argary.args.match(/\AR(\d+)\s+(\d+):(\d):(\d+):(\d)\s+\((\d+)\)/)
-    return nil unless am
+    spec = argary.argary_spec
+    return nil unless spec && argary.reg && argary.paren_value&.match?(/\A\d+\z/)
 
-    argary_dest = am[1]
-    m = am[2].to_i
-    return nil unless am[3].to_i.zero? && am[4].to_i.zero? && am[5].to_i.zero? && am[6].to_i.zero?
+    argary_dest = argary.reg
+    m = spec[0]
+    return nil unless spec[1..].all?(&:zero?) && argary.paren_value.to_i.zero?
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
-    super_dest = super_insn.args[/^R(\d+)/, 1]
+    super_dest = super_insn.reg
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
     # (5) ENTER is exactly m mandatory and nothing else (REQ:OPT:REST:POST:KEY:
     # KDICT:BLOCK:NOBLOCK, src/codedump.c), so regs[1..m] is the whole argument
     # list and there is no block parameter.
-    enter = instructions.find { |i| i.op == 'ENTER' }
+    enter = irep.enter
     return nil unless enter
 
-    em = enter.args.match(/\A(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+)/)
-    return nil unless em
-    return nil unless em[2..7].all? { |x| x.to_i.zero? }
-    return nil unless em[1].to_i == m
+    em = enter.enter_fields
+    return nil unless em.length >= 7
+    return nil unless em[1..6].all?(&:zero?)
+    return nil unless em[0] == m
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
@@ -327,18 +570,18 @@ class CodeGen
     # Strict adjacency: an interposed EXT declines.
     return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
 
-    argary_dest = argary.args[/^R(\d+)/, 1]
-    super_dest = super_insn.args[/^R(\d+)/, 1]
+    argary_dest = argary.reg
+    super_dest = super_insn.reg
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
     # (3) The `n=*` splat shape, not SUPER_TARGETS' fixed `n=N`.
-    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+    return nil unless super_insn.pure_splat?
 
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.
-    return nil unless argary.args[/\s(\d+:\d+:\d+:\d+)\s*\(/, 1] == shape[:argary]
-    return nil unless argary.args[/\((\d+)\)\s*\z/, 1].to_s == '0'
+    return nil unless argary.argary_spec&.join(':') == shape[:argary]
+    return nil unless argary.paren_value == '0'
 
     # (5) The superclass is the implicit Object (:none means a CLASS with no
     # superclass expression, not "unrecognized").

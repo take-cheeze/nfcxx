@@ -97,6 +97,9 @@ module NativeConstructSchema
       rescue StandardError
         next
       end
+      # The `(\w+)`-led pattern below has no literal prefix Onigmo can search for.
+      next unless src.include?("\"#{klass}\"")
+
       cm = src.match(/(\w+)\s*=\s*mrb_define_class_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"#{Regexp.escape(klass)}"/)
       next unless cm
 

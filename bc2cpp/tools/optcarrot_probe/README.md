@@ -1229,6 +1229,19 @@ their two frame-boundary hooks are the classes that remain interpreted too.
 The compiler also includes `mruby/numeric.h` in generated C++, required for
 its integer and float conversion helpers.
 
+**Update (RData slot lookup, ADR 0232)**: with every embedded ivar in an RData
+descriptor, the interpreted PPU (its Fiber loop stays interpreted) reads its
+own ivars through `rdata_ivar_slot`, which scanned the descriptor with
+`strlen`/`memcmp` per access. On a private, freshly patched tree (patch chain
+as `cmake/build-mruby.cmake`, `enable_debug` removed so mruby builds at -O3;
+180 frames) that cost `mruby + bc2cpp` 25-29 s against 9-11 s interpreted;
+`gprof` showed ~100M `rdata_ivar_slot` calls per 60 frames. Hashing the
+descriptor (`ivar_hash`) brought it to 12 s, and a per-(state, type, symbol)
+cache measured as a floor reached 8.3 s (faster than the interpreter), so the
+remaining gap is the name fetch and hash per access. The CI job builds with
+`enable_debug` (-O0 for both binaries), so its ratio is not comparable to
+these.
+
 ## Files
 
 - `build_bundle.rb` -- assembles a single runnable mruby script: applies

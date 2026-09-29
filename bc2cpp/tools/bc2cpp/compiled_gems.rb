@@ -11,12 +11,9 @@
 # dependency; only the final register.cxx compile needs both).
 #
 # EMBED_WIRED: the classes whose embedded-ivar layout is actually wired at
-# runtime. An embedded class keeps its ivars in an RData struct, so it is only
-# sound when the class is MRB_TT_DATA and *every* method that touches those
-# ivars is an installed compiled method, #initialize included (it allocates the
-# struct). Otherwise an interpreted fallback reads the ordinary iv_tbl (always
-# empty for an embedded ivar -- 3rd/mruby/include/mruby/data.h keeps `iv` and
-# `data` as separate fields) and sees nil.
+# runtime. Its instances use MRB_TT_DATA, and #initialize must be compiled so
+# it allocates the slot payload. Interpreted methods and native accessors can
+# still read and write the same slots through mruby's ivar APIs.
 #
 # bc2cpp.rb's driver generates that registration itself (OWNER_METHOD_
 # REGISTRATION, emit_owner_registrations) for every entry of these classes in
@@ -57,14 +54,6 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Message::ScanResult
 ].freeze
 
-# EMBED_IVAR_LIMITS: a wired owner listed here embeds only these ivars. Game::State
-# keeps the three it embedded before ADR 0202: its other ivars are written through
-# attr writers from code IvarLayout does not type-check (load/from_lsd), so lift
-# this only after a real save/load run.
-BC2CPP_EMBED_IVAR_LIMITS = {
-  'Game::State' => %w[bgm_looped encounter_total save_count]
-}.freeze
-
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
     # Owners are emission targets: every method of theirs that compiles clean is
@@ -72,11 +61,9 @@ BC2CPP_COMPILED_GEMS = {
     # arity, method_missing) stay interpreted. What each class compiles is in the
     # generated diagnostic (`== compiled entry points ==`), not listed here.
     #
-    # Embedding is decided by bc2cpp.rb's drop_unsafe_embeddings, never here: an
-    # ivar covered by a native attr_reader/attr_writer (natively_exposed?) never
-    # embeds, since the native accessor reads iv_tbl, not the RData struct. That
-    # is why LCF::MoveCommand/EventCommand/Tree embed nothing despite provably
-    # Fixnum ivars. #initialize is always private in mruby, so it registers with
+    # Embedding is decided by bc2cpp.rb's drop_unsafe_embeddings, never here.
+    # Plain native attr readers/writers can be replaced by direct slot accessors.
+    # #initialize is always private in mruby, so it registers with
     # mrb_define_private_method.
     #
     # LCF::File#[]/#[]= dispatch on @root dynamically (an LCF::Sections or a
@@ -91,7 +78,7 @@ BC2CPP_COMPILED_GEMS = {
     # touches no ivar.
     owners: %w[LCF::File LCF::Database LCF::MapTree LCF::MapUnit LCF::SaveData
                LCF::MoveCommand LCF::EventCommand LCF::Tree LCF::Sections
-               LCF::Array1D LCF::Array2D StringIO],
+               LCF::Array1D LCF::Array2D LCF.singleton StringIO],
     out_symbol: 'lcf_compiled',
   },
   'mruby-rpg2k-compiled' => {
@@ -102,13 +89,12 @@ BC2CPP_COMPILED_GEMS = {
     #   class or module (ADR 0139, ".singleton owner support"); they register
     #   with mrb_define_class_method and never embed (class ivars live on a
     #   different object than any instance's iv_tbl).
-    # - A compiled `#initialize` with pure mandatory arity is only the first gate
-    #   of drop_unsafe_embeddings; every ivar-touching method must also compile
-    #   (every_accessor_compiles?). The diagnostic's `== ivar embedding ==`
+    # - A compiled `#initialize` is required to allocate the RData payload. The
+    #   diagnostic's `== ivar embedding ==`
     #   section prints IvarLayout's raw proposal, before that filter -- trust the
     #   "classes needing MRB_SET_INSTANCE_TT" section instead.
-    # - Only Fixnum/Symbol ivars embed; a GETCONST-fed or method-return-fed
-    #   value stays UNKNOWN (a missed embedding, never an unsound one).
+    # - Every statically named ivar on a wired owner uses an mrb_value slot;
+    #   dynamic names keep the ordinary iv_tbl fallback.
     # - A Struct's members are positional (mruby-struct), never iv_tbl, so
     #   Game::Battle::Combatant has nothing to embed. Its `half_sp_cost?`/
     #   `member?` sanitize to the same C name as the Struct-native writers, but
@@ -116,11 +102,10 @@ BC2CPP_COMPILED_GEMS = {
     # - A POLY name in the registry only stops other call sites devirtualizing
     #   into it; it never blocks registering the owner's own method.
     #
-    # `LCF` (the bare module) is deliberately not an owner: its methods compile,
-    # but every call site reaches them as `LCF.read_ber(...)` through the
-    # module_function copy on the singleton class (irep nil, "LCF.singleton"), and
-    # LCF is never included or extended, so an LCF-owned _impl would be
-    # unreachable dead code.
+    # `LCF.singleton` selects module_function copies for selective emission. Their
+    # shared source ireps are emitted as LCF-owned implementations only when the
+    # copy is included in the hot-method set; the module instance methods remain
+    # bytecode and are not registered as compiled replacements.
     owners: %w[Game::Picture Game::EnemyAction Game::Screen RPG2k::Window
                Game::Transition Game::Actor Game::Party
                RPG2k::Scene::MapViewer Game::Battle RPG2k::Scene::ItemMenu

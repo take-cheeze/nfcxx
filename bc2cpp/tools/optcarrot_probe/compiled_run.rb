@@ -388,6 +388,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       spec.license = 'MIT'
       spec.authors = 'probe'
       spec.add_dependency 'mruby-onig-regexp'
+      # bc2cpp's emitted `#include "rgss_construct.hxx"`, the same wiring the
+      # real compiled gems use.
+      spec.cxx.include_paths << #{File.join(ROOT, 'include').dump}
     end
   RUBY
   profiling = ENV['GPROF'] == '1'
@@ -438,6 +441,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # do -- left `register.cxx` uncompilable ("'mrb_state' has no member named
   # 'errinfo'"), so the probe could not link at all. Same set the real build
   # uses, so the probe's mruby is the mruby bc2cpp is written against.
+  # mruby-rdata-ivar-slots.patch is required, not optional: without it the
+  # interpreted PPU reads embedded ivars out of an empty iv_tbl and crashes.
   %w[
     mruby-colon3-assign-setmcnst.patch
     mruby-dollar-bang-scoped.patch
@@ -446,6 +451,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     mruby-parser-dump-back-nth-ref.patch
     mruby-nomemoryerror-reentrant-alloc.patch
     mruby-gc-type-live-counts.patch
+    mruby-rdata-ivar-slots.patch
   ].each do |patch|
     path = File.join(ROOT, 'patches', patch)
     system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)

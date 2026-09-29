@@ -8,7 +8,6 @@ class CodeGen
   # registers and is undone with unshift_proof_reg wherever a register reaches a
   # proof rather than the output.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
-    a = insn.args
     case insn.op
     when 'ENTER'
       "  // #{insn.raw.strip} (args already bound above)\n"
@@ -22,14 +21,14 @@ class CodeGen
       # captured set this function declares parameters for; anything else keeps
       # `#error`. The access is the same at every level: an mrb_value* to the
       # defining frame's register.
-      reg, upvar_idx, level = a.split(/\s+/)
-      key = [level.to_i, upvar_idx.to_i]
-      if level =~ /\A\d+\z/ && @block_fallback_upvars&.include?(key)
+      upvar_idx, level = insn.upvar_ref
+      key = [level, upvar_idx]
+      if @block_fallback_upvars&.include?(key)
         vname = upvar_var_name(*key)
         if insn.op == 'GETUPVAR'
-          "  r#{reg[/\d+/]} = *#{vname};\n"
+          "  r#{insn.reg} = *#{vname};\n"
         else
-          "  *#{vname} = r#{reg[/\d+/]};\n"
+          "  *#{vname} = r#{insn.reg};\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -37,53 +36,53 @@ class CodeGen
     when 'KEY_P'
       # KEYWORD_ARG_SUPPORT: presence of an optional keyword: a bool parameter the
       # entry wrapper computed, named from `:sym` (kwarg_param_name).
-      d = a[/^R(\d+)/, 1]
-      sym = a[/:(\S+)/, 1]
+      d = insn.reg
+      sym = insn.sym_token
       "  r#{d} = mrb_bool_value(#{kw_given_param_name(sym)});\n"
     when 'KARG'
       # KEYWORD_ARG_SUPPORT: the keyword's value, already an unpacked parameter. An
       # omitted optional one's default code overwrites the register after KEY_P's
       # JMPIF.
-      d = a[/^R(\d+)/, 1]
-      sym = a[/:(\S+)/, 1]
+      d = insn.reg
+      sym = insn.sym_token
       "  r#{d} = #{kwarg_param_name(sym)};\n"
     when 'KEYEND'
       # KEYWORD_ARG_SUPPORT: unknown keywords already raised ArgumentError in the
       # entry wrapper's mrb_kwargs (`rest: NULL`).
       "  // KEYEND: already enforced by the entry wrapper's own mrb_kwargs (rest: NULL)\n"
     when 'MOVE'
-      d, s = regs(a, 2)
+      d, s = insn.regs.first(2)
       "  r#{d} = r#{s};\n"
     when 'LOADNIL'
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = mrb_nil_value();\n"
     when 'LOADFALSE'
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = mrb_false_value();\n"
     when 'LOADTRUE'
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = mrb_true_value();\n"
     when 'LOADSELF'
       # "LOADSELF R2 (R0)": R[a] = self (vm.c). Emitted for `self.foo = ...`; r0 is
       # already `self`.
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = self;\n"
     when 'LOADSYM'
-      d = a[/^R(\d+)/, 1]
-      name = a[/:(\S+)/, 1]
+      d = insn.reg
+      name = insn.sym_token
       "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, \"#{name}\"));\n"
     when /^LOADI/
-      d = a[/^R(\d+)/, 1]
+      d = insn.reg
       # Small immediates print parenthesized ("R6\t(3)"); LOADI8/16/32 print bare
       # ("R1\t128").
-      lit = a[/\(([^)]+)\)/, 1] || a[/^R\d+\s+(-?\d+)/, 1]
+      lit = insn.paren_value || insn.imm_operand
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
     when 'LOADL'
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
-      # mrbc's C dump prints it as a valid C double literal (".f=0.33000000000000002").
+      # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002").
       # INT32/INT64/BIGINT are not decoded and keep `#error`.
-      d = a[/^R(\d+)/, 1]
-      pidx = a[/L\[(\d+)\]/, 1].to_i
+      d = insn.reg
+      pidx = insn.pool_index.to_i
       entry = irep.pool.fetch(pidx)
       if entry.is_a?(Hash) && entry[:type] == :float
         lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
@@ -93,8 +92,8 @@ class CodeGen
         "  #error LOADL references a non-float pool entry (#{kind}) -- not in this prototype's supported subset\n"
       end
     when 'STRING'
-      d = a[/^R(\d+)/, 1]
-      idx = a[/L\[(\d+)\]/, 1].to_i
+      d = insn.reg
+      idx = insn.pool_index.to_i
       entry = irep.pool.fetch(idx)
       if entry.is_a?(String)
         "  r#{d} = mrb_str_new_cstr(M, #{c_string_literal(entry)});\n"
@@ -108,8 +107,8 @@ class CodeGen
       # literals (gen_literal_array: each word is an OP_STRING that gen_intern's
       # peephole turns into SYMBOL, followed by ARRAY(N)); `:foo` / `:"foo"` are
       # interned at parse time into LOADSYM.
-      d = a[/^R(\d+)/, 1]
-      sidx = a[/L\[(\d+)\]/, 1].to_i
+      d = insn.reg
+      sidx = insn.pool_index.to_i
       sentry = irep.pool.fetch(sidx)
       if sentry.is_a?(String)
         "  r#{d} = mrb_symbol_value(mrb_intern_cstr(M, #{c_string_literal(sentry)}));\n"
@@ -120,17 +119,17 @@ class CodeGen
       # "INTERN R<a>": vm.c `mrb_ensure_string_type(mrb, regs[a]); mrb_sym sym =
       # mrb_intern_str(mrb, regs[a]); regs[a] = mrb_symbol_value(sym);`, an in-place
       # String -> Symbol conversion (`:"#{expr}"`). Unconditional, like STRCAT.
-      d = a[/^R(\d+)/, 1]
+      d = insn.reg
       "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  r#{d} = mrb_symbol_value(mrb_intern_str(M, r#{d}));\n"
     when 'STRCAT'
       # Matches OP_STRCAT's own real semantics exactly (src/vm.c):
       # mrb_ensure_string_type then mrb_str_concat (mutates r<d> in place).
-      d = a[/^R(\d+)/, 1]
-      s = a[/\(R(\d+)\)/, 1]
+      d = insn.reg
+      s = insn.paren_reg
       "  r#{d} = mrb_ensure_string_type(M, r#{d});\n  mrb_str_concat(M, r#{d}, r#{s});\n"
     when 'GETIV'
-      d = a[/^R(\d+)/, 1]
-      ivar = a[/@(\w+)/, 1]
+      d = insn.reg
+      ivar = insn.ivar
       klass = self_class(owner_def)
       code = ivar_get_code(klass, 'self', ivar, "r#{d}", self_of_klass: true)
       type = embed_type(klass, ivar) if klass
@@ -142,9 +141,9 @@ class CodeGen
         "  #{code}\n"
       end
     when 'SETIV'
-      ivar = a[/@(\w+)/, 1]
+      ivar = insn.ivar
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
-      s = a[/R(\d+)/, 1]
+      s = insn.regs.first
       klass = self_class(owner_def)
       code = ivar_set_code(klass, 'self', ivar, "r#{s}", self_of_klass: true)
       type = embed_type(klass, ivar) if klass
@@ -156,29 +155,50 @@ class CodeGen
         "  #{code}\n"
       end
     when 'ADDI'
-      d = a[/^R(\d+)/, 1]
-      lit = a.split(/\s+/).last
+      d = insn.reg
+      lit = insn.imm_operand
       # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum, so only the destination
       # needs proving.
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
       else
+        guarded = guarded_game_integer_immediate('ADD', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+                                                 owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: addition stays inside Fixnum.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_integer_p(r#{d})) {
+          #{guarded_arm}  if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'ADD'
-      d = a[/^R(\d+)/, 1]
-      s = a[/\(R(\d+)\)/, 1]
+      d = insn.reg
+      s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('ADD', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -191,30 +211,52 @@ class CodeGen
           } else {
             #{compile_operator_fallback('+', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'SUBI'
-      d = a[/^R(\d+)/, 1]
-      lit = a.split(/\s+/).last
+      d = insn.reg
+      lit = insn.imm_operand
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
+        guarded = guarded_game_integer_immediate('SUB', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
+                                                 owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: subtraction stays inside Fixnum.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_integer_p(r#{d})) {
+          #{guarded_arm}  if (mrb_integer_p(r#{d})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'SUB'
-      d = a[/^R(\d+)/, 1]
-      s = a[/\(R(\d+)\)/, 1]
+      d = insn.reg
+      s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('SUB', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: both operands fit their traced intervals.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -227,18 +269,29 @@ class CodeGen
           } else {
             #{compile_operator_fallback('-', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'MUL'
       # Same shape as ADD/SUB: vm.c OP_ADD/OP_SUB/OP_MUL all expand OP_MATH, so MUL
       # differs only in operator and fallback name.
-      d = a[/^R(\d+)/, 1]
-      s = a[/\(R(\d+)\)/, 1]
+      d = insn.reg
+      s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('MUL', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: the product interval fits Fixnum.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
             r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
@@ -251,30 +304,50 @@ class CodeGen
           } else {
             #{compile_operator_fallback('*', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'DIV'
       # DIV_FASTPATH_SUPPORT: Integer#/ floors (not C's truncation). int_div
       # (src/numeric.c) calls mrb_div_int_value(mrb, mrb_integer(x), mrb_integer(y))
       # for Integer/Integer, so calling it here reproduces the rounding and the
-      # ZeroDivisionError/overflow raises exactly. Declared `extern "C"` like
-      # mrb_str_aref (mruby/internal.h has no C-linkage guard). Same fixnum/fixnum
-      # guard as ADD/SUB/MUL, mrb_funcall otherwise.
-      d = a[/^R(\d+)/, 1]
-      s = a[/\(R(\d+)\)/, 1]
+      # ZeroDivisionError/overflow raises exactly. OP_DIV also handles mixed
+      # Integer/Float pairs directly; preserve those VM paths before dispatching
+      # nonnumeric operands.
+      d = insn.reg
+      s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n"
       else
+        guarded = guarded_game_integer_pair('DIV', irep, idx, unshift_proof_reg(d, reg_offset),
+                                            unshift_proof_reg(s, reg_offset), owner_def)
+        guarded_arm = if guarded
+                        "  // GUARDED_GAME_VARIABLE_RANGE: quotient fits Fixnum; helper preserves zero errors.\n" \
+                          "  if (#{guarded[:condition]}) {\n" \
+                          "    r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));\n" \
+                          "  } else {\n"
+                      else
+                        ''
+                      end
         <<~CPP
-          if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            r#{d} = mrb_div_int_value(M, mrb_fixnum(r#{d}), mrb_fixnum(r#{s}));
+          #{guarded_arm}  if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+            r#{d} = mrb_div_int_value(M, mrb_integer(r#{d}), mrb_integer(r#{s}));
+          #ifndef MRB_NO_FLOAT
+          } else if (mrb_type(r#{d}) == MRB_TT_INTEGER && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+            r#{d} = mrb_float_value(M, mrb_div_float((mrb_float)mrb_integer(r#{d}), mrb_float(r#{s})));
+          } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_INTEGER) {
+            r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), (mrb_float)mrb_integer(r#{s})));
+          } else if (mrb_type(r#{d}) == MRB_TT_FLOAT && mrb_type(r#{s}) == MRB_TT_FLOAT) {
+            r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(r#{d}), mrb_float(r#{s})));
+          #endif
           } else {
             #{compile_operator_fallback('/', d, s, nil, irep, idx, owner_def, reg_offset)}
           }
+          #{guarded ? '  }' : ''}
         CPP
       end
     when 'EQ', 'LT', 'LE', 'GT', 'GE'
-      compile_cmp(insn.op, a, irep, idx, owner_def, reg_offset)
+      compile_cmp(insn, irep, idx, owner_def, reg_offset)
     # BLOCK_BODY_INDEX_SUPPORT: compile_send keeps `idx` nil inside shifted block
     # bodies: its other scans derive r<d>..r<d+n> windows from `args`, and two of
     # them (compile_keyword_send, compile_splat_send) print register lists back
@@ -282,10 +355,10 @@ class CodeGen
     # the receiver register and index, both safely unshiftable, so it alone gets
     # the separate `trace_idx`/offset context.
     when 'SEND0', 'SEND'
-      compile_send(a, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+      compile_send(insn, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                    trace_idx: idx, trace_reg_offset: reg_offset)
     when 'SSEND0', 'SSEND'
-      compile_send(a, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+      compile_send(insn, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                    trace_idx: idx, trace_reg_offset: reg_offset)
     when 'BLKPUSH'
       # BLKPUSH_YIELD_SUPPORT: `BLKPUSH R4 2:0:0:0 (0)`: vm.c OP_BLKPUSH with lv == 0
@@ -297,8 +370,8 @@ class CodeGen
       # BLOCK_FALLBACK_YIELD_SUPPORT: inside a BLOCK_FALLBACK body whose enclosing
       # method's block was captured, @blk_param_level answers exactly that lv
       # (uvenv(mrb, lv-1) is a different frame for each lv).
-      d = a[/^R(\d+)/, 1]
-      lv = a[/\((\d+)\)/, 1]
+      d = insn.reg
+      lv = insn.paren_value
       if lv == @blk_param_level.to_s && @blk_param_name
         <<~CPP
           if (mrb_nil_p(#{@blk_param_name})) {
@@ -307,7 +380,7 @@ class CodeGen
           r#{d} = #{@blk_param_name};
         CPP
       else
-        "#error unhandled opcode BLKPUSH #{a}\n"
+        "#error unhandled opcode BLKPUSH #{insn.args}\n"
       end
     when 'BLKCALL'
       # "BLKCALL R4 2": ops.h `R[a] = R[a].call(R[a+1],...,R[a+b])`. codegen_yield's
@@ -327,8 +400,8 @@ class CodeGen
       # passes the proc as self but mrb_yield_argv passes nil. Calling the cfunc
       # pointer directly would skip the ci frame mrb_get_args reads, which is worse.
       # No site passes one, and no core cfunc proc depends on its self.
-      d = a[/^R(\d+)/, 1].to_i
-      blkn = a[/^R\d+\s+(\d+)/, 1].to_i
+      d = insn.reg.to_i
+      blkn = insn.uint_operand.to_i
       out = String.new
       out << "  if (!mrb_proc_p(r#{d})) {\n"
       out << "    mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: BLKCALL (yield) expected a Proc\");\n"
@@ -343,7 +416,7 @@ class CodeGen
       end
       out
     when 'RETURN'
-      r = a.empty? ? '0' : a[/^R(\d+)/, 1]
+      r = insn.no_operands? ? '0' : insn.reg
       "  return r#{r};\n"
     when 'RETNIL'
       "  return mrb_nil_value();\n"
@@ -359,29 +432,29 @@ class CodeGen
     when 'JMP'
       # `.to_i`: the disassembly zero-pads ("018") while labels use the integer
       # ("L18:").
-      target = ensure_remapped_jump_target(irep, a.strip[/\d+/].to_i)
+      target = ensure_remapped_jump_target(irep, insn.jmp_addr)
       "  goto L#{target};\n"
     when 'JMPUW'
       # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when this irep has no
       # catch handlers (see jmpuw_is_plain_jump?). `.to_i` as for JMP.
       if jmpuw_is_plain_jump?(irep)
-        "  goto L#{a.strip[/\d+/].to_i};\n"
+        "  goto L#{insn.jmp_addr};\n"
       else
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
     when 'JMPNOT'
-      reg = a[/^R(\d+)/, 1]
-      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
+      reg = insn.reg
+      target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       "  if (!mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPIF'
-      reg = a[/^R(\d+)/, 1]
-      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
+      reg = insn.reg
+      target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       "  if (mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPNIL'
       # "JMPNIL R3 024": jump if exactly nil (vm.c), for nil-specific tests like
       # `x.nil? ? a : b`.
-      reg = a[/^R(\d+)/, 1]
-      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
+      reg = insn.reg
+      target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
     when 'GETCONST'
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
@@ -399,8 +472,8 @@ class CodeGen
       # A top-level def (owner "Object") needs just the one lookup.
       # Name: `\S+`, so a trailing "; R3:name" comment ("GETCONST R3 MAX_DIGITS\t;
       # R3:d") is not interned into the name.
-      d = a[/^R(\d+)/, 1]
-      name = a[/^R\d+\s+(\S+)/, 1]
+      d = insn.reg
+      name = insn.const_name
       # INTEGER_CONSTANT_VALUE_PROOF: a name analyze_values proved always binds this
       # number needs no lookup. Checked first; it can never also be a
       # StableClassConstants name (one poisons on CLASS/MODULE, the other requires
@@ -426,14 +499,14 @@ class CodeGen
     when 'OCLASS'
       # OCLASS_SUPPORT: "OCLASS R3" for `::Foo` (followed by GETMCNST); vm.c
       # `regs[a] = mrb_obj_value(mrb->object_class)`.
-      d = a[/^R(\d+)/, 1]
+      d = insn.reg
       "  r#{d} = mrb_obj_value(M->object_class);\n"
     when 'GETMCNST'
       # "GETMCNST R6 (R6)::Sections": r<d> holds the owning module (from the chain,
       # e.g. GETCONST R2 LCF; GETMCNST R2 (R2)::Schema; GETMCNST R2 (R2)::DATABASE);
       # read the constant from it into the same register.
-      d = a[/^R(\d+)/, 1]
-      name = a[/::(\w+)\s*$/, 1]
+      d = insn.reg
+      name = insn.mcnst_name
       # INTEGER_CONSTANT_VALUE_PROOF, as in GETCONST. The preceding scope lookups
       # still run (and raise if missing); only this value lookup is skipped. This is
       # the hot `case cmd.code when Cmd::X` shape.
@@ -445,8 +518,8 @@ class CodeGen
     when 'HASH'
       # "HASH R2 22": N key/value pairs from Rd, result into Rd (vm.c OP_HASH). All
       # pair registers are read before Rd is written.
-      d = a[/^R(\d+)/, 1].to_i
-      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      d = insn.reg.to_i
+      n = insn.uint_operand.to_i
       out = String.new
       out << "  {\n"
       out << "    mrb_value h = mrb_hash_new_capa(M, #{n});\n"
@@ -465,10 +538,10 @@ class CodeGen
       # [Rs .. Rs+N-1], emitted for `local = [literal]`. The 2-operand regex does
       # not match it, and treating N as 0 compiled it to an empty Array; it is
       # handled explicitly.
-      d = a[/^R(\d+)/, 1].to_i
-      three = a.match(/^R\d+\s+R(\d+)\s+(\d+)/)
-      src = three ? three[1].to_i : d
-      n = three ? three[2].to_i : a[/^R\d+\s+(\d+)/, 1].to_i
+      d = insn.reg.to_i
+      three = insn.src_and_literal
+      src = three ? three[0].to_i : d
+      n = three ? three[1].to_i : insn.uint_operand.to_i
       if n.zero?
         "  r#{d} = mrb_ary_new(M);\n"
       else
@@ -485,8 +558,8 @@ class CodeGen
       # always an Array here: codegen.c emits OP_ARYPUSH only in gen_values and
       # codegen_array, each after an OP_ARRAY wrote that register, so the ensure is
       # a no-op and plain mrb_ary_push calls suffice.
-      d = a[/^R(\d+)/, 1].to_i
-      n = a[/^R\d+\s+(\d+)/, 1].to_i
+      d = insn.reg.to_i
+      n = insn.uint_operand.to_i
       out = String.new
       n.times { |i| out << "  mrb_ary_push(M, r#{d}, r#{d + i + 1});\n" }
       out
@@ -499,8 +572,8 @@ class CodeGen
       # `LOADNIL R5` then `ARYCAT R5 (R6)`, so the nil branch is reproduced. A
       # non-nil R[a] always came from ARRAY or ARYCAT, so ensure_array_type is a
       # no-op. R[a+1] can be anything, so mrb_ary_splat is really called.
-      d = a[/^R(\d+)/, 1]
-      s = a[/\(R(\d+)\)/, 1]
+      d = insn.reg
+      s = insn.paren_reg
       <<~CPP
         {
           mrb_value bc2cpp_arycat_splat = mrb_ary_splat(M, r#{s});
@@ -515,8 +588,8 @@ class CodeGen
       # "AREF R2 R6 0 ; R2:x": R[a] = R[b][c] with an immediate c (vm.c): for a
       # non-Array, index 0 yields R[b] itself and others nil; for an Array,
       # mrb_ary_ref. This is `x, y, w, h = some_call(...)` destructuring.
-      d, s = regs(a, 2)
-      c = a[/^R\d+\s+R\d+\s+(\d+)/, 1]
+      d, s = insn.regs.first(2)
+      c = insn.src_and_literal&.last
       "  r#{d} = mrb_array_p(r#{s}) ? bc2cpp_ary_entry(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
     when 'GETIDX'
       # "GETIDX R2 (R3)": R[a] = R[a][R[a+1]] with a register index (vm.c).
@@ -534,7 +607,7 @@ class CodeGen
       # still falls back to `[]`, and subclasses use Ruby dispatch. A Hash needs no
       # index-type check; an Array still needs mrb_integer_p (bc2cpp_ary_entry only
       # takes a fixnum).
-      d, s = regs(a, 2)
+      d, s = insn.regs.first(2)
       index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
@@ -584,7 +657,7 @@ class CodeGen
       # and no index register. Same exact-class Array/Hash fast paths as GETIDX,
       # else a real `[]` send with 0, as vm.c's getidx0_fallback.
       # GETIDX_STATIC_RECEIVER_SUPPORT applies to `s`, the receiver here.
-      d, s = regs(a, 2)
+      d, s = insn.regs.first(2)
       index_class = static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
       case index_class
       when 'Array'
@@ -618,7 +691,7 @@ class CodeGen
       # GETIDX_STATIC_RECEIVER_SUPPORT as for GETIDX. The index register is named
       # `idx_reg`: `idx` would shadow compile_insn's instruction position, which
       # static_indexable_class needs.
-      d, idx_reg, val = regs(a, 3)
+      d, idx_reg, val = insn.regs.first(3)
       index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
@@ -648,15 +721,15 @@ class CodeGen
     when 'GETGV'
       # "GETGV R4 $stderr": R[a] = mrb_gv_get (vm.c); the symbol already includes the
       # `$`.
-      d = a[/^R(\d+)/, 1]
-      name = a[/(\$\S+)/, 1]
+      d = insn.reg
+      name = insn.global_name
       "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'SETGV'
       # "SETGV $stderr R4": operands are reversed relative to GETGV (codedump.c
       # `"SETGV\t\t%s\tR%d"`), so both are matched unanchored (one `$` token, one
       # register). vm.c: `mrb_gv_set(mrb, irep->syms[b], regs[a])`.
-      s = a[/R(\d+)/, 1]
-      name = a[/(\$\S+)/, 1]
+      s = insn.regs.first
+      name = insn.global_name
       "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
     when 'STOP'
       ''
@@ -670,8 +743,8 @@ class CodeGen
       # accepts. The immediate is the third operand (`^R\d+\s+R\d+\s+(-?\d+)`): `a`
       # is a named local, so a trailing "; Rd:name" comment is normal and
       # `.split.last` would pick it up.
-      d = a[/^R(\d+)/, 1]
-      lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
+      d = insn.reg
+      lit = insn.src_and_literal&.last
       # FIXNUM_OPERAND_PROOF: as ADDI; rarely provable (a loop back-edge sits
       # between the write and this use).
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
@@ -688,8 +761,8 @@ class CodeGen
     when 'SUBILV'
       # OP_SUBILV: ADDILV's sibling (same shape, same extraction), e.g. `new_level -=
       # 1 while ...`.
-      d = a[/^R(\d+)/, 1]
-      lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
+      d = insn.reg
+      lit = insn.src_and_literal&.last
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
@@ -704,11 +777,11 @@ class CodeGen
     when 'RANGE_INC'
       # "RANGE_INC Ra": R[a] = mrb_range_new(mrb, regs[a], regs[a+1], FALSE) (vm.c);
       # both operands are read before r<a> is written.
-      d = a[/^R(\d+)/, 1].to_i
+      d = insn.reg.to_i
       "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, FALSE);\n"
     when 'RANGE_EXC'
       # OP_RANGE_EXC: RANGE_INC with exclude_end TRUE (`a...b`).
-      d = a[/^R(\d+)/, 1].to_i
+      d = insn.reg.to_i
       "  r#{d} = mrb_range_new(M, r#{d}, r#{d + 1}, TRUE);\n"
     when 'RETURN_BLK'
       # "RETURN_BLK Ra": vm.c starts with `if (!MRB_PROC_ENV_P(ci->proc) ||
@@ -721,7 +794,7 @@ class CodeGen
       #     `throw bc2cpp_method_return{...}`, caught by compile_method's top-level
       #     try/catch (needs_return_catch). The per-call-site
       #     `catch (bc2cpp_block_break&)` cannot match it (exact C++ catch types).
-      r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
+      r = insn.no_operands? ? '0' : insn.reg
       if @block_fallback_active
         "  throw bc2cpp_method_return{r#{r}};\n"
       else
@@ -734,7 +807,7 @@ class CodeGen
       # (2) EXCEPTION_BREAK_SUPPORT: a BLOCK_FALLBACK body, where a non-strict break
       #     unwinds to the SENDB call site, past mrb_funcall_with_block: `throw`,
       #     caught by emit_block_fallback_glue's `catch (bc2cpp_block_break&)`.
-      r = a.strip.empty? ? '0' : a[/^R(\d+)/, 1]
+      r = insn.no_operands? ? '0' : insn.reg
       if @block_fallback_active
         "  throw bc2cpp_block_break{r#{r}};\n"
       else
@@ -745,16 +818,14 @@ class CodeGen
       # RESCUE_SUPPORT's glue produces one) and Rb the class from the preceding
       # GETCONST/GETMCNST chain, so this is correct wherever it appears; not gated on
       # the recognizer (unlike EXCEPT).
-      ra, rb = a.split(/\s+/)
-      d = ra[/^R(\d+)/, 1]
-      s = rb[/^R(\d+)/, 1]
+      d, s = insn.regs
       "  r#{s} = mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})));\n"
     when 'RAISEIF'
       # "RAISEIF Ra": re-raise Ra unless nil. In a recognized rescue it is reached
       # only on the non-matching path with the exception in Ra. vm.c's mrb_break_p
       # branch (a break unwinding through a block) does not apply: the leaf ireps
       # compiled here are def bodies, so Ra is nil or an exception.
-      ra = a[/^R(\d+)/, 1]
+      ra = insn.reg
       "  if (!mrb_nil_p(r#{ra})) { mrb_exc_raise(M, r#{ra}); }\n"
     when 'SUPER'
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
@@ -762,9 +833,8 @@ class CodeGen
       # the current block. That block is never read: a compiled `_impl` has none
       # (see SUPER_TARGETS). super_target applies the allowlist.
        target_def = super_target(owner_def)
-       dest, nstr = a.split(/\s+/, 2)
-       d_reg = dest[/^R(\d+)/, 1]
-       n = nstr && nstr[/^n=(\d+)$/, 1]
+       d_reg = insn.reg
+       n = insn.plain_fixed_argc? ? insn.n_spec : nil
        zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
        zsuper_plan = reg_offset.zero? && zsuper_kind.nil? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        if target_def && d_reg && n
@@ -837,10 +907,11 @@ class CodeGen
   # dispatching `==`, so `x == x` stays true even with an overridden `==`.
   # FIXNUM_OPERAND_PROOF: when both operands prove, only the native comparison
   # is emitted (the same value the fast path computes).
-  def compile_cmp(op, args, irep = nil, idx = nil, owner_def = nil, reg_offset = 0)
+  def compile_cmp(insn, irep = nil, idx = nil, owner_def = nil, reg_offset = 0)
+    op = insn.op
     sym = { 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=' }.fetch(op)
-    d = args[/^R(\d+)/, 1]
-    s = args[/\(R(\d+)\)/, 1]
+    d = insn.reg
+    s = insn.paren_reg
     if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
       return "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_bool_value(mrb_fixnum(r#{d}) #{sym} mrb_fixnum(r#{s}));\n"
     end
@@ -855,14 +926,21 @@ class CodeGen
     # MONO/TYPED resolver so compiled operator methods are called directly. For
     # EQ the generated chain below already handles String/Symbol, so its fallback
     # must not repeat the registered-expression switch.
-    @suppress_native_expression_send = sym if op == 'EQ'
-    begin
-      fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
-    ensure
-      @suppress_native_expression_send = nil
+    if op == 'EQ' && eqq_literal_devirt_safe?
+      # CLOSED_WORLD_EQUALITY: with no Ruby == override, mrb_equal is the VM's
+      # own equality helper. It keeps native class-specific equality behavior
+      # while avoiding a generated Ruby-send fallback for unmatched receiver tags.
+      fallback = "r#{d} = mrb_bool_value(mrb_equal(M, r#{d}, r#{s}));\n"
+    else
+      @suppress_native_expression_send = sym if op == 'EQ'
+      begin
+        fallback = compile_operator_fallback(sym, d, s, nil, irep, idx, owner_def, reg_offset)
+      ensure
+        @suppress_native_expression_send = nil
+      end
     end
-    # String/Symbol `==` come from their C wrappers; the resolver fallback stays
-    # the `else`.
+    # String/Symbol `==` use their registered C bodies; Integer's other numeric
+    # forms and unmatched tags keep mruby's mrb_equal semantics in the fallback.
     fallback = generated_eq_dispatch(d, s, fallback) || fallback if op == 'EQ'
 
     integer_accessor = "mrb_integer(r#{d}) #{sym} mrb_integer(r#{s})"
@@ -935,8 +1013,8 @@ class CodeGen
   # than borrowing a possibly live register.
   def compile_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
     argument = arg_reg ? "r#{arg_reg}" : arg_expr
-    send_args = "R#{dest_reg} :#{name} n=1"
-    send = compile_send(send_args, self_implicit: false, irep: irep,
+    send_insn = Insn.synthetic('SEND', "R#{dest_reg} :#{name} n=1")
+    send = compile_send(send_insn, self_implicit: false, irep: irep,
                         idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                         call_receiver: "r#{dest_reg}", call_arguments: [argument])
     send.lines.map { |line| "  #{line}" }.join

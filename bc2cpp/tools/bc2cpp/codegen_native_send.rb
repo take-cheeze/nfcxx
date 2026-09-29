@@ -3,6 +3,71 @@
 # CodeGen: sends devirtualized to native primitives.
 
 class CodeGen
+  # Owner/class pairs for frame-independent wrapper bodies that mirror these
+  # mruby-rgss registrations. Keep exact owners here: NATIVE_SRCS records the
+  # method name globally, while the runtime class guard selects the owner.
+  NATIVE_WRAPPER_DIRECT_OWNERS = {
+    'bitmap=' => %w[RGSS::Sprite],
+    'clear' => %w[RGSS::Bitmap],
+    'rect' => %w[RGSS::Bitmap RGSS::Viewport],
+    'fill_rect' => %w[RGSS::Bitmap],
+    'blt' => %w[RGSS::Bitmap],
+    'stretch_blt' => %w[RGSS::Bitmap],
+    'draw_text' => %w[RGSS::Bitmap],
+    'copy_blt' => %w[RGSS::Bitmap],
+    'text_size' => %w[RGSS::Bitmap],
+    'width' => %w[RGSS::Bitmap RGSS::Rect],
+    'height' => %w[RGSS::Bitmap RGSS::Rect],
+    'x' => %w[RGSS::Rect],
+    'y' => %w[RGSS::Rect],
+    'red' => %w[RGSS::Color RGSS::Tone],
+    'green' => %w[RGSS::Color RGSS::Tone],
+    'blue' => %w[RGSS::Color RGSS::Tone],
+    'alpha' => %w[RGSS::Color],
+    'gray' => %w[RGSS::Tone],
+    'disposed?' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window],
+    'visible' => %w[RGSS::Sprite RGSS::Viewport RGSS::Plane],
+    'update' => %w[RGSS::Sprite RGSS::Viewport RGSS::Window],
+    'dispose' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window],
+    'openness=' => %w[RGSS::Window],
+    'tone=' => %w[RGSS::Sprite RGSS::Window RGSS::Viewport],
+    'opacity=' => %w[RGSS::Sprite]
+  }.freeze
+
+  NATIVE_WRAPPER_ZERO_ARG_DIRECT = {
+    'clear' => { 'RGSS::Bitmap' => 'bitmap_clear_direct' },
+    'rect' => { 'RGSS::Bitmap' => 'bitmap_rect_direct', 'RGSS::Viewport' => 'viewport_rect_direct' },
+    'width' => { 'RGSS::Bitmap' => 'bitmap_width_direct', 'RGSS::Rect' => 'rect_width_direct' },
+    'height' => { 'RGSS::Bitmap' => 'bitmap_height_direct', 'RGSS::Rect' => 'rect_height_direct' },
+    'x' => { 'RGSS::Rect' => 'rect_x_direct' },
+    'y' => { 'RGSS::Rect' => 'rect_y_direct' },
+    'red' => { 'RGSS::Color' => 'color_red_direct', 'RGSS::Tone' => 'tone_red_direct' },
+    'green' => { 'RGSS::Color' => 'color_green_direct', 'RGSS::Tone' => 'tone_green_direct' },
+    'blue' => { 'RGSS::Color' => 'color_blue_direct', 'RGSS::Tone' => 'tone_blue_direct' },
+    'alpha' => { 'RGSS::Color' => 'color_alpha_direct' },
+    'gray' => { 'RGSS::Tone' => 'tone_gray_direct' },
+    'disposed?' => %w[RGSS::Bitmap RGSS::Sprite RGSS::Viewport RGSS::Plane RGSS::Tilemap RGSS::Window]
+      .to_h { |owner| [owner, 'disposed_direct'] },
+    'visible' => %w[RGSS::Sprite RGSS::Viewport RGSS::Plane].to_h { |owner| [owner, 'visible_direct'] },
+    'update' => {
+      'RGSS::Sprite' => 'sprite_update_direct',
+      'RGSS::Viewport' => 'viewport_update_direct',
+      'RGSS::Window' => 'window_update_direct'
+    }
+  }.freeze
+
+  NATIVE_WRAPPER_CLASS_ACCESSORS = {
+    'RGSS::Rect' => 'native_rect_class',
+    'RGSS::Color' => 'native_color_class',
+    'RGSS::Tone' => 'native_tone_class',
+    'RGSS::Bitmap' => 'native_bitmap_class',
+    'RGSS::Sprite' => 'native_sprite_class',
+    'RGSS::Viewport' => 'native_viewport_class',
+    'RGSS::Plane' => 'native_plane_class',
+    'RGSS::Tilemap' => 'native_tilemap_class',
+    'RGSS::Window' => 'native_window_class'
+  }.freeze
+
   # LITERAL_EQQ_SUPPORT soundness gate, re-checked against this run's @registry:
   # both `#==` and `#===` must be MONO native. `LITERAL === arg` must reach
   # mrb_eqq_m (src/kernel.c), which calls mrb_equal (src/object.c); mrb_equal
@@ -50,6 +115,36 @@ class CodeGen
     defs && defs.size == 1 && defs.first.irep.nil?
   end
 
+  # The rgss:: wrappers are defined by mruby-rgss/src, so a build that does not
+  # link it (optcarrot probe) must not emit them: a core native of the same
+  # name (Array#clear) satisfies the registry test but not the link.
+  def rgss_native_registers?(name)
+    return true unless @native_name_sources
+
+    @native_name_sources.fetch(name, []).any? { |path| path.include?('mruby-rgss/src/') }
+  end
+
+  # An exact runtime class guard selects a C wrapper only when that owner has
+  # one native registration and no prepended module can take lookup precedence.
+  def native_wrapper_owner_safe?(name, owner)
+    return false unless NATIVE_WRAPPER_DIRECT_OWNERS.fetch(name, []).include?(owner)
+    return false unless rgss_native_registers?(name)
+
+    defs = @registry[name]
+    return false unless defs
+
+    defs.any? { |definition| definition.owner == '<native>' && definition.irep.nil? } &&
+      defs.none? { |definition| definition.owner == owner } &&
+      Array(@prepended_modules[owner]).empty?
+  end
+
+  # OWNERLESS_NATIVE_DISPATCH: preserve the existing open-world primitive gate;
+  # closed-world builds additionally prove no external Ruby definition or
+  # dynamic installer can replace this method.
+  def ownerless_native_dispatch_safe?(name)
+    native_only_mono?(name) && (!@closed_world || @closed_world.ownerless_native_dispatch_safe?(name))
+  end
+
   # Permit per-class fast paths only for exact built-in receivers, with a
   # native registration present and no Ruby replacement on those classes.
   # A prepend can sit ahead of the native method, so decline the fast path
@@ -67,11 +162,22 @@ class CodeGen
                                           end
   end
 
+  # The closed world proves no Ruby respond_to_missing? exists, and every native
+  # one is mruby core's (kernel.c/class.c/method.c), whose default answers false.
+  def respond_to_missing_absent?
+    return false unless @closed_world&.respond_to_missing_free?
+    return false unless @native_name_sources
+
+    @native_name_sources.fetch('respond_to_missing?', []).all? { |path| path.match?(%r{/3rd/mruby/(?:src|mrbgems)/}) }
+  end
+
   # Guarded direct C++ for one NATIVE_PRIMITIVE_SEND_ARITY name, or an exact-class
   # expression generated from registered native C methods. The per-method
   # soundness notes are at compile_send's call site.
   def compile_native_primitive_send(name, d, recv, argv)
-    return compile_native_registered_expression(name, d, recv, argv) if @native_registered_expressions.key?(name)
+    if @native_registered_expressions.key?(name) && name != 'to_s'
+      return compile_native_registered_expression(name, d, recv, argv)
+    end
 
     case name
     when 'respond_to?'
@@ -80,9 +186,11 @@ class CodeGen
       # Answer hits directly and keep the original call for misses. compile_send's
       # arity and native-only gates ensure the core method is the target.
       method_name = argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      # RESPOND_TO_MISS_FOLD: with no respond_to_missing? override anywhere, a miss is
+      # exactly false (see respond_to_missing_absent?), so it needs no send.
+      fallback = respond_to_missing_absent? ? "r#{d} = mrb_false_value();\n" : dynamic_dispatch_line(d, recv, name, argv)
       <<~CPP
-          // respond_to? -- answer native hits directly; preserve missing-hook behavior on misses
+          // respond_to? -- answer native hits directly; #{respond_to_missing_absent? ? 'a miss is false (no respond_to_missing? hook exists)' : 'preserve missing-hook behavior on misses'}
           {
             // Braced so the symbol neither redeclares across sends that reuse
             // register #{d} nor sits between a goto and its label.
@@ -178,25 +286,37 @@ class CodeGen
       #   self) != mrb->string_class ? mrb_str_dup(mrb, self) : self`, reproduced.
       #   MRB_TT_INTEGER: int_to_s is mrb_integer_to_str(mrb, self, 10) for n == 0
       #   (a public MRB_API).
-      # Array/Hash are excluded: mrb_ary_to_s/mrb_hash_to_s start with
-      # `mrb->c->ci->mid = MRB_SYM(inspect);`, which would corrupt the current
-      # frame. Float/Range (static, no public equivalent) and Class/Module
-      # (mrb_mod_to_s is internal.h-only) are excluded too.
-      "  // to_s -- native primitive, runtime-guarded per real receiver type\n" \
-      "  // (only String/Integer are handled directly -- see compile_native_\n" \
-      "  // primitive_send's own TO_S_TYPE_TAG_DISPATCH comment for why Array/\n" \
-      "  // Hash/Float/Range/Class are deliberately left to ordinary dispatch)\n" \
-      "  switch (mrb_type(#{recv})) {\n" \
-      "  case MRB_TT_STRING:\n" \
-      "    r#{d} = mrb_obj_class(M, #{recv}) != M->string_class ? mrb_str_dup(M, #{recv}) : #{recv};\n" \
-      "    break;\n" \
-      "  case MRB_TT_INTEGER:\n" \
-      "    r#{d} = mrb_integer_to_str(M, #{recv}, 10);\n" \
-      "    break;\n" \
-      "  default:\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    break;\n" \
-      "  }\n"
+      # Array/Hash bodies mutate the active frame's method name for recursive
+      # inspect. mrb_inspect enters inspect normally, preserving that behavior;
+      # the exact class and inspect-definition checks retain override dispatch.
+      # Float/Range (no public equivalent) and Class/Module (internal.h-only) stay
+      # on ordinary dispatch.
+      inspect_containers = builtin_class_send_safe?('inspect', %w[Array Hash])
+      container_arms = if inspect_containers
+                         <<~CPP.chomp
+                           else if (mrb_type(#{recv}) == MRB_TT_ARRAY &&
+                                    mrb_obj_ptr(#{recv})->c == M->array_class) {
+                             r#{d} = mrb_inspect(M, #{recv});
+                         } else if (mrb_type(#{recv}) == MRB_TT_HASH &&
+                                    mrb_obj_ptr(#{recv})->c == M->hash_class) {
+                             r#{d} = mrb_inspect(M, #{recv});
+                         }
+                         CPP
+                       else
+                         ''
+                       end
+      <<~CPP
+          // to_s -- native primitive, runtime-guarded per real receiver type
+          if (mrb_type(#{recv}) == MRB_TT_STRING &&
+              mrb_obj_ptr(#{recv})->c == M->string_class) {
+            r#{d} = #{recv};
+          } else if (mrb_type(#{recv}) == MRB_TT_INTEGER &&
+                     mrb_obj_class(M, #{recv}) == M->integer_class) {
+            r#{d} = mrb_integer_to_str(M, #{recv}, 10);
+          } #{container_arms} else {
+            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          }
+      CPP
     when 'length'
       # LENGTH_TYPE_TAG_DISPATCH: Array (mrb_ary_size: ARY_LEN) and Hash
       # (mrb_hash_size, public) are handled. String is excluded: mrb_str_size uses
@@ -368,27 +488,20 @@ class CodeGen
       "  // primitive_send's own TO_I_TYPE_TAG_DISPATCH comment for why Time\n" \
       "  // and Float's own NaN/Infinity/overflow edge are deliberately left\n" \
       "  // to ordinary dispatch)\n" \
-      "  switch (mrb_type(#{recv})) {\n" \
-      "  case MRB_TT_INTEGER:\n" \
+      "  if (mrb_type(#{recv}) == MRB_TT_INTEGER) {\n" \
       "    r#{d} = #{recv};\n" \
-      "    break;\n" \
-      "  case MRB_TT_FLOAT: {\n" \
+      "  } else if (mrb_type(#{recv}) == MRB_TT_FLOAT &&\n" \
+      "             !isnan(mrb_float(#{recv})) && !isinf(mrb_float(#{recv})) &&\n" \
+      "             FIXABLE_FLOAT(mrb_float(#{recv}))) {\n" \
       "    mrb_float bc2cpp_toi_f#{d} = mrb_float(#{recv});\n" \
-      "    if (isnan(bc2cpp_toi_f#{d}) || isinf(bc2cpp_toi_f#{d}) || !FIXABLE_FLOAT(bc2cpp_toi_f#{d})) {\n" \
-      "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    } else {\n" \
-      "      if (bc2cpp_toi_f#{d} > 0.0) bc2cpp_toi_f#{d} = floor(bc2cpp_toi_f#{d});\n" \
-      "      if (bc2cpp_toi_f#{d} < 0.0) bc2cpp_toi_f#{d} = ceil(bc2cpp_toi_f#{d});\n" \
-      "      r#{d} = mrb_int_value(M, (mrb_int)bc2cpp_toi_f#{d});\n" \
-      "    }\n" \
-      "    break;\n" \
-      "  }\n" \
-      "  case MRB_TT_STRING:\n" \
+      "    if (bc2cpp_toi_f#{d} > 0.0) bc2cpp_toi_f#{d} = floor(bc2cpp_toi_f#{d});\n" \
+      "    if (bc2cpp_toi_f#{d} < 0.0) bc2cpp_toi_f#{d} = ceil(bc2cpp_toi_f#{d});\n" \
+      "    r#{d} = mrb_int_value(M, (mrb_int)bc2cpp_toi_f#{d});\n" \
+      "  } else if (mrb_type(#{recv}) == MRB_TT_STRING &&\n" \
+      "             mrb_obj_ptr(#{recv})->c == M->string_class) {\n" \
       "    r#{d} = mrb_str_to_integer(M, #{recv}, 10, FALSE);\n" \
-      "    break;\n" \
-      "  default:\n" \
+      "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    break;\n" \
       "  }\n"
     end
   end
@@ -440,38 +553,28 @@ class CodeGen
     return fallback unless entries && !entries.empty?
     return fallback unless entries.all? { |entry| entry[:arity] == argv.length }
 
-    cases = entries.map do |entry|
+    arms = entries.map do |entry|
       owner = entry[:owner]
       expression = entry[:expression].gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
       source_comment = if name == 'clear' && owner[:class_name] == 'Array' && expression.include?('mrb_ary_clear')
                          '// ARRAY_CLEAR :clear -- generated from mruby core C'
                        end
-      class_check = if %w[Float Symbol].include?(owner[:class_name])
-                      "r#{d} = #{expression};"
-                    else
-                      <<~CPP.chomp
-                        if (mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}) {
-                          r#{d} = #{expression};
-                        } else {
-                          #{fallback.chomp}
-                        }
-                      CPP
-      end
-      <<~CPP
+      exact_class = %w[Float Symbol].include?(owner[:class_name]) ? '' :
+                      " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}"
+      <<~CPP.chomp
         #{source_comment}
-        case #{owner[:tag]}:
-          #{class_check.gsub("\n", "\n  ")}
-          break;
+        if (mrb_type(#{recv}) == #{owner[:tag]}#{exact_class}) {
+          r#{d} = #{expression};
+        } else
       CPP
     end.join
     <<~CPP
       // #{name} -- generated from native registrations and C method bodies
-      switch (mrb_type(#{recv})) {
-      #{cases}
-      default:
+      {
+      #{arms} {
         #{fallback.chomp}
-        break;
+      }
       }
     CPP
   end

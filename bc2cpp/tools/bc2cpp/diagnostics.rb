@@ -11,19 +11,10 @@
 # Like IvarLayout.trace_type, but returns nil at any writer: non-nil means
 # `reg` (after MOVEs) is a bare incoming argument.
 def opaque_argument_position(irep, idx, reg, mand)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    if insn.op == 'MOVE'
-      d, s = insn.args.scan(/R(\d+)/).flatten
-      next unless d == reg
+  entry_reg = irep.walk_writers(idx - 1, reg, follow_moves: true, exhausted: ->(last) { last }) { nil }
+  return nil unless entry_reg
 
-      reg = s
-    else
-      d = insn.args[/^R(\d+)/, 1]
-      return nil if d == reg
-    end
-  end
-  pos = reg.to_i
+  pos = entry_reg.to_i
   pos.between?(1, mand) ? pos : nil
 end
 
@@ -40,8 +31,8 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       next unless init&.irep && pure_mandatory_arity?(ireps.fetch(init.irep))
 
       irep = ireps.fetch(d.irep)
-      enter = irep.instructions.find { |i| i.op == 'ENTER' }
-      mand = enter ? enter.args.split(':').first.to_i : 0
+      enter = irep.enter
+      mand = enter ? enter.enter_fields.first : 0
       next if mand.zero?
 
       already_at = lambda do |pos|
@@ -49,15 +40,13 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       end
       seen_pos = Set.new
 
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'SETIV'
-
-        src_reg = insn.args[/R(\d+)/, 1]
+      irep.each_with_op('SETIV') do |insn, idx|
+        src_reg = insn.regs.first
         pos = opaque_argument_position(irep, idx, src_reg, mand)
         next unless pos
         next if already_at.call(pos)
 
-        ivar = insn.args[/@(\w+)/, 1]
+        ivar = insn.ivar
         candidates << { owner: d.owner, name: d.name, ivar: ivar, pos: pos, mand: mand, via: 'SETIV' }
         seen_pos << pos
       end
@@ -68,9 +57,9 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       irep.instructions.each_with_index do |insn, idx|
         regs = case insn.op
                when 'ADD', 'SUB', 'MUL', 'EQ', 'LT', 'LE', 'GT', 'GE'
-                 [insn.args[/^R(\d+)/, 1], insn.args[/\(R(\d+)\)/, 1]]
+                 [insn.reg, insn.paren_reg]
                when 'ADDI', 'SUBI'
-                 [insn.args[/^R(\d+)/, 1]]
+                 [insn.reg]
                else
                  []
                end
@@ -117,7 +106,7 @@ def collect_static_call_target_names(ireps)
       # SENDB/SSENDB count too (docs/adr/0203): a method only called with a block
       # is still called.
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND', 'SENDB', 'SSENDB', 'LOADSYM'
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        name = insn.sym
         names << name if name
       else
         fixed = IMPLICIT_DISPATCH_NAMES[insn.op]

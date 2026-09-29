@@ -15,29 +15,21 @@
 # Two argument shapes: n <= CALL_MAXARGS members in consecutive LOADSYM
 # registers, or more (`n=*`) packed into one ARRAY first.
 def detect_struct_new_members(irep, idx, insn, namespace)
-  name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+  name = insn.sym
   return nil unless name == 'new'
 
-  d = insn.args[/^R(\d+)/, 1]
+  d = insn.reg
   return nil unless d
 
-  struct_recv = false
-  (idx - 1).downto(0) do |i|
-    prev = irep.instructions[i]
-    pd = prev.args[/^R(\d+)/, 1]
-    next unless pd == d
-
-    struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
-    break
-  end
+  prev = irep.last_writer(idx - 1, d)
+  struct_recv = prev && prev.op == 'GETCONST' && prev.const_name == 'Struct'
   return nil unless struct_recv
 
   # The Struct's name comes from a SETCONST right after the call on the same
   # register; an unnamed Struct.new is left unrecognized.
   next_insn = irep.instructions[idx + 1]
   struct_name = if next_insn && next_insn.op == 'SETCONST'
-                  sc_name, sc_reg = next_insn.args.split(/\s+/, 2)
-                  sc_name if sc_reg == "R#{d}"
+                  next_insn.const_name if next_insn.reg_operand == d.to_s
                 end
   return nil unless struct_name
 
@@ -51,18 +43,18 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   end
 
   # `keyword_init:` is Struct.new's only keyword; skip its (key, value) pair.
-  nk = insn.args[/nk=(\d+)/, 1].to_i
+  nk = insn.nk_spec.to_i
   scan_from -= 2 * nk
   return nil if scan_from < 0 && nk.positive?
 
-  pos = insn.args[/n=(\*|\d+)/, 1]
+  pos = insn.n_spec
   return nil unless pos
 
   if pos == '*'
     array_insn = scan_from >= 0 ? irep.instructions[scan_from] : nil
     return nil unless array_insn&.op == 'ARRAY'
 
-    n = array_insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+    n = array_insn.uint_operand
     return nil unless n
 
     scan_from -= 1
@@ -71,15 +63,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
     return nil if n.zero?
   end
 
-  members = []
-  i = scan_from
-  while i >= 0 && members.size < n
-    prev = irep.instructions[i]
-    break unless prev.op == 'LOADSYM'
-
-    members.unshift(prev.args[/:(\S+)/, 1])
-    i -= 1
-  end
+  members = irep.preceding_run('LOADSYM', scan_from, limit: n).map(&:sym_token)
   return nil unless members.size == n && members.all?
 
   [owner, members]
@@ -109,12 +93,16 @@ def build_registry(ireps, root_label)
   included_modules = {}
   prepended_modules = {}
   unknown_mixins = Set.new
-  # CONST_CONTAINER_SUPPORT: qualified constant name -> 'Array'/'Hash'/'Range'
-  # when every SETCONST of that name writes a proven literal_container_class
-  # value. Disagreeing sites poison the name to nil; poisoned entries are
-  # removed before returning. A literal's shape is a one-shot syntactic fact,
-  # so no fixed point is needed (unlike ClassLayout).
+  module_names = Set.new
+  mixin_sites = []
+  # Constant value class hints ('Array'/'Hash'/'Range') from assignments whose
+  # every SETCONST site writes a proven literal_container_class value.
+  # Disagreeing or unknown sites poison the name; constructor-based hints are
+  # added later, after closed-world constant proofs become available.
   container_constants = {}
+  # Value-constant type inference consumes these after class names and closed
+  # world facts are available. Keep the write site and lexical namespace here.
+  constant_assignment_sites = []
   # STRUCT_MEMBERS_ANALYSIS result: qualified Struct owner -> member names in
   # storage-index order. See detect_struct_new_members.
   struct_member_lists = {}
@@ -148,22 +136,14 @@ def build_registry(ireps, root_label)
     # trusted; anything else is unrecognized (a safe miss). Shared by the SCLASS
     # body case and the unfused DEF case below.
     resolve_singleton_receiver = lambda do |reg, before_idx|
-      recv = nil
-      (before_idx - 1).downto(0) do |i|
-        prev = irep.instructions[i]
-        pd = prev.args[/^(R\d+)/, 1]
-        next unless pd == reg
-
-        case prev.op
-        when 'LOADSELF'
-          recv = namespace || 'Object'
-        when 'GETCONST'
-          const_name = prev.args[/^R\d+\s+(\S+)/, 1]
-          recv = namespace ? "#{namespace}::#{const_name}" : const_name
-        end
-        break
+      prev = irep.last_writer(before_idx - 1, reg.delete_prefix('R'))
+      case prev&.op
+      when 'LOADSELF'
+        namespace || 'Object'
+      when 'GETCONST'
+        const_name = prev.const_name
+        namespace ? "#{namespace}::#{const_name}" : const_name
       end
-      recv
     end
 
     # Shared by TDEF and the unfused TCLASS+METHOD+DEF case: both need the builtin
@@ -173,27 +153,18 @@ def build_registry(ireps, root_label)
          respond_to_missing?].include?(method_name) ? :private : default_visibility
     end
 
-    # mrbc -v prints OP_EXT1/EXT2/EXT3 as their own lines between instructions
-    # codegen emits back to back (src/codedump.c; each widens the next
-    # instruction's operands). The unfused DEF case always has one (its METHOD
-    # index is > 0xff by construction). Returns the index of the first real opcode
-    # before `from_idx`, or -1.
-    skip_ext_back = lambda do |from_idx|
-      i = from_idx
-      i -= 1 while i >= 0 && %w[EXT1 EXT2 EXT3].include?(irep.instructions[i]&.op)
-      i
-    end
-
     irep.instructions.each_with_index do |insn, idx|
       case insn.op
       when 'CLASS', 'MODULE'
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
-        reg, name = insn.args.split(/\s+/, 2)
+        reg = insn.reg_token
+        name = insn.sym
         pending_reg = reg
         pending_idx = idx
         pending_ivar_owner = nil
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
-        pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
+        pending_name = namespace ? "#{namespace}::#{name}" : name
+        module_names << pending_name if insn.op == 'MODULE'
         if insn.op == 'MODULE'
           pending_ivar_owner = "#{pending_name}.singleton"
         end
@@ -214,7 +185,7 @@ def build_registry(ireps, root_label)
         # RGSS::Bitmap.extensions) were unregistered.
         # The receiver is resolved by resolve_singleton_receiver (LOADSELF or GETCONST
         # only; anything else is a safe miss).
-        reg = insn.args[/^(R\d+)/, 1]
+        reg = insn.reg_token
         recv = resolve_singleton_receiver.call(reg, idx)
         pending_reg = reg
         pending_idx = idx
@@ -226,9 +197,10 @@ def build_registry(ireps, root_label)
         # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" in a class/module body;
         # `namespace` is this body's lexical nesting. Only the literal (optionally
         # frozen) shape is recognized; anything else is a safe miss (nil).
-        const_name = insn.args[/^(\S+)/, 1]
-        src_reg = insn.args[/R(\d+)/, 1]
+        const_name = insn.const_name
+        src_reg = insn.regs.first
         qualified = namespace ? "#{namespace}::#{const_name}" : const_name
+        constant_assignment_sites << { name: qualified, irep: irep.label, idx: idx, reg: src_reg, owner: namespace }
         klass = literal_container_class(irep, idx, src_reg)
         # Two disagreeing (or unresolvable) sites poison the name to nil; never
         # guess which one wins.
@@ -238,9 +210,8 @@ def build_registry(ireps, root_label)
           container_constants[qualified] = klass
         end
       when 'EXEC'
-        reg, irep_ref = insn.args.split(/\s+/, 2)
-        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx2]
+        reg = insn.reg_token
+        child_label = irep.reps[insn.block_index]
         if reg == pending_reg && pending_name && idx == pending_idx + 1
           module_body_ivar_labels[pending_ivar_owner] << child_label if pending_ivar_owner
           walk.call(child_label, pending_name)
@@ -251,10 +222,8 @@ def build_registry(ireps, root_label)
         pending_ivar_owner = nil
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
-        _reg, name, irep_ref = insn.args.split(/\s+/, 3)
-        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx2]
-        method_name = name.sub(/^:/, '')
+        child_label = irep.reps[insn.block_index]
+        method_name = insn.sym
         owner = namespace || 'Object' # a top-level `def` lands on Object.
         # #initialize, #initialize_copy and #respond_to_missing? are always private,
         # whatever mode is in effect: src/class.c's define_method path sets
@@ -283,11 +252,9 @@ def build_registry(ireps, root_label)
         # resolved with resolve_singleton_receiver rather than assuming `self`; that
         # scan already skips interposed EXT lines. An unrecognized receiver is not
         # registered rather than attributed to `namespace`.
-        reg, sname, irep_ref = insn.args.split(/\s+/, 3)
-        sdef_name = sname.sub(/^:/, '')
-        sdef_idx = irep_ref[/I\[(\d+)\]/, 1].to_i
-        sdef_child_label = irep.reps[sdef_idx]
-        recv = resolve_singleton_receiver.call(reg, idx)
+        sdef_name = insn.sym
+        sdef_child_label = irep.reps[insn.block_index]
+        recv = resolve_singleton_receiver.call(insn.reg_token, idx)
         if recv
           registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{recv}.singleton",
                                                 irep: sdef_child_label, visibility: :public)
@@ -301,27 +268,26 @@ def build_registry(ireps, root_label)
         #   METHOD  R2  I[380]
         #   EXT2
         #   DEF     R1  :toned?  (R2)
-        # skip_ext_back steps over the interposed EXT lines.
-        reg, name, recv_arg = insn.args.split(/\s+/, 3)
-        method_idx = skip_ext_back.call(idx - 1)
+        # previous_real_index steps over the interposed EXT lines.
+        reg = insn.reg_token
+        method_idx = irep.previous_real_index(idx - 1)
         method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
         next unless method_insn && method_insn.op == 'METHOD'
 
-        method_reg, irep_ref = method_insn.args.split(/\s+/, 2)
+        method_reg = method_insn.reg
         # Registers must line up as codegen emits them (opener at R<n>, METHOD at
         # R<n+1>, DEF at R<n> referencing (R<n+1>)); adjacency alone is not trusted.
-        next unless recv_arg == "(#{method_reg})"
+        next unless insn.paren_reg == method_reg
 
-        opener_idx = skip_ext_back.call(method_idx - 1)
+        opener_idx = irep.previous_real_index(method_idx - 1)
         opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
         next unless opener_insn && %w[TCLASS SCLASS].include?(opener_insn.op)
 
-        opener_reg = opener_insn.args[/^(R\d+)/, 1]
+        opener_reg = opener_insn.reg_token
         next unless opener_reg == reg
 
-        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx2]
-        def_name = name.sub(/^:/, '')
+        child_label = irep.reps[method_insn.block_index]
+        def_name = insn.sym
 
         if opener_insn.op == 'TCLASS'
           # Unfused `def foo`: registered exactly like a TDEF, with a real irep.
@@ -343,7 +309,7 @@ def build_registry(ireps, root_label)
         end
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
         # Same charset as compile_send's name extraction; keep the two in sync.
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        name = insn.sym
         if name == 'new'
           # STRUCT_MEMBERS_ANALYSIS for the block-less `Const = Struct.new(...)` shape.
           # Additive only: returns nil for anything but a SETCONST-named Struct.new.
@@ -357,13 +323,12 @@ def build_registry(ireps, root_label)
           # n=1`. An explicit receiver, several arguments or a non-constant module flags
           # the owner in `unknown_mixins` so `super` there declines.
           mixin_owner = namespace || 'Object'
-          self_reg = insn.args[/^R(\d+)/, 1]
-          mixin_n = insn.args[/n=(\d+)/, 1]&.to_i
+          self_reg = insn.reg
+          mixin_n = insn.argc
           recognized = %w[SSEND SSEND0].include?(insn.op) && mixin_n == 1 && self_reg
-          mod = recognized ? resolve_superclass_ref(irep, idx, (self_reg.to_i + 1).to_s, namespace) : nil
-          if recognized && mod.is_a?(String)
-            table = name == 'include' ? included_modules : prepended_modules
-            (table[mixin_owner] ||= []) << mod
+          ref = recognized ? resolve_mixin_ref(irep, idx, (self_reg.to_i + 1).to_s) : nil
+          if ref
+            mixin_sites << { owner: mixin_owner, kind: name, namespace: namespace, ref: ref }
           else
             unknown_mixins << mixin_owner
           end
@@ -372,27 +337,18 @@ def build_registry(ireps, root_label)
         next unless %w[private protected public attr_reader attr_writer attr_accessor
                        module_function].include?(name)
 
-        n = insn.args[/n=(\d+)/, 1].to_i
+        n = insn.argc.to_i
         # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
-        packed = insn.args.include?('n=*')
+        packed = insn.n_spec == '*'
         if packed
           arr = idx.positive? && irep.instructions[idx - 1]
-          n = arr && arr.op == 'ARRAY' ? arr.args[/R\d+\s+(\d+)/, 1].to_i : -1
+          n = arr && arr.op == 'ARRAY' ? arr.uint_operand.to_i : -1
           raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
         end
         # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
         # into consecutive registers right before the send; walk back to collect them.
         collect_loadsym_names = lambda do
-          names = []
-          (idx - (packed ? 2 : 1)).downto(0) do |i|
-            break if names.size >= n
-
-            prev = irep.instructions[i]
-            break unless prev.op == 'LOADSYM'
-
-            names.unshift(prev.args[/:(\S+)/, 1])
-          end
-          names
+          irep.preceding_run('LOADSYM', idx - (packed ? 2 : 1), limit: n).map(&:sym_token)
         end
 
         if %w[private protected public].include?(name)
@@ -410,14 +366,15 @@ def build_registry(ireps, root_label)
           # `module_function :a, :b` installs a public copy of each instance method on
           # the module's singleton class. In mruby (src/class.c
           # mrb_mod_module_function), unlike CRuby, the instance method stays as it was
-          # (the make-private call is commented out), so only the singleton copy needs a
-          # registry entry. It is added as "Owner.singleton" with irep: nil: the registry
-          # cannot express "two owners, one irep", and irep: nil can only prevent a
-          # direct call, never enable a wrong one. Only the retroactive (n >= 1) form is
-          # handled; the bare mode-switch form does not occur in this closed world.
+          # (the make-private call is commented out). Preserve the copy's source irep
+          # separately: it is not a second method body, and must not replace the
+          # instance method's owner when codegen builds its `_impl`.
           collect_loadsym_names.call.each do |mname|
+            source_owner = namespace || 'Object'
+            source = registry[mname]&.reverse&.find { |d| d.owner == source_owner && d.irep }
             registry[mname] << MethodDef.new(name: mname, owner: "#{namespace || 'Object'}.singleton",
-                                              irep: nil, visibility: :public)
+                                              irep: nil, visibility: :public, kind: :module_function,
+                                              copy_irep: source&.irep, copy_owner: source&.owner)
           end
         else
           # attr_reader/attr_writer/attr_accessor are native, so their accessors get no
@@ -454,21 +411,14 @@ def build_registry(ireps, root_label)
         # Game::Battle::Combatant#state? and #actor looked MONO and devirtualized into
         # Game::Actor/RPG2k::Scene::EquipMenu bodies that read ivars a Struct does not
         # have (Struct members are positional, not iv_tbl).
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        name = insn.sym
         next unless name == 'new'
 
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
-        struct_recv = false
-        (idx - 1).downto(0) do |i|
-          prev = irep.instructions[i]
-          pd = prev.args[/^R(\d+)/, 1]
-          next unless pd == d
-
-          struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
-          break
-        end
+        prev = irep.last_writer(idx - 1, d)
+        struct_recv = prev && prev.op == 'GETCONST' && prev.const_name == 'Struct'
         next unless struct_recv
 
         # The block operand is the BLOCK right before the SENDB (codegen emits it
@@ -476,7 +426,7 @@ def build_registry(ireps, root_label)
         block_insn = irep.instructions[idx - 1]
         next unless block_insn && block_insn.op == 'BLOCK'
 
-        block_idx = block_insn.args[/I\[(\d+)\]/, 1]
+        block_idx = block_insn.block_index
         next unless block_idx
 
         block_label = irep.reps[block_idx.to_i]
@@ -487,8 +437,7 @@ def build_registry(ireps, root_label)
         # owner so `defs.size == 1` sees more than one definition.
         next_insn = irep.instructions[idx + 1]
         struct_name = if next_insn && next_insn.op == 'SETCONST'
-                         sc_name, sc_reg = next_insn.args.split(/\s+/, 2)
-                         sc_name if sc_reg == "R#{d}"
+                         next_insn.const_name if next_insn.reg_operand == d.to_s
                        end
         owner = struct_name ? (namespace ? "#{namespace}::#{struct_name}" : struct_name) : "<struct:#{label}:#{idx}>"
 
@@ -497,17 +446,8 @@ def build_registry(ireps, root_label)
         # attr_accessor.
         array_insn = irep.instructions[idx - 2]
         if array_insn && array_insn.op == 'ARRAY'
-          n = array_insn.args[/^R\d+\s+(\d+)/, 1].to_i
-          members = []
-          (idx - 3).downto(0) do |i|
-            break if members.size >= n
-
-            prev = irep.instructions[i]
-            break unless prev.op == 'LOADSYM'
-
-            members.unshift(prev.args[/:(\S+)/, 1])
-          end
-          members.each do |m|
+          n = array_insn.uint_operand.to_i
+          irep.preceding_run('LOADSYM', idx - 3, limit: n).map(&:sym_token).each do |m|
             registry[m] << MethodDef.new(name: m, owner: owner, irep: nil, visibility: :public)
             registry["#{m}="] << MethodDef.new(name: "#{m}=", owner: owner, irep: nil, visibility: :public)
           end
@@ -520,8 +460,34 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
+  declared_modules = module_names.to_set
+  declared_types = declared_modules | class_decls.keys.to_set
+  mixin_sites.each do |site|
+    ref = site[:ref]
+    candidates = if ref[:absolute]
+                   [ref[:name]]
+                 else
+                   scopes = []
+                   scope = site[:namespace]
+                   while scope
+                     scopes << scope
+                     scope = scope.include?('::') ? scope.rpartition('::').first : nil
+                   end
+                   segments = ref[:name].split('::')
+                   tail = segments.drop(1).join('::')
+                   suffix = tail.empty? ? '' : "::#{tail}"
+                   scopes.map { |prefix| "#{prefix}::#{segments.first}#{suffix}" } + [ref[:name]]
+                 end
+    resolved = candidates.find { |candidate| declared_types.include?(candidate) }
+    if resolved && declared_modules.include?(resolved)
+      table = site[:kind] == 'include' ? included_modules : prepended_modules
+      (table[site[:owner]] ||= []) << resolved
+    else
+      unknown_mixins << site[:owner]
+    end
+  end
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists, class_decls, walked, module_body_ivar_labels]
+   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites]
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back
@@ -530,25 +496,34 @@ end
 # or a MOVE of one is recognized; anything else returns nil (absent from
 # superclass_of, never a wrong guess).
 def resolve_superclass_ref(irep, before_idx, reg, namespace)
-  path = []
-  (before_idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
-    next unless d == reg
+  ref = irep.constant_path(before_idx - 1, reg)
+  case ref&.root
+  when :nil
+    :none # no explicit superclass written -- real Ruby default is Object.
+  when :const
+    return namespace ? "#{namespace}::#{ref.name}" : ref.name if ref.segments.empty?
 
-    case insn.op
-    when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
-    when 'LOADNIL'
-      return :none # no explicit superclass written -- real Ruby default is Object.
-    when 'GETMCNST'
-      path.unshift(insn.args[/::(\w+)/, 1])
-    when 'GETCONST'
-      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
-      return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
-    else
-      return nil
-    end
+    [ref.name, *ref.segments].join('::')
   end
-  nil
+end
+
+# Resolve the constant operand of a statically shaped class-body include. Keep
+# whether the source used namespace qualification: an unqualified constant uses
+# Ruby's lexical nesting lookup, which is disambiguated after all module names
+# have been collected by build_registry.
+def resolve_mixin_ref(irep, before_idx, reg)
+  ref = irep.constant_path(before_idx - 1, reg)
+  case ref&.root
+  when :const
+    return nil unless ref.name
+
+    absolute = ref.name.start_with?('::')
+    name = ref.name.delete_prefix('::')
+    { name: ref.segments.empty? ? name : [name, *ref.segments].join('::'), qualified: ref.qualified,
+      absolute: absolute }
+  when :object
+    return nil if ref.segments.empty?
+
+    { name: ref.segments.join('::'), qualified: true, absolute: true }
+  end
 end

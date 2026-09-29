@@ -15,7 +15,8 @@ module NativeExpressionDevirt
     '!' => 'mrb_bool_value(!mrb_test(recv))',
   }.freeze
   CLASS_EXPRESSION_CALLS = %w[
-    mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_ptr mrb_hash_size mrb_hash_empty_p mrb_hash_key_p mrb_hash_delete_key
+    mrb_bool_value mrb_int_value mrb_ary_push mrb_ary_concat mrb_ensure_array_type mrb_ary_ptr mrb_hash_size mrb_hash_empty_p
+    mrb_hash_key_p mrb_hash_delete_key
     mrb_hash_get
     mrb_str_ptr mrb_range_beg mrb_range_end mrb_range_excl_p mrb_float mrb_float_value mrb_fixnum_value mrb_nil_value
     mrb_as_int mrb_ary_entry mrb_str_equal mrb_obj_equal isfinite isinf isnan signbit
@@ -33,57 +34,44 @@ module NativeExpressionDevirt
     'Float' => 'MRB_TT_FLOAT', 'Symbol' => 'MRB_TT_SYMBOL', 'Range' => 'MRB_TT_RANGE',
   }.freeze
 
-  # NAMED_TWIN_CALLS: method name -> the C function mruby itself already calls
-  # underneath the registered wrapper, with the operand supplied explicitly.
-  #
-  # The registered bodies for these names are all FRAME-DEPENDENT: `int_add`,
-  # `flo_add`, `mrb_obj_equal_m` and `mrb_eqq_m` each begin with
-  # `mrb_value other/arg = mrb_get_arg1(mrb);`, which reads the CALLER'S VM
-  # frame. A C++ call site has no frame, so body extraction cannot reduce them
-  # (`frame_dependent_body?`), and the twins below take real parameters, so the
-  # one-value-parameter signature scan does not match them either. That is why
-  # these names stay POLY today despite the underlying function being MRB_API and
-  # exported from libmruby.
-  #
-  # Naming the twin directly sidesteps both gates WITHOUT patching mruby and
-  # WITHOUT reimplementing anything: each of these is the exact function the
-  # wrapper delegates to, so the semantics are mruby's own rather than a copy of
-  # them. Verified against the wrappers:
-  #
-  #   mrb_obj_equal_m  -> mrb_obj_equal (src/class.c). Note the return type:
-  #     mrb_obj_equal is declared `MRB_API mrb_bool` (include/mruby.h), and the
-  #     registered wrapper is exactly `mrb_bool_value(mrb_obj_equal(mrb, self,
-  #     arg))`. Wrapping it again is required, not optional -- assigning the bare
-  #     mrb_bool to an mrb_value register does not compile.
-  #
-  # Only `==` is listed. `+`, `-` and `*` were tried here too, on the theory that
-  # `mrb_num_add`/`mrb_num_sub`/`mrb_num_mul` (src/numops.c) are MRB_API, take
-  # real parameters, and would sidestep the frame-dependent `int_add`/`flo_add`
-  # wrappers -- all true. But they emit ZERO sites: `compile_send` only consults
-  # this table behind `builtin_class_send_safe?`, which requires that no
-  # registered definition of the name be one of the guarded builtins, and for
-  # `+` the registered owner IS Integer (numeric.c's own ROM table), so the gate
-  # can never pass. Those three names also have no POLY left to remove in this
-  # program, so listing them would claim coverage that does not exist.
-  #
-  # `==` reaches the emitter by a different route (the existing comparison
-  # chain), which is why it does fire: 640 Integer sites, +20,308 bytes of .text.
-  # That is a CPU trade, not a flash one -- consistent with every other guarded
-  # devirtualization measured in this build, where a TYPED site costs about 51
-  # source bytes against MONO's 31 because the fallback is always retained.
-  #
-  # `equal?` is deliberately absent: it shares `mrb_obj_equal_m` with `==`, and
-  # admitting the name here would also need `==`'s own ambiguity rules, which
-  # the registration scan above already settles.
-  #
-  # Soundness: the receiver is whatever the call site's exact-class guard proved
-  # (here, exactly Integer -- both the MRB_TT_INTEGER tag and the
-  # mrb->integer_class pointer are checked). `mrb_obj_equal` is total and reads
-  # no VM frame, so no argument can be misread.
+  # NAMED_TWIN_CALLS supplies Integer#== with a public helper because int_equal
+  # reads its argument from the caller's VM frame. mrb_equal retains int_equal's
+  # Float, BigInt, Rational, and Complex behavior and reads an explicit operand.
+  # The exact Integer type tag and class pointer are checked at each emitted site.
   NAMED_TWIN_CALLS = {
-    '==' => 'mrb_bool_value(mrb_obj_equal(M, recv, BC2CPP_ARG0))',
+    '==' => 'mrb_bool_value(mrb_equal(M, recv, BC2CPP_ARG0))',
   }.freeze
   module_function
+
+  # Each native source is read by up to three scans per run. Keyed by mtime and
+  # size so an in-process caller that rewrites a file never sees stale text.
+  SOURCE_CACHE = {}
+
+  def read_source(path)
+    stat = File.stat(path)
+    key = [path, stat.mtime, stat.size]
+    SOURCE_CACHE.fetch(key) { SOURCE_CACHE[key] = File.read(path, encoding: 'UTF-8') }
+  end
+
+  # Character indexing into a non-ASCII String is O(n), which made the scanners
+  # below quadratic. Every delimiter they look for is ASCII, so scan a copy with
+  # each non-ASCII character replaced by one ASCII character: indexes agree and
+  # the results are still sliced from the real source.
+  ASCII_VIEWS = {}.compare_by_identity
+
+  def ascii_view(source)
+    return source if source.ascii_only?
+
+    ASCII_VIEWS[source] ||= source.gsub(/[^\x00-\x7f]/, '?')
+  end
+
+  # `scan` for patterns that open with `(\w+)`, which Onigmo cannot search for
+  # by a literal prefix: skip files lacking every literal the pattern needs.
+  def scan_with(source, literals, pattern, &block)
+    return block ? source : [] unless literals.any? { |literal| source.include?(literal) }
+
+    source.scan(pattern, &block)
+  end
 
   def analyze(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
@@ -92,7 +80,7 @@ module NativeExpressionDevirt
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
+      source = read_source(path)
       macro_calls(source, 'MRB_MT_ENTRY').each do |arguments|
         next unless arguments.length == 3
 
@@ -142,7 +130,7 @@ module NativeExpressionDevirt
         registrations[name] << [nil, false]
       end
       needed = registrations.values.flatten(1).map(&:first).to_set
-      source.to_enum(:scan, /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
+      source.to_enum(:scan, /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
         function, state_arg, self_arg = Regexp.last_match.captures
         next unless needed.include?(function)
 
@@ -186,26 +174,26 @@ module NativeExpressionDevirt
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
+      source = read_source(path)
       class_variables = {}
-      source.scan(/(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+      scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
         class_variables[variable] = { field: field, class_name: class_name }
       end
-      source.scan(/(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+      scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
-      source.scan(/(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+      scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
         class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
       source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
         info = class_variables[variable]
         info[:field] ||= field if info
       end
-      source.scan(/\bmrb->(\w+_class)\b/) do |field|
+      scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
         field = field.first
         class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
-      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       # class.c boots BasicObject/Object/Module/Class through boot_defclass and
@@ -213,11 +201,11 @@ module NativeExpressionDevirt
       # would otherwise have an unknown owner, which disables every name they
       # share with a built-in class. Read the names off the source's own
       # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-      booted = source.scan(/(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+      booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
       source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
         class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
       end
-      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       tags = {}
@@ -293,14 +281,18 @@ module NativeExpressionDevirt
     needed_arities = registrations.values.flatten(1).filter_map do |entry|
       [entry[:function], entry[:arity]] unless entry[:arity].nil?
     end.to_set
-    function_pattern = /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
+    # No optional static/MRB_API prefix: only captures and match end are used,
+    # and a literal start lets the scan skip ahead.
+    function_pattern = /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
+    arities_by_function = Hash.new { |hash, function| hash[function] = [] }
+    needed_arities.each { |function, arity| arities_by_function[function] << arity }
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
+      source = read_source(path)
       source.to_enum(:scan, function_pattern).each do
         function, state_arg, self_arg = Regexp.last_match.captures
-        arities = needed_arities.select { |candidate, _arity| candidate == function }.map(&:last)
+        arities = arities_by_function.fetch(function, [])
         next if arities.empty?
 
         opening = Regexp.last_match.end(0) - 1
@@ -314,6 +306,8 @@ module NativeExpressionDevirt
                          "#{function}(M, recv)"
                        elsif function == 'mrb_ary_push_m' && arity == 1
                          exact_array_push_one_argument_expression(body, state_arg, self_arg) if body
+                       elsif function == 'mrb_ary_concat_m' && arity == 1
+                         exact_array_concat_one_argument_expression(body, state_arg, self_arg) if body
                        elsif %w[mrb_ary_first mrb_ary_last].include?(function) && arity.zero?
                          exact_array_no_argument_element_expression(body, state_arg, self_arg) if body
                        else
@@ -532,6 +526,24 @@ module NativeExpressionDevirt
     '(mrb_ary_push(M, recv, (BC2CPP_ARG0)), recv)'
   end
 
+  # Array#concat accepts a variable number of arrays. A one-argument call can
+  # use the same public conversion and mutation helpers as its native wrapper;
+  # all other arities stay on dispatch.
+  def exact_array_concat_one_argument_expression(body, state_arg, self_arg)
+    body = body.gsub(%r{/\*.*?\*/|//[^\n]*}, ' ').gsub(/\s+/, ' ').strip
+    expected = [
+      'mrb_value *args;',
+      'mrb_int len;',
+      "mrb_get_args(#{state_arg}, \"*!\", &args, &len);",
+      "for (int i=0; i<len; i++) { mrb_ensure_array_type(#{state_arg}, args[i]); }",
+      "for (int i=0; i<len; i++) { mrb_ary_concat(#{state_arg}, #{self_arg}, args[i]); }",
+      "return #{self_arg};"
+    ].join(' ')
+    return unless body == expected
+
+    '(mrb_ary_concat(M, recv, mrb_ensure_array_type(M, BC2CPP_ARG0)), recv)'
+  end
+
   # Array#first / #last: derive the zero-argument branch
   #   if (mrb_get_argc(mrb) == 0) { if (COND) return ARY_PTR(a)[INDEX]; return mrb_nil_value(); }
   # after the wrapper's leading local declarations. COND and INDEX go through
@@ -610,6 +622,10 @@ module NativeExpressionDevirt
 
   def macro_calls(source, macro)
     calls = []
+    # The regex below cannot match without the literal, and its `\b` prefix
+    # makes the unguarded scan of every native source slow.
+    return calls unless source.include?(macro)
+
     source.to_enum(:scan, /\b#{Regexp.escape(macro)}\s*\(/).each do
       opening = Regexp.last_match.end(0) - 1
       arguments, = split_call_arguments(source, opening)
@@ -625,8 +641,9 @@ module NativeExpressionDevirt
     quote = nil
     escaped = false
     index = opening
-    while index < source.length
-      char = source[index]
+    scanned = ascii_view(source)
+    while index < scanned.length
+      char = scanned[index]
       if quote
         if escaped
           escaped = false
@@ -686,10 +703,11 @@ module NativeExpressionDevirt
     line_comment = false
     block_comment = false
     index = opening
+    scanned = ascii_view(source)
 
-    while index < source.length
-      char = source[index]
-      following = source[index + 1]
+    while index < scanned.length
+      char = scanned[index]
+      following = scanned[index + 1]
       if line_comment
         line_comment = false if char == "\n"
       elsif block_comment

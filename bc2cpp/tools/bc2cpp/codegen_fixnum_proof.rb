@@ -84,7 +84,7 @@ class CodeGen
   def fixnum_proof_writes_reg?(insn, reg)
     return false if FIXNUM_PROOF_READONLY_REG_OPS.include?(insn.op)
 
-    !(insn.args =~ /\AR#{reg}\b/).nil?
+    insn.reg == reg.to_s
   end
 
   # Nested proven-arithmetic hops for source 4. `(a + b) * (c - d)` needs two;
@@ -98,14 +98,13 @@ class CodeGen
     @fixnum_proof_ctx ||= {}
     return @fixnum_proof_ctx[irep.label] if @fixnum_proof_ctx.key?(irep.label)
 
+    program = BytecodeIR.for(irep)
     entries = jump_targets(irep).dup
-    protected_addrs = Set.new
-    catch_targets = Set.new
-    (irep.catch_handlers || []).each do |ch|
-      entries << ch.target
-      catch_targets << ch.target
-      protected_addrs.merge(ch.begin_addr..ch.end_addr)
-    end
+    catch_targets = program.handler_target_addrs.dup
+    entries.merge(catch_targets)
+    # Inclusive end: the instruction after a range is refused too, which is
+    # more than the VM's half-open range needs.
+    protected_addrs = program.handler_protected_addrs(inclusive_end: true).dup
     edges = fixnum_proof_edge_sources(irep)
     entries.merge(edges.keys)
     @fixnum_proof_ctx[irep.label] =
@@ -126,12 +125,8 @@ class CodeGen
   def fixnum_proof_edge_sources(irep)
     edges = Hash.new { |h, k| h[k] = Set.new }
     irep.instructions.each do |insn|
-      case insn.op
-      when 'JMP', 'JMPUW'
-        edges[insn.args.strip[/\d+/].to_i] << insn.addr
-      when 'JMPIF', 'JMPNOT', 'JMPNIL'
-        edges[jmp_target_after_reg(insn.args)] << insn.addr
-      end
+      target = insn.branch_target
+      edges[target] << insn.addr if target
     end
     edges
   end
@@ -185,8 +180,7 @@ class CodeGen
       child.instructions.each do |insn|
         next unless insn.op == 'SETUPVAR'
 
-        b = insn.args.split(/\s+/)[1]
-        acc << b if b =~ /\A\d+\z/
+        acc << insn.upvar_ref.first.to_s
       end
       subtree_upvar_written_regs(child, acc, seen)
     end
@@ -206,53 +200,54 @@ class CodeGen
     cur = reg.to_s
     return false if ctx[:upvars].include?(cur)
 
+    # Inside a protected range: compiled into a separate function with
+    # re-initialized registers, so neither using nor stepping here means anything.
+    # An unaudited opcode could write `cur` from an operand this test does not
+    # read: refuse.
+    unaudited = lambda do |insn, _cur|
+      ctx[:protected].include?(insn.addr) ||
+        !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI'))
+    end
+    # The use itself is checked like every instruction crossed, but writes nothing.
+    if idx >= 0
+      use_insn = irep.instructions[idx]
+      return false unless use_insn
+      return false if unaudited.call(use_insn, cur)
+    end
+
     # JOIN_REACHING_DEFS: where `cur` is actually READ. It moves back to each MOVE
     # crossed, since `MOVE Ra Rb` reads Rb at its own address; asking at the
     # original use would ask about a register later code may overwrite.
     need_idx = idx
-    j = idx
-    while j >= 0
-      insn = irep.instructions[j]
-      return false unless insn
-      # Inside a protected range: compiled into a separate function with
-      # re-initialized registers, so neither using nor stepping here means anything.
-      return false if ctx[:protected].include?(insn.addr)
-      # An unaudited opcode could write `cur` from an operand this test does not
-      # read: refuse.
-      return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
-
-      if j < idx && fixnum_proof_writes_reg?(insn, cur)
-        if insn.op == 'MOVE'
-          # `regs[a] = regs[b]`: continue with the source register.
-          src = insn.args.scan(/R(\d+)/).flatten[1]
-          return false unless src
-          return false if ctx[:upvars].include?(src)
-
-          cur = src
-          need_idx = j
-        else
-          # REGION_DOMINANCE: the write is found; check nothing enters the region except
-          # through it.
-          if fixnum_proof_region_ok?(irep, ctx, j, idx)
-            return fixnum_proof_source?(irep, j, insn, cur, owner_def, depth)
-          end
-
-          # JOIN_REACHING_DEFS: the write does not dominate, so ask the multi-path
-          # question: every reaching definition must prove.
-          return fixnum_proof_reaching_defs?(irep, ctx, need_idx, cur, owner_def, depth)
-        end
+    at_entry = lambda do |entry_reg|
+      # Fell off the top: `cur` holds the preamble's value. REGION_DOMINANCE with -1
+      # still rejects a back-edge from below the use.
+      unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
+        next fixnum_proof_reaching_defs?(irep, ctx, need_idx, entry_reg, owner_def, depth)
       end
 
-      j -= 1
+      fixnum_proof_entry_arg?(irep, entry_reg, owner_def)
     end
+    irep.walk_writers(idx - 1, cur, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
+                                    barrier_result: false, exhausted: at_entry) do |insn, j, wreg|
+      if insn.op == 'MOVE'
+        # `regs[a] = regs[b]`: continue with the source register.
+        src = insn.regs[1]
+        next false unless src
+        next false if ctx[:upvars].include?(src)
 
-    # Fell off the top: `cur` holds the preamble's value. REGION_DOMINANCE with -1
-    # still rejects a back-edge from below the use.
-    unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
-      return fixnum_proof_reaching_defs?(irep, ctx, need_idx, cur, owner_def, depth)
+        need_idx = j
+        next IrepScans.follow(src)
+      end
+
+      # REGION_DOMINANCE: the write is found; check nothing enters the region except
+      # through it.
+      next fixnum_proof_source?(irep, j, insn, wreg, owner_def, depth) if fixnum_proof_region_ok?(irep, ctx, j, idx)
+
+      # JOIN_REACHING_DEFS: the write does not dominate, so ask the multi-path
+      # question: every reaching definition must prove.
+      fixnum_proof_reaching_defs?(irep, ctx, need_idx, wreg, owner_def, depth)
     end
-
-    fixnum_proof_entry_arg?(irep, cur, owner_def)
   end
 
   # JOIN_REACHING_DEFS -------------------------------------------------------
@@ -260,47 +255,11 @@ class CodeGen
   # exhaustion is safe and keeps codegen linear.
   FIXNUM_PROOF_REACHING_MAX_STATES = 400
 
-  # Predecessor map: index -> indices control can come from (-1 = method entry).
-  # An extra predecessor only costs a proof; a missing one is a wrong answer. So
-  # fall-through is assumed for every opcode except those that never fall
-  # through (JMP/JMPUW; RETURN/RETURN_BLK/RETSELF/RETNIL/RETTRUE/RETFALSE/BREAK/
-  # STOP), and branch edges are the five JMP* opcodes. A jump to an address with
-  # no instruction makes the whole map nil, so every query refuses.
-  FIXNUM_PROOF_NO_FALLTHROUGH_OPS = Set[
-    'JMP', 'JMPUW',
-    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'
-  ].freeze
-
+  # Predecessor map: index -> indices control can come from (-1 = method entry),
+  # nil when a jump targets a non-instruction so every query refuses. Extra
+  # predecessors only cost a proof; see BytecodeIR::NO_FALLTHROUGH.
   def fixnum_proof_preds(irep)
-    @fixnum_proof_preds ||= {}
-    return @fixnum_proof_preds[irep.label] if @fixnum_proof_preds.key?(irep.label)
-
-    @fixnum_proof_preds[irep.label] = build_fixnum_proof_preds(irep)
-  end
-
-  def build_fixnum_proof_preds(irep)
-    insns = irep.instructions
-    addr_to_idx = {}
-    insns.each_with_index { |ins, k| addr_to_idx[ins.addr] = k }
-    preds = Hash.new { |h, k| h[k] = Set.new }
-    preds[0] << -1
-    insns.each_with_index do |ins, k|
-      unless FIXNUM_PROOF_NO_FALLTHROUGH_OPS.include?(ins.op)
-        preds[k + 1] << k if k + 1 < insns.size
-      end
-      t =
-        case ins.op
-        when 'JMP', 'JMPUW' then ins.args.strip[/\d+/].to_i
-        when 'JMPIF', 'JMPNOT', 'JMPNIL' then jmp_target_after_reg(ins.args)
-        end
-      next if t.nil?
-
-      ti = addr_to_idx[t]
-      return nil if ti.nil?
-
-      preds[ti] << k
-    end
-    preds
+    BytecodeIR.for(irep).instruction_predecessors
   end
 
   # JOIN_REACHING_DEFS: does EVERY definition of `reg` reaching the read at
@@ -363,7 +322,7 @@ class CodeGen
 
         if fixnum_proof_writes_reg?(insn, r)
           if insn.op == 'MOVE'
-            src = insn.args.scan(/R(\d+)/).flatten[1]
+            src = insn.regs[1]
             return false unless src
             return false if ctx[:upvars].include?(src)
 
@@ -396,8 +355,7 @@ class CodeGen
   # A LOADI* literal, or nil: the second whitespace-separated token
   # (`LOADI32\tR1\t9999999\t; R1:x`). LOADINEG prints the negated value.
   def loadi_literal(insn)
-    tok = insn.args.split(/\s+/)[1]
-    tok && tok.match?(/\A-?\d+\z/) ? tok.to_i : nil
+    insn.imm_operand&.to_i
   end
 
   def loadi_proven_fixnum?(insn)
@@ -415,10 +373,10 @@ class CodeGen
 
     case insn.op
     when 'GETIV'
-      ivar = insn.args[/@(\w+)/, 1]
+      ivar = insn.ivar
       !ivar.nil? && embed_type(owner_def.owner, ivar) == :fixnum
     when 'ADD', 'SUB', 'MUL'
-      s = insn.args[/\(R(\d+)\)/, 1]
+      s = insn.paren_reg
       !s.nil? && proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1) &&
         proven_fixnum_operand?(irep, j, s, owner_def, depth + 1)
     when 'ADDI', 'SUBI'
@@ -426,19 +384,155 @@ class CodeGen
     when 'GETCONST'
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.
-      @integer_constants.include?(insn.args.split(/\s+/)[1])
+      @integer_constants.include?(insn.const_name)
     when 'GETMCNST'
       # "GETMCNST R4 (R4)::DEPTH": only the bare name after `::`, as IntegerConstants
       # keys on (the scope register is not modelled).
-      @integer_constants.include?(insn.args[/::(\S+)/, 1])
+      @integer_constants.include?(insn.mcnst_name)
     when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
       # FIXNUM_RETURN_PROOF (source 6): see compute_fixnum_return_names. SENDB/SSENDB
       # are excluded: a `break` in the caller's block becomes the send's result.
-      nm = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      nm = insn.sym
       !nm.nil? && @fixnum_return_names.include?(nm)
     else
       false
     end
+  end
+
+  # GUARDED_GAME_VARIABLE_RANGE: derive an interval from literals, Game::Variables
+  # reads, and integer arithmetic. Consumers guard actual mrb_values before
+  # unboxing because replace/to_h can bypass Variables#[]=.
+  GAME_VARIABLE_RANGE_MIN = -9_999_999
+  GAME_VARIABLE_RANGE_MAX = 9_999_999
+
+  def guarded_game_integer_range(irep, idx, reg, owner_def, depth = 0)
+    return nil unless irep && idx && reg && owner_def
+    return nil if depth > FIXNUM_PROOF_MAX_DEPTH
+
+    # An unaudited opcode or one inside a protected range refuses (see
+    # FIXNUM_PROOF_STEP_OVER_OPS).
+    unaudited = lambda do |insn, _cur|
+      !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')) ||
+        fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
+    end
+    irep.walk_writers(idx - 1, reg.to_s, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
+                                         follow_moves: true) do |insn, j, cur|
+      next nil unless fixnum_proof_region_ok?(irep, fixnum_proof_ctx(irep), j, idx)
+
+      case insn.op
+      when /^LOADI/
+        value = loadi_literal(insn)
+        next [value, value] if value && value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
+
+        next nil
+      when 'GETIDX', 'GETIDX0', 'SEND', 'SEND0'
+        name = insn.sym
+        next nil if %w[SEND SEND0].include?(insn.op) && name != '[]'
+        recv = if insn.op == 'GETIDX'
+                 cur
+               else
+                 insn.regs[1]
+               end
+        next nil unless recv && game_variables_index_receiver?(irep, j, recv, owner_def)
+
+        next [GAME_VARIABLE_RANGE_MIN, GAME_VARIABLE_RANGE_MAX]
+      when 'ADD', 'SUB', 'MUL'
+        regs = insn.regs
+        next nil unless regs.size >= 2
+        left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
+        right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
+        next nil unless left && right
+
+        next guarded_integer_binary_range(insn.op, left, right) ||
+          (insn.op == 'MUL' ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
+      when 'ADDI', 'SUBI'
+        literal = insn.imm_operand.to_i
+        left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
+        next nil unless left
+
+        next guarded_integer_binary_range(insn.op == 'ADDI' ? 'ADD' : 'SUB', left, [literal, literal])
+      when 'DIV'
+        regs = insn.regs
+        next nil unless regs.size >= 2
+        left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
+        right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
+        next nil unless left && right
+
+        bound = [left[0].abs, left[1].abs].max
+        next nil if -bound < LOADI_FIXNUM_MIN || bound > LOADI_FIXNUM_MAX
+
+        next [-bound, bound]
+      else
+        IrepScans::KEEP
+      end
+    end
+  end
+
+  def game_variables_index_receiver?(irep, idx, reg, owner_def)
+    return true if static_indexable_class(irep, idx, reg, owner_def) == 'Game::Variables'
+    return false unless owner_def.owner == 'Game::Variables'
+
+    irep.walk_writers(idx - 1, reg.to_s, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, follow_moves: true) do |insn|
+      insn.op == 'LOADSELF'
+    end || false
+  end
+
+  def guarded_integer_binary_range(op, left, right)
+    values = case op
+             when 'ADD' then [left[0] + right[0], left[1] + right[1]]
+             when 'SUB' then [left[0] - right[1], left[1] - right[0]]
+             when 'MUL'
+               products = [left[0] * right[0], left[0] * right[1], left[1] * right[0], left[1] * right[1]]
+               [products.min, products.max]
+             end
+    return nil unless values && values[0] >= LOADI_FIXNUM_MIN && values[1] <= LOADI_FIXNUM_MAX
+
+    values
+  end
+
+  def guarded_game_integer_pair(op, irep, idx, left_reg, right_reg, owner_def)
+    left = guarded_game_integer_range(irep, idx, left_reg, owner_def)
+    right = guarded_game_integer_range(irep, idx, right_reg, owner_def)
+    return nil unless left && right
+
+    result = if op == 'DIV'
+               bound = [left[0].abs, left[1].abs].max
+               [-bound, bound]
+             else
+               guarded_integer_binary_range(op, left, right)
+             end
+    result = [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] if result.nil? && op == 'MUL'
+    return nil unless result
+    return nil unless result[0] >= LOADI_FIXNUM_MIN && result[1] <= LOADI_FIXNUM_MAX
+
+    range_guard = lambda do |reg, range|
+      "mrb_fixnum_p(r#{reg}) && mrb_fixnum(r#{reg}) >= #{range[0]} && " \
+        "mrb_fixnum(r#{reg}) <= #{range[1]}"
+    end
+    condition = "(#{range_guard.call(left_reg, left)}) && (#{range_guard.call(right_reg, right)})"
+    condition += " && mrb_fixnum(r#{right_reg}) != 0" if op == 'DIV'
+    if op == 'MUL'
+      a = "mrb_fixnum(r#{left_reg})"
+      b = "mrb_fixnum(r#{right_reg})"
+      product_fits = "(#{a} == 0 || #{b} == 0 || " \
+        "(#{a} > 0 ? (#{b} > 0 ? #{a} <= MRB_FIXNUM_MAX / #{b} : #{b} >= MRB_FIXNUM_MIN / #{a}) : " \
+        "(#{b} > 0 ? #{a} >= MRB_FIXNUM_MIN / #{b} : #{a} >= MRB_FIXNUM_MAX / #{b})))"
+      condition += " && #{product_fits}"
+    end
+    { condition: condition,
+      result: result }
+  end
+
+  def guarded_game_integer_immediate(op, irep, idx, reg, literal, owner_def)
+    input = guarded_game_integer_range(irep, idx, reg, owner_def)
+    return nil unless input
+
+    result = guarded_integer_binary_range(op, input, [literal, literal])
+    return nil unless result
+
+    condition = "mrb_fixnum_p(r#{reg}) && mrb_fixnum(r#{reg}) >= #{input[0]} && " \
+      "mrb_fixnum(r#{reg}) <= #{input[1]}"
+    { condition: condition, result: result }
   end
 
   # Proof source 2: a mandatory argument register of THIS method's own irep whose
@@ -451,8 +545,8 @@ class CodeGen
     return false unless owner_def.irep == irep.label
     return false unless pure_mandatory_arity?(irep)
 
-    enter = irep.instructions.find { |i| i.op == 'ENTER' }
-    mand = enter ? enter.args.split(':').first.to_i : 0
+    enter = irep.enter
+    mand = enter ? enter.enter_fields.first : 0
     r = reg.to_i
     return false unless r >= 1 && r <= mand
 
@@ -559,16 +653,6 @@ class CodeGen
     'ALIAS', 'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
   ].freeze
 
-  # Same method-name charset as every SEND-name extraction.
-  ENTRY_ARG_NAME_RE = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
-
-  # codedump.c appends "\t; R<n>:<local>" (or "\t; <literal>") comments; a local
-  # named `tile` must not count as the method `tile`. Operands end at the first
-  # "\t;".
-  def entry_arg_operands(insn)
-    insn.args.to_s.split(/\t;/, 2).first.to_s
-  end
-
   # irep label -> the MethodDef whose body it is, following `reps` into nested
   # blocks/lambdas (a call site in a block is proven against the enclosing
   # method, as compile_insn does for BLOCK_FALLBACK). An uncovered label (root,
@@ -605,13 +689,12 @@ class CodeGen
       @ireps.each_value do |irep|
         owner = owner_of_body[irep.label]
         irep.instructions.each_with_index do |insn, i|
-          operands = entry_arg_operands(insn)
-          name = operands[ENTRY_ARG_NAME_RE, 1]
+          name = insn.sym
           next unless name
 
           unless ENTRY_ARG_CLASSIFIED_OPS.include?(insn.op)
             raise "ENTRY_ARG_CALLSITE_PROOF: opcode #{insn.op} names :#{name} " \
-                  "(#{operands.inspect}) but is not classified -- refusing to " \
+                  "(#{insn.args.inspect}) but is not classified -- refusing to " \
                   'guess whether that is a call site'
           end
 
@@ -623,15 +706,15 @@ class CodeGen
             next
           end
 
-          recv = operands[/\AR(\d+)/, 1]
-          argc = operands[/\bn=(\d+)\b/, 1]
+          recv = insn.reg
+          argc = insn.argc
           # `n=*` (packed arguments): argument k has no register, so it poisons.
           if recv.nil? || argc.nil?
             poisoned << name
             next
           end
 
-          sites[name] << [irep, i, recv.to_i, argc.to_i, owner]
+          sites[name] << [irep, i, recv.to_i, argc, owner]
         end
       end
       [sites, poisoned]

@@ -88,42 +88,27 @@ end
 # the send evaluate to the BREAK operand (ops.h OP_BREAK). Same argument as
 # compute_fixnum_return_names.
 def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret_proof = nil)
-  reg = dest_reg
-  (idx - 1).downto(0) do |i|
-    pin = irep.instructions[i]
-    next unless pin
-    # The block proc register (BLOCK writes dest+1) sits between the call and its
-    # receiver write; skip it.
-    next if pin.op == 'BLOCK'
-    next unless pin.args[/^R(\d+)/, 1] == reg
+  # The block proc register (BLOCK writes dest+1) sits between the call and its
+  # receiver write, so BLOCK is skipped. CORE_ARRAY_CHAIN: MOVE is followed to the
+  # register actually written (`regs[a] = regs[b]`, vm.c OP_MOVE); skipping it would
+  # let the scan reach an older, overwritten result on a reused register.
+  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true) do |pin|
+    next nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
 
-    # CORE_ARRAY_CHAIN: follow MOVE (`regs[a] = regs[b]`, vm.c OP_MOVE) to the
-    # register actually written. Skipping a MOVE would let the scan reach an older,
-    # overwritten result on a reused register.
-    if pin.op == 'MOVE'
-      src = pin.args.scan(/R(\d+)/).flatten[1]
-      return nil unless src
-
-      reg = src
-      next
-    end
-    return nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
-
-    called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-    return nil unless called
+    called = pin.sym
+    next nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
     # SEND0/SSEND0 print no `n=` field: absent means 0 args.
-    argc = pin.args[/n=(\d+)/, 1]&.to_i || 0
-    return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
-    return 'Array' if annotated&.call(called)
-    return 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
+    argc = pin.argc || 0
+    next 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
+    next 'Array' if annotated&.call(called)
+    next 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
     # ARRAY_RETURN_PROOF: non-block sends only (see ret_proof above).
-    return 'Array' if !block_carrying && ret_proof&.call(called)
+    next 'Array' if !block_carrying && ret_proof&.call(called)
 
-    return nil
+    nil
   end
-  nil
 end
 
 # ---------------------------------------------------------------------------
@@ -157,15 +142,13 @@ class ClassLayout
       methods_of.each do |owner, irep_labels|
         irep_labels.each do |label|
           irep = ireps.fetch(label)
-          enter = irep.instructions.find { |i| i.op == 'ENTER' }
-          mand = enter ? enter.args.split(':').first.to_i : 0
+          enter = irep.enter
+          mand = enter ? enter.enter_fields.first : 0
           arg_classes = class_annotations[label]&.args
 
-          irep.instructions.each_with_index do |insn, idx|
-            next unless insn.op == 'SETIV'
-
-            ivar = insn.args[/@(\w+)/, 1]
-            src_reg = insn.args[/R(\d+)/, 1]
+          irep.each_with_op('SETIV') do |insn, idx|
+            ivar = insn.ivar
+            src_reg = insn.regs.first
             # Never hand an UNKNOWN entry to trace_new_target's GETIV lookup.
             known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }
             # CHAINED_ACCESSOR_SUPPORT: the full, unfiltered in-progress table, so another

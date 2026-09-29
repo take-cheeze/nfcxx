@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
+
 # Construct, native-argument and super devirtualization targets.
 
 # The typed-_impl calling convention models plain mandatory arguments only.
@@ -22,20 +24,26 @@
 # mrb_int/mrb_float; mrb_as_int/mrb_as_float raise the same TypeError they
 # raised inside `fn`.
 NATIVE_CONSTRUCT_TARGETS = {
-  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', arity: 4, arg_type: :float },
-  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', arity: 4, arg_type: :float },
-  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', arity: 4, arg_type: :int },
+  'Tone' => { fn: 'rgss::tone_new_direct', class_fn: 'rgss::native_tone_class', class_owner: 'RGSS::Tone',
+              arity: 4, arg_type: :float },
+  'Color' => { fn: 'rgss::color_new_direct', class_fn: 'rgss::native_color_class', class_owner: 'RGSS::Color',
+               arity: 4, arg_type: :float },
+  'Rect' => { fn: 'rgss::rect_new_direct', class_fn: 'rgss::native_rect_class', class_owner: 'RGSS::Rect',
+              arity: 4, arg_type: :int },
   # Sprite: spr_init is `mrb_get_args(M, "|o", &vp)` plus a fixed body that
   # rgss::sprite_new_direct (include/rgss_construct.hxx) reproduces. "|o" never
   # coerces or raises, so there is no TypeError behavior to preserve.
-  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', arity: [0, 1],
+  'Sprite' => { fn: 'rgss::sprite_new_direct', class_fn: 'rgss::native_sprite_class', class_owner: 'RGSS::Sprite',
+                arity: [0, 1],
                 arg_type: :object },
   # Bitmap: bmp_init_size is `mrb_get_args(M, "ii", ...)` + alloc_obj, which
   # rgss::bitmap_new_direct reproduces. Bitmap#initialize also accepts a String
   # (file load), so `type_guard: :int` checks mrb_integer_p on every argument and
   # falls back to mrb_funcall otherwise.
-  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', arity: 2, arg_type: :int,
-                type_guard: :int },
+  'Bitmap' => { fn: 'rgss::bitmap_new_direct', class_fn: 'rgss::native_bitmap_class', class_owner: 'RGSS::Bitmap',
+                arity: 2, arg_type: :int, type_guard: :int },
+  'Table' => { fn: 'rgss::table_new_direct', class_fn: 'rgss::native_table_class', class_owner: 'RGSS::Table',
+               arity: [1, 2, 3], arg_type: :table_dimensions },
 }.freeze
 
 # bc2cpp-COMPILED classes whose `Owner.new` may become bc2cpp_direct_alloc +
@@ -397,9 +405,9 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # Owner prefixes equal Module.nesting only for nested (not compact `class
 # A::B`) definitions; the closed world has no compact ones. Lexical scope only;
 # the cref's ancestors are not searched.
-# Soundness: only returns a name the closed world DEFINES; a match at more than
-# one level is ambiguous and returns nil; no owner returns nil; nil falls back to
-# the written path (dynamic dispatch / `#error`).
+# Soundness: only returns a name the closed world DEFINES; the first matching
+# lexical prefix wins, then a proven top-level binding is considered. No owner
+# or no match returns nil and leaves the written path in place.
 #
 # LEXICAL_CONSTRUCT_RESOLUTION: this used to accept only a
 # DIRECT_CONSTRUCT_TARGETS entry, so a bare `Window.new` inside `class RPG2k`
@@ -411,7 +419,7 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # that "Every use is inside `class RPG2k`, so the bare name still resolves here".
 #
 # The table is therefore split in two. RESOLUTION still decides only WHICH class
-# the name denotes -- an unambiguous fact about the program. ADMISSION (whether
+# the name denotes -- a fact about the program. ADMISSION (whether
 # that class may be devirtualized) stays with compile_send's four live gates:
 # no custom `self.new`/`self.allocate`, an #initialize that compiles clean with
 # pure mandatory arity, a matching argument count, and the owner being emitted.
@@ -425,74 +433,115 @@ def lexically_resolve_construct_target(written, owner)
   nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
   return nil if nesting.empty?
 
-  hits = []
   nesting.length.downto(1) do |n|
     candidate = "#{nesting.first(n).join('::')}::#{written}"
-    hits << candidate if construct_resolution_known?(candidate)
+    return candidate if construct_resolution_known?(candidate)
   end
 
-  # Ambiguous across nesting levels: refuse (see above).
-  return nil if hits.length > 1
+  return written if construct_resolution_known?(written)
 
-  hits.first
+  nil
 end
 
 # Does the closed world define `name` as a class or module? A bare name
-# (no `::`) is not a definition on its own -- it is only ever reached through a
-# nesting prefix -- so it is refused here and left to the written path.
+# (no `::`) is a valid top-level binding only when the closed-world table lists
+# that exact name.
 def construct_resolution_known?(name)
-  return false unless name.include?('::')
   return true if DIRECT_CONSTRUCT_TARGETS.include?(name)
 
   (ConstructClassNames.table || {}).include?(name)
 end
 
+# Class of the value `reg` holds at `idx`. The backward walk (trace_new_target_walk)
+# answers first; when it finds nothing, the fact is asked of EVERY definition
+# reaching the read (BytecodeIR.reaching_definitions) and accepted only when
+# each one traces to the same class. Never applied with `dominated:`: RETURN
+# proofs run their own reaching-definition walk (return_value_sources).
+def trace_new_target(irep, idx, reg, *rest, dominated: nil, **opts)
+  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, **opts)
+  return klass if klass || dominated
+
+  trace_new_target_reaching(irep, idx, reg, rest, opts)
+end
+
+# Queries being answered, so a value that flows into its own definition (a
+# loop-carried `x = x.foo`) fails instead of recursing.
+module TraceReaching
+  IN_PROGRESS = Set.new
+end
+
+def trace_new_target_reaching(irep, idx, reg, rest, opts)
+  return nil unless idx&.positive? && reg
+
+  key = [irep.label, idx, reg.to_s, opts[:resolving_new] ? true : false]
+  return nil unless TraceReaching::IN_PROGRESS.add?(key)
+
+  begin
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+    return nil if defs.nil? || defs.empty?
+
+    ivar_classes, mand, arg_classes = rest
+    classes = defs.map do |definition|
+      if definition.entry?
+        # Register N is argument N for N <= mand; only an annotation names its class.
+        pos = definition.reg.to_i
+        arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)
+      else
+        trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest, dominated: nil, **opts)
+      end
+    end
+    classes.first if classes.first && classes.uniq.size == 1
+  ensure
+    TraceReaching::IN_PROGRESS.delete(key)
+  end
+end
+
 # `dominated:` (RETURN-site proofs only): `->(w_idx, use_idx, reg)` that must
 # accept every hop, so no hop can skip past a join (ADR 0198).
-def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
+def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes = nil, resolving_new: false, owner: nil,
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
-                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, dominated: nil, canonical: true)
+                      known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
+                      dominated: nil, canonical: true)
   path = []
   use = idx
   # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
   # receiver: `@position = POS_BOTTOM` is an Integer constant, not a class.
   # `resolving_new` becomes true right after a SEND :new (with an empty `path`),
   # or starts true for the `resolving_new:` caller.
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
+  # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see
+  # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write; `a` is
+  # a read, so RESCUE is skipped unless it writes the followed register.
+  rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+  # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
+  # READ_ONLY_OPCODE_SKIP only reads its register.
+  skip_ops = ['RESCUE', *(READ_ONLY_OPCODE_SKIP - %w[JMPIF JMPNOT])]
+  # Never written: an incoming argument (register N is argument N for N <=
+  # mand). Only a class annotation can name its class; pooling call sites is
+  # unsound for POLY names.
+  at_entry = lambda do |entry_reg|
+    next nil if dominated && !dominated.call(-1, use, entry_reg)
 
-    if insn.op == 'RESCUE'
-      # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see
-      # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write.
-      # Checked before the `d == reg` filter, which only reads the first token and
-      # would otherwise treat the instruction as not touching `reg`.
-      a, b = insn.args.scan(/R(\d+)/).flatten
-      next unless [a, b].include?(reg)
-      return nil if b == reg
-
-      next
-    end
-
-    d = insn.args[/^R(\d+)/, 1]
-    next unless d == reg
-
+    pos = entry_reg.to_i
+    arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
+  end
+  irep.walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: rescue_write, exhausted: at_entry) do |insn, i, cur|
     if dominated && !READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      return nil unless dominated.call(i, use, reg)
+      return nil unless dominated.call(i, use, cur)
 
       use = i
     end
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      next IrepScans.follow(insn.regs[1])
     when 'GETIDX', 'GETIDX0'
       return nil unless element_annotations && class_layout && registry
 
       # GETIDX overwrites its receiver register; GETIDX0 has a separate source.
       recv_reg = if insn.op == 'GETIDX'
-                   reg
+                   cur
                  else
-                   insn.args.scan(/R(\d+)/).flatten[1]
+                   insn.regs[1]
                  end
       return nil unless recv_reg
 
@@ -501,24 +550,15 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                                      container_constants: container_constants,
                                      element_annotations: element_annotations,
                                      known_owners: known_owners, capture_hints: capture_hints,
-                                     ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
+                                     ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                     dominated: dominated, canonical: canonical)
       # An annotated Hash<Klass> parameter is a safe source for indexed values.
       # Only plain MOVE aliases back to the untouched argument register count;
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
-      arg_reg = recv_reg
       captured_reg = nil
-      (i - 1).downto(0) do |j|
-        prior = irep.instructions[j]
-        next unless prior.args[/^R(\d+)/, 1] == arg_reg
-        if prior.op == 'MOVE'
-          arg_reg = prior.args.scan(/R(\d+)/).flatten[1]
-          break unless arg_reg
-        else
-          upvar = prior.args.split(/\s+/) if prior.op == 'GETUPVAR'
-          captured_reg = prior.args[/^R(\d+)/, 1].to_i if upvar && upvar[2] == '0'
-          arg_reg = nil
-          break
-        end
+      arg_reg = irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }) do |prior|
+        captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
+        nil
       end
       # The trace can stop at a block's GETUPVAR before reaching the captured
       # container; the callsite hint is limited to annotated Hash arguments.
@@ -540,7 +580,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
 
       # Same charset as compile_send's name extraction.
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       if name == 'new'
         resolving_new = true
       elsif name == 'dup' && registry && (registry['dup'] || []).all? { |md| md.owner == '<native>' }
@@ -553,16 +593,23 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # is the result's class.
         # SEND0 prints no `n=`; a `.dup(x)` with arguments is an ArgumentError and
         # proves nothing.
-        n_match = insn.args.match(/n=(\d+|\*)/)
-        return nil if n_match && n_match[1] != '0'
+        return nil if insn.n_spec && insn.n_spec != '0'
 
-        return trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+        return trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
                                  class_layout: class_layout, registry: registry,
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
                                  known_owners: known_owners, capture_hints: capture_hints,
-                                 ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
+                                 ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                 dominated: dominated, canonical: canonical)
       else
+        # A whole-program return proof is receiver-independent only when every
+        # registered implementation of the name agrees on its returned class.
+        # Successful dispatch then has that class regardless of receiver type.
+        if method_return_class && (returned_class = method_return_class.call(name))
+          return returned_class
+        end
+
         # CHAINED_ACCESSOR_SUPPORT (see the header): a non-`new` SEND may be a chained
         # :ivar_accessor read. A no-op unless the caller passes class_layout and
         # registry; `resolving_new` callers already returned above.
@@ -574,12 +621,13 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # The receiver is whatever wrote `reg` before `i` (SEND overwrites its
         # receiver register in place); recursing on a strictly smaller index
         # terminates.
-        recv_class = trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+        recv_class = trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
                                        class_layout: class_layout, registry: registry,
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
                                        known_owners: known_owners, capture_hints: capture_hints,
-                                       ret_class_proof: ret_class_proof, dominated: dominated, canonical: canonical)
+                                       ret_class_proof: ret_class_proof, method_return_class: method_return_class,
+                                       dominated: dominated, canonical: canonical)
         return nil unless recv_class
         recv_class = resolve_owner_name(recv_class, { owner: owner, known_owners: known_owners }) if known_owners
 
@@ -590,8 +638,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
           return element_annotations[annotated.irep].ret_class if annotated
         end
 
-        n_match = insn.args.match(/n=(\d+|\*)/)
-        return nil if n_match && n_match[1] != '0'
+        return nil if insn.n_spec && insn.n_spec != '0'
 
         # An attr_writer is registered as "name=", so `registry[name]` only matches
         # getters.
@@ -617,7 +664,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
       return nil unless ret_class_proof
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       return nil unless name
 
       # Explicit `return`: this is inside the downto block, so a bare expression
@@ -632,7 +679,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # no such site exists.
       return nil if resolving_new || !path.empty?
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       return nil unless name == 'new'
 
       resolving_new = true
@@ -640,16 +687,15 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     when 'GETIV'
       return nil if resolving_new || !path.empty?
 
-      ivar = insn.args[/@(\w+)/, 1]
+      ivar = insn.ivar
       klass = ivar_classes && ivar_classes[ivar]
       return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
     when 'GETUPVAR'
       return nil if resolving_new || !path.empty?
 
-      dst, _upvar, level = insn.args.split(/\s+/)
-      return nil unless level == '0'
+      return nil unless insn.upvar_ref&.last&.zero?
 
-      capture_class = capture_hints&.dig(irep.label, dst[/\d+/].to_i, :container_class)
+      capture_class = capture_hints&.dig(irep.label, insn.reg.to_i, :container_class)
       capture_class
     when 'ARRAY', 'ARRAY2'
       # EACH_BLOCK_SUPPORT: an ARRAY literal is always an Array (vm.c OP_ARRAY). Only
@@ -674,11 +720,11 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # CONST_CONTAINER_SUPPORT: collecting a segment is harmless either way; what
       # happens with `path` is decided at GETCONST.
       # Not `$`-anchored: a trailing "; R6:name" comment would end up in the segment.
-      path.unshift(insn.args[/::(\w+)/, 1])
+      path.unshift(insn.mcnst_name)
     when 'GETCONST'
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
-      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      const_name = insn.const_name
       written = ([const_name] + path).join('::')
 
       # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
@@ -694,22 +740,48 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # read `[1,2].map` as an Array receiver. A constant is different in kind --
       # it is a class NAME, not a value -- so resolving it is the point of the
       # walk. The safety test is therefore that the name must BE a class the
-      # closed world defines, checked against `known_owners` (the registry's own
-      # owner set, as resolve_owner_name and UniqueClassNames also use). A
+      # closed world defines, checked against its class-name table or the
+      # registry's owner set. A
       # non-class constant like POS_BOTTOM is not in that set, so it still
       # resolves to nothing and the old behaviour is unchanged for it.
       #
-      # Ambiguity is refused exactly as lexically_resolve_construct_target
-      # refuses it: a bare name that could fall through to a same-named
-      # top-level constant is not resolved unless it names a class uniquely, so
-      # this can only turn a nil into a class, never into the wrong one.
-      if resolving_new && owner && known_owners
+      # Ruby and generated constant lookup both search lexical scopes from the
+      # innermost outward. When same-named classes exist at multiple levels,
+      # the first defined binding is the one this site reads; runtime class
+      # identity guards still reject a rebound or merged receiver trace.
+      if resolving_new && owner
+        # GETMCNST extends an explicit constant path (`A::B.new`). Once a
+        # path is present it is already rooted at GETCONST's value; prefixing
+        # the caller's lexical owner would invent `Caller::A::B`.
+        if !path.empty? && (known_owners&.include?(written) || construct_resolution_known?(written))
+          return written
+        end
+
         nesting = owner.to_s.sub(/\.singleton\z/, '').split('::')
         hit = nesting.length.downto(1).filter_map do |n|
           candidate = "#{nesting.first(n).join('::')}::#{written}"
-          candidate if known_owners.include?(candidate)
+          candidate if known_owners&.include?(candidate) || construct_resolution_known?(candidate)
         end
-        return hit.first if hit.size == 1
+        return hit.first unless hit.empty?
+        # UNIQUE_CLASS_NAME: a bare constant may be reachable through an
+        # Object-included module (for example Bitmap -> RGSS::Bitmap). Resolve
+        # only names already proven unique and reachable at this lexical site.
+        if path.empty? && hit.empty? && (unique = UniqueClassNames.resolve(const_name, owner)) &&
+           (known_owners&.include?(unique) || construct_resolution_known?(unique))
+          return canonical ? unique : const_name
+        end
+        # Native RGSS constructors have gem-init-captured class accessors even
+        # when native source scanning cannot give their short names a unique
+        # canonical path. Object's RGSS include makes these bare names
+        # reachable; compile_send still requires the runtime receiver class to
+        # match that constructor's captured class before calling it directly.
+        if path.empty? && NATIVE_CONSTRUCT_TARGETS.key?(const_name) && object_includes_rgss?
+          return const_name
+        end
+        # String is a core mruby class whose RClass* is fixed in mrb_state.
+        # Generic construction still checks that identity and the standard
+        # Class#new/allocate chain before bypassing constant dispatch.
+        return const_name if path.empty? && %w[String NameError].include?(const_name)
       end
 
       # CONST_CONTAINER_SUPPORT: without `resolving_new` this chain is the receiver
@@ -776,28 +848,20 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # 'Array'` GATE, which has no runtime fallback (a wrong fact emits a loop
       # over a register that is not an Array), so a wrong merge would not
       # degrade to mrb_funcall as a wrong TYPED fact does.
-      merged = container_phi_merge(irep, i, reg)
+      merged = container_phi_merge(irep, i, cur)
       return merged if merged
 
       # Unproven: fall through to the READ_ONLY_OPCODE_SKIP behaviour ADR 0191
       # established, which is to keep walking backwards past this read.
-    when *READ_ONLY_OPCODE_SKIP
-      # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart; ADR 0188, ADR 0191): skip
-      # opcodes that only read their `R%d` operand, as IvarLayout.trace_type does.
-      # RESCUE is handled above the register filter instead.
     else
       return nil
     end
+    IrepScans::KEEP
   end
-  # Never written: an incoming argument (register N is argument N for N <=
-  # mand). Only a class annotation can name its class; pooling call sites is
-  # unsound for POLY names.
-  return nil if dominated && !dominated.call(-1, use, reg)
+end
 
-  pos = reg.to_i
-  return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
-
-  nil
+def object_includes_rgss?
+  Array(UniqueClassNames.object_mixins).any? { |mixin| mixin.delete_prefix('Object::') == 'RGSS' }
 end
 
 # CONTAINER_PHI_MERGE: the class a register provably holds across a
@@ -819,53 +883,64 @@ end
 #   * a literal of the SAME class -- both arms agree.
 # An older GETIV with no class fact, an opaque SEND result, or a GETIDX whose
 # element class is unresolved is refused, not merged.
+# CLOSED_WORLD_VALUE_CONSTANT: infer the instance class of a single-assignment
+# constant initialized directly by a statically resolved `Klass.new`. The
+# resulting receiver fact remains guarded at dispatch; a custom constructor
+# returning another class therefore takes the ordinary fallback.
+def infer_constructed_constant_classes(ireps, assignment_sites, registry, container_constants, closed_world)
+  return {} unless closed_world
+
+  known_owners = Set.new(registry.values.flatten.map(&:owner))
+  inferred = {}
+  assignment_sites.each do |site|
+    next unless closed_world.single_assignment_constant?(site[:name])
+    next unless site[:reg]
+    next if container_constants.key?(site[:name])
+
+    irep = ireps[site[:irep]]
+    next unless irep
+
+    next unless assigned_from_new_send?(irep, site[:idx], site[:reg])
+
+    klass = trace_new_target(irep, site[:idx], site[:reg], nil, 0, nil, owner: site[:owner],
+                             registry: registry, container_constants: container_constants,
+                             known_owners: known_owners)
+    next unless klass.is_a?(String) && known_owners.include?(klass)
+
+    inferred[site[:name]] = klass
+  end
+  inferred
+end
+
+# A SETCONST value may be copied after the constructor send. Follow only plain
+# MOVE aliases; every other write ends the proof, while trace_new_target repeats
+# the walk and proves the class expression itself.
+def assigned_from_new_send?(irep, idx, reg)
+  irep.walk_writers(idx - 1, reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP, follow_moves: true) do |insn|
+    %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym == 'new'
+  end || false
+end
+
 def container_phi_merge(irep, at, reg)
   lit = irep.instructions[at + 1]
-  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.args[/^R(\d+)/, 1] == reg
+  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
-  (at - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn.args[/^R(\d+)/, 1] == reg
-
-    case insn.op
-    when 'MOVE'
-      src = insn.args.scan(/R(\d+)/).flatten[1]
-      return nil unless src
-
-      reg = src
-      next
-    when 'LOADNIL'
-      return lit_class
-    when 'ARRAY', 'ARRAY2'
-      return 'Array' if lit_class == 'Array'
-    when 'HASH'
-      return 'Hash' if lit_class == 'Hash'
-    end
-    return nil
+  case irep.source_writer(at - 1, reg)&.op
+  when 'LOADNIL'
+    lit_class
+  when 'ARRAY', 'ARRAY2'
+    'Array' if lit_class == 'Array'
+  when 'HASH'
+    'Hash' if lit_class == 'Hash'
   end
-  nil
 end
 
 # NIL_TOLERANT_JOIN predicate: true only when `reg` at `idx` was just loaded by
 # LOADNIL (following MOVEs). A false negative only falls back to the ordinary
 # join; a false positive would drop real evidence.
 def nil_literal_write?(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
-    next unless d == reg
-
-    case insn.op
-    when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
-    when 'LOADNIL'
-      return true
-    else
-      return false
-    end
-  end
-  false
+  irep.source_writer(idx - 1, reg)&.op == 'LOADNIL'
 end
 
 # CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` is a fresh
@@ -875,27 +950,18 @@ end
 # passthrough: RGSS::Transition#freeze is an unrelated override with a
 # different return value.
 def literal_container_class(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
-    next unless d == reg
-
+  irep.walk_writers(idx - 1, reg, follow_moves: true) do |insn|
     case insn.op
-    when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
     when 'SEND0'
-      return nil unless insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'freeze'
+      insn.sym == 'freeze' ? IrepScans::KEEP : nil
     when 'ARRAY', 'ARRAY2'
-      return 'Array'
+      'Array'
     when 'HASH'
-      return 'Hash'
+      'Hash'
     when 'RANGE_INC', 'RANGE_EXC'
-      return 'Range'
-    else
-      return nil
+      'Range'
     end
   end
-  nil
 end
 
 # LITERAL_EQQ_SUPPORT: find a literal Fixnum/Symbol written to a `:===`
@@ -911,28 +977,30 @@ end
 # terminals. Follows MOVEs defensively. Returns {type: :fixnum, value: "5"} /
 # {type: :symbol, name: "bar"}, or nil (compile_send keeps POLY dispatch).
 def trace_eqq_literal_receiver(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
-    next unless d == reg
-
-    case insn.op
-    when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
-    when 'LOADSYM'
-      # Same extraction as LOADSYM's codegen (stops before a local-name comment).
-      name = insn.args[/:(\S+)/, 1]
-      return name ? { type: :symbol, name: name } : nil
-    when /^LOADI/
-      # Same two literal shapes as LOADI's codegen.
-      lit = insn.args[/\(([^)]+)\)/, 1] || insn.args[/^R\d+\s+(-?\d+)/, 1]
-      return lit ? { type: :fixnum, value: lit } : nil
-    else
-      # Anything else writing `reg` means the receiver is not a literal.
-      return nil
-    end
+  insn = irep.source_writer(idx - 1, reg)
+  case insn&.op
+  when 'LOADSYM'
+    # Same extraction as LOADSYM's codegen (stops before a local-name comment).
+    name = insn.sym_token
+    name ? { type: :symbol, name: name } : nil
+  when /^LOADI/
+    # Same two literal shapes as LOADI's codegen.
+    lit = insn.paren_value || insn.imm_operand
+    lit ? { type: :fixnum, value: lit } : nil
   end
-  # Never written: an argument or block-entry register, not a literal. No
-  # "argument is always literal N" fact exists to fall back on.
-  nil
+  # Anything else, or never written (an argument or block-entry register), is
+  # not a literal: no "argument is always literal N" fact exists to fall back on.
+end
+
+# FLOAT_DIV_RECEIVER: an mrbc float pool entry is always an immediate Float, so
+# Float#/ can use its core body without a runtime receiver check. Follow only
+# MOVEs; every other write loses this exact-type proof.
+def trace_float_literal_receiver(irep, idx, reg)
+  return false unless irep && idx && reg
+
+  insn = irep.source_writer(idx - 1, reg)
+  return false unless insn&.op == 'LOADL'
+
+  entry = insn.pool_index && irep.pool[insn.pool_index]
+  entry.is_a?(Hash) && entry[:type] == :float
 end
