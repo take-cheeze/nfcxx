@@ -53,7 +53,7 @@ class CodeGen
     # BLOCK_FALLBACK_YIELD_SUPPORT: `blk_available` is the same condition as
     # `mandatory_ok` below, so a region is never marked `needs_blk` for a method
     # whose wrapper will not extract `bc2cpp_blk`.
-    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: pure_mandatory_arity?(irep))
+    block_fallback_regions = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep))
     # NESTED_BLOCK_FALLBACK_SUPPORT: a RETURN_BLK nested at any depth throws
     # bc2cpp_method_return out to this same top-level catch (the per-call-site
     # catches only match bc2cpp_block_break), so search regions recursively.
@@ -96,6 +96,9 @@ class CodeGen
     has_rest = (mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)
     has_blk = (mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep)
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk
+    # BLOCK_SEMANTICS: the frame's block as a C++ name, from the wrapper's `&`
+    # (`needs_blk_param`) or the declared `&blk` parameter (`has_blk`).
+    blk_name = needs_blk_param || has_blk ? 'bc2cpp_blk' : nil
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
     arg_names = irep.lv.first(total_args).each_with_index.map { |n, i| n ? sanitize_c_ident(n) : "arg#{i + 1}" }
@@ -156,6 +159,9 @@ class CodeGen
     # BLOCK_FALLBACK region can throw bc2cpp_method_return. Cheap under zero-cost
     # exceptions but not free, hence the gate. Statements inside the `try` behave
     # the same; only a throw changes control flow.
+    # BLOCK_SEMANTICS: the method is a frame a block's `return` may unwind to; the
+    # blocks it builds carry the guard's token.
+    out << "  Bc2cppFrameGuard bc2cpp_ret_guard(&bc2cpp_return_frames);\n" if needs_return_catch
     out << "  Bc2cppVmMark bc2cpp_ret_mark = bc2cpp_vm_mark(M);\n  try {\n" if needs_return_catch
     (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     # A native-typed argument's register is still an mrb_value (NATIVE_ARG_TARGETS
@@ -222,13 +228,13 @@ class CodeGen
 
     # RESCUE_YIELD_SUPPORT: a `yield` in a protected range reads the block in the
     # try body, so it travels in the Ctx under the name BLKPUSH reads.
-    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
+    @blk_param_name = blk_name
     @blk_param_level = 0
     rescue_regions.each_with_index do |region, i|
       suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
       suppressed << region[:except_addr]
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
-      saved = (needs_blk_param ? [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] : []) +
+      saved = (blk_name ? [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] : []) +
               rescue_entry_saved_fields(irep, region)
       rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
@@ -353,7 +359,7 @@ class CodeGen
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
     # BLKPUSH_YIELD_SUPPORT: set for this method's top-level loop only (cleared
     # after). emit_proc_fallback_fn manages its own value.
-    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
+    @blk_param_name = blk_name
     # BLOCK_FALLBACK_YIELD_SUPPORT: in a METHOD body only lv == 0 can be answered
     # (vm.c `if (lv == 0) stack = regs + 1`). codegen_yield stops at the first
     # method scope, so a method's own yield is always level 0.
@@ -399,6 +405,7 @@ class CodeGen
     out << fell_off_end("#{d.owner}##{d.name}")
     if needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
+      out << "    if (bc2cpp_ret.token != bc2cpp_ret_guard.frame.token) throw;\n"
       out << "    bc2cpp_vm_restore(M, bc2cpp_ret_mark);\n"
       out << "    return bc2cpp_ret.value;\n"
       out << "  }\n"
@@ -485,6 +492,7 @@ class CodeGen
         fmt += '&'
         ptrs += ', &bc2cpp_blk'
       end
+      out << "  bc2cpp_check_argc(M, #{mand}, -1);\n"
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       out << "  mrb_value #{rest_name} = mrb_ary_new_from_values(M, bc2cpp_rest_len, bc2cpp_rest_ptr);\n"
       call_args = mand_names + [rest_name]
@@ -518,6 +526,9 @@ class CodeGen
         fmt += '&'
         ptrs += ', &bc2cpp_blk'
       end
+      # BLOCK_SEMANTICS: OP_ENTER words every arity error `expected <mandatory>`,
+      # where mrb_get_args says `1..2`.
+      out << "  bc2cpp_check_argc(M, #{mand}, #{mand + opt});\n" if opt.positive?
       out << "  mrb_get_args(M, \"#{fmt}\", #{ptrs});\n"
       if opt.positive?
         # OPTIONAL_ARG_SUPPORT: mrb_get_argc(M) - mand is the quantity OP_ENTER uses to

@@ -155,7 +155,7 @@ module SymbolCache
         va_start(ap, argc);
         for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
         va_end(ap);
-        return mrb_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
+        return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
       #{table.nomethod_used ? NOMETHOD : ''}
     CPP

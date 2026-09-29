@@ -115,6 +115,11 @@ class CodeGen
     # EXCEPTION_BREAK_SUPPORT: true only while compiling a BLOCK_FALLBACK body;
     # BREAK then throws bc2cpp_block_break instead of returning.
     @block_fallback_active = false
+    # BLOCK_SEMANTICS (ADR 0266): the env slots of the BLOCK_FALLBACK body being
+    # compiled that hold the method's return token and the call site's break
+    # token (nil: this block has none). Saved and restored like @blk_param_name.
+    @block_ret_slot = nil
+    @block_brk_slot = nil
     # BLKPUSH_YIELD_SUPPORT: the method's block parameter name ('bc2cpp_blk'), set
     # by compile_method around its body; read by BLKPUSH. nil elsewhere.
     # BLOCK_FALLBACK_YIELD_SUPPORT: also set by emit_proc_fallback_fn for a body

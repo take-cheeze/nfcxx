@@ -779,6 +779,7 @@ if $PROGRAM_NAME == __FILE__
 
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
+  puts '#include <string.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
   puts '#include <mruby/numeric.h>'
@@ -804,11 +805,16 @@ if $PROGRAM_NAME == __FILE__
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
   # call-site glue catches (mruby is built with MRB_USE_CXX_EXCEPTION). Always
   # emitted: a header-only struct with nothing to link.
-  puts 'struct bc2cpp_block_break { mrb_value value; };'
+  # BLOCK_SEMANTICS (ADR 0266): each carries the token of the frame it unwinds
+  # to, so a catch takes only its own.
+  puts 'struct bc2cpp_block_break { mrb_value value; mrb_int token; };'
   # EXCEPTION_RETURN_SUPPORT: a DIFFERENT type from bc2cpp_block_break, so the
   # method-level catch and the per-call-site catch never catch each other's
   # exception (exact C++ catch matching).
-  puts 'struct bc2cpp_method_return { mrb_value value; };'
+  puts 'struct bc2cpp_method_return { mrb_value value; mrb_int token; };'
+  # A `break` or `return` of a strict proc (Kernel#lambda over a block) only
+  # leaves the proc; caught by its entry function.
+  puts 'struct bc2cpp_proc_exit { mrb_value value; };'
   # VM_UNWIND_RESTORE: bc2cpp_block_break / bc2cpp_method_return are foreign
   # C++ exceptions, which mruby's own MRB_TRY/MRB_CATCH (`catch (mrb_jmpbuf*)`)
   # does not intercept. When one unwinds through real VM frames (a compiled block
@@ -837,6 +843,80 @@ if $PROGRAM_NAME == __FILE__
         c->ci--;
       }
       if (M->errinfo && (c->ci - c->cibase) < M->errinfo_ci_depth) M->errinfo = NULL;
+    }
+    // BLOCK_SEMANTICS (ADR 0266): a cfunc-backed Proc (every BLOCK_FALLBACK
+    // block) cannot be reached through Proc#call from a compiled frame: OP_CALL
+    // pops back to that cfunc frame and reads ci->proc->body.irep, which is NULL
+    // there. Such a call yields to the proc directly, as OP_BLKCALL does.
+    static bool bc2cpp_cfunc_proc_call_p(mrb_state* M, mrb_value recv, mrb_sym mid) {
+      if (!MRB_PROC_CFUNC_P(mrb_proc_ptr(recv)) || mrb_obj_ptr(recv)->c != M->proc_class) return false;
+      const char* name = mrb_sym_name(M, mid);
+      if (!name || !(!strcmp(name, "call") || !strcmp(name, "yield") || !strcmp(name, "[]") || !strcmp(name, "==="))) return false;
+      // Only where the name is Proc's own bytecode method: without mruby-proc-ext
+      // `===` is Object's, and `[]` may be missing altogether.
+      struct RClass* found = M->proc_class;
+      mrb_method_t m = mrb_method_search_vm(M, &found, mid);
+      return !MRB_METHOD_UNDEF_P(m) && found == M->proc_class && !MRB_METHOD_CFUNC_P(m);
+    }
+    // ADR 0266: a break or return may only unwind to a frame still on the C++
+    // stack; the frames that can be one are chained, each with a token that a
+    // block keeps in its env. A block outliving its frame (a stored or returned
+    // proc) finds no live token and raises LocalJumpError, as the VM does.
+    // Tokens are 30-bit serials, so a stale one matches a live frame only after
+    // 2^30 frames.
+    struct Bc2cppFrame { mrb_int token; Bc2cppFrame* parent; };
+    static Bc2cppFrame* bc2cpp_break_frames = nullptr;
+    static Bc2cppFrame* bc2cpp_return_frames = nullptr;
+    static mrb_int bc2cpp_frame_serial = 0;
+    struct Bc2cppFrameGuard {
+      Bc2cppFrame frame;
+      Bc2cppFrame** head;
+      explicit Bc2cppFrameGuard(Bc2cppFrame** h) : head(h) {
+        bc2cpp_frame_serial = bc2cpp_frame_serial % 0x3fffffff + 1;
+        frame.token = bc2cpp_frame_serial;
+        frame.parent = *h;
+        *h = &frame;
+      }
+      ~Bc2cppFrameGuard() { *head = frame.parent; }
+      Bc2cppFrameGuard(const Bc2cppFrameGuard&) = delete;
+      Bc2cppFrameGuard& operator=(const Bc2cppFrameGuard&) = delete;
+    };
+    static bool bc2cpp_frame_live(const Bc2cppFrame* head, mrb_value token) {
+      if (!mrb_integer_p(token)) return false;
+      for (const Bc2cppFrame* f = head; f; f = f->parent) if (f->token == mrb_integer(token)) return true;
+      return false;
+    }
+    // The method frame a block built right now returns to; 0 (never live) if none.
+    static inline mrb_value bc2cpp_return_token(mrb_state* M) {
+      return mrb_int_value(M, bc2cpp_return_frames ? bc2cpp_return_frames->token : 0);
+    }
+    [[noreturn]] static void bc2cpp_break(mrb_state* M, mrb_value value, mrb_value token) {
+      if (!bc2cpp_frame_live(bc2cpp_break_frames, token)) {
+        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "break from proc-closure");
+      }
+      throw bc2cpp_block_break{ value, mrb_integer(token) };
+    }
+    [[noreturn]] static void bc2cpp_return_from_block(mrb_state* M, mrb_value value, mrb_value token) {
+      if (!bc2cpp_frame_live(bc2cpp_return_frames, token)) {
+        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "unexpected return");
+      }
+      throw bc2cpp_method_return{ value, mrb_integer(token) };
+    }
+    // ADR 0266: OP_ENTER reports every positional arity error as `expected
+    // <mandatory>` (vm.c argnum_error); mrb_get_args would say `1+` or `1..2`.
+    // A call carrying keywords is left to mrb_get_args, which folds them in.
+    static inline void bc2cpp_check_argc(mrb_state* M, mrb_int min, mrb_int max) {
+      mrb_int argc = mrb_get_argc(M);
+      if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
+    }
+    // Kernel#lambda flags a copy of the RProc strict after the block was built.
+    static inline bool bc2cpp_proc_strict_p(mrb_state* M) {
+      const struct RProc* p = M->c->ci->proc;
+      return p && MRB_PROC_STRICT_P(p);
+    }
+    static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+      if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return mrb_yield_argv(M, recv, argc, argv);
+      return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
   # ENSURE_RAII_SUPPORT: the runtime guard for a recognized `ensure`

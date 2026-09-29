@@ -30,6 +30,7 @@ class CodeGen
   METHOD_COMPILE_STATE = {
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
     :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
+    :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil
   }.freeze

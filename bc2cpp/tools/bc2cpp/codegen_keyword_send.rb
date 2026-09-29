@@ -630,7 +630,7 @@ class CodeGen
   def compile_dynamic_splat_send(name, recv, d, argv_reg)
     <<~CPP
       // SPLAT n=* :#{name} runtime-sized (not a literal), dynamic dispatch via mrb_funcall_argv
-      r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
     CPP
   end
 

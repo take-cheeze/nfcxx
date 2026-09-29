@@ -13,9 +13,47 @@ module ArgShapeCalls
   # Past any real call: the unbounded upper bound of a rest callee's arity.
   REST_ARGC_MAX = 0x7fff
 
-  # Names that read the calling frame's block or state. A compiled callee that
-  # calls one sees the caller's frame, not its own.
-  FRAME_READING_NAMES = %w[block_given? iterator? binding].freeze
+  # Names that read the calling frame's state and that compiled code does not
+  # model: a compiled callee that calls one sees the caller's frame, not its own.
+  # `block_given?` is modelled (BLOCK_SEMANTICS, ADR 0266): it reads the
+  # `bc2cpp_blk` parameter, see compile_block_given.
+  FRAME_READING_NAMES = %w[iterator? binding].freeze
+
+  # `block_given?` as a bare self call, at any block depth. Over-approximates
+  # for a nested def, which only costs an unused block parameter.
+  def block_given_reads?(irep, seen = Set.new.compare_by_identity)
+    return false unless seen.add?(irep)
+    return true if calls_block_given?(irep)
+
+    (irep.reps || []).any? do |label|
+      child = label && @ireps[label]
+      child && block_given_reads?(child, seen)
+    end
+  end
+
+  def calls_block_given?(irep)
+    BytecodeIR.for(irep).instructions_with_op('SSEND0').any? { |insn| insn.sym == 'block_given?' }
+  end
+
+  # `block_given?` is this frame's block being non-nil. A frame whose wrapper
+  # does not extract the block (yields_block_param?, a declared `&blk`) cannot
+  # answer it, so the method stays interpreted rather than answer false.
+  def compile_block_given(insn, reg_offset)
+    return "  #error unhandled block_given? -- this frame's block is not extracted (BLOCK_SEMANTICS)\n" unless @blk_param_name
+
+    "  r#{insn.reg.to_i + reg_offset} = mrb_bool_value(!mrb_nil_p(#{@blk_param_name}));\n"
+  end
+
+  # The wrapper of this method extracts `bc2cpp_blk` (see compile_method).
+  def frame_block_available?(irep)
+    pure_mandatory_arity?(irep) || block_param_arity?(irep)
+  end
+
+  # Only mruby's own native `block_given?` exists: a Ruby definition of the
+  # name would be an ordinary method call.
+  def block_given_modelled?
+    (@registry['block_given?'] || []).all? { |definition| definition.irep.nil? }
+  end
 
   # A block-taking callee is only sound as a frame-less direct call when its
   # body cannot observe the frame: no zsuper/super (they forward the block) and
@@ -36,6 +74,7 @@ module ArgShapeCalls
   def yields_block_param?(irep, regions = nil)
     return false unless pure_mandatory_arity?(irep)
     return true if irep.instructions.any? { |insn| insn.op == 'BLKPUSH' && insn.paren_value == '0' }
+    return true if block_given_modelled? && block_given_reads?(irep)
 
     (regions || recognize_block_fallback_regions(irep, blk_available: true)).any? { |region| region[:needs_blk] }
   end
@@ -290,7 +329,7 @@ module ArgShapeCalls
       "    switch (RARRAY_LEN(#{ary})) {\n" \
       "#{arms.join}" \
       "    default:\n" \
-      "      r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), RARRAY_LEN(#{ary}), " \
+      "      r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_cstr(M, \"#{name}\"), RARRAY_LEN(#{ary}), " \
       "RARRAY_PTR(#{ary}));\n" \
       "    }\n" \
       "  }\n"
