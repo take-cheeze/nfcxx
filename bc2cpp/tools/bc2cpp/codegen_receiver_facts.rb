@@ -187,11 +187,10 @@ class CodeGen
       break if branch_index >= idx
       next unless %w[JMP JMPIF JMPNOT].include?(branch.op)
 
-      target_token = branch.args.split.last
-      return nil unless target_token&.match?(/\A\d+\z/)
+      target_addr = branch.jump_target
+      return nil unless target_addr
 
-      target_addr = target_token.to_i
-      target_index = target_addr && irep.instructions.index { |candidate| candidate.addr == target_addr }
+      target_index = irep.instructions.index { |candidate| candidate.addr == target_addr }
       return nil unless target_index
 
       branch_edges << [branch_index, target_index]

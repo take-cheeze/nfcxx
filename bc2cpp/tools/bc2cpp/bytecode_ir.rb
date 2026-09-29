@@ -52,10 +52,7 @@ module BytecodeIR
     end
 
     def branch_targets(instruction)
-      return [] unless %w[JMP JMPIF JMPNOT JMPNIL].include?(instruction.op)
-
-      target = instruction.source.args.split.last
-      target && target.match?(/\A\d+\z/) ? [target.to_i] : []
+      Array(instruction.source.jump_target)
     end
 
     def build_blocks

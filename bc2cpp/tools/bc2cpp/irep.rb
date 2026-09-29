@@ -8,7 +8,21 @@ MRBC = ENV['MRBC'] || 'mrbc'
 
 Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
                    :catch_handlers, keyword_init: true)
-Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
+Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
+  # Operand text without mrbc's trailing `; R5:name` local-variable comment,
+  # which would otherwise be mistaken for the last operand.
+  def operands
+    args.sub(/\s*;.*\z/m, '')
+  end
+
+  # Absolute target address of a JMP/JMPIF/JMPNOT/JMPNIL, nil for anything else.
+  def jump_target
+    return nil unless %w[JMP JMPIF JMPNOT JMPNIL].include?(op)
+
+    token = operands.split.last
+    token&.match?(/\A\d+\z/) ? token.to_i : nil
+  end
+end
 # One entry of an irep's catch handler table (mruby/irep.h
 # `struct mrb_irep_catch_handler`), from mrbc -v's "catch type:" header line.
 # `type` is "rescue" or "ensure"; the addresses are Insn#addr byte offsets.
