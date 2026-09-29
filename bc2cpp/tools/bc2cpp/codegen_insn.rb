@@ -79,14 +79,21 @@ class CodeGen
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
     when 'LOADL'
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
-      # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002").
-      # INT32/INT64/BIGINT are not decoded and keep `#error`.
+      # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002")
+      # and BIGINT (LOADL_BIGINT); INT32/INT64 never occur (the parser
+      # emits LOADI* up to int32 and BIGINT beyond) and keep `#error`.
       d = insn.reg
       pidx = insn.pool_index.to_i
       entry = irep.pool.fetch(pidx)
       if entry.is_a?(Hash) && entry[:type] == :float
         lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
         "  r#{d} = mrb_float_value(M, #{lit});\n"
+      elsif entry.is_a?(Hash) && entry[:type] == :bigint && entry[:digits].match?(/\A[0-9a-zA-Z]{1,255}\z/)
+        # LOADL_BIGINT (ADR 0260): rebuilt from its digits as OP_LOADL does, never
+        # from a 64-bit C constant a 32-bit mrb_int target could not hold.
+        "#ifdef MRB_USE_BIGINT\n" \
+          "  r#{d} = mrb_bint_new_str(M, \"#{entry[:digits]}\", #{entry[:digits].size}, #{entry[:base]});\n" \
+          "#else\n  #{inline_raise_exact('RangeError', 'integer overflow')}\n#endif\n"
       else
         kind = entry.is_a?(Hash) ? entry[:type] : :string
         "  #error LOADL references a non-float pool entry (#{kind}) -- not in this prototype's supported subset\n"
@@ -435,10 +442,10 @@ class CodeGen
       target = ensure_remapped_jump_target(irep, insn.jmp_addr)
       "  goto L#{target};\n"
     when 'JMPUW'
-      # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when this irep has no
-      # catch handlers (see jmpuw_is_plain_jump?). `.to_i` as for JMP.
-      if jmpuw_is_plain_jump?(irep)
-        "  goto L#{insn.jmp_addr};\n"
+      # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when no ensure handler
+      # can intercept it (see jmpuw_plain_jump_at?). `.to_i` as for JMP.
+      if jmpuw_plain_jump_at?(irep, insn)
+        "  goto L#{ensure_remapped_jump_target(irep, insn.jmp_addr)};\n"
       else
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end

@@ -217,6 +217,11 @@ class CodeGen
     "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"bc2cpp: #{message}\");"
   end
 
+  # `inline_raise` with the VM's own message (LOADL_BIGINT raises what OP_LOADL does).
+  def inline_raise_exact(exc_class, message)
+    "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"#{message}\");"
+  end
+
   # A tripwire, not a fallback: the recognizer's gate should make it unreachable,
   # and mrb_funcall cannot pass a block (why ADR 0147 rejected proc-wrapping).
   def inline_receiver_guard(predicate, recv_expr, expected)
@@ -246,7 +251,9 @@ class CodeGen
            "bc2cpp_times_i_#{addr} < bc2cpp_times_n_#{addr}; " \
            "++bc2cpp_times_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
-    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{addr});\n"
+    # A parameterless block has no R1 argument: R1 is one of its locals and must
+    # start nil like every other block register.
+    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_times_i_#{addr});\n" if region[:bind_counter]
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"

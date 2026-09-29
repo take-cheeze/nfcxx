@@ -921,6 +921,10 @@ if $PROGRAM_NAME == __FILE__
   puts 'extern "C" mrb_bool mrb_num_shift(mrb_state*, mrb_int, mrb_int, mrb_int*);'
   # DIV_FASTPATH_SUPPORT: same internal.h situation as mrb_str_aref.
   puts 'extern "C" mrb_value mrb_div_int_value(mrb_state*, mrb_int, mrb_int);'
+  # LOADL_BIGINT: same internal.h situation; only where mruby-bigint is built.
+  puts '#ifdef MRB_USE_BIGINT'
+  puts 'extern "C" mrb_value mrb_bint_new_str(mrb_state*, const char*, mrb_int, mrb_int);'
+  puts '#endif'
   # ZSUPER_NATIVE_SUPPORT: same internal.h situation (see ZSUPER_NATIVE_TARGETS).
   # Declared as internal.h does, `mrb_noreturn` included, so g++ treats the
   # following RETURN as unreachable.

@@ -222,15 +222,21 @@ class CodeGen
       glue_at[opt_jmp_addrs.first] = emit_optional_dispatch(opt_jmp_targets)
     end
 
+    # RESCUE_YIELD_SUPPORT: a `yield` in a protected range reads the block in the
+    # try body, so it travels in the Ctx under the name BLKPUSH reads.
+    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
+    @blk_param_level = 0
     rescue_regions.each_with_index do |region, i|
       suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
       suppressed << region[:except_addr]
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
-      saved = rescue_entry_saved_fields(irep, region)
+      saved = (needs_blk_param ? [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] : []) +
+              rescue_entry_saved_fields(irep, region)
       rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
-                                                      extra_field_values: saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
+                                                      extra_field_values: saved.map { |f| rescue_field_value(f) })
     end
+    @blk_param_name = nil
 
     # BLOCK_SUPPORT: each INLINE_LOOP_PASSES region replaces its anchor and SENDB
     # with one inlined loop at the anchor. A failed gate or an unclean body (nil)
