@@ -123,6 +123,32 @@ module IrepScans
     end
   end
 
+  # The constant name (`Name` or `Outer::Name`) that EVERY definition reaching
+  # the read of +reg+ at instruction +use+ agrees on, through joins and loops
+  # (BytecodeIR.reaching_definitions), or nil: a refused query, an entry value,
+  # or any definition that is not a GETCONST (GETMCNST scopes chained the same
+  # way) naming that same constant. Unlike #constant_path this does not stop at
+  # a branch, so it also answers when unrelated branches sit between the load
+  # and the use.
+  def agreed_constant_name(use, reg, depth = 0)
+    return nil if depth > CONSTANT_SCOPE_DEPTH
+
+    defs = BytecodeIR.reaching_definitions(self, use, reg)
+    return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+    names = defs.map do |definition|
+      insn = instructions[definition.index]
+      case insn.op
+      when 'GETCONST' then insn.const_name
+      when 'GETMCNST'
+        scope = agreed_constant_name(definition.index, insn.reg, depth + 1)
+        scope && insn.mcnst_name && "#{scope}::#{insn.mcnst_name}"
+      end
+    end
+    names.first if names.first && names.uniq.size == 1
+  end
+  CONSTANT_SCOPE_DEPTH = 4
+
   # The run of consecutive +op+ instructions ending at +from+ (inclusive), in
   # program order, at most +limit+ of them (the newest ones): the LOADSYMs of
   # `private :a, :b` sit right before the send.

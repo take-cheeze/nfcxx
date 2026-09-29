@@ -14,6 +14,10 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
                    :catch_handlers, keyword_init: true) do
   include IrepScans
 
+  # label => Irep of the whole tree this irep belongs to (set by load_ireps);
+  # an ivar, not a member, so Struct#==/hash/inspect never walk the cycle.
+  attr_accessor :tree
+
   # Instruction whose address is +addr+, as an index into #instructions.
   def index_of_addr(addr)
     @addr_index ||= instructions.each_with_index.to_h { |insn, index| [insn.addr, index] }
@@ -221,6 +225,7 @@ def load_ireps(image)
       end
     )
   end
+  ireps.each_value { |irep| irep.tree = ireps }
   [ireps, labels.first]
 end
 
