@@ -458,47 +458,44 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
                       class_layout: nil, registry: nil, container_constants: nil, element_annotations: nil,
                       known_owners: nil, capture_hints: nil, ret_class_proof: nil, method_return_class: nil,
                       dominated: nil, canonical: true)
-  ir = BytecodeIR.for(irep)
   path = []
   use = idx
   # GETCONST/GETMCNST are class-name evidence only while resolving a `.new`
   # receiver: `@position = POS_BOTTOM` is an Integer constant, not a class.
   # `resolving_new` becomes true right after a SEND :new (with an empty `path`),
   # or starts true for the `resolving_new:` caller.
-  (idx - 1).downto(0) do |i|
-    insn = ir.instruction_at(i)&.source
-    return nil unless insn
+  # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see
+  # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write; `a` is
+  # a read, so RESCUE is skipped unless it writes the followed register.
+  rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+  # JMPIF/JMPNOT stay visible for CONTAINER_PHI_MERGE below; the rest of
+  # READ_ONLY_OPCODE_SKIP only reads its register.
+  skip_ops = ['RESCUE', *(READ_ONLY_OPCODE_SKIP - %w[JMPIF JMPNOT])]
+  # Never written: an incoming argument (register N is argument N for N <=
+  # mand). Only a class annotation can name its class; pooling call sites is
+  # unsound for POLY names.
+  at_entry = lambda do |entry_reg|
+    next nil if dominated && !dominated.call(-1, use, entry_reg)
 
-    if insn.op == 'RESCUE'
-      # RESCUE_DUAL_REGISTER_SUPPORT: `R[b] = R[a].isa?(R[b])` (see
-      # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write.
-      # Checked before the `d == reg` filter, which only reads the first token and
-      # would otherwise treat the instruction as not touching `reg`.
-      a, b = insn.regs
-      next unless [a, b].include?(reg)
-      return nil if b == reg
-
-      next
-    end
-
-    d = insn.reg
-    next unless d == reg
-
+    pos = entry_reg.to_i
+    arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
+  end
+  irep.walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: rescue_write, exhausted: at_entry) do |insn, i, cur|
     if dominated && !READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      return nil unless dominated.call(i, use, reg)
+      return nil unless dominated.call(i, use, cur)
 
       use = i
     end
 
     case insn.op
     when 'MOVE'
-      reg = insn.regs[1]
+      next IrepScans.follow(insn.regs[1])
     when 'GETIDX', 'GETIDX0'
       return nil unless element_annotations && class_layout && registry
 
       # GETIDX overwrites its receiver register; GETIDX0 has a separate source.
       recv_reg = if insn.op == 'GETIDX'
-                   reg
+                   cur
                  else
                    insn.regs[1]
                  end
@@ -514,19 +511,10 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # An annotated Hash<Klass> parameter is a safe source for indexed values.
       # Only plain MOVE aliases back to the untouched argument register count;
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
-      arg_reg = recv_reg
       captured_reg = nil
-      (i - 1).downto(0) do |j|
-        prior = irep.instructions[j]
-        next unless prior.reg == arg_reg
-        if prior.op == 'MOVE'
-          arg_reg = prior.regs[1]
-          break unless arg_reg
-        else
-          captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
-          arg_reg = nil
-          break
-        end
+      arg_reg = irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }) do |prior|
+        captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
+        nil
       end
       # The trace can stop at a block's GETUPVAR before reaching the captured
       # container; the callsite hint is limited to annotated Hash arguments.
@@ -563,7 +551,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # proves nothing.
         return nil if insn.n_spec && insn.n_spec != '0'
 
-        return trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+        return trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
                                  class_layout: class_layout, registry: registry,
                                  container_constants: container_constants,
                                  element_annotations: element_annotations,
@@ -589,7 +577,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # The receiver is whatever wrote `reg` before `i` (SEND overwrites its
         # receiver register in place); recursing on a strictly smaller index
         # terminates.
-        recv_class = trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
+        recv_class = trace_new_target(irep, i, cur, ivar_classes, mand, arg_classes, owner: owner,
                                        class_layout: class_layout, registry: registry,
                                        container_constants: container_constants,
                                        element_annotations: element_annotations,
@@ -816,28 +804,16 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # 'Array'` GATE, which has no runtime fallback (a wrong fact emits a loop
       # over a register that is not an Array), so a wrong merge would not
       # degrade to mrb_funcall as a wrong TYPED fact does.
-      merged = container_phi_merge(irep, i, reg)
+      merged = container_phi_merge(irep, i, cur)
       return merged if merged
 
       # Unproven: fall through to the READ_ONLY_OPCODE_SKIP behaviour ADR 0191
       # established, which is to keep walking backwards past this read.
-    when *READ_ONLY_OPCODE_SKIP
-      # READ_ONLY_OPCODE_SKIP (ClassLayout counterpart; ADR 0188, ADR 0191): skip
-      # opcodes that only read their `R%d` operand, as IvarLayout.trace_type does.
-      # RESCUE is handled above the register filter instead.
     else
       return nil
     end
+    IrepScans::KEEP
   end
-  # Never written: an incoming argument (register N is argument N for N <=
-  # mand). Only a class annotation can name its class; pooling call sites is
-  # unsound for POLY names.
-  return nil if dominated && !dominated.call(-1, use, reg)
-
-  pos = reg.to_i
-  return arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
-
-  nil
 end
 
 def object_includes_rgss?
@@ -896,24 +872,9 @@ end
 # MOVE aliases; every other write ends the proof, while trace_new_target repeats
 # the walk and proves the class expression itself.
 def assigned_from_new_send?(irep, idx, reg)
-  current = reg.to_s
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
-
-    dst = insn.reg
-    next unless dst == current
-
-    if insn.op == 'MOVE'
-      current = insn.regs[1]
-      return false unless current
-      next
-    end
-
-    return %w[SEND SEND0 SENDB].include?(insn.op) &&
-           insn.reg == current.to_s && insn.sym == 'new'
-  end
-  false
+  irep.walk_writers(idx - 1, reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP, follow_moves: true) do |insn|
+    %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym == 'new'
+  end || false
 end
 
 def container_phi_merge(irep, at, reg)
@@ -945,27 +906,18 @@ end
 # passthrough: RGSS::Transition#freeze is an unrelated override with a
 # different return value.
 def literal_container_class(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.reg
-    next unless d == reg
-
+  irep.walk_writers(idx - 1, reg, follow_moves: true) do |insn|
     case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
     when 'SEND0'
-      return nil unless insn.sym == 'freeze'
+      insn.sym == 'freeze' ? IrepScans::KEEP : nil
     when 'ARRAY', 'ARRAY2'
-      return 'Array'
+      'Array'
     when 'HASH'
-      return 'Hash'
+      'Hash'
     when 'RANGE_INC', 'RANGE_EXC'
-      return 'Range'
-    else
-      return nil
+      'Range'
     end
   end
-  nil
 end
 
 # LITERAL_EQQ_SUPPORT: find a literal Fixnum/Symbol written to a `:===`

@@ -65,22 +65,15 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   # so the depth cap makes termination local to this function.
   return nil if depth > 8
 
-  reg = dest_reg
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn
-
-    # Skip the block proc register (see proven_array_source_scan).
-    next if insn.op == 'BLOCK'
-    next unless insn.reg == reg
-
+  # An `Array<Klass>` argument annotation counts only when the walk reaches the
+  # untouched incoming argument register; consumers still guard each element.
+  at_entry = lambda do |reg|
+    pos = reg.to_i
+    ctx[:arg_elements][pos - 1] if ctx[:arg_elements] && pos.between?(1, ctx[:mand])
+  end
+  # BLOCK is skipped: it writes the block proc register (see proven_array_source_scan).
+  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true, exhausted: at_entry) do |insn, i, reg|
     case insn.op
-    when 'MOVE'
-      src = insn.regs[1]
-      return nil unless src
-
-      reg = src
-      next
     when 'ARRAY', 'ARRAY2'
       # "ARRAY R3 2": N consecutive registers from Rd.
       # An EMPTY literal is VACUOUS, not unknown: it satisfies "every element is X"
@@ -88,31 +81,21 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       # `@x = []`). VACUOUS is skipped by the join, so an ivar whose only site is
       # `[]` gets no entry.
       n = insn.uint_operand
-      return nil if n.nil?
-      return ArrayElementLayout::VACUOUS if n.zero?
+      next nil if n.nil?
+      next ArrayElementLayout::VACUOUS if n.zero?
 
       base = reg.to_i
       classes = (0...n).map { |k| element_value_class(irep, i, (base + k).to_s, ctx, depth + 1) }
-      return nil if classes.any?(&:nil?) || classes.uniq.size != 1
+      next nil if classes.any?(&:nil?) || classes.uniq.size != 1
 
-      return classes.first
+      classes.first
     when 'GETIV'
       ivar = insn.ivar
-      return nil unless ivar
-
-      return ivar_element_hint(ctx[:owner], ivar, ctx)
+      ivar && ivar_element_hint(ctx[:owner], ivar, ctx)
     when 'SEND', 'SEND0', 'SENDB', 'SSENDB', 'SSEND', 'SSEND0'
-      return send_element_class(irep, i, reg, insn, ctx, depth)
-    else
-      return nil
+      send_element_class(irep, i, reg, insn, ctx, depth)
     end
   end
-  # An `Array<Klass>` argument annotation counts only when the walk reaches the
-  # untouched incoming argument register; consumers still guard each element.
-  pos = reg.to_i
-  return ctx[:arg_elements][pos - 1] if ctx[:arg_elements] && pos.between?(1, ctx[:mand])
-
-  nil
 end
 
 # HASH_ELEMENT_SUPPORT: VALUE class of the Hash in `reg` at `idx`. Narrower
@@ -121,44 +104,26 @@ end
 def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
   return nil if depth > 8
 
-  reg = dest_reg
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn
-
-    next if insn.op == 'BLOCK'
-    next unless insn.reg == reg
-
+  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, reg|
     case insn.op
-    when 'MOVE'
-      src = insn.regs[1]
-      return nil unless src
-
-      reg = src
-      next
     when 'HASH'
       # "HASH R2 2": N key/value PAIRS from Rd (vm.c OP_HASH sets regs[i] =>
       # regs[i+1]), so values are at odd offsets Rd+1, Rd+3, ... An empty literal is
       # VACUOUS, as in array_element_source_scan.
       n = insn.uint_operand
-      return nil if n.nil?
-      return HashElementLayout::VACUOUS if n.zero?
+      next nil if n.nil?
+      next HashElementLayout::VACUOUS if n.zero?
 
       base = reg.to_i
       classes = (0...n).map { |k| element_value_class(irep, i, (base + 2 * k + 1).to_s, ctx, depth + 1) }
-      return nil if classes.any?(&:nil?) || classes.uniq.size != 1
+      next nil if classes.any?(&:nil?) || classes.uniq.size != 1
 
-      return classes.first
+      classes.first
     when 'GETIV'
       ivar = insn.ivar
-      return nil unless ivar
-
-      return ivar_hash_element_hint(ctx[:owner], ivar, ctx)
-    else
-      return nil
+      ivar && ivar_hash_element_hint(ctx[:owner], ivar, ctx)
     end
   end
-  nil
 end
 
 # ELEMENT_CLASS_SUPPORT: the SEND arm of the scan above.
@@ -306,16 +271,10 @@ def block_mandatory_param_source?(irep, idx, reg)
   mandatory = enter ? enter.enter_fields.first : 0
   return false if mandatory.zero?
 
-  current = reg
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn.reg == current
-    return false unless insn.op == 'MOVE'
-
-    current = insn.regs[1]
-    return false unless current
-  end
-  current.to_i.between?(1, mandatory)
+  # Only MOVEs may sit between the read and the incoming register.
+  irep.walk_writers(idx - 1, reg, follow_moves: true, exhausted: ->(last) { last.to_i.between?(1, mandatory) }) do
+    false
+  end || false
 end
 
 # ELEMENT_CLASS_SUPPORT: trace a register to a class the REGISTRY knows.
@@ -515,35 +474,20 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
   direct = traced_owner(irep, idx, reg, ctx)
   return direct if direct
 
-  cur = reg
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn
-
-    next if insn.op == 'BLOCK'
-    next unless insn.reg == cur
-
-    if insn.op == 'MOVE'
-      src = insn.regs[1]
-      return nil unless src
-
-      cur = src
-      next
-    end
-
+  irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn, i, cur|
     # PRIMITIVE_ELEMENT_SUPPORT: a literal Integer/Hash/String/Symbol element.
     # Diagnostic only (`.known` strips these; see PRIMITIVE_ELEMENT_CLASSES): it
     # separates "provably Integer" from "untraceable" in the ANY/OPAQUE report.
     # LOADNIL is deliberately absent; a nil element was not a real shape here.
     case insn.op
     when 'HASH'
-      return 'Hash'
+      next 'Hash'
     when 'STRING'
-      return 'String'
+      next 'String'
     when /^LOADI/
-      return 'Integer'
+      next 'Integer'
     when 'LOADSYM'
-      return 'Symbol'
+      next 'Symbol'
     end
 
     # ELEMENT_CLASS_SUPPORT: `a[i]` is an index opcode, not SEND :[] (the VM only
@@ -554,25 +498,25 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     #   AREF    R2 R6 0      -- R[a] = R[b][c]:      receiver is R6.
     if %w[GETIDX GETIDX0 AREF].include?(insn.op)
       recv = insn.op == 'GETIDX' ? cur : insn.regs[1]
-      return nil unless recv
+      next nil unless recv
 
       hit = array_element_source_scan(irep, i, recv, ctx, depth + 1)
-      return hit if hit && hit != ArrayElementLayout::VACUOUS
+      next hit if hit && hit != ArrayElementLayout::VACUOUS
       # Not a known-element array. For GETIDX/GETIDX0 the VM's non-Array/non-Hash
       # path is a real `:[]` send, so resolve it like one (`@roster[i]` on a
       # Game::Actors). AREF is excluded: its non-Array behavior (index 0 yields the
       # receiver) is destructuring, not a `:[]` dispatch.
-      return nil if insn.op == 'AREF'
+      next nil if insn.op == 'AREF'
 
-      return receiver_scoped_return_class(irep, i, recv, '[]', ctx, depth)
+      next receiver_scoped_return_class(irep, i, recv, '[]', ctx, depth)
     end
-    return nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
+    next nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
 
     name = insn.sym
-    return nil unless name
+    next nil unless name
 
     annotated = ctx[:annotated_ret_class]&.call(name)
-    return annotated if annotated
+    next annotated if annotated
 
     argc = insn.argc || 0
     self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
@@ -583,7 +527,7 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     # `@roster[i]` on a non-Array falls through to the receiver-scoped rule.
     if indexer && !self_recv
       hit = array_element_source_scan(irep, i, cur, ctx, depth + 1)
-      return hit if hit && hit != ArrayElementLayout::VACUOUS
+      next hit if hit && hit != ArrayElementLayout::VACUOUS
     end
 
     scoped = if self_recv
@@ -592,12 +536,14 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
              else
                receiver_scoped_return_class(irep, i, cur, name, ctx, depth)
              end
-    return scoped if scoped
+    next scoped if scoped
 
     # Last resort: a MONO name whose body returns one exact class on every path.
+    # The answer has always been dropped and the walk continued (a statement,
+    # not a `return`); kept as is so this pass stays output-neutral.
     mono_fresh_return_class(name, ctx, depth)
+    IrepScans::KEEP
   end
-  nil
 end
 
 class ArrayElementLayout
@@ -780,25 +726,9 @@ end
 def mutated_ivar_target(irep, idx, reg)
   return nil unless reg
 
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn
-
-    next if insn.op == 'BLOCK'
-    next unless insn.reg == reg
-
-    return insn.ivar if insn.op == 'GETIV'
-
-    if insn.op == 'MOVE'
-      src = insn.regs[1]
-      return nil unless src
-
-      reg = src
-      next
-    end
-    return nil
+  irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true) do |insn|
+    insn.ivar if insn.op == 'GETIV'
   end
-  nil
 end
 
 # ELEMENT_CLASS_SUPPORT: element class one in-place mutation writes, or nil

@@ -201,53 +201,54 @@ class CodeGen
     cur = reg.to_s
     return false if ctx[:upvars].include?(cur)
 
+    # Inside a protected range: compiled into a separate function with
+    # re-initialized registers, so neither using nor stepping here means anything.
+    # An unaudited opcode could write `cur` from an operand this test does not
+    # read: refuse.
+    unaudited = lambda do |insn, _cur|
+      ctx[:protected].include?(insn.addr) ||
+        !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI'))
+    end
+    # The use itself is checked like every instruction crossed, but writes nothing.
+    if idx >= 0
+      use_insn = irep.instructions[idx]
+      return false unless use_insn
+      return false if unaudited.call(use_insn, cur)
+    end
+
     # JOIN_REACHING_DEFS: where `cur` is actually READ. It moves back to each MOVE
     # crossed, since `MOVE Ra Rb` reads Rb at its own address; asking at the
     # original use would ask about a register later code may overwrite.
     need_idx = idx
-    j = idx
-    while j >= 0
-      insn = irep.instructions[j]
-      return false unless insn
-      # Inside a protected range: compiled into a separate function with
-      # re-initialized registers, so neither using nor stepping here means anything.
-      return false if ctx[:protected].include?(insn.addr)
-      # An unaudited opcode could write `cur` from an operand this test does not
-      # read: refuse.
-      return false unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
-
-      if j < idx && fixnum_proof_writes_reg?(insn, cur)
-        if insn.op == 'MOVE'
-          # `regs[a] = regs[b]`: continue with the source register.
-          src = insn.regs[1]
-          return false unless src
-          return false if ctx[:upvars].include?(src)
-
-          cur = src
-          need_idx = j
-        else
-          # REGION_DOMINANCE: the write is found; check nothing enters the region except
-          # through it.
-          if fixnum_proof_region_ok?(irep, ctx, j, idx)
-            return fixnum_proof_source?(irep, j, insn, cur, owner_def, depth)
-          end
-
-          # JOIN_REACHING_DEFS: the write does not dominate, so ask the multi-path
-          # question: every reaching definition must prove.
-          return fixnum_proof_reaching_defs?(irep, ctx, need_idx, cur, owner_def, depth)
-        end
+    at_entry = lambda do |entry_reg|
+      # Fell off the top: `cur` holds the preamble's value. REGION_DOMINANCE with -1
+      # still rejects a back-edge from below the use.
+      unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
+        next fixnum_proof_reaching_defs?(irep, ctx, need_idx, entry_reg, owner_def, depth)
       end
 
-      j -= 1
+      fixnum_proof_entry_arg?(irep, entry_reg, owner_def)
     end
+    irep.walk_writers(idx - 1, cur, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
+                                    barrier_result: false, exhausted: at_entry) do |insn, j, wreg|
+      if insn.op == 'MOVE'
+        # `regs[a] = regs[b]`: continue with the source register.
+        src = insn.regs[1]
+        next false unless src
+        next false if ctx[:upvars].include?(src)
 
-    # Fell off the top: `cur` holds the preamble's value. REGION_DOMINANCE with -1
-    # still rejects a back-edge from below the use.
-    unless fixnum_proof_region_ok?(irep, ctx, -1, idx)
-      return fixnum_proof_reaching_defs?(irep, ctx, need_idx, cur, owner_def, depth)
+        need_idx = j
+        next IrepScans.follow(src)
+      end
+
+      # REGION_DOMINANCE: the write is found; check nothing enters the region except
+      # through it.
+      next fixnum_proof_source?(irep, j, insn, wreg, owner_def, depth) if fixnum_proof_region_ok?(irep, ctx, j, idx)
+
+      # JOIN_REACHING_DEFS: the write does not dominate, so ask the multi-path
+      # question: every reaching definition must prove.
+      fixnum_proof_reaching_defs?(irep, ctx, need_idx, wreg, owner_def, depth)
     end
-
-    fixnum_proof_entry_arg?(irep, cur, owner_def)
   end
 
   # JOIN_REACHING_DEFS -------------------------------------------------------
@@ -409,87 +410,72 @@ class CodeGen
     return nil unless irep && idx && reg && owner_def
     return nil if depth > FIXNUM_PROOF_MAX_DEPTH
 
-    cur = reg.to_s
-    (idx - 1).downto(0) do |j|
-      insn = irep.instructions[j]
-      return nil unless insn && (FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI'))
-      return nil if fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
-      next unless fixnum_proof_writes_reg?(insn, cur)
-
-      if insn.op == 'MOVE'
-        cur = insn.regs[1]
-        return nil unless cur
-        next
-      end
-      return nil unless fixnum_proof_region_ok?(irep, fixnum_proof_ctx(irep), j, idx)
+    # An unaudited opcode or one inside a protected range refuses (see
+    # FIXNUM_PROOF_STEP_OVER_OPS).
+    unaudited = lambda do |insn, _cur|
+      !(FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')) ||
+        fixnum_proof_ctx(irep)[:protected].include?(insn.addr)
+    end
+    irep.walk_writers(idx - 1, reg.to_s, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, barrier: unaudited,
+                                         follow_moves: true) do |insn, j, cur|
+      next nil unless fixnum_proof_region_ok?(irep, fixnum_proof_ctx(irep), j, idx)
 
       case insn.op
       when /^LOADI/
         value = loadi_literal(insn)
-        return [value, value] if value && value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
+        next [value, value] if value && value.between?(LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX)
 
-        return nil
+        next nil
       when 'GETIDX', 'GETIDX0', 'SEND', 'SEND0'
         name = insn.sym
-        return nil if %w[SEND SEND0].include?(insn.op) && name != '[]'
+        next nil if %w[SEND SEND0].include?(insn.op) && name != '[]'
         recv = if insn.op == 'GETIDX'
                  cur
                else
                  insn.regs[1]
                end
-        return nil unless recv && game_variables_index_receiver?(irep, j, recv, owner_def)
+        next nil unless recv && game_variables_index_receiver?(irep, j, recv, owner_def)
 
-        return [GAME_VARIABLE_RANGE_MIN, GAME_VARIABLE_RANGE_MAX]
+        next [GAME_VARIABLE_RANGE_MIN, GAME_VARIABLE_RANGE_MAX]
       when 'ADD', 'SUB', 'MUL'
         regs = insn.regs
-        return nil unless regs.size >= 2
+        next nil unless regs.size >= 2
         left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
         right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
-        return nil unless left && right
+        next nil unless left && right
 
-        return guarded_integer_binary_range(insn.op, left, right) ||
+        next guarded_integer_binary_range(insn.op, left, right) ||
           (insn.op == 'MUL' ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
       when 'ADDI', 'SUBI'
         literal = insn.imm_operand.to_i
         left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
-        return nil unless left
+        next nil unless left
 
-        return guarded_integer_binary_range(insn.op == 'ADDI' ? 'ADD' : 'SUB', left, [literal, literal])
+        next guarded_integer_binary_range(insn.op == 'ADDI' ? 'ADD' : 'SUB', left, [literal, literal])
       when 'DIV'
         regs = insn.regs
-        return nil unless regs.size >= 2
+        next nil unless regs.size >= 2
         left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
         right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
-        return nil unless left && right
+        next nil unless left && right
 
         bound = [left[0].abs, left[1].abs].max
-        return nil if -bound < LOADI_FIXNUM_MIN || bound > LOADI_FIXNUM_MAX
+        next nil if -bound < LOADI_FIXNUM_MIN || bound > LOADI_FIXNUM_MAX
 
-        return [-bound, bound]
+        next [-bound, bound]
       else
-        nil
+        IrepScans::KEEP
       end
     end
-    nil
   end
 
   def game_variables_index_receiver?(irep, idx, reg, owner_def)
     return true if static_indexable_class(irep, idx, reg, owner_def) == 'Game::Variables'
     return false unless owner_def.owner == 'Game::Variables'
 
-    cur = reg.to_s
-    (idx - 1).downto(0) do |j|
-      insn = irep.instructions[j]
-      next unless fixnum_proof_writes_reg?(insn, cur)
-
-      if insn.op == 'MOVE'
-        cur = insn.regs[1]
-        return false unless cur
-        next
-      end
-      return insn.op == 'LOADSELF'
-    end
-    false
+    irep.walk_writers(idx - 1, reg.to_s, skip_ops: FIXNUM_PROOF_READONLY_REG_OPS, follow_moves: true) do |insn|
+      insn.op == 'LOADSELF'
+    end || false
   end
 
   def guarded_integer_binary_range(op, left, right)

@@ -464,22 +464,16 @@ class CodeGen
   # definition, so `x = Foo.new if c; bar; x` must be refused. Falling off the
   # front is refused.
   def straightline_return_reg?(irep, idx, reg)
-    r = reg
     use = idx
-    (idx - 1).downto(0) do |i|
-      pin = irep.instructions[i]
-      next if READ_ONLY_OPCODE_SKIP.include?(pin.op) || pin.reg != r
+    irep.walk_writers(idx - 1, reg, skip_ops: READ_ONLY_OPCODE_SKIP) do |pin, i, r|
       # proven_array_source_scan steps over BLOCK, so it must not end this walk.
-      return false if pin.op == 'BLOCK'
-      return false unless return_write_dominates?(irep, i, use, r)
-      return true unless pin.op == 'MOVE'
-
-      r = pin.regs[1]
-      return false unless r
+      next false if pin.op == 'BLOCK'
+      next false unless return_write_dominates?(irep, i, use, r)
+      next true unless pin.op == 'MOVE'
 
       use = i
-    end
-    false
+      IrepScans.follow(pin.regs[1])
+    end || false
   end
 
   # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on

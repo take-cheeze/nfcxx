@@ -128,26 +128,9 @@ class CodeGen
   # MOVEs only. A miss only means the site is treated as before. Generic name
   # because calls_fiber_yield? reuses it for a plain SEND receiver.
   def fiber_const_receiver?(irep, call_idx, dest_reg)
-    reg = dest_reg
-    (call_idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      case insn.op
-      when 'MOVE'
-        d, s = insn.regs
-        next unless d == reg
-
-        reg = s
-      when 'GETCONST'
-        d = insn.reg
-        next unless d == reg
-
-        return insn.const_name == 'Fiber'
-      else
-        d = insn.reg
-        return false if d == reg
-      end
-    end
-    false
+    irep.walk_writers(call_idx - 1, dest_reg, follow_moves: true) do |insn|
+      insn.op == 'GETCONST' && insn.const_name == 'Fiber'
+    end || false
   end
 
   # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` is a plain SEND (`GETCONST R2

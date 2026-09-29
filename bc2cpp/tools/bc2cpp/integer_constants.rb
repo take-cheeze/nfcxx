@@ -174,56 +174,39 @@ module IntegerConstants
   # JMPNOT/STRING/JMP/LOADI_1/SETCONST, whose nearest backward writer is a LOADI
   # even though the other arm binds a String.
   def self.const_source_kind(irep, idx, reg, entries)
-    cur = reg.to_s
-    j = idx - 1
-    while j >= 0
-      insn = irep.instructions[j]
-      return nil unless insn
-      return nil if entries.include?(insn.addr)
+    irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
+                                         follow_moves: true) do |insn, j, cur|
+      next :literal if insn.op.start_with?('LOADI')
 
-      if insn.reg == cur.to_s
-        return :literal if insn.op.start_with?('LOADI')
+      case insn.op
+      when 'GETCONST'
+        # `"GETCONST\tR%d\t%s"` -- register first, bare name second.
+        n = insn.const_name
+        n && [:alias, n]
+      when 'GETMCNST'
+        # `"GETMCNST\tR%d\t(R%d)::%s"`: only the bare name after `::` is used; the
+        # scope register is not modelled, so the proof must hold for every constant
+        # of that name.
+        n = insn.mcnst_name
+        n && [:alias, n]
+      when 'ADD', 'SUB', 'ADDI', 'SUBI'
+        args = insn.regs
+        left = const_source_kind(irep, j, cur, entries)
+        right = if %w[ADDI SUBI].include?(insn.op)
+                  immediate = insn.imm_operand
+                  next nil unless immediate
 
-        case insn.op
-        when 'MOVE'
-          # `regs[a] = regs[b]` -- keep looking for whatever wrote the source.
-          src = insn.regs[1]
-          return nil unless src
+                  immediate.to_i
+                else
+                  next nil unless args[1]
 
-          cur = src
-        when 'GETCONST'
-          # `"GETCONST\tR%d\t%s"` -- register first, bare name second.
-          n = insn.const_name
-          return n && [:alias, n]
-        when 'GETMCNST'
-          # `"GETMCNST\tR%d\t(R%d)::%s"`: only the bare name after `::` is used; the
-          # scope register is not modelled, so the proof must hold for every constant
-          # of that name.
-          n = insn.mcnst_name
-          return n && [:alias, n]
-        when 'ADD', 'SUB', 'ADDI', 'SUBI'
-          args = insn.regs
-          left = const_source_kind(irep, j, cur, entries)
-          right = if %w[ADDI SUBI].include?(insn.op)
-                    immediate = insn.imm_operand
-                    return nil unless immediate
+                  const_source_kind(irep, j, args[1], entries)
+                end
+        next nil unless source_operand_kind?(left) && source_operand_kind?(right)
 
-                    immediate.to_i
-                  else
-                    return nil unless args[1]
-
-                    const_source_kind(irep, j, args[1], entries)
-                  end
-          return nil unless source_operand_kind?(left) && source_operand_kind?(right)
-
-          return [:arithmetic, insn.op, left, right]
-        else
-          return nil
-        end
+        [:arithmetic, insn.op, left, right]
       end
-      j -= 1
     end
-    nil
   end
 
   # INTEGER_CONSTANT_VALUE_PROOF: analyze proves a bare name always binds a
@@ -275,54 +258,38 @@ module IntegerConstants
   # const_source_kind's walk, returning `[:literal, N]` for LOADI* and exact
   # operand expressions for ADD/SUB. Everything else is refused.
   def self.literal_value_kind(irep, idx, reg, entries)
-    cur = reg.to_s
-    j = idx - 1
-    while j >= 0
-      insn = irep.instructions[j]
-      return nil unless insn
-      return nil if entries.include?(insn.addr)
-
-      if insn.reg == cur.to_s
-        if insn.op.start_with?('LOADI')
-          value = loadi_value(insn)
-          return value.nil? ? nil : [:literal, value]
-        end
-
-        case insn.op
-        when 'MOVE'
-          src = insn.regs[1]
-          return nil unless src
-
-          cur = src
-        when 'GETCONST'
-          n = insn.const_name
-          return n && [:alias, n]
-        when 'GETMCNST'
-          n = insn.mcnst_name
-          return n && [:alias, n]
-        when 'ADD', 'SUB', 'ADDI', 'SUBI'
-          args = insn.regs
-          left = literal_value_kind(irep, j, cur, entries)
-          right = if %w[ADDI SUBI].include?(insn.op)
-                    immediate = insn.imm_operand
-                    return nil unless immediate
-
-                    immediate.to_i
-                  else
-                    return nil unless args[1]
-
-                    literal_value_kind(irep, j, args[1], entries)
-                  end
-          return nil unless left && right
-
-          return [:arithmetic, insn.op, left, right]
-        else
-          return nil
-        end
+    irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
+                                         follow_moves: true) do |insn, j, cur|
+      if insn.op.start_with?('LOADI')
+        value = loadi_value(insn)
+        next value.nil? ? nil : [:literal, value]
       end
-      j -= 1
+
+      case insn.op
+      when 'GETCONST'
+        n = insn.const_name
+        n && [:alias, n]
+      when 'GETMCNST'
+        n = insn.mcnst_name
+        n && [:alias, n]
+      when 'ADD', 'SUB', 'ADDI', 'SUBI'
+        args = insn.regs
+        left = literal_value_kind(irep, j, cur, entries)
+        right = if %w[ADDI SUBI].include?(insn.op)
+                  immediate = insn.imm_operand
+                  next nil unless immediate
+
+                  immediate.to_i
+                else
+                  next nil unless args[1]
+
+                  literal_value_kind(irep, j, args[1], entries)
+                end
+        next nil unless left && right
+
+        [:arithmetic, insn.op, left, right]
+      end
     end
-    nil
   end
 
   # Duplicate of CodeGen's loadi_literal/loadi_proven_fixnum? (this module has no
