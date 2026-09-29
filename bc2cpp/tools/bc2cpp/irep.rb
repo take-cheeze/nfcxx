@@ -22,18 +22,26 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 
   # Yields `(insn, index)` for each instruction whose op is one of +ops+.
   def each_with_op(*ops)
-    instructions.each_with_index do |insn, index|
-      yield insn, index if ops.include?(insn.op)
-    end
+    # Per-op index lists (built once; instructions never change after loading)
+    # merged back into program order.
+    @op_indices ||= instructions.each_with_index.group_by { |insn, _| insn.op }
+                                .transform_values { |pairs| pairs.map(&:last).freeze }.freeze
+    indices = ops.uniq.flat_map { |op| @op_indices.fetch(op, []) }
+    indices.sort! if ops.uniq.size > 1
+    indices.each { |index| yield instructions[index], index }
   end
 
   # The ENTER instruction (nil for a bodyless zero-argument method).
   def enter
-    instructions.find { |insn| insn.op == 'ENTER' }
+    return @enter if defined?(@enter)
+
+    @enter = instructions.find { |insn| insn.op == 'ENTER' }
   end
 
   def enter_index
-    instructions.index { |insn| insn.op == 'ENTER' }
+    return @enter_index if defined?(@enter_index)
+
+    @enter_index = instructions.index { |insn| insn.op == 'ENTER' }
   end
 
   # mrbc -v prints EXT1/EXT2/EXT3 as their own lines widening the next
@@ -55,11 +63,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   end
 
   def last_writer_index(from, reg)
-    reg = reg.to_s
-    [from, instructions.length - 1].min.downto(0) do |i|
-      return i if instructions[i].reg == reg
-    end
-    nil
+    previous_lead_index(reg.to_s, from)
   end
 
   # The first non-MOVE instruction writing +reg+ at or before index +from+,

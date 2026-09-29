@@ -42,12 +42,23 @@ module IrepScans
   def walk_writers(from, reg, skip_ops: nil, barrier: nil, barrier_result: nil,
                    follow_moves: false, max_moves: nil, exhausted: nil)
     moves = 0
-    [from, instructions.length - 1].min.downto(0) do |index|
+    callable_barrier = barrier.respond_to?(:call)
+    index = [from, instructions.length - 1].min
+    while index >= 0
+      # Without a barrier only an instruction leading with +reg+ can matter, so
+      # jump straight to the previous one (skip_ops only ever skips those too).
+      unless barrier
+        index = previous_lead_index(reg, index)
+        break unless index
+      end
       insn = instructions[index]
-      hit = barrier && (barrier.respond_to?(:call) ? barrier.call(insn, reg) : barrier.include?(insn.op))
+      hit = barrier && (callable_barrier ? barrier.call(insn, reg) : barrier.include?(insn.op))
       return barrier_result if hit
-      next if skip_ops&.include?(insn.op)
-      next unless insn.reg == reg
+      next_index = index - 1
+      if insn.reg != reg || skip_ops&.include?(insn.op)
+        index = next_index
+        next
+      end
 
       if follow_moves && insn.op == 'MOVE'
         moves += 1
@@ -56,10 +67,12 @@ module IrepScans
         reg = insn.regs[1]
         return nil unless reg
 
+        index = next_index
         next
       end
 
       step = yield insn, index, reg
+      index = next_index
       next if step.equal?(KEEP)
       return step unless step.is_a?(Follow)
 
@@ -67,6 +80,20 @@ module IrepScans
       return nil unless reg
     end
     exhausted&.call(reg)
+  end
+
+  # Index of the nearest instruction at or before +from+ whose leading register
+  # operand is +reg+, or nil. The per-register index lists are built once per
+  # irep (instructions never change after loading).
+  def previous_lead_index(reg, from)
+    @lead_indices ||= instructions.each_with_index.group_by { |insn, _| insn.reg }
+                                  .transform_values { |pairs| pairs.map(&:last).freeze }.freeze
+    indices = @lead_indices[reg]
+    return nil unless indices
+
+    position = indices.bsearch_index { |i| i > from }
+    position = position ? position - 1 : indices.length - 1
+    position.negative? ? nil : indices[position]
   end
 
   # The constant expression held in +reg+ at instruction +from+ (inclusive):

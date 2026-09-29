@@ -43,6 +43,36 @@ module NativeExpressionDevirt
   }.freeze
   module_function
 
+  # Each native source is read by up to three scans per run. Keyed by mtime and
+  # size so an in-process caller that rewrites a file never sees stale text.
+  SOURCE_CACHE = {}
+
+  def read_source(path)
+    stat = File.stat(path)
+    key = [path, stat.mtime, stat.size]
+    SOURCE_CACHE.fetch(key) { SOURCE_CACHE[key] = File.read(path, encoding: 'UTF-8') }
+  end
+
+  # Character indexing into a non-ASCII String is O(n), which made the scanners
+  # below quadratic. Every delimiter they look for is ASCII, so scan a copy with
+  # each non-ASCII character replaced by one ASCII character: indexes agree and
+  # the results are still sliced from the real source.
+  ASCII_VIEWS = {}.compare_by_identity
+
+  def ascii_view(source)
+    return source if source.ascii_only?
+
+    ASCII_VIEWS[source] ||= source.gsub(/[^\x00-\x7f]/, '?')
+  end
+
+  # `scan` for patterns that open with `(\w+)`, which Onigmo cannot search for
+  # by a literal prefix: skip files lacking every literal the pattern needs.
+  def scan_with(source, literals, pattern, &block)
+    return block ? source : [] unless literals.any? { |literal| source.include?(literal) }
+
+    source.scan(pattern, &block)
+  end
+
   def analyze(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     implementations = {}
@@ -50,7 +80,7 @@ module NativeExpressionDevirt
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
+      source = read_source(path)
       macro_calls(source, 'MRB_MT_ENTRY').each do |arguments|
         next unless arguments.length == 3
 
@@ -100,7 +130,7 @@ module NativeExpressionDevirt
         registrations[name] << [nil, false]
       end
       needed = registrations.values.flatten(1).map(&:first).to_set
-      source.to_enum(:scan, /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
+      source.to_enum(:scan, /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
         function, state_arg, self_arg = Regexp.last_match.captures
         next unless needed.include?(function)
 
@@ -144,26 +174,26 @@ module NativeExpressionDevirt
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
+      source = read_source(path)
       class_variables = {}
-      source.scan(/(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+      scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
         class_variables[variable] = { field: field, class_name: class_name }
       end
-      source.scan(/(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+      scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
-      source.scan(/(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+      scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
         class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
       source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
         info = class_variables[variable]
         info[:field] ||= field if info
       end
-      source.scan(/\bmrb->(\w+_class)\b/) do |field|
+      scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
         field = field.first
         class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
-      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       # class.c boots BasicObject/Object/Module/Class through boot_defclass and
@@ -171,11 +201,11 @@ module NativeExpressionDevirt
       # would otherwise have an unknown owner, which disables every name they
       # share with a built-in class. Read the names off the source's own
       # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-      booted = source.scan(/(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+      booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
       source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
         class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
       end
-      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       tags = {}
@@ -251,14 +281,18 @@ module NativeExpressionDevirt
     needed_arities = registrations.values.flatten(1).filter_map do |entry|
       [entry[:function], entry[:arity]] unless entry[:arity].nil?
     end.to_set
-    function_pattern = /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
+    # No optional static/MRB_API prefix: only captures and match end are used,
+    # and a literal start lets the scan skip ahead.
+    function_pattern = /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
+    arities_by_function = Hash.new { |hash, function| hash[function] = [] }
+    needed_arities.each { |function, arity| arities_by_function[function] << arity }
     Array(paths).each do |path|
       next unless File.file?(path)
 
-      source = File.read(path, encoding: 'UTF-8')
+      source = read_source(path)
       source.to_enum(:scan, function_pattern).each do
         function, state_arg, self_arg = Regexp.last_match.captures
-        arities = needed_arities.select { |candidate, _arity| candidate == function }.map(&:last)
+        arities = arities_by_function.fetch(function, [])
         next if arities.empty?
 
         opening = Regexp.last_match.end(0) - 1
@@ -588,6 +622,10 @@ module NativeExpressionDevirt
 
   def macro_calls(source, macro)
     calls = []
+    # The regex below cannot match without the literal, and its `\b` prefix
+    # makes the unguarded scan of every native source slow.
+    return calls unless source.include?(macro)
+
     source.to_enum(:scan, /\b#{Regexp.escape(macro)}\s*\(/).each do
       opening = Regexp.last_match.end(0) - 1
       arguments, = split_call_arguments(source, opening)
@@ -603,8 +641,9 @@ module NativeExpressionDevirt
     quote = nil
     escaped = false
     index = opening
-    while index < source.length
-      char = source[index]
+    scanned = ascii_view(source)
+    while index < scanned.length
+      char = scanned[index]
       if quote
         if escaped
           escaped = false
@@ -664,10 +703,11 @@ module NativeExpressionDevirt
     line_comment = false
     block_comment = false
     index = opening
+    scanned = ascii_view(source)
 
-    while index < source.length
-      char = source[index]
-      following = source[index + 1]
+    while index < scanned.length
+      char = scanned[index]
+      following = scanned[index + 1]
       if line_comment
         line_comment = false if char == "\n"
       elsif block_comment

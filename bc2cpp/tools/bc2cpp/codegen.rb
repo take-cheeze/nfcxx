@@ -260,24 +260,12 @@ class CodeGen
 
   def select_embeddings(ivar_layout)
     embedding_owners = ivar_layout.keys.to_set
-    subclass_of = lambda do |klass, ancestor|
-      seen = Set.new
-      superclass = @superclass_of[klass]
-      while superclass.is_a?(String) && !seen.include?(superclass)
-        return true if superclass == ancestor
-
-        seen << superclass
-        superclass = @superclass_of[superclass]
-      end
-      false
-    end
-
     ivar_layout.each_with_object({}) do |(owner, ivars), out|
       # One object has one DATA_PTR: a base class and a subclass that both embed
       # would overwrite it with different layouts. Keep both in iv_tbl unless one
       # shared struct covers the whole chain.
       inherited_layout = embedding_owners.any? do |other|
-        other != owner && (subclass_of.call(owner, other) || subclass_of.call(other, owner))
+        other != owner && (strict_subclass?(owner, other) || strict_subclass?(other, owner))
       end
       next if inherited_layout
 
@@ -293,7 +281,7 @@ class CodeGen
       safe = ivars.reject do |name, _|
         excluded_access = self.class.hot_only_excluded && @registry.values.flatten.any? do |definition|
           next false unless definition.irep && self.class.hot_only_excluded.include?(definition.irep)
-          next false unless definition.owner == owner || subclass_of.call(definition.owner, owner)
+          next false unless definition.owner == owner || strict_subclass?(definition.owner, owner)
 
           irep_subtree_touches_ivar?(definition.irep, name)
         end
@@ -317,7 +305,7 @@ class CodeGen
       next if safe.empty?
 
       @superclass_of.each_key do |klass|
-        next unless subclass_of.call(klass, owner)
+        next unless strict_subclass?(klass, owner)
 
         initializers = (@registry['initialize'] || []).select { |d| d.owner == klass }
         next if initializers.empty?
@@ -416,31 +404,37 @@ class CodeGen
   end
 
   def strict_subclass?(klass, ancestor)
-    seen = Set.new
-    superclass = @superclass_of[klass]
-    while superclass.is_a?(String) && seen.add?(superclass)
-      return true if superclass == ancestor
-
-      superclass = @superclass_of[superclass]
+    # @superclass_of never changes after construction, so each class's strict
+    # ancestors are walked once.
+    @strict_ancestors ||= {}
+    ancestors = @strict_ancestors[klass] ||= begin
+      seen = Set.new
+      superclass = @superclass_of[klass]
+      superclass = @superclass_of[superclass] while superclass.is_a?(String) && seen.add?(superclass)
+      seen
     end
-    false
+    ancestors.include?(ancestor)
   end
 
   # Does this method's irep, or any irep nested in it (block bodies are separate
   # child ireps), touch this ivar? An interpreted method runs its blocks too, so
   # Game::Transition#clip's `rects.each { ... @width ... }` counts even though
-  # its top-level irep never mentions @width. `seen` skips ireps shared by
-  # several call sites.
-  def irep_subtree_touches_ivar?(label, ivar_name, seen = Set.new)
-    return false if seen.include?(label)
+  # its top-level irep never mentions @width.
+  def irep_subtree_touches_ivar?(label, ivar_name)
+    subtree_ivar_names(label).include?(ivar_name)
+  end
 
-    seen << label
-    irep = @ireps.fetch(label)
-    return true if irep.instructions.any? do |insn|
-      (insn.op == 'SETIV' || insn.op == 'GETIV') && insn.ivar == ivar_name
+  # Every ivar name a GETIV/SETIV in the irep or a nested one mentions; ireps
+  # are immutable, so each subtree is walked once however many ivars ask.
+  def subtree_ivar_names(label)
+    @subtree_ivar_names ||= {}
+    @subtree_ivar_names[label] ||= begin
+      irep = @ireps.fetch(label)
+      names = Set.new
+      irep.instructions.each { |insn| names << insn.ivar if insn.op == 'SETIV' || insn.op == 'GETIV' }
+      irep.reps.each { |child| names.merge(subtree_ivar_names(child)) }
+      names
     end
-
-    irep.reps.any? { |child| irep_subtree_touches_ivar?(child, ivar_name, seen) }
   end
 
   def cpp_name(owner, name)
@@ -517,9 +511,11 @@ class CodeGen
   STRUCTURAL_NAME_CHARS = ':.'.freeze
 
   def sanitize(s)
-    s.gsub(/[^a-zA-Z0-9_]/) { |c|
+    # Names repeat across thousands of call sites; the result is frozen because
+    # it is shared.
+    (@sanitized ||= {})[s] ||= s.gsub(/[^a-zA-Z0-9_]/) { |c|
       STRUCTURAL_NAME_CHARS.include?(c) ? '_' : format('$%02x', c.ord)
-    }
+    }.freeze
   end
 
   def ivar_field_name(name)
