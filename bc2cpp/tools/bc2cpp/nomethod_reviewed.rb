@@ -62,6 +62,7 @@ module NomethodReviewed
 end
 
 NOMETHOD_REVIEWED = Set[
+  "Game::Actor#base_stats -> int16_values",
   "Game::Actor#rpg2003? -> rpg2003?",
   "Game::Battle#actor_command -> actor",
   "Game::Battle#actor_command -> id",

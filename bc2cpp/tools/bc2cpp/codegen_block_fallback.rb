@@ -527,7 +527,7 @@ class CodeGen
       nested_glue_at[rregion[:begin_addr]] =
         emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
                          extra_field_values: extra_fields.map { |f| f[:name] } +
-                                             saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
+                                             saved.map { |f| rescue_field_value(f) })
     end
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.

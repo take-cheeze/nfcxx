@@ -122,7 +122,7 @@ module BytecodeIR
     # strictly before the region that lands on its first address.
     def region_boundary_breaches(body, exit_addr)
       region = (body.begin..exit_addr)
-      branch_edges(jmpuw: false).select do |edge|
+      branch_edges.select do |edge|
         if body.cover?(edge.src)
           !region.cover?(edge.target)
         elsif edge.src < region.begin && edge.target == region.begin
