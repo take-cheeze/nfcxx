@@ -4,11 +4,71 @@
 
 # MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
 # `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
+require_relative 'insn_operands'
+require_relative 'insn_decoder'
+require_relative 'irep_scans'
+
 MRBC = ENV['MRBC'] || 'mrbc'
 
 Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
-                   :catch_handlers, keyword_init: true)
-Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true)
+                   :catch_handlers, keyword_init: true) do
+  include IrepScans
+
+  # Instruction whose address is +addr+, as an index into #instructions.
+  def index_of_addr(addr)
+    @addr_index ||= instructions.each_with_index.to_h { |insn, index| [insn.addr, index] }
+    @addr_index[addr]
+  end
+
+  # Nearest instruction at or before index +from+ whose first register operand
+  # is +reg+ (digits), i.e. the write a register read at from + 1 sees.
+  def last_writer(from, reg)
+    index = last_writer_index(from, reg)
+    index && instructions[index]
+  end
+
+  def last_writer_index(from, reg)
+    reg = reg.to_s
+    [from, instructions.length - 1].min.downto(0) do |i|
+      return i if instructions[i].reg == reg
+    end
+    nil
+  end
+
+  # The first non-MOVE instruction writing +reg+ at or before index +from+,
+  # following MOVE copies to their source register. Nil when the register is
+  # never written or a MOVE has no source.
+  def source_writer(from, reg)
+    loop do
+      index = last_writer_index(from, reg)
+      return nil unless index
+
+      insn = instructions[index]
+      return insn unless insn.op == 'MOVE'
+
+      reg = insn.regs[1]
+      return nil unless reg
+
+      from = index - 1
+    end
+  end
+
+  # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).
+  def instructions_at(range)
+    instructions.select { |insn| range.cover?(insn.addr) }
+  end
+end
+# One decoded instruction. `args` is the disassembly's operand text, kept only
+# for diagnostics and comments; every pass reads the typed operands through
+# InsnOperands (see OperandSchema).
+Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
+  include InsnOperands
+
+  # An Insn for code the compiler synthesizes (no disassembly line behind it).
+  def self.synthetic(op, args)
+    new(lineno: 0, addr: 0, op: op, args: args, raw: "#{op} #{args}")
+  end
+end
 # One entry of an irep's catch handler table (mruby/irep.h
 # `struct mrb_irep_catch_handler`), from mrbc -v's "catch type:" header line.
 # `type` is "rescue" or "ensure"; the addresses are Insn#addr byte offsets.
@@ -26,19 +86,37 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # command line as one program (with class reopening across files), which is
 # what makes a whole-gem closed world possible.
 # ---------------------------------------------------------------------------
+#
+# The instruction stream comes back as a RiteImage (mrbc's RITE binary, decoded
+# by InsnDecoder), or as `mrbc -v` text with BC2CPP_TEXT_LOADER=1.
+RiteImage = Struct.new(:bytes)
+
+def text_loader?
+  ENV['BC2CPP_TEXT_LOADER'] == '1'
+end
+
 def run_mrbc(src_paths, symbol, out_dir)
   src_paths = Array(src_paths)
   c_dump = File.join(out_dir, "#{symbol}_dump.c")
-  disasm_txt = File.join(out_dir, "#{symbol}_disasm.txt")
+  mrb_path = File.join(out_dir, "#{symbol}.mrb")
 
   system(MRBC, '-B', symbol, '-S', '-o', c_dump, *src_paths, exception: true)
+  if text_loader?
+    stream = run_mrbc_text(src_paths, File.join(out_dir, "#{symbol}_disasm.txt"), mrb_path)
+  else
+    system(MRBC, '-g', '-o', mrb_path, *src_paths, exception: true)
+    stream = RiteImage.new(File.binread(mrb_path))
+  end
+
+  [File.read(c_dump, encoding: 'UTF-8'), stream]
+end
+
+def run_mrbc_text(src_paths, disasm_txt, mrb_path)
   # Source has non-ASCII comments/literals; don't trust the locale default.
-  disasm = IO.popen([MRBC, '-v', '-o', File.join(out_dir, "#{symbol}.mrb"), *src_paths],
-                     external_encoding: 'UTF-8', &:read)
+  disasm = IO.popen([MRBC, '-v', '-o', mrb_path, *src_paths], external_encoding: 'UTF-8', &:read)
   raise "mrbc -v failed" unless $?.success?
   File.write(disasm_txt, disasm)
-
-  [File.read(c_dump, encoding: 'UTF-8'), disasm]
+  disasm
 end
 
 # ---------------------------------------------------------------------------
@@ -131,6 +209,8 @@ end
 # same order they appear (verified to match dfs_order above).
 # ---------------------------------------------------------------------------
 def parse_disasm_blocks(text)
+  return parse_rite_blocks(text) if text.is_a?(RiteImage)
+
   blocks = []
   # Parallel to `blocks`: each irep's `file:` path, needed by
   # Annotations.extract to find a magic comment's source line.
@@ -159,10 +239,31 @@ def parse_disasm_blocks(text)
     end
     if line =~ /^\s*(\d+)\s+(\d+)\s+([A-Z][A-Z0-9_]*)\s*(.*)$/
       lineno, addr, op, rest = Regexp.last_match.captures
-      current << Insn.new(lineno: lineno.to_i, addr: addr.to_i, op: op, args: rest.strip, raw: line.rstrip)
+      insn = Insn.new(lineno: lineno.to_i, addr: addr.to_i, op: op, args: rest.strip, raw: line.rstrip)
+      insn.typed # parse once at load so a schema gap fails here, not in a pass
+      current << insn
     end
   end
   blocks << current if current
+  [blocks, block_files, block_catches]
+end
+
+# The same three parallel lists as parse_disasm_blocks, from the RITE binary.
+CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze
+
+def parse_rite_blocks(image)
+  blocks = []
+  block_files = []
+  block_catches = []
+  RiteBinary.parse(image.bytes).each do |rite|
+    insns, file = InsnDecoder.decode(rite)
+    blocks << insns
+    block_files << file
+    block_catches << rite.catch_handlers.map do |h|
+      type = CATCH_TYPES.fetch(h.type) { raise "bc2cpp: unknown catch handler type #{h.type}" }
+      CatchHandler.new(type: type, begin_addr: h.begin_addr, end_addr: h.end_addr, target: h.target)
+    end
+  end
   [blocks, block_files, block_catches]
 end
 

@@ -41,7 +41,7 @@ class CodeGen
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
     enter = irep.instructions.find { |i| i.op == 'ENTER' }
-    mand = enter ? enter.args.split(':').first.to_i : 0
+    mand = enter ? enter.enter_fields.first : 0
 
     # RUNTIME_DEF_DEVIRT_GUARD: cleared at the single entry point so no early
     # return can leak one method's blocked-name set into the next compile.
@@ -73,7 +73,7 @@ class CodeGen
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
     needs_blk_param = mandatory_ok &&
-                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0' } ||
+                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.paren_value == '0' } ||
                        block_fallback_regions.any? { |r| r[:needs_blk] })
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: tried whenever
@@ -84,7 +84,7 @@ class CodeGen
     # unsupported. Either failure also clears `opt_jmp_targets`, the flag
     # `supported` trusts; otherwise a recognized optional shape with an
     # unrecognized keyword shape would compile with its keywords dropped.
-    enter_kw = enter ? enter.args.split(':').map { |f| f[/\d+/].to_i }[4] : 0
+    enter_kw = enter ? enter.enter_fields[4] : 0
     if (opt.positive? && !opt_jmp_targets) || (enter_kw.positive? && !kw_table)
       opt_jmp_targets = nil
       kw_table = nil
@@ -578,15 +578,6 @@ class CodeGen
   # jmpuw_is_plain_jump? rejects it only adds a harmless label to a method that
   # will not ship.
   def jump_targets(irep)
-    targets = Set.new
-    irep.instructions.each do |insn|
-      case insn.op
-      when 'JMP', 'JMPUW'
-        targets << insn.args.strip[/\d+/].to_i
-      when 'JMPNOT', 'JMPIF', 'JMPNIL'
-        targets << jmp_target_after_reg(insn.args)
-      end
-    end
-    targets
+    BytecodeIR.for(irep).branch_targets.dup
   end
 end

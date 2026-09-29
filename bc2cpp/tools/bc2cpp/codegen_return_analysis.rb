@@ -120,7 +120,7 @@ class CodeGen
       case insn.op
       when 'RETURN'
         # `"RETURN\tR%d"` -- the returned register is the first operand.
-        reg = insn.args[/\AR(\d+)/, 1]
+        reg = insn.reg
         return false unless reg
         return false unless proven_fixnum_operand?(irep, idx, reg, d)
       when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
@@ -212,7 +212,7 @@ class CodeGen
       case insn.op
       when 'RETURN'
         # `"RETURN\tR%d"` -- the returned register is the first operand.
-        reg = insn.args[/\AR(\d+)/, 1]
+        reg = insn.reg
         return false unless reg
         return false unless straightline_return_reg?(irep, idx, reg)
         return false unless proven_array_operand?(irep, idx, reg, d.owner, mand, ivar_classes, arg_classes,
@@ -247,7 +247,7 @@ class CodeGen
       case insn.op
       # RETURN_BLK in a method body is a plain return (methods are strict procs).
       when 'RETURN', 'RETURN_BLK'
-        reg = insn.args[/\AR(\d+)/, 1]
+        reg = insn.reg
         return nil unless reg
 
         sources = return_value_sources(irep, idx, reg)
@@ -314,7 +314,7 @@ class CodeGen
         insn = irep.instructions[p]
         # vm.c only falls through a `RAISEIF Ra` when regs[a] is nil.
         if insn.op == 'RAISEIF'
-          if insn.args[/\AR(\d+)/, 1] == r
+          if insn.reg == r
             out << :nil
           else
             work << [p, r]
@@ -322,12 +322,12 @@ class CodeGen
           next
         end
         return nil unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
-        return nil if RETURN_SOURCE_CALLS.include?(insn.op) && insn.args[/\AR(\d+)/, 1].to_i < r.to_i
+        return nil if RETURN_SOURCE_CALLS.include?(insn.op) && insn.reg.to_i < r.to_i
 
         if !fixnum_proof_writes_reg?(insn, r)
           work << [p, r]
         elsif insn.op == 'MOVE'
-          src = insn.args.scan(/R(\d+)/).flatten[1]
+          src = insn.regs[1]
           return nil unless src
 
           work << [p, src]
@@ -361,17 +361,15 @@ class CodeGen
     names = Set.new
     @ireps.each_value do |irep|
       irep.instructions.each_with_index do |insn, idx|
-        operands = entry_arg_operands(insn)
         case insn.op
         when 'ALIAS', 'UNDEF'
-          operands.scan(ENTRY_ARG_NAME_RE) { |m| names << m[0] }
+          names << insn.sym
         when 'LOADSYM'
-          return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(operands[ENTRY_ARG_NAME_RE, 1])
+          return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(insn.sym)
         when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
-          m = operands.match(/\AR(\d+)\s+:(\S+?)(?:\s+n=(\S+))?\s*\z/)
-          next unless m && NAME_INSTALLER_SENDS.include?(m[2])
+          next unless NAME_INSTALLER_SENDS.include?(insn.sym)
 
-          syms = m[3]&.match?(/\A\d+\z/) && literal_symbol_args(irep, idx, m[1].to_i, m[3].to_i)
+          syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
           return @symbol_installed_names = nil unless syms && !syms.empty?
 
           names.merge(syms)
@@ -466,22 +464,16 @@ class CodeGen
   # definition, so `x = Foo.new if c; bar; x` must be refused. Falling off the
   # front is refused.
   def straightline_return_reg?(irep, idx, reg)
-    r = reg
     use = idx
-    (idx - 1).downto(0) do |i|
-      pin = irep.instructions[i]
-      next if READ_ONLY_OPCODE_SKIP.include?(pin.op) || pin.args[/^R(\d+)/, 1] != r
+    irep.walk_writers(idx - 1, reg, skip_ops: READ_ONLY_OPCODE_SKIP) do |pin, i, r|
       # proven_array_source_scan steps over BLOCK, so it must not end this walk.
-      return false if pin.op == 'BLOCK'
-      return false unless return_write_dominates?(irep, i, use, r)
-      return true unless pin.op == 'MOVE'
-
-      r = pin.args.scan(/R(\d+)/).flatten[1]
-      return false unless r
+      next false if pin.op == 'BLOCK'
+      next false unless return_write_dominates?(irep, i, use, r)
+      next true unless pin.op == 'MOVE'
 
       use = i
-    end
-    false
+      IrepScans.follow(pin.regs[1])
+    end || false
   end
 
   # Does the write of `reg` at `w_idx` (-1: method entry) reach `use_idx` on
@@ -514,9 +506,8 @@ class CodeGen
       child.instructions.each do |insn|
         next unless insn.op == 'SETUPVAR'
 
-        _src, b, lv = insn.args.split(/\s+/)
-        # An unparsable level is kept: over-collecting only costs a proof.
-        acc << b if b =~ /\A\d+\z/ && !(lv =~ /\A\d+\z/ && lv.to_i != depth - 1)
+        index, level = insn.upvar_ref
+        acc << index.to_s if level == depth - 1
       end
       collect_own_upvar_writes(child, depth + 1, acc)
     end

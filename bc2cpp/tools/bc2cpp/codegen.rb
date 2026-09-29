@@ -384,7 +384,7 @@ class CodeGen
     seen << label
     irep = @ireps.fetch(label)
     return true if irep.instructions.any? do |insn|
-      (insn.op == 'SETIV' || insn.op == 'GETIV') && insn.args[/@(\w+)/, 1] == ivar_name
+      (insn.op == 'SETIV' || insn.op == 'GETIV') && insn.ivar == ivar_name
     end
 
     irep.reps.any? { |child| irep_subtree_touches_ivar?(child, ivar_name, seen) }

@@ -6,7 +6,7 @@ def pure_mandatory_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   fields[1..].all?(&:zero?)
 end
 
@@ -16,7 +16,7 @@ def mandatory_arity(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return 0 unless enter
 
-  enter.args.split(':').first.to_i
+  enter.enter_fields.first
 end
 
 # KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT: can this def receive `nk`
@@ -33,7 +33,7 @@ def keyword_hash_positional_callee?(irep, total)
   return false unless enter
 
   mand, opt, rest, post, kw, kdict, block, noblock =
-    enter.args.split(':').map { |f| f[/\d+/].to_i }
+    enter.enter_fields
   kw.zero? && kdict.zero? && rest.zero? && post.zero? && block.zero? && noblock.zero? &&
     total.between?(mand, mand + opt)
 end
@@ -53,7 +53,7 @@ def mandatory_optional_and_keyword_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return false unless enter
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   _mand, _opt, rest, post, kw, kwrest, block, noblock = fields
   kw.to_i.positive? && rest.to_i.zero? && post.to_i.zero? &&
     kwrest.to_i.zero? && block.to_i.zero? && noblock.to_i.zero?
@@ -109,10 +109,10 @@ def collect_block_upvars(block_irep)
   block_irep.instructions.each do |insn|
     next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
 
-    _reg, upvar_idx, depth = insn.args.split(/\s+/)
-    return nil unless depth == '0'
+    upvar_idx, depth = insn.upvar_ref
+    return nil unless depth.zero?
 
-    upvars << upvar_idx.to_i
+    upvars << upvar_idx
   end
   upvars.uniq.sort
 end
@@ -228,7 +228,7 @@ def optional_arity(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return 0 unless enter
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   fields[1] || 0
 end
 
@@ -239,7 +239,7 @@ def pure_mandatory_or_optional_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   fields[2..].all?(&:zero?)
 end
 
@@ -263,7 +263,7 @@ def optional_arg_table(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return [0, nil, nil] unless enter
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   _mand, opt, rest, mand2, kw, kwrest, block = fields
   # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `kw` may be non-zero (`def f(a, b = 1, k:
   # nil)`): the default-value code falls through into the KEY_P/KARG/KEYEND
@@ -274,7 +274,7 @@ def optional_arg_table(irep)
   jmps = irep.instructions[enter_idx + 1, opt + 1]
   return [opt, nil, nil] unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
 
-  [opt, jmps.map(&:addr), jmps.map { |i| i.args.strip[/\d+/].to_i }]
+  [opt, jmps.map(&:addr), jmps.map { |i| i.jmp_addr }]
 end
 
 # KEYWORD_ARG_SUPPORT: parameter name for a keyword. compile_method (signature,
@@ -298,7 +298,7 @@ def keyword_arg_table(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return nil unless enter
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   _mand, opt, rest, mand2, kw, kwrest, block = fields
   # OPTIONAL_KEYWORD_COMBINED_SUPPORT: `opt` may be non-zero (see
   # optional_arg_table); this scan already covers the whole irep.
@@ -309,7 +309,7 @@ def keyword_arg_table(irep)
   irep.instructions.each do |insn|
     next unless insn.op == 'KEY_P' || insn.op == 'KARG'
 
-    sym = insn.args[/:(\S+)/, 1]
+    sym = insn.sym_token
     next unless sym
 
     unless required.key?(sym)
@@ -331,7 +331,7 @@ def rest_only_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return false unless enter
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   _mand, opt, rest, mand2, kw, kwrest, block = fields
   # REST_BLOCK_COMBINED_SUPPORT: `block` may be non-zero (`def m(name, *args,
   # &block)`, ENTER 1:0:1:0:0:0:1:0): the block arrives at register
@@ -347,7 +347,7 @@ def block_param_arity?(irep)
   enter = irep.instructions.find { |i| i.op == 'ENTER' }
   return false unless enter
 
-  fields = enter.args.split(':').map { |f| f[/\d+/].to_i }
+  fields = enter.enter_fields
   _mand, opt, rest, mand2, kw, kwrest, block = fields
   # REST_BLOCK_COMBINED_SUPPORT: `rest` may be non-zero (see rest_only_arity?).
   block.positive? && opt.zero? && mand2.zero? && kw.zero? && kwrest.zero?

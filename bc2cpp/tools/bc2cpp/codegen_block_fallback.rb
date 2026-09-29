@@ -18,7 +18,7 @@ class CodeGen
   # catch.
   def block_fallback_region_has_return_blk?(region)
     block_irep = region[:block_irep]
-    return true if block_irep.instructions.any? { |i| i.op == 'RETURN_BLK' }
+    return true if BytecodeIR.for(block_irep).op?('RETURN_BLK')
 
     # DEEP_UPVAR_CAPTURE_SUPPORT: `available_upvars` must be the same set
     # emit_proc_fallback_fn will use for this body; a pre-scan recognizing fewer
@@ -49,13 +49,9 @@ class CodeGen
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
-    irep.instructions.each do |insn|
-      next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
-
-      _reg, upvar_idx, level = insn.args.split(/\s+/)
-      return nil unless upvar_idx =~ /\A\d+\z/ && level =~ /\A\d+\z/
-
-      needs << [level.to_i, upvar_idx.to_i]
+    BytecodeIR.for(irep).instructions_with_op('GETUPVAR', 'SETUPVAR').each do |insn|
+      upvar_idx, level = insn.upvar_ref
+      needs << [level, upvar_idx]
     end
     (irep.reps || []).each do |child_label|
       child = child_label && @ireps[child_label]
@@ -98,10 +94,8 @@ class CodeGen
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
-    irep.instructions.each do |insn|
-      next unless insn.op == 'BLKPUSH'
-
-      lv = insn.args[/\((\d+)\)\s*\z/, 1]
+    BytecodeIR.for(irep).instructions_with_op('BLKPUSH').each do |insn|
+      lv = insn.paren_value
       return nil unless lv
 
       needs << lv.to_i
@@ -130,26 +124,8 @@ class CodeGen
   # MOVEs only. A miss only means the site is treated as before. Generic name
   # because calls_fiber_yield? reuses it for a plain SEND receiver.
   def fiber_const_receiver?(irep, call_idx, dest_reg)
-    reg = dest_reg
-    (call_idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      case insn.op
-      when 'MOVE'
-        d, s = insn.args.scan(/R(\d+)/).flatten
-        next unless d == reg
-
-        reg = s
-      when 'GETCONST'
-        d = insn.args[/^R(\d+)/, 1]
-        next unless d == reg
-
-        return insn.args.split(/\s+/)[1] == 'Fiber'
-      else
-        d = insn.args[/^R(\d+)/, 1]
-        return false if d == reg
-      end
-    end
-    false
+    writer = irep.source_writer(call_idx - 1, dest_reg)
+    writer&.op == 'GETCONST' && writer.const_name == 'Fiber'
   end
 
   # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` is a plain SEND (`GETCONST R2
@@ -161,13 +137,11 @@ class CodeGen
   # gets an early `#error` stub. Transitive callers are handled by
   # compute_fiber_unsafe_methods.
   def calls_fiber_yield?(irep)
-    irep.instructions.each_with_index do |insn, idx|
-      next unless %w[SEND SEND0].include?(insn.op)
-
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
+      name = insn.sym
       next unless name == 'yield'
 
-      dest_reg = insn.args[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
       next unless fiber_const_receiver?(irep, idx, dest_reg)
 
@@ -219,17 +193,14 @@ class CodeGen
 
     seeds = []
     @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
-        next unless insn.op == 'BLOCK'
+      BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB]) do |insn, paired, sendb_idx|
+        idx = sendb_idx - 1
+        next unless paired.sym == 'new'
 
-        paired = irep.instructions[idx + 1]
-        next unless paired && paired.op == 'SENDB'
-        next unless paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'new'
-
-        dest_reg = paired.args[/^R(\d+)/, 1]
+        dest_reg = paired.reg
         next unless dest_reg && fiber_const_receiver?(irep, idx, dest_reg)
 
-        block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+        block_irep_idx = insn.block_index
         next unless block_irep_idx
 
         block_label = irep.reps[block_irep_idx.to_i]
@@ -272,10 +243,8 @@ class CodeGen
     return [] unless seen.add?(irep)
 
     names = []
-    irep.instructions.each do |insn|
-      next unless %w[SSEND SSEND0 SSENDB].include?(insn.op)
-
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    BytecodeIR.for(irep).instructions_with_op('SSEND', 'SSEND0', 'SSENDB').each do |insn|
+      name = insn.sym
       names << name if name
     end
     (irep.reps || []).each do |child_label|
@@ -287,35 +256,29 @@ class CodeGen
 
   def recognize_block_fallback_regions(irep, available_upvars: [], blk_available: false)
     regions = []
-    irep.instructions.each_with_index do |insn, idx|
-      next unless insn.op == 'BLOCK'
-
-      paired = irep.instructions[idx + 1]
-      next unless paired && %w[SENDB SSENDB].include?(paired.op)
-
+    BytecodeIR.for(irep).adjacent_pairs('BLOCK', %w[SENDB SSENDB]) do |insn, paired, sendb_idx|
+      idx = sendb_idx - 1
       # EXPLICIT_ARGS_BLOCK_FALLBACK_SUPPORT: any fixed positional count
       # (`ary.inject(0) { }`, `ary.each_slice(2) { }`), but never `n=*` (a splat has
       # no static layout) and never a keyword call (`n=3|nk=1`):
       # mrb_funcall_with_block cannot carry keywords (`ci->nk = 0` in
       # funcall_args_capture).
-      n_match = paired.args.match(/n=(\d+)(?:\s|$)/)
-      next unless n_match
+      next unless paired.plain_fixed_argc?
 
-      n = n_match[1].to_i
-      dest, _rest = paired.args.split(/\s+/, 2)
-      dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = insn.args[/^R(\d+)/, 1]
+      n = paired.n_spec.to_i
+      dest_reg = paired.reg
+      block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
       # :reduce n=1`), so the block is at dest + n + 1.
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s
 
-      name = paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = paired.sym
       next unless name
 
       # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: never admit `Fiber.new { ... }`.
       next if paired.op == 'SENDB' && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
 
-      block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      block_irep_idx = insn.block_index
       next unless block_irep_idx
 
       block_label = irep.reps[block_irep_idx.to_i]
@@ -382,7 +345,7 @@ class CodeGen
     return nil unless shape && region[:n] == shape[1]
     return nil unless mandatory_arity(region[:block_irep]) == shape[2]
 
-    idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
+    idx = irep.index_of_addr(region[:sendb_addr])
     return nil unless idx
 
     insn = irep.instructions[idx]
@@ -504,8 +467,7 @@ class CodeGen
     # lexical scope the proc was built in, which compiled code cannot see.
     # Runs before the ivars are set, like the nested pass above.
     if region[:kind] == 'exec_fallback'
-      block_irep.instructions.each do |tinsn|
-        next unless tinsn.op == 'TDEF'
+      BytecodeIR.for(block_irep).instructions_with_op('TDEF').each do |tinsn|
         next if nested_suppressed.include?(tinsn.addr)
 
         tregion = tdef_fallback_region(tinsn, block_irep)
@@ -569,7 +531,7 @@ class CodeGen
     end
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.
-    targets = jump_targets(block_irep) - (nested_suppressed - nested_glue_at.keys)
+    targets = BytecodeIR.for(block_irep).branch_target_addrs - (nested_suppressed - nested_glue_at.keys)
     elem_class = block_fallback_element_class(region[:parent_irep], region, d.owner)
     block_irep.instructions.each_with_index do |insn, idx|
       next if insn.op == 'ENTER'
@@ -753,29 +715,27 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op)
 
-      prev = idx.positive? ? irep.instructions[idx - 1] : nil
+      prev = BytecodeIR.for(irep).previous(idx)
       next if prev && prev.op == 'BLOCK'
 
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
       # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
       # and the block is in R(dest+2).
-      n_match = insn.args.match(/n=(\d+|\*)(?:\s|$)/)
-      next unless n_match
+      next unless insn.n_spec && insn.nk_spec.nil?
 
-      dest, = insn.args.split(/\s+/, 2)
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       next unless name
 
-      if n_match[1] == '*'
+      if insn.n_spec == '*'
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: (dest_reg.to_i + 1).to_s,
                      blk_reg: (dest_reg.to_i + 2).to_s, name: name,
                      self_implicit: insn.op == 'SSENDB' }
       else
-        n = n_match[1].to_i
+        n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
                      self_implicit: insn.op == 'SSENDB' }

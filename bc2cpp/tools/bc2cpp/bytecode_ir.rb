@@ -15,10 +15,20 @@ module BytecodeIR
     end
   end
 
+  # A branch by instruction address: +src+ is the branching instruction, +target+
+  # the address it names (not necessarily an instruction; see Program#resolved?).
+  BranchEdge = Struct.new(:src, :target, keyword_init: true)
+
   BasicBlock = Struct.new(:id, :instructions, :successors, :predecessors, keyword_init: true)
 
-  TERMINATORS = %w[JMP JMPIF JMPNOT JMPNIL RETURN RETURN_BLK BREAK RAISE RAISEIF STOP].freeze
+  # Ops after which control never reaches the next instruction. RAISE and
+  # RAISEIF are deliberately absent: a missing predecessor makes a proof wrong
+  # while an extra one only costs a proof, so they conservatively fall through.
+  NO_FALLTHROUGH = %w[JMP JMPUW RETURN RETURN_BLK RETSELF RETNIL RETTRUE RETFALSE BREAK STOP].freeze
   CONDITIONAL_BRANCHES = %w[JMPIF JMPNOT JMPNIL].freeze
+  TERMINATORS = (NO_FALLTHROUGH + CONDITIONAL_BRANCHES).freeze
+  # Predecessor id of the method-entry edge into instruction 0.
+  ENTRY = -1
 
   class Program
     attr_reader :instructions, :blocks, :address_to_index
@@ -36,26 +46,99 @@ module BytecodeIR
       @instructions[index]
     end
 
-    private
+    # The decoded Insn at +addr+, or nil when no instruction starts there.
+    def insn_at_addr(addr)
+      index = @address_to_index[addr]
+      index && @instructions[index].source
+    end
 
-    def build_edges
-      @instructions.each do |instruction|
-        next_index = instruction.index + 1
-        next_addr = @instructions[next_index]&.addr
-        targets = branch_targets(instruction)
-        unless instruction.op == 'JMP'
-          targets << next_addr if next_addr && !TERMINATORS.include?(instruction.op)
-          targets << next_addr if next_addr && CONDITIONAL_BRANCHES.include?(instruction.op)
+    # False when some branch targets an address that is not an instruction, so
+    # the edge set is incomplete and no analysis may rely on it.
+    def resolved?
+      @resolved
+    end
+
+    # index -> Set of predecessor indices, with ENTRY for instruction 0's
+    # method-entry edge. Nil when #resolved? is false.
+    def instruction_predecessors
+      return nil unless @resolved
+
+      @instruction_predecessors ||= begin
+        preds = Array.new(@instructions.length) { Set.new }
+        preds[0] << ENTRY unless preds.empty?
+        @instructions.each do |instruction|
+          instruction.successors.each { |successor| preds[successor] << instruction.index }
         end
-        instruction.successors = targets.filter_map { |addr| @address_to_index[addr] }.uniq.freeze
+        preds.each(&:freeze).freeze
       end
     end
 
-    def branch_targets(instruction)
-      return [] unless %w[JMP JMPIF JMPNOT JMPNIL].include?(instruction.op)
+    # [source, target] instruction-index pairs of the given jump ops located
+    # before +limit+, or nil when a jump's target address is not an instruction.
+    def jump_edges_before(limit, ops)
+      edges = []
+      @instructions.each do |instruction|
+        break if instruction.index >= limit
+        next unless ops.include?(instruction.op)
 
-      target = instruction.source.args.split.last
-      target && target.match?(/\A\d+\z/) ? [target.to_i] : []
+        target = @address_to_index[instruction.source.jump_target]
+        return nil unless target
+
+        edges << [instruction.index, target]
+      end
+      edges
+    end
+
+    # Every explicit branch (JMP/JMPIF/JMPNOT/JMPNIL, plus JMPUW unless
+    # +jmpuw+ is false) in instruction order. Address-based, so unlike the
+    # index edges it stays meaningful when #resolved? is false.
+    def branch_edges(jmpuw: true)
+      @branch_edges ||= {}
+      @branch_edges[jmpuw] ||= @instructions.filter_map do |instruction|
+        target = jmpuw ? instruction.source.branch_target : instruction.source.jump_target
+        BranchEdge.new(src: instruction.addr, target: target).freeze if target
+      end.freeze
+    end
+
+    # Addresses named by any explicit branch, i.e. where a `goto` label is needed.
+    def branch_targets
+      @branch_targets ||= @instructions.filter_map { |instruction| instruction.source.branch_target }.to_set.freeze
+    end
+
+    # Branches that would break a single-entry, single-exit region whose
+    # protected instructions are the addresses of +body+ and whose one
+    # sanctioned exit is +exit_addr+ (so the region's addresses are
+    # body.begin..exit_addr). A branch from inside +body+ must land inside the
+    # region; a branch from outside must not land inside it, except one from
+    # strictly before the region that lands on its first address.
+    def region_boundary_breaches(body, exit_addr)
+      region = (body.begin..exit_addr)
+      branch_edges(jmpuw: false).select do |edge|
+        if body.cover?(edge.src)
+          !region.cover?(edge.target)
+        elsif edge.src < region.begin && edge.target == region.begin
+          false
+        else
+          region.cover?(edge.target)
+        end
+      end
+    end
+
+    private
+
+    def build_edges
+      @resolved = true
+      @instructions.each do |instruction|
+        targets = []
+        target_addr = instruction.source.branch_target
+        if target_addr
+          target = @address_to_index[target_addr]
+          target ? targets << target : @resolved = false
+        end
+        next_index = instruction.index + 1
+        targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH.include?(instruction.op)
+        instruction.successors = targets.uniq.freeze
+      end
     end
 
     def build_blocks

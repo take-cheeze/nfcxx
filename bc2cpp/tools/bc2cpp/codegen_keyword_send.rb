@@ -20,17 +20,11 @@ class CodeGen
   # `before_idx`, inclusive) a `LOADSYM :name`? Shared by compile_keyword_send
   # and splat_hash_literal_pairs.
   def literal_symbol_write(irep, before_idx, reg)
-    before_idx.downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      # A write to this register ends the scan -- it must be LOADSYM.
-      next unless insn.args =~ /^R#{reg}\b/
+    # The most recent write must be the LOADSYM.
+    insn = irep.last_writer(before_idx, reg)
+    return nil unless insn&.op == 'LOADSYM'
 
-      return nil unless insn.op == 'LOADSYM'
-
-      return insn.args[/:(\S+)/, 1]&.sub(/\A:/, '')
-    end
-    nil
+    insn.sym_token&.sub(/\A:/, '')
   end
 
   # KEYWORD_CALLSITE_SUPPORT: the shared tail of compile_keyword_send (MONO
@@ -135,7 +129,7 @@ class CodeGen
     "#{note}  #{call}\n"
   end
 
-  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
+  def compile_keyword_send(self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
     dest_reg = d.to_i
     # Keyword (sym, value) pairs sit right after the n positionals.
     kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
@@ -519,19 +513,11 @@ class CodeGen
     return nil unless send_insn && send_insn.op == 'SEND'
 
     recv_reg = d.to_i
-    write = nil
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      # The first write to the receiver register must be the constant read itself.
-      next unless insn.args =~ /^R#{recv_reg}\b/
-
-      write = insn
-      break
-    end
+    # The first write to the receiver register must be the constant read itself.
+    write = irep.last_writer(idx - 1, recv_reg)
     return nil unless write && write.op == 'GETCONST'
 
-    const_name = write.args[/^R\d+\s+(\S+)/, 1]
+    const_name = write.const_name
     return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
     return nil if universe.include?(const_name)
 
@@ -569,35 +555,17 @@ class CodeGen
   # so a bare r<base> would pass the Array as the first argument.
   # Returns C++ expressions or nil.
   def splat_array_literal_regs(irep, idx, reg)
-    hops = 0
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      # Skip the block proc register (see array_element_source_scan).
-      next if insn.op == 'BLOCK'
-      next unless insn.args[/^R(\d+)/, 1] == reg
-
+    # Skip the block proc register (see array_element_source_scan).
+    irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, max_moves: 8) do |insn, _index, base_reg|
       case insn.op
-      when 'MOVE'
-        hops += 1
-        return nil if hops > 8
-
-        src = insn.args.scan(/R(\d+)/).flatten[1]
-        return nil unless src
-
-        reg = src
-        next
       when 'ARRAY', 'ARRAY2'
-        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
-        return nil if n.nil?
+        n = insn.uint_operand
+        next nil if n.nil?
 
-        base = reg.to_i
-        return (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
-      else
-        return nil
+        base = base_reg.to_i
+        (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
       end
     end
-    nil
   end
 
   # SPLAT_UNROLL_SUPPORT: the double-splat analogue: a literal `HASH Rd N` (pairs
@@ -605,41 +573,22 @@ class CodeGen
   # LOADSYMs (needed to match the callee's keyword table). Returns [{name:,
   # val_reg:}] in order, or nil.
   def splat_hash_literal_pairs(irep, idx, reg)
-    hops = 0
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      next if insn.op == 'BLOCK'
-      next unless insn.args[/^R(\d+)/, 1] == reg
+    irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, max_moves: 8) do |insn, index, base_reg|
+      next nil unless insn.op == 'HASH'
 
-      case insn.op
-      when 'MOVE'
-        hops += 1
-        return nil if hops > 8
+      n = insn.uint_operand
+      next nil if n.nil?
 
-        src = insn.args.scan(/R(\d+)/).flatten[1]
-        return nil unless src
+      base = base_reg.to_i
+      (0...n).map do |k|
+        key_reg = base + (2 * k)
+        val_reg = base + (2 * k) + 1
+        kname = literal_symbol_write(irep, index - 1, key_reg.to_s)
+        break nil unless kname
 
-        reg = src
-        next
-      when 'HASH'
-        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
-        return nil if n.nil?
-
-        base = reg.to_i
-        return (0...n).map do |k|
-          key_reg = base + (2 * k)
-          val_reg = base + (2 * k) + 1
-          kname = literal_symbol_write(irep, i - 1, key_reg.to_s)
-          return nil unless kname
-
-          { name: kname, val_reg: "r#{val_reg}" }
-        end
-      else
-        return nil
+        { name: kname, val_reg: "r#{val_reg}" }
       end
     end
-    nil
   end
 
   # SPLAT_UNROLL_SUPPORT: a `n=*` and/or `nk=*` call site compiles as an ordinary
@@ -659,13 +608,13 @@ class CodeGen
     CPP
   end
 
-  def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
+  def compile_splat_send(insn, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
     return nil unless irep && idx
 
-    n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
-    return nil unless n_match
+    n_spec = insn.n_spec
+    nk_spec = insn.nk_spec
+    return nil unless n_spec
 
-    n_spec, nk_spec = n_match[1], n_match[2]
     return nil unless n_spec == '*' || nk_spec == '*'
 
     dest_reg = d.to_i
@@ -708,7 +657,7 @@ class CodeGen
       end
 
     if kw_pairs.empty?
-      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat, dynamic dispatch\n"
+      note = "  // SPLAT #{insn.argc_text} :#{name} unrolled from a literal-sized splat, dynamic dispatch\n"
       "#{note}  #{dynamic_dispatch_line(d, recv, name, positional)}"
     else
       result = compile_keyword_call(name: name, d: d, recv: recv, n: positional.size, argv: positional,
@@ -717,7 +666,7 @@ class CodeGen
                                      self_implicit: self_implicit, owner_def: owner_def)
       return nil unless result
 
-      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat/double-splat\n"
+      note = "  // SPLAT #{insn.argc_text} :#{name} unrolled from a literal-sized splat/double-splat\n"
       "#{note}#{result}"
     end
   end

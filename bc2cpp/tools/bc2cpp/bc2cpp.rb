@@ -14,11 +14,12 @@
 # a direct C++ call instead of mrb_funcall; names with several definitions keep
 # dynamic dispatch.
 #
-# Input comes from mrbc's two debug dumps of the same sources: `-v` (opcode
-# mnemonics, DFS pre-order blocks) and `-B -S` (the C irep structs, with exact
-# pool/symbol/lv arrays and reps[] parent/child pointers). Neither alone is
-# enough, so the C dump's tree is walked in DFS pre-order and zipped against
-# the disassembly's block sequence.
+# Input comes from mrbc's two dumps of the same sources: the RITE binary
+# (`-g`, decoded by insn_decoder.rb, DFS pre-order) and `-B -S` (the C irep
+# structs, with exact pool/symbol/lv arrays and reps[] parent/child pointers).
+# Neither alone is enough, so the C dump's tree is walked in DFS pre-order and
+# zipped against the binary's irep sequence (BC2CPP_TEXT_LOADER=1 zips `-v`
+# text instead).
 
 require 'shellwords'
 require 'set'

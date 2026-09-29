@@ -44,12 +44,12 @@ module UniqueClassNames
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
         case insn.op
-        when 'SETCONST' then assigned << insn.args[/\A(\S+)/, 1]
-        when 'SETMCNST' then assigned << insn.args[/::(\S+)/, 1]
+        when 'SETCONST' then assigned << insn.const_name
+        when 'SETMCNST' then assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
-          return {} if insn.args.match?(StableClassConstants::DYNAMIC_MUTATION)
+          return {} if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
-        return {} if insn.args.match?(/:const_missing\b/)
+        return {} if insn.sym == 'const_missing'
       end
     end
     Array(foreign_paths).each do |path|
@@ -109,9 +109,9 @@ module UniqueClassNames
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'CLASS', 'MODULE'
-          reg, sym = insn.args.split(/\s+/, 3)
-          name = sym.delete_prefix(':')
-          outer = outer_writer(irep, idx, reg)
+          reg = insn.reg_token
+          name = insn.sym
+          outer = irep.last_writer(idx - 1, insn.reg)
           full = case outer&.op
                  when 'LOADNIL' then namespace ? "#{namespace}::#{name}" : name
                  when 'OCLASS' then name
@@ -121,9 +121,8 @@ module UniqueClassNames
           seen << [label, idx]
           pending = [reg, full, idx]
         when 'EXEC'
-          reg, ref = insn.args.split(/\s+/, 3)
-          if pending && pending[0] == reg && pending[2] == idx - 1 && pending[1].is_a?(String)
-            walk.call(irep.reps[ref[/I\[(\d+)\]/, 1].to_i], pending[1])
+          if pending && pending[0] == insn.reg_token && pending[2] == idx - 1 && pending[1].is_a?(String)
+            walk.call(irep.reps[insn.block_index], pending[1])
           end
           pending = nil
         end
@@ -134,19 +133,10 @@ module UniqueClassNames
       irep.instructions.each_with_index do |insn, idx|
         next unless %w[CLASS MODULE].include?(insn.op) && !seen.include?([label, idx])
 
-        paths[insn.args[/:(\S+)/, 1]] << :unknown
+        paths[insn.sym_token] << :unknown
       end
     end
     paths
-  end
-
-  def outer_writer(irep, idx, reg)
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next if %w[EXT1 EXT2 EXT3].include?(insn.op)
-      return insn if insn.args[/\A(R\d+)/, 1] == reg
-    end
-    nil
   end
 
   # The module name `var` holds at `pos`: every assignment to it in the

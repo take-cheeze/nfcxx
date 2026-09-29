@@ -63,7 +63,7 @@ class CodeGen
   # block_fallback_region_has_return_blk?).
   def inline_nested_region_has_break?(region, available_upvars)
     block_irep = region[:block_irep]
-    return true if block_irep.instructions.any? { |i| i.op == 'BREAK' }
+    return true if BytecodeIR.for(block_irep).op?('BREAK')
 
     recognize_block_fallback_regions(block_irep, available_upvars: region[:upvars] || available_upvars)
       .any? { |nregion| inline_nested_region_has_break?(nregion, available_upvars) }
@@ -173,7 +173,7 @@ class CodeGen
     @blk_param_name = 'bc2cpp_blk' if forwarded_blk
     @blk_param_level = 1 if forwarded_blk
     @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
+    body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     compile_all = lambda do
       block_irep.instructions.each_with_index do |insn, i|
@@ -794,7 +794,7 @@ class CodeGen
     nested = merge_inline_nested(nested, inline_nested_profiler_pass(block_irep, irep, d, offset,
                                                                        region[:block_addr], block_irep))
     @inline_nested = nested
-    body_targets = @inline_nested.targets(jump_targets(block_irep))
+    body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     block_irep.instructions.each_with_index do |insn, i|
       next if insn.op == 'ENTER'
@@ -805,7 +805,7 @@ class CodeGen
       body << "  #{body_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       code = case insn.op
              when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
-               r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
+               r = insn.op == 'RETURN' ? (insn.no_operands? ? '0' : insn.reg) : nil
                store = case insn.op
                        when 'RETURN' then "r#{r.to_i + offset}"
                        when 'RETNIL' then 'mrb_nil_value()'
@@ -839,7 +839,7 @@ class CodeGen
                                 result_var:, break_dest:, break_label:, broke_flag:, idx: nil)
     case insn.op
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
-      r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
+      r = insn.op == 'RETURN' ? (insn.no_operands? ? '0' : insn.reg) : nil
       store = case insn.op
               when 'RETURN' then "r#{r.to_i + offset}"
               when 'RETNIL' then 'mrb_nil_value()'
@@ -850,7 +850,7 @@ class CodeGen
     when 'BREAK'
       # Same value semantics as compile_block_body_insn's BREAK, plus the broke
       # flag so the post-loop accumulator assignment is skipped.
-      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      r = insn.no_operands? ? '0' : insn.reg
       "  r#{break_dest} = r#{r.to_i + offset};\n  #{broke_flag} = TRUE;\n  goto #{break_label};\n"
     else
       compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,

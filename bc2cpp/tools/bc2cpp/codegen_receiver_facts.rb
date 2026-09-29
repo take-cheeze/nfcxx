@@ -11,35 +11,18 @@ class CodeGen
     addr = irep.instructions[idx]&.addr
     return false unless addr
 
-    reg = dest_reg.to_s
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      if insn.op == 'RESCUE'
-        # RESCUE reads its first register and writes its second; the caught
-        # exception remains live in the input register for the handler.
-        input_reg, output_reg = insn.args.scan(/R(\d+)/).flatten
-        return false if output_reg == reg
-        next if input_reg == reg
+    # RESCUE reads its first register and writes its second; the caught
+    # exception remains live in the input register for the handler.
+    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %w[RESCUE], barrier: rescue_write, barrier_result: false,
+                                              follow_moves: true) do |insn, _index, exc_reg|
+      next false unless insn.op == 'EXCEPT'
+
+      recognize_rescue_regions(irep).any? do |region|
+        region[:kind] == :rescue_class && region[:exc_reg] == exc_reg &&
+          region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
       end
-
-      written = insn.args[/^R(\d+)/, 1]
-      next unless written == reg
-
-      if insn.op == 'MOVE'
-        source = insn.args.scan(/R(\d+)/).flatten[1]
-        return false unless source
-
-        reg = source
-      elsif insn.op == 'EXCEPT'
-        return recognize_rescue_regions(irep).any? do |region|
-          region[:kind] == :rescue_class && region[:exc_reg] == reg &&
-            region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
-        end
-      else
-        return false
-      end
-    end
-    false
+    end || false
   end
 
   # `Exception#message` and `#to_s` share exc_to_s in mruby. A rescue proves the
@@ -119,25 +102,11 @@ class CodeGen
   def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
     return nil unless stable_standard_constructor_class?(expected_class)
 
-    reg = dest_reg
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn.args[/^R(\d+)/, 1] == reg
-
-      case insn.op
-      when 'MOVE'
-        reg = insn.args.scan(/R(\d+)/).flatten[1]
-        return nil unless reg
-      when 'SEND', 'SEND0'
-        return nil unless insn.args[/:(\w+)/, 1] == 'new'
-        # The known-class trace already resolved this SEND's constant path;
-        # stability above proves that path still denotes the same class.
-        return expected_class
-      else
-        return nil
-      end
+    irep.walk_writers(idx - 1, dest_reg, follow_moves: true) do |insn|
+      # The known-class trace already resolved this SEND's constant path;
+      # stability above proves that path still denotes the same class.
+      expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
     end
-    nil
   end
 
   # Diagnostic-only: identify the nearest producer behind an unresolved
@@ -145,33 +114,19 @@ class CodeGen
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
-    reg = dest_reg.to_s
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next if insn.op == 'BLOCK' || READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      next unless insn.args[/^R(\d+)/, 1] == reg
-
-      if insn.op == 'MOVE'
-        reg = insn.args.scan(/R(\d+)/).flatten[1]
-        return 'move_without_source' unless reg
-
-        next
+    at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], exhausted: at_entry) do |insn|
+      case insn.op
+      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source'
+      when 'GETIV' then 'get_ivar'
+      when 'GETIDX', 'GETIDX0' then 'indexed_result'
+      when 'GETUPVAR' then 'captured_upvar'
+      when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
+      when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
+      else "write_#{insn.op.downcase}"
       end
-
-      return case insn.op
-             when 'GETIV' then 'get_ivar'
-             when 'GETIDX', 'GETIDX0' then 'indexed_result'
-             when 'GETUPVAR' then 'captured_upvar'
-             when 'GETCONST', 'GETMCNST' then 'constant_lookup'
-             when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
-             when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
-             else "write_#{insn.op.downcase}"
-             end
     end
-
-    return 'self_register' if reg == '0'
-
-    'incoming_or_unwritten_register'
   end
 
   # Resolve a constant expression used as a class/module object, not an
@@ -180,55 +135,23 @@ class CodeGen
     return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
                       idx < irep.instructions.length && dest_reg
 
-    reg = dest_reg.to_s
-    path = []
-    branch_edges = []
-    irep.instructions.each_with_index do |branch, branch_index|
-      break if branch_index >= idx
-      next unless %w[JMP JMPIF JMPNOT].include?(branch.op)
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
+    return nil unless branch_edges
 
-      target_token = branch.args.split.last
-      return nil unless target_token&.match?(/\A\d+\z/)
+    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP,
+                                                     barrier: %w[JMPUW ONERR RESCUE EXCEPT BLOCK])
+    return nil unless ref&.root == :const
 
-      target_addr = target_token.to_i
-      target_index = target_addr && irep.instructions.index { |candidate| candidate.addr == target_addr }
-      return nil unless target_index
+    written = ref.name
+    written = ([written] + ref.segments).join('::') if written
+    # A forward edge from before this write into the send's block could
+    # bypass the receiver value; edges from later code already execute it.
+    return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
 
-      branch_edges << [branch_index, target_index]
-    end
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      return nil if %w[JMPUW ONERR RESCUE EXCEPT BLOCK].include?(insn.op)
-      next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      next unless insn.args[/^R(\d+)/, 1] == reg
-
-      case insn.op
-      when 'MOVE'
-        reg = insn.args.scan(/R(\d+)/).flatten[1]
-        return nil unless reg
-      when 'GETMCNST'
-        segment = insn.args[/::(\w+)/, 1]
-        return nil unless segment
-
-        path.unshift(segment)
-      when 'GETCONST'
-        written = insn.args[/^R\d+\s+(\S+)/, 1]
-        written = ([written] + path).join('::') if written
-        # A forward edge from before this write into the send's block could
-        # bypass the receiver value; edges from later code already execute it.
-        return nil if branch_edges.any? { |source, target| source < i && target > i && target <= idx }
-
-        owner = resolve_class_constant_name(written, lexical_owner)
-        stable = owner && (@closed_world.stable_constant_identity?(owner) ||
-                           CodeGen.stable_class_constants&.include?(owner.split('::').last))
-        return owner if stable
-
-        return nil
-      else
-        return nil
-      end
-    end
-    nil
+    owner = resolve_class_constant_name(written, lexical_owner)
+    stable = owner && (@closed_world.stable_constant_identity?(owner) ||
+                       CodeGen.stable_class_constants&.include?(owner.split('::').last))
+    stable ? owner : nil
   end
 
   def resolve_class_constant_name(written, lexical_owner)
@@ -267,7 +190,7 @@ class CodeGen
     return false unless irep.reps.empty?
 
     irep.instructions.none? do |insn|
-      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.args.match?(/\bR0\b/)
+      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.mentions_reg?(0)
     end
   end
 
@@ -543,20 +466,20 @@ class CodeGen
 
     # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
     # keyword `nk=` variant.
-    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+    return nil unless super_insn.pure_splat?
 
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
-    am = argary.args.match(/\AR(\d+)\s+(\d+):(\d):(\d+):(\d)\s+\((\d+)\)/)
-    return nil unless am
+    spec = argary.argary_spec
+    return nil unless spec && argary.reg && argary.paren_value&.match?(/\A\d+\z/)
 
-    argary_dest = am[1]
-    m = am[2].to_i
-    return nil unless am[3].to_i.zero? && am[4].to_i.zero? && am[5].to_i.zero? && am[6].to_i.zero?
+    argary_dest = argary.reg
+    m = spec[0]
+    return nil unless spec[1..].all?(&:zero?) && argary.paren_value.to_i.zero?
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
-    super_dest = super_insn.args[/^R(\d+)/, 1]
+    super_dest = super_insn.reg
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
@@ -566,10 +489,10 @@ class CodeGen
     enter = instructions.find { |i| i.op == 'ENTER' }
     return nil unless enter
 
-    em = enter.args.match(/\A(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+)/)
-    return nil unless em
-    return nil unless em[2..7].all? { |x| x.to_i.zero? }
-    return nil unless em[1].to_i == m
+    em = enter.enter_fields
+    return nil unless em.length >= 7
+    return nil unless em[1..6].all?(&:zero?)
+    return nil unless em[0] == m
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
@@ -640,18 +563,18 @@ class CodeGen
     # Strict adjacency: an interposed EXT declines.
     return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
 
-    argary_dest = argary.args[/^R(\d+)/, 1]
-    super_dest = super_insn.args[/^R(\d+)/, 1]
+    argary_dest = argary.reg
+    super_dest = super_insn.reg
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
     # (3) The `n=*` splat shape, not SUPER_TARGETS' fixed `n=N`.
-    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+    return nil unless super_insn.pure_splat?
 
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.
-    return nil unless argary.args[/\s(\d+:\d+:\d+:\d+)\s*\(/, 1] == shape[:argary]
-    return nil unless argary.args[/\((\d+)\)\s*\z/, 1].to_s == '0'
+    return nil unless argary.argary_spec&.join(':') == shape[:argary]
+    return nil unless argary.paren_value == '0'
 
     # (5) The superclass is the implicit Object (:none means a CLASS with no
     # superclass expression, not "unrecognized").

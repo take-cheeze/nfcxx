@@ -13,10 +13,10 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless insn.op == 'LAMBDA'
 
-      dest_reg = insn.args[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
 
-      lambda_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      lambda_irep_idx = insn.block_index
       next unless lambda_irep_idx
 
       lambda_label = irep.reps[lambda_irep_idx.to_i]
@@ -104,13 +104,12 @@ class CodeGen
     insns = irep.instructions
     insns.each_with_index do |insn, i|
       next if insn.equal?(lambda_insn)
-      next unless insn.args =~ /\bR#{d}\b/
+      next unless insn.mentions_reg?(d)
 
       # (3) the only permitted consumer: `MOVE R<t> R<d>` into a temporary.
-      m = insn.op == 'MOVE' && insn.args.match(/\AR(\d+)\s+R#{d}\b/)
-      return nil unless m
+      return nil unless insn.op == 'MOVE' && insn.regs[1] == d.to_s
 
-      t = m[1].to_i
+      t = insn.reg.to_i
       return nil unless t >= nlocals
 
       site = lambda_confined_call_consumes?(irep, i, t)
@@ -136,12 +135,12 @@ class CodeGen
     ((i + 1)...insns.size).each do |j|
       nxt = insns[j]
       if %w[SEND SEND0].include?(nxt.op) &&
-         (m = nxt.args.match(/\AR#{t}\s+:call(?:\s+n=(\d+))?(?:\s|\z)/))
-        return { send_addr: nxt.addr, dest_reg: t, n: m[1].to_i }
+         nxt.reg == t.to_s && nxt.sym == 'call' && nxt.nk_spec.nil? && nxt.n_spec != '*'
+        return { send_addr: nxt.addr, dest_reg: t, n: nxt.n_spec.to_i }
       end
 
       return nil unless LAMBDA_CONFINED_CALL_SETUP_OPS.include?(nxt.op)
-      return nil if nxt.args =~ /\bR#{t}\b/
+      return nil if nxt.mentions_reg?(t)
       return nil if targets.include?(nxt.addr)
     end
     nil
@@ -200,10 +199,9 @@ class CodeGen
   # nil (keep `#error`) for an unmatched line, a child index not in reps[], or a
   # non-mandatory body (runtime_def_body_safe?).
   def runtime_def_region(insn, irep, kind)
-    m = insn.args.match(/\AR(\d+)\s+:(\S+)\s+I\[(\d+)\]\z/)
-    return nil unless m
+    return nil unless insn.def_child_index
 
-    child_label = irep.reps[m[3].to_i]
+    child_label = irep.reps[insn.block_index]
     return nil unless child_label
 
     child = @ireps[child_label]
@@ -213,7 +211,7 @@ class CodeGen
     # emit_runtime_def_install can tell whether the `a` register exists (it may
     # not; see there).
     { block_irep: child, block_addr: insn.addr, kind: kind, self_source: :receiver,
-      dest_reg: m[1].to_i, name: m[2], mand: mandatory_arity(child),
+      dest_reg: insn.reg.to_i, name: insn.sym_token, mand: mandatory_arity(child),
       enclosing_nregs: irep.nregs.to_i }
   end
 
@@ -256,10 +254,9 @@ class CodeGen
       insn = irep.instructions[idx - n + k - 1]
       return nil unless insn && insn.op == 'LOADSYM'
 
-      m = insn.args.to_s.match(/\AR(\d+)\s+:(\S+)\z/)
-      return nil unless m && m[1].to_i == dest + k
+      return nil unless insn.operand_kinds == %i[reg sym] && insn.reg.to_i == dest + k
 
-      m[2]
+      insn.sym_token
     end
   end
 
@@ -281,18 +278,16 @@ class CodeGen
     body.instructions.each_with_index do |insn, idx|
       case insn.op
       when 'TDEF'
-        m = insn.args.match(/\AR\d+\s+:(\S+)\s+I\[\d+\]\z/)
-        return nil unless m
+        return nil unless insn.def_child_index
 
-        names << m[1]
+        names << insn.sym_token
       when 'SSEND', 'SSEND0'
-        m = insn.args.match(/\AR(\d+)\s+:(\S+?)(?:\s+n=(\d+))?\z/)
-        return nil unless m
+        return nil unless insn.reg && insn.sym_token && insn.nk_spec.nil? && insn.n_spec != '*'
 
-        kind = CLASS_BODY_INSTALLER_SENDS[m[2]]
+        kind = CLASS_BODY_INSTALLER_SENDS[insn.sym_token]
         return nil unless kind
 
-        syms = literal_symbol_args(body, idx, m[1].to_i, m[3].to_i)
+        syms = literal_symbol_args(body, idx, insn.reg.to_i, insn.n_spec.to_i)
         return nil unless syms && !syms.empty?
 
         case kind
@@ -317,10 +312,9 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless insn.op == 'SDEF'
 
-      m = insn.args.match(/\AR\d+\s+:(\S+)\s+I\[\d+\]\z/)
-      return nil unless m
+      return nil unless insn.def_child_index
 
-      names << m[1]
+      names << insn.sym_token
     end
     exec_regions.each do |region|
       body_names = class_body_installed_names(region[:block_irep])
@@ -492,11 +486,10 @@ class CodeGen
       nxt = irep.instructions[idx + 1]
       next unless nxt && nxt.op == 'EXEC'
 
-      reg = insn.args[/\AR(\d+)\z/, 1]
-      m = nxt.args.match(/\AR(\d+)\s+I\[(\d+)\]\z/)
-      next unless reg && m && m[1] == reg
+      reg = insn.reg if insn.operand_kinds == %i[reg]
+      next unless reg && nxt.operand_kinds == %i[reg irep] && nxt.reg == reg && nxt.block_index
 
-      child_label = irep.reps[m[2].to_i]
+      child_label = irep.reps[nxt.block_index]
       next unless child_label
 
       child = @ireps[child_label]
