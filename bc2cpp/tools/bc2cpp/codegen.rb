@@ -375,7 +375,10 @@ class CodeGen
   end
 
   # Shallow-copies every container ivar and restores it afterwards, except
-  # @clean_cache, whose answers stay valid.
+  # @clean_cache, whose answers stay valid. An ivar the probe created lazily
+  # (`@x ||= {}`) is removed: leaving it would keep the probe's registrations
+  # (e.g. a const-site helper) while the flag that emits their support code
+  # is rolled back.
   def without_probe_side_effects
     saved = instance_variables.to_h do |ivar|
       value = instance_variable_get(ivar)
@@ -383,6 +386,7 @@ class CodeGen
     end
     yield
   ensure
+    (instance_variables - saved.keys - [:@clean_cache]).each { |ivar| remove_instance_variable(ivar) }
     saved.each { |ivar, value| instance_variable_set(ivar, value) unless ivar == :@clean_cache }
   end
 
