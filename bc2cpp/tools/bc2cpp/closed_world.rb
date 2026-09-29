@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'compiled_gems'
+require_relative 'touch_scan'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -50,11 +51,9 @@ class ClosedWorld
     @outside_name_paths = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
-    # Per outside file that could reach a class: the constant names it spells.
-    @touch_sets = []
-    # Parallel to @touch_sets: true for a file that only defines plain
-    # Object-derived classes (see plain_native_source?).
-    @touch_plain = []
+    # Per outside file: the constants it can create, reopen, subclass or rebind
+    # (TouchScan, ADR 0256).
+    @touches = []
     @unknown_defs = Set.new
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
@@ -70,6 +69,28 @@ class ClosedWorld
     scan_closed_world
     build_hierarchy
     build_method_missing
+    warn touch_report.join("\n") if ENV['BC2CPP_TOUCH_REPORT'] == '1'
+  end
+
+  # BC2CPP_TOUCH_REPORT=1: every class the touch analysis makes opaque, the
+  # outside files that touched it and the construct that put it in the file's
+  # touch set, so a touch can be traced to its source.
+  def touch_report
+    lines = ['== class touch report (opaque because an outside file touches it) ==']
+    @class_decls.keys.sort.each do |owner|
+      next if owner.include?('.') || owner.include?('<') || @rebound.include?(simple(owner))
+
+      spelled = [owner.split('::').first, simple(owner)].uniq
+      files = touches_for(spelled, source: false)
+      next if files.empty?
+
+      lines << "  #{owner}: #{files.size} file(s)"
+      files.each do |t|
+        evidence = spelled.filter_map { |name| t.why[name] }.uniq.first(2)
+        lines << "    #{t.path}: #{evidence.empty? ? t.note : evidence.join(' | ')}"
+      end
+    end
+    lines
   end
 
   # nil when a fallback for `name` on a chain listing `listed` can only raise
@@ -171,8 +192,7 @@ class ClosedWorld
     return false unless ConstructClassNames.table&.key?(owner)
     return false if @rebound.include?(simple(owner))
 
-    spelled = [owner.split('::').first, simple(owner)].uniq
-    !@touch_sets.any? { |set| spelled.all? { |s| set.include?(s) } }
+    touches_for([owner.split('::').first, simple(owner)].uniq, source: true).empty?
   end
 
   # Constant-object dispatch needs identity stability, not an exact instance
@@ -288,12 +308,7 @@ class ClosedWorld
       # Struct members named by C strings (mruby-marshal checks for Struct).
       dynamic ||= text.match?(/"Struct"|MRB_SYM\(Struct\)/)
       text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
-      # A file that defines or rebinds constants may reach any class it names.
-      if defines_class
-        @touch_sets << (text.scan(C_STRING).flatten + text.scan(/MRB_SYM\(([A-Z]\w*)\)/).flatten)
-                       .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.to_set
-        @touch_plain << plain_native_source?(path, text)
-      end
+      record_native_touches(path, text, defines_class)
       names.merge(text.scan(C_STRING).flatten) if dynamic
       @outside_names.merge(names)
       names.each { |n| (@outside_name_paths[n] ||= Set.new) << path }
@@ -313,8 +328,7 @@ class ClosedWorld
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
       text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
-      @touch_sets << text.scan(/\b[A-Z]\w*/).to_set
-      @touch_plain << false
+      record_ruby_touches(path, text)
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
       @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
@@ -489,36 +503,44 @@ class ClosedWorld
     return true if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
 
     # Outside code reaches a class only through its path, so a file that could
-    # create, reopen or subclass it spells both the root and the last segment.
-    spelled = [owner.split('::').first, simple(owner)].uniq
-    @touch_sets.any? { |set| spelled.all? { |s| set.include?(s) } }
+    # create, reopen or subclass it names both the root and the last segment.
+    # A native definition of a class the closed world declares is its source.
+    touches_for([owner.split('::').first, simple(owner)].uniq, source: false).any?
   end
 
-  # mruby-rgss/src defines its classes with an Object superclass and writes
-  # only spelled-out constants: such a file cannot make a subclass or rebind a
-  # class constant, and the methods it registers are already named in
-  # @outside_names (a by-name refusal, or the arms of CodeGen's native_direct).
-  def plain_native_source?(path, text)
-    return false unless path.include?('/mruby-rgss/src/') && !@dynamic_constant_mutation
-
-    text.scan(/\bmrb_define_class(_id)?(_under)?(?:_id)?\s*\(([^;]*)/m).all? do |_id, under, body|
-      sup = bc2cpp_c_call_args(body)[under ? 3 : 2].to_s
-      sup.match?(/\A\s*(?:M|mrb)->object_class\s*\z/)
+  # Touches whose names cover a class path `[root, simple]`; `source: true` adds
+  # the files that natively define it (owners the closed world does not declare).
+  def touches_for(spelled, source:)
+    @touches.select do |t|
+      (source || !t.source) && t.names.include?(spelled.last) &&
+        (t.names.include?(spelled.first) || t.names.include?(TouchScan::WILD))
     end
   end
 
-  # A Ruby-side definer of a class the RGSS natives create. Only opaque? through
-  # files that plain_native_source? clears, so no outside code can add
-  # instances of another class or reopen it with methods unknown to the registry.
-  def native_plain_definer?(owner)
-    return false if @global_refusal || owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
-    return false unless @class_decls.key?(owner)
-    return false if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
+  Touch = Struct.new(:path, :names, :why, :note, :source)
 
-    spelled = [owner.split('::').first, simple(owner)].uniq
-    @touch_sets.each_with_index.none? do |set, i|
-      !@touch_plain[i] && spelled.all? { |s| set.include?(s) }
+  def record_ruby_touches(path, text)
+    scan = TouchScan.ruby(text)
+    if scan.legacy
+      names = text.scan(/\b[A-Z]\w*/).to_set
+      @touches << Touch.new(path, names, {}, "legacy (#{scan.legacy}): spells #{names.size} constants", false)
+    else
+      @touches << Touch.new(path, scan.hard, scan.evidence, '', false) unless scan.hard.empty?
     end
+  end
+
+  # ADR 0256: a native file touches what it subclasses, mixes into or rebinds by
+  # name. Any construct TouchScan cannot classify keeps the old rule, gated as
+  # before on the file defining classes or constants at all.
+  def record_native_touches(path, text, defines_class)
+    scan = TouchScan.native(text, @class_decls.keys.map { |k| simple(k) }.uniq)
+    if scan.legacy && defines_class
+      names = (text.scan(C_STRING).flatten + text.scan(/MRB_SYM\(([A-Z]\w*)\)/).flatten)
+              .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.to_set
+      @touches << Touch.new(path, names, {}, "legacy (#{scan.reasons.uniq.first(3).join('; ')}): spells #{names.size} constants", false)
+    end
+    @touches << Touch.new(path, scan.hard, scan.evidence, '', false) unless scan.hard.empty?
+    @touches << Touch.new(path, scan.origin, scan.evidence, '', true) unless scan.origin.empty?
   end
 
   def build_hierarchy
@@ -589,7 +611,7 @@ class ClosedWorld
 
           break reason = :singleton_definer
         end
-        break reason = :opaque_definer if opaque?(d.owner) && !native_plain_definer?(d.owner)
+        break reason = :opaque_definer if opaque?(d.owner)
 
         required << d.owner
         sub = descendants(d.owner)
