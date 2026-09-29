@@ -54,6 +54,43 @@ BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Message::ScanResult
 ].freeze
 
+# ADR 0264: mruby's own Ruby that joins the closed world as compiled input --
+# 3rd/mruby/mrblib/*.rb plus the mrblib of these gems, in interpreter load order
+# (core mrblib, then gems). A class is spread over several gems' mrblib, so the
+# registry must see every definition of a name before a call to it can
+# resolve; a file only joins when its gem is in the build's gem list
+# (core_compiled_mrblib_srcs), or the compiled body would replace a method of a
+# class that is never loaded.
+BC2CPP_CORE_MRBLIB_GEMS = %w[
+  mruby-array-ext mruby-hash-ext mruby-enum-ext mruby-numeric-ext mruby-range-ext mruby-string-ext
+  mruby-sprintf mruby-struct mruby-io mruby-dir mruby-enumerator
+].freeze
+# Core mrblib files that stay outside the world (foreign sources):
+# - mruby-io's kernel.rb defines Kernel#puts/print/printf/gets with `(...)`
+#   forwarding, whose call sites bc2cpp models separately
+#   (scripts/bc2cpp_io_puts_model_check.rb); and mrbc's multi-file parse leaves the
+#   `(...)` state set, so a file after it fails to parse.
+# - 10error.rb only gives NameError/NoMethodError their accessors; visible, they
+#   would add two exact-class arms to every `.name` call chain for nothing.
+BC2CPP_CORE_MRBLIB_EXCLUDED = %w[mrbgems/mruby-io/mrblib/kernel.rb mrblib/10error.rb].freeze
+# Same, from 3rd/<name>/mrblib. mruby-marshal has no mrblib.
+BC2CPP_EXTERNAL_MRBLIB_GEMS = %w[mruby-stringio mruby-onig-regexp].freeze
+# The gem set the canonical (script, coverage report) world assumes: wio's,
+# which has neither mruby-dir nor the Onigmo regexp gem (build_config.rb).
+BC2CPP_CANONICAL_CORE_GEMS = (BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS -
+                              %w[mruby-dir mruby-onig-regexp]).freeze
+# The classes core sources define methods on: the owners mruby-core-compiled
+# emits, except Object (mruby-rpg2k/mrblib/main.rb defines engine methods on it
+# that no compiled gem emits, so an Object owner would claim them). A class
+# also owned by an engine gem (Array, StringIO) is split per definition by
+# source file: see emit_unit in bc2cpp.rb.
+BC2CPP_CORE_OWNERS = %w[
+  Array Comparable Dir Dir.singleton Enumerable Enumerator Enumerator::Enumerator.singleton Enumerator::Generator
+  Enumerator::Yielder File File.singleton Float Hash IO IO.singleton Integer Kernel Numeric
+  OnigMatchData OnigRegexp OnigRegexp.singleton Range String StringIO StringIO.singleton Struct Symbol
+].freeze
+BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
+
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
     # Owners are emission targets: every method of theirs that compiles clean is
@@ -168,6 +205,18 @@ BC2CPP_COMPILED_GEMS = {
                RGSS::Graphics.singleton RGSS::Font.singleton RGSS::ErrorReport::Tee Array],
     out_symbol: 'rgss_compiled',
   },
+  'mruby-core-compiled' => {
+    # ADR 0264: mruby's own Ruby (BC2CPP_CORE_MRBLIB_GEMS) compiled by the same
+    # pipeline. Every eligible method (CoreMethods: not Fiber-naming, lambda-building,
+    # conditional, shadowed or refused; ADR 0269 guards the block-taking ones) is
+    # emitted, and registered through the
+    # generated bc2cpp_register_owner_methods (no hand register.cxx to drift)
+    # after the core gems that define the bytecode it replaces. Array and
+    # StringIO are also engine owners: each gem emits the definitions of its own
+    # source files (CodeGen#emit_unit_allows?).
+    owners: BC2CPP_CORE_OWNERS,
+    out_symbol: 'core_compiled',
+  },
 }.freeze
 
 # mruby's own core (3rd/mruby/src/*.c) and every core mrbgem active in the
@@ -207,20 +256,59 @@ def external_gem_native_srcs(gems_root)
     Dir["#{gems_root}/3rd/mruby-stringio/src/*.c"]
 end
 
+# The closed-world sources one build's codegen reads: core mrblib only when the
+# build compiles it (not a hot-only build, ADR 0214: flash-limited targets keep
+# core Ruby interpreted), and only for the gems it really has. Called from a
+# codegen task, when the gem list is complete.
+def bc2cpp_closed_world_srcs(spec, gems_root)
+  core_gems = bc2cpp_hot_only_build?(spec.build) ? nil : spec.build.gems.map(&:name)
+  closed_world_mrblib_srcs(gems_root, core_gems: core_gems)
+end
+
+# Every file bc2cpp_closed_world_srcs can name, for make prerequisites (fixed
+# before the gem list is complete).
+def bc2cpp_closed_world_prerequisites(gems_root)
+  closed_world_mrblib_srcs(gems_root, core_gems: BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
+end
+
 # The whole-program mrblib source set every *-compiled mrbgem.rake feeds into
 # bc2cpp.rb as `closed_world_srcs`, so build_registry's MONO/POLY resolution
 # sees every gem that could define a colliding name (e.g.
 # `LCF::Database#rpg2003?` is MONO in isolation but not with Game::Actor/
 # Party/Battle#rpg2003?). Shared here so the gems cannot drift apart: a
 # drifted set fails silently, with different MONO/POLY conclusions per gem.
-def closed_world_mrblib_srcs(gems_root)
+def closed_world_mrblib_srcs(gems_root, core_gems: :canonical)
   # Sorted: Dir[] returns filesystem order (ext4 vs APFS disagree), and
   # bc2cpp's capped fixed-point sweeps converge order-dependently, so ARGV order
   # changes devirtualization. A canonical order makes every consumer agree; the
   # analyses' own order-sensitivity is a separate bug, not fixed by this.
-  (Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
-    Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
-    Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort
+  #
+  # The core files come first (core_compiled_mrblib_srcs): the interpreter
+  # defines them before any gem's mrblib, and a reopening gem (mruby-rgss's
+  # Array#include?) must follow the file it reopens. `core_gems`: the build's
+  # gem names, :canonical, or nil for a build that compiles no core Ruby.
+  core_compiled_mrblib_srcs(gems_root, core_gems) +
+    (Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
+      Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
+      Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort
+end
+
+# `gem_names`: names of the gems in the build (:canonical: BC2CPP_CANONICAL_CORE_GEMS,
+# nil: none). Order is the interpreter's: mrblib/*.rb sorted, then each gem's
+# mrblib/**/*.rb sorted, gems in BC2CPP_CORE_MRBLIB_GEMS order.
+def core_compiled_mrblib_srcs(gems_root, gem_names = :canonical)
+  return [] if gem_names.nil?
+
+  gem_names = BC2CPP_CANONICAL_CORE_GEMS if gem_names == :canonical
+  srcs = Dir["#{gems_root}/3rd/mruby/mrblib/*.rb"].sort
+  BC2CPP_CORE_MRBLIB_GEMS.each do |name|
+    srcs += Dir["#{gems_root}/3rd/mruby/mrbgems/#{name}/mrblib/**/*.rb"].sort if gem_names.include?(name)
+  end
+  srcs.reject! { |path| BC2CPP_CORE_MRBLIB_EXCLUDED.any? { |tail| path.end_with?("/3rd/mruby/#{tail}") } }
+  BC2CPP_EXTERNAL_MRBLIB_GEMS.each do |name|
+    srcs += Dir["#{gems_root}/3rd/#{name}/mrblib/**/*.rb"].sort if gem_names.include?(name)
+  end
+  srcs
 end
 
 # INTEGER_CONSTANT_PROOF: every Ruby source compiled into the same VM as the

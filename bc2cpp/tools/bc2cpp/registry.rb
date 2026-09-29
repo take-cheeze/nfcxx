@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'core_defs'
+
 # Step 6: the whole-program class/method registry.
 
 # STRUCT_MEMBERS_ANALYSIS: `Const = Struct.new(:a, :b, ...)` (with or without
@@ -111,6 +113,8 @@ def build_registry(ireps, root_label)
   class_decls = Hash.new { |h, k| h[k] = [] }
   module_body_ivar_labels = Hash.new { |h, k| h[k] = [] }
   walked = Set.new
+  # CORE_ALIASES (ADR 0269): every `alias new old` of a class body, in walk order.
+  alias_sites = []
 
   walk = lambda do |label, namespace|
     walked << label
@@ -220,6 +224,9 @@ def build_registry(ireps, root_label)
         pending_name = nil
         pending_idx = nil
         pending_ivar_owner = nil
+      when 'ALIAS'
+        old_name = insn.first_of(:name)&.value
+        alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
         child_label = irep.reps[insn.block_index]
@@ -374,7 +381,8 @@ def build_registry(ireps, root_label)
             source = registry[mname]&.reverse&.find { |d| d.owner == source_owner && d.irep }
             registry[mname] << MethodDef.new(name: mname, owner: "#{namespace || 'Object'}.singleton",
                                               irep: nil, visibility: :public, kind: :module_function,
-                                              copy_irep: source&.irep, copy_owner: source&.owner)
+                                              copy_irep: source&.irep, copy_owner: source&.owner,
+                                              core: CoreDefs.core_source?(irep.file))
           end
         else
           # attr_reader/attr_writer/attr_accessor are native, so their accessors get no
@@ -392,11 +400,12 @@ def build_registry(ireps, root_label)
             # IVAR_ACCESSOR_DEVIRT.
             if getter_flag
               registry[mname] << MethodDef.new(name: mname, owner: owner, irep: nil, visibility: :public,
-                                                kind: :ivar_accessor)
+                                                kind: :ivar_accessor, core: CoreDefs.core_source?(irep.file))
             end
             if setter_flag
               registry["#{mname}="] << MethodDef.new(name: "#{mname}=", owner: owner, irep: nil,
-                                                       visibility: :public, kind: :ivar_accessor)
+                                                       visibility: :public, kind: :ivar_accessor,
+                                                       core: CoreDefs.core_source?(irep.file))
             end
           end
         end
@@ -487,7 +496,8 @@ def build_registry(ireps, root_label)
     end
   end
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites]
+   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites, declared_modules,
+   alias_sites]
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back

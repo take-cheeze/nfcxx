@@ -40,6 +40,18 @@ class CodeGen
   def compile_method(label)
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
+    # ADR 0264: mruby's own methods are compiled with no closed-world proof (the closed
+    # world is the engine's Ruby) and may bind statically only to core definitions.
+    if d.core && @closed_world
+      saved_world = @closed_world
+      @closed_world = nil
+      begin
+        return compile_method(label)
+      ensure
+        @closed_world = saved_world
+      end
+    end
+    @compiling_core = d.core ? true : false
     enter = irep.enter
     mand = enter ? enter.enter_fields.first : 0
 
@@ -97,6 +109,13 @@ class CodeGen
     # block to be zero.
     has_rest = (mandatory_ok || opt_jmp_targets || kw_table) ? false : rest_only_arity?(irep)
     has_blk = (mandatory_ok || opt_jmp_targets || kw_table) ? false : block_param_arity?(irep)
+    # CORE_BLOCK_OPT: optionals and `&blk` together (`any?(pattern = NONE, &block)`). The
+    # block sits after the optionals (OP_ENTER blk_pos), so it is the same extra
+    # parameter, ahead of `bc2cpp_given_opt`.
+    if !mandatory_ok && !opt_jmp_targets && !kw_table && (blk_table = optional_block_arg_table(irep))
+      opt, opt_jmp_addrs, opt_jmp_targets = blk_table
+      has_blk = true
+    end
     supported = mandatory_ok || opt_jmp_targets || kw_table || has_rest || has_blk
 
     total_args = supported ? mand + opt + (has_rest ? 1 : 0) : mand
@@ -222,15 +241,21 @@ class CodeGen
       glue_at[opt_jmp_addrs.first] = emit_optional_dispatch(opt_jmp_targets)
     end
 
+    # CORE_BLOCK_YIELD: a `yield` inside a rescue range (Kernel#loop) reads the method's block,
+    # which the extracted try body receives as one more captured value.
+    blk_field = needs_blk_param || has_blk ? [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] : []
+    @blk_param_name = blk_field.empty? ? nil : 'bc2cpp_blk'
+    @blk_param_level = 0
     rescue_regions.each_with_index do |region, i|
       suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
       suppressed << region[:except_addr]
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
-      saved = rescue_entry_saved_fields(irep, region)
+      saved = rescue_entry_saved_fields(irep, region) + blk_field
       rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
                                                       extra_field_values: saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
     end
+    @blk_param_name = nil
 
     # BLOCK_SUPPORT: each INLINE_LOOP_PASSES region replaces its anchor and SENDB
     # with one inlined loop at the anchor. A failed gate or an unclean body (nil)
@@ -349,7 +374,8 @@ class CodeGen
     targets = jump_targets(irep) - (suppressed - glue_at.keys)
     # BLKPUSH_YIELD_SUPPORT: set for this method's top-level loop only (cleared
     # after). emit_proc_fallback_fn manages its own value.
-    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : nil
+    # CORE_BLOCK_YIELD: with `&blk` declared, the BLKPUSH slot is that parameter's register.
+    @blk_param_name = needs_blk_param ? 'bc2cpp_blk' : (has_blk ? "r#{total_args + 1}" : nil)
     # BLOCK_FALLBACK_YIELD_SUPPORT: in a METHOD body only lv == 0 can be answered
     # (vm.c `if (lv == 0) stack = regs + 1`). codegen_yield stops at the first
     # method scope, so a method's own yield is always level 0.
@@ -408,6 +434,8 @@ class CodeGen
     @runtime_installed_names = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
+    guard = core_block_guard(label, d)
+    out << guard[:prologue] if guard
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"
     elsif arg_names.empty? && (needs_blk_param || has_blk)
@@ -522,7 +550,7 @@ class CodeGen
         out << "  mrb_int bc2cpp_given_opt = mrb_get_argc(M) - #{mand};\n"
         out << "  if (bc2cpp_given_opt < 0) bc2cpp_given_opt = 0;\n"
         out << "  if (bc2cpp_given_opt > #{opt}) bc2cpp_given_opt = #{opt};\n"
-        out << "  return #{impl_name}(M, self, #{arg_names.join(', ')}, bc2cpp_given_opt);\n"
+        out << "  return #{impl_name}(M, self, #{(has_blk ? arg_names + ['bc2cpp_blk'] : arg_names).join(', ')}, bc2cpp_given_opt);\n"
       else
         call_args = (needs_blk_param || has_blk) ? arg_names + ['bc2cpp_blk'] : arg_names
         out << "  return #{impl_name}(M, self, #{call_args.join(', ')});\n"
@@ -558,7 +586,26 @@ class CodeGen
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
-      code: out, visibility: d.visibility }
+      code: out, visibility: d.visibility, guard: guard&.fetch(:index) }
+  end
+
+  # CORE_BLOCK_GUARD (ADR 0269): the entry of a core method that touches a block first
+  # checks whether a Fiber is running and, if so, lets the VM run the bytecode instead
+  # (bc2cpp_core_interpreted). A compiled frame under a block that calls Fiber.yield
+  # cannot be suspended, and a frame in the root context never is: a yield there is a
+  # FiberError with or without this frame. Direct `_impl` calls never take a block
+  # (pure_mandatory_or_optional_arity?), so the entry is the only way in with one.
+  # An Enumerable method also needs an `each` that the core defines, since a block
+  # captured by pointer must not outlive the frame (BLOCK_FALLBACK_UPVAR_SAFE_METHODS).
+  # Returns { index:, prologue: } or nil for an unguarded method.
+  def core_block_guard(label, d)
+    return nil unless d.core && self.class.core_guarded&.include?(label)
+
+    index = (@core_guard_index[label] ||= @core_guard_index.size)
+    condition = 'M->c != M->root_c'
+    condition += ' || !bc2cpp_core_each_is_builtin(M, self)' if d.owner == 'Enumerable'
+    { index: index,
+      prologue: "  if (mrb_unlikely(#{condition})) return bc2cpp_core_interpreted(M, self, #{index});\n" }
   end
 
   # OPTIONAL_ARG_SUPPORT: the switch replacing ENTER's jump table (see

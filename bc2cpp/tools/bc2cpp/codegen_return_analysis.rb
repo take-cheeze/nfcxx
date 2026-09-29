@@ -359,7 +359,13 @@ class CodeGen
     return @symbol_installed_names if defined?(@symbol_installed_names)
 
     names = Set.new
-    @ireps.each_value do |irep|
+    children = @ireps.values.flat_map(&:reps).compact.to_set
+    @ireps.each do |label, irep|
+      # ADR 0264: mruby's own Ruby is outside this closed world (the aliases in its
+      # mrblib rename core methods, not the engine's), as it was before it became
+      # compiled input. The root irep spans every file, so it is always scanned.
+      next if children.include?(label) && CoreDefs.core_source?(irep.file)
+
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'ALIAS', 'UNDEF'
