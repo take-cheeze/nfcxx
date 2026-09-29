@@ -109,6 +109,8 @@ def build_registry(ireps, root_label)
   included_modules = {}
   prepended_modules = {}
   unknown_mixins = Set.new
+  module_names = Set.new
+  mixin_sites = []
   # Constant value class hints ('Array'/'Hash'/'Range') from assignments whose
   # every SETCONST site writes a proven literal_container_class value.
   # Disagreeing or unknown sites poison the name; constructor-based hints are
@@ -196,6 +198,7 @@ def build_registry(ireps, root_label)
         pending_ivar_owner = nil
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
         pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
+        module_names << pending_name if insn.op == 'MODULE'
         if insn.op == 'MODULE'
           pending_ivar_owner = "#{pending_name}.singleton"
         end
@@ -363,10 +366,9 @@ def build_registry(ireps, root_label)
           self_reg = insn.args[/^R(\d+)/, 1]
           mixin_n = insn.args[/n=(\d+)/, 1]&.to_i
           recognized = %w[SSEND SSEND0].include?(insn.op) && mixin_n == 1 && self_reg
-          mod = recognized ? resolve_superclass_ref(irep, idx, (self_reg.to_i + 1).to_s, namespace) : nil
-          if recognized && mod.is_a?(String)
-            table = name == 'include' ? included_modules : prepended_modules
-            (table[mixin_owner] ||= []) << mod
+          ref = recognized ? resolve_mixin_ref(irep, idx, (self_reg.to_i + 1).to_s) : nil
+          if ref
+            mixin_sites << { owner: mixin_owner, kind: name, namespace: namespace, ref: ref }
           else
             unknown_mixins << mixin_owner
           end
@@ -524,6 +526,32 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
+  declared_modules = module_names.to_set
+  declared_types = declared_modules | class_decls.keys.to_set
+  mixin_sites.each do |site|
+    ref = site[:ref]
+    candidates = if ref[:absolute]
+                   [ref[:name]]
+                 else
+                   scopes = []
+                   scope = site[:namespace]
+                   while scope
+                     scopes << scope
+                     scope = scope.include?('::') ? scope.rpartition('::').first : nil
+                   end
+                   segments = ref[:name].split('::')
+                   tail = segments.drop(1).join('::')
+                   suffix = tail.empty? ? '' : "::#{tail}"
+                   scopes.map { |prefix| "#{prefix}::#{segments.first}#{suffix}" } + [ref[:name]]
+                 end
+    resolved = candidates.find { |candidate| declared_types.include?(candidate) }
+    if resolved && declared_modules.include?(resolved)
+      table = site[:kind] == 'include' ? included_modules : prepended_modules
+      (table[site[:owner]] ||= []) << resolved
+    else
+      unknown_mixins << site[:owner]
+    end
+  end
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
    struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites]
 end
@@ -550,6 +578,43 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
     when 'GETCONST'
       const_name = insn.args[/^R\d+\s+(\S+)/, 1]
       return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
+    else
+      return nil
+    end
+  end
+  nil
+end
+
+# Resolve the constant operand of a statically shaped class-body include. Keep
+# whether the source used namespace qualification: an unqualified constant uses
+# Ruby's lexical nesting lookup, which is disambiguated after all module names
+# have been collected by build_registry.
+def resolve_mixin_ref(irep, before_idx, reg)
+  path = []
+  qualified = false
+  (before_idx - 1).downto(0) do |i|
+    insn = irep.instructions[i]
+    next unless insn.args[/^R(\d+)/, 1] == reg
+
+    case insn.op
+    when 'MOVE'
+      reg = insn.args.scan(/R(\d+)/).flatten[1]
+    when 'GETMCNST'
+      qualified = true
+      path.unshift(insn.args[/::(\w+)/, 1])
+    when 'GETCONST'
+      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      return nil unless const_name
+
+      absolute = const_name.start_with?('::')
+      const_name = const_name.delete_prefix('::')
+      path.unshift(const_name) unless path.empty?
+      return { name: path.empty? ? const_name : path.join('::'), qualified: qualified,
+               absolute: absolute }
+    when 'OCLASS'
+      return nil if path.empty?
+
+      return { name: path.join('::'), qualified: true, absolute: true }
     else
       return nil
     end

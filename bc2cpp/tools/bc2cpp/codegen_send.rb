@@ -1585,25 +1585,47 @@ class CodeGen
     return nil unless @closed_world&.inherited_lookup_safe?(name, receiver_class)
     return nil if devirt_blocked_name?(name)
 
-    klass = receiver_class
-    seen = Set.new
-    loop do
-      return nil unless seen.add?(klass)
-      return nil if @unknown_mixins.include?(klass) || !Array(@included_modules[klass]).empty? ||
-                    !Array(@prepended_modules[klass]).empty?
+    target, known = closed_world_lookup_target(name, receiver_class, Set.new)
+    known && target&.owner != receiver_class ? target : nil
+  end
 
-      definitions = @registry.fetch(name, []).reject { |definition| definition.owner == '<native>' }
-      here = definitions.select { |definition| definition.owner == klass }
-      unless here.empty?
-        return nil if klass == receiver_class
-        return here.one? && here.first.irep ? here.first : nil
-      end
+  # Follow the proven mruby ancestor order: prepended modules, the owner,
+  # included modules (latest include first), then the superclass. An unknown or
+  # unstable mixin before the first definition makes the lookup ambiguous.
+  def closed_world_lookup_target(name, owner, active)
+    return [nil, false] unless active.add?(owner)
+    return [nil, false] if @unknown_mixins.include?(owner)
 
-      superclass = @superclass_of[klass]
-      return nil if superclass.nil? || superclass == :none
+    Array(@prepended_modules[owner]).reverse.each do |mod|
+      return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
-      klass = superclass
+      target, known = closed_world_lookup_target(name, mod, active.dup)
+      return [nil, false] unless known
+      return [target, true] if target
     end
+
+    definitions = @registry.fetch(name, []).select { |definition| definition.owner == owner }
+    unless definitions.empty?
+      return [nil, false] unless definitions.one? && definitions.first.irep && definitions.first.visibility == :public
+
+      return [definitions.first, true]
+    end
+
+    # Included modules follow the class's own methods, so check them after the
+    # owner before advancing to its superclass.
+    Array(@included_modules[owner]).reverse.each do |mod|
+      return [nil, false] unless @closed_world.stable_constant_identity?(mod)
+
+      target, known = closed_world_lookup_target(name, mod, active.dup)
+      return [nil, false] unless known
+      return [target, true] if target
+    end
+
+    superclass = @superclass_of[owner]
+    superclass = 'Object' if superclass == :none && owner != 'Object'
+    return [nil, true] if superclass.nil?
+
+    closed_world_lookup_target(name, superclass, active)
   end
 
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
