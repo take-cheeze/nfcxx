@@ -184,10 +184,7 @@ module StaticDispatchRegistrations
     ENV['MRBC'] = mrbc
     require_relative 'bc2cpp'
     Dir.mktmpdir('bc2cpp_static_dispatch') do |tmp|
-      c_src, disasm = run_mrbc(closed_world_mrblib_srcs(repo_root), 'static_dispatch_probe', tmp)
-      ireps, root = parse_c_dump(c_src, 'static_dispatch_probe')
-      blocks, files, catches = parse_disasm_blocks(disasm)
-      merge!(ireps, dfs_order(ireps, root), blocks, files, catches)
+      ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root), 'static_dispatch_probe', tmp)
       registry, superclass_of = build_registry(ireps, root)
       [ireps, registry, superclass_of]
     end

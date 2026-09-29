@@ -14,12 +14,8 @@
 # a direct C++ call instead of mrb_funcall; names with several definitions keep
 # dynamic dispatch.
 #
-# Input comes from mrbc's two dumps of the same sources: the RITE binary
-# (`-g`, decoded by insn_decoder.rb, DFS pre-order) and `-B -S` (the C irep
-# structs, with exact pool/symbol/lv arrays and reps[] parent/child pointers).
-# Neither alone is enough, so the C dump's tree is walked in DFS pre-order and
-# zipped against the binary's irep sequence (BC2CPP_TEXT_LOADER=1 zips `-v`
-# text instead).
+# Input is mrbc's RITE binary (`-g`): irep.rb builds every Irep (tree, pool,
+# symbols, lv, instructions) from it, see ADR 0249 and ADR 0251.
 
 require 'shellwords'
 require 'set'
@@ -93,11 +89,8 @@ if $PROGRAM_NAME == __FILE__
     value
   end
 
-  c_src, disasm_text = run_mrbc(srcs, symbol, out_dir)
-  ireps, root_label = parse_c_dump(c_src, symbol)
+  ireps, root_label = compile_ireps(srcs, symbol, out_dir)
   order = dfs_order(ireps, root_label)
-  blocks, block_files, block_catches = parse_disasm_blocks(disasm_text)
-  merge!(ireps, order, blocks, block_files, block_catches)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites =
     build_registry(ireps, root_label)
