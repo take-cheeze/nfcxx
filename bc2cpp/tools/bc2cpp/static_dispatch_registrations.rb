@@ -318,7 +318,7 @@ module StaticDispatchRegistrations
     sends = lambda do |irep, into|
       grew = false
       irep.instructions.each do |insn|
-        name = if SEND_OPS.include?(insn.op) then insn.args[NAME_ARG, 1]
+        name = if SEND_OPS.include?(insn.op) then insn.sym
                else IMPLICIT_DISPATCH_NAMES[insn.op]
                end
         grew = true if name && into.add?(name)
@@ -373,7 +373,7 @@ module StaticDispatchRegistrations
     return Hash.new(:unknown) if irep.instructions.any? { |i| i.op == 'APOST' }
 
     irep.instructions.each do |insn|
-      args = insn.args.to_s.split(/\s+/)
+      args = insn.tokens
       dst = args.first&.then { |a| a[/\AR(\d+)\z/, 1] }
       next unless dst
 
@@ -409,7 +409,7 @@ module StaticDispatchRegistrations
     starts = Set.new
     insns.each_with_index do |insn, i|
       if insn.op.start_with?('JMP')
-        target = insn.args.to_s.split(/\s+/).last
+        target = insn.tokens.last
         starts << target.to_i if target.to_s.match?(/\A\d+\z/)
       end
       starts << insns[i + 1].addr.to_i if insns[i + 1] && (insn.op.start_with?('JMP') || BLOCK_ENDERS.include?(insn.op))
@@ -420,7 +420,7 @@ module StaticDispatchRegistrations
     kind_of = ->(reg) { local.key?(reg) ? local[reg] : global[reg] }
     insns.map do |insn|
       local = {} if starts.include?(insn.addr.to_i) || insn.op == 'APOST'
-      args = insn.args.to_s.split(/\s+/)
+      args = insn.tokens
       reg = args.first.to_s[/\AR(\d+)\z/, 1]
       kind = if SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
                insn.op.start_with?('SS') ? :self : kind_of.call(reg)
@@ -481,7 +481,7 @@ module StaticDispatchRegistrations
       irep.instructions.each_with_index do |insn, idx|
         next unless SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
 
-        name = insn.args[NAME_ARG, 1]
+        name = insn.sym
         next unless name
 
         names << name
@@ -529,7 +529,7 @@ module StaticDispatchRegistrations
         irep.instructions.each do |insn|
           next unless SEND_OPS.include?(insn.op)
 
-          name = insn.args[NAME_ARG, 1]
+          name = insn.sym
           grew = true if name && names.add?(name)
         end
       end

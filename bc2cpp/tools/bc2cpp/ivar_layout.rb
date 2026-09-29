@@ -74,7 +74,7 @@ class IvarLayout
           ireps.fetch(d.irep).instructions.each do |insn|
             next unless %w[GETIV SETIV].include?(insn.op)
 
-            name = insn.args[/@(\w+)/, 1]
+            name = insn.ivar
             ivars[d.owner] << name if name
           end
         elsif d.kind == :ivar_accessor
@@ -118,10 +118,10 @@ class IvarLayout
           irep = ireps.fetch(label)
           d = def_of_irep[label]
           enter = irep.instructions.find { |i| i.op == 'ENTER' }
-          mand = enter ? enter.args.split(':').first.to_i : 0
+          mand = enter ? enter.enter_fields.first : 0
           irep.instructions.each_with_index do |insn, idx|
             next unless insn.op == 'SETIV'
-            ivar = insn.args[/@(\w+)/, 1]
+            ivar = insn.ivar
             # Not `$`-anchored: "SETIV @x R1 ; R1:v" carries a trailing local-name comment
             # whenever the source is a named local.
             src_reg = insn.args[/R(\d+)/, 1]
@@ -240,7 +240,7 @@ class IvarLayout
       insn = irep.instructions[i]
       case insn.op
       when 'MOVE'
-        d, s = insn.args.scan(/R(\d+)/).flatten
+        d, s = insn.regs
         next unless d == src_reg
 
         src_reg = s
@@ -296,7 +296,7 @@ class IvarLayout
       insn = irep.instructions[i]
       case insn.op
       when 'MOVE'
-        d, s = insn.args.scan(/R(\d+)/).flatten
+        d, s = insn.regs
         next unless d == reg
 
         reg = s
@@ -336,7 +336,7 @@ class IvarLayout
         d = insn.reg
         next unless d == reg
 
-        name = insn.op == 'GETCONST' ? insn.args.split(/\s+/)[1] : insn.args[/::(\S+)/, 1]
+        name = insn.op == 'GETCONST' ? insn.tokens[1] : insn.mcnst_name
         return :fixnum if name && integer_constants&.include?(name)
 
         return UNKNOWN
@@ -367,7 +367,7 @@ class IvarLayout
         # NILABLE_EMBED_SUPPORT stopped poisoning). A nonnil Array field
         # still escapes through some other writer's own evidence, so this
         # arm is a missed embedding, not a wrong one.
-        s = insn.args[/\(R(\d+)\)/, 1]
+        s = insn.paren_reg
         if s
           left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
@@ -383,7 +383,7 @@ class IvarLayout
         # recursively. Overflow could make the value wrong but not the type, and the
         # embedded SETIV re-checks the type before storing (TypeError, not memory
         # corruption).
-        s = insn.args[/\(R(\d+)\)/, 1]
+        s = insn.paren_reg
         if s
           left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
@@ -401,7 +401,7 @@ class IvarLayout
         d = insn.reg
         next unless d == reg
 
-        other_ivar = insn.args[/@(\w+)/, 1]
+        other_ivar = insn.ivar
         known = known_ivar_types[other_ivar]
         # EMBED_TYPE_SAFETY: a nilable (or unknown) source is not a concrete
         # scalar, so it never propagates a type to the copy (NILABLE_EMBED_SUPPORT).
@@ -416,9 +416,8 @@ class IvarLayout
         # compile_send's FIXNUM_BINARY fast path; +/-/* and << can overflow). Sound only
         # when both operands are proven Fixnum AND the operator has no override
         # anywhere (native_only_mono?).
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
-        n = insn.args[/n=(\d+)/, 1]
-        if registry && %w[% & | ^].include?(name) && n == '1' && native_only_mono?(registry, name)
+        name = insn.sym
+        if registry && %w[% & | ^].include?(name) && insn.argc == 1 && native_only_mono?(registry, name)
           arg_reg = (d.to_i + 1).to_s
           left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
@@ -446,7 +445,7 @@ class IvarLayout
         # RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
         # write lands on the SECOND register. `a` is a read; `b` is a real write and
         # must stop the trace like the generic `else`.
-        a, b = insn.args.scan(/R(\d+)/).flatten
+        a, b = insn.regs
         return UNKNOWN if b == reg
         next unless a == reg
       else

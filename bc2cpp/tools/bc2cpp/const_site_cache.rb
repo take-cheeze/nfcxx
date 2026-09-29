@@ -35,12 +35,12 @@ module StableClassConstants
       irep.instructions.each do |insn|
         case insn.op
         when 'CLASS', 'MODULE'
-          name = insn.args[/:(\S+)/, 1]
+          name = insn.sym_token
           class_defs[name] += 1 if name
         when 'SETCONST'
           assigned << insn.args[/\A(\S+)/, 1]
         when 'SETMCNST'
-          assigned << insn.args[/::(\S+)/, 1]
+          assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
           return Set.new if insn.args.match?(DYNAMIC_MUTATION)
         end
@@ -134,7 +134,7 @@ module StableClassConstants
         when 'SETCONST'
           assigned << insn.args[/\A(\S+)/, 1]
         when 'SETMCNST'
-          assigned << insn.args[/::(\S+)/, 1]
+          assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
           return Set.new if insn.args.match?(DYNAMIC_MUTATION)
         end

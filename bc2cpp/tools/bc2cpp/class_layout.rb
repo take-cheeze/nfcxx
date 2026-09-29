@@ -101,7 +101,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     # register actually written. Skipping a MOVE would let the scan reach an older,
     # overwritten result on a reused register.
     if pin.op == 'MOVE'
-      src = pin.args.scan(/R(\d+)/).flatten[1]
+      src = pin.regs[1]
       return nil unless src
 
       reg = src
@@ -109,12 +109,12 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     end
     return nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
 
-    called = pin.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    called = pin.sym
     return nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
     # SEND0/SSEND0 print no `n=` field: absent means 0 args.
-    argc = pin.args[/n=(\d+)/, 1]&.to_i || 0
+    argc = pin.argc || 0
     return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
     return 'Array' if annotated&.call(called)
     return 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
@@ -158,13 +158,13 @@ class ClassLayout
         irep_labels.each do |label|
           irep = ireps.fetch(label)
           enter = irep.instructions.find { |i| i.op == 'ENTER' }
-          mand = enter ? enter.args.split(':').first.to_i : 0
+          mand = enter ? enter.enter_fields.first : 0
           arg_classes = class_annotations[label]&.args
 
           irep.instructions.each_with_index do |insn, idx|
             next unless insn.op == 'SETIV'
 
-            ivar = insn.args[/@(\w+)/, 1]
+            ivar = insn.ivar
             src_reg = insn.args[/R(\d+)/, 1]
             # Never hand an UNKNOWN entry to trace_new_target's GETIV lookup.
             known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }

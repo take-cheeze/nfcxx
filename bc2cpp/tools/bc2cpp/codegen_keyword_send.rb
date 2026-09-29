@@ -28,7 +28,7 @@ class CodeGen
 
       return nil unless insn.op == 'LOADSYM'
 
-      return insn.args[/:(\S+)/, 1]&.sub(/\A:/, '')
+      return insn.sym_token&.sub(/\A:/, '')
     end
     nil
   end
@@ -135,7 +135,7 @@ class CodeGen
     "#{note}  #{call}\n"
   end
 
-  def compile_keyword_send(args, self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
+  def compile_keyword_send(self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
     dest_reg = d.to_i
     # Keyword (sym, value) pairs sit right after the n positionals.
     kw_sym_regs = (0...nk).map { |k| dest_reg + 1 + n + k * 2 }
@@ -582,13 +582,13 @@ class CodeGen
         hops += 1
         return nil if hops > 8
 
-        src = insn.args.scan(/R(\d+)/).flatten[1]
+        src = insn.regs[1]
         return nil unless src
 
         reg = src
         next
       when 'ARRAY', 'ARRAY2'
-        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+        n = insn.uint_operand
         return nil if n.nil?
 
         base = reg.to_i
@@ -617,13 +617,13 @@ class CodeGen
         hops += 1
         return nil if hops > 8
 
-        src = insn.args.scan(/R(\d+)/).flatten[1]
+        src = insn.regs[1]
         return nil unless src
 
         reg = src
         next
       when 'HASH'
-        n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+        n = insn.uint_operand
         return nil if n.nil?
 
         base = reg.to_i
@@ -659,13 +659,13 @@ class CodeGen
     CPP
   end
 
-  def compile_splat_send(args, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
+  def compile_splat_send(insn, self_implicit:, irep:, idx:, name:, d:, owner_def: nil)
     return nil unless irep && idx
 
-    n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
-    return nil unless n_match
+    n_spec = insn.n_spec
+    nk_spec = insn.nk_spec
+    return nil unless n_spec
 
-    n_spec, nk_spec = n_match[1], n_match[2]
     return nil unless n_spec == '*' || nk_spec == '*'
 
     dest_reg = d.to_i
@@ -708,7 +708,7 @@ class CodeGen
       end
 
     if kw_pairs.empty?
-      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat, dynamic dispatch\n"
+      note = "  // SPLAT #{insn.argc_text} :#{name} unrolled from a literal-sized splat, dynamic dispatch\n"
       "#{note}  #{dynamic_dispatch_line(d, recv, name, positional)}"
     else
       result = compile_keyword_call(name: name, d: d, recv: recv, n: positional.size, argv: positional,
@@ -717,7 +717,7 @@ class CodeGen
                                      self_implicit: self_implicit, owner_def: owner_def)
       return nil unless result
 
-      note = "  // SPLAT #{n_match[0]} :#{name} unrolled from a literal-sized splat/double-splat\n"
+      note = "  // SPLAT #{insn.argc_text} :#{name} unrolled from a literal-sized splat/double-splat\n"
       "#{note}#{result}"
     end
   end

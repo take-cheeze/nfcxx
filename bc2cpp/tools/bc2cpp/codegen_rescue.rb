@@ -39,9 +39,9 @@ class CodeGen
   def ensure_jump_target(insn)
     case insn.op
     when 'JMP', 'JMPUW'
-      insn.args.strip[/\d+/].to_i
+      insn.jmp_addr
     when 'JMPIF', 'JMPNOT', 'JMPNIL'
-      insn.args.sub(/;.*\z/m, '').strip.split(/\s+/).last&.to_i
+      insn.tokens.last&.to_i
     end
   end
 
@@ -279,7 +279,7 @@ class CodeGen
 
       exit_i = by_addr[e]
       next unless exit_i && exit_i.op == 'JMP'
-      shared_target = exit_i.args.strip[/\d+/].to_i
+      shared_target = exit_i.jmp_addr
       # shared_target can never be this region's except_addr in mrbc output
       # (OP_EXCEPT is emitted before the success JMP is patched); rejected anyway,
       # since that address is suppressed and has no label.
@@ -300,7 +300,7 @@ class CodeGen
       tail_return = %w[RETURN RETURN_BLK].include?(shared_i.op)
       connector_reg = exc_reg
       if tail_return
-        tail_reg = shared_i.args.strip.empty? ? '0' : shared_i.reg
+        tail_reg = shared_i.no_operands? ? '0' : shared_i.reg
         next unless tail_reg == connector_reg
       end
 
@@ -314,7 +314,7 @@ class CodeGen
       #      (checked above) or a raise (mrb_protect_error's job).
       jump_target_of = lambda do |insn|
         case insn.op
-        when 'JMP' then insn.args.strip[/\d+/].to_i
+        when 'JMP' then insn.jmp_addr
         when 'JMPNOT', 'JMPIF', 'JMPNIL' then jmp_target_after_reg(insn.args)
         end
       end
@@ -430,7 +430,7 @@ class CodeGen
       match_addr = jmp_target_after_reg(jmpif_i.args)
       return nil unless match_addr && match_addr > jmpif_i.addr
       return nil unless jmp_i.op == 'JMP'
-      next_addr = jmp_i.args.strip[/\d+/].to_i
+      next_addr = jmp_i.jmp_addr
       # Strictly forward: bounds the walk and excludes a backward `retry`.
       return nil unless next_addr > jmp_i.addr
 
@@ -502,7 +502,7 @@ class CodeGen
     return nil unless loadnil_i.op == 'LOADNIL' && loadnil_i.reg == exc_reg
     return nil unless jmp_i.op == 'JMP'
 
-    join_addr = jmp_i.args.strip[/\d+/].to_i
+    join_addr = jmp_i.jmp_addr
     # The handler only runs forward into the join.
     return nil unless join_addr > jmp_i.addr
 

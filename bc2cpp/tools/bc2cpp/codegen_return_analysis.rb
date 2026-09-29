@@ -327,7 +327,7 @@ class CodeGen
         if !fixnum_proof_writes_reg?(insn, r)
           work << [p, r]
         elsif insn.op == 'MOVE'
-          src = insn.args.scan(/R(\d+)/).flatten[1]
+          src = insn.regs[1]
           return nil unless src
 
           work << [p, src]
@@ -476,7 +476,7 @@ class CodeGen
       return false unless return_write_dominates?(irep, i, use, r)
       return true unless pin.op == 'MOVE'
 
-      r = pin.args.scan(/R(\d+)/).flatten[1]
+      r = pin.regs[1]
       return false unless r
 
       use = i
@@ -514,7 +514,7 @@ class CodeGen
       child.instructions.each do |insn|
         next unless insn.op == 'SETUPVAR'
 
-        _src, b, lv = insn.args.split(/\s+/)
+        _src, b, lv = insn.tokens
         # An unparsable level is kept: over-collecting only costs a proof.
         acc << b if b =~ /\A\d+\z/ && !(lv =~ /\A\d+\z/ && lv.to_i != depth - 1)
       end

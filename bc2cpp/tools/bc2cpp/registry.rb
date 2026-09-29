@@ -15,7 +15,7 @@
 # Two argument shapes: n <= CALL_MAXARGS members in consecutive LOADSYM
 # registers, or more (`n=*`) packed into one ARRAY first.
 def detect_struct_new_members(irep, idx, insn, namespace)
-  name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+  name = insn.sym
   return nil unless name == 'new'
 
   d = insn.reg
@@ -36,7 +36,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   # register; an unnamed Struct.new is left unrecognized.
   next_insn = irep.instructions[idx + 1]
   struct_name = if next_insn && next_insn.op == 'SETCONST'
-                  sc_name, sc_reg = next_insn.args.split(/\s+/, 2)
+                  sc_name, sc_reg = next_insn.tokens
                   sc_name if sc_reg == "R#{d}"
                 end
   return nil unless struct_name
@@ -62,7 +62,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
     array_insn = scan_from >= 0 ? irep.instructions[scan_from] : nil
     return nil unless array_insn&.op == 'ARRAY'
 
-    n = array_insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+    n = array_insn.uint_operand
     return nil unless n
 
     scan_from -= 1
@@ -77,7 +77,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
     prev = irep.instructions[i]
     break unless prev.op == 'LOADSYM'
 
-    members.unshift(prev.args[/:(\S+)/, 1])
+    members.unshift(prev.sym_token)
     i -= 1
   end
   return nil unless members.size == n && members.all?
@@ -192,7 +192,7 @@ def build_registry(ireps, root_label)
       case insn.op
       when 'CLASS', 'MODULE'
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
-        reg, name = insn.args.split(/\s+/, 2)
+        reg, name = insn.tokens
         pending_reg = reg
         pending_idx = idx
         pending_ivar_owner = nil
@@ -244,7 +244,7 @@ def build_registry(ireps, root_label)
           container_constants[qualified] = klass
         end
       when 'EXEC'
-        reg, irep_ref = insn.args.split(/\s+/, 2)
+        reg, irep_ref = insn.tokens
         idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
         child_label = irep.reps[idx2]
         if reg == pending_reg && pending_name && idx == pending_idx + 1
@@ -257,7 +257,7 @@ def build_registry(ireps, root_label)
         pending_ivar_owner = nil
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
-        _reg, name, irep_ref = insn.args.split(/\s+/, 3)
+        _reg, name, irep_ref = insn.tokens
         idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
         child_label = irep.reps[idx2]
         method_name = name.sub(/^:/, '')
@@ -289,7 +289,7 @@ def build_registry(ireps, root_label)
         # resolved with resolve_singleton_receiver rather than assuming `self`; that
         # scan already skips interposed EXT lines. An unrecognized receiver is not
         # registered rather than attributed to `namespace`.
-        reg, sname, irep_ref = insn.args.split(/\s+/, 3)
+        reg, sname, irep_ref = insn.tokens
         sdef_name = sname.sub(/^:/, '')
         sdef_idx = irep_ref[/I\[(\d+)\]/, 1].to_i
         sdef_child_label = irep.reps[sdef_idx]
@@ -308,12 +308,12 @@ def build_registry(ireps, root_label)
         #   EXT2
         #   DEF     R1  :toned?  (R2)
         # skip_ext_back steps over the interposed EXT lines.
-        reg, name, recv_arg = insn.args.split(/\s+/, 3)
+        reg, name, recv_arg = insn.tokens
         method_idx = skip_ext_back.call(idx - 1)
         method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
         next unless method_insn && method_insn.op == 'METHOD'
 
-        method_reg, irep_ref = method_insn.args.split(/\s+/, 2)
+        method_reg, irep_ref = method_insn.tokens
         # Registers must line up as codegen emits them (opener at R<n>, METHOD at
         # R<n+1>, DEF at R<n> referencing (R<n+1>)); adjacency alone is not trusted.
         next unless recv_arg == "(#{method_reg})"
@@ -349,7 +349,7 @@ def build_registry(ireps, root_label)
         end
       when 'SEND0', 'SEND', 'SSEND0', 'SSEND'
         # Same charset as compile_send's name extraction; keep the two in sync.
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        name = insn.sym
         if name == 'new'
           # STRUCT_MEMBERS_ANALYSIS for the block-less `Const = Struct.new(...)` shape.
           # Additive only: returns nil for anything but a SETCONST-named Struct.new.
@@ -364,7 +364,7 @@ def build_registry(ireps, root_label)
           # the owner in `unknown_mixins` so `super` there declines.
           mixin_owner = namespace || 'Object'
           self_reg = insn.reg
-          mixin_n = insn.args[/n=(\d+)/, 1]&.to_i
+          mixin_n = insn.argc
           recognized = %w[SSEND SSEND0].include?(insn.op) && mixin_n == 1 && self_reg
           ref = recognized ? resolve_mixin_ref(irep, idx, (self_reg.to_i + 1).to_s) : nil
           if ref
@@ -377,12 +377,12 @@ def build_registry(ireps, root_label)
         next unless %w[private protected public attr_reader attr_writer attr_accessor
                        module_function].include?(name)
 
-        n = insn.args[/n=(\d+)/, 1].to_i
+        n = insn.argc.to_i
         # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
         packed = insn.args.include?('n=*')
         if packed
           arr = idx.positive? && irep.instructions[idx - 1]
-          n = arr && arr.op == 'ARRAY' ? arr.args[/R\d+\s+(\d+)/, 1].to_i : -1
+          n = arr && arr.op == 'ARRAY' ? arr.uint_operand.to_i : -1
           raise "bc2cpp: #{name} with a splat argument at #{irep.label}:#{insn.addr} names methods statically unknown" if n <= 0
         end
         # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
@@ -395,7 +395,7 @@ def build_registry(ireps, root_label)
             prev = irep.instructions[i]
             break unless prev.op == 'LOADSYM'
 
-            names.unshift(prev.args[/:(\S+)/, 1])
+            names.unshift(prev.sym_token)
           end
           names
         end
@@ -460,7 +460,7 @@ def build_registry(ireps, root_label)
         # Game::Battle::Combatant#state? and #actor looked MONO and devirtualized into
         # Game::Actor/RPG2k::Scene::EquipMenu bodies that read ivars a Struct does not
         # have (Struct members are positional, not iv_tbl).
-        name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+        name = insn.sym
         next unless name == 'new'
 
         d = insn.reg
@@ -482,7 +482,7 @@ def build_registry(ireps, root_label)
         block_insn = irep.instructions[idx - 1]
         next unless block_insn && block_insn.op == 'BLOCK'
 
-        block_idx = block_insn.args[/I\[(\d+)\]/, 1]
+        block_idx = block_insn.block_index
         next unless block_idx
 
         block_label = irep.reps[block_idx.to_i]
@@ -493,7 +493,7 @@ def build_registry(ireps, root_label)
         # owner so `defs.size == 1` sees more than one definition.
         next_insn = irep.instructions[idx + 1]
         struct_name = if next_insn && next_insn.op == 'SETCONST'
-                         sc_name, sc_reg = next_insn.args.split(/\s+/, 2)
+                         sc_name, sc_reg = next_insn.tokens
                          sc_name if sc_reg == "R#{d}"
                        end
         owner = struct_name ? (namespace ? "#{namespace}::#{struct_name}" : struct_name) : "<struct:#{label}:#{idx}>"
@@ -503,7 +503,7 @@ def build_registry(ireps, root_label)
         # attr_accessor.
         array_insn = irep.instructions[idx - 2]
         if array_insn && array_insn.op == 'ARRAY'
-          n = array_insn.args[/^R\d+\s+(\d+)/, 1].to_i
+          n = array_insn.uint_operand.to_i
           members = []
           (idx - 3).downto(0) do |i|
             break if members.size >= n
@@ -511,7 +511,7 @@ def build_registry(ireps, root_label)
             prev = irep.instructions[i]
             break unless prev.op == 'LOADSYM'
 
-            members.unshift(prev.args[/:(\S+)/, 1])
+            members.unshift(prev.sym_token)
           end
           members.each do |m|
             registry[m] << MethodDef.new(name: m, owner: owner, irep: nil, visibility: :public)
@@ -570,11 +570,11 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
     when 'LOADNIL'
       return :none # no explicit superclass written -- real Ruby default is Object.
     when 'GETMCNST'
-      path.unshift(insn.args[/::(\w+)/, 1])
+      path.unshift(insn.mcnst_name)
     when 'GETCONST'
       const_name = insn.args[/^R\d+\s+(\S+)/, 1]
       return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
@@ -598,10 +598,10 @@ def resolve_mixin_ref(irep, before_idx, reg)
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
     when 'GETMCNST'
       qualified = true
-      path.unshift(insn.args[/::(\w+)/, 1])
+      path.unshift(insn.mcnst_name)
     when 'GETCONST'
       const_name = insn.args[/^R\d+\s+(\S+)/, 1]
       return nil unless const_name

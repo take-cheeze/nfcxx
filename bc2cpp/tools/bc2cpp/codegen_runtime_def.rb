@@ -16,7 +16,7 @@ class CodeGen
       dest_reg = insn.reg
       next unless dest_reg
 
-      lambda_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      lambda_irep_idx = insn.block_index
       next unless lambda_irep_idx
 
       lambda_label = irep.reps[lambda_irep_idx.to_i]

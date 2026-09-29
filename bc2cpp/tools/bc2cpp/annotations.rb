@@ -22,7 +22,7 @@ class ArgTypes
 
       irep = ireps.fetch(defs.first.irep)
       enter = irep.instructions.find { |i| i.op == 'ENTER' }
-      mand = enter ? enter.args.split(':').first.to_i : 0
+      mand = enter ? enter.enter_fields.first : 0
       next if mand.zero?
 
       arg_types = Array.new(mand)

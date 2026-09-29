@@ -17,7 +17,7 @@ class CodeGen
       if insn.op == 'RESCUE'
         # RESCUE reads its first register and writes its second; the caught
         # exception remains live in the input register for the handler.
-        input_reg, output_reg = insn.args.scan(/R(\d+)/).flatten
+        input_reg, output_reg = insn.regs
         return false if output_reg == reg
         next if input_reg == reg
       end
@@ -26,7 +26,7 @@ class CodeGen
       next unless written == reg
 
       if insn.op == 'MOVE'
-        source = insn.args.scan(/R(\d+)/).flatten[1]
+        source = insn.regs[1]
         return false unless source
 
         reg = source
@@ -126,7 +126,7 @@ class CodeGen
 
       case insn.op
       when 'MOVE'
-        reg = insn.args.scan(/R(\d+)/).flatten[1]
+        reg = insn.regs[1]
         return nil unless reg
       when 'SEND', 'SEND0'
         return nil unless insn.args[/:(\w+)/, 1] == 'new'
@@ -152,7 +152,7 @@ class CodeGen
       next unless insn.reg == reg
 
       if insn.op == 'MOVE'
-        reg = insn.args.scan(/R(\d+)/).flatten[1]
+        reg = insn.regs[1]
         return 'move_without_source' unless reg
 
         next
@@ -203,10 +203,10 @@ class CodeGen
 
       case insn.op
       when 'MOVE'
-        reg = insn.args.scan(/R(\d+)/).flatten[1]
+        reg = insn.regs[1]
         return nil unless reg
       when 'GETMCNST'
-        segment = insn.args[/::(\w+)/, 1]
+        segment = insn.mcnst_name
         return nil unless segment
 
         path.unshift(segment)
@@ -542,7 +542,7 @@ class CodeGen
 
     # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
     # keyword `nk=` variant.
-    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+    return nil unless super_insn.tokens[1].to_s.strip == 'n=*'
 
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
@@ -645,7 +645,7 @@ class CodeGen
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
     # (3) The `n=*` splat shape, not SUPER_TARGETS' fixed `n=N`.
-    return nil unless super_insn.args.split(/\s+/, 2)[1].to_s.strip == 'n=*'
+    return nil unless super_insn.tokens[1].to_s.strip == 'n=*'
 
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.

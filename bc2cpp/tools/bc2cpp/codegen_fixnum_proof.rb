@@ -128,7 +128,7 @@ class CodeGen
     irep.instructions.each do |insn|
       case insn.op
       when 'JMP', 'JMPUW'
-        edges[insn.args.strip[/\d+/].to_i] << insn.addr
+        edges[insn.jmp_addr] << insn.addr
       when 'JMPIF', 'JMPNOT', 'JMPNIL'
         edges[jmp_target_after_reg(insn.args)] << insn.addr
       end
@@ -185,7 +185,7 @@ class CodeGen
       child.instructions.each do |insn|
         next unless insn.op == 'SETUPVAR'
 
-        b = insn.args.split(/\s+/)[1]
+        b = insn.tokens[1]
         acc << b if b =~ /\A\d+\z/
       end
       subtree_upvar_written_regs(child, acc, seen)
@@ -224,7 +224,7 @@ class CodeGen
       if j < idx && fixnum_proof_writes_reg?(insn, cur)
         if insn.op == 'MOVE'
           # `regs[a] = regs[b]`: continue with the source register.
-          src = insn.args.scan(/R(\d+)/).flatten[1]
+          src = insn.regs[1]
           return false unless src
           return false if ctx[:upvars].include?(src)
 
@@ -290,7 +290,7 @@ class CodeGen
       end
       t =
         case ins.op
-        when 'JMP', 'JMPUW' then ins.args.strip[/\d+/].to_i
+        when 'JMP', 'JMPUW' then ins.jmp_addr
         when 'JMPIF', 'JMPNOT', 'JMPNIL' then jmp_target_after_reg(ins.args)
         end
       next if t.nil?
@@ -363,7 +363,7 @@ class CodeGen
 
         if fixnum_proof_writes_reg?(insn, r)
           if insn.op == 'MOVE'
-            src = insn.args.scan(/R(\d+)/).flatten[1]
+            src = insn.regs[1]
             return false unless src
             return false if ctx[:upvars].include?(src)
 
@@ -396,7 +396,7 @@ class CodeGen
   # A LOADI* literal, or nil: the second whitespace-separated token
   # (`LOADI32\tR1\t9999999\t; R1:x`). LOADINEG prints the negated value.
   def loadi_literal(insn)
-    tok = insn.args.split(/\s+/)[1]
+    tok = insn.tokens[1]
     tok && tok.match?(/\A-?\d+\z/) ? tok.to_i : nil
   end
 
@@ -415,10 +415,10 @@ class CodeGen
 
     case insn.op
     when 'GETIV'
-      ivar = insn.args[/@(\w+)/, 1]
+      ivar = insn.ivar
       !ivar.nil? && embed_type(owner_def.owner, ivar) == :fixnum
     when 'ADD', 'SUB', 'MUL'
-      s = insn.args[/\(R(\d+)\)/, 1]
+      s = insn.paren_reg
       !s.nil? && proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1) &&
         proven_fixnum_operand?(irep, j, s, owner_def, depth + 1)
     when 'ADDI', 'SUBI'
@@ -426,15 +426,15 @@ class CodeGen
     when 'GETCONST'
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.
-      @integer_constants.include?(insn.args.split(/\s+/)[1])
+      @integer_constants.include?(insn.tokens[1])
     when 'GETMCNST'
       # "GETMCNST R4 (R4)::DEPTH": only the bare name after `::`, as IntegerConstants
       # keys on (the scope register is not modelled).
-      @integer_constants.include?(insn.args[/::(\S+)/, 1])
+      @integer_constants.include?(insn.mcnst_name)
     when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
       # FIXNUM_RETURN_PROOF (source 6): see compute_fixnum_return_names. SENDB/SSENDB
       # are excluded: a `break` in the caller's block becomes the send's result.
-      nm = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      nm = insn.sym
       !nm.nil? && @fixnum_return_names.include?(nm)
     else
       false
@@ -459,7 +459,7 @@ class CodeGen
       next unless fixnum_proof_writes_reg?(insn, cur)
 
       if insn.op == 'MOVE'
-        cur = insn.args.scan(/R(\d+)/).flatten[1]
+        cur = insn.regs[1]
         return nil unless cur
         next
       end
@@ -477,13 +477,13 @@ class CodeGen
         recv = if insn.op == 'GETIDX'
                  cur
                else
-                 insn.args.scan(/R(\d+)/).flatten[1]
+                 insn.regs[1]
                end
         return nil unless recv && game_variables_index_receiver?(irep, j, recv, owner_def)
 
         return [GAME_VARIABLE_RANGE_MIN, GAME_VARIABLE_RANGE_MAX]
       when 'ADD', 'SUB', 'MUL'
-        regs = insn.args.scan(/R(\d+)/).flatten
+        regs = insn.regs
         return nil unless regs.size >= 2
         left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
         right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
@@ -492,13 +492,13 @@ class CodeGen
         return guarded_integer_binary_range(insn.op, left, right) ||
           (insn.op == 'MUL' ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
       when 'ADDI', 'SUBI'
-        literal = insn.args.split(/\s+/).last.to_i
+        literal = insn.tokens.last.to_i
         left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
         return nil unless left
 
         return guarded_integer_binary_range(insn.op == 'ADDI' ? 'ADD' : 'SUB', left, [literal, literal])
       when 'DIV'
-        regs = insn.args.scan(/R(\d+)/).flatten
+        regs = insn.regs
         return nil unless regs.size >= 2
         left = guarded_game_integer_range(irep, j, regs[0], owner_def, depth + 1)
         right = guarded_game_integer_range(irep, j, regs[1], owner_def, depth + 1)
@@ -525,7 +525,7 @@ class CodeGen
       next unless fixnum_proof_writes_reg?(insn, cur)
 
       if insn.op == 'MOVE'
-        cur = insn.args.scan(/R(\d+)/).flatten[1]
+        cur = insn.regs[1]
         return false unless cur
         next
       end
@@ -603,7 +603,7 @@ class CodeGen
     return false unless pure_mandatory_arity?(irep)
 
     enter = irep.instructions.find { |i| i.op == 'ENTER' }
-    mand = enter ? enter.args.split(':').first.to_i : 0
+    mand = enter ? enter.enter_fields.first : 0
     r = reg.to_i
     return false unless r >= 1 && r <= mand
 

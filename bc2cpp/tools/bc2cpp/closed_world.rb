@@ -257,24 +257,24 @@ class ClosedWorld
       insns.each_with_index do |insn, idx|
         case insn.op
         when 'TDEF', 'SDEF'
-          _reg, sym, ref = insn.args.split(/\s+/, 3)
+          _reg, sym, ref = insn.tokens
           child = irep.reps[ref.to_s[/I\[(\d+)\]/, 1].to_i]
           @unknown_defs << sym.delete_prefix(':') unless registered.include?(child)
         when 'DEF'
-          sym = insn.args[/:(\S+)/, 1]
+          sym = insn.sym_token
           method = insns[0...idx].reverse.find { |i| i.op == 'METHOD' }
-          child = method && irep.reps[method.args[/I\[(\d+)\]/, 1].to_i]
+          child = method && irep.reps[method.block_index.to_i]
           @unknown_defs << sym unless child && registered.include?(child)
         when *SEND_OPS
           scan_send(irep, insns, idx, insn)
         when 'LOADSYM'
-          sym = insn.args[/:(\S+)/, 1]
+          sym = insn.sym_token
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
           const = insn.args[/(?:::|\s)(\w+)\s*\z/, 1]
           scan_factory(irep, insns, idx, insn, const) if CLASS_FACTORIES.include?(const)
         when 'CLASS', 'MODULE'
-          name = insn.args[/:(\S+)/, 1]
+          name = insn.sym_token
           @class_constant_names << name.split('::').last if name
         when 'SETCONST', 'SETMCNST'
           name = insn.args[/(?:::|\A)(\w+)\s+R\d+/, 1].to_s
@@ -287,7 +287,7 @@ class ClosedWorld
   end
 
   def scan_send(irep, insns, idx, insn)
-    name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    name = insn.sym
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
       global!(:dynamic_install)
@@ -303,7 +303,7 @@ class ClosedWorld
     end
     return unless INSTALLER_SENDS.include?(name)
 
-    n = insn.args[/n=(\d+)/, 1]&.to_i
+    n = insn.argc
     syms = n ? literal_syms(insns, idx, n) : packed_syms(insns, idx, insn)
     return global!(:dynamic_install) unless syms
 
@@ -324,7 +324,7 @@ class ClosedWorld
     run = insns[(idx - n).clamp(0, idx)...idx]
     return nil unless run.size == n && run.all? { |i| i.op == 'LOADSYM' }
 
-    run.map { |i| i.args[/:(\S+)/, 1] }
+    run.map { |i| i.sym_token }
   end
 
   # 15+ arguments arrive packed: `ARRAY Ra k` right before an `n=*` send.
@@ -332,7 +332,7 @@ class ClosedWorld
     arr = idx.positive? && insns[idx - 1]
     return nil unless insn.args.match?(/n=\*(?!\|)/) && arr && arr.op == 'ARRAY'
 
-    k = arr.args[/\AR\d+\s+(\d+)/, 1].to_i
+    k = arr.uint_operand.to_i
     k.positive? ? literal_syms(insns, idx - 1, k) : nil
   end
 
@@ -351,7 +351,7 @@ class ClosedWorld
       break if ins.op.match?(STOP_OPS)
       next unless reads_register?(ins, reg)
 
-      name = SEND_OPS.include?(ins.op) && ins.args[/:(\S+)/, 1]
+      name = SEND_OPS.include?(ins.op) && ins.sym_token
       next compared = true if FACTORY_READS.include?(name)
 
       send_idx = j if name == 'new' && !ins.op.start_with?('SS') && ins.reg.to_i == reg
@@ -367,12 +367,12 @@ class ClosedWorld
       between.each do |i|
         next unless i.op == 'LOADSYM'
 
-        s = i.args[/:(\S+)/, 1]
+        s = i.sym_token
         @unknown_defs << s
         @unknown_defs << "#{s}="
       end
     when 'Class'
-      n = insns[send_idx].args[/n=(\d+)/, 1]&.to_i
+      n = insns[send_idx].argc
       return global!(:class_factory_escape) if n.nil?
       return if n.zero?
 
@@ -396,7 +396,7 @@ class ClosedWorld
     return true if rest.match?(/\bR#{reg}\b/)
     return false if first.nil? || ins.op.match?(PURE_WRITES)
 
-    count = ins.args[/n=(\d+)/, 1]&.to_i || ins.args[/\AR\d+\s+(\d+)/, 1]&.to_i || 1
+    count = ins.argc || ins.uint_operand || 1
     count = 15 if ins.args.include?('n=*')
     reg.between?(first, first + (2 * count) + 2)
   end

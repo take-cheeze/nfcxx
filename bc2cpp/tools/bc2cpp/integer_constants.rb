@@ -40,13 +40,13 @@ module IntegerConstants
       irep.instructions.each_with_index do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
-          name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.args[/::(\S+)/, 1]
+          name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.mcnst_name
           next unless name
 
-          src = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten.last
+          src = insn.regs.last
           defs[name] << (src && const_source_kind(irep, i, src, entries))
         when 'CLASS', 'MODULE'
-          nm = insn.args[/:(\S+)/, 1]
+          nm = insn.sym_token
           poisoned << nm if nm
         end
       end
@@ -162,10 +162,10 @@ module IntegerConstants
     irep.instructions.each do |insn|
       case insn.op
       when 'JMP', 'JMPUW'
-        addrs << insn.args.strip[/\d+/].to_i
+        addrs << insn.jmp_addr
       when 'JMPIF', 'JMPNOT', 'JMPNIL'
         # `"JMPIF\t\tR%d\t%03d"` -- register first, target last.
-        t = insn.args.sub(/;.*\z/m, '').strip.split(/\s+/).last
+        t = insn.tokens.last
         addrs << t.to_i if t
       end
     end
@@ -193,25 +193,25 @@ module IntegerConstants
         case insn.op
         when 'MOVE'
           # `regs[a] = regs[b]` -- keep looking for whatever wrote the source.
-          src = insn.args.scan(/R(\d+)/).flatten[1]
+          src = insn.regs[1]
           return nil unless src
 
           cur = src
         when 'GETCONST'
           # `"GETCONST\tR%d\t%s"` -- register first, bare name second.
-          n = insn.args.split(/\s+/)[1]
+          n = insn.tokens[1]
           return n && [:alias, n]
         when 'GETMCNST'
           # `"GETMCNST\tR%d\t(R%d)::%s"`: only the bare name after `::` is used; the
           # scope register is not modelled, so the proof must hold for every constant
           # of that name.
-          n = insn.args[/::(\S+)/, 1]
+          n = insn.mcnst_name
           return n && [:alias, n]
         when 'ADD', 'SUB', 'ADDI', 'SUBI'
-          args = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten
+          args = insn.regs
           left = const_source_kind(irep, j, cur, entries)
           right = if %w[ADDI SUBI].include?(insn.op)
-                    immediate = insn.args.sub(/;.*\z/m, '').split(/\s+/).last
+                    immediate = insn.tokens.last
                     return nil unless immediate&.match?(/\A-?\d+\z/)
 
                     immediate.to_i
@@ -249,10 +249,10 @@ module IntegerConstants
       irep.instructions.each_with_index do |insn, i|
         next unless insn.op == 'SETCONST' || insn.op == 'SETMCNST'
 
-        name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.args[/::(\S+)/, 1]
+        name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.mcnst_name
         next unless name && admitted.include?(name)
 
-        src = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten.last
+        src = insn.regs.last
         defs[name] << (src && literal_value_kind(irep, i, src, entries))
       end
     end
@@ -296,21 +296,21 @@ module IntegerConstants
 
         case insn.op
         when 'MOVE'
-          src = insn.args.scan(/R(\d+)/).flatten[1]
+          src = insn.regs[1]
           return nil unless src
 
           cur = src
         when 'GETCONST'
-          n = insn.args.split(/\s+/)[1]
+          n = insn.tokens[1]
           return n && [:alias, n]
         when 'GETMCNST'
-          n = insn.args[/::(\S+)/, 1]
+          n = insn.mcnst_name
           return n && [:alias, n]
         when 'ADD', 'SUB', 'ADDI', 'SUBI'
-          args = insn.args.sub(/;.*\z/m, '').scan(/R(\d+)/).flatten
+          args = insn.regs
           left = literal_value_kind(irep, j, cur, entries)
           right = if %w[ADDI SUBI].include?(insn.op)
-                    immediate = insn.args.sub(/;.*\z/m, '').split(/\s+/).last
+                    immediate = insn.tokens.last
                     return nil unless immediate&.match?(/\A-?\d+\z/)
 
                     immediate.to_i
@@ -335,7 +335,7 @@ module IntegerConstants
   # CodeGen instance). Only LOADI32 can leave the LOADI_FIXNUM_MIN/MAX margin, so
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
-    tok = insn.args.split(/\s+/)[1]
+    tok = insn.tokens[1]
     return nil unless tok&.match?(/\A-?\d+\z/)
 
     value = tok.to_i
@@ -412,9 +412,9 @@ module IntegerConstants
         when 'SETCONST'
           names << insn.args[/\A(\S+)/, 1]
         when 'SETMCNST'
-          names << insn.args[/::(\S+)/, 1]
+          names << insn.mcnst_name
         when 'CLASS', 'MODULE'
-          names << insn.args[/:(\S+)/, 1]
+          names << insn.sym_token
         end
       end
     end

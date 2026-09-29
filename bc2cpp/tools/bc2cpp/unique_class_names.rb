@@ -45,7 +45,7 @@ module UniqueClassNames
       irep.instructions.each do |insn|
         case insn.op
         when 'SETCONST' then assigned << insn.args[/\A(\S+)/, 1]
-        when 'SETMCNST' then assigned << insn.args[/::(\S+)/, 1]
+        when 'SETMCNST' then assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
           return {} if insn.args.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
@@ -109,7 +109,7 @@ module UniqueClassNames
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'CLASS', 'MODULE'
-          reg, sym = insn.args.split(/\s+/, 3)
+          reg, sym = insn.tokens
           name = sym.delete_prefix(':')
           outer = outer_writer(irep, idx, reg)
           full = case outer&.op
@@ -121,7 +121,7 @@ module UniqueClassNames
           seen << [label, idx]
           pending = [reg, full, idx]
         when 'EXEC'
-          reg, ref = insn.args.split(/\s+/, 3)
+          reg, ref = insn.tokens
           if pending && pending[0] == reg && pending[2] == idx - 1 && pending[1].is_a?(String)
             walk.call(irep.reps[ref[/I\[(\d+)\]/, 1].to_i], pending[1])
           end
@@ -134,7 +134,7 @@ module UniqueClassNames
       irep.instructions.each_with_index do |insn, idx|
         next unless %w[CLASS MODULE].include?(insn.op) && !seen.include?([label, idx])
 
-        paths[insn.args[/:(\S+)/, 1]] << :unknown
+        paths[insn.sym_token] << :unknown
       end
     end
     paths

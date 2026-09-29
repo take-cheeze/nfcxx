@@ -41,7 +41,7 @@ class CodeGen
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
     enter = irep.instructions.find { |i| i.op == 'ENTER' }
-    mand = enter ? enter.args.split(':').first.to_i : 0
+    mand = enter ? enter.enter_fields.first : 0
 
     # RUNTIME_DEF_DEVIRT_GUARD: cleared at the single entry point so no early
     # return can leak one method's blocked-name set into the next compile.
@@ -84,7 +84,7 @@ class CodeGen
     # unsupported. Either failure also clears `opt_jmp_targets`, the flag
     # `supported` trusts; otherwise a recognized optional shape with an
     # unrecognized keyword shape would compile with its keywords dropped.
-    enter_kw = enter ? enter.args.split(':').map { |f| f[/\d+/].to_i }[4] : 0
+    enter_kw = enter ? enter.enter_fields[4] : 0
     if (opt.positive? && !opt_jmp_targets) || (enter_kw.positive? && !kw_table)
       opt_jmp_targets = nil
       kw_table = nil
@@ -582,7 +582,7 @@ class CodeGen
     irep.instructions.each do |insn|
       case insn.op
       when 'JMP', 'JMPUW'
-        targets << insn.args.strip[/\d+/].to_i
+        targets << insn.jmp_addr
       when 'JMPNOT', 'JMPIF', 'JMPNIL'
         targets << jmp_target_after_reg(insn.args)
       end

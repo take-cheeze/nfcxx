@@ -474,7 +474,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # IvarLayout.trace_type's RESCUE arm): `b`, the SECOND token, is a write.
       # Checked before the `d == reg` filter, which only reads the first token and
       # would otherwise treat the instruction as not touching `reg`.
-      a, b = insn.args.scan(/R(\d+)/).flatten
+      a, b = insn.regs
       next unless [a, b].include?(reg)
       return nil if b == reg
 
@@ -492,7 +492,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
     when 'GETIDX', 'GETIDX0'
       return nil unless element_annotations && class_layout && registry
 
@@ -500,7 +500,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       recv_reg = if insn.op == 'GETIDX'
                    reg
                  else
-                   insn.args.scan(/R(\d+)/).flatten[1]
+                   insn.regs[1]
                  end
       return nil unless recv_reg
 
@@ -520,10 +520,10 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         prior = irep.instructions[j]
         next unless prior.reg == arg_reg
         if prior.op == 'MOVE'
-          arg_reg = prior.args.scan(/R(\d+)/).flatten[1]
+          arg_reg = prior.regs[1]
           break unless arg_reg
         else
-          upvar = prior.args.split(/\s+/) if prior.op == 'GETUPVAR'
+          upvar = prior.tokens if prior.op == 'GETUPVAR'
           captured_reg = prior.reg.to_i if upvar && upvar[2] == '0'
           arg_reg = nil
           break
@@ -549,7 +549,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
 
       # Same charset as compile_send's name extraction.
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       if name == 'new'
         resolving_new = true
       elsif name == 'dup' && registry && (registry['dup'] || []).all? { |md| md.owner == '<native>' }
@@ -635,7 +635,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       return nil if resolving_new || !path.empty?
       return nil unless ret_class_proof
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       return nil unless name
 
       # Explicit `return`: this is inside the downto block, so a bare expression
@@ -650,7 +650,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # no such site exists.
       return nil if resolving_new || !path.empty?
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       return nil unless name == 'new'
 
       resolving_new = true
@@ -658,13 +658,13 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     when 'GETIV'
       return nil if resolving_new || !path.empty?
 
-      ivar = insn.args[/@(\w+)/, 1]
+      ivar = insn.ivar
       klass = ivar_classes && ivar_classes[ivar]
       return known_owners ? resolve_owner_name(klass, { owner: owner, known_owners: known_owners }) : klass
     when 'GETUPVAR'
       return nil if resolving_new || !path.empty?
 
-      dst, _upvar, level = insn.args.split(/\s+/)
+      dst, _upvar, level = insn.tokens
       return nil unless level == '0'
 
       capture_class = capture_hints&.dig(irep.label, dst[/\d+/].to_i, :container_class)
@@ -692,7 +692,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # CONST_CONTAINER_SUPPORT: collecting a segment is harmless either way; what
       # happens with `path` is decided at GETCONST.
       # Not `$`-anchored: a trailing "; R6:name" comment would end up in the segment.
-      path.unshift(insn.args[/::(\w+)/, 1])
+      path.unshift(insn.mcnst_name)
     when 'GETCONST'
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
@@ -909,7 +909,7 @@ def assigned_from_new_send?(irep, idx, reg)
     next unless dst == current
 
     if insn.op == 'MOVE'
-      current = insn.args.scan(/R(\d+)/).flatten[1]
+      current = insn.regs[1]
       return false unless current
       next
     end
@@ -931,7 +931,7 @@ def container_phi_merge(irep, at, reg)
 
     case insn.op
     when 'MOVE'
-      src = insn.args.scan(/R(\d+)/).flatten[1]
+      src = insn.regs[1]
       return nil unless src
 
       reg = src
@@ -959,7 +959,7 @@ def nil_literal_write?(irep, idx, reg)
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
     when 'LOADNIL'
       return true
     else
@@ -983,9 +983,9 @@ def literal_container_class(irep, idx, reg)
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
     when 'SEND0'
-      return nil unless insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'freeze'
+      return nil unless insn.sym == 'freeze'
     when 'ARRAY', 'ARRAY2'
       return 'Array'
     when 'HASH'
@@ -1019,14 +1019,14 @@ def trace_eqq_literal_receiver(irep, idx, reg)
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
     when 'LOADSYM'
       # Same extraction as LOADSYM's codegen (stops before a local-name comment).
-      name = insn.args[/:(\S+)/, 1]
+      name = insn.sym_token
       return name ? { type: :symbol, name: name } : nil
     when /^LOADI/
       # Same two literal shapes as LOADI's codegen.
-      lit = insn.args[/\(([^)]+)\)/, 1] || insn.args[/^R\d+\s+(-?\d+)/, 1]
+      lit = insn.args[/\(([^)]+)\)/, 1] || insn.imm_operand
       return lit ? { type: :fixnum, value: lit } : nil
     else
       # Anything else writing `reg` means the receiver is not a literal.
@@ -1050,10 +1050,10 @@ def trace_float_literal_receiver(irep, idx, reg)
 
     case insn.op
     when 'MOVE'
-      reg = insn.args.scan(/R(\d+)/).flatten[1]
+      reg = insn.regs[1]
       return false unless reg
     when 'LOADL'
-      pool_idx = insn.args[/L\[(\d+)\]/, 1]
+      pool_idx = insn.pool_index
       entry = pool_idx && irep.pool[pool_idx.to_i]
       return entry.is_a?(Hash) && entry[:type] == :float
     else

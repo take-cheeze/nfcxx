@@ -3,7 +3,7 @@
 # CodeGen: compile_send and const/owner caches.
 
 class CodeGen
-  def compile_send(args, self_implicit:, irep: nil, idx: nil, owner_def: nil,
+  def compile_send(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil,
                    call_receiver: nil, call_arguments: nil, trace_idx: nil, trace_receiver_reg: nil,
                    trace_reg_offset: 0, typed_fallback: nil)
     # ELEMENT_CLASS_SUPPORT: consume the element hint before anything else
@@ -11,13 +11,13 @@ class CodeGen
     # call site can read it.
     elem_class_hint = @elem_class_hint
     @elem_class_hint = nil
-    d = args[/^R(\d+)/, 1]
+    d = insn.reg
     # The method-name charset must include `?`, `!` and every operator character
     # (`&`, `|`, `^`, `~`, `%`, `@` for `-@`/`+@`). A missing character truncates
     # the name (`key?` -> "key") or yields "" (`flags & x` -> `mrb_funcall(M, r6,
     # "", ...)`): the C++ compiles and links, then raises NoMethodError at runtime,
     # which no `#error` check catches. Keep every copy of this charset in sync.
-    name = args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    name = insn.sym
     # Parse `n=` including the other print_args shapes (src/codedump.c):
     #   - "n=3|nk=1": keyword pairs, which OP_SEND packs into a Hash at runtime;
     #   - "n=*": a splat (CALL_MAXARGS) with no fixed register list.
@@ -26,27 +26,28 @@ class CodeGen
     # while compiling cleanly. Such sites now go to the keyword/splat paths or get
     # `#error` (SKIP_UNSUPPORTED keeps them interpreted). SEND0/SSEND0 print no
     # `n=` (vm.c OP_SEND0 has c=0), so nil still means n=0.
-    n_match = args.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
-    if n_match && (n_match[1] == '*' || n_match[2])
+    n_spec = insn.n_spec
+    nk_spec = insn.nk_spec
+    if n_spec == '*' || nk_spec
       # Keyword call site (nk > 0, no splat): try compile_keyword_send before
       # `#error`.
-      if n_match[1] != '*' && n_match[2] != '*' && irep && !idx.nil?
-        kw_result = compile_keyword_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
+      if n_spec != '*' && nk_spec != '*' && irep && !idx.nil?
+        kw_result = compile_keyword_send(self_implicit: self_implicit, irep: irep, idx: idx,
                                          owner_def: owner_def, name: name, d: d,
-                                         n: n_match[1].to_i, nk: n_match[2].to_i)
+                                         n: n_spec.to_i, nk: nk_spec.to_i)
         return kw_result if kw_result
       end
       # SPLAT_UNROLL_SUPPORT: try compile_splat_send (literal Array/Hash) before
       # `#error`; a splatted variable or expression still errors.
       if irep && !idx.nil?
-        splat_result = compile_splat_send(args, self_implicit: self_implicit, irep: irep, idx: idx,
+        splat_result = compile_splat_send(insn, self_implicit: self_implicit, irep: irep, idx: idx,
                                           name: name, d: d, owner_def: owner_def)
         return splat_result if splat_result
       end
-      return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{n_match[0]}) -- not in this prototype's supported subset\n"
+      return "  #error SEND/SSEND :#{name} has a splat and/or keyword argument list (#{insn.argc_text}) -- not in this prototype's supported subset\n"
     end
 
-    n = n_match ? n_match[1].to_i : 0
+    n = n_spec.to_i
     recv = call_receiver || (self_implicit ? 'self' : "r#{d}")
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_proof_idx = idx || trace_idx
@@ -54,7 +55,7 @@ class CodeGen
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.instructions&.find { |insn| insn.op == 'ENTER' }
-    drawing_mand = drawing_enter ? drawing_enter.args.split(':').first.to_i : 0
+    drawing_mand = drawing_enter ? drawing_enter.enter_fields.first : 0
     drawing_arg_classes = owner_def && @class_annotations[irep&.label]&.args
     drawing_ivar_classes = owner_def && @class_layout[owner_def.owner]
 
@@ -1249,7 +1250,7 @@ class CodeGen
       proof_idx = idx || trace_idx
       proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
-      cur_mand = cur_enter ? cur_enter.args.split(':').first.to_i : 0
+      cur_mand = cur_enter ? cur_enter.enter_fields.first : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
       ivar_classes = owner_def && @class_layout[owner_def.owner]
       # CHAINED_ACCESSOR_SUPPORT: passing @class_layout/@registry lets TYPED resolve

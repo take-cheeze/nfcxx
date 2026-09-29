@@ -13,11 +13,11 @@ class CallSiteIndex
       irep.instructions.each_with_index do |insn, idx|
         next unless SEND_OPS.include?(insn.op)
 
-        name = insn.args[NAME_RE, 1]
+        name = insn.sym
         next unless name
 
         dest = insn.reg.to_i
-        argc = insn.args[/n=(\d+)/, 1].to_i
+        argc = insn.argc.to_i
         by_name[name] << [irep, idx, dest, argc]
       end
     end

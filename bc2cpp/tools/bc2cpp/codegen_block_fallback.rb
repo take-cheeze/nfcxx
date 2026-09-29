@@ -52,7 +52,7 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
 
-      _reg, upvar_idx, level = insn.args.split(/\s+/)
+      _reg, upvar_idx, level = insn.tokens
       return nil unless upvar_idx =~ /\A\d+\z/ && level =~ /\A\d+\z/
 
       needs << [level.to_i, upvar_idx.to_i]
@@ -135,7 +135,7 @@ class CodeGen
       insn = irep.instructions[i]
       case insn.op
       when 'MOVE'
-        d, s = insn.args.scan(/R(\d+)/).flatten
+        d, s = insn.regs
         next unless d == reg
 
         reg = s
@@ -143,7 +143,7 @@ class CodeGen
         d = insn.reg
         next unless d == reg
 
-        return insn.args.split(/\s+/)[1] == 'Fiber'
+        return insn.tokens[1] == 'Fiber'
       else
         d = insn.reg
         return false if d == reg
@@ -164,7 +164,7 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SEND SEND0].include?(insn.op)
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       next unless name == 'yield'
 
       dest_reg = insn.reg
@@ -224,12 +224,12 @@ class CodeGen
 
         paired = irep.instructions[idx + 1]
         next unless paired && paired.op == 'SENDB'
-        next unless paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'new'
+        next unless paired.sym == 'new'
 
         dest_reg = paired.reg
         next unless dest_reg && fiber_const_receiver?(irep, idx, dest_reg)
 
-        block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+        block_irep_idx = insn.block_index
         next unless block_irep_idx
 
         block_label = irep.reps[block_irep_idx.to_i]
@@ -275,7 +275,7 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless %w[SSEND SSEND0 SSENDB].include?(insn.op)
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       names << name if name
     end
     (irep.reps || []).each do |child_label|
@@ -302,20 +302,20 @@ class CodeGen
       next unless n_match
 
       n = n_match[1].to_i
-      dest, _rest = paired.args.split(/\s+/, 2)
+      dest, _rest = paired.tokens
       dest_reg = dest[/^R(\d+)/, 1]
       block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
       # :reduce n=1`), so the block is at dest + n + 1.
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s
 
-      name = paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = paired.sym
       next unless name
 
       # FIBER_NEW_BLOCK_UNSAFE_SUPPORT: never admit `Fiber.new { ... }`.
       next if paired.op == 'SENDB' && name == 'new' && fiber_const_receiver?(irep, idx, dest_reg)
 
-      block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
+      block_irep_idx = insn.block_index
       next unless block_irep_idx
 
       block_label = irep.reps[block_irep_idx.to_i]
@@ -762,11 +762,11 @@ class CodeGen
       n_match = insn.args.match(/n=(\d+|\*)(?:\s|$)/)
       next unless n_match
 
-      dest, = insn.args.split(/\s+/, 2)
+      dest, = insn.tokens
       dest_reg = dest[/^R(\d+)/, 1]
       next unless dest_reg
 
-      name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+      name = insn.sym
       next unless name
 
       if n_match[1] == '*'

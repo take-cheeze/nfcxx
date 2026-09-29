@@ -76,7 +76,7 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
 
     case insn.op
     when 'MOVE'
-      src = insn.args.scan(/R(\d+)/).flatten[1]
+      src = insn.regs[1]
       return nil unless src
 
       reg = src
@@ -87,7 +87,7 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       # for every X, so it must not poison (nearly every array ivar starts as
       # `@x = []`). VACUOUS is skipped by the join, so an ivar whose only site is
       # `[]` gets no entry.
-      n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+      n = insn.uint_operand
       return nil if n.nil?
       return ArrayElementLayout::VACUOUS if n.zero?
 
@@ -97,7 +97,7 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
 
       return classes.first
     when 'GETIV'
-      ivar = insn.args[/@(\w+)/, 1]
+      ivar = insn.ivar
       return nil unless ivar
 
       return ivar_element_hint(ctx[:owner], ivar, ctx)
@@ -131,7 +131,7 @@ def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
 
     case insn.op
     when 'MOVE'
-      src = insn.args.scan(/R(\d+)/).flatten[1]
+      src = insn.regs[1]
       return nil unless src
 
       reg = src
@@ -140,7 +140,7 @@ def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
       # "HASH R2 2": N key/value PAIRS from Rd (vm.c OP_HASH sets regs[i] =>
       # regs[i+1]), so values are at odd offsets Rd+1, Rd+3, ... An empty literal is
       # VACUOUS, as in array_element_source_scan.
-      n = insn.args[/^R\d+\s+(\d+)/, 1]&.to_i
+      n = insn.uint_operand
       return nil if n.nil?
       return HashElementLayout::VACUOUS if n.zero?
 
@@ -150,7 +150,7 @@ def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
 
       return classes.first
     when 'GETIV'
-      ivar = insn.args[/@(\w+)/, 1]
+      ivar = insn.ivar
       return nil unless ivar
 
       return ivar_hash_element_hint(ctx[:owner], ivar, ctx)
@@ -164,12 +164,12 @@ end
 # ELEMENT_CLASS_SUPPORT: the SEND arm of the scan above.
 def send_element_class(irep, i, reg, insn, ctx, depth)
   # Same charset as compile_send's own name extraction (see its comment).
-  name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+  name = insn.sym
   return nil unless name
 
   block_carrying = %w[SENDB SSENDB].include?(insn.op)
   # SEND0/SSEND0 print no "n=": zero arguments.
-  argc = insn.args[/n=(\d+)/, 1]&.to_i || 0
+  argc = insn.argc || 0
   self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
 
   # A `-> Array<Klass>` annotation is trusted only when its irep is the only
@@ -252,7 +252,7 @@ def adjacent_block_irep(irep, i, recv_reg, ctx)
   return nil unless block_insn && block_insn.op == 'BLOCK'
   return nil unless block_insn.reg == (recv_reg.to_i + 1).to_s
 
-  k = block_insn.args[/I\[(\d+)\]/, 1]
+  k = block_insn.block_index
   return nil unless k
 
   label = irep.reps[k.to_i]
@@ -279,7 +279,7 @@ def filter_map_block_return_class(block_irep, ctx, depth, input_class)
   block_irep.instructions.each_with_index do |insn, i|
     case insn.op
     when 'RETURN'
-      reg = insn.args.strip.empty? ? '0' : insn.reg
+      reg = insn.no_operands? ? '0' : insn.reg
       previous = i.positive? ? block_irep.instructions[i - 1] : nil
       if previous && %w[LOADNIL LOADFALSE].include?(previous.op) && previous.reg == reg
         next
@@ -303,7 +303,7 @@ end
 
 def block_mandatory_param_source?(irep, idx, reg)
   enter = irep.instructions.find { |insn| insn.op == 'ENTER' }
-  mandatory = enter ? enter.args.split(':').first.to_i : 0
+  mandatory = enter ? enter.enter_fields.first : 0
   return false if mandatory.zero?
 
   current = reg
@@ -312,7 +312,7 @@ def block_mandatory_param_source?(irep, idx, reg)
     next unless insn.reg == current
     return false unless insn.op == 'MOVE'
 
-    current = insn.args.scan(/R(\d+)/).flatten[1]
+    current = insn.regs[1]
     return false unless current
   end
   current.to_i.between?(1, mandatory)
@@ -353,7 +353,7 @@ end
 # ELEMENT_CLASS_SUPPORT: mandatory arity from ENTER, 0 if none.
 def mand_of(ireps, label)
   enter = ireps.fetch(label).instructions.find { |i| i.op == 'ENTER' }
-  enter ? enter.args.split(':').first.to_i : 0
+  enter ? enter.enter_fields.first : 0
 end
 
 # ELEMENT_CLASS_SUPPORT: every irep reachable through `reps`; `seen` guards
@@ -386,7 +386,7 @@ def irep_return_class(irep, ctx, depth)
   irep.instructions.each_with_index do |insn, i|
     case insn.op
     when 'RETURN'
-      r = insn.args.strip.empty? ? '0' : insn.reg
+      r = insn.no_operands? ? '0' : insn.reg
       cls = element_value_class(irep, i, r, ctx, depth)
       return nil unless cls
       return nil if found && found != cls
@@ -524,7 +524,7 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     next unless insn.reg == cur
 
     if insn.op == 'MOVE'
-      src = insn.args.scan(/R(\d+)/).flatten[1]
+      src = insn.regs[1]
       return nil unless src
 
       cur = src
@@ -553,7 +553,7 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     #   GETIDX0 R7 R4[0]     -- R[a] = R[b][0]:      receiver is R4.
     #   AREF    R2 R6 0      -- R[a] = R[b][c]:      receiver is R6.
     if %w[GETIDX GETIDX0 AREF].include?(insn.op)
-      recv = insn.op == 'GETIDX' ? cur : insn.args.scan(/R(\d+)/).flatten[1]
+      recv = insn.op == 'GETIDX' ? cur : insn.regs[1]
       return nil unless recv
 
       hit = array_element_source_scan(irep, i, recv, ctx, depth + 1)
@@ -568,13 +568,13 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     end
     return nil unless %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB].include?(insn.op)
 
-    name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+    name = insn.sym
     return nil unless name
 
     annotated = ctx[:annotated_ret_class]&.call(name)
     return annotated if annotated
 
-    argc = insn.args[/n=(\d+)/, 1]&.to_i || 0
+    argc = insn.argc || 0
     self_recv = %w[SSEND SSEND0 SSENDB].include?(insn.op)
     indexer =
       (ARRAY_ELEMENT_INDEXERS_NEEDS_ARG.include?(name) && argc == 1) ||
@@ -673,7 +673,7 @@ class ArrayElementLayout
               found = nil
               ivar = nil
               if insn.op == 'SETIV'
-                ivar = insn.args[/@(\w+)/, 1]
+                ivar = insn.ivar
                 next unless array_ivars.include?(ivar)
 
                 src_reg = insn.args[/R(\d+)/, 1]
@@ -684,7 +684,7 @@ class ArrayElementLayout
               # SSEND/SSENDB excluded: their receiver is self, and the `^R` register is the
               # destination.
               elsif %w[SEND SEND0 SENDB].include?(insn.op)
-                name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+                name = insn.sym
                 next unless name && ARRAY_ELEMENT_WRITERS.include?(name)
 
                 recv = insn.reg
@@ -695,7 +695,7 @@ class ArrayElementLayout
               elsif insn.op == 'SETIDX'
                 # ELEMENT_CLASS_SUPPORT: `@a[0] = x` is OP_SETIDX, not SEND :[]=.
                 # "SETIDX R4 (R5) (R6)" is `R[a][R[a+1]] = R[a+2]`: receiver R4, element R6.
-                recv, _i_reg, val = insn.args.scan(/R(\d+)/).flatten
+                recv, _i_reg, val = insn.regs
                 next unless recv && val
 
                 ivar = mutated_ivar_target(irep, idx, recv)
@@ -787,10 +787,10 @@ def mutated_ivar_target(irep, idx, reg)
     next if insn.op == 'BLOCK'
     next unless insn.reg == reg
 
-    return insn.args[/@(\w+)/, 1] if insn.op == 'GETIV'
+    return insn.ivar if insn.op == 'GETIV'
 
     if insn.op == 'MOVE'
-      src = insn.args.scan(/R(\d+)/).flatten[1]
+      src = insn.regs[1]
       return nil unless src
 
       reg = src
@@ -902,7 +902,7 @@ class HashElementLayout
               found = nil
               ivar = nil
               if insn.op == 'SETIV'
-                ivar = insn.args[/@(\w+)/, 1]
+                ivar = insn.ivar
                 next unless hash_ivars.include?(ivar)
 
                 src_reg = insn.args[/R(\d+)/, 1]
@@ -911,7 +911,7 @@ class HashElementLayout
                 next if found.nil? && nil_literal_write?(irep, idx, src_reg)
               # SSEND/SSENDB excluded, as in ArrayElementLayout.analyze.
               elsif %w[SEND SEND0 SENDB].include?(insn.op)
-                name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
+                name = insn.sym
                 next unless name && HASH_ELEMENT_WRITERS.include?(name)
 
                 recv = insn.reg
@@ -922,7 +922,7 @@ class HashElementLayout
               elsif insn.op == 'SETIDX'
                 # `h[k] = v` is OP_SETIDX: "SETIDX R4 (R5) (R6)", receiver R4, value R6 (the
                 # key is not read).
-                recv, _i_reg, val = insn.args.scan(/R(\d+)/).flatten
+                recv, _i_reg, val = insn.regs
                 next unless recv && val
 
                 ivar = mutated_ivar_target(irep, idx, recv)
