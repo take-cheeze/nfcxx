@@ -290,6 +290,27 @@ class CodeGen
     pairs.sort.filter_map { |owner, ivar, which| emit_ivar_accessor_pair(owner, ivar, which) }
   end
 
+  RDATA_IVAR_HASH_EMPTY = 0xFFFF
+
+  # RDATA_IVAR_HASH: open-addressing index (FNV-1a 32 of the "@name", linear
+  # probing, half full) over a descriptor, so rdata_ivar_slot in
+  # patches/mruby-rdata-ivar-slots.patch stops scanning every slot per access.
+  def rdata_ivar_hash(names)
+    raise "too many RData ivar slots (#{names.size})" if names.size >= RDATA_IVAR_HASH_EMPTY
+
+    size = 2
+    size <<= 1 while size < names.size * 2
+    table = Array.new(size, RDATA_IVAR_HASH_EMPTY)
+    names.each_with_index do |name, index|
+      hash = 2_166_136_261
+      name.each_byte { |byte| hash = ((hash ^ byte) * 16_777_619) & 0xffff_ffff }
+      pos = hash & (size - 1)
+      pos = (pos + 1) & (size - 1) until table[pos] == RDATA_IVAR_HASH_EMPTY
+      table[pos] = index
+    end
+    table
+  end
+
   # One mrb_value slot + mrb_data_type marker per statically named ivar. The
   # marker lets mruby's normal ivar APIs and GC find slots; dynamic names remain
   # in RData's ordinary iv_tbl.
@@ -339,9 +360,16 @@ class CodeGen
       end
       out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
       out << "};\n"
+      hash_fields = 'nullptr, 0'
+      unless slots.empty?
+        table = rdata_ivar_hash(slots.map { |name| "@#{name}" })
+        out << "static const uint16_t #{sanitize(owner)}_ivar_hash[] = { #{table.join(', ')} };\n"
+        hash_fields = "#{sanitize(owner)}_ivar_hash, #{table.size - 1}"
+      end
       out << "static const mrb_data_type #{type_var(owner)} = " \
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \
-             "#{sanitize(owner)}_ivar_slots, #{slots.size}, sizeof(#{struct_name(owner)}) };\n\n"
+             "#{sanitize(owner)}_ivar_slots, #{slots.size}, sizeof(#{struct_name(owner)}), " \
+             "#{hash_fields} };\n\n"
     end
     out
   end
