@@ -92,7 +92,8 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
   # receiver write, so BLOCK is skipped. CORE_ARRAY_CHAIN: MOVE is followed to the
   # register actually written (`regs[a] = regs[b]`, vm.c OP_MOVE); skipping it would
   # let the scan reach an older, overwritten result on a reused register.
-  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true) do |pin|
+  # JOIN_DOMINANCE: the source must be the only value the register can hold.
+  irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |pin|
     next nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
 
     called = pin.sym

@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require 'set'
+require_relative 'bytecode_ir'
+
 # Step 6b: which statically named ivars use compiler-managed RData slots.
 
 # Opcodes that print a READ-only register as their first `R<n>` operand.
@@ -210,7 +213,8 @@ class IvarLayout
   # embeddable (C_TYPE has no entry), so `@x = nil` alone still leaves it in
   # iv_tbl. Everything else that disagrees still poisons.
   def self.join(a, b)
-    return b if a.nil?                       # no fact yet
+    return b if a.nil? || a == BOTTOM        # no fact yet
+    return a if b == BOTTOM
     return UNKNOWN if a == UNKNOWN || b.nil?
     return UNKNOWN if b == UNKNOWN
     return a if a == b                      # the ordinary agreement
@@ -272,10 +276,67 @@ class IvarLayout
     NULLABLE_PAIRS.any? { |left, right| (a == left && b == right) || (a == right && b == left) }
   end
 
-  # Walk back from `idx` for the last writer of `reg`, following MOVEs, until a
-  # type-determining opcode or the top of the body (an incoming argument).
+  # A hop whose write does not dominate its read (ADR 0261): join every reaching definition.
+  JOIN_BREAK = :join_break
+
+  # A query already being answered (a loop-carried value): the identity of the
+  # join, the least fixed point of `x = join(init, x + 1)`. Never a final answer.
+  BOTTOM = :bottom
+
+  TRACE_STATE = { depth: 0, active: Set.new }
+
+  # The type of `reg` at `idx`: the nearest writer's when it dominates the read,
+  # else the join over every reaching definition, UNKNOWN when they cannot be
+  # accounted for.
   def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil,
                        registry = nil, integer_constants = nil, fixnum_return_names = nil)
+    args = [known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants,
+            fixnum_return_names]
+    TRACE_STATE[:depth] += 1
+    begin
+      type = trace_type_joined(irep, idx, reg, args)
+    ensure
+      TRACE_STATE[:depth] -= 1
+    end
+    type == BOTTOM && TRACE_STATE[:depth].zero? ? UNKNOWN : type
+  end
+
+  def self.trace_type_joined(irep, idx, reg, args)
+    walked = trace_type_walk(irep, idx, reg, *args)
+    return walked unless walked == JOIN_BREAK
+
+    key = [irep.label, idx, reg.to_s]
+    return BOTTOM unless TRACE_STATE[:active].add?(key)
+
+    begin
+      defs = BytecodeIR.reaching_definitions(irep, idx, reg.to_s)
+      return UNKNOWN if defs.nil? || defs.empty?
+
+      defs.map do |d|
+        # An entry definition has no write to walk back to: index 0 reaches the top of the body.
+        trace_type_walk(irep, d.entry? ? 0 : d.index + 1, d.reg, *args, trusted: true)
+      end.reduce { |a, b| join(a, b) }
+    ensure
+      TRACE_STATE[:active].delete(key)
+    end
+  end
+
+  # ADD/SUB/MUL are Fixnum only when both operands are; a cyclic one is BOTTOM.
+  def self.fixnum_operands(left, right)
+    fix = ->(t) { t == :fixnum || t == BOTTOM }
+    return nil unless fix.call(left) && fix.call(right)
+
+    left == BOTTOM && right == BOTTOM ? BOTTOM : :fixnum
+  end
+
+  # Walk back from `idx` for the last writer of `reg`, following MOVEs, until a
+  # type-determining opcode or the top of the body (an incoming argument);
+  # JOIN_BREAK when a hop does not dominate its read. `trusted`: the walk starts
+  # at a reaching definition, whose first hop needs no proof.
+  def self.trace_type_walk(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil,
+                            annotations = nil, registry = nil, integer_constants = nil, fixnum_return_names = nil,
+                            trusted: false)
+    use = idx
     # RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
     # write lands on the SECOND register. `a` is a read (skipped); `b` is a real
     # write and must stop the trace like the generic `else`.
@@ -299,9 +360,18 @@ class IvarLayout
       end
       UNKNOWN
     end
+    entry_checked = lambda do |last|
+      type = at_entry.call(last)
+      type == UNKNOWN || trusted || BytecodeIR.write_dominates?(irep, BytecodeIR::ENTRY, use, last) ? type : JOIN_BREAK
+    end
     irep.walk_writers(idx - 1, reg, skip_ops: TRACE_TYPE_SKIP_OPS, barrier: rescue_write, barrier_result: UNKNOWN,
-                                    follow_moves: true, exhausted: at_entry) do |insn, i, cur|
+                                    exhausted: entry_checked) do |insn, i, cur|
+      return JOIN_BREAK unless (trusted && i == idx - 1) || BytecodeIR.write_dominates?(irep, i, use, cur)
+
+      use = i
       case insn.op
+      when 'MOVE'
+        next IrepScans.follow(insn.regs[1])
       when /^LOADI/
         next :fixnum
       when 'LOADSYM'
@@ -355,7 +425,8 @@ class IvarLayout
         if s
           left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          next :fixnum if left == :fixnum && right == :fixnum
+          fixnum = fixnum_operands(left, right)
+          next fixnum if fixnum
         end
         next UNKNOWN
       when 'SUB', 'MUL'
@@ -368,7 +439,8 @@ class IvarLayout
         if s
           left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          next :fixnum if left == :fixnum && right == :fixnum
+          fixnum = fixnum_operands(left, right)
+          next fixnum if fixnum
         end
         next UNKNOWN
       when 'SUBI'
@@ -393,7 +465,8 @@ class IvarLayout
           arg_reg = (cur.to_i + 1).to_s
           left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          next :fixnum if left == :fixnum && right == :fixnum
+          fixnum = fixnum_operands(left, right)
+          next fixnum if fixnum
         end
 
         # FIXNUM_RETURN_IVAR_HINT: a send of a name in FIXNUM_RETURN_PROOF's set

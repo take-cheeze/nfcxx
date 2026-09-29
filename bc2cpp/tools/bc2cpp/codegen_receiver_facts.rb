@@ -102,7 +102,8 @@ class CodeGen
   def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
     return nil unless stable_standard_constructor_class?(expected_class)
 
-    irep.walk_writers(idx - 1, dest_reg, follow_moves: true) do |insn|
+    # JOIN_DOMINANCE: unguarded, so the `new` must be the only value the register can hold.
+    irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, follow_moves: true) do |insn|
       # The known-class trace already resolved this SEND's constant path;
       # stability above proves that path still denotes the same class.
       expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
@@ -147,7 +148,7 @@ class CodeGen
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg)
-    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT JMPNIL JMPUW])
     return nil unless branch_edges
 
     ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP,
@@ -206,7 +207,7 @@ class CodeGen
       current = pending.pop
       next unless seen.add?(current.label)
 
-      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) || insn.mentions_reg?(0) }
+      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) || insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
 
       pending.concat(current.reps.map { |label| @ireps.fetch(label) })
     end

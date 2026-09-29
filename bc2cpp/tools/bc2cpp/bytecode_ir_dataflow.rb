@@ -107,6 +107,68 @@ module BytecodeIR
       defs.sort_by { |d| [d.index, d.reg.to_i] }
     end
 
+    # JOIN_DOMINANCE (ADR 0261): does the write at +w+ (ENTRY: the method's
+    # incoming value) supply +reg+ at +use+ on every path? True when no edge,
+    # jump or exception, enters (w, use] from outside [w, use] and every op
+    # stepped over is on the audited write list (ADR 0198's region test).
+    # False when an edge set is incomplete or a nested block writes +reg+.
+    def write_dominates?(w, use, reg, opaque_regs: nil)
+      return false if opaque_regs&.include?(reg.to_s)
+      return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
+
+      preds = instruction_predecessors(include_handlers: true) or return false
+      low = [w, 0].max
+      ((w + 1)..use).each do |k|
+        insn = @instructions[k].source
+        return false unless k == use || dataflow_steps_over?(insn)
+
+        preds[k].each do |p|
+          return false if p == ENTRY ? w != ENTRY : (p < low || p > use)
+        end
+      end
+      true
+    end
+
+    # Ops that leave the frame.
+    FRAME_EXIT_OPS = Set['RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
+    # Ops that can hand `self` to code that reads its ivars.
+    SELF_EXPOSING_OPS = Set['LOADSELF', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLOCK', 'LAMBDA', 'METHOD', 'EXEC', 'SCLASS'].freeze
+
+    # INIT_ASSIGNED (ADR 0261): on every path, is `@ivar` assigned before it is
+    # read, before the frame exits and before `self` can reach other code? A
+    # zeroed typed slot would otherwise read 0/false where the ivar reads nil.
+    # A forward must-analysis over normal and handler edges.
+    def ivar_assigned_before_exposure?(ivar)
+      preds = instruction_predecessors(include_handlers: true) or return false
+
+      count = @instructions.length
+      out = Array.new(count, true)
+      changed = true
+      while changed
+        changed = false
+        @instructions.each do |instruction|
+          i = instruction.index
+          reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
+          assigned = reached.empty? ? true : reached.all?
+          assigned ||= instruction.source.op == 'SETIV' && instruction.source.ivar == ivar
+          next if out[i] == assigned
+
+          out[i] = assigned
+          changed = true
+        end
+      end
+      @instructions.all? do |instruction|
+        i = instruction.index
+        insn = instruction.source
+        reached = preds[i].map { |p| p == ENTRY ? false : out[p] }
+        assigned = reached.empty? || reached.all?
+        observes = FRAME_EXIT_OPS.include?(insn.op) || SELF_EXPOSING_OPS.include?(insn.op) ||
+                   (insn.op == 'GETIV' && insn.ivar == ivar) ||
+                   (!%w[GETIV SETIV].include?(insn.op) && insn.regs.include?('0'))
+        assigned || !observes
+      end
+    end
+
     # True when +index+'s value of +reg+ can only come from definitions for
     # which the block answers true (nil when the query refuses, so callers
     # cannot mistake a refusal for "no").
@@ -116,6 +178,12 @@ module BytecodeIR
     end
 
     private
+
+    # On the audited list of ops that write at most their leading register.
+    def dataflow_steps_over?(insn)
+      op = insn.op
+      READS_LEADING_REG_OPS.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+    end
 
     # :pass (writes nothing relevant), :define (writes +reg+) or :refuse.
     def dataflow_effect(insn, reg)
@@ -175,5 +243,10 @@ module BytecodeIR
   # own nested-block writes accounted for. See Program#reaching_definitions.
   def self.reaching_definitions(irep, index, reg, **options)
     self.for(irep).reaching_definitions(index, reg, opaque_regs: own_upvar_written_regs(irep), **options)
+  end
+
+  # Program#write_dominates? with the irep's own nested-block writes accounted for.
+  def self.write_dominates?(irep, w, use, reg)
+    self.for(irep).write_dominates?(w, use, reg, opaque_regs: own_upvar_written_regs(irep))
   end
 end

@@ -52,6 +52,7 @@ require_relative 'codegen_ivar_poly'
 require_relative 'codegen_native_send'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_core_direct'
+require_relative 'codegen_core_methods'
 require_relative 'codegen_receiver_facts'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
@@ -370,6 +371,9 @@ if $PROGRAM_NAME == __FILE__
   # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
   # run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  # CORE_MIXINS: the modelled core methods this build's core sources still match.
+  CodeGen.core_methods = CoreMixins.verified(foreign_ruby_srcs, native_name_sources)
+  warn "== core Ruby methods verified against the build's sources (CORE_MIXINS): #{CodeGen.core_methods.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
                                     Set.new, foreign_methods, nil, nil,

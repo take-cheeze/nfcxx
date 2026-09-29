@@ -457,11 +457,50 @@ end
 # reaching the read (BytecodeIR.reaching_definitions) and accepted only when
 # each one traces to the same class. Never applied with `dominated:`: RETURN
 # proofs run their own reaching-definition walk (return_value_sources).
-def trace_new_target(irep, idx, reg, *rest, dominated: nil, **opts)
-  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, **opts)
-  return klass if klass || dominated
+def trace_new_target(irep, idx, reg, *rest, dominated: nil, guarded: false, **opts)
+  return trace_new_target_walk(irep, idx, reg, *rest, dominated: dominated, **opts) if dominated && !dominated.is_a?(JoinDominance)
+
+  # A guarded consumer re-checks the class at run time; a join costs it a compare.
+  if guarded || JoinDominance.guarded?
+    return JoinDominance.guarded do
+      klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: nil, **opts)
+      klass || trace_new_target_reaching(irep, idx, reg, rest, opts)
+    end
+  end
+
+  klass = trace_new_target_walk(irep, idx, reg, *rest, dominated: JoinDominance.new(irep), **opts)
+  return klass if klass
 
   trace_new_target_reaching(irep, idx, reg, rest, opts)
+end
+
+# JOIN_DOMINANCE (ADR 0261): every hop of the walk must dominate the read it
+# feeds; a hop that does not ends the walk and trace_new_target_reaching then
+# accepts only a unanimous answer over the reaching definitions.
+class JoinDominance
+  @guarded_depth = 0
+
+  class << self
+    # Runs the block for a consumer that guards the fact at run time.
+    def guarded
+      @guarded_depth += 1
+      yield
+    ensure
+      @guarded_depth -= 1
+    end
+
+    def guarded?
+      @guarded_depth.positive?
+    end
+  end
+
+  def initialize(irep)
+    @irep = irep
+  end
+
+  def call(w_idx, use_idx, reg)
+    BytecodeIR.write_dominates?(@irep, w_idx, use_idx, reg.to_s)
+  end
 end
 
 # Queries being answered, so a value that flows into its own definition (a
@@ -926,21 +965,26 @@ def container_phi_merge(irep, at, reg)
   return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
-  case irep.source_writer(at - 1, reg)&.op
-  when 'LOADNIL'
-    lit_class
-  when 'ARRAY', 'ARRAY2'
-    'Array' if lit_class == 'Array'
-  when 'HASH'
-    'Hash' if lit_class == 'Hash'
+  # Every definition that can reach the branch, not the textually nearest one.
+  defs = BytecodeIR.reaching_definitions(irep, at, reg)
+  return nil if defs.nil? || defs.empty? || defs.any?(&:entry?)
+
+  agree = defs.all? do |d|
+    case irep.instructions[d.index].op
+    when 'LOADNIL' then true
+    when 'ARRAY', 'ARRAY2' then lit_class == 'Array'
+    when 'HASH' then lit_class == 'Hash'
+    else false
+    end
   end
+  lit_class if agree
 end
 
 # NIL_TOLERANT_JOIN predicate: true only when `reg` at `idx` was just loaded by
 # LOADNIL (following MOVEs). A false negative only falls back to the ordinary
 # join; a false positive would drop real evidence.
 def nil_literal_write?(irep, idx, reg)
-  irep.source_writer(idx - 1, reg)&.op == 'LOADNIL'
+  irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) { |insn| insn.op == 'LOADNIL' } == true
 end
 
 # CONST_CONTAINER_SUPPORT predicate: `reg` at `idx` is a fresh
