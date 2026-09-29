@@ -414,6 +414,8 @@ class CodeGen
     if name == 'new' && irep && new_target
       known = new_target
       builtin_class_expr = { 'Array' => 'M->array_class',
+                             'Hash' => 'M->hash_class',
+                             'Range' => 'M->range_class',
                              'String' => 'M->string_class',
                              'NameError' => 'mrb_exc_get_id(M, MRB_SYM(NameError))' }[known]
       generic_constructor_safe = stable_standard_constructor_class?(known) ||
