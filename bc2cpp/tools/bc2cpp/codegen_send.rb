@@ -413,7 +413,8 @@ class CodeGen
     # SENDB / keyword sends do not enter this positional compile_send path.
     if name == 'new' && irep && new_target
       known = new_target
-      builtin_class_expr = { 'String' => 'M->string_class',
+      builtin_class_expr = { 'Array' => 'M->array_class',
+                             'String' => 'M->string_class',
                              'NameError' => 'mrb_exc_get_id(M, MRB_SYM(NameError))' }[known]
       generic_constructor_safe = stable_standard_constructor_class?(known) ||
                                  (builtin_class_expr && @closed_world&.standard_constructor_lookup? &&
