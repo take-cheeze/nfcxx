@@ -260,24 +260,12 @@ class CodeGen
 
   def select_embeddings(ivar_layout)
     embedding_owners = ivar_layout.keys.to_set
-    subclass_of = lambda do |klass, ancestor|
-      seen = Set.new
-      superclass = @superclass_of[klass]
-      while superclass.is_a?(String) && !seen.include?(superclass)
-        return true if superclass == ancestor
-
-        seen << superclass
-        superclass = @superclass_of[superclass]
-      end
-      false
-    end
-
     ivar_layout.each_with_object({}) do |(owner, ivars), out|
       # One object has one DATA_PTR: a base class and a subclass that both embed
       # would overwrite it with different layouts. Keep both in iv_tbl unless one
       # shared struct covers the whole chain.
       inherited_layout = embedding_owners.any? do |other|
-        other != owner && (subclass_of.call(owner, other) || subclass_of.call(other, owner))
+        other != owner && (strict_subclass?(owner, other) || strict_subclass?(other, owner))
       end
       next if inherited_layout
 
@@ -293,7 +281,7 @@ class CodeGen
       safe = ivars.reject do |name, _|
         excluded_access = self.class.hot_only_excluded && @registry.values.flatten.any? do |definition|
           next false unless definition.irep && self.class.hot_only_excluded.include?(definition.irep)
-          next false unless definition.owner == owner || subclass_of.call(definition.owner, owner)
+          next false unless definition.owner == owner || strict_subclass?(definition.owner, owner)
 
           irep_subtree_touches_ivar?(definition.irep, name)
         end
@@ -317,7 +305,7 @@ class CodeGen
       next if safe.empty?
 
       @superclass_of.each_key do |klass|
-        next unless subclass_of.call(klass, owner)
+        next unless strict_subclass?(klass, owner)
 
         initializers = (@registry['initialize'] || []).select { |d| d.owner == klass }
         next if initializers.empty?
