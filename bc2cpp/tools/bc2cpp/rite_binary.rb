@@ -12,7 +12,7 @@ module RiteBinary
   DebugFile = Struct.new(:start_pos, :filename, :line_type, :lines)
   # `debug_files` is nil when the binary has no debug section; `lv` is nil
   # without an LV section, else one name (or nil) per register 1...nlocals.
-  RiteIrep = Struct.new(:nlocals, :nregs, :iseq, :catch_handlers, :pool, :syms, :lv, :debug_files,
+  RiteIrep = Struct.new(:nlocals, :nregs, :rlen, :iseq, :catch_handlers, :pool, :syms, :lv, :debug_files,
                         keyword_init: true)
   RawCatch = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: true)
 
@@ -94,7 +94,8 @@ module RiteBinary
   def self.parse_irep_record(reader, out)
     reader.u32 # record size
     irep = RiteIrep.new(nlocals: reader.u16, nregs: reader.u16)
-    rlen = reader.u16
+    irep.rlen = reader.u16
+    rlen = irep.rlen
     out << irep
     clen = reader.u16
     ilen = reader.u32

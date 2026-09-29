@@ -79,7 +79,7 @@ class CodeGen
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
     when 'LOADL'
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
-      # mrbc's C dump prints it as a valid C double literal (".f=0.33000000000000002").
+      # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002").
       # INT32/INT64/BIGINT are not decoded and keep `#error`.
       d = insn.reg
       pidx = insn.pool_index.to_i
