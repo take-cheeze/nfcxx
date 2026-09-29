@@ -273,6 +273,13 @@ class CodeGen
     end
   end
 
+  # The chain, or past POLY_SMALL_N_MAX the table, so a name that outgrows the
+  # chain cap does not fall to plain dispatch (ADR 0261).
+  def compile_poly_dispatch(name, d, recv, argv, n, closed_world_site: nil)
+    compile_poly_small_n(name, d, recv, argv, n, closed_world_site: closed_world_site) ||
+      compile_poly_table(name, d, recv, argv, n, closed_world_site: closed_world_site)
+  end
+
   def compile_poly_small_n(name, d, recv, argv, n, closed_world_site: nil)
     candidates = poly_small_n_targets(name, n)
     return nil unless candidates
@@ -700,7 +707,7 @@ class CodeGen
            when 'getidx'
              # INDEX_CHAIN's tail, with the result in r0 (the name
              # compile_poly_small_n spells as `r<d>`).
-             tail = compile_poly_small_n('[]', 0, 'recv', ['key'], 1) ||
+             tail = compile_poly_dispatch('[]', 0, 'recv', ['key'], 1) ||
                     "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"
              <<~CPP.chomp + "\n#{tail}  return r0;\n"
                if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {

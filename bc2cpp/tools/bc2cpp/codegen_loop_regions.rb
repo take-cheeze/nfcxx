@@ -425,7 +425,7 @@ class CodeGen
   RANGE_RETURN_METHODS = Set['Game::Interpreter#range'].freeze
 
   def range_return_call(irep, idx, dest_reg)
-    pin = irep.last_writer(idx - 1, dest_reg)
+    pin = irep.walk_dominating_writers(idx - 1, dest_reg, use: idx) { |insn| insn }
     # Only a `range` call made FROM a Game::Interpreter method counts (checked via
     # the irep's MethodDef owner), not just the name.
     return nil unless pin && %w[SEND SSEND SEND0 SSEND0].include?(pin.op) && pin.sym == 'range'

@@ -82,6 +82,26 @@ module IrepScans
     exhausted&.call(reg)
   end
 
+  # JOIN_DOMINANCE (ADR 0261): walk_writers whose every hop must dominate the
+  # read it feeds (BytecodeIR.write_dominates?); a hop that does not ends the
+  # walk with nil. +use+ is the instruction the first hop feeds.
+  def walk_dominating_writers(from, reg, use: from + 1, follow_moves: false, exhausted: nil, **options)
+    read = use
+    entry = lambda do |last|
+      BytecodeIR.write_dominates?(self, BytecodeIR::ENTRY, read, last) ? exhausted&.call(last) : nil
+    end
+    walk_writers(from, reg, exhausted: entry, **options) do |insn, index, cur|
+      next nil unless BytecodeIR.write_dominates?(self, index, read, cur)
+
+      read = index
+      if follow_moves && insn.op == 'MOVE'
+        IrepScans.follow(insn.regs[1])
+      else
+        yield insn, index, cur
+      end
+    end
+  end
+
   # Index of the nearest instruction at or before +from+ whose leading register
   # operand is +reg+, or nil. The per-register index lists are built once per
   # irep (instructions never change after loading).

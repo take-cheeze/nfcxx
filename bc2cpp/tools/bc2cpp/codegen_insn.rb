@@ -634,7 +634,7 @@ class CodeGen
           # INDEX_CHAIN: send the untyped `x[i]` fallback through the exact-class chain
           # (compile_poly_small_n), so program-defined `#[]` (Game::Variables,
           # LCF::Array1D, ...) is called directly; nil keeps the funcall.
-          tail = compile_poly_small_n('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
+          tail = compile_poly_dispatch('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
           tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
           fallback = <<~CPP
             if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {

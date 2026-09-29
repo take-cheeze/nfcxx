@@ -113,7 +113,7 @@ class CodeGen
                                    element_annotations: @element_annotations,
                                    known_owners: @known_owners,
                                    capture_hints: @block_hash_capture_hints,
-                                   method_return_class: ->(method_name) { class_return_for_dispatch(method_name) })
+                                   method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
                  end
 
     # LITERAL_EQQ_SUPPORT: `LITERAL === x` from `case x; when LITERAL` (receiver a
@@ -451,8 +451,8 @@ class CodeGen
             "  r#{d} = rgss::#{helper}(M, #{recv});\n} else "
         end.join
         fallback = with_native_arms_emitted(name, owners) do
-          compile_poly_small_n(name, d, recv, argv, n,
-                               closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+          compile_poly_dispatch(name, d, recv, argv, n,
+                                closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
             dynamic_dispatch_line(d, recv, name, argv)
         end
         return "  // RGSS ##{name} -- exact native class identities select frame independent wrappers\n" \
@@ -479,8 +479,8 @@ class CodeGen
             "  r#{d} = rgss::#{function}(M, #{recv});\n} else "
         end.join
         fallback = with_native_arms_emitted(name, owners) do
-          compile_poly_small_n(name, d, recv, argv, n,
-                               closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+          compile_poly_dispatch(name, d, recv, argv, n,
+                                closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
             dynamic_dispatch_line(d, recv, name, argv)
         end
         return "  // RGSS #dispose -- captured exact-class registrations select frame-independent native bodies\n" \
@@ -584,7 +584,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Sprite' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Sprite'
@@ -609,7 +609,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -635,7 +635,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -664,7 +664,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -692,7 +692,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -718,7 +718,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -756,7 +756,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if %w[openness= tone=].include?(name) &&
          (traced_class == 'RGSS::Window' ||
@@ -988,6 +988,14 @@ class CodeGen
 
     integer_unary = compile_integer_unary(name, n, d, recv, argv)
     return integer_unary if integer_unary
+
+    # CORE_MIXINS (ADR 0261): core Ruby methods whose definition the build's core
+    # sources are verified to match.
+    core_sign = compile_core_numeric_sign(name, n, d, recv, argv)
+    return core_sign if core_sign
+
+    core_extreme = compile_core_min_max(insn, name, n, d, recv, argv)
+    return core_extreme if core_extreme
 
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
@@ -1274,7 +1282,7 @@ class CodeGen
                                       element_annotations: @element_annotations,
                                       known_owners: @known_owners,
                                       capture_hints: @block_hash_capture_hints,
-                                      method_return_class: ->(method_name) { class_return_for_dispatch(method_name) })
+                                      method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)
