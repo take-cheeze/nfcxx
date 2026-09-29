@@ -14,6 +14,14 @@ class CodeGen
     reg = dest_reg.to_s
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
+      if insn.op == 'RESCUE'
+        # RESCUE reads its first register and writes its second; the caught
+        # exception remains live in the input register for the handler.
+        input_reg, output_reg = insn.args.scan(/R(\d+)/).flatten
+        return false if output_reg == reg
+        next if input_reg == reg
+      end
+
       written = insn.args[/^R(\d+)/, 1]
       next unless written == reg
 
