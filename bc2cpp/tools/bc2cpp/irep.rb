@@ -59,11 +59,7 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
   end
 
   def last_writer_index(from, reg)
-    reg = reg.to_s
-    [from, instructions.length - 1].min.downto(0) do |i|
-      return i if instructions[i].reg == reg
-    end
-    nil
+    previous_lead_index(reg.to_s, from)
   end
 
   # The first non-MOVE instruction writing +reg+ at or before index +from+,
