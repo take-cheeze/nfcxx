@@ -450,9 +450,11 @@ class CodeGen
           "if (mrb_obj_class(M, #{recv}) == rgss::#{class_accessor}()) {\n" \
             "  r#{d} = rgss::#{helper}(M, #{recv});\n} else "
         end.join
-        fallback = compile_poly_small_n(name, d, recv, argv, n,
-                                        closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
-                   dynamic_dispatch_line(d, recv, name, argv)
+        fallback = with_native_arms_emitted(name, owners) do
+          compile_poly_small_n(name, d, recv, argv, n,
+                               closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+            dynamic_dispatch_line(d, recv, name, argv)
+        end
         return "  // RGSS ##{name} -- exact native class identities select frame independent wrappers\n" \
                "  #{branches}{\n" \
                "#{fallback.lines.map { |line| "  #{line}" }.join}" \
@@ -476,9 +478,11 @@ class CodeGen
           "if (mrb_obj_class(M, #{recv}) == rgss::#{class_accessors.fetch(owner)}()) {\n" \
             "  r#{d} = rgss::#{function}(M, #{recv});\n} else "
         end.join
-        fallback = compile_poly_small_n(name, d, recv, argv, n,
-                                        closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
-                   dynamic_dispatch_line(d, recv, name, argv)
+        fallback = with_native_arms_emitted(name, owners) do
+          compile_poly_small_n(name, d, recv, argv, n,
+                               closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+            dynamic_dispatch_line(d, recv, name, argv)
+        end
         return "  // RGSS #dispose -- captured exact-class registrations select frame-independent native bodies\n" \
                "  #{branches}{\n" \
                "#{fallback.lines.map { |line| "  #{line}" }.join}" \
@@ -1578,7 +1582,7 @@ class CodeGen
                         end
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      "#{diag}#{note}  #{dynamic_dispatch_line(d, recv, name, argv)}"
+      "#{diag}#{note}  #{native_direct_dynamic_line(d, recv, name, argv)}"
     end
   end
 
