@@ -175,16 +175,30 @@ class CodeGen
   end
 
   # Resolve a constant expression used as a class/module object, not an
-  # instance of that class. Only a straight-line GETCONST/MOVE trace qualifies:
-  # a branch or other register writer may select a different receiver.
+  # instance. A branch edge that can bypass the constant write invalidates it.
   def constant_object_owner(irep, idx, dest_reg, lexical_owner)
-    return nil unless @closed_world && ConstructClassNames.table
+    return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
+                      idx < irep.instructions.length && dest_reg
 
     reg = dest_reg.to_s
     path = []
+    branch_edges = []
+    irep.instructions.each_with_index do |branch, branch_index|
+      break if branch_index >= idx
+      next unless %w[JMP JMPIF JMPNOT].include?(branch.op)
+
+      target_token = branch.args.split.last
+      return nil unless target_token&.match?(/\A\d+\z/)
+
+      target_addr = target_token.to_i
+      target_index = target_addr && irep.instructions.index { |candidate| candidate.addr == target_addr }
+      return nil unless target_index
+
+      branch_edges << [branch_index, target_index]
+    end
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
-      return nil if %w[JMP JMPIF JMPNOT ONERR RESCUE EXCEPT BLOCK].include?(insn.op)
+      return nil if %w[JMPUW ONERR RESCUE EXCEPT BLOCK].include?(insn.op)
       next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
       next unless insn.args[/^R(\d+)/, 1] == reg
 
@@ -200,6 +214,10 @@ class CodeGen
       when 'GETCONST'
         written = insn.args[/^R\d+\s+(\S+)/, 1]
         written = ([written] + path).join('::') if written
+        # A forward edge from before this write into the send's block could
+        # bypass the receiver value; edges from later code already execute it.
+        return nil if branch_edges.any? { |source, target| source < i && target > i && target <= idx }
+
         owner = resolve_class_constant_name(written, lexical_owner)
         stable = owner && (@closed_world.stable_constant_identity?(owner) ||
                            CodeGen.stable_class_constants&.include?(owner.split('::').last))
