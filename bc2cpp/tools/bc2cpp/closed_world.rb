@@ -87,6 +87,25 @@ class ClosedWorld
     @mm_classes
   end
 
+  # The classes a chain listing `listed` must still guard for `refusal` to clear:
+  # empty unless :unlisted_class is the only reason it refuses (and, since that
+  # check runs first, the receiver is method_missing-free). Each returned class
+  # answers `name` itself or inherits it, so a guarded send to it reaches its
+  # definition and every other class can only raise NoMethodError.
+  def unlisted_classes(name, listed, self_owner, installed)
+    return [] unless refusal(name, listed, self_owner, installed) == :unlisted_class
+    return [] unless method_missing_free?(self_owner)
+
+    _reason, required = required_classes(name)
+    (required - listed.to_set).to_a.sort
+  end
+
+  # A `class` (never a module) declared in the closed world: the only owners an
+  # exact-class guard can name, since modules never are `mrb_obj_class`.
+  def class_declared?(owner)
+    @class_decls.key?(owner)
+  end
+
   # Is every instance whose class descends from `owner` exactly an `owner`?
   def exact_class?(owner)
     !@global_refusal && !opaque?(owner) && descendants(owner).empty?

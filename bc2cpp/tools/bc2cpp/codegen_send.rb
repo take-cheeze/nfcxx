@@ -1834,13 +1834,47 @@ class CodeGen
 
     reason = argv.size > FUNCALL_ARGC_MAX ? :argc : @closed_world.refusal(name, listed, site[:self_owner],
                                                                           symbol_installed_names)
+    extra_branches = ''
+    if reason == :unlisted_class
+      extra = unlisted_class_guards(name, listed, site)
+      if extra
+        extra_branches = extra.map do |klass|
+          "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{dispatch.chomp}\n    } else "
+        end.join
+        listed += extra
+        reason = @closed_world.refusal(name, listed, site[:self_owner], symbol_installed_names)
+      end
+    end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
 
     args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
     # The marker outlives SymbolCache's rewrite of the name; bc2cpp.rb reads it
     # to hold every such site to NOMETHOD_REVIEWED (ADR 0226).
     marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?)
-    "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
+    error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
+    return error if extra_branches.empty?
+
+    "#{extra_branches}{\n      #{error.chomp}\n    }\n"
+  end
+
+  # UNLISTED_CLASS_GUARDS: a definer class the chain leaves out (its definition
+  # is not a direct-call candidate: arity, unclean body, ...) still answers the
+  # name, so it gets its own exact-class branch that dispatches; the remaining
+  # `else` is then provably an error. Only for declared, stable classes (a
+  # module owner has no class to compare), and a bounded number of them.
+  UNLISTED_CLASS_GUARDS_MAX = 8
+
+  def unlisted_class_guards(name, listed, site)
+    # HOT_ONLY leaves definers uncompiled, so they look unlisted for a reason a full
+    # build would not have, and the dead fallback this creates could not be in
+    # NOMETHOD_REVIEWED, which is the full build's list (ADR 0226): keep the dispatch.
+    return nil if hot_only_active?
+
+    extra = @closed_world.unlisted_classes(name, listed, site[:self_owner], symbol_installed_names)
+    return nil if extra.empty? || extra.size > UNLISTED_CLASS_GUARDS_MAX
+    return nil unless extra.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.stable_class_constant?(klass) }
+
+    extra
   end
 
   # CLOSED_WORLD: the facts guarded_fallback_line needs about a call site --
