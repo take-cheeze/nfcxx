@@ -159,24 +159,21 @@ class CodeGen
       end
     end
 
-    # FLOAT_DIV_RECEIVER: LOADL float entries create immediate Float values.
-    # Float#/ is native and unoverridden for this receiver; its core body is
-    # mrb_div_float(mrb_float(self), mrb_as_float(arg)). Complex keeps the
-    # native method's specialized path when that optional feature is enabled.
-    if name == '/' && n == 1 && irep && new_proof_idx &&
-       trace_float_literal_receiver(irep, new_proof_idx, new_proof_reg) &&
-       builtin_class_send_safe?(name, %w[Float])
+    # FLOAT_DIV_RECEIVER: an exact Float tag selects Float#/'s native body.
+    # Keep dispatch for other receiver classes and Complex arguments.
+    if name == '/' && n == 1 && builtin_class_send_safe?(name, %w[Float])
       arg = argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
-      return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, proven by the float pool literal\n" \
+      return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, guarded by exact Float type\n" \
              "  #ifdef MRB_USE_COMPLEX\n" \
-             "  if (mrb_type(#{arg}) == MRB_TT_COMPLEX) {\n" \
-             "    #{fallback}  } else {\n" \
-             "    r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
-             "  }\n" \
+             "  if (mrb_type(#{recv}) == MRB_TT_FLOAT && mrb_type(#{arg}) != MRB_TT_COMPLEX) {\n" \
              "  #else\n" \
-             "  r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
-             "  #endif\n"
+             "  if (mrb_type(#{recv}) == MRB_TT_FLOAT) {\n" \
+             "  #endif\n" \
+             "    r#{d} = mrb_float_value(M, mrb_div_float(mrb_float(#{recv}), mrb_as_float(M, #{arg})));\n" \
+             "  } else {\n" \
+             "    #{fallback.chomp}\n" \
+             "  }\n"
     end
 
     # Devirtualize `:new` when either bytecode traces its class constant or the
