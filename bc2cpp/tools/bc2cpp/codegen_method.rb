@@ -72,9 +72,7 @@ class CodeGen
     # LCF::Array2D#each), found by block_fallback_regions and read by
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
-    needs_blk_param = mandatory_ok &&
-                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.paren_value == '0' } ||
-                       block_fallback_regions.any? { |r| r[:needs_blk] })
+    needs_blk_param = yields_block_param?(irep, block_fallback_regions)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: tried whenever
     # mandatory_ok is false, whether or not the optional table resolved (the
@@ -227,6 +225,8 @@ class CodeGen
       suppressed << region[:except_addr]
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
       saved = rescue_entry_saved_fields(irep, region)
+      # ARG_SHAPES_YIELD: the protected range's own `yield` reads the method's block.
+      saved += [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] if needs_blk_param
       rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
                                                       extra_field_values: saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })

@@ -486,11 +486,7 @@ class CodeGen
          native_arg_types(target, t_mand).compact.empty? &&
          (!@only_owners || @only_owners.include?(target.owner) || @other_owners&.include?(target.owner))
         impl = cpp_name(target.owner, target.name) + '_impl'
-        call_argv = ext_argv.dup
-        if t_opt.positive?
-          call_argv += Array.new(t_mand + t_opt - ext_argv.size, 'mrb_nil_value()')
-          call_argv << (ext_argv.size - t_mand).to_s
-        end
+        call_argv, = direct_call_args(target, ext_argv, impl)
         return "  // KEYWORD_HASH_DEVIRT :#{name} -> #{target.owner}##{target.name} (MONO, trailing-Hash " \
                "positional, direct C++ call, no mrb_funcall)\n" \
                "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
