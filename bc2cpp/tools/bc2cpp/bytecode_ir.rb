@@ -17,8 +17,14 @@ module BytecodeIR
 
   BasicBlock = Struct.new(:id, :instructions, :successors, :predecessors, keyword_init: true)
 
-  TERMINATORS = %w[JMP JMPIF JMPNOT JMPNIL RETURN RETURN_BLK BREAK RAISE RAISEIF STOP].freeze
+  # Ops after which control never reaches the next instruction. RAISE and
+  # RAISEIF are deliberately absent: a missing predecessor makes a proof wrong
+  # while an extra one only costs a proof, so they conservatively fall through.
+  NO_FALLTHROUGH = %w[JMP JMPUW RETURN RETURN_BLK RETSELF RETNIL RETTRUE RETFALSE BREAK STOP].freeze
   CONDITIONAL_BRANCHES = %w[JMPIF JMPNOT JMPNIL].freeze
+  TERMINATORS = (NO_FALLTHROUGH + CONDITIONAL_BRANCHES).freeze
+  # Predecessor id of the method-entry edge into instruction 0.
+  ENTRY = -1
 
   class Program
     attr_reader :instructions, :blocks, :address_to_index
@@ -34,6 +40,27 @@ module BytecodeIR
 
     def instruction_at(index)
       @instructions[index]
+    end
+
+    # False when some branch targets an address that is not an instruction, so
+    # the edge set is incomplete and no analysis may rely on it.
+    def resolved?
+      @resolved
+    end
+
+    # index -> Set of predecessor indices, with ENTRY for instruction 0's
+    # method-entry edge. Nil when #resolved? is false.
+    def instruction_predecessors
+      return nil unless @resolved
+
+      @instruction_predecessors ||= begin
+        preds = Array.new(@instructions.length) { Set.new }
+        preds[0] << ENTRY unless preds.empty?
+        @instructions.each do |instruction|
+          instruction.successors.each { |successor| preds[successor] << instruction.index }
+        end
+        preds.each(&:freeze).freeze
+      end
     end
 
     # [source, target] instruction-index pairs of the given jump ops located
@@ -55,20 +82,18 @@ module BytecodeIR
     private
 
     def build_edges
+      @resolved = true
       @instructions.each do |instruction|
-        next_index = instruction.index + 1
-        next_addr = @instructions[next_index]&.addr
-        targets = branch_targets(instruction)
-        unless instruction.op == 'JMP'
-          targets << next_addr if next_addr && !TERMINATORS.include?(instruction.op)
-          targets << next_addr if next_addr && CONDITIONAL_BRANCHES.include?(instruction.op)
+        targets = []
+        target_addr = instruction.source.branch_target
+        if target_addr
+          target = @address_to_index[target_addr]
+          target ? targets << target : @resolved = false
         end
-        instruction.successors = targets.filter_map { |addr| @address_to_index[addr] }.uniq.freeze
+        next_index = instruction.index + 1
+        targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH.include?(instruction.op)
+        instruction.successors = targets.uniq.freeze
       end
-    end
-
-    def branch_targets(instruction)
-      Array(instruction.source.jump_target)
     end
 
     def build_blocks

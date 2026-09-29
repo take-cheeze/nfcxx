@@ -256,43 +256,11 @@ class CodeGen
   # exhaustion is safe and keeps codegen linear.
   FIXNUM_PROOF_REACHING_MAX_STATES = 400
 
-  # Predecessor map: index -> indices control can come from (-1 = method entry).
-  # An extra predecessor only costs a proof; a missing one is a wrong answer. So
-  # fall-through is assumed for every opcode except those that never fall
-  # through (JMP/JMPUW; RETURN/RETURN_BLK/RETSELF/RETNIL/RETTRUE/RETFALSE/BREAK/
-  # STOP), and branch edges are the five JMP* opcodes. A jump to an address with
-  # no instruction makes the whole map nil, so every query refuses.
-  FIXNUM_PROOF_NO_FALLTHROUGH_OPS = Set[
-    'JMP', 'JMPUW',
-    'RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'
-  ].freeze
-
+  # Predecessor map: index -> indices control can come from (-1 = method entry),
+  # nil when a jump targets a non-instruction so every query refuses. Extra
+  # predecessors only cost a proof; see BytecodeIR::NO_FALLTHROUGH.
   def fixnum_proof_preds(irep)
-    @fixnum_proof_preds ||= {}
-    return @fixnum_proof_preds[irep.label] if @fixnum_proof_preds.key?(irep.label)
-
-    @fixnum_proof_preds[irep.label] = build_fixnum_proof_preds(irep)
-  end
-
-  def build_fixnum_proof_preds(irep)
-    insns = irep.instructions
-    addr_to_idx = {}
-    insns.each_with_index { |ins, k| addr_to_idx[ins.addr] = k }
-    preds = Hash.new { |h, k| h[k] = Set.new }
-    preds[0] << -1
-    insns.each_with_index do |ins, k|
-      unless FIXNUM_PROOF_NO_FALLTHROUGH_OPS.include?(ins.op)
-        preds[k + 1] << k if k + 1 < insns.size
-      end
-      t = ins.branch_target
-      next if t.nil?
-
-      ti = addr_to_idx[t]
-      return nil if ti.nil?
-
-      preds[ti] << k
-    end
-    preds
+    BytecodeIR.for(irep).instruction_predecessors
   end
 
   # JOIN_REACHING_DEFS: does EVERY definition of `reg` reaching the read at
