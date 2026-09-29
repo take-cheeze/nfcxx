@@ -272,46 +272,28 @@ class CodeGen
       # on ordinary dispatch.
       inspect_containers = builtin_class_send_safe?('inspect', %w[Array Hash])
       container_arms = if inspect_containers
-                         <<~CPP
-                           case MRB_TT_ARRAY:
-                             if (mrb_obj_ptr(#{recv})->c == M->array_class) {
-                               r#{d} = mrb_inspect(M, #{recv});
-                             } else {
-                               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
-                             }
-                             break;
-                           case MRB_TT_HASH:
-                             if (mrb_obj_ptr(#{recv})->c == M->hash_class) {
-                               r#{d} = mrb_inspect(M, #{recv});
-                             } else {
-                               #{dynamic_dispatch_line(d, recv, name, argv).chomp}
-                             }
-                             break;
+                         <<~CPP.chomp
+                           else if (mrb_type(#{recv}) == MRB_TT_ARRAY &&
+                                    mrb_obj_ptr(#{recv})->c == M->array_class) {
+                             r#{d} = mrb_inspect(M, #{recv});
+                         } else if (mrb_type(#{recv}) == MRB_TT_HASH &&
+                                    mrb_obj_ptr(#{recv})->c == M->hash_class) {
+                             r#{d} = mrb_inspect(M, #{recv});
+                         }
                          CPP
                        else
                          ''
                        end
       <<~CPP
           // to_s -- native primitive, runtime-guarded per real receiver type
-          switch (mrb_type(#{recv})) {
-          case MRB_TT_STRING:
-            if (mrb_obj_ptr(#{recv})->c == M->string_class) {
-              r#{d} = #{recv};
-            } else {
-              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
-            }
-            break;
-          case MRB_TT_INTEGER:
-            if (mrb_obj_class(M, #{recv}) == M->integer_class) {
-              r#{d} = mrb_integer_to_str(M, #{recv}, 10);
-            } else {
-              #{dynamic_dispatch_line(d, recv, name, argv).chomp}
-            }
-            break;
-          #{container_arms}
-          default:
+          if (mrb_type(#{recv}) == MRB_TT_STRING &&
+              mrb_obj_ptr(#{recv})->c == M->string_class) {
+            r#{d} = #{recv};
+          } else if (mrb_type(#{recv}) == MRB_TT_INTEGER &&
+                     mrb_obj_class(M, #{recv}) == M->integer_class) {
+            r#{d} = mrb_integer_to_str(M, #{recv}, 10);
+          } #{container_arms} else {
             #{dynamic_dispatch_line(d, recv, name, argv).chomp}
-            break;
           }
       CPP
     when 'length'
@@ -561,38 +543,28 @@ class CodeGen
     return fallback unless entries && !entries.empty?
     return fallback unless entries.all? { |entry| entry[:arity] == argv.length }
 
-    cases = entries.map do |entry|
+    arms = entries.map do |entry|
       owner = entry[:owner]
       expression = entry[:expression].gsub('recv', recv)
       expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
       source_comment = if name == 'clear' && owner[:class_name] == 'Array' && expression.include?('mrb_ary_clear')
                          '// ARRAY_CLEAR :clear -- generated from mruby core C'
                        end
-      class_check = if %w[Float Symbol].include?(owner[:class_name])
-                      "r#{d} = #{expression};"
-                    else
-                      <<~CPP.chomp
-                        if (mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}) {
-                          r#{d} = #{expression};
-                        } else {
-                          #{fallback.chomp}
-                        }
-                      CPP
-      end
-      <<~CPP
+      exact_class = %w[Float Symbol].include?(owner[:class_name]) ? '' :
+                      " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}"
+      <<~CPP.chomp
         #{source_comment}
-        case #{owner[:tag]}:
-          #{class_check.gsub("\n", "\n  ")}
-          break;
+        if (mrb_type(#{recv}) == #{owner[:tag]}#{exact_class}) {
+          r#{d} = #{expression};
+        } else
       CPP
     end.join
     <<~CPP
       // #{name} -- generated from native registrations and C method bodies
-      switch (mrb_type(#{recv})) {
-      #{cases}
-      default:
+      {
+      #{arms} {
         #{fallback.chomp}
-        break;
+      }
       }
     CPP
   end
