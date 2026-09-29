@@ -1237,6 +1237,15 @@ class CodeGen
         end
       end
     end
+    # CHA_SELF: a call on self whose every possible receiver (the enclosing class
+    # and its descendants) resolves the name to known definitions; see cha_self_plan.
+    if target.nil? && lexical_self_ivar_accessor.nil? && @closed_world
+      cha_site = closed_world_site(recv, irep, idx, owner_def)
+      if cha_site && cha_site[:self_owner]
+        plan, = cha_self_plan(name, n, cha_site[:self_owner], explicit: !self_implicit)
+        return cha_self_code(plan, cha_site[:self_owner], name, d, recv, argv) if plan
+      end
+    end
     # Still POLY: try the call-site fallback: the receiver traced (trace_new_target)
     # to one exact class. Exact owner match only (no MRO walk), so an inherited
     # method misses and keeps dispatch.
@@ -1343,35 +1352,7 @@ class CodeGen
 
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
-      # NATIVE_ARG_TARGETS call-site half: the callee's `_impl` takes mrb_int/mrb_sym
-      # for retyped positions (C++ has no implicit conversion from mrb_value), so
-      # call_argv unboxes them here with mrb_as_int/mrb_obj_to_sym, the coercions
-      # mrb_get_args "i"/"n" use in the entry wrapper (same TypeError). It wraps
-      # whatever expression argv holds (e.g. `-weapon_sp_cost`).
-      # native_arg_types is asked for t_mand positions only; NATIVE_ARG_TARGETS never
-      # names optional-arg methods.
-      t_irep = @ireps.fetch(target.irep)
-      t_mand = mandatory_arity(t_irep)
-      t_opt = optional_arity(t_irep)
-      call_types = native_arg_types(target, t_mand)
-      call_argv = argv.each_with_index.map do |a, i|
-        case call_types[i]
-        when :fixnum then "mrb_as_int(M, #{a})"
-        when :symbol then "mrb_obj_to_sym(M, #{a})"
-        else a
-        end
-      end
-      # CALLSITE_OPTIONAL_ARG_SUPPORT: `_impl` always takes all optionals, so omitted
-      # trailing ones get mrb_nil_value() placeholders (as the entry wrapper does;
-      # never read), plus the `bc2cpp_given_opt` literal `argv.size - t_mand`.
-      if t_opt.positive?
-        call_argv += Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
-        call_argv << (argv.size - t_mand).to_s
-      end
-      native_positions = call_types.each_index.select { |i| call_types[i] }.map { |i| i + 1 }
-      native_note = native_positions.empty? ? '' : " (position#{'s' unless native_positions.one?} " \
-                                                    "#{native_positions.join(', ')} unboxed here to match " \
-                                                    "#{impl}'s own native argument type)"
+      call_argv, native_note = direct_call_args(target, argv, impl)
       if typed
         if exact_class_dispatch
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
@@ -1428,6 +1409,18 @@ class CodeGen
         if cw_site && cw_site[:self_owner] == target.owner && @closed_world.exact_class?(target.owner)
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self, exactly " \
                  "#{target.owner}: no subclass in the closed world), direct C++ call#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
+        # CHA_SELF: the same for a class with subclasses, when none of them can
+        # resolve the name elsewhere (cha_self_plan). A descendant's payload is
+        # the embedding ancestor's, see select_embeddings.
+        cha_plan, = cw_site && cw_site[:self_owner] &&
+                    cha_self_plan(name, n, cw_site[:self_owner], explicit: !self_implicit)
+        if cha_plan && cha_plan[:arms].empty? && cha_plan[:default].equal?(target)
+          note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self in " \
+                 "#{cw_site[:self_owner]}; class hierarchy analysis: no descendant defines or mixes in " \
+                 "the name), direct C++ call#{native_note}\n"
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
@@ -1586,6 +1579,41 @@ class CodeGen
     end
   end
 
+  # The argument list of a direct `_impl` call to `target` and the note naming
+  # any unboxed positions.
+  def direct_call_args(target, argv, impl)
+    # NATIVE_ARG_TARGETS call-site half: the callee's `_impl` takes mrb_int/mrb_sym
+    # for retyped positions (C++ has no implicit conversion from mrb_value), so
+    # call_argv unboxes them here with mrb_as_int/mrb_obj_to_sym, the coercions
+    # mrb_get_args "i"/"n" use in the entry wrapper (same TypeError). It wraps
+    # whatever expression argv holds (e.g. `-weapon_sp_cost`).
+    # native_arg_types is asked for t_mand positions only; NATIVE_ARG_TARGETS never
+    # names optional-arg methods.
+    t_irep = @ireps.fetch(target.irep)
+    t_mand = mandatory_arity(t_irep)
+    t_opt = optional_arity(t_irep)
+    call_types = native_arg_types(target, t_mand)
+    call_argv = argv.each_with_index.map do |a, i|
+      case call_types[i]
+      when :fixnum then "mrb_as_int(M, #{a})"
+      when :symbol then "mrb_obj_to_sym(M, #{a})"
+      else a
+      end
+    end
+    # CALLSITE_OPTIONAL_ARG_SUPPORT: `_impl` always takes all optionals, so omitted
+    # trailing ones get mrb_nil_value() placeholders (as the entry wrapper does;
+    # never read), plus the `bc2cpp_given_opt` literal `argv.size - t_mand`.
+    if t_opt.positive?
+      call_argv += Array.new(t_mand + t_opt - argv.size, 'mrb_nil_value()')
+      call_argv << (argv.size - t_mand).to_s
+    end
+    native_positions = call_types.each_index.select { |i| call_types[i] }.map { |i| i + 1 }
+    native_note = native_positions.empty? ? '' : " (position#{'s' unless native_positions.one?} " \
+                                                  "#{native_positions.join(', ')} unboxed here to match " \
+                                                  "#{impl}'s own native argument type)"
+    [call_argv, native_note]
+  end
+
   # Prove the first implementation in a receiver's inherited lookup chain. An
   # exact runtime class guard handles subclasses; this proof only needs a stable
   # receiver constant and a complete, mixin-free chain up to the defining owner.
@@ -1600,21 +1628,27 @@ class CodeGen
   # Follow the proven mruby ancestor order: prepended modules, the owner,
   # included modules (latest include first), then the superclass. An unknown or
   # unstable mixin before the first definition makes the lookup ambiguous.
-  def closed_world_lookup_target(name, owner, active)
+  def closed_world_lookup_target(name, owner, active, self_call: false)
     return [nil, false] unless active.add?(owner)
     return [nil, false] if @unknown_mixins.include?(owner)
 
     Array(@prepended_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
-      target, known = closed_world_lookup_target(name, mod, active.dup)
+      target, known = closed_world_lookup_target(name, mod, active.dup, self_call: self_call)
       return [nil, false] unless known
       return [target, true] if target
     end
 
     definitions = @registry.fetch(name, []).select { |definition| definition.owner == owner }
     unless definitions.empty?
-      return [nil, false] unless definitions.one? && definitions.first.irep && definitions.first.visibility == :public
+      # CHA_SELF: a self call also reaches a private def, and an attr_* def
+      # (no irep) is resolved by its accessor code, not an `_impl`.
+      only = definitions.first
+      usable = definitions.one? &&
+               (self_call ? (only.irep || (only.kind == :ivar_accessor && only.owner != '<native>')) :
+                            (only.irep && only.visibility == :public))
+      return [nil, false] unless usable
 
       return [definitions.first, true]
     end
@@ -1624,7 +1658,7 @@ class CodeGen
     Array(@included_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
-      target, known = closed_world_lookup_target(name, mod, active.dup)
+      target, known = closed_world_lookup_target(name, mod, active.dup, self_call: self_call)
       return [nil, false] unless known
       return [target, true] if target
     end
@@ -1633,7 +1667,7 @@ class CodeGen
     superclass = 'Object' if superclass == :none && owner != 'Object'
     return [nil, true] if superclass.nil?
 
-    closed_world_lookup_target(name, superclass, active)
+    closed_world_lookup_target(name, superclass, active, self_call: self_call)
   end
 
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
