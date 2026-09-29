@@ -275,7 +275,10 @@ class CodeGen
     seen = Set.new
     while klass.is_a?(String) && seen.add?(klass)
       singleton = "#{klass}.singleton"
-      return false if @unknown_mixins.include?(klass) || @unknown_mixins.include?(singleton)
+      # Instance includes/prepends do not affect the class object's singleton
+      # lookup. Only an unresolved mixin on the singleton owner can intercept
+      # Class#new or #allocate; known singleton mixins are checked below too.
+      return false if @unknown_mixins.include?(singleton)
       return false unless Array(@included_modules[singleton]).empty? && Array(@prepended_modules[singleton]).empty?
 
       %w[new allocate].each do |name|
