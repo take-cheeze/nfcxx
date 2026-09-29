@@ -51,6 +51,7 @@ require_relative 'codegen'
 require_relative 'codegen_ivar_poly'
 require_relative 'codegen_native_send'
 require_relative 'codegen_native_direct'
+require_relative 'codegen_native_core_direct'
 require_relative 'codegen_receiver_facts'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
@@ -947,6 +948,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
+  print gen.emit_native_core_helpers(compiled)
   print gen.emit_integer_operand_helpers(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls

@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'touch_scan'
+require_relative 'foreign_definers'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -51,6 +52,7 @@ class ClosedWorld
     @outside_name_paths = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
+    @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
     # (TouchScan, ADR 0256).
     @touches = []
@@ -152,6 +154,15 @@ class ClosedWorld
     yield
   ensure
     @native_arms_name = previous
+  end
+
+  # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby
+  # definition, alias, visibility change or prepend on `owner`, a dynamic
+  # installer) can replace core `owner`'s native `name`.
+  def core_native_arm_safe?(name, owner)
+    return false if @global_refusal || @unknown_defs.include?(name)
+
+    !ForeignDefiners.defines?(@ruby_paths, owner, name)
   end
 
   # `name` is spelled only by the given native files, and no outside Ruby.

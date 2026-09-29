@@ -99,6 +99,13 @@ module NativeDirectFallback
       @closed_world.native_subclass_free?(registered.to_a)
   end
 
+  # POLY_DIAG: the arms cover every native class answering `name`, so the native
+  # definition no longer reaches a dispatch (ADR 0257).
+  def native_direct_lifted?(name, arity)
+    plan = native_direct_plan(name, arity, closed_world_site: !@closed_world.nil?)
+    !plan.nil? && plan[:lift]
+  end
+
   def native_direct_wrap(d, recv, name, argv, arms, tail)
     return tail if arms.empty?
 
