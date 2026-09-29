@@ -147,7 +147,7 @@ module StaticDispatchRegistrations
   def subclassed_paths(repo_root, superclass_of)
     found = superclass_of.values.grep(String).to_set
     ruby, native = outside_world_files(repo_root)
-    (closed_world_mrblib_srcs(repo_root) + ruby).each do |f|
+    (closed_world_mrblib_srcs(repo_root, core_gems: nil) + ruby).each do |f|
       text = File.read(f, encoding: 'BINARY')
       text.scan(/(?:<\s*|Class\.new\(\s*)(?:::)?((?:[A-Z]\w*::)*[A-Z]\w*)/) { |(n)| found << n }
       # A superclass the scan cannot name (`Class.new(klass)`) could be any.
@@ -184,14 +184,16 @@ module StaticDispatchRegistrations
     ENV['MRBC'] = mrbc
     require_relative 'bc2cpp'
     Dir.mktmpdir('bc2cpp_static_dispatch') do |tmp|
-      ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root), 'static_dispatch_probe', tmp)
+      # ADR 0264: the engine's own Ruby. Core mrblib stays an outside source here (its sends
+      # and names are dynamic references: outside_world_tokens), as before it was compiled.
+      ireps, root = compile_ireps(closed_world_mrblib_srcs(repo_root, core_gems: nil), 'static_dispatch_probe', tmp)
       registry, superclass_of = build_registry(ireps, root)
       [ireps, registry, superclass_of]
     end
   end
 
   def outside_world_files(repo_root)
-    closed = closed_world_mrblib_srcs(repo_root).map { |p| File.expand_path(p) }.to_set
+    closed = closed_world_mrblib_srcs(repo_root, core_gems: nil).map { |p| File.expand_path(p) }.to_set
     # scripts/ and the CI workflows are scanned whatever their extension: the
     # boot checks feed inline Ruby (heredocs in *.bash) to the real binary's
     # `--script`, which runs it inside the same VM.

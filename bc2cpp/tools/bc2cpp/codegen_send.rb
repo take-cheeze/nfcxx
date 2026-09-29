@@ -1317,7 +1317,7 @@ class CodeGen
       via_element = true
     end
     if target.nil? && !self_implicit && known_class
-      candidate = @registry[name]&.find { |md| md.owner == known_class }
+      candidate = core_targets(@registry[name])&.find { |md| md.owner == known_class }
       # The same two guards as MONO: the class-exact candidate must compile clean
       # and fit the call's argument count.
       if candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(candidate.irep)) &&
@@ -1837,6 +1837,20 @@ class CodeGen
   FUNCALL_ARGC_MAX = 16
 
   def dynamic_dispatch_line(d, recv, name, argv)
+    # CORE_PROC_CALL: `block.call(x)` in a core body. An mrb_funcall of Proc#call runs OP_CALL
+    # over the C caller's frame, which crashes when the proc is a compiled block (cfunc-backed);
+    # yielding to it is what BLKCALL does for `yield` and is the same call for a plain Proc.
+    if @compiling_core && name == 'call' && argv.size < FUNCALL_ARGC_MAX
+      generic = dynamic_dispatch_line_generic(d, recv, name, argv)
+      return "if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {\n" \
+             "    mrb_value bc2cpp_call_argv[] = { #{(argv + ['mrb_nil_value()']).join(', ')} };\n" \
+             "    r#{d} = mrb_yield_argv(M, #{recv}, #{argv.size}, bc2cpp_call_argv);\n" \
+             "  } else {\n    #{generic}  }\n"
+    end
+    dynamic_dispatch_line_generic(d, recv, name, argv)
+  end
+
+  def dynamic_dispatch_line_generic(d, recv, name, argv)
     if argv.empty?
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", 0);\n"
     elsif argv.size > FUNCALL_ARGC_MAX

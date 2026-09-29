@@ -114,7 +114,8 @@ CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: 
 # inline mrb_iv_get/mrb_iv_set. Other synthetic defs (Struct members, which are
 # not ivars; module_function copies; NATIVE_SRCS names) must stay untagged:
 # tagging them would be a silent wrong-value bug, not a missed optimization.
-MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, keyword_init: true)
+# `core`: the body comes from mruby's own Ruby (CoreDefs, set by the driver).
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, keyword_init: true)
 
 # ---------------------------------------------------------------------------
 # mrbc compiles several files on one command line as one program (with class

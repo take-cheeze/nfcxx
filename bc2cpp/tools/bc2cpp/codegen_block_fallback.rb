@@ -419,7 +419,8 @@ class CodeGen
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
-    arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
+    rest_block = (region[:kind] || 'block_fallback') == 'block_fallback' && rest_only_block?(block_irep)
+    arg_names = (1..(rest_block ? 1 : mand)).map { |i| "bc2cpp_barg#{i}" }
     # UPVAR_CAPTURE_SUPPORT: region[:upvars] comes from
     # recognize_block_fallback_regions, or from recognize_lambda_fallback_regions
     # for a frame-confined lambda (lambda_proc_frame_confined?). `|| []` is the
@@ -645,7 +646,13 @@ class CodeGen
         "  return #{impl_name}(#{args});\n"
       end
     end
-    if kind == 'block_fallback'
+    if rest_block
+      # REST_ONLY_BLOCK: the block's single parameter is the whole argument array.
+      out << "  mrb_value* bc2cpp_argv;\n"
+      out << "  mrb_int bc2cpp_argc;\n"
+      out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+      out << call_impl.call("M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv)")
+    elsif kind == 'block_fallback'
       # BLOCK_SEMANTICS: a block is called like OP_ENTER of a non-strict proc:
       # missing arguments are nil, extra ones are dropped, and one Array
       # argument is spread over several parameters (vm.c `len > 1 && argc == 1

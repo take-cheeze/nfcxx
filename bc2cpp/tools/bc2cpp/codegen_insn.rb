@@ -1022,7 +1022,7 @@ class CodeGen
     chain = entries.map do |entry|
       owner = entry[:owner]
       guard = "mrb_type(#{recv}) == #{owner[:tag]}"
-      guard += " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}" unless %w[Float Symbol].include?(owner[:class_name])
+      guard += " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}" unless IMMEDIATE_NATIVE_CLASSES.include?(owner[:class_name])
       expression = entry[:expression].gsub('recv', recv).gsub('BC2CPP_ARG0', "r#{s}")
       "  if (#{guard}) {\n    r#{d} = #{expression};\n  } else "
     end.join

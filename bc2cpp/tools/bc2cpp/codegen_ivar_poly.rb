@@ -38,7 +38,7 @@ class CodeGen
     # singleton class was just given its own `shared_name`.
     return nil if devirt_blocked_name?(name)
 
-    defs = @registry[name]
+    defs = core_targets(@registry[name])
     # LONE_ACCESSOR_CHAIN: a name whose only definition is a plain attr_reader/
     # attr_writer (LCF::EventCommand `indent`/`code`) cannot be MONO (no bytecode).
     # The receiver may be any class (rpgxp/rpgvx/wolf define their own), so it is
@@ -66,6 +66,11 @@ class CodeGen
         next !ivar_accessor_call_code(t.owner, 'recv', name, 0, ['arg']).nil?
       end
       next false unless t.irep
+      # MODULE_OWNER_EXCLUSION: `mrb_obj_class` is a real class, never a module, so
+      # a module's own definition can never match its arm (its includers reach it
+      # through the by-name fallback). Coverage of those includers is a separate
+      # question the closed world answers from `required_classes`, not from an arm.
+      next false if t.core && CodeGen.module_names&.include?(t.owner)
       # SINGLETON_OWNER_EXCLUSION: a `.singleton` owner can never match the guard:
       # mrb_obj_class is mrb_class_real(mrb_class(obj)) (src/class.c), which skips
       # SCLASS/ICLASS and returns e.g. Module, and const_chain_value_expr strips the
@@ -100,7 +105,7 @@ class CodeGen
     cache_key = [name, n, candidates.map(&:object_id)]
     reasons = @poly_diagnostic_reason_cache[cache_key]
     unless reasons
-      defs = @registry[name] || []
+      defs = core_targets(@registry[name]) || []
       reasons = Hash.new(0)
       if devirt_blocked_name?(name)
         reasons[:runtime_definition_guard] += defs.size

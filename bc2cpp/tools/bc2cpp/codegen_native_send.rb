@@ -162,6 +162,10 @@ class CodeGen
                                           end
   end
 
+  # Classes whose instances are immediate values: a type-tag test is their whole class
+  # test, and `mrb_obj_ptr(v)->c` on one reads through a tagged (or integer) word.
+  IMMEDIATE_NATIVE_CLASSES = %w[Float Symbol Integer].freeze
+
   # The closed world proves no Ruby respond_to_missing? exists, and every native
   # one is mruby core's (kernel.c/class.c/method.c), whose default answers false.
   def respond_to_missing_absent?
@@ -560,7 +564,7 @@ class CodeGen
       source_comment = if name == 'clear' && owner[:class_name] == 'Array' && expression.include?('mrb_ary_clear')
                          '// ARRAY_CLEAR :clear -- generated from mruby core C'
                        end
-      exact_class = %w[Float Symbol].include?(owner[:class_name]) ? '' :
+      exact_class = IMMEDIATE_NATIVE_CLASSES.include?(owner[:class_name]) ? '' :
                       " && mrb_obj_ptr(#{recv})->c == M->#{owner[:field]}"
       <<~CPP.chomp
         #{source_comment}
