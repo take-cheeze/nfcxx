@@ -719,6 +719,8 @@ class CodeGen
     end
     body_targets = jump_targets(irep).select { |t| range.cover?(t) } -
                    (local_suppressed.to_a - local_glue_at.keys)
+    saved_blk_param_name = @blk_param_name
+    @blk_param_name = 'bc2cpp_blk' if extra_fields.any? { |f| f[:name] == 'bc2cpp_blk' }
     irep.instructions_at(range).each do |insn|
       idx = irep.index_of_addr(insn.addr)
       next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
@@ -730,6 +732,7 @@ class CodeGen
                 local_glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
               end
     end
+    @blk_param_name = saved_blk_param_name
     out << fell_off_end(try_name)
     out << "}\n\n"
     out

@@ -670,22 +670,26 @@ class CodeGen
   # compile_block_body_insn shift) and is passed on for the capture levels.
   # `self` is not shifted: the block shares the method's self. nil keeps the
   # previous output.
-  def emit_block_fallback_glue(region, fn_name, inline_offset: nil)
+  def emit_block_fallback_glue(region, fn_name, inline_offset: nil, owner_def: nil)
     dest_reg = region[:dest_reg].to_i + (inline_offset || 0)
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset)
+    # ARG_SHAPES_BLOCK (ADR 0265): a top-level site whose call resolves to compiled code.
+    direct = inline_offset.nil? ? compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def) : nil
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
-           "(self captured at construction time), dynamic dispatch\n"
+           "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"
     out << "  {\n"
     out << ctor
     # EXCEPTION_BREAK_SUPPORT: the dispatch is always wrapped (cheap under
     # zero-cost exceptions, and no need to know whether this body has a BREAK); a
     # body without one never throws.
     out << "    Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n    try {\n"
-    if argv.empty?
+    if direct
+      out << direct.lines.map { |line| "      #{line}" }.join
+    elsif argv.empty?
       out << "      r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
              "mrb_obj_value(#{rproc_var}));\n"
     else
@@ -788,7 +792,7 @@ class CodeGen
       fn_name, fn_code = fn_result
       pre << fn_code
       suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
+      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name, owner_def: d)
     end
     explicit_arg_regions.each do |region|
       next if suppressed.include?(region[:sendb_addr])

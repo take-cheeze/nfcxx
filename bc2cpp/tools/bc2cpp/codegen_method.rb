@@ -72,9 +72,7 @@ class CodeGen
     # LCF::Array2D#each), found by block_fallback_regions and read by
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
-    needs_blk_param = mandatory_ok &&
-                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.paren_value == '0' } ||
-                       block_fallback_regions.any? { |r| r[:needs_blk] })
+    needs_blk_param = yields_block_param?(irep, block_fallback_regions)
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: tried whenever
     # mandatory_ok is false, whether or not the optional table resolved (the
