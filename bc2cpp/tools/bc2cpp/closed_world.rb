@@ -121,6 +121,25 @@ class ClosedWorld
     !@global_refusal && !opaque?(owner) && descendants(owner).empty?
   end
 
+  # CHA_SELF (ADR 0254): every class whose instances can be `owner` or descend
+  # from it, or nil when that set is not fully enumerable (opaque owner or
+  # opaque descendant, global refusal). `wild` are descendants whose superclass
+  # the walk could not resolve: they may sit under any class, so a caller
+  # cannot place them relative to an override.
+  def class_hierarchy(owner)
+    return nil if @global_refusal || opaque?(owner)
+
+    sub = descendants(owner)
+    return nil if sub.any? { |c| opaque?(c) }
+
+    { descendants: sub, wild: @wild & sub }
+  end
+
+  # Can an instance of `owner` or of a descendant answer through method_missing?
+  def self_method_missing_free?(owner)
+    method_missing_free?(owner)
+  end
+
   # A runtime exact-class guard needs a stable constant, but unlike
   # exact_class? it does not require the class to have no subclasses.
   def stable_class_constant?(owner)

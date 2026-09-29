@@ -312,6 +312,160 @@ class CodeGen
       "  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
   end
 
+  # CHA_SELF (ADR 0254): `self.name` in a method of class C reaches C or one of
+  # its descendants. When the closed world enumerates them all, the receiver's
+  # class need not be compared: every descendant either resolves `name` to the
+  # definition C's own lookup finds, or to one of a few overriders, and those
+  # get exact-class arms (with the classes that inherit from them) ahead of a
+  # default arm.
+  CHA_SELF_GUARDS_MAX = 8
+
+  # [plan, reason]: plan is { default: MethodDef, arms: [[MethodDef, [class...]]] }
+  # or nil with the Symbol naming the refusal. `explicit` is a `self.name` send
+  # (public methods only), as opposed to an implicit-self call.
+  def cha_self_plan(name, n, self_owner, explicit:)
+    return [nil, :no_closed_world] unless @closed_world
+    return [nil, :not_a_class] if self_owner.end_with?('.singleton') || !@closed_world.class_declared?(self_owner)
+    return [nil, :blocked_name] if devirt_blocked_name?(name)
+
+    hierarchy = @closed_world.class_hierarchy(self_owner)
+    return [nil, :opaque_hierarchy] unless hierarchy
+    return [nil, :unsafe_name] unless @closed_world.inherited_lookup_safe?(name, self_owner)
+
+    installed = symbol_installed_names
+    return [nil, :installed_name] if installed.nil? || installed.include?(name)
+    return [nil, :native_definition] if @registry.fetch(name, []).any? { |d| d.owner == '<native>' }
+    return [nil, :method_missing] unless @closed_world.self_method_missing_free?(self_owner)
+
+    default, known = closed_world_lookup_target(name, self_owner, Set.new, self_call: true)
+    return [nil, known ? :no_definition : :ambiguous_lookup] unless default
+
+    descendants = hierarchy[:descendants]
+    return [nil, :mixin_in_the_way] if descendants.any? { |klass| cha_mixin_may_define?(name, klass) }
+
+    overriders = @registry.fetch(name, []).select { |d| descendants.include?(d.owner) }
+    unless overriders.empty?
+      return [nil, :wild_subclass] unless hierarchy[:wild].empty?
+      return [nil, :redefined_owner] if overriders.group_by(&:owner).any? { |_, defs| defs.size > 1 }
+    end
+
+    arms = cha_override_arms(overriders, self_owner, descendants)
+    return [nil, :unresolved_chain] unless arms
+    return [nil, :too_many_guards] if arms.sum { |_, classes| classes.size } > CHA_SELF_GUARDS_MAX
+
+    ([default] + arms.map(&:first)).each do |t|
+      reason = cha_unready_reason(t, name, n, explicit, descendants)
+      return [nil, reason] if reason
+    end
+    [{ default: default, arms: arms }, nil]
+  end
+
+  # Does a mixin on `klass` (a descendant) possibly supply `name`? Any mixin the
+  # compiler cannot name, or whose own mixins it cannot follow, may.
+  def cha_mixin_may_define?(name, klass)
+    return true if @unknown_mixins.include?(klass)
+
+    (Array(@included_modules[klass]) + Array(@prepended_modules[klass])).any? do |mod|
+      cha_module_may_define?(name, mod, Set.new)
+    end
+  end
+
+  def cha_module_may_define?(name, mod, seen)
+    return false unless seen.add?(mod)
+    return true unless @closed_world.stable_constant_identity?(mod) && !@unknown_mixins.include?(mod)
+    return true if @registry.fetch(name, []).any? { |d| d.owner == mod }
+
+    (Array(@included_modules[mod]) + Array(@prepended_modules[mod])).any? do |inner|
+      cha_module_may_define?(name, inner, seen)
+    end
+  end
+
+  # [[MethodDef, classes]] for each overrider: the classes whose lookup of the
+  # name ends at it (the overrider and the descendants inheriting from it). nil
+  # when a descendant's chain to `self_owner` cannot be followed.
+  def cha_override_arms(overriders, self_owner, descendants)
+    return [] if overriders.empty?
+
+    by_owner = overriders.to_h { |d| [d.owner, d] }
+    classes = Hash.new { |h, k| h[k] = [] }
+    descendants.sort.each do |klass|
+      k = klass
+      seen = Set.new
+      until k == self_owner || by_owner.key?(k)
+        return nil unless k.is_a?(String) && seen.add?(k)
+
+        k = @superclass_of[k]
+      end
+      classes[k] << klass if by_owner.key?(k)
+    end
+    overriders.map { |d| [d, classes[d.owner]] }
+  end
+
+  # nil when `t` can be called directly from this site, else why not.
+  def cha_unready_reason(t, name, n, explicit, descendants)
+    return :singleton_definer if t.owner.end_with?('.singleton')
+    return :private_definer if explicit && t.visibility != :public
+    if @only_owners && !@only_owners.include?(t.owner) && !@other_owners&.include?(t.owner)
+      return :owner_not_emitted
+    end
+
+    if t.irep.nil?
+      return :not_compiled unless t.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
+
+      # A descendant that embeds the ivar the accessor's owner keeps in iv_tbl
+      # (or the reverse) has a different storage than the accessor's.
+      ivar = name.chomp('=')
+      return :embedded_elsewhere if descendants.any? { |k| k != t.owner && embed_type(k, ivar) }
+      return :accessor_unlinkable if ivar_accessor_call_code(t.owner, 'recv', name, 0, ['arg']).nil?
+
+      return nil
+    end
+
+    irep = @ireps.fetch(t.irep)
+    return :arity unless pure_mandatory_or_optional_arity?(irep) &&
+                         n.between?(mandatory_arity(irep), mandatory_arity(irep) + optional_arity(irep))
+    return :unclean unless compiles_clean?(t.irep)
+
+    nil
+  end
+
+  # The statements calling one CHA_SELF target into r<d>.
+  def cha_call_code(t, self_owner, recv, name, d, argv, indent: '  ')
+    if t.irep.nil?
+      return ivar_accessor_call_code(t.owner, recv, name, d, argv, self_of_klass: t.owner == self_owner,
+                                                                    indent: indent)
+    end
+
+    impl = cpp_name(t.owner, t.name) + '_impl'
+    call_argv, = direct_call_args(t, argv, impl)
+    "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+  end
+
+  def cha_self_code(plan, self_owner, name, d, recv, argv)
+    default = plan[:default]
+    arms = plan[:arms]
+    if arms.empty?
+      return "  // CLOSED_WORLD_SELF :#{name} -> #{default.owner}##{default.name} (self in #{self_owner}; " \
+             "class hierarchy analysis: no descendant defines or mixes in the name), direct C++ call\n" \
+             "  #{cha_call_code(default, self_owner, recv, name, d, argv)}\n"
+    end
+
+    note = arms.map { |t, classes| "#{t.owner} (#{classes.join(', ')})" }.join('; ')
+    hoist = arms.sum { |_, classes| classes.size } > 1
+    recv_class = hoist ? 'bc2cpp_recv_class' : "mrb_obj_class(M, #{recv})"
+    branches = arms.map do |t, classes|
+      check = classes.map { |k| "#{owner_class_ptr_expr(k)} == #{recv_class}" }.join(' || ')
+      "if (#{check}) {\n    #{cha_call_code(t, self_owner, recv, name, d, argv, indent: '    ')}\n  } else "
+    end
+    chain = "#{branches.join}{\n    #{cha_call_code(default, self_owner, recv, name, d, argv, indent: '    ')}\n  }\n"
+    head = "  // CLOSED_WORLD_SELF :#{name} -> #{default.owner}##{default.name} (self in #{self_owner}; class " \
+           "hierarchy analysis: only #{note} override), exact-class arms for the overriders, " \
+           "the inherited definition for every other receiver\n"
+    return "#{head}  #{chain}" unless hoist
+
+    "#{head}  {\n  struct RClass* #{recv_class} = mrb_obj_class(M, #{recv});\n  #{chain}  }\n"
+  end
+
   # POLY_TABLE (ADR 0227): a name with more than POLY_SMALL_N_MAX candidates
   # gets one file-scope table of {owner, `_impl`} rows shared by every site,
   # instead of a per-site chain. The site looks the receiver's class up and
