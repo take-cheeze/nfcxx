@@ -27,7 +27,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -68,7 +68,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -117,7 +117,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -156,7 +156,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -212,7 +212,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -262,7 +262,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -435,7 +435,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       if is_fold
         # `reduce(init)`: dest, init, block, so BLOCK is at dest+2 (`BLOCK R4` +
         # `SENDB R2 :reduce n=1`).
@@ -486,7 +486,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -540,7 +540,7 @@ class CodeGen
       # always SEND/SSEND, never SENDB/SSENDB, so it cannot form a region here.
 
       dest_reg = dest[/^R(\d+)/, 1]
-      sym_reg = loadsym_insn.args[/^R(\d+)/, 1]
+      sym_reg = loadsym_insn.reg
       next unless dest_reg && sym_reg && sym_reg == (dest_reg.to_i + 1).to_s
 
       sym_name = loadsym_insn.args[/:(\S+)/, 1]&.sub(/\A:/, '')
@@ -581,7 +581,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -611,7 +611,7 @@ class CodeGen
     (idx - 1).downto(0) do |i|
       pin = irep.instructions[i]
       next unless pin
-      next unless pin.args[/^R(\d+)/, 1] == dest_reg
+      next unless pin.reg == dest_reg
       # Only a `range` call made FROM a Game::Interpreter method counts (checked via
       # the irep's MethodDef owner), not just the name.
       next unless %w[SEND SSEND SEND0 SSEND0].include?(pin.op)
@@ -689,7 +689,7 @@ class CodeGen
       # dest+1 for :frame (no arguments at all), dest+2 for :section, whose name
       # is argument 0 and is written into dest+1 first. Getting this wrong is
       # what a plain "dest+1" check from the collection passes assumes.
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless block_reg == (dest_reg.to_i + 1 + want_argc).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -751,7 +751,7 @@ class CodeGen
   # the method can never be mistaken for this call's name.
   def profiler_section_literal(irep, idx, reg)
     insn = irep.instructions[idx - 2]
-    return nil unless insn && insn.op == 'STRING' && insn.args[/^R(\d+)/, 1] == reg
+    return nil unless insn && insn.op == 'STRING' && insn.reg == reg
 
     pool_idx = insn.args[/L\[(\d+)\]/, 1]
     return nil unless pool_idx
@@ -785,7 +785,7 @@ class CodeGen
       next unless block_insn && block_insn.op == 'BLOCK'
 
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = block_insn.args[/^R(\d+)/, 1]
+      block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
       block_irep_idx = block_insn.args[/I\[(\d+)\]/, 1]
@@ -857,7 +857,7 @@ class CodeGen
       reg = upvar
       (call_idx - 1).downto(0) do |i|
         prior = host_irep.instructions[i]
-        next unless prior.args[/^R(\d+)/, 1] == reg
+        next unless prior.reg == reg
 
         if prior.op == 'MOVE'
           reg = prior.args.scan(/R(\d+)/).flatten[1]
@@ -895,7 +895,7 @@ class CodeGen
   def with_element_hint(block_irep, insn, i, elem_reg, elem_class)
     hint = nil
     if elem_class && elem_reg && %w[SEND SEND0].include?(insn.op) &&
-       element_receiver?(block_irep, i, insn.args[/^R(\d+)/, 1], elem_reg)
+       element_receiver?(block_irep, i, insn.reg, elem_reg)
       hint = elem_class
     end
     prev = @elem_class_hint
@@ -917,7 +917,7 @@ class CodeGen
     (idx - 1).downto(0) do |i|
       insn = block_irep.instructions[i]
       next unless insn
-      next unless insn.args[/^R(\d+)/, 1] == reg
+      next unless insn.reg == reg
       return false unless insn.op == 'MOVE'
 
       src = insn.args.scan(/R(\d+)/).flatten[1]
@@ -963,7 +963,7 @@ class CodeGen
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
       "  goto #{iter_end_label};\n"
     when 'RETURN_BLK'
-      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      r = insn.args.strip.empty? ? '0' : insn.reg
       "  return r#{r.to_i + offset};\n"
     when 'BREAK'
       # EACH_BLOCK_SUPPORT: `break` (bare breaks carry a LOADNIL'd register) makes
@@ -971,7 +971,7 @@ class CodeGen
       # assign the SENDB destination and jump past the loop. Only the each/sym
       # emitters pass break_dest/break_label; in #times a break keeps its `#error`.
       if break_dest && break_label
-        r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+        r = insn.args.strip.empty? ? '0' : insn.reg
         "  r#{break_dest} = r#{r.to_i + offset};\n  goto #{break_label};\n"
       else
         "  #error unhandled opcode BREAK -- not in this prototype's supported subset\n"
@@ -1006,13 +1006,13 @@ class CodeGen
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
     when 'JMPNOT'
-      reg = insn.args[/^R(\d+)/, 1]
+      reg = insn.reg
       "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     when 'JMPIF'
-      reg = insn.args[/^R(\d+)/, 1]
+      reg = insn.reg
       "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     when 'JMPNIL'
-      reg = insn.args[/^R(\d+)/, 1]
+      reg = insn.reg
       "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
     else
       # BLOCK_BODY_INDEX_SUPPORT: `idx` is the instruction's real position in

@@ -140,12 +140,12 @@ class CodeGen
 
         reg = s
       when 'GETCONST'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         return insn.args.split(/\s+/)[1] == 'Fiber'
       else
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         return false if d == reg
       end
     end
@@ -167,7 +167,7 @@ class CodeGen
       name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
       next unless name == 'yield'
 
-      dest_reg = insn.args[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
       next unless fiber_const_receiver?(irep, idx, dest_reg)
 
@@ -226,7 +226,7 @@ class CodeGen
         next unless paired && paired.op == 'SENDB'
         next unless paired.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1] == 'new'
 
-        dest_reg = paired.args[/^R(\d+)/, 1]
+        dest_reg = paired.reg
         next unless dest_reg && fiber_const_receiver?(irep, idx, dest_reg)
 
         block_irep_idx = insn.args[/I\[(\d+)\]/, 1]
@@ -304,7 +304,7 @@ class CodeGen
       n = n_match[1].to_i
       dest, _rest = paired.args.split(/\s+/, 2)
       dest_reg = dest[/^R(\d+)/, 1]
-      block_reg = insn.args[/^R(\d+)/, 1]
+      block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
       # :reduce n=1`), so the block is at dest + n + 1.
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + n + 1).to_s

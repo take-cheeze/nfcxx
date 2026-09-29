@@ -120,7 +120,7 @@ class CodeGen
       case insn.op
       when 'RETURN'
         # `"RETURN\tR%d"` -- the returned register is the first operand.
-        reg = insn.args[/\AR(\d+)/, 1]
+        reg = insn.reg
         return false unless reg
         return false unless proven_fixnum_operand?(irep, idx, reg, d)
       when 'RETURN_BLK', 'BREAK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'STOP'
@@ -212,7 +212,7 @@ class CodeGen
       case insn.op
       when 'RETURN'
         # `"RETURN\tR%d"` -- the returned register is the first operand.
-        reg = insn.args[/\AR(\d+)/, 1]
+        reg = insn.reg
         return false unless reg
         return false unless straightline_return_reg?(irep, idx, reg)
         return false unless proven_array_operand?(irep, idx, reg, d.owner, mand, ivar_classes, arg_classes,
@@ -247,7 +247,7 @@ class CodeGen
       case insn.op
       # RETURN_BLK in a method body is a plain return (methods are strict procs).
       when 'RETURN', 'RETURN_BLK'
-        reg = insn.args[/\AR(\d+)/, 1]
+        reg = insn.reg
         return nil unless reg
 
         sources = return_value_sources(irep, idx, reg)
@@ -314,7 +314,7 @@ class CodeGen
         insn = irep.instructions[p]
         # vm.c only falls through a `RAISEIF Ra` when regs[a] is nil.
         if insn.op == 'RAISEIF'
-          if insn.args[/\AR(\d+)/, 1] == r
+          if insn.reg == r
             out << :nil
           else
             work << [p, r]
@@ -322,7 +322,7 @@ class CodeGen
           next
         end
         return nil unless FIXNUM_PROOF_STEP_OVER_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
-        return nil if RETURN_SOURCE_CALLS.include?(insn.op) && insn.args[/\AR(\d+)/, 1].to_i < r.to_i
+        return nil if RETURN_SOURCE_CALLS.include?(insn.op) && insn.reg.to_i < r.to_i
 
         if !fixnum_proof_writes_reg?(insn, r)
           work << [p, r]
@@ -470,7 +470,7 @@ class CodeGen
     use = idx
     (idx - 1).downto(0) do |i|
       pin = irep.instructions[i]
-      next if READ_ONLY_OPCODE_SKIP.include?(pin.op) || pin.args[/^R(\d+)/, 1] != r
+      next if READ_ONLY_OPCODE_SKIP.include?(pin.op) || pin.reg != r
       # proven_array_source_scan steps over BLOCK, so it must not end this walk.
       return false if pin.op == 'BLOCK'
       return false unless return_write_dominates?(irep, i, use, r)

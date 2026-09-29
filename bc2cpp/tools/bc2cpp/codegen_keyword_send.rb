@@ -575,7 +575,7 @@ class CodeGen
       next unless insn
       # Skip the block proc register (see array_element_source_scan).
       next if insn.op == 'BLOCK'
-      next unless insn.args[/^R(\d+)/, 1] == reg
+      next unless insn.reg == reg
 
       case insn.op
       when 'MOVE'
@@ -610,7 +610,7 @@ class CodeGen
       insn = irep.instructions[i]
       next unless insn
       next if insn.op == 'BLOCK'
-      next unless insn.args[/^R(\d+)/, 1] == reg
+      next unless insn.reg == reg
 
       case insn.op
       when 'MOVE'

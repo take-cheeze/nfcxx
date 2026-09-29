@@ -22,7 +22,7 @@ class CodeGen
         next if input_reg == reg
       end
 
-      written = insn.args[/^R(\d+)/, 1]
+      written = insn.reg
       next unless written == reg
 
       if insn.op == 'MOVE'
@@ -122,7 +122,7 @@ class CodeGen
     reg = dest_reg
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
-      next unless insn.args[/^R(\d+)/, 1] == reg
+      next unless insn.reg == reg
 
       case insn.op
       when 'MOVE'
@@ -149,7 +149,7 @@ class CodeGen
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       next if insn.op == 'BLOCK' || READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      next unless insn.args[/^R(\d+)/, 1] == reg
+      next unless insn.reg == reg
 
       if insn.op == 'MOVE'
         reg = insn.args.scan(/R(\d+)/).flatten[1]
@@ -199,7 +199,7 @@ class CodeGen
       insn = irep.instructions[i]
       return nil if %w[JMPUW ONERR RESCUE EXCEPT BLOCK].include?(insn.op)
       next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      next unless insn.args[/^R(\d+)/, 1] == reg
+      next unless insn.reg == reg
 
       case insn.op
       when 'MOVE'
@@ -555,7 +555,7 @@ class CodeGen
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
-    super_dest = super_insn.args[/^R(\d+)/, 1]
+    super_dest = super_insn.reg
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
@@ -639,8 +639,8 @@ class CodeGen
     # Strict adjacency: an interposed EXT declines.
     return nil unless argary.op == 'ARGARY' && super_insn.op == 'SUPER'
 
-    argary_dest = argary.args[/^R(\d+)/, 1]
-    super_dest = super_insn.args[/^R(\d+)/, 1]
+    argary_dest = argary.reg
+    super_dest = super_insn.reg
     return nil unless argary_dest && super_dest
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 

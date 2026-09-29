@@ -72,7 +72,7 @@ def array_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
 
     # Skip the block proc register (see proven_array_source_scan).
     next if insn.op == 'BLOCK'
-    next unless insn.args[/^R(\d+)/, 1] == reg
+    next unless insn.reg == reg
 
     case insn.op
     when 'MOVE'
@@ -127,7 +127,7 @@ def hash_element_source_scan(irep, idx, dest_reg, ctx, depth = 0)
     next unless insn
 
     next if insn.op == 'BLOCK'
-    next unless insn.args[/^R(\d+)/, 1] == reg
+    next unless insn.reg == reg
 
     case insn.op
     when 'MOVE'
@@ -250,7 +250,7 @@ end
 def adjacent_block_irep(irep, i, recv_reg, ctx)
   block_insn = i.positive? ? irep.instructions[i - 1] : nil
   return nil unless block_insn && block_insn.op == 'BLOCK'
-  return nil unless block_insn.args[/^R(\d+)/, 1] == (recv_reg.to_i + 1).to_s
+  return nil unless block_insn.reg == (recv_reg.to_i + 1).to_s
 
   k = block_insn.args[/I\[(\d+)\]/, 1]
   return nil unless k
@@ -279,9 +279,9 @@ def filter_map_block_return_class(block_irep, ctx, depth, input_class)
   block_irep.instructions.each_with_index do |insn, i|
     case insn.op
     when 'RETURN'
-      reg = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      reg = insn.args.strip.empty? ? '0' : insn.reg
       previous = i.positive? ? block_irep.instructions[i - 1] : nil
-      if previous && %w[LOADNIL LOADFALSE].include?(previous.op) && previous.args[/^R(\d+)/, 1] == reg
+      if previous && %w[LOADNIL LOADFALSE].include?(previous.op) && previous.reg == reg
         next
       end
 
@@ -309,7 +309,7 @@ def block_mandatory_param_source?(irep, idx, reg)
   current = reg
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    next unless insn.args[/^R(\d+)/, 1] == current
+    next unless insn.reg == current
     return false unless insn.op == 'MOVE'
 
     current = insn.args.scan(/R(\d+)/).flatten[1]
@@ -386,7 +386,7 @@ def irep_return_class(irep, ctx, depth)
   irep.instructions.each_with_index do |insn, i|
     case insn.op
     when 'RETURN'
-      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      r = insn.args.strip.empty? ? '0' : insn.reg
       cls = element_value_class(irep, i, r, ctx, depth)
       return nil unless cls
       return nil if found && found != cls
@@ -521,7 +521,7 @@ def element_value_class(irep, idx, reg, ctx, depth = 0)
     next unless insn
 
     next if insn.op == 'BLOCK'
-    next unless insn.args[/^R(\d+)/, 1] == cur
+    next unless insn.reg == cur
 
     if insn.op == 'MOVE'
       src = insn.args.scan(/R(\d+)/).flatten[1]
@@ -687,7 +687,7 @@ class ArrayElementLayout
                 name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
                 next unless name && ARRAY_ELEMENT_WRITERS.include?(name)
 
-                recv = insn.args[/^R(\d+)/, 1]
+                recv = insn.reg
                 ivar = mutated_ivar_target(irep, idx, recv)
                 next unless ivar && array_ivars.include?(ivar)
 
@@ -785,7 +785,7 @@ def mutated_ivar_target(irep, idx, reg)
     next unless insn
 
     next if insn.op == 'BLOCK'
-    next unless insn.args[/^R(\d+)/, 1] == reg
+    next unless insn.reg == reg
 
     return insn.args[/@(\w+)/, 1] if insn.op == 'GETIV'
 
@@ -914,7 +914,7 @@ class HashElementLayout
                 name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
                 next unless name && HASH_ELEMENT_WRITERS.include?(name)
 
-                recv = insn.args[/^R(\d+)/, 1]
+                recv = insn.reg
                 ivar = mutated_ivar_target(irep, idx, recv)
                 next unless ivar && hash_ivars.include?(ivar)
 

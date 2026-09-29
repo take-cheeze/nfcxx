@@ -805,7 +805,7 @@ class CodeGen
       body << "  #{body_prefix}#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       code = case insn.op
              when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
-               r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
+               r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.reg) : nil
                store = case insn.op
                        when 'RETURN' then "r#{r.to_i + offset}"
                        when 'RETNIL' then 'mrb_nil_value()'
@@ -839,7 +839,7 @@ class CodeGen
                                 result_var:, break_dest:, break_label:, broke_flag:, idx: nil)
     case insn.op
     when 'RETURN', 'RETNIL', 'RETFALSE', 'RETTRUE'
-      r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]) : nil
+      r = insn.op == 'RETURN' ? (insn.args.strip.empty? ? '0' : insn.reg) : nil
       store = case insn.op
               when 'RETURN' then "r#{r.to_i + offset}"
               when 'RETNIL' then 'mrb_nil_value()'
@@ -850,7 +850,7 @@ class CodeGen
     when 'BREAK'
       # Same value semantics as compile_block_body_insn's BREAK, plus the broke
       # flag so the post-loop accumulator assignment is skipped.
-      r = insn.args.strip.empty? ? '0' : insn.args[/^R(\d+)/, 1]
+      r = insn.args.strip.empty? ? '0' : insn.reg
       "  r#{break_dest} = r#{r.to_i + offset};\n  #{broke_flag} = TRUE;\n  goto #{break_label};\n"
     else
       compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,

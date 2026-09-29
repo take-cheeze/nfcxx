@@ -13,7 +13,7 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless insn.op == 'LAMBDA'
 
-      dest_reg = insn.args[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
 
       lambda_irep_idx = insn.args[/I\[(\d+)\]/, 1]

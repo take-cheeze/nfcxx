@@ -16,7 +16,7 @@ class CallSiteIndex
         name = insn.args[NAME_RE, 1]
         next unless name
 
-        dest = insn.args[/^R(\d+)/, 1].to_i
+        dest = insn.reg.to_i
         argc = insn.args[/n=(\d+)/, 1].to_i
         by_name[name] << [irep, idx, dest, argc]
       end

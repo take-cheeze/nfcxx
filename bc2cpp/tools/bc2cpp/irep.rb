@@ -15,6 +15,21 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
     args.sub(/\s*;.*\z/m, '')
   end
 
+  # First register operand as digits ("R6" -> "6"), nil when the instruction
+  # has none. Registers are Strings because callers key maps and compare
+  # against `dest_reg.to_s`.
+  def reg
+    return @reg if defined?(@reg)
+
+    @reg = args[/\AR(\d+)/, 1]
+  end
+
+  # Every register operand in order, excluding those named only in the
+  # trailing comment.
+  def regs
+    @regs ||= operands.scan(/R(\d+)/).flatten.freeze
+  end
+
   # Absolute target address of a JMP/JMPIF/JMPNOT/JMPNIL, nil for anything else.
   def jump_target
     return nil unless %w[JMP JMPIF JMPNOT JMPNIL].include?(op)

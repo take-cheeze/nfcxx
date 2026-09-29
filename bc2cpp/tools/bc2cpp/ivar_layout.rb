@@ -245,17 +245,17 @@ class IvarLayout
 
         src_reg = s
       when /^LOADI/
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == src_reg
 
         return false # a literal Integer: readable, and a Fixnum
       when 'LOADNIL'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == src_reg
 
         return false # nil: legal in the type
       when 'LOADSYM', 'LOADTRUE', 'LOADFALSE', 'STRING', 'ARRAY', 'ARRAY2', 'HASH', 'RANGE_INC', 'RANGE_EXC'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == src_reg
 
         return true # positively another kind of value
@@ -264,7 +264,7 @@ class IvarLayout
         # ADD arm); it was refused here, so the value is not readable.
         next
       else
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         return false if d == src_reg # an unmodeled writer: unreadable, not "other"
 
         next
@@ -301,18 +301,18 @@ class IvarLayout
 
         reg = s
       when /^LOADI/
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         return :fixnum
       when 'LOADSYM'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
         # A Symbol is as safe to embed as a Fixnum: an mrb_sym is an interned id, not a
         # GC object (symbol.c frees the table only at mrb_close). See CodeGen::TYPE_OPS.
         return :symbol
       when 'LOADNIL'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         # NILABLE_EMBED_SUPPORT: nil is a concrete value, so it is a contribution
@@ -323,7 +323,7 @@ class IvarLayout
         # BOOL_EMBED_SUPPORT: LOADT/LOADF. true/false are immediates in every boxing
         # this project targets (word, no-float, nan), so an mrb_bool field needs no GC
         # keep-alive. See CodeGen::TYPE_OPS :bool.
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         return :bool
@@ -333,7 +333,7 @@ class IvarLayout
         # path trusts). `integer_constants` is nil for callers that never ran the scan
         # (ArgTypes), and then nothing is proven. GETMCNST keys on the bare name after
         # `::`; see IntegerConstants.analyze for why that is required.
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         name = insn.op == 'GETCONST' ? insn.args.split(/\s+/)[1] : insn.args[/::(\S+)/, 1]
@@ -341,7 +341,7 @@ class IvarLayout
 
         return UNKNOWN
       when 'ADDI'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
         # ADDI is `+= <literal>`: OP_ADDI is a plain integer add on the
         # destination, so it keeps the destination's own type. When the
@@ -350,7 +350,7 @@ class IvarLayout
         # `@y` would), so trace the destination rather than assume.
         return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
       when 'ADD'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
         # ADD is `+`, which is Integer#+ ONLY when both operands are Integers;
         # for two Arrays it is Array#+ and yields an Array. This is the same
@@ -375,7 +375,7 @@ class IvarLayout
         end
         return UNKNOWN
       when 'SUB', 'MUL'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         # FIXNUM_SUBMUL_EMBED_SUPPORT: SUB/MUL (vm.c OP_MATH) dispatch on both operand
@@ -391,14 +391,14 @@ class IvarLayout
         end
         return UNKNOWN
       when 'SUBI'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         # FIXNUM_SUBMUL_EMBED_SUPPORT for the immediate form: only the destination's
         # prior value needs proving.
         return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
       when 'GETIV'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         other_ivar = insn.args[/@(\w+)/, 1]
@@ -409,7 +409,7 @@ class IvarLayout
 
         return UNKNOWN
       when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         next unless d == reg
 
         # FIXNUM_BINOP_EMBED_SUPPORT: %, &, |, ^ never promote to Bignum (like
@@ -453,7 +453,7 @@ class IvarLayout
         # Any other opcode's first operand is almost always its destination, so stop
         # at UNKNOWN. Skipping an unrecognized writer could reach an unrelated earlier
         # write to a reused register and misattribute its type.
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         return UNKNOWN if d == reg
       end
     end

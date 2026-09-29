@@ -95,7 +95,7 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     # The block proc register (BLOCK writes dest+1) sits between the call and its
     # receiver write; skip it.
     next if pin.op == 'BLOCK'
-    next unless pin.args[/^R(\d+)/, 1] == reg
+    next unless pin.reg == reg
 
     # CORE_ARRAY_CHAIN: follow MOVE (`regs[a] = regs[b]`, vm.c OP_MOVE) to the
     # register actually written. Skipping a MOVE would let the scan reach an older,

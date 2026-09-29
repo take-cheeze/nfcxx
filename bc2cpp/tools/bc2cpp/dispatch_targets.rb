@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir'
+
 # Construct, native-argument and super devirtualization targets.
 
 # The typed-_impl calling convention models plain mandatory arguments only.
@@ -479,7 +481,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       next
     end
 
-    d = insn.args[/^R(\d+)/, 1]
+    d = insn.reg
     next unless d == reg
 
     if dominated && !READ_ONLY_OPCODE_SKIP.include?(insn.op)
@@ -516,13 +518,13 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       captured_reg = nil
       (i - 1).downto(0) do |j|
         prior = irep.instructions[j]
-        next unless prior.args[/^R(\d+)/, 1] == arg_reg
+        next unless prior.reg == arg_reg
         if prior.op == 'MOVE'
           arg_reg = prior.args.scan(/R(\d+)/).flatten[1]
           break unless arg_reg
         else
           upvar = prior.args.split(/\s+/) if prior.op == 'GETUPVAR'
-          captured_reg = prior.args[/^R(\d+)/, 1].to_i if upvar && upvar[2] == '0'
+          captured_reg = prior.reg.to_i if upvar && upvar[2] == '0'
           arg_reg = nil
           break
         end
@@ -903,7 +905,7 @@ def assigned_from_new_send?(irep, idx, reg)
     insn = irep.instructions[i]
     next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
 
-    dst = insn.args[/^R(\d+)/, 1]
+    dst = insn.reg
     next unless dst == current
 
     if insn.op == 'MOVE'
@@ -920,12 +922,12 @@ end
 
 def container_phi_merge(irep, at, reg)
   lit = irep.instructions[at + 1]
-  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.args[/^R(\d+)/, 1] == reg
+  return nil unless lit && %w[ARRAY ARRAY2 HASH].include?(lit.op) && lit.reg == reg
 
   lit_class = lit.op == 'HASH' ? 'Hash' : 'Array'
   (at - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    next unless insn.args[/^R(\d+)/, 1] == reg
+    next unless insn.reg == reg
 
     case insn.op
     when 'MOVE'
@@ -952,7 +954,7 @@ end
 def nil_literal_write?(irep, idx, reg)
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
+    d = insn.reg
     next unless d == reg
 
     case insn.op
@@ -976,7 +978,7 @@ end
 def literal_container_class(irep, idx, reg)
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
+    d = insn.reg
     next unless d == reg
 
     case insn.op
@@ -1012,7 +1014,7 @@ end
 def trace_eqq_literal_receiver(irep, idx, reg)
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
+    d = insn.reg
     next unless d == reg
 
     case insn.op
@@ -1044,7 +1046,7 @@ def trace_float_literal_receiver(irep, idx, reg)
 
   (idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    next unless insn.args[/^R(\d+)/, 1] == reg
+    next unless insn.reg == reg
 
     case insn.op
     when 'MOVE'

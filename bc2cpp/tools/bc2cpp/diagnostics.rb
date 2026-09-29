@@ -19,7 +19,7 @@ def opaque_argument_position(irep, idx, reg, mand)
 
       reg = s
     else
-      d = insn.args[/^R(\d+)/, 1]
+      d = insn.reg
       return nil if d == reg
     end
   end
@@ -68,9 +68,9 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       irep.instructions.each_with_index do |insn, idx|
         regs = case insn.op
                when 'ADD', 'SUB', 'MUL', 'EQ', 'LT', 'LE', 'GT', 'GE'
-                 [insn.args[/^R(\d+)/, 1], insn.args[/\(R(\d+)\)/, 1]]
+                 [insn.reg, insn.args[/\(R(\d+)\)/, 1]]
                when 'ADDI', 'SUBI'
-                 [insn.args[/^R(\d+)/, 1]]
+                 [insn.reg]
                else
                  []
                end

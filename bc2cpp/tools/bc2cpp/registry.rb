@@ -18,13 +18,13 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
   return nil unless name == 'new'
 
-  d = insn.args[/^R(\d+)/, 1]
+  d = insn.reg
   return nil unless d
 
   struct_recv = false
   (idx - 1).downto(0) do |i|
     prev = irep.instructions[i]
-    pd = prev.args[/^R(\d+)/, 1]
+    pd = prev.reg
     next unless pd == d
 
     struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
@@ -363,7 +363,7 @@ def build_registry(ireps, root_label)
           # n=1`. An explicit receiver, several arguments or a non-constant module flags
           # the owner in `unknown_mixins` so `super` there declines.
           mixin_owner = namespace || 'Object'
-          self_reg = insn.args[/^R(\d+)/, 1]
+          self_reg = insn.reg
           mixin_n = insn.args[/n=(\d+)/, 1]&.to_i
           recognized = %w[SSEND SSEND0].include?(insn.op) && mixin_n == 1 && self_reg
           ref = recognized ? resolve_mixin_ref(irep, idx, (self_reg.to_i + 1).to_s) : nil
@@ -463,13 +463,13 @@ def build_registry(ireps, root_label)
         name = insn.args[/:([\w+\-*\/<>=!?\[\]&|^~%@]+)/, 1]
         next unless name == 'new'
 
-        d = insn.args[/^R(\d+)/, 1]
+        d = insn.reg
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
         struct_recv = false
         (idx - 1).downto(0) do |i|
           prev = irep.instructions[i]
-          pd = prev.args[/^R(\d+)/, 1]
+          pd = prev.reg
           next unless pd == d
 
           struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
@@ -565,7 +565,7 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
   path = []
   (before_idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    d = insn.args[/^R(\d+)/, 1]
+    d = insn.reg
     next unless d == reg
 
     case insn.op
@@ -594,7 +594,7 @@ def resolve_mixin_ref(irep, before_idx, reg)
   qualified = false
   (before_idx - 1).downto(0) do |i|
     insn = irep.instructions[i]
-    next unless insn.args[/^R(\d+)/, 1] == reg
+    next unless insn.reg == reg
 
     case insn.op
     when 'MOVE'

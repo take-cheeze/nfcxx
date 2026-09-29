@@ -343,7 +343,7 @@ class ClosedWorld
   # `Struct.new(:a, ...)`, `Class.new(Base)`: the constant must feed one `new`
   # directly, whose members/superclass are then recorded.
   def scan_factory(irep, insns, idx, insn, const)
-    reg = insn.args[/\AR(\d+)/, 1].to_i
+    reg = insn.reg.to_i
     send_idx = nil
     compared = false
     ((idx + 1)...insns.size).each do |j|
@@ -354,7 +354,7 @@ class ClosedWorld
       name = SEND_OPS.include?(ins.op) && ins.args[/:(\S+)/, 1]
       next compared = true if FACTORY_READS.include?(name)
 
-      send_idx = j if name == 'new' && !ins.op.start_with?('SS') && ins.args[/\AR(\d+)/, 1].to_i == reg
+      send_idx = j if name == 'new' && !ins.op.start_with?('SS') && ins.reg.to_i == reg
       break
     end
     return if send_idx.nil? && compared
@@ -391,7 +391,7 @@ class ClosedWorld
   # Could `ins` read register `reg`? Over-approximate: a spelled-out operand,
   # or the window after its first register that sends and packing ops use.
   def reads_register?(ins, reg)
-    first = ins.args[/\AR(\d+)/, 1]&.to_i
+    first = ins.reg&.to_i
     rest = first ? ins.args.sub(/\AR\d+/, '') : ins.args
     return true if rest.match?(/\bR#{reg}\b/)
     return false if first.nil? || ins.op.match?(PURE_WRITES)

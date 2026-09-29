@@ -1848,7 +1848,7 @@ class CodeGen
     unless recv == 'self'
       reg = recv[/\Ar(\d+)\z/, 1]
       prev = reg && irep && idx&.positive? && irep.instructions[idx - 1]
-      self_loaded = prev && prev.op == 'LOADSELF' && prev.args[/\AR(\d+)/, 1] == reg &&
+      self_loaded = prev && prev.op == 'LOADSELF' && prev.reg == reg &&
                     fixnum_proof_preds(irep)&.fetch(idx, nil).to_a == [idx - 1]
       self_owner = nil unless self_loaded
     end

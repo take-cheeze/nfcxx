@@ -263,7 +263,7 @@ class CodeGen
 
       except_i = by_addr[t]
       next unless except_i && except_i.op == 'EXCEPT'
-      exc_reg = except_i.args[/^R(\d+)/, 1]
+      exc_reg = except_i.reg
       next unless exc_reg
 
       # Two exclusive handler shapes, each with its own recognizer (nil means "not
@@ -291,7 +291,7 @@ class CodeGen
       # patches/mruby-defined-keyword.patch), which overwrites r<exc_reg>. That makes
       # the try body's result dead on success; anything else is unverified.
       if handler[:kind] == :defined_const
-        next unless shared_i.op == 'STRING' && shared_i.args[/^R(\d+)/, 1] == exc_reg
+        next unless shared_i.op == 'STRING' && shared_i.reg == exc_reg
         next unless handler[:join_addr] > shared_target
       end
       # connector_reg is always exc_reg (see the header). tail_return stays a
@@ -300,7 +300,7 @@ class CodeGen
       tail_return = %w[RETURN RETURN_BLK].include?(shared_i.op)
       connector_reg = exc_reg
       if tail_return
-        tail_reg = shared_i.args.strip.empty? ? '0' : shared_i.args[/^R(\d+)/, 1]
+        tail_reg = shared_i.args.strip.empty? ? '0' : shared_i.reg
         next unless tail_reg == connector_reg
       end
 
@@ -407,7 +407,7 @@ class CodeGen
       # writing the root's register; anything else is rejected.
       getconst_i = irep.instructions[clause_idx]
       return nil unless getconst_i && getconst_i.op == 'GETCONST'
-      cls_reg = getconst_i.args[/^R(\d+)/, 1]
+      cls_reg = getconst_i.reg
       cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
       return nil unless cls_reg && cls_name
       # The class chain must not target the exception register (RESCUE/RAISEIF
@@ -425,7 +425,7 @@ class CodeGen
       rescue_i, jmpif_i, jmp_i = irep.instructions[seg_idx, 3]
       return nil unless rescue_i && jmpif_i && jmp_i
       return nil unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
-      return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.args[/^R(\d+)/, 1] == cls_reg
+      return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.reg == cls_reg
 
       match_addr = jmp_target_after_reg(jmpif_i.args)
       return nil unless match_addr && match_addr > jmpif_i.addr
@@ -442,7 +442,7 @@ class CodeGen
 
       # Last clause: the no-match path re-raises.
       if next_i.op == 'RAISEIF'
-        return nil unless next_i.args[/^R(\d+)/, 1] == exc_reg
+        return nil unless next_i.reg == exc_reg
 
         return { kind: :rescue_class, cls_name: cls_names.join(', '),
                  match_addr: first_match_addr, raise_addr: next_addr }
@@ -499,7 +499,7 @@ class CodeGen
     return nil unless seq && seq.size == 2
 
     loadnil_i, jmp_i = seq
-    return nil unless loadnil_i.op == 'LOADNIL' && loadnil_i.args[/^R(\d+)/, 1] == exc_reg
+    return nil unless loadnil_i.op == 'LOADNIL' && loadnil_i.reg == exc_reg
     return nil unless jmp_i.op == 'JMP'
 
     join_addr = jmp_i.args.strip[/\d+/].to_i
@@ -511,11 +511,11 @@ class CodeGen
     return nil unless head
     case head.op
     when 'GETCONST'
-      return nil unless head.args[/^R(\d+)/, 1] == exc_reg && head.args[/^R\d+\s+(\S+)/, 1]
+      return nil unless head.reg == exc_reg && head.args[/^R\d+\s+(\S+)/, 1]
     when 'OCLASS'
       # `::Name` always has a GETMCNST after OCLASS; a lone OCLASS cannot raise and
       # is never emitted by codegen_defined_const.
-      return nil unless head.args[/^R(\d+)/, 1] == exc_reg && !rest.empty?
+      return nil unless head.reg == exc_reg && !rest.empty?
     else
       return nil
     end
