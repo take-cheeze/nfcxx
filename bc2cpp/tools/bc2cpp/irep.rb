@@ -29,11 +29,15 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
 
   # The ENTER instruction (nil for a bodyless zero-argument method).
   def enter
-    instructions.find { |insn| insn.op == 'ENTER' }
+    return @enter if defined?(@enter)
+
+    @enter = instructions.find { |insn| insn.op == 'ENTER' }
   end
 
   def enter_index
-    instructions.index { |insn| insn.op == 'ENTER' }
+    return @enter_index if defined?(@enter_index)
+
+    @enter_index = instructions.index { |insn| insn.op == 'ENTER' }
   end
 
   # mrbc -v prints EXT1/EXT2/EXT3 as their own lines widening the next

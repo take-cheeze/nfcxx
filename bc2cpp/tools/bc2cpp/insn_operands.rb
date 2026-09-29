@@ -19,7 +19,8 @@ module InsnOperands
   end
 
   def first_of(*kinds)
-    typed.find { |operand| kinds.include?(operand.kind) }
+    typed.each { |operand| return operand if kinds.include?(operand.kind) }
+    nil
   end
 
   # First register operand as digits, only when it is the leading operand.

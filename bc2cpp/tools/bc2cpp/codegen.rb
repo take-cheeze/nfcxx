@@ -412,31 +412,37 @@ class CodeGen
   end
 
   def strict_subclass?(klass, ancestor)
-    seen = Set.new
-    superclass = @superclass_of[klass]
-    while superclass.is_a?(String) && seen.add?(superclass)
-      return true if superclass == ancestor
-
-      superclass = @superclass_of[superclass]
+    # @superclass_of never changes after construction, so each class's strict
+    # ancestors are walked once.
+    @strict_ancestors ||= {}
+    ancestors = @strict_ancestors[klass] ||= begin
+      seen = Set.new
+      superclass = @superclass_of[klass]
+      superclass = @superclass_of[superclass] while superclass.is_a?(String) && seen.add?(superclass)
+      seen
     end
-    false
+    ancestors.include?(ancestor)
   end
 
   # Does this method's irep, or any irep nested in it (block bodies are separate
   # child ireps), touch this ivar? An interpreted method runs its blocks too, so
   # Game::Transition#clip's `rects.each { ... @width ... }` counts even though
-  # its top-level irep never mentions @width. `seen` skips ireps shared by
-  # several call sites.
-  def irep_subtree_touches_ivar?(label, ivar_name, seen = Set.new)
-    return false if seen.include?(label)
+  # its top-level irep never mentions @width.
+  def irep_subtree_touches_ivar?(label, ivar_name)
+    subtree_ivar_names(label).include?(ivar_name)
+  end
 
-    seen << label
-    irep = @ireps.fetch(label)
-    return true if irep.instructions.any? do |insn|
-      (insn.op == 'SETIV' || insn.op == 'GETIV') && insn.ivar == ivar_name
+  # Every ivar name a GETIV/SETIV in the irep or a nested one mentions; ireps
+  # are immutable, so each subtree is walked once however many ivars ask.
+  def subtree_ivar_names(label)
+    @subtree_ivar_names ||= {}
+    @subtree_ivar_names[label] ||= begin
+      irep = @ireps.fetch(label)
+      names = Set.new
+      irep.instructions.each { |insn| names << insn.ivar if insn.op == 'SETIV' || insn.op == 'GETIV' }
+      irep.reps.each { |child| names.merge(subtree_ivar_names(child)) }
+      names
     end
-
-    irep.reps.any? { |child| irep_subtree_touches_ivar?(child, ivar_name, seen) }
   end
 
   def cpp_name(owner, name)
