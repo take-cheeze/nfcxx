@@ -75,7 +75,7 @@ class ClosedWorld
     return :unknown_definer if @unknown_defs.include?(name)
     return :core_or_native if @outside_names.include?(name)
 
-    reason, required = required_classes(name)
+    reason, required = required_classes(name, instance_self?(self_owner))
     return reason if reason
     return :unlisted_class unless required.subset?(listed.to_set)
     return :method_missing_receiver unless method_missing_free?(self_owner)
@@ -106,7 +106,7 @@ class ClosedWorld
     return [] unless refusal(name, listed, self_owner, installed) == :unlisted_class
     return [] unless method_missing_free?(self_owner)
 
-    _reason, required = required_classes(name)
+    _reason, required = required_classes(name, instance_self?(self_owner))
     (required - listed.to_set).to_a.sort
   end
 
@@ -452,6 +452,7 @@ class ClosedWorld
     global!(:qualified_class_definition) if @class_decls.values.flatten.any? { |d| !d[:outer_nil] }
     by_simple = Hash.new { |h, k| h[k] = [] }
     @class_decls.each_key { |c| by_simple[simple(c)] << c }
+    @by_simple = by_simple
     @children = Hash.new { |h, k| h[k] = Set.new }
     # A superclass the walk could not resolve could be any class.
     @wild = Set.new
@@ -481,13 +482,40 @@ class ClosedWorld
   end
 
   # Every class whose instances answer `name`, or the reason that is unknown.
-  def required_classes(name)
-    @memo[name] ||= begin
+  # SELF_INSTANCE_RECEIVER: `self` in an instance method of a declared class is an
+  # instance of it or a descendant, never a class or module object, so a method
+  # defined on a `.singleton` (a `def self.x` or `class << self` one) cannot answer
+  # it. False when the class could itself be a Module/Class subclass (whose
+  # instances are class objects), when its superclass is unresolved, or for
+  # modules (their `self` may be the module object or an includer).
+  def instance_self?(self_owner)
+    return false unless self_owner.is_a?(String) && class_declared?(self_owner)
+
+    !derives_from_module_or_class?(self_owner, Set.new)
+  end
+
+  def derives_from_module_or_class?(klass, seen)
+    return false unless seen.add?(klass)
+
+    Array(@class_decls[klass]).any? do |d|
+      sup = d[:super]
+      next true if sup.nil? || %w[Module Class].include?(simple(sup.to_s))
+
+      sup.is_a?(String) && @by_simple[simple(sup)].any? { |parent| derives_from_module_or_class?(parent, seen) }
+    end
+  end
+
+  def required_classes(name, instance_self = false)
+    @memo[[name, instance_self]] ||= begin
       defs = @registry.fetch(name, []).reject { |d| d.owner == '<native>' }
       required = Set.new
       reason = nil
       defs.each do |d|
-        break reason = :singleton_definer if d.owner.end_with?('.singleton')
+        if d.owner.end_with?('.singleton')
+          next if instance_self
+
+          break reason = :singleton_definer
+        end
         break reason = :opaque_definer if opaque?(d.owner)
 
         required << d.owner
