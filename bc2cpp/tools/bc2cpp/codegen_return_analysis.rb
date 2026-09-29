@@ -514,9 +514,8 @@ class CodeGen
       child.instructions.each do |insn|
         next unless insn.op == 'SETUPVAR'
 
-        _src, b, lv = insn.tokens
-        # An unparsable level is kept: over-collecting only costs a proof.
-        acc << b if b =~ /\A\d+\z/ && !(lv =~ /\A\d+\z/ && lv.to_i != depth - 1)
+        index, level = insn.upvar_ref
+        acc << index.to_s if level == depth - 1
       end
       collect_own_upvar_writes(child, depth + 1, acc)
     end

@@ -109,10 +109,10 @@ def collect_block_upvars(block_irep)
   block_irep.instructions.each do |insn|
     next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
 
-    _reg, upvar_idx, depth = insn.tokens
-    return nil unless depth == '0'
+    upvar_idx, depth = insn.upvar_ref
+    return nil unless depth.zero?
 
-    upvars << upvar_idx.to_i
+    upvars << upvar_idx
   end
   upvars.uniq.sort
 end

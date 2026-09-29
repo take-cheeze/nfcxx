@@ -373,14 +373,13 @@ module StaticDispatchRegistrations
     return Hash.new(:unknown) if irep.instructions.any? { |i| i.op == 'APOST' }
 
     irep.instructions.each do |insn|
-      args = insn.tokens
-      dst = args.first&.then { |a| a[/\AR(\d+)\z/, 1] }
+      dst = insn.reg
       next unless dst
 
       kinds[dst] << case insn.op
-                    when 'GETCONST', 'GETMCNST' then [:const, args[1].to_s.split('::').last]
+                    when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
                     when 'LOADSELF' then :self
-                    when 'MOVE' then [:move, args[1].to_s[/\AR(\d+)\z/, 1]]
+                    when 'MOVE' then [:move, insn.regs[1]]
                     else
                       insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
                     end
@@ -408,10 +407,7 @@ module StaticDispatchRegistrations
     insns = irep.instructions
     starts = Set.new
     insns.each_with_index do |insn, i|
-      if insn.op.start_with?('JMP')
-        target = insn.tokens.last
-        starts << target.to_i if target.to_s.match?(/\A\d+\z/)
-      end
+      starts << insn.branch_target if insn.op.start_with?('JMP') && insn.branch_target
       starts << insns[i + 1].addr.to_i if insns[i + 1] && (insn.op.start_with?('JMP') || BLOCK_ENDERS.include?(insn.op))
     end
     (irep.catch_handlers || []).each { |h| starts << h.target.to_i }
@@ -420,16 +416,15 @@ module StaticDispatchRegistrations
     kind_of = ->(reg) { local.key?(reg) ? local[reg] : global[reg] }
     insns.map do |insn|
       local = {} if starts.include?(insn.addr.to_i) || insn.op == 'APOST'
-      args = insn.tokens
-      reg = args.first.to_s[/\AR(\d+)\z/, 1]
+      reg = insn.reg
       kind = if SEND_OPS.include?(insn.op) && insn.op != 'LOADSYM'
                insn.op.start_with?('SS') ? :self : kind_of.call(reg)
              end
       if reg
         local[reg] = case insn.op
-                     when 'GETCONST', 'GETMCNST' then [:const, args[1].to_s.split('::').last]
+                     when 'GETCONST', 'GETMCNST' then [:const, insn.const_name.to_s]
                      when 'LOADSELF' then :self
-                     when 'MOVE' then kind_of.call(args[1].to_s[/\AR(\d+)\z/, 1])
+                     when 'MOVE' then kind_of.call(insn.regs[1])
                      else insn.op.start_with?('LOADI') || LITERAL_OPS.include?(insn.op) ? :core : :unknown
                      end
       end

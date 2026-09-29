@@ -52,10 +52,8 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless %w[GETUPVAR SETUPVAR].include?(insn.op)
 
-      _reg, upvar_idx, level = insn.tokens
-      return nil unless upvar_idx =~ /\A\d+\z/ && level =~ /\A\d+\z/
-
-      needs << [level.to_i, upvar_idx.to_i]
+      upvar_idx, level = insn.upvar_ref
+      needs << [level, upvar_idx]
     end
     (irep.reps || []).each do |child_label|
       child = child_label && @ireps[child_label]
@@ -143,7 +141,7 @@ class CodeGen
         d = insn.reg
         next unless d == reg
 
-        return insn.tokens[1] == 'Fiber'
+        return insn.const_name == 'Fiber'
       else
         d = insn.reg
         return false if d == reg
@@ -301,8 +299,7 @@ class CodeGen
       next unless paired.plain_fixed_argc?
 
       n = paired.n_spec.to_i
-      dest, _rest = paired.tokens
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = paired.reg
       block_reg = insn.reg
       # Layout: dest, n positional args, then the block (`BLOCK R4` + `SENDB R2
       # :reduce n=1`), so the block is at dest + n + 1.
@@ -760,8 +757,7 @@ class CodeGen
       # and the block is in R(dest+2).
       next unless insn.n_spec && insn.nk_spec.nil?
 
-      dest, = insn.tokens
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
 
       name = insn.sym

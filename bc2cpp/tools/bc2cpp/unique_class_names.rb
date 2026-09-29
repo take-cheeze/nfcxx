@@ -44,7 +44,7 @@ module UniqueClassNames
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
         case insn.op
-        when 'SETCONST' then assigned << insn.tokens.first
+        when 'SETCONST' then assigned << insn.const_name
         when 'SETMCNST' then assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
           return {} if insn.operands.match?(StableClassConstants::DYNAMIC_MUTATION)
@@ -109,8 +109,8 @@ module UniqueClassNames
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'CLASS', 'MODULE'
-          reg, sym = insn.tokens
-          name = sym.delete_prefix(':')
+          reg = insn.reg_token
+          name = insn.sym
           outer = outer_writer(irep, idx, reg)
           full = case outer&.op
                  when 'LOADNIL' then namespace ? "#{namespace}::#{name}" : name
@@ -121,9 +121,8 @@ module UniqueClassNames
           seen << [label, idx]
           pending = [reg, full, idx]
         when 'EXEC'
-          reg, ref = insn.tokens
-          if pending && pending[0] == reg && pending[2] == idx - 1 && pending[1].is_a?(String)
-            walk.call(irep.reps[ref[/I\[(\d+)\]/, 1].to_i], pending[1])
+          if pending && pending[0] == insn.reg_token && pending[2] == idx - 1 && pending[1].is_a?(String)
+            walk.call(irep.reps[insn.block_index], pending[1])
           end
           pending = nil
         end

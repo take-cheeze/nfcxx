@@ -201,7 +201,7 @@ class CodeGen
 
         path.unshift(segment)
       when 'GETCONST'
-        written = insn.tokens[1]
+        written = insn.const_name
         written = ([written] + path).join('::') if written
         # A forward edge from before this write into the send's block could
         # bypass the receiver value; edges from later code already execute it.
@@ -532,7 +532,7 @@ class CodeGen
 
     # (2) SUPER is the `n=*` zsuper splat, not the fixed `n=N` shape or the
     # keyword `nk=` variant.
-    return nil unless super_insn.tokens[1].to_s.strip == 'n=*'
+    return nil unless super_insn.pure_splat?
 
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
@@ -635,7 +635,7 @@ class CodeGen
     return nil unless argary_dest.to_i == super_dest.to_i + 1
 
     # (3) The `n=*` splat shape, not SUPER_TARGETS' fixed `n=N`.
-    return nil unless super_insn.tokens[1].to_s.strip == 'n=*'
+    return nil unless super_insn.pure_splat?
 
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.

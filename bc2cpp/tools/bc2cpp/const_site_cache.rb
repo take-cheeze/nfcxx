@@ -38,7 +38,7 @@ module StableClassConstants
           name = insn.sym_token
           class_defs[name] += 1 if name
         when 'SETCONST'
-          assigned << insn.tokens.first
+          assigned << insn.const_name
         when 'SETMCNST'
           assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
@@ -132,7 +132,7 @@ module StableClassConstants
       irep.instructions.each do |insn|
         case insn.op
         when 'SETCONST'
-          assigned << insn.tokens.first
+          assigned << insn.const_name
         when 'SETMCNST'
           assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'

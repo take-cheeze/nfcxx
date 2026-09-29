@@ -397,7 +397,7 @@ class CodeGen
       getconst_i = irep.instructions[clause_idx]
       return nil unless getconst_i && getconst_i.op == 'GETCONST'
       cls_reg = getconst_i.reg
-      cls_name = getconst_i.tokens[1]
+      cls_name = getconst_i.const_name
       return nil unless cls_reg && cls_name
       # The class chain must not target the exception register (RESCUE/RAISEIF
       # still need it); codegen_rescue puts it at cursp() above exc, checked here.
@@ -412,7 +412,7 @@ class CodeGen
 
       rescue_i, jmpif_i, jmp_i = irep.instructions[seg_idx, 3]
       return nil unless rescue_i && jmpif_i && jmp_i
-      return nil unless rescue_i.op == 'RESCUE' && rescue_i.regs == [exc_reg, cls_reg] && rescue_i.tokens.length == 2
+      return nil unless rescue_i.op == 'RESCUE' && rescue_i.regs == [exc_reg, cls_reg]
       return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.reg == cls_reg
 
       match_addr = jmpif_i.uint_operand.to_i
@@ -499,7 +499,7 @@ class CodeGen
     return nil unless head
     case head.op
     when 'GETCONST'
-      return nil unless head.reg == exc_reg && head.tokens[1]
+      return nil unless head.reg == exc_reg && head.const_name
     when 'OCLASS'
       # `::Name` always has a GETMCNST after OCLASS; a lone OCLASS cannot raise and
       # is never emitted by codegen_defined_const.

@@ -20,13 +20,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless insn.op == 'SENDB' && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':times' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'times' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -61,13 +62,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':each' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'each' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -110,13 +112,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':each' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'each' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -149,13 +152,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':each_value' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'each_value' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -205,13 +209,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':each_index' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'each_index' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -255,13 +260,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':each_key' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'each_key' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -424,8 +430,9 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      meth = name&.sub(/\A:/, '')
+      name = insn.sym
+      nstr = insn.argc_text
+      meth = name
       n = nstr.to_s[/n=(\d+)/, 1]&.to_i
       is_pred = n == 0 && ACCUM_BLOCK_METHODS.include?(meth)
       is_fold = n == 1 && ACCUM_FOLD_METHODS.include?(meth)
@@ -434,7 +441,7 @@ class CodeGen
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       if is_fold
         # `reduce(init)`: dest, init, block, so BLOCK is at dest+2 (`BLOCK R4` +
@@ -478,14 +485,15 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      meth = name&.sub(/\A:/, '')
+      name = insn.sym
+      nstr = insn.argc_text
+      meth = name
       next unless nstr == 'n=0' && COLLECT_BLOCK_METHODS.include?(meth)
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -529,8 +537,9 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless nstr == 'n=0' && SYM_BLOCK_METHODS.include?(name&.sub(/\A:/, ''))
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless nstr == 'n=0' && SYM_BLOCK_METHODS.include?(name)
 
       loadsym_insn = irep.instructions[idx - 1]
       next unless loadsym_insn && loadsym_insn.op == 'LOADSYM'
@@ -539,7 +548,7 @@ class CodeGen
       # A keyword call also LOADSYMs its key symbols into later registers, but it is
       # always SEND/SSEND, never SENDB/SSENDB, so it cannot form a region here.
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       sym_reg = loadsym_insn.reg
       next unless dest_reg && sym_reg && sym_reg == (dest_reg.to_i + 1).to_s
 
@@ -559,7 +568,7 @@ class CodeGen
       end
 
       regions << { sym_addr: loadsym_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
-                   method_name: name.sub(/\A:/, ''), sym_name: sym_name, ssendb: insn.op == 'SSENDB' }
+                   method_name: name, sym_name: sym_name, ssendb: insn.op == 'SSENDB' }
     end
     regions
   end
@@ -574,13 +583,14 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless insn.op == 'SENDB' && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      next unless name == ':each' && nstr == 'n=0'
+      name = insn.sym
+      nstr = insn.argc_text
+      next unless name == 'each' && nstr == 'n=0'
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -674,12 +684,13 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless insn.op == 'SENDB' && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      meth = name&.sub(/\A:/, '')
+      name = insn.sym
+      nstr = insn.argc_text
+      meth = name
       want_argc = PROFILER_SECTION_NAMES[meth]
       next unless want_argc && nstr == "n=#{want_argc}"
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       next unless dest_reg
 
       block_insn = irep.instructions[idx - 1]
@@ -741,7 +752,7 @@ class CodeGen
     return false unless mcnst.reg == reg.to_s && mcnst.paren_reg == reg.to_s && mcnst.mcnst_name == 'Profiler'
 
     const = irep.instructions[block_idx - 2]
-    const && const.op == 'GETCONST' && const.reg == reg.to_s && const.tokens == ["R#{reg}", 'RGSS']
+    const && const.op == 'GETCONST' && const.reg == reg.to_s && const.const_name == 'RGSS'
   end
 
   # The String pool literal for :section's name argument, or nil. The VM wrote
@@ -777,14 +788,15 @@ class CodeGen
     irep.instructions.each_with_index do |insn, idx|
       next unless %w[SENDB SSENDB].include?(insn.op) && idx.positive?
 
-      dest, name, nstr = insn.tokens
-      meth = name&.sub(/\A:/, '')
+      name = insn.sym
+      nstr = insn.argc_text
+      meth = name
       next unless nstr == 'n=0' && SORT_BLOCK_METHODS.include?(meth)
 
       block_insn = irep.instructions[idx - 1]
       next unless block_insn && block_insn.op == 'BLOCK'
 
-      dest_reg = dest[/^R(\d+)/, 1]
+      dest_reg = insn.reg
       block_reg = block_insn.reg
       next unless dest_reg && block_reg && block_reg == (dest_reg.to_i + 1).to_s
 
@@ -851,10 +863,10 @@ class CodeGen
     block_irep.instructions.each do |insn|
       next unless insn.op == 'GETUPVAR'
 
-      dst, upvar, level = insn.tokens
-      next unless level == '0'
+      upvar, level = insn.upvar_ref
+      next unless level.zero?
 
-      reg = upvar
+      reg = upvar.to_s
       (call_idx - 1).downto(0) do |i|
         prior = host_irep.instructions[i]
         next unless prior.reg == reg
@@ -874,7 +886,7 @@ class CodeGen
       element_class = elements.arg_elements&.[](arg_pos - 1)
       next unless element_class
 
-      captures[dst[/\d+/].to_i] = { container_class: 'Hash', element_class: element_class }
+      captures[insn.reg.to_i] = { container_class: 'Hash', element_class: element_class }
     end
     captures.empty? ? {} : { block_irep.label => captures }
   end
@@ -975,16 +987,16 @@ class CodeGen
         "  #error unhandled opcode BREAK -- not in this prototype's supported subset\n"
       end
     when 'GETUPVAR'
-      dst, upvar_idx, level = insn.tokens
-      if level == '0'
-        "  r#{dst[/\d+/].to_i + offset} = r#{upvar_idx};\n"
+      upvar_idx, level = insn.upvar_ref
+      if level.zero?
+        "  r#{insn.reg.to_i + offset} = r#{upvar_idx};\n"
       else
         "  #error unhandled opcode GETUPVAR -- not in this prototype's supported subset\n"
       end
     when 'SETUPVAR'
-      src, upvar_idx, level = insn.tokens
-      if level == '0'
-        "  r#{upvar_idx} = r#{src[/\d+/].to_i + offset};\n"
+      upvar_idx, level = insn.upvar_ref
+      if level.zero?
+        "  r#{upvar_idx} = r#{insn.reg.to_i + offset};\n"
       else
         "  #error unhandled opcode SETUPVAR -- not in this prototype's supported subset\n"
       end

@@ -254,7 +254,7 @@ class CodeGen
       insn = irep.instructions[idx - n + k - 1]
       return nil unless insn && insn.op == 'LOADSYM'
 
-      return nil unless insn.tokens.length == 2 && insn.reg && insn.sym_token && insn.reg.to_i == dest + k
+      return nil unless insn.operand_kinds == %i[reg sym] && insn.reg.to_i == dest + k
 
       insn.sym_token
     end
@@ -282,7 +282,7 @@ class CodeGen
 
         names << insn.sym_token
       when 'SSEND', 'SSEND0'
-        return nil unless insn.reg && insn.sym_token && insn.nk_spec.nil? && insn.n_spec != '*' && insn.tokens.length <= 3
+        return nil unless insn.reg && insn.sym_token && insn.nk_spec.nil? && insn.n_spec != '*'
 
         kind = CLASS_BODY_INSTALLER_SENDS[insn.sym_token]
         return nil unless kind
@@ -486,8 +486,8 @@ class CodeGen
       nxt = irep.instructions[idx + 1]
       next unless nxt && nxt.op == 'EXEC'
 
-      reg = insn.reg if insn.tokens.length == 1
-      next unless reg && nxt.tokens.length == 2 && nxt.reg == reg && nxt.block_index
+      reg = insn.reg if insn.operand_kinds == %i[reg]
+      next unless reg && nxt.operand_kinds == %i[reg irep] && nxt.reg == reg && nxt.block_index
 
       child_label = irep.reps[nxt.block_index]
       next unless child_label

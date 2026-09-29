@@ -181,8 +181,7 @@ class CodeGen
       child.instructions.each do |insn|
         next unless insn.op == 'SETUPVAR'
 
-        b = insn.tokens[1]
-        acc << b if b =~ /\A\d+\z/
+        acc << insn.upvar_ref.first.to_s
       end
       subtree_upvar_written_regs(child, acc, seen)
     end
@@ -356,8 +355,7 @@ class CodeGen
   # A LOADI* literal, or nil: the second whitespace-separated token
   # (`LOADI32\tR1\t9999999\t; R1:x`). LOADINEG prints the negated value.
   def loadi_literal(insn)
-    tok = insn.tokens[1]
-    tok && tok.match?(/\A-?\d+\z/) ? tok.to_i : nil
+    insn.imm_operand&.to_i
   end
 
   def loadi_proven_fixnum?(insn)
@@ -386,7 +384,7 @@ class CodeGen
     when 'GETCONST'
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.
-      @integer_constants.include?(insn.tokens[1])
+      @integer_constants.include?(insn.const_name)
     when 'GETMCNST'
       # "GETMCNST R4 (R4)::DEPTH": only the bare name after `::`, as IntegerConstants
       # keys on (the scope register is not modelled).
@@ -452,7 +450,7 @@ class CodeGen
         return guarded_integer_binary_range(insn.op, left, right) ||
           (insn.op == 'MUL' ? [LOADI_FIXNUM_MIN, LOADI_FIXNUM_MAX] : nil)
       when 'ADDI', 'SUBI'
-        literal = insn.tokens.last.to_i
+        literal = insn.imm_operand.to_i
         left = guarded_game_integer_range(irep, j, cur, owner_def, depth + 1)
         return nil unless left
 

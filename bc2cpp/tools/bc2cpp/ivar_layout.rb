@@ -336,7 +336,7 @@ class IvarLayout
         d = insn.reg
         next unless d == reg
 
-        name = insn.op == 'GETCONST' ? insn.tokens[1] : insn.mcnst_name
+        name = insn.const_name
         return :fixnum if name && integer_constants&.include?(name)
 
         return UNKNOWN

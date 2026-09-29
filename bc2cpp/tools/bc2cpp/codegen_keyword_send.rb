@@ -517,7 +517,7 @@ class CodeGen
     write = irep.last_writer(idx - 1, recv_reg)
     return nil unless write && write.op == 'GETCONST'
 
-    const_name = write.tokens[1]
+    const_name = write.const_name
     return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
     return nil if universe.include?(const_name)
 

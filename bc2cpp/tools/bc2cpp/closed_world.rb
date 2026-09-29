@@ -257,9 +257,8 @@ class ClosedWorld
       insns.each_with_index do |insn, idx|
         case insn.op
         when 'TDEF', 'SDEF'
-          _reg, sym, ref = insn.tokens
-          child = irep.reps[ref.to_s[/I\[(\d+)\]/, 1].to_i]
-          @unknown_defs << sym.delete_prefix(':') unless registered.include?(child)
+          child = irep.reps[insn.block_index]
+          @unknown_defs << insn.sym unless registered.include?(child)
         when 'DEF'
           sym = insn.sym_token
           method = insns[0...idx].reverse.find { |i| i.op == 'METHOD' }

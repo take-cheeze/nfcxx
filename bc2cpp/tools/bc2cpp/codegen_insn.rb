@@ -21,14 +21,14 @@ class CodeGen
       # captured set this function declares parameters for; anything else keeps
       # `#error`. The access is the same at every level: an mrb_value* to the
       # defining frame's register.
-      reg, upvar_idx, level = insn.tokens
-      key = [level.to_i, upvar_idx.to_i]
-      if level =~ /\A\d+\z/ && @block_fallback_upvars&.include?(key)
+      upvar_idx, level = insn.upvar_ref
+      key = [level, upvar_idx]
+      if @block_fallback_upvars&.include?(key)
         vname = upvar_var_name(*key)
         if insn.op == 'GETUPVAR'
-          "  r#{reg[/\d+/]} = *#{vname};\n"
+          "  r#{insn.reg} = *#{vname};\n"
         else
-          "  *#{vname} = r#{reg[/\d+/]};\n"
+          "  *#{vname} = r#{insn.reg};\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -156,7 +156,7 @@ class CodeGen
       end
     when 'ADDI'
       d = insn.reg
-      lit = insn.tokens.last
+      lit = insn.imm_operand
       # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum, so only the destination
       # needs proving.
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
@@ -216,7 +216,7 @@ class CodeGen
       end
     when 'SUBI'
       d = insn.reg
-      lit = insn.tokens.last
+      lit = insn.imm_operand
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
@@ -473,7 +473,7 @@ class CodeGen
       # Name: `\S+`, so a trailing "; R3:name" comment ("GETCONST R3 MAX_DIGITS\t;
       # R3:d") is not interned into the name.
       d = insn.reg
-      name = insn.tokens[1]
+      name = insn.const_name
       # INTEGER_CONSTANT_VALUE_PROOF: a name analyze_values proved always binds this
       # number needs no lookup. Checked first; it can never also be a
       # StableClassConstants name (one poisons on CLASS/MODULE, the other requires
@@ -818,9 +818,7 @@ class CodeGen
       # RESCUE_SUPPORT's glue produces one) and Rb the class from the preceding
       # GETCONST/GETMCNST chain, so this is correct wherever it appears; not gated on
       # the recognizer (unlike EXCEPT).
-      ra, rb = insn.tokens
-      d = ra[/^R(\d+)/, 1]
-      s = rb[/^R(\d+)/, 1]
+      d, s = insn.regs
       "  r#{s} = mrb_bool_value(mrb_obj_is_kind_of(M, r#{d}, mrb_class_ptr(r#{s})));\n"
     when 'RAISEIF'
       # "RAISEIF Ra": re-raise Ra unless nil. In a recognized rescue it is reached
@@ -835,9 +833,8 @@ class CodeGen
       # the current block. That block is never read: a compiled `_impl` has none
       # (see SUPER_TARGETS). super_target applies the allowlist.
        target_def = super_target(owner_def)
-       dest, nstr = insn.tokens
-       d_reg = dest[/^R(\d+)/, 1]
-       n = nstr && nstr[/^n=(\d+)$/, 1]
+       d_reg = insn.reg
+       n = insn.plain_fixed_argc? ? insn.n_spec : nil
        zsuper_kind = reg_offset.zero? ? zsuper_native_kind(owner_def, irep, idx) : nil
        zsuper_plan = reg_offset.zero? && zsuper_kind.nil? ? zsuper_forward_plan(owner_def, irep, idx) : nil
        if target_def && d_reg && n

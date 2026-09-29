@@ -22,15 +22,14 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   return nil unless d
 
   prev = irep.last_writer(idx - 1, d)
-  struct_recv = prev && prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
+  struct_recv = prev && prev.op == 'GETCONST' && prev.const_name == 'Struct'
   return nil unless struct_recv
 
   # The Struct's name comes from a SETCONST right after the call on the same
   # register; an unnamed Struct.new is left unrecognized.
   next_insn = irep.instructions[idx + 1]
   struct_name = if next_insn && next_insn.op == 'SETCONST'
-                  sc_name, sc_reg = next_insn.tokens
-                  sc_name if sc_reg == "R#{d}"
+                  next_insn.const_name if next_insn.reg_operand == d.to_s
                 end
   return nil unless struct_name
 
@@ -150,7 +149,7 @@ def build_registry(ireps, root_label)
       when 'LOADSELF'
         namespace || 'Object'
       when 'GETCONST'
-        const_name = prev.tokens[1]
+        const_name = prev.const_name
         namespace ? "#{namespace}::#{const_name}" : const_name
       end
     end
@@ -177,12 +176,13 @@ def build_registry(ireps, root_label)
       case insn.op
       when 'CLASS', 'MODULE'
         # "CLASS R4 :Animal" / "MODULE R1 :Game" -- args "R4\t:Animal"
-        reg, name = insn.tokens
+        reg = insn.reg_token
+        name = insn.sym
         pending_reg = reg
         pending_idx = idx
         pending_ivar_owner = nil
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
-        pending_name = namespace ? "#{namespace}::#{name.sub(/^:/, '')}" : name.sub(/^:/, '')
+        pending_name = namespace ? "#{namespace}::#{name}" : name
         module_names << pending_name if insn.op == 'MODULE'
         if insn.op == 'MODULE'
           pending_ivar_owner = "#{pending_name}.singleton"
@@ -216,7 +216,7 @@ def build_registry(ireps, root_label)
         # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" in a class/module body;
         # `namespace` is this body's lexical nesting. Only the literal (optionally
         # frozen) shape is recognized; anything else is a safe miss (nil).
-        const_name = insn.tokens.first
+        const_name = insn.const_name
         src_reg = insn.regs.first
         qualified = namespace ? "#{namespace}::#{const_name}" : const_name
         constant_assignment_sites << { name: qualified, irep: irep.label, idx: idx, reg: src_reg, owner: namespace }
@@ -229,9 +229,8 @@ def build_registry(ireps, root_label)
           container_constants[qualified] = klass
         end
       when 'EXEC'
-        reg, irep_ref = insn.tokens
-        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx2]
+        reg = insn.reg_token
+        child_label = irep.reps[insn.block_index]
         if reg == pending_reg && pending_name && idx == pending_idx + 1
           module_body_ivar_labels[pending_ivar_owner] << child_label if pending_ivar_owner
           walk.call(child_label, pending_name)
@@ -242,10 +241,8 @@ def build_registry(ireps, root_label)
         pending_ivar_owner = nil
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
-        _reg, name, irep_ref = insn.tokens
-        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx2]
-        method_name = name.sub(/^:/, '')
+        child_label = irep.reps[insn.block_index]
+        method_name = insn.sym
         owner = namespace || 'Object' # a top-level `def` lands on Object.
         # #initialize, #initialize_copy and #respond_to_missing? are always private,
         # whatever mode is in effect: src/class.c's define_method path sets
@@ -274,11 +271,9 @@ def build_registry(ireps, root_label)
         # resolved with resolve_singleton_receiver rather than assuming `self`; that
         # scan already skips interposed EXT lines. An unrecognized receiver is not
         # registered rather than attributed to `namespace`.
-        reg, sname, irep_ref = insn.tokens
-        sdef_name = sname.sub(/^:/, '')
-        sdef_idx = irep_ref[/I\[(\d+)\]/, 1].to_i
-        sdef_child_label = irep.reps[sdef_idx]
-        recv = resolve_singleton_receiver.call(reg, idx)
+        sdef_name = insn.sym
+        sdef_child_label = irep.reps[insn.block_index]
+        recv = resolve_singleton_receiver.call(insn.reg_token, idx)
         if recv
           registry[sdef_name] << MethodDef.new(name: sdef_name, owner: "#{recv}.singleton",
                                                 irep: sdef_child_label, visibility: :public)
@@ -293,15 +288,15 @@ def build_registry(ireps, root_label)
         #   EXT2
         #   DEF     R1  :toned?  (R2)
         # skip_ext_back steps over the interposed EXT lines.
-        reg, name, recv_arg = insn.tokens
+        reg = insn.reg_token
         method_idx = skip_ext_back.call(idx - 1)
         method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
         next unless method_insn && method_insn.op == 'METHOD'
 
-        method_reg, irep_ref = method_insn.tokens
+        method_reg = method_insn.reg
         # Registers must line up as codegen emits them (opener at R<n>, METHOD at
         # R<n+1>, DEF at R<n> referencing (R<n+1>)); adjacency alone is not trusted.
-        next unless recv_arg == "(#{method_reg})"
+        next unless insn.paren_reg == method_reg
 
         opener_idx = skip_ext_back.call(method_idx - 1)
         opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
@@ -310,9 +305,8 @@ def build_registry(ireps, root_label)
         opener_reg = opener_insn.reg_token
         next unless opener_reg == reg
 
-        idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
-        child_label = irep.reps[idx2]
-        def_name = name.sub(/^:/, '')
+        child_label = irep.reps[method_insn.block_index]
+        def_name = insn.sym
 
         if opener_insn.op == 'TCLASS'
           # Unfused `def foo`: registered exactly like a TDEF, with a real irep.
@@ -452,7 +446,7 @@ def build_registry(ireps, root_label)
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
         prev = irep.last_writer(idx - 1, d)
-        struct_recv = prev && prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
+        struct_recv = prev && prev.op == 'GETCONST' && prev.const_name == 'Struct'
         next unless struct_recv
 
         # The block operand is the BLOCK right before the SENDB (codegen emits it
@@ -471,8 +465,7 @@ def build_registry(ireps, root_label)
         # owner so `defs.size == 1` sees more than one definition.
         next_insn = irep.instructions[idx + 1]
         struct_name = if next_insn && next_insn.op == 'SETCONST'
-                         sc_name, sc_reg = next_insn.tokens
-                         sc_name if sc_reg == "R#{d}"
+                         next_insn.const_name if next_insn.reg_operand == d.to_s
                        end
         owner = struct_name ? (namespace ? "#{namespace}::#{struct_name}" : struct_name) : "<struct:#{label}:#{idx}>"
 
@@ -554,7 +547,7 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
     when 'GETMCNST'
       path.unshift(insn.mcnst_name)
     when 'GETCONST'
-      const_name = insn.tokens[1]
+      const_name = insn.const_name
       return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
     else
       return nil
@@ -581,7 +574,7 @@ def resolve_mixin_ref(irep, before_idx, reg)
       qualified = true
       path.unshift(insn.mcnst_name)
     when 'GETCONST'
-      const_name = insn.tokens[1]
+      const_name = insn.const_name
       return nil unless const_name
 
       absolute = const_name.start_with?('::')

@@ -4,6 +4,8 @@
 
 # MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
 # `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
+require_relative 'operand_schema'
+
 MRBC = ENV['MRBC'] || 'mrbc'
 
 Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
@@ -178,6 +180,22 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
   end
 
   # First register operand spelled as in the disassembly (`R6`).
+  def upvar_ref
+    return nil unless %w[GETUPVAR SETUPVAR].include?(op)
+
+    a = tokens
+    a.length == 3 ? [a[1].to_i, a[2].to_i] : nil
+  end
+
+  def operand_kinds
+    OperandSchema.parse(op, args).map(&:kind)
+  end
+
+  def reg_operand
+    typed_ops = OperandSchema.parse(op, args)
+    typed_ops.find { |operand| operand.kind == :reg }&.value&.to_s
+  end
+
   def reg_token
     reg && "R#{reg}"
   end

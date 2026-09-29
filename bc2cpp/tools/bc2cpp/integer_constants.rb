@@ -40,7 +40,7 @@ module IntegerConstants
       irep.instructions.each_with_index do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
-          name = insn.op == 'SETCONST' ? insn.tokens.first : insn.mcnst_name
+          name = insn.const_name
           next unless name
 
           src = insn.regs.last
@@ -193,7 +193,7 @@ module IntegerConstants
           cur = src
         when 'GETCONST'
           # `"GETCONST\tR%d\t%s"` -- register first, bare name second.
-          n = insn.tokens[1]
+          n = insn.const_name
           return n && [:alias, n]
         when 'GETMCNST'
           # `"GETMCNST\tR%d\t(R%d)::%s"`: only the bare name after `::` is used; the
@@ -205,8 +205,8 @@ module IntegerConstants
           args = insn.regs
           left = const_source_kind(irep, j, cur, entries)
           right = if %w[ADDI SUBI].include?(insn.op)
-                    immediate = insn.tokens.last
-                    return nil unless immediate&.match?(/\A-?\d+\z/)
+                    immediate = insn.imm_operand
+                    return nil unless immediate
 
                     immediate.to_i
                   else
@@ -243,7 +243,7 @@ module IntegerConstants
       irep.instructions.each_with_index do |insn, i|
         next unless insn.op == 'SETCONST' || insn.op == 'SETMCNST'
 
-        name = insn.op == 'SETCONST' ? insn.tokens.first : insn.mcnst_name
+        name = insn.const_name
         next unless name && admitted.include?(name)
 
         src = insn.regs.last
@@ -295,7 +295,7 @@ module IntegerConstants
 
           cur = src
         when 'GETCONST'
-          n = insn.tokens[1]
+          n = insn.const_name
           return n && [:alias, n]
         when 'GETMCNST'
           n = insn.mcnst_name
@@ -304,8 +304,8 @@ module IntegerConstants
           args = insn.regs
           left = literal_value_kind(irep, j, cur, entries)
           right = if %w[ADDI SUBI].include?(insn.op)
-                    immediate = insn.tokens.last
-                    return nil unless immediate&.match?(/\A-?\d+\z/)
+                    immediate = insn.imm_operand
+                    return nil unless immediate
 
                     immediate.to_i
                   else
@@ -329,8 +329,8 @@ module IntegerConstants
   # CodeGen instance). Only LOADI32 can leave the LOADI_FIXNUM_MIN/MAX margin, so
   # it is range-checked and refused (nil) outside it.
   def self.loadi_value(insn)
-    tok = insn.tokens[1]
-    return nil unless tok&.match?(/\A-?\d+\z/)
+    tok = insn.imm_operand
+    return nil unless tok
 
     value = tok.to_i
     return nil if insn.op == 'LOADI32' && !value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
@@ -404,7 +404,7 @@ module IntegerConstants
       irep.instructions.each do |insn|
         case insn.op
         when 'SETCONST'
-          names << insn.tokens.first
+          names << insn.const_name
         when 'SETMCNST'
           names << insn.mcnst_name
         when 'CLASS', 'MODULE'

@@ -523,8 +523,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
           arg_reg = prior.regs[1]
           break unless arg_reg
         else
-          upvar = prior.tokens if prior.op == 'GETUPVAR'
-          captured_reg = prior.reg.to_i if upvar && upvar[2] == '0'
+          captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
           arg_reg = nil
           break
         end
@@ -662,10 +661,9 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     when 'GETUPVAR'
       return nil if resolving_new || !path.empty?
 
-      dst, _upvar, level = insn.tokens
-      return nil unless level == '0'
+      return nil unless insn.upvar_ref&.last&.zero?
 
-      capture_class = capture_hints&.dig(irep.label, dst[/\d+/].to_i, :container_class)
+      capture_class = capture_hints&.dig(irep.label, insn.reg.to_i, :container_class)
       capture_class
     when 'ARRAY', 'ARRAY2'
       # EACH_BLOCK_SUPPORT: an ARRAY literal is always an Array (vm.c OP_ARRAY). Only
@@ -694,7 +692,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     when 'GETCONST'
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
-      const_name = insn.tokens[1]
+      const_name = insn.const_name
       written = ([const_name] + path).join('::')
 
       # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
