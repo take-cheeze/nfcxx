@@ -40,7 +40,8 @@ class ClosedWorld
 
   attr_reader :global_refusal
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
+    @module_names = module_names
     @ireps = ireps
     @registry = registry
     @class_decls = class_decls
@@ -141,6 +142,12 @@ class ClosedWorld
   # exact-class guard can name, since modules never are `mrb_obj_class`.
   def class_declared?(owner)
     @class_decls.key?(owner)
+  end
+
+  # A `module` declared in the closed world (and never also a `class`): nothing
+  # can subclass it, so a `def self.x` body's `self` is that module object.
+  def module_declared?(owner)
+    @module_names.include?(owner) && !@class_decls.key?(owner)
   end
 
   # NATIVE_DIRECT (ADR 0253): while a caller emits exact-class arms for every

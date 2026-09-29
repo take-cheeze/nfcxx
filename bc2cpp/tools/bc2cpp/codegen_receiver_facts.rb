@@ -190,15 +190,26 @@ class CodeGen
   end
 
   # A module_function copy shares its instance method's irep but runs with the
-  # module object as self. The instance-owner proof is reusable only when that
-  # body never observes self or creates a block that could capture it.
-  def module_function_copy_self_safe?(irep)
-    return false unless irep
-    return false unless irep.reps.empty?
+  # module object as self (ADR 0241 already passes it for the body's own bare
+  # calls). Passing it from a constant-object call is equally exact unless the
+  # body ties itself to instance state: ivars, class variables or `super`,
+  # anywhere in its blocks too (ADR 0258; ADR 0235 refused any self use).
+  MODULE_FUNCTION_INSTANCE_OPS = %w[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
 
-    irep.instructions.none? do |insn|
-      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.mentions_reg?(0)
+  def module_function_copy_self_safe?(irep, owner)
+    return false unless irep
+    return false if @ivar_layout.key?(owner)
+
+    seen = Set.new
+    pending = [irep]
+    until pending.empty?
+      current = pending.pop
+      next unless seen.add?(current.label)
+      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) }
+
+      pending.concat(current.reps.map { |label| @ireps.fetch(label) })
     end
+    true
   end
 
   def stable_standard_constructor_class?(klass)
@@ -267,9 +278,20 @@ class CodeGen
     owner
   end
 
+  # MODULE_SINGLETON_SELF (ADR 0258): ClosedWorld#exact_class? has no answer for
+  # a module (only classes are declared), so `def self.x` in a module M never
+  # reached SINGLETON_LEXICAL_SELF under a closed world. A module has no
+  # subclass and its singleton's own defs win lookup, so self is M; the
+  # inherited_lookup_safe? gate covers outside reopening and by-name installers.
+  def module_singleton_self?(base, name)
+    return false unless name && @closed_world&.module_declared?(base)
+
+    @closed_world.inherited_lookup_safe?(name, base)
+  end
+
   # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
   # subclassed class (a module never is), and X's own singleton def wins lookup.
-  def lexical_self_singleton_owner(owner_def)
+  def lexical_self_singleton_owner(owner_def, name: nil)
     return nil unless owner_def && self_class(owner_def)
 
     owner = owner_def.owner
@@ -277,7 +299,7 @@ class CodeGen
 
     base = owner.delete_suffix('.singleton')
     # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
-    return nil if base == 'Object' || !exact_receiver_class?(base)
+    return nil if base == 'Object' || !(exact_receiver_class?(base) || module_singleton_self?(base, name))
     return nil unless Array(@prepended_modules[owner]).empty?
     return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
 
@@ -287,7 +309,7 @@ class CodeGen
   # The one irep def `name` has on that singleton owner (module_function copies
   # have no irep; a second def would make "which one is live" order-dependent).
   def lexical_self_singleton_def(name, owner_def)
-    owner = lexical_self_singleton_owner(owner_def)
+    owner = lexical_self_singleton_owner(owner_def, name: name)
     return nil unless owner
 
     defs = (@registry[name] || []).select { |md| md.owner == owner }

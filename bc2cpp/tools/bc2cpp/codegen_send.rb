@@ -1187,6 +1187,10 @@ class CodeGen
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
+    keywordless = compile_keywordless_call(name: name, d: d, recv: recv, n: n, argv: argv, self_implicit: self_implicit,
+                                           owner_def: owner_def, irep: irep, idx: idx)
+    return keywordless if keywordless
+
     target = monomorphic_target(name)
     # A MONO name is only safe to devirtualize if its definition fits the calling
     # convention (pure_mandatory_or_optional_arity?).
@@ -1518,12 +1522,26 @@ class CodeGen
                  else
                    candidate
                  end
+        # CONSTANT_OBJECT_ACCESSOR (ADR 0258): an attr_* pair on the singleton is a
+        # bare mrb_iv_get/mrb_iv_set of the module object (see MethodDef's kind
+        # comment), the same lowering as IVAR_ACCESSOR_DEVIRT.
+        if candidate&.kind == :ivar_accessor && candidate.irep.nil? && candidate.visibility == :public &&
+           !devirt_blocked_name?(name) && n == (name.end_with?('=') ? 1 : 0) &&
+           Array(@included_modules[singleton_owner]).empty? && Array(@prepended_modules[singleton_owner]).empty? &&
+           !@unknown_mixins.include?(singleton_owner) && singleton_defs.one?
+          access = ivar_accessor_call_code(candidate.owner, recv, name, d, argv)
+          if access
+            return "  // CLOSED_WORLD_CONSTANT_OBJECT :#{name} -> #{candidate.owner}##{name.chomp('=')} " \
+                   "(stable class/module constant, unique public attr_* singleton definition), " \
+                   "direct mrb_iv_get/mrb_iv_set without mrb_funcall.\n  #{access}\n"
+          end
+        end
         if candidate && candidate_irep && candidate.visibility == :public && !devirt_blocked_name?(name) &&
            Array(@included_modules[singleton_owner]).empty? && Array(@prepended_modules[singleton_owner]).empty? &&
            !@unknown_mixins.include?(singleton_owner) && pure_mandatory_arity?(candidate_irep) &&
            mandatory_arity(candidate_irep) == n && !hot_only_excluded?(candidate_label) &&
            constant_object_candidate_clean?(candidate_label) &&
-           (!copied_module_function || module_function_copy_self_safe?(candidate_irep)) &&
+           (!copied_module_function || module_function_copy_self_safe?(candidate_irep, candidate.copy_owner)) &&
            target &&
            native_arg_types(target, n).compact.empty? &&
            (!@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner))

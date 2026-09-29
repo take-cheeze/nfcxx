@@ -487,7 +487,7 @@ def build_registry(ireps, root_label)
     end
   end
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites]
+   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites, declared_modules]
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back
