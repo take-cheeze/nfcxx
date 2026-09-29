@@ -191,9 +191,9 @@ class CodeGen
 
   # A module_function copy shares its instance method's irep but runs with the
   # module object as self (ADR 0241 already passes it for the body's own bare
-  # calls). Passing it from a constant-object call is equally exact unless the
-  # body ties itself to instance state: ivars, class variables or `super`,
-  # anywhere in its blocks too (ADR 0258; ADR 0235 refused any self use).
+  # calls), so the instance-owner proof is reusable only when the body neither
+  # observes self nor ties itself to instance state: ivars, class variables,
+  # `super` or ARGARY, anywhere in its blocks too (ADR 0258, 0259).
   MODULE_FUNCTION_INSTANCE_OPS = %w[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
 
   def module_function_copy_self_safe?(irep, owner)
@@ -205,7 +205,8 @@ class CodeGen
     until pending.empty?
       current = pending.pop
       next unless seen.add?(current.label)
-      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) }
+
+      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) || insn.mentions_reg?(0) }
 
       pending.concat(current.reps.map { |label| @ireps.fetch(label) })
     end
@@ -280,17 +281,18 @@ class CodeGen
 
   # MODULE_SINGLETON_SELF (ADR 0258): ClosedWorld#exact_class? has no answer for
   # a module (only classes are declared), so `def self.x` in a module M never
-  # reached SINGLETON_LEXICAL_SELF under a closed world. A module has no
-  # subclass and its singleton's own defs win lookup, so self is M; the
-  # inherited_lookup_safe? gate covers outside reopening and by-name installers.
+  # reached SINGLETON_LEXICAL_SELF under a closed world. ClosedWorld#module_object_self?
+  # proves self is M (ADR 0259); inherited_lookup_safe? covers outside reopening
+  # and by-name installers.
   def module_singleton_self?(base, name)
-    return false unless name && @closed_world&.module_declared?(base)
+    return false unless name && @closed_world&.module_object_self?(base)
 
     @closed_world.inherited_lookup_safe?(name, base)
   end
 
   # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
-  # subclassed class (a module never is), and X's own singleton def wins lookup.
+  # subclassed class or a declared module that never has its singleton methods
+  # cloned (ADR 0258, 0259), and X's own singleton def wins lookup.
   def lexical_self_singleton_owner(owner_def, name: nil)
     return nil unless owner_def && self_class(owner_def)
 
@@ -306,14 +308,15 @@ class CodeGen
     owner
   end
 
-  # The one irep def `name` has on that singleton owner (module_function copies
-  # have no irep; a second def would make "which one is live" order-dependent).
+  # The one irep def (or `attr_*` accessor) `name` has on that singleton owner
+  # (module_function copies have no irep; a second def would make "which one is
+  # live" order-dependent).
   def lexical_self_singleton_def(name, owner_def)
     owner = lexical_self_singleton_owner(owner_def, name: name)
     return nil unless owner
 
     defs = (@registry[name] || []).select { |md| md.owner == owner }
-    defs.size == 1 && defs.first.irep ? defs.first : nil
+    defs.size == 1 && (defs.first.irep || defs.first.kind == :ivar_accessor) ? defs.first : nil
   end
 
   # A compiled module_function copy runs the source body with the module object

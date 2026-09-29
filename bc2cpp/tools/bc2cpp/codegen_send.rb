@@ -1223,7 +1223,7 @@ class CodeGen
         module_function_self = true
       end
       lex_owner = lexical_self_owner(owner_def)
-      # SINGLETON_LEXICAL_SELF: only the irep branch below; accessors stay dynamic.
+      # SINGLETON_LEXICAL_SELF: a singleton attr accessor never embeds (IVAR_ACCESS).
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
       if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
@@ -1233,6 +1233,9 @@ class CodeGen
                       mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
           target = lex_candidate
           lexical_self = true
+        elsif lex_candidate&.irep && @registry[name].one? { |md| md.owner == lex_candidate.owner } &&
+              (argc_error = static_argc_error_code(lex_candidate, @ireps.fetch(lex_candidate.irep), n, d))
+          return argc_error
         elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
           # LEXICAL_SELF_IVAR_ACCESSOR: the :ivar_accessor analogue (an attr_* candidate
           # has no irep; see IVAR_ACCESSOR_DEVIRT). Same certainty, no guard; IVAR_ACCESS
@@ -1509,49 +1512,8 @@ class CodeGen
         constant_owner = constant_object_owner(irep, constant_site_idx,
                                                unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                owner_def&.owner)
-        singleton_owner = "#{constant_owner}.singleton" if constant_owner
-        singleton_defs = @registry[name]&.select { |md| md.owner == singleton_owner } if singleton_owner
-        candidate = singleton_defs&.one? ? singleton_defs.first : nil
-        copied_module_function = candidate&.kind == :module_function
-        candidate_label = candidate&.irep || (candidate.copy_irep if copied_module_function)
-        candidate_irep = candidate_label && @ireps.fetch(candidate_label)
-        target = if copied_module_function
-                   @registry[name]&.find do |md|
-                     md.owner == candidate.copy_owner && md.irep == candidate.copy_irep
-                   end
-                 else
-                   candidate
-                 end
-        # CONSTANT_OBJECT_ACCESSOR (ADR 0258): an attr_* pair on the singleton is a
-        # bare mrb_iv_get/mrb_iv_set of the module object (see MethodDef's kind
-        # comment), the same lowering as IVAR_ACCESSOR_DEVIRT.
-        if candidate&.kind == :ivar_accessor && candidate.irep.nil? && candidate.visibility == :public &&
-           !devirt_blocked_name?(name) && n == (name.end_with?('=') ? 1 : 0) &&
-           Array(@included_modules[singleton_owner]).empty? && Array(@prepended_modules[singleton_owner]).empty? &&
-           !@unknown_mixins.include?(singleton_owner) && singleton_defs.one?
-          access = ivar_accessor_call_code(candidate.owner, recv, name, d, argv)
-          if access
-            return "  // CLOSED_WORLD_CONSTANT_OBJECT :#{name} -> #{candidate.owner}##{name.chomp('=')} " \
-                   "(stable class/module constant, unique public attr_* singleton definition), " \
-                   "direct mrb_iv_get/mrb_iv_set without mrb_funcall.\n  #{access}\n"
-          end
-        end
-        if candidate && candidate_irep && candidate.visibility == :public && !devirt_blocked_name?(name) &&
-           Array(@included_modules[singleton_owner]).empty? && Array(@prepended_modules[singleton_owner]).empty? &&
-           !@unknown_mixins.include?(singleton_owner) && pure_mandatory_arity?(candidate_irep) &&
-           mandatory_arity(candidate_irep) == n && !hot_only_excluded?(candidate_label) &&
-           constant_object_candidate_clean?(candidate_label) &&
-           (!copied_module_function || module_function_copy_self_safe?(candidate_irep, candidate.copy_owner)) &&
-           target &&
-           native_arg_types(target, n).compact.empty? &&
-           (!@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner))
-          impl = cpp_name(target.owner, target.name) + '_impl'
-          via = copied_module_function ? "module_function copy of #{target.owner}##{target.name}" : "#{candidate.owner}##{candidate.name}"
-          note = "  // CLOSED_WORLD_CONSTANT_OBJECT :#{name} -> #{via} " \
-                 "(stable class/module constant, unique public singleton definition), direct C++ call " \
-                 "without mrb_funcall.\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
-        end
+        constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
+        return constant_code if constant_code
       end
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
@@ -1895,7 +1857,8 @@ class CodeGen
       extra = unlisted_class_guards(name, listed, site)
       if extra
         extra_branches = extra.map do |klass|
-          "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{dispatch.chomp}\n    } else "
+          arm = unlisted_class_call(klass, name, d, recv, argv)&.chomp&.gsub("\n", "\n      ") || dispatch.chomp
+          "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
         end.join
         listed += extra
         reason = @closed_world.refusal(name, listed, site[:self_owner], symbol_installed_names)

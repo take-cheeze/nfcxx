@@ -2443,6 +2443,7 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#drive_shop_quantity -> quantity",
   "RPG2k::Scene::Map#drive_shop_quantity -> screen=",
   "RPG2k::Scene::Map#drive_shop_quantity -> sell",
+  "RPG2k::Scene::Map#drive_text_message -> advance",
   "RPG2k::Scene::Map#drive_text_message -> auto_close?",
   "RPG2k::Scene::Map#drive_text_message -> awaiting_followup=",
   "RPG2k::Scene::Map#drive_text_message -> done?",
