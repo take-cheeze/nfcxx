@@ -160,14 +160,8 @@ module IntegerConstants
   def self.const_entry_addrs(irep)
     addrs = Set.new
     irep.instructions.each do |insn|
-      case insn.op
-      when 'JMP', 'JMPUW'
-        addrs << insn.jmp_addr
-      when 'JMPIF', 'JMPNOT', 'JMPNIL'
-        # `"JMPIF\t\tR%d\t%03d"` -- register first, target last.
-        t = insn.tokens.last
-        addrs << t.to_i if t
-      end
+      target = insn.branch_target
+      addrs << target if target
     end
     (irep.catch_handlers || []).each { |ch| addrs << ch.target }
     addrs

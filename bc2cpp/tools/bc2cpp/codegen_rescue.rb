@@ -34,17 +34,6 @@ class CodeGen
     irep.catch_handlers.nil? || irep.catch_handlers.empty?
   end
 
-  # ENSURE_RAII_SUPPORT: the branch target of one instruction, or nil. Same arg
-  # shapes as const_entry_addrs.
-  def ensure_jump_target(insn)
-    case insn.op
-    when 'JMP', 'JMPUW'
-      insn.jmp_addr
-    when 'JMPIF', 'JMPNOT', 'JMPNIL'
-      insn.tokens.last&.to_i
-    end
-  end
-
   # ENSURE_DISPATCH_MERGE_SUPPORT: compile_method's per-irep remap of jumps onto
   # an ensure handler address. nil outside compile_method (hence `&.`); keyed on
   # the irep object so a nested irep's same numeric address is unaffected.
@@ -114,7 +103,7 @@ class CodeGen
     # allowed (mrbc's "skip the rest" target for a conditional ensure body) and
     # becomes a label at the end of the lambda.
     return nil if body.any? do |i|
-      jt = ensure_jump_target(i)
+      jt = i.branch_target
       jt && !(jt > t && jt <= raiseif.addr)
     end
     # No branch may cross into or out of the protected range: the guard is a C++
@@ -141,7 +130,7 @@ class CodeGen
     inside = ->(a) { a >= b && a < ch.end_addr }
     except_jump_srcs = []
     irep.instructions.each do |i|
-      jt = ensure_jump_target(i)
+      jt = i.branch_target
       next unless jt
       # The ensure body was already checked above with a stricter rule.
       next if i.addr > t && i.addr < raiseif.addr
@@ -171,7 +160,7 @@ class CodeGen
     ok = true
     # The ensure body's branches target the body or the RAISEIF; both become
     # labels inside the lambda, so compile_insn's gotos need no rewriting.
-    body_targets = region[:body_insns].filter_map { |i| ensure_jump_target(i) }.to_set
+    body_targets = region[:body_insns].filter_map { |i| i.branch_target }.to_set
     region[:body_insns].each do |insn|
       idx = irep.instructions.index(insn)
       body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)

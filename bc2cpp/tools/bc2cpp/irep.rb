@@ -222,6 +222,15 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
     end
   end
 
+  # Target address of any branch op (JMP/JMPUW/JMPIF/JMPNOT/JMPNIL), nil for
+  # every other op. JMPUW has JMP's operand shape.
+  def branch_target
+    case op
+    when 'JMP', 'JMPUW' then jmp_addr
+    when 'JMPIF', 'JMPNOT', 'JMPNIL' then uint_operand.to_i
+    end
+  end
+
   # Absolute target address of a JMP/JMPIF/JMPNOT/JMPNIL, nil for anything else.
   def jump_target
     return nil unless %w[JMP JMPIF JMPNOT JMPNIL].include?(op)

@@ -578,15 +578,6 @@ class CodeGen
   # jmpuw_is_plain_jump? rejects it only adds a harmless label to a method that
   # will not ship.
   def jump_targets(irep)
-    targets = Set.new
-    irep.instructions.each do |insn|
-      case insn.op
-      when 'JMP', 'JMPUW'
-        targets << insn.jmp_addr
-      when 'JMPNOT', 'JMPIF', 'JMPNIL'
-        targets << insn.uint_operand.to_i
-      end
-    end
-    targets
+    irep.instructions.filter_map(&:branch_target).to_set
   end
 end

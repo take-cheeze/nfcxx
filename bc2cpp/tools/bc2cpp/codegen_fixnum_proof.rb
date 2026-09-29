@@ -126,12 +126,8 @@ class CodeGen
   def fixnum_proof_edge_sources(irep)
     edges = Hash.new { |h, k| h[k] = Set.new }
     irep.instructions.each do |insn|
-      case insn.op
-      when 'JMP', 'JMPUW'
-        edges[insn.jmp_addr] << insn.addr
-      when 'JMPIF', 'JMPNOT', 'JMPNIL'
-        edges[insn.uint_operand.to_i] << insn.addr
-      end
+      target = insn.branch_target
+      edges[target] << insn.addr if target
     end
     edges
   end
@@ -288,11 +284,7 @@ class CodeGen
       unless FIXNUM_PROOF_NO_FALLTHROUGH_OPS.include?(ins.op)
         preds[k + 1] << k if k + 1 < insns.size
       end
-      t =
-        case ins.op
-        when 'JMP', 'JMPUW' then ins.jmp_addr
-        when 'JMPIF', 'JMPNOT', 'JMPNIL' then ins.uint_operand.to_i
-        end
+      t = ins.branch_target
       next if t.nil?
 
       ti = addr_to_idx[t]

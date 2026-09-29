@@ -182,19 +182,9 @@ class CodeGen
 
     reg = dest_reg.to_s
     path = []
-    branch_edges = []
-    irep.instructions.each_with_index do |branch, branch_index|
-      break if branch_index >= idx
-      next unless %w[JMP JMPIF JMPNOT].include?(branch.op)
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
+    return nil unless branch_edges
 
-      target_addr = branch.jump_target
-      return nil unless target_addr
-
-      target_index = irep.instructions.index { |candidate| candidate.addr == target_addr }
-      return nil unless target_index
-
-      branch_edges << [branch_index, target_index]
-    end
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       return nil if %w[JMPUW ONERR RESCUE EXCEPT BLOCK].include?(insn.op)

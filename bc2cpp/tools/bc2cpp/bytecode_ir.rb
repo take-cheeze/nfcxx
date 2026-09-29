@@ -36,6 +36,22 @@ module BytecodeIR
       @instructions[index]
     end
 
+    # [source, target] instruction-index pairs of the given jump ops located
+    # before +limit+, or nil when a jump's target address is not an instruction.
+    def jump_edges_before(limit, ops)
+      edges = []
+      @instructions.each do |instruction|
+        break if instruction.index >= limit
+        next unless ops.include?(instruction.op)
+
+        target = @address_to_index[instruction.source.jump_target]
+        return nil unless target
+
+        edges << [instruction.index, target]
+      end
+      edges
+    end
+
     private
 
     def build_edges
