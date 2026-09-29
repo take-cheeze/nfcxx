@@ -2,9 +2,16 @@
 
 # Step 6b: which statically named ivars use compiler-managed RData slots.
 
-# Opcodes that print a READ-only register as their first `R<n>` operand --
-# see IvarLayout.trace_type's own `when *READ_ONLY_OPCODE_SKIP` arm.
+# Opcodes that print a READ-only register as their first `R<n>` operand.
+# mruby/ops.h: RETURN/RETURN_BLK "return R[a]", BREAK, JMPIF/JMPNOT/JMPNIL
+# "if R[a] ...", RAISEIF, MATCHERR, SETUPVAR "uvset(b,c,R[a])"; codedump.c prints
+# them that way. Skipping a non-writer is as sound as skipping a MOVE to another
+# register; without it an early `return v if v == @flag` stopped the trace for a
+# later `@flag = v`. SETUPVAR's `b`/`c` are slot/level numbers in an ancestor
+# frame, not this irep's registers, so its only `R` token is a same-frame read.
 READ_ONLY_OPCODE_SKIP = %w[RETURN RETURN_BLK BREAK JMPIF JMPNOT JMPNIL RAISEIF MATCHERR SETUPVAR].freeze
+# IvarLayout.trace_type also steps over RESCUE's read operand; its write is a barrier.
+TRACE_TYPE_SKIP_OPS = (READ_ONLY_OPCODE_SKIP + %w[RESCUE]).freeze
 
 # ---------------------------------------------------------------------------
 # Step 6b: ivar embedding: which ivars can move out of iv_tbl into C struct
@@ -236,41 +243,19 @@ class IvarLayout
   # value the analysis positively resolved to a non-Fixnum, so a false "readable"
   # can only cost an embedding, never admit a wrong one.
   def self.readable_but_other(irep, idx, src_reg)
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
+    # An arithmetic site is a Fixnum only when its operands prove (see the ADD
+    # arm of trace_type); it was refused here, so the value is not readable and
+    # the walk steps over it.
+    irep.walk_writers(idx - 1, src_reg, skip_ops: %w[ADD ADDI SUB SUBI MUL DIV], follow_moves: true) do |insn|
       case insn.op
-      when 'MOVE'
-        d, s = insn.regs
-        next unless d == src_reg
-
-        src_reg = s
-      when /^LOADI/
-        d = insn.reg
-        next unless d == src_reg
-
-        return false # a literal Integer: readable, and a Fixnum
-      when 'LOADNIL'
-        d = insn.reg
-        next unless d == src_reg
-
-        return false # nil: legal in the type
+      when /^LOADI/, 'LOADNIL'
+        false # a literal Integer (readable, and a Fixnum) or nil (legal in the type)
       when 'LOADSYM', 'LOADTRUE', 'LOADFALSE', 'STRING', 'ARRAY', 'ARRAY2', 'HASH', 'RANGE_INC', 'RANGE_EXC'
-        d = insn.reg
-        next unless d == src_reg
-
-        return true # positively another kind of value
-      when 'ADD', 'ADDI', 'SUB', 'SUBI', 'MUL', 'DIV'
-        # An arithmetic site is a Fixnum only when its operands prove (see the
-        # ADD arm); it was refused here, so the value is not readable.
-        next
+        true # positively another kind of value
       else
-        d = insn.reg
-        return false if d == src_reg # an unmodeled writer: unreadable, not "other"
-
-        next
+        false # an unmodeled writer: unreadable, not "other"
       end
-    end
-    false
+    end || false
   end
 
   # NILABLE_EMBED_SUPPORT: the only disagreeing pairs that are still
@@ -292,66 +277,66 @@ class IvarLayout
   # type-determining opcode or the top of the body (an incoming argument).
   def self.trace_type(irep, idx, reg, known_ivar_types, arg_types = nil, mand = 0, method_name = nil, annotations = nil,
                        registry = nil, integer_constants = nil, fixnum_return_names = nil)
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
+    # RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
+    # write lands on the SECOND register. `a` is a read (skipped); `b` is a real
+    # write and must stop the trace like the generic `else`.
+    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+    at_entry = lambda do |last|
+      # Never written in this block: an incoming argument. Register N is argument N
+      # for N <= mand (as in CodeGen#compile_method). Use ArgTypes' whole-program
+      # inference if it has one; otherwise the value is opaque.
+      pos = last.to_i
+      if pos.between?(1, mand)
+        # An annotation is per-definition (keyed by irep), so it is trusted whether
+        # the name is MONO or POLY; tried first.
+        # EMBED_TYPE_SAFETY: only :fixnum and :symbol pass. Other tokens (:array) have
+        # no TYPE_OPS entry, and letting them through surfaced later as a KeyError in
+        # GETIV/SETIV codegen of an unrelated owner.
+        t = annotations && annotations[irep.label]&.args&.[](pos - 1)
+        next t if t == :fixnum || t == :symbol
+
+        t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
+        next t if t
+      end
+      UNKNOWN
+    end
+    irep.walk_writers(idx - 1, reg, skip_ops: TRACE_TYPE_SKIP_OPS, barrier: rescue_write, barrier_result: UNKNOWN,
+                                    follow_moves: true, exhausted: at_entry) do |insn, i, cur|
       case insn.op
-      when 'MOVE'
-        d, s = insn.regs
-        next unless d == reg
-
-        reg = s
       when /^LOADI/
-        d = insn.reg
-        next unless d == reg
-
-        return :fixnum
+        next :fixnum
       when 'LOADSYM'
-        d = insn.reg
-        next unless d == reg
         # A Symbol is as safe to embed as a Fixnum: an mrb_sym is an interned id, not a
         # GC object (symbol.c frees the table only at mrb_close). See CodeGen::TYPE_OPS.
-        return :symbol
+        next :symbol
       when 'LOADNIL'
-        d = insn.reg
-        next unless d == reg
-
         # NILABLE_EMBED_SUPPORT: nil is a concrete value, so it is a contribution
         # the join can widen (NIL + :fixnum -> FIXNUM_NIL) instead of the UNKNOWN
         # this used to return, which poisoned every nilable ivar.
-        return NIL
+        next NIL
       when 'LOADTRUE', 'LOADFALSE'
         # BOOL_EMBED_SUPPORT: LOADT/LOADF. true/false are immediates in every boxing
         # this project targets (word, no-float, nan), so an mrb_bool field needs no GC
         # keep-alive. See CodeGen::TYPE_OPS :bool.
-        d = insn.reg
-        next unless d == reg
-
-        return :bool
+        next :bool
       when 'GETCONST', 'GETMCNST'
         # INTEGER_CONST_EMBED_SUPPORT: `@x = SOME_CONST` is Fixnum when
         # IntegerConstants.analyze admitted the bare name (the proof GETCONST's fast
         # path trusts). `integer_constants` is nil for callers that never ran the scan
         # (ArgTypes), and then nothing is proven. GETMCNST keys on the bare name after
         # `::`; see IntegerConstants.analyze for why that is required.
-        d = insn.reg
-        next unless d == reg
-
         name = insn.const_name
-        return :fixnum if name && integer_constants&.include?(name)
+        next :fixnum if name && integer_constants&.include?(name)
 
-        return UNKNOWN
+        next UNKNOWN
       when 'ADDI'
-        d = insn.reg
-        next unless d == reg
         # ADDI is `+= <literal>`: OP_ADDI is a plain integer add on the
         # destination, so it keeps the destination's own type. When the
         # destination is not known to be a Fixnum the value is not one either
         # (`1 + []` would not reach here, but `@x = @y += 1` with an Array
         # `@y` would), so trace the destination rather than assume.
-        return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+        next trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
       when 'ADD'
-        d = insn.reg
-        next unless d == reg
         # ADD is `+`, which is Integer#+ ONLY when both operands are Integers;
         # for two Arrays it is Array#+ and yields an Array. This is the same
         # rule codegen_insn's own ADD arm uses before it emits the bare
@@ -369,15 +354,12 @@ class IvarLayout
         # arm is a missed embedding, not a wrong one.
         s = insn.paren_reg
         if s
-          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+          left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          return :fixnum if left == :fixnum && right == :fixnum
+          next :fixnum if left == :fixnum && right == :fixnum
         end
-        return UNKNOWN
+        next UNKNOWN
       when 'SUB', 'MUL'
-        d = insn.reg
-        next unless d == reg
-
         # FIXNUM_SUBMUL_EMBED_SUPPORT: SUB/MUL (vm.c OP_MATH) dispatch on both operand
         # types, so they are Fixnum only when both operands are proven Fixnum
         # recursively. Overflow could make the value wrong but not the type, and the
@@ -385,43 +367,34 @@ class IvarLayout
         # corruption).
         s = insn.paren_reg
         if s
-          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+          left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          return :fixnum if left == :fixnum && right == :fixnum
+          next :fixnum if left == :fixnum && right == :fixnum
         end
-        return UNKNOWN
+        next UNKNOWN
       when 'SUBI'
-        d = insn.reg
-        next unless d == reg
-
         # FIXNUM_SUBMUL_EMBED_SUPPORT for the immediate form: only the destination's
         # prior value needs proving.
-        return trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+        next trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
       when 'GETIV'
-        d = insn.reg
-        next unless d == reg
-
         other_ivar = insn.ivar
         known = known_ivar_types[other_ivar]
         # EMBED_TYPE_SAFETY: a nilable (or unknown) source is not a concrete
         # scalar, so it never propagates a type to the copy (NILABLE_EMBED_SUPPORT).
-        return known if EMBEDDABLE.include?(known)
+        next known if EMBEDDABLE.include?(known)
 
-        return UNKNOWN
+        next UNKNOWN
       when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
-        d = insn.reg
-        next unless d == reg
-
         # FIXNUM_BINOP_EMBED_SUPPORT: %, &, |, ^ never promote to Bignum (like
         # compile_send's FIXNUM_BINARY fast path; +/-/* and << can overflow). Sound only
         # when both operands are proven Fixnum AND the operator has no override
         # anywhere (native_only_mono?).
         name = insn.sym
         if registry && %w[% & | ^].include?(name) && insn.argc == 1 && native_only_mono?(registry, name)
-          arg_reg = (d.to_i + 1).to_s
-          left = trace_type(irep, i, d, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
+          arg_reg = (cur.to_i + 1).to_s
+          left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
           right = trace_type(irep, i, arg_reg, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          return :fixnum if left == :fixnum && right == :fixnum
+          next :fixnum if left == :fixnum && right == :fixnum
         end
 
         # FIXNUM_RETURN_IVAR_HINT: a send of a name in FIXNUM_RETURN_PROOF's set
@@ -429,50 +402,16 @@ class IvarLayout
         # requires exactly one MethodDef, so the call either raises NoMethodError or
         # reaches that definition. No native_only_mono? re-check needed.
         # `fixnum_return_names` is nil for callers without a CodeGen (ArgTypes).
-        return :fixnum if name && fixnum_return_names&.include?(name)
+        next :fixnum if name && fixnum_return_names&.include?(name)
 
-        return UNKNOWN
-      when *READ_ONLY_OPCODE_SKIP
-        # READ_ONLY_OPCODE_SKIP: these opcodes print a register as their first `R%d`
-        # token but only READ it (mruby/ops.h: RETURN/RETURN_BLK "return R[a]", BREAK,
-        # JMPIF/JMPNOT/JMPNIL "if R[a] ...", RAISEIF, MATCHERR, SETUPVAR
-        # "uvset(b,c,R[a])"; codedump.c prints them that way). Skipping a non-writer is
-        # as sound as skipping a MOVE to another register. Without this an early
-        # `return v if v == @flag` stopped the trace for a later `@flag = v`.
-        # SETUPVAR's `b`/`c` are slot/level numbers in an ancestor frame, not this
-        # irep's registers, so its only `R` token is a same-frame read.
-      when 'RESCUE'
-        # RESCUE is `R[b] = R[a].isa?(R[b])` (ops.h), printed `RESCUE\tR%d\tR%d`: the
-        # write lands on the SECOND register. `a` is a read; `b` is a real write and
-        # must stop the trace like the generic `else`.
-        a, b = insn.regs
-        return UNKNOWN if b == reg
-        next unless a == reg
+        next UNKNOWN
       else
         # Any other opcode's first operand is almost always its destination, so stop
         # at UNKNOWN. Skipping an unrecognized writer could reach an unrelated earlier
         # write to a reused register and misattribute its type.
-        d = insn.reg
-        return UNKNOWN if d == reg
+        UNKNOWN
       end
     end
-    # Never written in this block: an incoming argument. Register N is argument N
-    # for N <= mand (as in CodeGen#compile_method). Use ArgTypes' whole-program
-    # inference if it has one; otherwise the value is opaque.
-    pos = reg.to_i
-    if pos.between?(1, mand)
-      # An annotation is per-definition (keyed by irep), so it is trusted whether
-      # the name is MONO or POLY; tried first.
-      # EMBED_TYPE_SAFETY: only :fixnum and :symbol pass. Other tokens (:array) have
-      # no TYPE_OPS entry, and letting them through surfaced later as a KeyError in
-      # GETIV/SETIV codegen of an unrelated owner.
-      t = annotations && annotations[irep.label]&.args&.[](pos - 1)
-      return t if t == :fixnum || t == :symbol
-
-      t = arg_types && method_name && arg_types[method_name]&.[](pos - 1)
-      return t if t
-    end
-    UNKNOWN
   end
 
   # Same guarantee as CodeGen#native_only_mono?, duplicated because that one

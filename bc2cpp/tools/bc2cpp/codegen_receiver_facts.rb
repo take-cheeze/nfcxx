@@ -11,35 +11,18 @@ class CodeGen
     addr = irep.instructions[idx]&.addr
     return false unless addr
 
-    reg = dest_reg.to_s
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      if insn.op == 'RESCUE'
-        # RESCUE reads its first register and writes its second; the caught
-        # exception remains live in the input register for the handler.
-        input_reg, output_reg = insn.regs
-        return false if output_reg == reg
-        next if input_reg == reg
+    # RESCUE reads its first register and writes its second; the caught
+    # exception remains live in the input register for the handler.
+    rescue_write = ->(insn, cur) { insn.op == 'RESCUE' && insn.regs[1] == cur }
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: %w[RESCUE], barrier: rescue_write, barrier_result: false,
+                                              follow_moves: true) do |insn, _index, exc_reg|
+      next false unless insn.op == 'EXCEPT'
+
+      recognize_rescue_regions(irep).any? do |region|
+        region[:kind] == :rescue_class && region[:exc_reg] == exc_reg &&
+          region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
       end
-
-      written = insn.reg
-      next unless written == reg
-
-      if insn.op == 'MOVE'
-        source = insn.regs[1]
-        return false unless source
-
-        reg = source
-      elsif insn.op == 'EXCEPT'
-        return recognize_rescue_regions(irep).any? do |region|
-          region[:kind] == :rescue_class && region[:exc_reg] == reg &&
-            region[:except_addr] == insn.addr && insn.addr < addr && addr < region[:shared_target]
-        end
-      else
-        return false
-      end
-    end
-    false
+    end || false
   end
 
   # `Exception#message` and `#to_s` share exc_to_s in mruby. A rescue proves the
@@ -119,25 +102,11 @@ class CodeGen
   def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
     return nil unless stable_standard_constructor_class?(expected_class)
 
-    reg = dest_reg
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn.reg == reg
-
-      case insn.op
-      when 'MOVE'
-        reg = insn.regs[1]
-        return nil unless reg
-      when 'SEND', 'SEND0'
-        return nil unless insn.sym == 'new'
-        # The known-class trace already resolved this SEND's constant path;
-        # stability above proves that path still denotes the same class.
-        return expected_class
-      else
-        return nil
-      end
+    irep.walk_writers(idx - 1, dest_reg, follow_moves: true) do |insn|
+      # The known-class trace already resolved this SEND's constant path;
+      # stability above proves that path still denotes the same class.
+      expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
     end
-    nil
   end
 
   # Diagnostic-only: identify the nearest producer behind an unresolved
@@ -145,33 +114,19 @@ class CodeGen
   def receiver_trace_origin(irep, idx, dest_reg)
     return 'receiver_unavailable' unless irep && idx && dest_reg
 
-    reg = dest_reg.to_s
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next if insn.op == 'BLOCK' || READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      next unless insn.reg == reg
-
-      if insn.op == 'MOVE'
-        reg = insn.regs[1]
-        return 'move_without_source' unless reg
-
-        next
+    at_entry = ->(last) { last == '0' ? 'self_register' : 'incoming_or_unwritten_register' }
+    irep.walk_writers(idx - 1, dest_reg.to_s, skip_ops: ['BLOCK', *READ_ONLY_OPCODE_SKIP], exhausted: at_entry) do |insn|
+      case insn.op
+      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : 'move_without_source'
+      when 'GETIV' then 'get_ivar'
+      when 'GETIDX', 'GETIDX0' then 'indexed_result'
+      when 'GETUPVAR' then 'captured_upvar'
+      when 'GETCONST', 'GETMCNST' then 'constant_lookup'
+      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
+      when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
+      else "write_#{insn.op.downcase}"
       end
-
-      return case insn.op
-             when 'GETIV' then 'get_ivar'
-             when 'GETIDX', 'GETIDX0' then 'indexed_result'
-             when 'GETUPVAR' then 'captured_upvar'
-             when 'GETCONST', 'GETMCNST' then 'constant_lookup'
-             when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB' then 'send_result'
-             when 'ARRAY', 'ARRAY2', 'HASH', 'STRING', 'STR' then 'literal_container'
-             else "write_#{insn.op.downcase}"
-             end
     end
-
-    return 'self_register' if reg == '0'
-
-    'incoming_or_unwritten_register'
   end
 
   # Resolve a constant expression used as a class/module object, not an
@@ -180,44 +135,23 @@ class CodeGen
     return nil unless @closed_world && ConstructClassNames.table && irep && idx &&
                       idx < irep.instructions.length && dest_reg
 
-    reg = dest_reg.to_s
-    path = []
     branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
     return nil unless branch_edges
 
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      return nil if %w[JMPUW ONERR RESCUE EXCEPT BLOCK].include?(insn.op)
-      next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
-      next unless insn.reg == reg
+    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP,
+                                                     barrier: %w[JMPUW ONERR RESCUE EXCEPT BLOCK])
+    return nil unless ref&.root == :const
 
-      case insn.op
-      when 'MOVE'
-        reg = insn.regs[1]
-        return nil unless reg
-      when 'GETMCNST'
-        segment = insn.mcnst_name
-        return nil unless segment
+    written = ref.name
+    written = ([written] + ref.segments).join('::') if written
+    # A forward edge from before this write into the send's block could
+    # bypass the receiver value; edges from later code already execute it.
+    return nil if branch_edges.any? { |source, target| source < ref.root_index && target > ref.root_index && target <= idx }
 
-        path.unshift(segment)
-      when 'GETCONST'
-        written = insn.const_name
-        written = ([written] + path).join('::') if written
-        # A forward edge from before this write into the send's block could
-        # bypass the receiver value; edges from later code already execute it.
-        return nil if branch_edges.any? { |source, target| source < i && target > i && target <= idx }
-
-        owner = resolve_class_constant_name(written, lexical_owner)
-        stable = owner && (@closed_world.stable_constant_identity?(owner) ||
-                           CodeGen.stable_class_constants&.include?(owner.split('::').last))
-        return owner if stable
-
-        return nil
-      else
-        return nil
-      end
-    end
-    nil
+    owner = resolve_class_constant_name(written, lexical_owner)
+    stable = owner && (@closed_world.stable_constant_identity?(owner) ||
+                       CodeGen.stable_class_constants&.include?(owner.split('::').last))
+    stable ? owner : nil
   end
 
   def resolve_class_constant_name(written, lexical_owner)
