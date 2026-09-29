@@ -602,6 +602,17 @@ class CodeGen
   # argument is a splat), so mrb_funcall_argv with its RARRAY_LEN/RARRAY_PTR is
   # exact. Keyword variants have no such translation and keep `#error`.
   def compile_dynamic_splat_send(name, recv, d, argv_reg)
+    # CORE_PROC_CALL: see dynamic_dispatch_line.
+    if @compiling_core && name == 'call'
+      return <<~CPP
+        // SPLAT n=* :call in a core body: a Proc is yielded to (CORE_PROC_CALL)
+        if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {
+          r#{d} = mrb_yield_argv(M, #{recv}, RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+        } else {
+          r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "call"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+        }
+      CPP
+    end
     <<~CPP
       // SPLAT n=* :#{name} runtime-sized (not a literal), dynamic dispatch via mrb_funcall_argv
       r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "#{name}"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));

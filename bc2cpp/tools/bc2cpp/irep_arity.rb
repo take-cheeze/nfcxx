@@ -157,11 +157,20 @@ BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   sub sub! with_index step
 ].freeze
 
+# CORE_BLOCK_REST: `{ |*args| }` (ENTER 0:0:1:0:0:0:0:0), the shape of every Enumerable
+# iterator block in mruby's core. vm.c OP_ENTER binds all of the yielded values to the
+# array (its `len > 1` autosplat does not apply to a lone rest), so the entry can pack
+# what mrb_get_args "*" reads.
+def rest_only_block?(block_irep)
+  enter = block_irep.enter
+  enter && enter.enter_fields == [0, 0, 1, 0, 0, 0, 0, 0]
+end
+
 # The irep-only half of the block-fallback gate (arity plus the unsafe-op
 # scan). The upvar-depth check lives in recognize_block_fallback_regions
 # (`available_upvars`), which knows what the enclosing level can supply.
 def block_fallback_safe?(block_irep)
-  return false unless pure_mandatory_arity?(block_irep)
+  return false unless pure_mandatory_arity?(block_irep) || rest_only_block?(block_irep)
 
   block_irep.instructions.none? { |insn| BLOCK_FALLBACK_UNSAFE_OPS.include?(insn.op) }
 end
@@ -275,6 +284,22 @@ def optional_arg_table(irep)
   return [opt, nil, nil] unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
 
   [opt, jmps.map(&:addr), jmps.map { |i| i.jmp_addr }]
+end
+
+# CORE_BLOCK_OPT: optional_arg_table for `def f(a, b = 1, &blk)` (ENTER n:o:0:0:0:0:1:0):
+# the same jump table with the block field set. Only compile_method asks for it, so no
+# direct call is built for such a method (pure_mandatory_or_optional_arity? refuses it).
+def optional_block_arg_table(irep)
+  enter = irep.enter
+  return nil unless enter
+
+  _mand, opt, rest, mand2, kw, kwrest, block = enter.enter_fields
+  return nil unless opt.positive? && rest.zero? && mand2.zero? && kw.zero? && kwrest.zero? && block.positive?
+
+  jmps = irep.instructions[irep.enter_index + 1, opt + 1]
+  return nil unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
+
+  [opt, jmps.map(&:addr), jmps.map(&:jmp_addr)]
 end
 
 # KEYWORD_ARG_SUPPORT: parameter name for a keyword. compile_method (signature,

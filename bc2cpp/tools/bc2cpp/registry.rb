@@ -113,6 +113,8 @@ def build_registry(ireps, root_label)
   class_decls = Hash.new { |h, k| h[k] = [] }
   module_body_ivar_labels = Hash.new { |h, k| h[k] = [] }
   walked = Set.new
+  # CORE_ALIASES (ADR 0269): every `alias new old` of a class body, in walk order.
+  alias_sites = []
 
   walk = lambda do |label, namespace|
     walked << label
@@ -222,6 +224,9 @@ def build_registry(ireps, root_label)
         pending_name = nil
         pending_idx = nil
         pending_ivar_owner = nil
+      when 'ALIAS'
+        old_name = insn.first_of(:name)&.value
+        alias_sites << { owner: namespace || 'Object', new: insn.sym, old: old_name, irep: label } if insn.sym && old_name
       when 'TDEF'
         # "TDEF R1 :speak I[1]"
         child_label = irep.reps[insn.block_index]
@@ -491,7 +496,8 @@ def build_registry(ireps, root_label)
     end
   end
   [registry, superclass_of, container_constants.compact, included_modules, prepended_modules, unknown_mixins,
-   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites, declared_modules]
+   struct_member_lists, class_decls, walked, module_body_ivar_labels, constant_assignment_sites, declared_modules,
+   alias_sites]
 end
 
 # SUPER_SUPPORT: resolve `class X < SUPER_EXPR` to a class name by walking back

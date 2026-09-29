@@ -26,7 +26,8 @@ class CodeGen
   # or empty excludes nothing. Class-level so every probing CodeGen sees it.
   class << self
     attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
-                  :integer_constant_values, :hot_only_excluded, :module_names, :core_hidden_defs
+                  :integer_constant_values, :hot_only_excluded, :module_names, :core_hidden_defs,
+                  :core_guarded, :core_aliases
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
@@ -155,6 +156,7 @@ class CodeGen
     end
     # CORE_VISIBILITY (ADR 0264): compiled, but never a dispatch candidate.
     (self.class.core_hidden_defs || []).each { |d| @owner_of[d.irep] = d if d.irep }
+    @core_guard_index = {}
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.
