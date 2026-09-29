@@ -61,7 +61,7 @@ class ClassArgTypes
       next unless defs.first.irep # native-only definition -- no body to walk.
 
       irep = ireps.fetch(defs.first.irep)
-      enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      enter = irep.enter
       mand = enter ? enter.enter_fields.first : 0
       next if mand.zero?
 

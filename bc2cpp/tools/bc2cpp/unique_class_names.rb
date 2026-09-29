@@ -130,8 +130,8 @@ module UniqueClassNames
     end
     walk.call(root_label, nil)
     ireps.each do |label, irep|
-      irep.instructions.each_with_index do |insn, idx|
-        next unless %w[CLASS MODULE].include?(insn.op) && !seen.include?([label, idx])
+      irep.each_with_op('CLASS', 'MODULE') do |insn, idx|
+        next if seen.include?([label, idx])
 
         paths[insn.sym_token] << :unknown
       end

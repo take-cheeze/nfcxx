@@ -153,17 +153,6 @@ def build_registry(ireps, root_label)
          respond_to_missing?].include?(method_name) ? :private : default_visibility
     end
 
-    # mrbc -v prints OP_EXT1/EXT2/EXT3 as their own lines between instructions
-    # codegen emits back to back (src/codedump.c; each widens the next
-    # instruction's operands). The unfused DEF case always has one (its METHOD
-    # index is > 0xff by construction). Returns the index of the first real opcode
-    # before `from_idx`, or -1.
-    skip_ext_back = lambda do |from_idx|
-      i = from_idx
-      i -= 1 while i >= 0 && %w[EXT1 EXT2 EXT3].include?(irep.instructions[i]&.op)
-      i
-    end
-
     irep.instructions.each_with_index do |insn, idx|
       case insn.op
       when 'CLASS', 'MODULE'
@@ -279,9 +268,9 @@ def build_registry(ireps, root_label)
         #   METHOD  R2  I[380]
         #   EXT2
         #   DEF     R1  :toned?  (R2)
-        # skip_ext_back steps over the interposed EXT lines.
+        # previous_real_index steps over the interposed EXT lines.
         reg = insn.reg_token
-        method_idx = skip_ext_back.call(idx - 1)
+        method_idx = irep.previous_real_index(idx - 1)
         method_insn = method_idx >= 0 ? irep.instructions[method_idx] : nil
         next unless method_insn && method_insn.op == 'METHOD'
 
@@ -290,7 +279,7 @@ def build_registry(ireps, root_label)
         # R<n+1>, DEF at R<n> referencing (R<n+1>)); adjacency alone is not trusted.
         next unless insn.paren_reg == method_reg
 
-        opener_idx = skip_ext_back.call(method_idx - 1)
+        opener_idx = irep.previous_real_index(method_idx - 1)
         opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
         next unless opener_insn && %w[TCLASS SCLASS].include?(opener_insn.op)
 

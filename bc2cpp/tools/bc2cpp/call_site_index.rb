@@ -10,9 +10,7 @@ class CallSiteIndex
   def self.build(ireps)
     by_name = Hash.new { |hash, name| hash[name] = [] }
     ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
-        next unless SEND_OPS.include?(insn.op)
-
+      irep.each_with_op(*SEND_OPS) do |insn, idx|
         name = insn.sym
         next unless name
 

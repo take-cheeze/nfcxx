@@ -3,7 +3,7 @@
 # Argument shapes and block/lambda/def fallback safety of an irep.
 
 def pure_mandatory_arity?(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
 
   fields = enter.enter_fields
@@ -13,7 +13,7 @@ end
 # ENTER's mandatory count (fields[0]), used by compile_send's MONO guard to
 # refuse a direct call whose argument count differs from the target's arity.
 def mandatory_arity(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return 0 unless enter
 
   enter.enter_fields.first
@@ -29,7 +29,7 @@ end
 # noblock stay excluded (they move where the Hash lands). ENTER's fields are
 # REQ:OPT:REST:POST:KEY:KDICT:BLOCK:NOBLOCK (src/codedump.c).
 def keyword_hash_positional_callee?(irep, total)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return false unless enter
 
   mand, opt, rest, post, kw, kdict, block, noblock =
@@ -50,7 +50,7 @@ end
 # as compile_keyword_call); without that padding, g++ fails with "too few
 # arguments". With opt == 0 the output is unchanged.
 def mandatory_optional_and_keyword_arity?(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return false unless enter
 
   fields = enter.enter_fields
@@ -225,7 +225,7 @@ end
 # pass `bc2cpp_given_opt`, mirroring the entry wrapper's `mrb_get_argc(M) -
 # mand`.
 def optional_arity(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return 0 unless enter
 
   fields = enter.enter_fields
@@ -236,7 +236,7 @@ end
 # optional positionals (`def foo(a, b = 1)`); every other non-mandatory field
 # must be zero. Callers still check compiles_clean? separately.
 def pure_mandatory_or_optional_arity?(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return true unless enter # no ENTER at all: a 0-arg method, trivially fine.
 
   fields = enter.enter_fields
@@ -260,7 +260,7 @@ def jmp_target_after_reg(args)
 end
 
 def optional_arg_table(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return [0, nil, nil] unless enter
 
   fields = enter.enter_fields
@@ -270,7 +270,7 @@ def optional_arg_table(irep)
   # sequence keyword_arg_table recognizes independently.
   return [0, nil, nil] unless opt.positive? && rest.zero? && mand2.zero? && kwrest.zero? && block.zero?
 
-  enter_idx = irep.instructions.index { |i| i.op == 'ENTER' }
+  enter_idx = irep.enter_index
   jmps = irep.instructions[enter_idx + 1, opt + 1]
   return [opt, nil, nil] unless jmps && jmps.size == opt + 1 && jmps.all? { |i| i.op == 'JMP' }
 
@@ -295,7 +295,7 @@ end
 # KEY_P) or optional (KEY_P/JMPIF guard). Returns [{name:, required:}], or nil
 # for unmodeled fields or a count mismatch with ENTER.
 def keyword_arg_table(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return nil unless enter
 
   fields = enter.enter_fields
@@ -328,7 +328,7 @@ end
 # before the body runs, and it sits right after the mandatory registers, so
 # compile_method treats it as one more contiguous `total_args` slot.
 def rest_only_arity?(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return false unless enter
 
   fields = enter.enter_fields
@@ -344,7 +344,7 @@ end
 # 0:0:0:0:0:0:1:0, then `MOVE R2 R1 ; R2:blk`). The block arrives at register
 # mand+1 through the ordinary entry convention, not BLKPUSH/BLKCALL.
 def block_param_arity?(irep)
-  enter = irep.instructions.find { |i| i.op == 'ENTER' }
+  enter = irep.enter
   return false unless enter
 
   fields = enter.enter_fields

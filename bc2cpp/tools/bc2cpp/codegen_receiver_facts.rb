@@ -486,7 +486,7 @@ class CodeGen
     # (5) ENTER is exactly m mandatory and nothing else (REQ:OPT:REST:POST:KEY:
     # KDICT:BLOCK:NOBLOCK, src/codedump.c), so regs[1..m] is the whole argument
     # list and there is no block parameter.
-    enter = instructions.find { |i| i.op == 'ENTER' }
+    enter = irep.enter
     return nil unless enter
 
     em = enter.enter_fields

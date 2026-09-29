@@ -40,7 +40,7 @@ class CodeGen
   def compile_method(label)
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
-    enter = irep.instructions.find { |i| i.op == 'ENTER' }
+    enter = irep.enter
     mand = enter ? enter.enter_fields.first : 0
 
     # RUNTIME_DEF_DEVIRT_GUARD: cleared at the single entry point so no early

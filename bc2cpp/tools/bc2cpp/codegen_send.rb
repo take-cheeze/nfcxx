@@ -54,7 +54,7 @@ class CodeGen
     new_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
-    drawing_enter = irep&.instructions&.find { |insn| insn.op == 'ENTER' }
+    drawing_enter = irep&.enter
     drawing_mand = drawing_enter ? drawing_enter.enter_fields.first : 0
     drawing_arg_classes = owner_def && @class_annotations[irep&.label]&.args
     drawing_ivar_classes = owner_def && @class_layout[owner_def.owner]
@@ -1249,7 +1249,7 @@ class CodeGen
     if target.nil? && !self_implicit && irep && (idx || trace_idx)
       proof_idx = idx || trace_idx
       proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
-      cur_enter = irep.instructions.find { |i| i.op == 'ENTER' }
+      cur_enter = irep.enter
       cur_mand = cur_enter ? cur_enter.enter_fields.first : 0
       cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
       ivar_classes = owner_def && @class_layout[owner_def.owner]

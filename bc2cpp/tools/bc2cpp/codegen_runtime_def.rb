@@ -480,9 +480,7 @@ class CodeGen
   # a block body; `def` is added by its TDEF pass.
   def recognize_exec_fallback_regions(irep)
     regions = []
-    irep.instructions.each_with_index do |insn, idx|
-      next unless insn.op == 'SCLASS'
-
+    irep.each_with_op('SCLASS') do |insn, idx|
       nxt = irep.instructions[idx + 1]
       next unless nxt && nxt.op == 'EXEC'
 

@@ -712,9 +712,7 @@ class CodeGen
   # BLOCK_FALLBACK RProcs, whose break throws that type).
   def recognize_explicit_block_arg_regions(irep)
     regions = []
-    irep.instructions.each_with_index do |insn, idx|
-      next unless %w[SENDB SSENDB].include?(insn.op)
-
+    irep.each_with_op('SENDB', 'SSENDB') do |insn, idx|
       prev = BytecodeIR.for(irep).previous(idx)
       next if prev && prev.op == 'BLOCK'
 

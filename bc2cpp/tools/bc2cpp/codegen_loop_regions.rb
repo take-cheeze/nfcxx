@@ -237,7 +237,7 @@ class CodeGen
   def static_indexable_class(irep, idx, reg, owner_def)
     return nil unless owner_def && idx
 
-    enter = irep.instructions.find { |i| i.op == 'ENTER' }
+    enter = irep.enter
     mand = enter ? enter.enter_fields.first : 0
     arg_classes = @class_annotations[irep.label]&.args
     ivar_classes = @class_layout[owner_def.owner]
@@ -605,7 +605,7 @@ class CodeGen
     call_idx = host_irep.index_of_addr(region[:sendb_addr])
     return {} unless call_idx
 
-    enter = host_irep.instructions.find { |insn| insn.op == 'ENTER' }
+    enter = host_irep.enter
     mandatory = enter ? enter.enter_fields.first : 0
     elements = @element_annotations[host_irep.label]
     return {} unless elements

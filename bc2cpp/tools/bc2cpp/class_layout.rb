@@ -142,13 +142,11 @@ class ClassLayout
       methods_of.each do |owner, irep_labels|
         irep_labels.each do |label|
           irep = ireps.fetch(label)
-          enter = irep.instructions.find { |i| i.op == 'ENTER' }
+          enter = irep.enter
           mand = enter ? enter.enter_fields.first : 0
           arg_classes = class_annotations[label]&.args
 
-          irep.instructions.each_with_index do |insn, idx|
-            next unless insn.op == 'SETIV'
-
+          irep.each_with_op('SETIV') do |insn, idx|
             ivar = insn.ivar
             src_reg = insn.regs.first
             # Never hand an UNKNOWN entry to trace_new_target's GETIV lookup.

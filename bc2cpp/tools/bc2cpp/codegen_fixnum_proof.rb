@@ -546,7 +546,7 @@ class CodeGen
     return false unless owner_def.irep == irep.label
     return false unless pure_mandatory_arity?(irep)
 
-    enter = irep.instructions.find { |i| i.op == 'ENTER' }
+    enter = irep.enter
     mand = enter ? enter.enter_fields.first : 0
     r = reg.to_i
     return false unless r >= 1 && r <= mand
