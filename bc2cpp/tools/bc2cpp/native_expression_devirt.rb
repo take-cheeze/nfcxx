@@ -65,6 +65,14 @@ module NativeExpressionDevirt
     ASCII_VIEWS[source] ||= source.gsub(/[^\x00-\x7f]/, '?')
   end
 
+  # `scan` for patterns that open with `(\w+)`, which Onigmo cannot search for
+  # by a literal prefix: skip files lacking every literal the pattern needs.
+  def scan_with(source, literals, pattern, &block)
+    return block ? source : [] unless literals.any? { |literal| source.include?(literal) }
+
+    source.scan(pattern, &block)
+  end
+
   def analyze(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     implementations = {}
@@ -122,7 +130,7 @@ module NativeExpressionDevirt
         registrations[name] << [nil, false]
       end
       needed = registrations.values.flatten(1).map(&:first).to_set
-      source.to_enum(:scan, /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
+      source.to_enum(:scan, /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/).each do
         function, state_arg, self_arg = Regexp.last_match.captures
         next unless needed.include?(function)
 
@@ -168,24 +176,24 @@ module NativeExpressionDevirt
 
       source = read_source(path)
       class_variables = {}
-      source.scan(/(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+      scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
         class_variables[variable] = { field: field, class_name: class_name }
       end
-      source.scan(/(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+      scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
-      source.scan(/(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+      scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
         class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
       source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
         info = class_variables[variable]
         info[:field] ||= field if info
       end
-      source.scan(/\bmrb->(\w+_class)\b/) do |field|
+      scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
         field = field.first
         class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
       end
-      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       # class.c boots BasicObject/Object/Module/Class through boot_defclass and
@@ -193,11 +201,11 @@ module NativeExpressionDevirt
       # would otherwise have an unknown owner, which disables every name they
       # share with a built-in class. Read the names off the source's own
       # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-      booted = source.scan(/(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+      booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
       source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
         class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
       end
-      source.scan(/(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
         class_variables[variable] ||= { field: nil, class_name: class_name }
       end
       tags = {}
@@ -273,7 +281,9 @@ module NativeExpressionDevirt
     needed_arities = registrations.values.flatten(1).filter_map do |entry|
       [entry[:function], entry[:arity]] unless entry[:arity].nil?
     end.to_set
-    function_pattern = /(?:static\s+|MRB_API\s+)?mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
+    # No optional static/MRB_API prefix: only captures and match end are used,
+    # and a literal start lets the scan skip ahead.
+    function_pattern = /mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*(\w+)\s*,\s*mrb_value\s+(\w+)\s*\)\s*\{/
     arities_by_function = Hash.new { |hash, function| hash[function] = [] }
     needed_arities.each { |function, arity| arities_by_function[function] << arity }
     Array(paths).each do |path|
