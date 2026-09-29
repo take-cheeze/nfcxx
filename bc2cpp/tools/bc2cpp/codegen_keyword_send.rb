@@ -20,17 +20,11 @@ class CodeGen
   # `before_idx`, inclusive) a `LOADSYM :name`? Shared by compile_keyword_send
   # and splat_hash_literal_pairs.
   def literal_symbol_write(irep, before_idx, reg)
-    before_idx.downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      # A write to this register ends the scan -- it must be LOADSYM.
-      next unless insn.reg == reg.to_s
+    # The most recent write must be the LOADSYM.
+    insn = irep.last_writer(before_idx, reg)
+    return nil unless insn&.op == 'LOADSYM'
 
-      return nil unless insn.op == 'LOADSYM'
-
-      return insn.sym_token&.sub(/\A:/, '')
-    end
-    nil
+    insn.sym_token&.sub(/\A:/, '')
   end
 
   # KEYWORD_CALLSITE_SUPPORT: the shared tail of compile_keyword_send (MONO
@@ -519,16 +513,8 @@ class CodeGen
     return nil unless send_insn && send_insn.op == 'SEND'
 
     recv_reg = d.to_i
-    write = nil
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      # The first write to the receiver register must be the constant read itself.
-      next unless insn.reg == recv_reg.to_s
-
-      write = insn
-      break
-    end
+    # The first write to the receiver register must be the constant read itself.
+    write = irep.last_writer(idx - 1, recv_reg)
     return nil unless write && write.op == 'GETCONST'
 
     const_name = write.tokens[1]

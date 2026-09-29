@@ -21,15 +21,8 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   d = insn.reg
   return nil unless d
 
-  struct_recv = false
-  (idx - 1).downto(0) do |i|
-    prev = irep.instructions[i]
-    pd = prev.reg
-    next unless pd == d
-
-    struct_recv = prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
-    break
-  end
+  prev = irep.last_writer(idx - 1, d)
+  struct_recv = prev && prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
   return nil unless struct_recv
 
   # The Struct's name comes from a SETCONST right after the call on the same
@@ -152,22 +145,14 @@ def build_registry(ireps, root_label)
     # trusted; anything else is unrecognized (a safe miss). Shared by the SCLASS
     # body case and the unfused DEF case below.
     resolve_singleton_receiver = lambda do |reg, before_idx|
-      recv = nil
-      (before_idx - 1).downto(0) do |i|
-        prev = irep.instructions[i]
-        pd = prev.reg_token
-        next unless pd == reg
-
-        case prev.op
-        when 'LOADSELF'
-          recv = namespace || 'Object'
-        when 'GETCONST'
-          const_name = prev.tokens[1]
-          recv = namespace ? "#{namespace}::#{const_name}" : const_name
-        end
-        break
+      prev = irep.last_writer(before_idx - 1, reg.delete_prefix('R'))
+      case prev&.op
+      when 'LOADSELF'
+        namespace || 'Object'
+      when 'GETCONST'
+        const_name = prev.tokens[1]
+        namespace ? "#{namespace}::#{const_name}" : const_name
       end
-      recv
     end
 
     # Shared by TDEF and the unfused TCLASS+METHOD+DEF case: both need the builtin
@@ -466,15 +451,8 @@ def build_registry(ireps, root_label)
         d = insn.reg
         # Only a bare `Struct` GETCONST receiver is trusted; anything else is a safe
         # miss.
-        struct_recv = false
-        (idx - 1).downto(0) do |i|
-          prev = irep.instructions[i]
-          pd = prev.reg
-          next unless pd == d
-
-          struct_recv = prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
-          break
-        end
+        prev = irep.last_writer(idx - 1, d)
+        struct_recv = prev && prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
         next unless struct_recv
 
         # The block operand is the BLOCK right before the SENDB (codegen emits it

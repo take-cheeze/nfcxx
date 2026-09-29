@@ -14,6 +14,17 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
     @addr_index[addr]
   end
 
+  # Nearest instruction at or before index +from+ whose first register operand
+  # is +reg+ (digits), i.e. the write a register read at from + 1 sees.
+  def last_writer(from, reg)
+    reg = reg.to_s
+    [from, instructions.length - 1].min.downto(0) do |i|
+      insn = instructions[i]
+      return insn if insn.reg == reg
+    end
+    nil
+  end
+
   # Instructions whose address lies in +range+ (`b...e`, `(t + 1)..`).
   def instructions_at(range)
     instructions.select { |insn| range.cover?(insn.addr) }
