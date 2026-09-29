@@ -1,0 +1,3 @@
+# tools/bc2cpp/core_refused.txt -- methods of mruby's own Ruby that stay bytecode although
+# they compile (docs/adr/0264). One `Owner#name  # reason` per line. Everything else in
+# BC2CPP_CORE_MRBLIBS that compiles clean is compiled and registered by mruby-core-compiled.

@@ -50,7 +50,8 @@ module NomethodReviewedProbe
         'BC2CPP_HOT_METHODS' => hot_methods,
         NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil)
       }
-      Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), *closed_world_mrblib_srcs(root))
+      world = closed_world_mrblib_srcs(root, core_gems: hot_methods ? nil : :canonical)
+      Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), *world)
     end
   end
 

@@ -1302,7 +1302,7 @@ class CodeGen
       via_element = true
     end
     if target.nil? && !self_implicit && known_class
-      candidate = @registry[name]&.find { |md| md.owner == known_class }
+      candidate = core_targets(@registry[name])&.find { |md| md.owner == known_class }
       # The same two guards as MONO: the class-exact candidate must compile clean
       # and fit the call's argument count.
       if candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(candidate.irep)) &&

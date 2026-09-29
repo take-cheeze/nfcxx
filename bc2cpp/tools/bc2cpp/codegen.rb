@@ -26,7 +26,7 @@ class CodeGen
   # or empty excludes nothing. Class-level so every probing CodeGen sees it.
   class << self
     attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
-                  :integer_constant_values, :hot_only_excluded
+                  :integer_constant_values, :hot_only_excluded, :module_names, :core_hidden_defs
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
@@ -126,6 +126,8 @@ class CodeGen
     # body's nesting depth below its method (codegen.c counts scopes up to the
     # method scope, so a direct child block has lv == 1). Other lv keep `#error`.
     @blk_param_level = 0
+    # ADR 0264: true while compiling a method of mruby's own Ruby (see core_targets).
+    @compiling_core = false
     @registry = registry
     @known_owners = Set.new(registry.values.flatten.map(&:owner))
     # FIBER_REACHABILITY_UNSAFE_SUPPORT: must exist before drop_unsafe_embeddings,
@@ -151,6 +153,8 @@ class CodeGen
     registry.each_value do |defs|
       defs.each { |d| @owner_of[d.irep] = d if d.irep }
     end
+    # CORE_VISIBILITY (ADR 0264): compiled, but never a dispatch candidate.
+    (self.class.core_hidden_defs || []).each { |d| @owner_of[d.irep] = d if d.irep }
     @class_layout = class_layout # class_name -> {ivar_name => class_name} -- see ClassLayout's own comment.
     @class_annotations = class_annotations # irep label -> ClassAnnotations::Annotation
     @only_owners = nil # set by compile_all -- see its own comment.
@@ -543,11 +547,19 @@ class CodeGen
     # devirt_blocked_name?/class_body_installed_names).
     return nil if devirt_blocked_name?(name)
 
-    defs = @registry[name]
+    defs = core_targets(@registry[name])
     return nil unless defs && defs.size == 1
     return nil unless defs.first.irep
     return nil unless compiles_clean?(defs.first.irep)
 
     defs.first
+  end
+
+  # ADR 0264: inside a core method only core definitions (and the native placeholders that
+  # keep a name POLY) are static call targets; mruby's own code never binds an engine method.
+  def core_targets(defs)
+    return defs unless @compiling_core && defs
+
+    defs.select { |d| d.core || d.owner == '<native>' }
   end
 end

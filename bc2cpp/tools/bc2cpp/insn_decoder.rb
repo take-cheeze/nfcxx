@@ -389,7 +389,8 @@ module InsnDecoder
       raise "bc2cpp: no line info for #{op} at #{start}" if lineno.negative?
 
       # The disassembly is line-oriented: a pool string with a newline is cut there.
-      first = "#{op}#{sep_for(name, values)}#{rest}".split("\n", 2).first
+      # scrub: a binary pool string (mruby-wolf's data.rb) is not valid UTF-8.
+      first = "#{op}#{sep_for(name, values)}#{rest}".scrub.split("\n", 2).first
       insn = Insn.new(lineno: lineno, addr: start, op: op, args: first.delete_prefix(op).strip,
                       raw: (format('%5d %03d ', lineno, start) + first).rstrip)
       insn.typed = operands

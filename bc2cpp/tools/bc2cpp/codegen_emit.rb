@@ -31,7 +31,8 @@ class CodeGen
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
     :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
-    :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil
+    :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
+    :@compiling_core => false
   }.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's
@@ -631,7 +632,7 @@ class CodeGen
     # compile_method runs. compile_method never assigns them.
     leaves = @owner_of.keys
     if only_owners
-      leaves.select! { |l| only_owners.include?(@owner_of.fetch(l).owner) }
+      leaves.select! { |l| only_owners.include?(@owner_of.fetch(l).owner) && emit_unit_allows?(l) }
       # A module_function copy has its own singleton lookup entry but shares its
       # source body's irep. Emit that body from the module's gem when the copy's
       # singleton owner is selected; the source module method itself stays bytecode.
@@ -643,6 +644,28 @@ class CodeGen
     # HOT_ONLY: excluded methods get no `_impl`, entry or declaration (ADR 0214).
     leaves = leaves.reject { |l| hot_only_excluded?(l) }
     leaves.map { |label| compile_method(label) }
+  end
+
+  # EMIT_UNIT (ADR 0264): Array and StringIO have definitions in both mruby's own
+  # Ruby and an engine gem (mruby-rgss's Array#include?, mruby-lcf's
+  # StringIO#ungetbyte), and each compiled gem is one translation unit that must
+  # emit a symbol exactly once. The unit is read from the source file and the
+  # owner list: the core gem is the run whose owners are all core owners
+  # (BC2CPP_CORE_OWNERS) and emits the core-source definitions; a run with any
+  # other owner is an engine gem (or the aggregate of all gems) and emits the
+  # rest. A run whose owners cover the core set and more emits both, which is
+  # what a single-process analysis of every gem wants. Every run agrees on
+  # which bodies compile (same registry), only on which TU emits them.
+  def emit_unit_allows?(label)
+    return true unless @only_owners
+
+    covers_core = BC2CPP_CORE_OWNERS.all? { |owner| @only_owners.include?(owner) }
+    core_only = @only_owners.all? { |owner| BC2CPP_CORE_OWNERS.include?(owner) }
+    if CoreDefs.core_source?(@ireps.fetch(label).file)
+      covers_core
+    else
+      !core_only
+    end
   end
 
   # HOT_ONLY (ADR 0214): did BC2CPP_HOT_METHODS leave irep `label` out?

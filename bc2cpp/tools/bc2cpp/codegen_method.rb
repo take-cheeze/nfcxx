@@ -40,6 +40,18 @@ class CodeGen
   def compile_method(label)
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
+    # ADR 0264: mruby's own methods are compiled with no closed-world proof (the closed
+    # world is the engine's Ruby) and may bind statically only to core definitions.
+    if d.core && @closed_world
+      saved_world = @closed_world
+      @closed_world = nil
+      begin
+        return compile_method(label)
+      ensure
+        @closed_world = saved_world
+      end
+    end
+    @compiling_core = d.core ? true : false
     enter = irep.enter
     mand = enter ? enter.enter_fields.first : 0
 

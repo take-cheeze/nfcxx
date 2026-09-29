@@ -45,7 +45,8 @@ module NeverCalledRegistrations
             'tools/bc2cpp/compiled_gems.rb'
     end
     other_gems = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
-    closed_world_srcs = closed_world_mrblib_srcs(repo_root)
+    # A hot-only build's world holds no core Ruby (compiled_gems.rb bc2cpp_closed_world_srcs).
+    closed_world_srcs = closed_world_mrblib_srcs(repo_root, core_gems: hot_methods ? nil : :canonical)
     # The canonical, target-independent native source set (as in
     # wio_registered_methods.rb and bc2cpp_wired_embedding_check.rb): every target
     # shares one register.cxx per gem, so a target-specific set would make one
