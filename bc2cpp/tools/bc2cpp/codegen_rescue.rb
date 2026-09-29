@@ -77,11 +77,11 @@ class CodeGen
     # `end == target` is the only shape reasoned about.
     return nil unless ch.end_addr == ch.target
 
-    by_addr = irep.instructions.each_with_object({}) { |insn, h| h[insn.addr] = insn }
+    program = BytecodeIR.for(irep)
     b, t = ch.begin_addr, ch.target
-    return nil unless by_addr.key?(b)
+    return nil unless program.insn_at_addr(b)
 
-    exc = by_addr[t]
+    exc = program.insn_at_addr(t)
     return nil unless exc && exc.op == 'EXCEPT'
     exc_reg = exc.regs.first
     return nil unless exc_reg
@@ -127,20 +127,18 @@ class CodeGen
     # landing just after it, so these jumps are remapped to raiseif_addr by
     # compile_method (which also emits that label). A jump from OUTSIDE onto `t`
     # stays rejected: it would skip the body but run the ensure.
-    inside = ->(a) { a >= b && a < ch.end_addr }
+    protected_range = (b...ch.end_addr)
     except_jump_srcs = []
-    irep.instructions.each do |i|
-      jt = i.branch_target
-      next unless jt
+    program.branch_edges.each do |edge|
       # The ensure body was already checked above with a stricter rule.
-      next if ((t + 1)...raiseif.addr).cover?(i.addr)
-      if jt == t
-        return nil unless inside.call(i.addr)
+      next if ((t + 1)...raiseif.addr).cover?(edge.src)
+      if edge.target == t
+        return nil unless protected_range.cover?(edge.src)
 
-        except_jump_srcs << i.addr
+        except_jump_srcs << edge.src
         next
       end
-      return nil if inside.call(i.addr) != inside.call(jt)
+      return nil if protected_range.cover?(edge.src) != protected_range.cover?(edge.target)
     end
     # An optional-argument jump table is ordinary JMPs in this irep, so the
     # crossing test already covered it.
@@ -162,7 +160,7 @@ class CodeGen
     # labels inside the lambda, so compile_insn's gotos need no rewriting.
     body_targets = region[:body_insns].filter_map { |i| i.branch_target }.to_set
     region[:body_insns].each do |insn|
-      idx = irep.instructions.index(insn)
+      idx = irep.index_of_addr(insn.addr)
       body << "    L#{insn.addr}:;\n" if body_targets.include?(insn.addr)
       code = compile_insn(insn, irep, d, idx)
       ok = false if code.include?('#error')
@@ -230,8 +228,7 @@ class CodeGen
     return [] if irep.catch_handlers.nil? || irep.catch_handlers.empty?
     return [] unless irep.catch_handlers.all? { |ch| ch.type == :rescue }
 
-    by_addr = irep.instructions.each_with_object({}) { |insn, h| h[insn.addr] = insn }
-    by_index = irep.instructions.each_with_index.to_h
+    program = BytecodeIR.for(irep)
 
     regions = []
     irep.catch_handlers.each do |ch|
@@ -250,7 +247,7 @@ class CodeGen
         overlaps && !nested
       end
 
-      except_i = by_addr[t]
+      except_i = program.insn_at_addr(t)
       next unless except_i && except_i.op == 'EXCEPT'
       exc_reg = except_i.reg
       next unless exc_reg
@@ -258,22 +255,22 @@ class CodeGen
       # Two exclusive handler shapes, each with its own recognizer (nil means "not
       # this shape"): the classic `rescue SomeClass` chain, and the `defined?`
       # constant probe (see recognize_defined_const_handler).
-      handler = recognize_rescue_class_handler(irep, by_addr, by_index, except_i, exc_reg) ||
-                recognize_defined_const_handler(irep, by_index, except_i, exc_reg, b, e)
+      handler = recognize_rescue_class_handler(irep, program, except_i, exc_reg) ||
+                recognize_defined_const_handler(irep, except_i, exc_reg, b, e)
       next unless handler
 
       cls_name = handler[:cls_name]
       match_addr = handler[:match_addr]
       raise_addr = handler[:raise_addr]
 
-      exit_i = by_addr[e]
+      exit_i = program.insn_at_addr(e)
       next unless exit_i && exit_i.op == 'JMP'
       shared_target = exit_i.jmp_addr
       # shared_target can never be this region's except_addr in mrbc output
       # (OP_EXCEPT is emitted before the success JMP is patched); rejected anyway,
       # since that address is suppressed and has no label.
       next if shared_target == t
-      shared_i = by_addr[shared_target]
+      shared_i = program.insn_at_addr(shared_target)
       next unless shared_i
       # DEFINED_CONST_RESCUE_SUPPORT: the success path must land on `STRING
       # R<exc_reg> L[n]` (codegen_defined_const's "constant" push,
@@ -301,24 +298,7 @@ class CodeGen
       #      rejected.
       #   2. No jump from inside [b, e) may leave it; the only exits are `e`
       #      (checked above) or a raise (mrb_protect_error's job).
-      jump_target_of = lambda do |insn|
-        case insn.op
-        when 'JMP' then insn.jmp_addr
-        when 'JMPNOT', 'JMPIF', 'JMPNIL' then insn.uint_operand.to_i
-        end
-      end
-      escapes = irep.instructions.any? do |src|
-        tgt = jump_target_of.call(src)
-        next false unless tgt
-        if (b...e).cover?(src.addr)
-          !(tgt >= b && tgt <= e) # (2): an internal source jumping outside the region
-        elsif src.addr < b && tgt == b
-          false # legitimate explicit-branch entry into the region, see above
-        else
-          tgt >= b && tgt <= e # (1): an external source jumping into the region
-        end
-      end
-      next if escapes
+      next unless program.region_boundary_breaches(b...e, e).empty?
 
       regions << { begin_addr: b, end_addr: e, except_addr: t, exc_reg: exc_reg, cls_name: cls_name,
                    match_addr: match_addr, raise_addr: raise_addr, shared_target: shared_target,
@@ -383,8 +363,8 @@ class CodeGen
   # except_addr only and compiles everything after through compile_insn, which
   # translates each of these opcodes unconditionally. The protected range and
   # its checks are untouched.
-  def recognize_rescue_class_handler(irep, by_addr, by_index, except_i, exc_reg)
-    clause_idx = by_index[except_i]
+  def recognize_rescue_class_handler(irep, program, except_i, exc_reg)
+    clause_idx = irep.index_of_addr(except_i.addr)
     return nil unless clause_idx
 
     clause_idx += 1
@@ -425,7 +405,7 @@ class CodeGen
       cls_names << cls_name
       first_match_addr ||= match_addr
 
-      next_i = by_addr[next_addr]
+      next_i = program.insn_at_addr(next_addr)
       return nil unless next_i
 
       # Last clause: the no-match path re-raises.
@@ -440,7 +420,7 @@ class CodeGen
       # body (the soundness property above).
       return nil unless next_i.op == 'GETCONST'
 
-      clause_idx = by_index[next_i]
+      clause_idx = irep.index_of_addr(next_i.addr)
       return nil unless clause_idx
     end
   end
@@ -481,8 +461,8 @@ class CodeGen
   # other compiler-generated rescue region exists.
   # Returns {kind:, cls_name:, match_addr:, raise_addr:, join_addr:}; the three
   # classic fields are nil and unused by the emitters.
-  def recognize_defined_const_handler(irep, by_index, except_i, exc_reg, b, e)
-    idx = by_index[except_i]
+  def recognize_defined_const_handler(irep, except_i, exc_reg, b, e)
+    idx = irep.index_of_addr(except_i.addr)
     seq = irep.instructions[idx + 1, 2]
     return nil unless seq && seq.size == 2
 
@@ -546,7 +526,7 @@ class CodeGen
   # ...; return; end` guard) can have any register set, so the whole register
   # file is captured by value, as for NESTED_RESCUE_SUPPORT.
   def rescue_entry_saved_fields(irep, region)
-    return [] if irep.instructions.all? { |insn| insn.addr >= region[:begin_addr] || insn.op == 'ENTER' }
+    return [] if irep.instructions_at(0...region[:begin_addr]).all? { |insn| insn.op == 'ENTER' }
 
     (1...irep.nregs).map { |i| { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' } }
   end
@@ -633,10 +613,10 @@ class CodeGen
         out << "  mrb_value r#{i} = mrb_nil_value();\n"
       end
     end
-    body_targets = jump_targets(irep).select { |t| t >= region[:begin_addr] && t <= region[:end_addr] } -
+    body_targets = jump_targets(irep).select { |t| range.cover?(t) } -
                    (local_suppressed.to_a - local_glue_at.keys)
-    irep.instructions.each_with_index do |insn, idx|
-      next unless insn.addr >= region[:begin_addr] && insn.addr <= region[:end_addr]
+    irep.instructions_at(range).each do |insn|
+      idx = irep.index_of_addr(insn.addr)
       next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
 
       out << "  L#{insn.addr}:;\n" if body_targets.include?(insn.addr)

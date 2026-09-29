@@ -15,6 +15,10 @@ module BytecodeIR
     end
   end
 
+  # A branch by instruction address: +src+ is the branching instruction, +target+
+  # the address it names (not necessarily an instruction; see Program#resolved?).
+  BranchEdge = Struct.new(:src, :target, keyword_init: true)
+
   BasicBlock = Struct.new(:id, :instructions, :successors, :predecessors, keyword_init: true)
 
   # Ops after which control never reaches the next instruction. RAISE and
@@ -40,6 +44,12 @@ module BytecodeIR
 
     def instruction_at(index)
       @instructions[index]
+    end
+
+    # The decoded Insn at +addr+, or nil when no instruction starts there.
+    def insn_at_addr(addr)
+      index = @address_to_index[addr]
+      index && @instructions[index].source
     end
 
     # False when some branch targets an address that is not an instruction, so
@@ -77,6 +87,41 @@ module BytecodeIR
         edges << [instruction.index, target]
       end
       edges
+    end
+
+    # Every explicit branch (JMP/JMPIF/JMPNOT/JMPNIL, plus JMPUW unless
+    # +jmpuw+ is false) in instruction order. Address-based, so unlike the
+    # index edges it stays meaningful when #resolved? is false.
+    def branch_edges(jmpuw: true)
+      @branch_edges ||= {}
+      @branch_edges[jmpuw] ||= @instructions.filter_map do |instruction|
+        target = jmpuw ? instruction.source.branch_target : instruction.source.jump_target
+        BranchEdge.new(src: instruction.addr, target: target).freeze if target
+      end.freeze
+    end
+
+    # Addresses named by any explicit branch, i.e. where a `goto` label is needed.
+    def branch_targets
+      @branch_targets ||= @instructions.filter_map { |instruction| instruction.source.branch_target }.to_set.freeze
+    end
+
+    # Branches that would break a single-entry, single-exit region whose
+    # protected instructions are the addresses of +body+ and whose one
+    # sanctioned exit is +exit_addr+ (so the region's addresses are
+    # body.begin..exit_addr). A branch from inside +body+ must land inside the
+    # region; a branch from outside must not land inside it, except one from
+    # strictly before the region that lands on its first address.
+    def region_boundary_breaches(body, exit_addr)
+      region = (body.begin..exit_addr)
+      branch_edges(jmpuw: false).select do |edge|
+        if body.cover?(edge.src)
+          !region.cover?(edge.target)
+        elsif edge.src < region.begin && edge.target == region.begin
+          false
+        else
+          region.cover?(edge.target)
+        end
+      end
     end
 
     private
