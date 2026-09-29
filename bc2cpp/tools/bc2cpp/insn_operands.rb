@@ -13,6 +13,11 @@ module InsnOperands
                raise(ArgumentError, "bc2cpp: no operand schema for #{op} #{args.inspect}")
   end
 
+  # The binary loader decodes operands directly and installs them here.
+  def typed=(operands)
+    @typed = operands.freeze
+  end
+
   def first_of(*kinds)
     typed.find { |operand| kinds.include?(operand.kind) }
   end
