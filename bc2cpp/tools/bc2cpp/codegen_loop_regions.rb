@@ -738,10 +738,10 @@ class CodeGen
   def receiver_pair_before?(irep, block_idx, reg)
     mcnst = irep.instructions[block_idx - 1]
     return false unless mcnst && mcnst.op == 'GETMCNST'
-    return false unless mcnst.args =~ /\AR#{reg}\s+\(R#{reg}\)::Profiler\z/
+    return false unless mcnst.reg == reg.to_s && mcnst.paren_reg == reg.to_s && mcnst.mcnst_name == 'Profiler'
 
     const = irep.instructions[block_idx - 2]
-    const && const.op == 'GETCONST' && const.args == "R#{reg}\tRGSS"
+    const && const.op == 'GETCONST' && const.reg == reg.to_s && const.tokens == ["R#{reg}", 'RGSS']
   end
 
   # The String pool literal for :section's name argument, or nil. The VM wrote
@@ -932,9 +932,7 @@ class CodeGen
   # compile_block_body_insn's `else` arm, named so the BLOCK/SENDB/SSENDB case
   # can reuse it for an unclaimed nested region (one copy, no drift).
   def compile_shifted_body_insn(insn, block_irep, owner_def, offset, idx)
-    shifted_args = insn.args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" }
-    shifted = Insn.new(lineno: insn.lineno, addr: insn.addr, op: insn.op, args: shifted_args, raw: insn.raw)
-    compile_insn(shifted, block_irep, owner_def, idx, offset)
+    compile_insn(insn.shift_regs(offset), block_irep, owner_def, idx, offset)
   end
 
   def compile_block_body_insn(insn, block_irep, owner_def, offset, iter_end_label, label_prefix,
@@ -1007,13 +1005,13 @@ class CodeGen
       end
     when 'JMPNOT'
       reg = insn.reg
-      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
+      "  if (!mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
     when 'JMPIF'
       reg = insn.reg
-      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
+      "  if (mrb_test(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
     when 'JMPNIL'
       reg = insn.reg
-      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{jmp_target_after_reg(insn.args)};\n"
+      "  if (mrb_nil_p(r#{reg.to_i + offset})) goto #{label_prefix}#{insn.uint_operand.to_i};\n"
     else
       # BLOCK_BODY_INDEX_SUPPORT: `idx` is the instruction's real position in
       # block_irep.instructions (the emitters walk it in order, skipping only

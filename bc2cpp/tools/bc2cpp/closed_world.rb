@@ -271,13 +271,13 @@ class ClosedWorld
           sym = insn.sym_token
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
-          const = insn.args[/(?:::|\s)(\w+)\s*\z/, 1]
+          const = insn.const_name
           scan_factory(irep, insns, idx, insn, const) if CLASS_FACTORIES.include?(const)
         when 'CLASS', 'MODULE'
           name = insn.sym_token
           @class_constant_names << name.split('::').last if name
         when 'SETCONST', 'SETMCNST'
-          name = insn.args[/(?:::|\A)(\w+)\s+R\d+/, 1].to_s
+          name = insn.const_name.to_s
           @rebound << name
           @constant_write_counts[name] += 1
           @deferred_constant_writes << name unless @walked.include?(irep.label)
@@ -330,7 +330,7 @@ class ClosedWorld
   # 15+ arguments arrive packed: `ARRAY Ra k` right before an `n=*` send.
   def packed_syms(insns, idx, insn)
     arr = idx.positive? && insns[idx - 1]
-    return nil unless insn.args.match?(/n=\*(?!\|)/) && arr && arr.op == 'ARRAY'
+    return nil unless insn.pure_splat? && arr && arr.op == 'ARRAY'
 
     k = arr.uint_operand.to_i
     k.positive? ? literal_syms(insns, idx - 1, k) : nil
@@ -377,8 +377,8 @@ class ClosedWorld
       return if n.zero?
 
       sup = "R#{reg.to_i + 1}"
-      writer = between.reverse.find { |i| i.args.match?(/\A#{sup}\b/) }
-      base = writer && %w[GETCONST GETMCNST].include?(writer.op) && writer.args[/(?:::|\s)(\w+)\s*\z/, 1]
+      writer = between.reverse.find { |i| i.reg_token == sup }
+      base = writer && %w[GETCONST GETMCNST].include?(writer.op) && writer.const_name
       return global!(:class_factory_escape) unless base
 
       @dynamic_subclassed << base
@@ -392,12 +392,11 @@ class ClosedWorld
   # or the window after its first register that sends and packing ops use.
   def reads_register?(ins, reg)
     first = ins.reg&.to_i
-    rest = first ? ins.args.sub(/\AR\d+/, '') : ins.args
-    return true if rest.match?(/\bR#{reg}\b/)
+    return true if (first ? ins.regs.drop(1) : ins.regs).include?(reg.to_s)
     return false if first.nil? || ins.op.match?(PURE_WRITES)
 
     count = ins.argc || ins.uint_operand || 1
-    count = 15 if ins.args.include?('n=*')
+    count = 15 if ins.n_spec == '*'
     reg.between?(first, first + (2 * count) + 2)
   end
 

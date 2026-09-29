@@ -676,7 +676,7 @@ class ArrayElementLayout
                 ivar = insn.ivar
                 next unless array_ivars.include?(ivar)
 
-                src_reg = insn.args[/R(\d+)/, 1]
+                src_reg = insn.regs.first
                 found = array_element_source_scan(irep, idx, src_reg, ctx)
                 # NIL_TOLERANT_JOIN (element dimension): `@x = nil` says nothing about the
                 # elements; see ClassLayout.analyze.
@@ -805,10 +805,9 @@ end
 # (poison). See ARRAY_ELEMENT_WRITERS for the argument layouts.
 def written_element_class(irep, idx, insn, recv, name, ctx)
   # A splat call ("n=*") has no fixed register list, so it poisons.
-  n_match = insn.args.match(/n=(\d+|\*)/)
-  return nil if n_match && n_match[1] == '*'
+  return nil if insn.n_spec == '*'
 
-  argc = n_match ? n_match[1].to_i : 0
+  argc = insn.n_spec.to_i
   base = recv.to_i
   arg_regs = (1..argc).map { |k| (base + k).to_s }
 
@@ -835,8 +834,7 @@ end
 # hash_set, src/hash.c, same (key, value) layout): arity must be 2; read the
 # second argument.
 def written_hash_element_class(irep, idx, insn, recv, ctx)
-  n_match = insn.args.match(/n=(\d+|\*)/)
-  return nil unless n_match && n_match[1] == '2'
+  return nil unless insn.n_spec == '2'
 
   val_reg = (recv.to_i + 2).to_s
   element_value_class(irep, idx, val_reg, ctx, 1)
@@ -905,7 +903,7 @@ class HashElementLayout
                 ivar = insn.ivar
                 next unless hash_ivars.include?(ivar)
 
-                src_reg = insn.args[/R(\d+)/, 1]
+                src_reg = insn.regs.first
                 found = hash_element_source_scan(irep, idx, src_reg, ctx)
                 # NIL_TOLERANT_JOIN (hash-value dimension); see ArrayElementLayout.analyze.
                 next if found.nil? && nil_literal_write?(irep, idx, src_reg)

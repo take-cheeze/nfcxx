@@ -1856,10 +1856,6 @@ class CodeGen
     { self_owner: self_owner }
   end
 
-  def regs(args_text, count)
-    args_text.scan(/R(\d+)/).flatten.first(count)
-  end
-
   def c_string_literal(s)
     '"' + s.bytes.map { |b| format('\\x%02x', b) }.join + '"'
   end

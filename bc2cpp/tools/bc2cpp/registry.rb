@@ -27,7 +27,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
     pd = prev.reg
     next unless pd == d
 
-    struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
+    struct_recv = prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
     break
   end
   return nil unless struct_recv
@@ -51,11 +51,11 @@ def detect_struct_new_members(irep, idx, insn, namespace)
   end
 
   # `keyword_init:` is Struct.new's only keyword; skip its (key, value) pair.
-  nk = insn.args[/nk=(\d+)/, 1].to_i
+  nk = insn.nk_spec.to_i
   scan_from -= 2 * nk
   return nil if scan_from < 0 && nk.positive?
 
-  pos = insn.args[/n=(\*|\d+)/, 1]
+  pos = insn.n_spec
   return nil unless pos
 
   if pos == '*'
@@ -155,14 +155,14 @@ def build_registry(ireps, root_label)
       recv = nil
       (before_idx - 1).downto(0) do |i|
         prev = irep.instructions[i]
-        pd = prev.args[/^(R\d+)/, 1]
+        pd = prev.reg_token
         next unless pd == reg
 
         case prev.op
         when 'LOADSELF'
           recv = namespace || 'Object'
         when 'GETCONST'
-          const_name = prev.args[/^R\d+\s+(\S+)/, 1]
+          const_name = prev.tokens[1]
           recv = namespace ? "#{namespace}::#{const_name}" : const_name
         end
         break
@@ -219,7 +219,7 @@ def build_registry(ireps, root_label)
         # RGSS::Bitmap.extensions) were unregistered.
         # The receiver is resolved by resolve_singleton_receiver (LOADSELF or GETCONST
         # only; anything else is a safe miss).
-        reg = insn.args[/^(R\d+)/, 1]
+        reg = insn.reg_token
         recv = resolve_singleton_receiver.call(reg, idx)
         pending_reg = reg
         pending_idx = idx
@@ -231,8 +231,8 @@ def build_registry(ireps, root_label)
         # CONST_CONTAINER_SUPPORT: "SETCONST NAME Rsrc" in a class/module body;
         # `namespace` is this body's lexical nesting. Only the literal (optionally
         # frozen) shape is recognized; anything else is a safe miss (nil).
-        const_name = insn.args[/^(\S+)/, 1]
-        src_reg = insn.args[/R(\d+)/, 1]
+        const_name = insn.tokens.first
+        src_reg = insn.regs.first
         qualified = namespace ? "#{namespace}::#{const_name}" : const_name
         constant_assignment_sites << { name: qualified, irep: irep.label, idx: idx, reg: src_reg, owner: namespace }
         klass = literal_container_class(irep, idx, src_reg)
@@ -322,7 +322,7 @@ def build_registry(ireps, root_label)
         opener_insn = opener_idx >= 0 ? irep.instructions[opener_idx] : nil
         next unless opener_insn && %w[TCLASS SCLASS].include?(opener_insn.op)
 
-        opener_reg = opener_insn.args[/^(R\d+)/, 1]
+        opener_reg = opener_insn.reg_token
         next unless opener_reg == reg
 
         idx2 = irep_ref[/I\[(\d+)\]/, 1].to_i
@@ -379,7 +379,7 @@ def build_registry(ireps, root_label)
 
         n = insn.argc.to_i
         # 15+ arguments are packed into one ARRAY (CALL_MAXARGS) and sent as n=*.
-        packed = insn.args.include?('n=*')
+        packed = insn.n_spec == '*'
         if packed
           arr = idx.positive? && irep.instructions[idx - 1]
           n = arr && arr.op == 'ARRAY' ? arr.uint_operand.to_i : -1
@@ -472,7 +472,7 @@ def build_registry(ireps, root_label)
           pd = prev.reg
           next unless pd == d
 
-          struct_recv = prev.op == 'GETCONST' && prev.args[/^R\d+\s+(\S+)/, 1] == 'Struct'
+          struct_recv = prev.op == 'GETCONST' && prev.tokens[1] == 'Struct'
           break
         end
         next unless struct_recv
@@ -576,7 +576,7 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
     when 'GETMCNST'
       path.unshift(insn.mcnst_name)
     when 'GETCONST'
-      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      const_name = insn.tokens[1]
       return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
     else
       return nil
@@ -603,7 +603,7 @@ def resolve_mixin_ref(irep, before_idx, reg)
       qualified = true
       path.unshift(insn.mcnst_name)
     when 'GETCONST'
-      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      const_name = insn.tokens[1]
       return nil unless const_name
 
       absolute = const_name.start_with?('::')

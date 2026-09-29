@@ -562,8 +562,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
         # is the result's class.
         # SEND0 prints no `n=`; a `.dup(x)` with arguments is an ArgumentError and
         # proves nothing.
-        n_match = insn.args.match(/n=(\d+|\*)/)
-        return nil if n_match && n_match[1] != '0'
+        return nil if insn.n_spec && insn.n_spec != '0'
 
         return trace_new_target(irep, i, reg, ivar_classes, mand, arg_classes, owner: owner,
                                  class_layout: class_layout, registry: registry,
@@ -608,8 +607,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
           return element_annotations[annotated.irep].ret_class if annotated
         end
 
-        n_match = insn.args.match(/n=(\d+|\*)/)
-        return nil if n_match && n_match[1] != '0'
+        return nil if insn.n_spec && insn.n_spec != '0'
 
         # An attr_writer is registered as "name=", so `registry[name]` only matches
         # getters.
@@ -696,7 +694,7 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
     when 'GETCONST'
       # "GETCONST R4 Integer" or "GETCONST R3 MAX_DIGITS\t; R3:d": \S+ stops before
       # the local-name comment.
-      const_name = insn.args[/^R\d+\s+(\S+)/, 1]
+      const_name = insn.tokens[1]
       written = ([const_name] + path).join('::')
 
       # RELATIVE_CONST_UNDER_NEW (resolving_new): the `.new` receiver may be a
@@ -915,7 +913,7 @@ def assigned_from_new_send?(irep, idx, reg)
     end
 
     return %w[SEND SEND0 SENDB].include?(insn.op) &&
-           insn.args.match?(/^R#{Regexp.escape(current)}\s+:new\b/)
+           insn.reg == current.to_s && insn.sym == 'new'
   end
   false
 end
@@ -1026,7 +1024,7 @@ def trace_eqq_literal_receiver(irep, idx, reg)
       return name ? { type: :symbol, name: name } : nil
     when /^LOADI/
       # Same two literal shapes as LOADI's codegen.
-      lit = insn.args[/\(([^)]+)\)/, 1] || insn.imm_operand
+      lit = insn.paren_value || insn.imm_operand
       return lit ? { type: :fixnum, value: lit } : nil
     else
       # Anything else writing `reg` means the receiver is not a literal.

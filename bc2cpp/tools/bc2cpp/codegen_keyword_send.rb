@@ -24,7 +24,7 @@ class CodeGen
       insn = irep.instructions[i]
       next unless insn
       # A write to this register ends the scan -- it must be LOADSYM.
-      next unless insn.args =~ /^R#{reg}\b/
+      next unless insn.reg == reg.to_s
 
       return nil unless insn.op == 'LOADSYM'
 
@@ -524,14 +524,14 @@ class CodeGen
       insn = irep.instructions[i]
       next unless insn
       # The first write to the receiver register must be the constant read itself.
-      next unless insn.args =~ /^R#{recv_reg}\b/
+      next unless insn.reg == recv_reg.to_s
 
       write = insn
       break
     end
     return nil unless write && write.op == 'GETCONST'
 
-    const_name = write.args[/^R\d+\s+(\S+)/, 1]
+    const_name = write.tokens[1]
     return nil unless const_name&.match?(/\A[A-Z][A-Za-z_0-9]*\z/)
     return nil if universe.include?(const_name)
 

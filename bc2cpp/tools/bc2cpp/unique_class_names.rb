@@ -44,12 +44,12 @@ module UniqueClassNames
     ireps.each_value do |irep|
       irep.instructions.each do |insn|
         case insn.op
-        when 'SETCONST' then assigned << insn.args[/\A(\S+)/, 1]
+        when 'SETCONST' then assigned << insn.tokens.first
         when 'SETMCNST' then assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
-          return {} if insn.args.match?(StableClassConstants::DYNAMIC_MUTATION)
+          return {} if insn.operands.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
-        return {} if insn.args.match?(/:const_missing\b/)
+        return {} if insn.operands.match?(/:const_missing\b/)
       end
     end
     Array(foreign_paths).each do |path|
@@ -144,7 +144,7 @@ module UniqueClassNames
     (idx - 1).downto(0) do |i|
       insn = irep.instructions[i]
       next if %w[EXT1 EXT2 EXT3].include?(insn.op)
-      return insn if insn.args[/\A(R\d+)/, 1] == reg
+      return insn if insn.reg_token == reg
     end
     nil
   end

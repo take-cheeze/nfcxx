@@ -94,12 +94,12 @@ class CodeGen
 
     exc = by_addr[t]
     return nil unless exc && exc.op == 'EXCEPT'
-    exc_reg = exc.args.strip[/R(\d+)/, 1]
+    exc_reg = exc.regs.first
     return nil unless exc_reg
 
     # Find this handler's own terminating `RAISEIF Rx` (same register).
     after = irep.instructions.select { |i| i.addr > t }
-    raiseif = after.find { |i| i.op == 'RAISEIF' && i.args.strip[/R(\d+)/, 1] == exc_reg }
+    raiseif = after.find { |i| i.op == 'RAISEIF' && i.regs.first == exc_reg }
     return nil unless raiseif
 
     body = after.select { |i| i.addr < raiseif.addr }
@@ -315,7 +315,7 @@ class CodeGen
       jump_target_of = lambda do |insn|
         case insn.op
         when 'JMP' then insn.jmp_addr
-        when 'JMPNOT', 'JMPIF', 'JMPNIL' then jmp_target_after_reg(insn.args)
+        when 'JMPNOT', 'JMPIF', 'JMPNIL' then insn.uint_operand.to_i
         end
       end
       escapes = irep.instructions.any? do |src|
@@ -408,7 +408,7 @@ class CodeGen
       getconst_i = irep.instructions[clause_idx]
       return nil unless getconst_i && getconst_i.op == 'GETCONST'
       cls_reg = getconst_i.reg
-      cls_name = getconst_i.args[/^R\d+\s+(\S+)/, 1]
+      cls_name = getconst_i.tokens[1]
       return nil unless cls_reg && cls_name
       # The class chain must not target the exception register (RESCUE/RAISEIF
       # still need it); codegen_rescue puts it at cursp() above exc, checked here.
@@ -416,18 +416,17 @@ class CodeGen
 
       seg_idx = clause_idx + 1
       while (seg_i = irep.instructions[seg_idx]) && seg_i.op == 'GETMCNST'
-        seg_m = seg_i.args.strip.match(/^R#{cls_reg}\s+\(R#{cls_reg}\)::(\S+?)\s*(?:;.*)?$/)
-        return nil unless seg_m
-        cls_name = "#{cls_name}::#{seg_m[1]}"
+        return nil unless seg_i.reg == cls_reg && seg_i.paren_reg == cls_reg && seg_i.mcnst_name
+        cls_name = "#{cls_name}::#{seg_i.mcnst_name}"
         seg_idx += 1
       end
 
       rescue_i, jmpif_i, jmp_i = irep.instructions[seg_idx, 3]
       return nil unless rescue_i && jmpif_i && jmp_i
-      return nil unless rescue_i.op == 'RESCUE' && rescue_i.args.strip =~ /^R#{exc_reg}\s+R#{cls_reg}$/
+      return nil unless rescue_i.op == 'RESCUE' && rescue_i.regs == [exc_reg, cls_reg] && rescue_i.tokens.length == 2
       return nil unless jmpif_i.op == 'JMPIF' && jmpif_i.reg == cls_reg
 
-      match_addr = jmp_target_after_reg(jmpif_i.args)
+      match_addr = jmpif_i.uint_operand.to_i
       return nil unless match_addr && match_addr > jmpif_i.addr
       return nil unless jmp_i.op == 'JMP'
       next_addr = jmp_i.jmp_addr
@@ -511,7 +510,7 @@ class CodeGen
     return nil unless head
     case head.op
     when 'GETCONST'
-      return nil unless head.reg == exc_reg && head.args[/^R\d+\s+(\S+)/, 1]
+      return nil unless head.reg == exc_reg && head.tokens[1]
     when 'OCLASS'
       # `::Name` always has a GETMCNST after OCLASS; a lone OCLASS cannot raise and
       # is never emitted by codegen_defined_const.
@@ -521,7 +520,7 @@ class CodeGen
     end
     rest.each do |i|
       return nil unless i.op == 'GETMCNST'
-      return nil unless i.args.strip =~ /^R#{exc_reg}\s+\(R#{exc_reg}\)::\w+\s*(;.*)?$/
+      return nil unless i.reg == exc_reg && i.paren_reg == exc_reg && i.mcnst_name&.match?(/\A\w+\z/)
     end
 
     { kind: :defined_const, cls_name: nil, match_addr: nil, raise_addr: nil, join_addr: join_addr }

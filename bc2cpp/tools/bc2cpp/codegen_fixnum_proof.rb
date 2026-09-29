@@ -84,7 +84,7 @@ class CodeGen
   def fixnum_proof_writes_reg?(insn, reg)
     return false if FIXNUM_PROOF_READONLY_REG_OPS.include?(insn.op)
 
-    !(insn.args =~ /\AR#{reg}\b/).nil?
+    insn.reg == reg.to_s
   end
 
   # Nested proven-arithmetic hops for source 4. `(a + b) * (c - d)` needs two;
@@ -130,7 +130,7 @@ class CodeGen
       when 'JMP', 'JMPUW'
         edges[insn.jmp_addr] << insn.addr
       when 'JMPIF', 'JMPNOT', 'JMPNIL'
-        edges[jmp_target_after_reg(insn.args)] << insn.addr
+        edges[insn.uint_operand.to_i] << insn.addr
       end
     end
     edges
@@ -291,7 +291,7 @@ class CodeGen
       t =
         case ins.op
         when 'JMP', 'JMPUW' then ins.jmp_addr
-        when 'JMPIF', 'JMPNOT', 'JMPNIL' then jmp_target_after_reg(ins.args)
+        when 'JMPIF', 'JMPNOT', 'JMPNIL' then ins.uint_operand.to_i
         end
       next if t.nil?
 
@@ -472,7 +472,7 @@ class CodeGen
 
         return nil
       when 'GETIDX', 'GETIDX0', 'SEND', 'SEND0'
-        name = insn.args[/:(\w+|\[\])/, 1]
+        name = insn.sym
         return nil if %w[SEND SEND0].include?(insn.op) && name != '[]'
         recv = if insn.op == 'GETIDX'
                  cur
@@ -717,7 +717,7 @@ class CodeGen
   # named `tile` must not count as the method `tile`. Operands end at the first
   # "\t;".
   def entry_arg_operands(insn)
-    insn.args.to_s.split(/\t;/, 2).first.to_s
+    insn.operands
   end
 
   # irep label -> the MethodDef whose body it is, following `reps` into nested

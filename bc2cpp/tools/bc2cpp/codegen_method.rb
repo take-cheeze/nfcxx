@@ -73,7 +73,7 @@ class CodeGen
     # emit_rproc_construction. Both stay gated on mandatory_ok, so this is
     # exclusive with `has_blk`.
     needs_blk_param = mandatory_ok &&
-                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.args[/\((\d+)\)/, 1] == '0' } ||
+                      (irep.instructions.any? { |i| i.op == 'BLKPUSH' && i.paren_value == '0' } ||
                        block_fallback_regions.any? { |r| r[:needs_blk] })
     opt, opt_jmp_addrs, opt_jmp_targets = mandatory_ok ? [0, nil, nil] : optional_arg_table(irep)
     # KEYWORD_ARG_SUPPORT / OPTIONAL_KEYWORD_COMBINED_SUPPORT: tried whenever
@@ -584,7 +584,7 @@ class CodeGen
       when 'JMP', 'JMPUW'
         targets << insn.jmp_addr
       when 'JMPNOT', 'JMPIF', 'JMPNIL'
-        targets << jmp_target_after_reg(insn.args)
+        targets << insn.uint_operand.to_i
       end
     end
     targets

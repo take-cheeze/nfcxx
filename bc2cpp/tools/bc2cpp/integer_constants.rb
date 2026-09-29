@@ -40,7 +40,7 @@ module IntegerConstants
       irep.instructions.each_with_index do |insn, i|
         case insn.op
         when 'SETCONST', 'SETMCNST'
-          name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.mcnst_name
+          name = insn.op == 'SETCONST' ? insn.tokens.first : insn.mcnst_name
           next unless name
 
           src = insn.regs.last
@@ -187,7 +187,7 @@ module IntegerConstants
       return nil unless insn
       return nil if entries.include?(insn.addr)
 
-      if insn.args =~ /\AR#{cur}\b/
+      if insn.reg == cur.to_s
         return :literal if insn.op.start_with?('LOADI')
 
         case insn.op
@@ -249,7 +249,7 @@ module IntegerConstants
       irep.instructions.each_with_index do |insn, i|
         next unless insn.op == 'SETCONST' || insn.op == 'SETMCNST'
 
-        name = insn.op == 'SETCONST' ? insn.args[/\A(\S+)/, 1] : insn.mcnst_name
+        name = insn.op == 'SETCONST' ? insn.tokens.first : insn.mcnst_name
         next unless name && admitted.include?(name)
 
         src = insn.regs.last
@@ -288,7 +288,7 @@ module IntegerConstants
       return nil unless insn
       return nil if entries.include?(insn.addr)
 
-      if insn.args =~ /\AR#{cur}\b/
+      if insn.reg == cur.to_s
         if insn.op.start_with?('LOADI')
           value = loadi_value(insn)
           return value.nil? ? nil : [:literal, value]
@@ -410,7 +410,7 @@ module IntegerConstants
       irep.instructions.each do |insn|
         case insn.op
         when 'SETCONST'
-          names << insn.args[/\A(\S+)/, 1]
+          names << insn.tokens.first
         when 'SETMCNST'
           names << insn.mcnst_name
         when 'CLASS', 'MODULE'

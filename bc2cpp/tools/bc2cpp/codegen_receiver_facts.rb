@@ -129,7 +129,7 @@ class CodeGen
         reg = insn.regs[1]
         return nil unless reg
       when 'SEND', 'SEND0'
-        return nil unless insn.args[/:(\w+)/, 1] == 'new'
+        return nil unless insn.sym == 'new'
         # The known-class trace already resolved this SEND's constant path;
         # stability above proves that path still denotes the same class.
         return expected_class
@@ -211,7 +211,7 @@ class CodeGen
 
         path.unshift(segment)
       when 'GETCONST'
-        written = insn.args[/^R\d+\s+(\S+)/, 1]
+        written = insn.tokens[1]
         written = ([written] + path).join('::') if written
         # A forward edge from before this write into the send's block could
         # bypass the receiver value; edges from later code already execute it.
@@ -266,7 +266,7 @@ class CodeGen
     return false unless irep.reps.empty?
 
     irep.instructions.none? do |insn|
-      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.args.match?(/\bR0\b/)
+      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.mentions_reg?(0)
     end
   end
 
@@ -546,12 +546,12 @@ class CodeGen
 
     # (3) ARGARY is `m1:0:0:0 (0)`: no rest, post, kd, and lv==0 (this frame's
     # registers). m1 is the forwarded count.
-    am = argary.args.match(/\AR(\d+)\s+(\d+):(\d):(\d+):(\d)\s+\((\d+)\)/)
-    return nil unless am
+    spec = argary.argary_spec
+    return nil unless spec && argary.reg && argary.paren_value&.match?(/\A\d+\z/)
 
-    argary_dest = am[1]
-    m = am[2].to_i
-    return nil unless am[3].to_i.zero? && am[4].to_i.zero? && am[5].to_i.zero? && am[6].to_i.zero?
+    argary_dest = argary.reg
+    m = spec[0]
+    return nil unless spec[1..].all?(&:zero?) && argary.paren_value.to_i.zero?
     return nil if m.zero? # zero-param bare `super` is `SUPER ... n=0`, no ARGARY at all
 
     # (4) OP_SUPER reads regs[a+1], so ARGARY's dest must be SUPER's dest + 1.
@@ -565,10 +565,10 @@ class CodeGen
     enter = instructions.find { |i| i.op == 'ENTER' }
     return nil unless enter
 
-    em = enter.args.match(/\A(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+)/)
-    return nil unless em
-    return nil unless em[2..7].all? { |x| x.to_i.zero? }
-    return nil unless em[1].to_i == m
+    em = enter.enter_fields
+    return nil unless em.length >= 7
+    return nil unless em[1..6].all?(&:zero?)
+    return nil unless em[0] == m
 
     # (6) The same-named method on the registered superclass exists, is bytecode
     # and compiles clean. A clean `_impl` never yields, so a caller's block is
@@ -649,8 +649,8 @@ class CodeGen
 
     # (4) The ARGARY spec this kind was derived against (`2:0:0:0` or `1:1:0:0`)
     # with lv=0 (plain regs+1) and kd=0. A changed parameter list declines.
-    return nil unless argary.args[/\s(\d+:\d+:\d+:\d+)\s*\(/, 1] == shape[:argary]
-    return nil unless argary.args[/\((\d+)\)\s*\z/, 1].to_s == '0'
+    return nil unless argary.argary_spec&.join(':') == shape[:argary]
+    return nil unless argary.paren_value == '0'
 
     # (5) The superclass is the implicit Object (:none means a CLASS with no
     # superclass expression, not "unrecognized").

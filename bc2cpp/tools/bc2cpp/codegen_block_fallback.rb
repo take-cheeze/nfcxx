@@ -101,7 +101,7 @@ class CodeGen
     irep.instructions.each do |insn|
       next unless insn.op == 'BLKPUSH'
 
-      lv = insn.args[/\((\d+)\)\s*\z/, 1]
+      lv = insn.paren_value
       return nil unless lv
 
       needs << lv.to_i
@@ -298,10 +298,9 @@ class CodeGen
       # no static layout) and never a keyword call (`n=3|nk=1`):
       # mrb_funcall_with_block cannot carry keywords (`ci->nk = 0` in
       # funcall_args_capture).
-      n_match = paired.args.match(/n=(\d+)(?:\s|$)/)
-      next unless n_match
+      next unless paired.plain_fixed_argc?
 
-      n = n_match[1].to_i
+      n = paired.n_spec.to_i
       dest, _rest = paired.tokens
       dest_reg = dest[/^R(\d+)/, 1]
       block_reg = insn.reg
@@ -759,8 +758,7 @@ class CodeGen
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: `n=*` (no `|nk=`) with `&expr`.
       # The args Array is already built in R(dest+1) (see compile_dynamic_splat_send)
       # and the block is in R(dest+2).
-      n_match = insn.args.match(/n=(\d+|\*)(?:\s|$)/)
-      next unless n_match
+      next unless insn.n_spec && insn.nk_spec.nil?
 
       dest, = insn.tokens
       dest_reg = dest[/^R(\d+)/, 1]
@@ -769,13 +767,13 @@ class CodeGen
       name = insn.sym
       next unless name
 
-      if n_match[1] == '*'
+      if insn.n_spec == '*'
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: '*',
                      argv_reg: (dest_reg.to_i + 1).to_s,
                      blk_reg: (dest_reg.to_i + 2).to_s, name: name,
                      self_implicit: insn.op == 'SSENDB' }
       else
-        n = n_match[1].to_i
+        n = insn.n_spec.to_i
         regions << { sendb_addr: insn.addr, dest_reg: dest_reg, n: n,
                      blk_reg: (dest_reg.to_i + n + 1).to_s, name: name,
                      self_implicit: insn.op == 'SSENDB' }

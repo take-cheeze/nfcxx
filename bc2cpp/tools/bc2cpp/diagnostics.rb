@@ -52,7 +52,7 @@ def report_annotation_candidates(ireps, registry, arg_types, annotations)
       irep.instructions.each_with_index do |insn, idx|
         next unless insn.op == 'SETIV'
 
-        src_reg = insn.args[/R(\d+)/, 1]
+        src_reg = insn.regs.first
         pos = opaque_argument_position(irep, idx, src_reg, mand)
         next unless pos
         next if already_at.call(pos)

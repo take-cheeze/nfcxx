@@ -133,6 +133,58 @@ Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
     @imm_operand = operands[/\AR\d+\s+(-?\d+)/, 1]
   end
 
+  # First register operand spelled as in the disassembly (`R6`).
+  def reg_token
+    reg && "R#{reg}"
+  end
+
+  # Whether register +number+ is named by any operand.
+  def mentions_reg?(number)
+    regs.include?(number.to_s)
+  end
+
+  # `n=*` with no keyword part: the call passes a single splatted array.
+  def pure_splat?
+    n_spec == '*' && nk_spec.nil?
+  end
+
+  # A fixed positional-argument count with no keyword part (`n=3`).
+  def plain_fixed_argc?
+    n_spec && n_spec != '*' && nk_spec.nil?
+  end
+
+  # ARGARY's `m1:rest:post:kd` field group as Integers, nil when absent.
+  def argary_spec
+    operands[/\s(\d+:\d+:\d+:\d+)\s*\(/, 1]&.split(':')&.map(&:to_i)
+  end
+
+  # `R1 :name I[2]` (DEF/SDEF/TDEF): the child irep index of a definition
+  # whose operands are exactly a register, a symbol and a child, else nil.
+  def def_child_index
+    tokens.length == 3 && reg && sym_token && block_index
+  end
+
+  # A copy with every register operand moved up by +offset+, for compiling a
+  # block body inside its parent's register file.
+  def shift_regs(offset)
+    Insn.new(lineno: lineno, addr: addr, op: op, raw: raw,
+             args: args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" })
+  end
+
+  # `R1 R2 3`: [source register, literal] as Strings, for the ops that read a
+  # register and carry a literal index or count (AREF, ARRAY, ADDI, SUBI).
+  def src_and_literal
+    m = operands.match(/\AR\d+\s+R(\d+)\s+(-?\d+)/)
+    m && [m[1], m[2]]
+  end
+
+  # `$name` operand of GETGV/SETGV.
+  def global_name
+    return @global_name if defined?(@global_name)
+
+    @global_name = operands[/(\$\S+)/, 1]
+  end
+
   # Whitespace-separated operands, comment excluded.
   def tokens
     @tokens ||= operands.split(/\s+/).freeze

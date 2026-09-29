@@ -8,7 +8,6 @@ class CodeGen
   # registers and is undone with unshift_proof_reg wherever a register reaches a
   # proof rather than the output.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
-    a = insn.args
     case insn.op
     when 'ENTER'
       "  // #{insn.raw.strip} (args already bound above)\n"
@@ -52,21 +51,21 @@ class CodeGen
       # entry wrapper's mrb_kwargs (`rest: NULL`).
       "  // KEYEND: already enforced by the entry wrapper's own mrb_kwargs (rest: NULL)\n"
     when 'MOVE'
-      d, s = regs(a, 2)
+      d, s = insn.regs.first(2)
       "  r#{d} = r#{s};\n"
     when 'LOADNIL'
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = mrb_nil_value();\n"
     when 'LOADFALSE'
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = mrb_false_value();\n"
     when 'LOADTRUE'
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = mrb_true_value();\n"
     when 'LOADSELF'
       # "LOADSELF R2 (R0)": R[a] = self (vm.c). Emitted for `self.foo = ...`; r0 is
       # already `self`.
-      d, = regs(a, 1)
+      d = insn.reg
       "  r#{d} = self;\n"
     when 'LOADSYM'
       d = insn.reg
@@ -144,7 +143,7 @@ class CodeGen
     when 'SETIV'
       ivar = insn.ivar
       # Not `$`-anchored: a trailing "; R1:name" comment (see IvarLayout.analyze).
-      s = a[/R(\d+)/, 1]
+      s = insn.regs.first
       klass = self_class(owner_def)
       code = ivar_set_code(klass, 'self', ivar, "r#{s}", self_of_klass: true)
       type = embed_type(klass, ivar) if klass
@@ -372,7 +371,7 @@ class CodeGen
       # method's block was captured, @blk_param_level answers exactly that lv
       # (uvenv(mrb, lv-1) is a different frame for each lv).
       d = insn.reg
-      lv = a[/\((\d+)\)/, 1]
+      lv = insn.paren_value
       if lv == @blk_param_level.to_s && @blk_param_name
         <<~CPP
           if (mrb_nil_p(#{@blk_param_name})) {
@@ -381,7 +380,7 @@ class CodeGen
           r#{d} = #{@blk_param_name};
         CPP
       else
-        "#error unhandled opcode BLKPUSH #{a}\n"
+        "#error unhandled opcode BLKPUSH #{insn.args}\n"
       end
     when 'BLKCALL'
       # "BLKCALL R4 2": ops.h `R[a] = R[a].call(R[a+1],...,R[a+b])`. codegen_yield's
@@ -445,17 +444,17 @@ class CodeGen
       end
     when 'JMPNOT'
       reg = insn.reg
-      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
+      target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       "  if (!mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPIF'
       reg = insn.reg
-      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
+      target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       "  if (mrb_test(r#{reg})) goto L#{target};\n"
     when 'JMPNIL'
       # "JMPNIL R3 024": jump if exactly nil (vm.c), for nil-specific tests like
       # `x.nil? ? a : b`.
       reg = insn.reg
-      target = ensure_remapped_jump_target(irep, jmp_target_after_reg(a))
+      target = ensure_remapped_jump_target(irep, insn.uint_operand.to_i)
       "  if (mrb_nil_p(r#{reg})) goto L#{target};\n"
     when 'GETCONST'
       # "GETCONST R4 Integer": the VM resolves against the lexical scope chain
@@ -507,7 +506,7 @@ class CodeGen
       # e.g. GETCONST R2 LCF; GETMCNST R2 (R2)::Schema; GETMCNST R2 (R2)::DATABASE);
       # read the constant from it into the same register.
       d = insn.reg
-      name = a[/::(\w+)\s*$/, 1]
+      name = insn.mcnst_name
       # INTEGER_CONSTANT_VALUE_PROOF, as in GETCONST. The preceding scope lookups
       # still run (and raise if missing); only this value lookup is skipped. This is
       # the hot `case cmd.code when Cmd::X` shape.
@@ -540,9 +539,9 @@ class CodeGen
       # not match it, and treating N as 0 compiled it to an empty Array; it is
       # handled explicitly.
       d = insn.reg.to_i
-      three = a.match(/^R\d+\s+R(\d+)\s+(\d+)/)
-      src = three ? three[1].to_i : d
-      n = three ? three[2].to_i : insn.uint_operand.to_i
+      three = insn.src_and_literal
+      src = three ? three[0].to_i : d
+      n = three ? three[1].to_i : insn.uint_operand.to_i
       if n.zero?
         "  r#{d} = mrb_ary_new(M);\n"
       else
@@ -589,8 +588,8 @@ class CodeGen
       # "AREF R2 R6 0 ; R2:x": R[a] = R[b][c] with an immediate c (vm.c): for a
       # non-Array, index 0 yields R[b] itself and others nil; for an Array,
       # mrb_ary_ref. This is `x, y, w, h = some_call(...)` destructuring.
-      d, s = regs(a, 2)
-      c = a[/^R\d+\s+R\d+\s+(\d+)/, 1]
+      d, s = insn.regs.first(2)
+      c = insn.src_and_literal&.last
       "  r#{d} = mrb_array_p(r#{s}) ? bc2cpp_ary_entry(M, r#{s}, #{c}) : (#{c} == 0 ? r#{s} : mrb_nil_value());\n"
     when 'GETIDX'
       # "GETIDX R2 (R3)": R[a] = R[a][R[a+1]] with a register index (vm.c).
@@ -608,7 +607,7 @@ class CodeGen
       # still falls back to `[]`, and subclasses use Ruby dispatch. A Hash needs no
       # index-type check; an Array still needs mrb_integer_p (bc2cpp_ary_entry only
       # takes a fixnum).
-      d, s = regs(a, 2)
+      d, s = insn.regs.first(2)
       index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
@@ -658,7 +657,7 @@ class CodeGen
       # and no index register. Same exact-class Array/Hash fast paths as GETIDX,
       # else a real `[]` send with 0, as vm.c's getidx0_fallback.
       # GETIDX_STATIC_RECEIVER_SUPPORT applies to `s`, the receiver here.
-      d, s = regs(a, 2)
+      d, s = insn.regs.first(2)
       index_class = static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
       case index_class
       when 'Array'
@@ -692,7 +691,7 @@ class CodeGen
       # GETIDX_STATIC_RECEIVER_SUPPORT as for GETIDX. The index register is named
       # `idx_reg`: `idx` would shadow compile_insn's instruction position, which
       # static_indexable_class needs.
-      d, idx_reg, val = regs(a, 3)
+      d, idx_reg, val = insn.regs.first(3)
       index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
@@ -723,14 +722,14 @@ class CodeGen
       # "GETGV R4 $stderr": R[a] = mrb_gv_get (vm.c); the symbol already includes the
       # `$`.
       d = insn.reg
-      name = a[/(\$\S+)/, 1]
+      name = insn.global_name
       "  r#{d} = mrb_gv_get(M, mrb_intern_cstr(M, \"#{name}\"));\n"
     when 'SETGV'
       # "SETGV $stderr R4": operands are reversed relative to GETGV (codedump.c
       # `"SETGV\t\t%s\tR%d"`), so both are matched unanchored (one `$` token, one
       # register). vm.c: `mrb_gv_set(mrb, irep->syms[b], regs[a])`.
-      s = a[/R(\d+)/, 1]
-      name = a[/(\$\S+)/, 1]
+      s = insn.regs.first
+      name = insn.global_name
       "  mrb_gv_set(M, mrb_intern_cstr(M, \"#{name}\"), r#{s});\n"
     when 'STOP'
       ''
@@ -745,7 +744,7 @@ class CodeGen
       # is a named local, so a trailing "; Rd:name" comment is normal and
       # `.split.last` would pick it up.
       d = insn.reg
-      lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
+      lit = insn.src_and_literal&.last
       # FIXNUM_OPERAND_PROOF: as ADDI; rarely provable (a loop back-edge sits
       # between the write and this use).
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
@@ -763,7 +762,7 @@ class CodeGen
       # OP_SUBILV: ADDILV's sibling (same shape, same extraction), e.g. `new_level -=
       # 1 while ...`.
       d = insn.reg
-      lit = a[/^R\d+\s+R\d+\s+(-?\d+)/, 1]
+      lit = insn.src_and_literal&.last
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
         "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
       else
@@ -795,7 +794,7 @@ class CodeGen
       #     `throw bc2cpp_method_return{...}`, caught by compile_method's top-level
       #     try/catch (needs_return_catch). The per-call-site
       #     `catch (bc2cpp_block_break&)` cannot match it (exact C++ catch types).
-      r = a.strip.empty? ? '0' : insn.reg
+      r = insn.no_operands? ? '0' : insn.reg
       if @block_fallback_active
         "  throw bc2cpp_method_return{r#{r}};\n"
       else
@@ -808,7 +807,7 @@ class CodeGen
       # (2) EXCEPTION_BREAK_SUPPORT: a BLOCK_FALLBACK body, where a non-strict break
       #     unwinds to the SENDB call site, past mrb_funcall_with_block: `throw`,
       #     caught by emit_block_fallback_glue's `catch (bc2cpp_block_break&)`.
-      r = a.strip.empty? ? '0' : insn.reg
+      r = insn.no_operands? ? '0' : insn.reg
       if @block_fallback_active
         "  throw bc2cpp_block_break{r#{r}};\n"
       else

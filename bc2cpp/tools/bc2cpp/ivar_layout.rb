@@ -124,7 +124,7 @@ class IvarLayout
             ivar = insn.ivar
             # Not `$`-anchored: "SETIV @x R1 ; R1:v" carries a trailing local-name comment
             # whenever the source is a named local.
-            src_reg = insn.args[/R(\d+)/, 1]
+            src_reg = insn.regs.first
             inferred = trace_type(irep, idx, src_reg, types[klass], arg_types, mand, d&.name, annotations, registry,
                                    integer_constants, fixnum_return_names)
             before = types[klass][ivar]

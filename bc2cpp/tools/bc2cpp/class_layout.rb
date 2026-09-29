@@ -165,7 +165,7 @@ class ClassLayout
             next unless insn.op == 'SETIV'
 
             ivar = insn.ivar
-            src_reg = insn.args[/R(\d+)/, 1]
+            src_reg = insn.regs.first
             # Never hand an UNKNOWN entry to trace_new_target's GETIV lookup.
             known_so_far = classes[owner].reject { |_, c| c == UNKNOWN }
             # CHAINED_ACCESSOR_SUPPORT: the full, unfiltered in-progress table, so another
