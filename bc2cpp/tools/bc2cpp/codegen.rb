@@ -255,6 +255,10 @@ class CodeGen
   # callers still need pure arity because they call `_impl` directly, bypassing
   # the entry wrapper.)
   def drop_unsafe_embeddings(ivar_layout)
+    demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout))
+  end
+
+  def select_embeddings(ivar_layout)
     embedding_owners = ivar_layout.keys.to_set
     subclass_of = lambda do |klass, ancestor|
       seen = Set.new
@@ -335,6 +339,51 @@ class CodeGen
 
       out[owner] = safe unless safe.empty?
     end
+  end
+
+  # TYPED_SLOT_INTERPRETED_ACCESS: a typed slot holds a raw C value, but the
+  # RData ivar descriptor (patches/mruby-rdata-ivar-slots.patch) only
+  # understands mrb_value slots, so a method left on the interpreter would
+  # read/write it as a boxed value. Such an ivar stays a plain :value slot.
+  def demote_typed_ivars_read_by_interpreter(layout)
+    typed = layout.flat_map { |owner, ivars| ivars.filter_map { |name, type| [owner, name] if type != :value } }
+    return layout if typed.empty?
+
+    # A probe compile registers class slots, counters and the like that the
+    # final compile must meet in its own order, so keep only the answers.
+    demoted = without_probe_side_effects do
+      typed.select { |owner, name| interpreted_access?(owner, name) }
+    end
+    return layout if demoted.empty?
+
+    layout.to_h do |owner, ivars|
+      [owner, ivars.to_h { |name, type| [name, demoted.include?([owner, name]) ? :value : type] }]
+    end
+  end
+
+  def interpreted_access?(owner, name)
+    holders = [owner, *Array(@included_modules[owner])]
+    # Snapshot: compiles_clean? reads @registry through its default proc,
+    # which inserts keys.
+    @registry.values.any? do |defs|
+      defs.any? do |d|
+        d.irep &&
+          (holders.include?(d.owner) || strict_subclass?(d.owner, owner)) &&
+          irep_subtree_touches_ivar?(d.irep, name) && !compiles_clean?(d.irep)
+      end
+    end
+  end
+
+  # Shallow-copies every container ivar and restores it afterwards, except
+  # @clean_cache, whose answers stay valid.
+  def without_probe_side_effects
+    saved = instance_variables.to_h do |ivar|
+      value = instance_variable_get(ivar)
+      [ivar, value.is_a?(Hash) || value.is_a?(Array) || value.is_a?(Set) ? value.dup : value]
+    end
+    yield
+  ensure
+    saved.each { |ivar, value| instance_variable_set(ivar, value) unless ivar == :@clean_cache }
   end
 
   def initializer_starts_with_super?(definition)

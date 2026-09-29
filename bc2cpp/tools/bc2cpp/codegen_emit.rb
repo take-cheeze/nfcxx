@@ -331,13 +331,17 @@ class CodeGen
       out << "  mrb_free(mrb, p);\n"
       out << "}\n"
       out << "static const mrb_data_ivar #{sanitize(owner)}_ivar_slots[] = {\n"
-      ivars.each_key do |name|
+      # Typed fields hold raw C values, which the descriptor consumers (GC mark,
+      # mrb_iv_get/set) would misread as mrb_value; see interpreted_access?.
+      slots = ivars.select { |_, type| type == :value }.keys
+      slots.each do |name|
         out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}) },\n"
       end
+      out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
       out << "};\n"
       out << "static const mrb_data_type #{type_var(owner)} = " \
              "{ \"#{struct_name(owner)}\", #{sanitize(owner)}_ivars_free, " \
-             "#{sanitize(owner)}_ivar_slots, #{ivars.size}, sizeof(#{struct_name(owner)}) };\n\n"
+             "#{sanitize(owner)}_ivar_slots, #{slots.size}, sizeof(#{struct_name(owner)}) };\n\n"
     end
     out
   end

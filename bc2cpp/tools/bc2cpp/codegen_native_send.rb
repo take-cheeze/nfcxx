@@ -115,10 +115,20 @@ class CodeGen
     defs && defs.size == 1 && defs.first.irep.nil?
   end
 
+  # The rgss:: wrappers are defined by mruby-rgss/src, so a build that does not
+  # link it (optcarrot probe) must not emit them: a core native of the same
+  # name (Array#clear) satisfies the registry test but not the link.
+  def rgss_native_registers?(name)
+    return true unless @native_name_sources
+
+    @native_name_sources.fetch(name, []).any? { |path| path.include?('mruby-rgss/src/') }
+  end
+
   # An exact runtime class guard selects a C wrapper only when that owner has
   # one native registration and no prepended module can take lookup precedence.
   def native_wrapper_owner_safe?(name, owner)
     return false unless NATIVE_WRAPPER_DIRECT_OWNERS.fetch(name, []).include?(owner)
+    return false unless rgss_native_registers?(name)
 
     defs = @registry[name]
     return false unless defs
