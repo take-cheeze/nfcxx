@@ -87,6 +87,16 @@ class ClosedWorld
     @mm_classes
   end
 
+  # No Ruby code in the closed world defines or installs `respond_to_missing?`
+  # (nor could an outside Ruby file), so Kernel#respond_to?'s hook call after a
+  # method-table miss can only reach the core default, which answers false.
+  def respond_to_missing_free?
+    return false if @global_refusal || @unknown_defs.include?('respond_to_missing?')
+    return false if @outside_ruby_names.include?('respond_to_missing?')
+
+    @registry.fetch('respond_to_missing?', []).all? { |d| d.owner == '<native>' }
+  end
+
   # The classes a chain listing `listed` must still guard for `refusal` to clear:
   # empty unless :unlisted_class is the only reason it refuses (and, since that
   # check runs first, the receiver is method_missing-free). Each returned class

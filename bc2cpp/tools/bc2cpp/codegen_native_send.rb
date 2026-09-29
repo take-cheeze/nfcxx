@@ -162,6 +162,15 @@ class CodeGen
                                           end
   end
 
+  # The closed world proves no Ruby respond_to_missing? exists, and every native
+  # one is mruby core's (kernel.c/class.c/method.c), whose default answers false.
+  def respond_to_missing_absent?
+    return false unless @closed_world&.respond_to_missing_free?
+    return false unless @native_name_sources
+
+    @native_name_sources.fetch('respond_to_missing?', []).all? { |path| path.match?(%r{/3rd/mruby/(?:src|mrbgems)/}) }
+  end
+
   # Guarded direct C++ for one NATIVE_PRIMITIVE_SEND_ARITY name, or an exact-class
   # expression generated from registered native C methods. The per-method
   # soundness notes are at compile_send's call site.
@@ -177,9 +186,11 @@ class CodeGen
       # Answer hits directly and keep the original call for misses. compile_send's
       # arity and native-only gates ensure the core method is the target.
       method_name = argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      # RESPOND_TO_MISS_FOLD: with no respond_to_missing? override anywhere, a miss is
+      # exactly false (see respond_to_missing_absent?), so it needs no send.
+      fallback = respond_to_missing_absent? ? "r#{d} = mrb_false_value();\n" : dynamic_dispatch_line(d, recv, name, argv)
       <<~CPP
-          // respond_to? -- answer native hits directly; preserve missing-hook behavior on misses
+          // respond_to? -- answer native hits directly; #{respond_to_missing_absent? ? 'a miss is false (no respond_to_missing? hook exists)' : 'preserve missing-hook behavior on misses'}
           {
             // Braced so the symbol neither redeclares across sends that reuse
             // register #{d} nor sits between a goto and its label.
