@@ -129,6 +129,36 @@ class CodeGen
     "#{note}  #{call}\n"
   end
 
+  # KEYWORDLESS_CALL (ADR 0258): a send with no keyword pairs to the one
+  # definition of a name whose parameters include keywords. Every keyword is
+  # then "not passed", which compile_keyword_call already lowers (given = 0), so
+  # the omitted-defaults call needs no dispatch. Declines whenever the ordinary
+  # path can take the target itself (pure arity) or the callee has a required
+  # keyword (the interpreter raises ArgumentError). An embedding owner keeps its
+  # runtime class guard, as MONO_EMBED_GUARD does, unless self is exactly it.
+  def compile_keywordless_call(name:, d:, recv:, n:, argv:, self_implicit:, owner_def:, irep:, idx:)
+    target = monomorphic_target(name) ||
+             lexical_self_keyword_target(name, self_implicit: self_implicit, owner_def: owner_def)
+    return nil unless target&.irep
+
+    callee = @ireps.fetch(target.irep)
+    return nil if pure_mandatory_or_optional_arity?(callee) || keyword_arg_table(callee).nil?
+    # An explicit receiver may not reach a private or protected method.
+    return nil unless self_implicit || target.visibility == :public
+
+    call = compile_keyword_call(name: name, d: d, recv: recv, n: n, argv: argv, kw_names: [], kw_val_exprs: [],
+                                self_implicit: self_implicit, owner_def: owner_def)
+    return nil unless call
+    return call unless @ivar_layout.key?(target.owner)
+
+    site = closed_world_site(recv, irep, idx, owner_def)
+    return call if self_implicit && site&.dig(:self_owner) == target.owner && @closed_world&.exact_class?(target.owner)
+
+    check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+    "#{call.lines.first}  if (#{check}) {\n  #{call.lines.drop(1).join}  } else {\n    " \
+      "#{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+  end
+
   def compile_keyword_send(self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
     dest_reg = d.to_i
     # Keyword (sym, value) pairs sit right after the n positionals.
