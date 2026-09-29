@@ -945,6 +945,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
+  print gen.emit_integer_operand_helpers(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls

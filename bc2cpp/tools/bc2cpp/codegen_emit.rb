@@ -411,6 +411,23 @@ class CodeGen
     CPP
   end
 
+  # bc2cpp_integer_recv_p / bc2cpp_integer_operand_p (FIXNUM_ARITHMETIC), emitted
+  # only when the output uses them. A receiver is an Integer when it is a Fixnum
+  # or, where mruby is built with bigints, a heap bigint; the operand may also be
+  # a Float. Those are exactly the operand types Integer#+/-/* (src/numeric.c
+  # int_add/int_sub/int_mul, mrb_num_add/sub/mul) handle without coercion, so the
+  # direct helper call can neither raise a TypeError nor differ from the send.
+  def emit_integer_operand_helpers(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_integer_recv_p(') }
+
+    # mrb_bigint_p / mrb_float_p are FALSE when mruby is built without them.
+    <<~CPP
+      static inline mrb_bool bc2cpp_integer_recv_p(mrb_value v) { return mrb_integer_p(v) || mrb_bigint_p(v); }
+      static inline mrb_bool bc2cpp_integer_operand_p(mrb_value v) { return bc2cpp_integer_recv_p(v) || mrb_float_p(v); }
+
+    CPP
+  end
+
   # bc2cpp_bool_p (TYPE_OPS :bool check), emitted only when the output uses it.
   # There is no single macro for both boolean tags, so it ORs
   # mrb_true_p/mrb_false_p (mruby/value.h).

@@ -937,8 +937,8 @@ class CodeGen
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       helper = { '+' => 'mrb_num_add', '-' => 'mrb_num_sub', '*' => 'mrb_num_mul' }.fetch(name)
       return <<~CPP
-          // FIXNUM_ARITHMETIC :#{name} -- exact Fixnums use mruby's overflow-aware numeric helper
-          if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
+          // FIXNUM_ARITHMETIC :#{name} -- an Integer receiver (Fixnum or bigint) with a Fixnum/bigint/Float operand runs Integer##{name}'s own body through mruby's overflow-aware numeric helper
+          if (bc2cpp_integer_recv_p(#{left}) && bc2cpp_integer_operand_p(#{right})) {
             r#{d} = #{helper}(M, #{left}, #{right});
           } else {
             #{fallback.chomp}
