@@ -169,8 +169,10 @@ module SymbolCache
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
       mrb_sym mid = bc2cpp_sym(M, i);
       mrb_funcall_argv(M, recv, mid, argc, argv);
-      // Unreachable while the proof holds; raise rather than run on.
-      mrb_method_missing(M, mid, recv, mrb_ary_new_from_values(M, argc, argv));
+      // The dispatch above found a method: the proof was wrong (ADR 0262). A
+      // NoMethodError here would look like an ordinary user error.
+      mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")),
+                 "bc2cpp: closed-world proof violated: %T#%n was proven undefined but dispatched", recv, mid);
     }
     // Typed as returning so GCC keeps the call site in place: a known-noreturn
     // call is moved to the end of its function, which costs more than it saves.

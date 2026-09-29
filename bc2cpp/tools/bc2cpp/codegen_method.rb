@@ -392,7 +392,7 @@ class CodeGen
     end
     @blk_param_name = nil
     @ensure_except_remaps = nil
-    out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
+    out << fell_off_end("#{d.owner}##{d.name}")
     if needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
       out << "    bc2cpp_vm_restore(M, bc2cpp_ret_mark);\n"

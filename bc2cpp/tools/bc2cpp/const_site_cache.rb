@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'source_text'
+
 # CONST_SITE_CACHE: a GETCONST inside a namespaced owner resolves its lexical
 # scope chain on every execution -- one mrb_const_get per owner path segment,
 # then one probe per scope, innermost first (Game::Interpreter#execute does it
@@ -49,7 +51,7 @@ module StableClassConstants
     Array(foreign_paths).each do |path|
       text = begin
         File.read(path, encoding: 'UTF-8')
-      rescue StandardError => e
+      rescue SystemCallError => e
         warn "[bc2cpp] StableClassConstants: cannot read #{path}: #{e.message}"
         return Set.new
       end
@@ -112,11 +114,7 @@ module StableClassConstants
   def self.foreign_reassigned_names(paths)
     names = Set.new
     Array(paths).each do |path|
-      text = begin
-        File.read(path, encoding: 'UTF-8')
-      rescue StandardError
-        next
-      end
+      text = SourceText.read(path, 'StableClassConstants.foreign_reassigned_names') or next
       text.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
     end
     names
@@ -143,7 +141,7 @@ module StableClassConstants
     Array(foreign_paths).each do |path|
       text = begin
         File.read(path, encoding: 'UTF-8')
-      rescue StandardError => e
+      rescue SystemCallError => e
         warn "[bc2cpp] StableClassConstants: cannot read #{path}: #{e.message}"
         return Set.new
       end

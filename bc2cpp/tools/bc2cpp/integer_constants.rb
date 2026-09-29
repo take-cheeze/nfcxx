@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'source_text'
+
 # INTEGER_CONSTANT_PROOF: constant names that only ever hold an Integer.
 
 # ---------------------------------------------------------------------------
@@ -109,7 +111,7 @@ module IntegerConstants
     when :alias then candidates.include?(kind[1])
     when :arithmetic
       integral_operand?(kind[2], candidates) && integral_operand?(kind[3], candidates)
-    else false
+    else raise ArgumentError, "bc2cpp: IntegerConstants: unknown definition kind #{kind.inspect}"
     end
   end
 
@@ -121,7 +123,7 @@ module IntegerConstants
     when :literal then true
     when :alias then candidates.include?(operand[1])
     when :arithmetic then integral_kind?(operand, candidates)
-    else false
+    else raise ArgumentError, "bc2cpp: IntegerConstants: unknown operand kind #{operand.inspect}"
     end
   end
 
@@ -142,8 +144,10 @@ module IntegerConstants
       value = case kind[1]
               when 'ADD', 'ADDI' then left + right
               when 'SUB', 'SUBI' then left - right
+              else raise ArgumentError, "bc2cpp: IntegerConstants: unknown arithmetic opcode #{kind[1].inspect}"
               end
-      value if value&.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+      value if value.between?(CodeGen::LOADI_FIXNUM_MIN, CodeGen::LOADI_FIXNUM_MAX)
+    else raise ArgumentError, "bc2cpp: IntegerConstants: unknown definition kind #{kind.inspect}"
     end
   end
 
@@ -307,11 +311,7 @@ module IntegerConstants
   def self.native_const_names(paths)
     names = Set.new
     Array(paths).each do |path|
-      src = begin
-        File.read(path, encoding: 'UTF-8')
-      rescue StandardError
-        next
-      end
+      src = SourceText.read(path, 'IntegerConstants.native_const_names') or next
       src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\(.{0,200}?/m) do
         seg = Regexp.last_match(0)
         seg.scan(/"([A-Za-z_][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
@@ -334,11 +334,7 @@ module IntegerConstants
   def self.native_defined_const_names(paths)
     names = Set.new
     Array(paths).each do |path|
-      src = begin
-        File.read(path, encoding: 'UTF-8')
-      rescue StandardError
-        next
-      end
+      src = SourceText.read(path, 'IntegerConstants.native_defined_const_names') or next
       src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\([^;]{0,200}/m) do
         seg = Regexp.last_match(0)
         seg.scan(/"([A-Z][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
@@ -388,11 +384,7 @@ module IntegerConstants
   def self.foreign_const_names(paths)
     names = Set.new
     Array(paths).each do |path|
-      src = begin
-        File.read(path, encoding: 'UTF-8')
-      rescue StandardError
-        next
-      end
+      src = SourceText.read(path, 'IntegerConstants.foreign_const_names') or next
       src.scan(/^\s*([A-Z][A-Za-z_0-9]*)\s*=[^=~]/) { names << Regexp.last_match(1) }
       # `class Foo` / `module Foo` bind a constant too (poison source 2).
       src.scan(/^\s*(?:class|module)\s+([A-Z][A-Za-z_0-9]*)/) { names << Regexp.last_match(1) }

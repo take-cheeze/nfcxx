@@ -217,6 +217,12 @@ class CodeGen
     "mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"#{exc_class}\")), \"bc2cpp: #{message}\");"
   end
 
+  # The tail of a generated function whose every path RETURNs (ADR 0262): a
+  # compiler that let control fall off the end raises instead of returning nil.
+  def fell_off_end(where)
+    "  #{inline_raise('RuntimeError', "#{where} fell off the end of its body")}\n"
+  end
+
   # A tripwire, not a fallback: the recognizer's gate should make it unreachable,
   # and mrb_funcall cannot pass a block (why ADR 0147 rejected proc-wrapping).
   def inline_receiver_guard(predicate, recv_expr, expected)

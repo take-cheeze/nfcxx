@@ -562,7 +562,7 @@ class CodeGen
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     out << body
-    out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
+    out << fell_off_end(impl_name)
     out << "}\n\n"
 
     # RUNTIME_DEF_FALLBACK_SUPPORT: method bodies and EXEC-opened class bodies take

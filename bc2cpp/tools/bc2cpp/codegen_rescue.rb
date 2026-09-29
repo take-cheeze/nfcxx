@@ -615,7 +615,7 @@ class CodeGen
                 local_glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
               end
     end
-    out << "  return mrb_nil_value(); // unreachable\n"
+    out << fell_off_end(try_name)
     out << "}\n\n"
     out
   end
