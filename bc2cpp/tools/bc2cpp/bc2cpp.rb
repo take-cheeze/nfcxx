@@ -64,6 +64,7 @@ require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
+require_relative 'codegen_constant_object'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -94,7 +95,8 @@ if $PROGRAM_NAME == __FILE__
   ireps, root_label = compile_ireps(srcs, symbol, out_dir)
   order = dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
-    struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites =
+    struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
+    declared_modules =
     build_registry(ireps, root_label)
   profile_phase.call('mrbc + parse + registry')
 
@@ -110,7 +112,8 @@ if $PROGRAM_NAME == __FILE__
 
     outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
     closed_world = ClosedWorld.new(ireps: ireps, registry: registry, class_decls: class_decls, walked: walked_ireps,
-                                   native_paths: outside_native, ruby_paths: outside_ruby)
+                                   native_paths: outside_native, ruby_paths: outside_ruby,
+                                   module_names: declared_modules)
     warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"

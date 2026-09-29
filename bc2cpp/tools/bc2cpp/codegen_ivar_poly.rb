@@ -19,14 +19,20 @@ class CodeGen
   # @only_owners/@other_owners gate (no `_impl` for owners not emitted).
   POLY_SMALL_N_MAX = 16
 
+  # ADR 0259: a definition with optional parameters joins a chain (its `_impl`
+  # takes every optional, see direct_call_args); the table path keeps the
+  # exact-arity rule, so the wider set is used only while it still fits a chain.
   def poly_small_n_targets(name, n)
-    candidates = poly_candidates(name, n)
-    candidates if candidates && candidates.size <= POLY_SMALL_N_MAX
+    [true, false].each do |optional|
+      candidates = poly_candidates(name, n, optional: optional)
+      return candidates if candidates && candidates.size <= POLY_SMALL_N_MAX
+    end
+    nil
   end
 
   # Every definition of `name` a runtime-class-checked direct call can reach
   # for an `n`-argument send, uncapped; nil when there is none.
-  def poly_candidates(name, n)
+  def poly_candidates(name, n, optional: false)
     # RUNTIME_DEF_DEVIRT_GUARD: same gate as monomorphic_target. The chain's
     # `mrb_obj_class(M, recv) == Widget` guard still matches an object whose
     # singleton class was just given its own `shared_name`.
@@ -68,9 +74,8 @@ class CodeGen
       next false unless compiles_clean?(t.irep)
 
       t_irep = @ireps.fetch(t.irep)
-      next false unless pure_mandatory_arity?(t_irep)
-      next false unless n == mandatory_arity(t_irep)
-      next false unless native_arg_types(t, n).compact.empty?
+      next false unless poly_arity_fits?(t_irep, n, optional)
+      next false unless native_arg_types(t, mandatory_arity(t_irep)).compact.empty?
 
       if @only_owners && !@only_owners.include?(t.owner)
         next false unless @other_owners&.include?(t.owner)
@@ -79,6 +84,12 @@ class CodeGen
       true
     end
     candidates unless candidates.empty?
+  end
+
+  def poly_arity_fits?(irep, n, optional)
+    return pure_mandatory_arity?(irep) && n == mandatory_arity(irep) unless optional
+
+    pure_mandatory_or_optional_arity?(irep) && n.between?(mandatory_arity(irep), mandatory_arity(irep) + optional_arity(irep))
   end
 
   # POLY_DIAGNOSTICS: definition-level exclusion counts attached to each
@@ -111,9 +122,9 @@ class CodeGen
                      :native_or_uncompiled
                    elsif !compiles_clean?(target.irep)
                      :unclean
-                   elsif !pure_mandatory_arity?(@ireps.fetch(target.irep))
+                   elsif !pure_mandatory_or_optional_arity?(@ireps.fetch(target.irep))
                      :unsupported_arity
-                   elsif n != mandatory_arity(@ireps.fetch(target.irep))
+                   elsif !poly_arity_fits?(@ireps.fetch(target.irep), n, true)
                      :arity
                    elsif !native_arg_types(target, n).compact.empty?
                      :native_argument
@@ -294,7 +305,8 @@ class CodeGen
                ivar_accessor_call_code(target.owner, recv, name, d, argv, indent: '    ')
              else
                impl = cpp_name(target.owner, target.name) + '_impl'
-               "r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});"
+               call_argv, = direct_call_args(target, argv, impl)
+               "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
              end
       "if (#{check}) {\n    #{call}\n  } else "
     end

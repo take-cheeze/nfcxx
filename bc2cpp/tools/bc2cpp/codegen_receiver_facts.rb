@@ -191,14 +191,13 @@ class CodeGen
 
   # A module_function copy shares its instance method's irep but runs with the
   # module object as self. The instance-owner proof is reusable only when that
-  # body never observes self or creates a block that could capture it.
+  # body never observes self; a block (ADR 0259) captures it only if its own
+  # body does, so nested reps are held to the same rule.
   def module_function_copy_self_safe?(irep)
     return false unless irep
-    return false unless irep.reps.empty?
 
-    irep.instructions.none? do |insn|
-      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.mentions_reg?(0)
-    end
+    irep.instructions.none? { |insn| %w[GETIV SETIV SUPER].include?(insn.op) || insn.mentions_reg?(0) } &&
+      irep.reps.all? { |rep| module_function_copy_self_safe?(@ireps.fetch(rep)) }
   end
 
   def stable_standard_constructor_class?(klass)
@@ -268,7 +267,8 @@ class CodeGen
   end
 
   # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
-  # subclassed class (a module never is), and X's own singleton def wins lookup.
+  # subclassed class or a module ClosedWorld#module_object_self? accepts (ADR 0259),
+  # and X's own singleton def wins lookup.
   def lexical_self_singleton_owner(owner_def)
     return nil unless owner_def && self_class(owner_def)
 
@@ -277,21 +277,23 @@ class CodeGen
 
     base = owner.delete_suffix('.singleton')
     # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
-    return nil if base == 'Object' || !exact_receiver_class?(base)
+    return nil if base == 'Object'
+    return nil unless exact_receiver_class?(base) || @closed_world&.module_object_self?(base)
     return nil unless Array(@prepended_modules[owner]).empty?
     return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
 
     owner
   end
 
-  # The one irep def `name` has on that singleton owner (module_function copies
-  # have no irep; a second def would make "which one is live" order-dependent).
+  # The one irep def (or `attr_*` accessor) `name` has on that singleton owner
+  # (module_function copies have no irep; a second def would make "which one is
+  # live" order-dependent).
   def lexical_self_singleton_def(name, owner_def)
     owner = lexical_self_singleton_owner(owner_def)
     return nil unless owner
 
     defs = (@registry[name] || []).select { |md| md.owner == owner }
-    defs.size == 1 && defs.first.irep ? defs.first : nil
+    defs.size == 1 && (defs.first.irep || defs.first.kind == :ivar_accessor) ? defs.first : nil
   end
 
   # A compiled module_function copy runs the source body with the module object
