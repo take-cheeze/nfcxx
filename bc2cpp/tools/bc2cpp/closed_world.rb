@@ -47,8 +47,14 @@ class ClosedWorld
     @global_refusal = nil
     @outside_names = Set.new
     @outside_ruby_names = Set.new
+    @outside_name_paths = {}
+    @outside_ruby_supers = Set.new
+    @native_arms_name = nil
     # Per outside file that could reach a class: the constant names it spells.
     @touch_sets = []
+    # Parallel to @touch_sets: true for a file that only defines plain
+    # Object-derived classes (see plain_native_source?).
+    @touch_plain = []
     @unknown_defs = Set.new
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
@@ -73,7 +79,7 @@ class ClosedWorld
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if @unknown_defs.include?(name)
-    return :core_or_native if @outside_names.include?(name)
+    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name)
 
     reason, required = required_classes(name)
     return reason if reason
@@ -85,6 +91,38 @@ class ClosedWorld
 
   def method_missing_classes
     @mm_classes
+  end
+
+  # NATIVE_DIRECT (ADR 0253): while a caller emits exact-class arms for every
+  # native class answering `name` (CodeGen#guarded_fallback_line), the native
+  # registrations no longer make the fallback's receiver unknowable.
+  def with_native_arms(name)
+    previous = @native_arms_name
+    @native_arms_name = name
+    yield
+  ensure
+    @native_arms_name = previous
+  end
+
+  # `name` is spelled only by the given native files, and no outside Ruby.
+  def native_only_in?(name, path_fragment)
+    paths = @outside_name_paths[name]
+    !paths.nil? && !@outside_ruby_names.include?(name) && paths.all? { |path| path.include?(path_fragment) }
+  end
+
+  # No class in `owners` (full constant paths) has a declared, factory-made or
+  # outside subclass, so an exact class guard names every instance.
+  def native_subclass_free?(owners)
+    return false if @global_refusal || !@wild.empty?
+
+    simples = owners.map { |owner| simple(owner) }
+    supers = @class_decls.values.flatten.map { |decl| decl[:super] }
+    return false unless supers.all? { |sup| sup == :none || sup.is_a?(String) }
+
+    simples.none? do |name|
+      @dynamic_subclassed.include?(name) || @outside_ruby_supers.include?(name) ||
+        supers.any? { |sup| sup.is_a?(String) && simple(sup) == name }
+    end
   end
 
   # Is every instance whose class descends from `owner` exactly an `owner`?
@@ -158,6 +196,10 @@ class ClosedWorld
 
   private
 
+  def native_arms_lift?(name)
+    @native_arms_name == name && native_only_in?(name, '/mruby-rgss/src/')
+  end
+
   def global!(reason)
     @global_refusal ||= reason
   end
@@ -221,9 +263,11 @@ class ClosedWorld
       if defines_class
         @touch_sets << (text.scan(C_STRING).flatten + text.scan(/MRB_SYM\(([A-Z]\w*)\)/).flatten)
                        .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.to_set
+        @touch_plain << plain_native_source?(path, text)
       end
       names.merge(text.scan(C_STRING).flatten) if dynamic
       @outside_names.merge(names)
+      names.each { |n| (@outside_name_paths[n] ||= Set.new) << path }
       # Only mruby's own defaults: BasicObject#method_missing, Kernel#respond_to_missing?.
       global!(:outside_method_missing) if names.include?('method_missing') && !path.end_with?('/3rd/mruby/src/class.c')
       global!(:outside_respond_to_missing) if names.include?('respond_to_missing?') &&
@@ -239,7 +283,9 @@ class ClosedWorld
     @outside_names.merge(ruby_names)
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
+      text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
       @touch_sets << text.scan(/\b[A-Z]\w*/).to_set
+      @touch_plain << false
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
       @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
@@ -419,6 +465,33 @@ class ClosedWorld
     @touch_sets.any? { |set| spelled.all? { |s| set.include?(s) } }
   end
 
+  # mruby-rgss/src defines its classes with an Object superclass and writes
+  # only spelled-out constants: such a file cannot make a subclass or rebind a
+  # class constant, and the methods it registers are already named in
+  # @outside_names (a by-name refusal, or the arms of CodeGen's native_direct).
+  def plain_native_source?(path, text)
+    return false unless path.include?('/mruby-rgss/src/') && !@dynamic_constant_mutation
+
+    text.scan(/\bmrb_define_class(_id)?(_under)?(?:_id)?\s*\(([^;]*)/m).all? do |_id, under, body|
+      sup = bc2cpp_c_call_args(body)[under ? 3 : 2].to_s
+      sup.match?(/\A\s*(?:M|mrb)->object_class\s*\z/)
+    end
+  end
+
+  # A Ruby-side definer of a class the RGSS natives create. Only opaque? through
+  # files that plain_native_source? clears, so no outside code can add
+  # instances of another class or reopen it with methods unknown to the registry.
+  def native_plain_definer?(owner)
+    return false if @global_refusal || owner.include?('.') || owner.include?('<') || BOOT_CLASSES.include?(owner)
+    return false unless @class_decls.key?(owner)
+    return false if @rebound.include?(simple(owner)) || @dynamic_subclassed.include?(simple(owner))
+
+    spelled = [owner.split('::').first, simple(owner)].uniq
+    @touch_sets.each_with_index.none? do |set, i|
+      !@touch_plain[i] && spelled.all? { |s| set.include?(s) }
+    end
+  end
+
   def build_hierarchy
     global!(:qualified_class_definition) if @class_decls.values.flatten.any? { |d| !d[:outer_nil] }
     by_simple = Hash.new { |h, k| h[k] = [] }
@@ -459,7 +532,7 @@ class ClosedWorld
       reason = nil
       defs.each do |d|
         break reason = :singleton_definer if d.owner.end_with?('.singleton')
-        break reason = :opaque_definer if opaque?(d.owner)
+        break reason = :opaque_definer if opaque?(d.owner) && !native_plain_definer?(d.owner)
 
         required << d.owner
         sub = descendants(d.owner)
