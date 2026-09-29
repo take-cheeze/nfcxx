@@ -47,9 +47,9 @@ module UniqueClassNames
         when 'SETCONST' then assigned << insn.const_name
         when 'SETMCNST' then assigned << insn.mcnst_name
         when 'SEND', 'SEND0', 'SSEND', 'SSEND0', 'SENDB', 'SSENDB', 'LOADSYM'
-          return {} if insn.operands.match?(StableClassConstants::DYNAMIC_MUTATION)
+          return {} if insn.sym.to_s.match?(StableClassConstants::DYNAMIC_MUTATION)
         end
-        return {} if insn.operands.match?(/:const_missing\b/)
+        return {} if insn.sym == 'const_missing'
       end
     end
     Array(foreign_paths).each do |path|

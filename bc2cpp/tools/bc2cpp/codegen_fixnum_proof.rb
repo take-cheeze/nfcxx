@@ -668,16 +668,6 @@ class CodeGen
     'ALIAS', 'ARGARY', 'BLKPUSH', 'ENTER', 'GETMCNST'
   ].freeze
 
-  # Same method-name charset as every SEND-name extraction.
-  ENTRY_ARG_NAME_RE = %r{:([\w+\-*/<>=!?\[\]&|^~%@]+)}
-
-  # codedump.c appends "\t; R<n>:<local>" (or "\t; <literal>") comments; a local
-  # named `tile` must not count as the method `tile`. Operands end at the first
-  # "\t;".
-  def entry_arg_operands(insn)
-    insn.operands
-  end
-
   # irep label -> the MethodDef whose body it is, following `reps` into nested
   # blocks/lambdas (a call site in a block is proven against the enclosing
   # method, as compile_insn does for BLOCK_FALLBACK). An uncovered label (root,
@@ -714,13 +704,12 @@ class CodeGen
       @ireps.each_value do |irep|
         owner = owner_of_body[irep.label]
         irep.instructions.each_with_index do |insn, i|
-          operands = entry_arg_operands(insn)
-          name = operands[ENTRY_ARG_NAME_RE, 1]
+          name = insn.sym
           next unless name
 
           unless ENTRY_ARG_CLASSIFIED_OPS.include?(insn.op)
             raise "ENTRY_ARG_CALLSITE_PROOF: opcode #{insn.op} names :#{name} " \
-                  "(#{operands.inspect}) but is not classified -- refusing to " \
+                  "(#{insn.args.inspect}) but is not classified -- refusing to " \
                   'guess whether that is a call site'
           end
 
@@ -732,15 +721,15 @@ class CodeGen
             next
           end
 
-          recv = operands[/\AR(\d+)/, 1]
-          argc = operands[/\bn=(\d+)\b/, 1]
+          recv = insn.reg
+          argc = insn.argc
           # `n=*` (packed arguments): argument k has no register, so it poisons.
           if recv.nil? || argc.nil?
             poisoned << name
             next
           end
 
-          sites[name] << [irep, i, recv.to_i, argc.to_i, owner]
+          sites[name] << [irep, i, recv.to_i, argc, owner]
         end
       end
       [sites, poisoned]

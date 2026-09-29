@@ -361,17 +361,15 @@ class CodeGen
     names = Set.new
     @ireps.each_value do |irep|
       irep.instructions.each_with_index do |insn, idx|
-        operands = entry_arg_operands(insn)
         case insn.op
         when 'ALIAS', 'UNDEF'
-          operands.scan(ENTRY_ARG_NAME_RE) { |m| names << m[0] }
+          names << insn.sym
         when 'LOADSYM'
-          return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(operands[ENTRY_ARG_NAME_RE, 1])
+          return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(insn.sym)
         when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
-          m = operands.match(/\AR(\d+)\s+:(\S+?)(?:\s+n=(\S+))?\s*\z/)
-          next unless m && NAME_INSTALLER_SENDS.include?(m[2])
+          next unless NAME_INSTALLER_SENDS.include?(insn.sym)
 
-          syms = m[3]&.match?(/\A\d+\z/) && literal_symbol_args(irep, idx, m[1].to_i, m[3].to_i)
+          syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
           return @symbol_installed_names = nil unless syms && !syms.empty?
 
           names.merge(syms)

@@ -4,7 +4,7 @@
 
 # MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
 # `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
-require_relative 'operand_schema'
+require_relative 'insn_operands'
 
 MRBC = ENV['MRBC'] || 'mrbc'
 
@@ -54,251 +54,15 @@ Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructi
     instructions.select { |insn| range.cover?(insn.addr) }
   end
 end
+# One decoded instruction. `args` is the disassembly's operand text, kept only
+# for diagnostics and comments; every pass reads the typed operands through
+# InsnOperands (see OperandSchema).
 Insn = Struct.new(:lineno, :addr, :op, :args, :raw, keyword_init: true) do
-  # Operand text without mrbc's trailing `; R5:name` local-variable comment,
-  # which would otherwise be mistaken for the last operand.
-  def operands
-    args.sub(/\s*;.*\z/m, '')
-  end
-
-  # First register operand as digits ("R6" -> "6"), nil when the instruction
-  # has none. Registers are Strings because callers key maps and compare
-  # against `dest_reg.to_s`.
-  def reg
-    return @reg if defined?(@reg)
-
-    @reg = args[/\AR(\d+)/, 1]
-  end
-
-  # Every register operand in order, excluding those named only in the
-  # trailing comment.
-  def regs
-    @regs ||= operands.scan(/R(\d+)/).flatten.freeze
-  end
-
-  SYM_RE = /:([\w+\-*\/<>=!?\[\]&|^~%@]+)/
-
-  # First `:symbol` operand (method or LOADSYM name), operators included.
-  def sym
-    return @sym if defined?(@sym)
-
-    @sym = operands[SYM_RE, 1]
-  end
-
-  # `@name` operand of GETIV/SETIV, without the sigil.
-  def ivar
-    return @ivar if defined?(@ivar)
-
-    @ivar = operands[/@(\w+)/, 1]
-  end
-
-  # Positional argument count of a SEND-family op (`n=3`, `n=3|nk=1`); nil
-  # for a splat (`n=*`) or when absent.
-  def argc
-    return @argc if defined?(@argc)
-
-    @argc = operands[/n=(\d+)/, 1]&.to_i
-  end
-
-  # The colon-separated ENTER operand fields as Integers
-  # (req:opt:rest:post:key:kdict:block plus the trailing flags word).
-  def enter_fields
-    @enter_fields ||= operands.split(':').map { |f| f[/\d+/].to_i }.freeze
-  end
-
-  # `n=` and `nk=` of a SEND-family op as printed by mrbc: digits, `*` for a
-  # splat, nil when absent. SEND0/SSEND0 print neither (n is 0).
-  def n_spec
-    argc_match&.[](1)
-  end
-
-  def nk_spec
-    argc_match&.[](2)
-  end
-
-  # The matched `n=3|nk=1` text, for diagnostics.
-  def argc_text
-    argc_match&.[](0)
-  end
-
-  def argc_match
-    return @argc_match if defined?(@argc_match)
-
-    @argc_match = operands.match(/n=(\d+|\*)(?:\|nk=(\d+|\*))?/)
-  end
-  private :argc_match
+  include InsnOperands
 
   # An Insn for code the compiler synthesizes (no disassembly line behind it).
   def self.synthetic(op, args)
     new(lineno: 0, addr: 0, op: op, args: args, raw: "#{op} #{args}")
-  end
-
-  # First `:token` operand verbatim (globals such as `:$stdout` included, which
-  # #sym's operator character class excludes).
-  def sym_token
-    return @sym_token if defined?(@sym_token)
-
-    @sym_token = operands[/:(\S+)/, 1]
-  end
-
-  # Name after the `::` of GETMCNST/SETMCNST (`R6 (R6)::Foo`).
-  def mcnst_name
-    return @mcnst_name if defined?(@mcnst_name)
-
-    @mcnst_name = operands[/::(\S+)/, 1]
-  end
-
-  # Register named in parentheses, the second operand of the binary ops
-  # (`R1 (R2)`).
-  def paren_reg
-    return @paren_reg if defined?(@paren_reg)
-
-    @paren_reg = operands[/\(R(\d+)\)/, 1]
-  end
-
-  # Text of the first parenthesized operand: the literal of LOADI/LOADL forms
-  # (`R1 (5)`), the level of BLKPUSH.
-  def paren_value
-    return @paren_value if defined?(@paren_value)
-
-    @paren_value = operands[/\(([^)]+)\)/, 1]
-  end
-
-  # Unsigned integer right after the destination register (`R1 3`), the size
-  # of ARRAY/HASH/STRCAT-style ops and the target of conditional jumps.
-  def uint_operand
-    return @uint_operand if defined?(@uint_operand)
-
-    @uint_operand = operands[/\AR\d+\s+(\d+)/, 1]&.to_i
-  end
-
-  # Signed literal right after the destination register (`R1 -5`).
-  def imm_operand
-    return @imm_operand if defined?(@imm_operand)
-
-    @imm_operand = operands[/\AR\d+\s+(-?\d+)/, 1]
-  end
-
-  # First register operand spelled as in the disassembly (`R6`).
-  def upvar_ref
-    return nil unless %w[GETUPVAR SETUPVAR].include?(op)
-
-    a = tokens
-    a.length == 3 ? [a[1].to_i, a[2].to_i] : nil
-  end
-
-  def operand_kinds
-    OperandSchema.parse(op, args).map(&:kind)
-  end
-
-  def reg_operand
-    typed_ops = OperandSchema.parse(op, args)
-    typed_ops.find { |operand| operand.kind == :reg }&.value&.to_s
-  end
-
-  def reg_token
-    reg && "R#{reg}"
-  end
-
-  # Whether register +number+ is named by any operand.
-  def mentions_reg?(number)
-    regs.include?(number.to_s)
-  end
-
-  # `n=*` with no keyword part: the call passes a single splatted array.
-  def pure_splat?
-    n_spec == '*' && nk_spec.nil?
-  end
-
-  # A fixed positional-argument count with no keyword part (`n=3`).
-  def plain_fixed_argc?
-    n_spec && n_spec != '*' && nk_spec.nil?
-  end
-
-  # ARGARY's `m1:rest:post:kd` field group as Integers, nil when absent.
-  def argary_spec
-    operands[/\s(\d+:\d+:\d+:\d+)\s*\(/, 1]&.split(':')&.map(&:to_i)
-  end
-
-  # `R1 :name I[2]` (DEF/SDEF/TDEF): the child irep index of a definition
-  # whose operands are exactly a register, a symbol and a child, else nil.
-  def def_child_index
-    tokens.length == 3 && reg && sym_token && block_index
-  end
-
-  # A copy with every register operand moved up by +offset+, for compiling a
-  # block body inside its parent's register file.
-  def shift_regs(offset)
-    Insn.new(lineno: lineno, addr: addr, op: op, raw: raw,
-             args: args.gsub(/R(\d+)/) { "R#{Regexp.last_match(1).to_i + offset}" })
-  end
-
-  # `R1 R2 3`: [source register, literal] as Strings, for the ops that read a
-  # register and carry a literal index or count (AREF, ARRAY, ADDI, SUBI).
-  def src_and_literal
-    m = operands.match(/\AR\d+\s+R(\d+)\s+(-?\d+)/)
-    m && [m[1], m[2]]
-  end
-
-  # `$name` operand of GETGV/SETGV.
-  def global_name
-    return @global_name if defined?(@global_name)
-
-    @global_name = operands[/(\$\S+)/, 1]
-  end
-
-  # Whitespace-separated operands, comment excluded.
-  def tokens
-    @tokens ||= operands.split(/\s+/).freeze
-  end
-
-  def no_operands?
-    operands.strip.empty?
-  end
-
-  # Index into the irep's child `reps` (`I[2]` of BLOCK/LAMBDA/METHOD).
-  def block_index
-    return @block_index if defined?(@block_index)
-
-    @block_index = operands[/I\[(\d+)\]/, 1]&.to_i
-  end
-
-  # Index into the irep's literal pool (`L[3]`).
-  def pool_index
-    return @pool_index if defined?(@pool_index)
-
-    @pool_index = operands[/L\[(\d+)\]/, 1]&.to_i
-  end
-
-  # Address operand of an unconditional JMP/JMPUW (0 when absent).
-  def jmp_addr
-    operands.strip[/\d+/].to_i
-  end
-
-  # Constant name read or written by GETCONST/SETCONST/GETMCNST/SETMCNST.
-  def const_name
-    case op
-    when 'SETCONST' then tokens[0]
-    when 'GETCONST' then tokens[1]
-    when 'GETMCNST', 'SETMCNST' then operands[/::(\S+)/, 1]
-    end
-  end
-
-  # Target address of any branch op (JMP/JMPUW/JMPIF/JMPNOT/JMPNIL), nil for
-  # every other op. JMPUW has JMP's operand shape.
-  def branch_target
-    case op
-    when 'JMP', 'JMPUW' then jmp_addr
-    when 'JMPIF', 'JMPNOT', 'JMPNIL' then uint_operand.to_i
-    end
-  end
-
-  # Absolute target address of a JMP/JMPIF/JMPNOT/JMPNIL, nil for anything else.
-  def jump_target
-    return nil unless %w[JMP JMPIF JMPNOT JMPNIL].include?(op)
-
-    token = operands.split.last
-    token&.match?(/\A\d+\z/) ? token.to_i : nil
   end
 end
 # One entry of an irep's catch handler table (mruby/irep.h
@@ -451,7 +215,9 @@ def parse_disasm_blocks(text)
     end
     if line =~ /^\s*(\d+)\s+(\d+)\s+([A-Z][A-Z0-9_]*)\s*(.*)$/
       lineno, addr, op, rest = Regexp.last_match.captures
-      current << Insn.new(lineno: lineno.to_i, addr: addr.to_i, op: op, args: rest.strip, raw: line.rstrip)
+      insn = Insn.new(lineno: lineno.to_i, addr: addr.to_i, op: op, args: rest.strip, raw: line.rstrip)
+      insn.typed # parse once at load so a schema gap fails here, not in a pass
+      current << insn
     end
   end
   blocks << current if current
