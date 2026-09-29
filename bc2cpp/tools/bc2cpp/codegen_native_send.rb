@@ -467,31 +467,20 @@ class CodeGen
       "  // primitive_send's own TO_I_TYPE_TAG_DISPATCH comment for why Time\n" \
       "  // and Float's own NaN/Infinity/overflow edge are deliberately left\n" \
       "  // to ordinary dispatch)\n" \
-      "  switch (mrb_type(#{recv})) {\n" \
-      "  case MRB_TT_INTEGER:\n" \
+      "  if (mrb_type(#{recv}) == MRB_TT_INTEGER) {\n" \
       "    r#{d} = #{recv};\n" \
-      "    break;\n" \
-      "  case MRB_TT_FLOAT: {\n" \
+      "  } else if (mrb_type(#{recv}) == MRB_TT_FLOAT &&\n" \
+      "             !isnan(mrb_float(#{recv})) && !isinf(mrb_float(#{recv})) &&\n" \
+      "             FIXABLE_FLOAT(mrb_float(#{recv}))) {\n" \
       "    mrb_float bc2cpp_toi_f#{d} = mrb_float(#{recv});\n" \
-      "    if (isnan(bc2cpp_toi_f#{d}) || isinf(bc2cpp_toi_f#{d}) || !FIXABLE_FLOAT(bc2cpp_toi_f#{d})) {\n" \
-      "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    } else {\n" \
-      "      if (bc2cpp_toi_f#{d} > 0.0) bc2cpp_toi_f#{d} = floor(bc2cpp_toi_f#{d});\n" \
-      "      if (bc2cpp_toi_f#{d} < 0.0) bc2cpp_toi_f#{d} = ceil(bc2cpp_toi_f#{d});\n" \
-      "      r#{d} = mrb_int_value(M, (mrb_int)bc2cpp_toi_f#{d});\n" \
-      "    }\n" \
-      "    break;\n" \
-      "  }\n" \
-      "  case MRB_TT_STRING:\n" \
-      "    if (mrb_obj_ptr(#{recv})->c == M->string_class) {\n" \
-      "      r#{d} = mrb_str_to_integer(M, #{recv}, 10, FALSE);\n" \
-      "    } else {\n" \
-      "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    }\n" \
-      "    break;\n" \
-      "  default:\n" \
+      "    if (bc2cpp_toi_f#{d} > 0.0) bc2cpp_toi_f#{d} = floor(bc2cpp_toi_f#{d});\n" \
+      "    if (bc2cpp_toi_f#{d} < 0.0) bc2cpp_toi_f#{d} = ceil(bc2cpp_toi_f#{d});\n" \
+      "    r#{d} = mrb_int_value(M, (mrb_int)bc2cpp_toi_f#{d});\n" \
+      "  } else if (mrb_type(#{recv}) == MRB_TT_STRING &&\n" \
+      "             mrb_obj_ptr(#{recv})->c == M->string_class) {\n" \
+      "    r#{d} = mrb_str_to_integer(M, #{recv}, 10, FALSE);\n" \
+      "  } else {\n" \
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    break;\n" \
       "  }\n"
     end
   end
