@@ -578,6 +578,6 @@ class CodeGen
   # jmpuw_is_plain_jump? rejects it only adds a harmless label to a method that
   # will not ship.
   def jump_targets(irep)
-    irep.instructions.filter_map(&:branch_target).to_set
+    BytecodeIR.for(irep).branch_targets.dup
   end
 end
