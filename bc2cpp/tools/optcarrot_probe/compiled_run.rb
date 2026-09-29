@@ -388,6 +388,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       spec.license = 'MIT'
       spec.authors = 'probe'
       spec.add_dependency 'mruby-onig-regexp'
+      # bc2cpp's emitted `#include "rgss_construct.hxx"`, the same wiring the
+      # real compiled gems use.
+      spec.cxx.include_paths << #{File.join(ROOT, 'include').dump}
     end
   RUBY
   profiling = ENV['GPROF'] == '1'
