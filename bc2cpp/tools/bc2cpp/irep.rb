@@ -5,11 +5,14 @@
 # MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
 # `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
 require_relative 'insn_operands'
+require_relative 'irep_scans'
 
 MRBC = ENV['MRBC'] || 'mrbc'
 
 Irep = Struct.new(:label, :nlocals, :nregs, :pool, :syms, :reps, :lv, :instructions, :file,
                    :catch_handlers, keyword_init: true) do
+  include IrepScans
+
   # Instruction whose address is +addr+, as an index into #instructions.
   def index_of_addr(addr)
     @addr_index ||= instructions.each_with_index.to_h { |insn, index| [insn.addr, index] }

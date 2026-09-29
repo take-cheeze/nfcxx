@@ -555,35 +555,17 @@ class CodeGen
   # so a bare r<base> would pass the Array as the first argument.
   # Returns C++ expressions or nil.
   def splat_array_literal_regs(irep, idx, reg)
-    hops = 0
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      # Skip the block proc register (see array_element_source_scan).
-      next if insn.op == 'BLOCK'
-      next unless insn.reg == reg
-
+    # Skip the block proc register (see array_element_source_scan).
+    irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, max_moves: 8) do |insn, _index, base_reg|
       case insn.op
-      when 'MOVE'
-        hops += 1
-        return nil if hops > 8
-
-        src = insn.regs[1]
-        return nil unless src
-
-        reg = src
-        next
       when 'ARRAY', 'ARRAY2'
         n = insn.uint_operand
-        return nil if n.nil?
+        next nil if n.nil?
 
-        base = reg.to_i
-        return (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
-      else
-        return nil
+        base = base_reg.to_i
+        (0...n).map { |k| "mrb_ary_ref(M, r#{base}, #{k})" }
       end
     end
-    nil
   end
 
   # SPLAT_UNROLL_SUPPORT: the double-splat analogue: a literal `HASH Rd N` (pairs
@@ -591,41 +573,22 @@ class CodeGen
   # LOADSYMs (needed to match the callee's keyword table). Returns [{name:,
   # val_reg:}] in order, or nil.
   def splat_hash_literal_pairs(irep, idx, reg)
-    hops = 0
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next unless insn
-      next if insn.op == 'BLOCK'
-      next unless insn.reg == reg
+    irep.walk_writers(idx - 1, reg, skip_ops: %w[BLOCK], follow_moves: true, max_moves: 8) do |insn, index, base_reg|
+      next nil unless insn.op == 'HASH'
 
-      case insn.op
-      when 'MOVE'
-        hops += 1
-        return nil if hops > 8
+      n = insn.uint_operand
+      next nil if n.nil?
 
-        src = insn.regs[1]
-        return nil unless src
+      base = base_reg.to_i
+      (0...n).map do |k|
+        key_reg = base + (2 * k)
+        val_reg = base + (2 * k) + 1
+        kname = literal_symbol_write(irep, index - 1, key_reg.to_s)
+        break nil unless kname
 
-        reg = src
-        next
-      when 'HASH'
-        n = insn.uint_operand
-        return nil if n.nil?
-
-        base = reg.to_i
-        return (0...n).map do |k|
-          key_reg = base + (2 * k)
-          val_reg = base + (2 * k) + 1
-          kname = literal_symbol_write(irep, i - 1, key_reg.to_s)
-          return nil unless kname
-
-          { name: kname, val_reg: "r#{val_reg}" }
-        end
-      else
-        return nil
+        { name: kname, val_reg: "r#{val_reg}" }
       end
     end
-    nil
   end
 
   # SPLAT_UNROLL_SUPPORT: a `n=*` and/or `nk=*` call site compiles as an ordinary

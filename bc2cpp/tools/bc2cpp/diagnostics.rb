@@ -11,19 +11,10 @@
 # Like IvarLayout.trace_type, but returns nil at any writer: non-nil means
 # `reg` (after MOVEs) is a bare incoming argument.
 def opaque_argument_position(irep, idx, reg, mand)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    if insn.op == 'MOVE'
-      d, s = insn.regs
-      next unless d == reg
+  entry_reg = irep.walk_writers(idx - 1, reg, follow_moves: true, exhausted: ->(last) { last }) { nil }
+  return nil unless entry_reg
 
-      reg = s
-    else
-      d = insn.reg
-      return nil if d == reg
-    end
-  end
-  pos = reg.to_i
+  pos = entry_reg.to_i
   pos.between?(1, mand) ? pos : nil
 end
 

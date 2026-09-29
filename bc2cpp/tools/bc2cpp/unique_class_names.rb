@@ -111,7 +111,7 @@ module UniqueClassNames
         when 'CLASS', 'MODULE'
           reg = insn.reg_token
           name = insn.sym
-          outer = outer_writer(irep, idx, reg)
+          outer = irep.last_writer(idx - 1, insn.reg)
           full = case outer&.op
                  when 'LOADNIL' then namespace ? "#{namespace}::#{name}" : name
                  when 'OCLASS' then name
@@ -137,15 +137,6 @@ module UniqueClassNames
       end
     end
     paths
-  end
-
-  def outer_writer(irep, idx, reg)
-    (idx - 1).downto(0) do |i|
-      insn = irep.instructions[i]
-      next if %w[EXT1 EXT2 EXT3].include?(insn.op)
-      return insn if insn.reg_token == reg
-    end
-    nil
   end
 
   # The module name `var` holds at `pos`: every assignment to it in the

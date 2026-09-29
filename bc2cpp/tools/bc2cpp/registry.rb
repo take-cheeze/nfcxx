@@ -63,15 +63,7 @@ def detect_struct_new_members(irep, idx, insn, namespace)
     return nil if n.zero?
   end
 
-  members = []
-  i = scan_from
-  while i >= 0 && members.size < n
-    prev = irep.instructions[i]
-    break unless prev.op == 'LOADSYM'
-
-    members.unshift(prev.sym_token)
-    i -= 1
-  end
+  members = irep.preceding_run('LOADSYM', scan_from, limit: n).map(&:sym_token)
   return nil unless members.size == n && members.all?
 
   [owner, members]
@@ -367,16 +359,7 @@ def build_registry(ireps, root_label)
         # `private :a, :b` / `attr_reader :a, :b`: the Symbol arguments are LOADSYM'd
         # into consecutive registers right before the send; walk back to collect them.
         collect_loadsym_names = lambda do
-          names = []
-          (idx - (packed ? 2 : 1)).downto(0) do |i|
-            break if names.size >= n
-
-            prev = irep.instructions[i]
-            break unless prev.op == 'LOADSYM'
-
-            names.unshift(prev.sym_token)
-          end
-          names
+          irep.preceding_run('LOADSYM', idx - (packed ? 2 : 1), limit: n).map(&:sym_token)
         end
 
         if %w[private protected public].include?(name)
@@ -475,16 +458,7 @@ def build_registry(ireps, root_label)
         array_insn = irep.instructions[idx - 2]
         if array_insn && array_insn.op == 'ARRAY'
           n = array_insn.uint_operand.to_i
-          members = []
-          (idx - 3).downto(0) do |i|
-            break if members.size >= n
-
-            prev = irep.instructions[i]
-            break unless prev.op == 'LOADSYM'
-
-            members.unshift(prev.sym_token)
-          end
-          members.each do |m|
+          irep.preceding_run('LOADSYM', idx - 3, limit: n).map(&:sym_token).each do |m|
             registry[m] << MethodDef.new(name: m, owner: owner, irep: nil, visibility: :public)
             registry["#{m}="] << MethodDef.new(name: "#{m}=", owner: owner, irep: nil, visibility: :public)
           end
@@ -533,27 +507,15 @@ end
 # or a MOVE of one is recognized; anything else returns nil (absent from
 # superclass_of, never a wrong guess).
 def resolve_superclass_ref(irep, before_idx, reg, namespace)
-  path = []
-  (before_idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.reg
-    next unless d == reg
+  ref = irep.constant_path(before_idx - 1, reg)
+  case ref&.root
+  when :nil
+    :none # no explicit superclass written -- real Ruby default is Object.
+  when :const
+    return namespace ? "#{namespace}::#{ref.name}" : ref.name if ref.segments.empty?
 
-    case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
-    when 'LOADNIL'
-      return :none # no explicit superclass written -- real Ruby default is Object.
-    when 'GETMCNST'
-      path.unshift(insn.mcnst_name)
-    when 'GETCONST'
-      const_name = insn.const_name
-      return path.empty? ? (namespace ? "#{namespace}::#{const_name}" : const_name) : path.unshift(const_name).join('::')
-    else
-      return nil
-    end
+    [ref.name, *ref.segments].join('::')
   end
-  nil
 end
 
 # Resolve the constant operand of a statically shaped class-body include. Keep
@@ -561,34 +523,18 @@ end
 # Ruby's lexical nesting lookup, which is disambiguated after all module names
 # have been collected by build_registry.
 def resolve_mixin_ref(irep, before_idx, reg)
-  path = []
-  qualified = false
-  (before_idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next unless insn.reg == reg
+  ref = irep.constant_path(before_idx - 1, reg)
+  case ref&.root
+  when :const
+    return nil unless ref.name
 
-    case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
-    when 'GETMCNST'
-      qualified = true
-      path.unshift(insn.mcnst_name)
-    when 'GETCONST'
-      const_name = insn.const_name
-      return nil unless const_name
+    absolute = ref.name.start_with?('::')
+    name = ref.name.delete_prefix('::')
+    { name: ref.segments.empty? ? name : [name, *ref.segments].join('::'), qualified: ref.qualified,
+      absolute: absolute }
+  when :object
+    return nil if ref.segments.empty?
 
-      absolute = const_name.start_with?('::')
-      const_name = const_name.delete_prefix('::')
-      path.unshift(const_name) unless path.empty?
-      return { name: path.empty? ? const_name : path.join('::'), qualified: qualified,
-               absolute: absolute }
-    when 'OCLASS'
-      return nil if path.empty?
-
-      return { name: path.join('::'), qualified: true, absolute: true }
-    else
-      return nil
-    end
+    { name: ref.segments.join('::'), qualified: true, absolute: true }
   end
-  nil
 end

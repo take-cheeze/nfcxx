@@ -88,42 +88,27 @@ end
 # the send evaluate to the BREAK operand (ops.h OP_BREAK). Same argument as
 # compute_fixnum_return_names.
 def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret_proof = nil)
-  reg = dest_reg
-  (idx - 1).downto(0) do |i|
-    pin = irep.instructions[i]
-    next unless pin
-    # The block proc register (BLOCK writes dest+1) sits between the call and its
-    # receiver write; skip it.
-    next if pin.op == 'BLOCK'
-    next unless pin.reg == reg
-
-    # CORE_ARRAY_CHAIN: follow MOVE (`regs[a] = regs[b]`, vm.c OP_MOVE) to the
-    # register actually written. Skipping a MOVE would let the scan reach an older,
-    # overwritten result on a reused register.
-    if pin.op == 'MOVE'
-      src = pin.regs[1]
-      return nil unless src
-
-      reg = src
-      next
-    end
-    return nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
+  # The block proc register (BLOCK writes dest+1) sits between the call and its
+  # receiver write, so BLOCK is skipped. CORE_ARRAY_CHAIN: MOVE is followed to the
+  # register actually written (`regs[a] = regs[b]`, vm.c OP_MOVE); skipping it would
+  # let the scan reach an older, overwritten result on a reused register.
+  irep.walk_writers(idx - 1, dest_reg, skip_ops: %w[BLOCK], follow_moves: true) do |pin|
+    next nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
 
     called = pin.sym
-    return nil unless called
+    next nil unless called
 
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
     # SEND0/SSEND0 print no `n=` field: absent means 0 args.
     argc = pin.argc || 0
-    return 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
-    return 'Array' if annotated&.call(called)
-    return 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
+    next 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
+    next 'Array' if annotated&.call(called)
+    next 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
     # ARRAY_RETURN_PROOF: non-block sends only (see ret_proof above).
-    return 'Array' if !block_carrying && ret_proof&.call(called)
+    next 'Array' if !block_carrying && ret_proof&.call(called)
 
-    return nil
+    nil
   end
-  nil
 end
 
 # ---------------------------------------------------------------------------

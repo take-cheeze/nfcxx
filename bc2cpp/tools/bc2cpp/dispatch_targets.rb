@@ -514,19 +514,10 @@ def trace_new_target(irep, idx, reg, ivar_classes = nil, mand = 0, arg_classes =
       # An annotated Hash<Klass> parameter is a safe source for indexed values.
       # Only plain MOVE aliases back to the untouched argument register count;
       # GETIDX keeps its Hash and subclass dispatch guards at codegen.
-      arg_reg = recv_reg
       captured_reg = nil
-      (i - 1).downto(0) do |j|
-        prior = irep.instructions[j]
-        next unless prior.reg == arg_reg
-        if prior.op == 'MOVE'
-          arg_reg = prior.regs[1]
-          break unless arg_reg
-        else
-          captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
-          arg_reg = nil
-          break
-        end
+      arg_reg = irep.walk_writers(i - 1, recv_reg, follow_moves: true, exhausted: ->(last) { last }) do |prior|
+        captured_reg = prior.reg.to_i if prior.op == 'GETUPVAR' && prior.upvar_ref&.last&.zero?
+        nil
       end
       # The trace can stop at a block's GETUPVAR before reaching the captured
       # container; the callsite hint is limited to annotated Hash arguments.
@@ -896,24 +887,9 @@ end
 # MOVE aliases; every other write ends the proof, while trace_new_target repeats
 # the walk and proves the class expression itself.
 def assigned_from_new_send?(irep, idx, reg)
-  current = reg.to_s
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    next if READ_ONLY_OPCODE_SKIP.include?(insn.op)
-
-    dst = insn.reg
-    next unless dst == current
-
-    if insn.op == 'MOVE'
-      current = insn.regs[1]
-      return false unless current
-      next
-    end
-
-    return %w[SEND SEND0 SENDB].include?(insn.op) &&
-           insn.reg == current.to_s && insn.sym == 'new'
-  end
-  false
+  irep.walk_writers(idx - 1, reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP, follow_moves: true) do |insn|
+    %w[SEND SEND0 SENDB].include?(insn.op) && insn.sym == 'new'
+  end || false
 end
 
 def container_phi_merge(irep, at, reg)
@@ -945,27 +921,18 @@ end
 # passthrough: RGSS::Transition#freeze is an unrelated override with a
 # different return value.
 def literal_container_class(irep, idx, reg)
-  (idx - 1).downto(0) do |i|
-    insn = irep.instructions[i]
-    d = insn.reg
-    next unless d == reg
-
+  irep.walk_writers(idx - 1, reg, follow_moves: true) do |insn|
     case insn.op
-    when 'MOVE'
-      reg = insn.regs[1]
     when 'SEND0'
-      return nil unless insn.sym == 'freeze'
+      insn.sym == 'freeze' ? IrepScans::KEEP : nil
     when 'ARRAY', 'ARRAY2'
-      return 'Array'
+      'Array'
     when 'HASH'
-      return 'Hash'
+      'Hash'
     when 'RANGE_INC', 'RANGE_EXC'
-      return 'Range'
-    else
-      return nil
+      'Range'
     end
   end
-  nil
 end
 
 # LITERAL_EQQ_SUPPORT: find a literal Fixnum/Symbol written to a `:===`
