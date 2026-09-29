@@ -5,6 +5,7 @@
 # MRBC is passed explicitly by every real caller (e.g. mrbgem.rake passes
 # `spec.build.mrbcfile`): the right mrbc depends on which build invokes this.
 require_relative 'insn_operands'
+require_relative 'insn_decoder'
 
 MRBC = ENV['MRBC'] || 'mrbc'
 
@@ -82,19 +83,37 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # command line as one program (with class reopening across files), which is
 # what makes a whole-gem closed world possible.
 # ---------------------------------------------------------------------------
+#
+# The instruction stream comes back as a RiteImage (mrbc's RITE binary, decoded
+# by InsnDecoder), or as `mrbc -v` text with BC2CPP_TEXT_LOADER=1.
+RiteImage = Struct.new(:bytes)
+
+def text_loader?
+  ENV['BC2CPP_TEXT_LOADER'] == '1'
+end
+
 def run_mrbc(src_paths, symbol, out_dir)
   src_paths = Array(src_paths)
   c_dump = File.join(out_dir, "#{symbol}_dump.c")
-  disasm_txt = File.join(out_dir, "#{symbol}_disasm.txt")
+  mrb_path = File.join(out_dir, "#{symbol}.mrb")
 
   system(MRBC, '-B', symbol, '-S', '-o', c_dump, *src_paths, exception: true)
+  if text_loader?
+    stream = run_mrbc_text(src_paths, File.join(out_dir, "#{symbol}_disasm.txt"), mrb_path)
+  else
+    system(MRBC, '-g', '-o', mrb_path, *src_paths, exception: true)
+    stream = RiteImage.new(File.binread(mrb_path))
+  end
+
+  [File.read(c_dump, encoding: 'UTF-8'), stream]
+end
+
+def run_mrbc_text(src_paths, disasm_txt, mrb_path)
   # Source has non-ASCII comments/literals; don't trust the locale default.
-  disasm = IO.popen([MRBC, '-v', '-o', File.join(out_dir, "#{symbol}.mrb"), *src_paths],
-                     external_encoding: 'UTF-8', &:read)
+  disasm = IO.popen([MRBC, '-v', '-o', mrb_path, *src_paths], external_encoding: 'UTF-8', &:read)
   raise "mrbc -v failed" unless $?.success?
   File.write(disasm_txt, disasm)
-
-  [File.read(c_dump, encoding: 'UTF-8'), disasm]
+  disasm
 end
 
 # ---------------------------------------------------------------------------
@@ -187,6 +206,8 @@ end
 # same order they appear (verified to match dfs_order above).
 # ---------------------------------------------------------------------------
 def parse_disasm_blocks(text)
+  return parse_rite_blocks(text) if text.is_a?(RiteImage)
+
   blocks = []
   # Parallel to `blocks`: each irep's `file:` path, needed by
   # Annotations.extract to find a magic comment's source line.
@@ -221,6 +242,25 @@ def parse_disasm_blocks(text)
     end
   end
   blocks << current if current
+  [blocks, block_files, block_catches]
+end
+
+# The same three parallel lists as parse_disasm_blocks, from the RITE binary.
+CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze
+
+def parse_rite_blocks(image)
+  blocks = []
+  block_files = []
+  block_catches = []
+  RiteBinary.parse(image.bytes).each do |rite|
+    insns, file = InsnDecoder.decode(rite)
+    blocks << insns
+    block_files << file
+    block_catches << rite.catch_handlers.map do |h|
+      type = CATCH_TYPES.fetch(h.type) { raise "bc2cpp: unknown catch handler type #{h.type}" }
+      CatchHandler.new(type: type, begin_addr: h.begin_addr, end_addr: h.end_addr, target: h.target)
+    end
+  end
   [blocks, block_files, block_catches]
 end
 

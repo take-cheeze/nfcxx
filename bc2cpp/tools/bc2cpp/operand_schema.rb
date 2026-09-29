@@ -1,11 +1,12 @@
 # frozen_string_literal: true
 
-# Typed operands for every mruby opcode. `mrbc -v` (src/codedump.c) is the only
-# place operand text is read: each instruction is parsed once, here, into
-# Operand values by the per-opcode kind list below, and no compiler pass looks
-# at the text again. OperandSchema.to_text regenerates the text from the typed
-# operands, which is how scripts/bc2cpp_operand_schema_check.rb proves every
-# schema entry against a real disassembly.
+# Typed operands for every mruby opcode. The RITE-binary loader builds them
+# straight from decoded bytes (insn_decoder.rb). The `mrbc -v` text loader
+# (BC2CPP_TEXT_LOADER=1) parses each instruction once, here, by the per-opcode
+# kind list below; no compiler pass looks at text again. OperandSchema.to_text
+# regenerates the text from the typed operands, which is how
+# scripts/bc2cpp_operand_schema_check.rb proves every schema entry against a
+# real disassembly.
 module OperandSchema
   # kind: one of KINDS. value: Integer for numeric kinds, String for names, an
   # [Integer, String] pair for :mcnst, an [n, nk] pair for :argc (nil = `*`).
