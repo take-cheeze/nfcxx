@@ -1500,9 +1500,12 @@ class CodeGen
         return compile_native_primitive_send(name, d, recv, argv)
       end
 
-      if !self_implicit && irep && idx && @closed_world &&
-         %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[idx].op)
-        constant_owner = constant_object_owner(irep, idx,
+      # Inlined block bodies pass no `idx` (their registers are shifted) but carry
+      # the unshifted site in `trace_idx`/`trace_reg_offset`, as the other proofs use it.
+      constant_site_idx = idx || trace_idx
+      if !self_implicit && irep && constant_site_idx && @closed_world &&
+         %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[constant_site_idx].op)
+        constant_owner = constant_object_owner(irep, constant_site_idx,
                                                unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                owner_def&.owner)
         singleton_owner = "#{constant_owner}.singleton" if constant_owner
