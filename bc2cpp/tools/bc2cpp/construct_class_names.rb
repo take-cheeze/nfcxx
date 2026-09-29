@@ -9,7 +9,7 @@
 # already restricted the search to one lexical scope, so what is needed is only
 # "does `P::N` exist" -- a fact about the program, not an inference about which
 # one a lookup would reach. A name defined twice in the same scope still exists;
-# lexical lookup order selects the innermost matching path.
+# lexical lookup order selects the innermost matching path before top-level.
 #
 # Built from the same CLASS/MODULE walk UniqueClassNames uses
 # (bytecode_class_paths), then extended only with fully-qualified native paths

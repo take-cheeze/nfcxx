@@ -404,8 +404,8 @@ ZSUPER_NATIVE_BLOCKED_OWNERS = %w[Object Kernel BasicObject].freeze
 # A::B`) definitions; the closed world has no compact ones. Lexical scope only;
 # the cref's ancestors are not searched.
 # Soundness: only returns a name the closed world DEFINES; the first matching
-# prefix is the binding Ruby's lexical lookup selects. No owner or no match
-# returns nil and leaves the written path in place.
+# lexical prefix wins, then a proven top-level binding is considered. No owner
+# or no match returns nil and leaves the written path in place.
 #
 # LEXICAL_CONSTRUCT_RESOLUTION: this used to accept only a
 # DIRECT_CONSTRUCT_TARGETS entry, so a bare `Window.new` inside `class RPG2k`
@@ -436,14 +436,15 @@ def lexically_resolve_construct_target(written, owner)
     return candidate if construct_resolution_known?(candidate)
   end
 
+  return written if construct_resolution_known?(written)
+
   nil
 end
 
 # Does the closed world define `name` as a class or module? A bare name
-# (no `::`) is not a definition on its own -- it is only ever reached through a
-# nesting prefix -- so it is refused here and left to the written path.
+# (no `::`) is a valid top-level binding only when the closed-world table lists
+# that exact name.
 def construct_resolution_known?(name)
-  return false unless name.include?('::')
   return true if DIRECT_CONSTRUCT_TARGETS.include?(name)
 
   (ConstructClassNames.table || {}).include?(name)
