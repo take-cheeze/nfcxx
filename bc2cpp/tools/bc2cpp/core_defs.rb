@@ -61,6 +61,27 @@ module CoreDefs
     out
   end
 
+  # `alias new old` in a core body, where `old` is the one live definition of its owner and
+  # nothing else defines `new` there: [owner, old] => [new, ...]. The interpreter's alias
+  # copied the method it replaced, so a compiled `old` is registered under `new` as well
+  # (Array#map, #select, Hash#each_pair, ...) and the guard's fallback is `old`'s bytecode.
+  def alias_map(sites, registry, ireps, shadowed_pairs)
+    defs = registry.values.flatten.group_by { |d| [d.owner, d.name] }
+    sites.each_with_object(Hash.new { |h, k| h[k] = [] }) do |site, out|
+      next unless core_source?(ireps.fetch(site[:irep]).file)
+
+      old_key = [site[:owner], site[:old]]
+      next if site[:new] == site[:old] || shadowed_pairs.include?(old_key)
+
+      old_defs = defs[old_key]
+      next unless old_defs && old_defs.size == 1 && old_defs.first.irep && old_defs.first.core
+      next if defs.key?([site[:owner], site[:new]])
+      next if sites.count { |other| other[:owner] == site[:owner] && other[:new] == site[:new] } > 1
+
+      out[old_key] << site[:new]
+    end
+  end
+
   # mruby-enumerator runs Enumerator#next and the generators on a Fiber.
   def fiber_gem?(file)
     file.to_s.include?('/mruby-enumerator/')
@@ -73,14 +94,23 @@ module CoreDefs
   # forward a block? Such a compiled frame stays on the C++ stack while the block
   # runs, and a `Fiber.yield` inside the block (the RGSS script host's
   # Graphics.update, an Enumerator#next) cannot cross it: mruby raises FiberError
-  # for a yield through a C frame. Only the caller's own code can decide that, so
-  # every block-touching core method stays bytecode.
+  # for a yield through a C frame. The compiled entry of these "guarded" methods
+  # hands the call to the bytecode whenever a Fiber runs (CORE_BLOCK_GUARD, ADR 0269).
   def touches_block?(irep, ireps)
     enter = irep.enter
     return true if enter && enter.enter_fields[6].to_i.positive?
     return true if irep.instructions.any? { |insn| BLOCK_OPS.include?(insn.op) }
 
     irep.reps.any? { |child| child && touches_block?(ireps.fetch(child), ireps) }
+  end
+
+  # Does the body build a lambda? It is the one opcode that can make a closure the
+  # method's result; the guard covers frames that sit on the stack while a block runs,
+  # not a closure that a Fiber calls after the frame is gone.
+  def builds_lambda?(irep, ireps)
+    return true if irep.instructions.any? { |insn| insn.op == 'LAMBDA' }
+
+    irep.reps.any? { |child| child && builds_lambda?(ireps.fetch(child), ireps) }
   end
 
   # Does the body name the Fiber class? mruby-enumerator's Enumerator#next and the

@@ -96,16 +96,19 @@ if $PROGRAM_NAME == __FILE__
   order = dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
-    module_names = build_registry(ireps, root_label)
+    module_names, alias_sites = build_registry(ireps, root_label)
   # CORE_DEFS (ADR 0264): a core-source definition a later one replaces is not the
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
   CodeGen.module_names = module_names
   core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
+  core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
+                                .to_set { |d| [d.owner, d.name] }
   registry.each_value { |defs| defs.reject! { |d| d.irep && core_shadowed.include?(d.irep) } }
   registry.each_value do |defs|
     defs.each { |d| d.core = true if d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
   end
+  CodeGen.core_aliases = CoreDefs.alias_map(alias_sites, registry, ireps, core_shadowed_pairs)
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
   core_refused = CoreMethods.load_refused(ENV['BC2CPP_CORE_REFUSED'] || CoreMethods::DEFAULT_PATH)
   core_ineligible = CoreMethods.excluded_labels(registry, ireps, core_refused)
@@ -185,12 +188,15 @@ if $PROGRAM_NAME == __FILE__
 
   # CORE_VISIBILITY (ADR 0264): a core method is compiled and registered whenever it is
   # eligible, but only one whose name no native method shares (and no fast-path
-  # operator) is a registry definition, i.e. a dispatch target. Every name-keyed
+  # operator, and no guard) is a registry definition, i.e. a dispatch target. Every name-keyed
   # proof and inline path in the compiler models mruby's own method for the names
   # natives define, on the premise that its Ruby definitions cannot be seen; a
   # core definition there would switch them off (FIXNUM_COMPARE, LITERAL ===,
   # ELEM_HINT through `compact`, ...). The others are emitted from CodeGen's
   # `core_hidden_defs`, without becoming candidates.
+  # A guarded method (CORE_BLOCK_GUARD, ADR 0269) is never a direct-call target either, so a
+  # registry definition of it would only turn every `each`/`map`/`select` proof off.
+  core_guarded = CoreMethods.guarded_labels(registry.values.flatten, ireps)
   core_hidden_defs = []
   registry.each do |name, defs|
     next unless defs.any?(&:core)
@@ -198,10 +204,15 @@ if $PROGRAM_NAME == __FILE__
     if native_names.include?(name) || CoreMethods::OPERATOR_NAMES.include?(name)
       core_hidden_defs.concat(defs.select(&:core))
       defs.reject!(&:core)
+    else
+      guarded_defs = defs.select { |d| d.core && core_guarded.include?(d.irep) }
+      core_hidden_defs.concat(guarded_defs)
+      defs.reject! { |d| guarded_defs.include?(d) }
     end
   end
   registry.delete_if { |_, defs| defs.empty? }
   CodeGen.core_hidden_defs = core_hidden_defs
+  CodeGen.core_guarded = core_guarded
 
   warn '== whole-program method registry =='
   registry.sort.each do |name, defs|
@@ -230,7 +241,7 @@ if $PROGRAM_NAME == __FILE__
   if core_bytecode.positive? || !core_shadowed.empty?
     warn ''
     warn "== core methods: #{core_bytecode} core-source bytecode methods, #{core_shadowed.size} shadowed by a " \
-         "later definition, #{core_ineligible.size} kept interpreted (block/Fiber use, conditional, refused), " \
+         "later definition, #{core_ineligible.size} kept interpreted (Fiber, lambda, mruby-enumerator, conditional, refused), " \
          "#{core_hidden_defs.size} compiled without being registry definitions (native or operator name) =="
     core_hidden_defs.map { |d| "#{d.owner}##{d.name}" }.sort.each { |k| warn "  HIDDEN #{k}" }
     core_stale_refusals.each { |k| warn "  STALE #{k}" }
@@ -1011,6 +1022,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
   print gen.emit_instance_tt_setup
+  print gen.emit_core_guard_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)

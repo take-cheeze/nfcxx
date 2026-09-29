@@ -7,8 +7,9 @@ require_relative 'core_defs'
 # CORE_METHODS (ADR 0264): every method of mruby's own Ruby (compiled_gems.rb
 # BC2CPP_CORE_MRBLIB_GEMS) that compiles clean is compiled, except the ones that
 # stay bytecode by decision: a definition a later one replaces, one a
-# conditional can skip, one that touches a block or the Fiber class (CoreDefs),
-# and the `Owner#name` entries of core_refused.txt. An excluded definition is
+# conditional can skip, one that names the Fiber class or builds a lambda (CoreDefs),
+# and the `Owner#name` entries of core_refused.txt. A method that touches a block
+# compiles behind the Fiber guard of ADR 0269 (guarded_labels). An excluded definition is
 # dropped from the registry (bc2cpp.rb), so it is neither compiled nor a dispatch
 # target, and the interpreter's method answers it exactly as before.
 module CoreMethods
@@ -30,7 +31,7 @@ module CoreMethods
   end
 
   # Irep labels of the core-source definitions in `registry` that must not be
-  # compiled: refused, conditional, block/Fiber-touching or mruby-enumerator's
+  # compiled: refused, conditional, Fiber-naming, lambda-building or mruby-enumerator's
   # (shadowed ones are dropped from the registry by the driver before this runs).
   def excluded_labels(registry, ireps, refused)
     conditional = CoreDefs.conditional_def_labels(ireps)
@@ -42,10 +43,16 @@ module CoreMethods
         irep = ireps.fetch(d.irep)
         out << d.irep if refused.include?(HotMethods.key(d)) || conditional.include?(d.irep) ||
                          CoreDefs.fiber_gem?(irep.file) ||
-                         CoreDefs.touches_block?(irep, ireps) || CoreDefs.references_fiber?(irep, ireps)
+                         CoreDefs.builds_lambda?(irep, ireps) || CoreDefs.references_fiber?(irep, ireps)
       end
     end
     out
+  end
+
+  # Irep labels of the compiled core methods whose entry is guarded (CORE_BLOCK_GUARD,
+  # CodeGen#core_block_guard): the ones that touch a block.
+  def guarded_labels(defs, ireps)
+    defs.select { |d| d.irep && d.core && CoreDefs.touches_block?(ireps.fetch(d.irep), ireps) }.to_set(&:irep)
   end
 
   # Refused entries no core-source method answers to (renamed or removed).

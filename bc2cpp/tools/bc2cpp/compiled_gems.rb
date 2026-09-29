@@ -207,8 +207,9 @@ BC2CPP_COMPILED_GEMS = {
   },
   'mruby-core-compiled' => {
     # ADR 0264: mruby's own Ruby (BC2CPP_CORE_MRBLIB_GEMS) compiled by the same
-    # pipeline. Every eligible method (CoreMethods: not block/Fiber-touching,
-    # conditional, shadowed or refused) is emitted, and registered through the
+    # pipeline. Every eligible method (CoreMethods: not Fiber-naming, lambda-building,
+    # conditional, shadowed or refused; ADR 0269 guards the block-taking ones) is
+    # emitted, and registered through the
     # generated bc2cpp_register_owner_methods (no hand register.cxx to drift)
     # after the core gems that define the bytecode it replaces. Array and
     # StringIO are also engine owners: each gem emits the definitions of its own

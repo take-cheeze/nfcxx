@@ -393,7 +393,8 @@ class CodeGen
   def emit_proc_fallback_fn_body(region, d, fn_prefix)
     block_irep = region[:block_irep]
     mand = mandatory_arity(block_irep)
-    arg_names = (1..mand).map { |i| "bc2cpp_barg#{i}" }
+    rest_block = (region[:kind] || 'block_fallback') == 'block_fallback' && rest_only_block?(block_irep)
+    arg_names = (1..(rest_block ? 1 : mand)).map { |i| "bc2cpp_barg#{i}" }
     # UPVAR_CAPTURE_SUPPORT: region[:upvars] comes from
     # recognize_block_fallback_regions, or from recognize_lambda_fallback_regions
     # for a frame-confined lambda (lambda_proc_frame_confined?). `|| []` is the
@@ -593,7 +594,12 @@ class CodeGen
       out << "  mrb_value bc2cpp_blk = mrb_proc_cfunc_env_get(M, #{upvar_regs.size + 1});\n"
     end
     call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
-    if mand.zero?
+    if rest_block
+      out << "  mrb_value* bc2cpp_argv;\n"
+      out << "  mrb_int bc2cpp_argc;\n"
+      out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+      out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
+    elsif mand.zero?
       out << "  return #{impl_name}(M, #{call_args});\n"
     elsif (region[:kind] || 'block_fallback') == 'block_fallback' && mand > 1
       # Blocks are lenient about argument count, and Hash#each passes one [key,
