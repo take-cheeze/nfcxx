@@ -507,9 +507,11 @@ class CodeGen
   STRUCTURAL_NAME_CHARS = ':.'.freeze
 
   def sanitize(s)
-    s.gsub(/[^a-zA-Z0-9_]/) { |c|
+    # Names repeat across thousands of call sites; the result is frozen because
+    # it is shared.
+    (@sanitized ||= {})[s] ||= s.gsub(/[^a-zA-Z0-9_]/) { |c|
       STRUCTURAL_NAME_CHARS.include?(c) ? '_' : format('$%02x', c.ord)
-    }
+    }.freeze
   end
 
   def ivar_field_name(name)

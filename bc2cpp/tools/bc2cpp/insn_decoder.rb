@@ -49,7 +49,15 @@ module InsnDecoder
   # Operand byte widths of an instruction; EXT1 widens the first operand and
   # EXT2 the second, EXT3 both (ops.h FETCH_*_1/_2/_3). Only one-byte operands
   # widen, and a lone B operand is widened by EXT1 only.
+  OPERAND_SIZES = Hash.new do |cache, (format, ext)|
+    cache[[format, ext]] = compute_operand_sizes(format, ext).freeze
+  end
+
   def self.operand_sizes(format, ext)
+    OPERAND_SIZES[[format, ext]]
+  end
+
+  def self.compute_operand_sizes(format, ext)
     sizes = format.delete('Z').chars.map { |c| OPERAND_BYTES.fetch(c) }
     widen = case ext
             when 1 then [0]

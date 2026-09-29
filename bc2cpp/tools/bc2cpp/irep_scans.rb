@@ -42,6 +42,7 @@ module IrepScans
   def walk_writers(from, reg, skip_ops: nil, barrier: nil, barrier_result: nil,
                    follow_moves: false, max_moves: nil, exhausted: nil)
     moves = 0
+    callable_barrier = barrier.respond_to?(:call)
     index = [from, instructions.length - 1].min
     while index >= 0
       # Without a barrier only an instruction leading with +reg+ can matter, so
@@ -51,10 +52,10 @@ module IrepScans
         break unless index
       end
       insn = instructions[index]
-      hit = barrier && (barrier.respond_to?(:call) ? barrier.call(insn, reg) : barrier.include?(insn.op))
+      hit = barrier && (callable_barrier ? barrier.call(insn, reg) : barrier.include?(insn.op))
       return barrier_result if hit
       next_index = index - 1
-      if skip_ops&.include?(insn.op) || insn.reg != reg
+      if insn.reg != reg || skip_ops&.include?(insn.op)
         index = next_index
         next
       end

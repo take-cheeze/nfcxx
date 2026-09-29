@@ -402,7 +402,7 @@ class ClosedWorld
   # -- the class hierarchy -----------------------------------------------------
 
   def simple(name)
-    name.split('::').last
+    (@simple_names ||= {})[name] ||= name.split('::').last
   end
 
   # A class whose instances this analysis can enumerate: declared by a CLASS
