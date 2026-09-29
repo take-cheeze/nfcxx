@@ -98,14 +98,13 @@ class CodeGen
     @fixnum_proof_ctx ||= {}
     return @fixnum_proof_ctx[irep.label] if @fixnum_proof_ctx.key?(irep.label)
 
+    program = BytecodeIR.for(irep)
     entries = jump_targets(irep).dup
-    protected_addrs = Set.new
-    catch_targets = Set.new
-    (irep.catch_handlers || []).each do |ch|
-      entries << ch.target
-      catch_targets << ch.target
-      protected_addrs.merge(ch.begin_addr..ch.end_addr)
-    end
+    catch_targets = program.handler_target_addrs.dup
+    entries.merge(catch_targets)
+    # Inclusive end: the instruction after a range is refused too, which is
+    # more than the VM's half-open range needs.
+    protected_addrs = program.handler_protected_addrs(inclusive_end: true).dup
     edges = fixnum_proof_edge_sources(irep)
     entries.merge(edges.keys)
     @fixnum_proof_ctx[irep.label] =

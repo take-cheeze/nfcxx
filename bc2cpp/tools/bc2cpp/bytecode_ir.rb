@@ -2,8 +2,11 @@
 
 # A conservative normal-flow view of an mruby IREP. The original disassembly
 # remains the source of opcode semantics; this layer gives analyses stable
-# instruction identities and explicit basic-block edges. Catch-handler edges
-# are not modeled, so consumers must not use this graph to prove exception flow.
+# instruction identities and explicit basic-block edges. Instruction#successors,
+# the blocks and the default queries are NORMAL flow only. Catch-handler edges
+# live apart from them (bytecode_ir_handlers.rb) and are opt-in through
+# `include_handlers:`, so a consumer proving something about exception flow
+# must ask for them explicitly.
 module BytecodeIR
   Instruction = Struct.new(:index, :source, :successors, keyword_init: true) do
     def addr
@@ -34,6 +37,7 @@ module BytecodeIR
     attr_reader :instructions, :blocks, :address_to_index
 
     def initialize(irep)
+      @catch_handlers = Array(irep.catch_handlers).freeze
       @instructions = Array(irep.instructions).each_with_index.map do |source, index|
         Instruction.new(index: index, source: source, successors: [])
       end
@@ -59,16 +63,21 @@ module BytecodeIR
     end
 
     # index -> Set of predecessor indices, with ENTRY for instruction 0's
-    # method-entry edge. Nil when #resolved? is false.
-    def instruction_predecessors
+    # method-entry edge. Nil when #resolved? is false. +include_handlers+ adds
+    # the catch-handler edges (see #handler_edges) and is nil unless
+    # #handlers_resolved? too.
+    def instruction_predecessors(include_handlers: false)
       return nil unless @resolved
+      return nil if include_handlers && !handlers_resolved?
 
-      @instruction_predecessors ||= begin
+      @instruction_predecessors ||= {}
+      @instruction_predecessors[include_handlers] ||= begin
         preds = Array.new(@instructions.length) { Set.new }
         preds[0] << ENTRY unless preds.empty?
         @instructions.each do |instruction|
           instruction.successors.each { |successor| preds[successor] << instruction.index }
         end
+        handler_edges.each { |edge| preds[edge.target] << edge.src } if include_handlers
         preds.each(&:freeze).freeze
       end
     end
@@ -187,3 +196,5 @@ module BytecodeIR
     irep.instance_variable_set(:@bytecode_ir, Program.new(irep))
   end
 end
+
+require_relative 'bytecode_ir_handlers'
