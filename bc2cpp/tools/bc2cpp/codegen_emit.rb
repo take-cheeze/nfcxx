@@ -456,6 +456,15 @@ class CodeGen
     CPP
   end
 
+  # NATIVE_CORE_DIRECT (ADR 0257) mirrors of core natives whose bodies are
+  # static, emitted only for the ones the output calls. NativeCoreDirect::ENTRIES
+  # pins each to the audited core body.
+  def emit_native_core_helpers(compiled)
+    NativeCoreDirect::HELPERS.filter_map do |name, text|
+      "#{text}\n" if compiled.any? { |m| m[:code].include?("#{name}(") }
+    end.join
+  end
+
   # bc2cpp_bool_p (TYPE_OPS :bool check), emitted only when the output uses it.
   # There is no single macro for both boolean tags, so it ORs
   # mrb_true_p/mrb_false_p (mruby/value.h).

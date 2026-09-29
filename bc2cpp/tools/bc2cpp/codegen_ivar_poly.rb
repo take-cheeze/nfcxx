@@ -108,7 +108,7 @@ class CodeGen
                    elsif target.kind == :ivar_accessor
                      n == (name.end_with?('=') ? 1 : 0) ? :accessor_unlinkable : :arity
                    elsif !target.irep
-                     :native_or_uncompiled
+                     native_direct_lifted?(name, n) ? :native_direct : :native_or_uncompiled
                    elsif !compiles_clean?(target.irep)
                      :unclean
                    elsif !pure_mandatory_arity?(@ireps.fetch(target.irep))
