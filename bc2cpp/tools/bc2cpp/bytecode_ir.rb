@@ -133,6 +133,26 @@ module BytecodeIR
       end
     end
 
+    # Explicit branches (JMPUW included) from an address in +from+ whose target is
+    # not in +into+.
+    def branches_escaping(from, into)
+      branch_edges.select { |edge| from.cover?(edge.src) && !into.cover?(edge.target) }
+    end
+
+    # Explicit branches (JMPUW included) landing exactly on +addr+, minus those
+    # whose source is in +except_from+.
+    def branches_onto(addr, except_from: nil)
+      branch_edges.select { |edge| edge.target == addr && !except_from&.cover?(edge.src) }
+    end
+
+    # Explicit branches (JMPUW included) with exactly one end in +range+, minus
+    # those whose source is in +except_from+.
+    def region_crossings(range, except_from: nil)
+      branch_edges.select do |edge|
+        !except_from&.cover?(edge.src) && range.cover?(edge.src) != range.cover?(edge.target)
+      end
+    end
+
     private
 
     def build_edges

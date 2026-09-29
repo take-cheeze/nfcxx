@@ -45,6 +45,10 @@ module BytecodeIR
       end
     end
 
+    def handlers?
+      !@catch_handlers.empty?
+    end
+
     # Addresses some handler resumes at, whether or not one is an instruction.
     def handler_target_addrs
       @handler_target_addrs ||= @catch_handlers.to_set(&:target).freeze

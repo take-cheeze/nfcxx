@@ -31,7 +31,7 @@ class CodeGen
   # and it keeps JMPUW away from RESCUE_SUPPORT's extracted regions (a rescue
   # region implies clen > 0).
   def jmpuw_is_plain_jump?(irep)
-    irep.catch_handlers.nil? || irep.catch_handlers.empty?
+    !BytecodeIR.for(irep).handlers?
   end
 
   # ENSURE_DISPATCH_MERGE_SUPPORT: compile_method's per-irep remap of jumps onto
@@ -102,10 +102,8 @@ class CodeGen
     # Branches inside the ensure body must stay inside it; its RAISEIF address is
     # allowed (mrbc's "skip the rest" target for a conditional ensure body) and
     # becomes a label at the end of the lambda.
-    return nil if body.any? do |i|
-      jt = i.branch_target
-      jt && !(jt > t && jt <= raiseif.addr)
-    end
+    body_range = (t + 1)...raiseif.addr
+    return nil unless program.branches_escaping(body_range, (t + 1)..raiseif.addr).empty?
     # No branch may cross into or out of the protected range: the guard is a C++
     # scope, and jumping in would skip its initialization (ill-formed), jumping
     # out would run the ensure where the bytecode does not.
@@ -128,18 +126,15 @@ class CodeGen
     # compile_method (which also emits that label). A jump from OUTSIDE onto `t`
     # stays rejected: it would skip the body but run the ensure.
     protected_range = (b...ch.end_addr)
-    except_jump_srcs = []
-    program.branch_edges.each do |edge|
-      # The ensure body was already checked above with a stricter rule.
-      next if ((t + 1)...raiseif.addr).cover?(edge.src)
-      if edge.target == t
-        return nil unless protected_range.cover?(edge.src)
+    # A jump onto `t` is only allowed from inside the range; the ensure body's own
+    # branches were checked above with a stricter rule.
+    onto_t = program.branches_onto(t, except_from: body_range)
+    return nil unless onto_t.all? { |edge| protected_range.cover?(edge.src) }
 
-        except_jump_srcs << edge.src
-        next
-      end
-      return nil if protected_range.cover?(edge.src) != protected_range.cover?(edge.target)
-    end
+    crossings = program.region_crossings(protected_range, except_from: body_range)
+    return nil unless crossings.all? { |edge| edge.target == t }
+
+    except_jump_srcs = onto_t.map(&:src)
     # An optional-argument jump table is ordinary JMPs in this irep, so the
     # crossing test already covered it.
     { begin_addr: b, except_addr: t, raiseif_addr: raiseif.addr, body_insns: body,
@@ -377,12 +372,12 @@ class CodeGen
       # still need it); codegen_rescue puts it at cursp() above exc, checked here.
       return nil if cls_reg == exc_reg
 
-      seg_idx = clause_idx + 1
-      while (seg_i = irep.instructions[seg_idx]) && seg_i.op == 'GETMCNST'
+      segments = program.run_of_op(clause_idx + 1, 'GETMCNST')
+      segments.each do |seg_i|
         return nil unless seg_i.reg == cls_reg && seg_i.paren_reg == cls_reg && seg_i.mcnst_name
         cls_name = "#{cls_name}::#{seg_i.mcnst_name}"
-        seg_idx += 1
       end
+      seg_idx = clause_idx + 1 + segments.size
 
       rescue_i, jmpif_i, jmp_i = irep.instructions[seg_idx, 3]
       return nil unless rescue_i && jmpif_i && jmp_i

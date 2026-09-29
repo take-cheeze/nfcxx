@@ -53,6 +53,17 @@ module BytecodeIR
       end
     end
 
+    # Source instructions of the unbroken run of +op+ starting at linear
+    # +index+ (empty when the instruction there is not +op+ or is missing).
+    def run_of_op(index, op)
+      run = []
+      while (instruction = @instructions[index]) && instruction.op == op
+        run << instruction.source
+        index += 1
+      end
+      run
+    end
+
     # Follow MOVE copies of +reg+ backward from +from_index+ (inclusive) to the
     # register the value was copied out of. The writer is the first non-MOVE
     # instruction writing that register, nil when none precedes (a value that
