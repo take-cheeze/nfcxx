@@ -239,13 +239,7 @@ class CodeGen
       # shape assumptions are wrong. compile_method and emit_rescue_try_body each
       # claim only top-level regions of their scope (top_level_rescue_regions);
       # nested ones become further-nested try-body functions.
-      next if irep.catch_handlers.any? do |o|
-        next false if o == ch
-
-        overlaps = o.begin_addr <= e && b <= o.end_addr
-        nested = (o.begin_addr <= b && e <= o.end_addr) || (b <= o.begin_addr && o.end_addr <= e)
-        overlaps && !nested
-      end
+      next if program.handler_partially_overlaps?(ch)
 
       except_i = program.insn_at_addr(t)
       next unless except_i && except_i.op == 'EXCEPT'
