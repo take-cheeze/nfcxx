@@ -1222,11 +1222,7 @@ class CodeGen
     lexical_self_ivar_accessor = nil
     if target.nil? && self_implicit
       module_target = lexical_module_function_self_target(name, owner_def)
-      if module_target&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(module_target.irep)) &&
-         compiles_clean?(module_target.irep) &&
-         n.between?(mandatory_arity(@ireps.fetch(module_target.irep)),
-                    mandatory_arity(@ireps.fetch(module_target.irep)) + optional_arity(@ireps.fetch(module_target.irep))) &&
-         native_arg_types(module_target, n).compact.empty?
+      if direct_callable?(module_target, n) && native_arg_types(module_target, n).compact.empty?
         target = module_target
         module_function_self = true
       end
@@ -1235,10 +1231,7 @@ class CodeGen
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
       if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
-        if lex_candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(lex_candidate.irep)) &&
-           compiles_clean?(lex_candidate.irep) &&
-           n.between?(mandatory_arity(@ireps.fetch(lex_candidate.irep)),
-                      mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
+        if direct_callable?(lex_candidate, n)
           target = lex_candidate
           lexical_self = true
         elsif lex_candidate&.irep && @registry[name].one? { |md| md.owner == lex_candidate.owner } &&
@@ -1315,10 +1308,7 @@ class CodeGen
       end
       if exact_class
         exact_target = closed_world_exact_target(name, exact_class)
-        if exact_target&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(exact_target.irep)) &&
-           compiles_clean?(exact_target.irep) &&
-           n.between?(mandatory_arity(@ireps.fetch(exact_target.irep)),
-                      mandatory_arity(@ireps.fetch(exact_target.irep)) + optional_arity(@ireps.fetch(exact_target.irep)))
+        if direct_callable?(exact_target, n)
           target = exact_target
           typed = true
           exact_class_dispatch = true
@@ -1340,10 +1330,7 @@ class CodeGen
       candidate = core_targets(@registry[name])&.find { |md| md.owner == known_class }
       # The same two guards as MONO: the class-exact candidate must compile clean
       # and fit the call's argument count.
-      if candidate&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(candidate.irep)) &&
-         compiles_clean?(candidate.irep) &&
-         n.between?(mandatory_arity(@ireps.fetch(candidate.irep)),
-                    mandatory_arity(@ireps.fetch(candidate.irep)) + optional_arity(@ireps.fetch(candidate.irep)))
+      if direct_callable?(candidate, n)
         target = candidate
         typed = true
         typed_guard_class = known_class
@@ -1360,10 +1347,7 @@ class CodeGen
       end
       if target.nil? && !ivar_accessor_target
         inherited = closed_world_inherited_target(name, known_class)
-        if inherited&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(inherited.irep)) &&
-           compiles_clean?(inherited.irep) &&
-           n.between?(mandatory_arity(@ireps.fetch(inherited.irep)),
-                      mandatory_arity(@ireps.fetch(inherited.irep)) + optional_arity(@ireps.fetch(inherited.irep)))
+        if direct_callable?(inherited, n)
           target = inherited
           typed = true
           inherited_typed = true
@@ -1730,6 +1714,20 @@ class CodeGen
     return [nil, true] if superclass.nil?
 
     closed_world_lookup_target(name, superclass, active, self_call: self_call)
+  end
+
+  # DIRECT_CALLABLE: can a call with `n` positional arguments reach `definition`'s compiled `_impl` as a
+  # plain direct call? It needs a bytecode body whose signature the direct convention carries, that
+  # compiles without an `#error`, and an argument count in [mandatory, mandatory + optional]. The
+  # order (signature, compile, count) is part of the contract: compiles_clean? compiles the callee, so
+  # it must not run for a signature the direct call cannot express. Natives and attr_* (no irep) are not
+  # callable this way; the ivar-accessor and native-direct paths have their own gates.
+  def direct_callable?(definition, n)
+    return false unless definition&.irep
+
+    irep = @ireps.fetch(definition.irep)
+    pure_mandatory_or_optional_arity?(irep) && compiles_clean?(definition.irep) &&
+      n.between?(mandatory_arity(irep), mandatory_arity(irep) + optional_arity(irep))
   end
 
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
