@@ -9,6 +9,7 @@ require 'shellwords'
 require 'tmpdir'
 require_relative 'compiled_gems'
 require_relative 'nomethod_reviewed'
+require_relative 'proven_miss_reviewed'
 
 module NomethodReviewedProbe
   # The wio build's gem list: build_config.rb's rpg_maker_gems for
@@ -61,6 +62,11 @@ module NomethodReviewedProbe
     runs(root, mrbc, hot: false).fetch(:full)
   end
 
+  # Every PROVEN_MISS site (ADR 0275) of the same full runs: {gem:, key:}.
+  def full_proven_miss_sites(root, mrbc)
+    runs(root, mrbc, hot: false).fetch(:proven_miss)
+  end
+
   # The full runs (listing kept past violations), plus with `hot:` the real
   # build's hot-only runs held to NOMETHOD_REVIEWED: {full: sites, hot: {gem =>
   # [status, stderr]}}. Runs in parallel; each is one single-threaded Ruby.
@@ -79,7 +85,10 @@ module NomethodReviewedProbe
 
       NomethodReviewed.parse_listing(err).map { |s| s.merge(gem: gem_name) }
     end
+    proven = results.select { |_, kind, _, _| kind == :full }.flat_map do |gem_name, _, err, _|
+      ProvenMiss.parse_listing(err).map { |s| s.merge(gem: gem_name) }
+    end
     hot_runs = results.select { |_, kind, _, _| kind == :hot }.to_h { |gem_name, _, err, status| [gem_name, [status, err]] }
-    { full: full, hot: hot_runs }
+    { full: full, proven_miss: proven, hot: hot_runs }
   end
 end
