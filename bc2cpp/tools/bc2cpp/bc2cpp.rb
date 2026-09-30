@@ -36,6 +36,7 @@ require_relative 'annotation_contradictions'
 require_relative 'class_arg_types'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
+require_relative 'proven_miss_reviewed'
 require_relative 'hot_methods'
 require_relative 'core_methods'
 
@@ -68,6 +69,8 @@ require_relative 'codegen_numeric_returns'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
+require_relative 'codegen_step_loop'
+require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
@@ -76,6 +79,7 @@ require_relative 'codegen_send'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_block_core_direct'
+require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -1084,9 +1088,16 @@ if $PROGRAM_NAME == __FILE__
     struct bc2cpp_ensure_guard {
       mrb_state* M;
       F fn;
+      mrb_int depth = M->c->ci - M->c->cibase;
       ~bc2cpp_ensure_guard() noexcept(false) {
         struct RObject* saved = M->exc;
         M->exc = NULL;
+        /* OP_EXCEPT's `$!`. The frame depth is the guard's own: a C++ unwind
+           has not popped the raiser's callinfo yet. */
+        if (saved && saved->tt == MRB_TT_EXCEPTION) {
+          M->errinfo = saved;
+          M->errinfo_ci_depth = depth;
+        }
         /* M->exc is itself a GC root (src/gc.c's own mrb_gc_mark of it in
            both mark phases). Clearing it just above therefore removed the
            ONLY root keeping the in-flight exception alive -- the object
@@ -1141,6 +1152,28 @@ if $PROGRAM_NAME == __FILE__
       }
     };
   ENSURE_GUARD
+  # RESCUE_ERRINFO: OP_EXCEPT's `$!` (mrb->errinfo) for a compiled rescue, and cipop's
+  # scoping of it for a compiled function. A direct `_impl` call pushes no callinfo, so
+  # the scope object stands in for the frame pop that would clear it.
+  puts <<~'ERRINFO'
+    static inline void bc2cpp_set_errinfo(mrb_state* M, mrb_value exc) {
+      if (mrb_type(exc) == MRB_TT_EXCEPTION) {
+        M->errinfo = mrb_obj_ptr(exc);
+        M->errinfo_ci_depth = M->c->ci - M->c->cibase;
+      }
+    }
+    struct Bc2cppErrinfoScope {
+      mrb_state* M;
+      struct RObject* prev;
+      mrb_int prev_depth;
+      explicit Bc2cppErrinfoScope(mrb_state* m) : M(m), prev(m->errinfo), prev_depth(m->errinfo_ci_depth) {}
+      ~Bc2cppErrinfoScope() {
+        if (M->errinfo != prev || M->errinfo_ci_depth != prev_depth) M->errinfo = NULL;
+      }
+      Bc2cppErrinfoScope(const Bc2cppErrinfoScope&) = delete;
+      Bc2cppErrinfoScope& operator=(const Bc2cppErrinfoScope&) = delete;
+    };
+  ERRINFO
   # GETIDX's String arm calls mrb_str_aref (src/string.c, non-static), declared
   # only in mruby/internal.h, which has no C-linkage guard; including it would
   # give it C++ linkage and fail to link. So it is declared `extern "C"` here
@@ -1186,7 +1219,8 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
-  print gen.emit_instance_tt_setup
+  print gen.emit_resumable_helpers(compiled)
+  print gen.emit_instance_tt_setup(compiled)
   print gen.emit_core_guard_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
@@ -1217,6 +1251,21 @@ if $PROGRAM_NAME == __FILE__
             "#{violations.join("\n  ")}\n" \
             'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
             'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp_nomethod_reviewed_update.rb).'
+      abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
+
+      warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
+    end
+    # PROVEN_MISS_REVIEWED (docs/adr/0275): a send to a proven class that nothing answers.
+    miss_sites = ProvenMiss.sites(compiled)
+    warn "== closed world proven-class miss sites: #{miss_sites.size} =="
+    miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
+    warn ''
+    miss_violations = ProvenMiss.violations(miss_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
+    unless miss_violations.empty?
+      msg = "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) (docs/adr/0275):\n  " \
+            "#{miss_violations.join("\n  ")}\n" \
+            'Read each site: fix the missing method, or list defensive code in ' \
+            'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp_proven_miss_update.rb).'
       abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
 
       warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")

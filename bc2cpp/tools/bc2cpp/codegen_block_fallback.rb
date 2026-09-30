@@ -149,8 +149,9 @@ class CodeGen
   # path (fiber_switch/fiber_resume) breaks with a VM-invisible native frame
   # between the fiber entry and the yield ("resuming dead fiber"; see
   # tools/optcarrot_probe/README.md). A method that calls Fiber.yield directly
-  # gets an early `#error` stub. Transitive callers are handled by
-  # compute_fiber_unsafe_methods.
+  # gets an early `#error` stub, unless it is a Fiber.new root that compiles as a
+  # resumable step function (RESUMABLE_ROOTS, ADR 0273). Transitive callers are handled
+  # by compute_fiber_unsafe_methods.
   def calls_fiber_yield?(irep)
     BytecodeIR.for(irep).each_with_op('SEND', 'SEND0') do |insn, idx|
       name = insn.sym
@@ -170,7 +171,9 @@ class CodeGen
   # (Optcarrot::PPU#main_loop, which calls the yielding methods, still crashed).
   # This takes the transitive closure from every `Fiber.new { }` block body over
   # self-implicit sends (SSEND/SSEND0/SSENDB) to methods of the SAME owner, and
-  # refuses every method reached.
+  # refuses the methods reached that can themselves reach Fiber.yield
+  # (compute_fiber_yield_names): only those have a yield above their native frame.
+  # The others return before any fiber switch and compile like any method.
   # Same-owner self-sends only: every real call in a fiber body here has that
   # shape. An explicit-receiver call leaving the class is a known gap (none
   # exists); missing one reproduces the loud FiberError, never a silent wrong
@@ -178,12 +181,14 @@ class CodeGen
   def compute_fiber_unsafe_methods
     by_owner_name = {} # [owner, name] -> irep label, registered methods only
     irep_owner = {} # irep label -> owner, registered methods AND every block nested inside them
+    fiber_defs = {} # irep label -> MethodDef, registered methods only
     @registry.each_value do |defs|
       defs.each do |d|
         next unless d.irep
 
         by_owner_name[[d.owner, d.name]] = d.irep
         irep_owner[d.irep] = d.owner
+        fiber_defs[d.irep] = d
       end
     end
 
@@ -223,7 +228,21 @@ class CodeGen
       end
     end
 
-    unsafe = Set.new
+    # RESUMABLE_ROOTS (ADR 0273): the methods a Fiber.new block body calls directly on self.
+    # A root that qualifies is compiled as a resumable step function instead of refused.
+    @fiber_roots = Set.new
+    seeds.each do |label|
+      seed_irep = @ireps[label]
+      owner = irep_owner[label]
+      next unless seed_irep && owner
+
+      fiber_block_root_targets(seed_irep).each do |name|
+        root = by_owner_name[[owner, name]]
+        @fiber_roots << root if root
+      end
+    end
+
+    reachable = Set.new
     # SEEDS_MULTIPLE_OWNERS_SUPPORT: resolve each seed's owner separately.
     queue = seeds.flat_map do |label|
       seed_irep = @ireps[label]
@@ -236,7 +255,7 @@ class CodeGen
     end
     until queue.empty?
       label = queue.shift
-      next unless unsafe.add?(label)
+      next unless reachable.add?(label)
 
       irep = @ireps[label]
       next unless irep
@@ -249,7 +268,15 @@ class CodeGen
         queue << target if target
       end
     end
-    @fiber_unsafe_methods = unsafe
+    # Only a reachable method that can itself reach Fiber.yield has a yield above its native
+    # frame; the others return before any switch and compile like any method. The yield names
+    # are by name over every receiver, so an explicit-receiver call cannot hide one
+    # (compute_fiber_yield_names).
+    @fiber_yield_names = seeds.empty? ? Set.new : compute_fiber_yield_names(seeds.to_set)
+    @fiber_unsafe_methods = reachable.select do |label|
+      d = fiber_defs[label]
+      d.nil? || @fiber_yield_names.include?(d.name)
+    end.to_set
   end
 
   # Every self-send name reachable from `irep`, including inside nested block
@@ -597,6 +624,7 @@ class CodeGen
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
            "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}" \
            "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+    out << errinfo_scope_line(block_irep)
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     out << body

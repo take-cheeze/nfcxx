@@ -16,6 +16,8 @@ class CodeGen
     # CORE_BLOCK_GUARD: only the registered entry carries the guard, so no direct `_impl`
     # call may reach a guarded body.
     return false if self.class.core_guarded&.include?(label)
+    # RESUMABLE_ENTRY: `_impl` is the entry that hands over to the driver, not the body.
+    return false if resumable_method?(label)
     return @clean_cache[label] if @clean_cache.key?(label)
     return false if @probing.include?(label)
 
@@ -36,7 +38,7 @@ class CodeGen
     :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
-    :@compiling_core => false
+    :@compiling_core => false, :@resumable => nil
   }.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's
@@ -210,7 +212,7 @@ class CodeGen
     CPP
   end
 
-  def emit_instance_tt_setup
+  def emit_instance_tt_setup(compiled = [])
     out = +"// INSTANCE_TT_SETUP -- see bc2cpp.rb's own emit_instance_tt_setup comment.\n"
     out << "static void bc2cpp_set_instance_tts(mrb_state* M) {\n"
     out << "  static const char* const paths[][6] = {\n"
@@ -236,6 +238,8 @@ class CodeGen
         if (found && mrb_type(scope) == MRB_TT_CLASS) MRB_SET_INSTANCE_TT(mrb_class_ptr(scope), MRB_TT_DATA);
       }
     CPP
+    # RESUMABLE_ENTRY: define the frame class and the driver where no fiber is running.
+    out << "  bc2cpp_resumable_init(M);\n" if compiled.any? { |m| m[:resumable] }
     out << "}\n"
     out
   end

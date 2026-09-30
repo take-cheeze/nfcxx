@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'prism'
 require_relative 'source_text'
 
 # Step 5b: method names defined or called outside the compiled bytecode.
@@ -63,10 +64,58 @@ end
 # <=>` / `def []=` are seen).
 FOREIGN_METHOD_NAME_RE = %r{[\w+\-*/<>=!?\[\]&|^~%@]+}
 
+# Every name the syntax tree defines, in any position (`private def x`, after `;`,
+# `def self.x`, `alias`, `attr_*`, `alias_method :x`, `define_method(:x)`): a line-start
+# regex misses all the modifier and one-line forms (ADR 0278).
+class ForeignDefNames < Prism::Visitor
+  INSTALLERS = %w[alias_method define_method attr attr_reader attr_writer attr_accessor].freeze
+
+  attr_reader :names
+
+  def initialize
+    super
+    @names = Set.new
+  end
+
+  def visit_def_node(node)
+    @names << node.name.to_s
+    super
+  end
+
+  def visit_alias_method_node(node)
+    literal(node.new_name)
+    super
+  end
+
+  def visit_call_node(node)
+    if INSTALLERS.include?(node.name.to_s)
+      accessor = node.name.to_s.start_with?('attr')
+      (node.arguments&.arguments || []).each { |arg| literal(arg, accessor) }
+    end
+    super
+  end
+
+  private
+
+  def literal(node, accessor = false)
+    return unless node.is_a?(Prism::SymbolNode) || node.is_a?(Prism::StringNode)
+
+    @names << node.unescaped
+    @names << "#{node.unescaped}=" if accessor
+  end
+end
+
 def foreign_method_names(paths)
   names = Set.new
   Array(paths).each do |path|
     src = SourceText.read(path, 'foreign_method_names') or next
+    parsed = Prism.parse(src, filepath: path)
+    # The tree still recovers around an error and the regexes below cover the rest, but a
+    # file that does not parse must not go unnoticed.
+    warn "[bc2cpp] foreign_method_names: #{path} does not parse: #{parsed.errors.first.message}" unless parsed.errors.empty?
+    collector = ForeignDefNames.new
+    parsed.value.accept(collector)
+    names.merge(collector.names)
     # `def name`, `def self.name`, `def obj.name`.
     src.scan(/^\s*def\s+(?:[A-Za-z_][A-Za-z_0-9]*\.)?(#{FOREIGN_METHOD_NAME_RE})/o) do
       names << Regexp.last_match(1)

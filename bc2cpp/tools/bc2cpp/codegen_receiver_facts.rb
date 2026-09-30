@@ -110,6 +110,76 @@ class CodeGen
     end
   end
 
+  # PROVEN_MISS (ADR 0275): [kind, class] when this send's receiver class is proven by an
+  # unguarded fact (never a ClassLayout, annotation or element hint), else nil.
+  def proven_receiver_class(irep, idx, reg, cw_site, exact_class, constant_owner, self_implicit)
+    return [:fresh_new, exact_class] if exact_class
+    return [:constant_object, constant_owner] if constant_owner
+
+    self_owner = cw_site && cw_site[:self_owner]
+    return [:lexical_self, self_owner] if self_owner.is_a?(String) && !self_owner.end_with?('.singleton')
+
+    # An implicit-self send has no receiver register to read: R[a] still holds an old value.
+    return nil if self_implicit
+
+    literal = irep.walk_dominating_writers(idx - 1, reg, use: idx, follow_moves: true) do |insn|
+      { 'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String' }[insn.op]
+    end
+    [:literal, literal] if literal
+  end
+
+  # The class of a receiver that is the dominating result of a literal `Klass.new`, or nil.
+  # The trace may start from a hint; exact_new_receiver_class keeps only the `new` proof.
+  def exact_new_class_at(irep, idx, reg, owner_def)
+    enter = irep.enter
+    known = trace_new_target(irep, idx, reg, owner_def && @class_layout[owner_def.owner],
+                             enter ? enter.enter_fields.first : 0, owner_def && @class_annotations[irep.label]&.args,
+                             owner: owner_def&.owner, class_layout: @class_layout, registry: @registry,
+                             container_constants: @container_constants, element_annotations: @element_annotations,
+                             known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+                             method_return_class: ->(method_name) { class_return_for_dispatch(method_name) },
+                             guarded: true)
+    known && exact_new_receiver_class(irep, idx, reg, owner: owner_def&.owner, expected_class: known)
+  end
+
+  # Ireps whose exceptions an enclosing `rescue` may catch, a NoMethodError included: the
+  # irep with the handler and every block irep nested under it.
+  def rescue_covered_labels
+    @rescue_covered_labels ||= begin
+      covered = Set.new
+      mark = lambda do |label, inside|
+        irep = @ireps[label]
+        inside ||= !(irep.catch_handlers || []).empty?
+        covered << label if inside
+        (irep.reps || []).each { |child| mark.call(child, inside) }
+      end
+      @ireps.each_key { |label| mark.call(label, false) }
+      covered
+    end
+  end
+
+  # The marker line for a send that provably raises NoMethodError (whether it is emitted
+  # as dispatch or as a direct call into an unrelated owner), or ''. A `rescue` around the
+  # site, a respond_to?-style probe of the name and a method_missing class in the chain
+  # (ClosedWorld#proven_miss?) make the send guarded, so it is not a miss.
+  def proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                         trace_reg_offset, exact_class: nil)
+    site_idx = idx || trace_idx
+    return '' unless @closed_world && irep && site_idx && !rescue_covered_labels.include?(irep.label)
+
+    reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    exact_class ||= exact_new_class_at(irep, site_idx, reg, owner_def) unless self_implicit
+    constant_owner = nil
+    if !self_implicit && idx && %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[idx].op)
+      constant_owner = constant_object_owner(irep, idx, reg, owner_def&.owner)
+    end
+    kind, klass = proven_receiver_class(irep, site_idx, reg, closed_world_site(recv, irep, idx, owner_def),
+                                        exact_class, constant_owner, self_implicit)
+    return '' unless klass && @closed_world.proven_miss?(name, klass, symbol_installed_names, kind)
+
+    "  #{ProvenMiss.marker(name, kind, klass)}\n"
+  end
+
   # Diagnostic-only: identify the nearest producer behind an unresolved
   # receiver, following register copies without changing the type proof.
   def receiver_trace_origin(irep, idx, dest_reg)
