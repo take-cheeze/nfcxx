@@ -1000,6 +1000,18 @@ if $PROGRAM_NAME == __FILE__
       const struct RProc* p = M->c->ci->proc;
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
     }
+    // SETUPVAR writes into the enclosing compiled frame, which the GC cannot see; the arena that
+    // held the value is restored when the block returns (ADR 0272). Roots stay per slot address.
+    static inline void bc2cpp_upvar_root(mrb_state* M, mrb_value* slot, mrb_value v) {
+      if (mrb_immediate_p(v)) return;
+      mrb_sym id = mrb_intern_lit(M, "$__bc2cpp_upvar_roots");
+      mrb_value roots = mrb_gv_get(M, id);
+      if (!mrb_hash_p(roots)) {
+        roots = mrb_hash_new(M);
+        mrb_gv_set(M, id, roots);
+      }
+      mrb_hash_set(M, roots, mrb_int_value(M, (mrb_int)((uintptr_t)slot >> 2)), v);
+    }
     // mrb_yield_argv, minus the frame when `blk` is a non-strict block with a direct entry. The
     // arena is restored and the result protected as mrb_yield_with_class does.
     static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {

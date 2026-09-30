@@ -28,7 +28,7 @@ class CodeGen
         if insn.op == 'GETUPVAR'
           "  r#{insn.reg} = *#{vname};\n"
         else
-          "  *#{vname} = r#{insn.reg};\n"
+          "  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
