@@ -84,13 +84,15 @@ module BytecodeIR
 
     # [source, target] instruction-index pairs of the given jump ops located
     # before +limit+, or nil when a jump's target address is not an instruction.
+    # A JMPUW named in +ops+ is an edge too (branch_target): jump_target would
+    # be nil for it and read as an unresolved jump.
     def jump_edges_before(limit, ops)
       edges = []
       @instructions.each do |instruction|
         break if instruction.index >= limit
         next unless ops.include?(instruction.op)
 
-        target = @address_to_index[instruction.source.jump_target]
+        target = @address_to_index[instruction.source.branch_target]
         return nil unless target
 
         edges << [instruction.index, target]
@@ -166,6 +168,15 @@ module BytecodeIR
         end
         next_index = instruction.index + 1
         targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH.include?(instruction.op)
+        # OP_ENTER lands on one of the `o + 1` JMP table entries that follow it (vm.c
+        # `ci->pc += o*3` and its argc form), so each entry has ENTER as a predecessor.
+        if instruction.op == 'ENTER'
+          optional = instruction.source.enter_fields[1].to_i
+          (1..optional).each do |k|
+            table = instruction.index + 1 + k
+            targets << table if table < @instructions.length
+          end
+        end
         instruction.successors = targets.uniq.freeze
       end
     end

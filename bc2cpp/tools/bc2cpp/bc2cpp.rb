@@ -36,35 +36,47 @@ require_relative 'annotation_contradictions'
 require_relative 'class_arg_types'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
+require_relative 'proven_miss_reviewed'
 require_relative 'hot_methods'
 require_relative 'core_methods'
 
 require_relative 'integer_constants'
 require_relative 'native_construct_schema'
+require_relative 'dynamic_names'
 require_relative 'ivar_layout'
 require_relative 'annotations'
 require_relative 'class_layout'
 require_relative 'element_layouts'
+require_relative 'record_hash'
 require_relative 'diagnostics'
 require_relative 'dispatch_targets'
 require_relative 'irep_arity'
 require_relative 'codegen'
 require_relative 'codegen_ivar_poly'
 require_relative 'codegen_native_send'
+require_relative 'codegen_exact_receiver'
 require_relative 'codegen_native_direct'
+require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_native_core_direct'
 require_relative 'codegen_core_methods'
 require_relative 'codegen_receiver_facts'
+require_relative 'codegen_record_hash'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
 require_relative 'codegen_rescue'
 require_relative 'codegen_loop_regions'
 require_relative 'codegen_fixnum_proof'
+require_relative 'codegen_numeric_proof'
+require_relative 'codegen_numeric_args'
+require_relative 'codegen_numeric_ivars'
+require_relative 'codegen_numeric_returns'
+require_relative 'codegen_numeric_consts'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
 require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
+require_relative 'codegen_yield_free'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
@@ -72,6 +84,7 @@ require_relative 'codegen_send'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_block_core_direct'
+require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -345,6 +358,32 @@ if $PROGRAM_NAME == __FILE__
   profile_phase.call('global facts + annotations')
   warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
+
+  # RECORD_HASH_PROOF (docs/adr/0285): needs the same outside-source picture as
+  # IntegerConstants, and a closed world (no open-world caller can see every writer).
+  # The trusted tier classifies a writer with the tripwire-backed Array scan
+  # the block recognizers already rely on; the default consumer tier is strict.
+  record_hash = profile_call.call('RecordHash.analyze') do
+    RecordHash.analyze(ireps, registry, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
+                                        closed_world: closed_world,
+                                        outside_tokens: (outside_world_tokens(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs),
+                                        trusted: ->(irep, idx, reg) { proven_array_source_scan(irep, idx, reg.to_s, registry) == 'Array' })
+  end
+  RecordHash.table = record_hash.table
+  RecordHash.readers = record_hash.readers
+  warn '== record hash slots (RECORD_HASH_PROOF) =='
+  warn "  global refusal: #{record_hash.global_refusal}" if record_hash.global_refusal
+  record_hash.slots.sort.each do |name, slot|
+    arrays = slot.keys.count { |_, t| t[:strict] == Set['Array'] }
+    trusted = slot.keys.count { |_, t| t[:trusted] == Set['Array'] }
+    warn "  RECORD_HASH  @#{name}  (#{slot.literals} literal#{'s' unless slot.literals == 1}, #{slot.keys.size} keys, " \
+         "#{slot.reads} reads, #{slot.stores} stores; non-nil Array keys: #{arrays} strict, #{trusted} trusted)"
+    next unless ENV['BC2CPP_RECORD_HASH_KEYS'] == '1'
+
+    slot.keys.sort.each { |key, t| warn "    :#{key} strict=#{t[:strict].map(&:to_s).sort.join('|')} trusted=#{t[:trusted].map(&:to_s).sort.join('|')}" }
+  end
+  record_hash.refused.sort.each { |name, why| warn "  RECORD_HASH_REFUSED  @#{name}  (#{why})" }
+  warn ''
 
   # FIXNUM_NIL_DECLARATION: a reviewed "Owner#@ivar" list for the nullable
   # embedding (NILABLE_EMBED_SUPPORT). Opt-in per field, never inferred --
@@ -692,6 +731,14 @@ if $PROGRAM_NAME == __FILE__
     if native_paths && foreign_ruby_srcs
       outside_world_tokens(native_paths + foreign_ruby_srcs)
     end
+  # NUMERIC_OPERAND_PROOF: the same two outside inputs, as ivar names they spell
+  # and operators they define on NilClass; nil when either input is absent.
+  outside_ivars = (outside_ivar_names(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs)
+  nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
+  outside_consts = if native_paths && foreign_ruby_srcs
+                     IntegerConstants.native_defined_const_names(native_paths) |
+                       IntegerConstants.foreign_const_names(foreign_ruby_srcs)
+                   end
   warn ''
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
@@ -758,7 +805,15 @@ if $PROGRAM_NAME == __FILE__
                     included_modules, prepended_modules, unknown_mixins,
                     native_expression_devirt: native_expression_devirt,
                     native_registered_expressions: native_registered_expressions,
-                    closed_world: closed_world)
+                    closed_world: closed_world, outside_ivar_names: outside_ivars,
+                    nil_operator_names: nil_operators, outside_const_names: outside_consts)
+  warn '== typed slots demoted to boxed slots (foreign writers, ADR 0279) =='
+  if gen.typed_demotions.empty?
+    warn '  (none)'
+  else
+    gen.typed_demotions.sort.each { |(owner, name), why| warn "  BOXED  #{owner}#@#{name}  (#{why})" }
+  end
+  warn ''
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
@@ -811,6 +866,11 @@ if $PROGRAM_NAME == __FILE__
       d ? "  ARG #{d.owner}##{d.name} arg#{k}" : "  ARG <irep #{label}> arg#{k}"
     end.sort.each { |l| warn l }
   end
+  warn ''
+  # NUMERIC_OPERAND_PROOF (ADR 0276): the whole-program facts behind the
+  # dynamic-send-free arithmetic/compare arms.
+  warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
+  gen.numeric_facts_report.each { |l| warn l }
   warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).
@@ -989,11 +1049,11 @@ if $PROGRAM_NAME == __FILE__
     // BLOCK_DIRECT_ENTRY (ADR 0271): a compiled block without break or return has a direct entry
     // taking its captured environment and arguments. Its proc is a cfunc proc over this one
     // function (inline: one address in every translation unit of the link) with the entry as the
-    // last env slot, so a yield from compiled code calls the entry without a VM frame, and
+    // second-to-last env slot, so a yield from compiled code calls the entry without a VM frame, and
     // anything else (an interpreted iterator, a Fiber) reaches it through the VM like any cfunc.
     typedef mrb_value (*Bc2cppBlockEntry)(mrb_state*, struct REnv*, bool, mrb_int, const mrb_value*);
     static inline Bc2cppBlockEntry bc2cpp_block_entry(struct REnv* e) {
-      return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 1])));
+      return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 2])));
     }
     inline mrb_value bc2cpp_block_thunk(mrb_state* M, mrb_value) {
       mrb_value* argv;
@@ -1001,6 +1061,16 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       const struct RProc* p = M->c->ci->proc;
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
+    }
+    // YIELD_REACH (ADR 0283): the last env slot of a direct-entry block says its body, and everything
+    // it can call, provably never suspends a Fiber. A compiled core iterator running such a block
+    // may then stay compiled under a Fiber (its frame cannot be crossed by a yield).
+    static inline bool bc2cpp_block_yield_free(mrb_value blk) {
+      if (mrb_type(blk) != MRB_TT_PROC) return false;
+      const struct RProc* p = mrb_proc_ptr(blk);
+      if (!MRB_PROC_CFUNC_P(p) || MRB_PROC_CFUNC(p) != bc2cpp_block_thunk) return false;
+      const struct REnv* e = MRB_PROC_ENV(p);
+      return mrb_integer(e->stack[MRB_ENV_LEN(e) - 1]) != 0;
     }
     // SETUPVAR writes into the enclosing compiled frame, which the GC cannot see; the arena that
     // held the value is restored when the block returns (ADR 0272). Roots stay per slot address.
@@ -1070,9 +1140,16 @@ if $PROGRAM_NAME == __FILE__
     struct bc2cpp_ensure_guard {
       mrb_state* M;
       F fn;
+      mrb_int depth = M->c->ci - M->c->cibase;
       ~bc2cpp_ensure_guard() noexcept(false) {
         struct RObject* saved = M->exc;
         M->exc = NULL;
+        /* OP_EXCEPT's `$!`. The frame depth is the guard's own: a C++ unwind
+           has not popped the raiser's callinfo yet. */
+        if (saved && saved->tt == MRB_TT_EXCEPTION) {
+          M->errinfo = saved;
+          M->errinfo_ci_depth = depth;
+        }
         /* M->exc is itself a GC root (src/gc.c's own mrb_gc_mark of it in
            both mark phases). Clearing it just above therefore removed the
            ONLY root keeping the in-flight exception alive -- the object
@@ -1127,6 +1204,28 @@ if $PROGRAM_NAME == __FILE__
       }
     };
   ENSURE_GUARD
+  # RESCUE_ERRINFO: OP_EXCEPT's `$!` (mrb->errinfo) for a compiled rescue, and cipop's
+  # scoping of it for a compiled function. A direct `_impl` call pushes no callinfo, so
+  # the scope object stands in for the frame pop that would clear it.
+  puts <<~'ERRINFO'
+    static inline void bc2cpp_set_errinfo(mrb_state* M, mrb_value exc) {
+      if (mrb_type(exc) == MRB_TT_EXCEPTION) {
+        M->errinfo = mrb_obj_ptr(exc);
+        M->errinfo_ci_depth = M->c->ci - M->c->cibase;
+      }
+    }
+    struct Bc2cppErrinfoScope {
+      mrb_state* M;
+      struct RObject* prev;
+      mrb_int prev_depth;
+      explicit Bc2cppErrinfoScope(mrb_state* m) : M(m), prev(m->errinfo), prev_depth(m->errinfo_ci_depth) {}
+      ~Bc2cppErrinfoScope() {
+        if (M->errinfo != prev || M->errinfo_ci_depth != prev_depth) M->errinfo = NULL;
+      }
+      Bc2cppErrinfoScope(const Bc2cppErrinfoScope&) = delete;
+      Bc2cppErrinfoScope& operator=(const Bc2cppErrinfoScope&) = delete;
+    };
+  ERRINFO
   # GETIDX's String arm calls mrb_str_aref (src/string.c, non-static), declared
   # only in mruby/internal.h, which has no C-linkage guard; including it would
   # give it C++ linkage and fail to link. So it is declared `extern "C"` here
@@ -1208,6 +1307,21 @@ if $PROGRAM_NAME == __FILE__
 
       warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
     end
+    # PROVEN_MISS_REVIEWED (docs/adr/0275): a send to a proven class that nothing answers.
+    miss_sites = ProvenMiss.sites(compiled)
+    warn "== closed world proven-class miss sites: #{miss_sites.size} =="
+    miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
+    warn ''
+    miss_violations = ProvenMiss.violations(miss_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
+    unless miss_violations.empty?
+      msg = "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) (docs/adr/0275):\n  " \
+            "#{miss_violations.join("\n  ")}\n" \
+            'Read each site: fix the missing method, or list defensive code in ' \
+            'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp_proven_miss_update.rb).'
+      abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
+
+      warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
+    end
   end
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
@@ -1256,6 +1370,21 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn "== core-source compiled entry points (#{core_entries.size}) =="
   core_entries.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+
+  # YIELD_REACH (ADR 0283): what the yield-free proof gave this build.
+  yf = gen.yield_free_report(compiled.filter_map { |m| m[:label] })
+  warn ''
+  warn '== yield-free proof (YIELD_REACH) =='
+  warn "  world: #{yf[:sound] ? 'closed, proof in force' : 'not a closed world, nothing is proved yield-free'}" \
+       "#{yf[:seal] == true ? '' : " (Enumerator machinery not sealed: #{yf[:seal].inspect})"}"
+  warn "  compiled methods: #{yf[:methods]}: #{yf[:methods_free]} yield-free, #{yf[:methods] - yf[:methods_free]} may yield " \
+       "(#{yf[:methods_body_free]} have a body that cannot suspend a Fiber given a yield-free block)"
+  warn "  compiled blocks with a direct entry: #{yf[:blocks]}: #{yf[:blocks_free]} yield-free, #{yf[:blocks] - yf[:blocks_free]} may yield"
+  warn "  block-taking core methods with a run-time guard: #{yf[:guarded_core]}, #{yf[:guarded_core_relaxable]} stay compiled under a " \
+       'Fiber when the block is yield-free'
+  warn "  BLOCK_CORE_DIRECT sites: #{yf[:arm_sites]}, #{yf[:arm_sites_free]} with a yield-free block; " \
+       "arms: #{yf[:arms]}, #{yf[:arms_unguarded]} with the root-context test dropped"
+  warn "  methods refused as crossable under a Fiber (FIBER_REACHABILITY_UNSAFE): #{yf[:unsafe_methods]}"
 
   warn ''
   warn '== classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA) =='

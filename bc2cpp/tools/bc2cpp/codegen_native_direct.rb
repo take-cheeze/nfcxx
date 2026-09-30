@@ -111,6 +111,10 @@ module NativeDirectFallback
 
     @native_construct_used.merge(arms.keys)
     generic = dynamic_dispatch_line(d, recv, name, argv)
+    site = exact_core_site_for(recv, name)
+    exact = site && arms.slice(site[:klass])
+    return native_direct_exact_line(d, recv, name, argv, exact.first, generic) if exact && !exact.empty?
+
     branches = arms.group_by { |_, spec| spec }.map do |(function, kinds), owners|
       check = owners.map { |owner, _| "bc2cpp_native_class == rgss::#{CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.fetch(owner)}()" }
                     .join(' || ')
@@ -137,6 +141,24 @@ module NativeDirectFallback
       "    #{tail.chomp}\n" \
       "  }\n" \
       "  }\n"
+  end
+
+  # EXACT_CORE_RECEIVER (ADR 0280): the receiver is a fresh `Klass.new`, so the class test is a
+  # fact. An integer argument that is not one still takes the ordinary send.
+  def native_direct_exact_line(d, recv, name, argv, (owner, (function, kinds)), generic)
+    args = kinds.each_index.map do |i|
+      case kinds[i]
+      when :int then "mrb_integer(#{argv[i]})"
+      when :bool then "mrb_test(#{argv[i]})"
+      else argv[i]
+      end
+    end
+    call = "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});"
+    guards = kinds.each_index.select { |i| kinds[i] == :int }.map { |i| "mrb_integer_p(#{argv[i]})" }
+    note = "// NATIVE_DIRECT_EXACT :#{name} -- fresh #{owner} (unguarded proof) calls the shared native entry point\n"
+    return "#{note}  #{call}\n" if guards.empty?
+
+    "#{note}  if (#{guards.join(' && ')}) {\n    #{call}\n  } else {\n    #{generic.chomp}\n  }\n"
   end
 end
 

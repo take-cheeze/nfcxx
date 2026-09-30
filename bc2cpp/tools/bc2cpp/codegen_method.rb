@@ -199,6 +199,7 @@ class CodeGen
       step_body_start = out.length
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
+      out << errinfo_scope_line(irep)
       # EXCEPTION_RETURN_SUPPORT: wrap the body in one try/catch only when a
       # BLOCK_FALLBACK region can throw bc2cpp_method_return. Cheap under zero-cost
       # exceptions but not free, hence the gate. Statements inside the `try` behave
@@ -670,7 +671,13 @@ class CodeGen
     return nil unless d.core && self.class.core_guarded&.include?(label)
 
     index = (@core_guard_index[label] ||= @core_guard_index.size)
-    condition = 'M->c != M->root_c'
+    # YIELD_REACH (ADR 0283): a body that cannot suspend a Fiber on its own stays compiled under one
+    # while the block it runs is provably yield-free too (checked per call, by its env flag).
+    condition = if core_body_relaxable?(label)
+                  '(M->c != M->root_c && !bc2cpp_block_yield_free(bc2cpp_entry_block(M)))'
+                else
+                  'M->c != M->root_c'
+                end
     condition += ' || !bc2cpp_core_each_is_builtin(M, self)' if d.owner == 'Enumerable'
     { index: index,
       prologue: "  if (mrb_unlikely(#{condition})) return bc2cpp_core_interpreted(M, self, #{index});\n" }

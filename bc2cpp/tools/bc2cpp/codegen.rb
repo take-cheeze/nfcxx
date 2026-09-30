@@ -46,7 +46,7 @@ class CodeGen
   # emit_ivar_accessor_pair). `check` uses mrb_fixnum_p, so a heap Bignum can
   # never be truncated into the field's mrb_int.
   TYPE_OPS = {
-    fixnum: { box: 'mrb_fixnum_value', check: 'mrb_integer_p', unbox: 'mrb_integer', err: 'Integer' },
+    fixnum: { box: 'mrb_fixnum_value', check: 'mrb_fixnum_p', unbox: 'mrb_fixnum', err: 'Integer' },
     symbol: { box: 'mrb_symbol_value', check: 'mrb_symbol_p', unbox: 'mrb_symbol', err: 'Symbol' },
     bool: { box: 'mrb_bool_value', check: 'bc2cpp_bool_p', unbox: 'mrb_true_p', err: 'boolean' },
     fixnum_nil: { box: 'bc2cpp_fixnum_or_nil_box', check: 'bc2cpp_fixnum_or_nil_p',
@@ -65,8 +65,15 @@ class CodeGen
                  foreign_method_names = nil, outside_tokens = nil,
                   native_name_sources = nil, included_modules = {}, prepended_modules = {},
                   unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {},
-                  native_registered_expressions: {}, closed_world: nil)
+                  native_registered_expressions: {}, closed_world: nil, outside_ivar_names: nil,
+                  nil_operator_names: nil, outside_const_names: nil)
     @ireps = ireps
+    # NUMERIC_OPERAND_PROOF (ADR 0276): ivar names spelled by sources outside the
+    # closed world, and operators they define on NilClass. nil means the scan did
+    # not run; the proofs that need them then prove nothing.
+    @outside_ivar_names = outside_ivar_names
+    @nil_operator_names = nil_operator_names
+    @outside_const_names = outside_const_names
     # CLOSED_WORLD: a ClosedWorld (closed_world.rb) when BC2CPP_CLOSED_WORLD=1.
     @closed_world = closed_world
     # ENTRY_ARG_CALLSITE_PROOF: identifier tokens from NATIVE_SRCS and
@@ -139,6 +146,7 @@ class CodeGen
     # FIBER_REACHABILITY_UNSAFE_SUPPORT: must exist before drop_unsafe_embeddings,
     # which reaches compile_method through compiles_clean?. See
     # compute_fiber_unsafe_methods.
+    @yield_reach = build_yield_reach
     compute_fiber_unsafe_methods
     # SUPER_SUPPORT: resolve_superclass_ref's table (name, :none, or absent); read
     # by compile_insn's SUPER case.
@@ -183,6 +191,7 @@ class CodeGen
     # struct-aware accessor (emit_ivar_accessor_pair) replaces the native attr_*
     # one. Filled by drop_unsafe_embeddings, read by emit_synthesized_accessors.
     @synthesize_accessor_for = Set.new
+    @typed_demotions = {}
     # Temporarily the RAW layout: drop_unsafe_embeddings calls compiles_clean? ->
     # compile_method, which reads @ivar_layout[d.owner] (nil would raise).
     # Replaced by the filtered result right after.
@@ -243,6 +252,10 @@ class CodeGen
       compute_fixnum_return_names
       break if @entry_arg_fixnum == before_args && @fixnum_return_names == before_rets
     end
+    # NUMERIC_OPERAND_PROOF reads the sets above; drop flows memoized by the
+    # compile probes that ran with weaker facts.
+    reset_numeric_flow!
+    compute_numeric_facts
   end
 
   def const_lookup_helper_used?
@@ -266,7 +279,9 @@ class CodeGen
   # callers still need pure arity because they call `_impl` directly, bypassing
   # the entry wrapper.)
   def drop_unsafe_embeddings(ivar_layout)
-    demote_typed_ivars_maybe_unassigned(demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout)))
+    demote_typed_ivars_foreign_writable(
+      demote_typed_ivars_maybe_unassigned(demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout)))
+    )
   end
 
   # INIT_ASSIGNED (ADR 0261): the slots whose zeroed state reads as a value.
@@ -284,6 +299,95 @@ class CodeGen
         [name, assigned ? type : :value]
       end]
     end
+  end
+
+  # ADR 0279: a typed slot only holds its type; the runtime (rdata_ivar_store) and the
+  # synthesized attr_writer raise TypeError for anything else, where the interpreter would
+  # store the value. So an ivar keeps a typed slot only when every writer is one the compiler
+  # sees and has typed: no reflection or foreign source spells it, no computed
+  # instance_variable_set can reach it, and an attr_writer for it is only called with
+  # values of its type. Needs the closed-world scans; without them (unit fixtures) the layout
+  # is the caller's declaration, as before.
+  def demote_typed_ivars_foreign_writable(layout)
+    return layout if @outside_ivar_names.nil? || @closed_world.nil?
+
+    typed = layout.flat_map { |owner, ivars| ivars.filter_map { |name, type| [owner, name] if type != :value } }
+    return layout if typed.empty?
+
+    names, reflective = foreign_written_ivar_facts
+    typed.each do |owner, name|
+      reason = if reflective then "computed write: #{reflective}"
+               elsif names.include?(name) then 'name spelled outside the typed analysis'
+               else setter_foreign_value_reason(owner, name, layout[owner][name])
+               end
+      @typed_demotions[[owner, name]] = reason if reason
+    end
+    return layout if @typed_demotions.empty?
+
+    layout.to_h do |owner, ivars|
+      [owner, ivars.to_h { |name, type| [name, @typed_demotions.key?([owner, name]) ? :value : type] }]
+    end
+  end
+
+  # [owner, ivar] => why its typed slot became a boxed one (demote_typed_ivars_foreign_writable),
+  # for the diagnostic.
+  def typed_demotions
+    @typed_demotions
+  end
+
+  # [names, reflective]: ivar names some source outside the typed analysis writes or reads by
+  # name (native/foreign source, a '@name' Symbol/String literal, a block run under another
+  # self), and the reason when a write by computed name could reach any ivar (nil otherwise).
+  # Marshal.load of bytes outside the closed world stays outside the model, as in ADR 0276.
+  def foreign_written_ivar_facts
+    @foreign_written_ivar_facts ||= begin
+      saved = @numeric_ivar_disabled
+      @numeric_ivar_disabled = nil
+      names = numeric_ivar_poisoned_names
+      rebound = numeric_self_rebound_ireps
+      reflective = @numeric_ivar_disabled
+      @numeric_ivar_disabled = saved
+      rebound.each do |label|
+        @ireps[label].instructions.each { |i| names << i.ivar if %w[GETIV SETIV].include?(i.op) && i.ivar }
+      end
+      [names, reflective]
+    end
+  end
+
+  IVAR_SETTER_SLOT_TYPES = { fixnum: %i[fixnum], symbol: %i[symbol], bool: %i[bool],
+                             fixnum_nil: %i[fixnum fixnum_nil nil_literal] }.freeze
+
+  # Why an attr_writer (or a setter reached by a computed name) may hand @name of +owner+ a value
+  # its slot type cannot hold, or nil when every call of `name=` is a visible site whose
+  # argument traces to the slot's type.
+  def setter_foreign_value_reason(owner, name, type)
+    setter = "#{name}="
+    writers = @registry.fetch(setter, []).select do |d|
+      d.irep.nil? && d.kind == :ivar_accessor && embed_family_owner?(d.owner, owner)
+    end
+    return nil if writers.empty?
+    return 'attr_writer, no outside-source scan' unless @foreign_method_names && @outside_tokens
+    return 'attr_writer reachable by a computed name' if numeric_dynamically_named?(setter)
+    return 'attr_writer, name spelled by an outside source' if @outside_tokens.include?(name) || @foreign_method_names.include?(setter)
+
+    sites, poisoned = entry_arg_call_index
+    return 'attr_writer, symbol literal of the setter' if poisoned.include?(setter)
+
+    here = sites[setter]
+    return 'attr_writer without a visible call site' if here.empty? || here.any? { |(_irep, _idx, _recv, argc, _own)| argc != 1 }
+
+    allowed = IVAR_SETTER_SLOT_TYPES.fetch(type)
+    untyped = here.any? do |(irep, idx, recv, _argc, _own)|
+      !allowed.include?(IvarLayout.trace_type(irep, idx, (recv + 1).to_s, {}, nil, 0, nil, nil, @registry,
+                                              @integer_constants, nil))
+    end
+    'attr_writer called with an untyped value' if untyped
+  end
+
+  def embed_family_owner?(candidate, owner)
+    candidate == owner || Array(@included_modules[owner]).include?(candidate) ||
+      Array(@prepended_modules[owner]).include?(candidate) ||
+      strict_subclass?(candidate, owner) || strict_subclass?(owner, candidate)
   end
 
   def select_embeddings(ivar_layout)

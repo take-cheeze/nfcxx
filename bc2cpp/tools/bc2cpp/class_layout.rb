@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'record_hash'
+
 # Steps 6f-bis and 6g: proven fresh Arrays and ivar classes.
 
 # ---------------------------------------------------------------------------
@@ -93,7 +95,10 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
   # register actually written (`regs[a] = regs[b]`, vm.c OP_MOVE); skipping it would
   # let the scan reach an older, overwritten result on a reused register.
   # JOIN_DOMINANCE: the source must be the only value the register can hold.
-  irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |pin|
+  irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, skip_ops: %w[BLOCK], follow_moves: true) do |pin, pin_idx|
+    # RECORD_HASH_PROOF (ADR 0285): `@slot[:key]` on a record Hash whose key only ever holds an Array.
+    next 'Array' if pin.op == 'GETIDX' && RecordHash.array_read?(irep, pin_idx, tier: RecordHash.consumer_tier)
+
     next nil unless %w[SEND SSEND SENDB SSENDB SEND0 SSEND0].include?(pin.op)
 
     called = pin.sym

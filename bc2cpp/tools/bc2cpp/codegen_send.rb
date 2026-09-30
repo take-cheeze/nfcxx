@@ -1109,7 +1109,7 @@ class CodeGen
             }
           }
           if (bc2cpp_shift_fast) {
-            r#{d} = mrb_fixnum_value(bc2cpp_shift_result);
+            r#{d} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
           } else {
             #{fallback.chomp}
           }
@@ -1242,6 +1242,12 @@ class CodeGen
         end
       end
     end
+    # NATIVE_EXACT_DIRECT (ADR 0281): `self` is exactly the enclosing class's instance or
+    # class/module object, and the name is one of its RGSS natives.
+    if target.nil? && self_implicit && lexical_self_ivar_accessor.nil? && @closed_world
+      native_self_code = native_exact_direct_code(name, d, recv, argv, native_exact_self_owner(owner_def))
+      return native_self_code if native_self_code
+    end
     # CHA_SELF: a call on self whose every possible receiver (the enclosing class
     # and its descendants) resolves the name to known definitions; see cha_self_plan.
     if target.nil? && lexical_self_ivar_accessor.nil? && @closed_world
@@ -1261,6 +1267,7 @@ class CodeGen
     via_element = false
     inherited_typed = false
     exact_class_dispatch = false
+    exact_via_record = false
     typed_guard_class = nil
     ivar_accessor_target = nil
     known_class = nil
@@ -1283,6 +1290,12 @@ class CodeGen
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)
+      # RECORD_HASH_PROOF (ADR 0285): a literal-key read of a record Hash whose key only ever holds
+      # fresh instances of one class is as exact as a `Klass.new` in this method.
+      if exact_class.nil? && (record_class = record_hash_exact_class(irep, proof_idx, proof_reg))
+        known_class = exact_class = record_class
+        exact_via_record = true
+      end
       if exact_class
         exact_target = closed_world_exact_target(name, exact_class)
         if exact_target&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(exact_target.irep)) &&
@@ -1360,8 +1373,9 @@ class CodeGen
       call_argv, native_note = direct_call_args(target, argv, impl)
       if typed
         if exact_class_dispatch
+          origin = exact_via_record ? 'record key holds only fresh' : 'fresh'
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
-                 "(fresh #{typed_guard_class}.new; stable class constant and standard constructor), " \
+                 "(#{origin} #{typed_guard_class}.new; stable class constant and standard constructor), " \
                  "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
@@ -1429,6 +1443,15 @@ class CodeGen
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 
+        # RECORD_HASH_PROOF (ADR 0285): the receiver is a record key that only holds fresh instances of
+        # target.owner, so the guard can only be true.
+        if irep && (idx || trace_idx) &&
+           record_hash_exact_class(irep, idx || trace_idx, unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)) == target.owner
+          note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} (record key holds only " \
+                 "fresh #{target.owner}.new), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
         check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
@@ -1445,7 +1468,11 @@ class CodeGen
         # guard.
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
-        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        # PROVEN_MISS: MONO trusts the name alone, so a receiver proven to be another class
+        # would run this owner's body instead of raising.
+        miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                                  trace_reg_offset)
+        "#{note}#{miss}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     elsif lexical_self_ivar_accessor
       # LEXICAL_SELF_IVAR_ACCESSOR codegen: no guard, no fallback; IVAR_ACCESS picks
@@ -1512,6 +1539,24 @@ class CodeGen
                                                owner_def&.owner)
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
+
+        native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton")
+        return native_code if native_code
+      end
+
+      if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+        kernel_code = kernel_direct_code(name, d, recv, argv)
+        return kernel_code if kernel_code
+      end
+
+      if name == 'call' && !self_implicit && call_receiver.nil?
+        call_code = block_param_call_code(irep, new_proof_idx, new_proof_reg, d, recv, argv)
+        return call_code if call_code
+      end
+
+      if !self_implicit && call_receiver.nil? && @native_name_sources
+        rest_code = rest_param_native_code(irep, new_proof_idx, new_proof_reg, name, d, recv, argv)
+        return rest_code if rest_code
       end
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
@@ -1553,7 +1598,12 @@ class CodeGen
                         end
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      "#{diag}#{note}  #{native_direct_dynamic_line(d, recv, name, argv)}"
+      exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+      exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
+                                                             exact_class, recv: recv, name: name)
+      miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                                trace_reg_offset, exact_class: exact_class)
+      "#{diag}#{note}#{miss}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
     end
   end
 

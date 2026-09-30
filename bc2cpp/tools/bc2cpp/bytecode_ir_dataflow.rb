@@ -61,12 +61,21 @@ module BytecodeIR
     # refuses. Exception flow is not modelled: a query that touches a handler
     # target or a protected instruction refuses (RESCUE_SUPPORT compiles that
     # range apart, with re-initialised registers).
-    def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES)
+    #
+    # +through_handlers+ (RECORD_HASH_PROOF, ADR 0285) crosses handler edges
+    # instead of refusing at them: an instruction that can raise into a handler
+    # contributes both the value it leaves (a completed write) and the value
+    # it was entered with, since the raise happens before or after the write.
+    def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
+                             through_handlers: false)
       preds = instruction_predecessors
       return nil unless preds
       return nil unless index.between?(0, @instructions.length - 1)
 
-      guarded = dataflow_handler_addrs
+      all_preds = through_handlers ? instruction_predecessors(include_handlers: true) : nil
+      return nil if through_handlers && !all_preds
+
+      guarded = through_handlers ? Set.new : dataflow_handler_addrs
       seen = Set.new
       defs = Set.new
       work = [[index, reg.to_s]]
@@ -77,7 +86,7 @@ module BytecodeIR
         return nil if opaque_regs&.include?(r)
         return nil if guarded.include?(@instructions[i].addr)
 
-        ps = preds[i]
+        ps = all_preds ? all_preds[i] : preds[i]
         return nil if ps.empty?
 
         ps.each do |p|
@@ -89,6 +98,8 @@ module BytecodeIR
           insn = @instructions[p].source
           return nil if guarded.include?(insn.addr)
 
+          # A handler-only edge may fire before the write completes.
+          work << [p, r] if all_preds && !preds[i].include?(p)
           case dataflow_effect(insn, r)
           when :refuse then return nil
           when :pass then work << [p, r]

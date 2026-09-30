@@ -15,11 +15,13 @@ module ArgShapeCalls
 
   # Names that read the calling frame's state and that compiled code does not
   # model: a compiled callee that calls one sees the caller's frame, not its own.
-  # `block_given?` is modelled (BLOCK_SEMANTICS, ADR 0266): it reads the
-  # `bc2cpp_blk` parameter, see compile_block_given.
-  FRAME_READING_NAMES = %w[iterator? binding].freeze
+  # `block_given?` and its alias `iterator?` (one cfunc in kernel.c) are modelled
+  # (BLOCK_SEMANTICS, ADR 0266): they read the `bc2cpp_blk` parameter, see
+  # compile_block_given.
+  BLOCK_GIVEN_NAMES = %w[block_given? iterator?].freeze
+  FRAME_READING_NAMES = %w[binding].freeze
 
-  # `block_given?` as a bare self call, at any block depth. Over-approximates
+  # `block_given?` / `iterator?` as a bare self call, at any block depth. Over-approximates
   # for a nested def, which only costs an unused block parameter.
   def block_given_reads?(irep, seen = Set.new.compare_by_identity)
     return false unless seen.add?(irep)
@@ -32,16 +34,18 @@ module ArgShapeCalls
   end
 
   def calls_block_given?(irep)
-    BytecodeIR.for(irep).instructions_with_op('SSEND0').any? { |insn| insn.sym == 'block_given?' }
+    BytecodeIR.for(irep).instructions_with_op('SSEND0').any? { |insn| BLOCK_GIVEN_NAMES.include?(insn.sym) }
   end
 
   # `block_given?` is this frame's block being non-nil. A frame whose wrapper
   # does not extract the block (yields_block_param?, a declared `&blk`) cannot
   # answer it, so the method stays interpreted rather than answer false.
-  def compile_block_given(insn, reg_offset)
+  # `insn` is already shifted into an inlined block body's register window, so
+  # its register is used as is (a second `+ reg_offset` names an undeclared r<N>).
+  def compile_block_given(insn)
     return "  #error unhandled block_given? -- this frame's block is not extracted (BLOCK_SEMANTICS)\n" unless @blk_param_name
 
-    "  r#{insn.reg.to_i + reg_offset} = mrb_bool_value(!mrb_nil_p(#{@blk_param_name}));\n"
+    "  r#{insn.reg} = mrb_bool_value(!mrb_nil_p(#{@blk_param_name}));\n"
   end
 
   # The wrapper of this method extracts `bc2cpp_blk` (see compile_method).
@@ -49,10 +53,10 @@ module ArgShapeCalls
     pure_mandatory_arity?(irep) || block_param_arity?(irep)
   end
 
-  # Only mruby's own native `block_given?` exists: a Ruby definition of the
-  # name would be an ordinary method call.
+  # Only mruby's own native `block_given?` and `iterator?` exist: a Ruby definition of
+  # either name would be an ordinary method call.
   def block_given_modelled?
-    (@registry['block_given?'] || []).all? { |definition| definition.irep.nil? }
+    BLOCK_GIVEN_NAMES.all? { |name| (@registry[name] || []).all? { |definition| definition.irep.nil? } }
   end
 
   # A block-taking callee is only sound as a frame-less direct call when its
@@ -231,14 +235,15 @@ module ArgShapeCalls
   # A nested compile (compiles_clean? -> compile_method) is a different call
   # site: it must not inherit this one's block.
   def with_fresh_method_state
-    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono]
+    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region]
     @call_block_expr = nil
     @call_block_direct_calls = 0
     @extended_callee_shapes = false
     @no_by_name_mono = false
+    @call_block_region = nil
     super
   ensure
-    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono = saved if saved
+    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region = saved if saved
   end
 
   # ARG_SHAPES_BLOCK: the SENDB `region` (a literal block already built into
@@ -271,14 +276,15 @@ module ArgShapeCalls
 
     insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
                           "R#{region[:dest_reg]} :#{region[:name]} n=#{region[:n]}")
-    saved = [@call_block_expr, @call_block_direct_calls]
+    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region]
     @call_block_expr = block_expr
     @call_block_direct_calls = 0
+    @call_block_region = region
     begin
       code = compile_send(insn, self_implicit: region[:self_implicit], irep: irep, idx: idx, owner_def: owner_def)
       accepted = direct_block_code?(code, @call_block_direct_calls)
     ensure
-      @call_block_expr, @call_block_direct_calls = saved
+      @call_block_expr, @call_block_direct_calls, @call_block_region = saved
     end
     accepted ? code : nil
   end
