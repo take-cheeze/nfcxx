@@ -4,6 +4,7 @@ require 'set'
 require_relative 'compiled_gems'
 require_relative 'touch_scan'
 require_relative 'foreign_definers'
+require_relative 'core_defs'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -166,6 +167,15 @@ class ClosedWorld
     return false if @global_refusal || @unknown_defs.include?(name)
 
     !ForeignDefiners.defines?(@ruby_paths, owner, name)
+  end
+
+  # BLOCK_CORE_DIRECT (ADR 0270): like core_native_arm_safe?, for a method that mruby's own
+  # Ruby defines on `owner`. That Ruby is what the arm calls, so only an outside definer that
+  # is not core source (an engine-side reopening, a dynamic installer) can replace it.
+  def core_ruby_arm_safe?(name, owner)
+    return false if @global_refusal || @unknown_defs.include?(name)
+
+    !ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
   end
 
   # `name` is spelled only by the given native files, and no outside Ruby.
