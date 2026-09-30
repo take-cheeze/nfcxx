@@ -15,10 +15,8 @@ class CodeGen
   #      entry: the C++ parameter is an mrb_int (fixnum_proof_entry_arg?).
   #   3. A GETIV of an ivar embedded as :fixnum: an mrb_int struct field whose
   #      every write is guarded by mrb_integer_p.
-  #   4. ADD/SUB/MUL/ADDI/SUBI whose operands prove (bounded by
-  #      FIXNUM_PROOF_MAX_DEPTH): such an op is emitted as a bare
-  #      mrb_fixnum_value(a <op> b). DIV is not a source: mrb_div_int_value's
-  #      result type is not audited.
+  #   4. (retired, ADR 0279: an ADD/SUB/MUL/ADDI/SUBI result can leave the Fixnum range,
+  #      so it is an Integer -- see NumericFlow -- not a proven Fixnum.)
   #   5. GETCONST/GETMCNST of an IntegerConstants name.
   #   (6. FIXNUM_RETURN_PROOF and 7. ENTRY_ARG_CALLSITE_PROOF, below.)
   # MOVE chains are followed (`regs[a] = regs[b]`).
@@ -375,12 +373,6 @@ class CodeGen
     when 'GETIV'
       ivar = insn.ivar
       !ivar.nil? && embed_type(owner_def.owner, ivar) == :fixnum
-    when 'ADD', 'SUB', 'MUL'
-      s = insn.paren_reg
-      !s.nil? && proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1) &&
-        proven_fixnum_operand?(irep, j, s, owner_def, depth + 1)
-    when 'ADDI', 'SUBI'
-      proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1)
     when 'GETCONST'
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.
@@ -568,9 +560,11 @@ class CodeGen
   #   - No Ruby runs that the compiler cannot see: mrb_load_string/file/irep/
   #     nstring are not called by mruby-rgss/rpg2k/lcf native code, so all Ruby
   #     is closed-world mrblib (parsed here) or foreign mrblib (poisoned).
-  #   - The closed world has no send/__send__/public_send/method(:x)/
-  #     define_method/*_eval; alias_method and `&:sym` materialize as LOADSYM,
-  #     which poisons anyway.
+  #   - A literal `:sym` (send(:x), method(:x), alias_method, `&:sym`) is a LOADSYM,
+  #     which poisons. A name computed from a String or an interpolation is not
+  #     visible that way: numeric_dynamically_named? refuses every name a program
+  #     spells as a string (and the setter `stem=` of one) once any computed-name
+  #     send exists (ADR 0279).
   # So a call into M under name N can only be:
   #   (a) a bytecode SEND-family instruction naming `:N` -- enumerated;
   #   (b) symbol-mediated dispatch -- `:N` in a non-call opcode poisons N;
@@ -605,7 +599,8 @@ class CodeGen
   #   6. pure_mandatory_arity? on M, and 1 <= k <= mand.
   #   7. N is not poisoned: no LOADSYM :N, no other DEF/SDEF/TDEF :N, no
   #      SEND0/SSEND0 :N (a zero-argument call to a mand >= 1 method means this
-  #      model is wrong), no `:N` in any other opcode.
+  #      model is wrong), no `:N` in any other opcode, and N is not a name a
+  #      computed-name send could reach (numeric_dynamically_named?).
   #   8. At least one site exists, and every site is SEND/SENDB/SSEND/SSENDB
   #      with a literal `n=` equal to mand (`n=*` refuses), in an irep
   #      attributable to a known method body.
@@ -743,6 +738,7 @@ class CodeGen
       next unless name =~ /\A[A-Za-z_]/                # rule 4
       next if name == 'initialize'                     # rule 5
       next if poisoned.include?(name)                  # rule 7
+      next if numeric_dynamically_named?(name)         # rule 7b (ADR 0279)
 
       d = defs.first
       next unless d.irep

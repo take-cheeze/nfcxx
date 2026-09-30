@@ -42,6 +42,7 @@ require_relative 'core_methods'
 
 require_relative 'integer_constants'
 require_relative 'native_construct_schema'
+require_relative 'dynamic_names'
 require_relative 'ivar_layout'
 require_relative 'annotations'
 require_relative 'class_layout'
@@ -806,6 +807,13 @@ if $PROGRAM_NAME == __FILE__
                     native_registered_expressions: native_registered_expressions,
                     closed_world: closed_world, outside_ivar_names: outside_ivars,
                     nil_operator_names: nil_operators, outside_const_names: outside_consts)
+  warn '== typed slots demoted to boxed slots (foreign writers, ADR 0279) =='
+  if gen.typed_demotions.empty?
+    warn '  (none)'
+  else
+    gen.typed_demotions.sort.each { |(owner, name), why| warn "  BOXED  #{owner}#@#{name}  (#{why})" }
+  end
+  warn ''
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'

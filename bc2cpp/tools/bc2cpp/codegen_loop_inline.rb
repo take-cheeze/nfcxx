@@ -443,7 +443,7 @@ class CodeGen
 
   # INTERP_UNLOCK: the inlined loop for Range#each (nil if not clean), following
   # mrblib/range.rb's integer fast path:
-  #   - the element is the counter (`mrb_fixnum_value(i)`);
+  #   - the element is the counter, boxed through FIXABLE (a bound past the Fixnum range);
   #   - beg/end/excl are read once (Ranges are frozen by range_initialize);
   #   - `excl ? i < e : i <= e` instead of mrblib's `lim = end + 1`, which
   #     overflows at MRB_INT_MAX;
@@ -473,13 +473,17 @@ class CodeGen
     out << "    mrb_int bc2cpp_range_a_#{addr} = mrb_integer(bc2cpp_range_b_#{addr});\n"
     out << "    mrb_int bc2cpp_range_z_#{addr} = mrb_integer(bc2cpp_range_e_#{addr});\n"
     out << "    mrb_bool bc2cpp_range_x_#{addr} = mrb_range_excl_p(M, #{recv});\n"
+    # The step is at the iteration label, not in the header, so an end at MRB_INT_MAX cannot
+    # wrap; an end between the Fixnum and mrb_int ranges boxes through mrb_int_value (ADR 0279).
     out << "    for (mrb_int bc2cpp_range_i_#{addr} = bc2cpp_range_a_#{addr}; " \
-           "bc2cpp_range_x_#{addr} ? bc2cpp_range_i_#{addr} < bc2cpp_range_z_#{addr} : bc2cpp_range_i_#{addr} <= bc2cpp_range_z_#{addr}; " \
-           "++bc2cpp_range_i_#{addr}) {\n"
+           "bc2cpp_range_x_#{addr} ? bc2cpp_range_i_#{addr} < bc2cpp_range_z_#{addr} : bc2cpp_range_i_#{addr} <= bc2cpp_range_z_#{addr};) {\n"
     out << inline_block_frame(block_irep, offset)
-    out << "      r#{param_reg} = mrb_fixnum_value(bc2cpp_range_i_#{addr});\n"
+    out << "      r#{param_reg} = FIXABLE(bc2cpp_range_i_#{addr}) ? mrb_fixnum_value(bc2cpp_range_i_#{addr}) : " \
+           "mrb_int_value(M, bc2cpp_range_i_#{addr});\n"
     out << body
     out << "      #{iter_label}:;\n"
+    out << "      if (bc2cpp_range_i_#{addr} >= bc2cpp_range_z_#{addr}) break;\n"
+    out << "      ++bc2cpp_range_i_#{addr};\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"

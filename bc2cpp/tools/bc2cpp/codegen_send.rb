@@ -1119,7 +1119,7 @@ class CodeGen
             }
           }
           if (bc2cpp_shift_fast) {
-            r#{d} = mrb_fixnum_value(bc2cpp_shift_result);
+            r#{d} = FIXABLE(bc2cpp_shift_result) ? mrb_fixnum_value(bc2cpp_shift_result) : mrb_int_value(M, bc2cpp_shift_result);
           } else {
             #{fallback.chomp}
           }

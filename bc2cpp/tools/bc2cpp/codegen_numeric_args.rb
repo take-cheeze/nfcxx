@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'dynamic_names'
+
 # CodeGen: NUMERIC_ENTRY_ARG_PROOF (ADR 0276).
 #
 # ENTRY_ARG_CALLSITE_PROOF with class sets instead of "Fixnum". A mandatory
@@ -10,7 +12,7 @@
 # unmodelled class or sits in an irep the flow cannot model.
 class CodeGen
   def setup_numeric_entry_args
-    @entry_cand = entry_arg_candidates.reject { |(label, _k), _| numeric_dynamically_named?(@owner_of[label]&.name) }
+    @entry_cand = entry_arg_candidates
     @entry_arg_numeric = @entry_cand.keys.to_h { |key| [key, 0] }
   end
 
@@ -25,35 +27,12 @@ class CodeGen
   end
 
   # Sends whose method name is computed at run time can reach a candidate the
-  # call-site enumeration never sees. A name built from a Symbol literal is
-  # already poisoned (entry_arg_call_index); this adds names a program spells as
-  # a string, and the setter `stem=` a computed `"#{stem}="` names (the only
-  # composition the closed-world lint baseline contains). Refusing costs a proof.
+  # call-site enumeration never sees (DynamicNames). Refusing costs a proof.
   def numeric_dynamically_named?(name)
     return true unless name
 
-    @numeric_dynamic_names ||= numeric_dynamic_name_universe
+    @numeric_dynamic_names ||= DynamicNames.universe(@ireps)
     @numeric_dynamic_names.include?(name)
-  end
-
-  def numeric_dynamic_name_universe
-    stems = Set.new
-    computed = false
-    @ireps.each_value do |irep|
-      irep.instructions.each_with_index do |insn, idx|
-        stems << insn.sym if insn.op == 'LOADSYM' && insn.sym
-        if insn.op == 'STRING'
-          entry = irep.pool[insn.pool_index.to_i]
-          stems << entry if entry.is_a?(String) && entry.match?(/\A[A-Za-z_]\w*[?!=]?\z/)
-        end
-        next unless insn.op.include?('SEND') && %w[send __send__ public_send].include?(insn.sym)
-
-        literal = insn.plain_fixed_argc? && insn.argc.to_i.positive? &&
-                  irep.walk_writers(idx - 1, (insn.reg.to_i + 1).to_s, follow_moves: true) { |w| w.op == 'LOADSYM' }
-        computed = true unless literal
-      end
-    end
-    computed ? stems | stems.map { |n| "#{n}=" } : stems
   end
 
   # One growth pass; true when a mask grew or a candidate was dropped.

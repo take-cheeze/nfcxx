@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'call_site_index'
+require_relative 'dynamic_names'
 
 # Steps 6c-6f-ter: call-site argument types and `# bc2cpp:` annotations.
 
@@ -15,9 +16,11 @@ class ArgTypes
   def self.analyze(ireps, registry, call_sites: nil)
     call_sites ||= CallSiteIndex.build(ireps)
     types = {}
+    dynamic = DynamicNames.universe(ireps)
 
     registry.each do |name, defs|
       next unless defs.size == 1 # MONO names only -- see this class's own comment.
+      next if dynamic.include?(name) # a computed-name send can pass anything (ADR 0279)
       next unless defs.first.irep # native-only definition -- no bytecode body to walk.
 
       irep = ireps.fetch(defs.first.irep)
