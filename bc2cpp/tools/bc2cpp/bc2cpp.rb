@@ -61,6 +61,11 @@ require_relative 'codegen_method'
 require_relative 'codegen_rescue'
 require_relative 'codegen_loop_regions'
 require_relative 'codegen_fixnum_proof'
+require_relative 'codegen_numeric_proof'
+require_relative 'codegen_numeric_args'
+require_relative 'codegen_numeric_ivars'
+require_relative 'codegen_numeric_returns'
+require_relative 'codegen_numeric_consts'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
@@ -694,6 +699,14 @@ if $PROGRAM_NAME == __FILE__
     if native_paths && foreign_ruby_srcs
       outside_world_tokens(native_paths + foreign_ruby_srcs)
     end
+  # NUMERIC_OPERAND_PROOF: the same two outside inputs, as ivar names they spell
+  # and operators they define on NilClass; nil when either input is absent.
+  outside_ivars = (outside_ivar_names(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs)
+  nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
+  outside_consts = if native_paths && foreign_ruby_srcs
+                     IntegerConstants.native_defined_const_names(native_paths) |
+                       IntegerConstants.foreign_const_names(foreign_ruby_srcs)
+                   end
   warn ''
   # BC2CPP_SELF_REGISTERING: same guard as for the probing CodeGen above.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
@@ -760,7 +773,8 @@ if $PROGRAM_NAME == __FILE__
                     included_modules, prepended_modules, unknown_mixins,
                     native_expression_devirt: native_expression_devirt,
                     native_registered_expressions: native_registered_expressions,
-                    closed_world: closed_world)
+                    closed_world: closed_world, outside_ivar_names: outside_ivars,
+                    nil_operator_names: nil_operators, outside_const_names: outside_consts)
   warn '== methods proven Fixnum-returning (FIXNUM_RETURN_PROOF) =='
   if gen.fixnum_return_names.empty?
     warn '  (none)'
@@ -813,6 +827,11 @@ if $PROGRAM_NAME == __FILE__
       d ? "  ARG #{d.owner}##{d.name} arg#{k}" : "  ARG <irep #{label}> arg#{k}"
     end.sort.each { |l| warn l }
   end
+  warn ''
+  # NUMERIC_OPERAND_PROOF (ADR 0276): the whole-program facts behind the
+  # dynamic-send-free arithmetic/compare arms.
+  warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
+  gen.numeric_facts_report.each { |l| warn l }
   warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).

@@ -351,6 +351,13 @@ class ClosedWorld
     end
   end
 
+  # NUMERIC_RETURN_PROOF: can a call to `name` reach only the definitions the
+  # registry lists? False for a name some native or foreign source defines or
+  # calls a runtime installer with, or whenever a method_missing hook exists.
+  def name_fully_visible?(name)
+    !@global_refusal && @mm_classes.empty? && !@unknown_defs.include?(name) && !@outside_names.include?(name)
+  end
+
   # Inherited dispatch additionally needs every possible method installer for
   # this name to be represented in the registry.
   def inherited_lookup_safe?(name, owner)
