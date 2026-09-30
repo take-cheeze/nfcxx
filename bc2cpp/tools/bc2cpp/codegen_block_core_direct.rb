@@ -64,7 +64,13 @@ module BlockCoreDirectFallback
     arms = exact if exact_class
     branches = arms.map do |arm|
       args, = direct_call_args(arm[:target], argv, arm[:impl])
-      "if (M->c == M->root_c#{exact_class ? '' : " && #{format(arm[:guard], r: recv)}"}) {\n" \
+      # YIELD_REACH (ADR 0283): with a yield-free block and a body that cannot suspend a Fiber on its
+      # own, no yield can cross the callee's frame, so the root-context test is not needed.
+      unguarded = block_core_arm_unguarded?(arm)
+      tests = []
+      tests << 'M->c == M->root_c' unless unguarded
+      tests << format(arm[:guard], r: recv) unless exact_class
+      "if (#{tests.empty? ? 'true' : tests.join(' && ')}) {\n" \
         "    r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});\n" \
         '  } else '
     end.join
@@ -73,6 +79,20 @@ module BlockCoreDirectFallback
       "  #{branches}{\n" \
       "    #{tail.chomp}\n" \
       "  }\n"
+  end
+
+  # Is the site's literal block proved yield-free and the arm's body relaxable? Recorded for the
+  # build-time table (once per site).
+  def block_core_arm_unguarded?(arm)
+    region = @call_block_region
+    block_free = !!(region && region[:direct_entry] && region[:yield_free])
+    unguarded = block_free && core_body_relaxable?(arm[:target].irep)
+    site = (@yf_arm_sites ||= {})[[region && region[:parent_irep]&.label, region && region[:block_addr]]] ||=
+             { block_free: false, arms: Set.new, unguarded: Set.new }
+    site[:block_free] = block_free
+    site[:arms] << arm[:class]
+    site[:unguarded] << arm[:class] if unguarded
+    unguarded
   end
 
   # BC2CPP_BLOCK_CORE_WHY=1 reports, on stderr, why a class gets no arm for a name.

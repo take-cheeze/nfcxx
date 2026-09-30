@@ -146,6 +146,7 @@ class CodeGen
     # FIBER_REACHABILITY_UNSAFE_SUPPORT: must exist before drop_unsafe_embeddings,
     # which reaches compile_method through compiles_clean?. See
     # compute_fiber_unsafe_methods.
+    @yield_reach = build_yield_reach
     compute_fiber_unsafe_methods
     # SUPER_SUPPORT: resolve_superclass_ref's table (name, :none, or absent); read
     # by compile_insn's SUPER case.

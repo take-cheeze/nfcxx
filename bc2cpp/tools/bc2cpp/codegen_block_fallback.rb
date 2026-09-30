@@ -277,6 +277,15 @@ class CodeGen
       d = fiber_defs[label]
       d.nil? || @fiber_yield_names.include?(d.name)
     end.to_set
+    @fiber_unsafe_methods.merge(yield_reach_unsafe_methods(fiber_defs))
+  end
+
+  # YIELD_REACH_UNSAFE_SUPPORT (ADR 0283): every method a Fiber.new body can reach by any call (explicit
+  # receivers, other classes, blocks, dynamic sends resolved by name) whose execution may suspend the
+  # Fiber above its frame. A core iterator with a run-time guard decides per call instead.
+  def yield_reach_unsafe_methods(fiber_defs)
+    guarded = self.class.core_guarded || Set.new
+    @yield_reach.fiber_unsafe(fiber_defs.keys.reject { |label| guarded.include?(label) })
   end
 
   # Every self-send name reachable from `irep`, including inside nested block
@@ -639,6 +648,7 @@ class CodeGen
             (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
     # BLOCK_DIRECT_ENTRY (ADR 0271): the entry replaces the cfunc wrapper for this block.
     region[:direct_entry] = block_direct_entry?(region, kind, exits)
+    region[:yield_free] = region[:direct_entry] && note_block_yield_free(region[:block_irep])
     if region[:direct_entry]
       out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
       return [fn_name, out]
@@ -795,9 +805,10 @@ class CodeGen
   # BLOCK_SEMANTICS: `ret_token` / `brk_token` are the C++ expressions for the
   # method's return token and this site's break token (nil: the body has none).
   # BLOCK_DIRECT_ENTRY (ADR 0271): `direct_entry` names the block's entry function; the proc is
-  # then built over bc2cpp_block_thunk with the entry as the last env slot.
+  # then built over bc2cpp_block_thunk with the entry and the YIELD_FREE flag (ADR 0283) as the two
+  # last env slots.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
-                              ret_token: nil, brk_token: nil, direct_entry: nil)
+                              ret_token: nil, brk_token: nil, direct_entry: nil, yield_free: false)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -820,7 +831,10 @@ class CodeGen
     env_entries << 'bc2cpp_blk' if needs_blk
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
-    env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))" if direct_entry
+    if direct_entry
+      env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))"
+      env_entries << "mrb_int_value(M, #{yield_free ? 1 : 0})"
+    end
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
     out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
            "#{env_entries.size}, bc2cpp_blk_env_#{addr});\n"
@@ -859,7 +873,8 @@ class CodeGen
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
                                               ret_token: ret_token, brk_token: brk_token,
-                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil)
+                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
+                                              yield_free: region[:yield_free])
     # ARG_SHAPES_BLOCK (ADR 0265): a top-level site whose call resolves to compiled code.
     direct = inline_offset.nil? ? compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def) : nil
     out = String.new

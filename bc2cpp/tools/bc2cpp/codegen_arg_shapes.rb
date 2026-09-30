@@ -235,14 +235,15 @@ module ArgShapeCalls
   # A nested compile (compiles_clean? -> compile_method) is a different call
   # site: it must not inherit this one's block.
   def with_fresh_method_state
-    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono]
+    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region]
     @call_block_expr = nil
     @call_block_direct_calls = 0
     @extended_callee_shapes = false
     @no_by_name_mono = false
+    @call_block_region = nil
     super
   ensure
-    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono = saved if saved
+    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region = saved if saved
   end
 
   # ARG_SHAPES_BLOCK: the SENDB `region` (a literal block already built into
@@ -275,14 +276,15 @@ module ArgShapeCalls
 
     insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
                           "R#{region[:dest_reg]} :#{region[:name]} n=#{region[:n]}")
-    saved = [@call_block_expr, @call_block_direct_calls]
+    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region]
     @call_block_expr = block_expr
     @call_block_direct_calls = 0
+    @call_block_region = region
     begin
       code = compile_send(insn, self_implicit: region[:self_implicit], irep: irep, idx: idx, owner_def: owner_def)
       accepted = direct_block_code?(code, @call_block_direct_calls)
     ensure
-      @call_block_expr, @call_block_direct_calls = saved
+      @call_block_expr, @call_block_direct_calls, @call_block_region = saved
     end
     accepted ? code : nil
   end
