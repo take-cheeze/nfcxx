@@ -389,12 +389,14 @@ class CodeGen
     "#{RESUMABLE_HELPERS_CPP.sub('@DRIVER@') { resumable_driver_bytes }}\n"
   end
 
+  # Loaded from inside a running method, so the module and every constant it names are
+  # spelled from the top level: a bare `module` would nest in that method's class.
   RESUMABLE_DRIVER_RB = <<~'RUBY'
-    module Bc2cppResumable
+    module ::Bc2cppResumable
       def drive(&step)
         f = step.call(self, nil, nil)
-        while Bc2cppResumable::Frame === f
-          f = step.call(self, f, Fiber.yield(f.value))
+        while ::Bc2cppResumable::Frame === f
+          f = step.call(self, f, ::Fiber.yield(f.value))
         end
         f
       end
