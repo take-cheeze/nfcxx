@@ -2,6 +2,8 @@
 
 # CodeGen: Fixnum, Array and class return proofs.
 
+require_relative 'define_method_sites'
+
 class CodeGen
   # ---------------------------------------------------------------------------
   # FIXNUM_RETURN_PROOF (proof source 6): bare method names whose
@@ -379,6 +381,8 @@ class CodeGen
           return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(insn.sym)
         when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
+          # DEFINE_METHOD_SITES (ADR 0288): the registry defines this one, so it names nothing unknown.
+          next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
 
           syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
           return @symbol_installed_names = nil unless syms && !syms.empty?
