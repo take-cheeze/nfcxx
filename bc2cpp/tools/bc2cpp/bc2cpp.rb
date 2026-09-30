@@ -1061,9 +1061,16 @@ if $PROGRAM_NAME == __FILE__
     struct bc2cpp_ensure_guard {
       mrb_state* M;
       F fn;
+      mrb_int depth = M->c->ci - M->c->cibase;
       ~bc2cpp_ensure_guard() noexcept(false) {
         struct RObject* saved = M->exc;
         M->exc = NULL;
+        /* OP_EXCEPT's `$!`. The frame depth is the guard's own: a C++ unwind
+           has not popped the raiser's callinfo yet. */
+        if (saved && saved->tt == MRB_TT_EXCEPTION) {
+          M->errinfo = saved;
+          M->errinfo_ci_depth = depth;
+        }
         /* M->exc is itself a GC root (src/gc.c's own mrb_gc_mark of it in
            both mark phases). Clearing it just above therefore removed the
            ONLY root keeping the in-flight exception alive -- the object
@@ -1118,6 +1125,28 @@ if $PROGRAM_NAME == __FILE__
       }
     };
   ENSURE_GUARD
+  # RESCUE_ERRINFO: OP_EXCEPT's `$!` (mrb->errinfo) for a compiled rescue, and cipop's
+  # scoping of it for a compiled function. A direct `_impl` call pushes no callinfo, so
+  # the scope object stands in for the frame pop that would clear it.
+  puts <<~'ERRINFO'
+    static inline void bc2cpp_set_errinfo(mrb_state* M, mrb_value exc) {
+      if (mrb_type(exc) == MRB_TT_EXCEPTION) {
+        M->errinfo = mrb_obj_ptr(exc);
+        M->errinfo_ci_depth = M->c->ci - M->c->cibase;
+      }
+    }
+    struct Bc2cppErrinfoScope {
+      mrb_state* M;
+      struct RObject* prev;
+      mrb_int prev_depth;
+      explicit Bc2cppErrinfoScope(mrb_state* m) : M(m), prev(m->errinfo), prev_depth(m->errinfo_ci_depth) {}
+      ~Bc2cppErrinfoScope() {
+        if (M->errinfo != prev || M->errinfo_ci_depth != prev_depth) M->errinfo = NULL;
+      }
+      Bc2cppErrinfoScope(const Bc2cppErrinfoScope&) = delete;
+      Bc2cppErrinfoScope& operator=(const Bc2cppErrinfoScope&) = delete;
+    };
+  ERRINFO
   # GETIDX's String arm calls mrb_str_aref (src/string.c, non-static), declared
   # only in mruby/internal.h, which has no C-linkage guard; including it would
   # give it C++ linkage and fail to link. So it is declared `extern "C"` here
