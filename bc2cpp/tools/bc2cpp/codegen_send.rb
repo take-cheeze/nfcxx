@@ -1252,6 +1252,12 @@ class CodeGen
         end
       end
     end
+    # NATIVE_EXACT_DIRECT (ADR 0281): `self` is exactly the enclosing class's instance or
+    # class/module object, and the name is one of its RGSS natives.
+    if target.nil? && self_implicit && lexical_self_ivar_accessor.nil? && @closed_world
+      native_self_code = native_exact_direct_code(name, d, recv, argv, native_exact_self_owner(owner_def))
+      return native_self_code if native_self_code
+    end
     # CHA_SELF: a call on self whose every possible receiver (the enclosing class
     # and its descendants) resolves the name to known definitions; see cha_self_plan.
     if target.nil? && lexical_self_ivar_accessor.nil? && @closed_world
@@ -1526,6 +1532,9 @@ class CodeGen
                                                owner_def&.owner)
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
+
+        native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton")
+        return native_code if native_code
       end
 
       if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
@@ -1582,9 +1591,12 @@ class CodeGen
                         end
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
+      exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+      exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
+                                                             exact_class, recv: recv, name: name)
       miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
                                 trace_reg_offset, exact_class: exact_class)
-      "#{diag}#{note}#{miss}  #{native_direct_dynamic_line(d, recv, name, argv)}"
+      "#{diag}#{note}#{miss}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
     end
   end
 

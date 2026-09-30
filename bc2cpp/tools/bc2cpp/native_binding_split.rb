@@ -418,6 +418,8 @@ module NativeBindingSplit
     end
 
     owners_by_file = {}
+    stripped = sources.transform_values { |src| NativeDirect.strip_comments(src.bytes.dup.force_encoding('UTF-8')) }
+    param_owners = NativeDirect.cross_file_param_owners(stripped)
     bindings = table.map do |key, per_config|
       file = key[0]
       source = sources.fetch(file)
@@ -426,7 +428,7 @@ module NativeBindingSplit
         classify_target(reg, source, fdata['functions'], fdata['exports'])
       end
       verdict = merge_verdicts(verdicts)
-      owners = (owners_by_file[file] ||= NativeDirect.class_variables(NativeDirect.strip_comments(source.bytes.dup.force_encoding('UTF-8'))))
+      owners = (owners_by_file[file] ||= NativeDirect.class_variables(stripped.fetch(file), param_owners))
       owner = owners[first_reg['class_expr']]
       owner = "#{owner}.singleton" if owner && first_reg['kind'] != 'method'
       target = first_reg['target']

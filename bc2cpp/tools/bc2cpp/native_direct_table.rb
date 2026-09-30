@@ -12,6 +12,33 @@ module NativeDirect
     "_begin_load" => {
       "RGSS::Bitmap.singleton" => ["bmp_begin_load_direct", []]
     },
+    "_bgm_fade" => {
+      "RGSS::Audio.singleton" => ["bgm_fade_direct", [:int]]
+    },
+    "_bgm_pan" => {
+      "RGSS::Audio.singleton" => ["bgm_pan_direct", [:int]]
+    },
+    "_bgm_pos" => {
+      "RGSS::Audio.singleton" => ["bgm_pos_direct", []]
+    },
+    "_bgm_stop" => {
+      "RGSS::Audio.singleton" => ["bgm_stop_direct", []]
+    },
+    "_bgm_volume" => {
+      "RGSS::Audio.singleton" => ["bgm_volume_direct", [:int]]
+    },
+    "_bgs_fade" => {
+      "RGSS::Audio.singleton" => ["bgs_fade_direct", [:int]]
+    },
+    "_bgs_pos" => {
+      "RGSS::Audio.singleton" => ["bgs_pos_direct", []]
+    },
+    "_bgs_stop" => {
+      "RGSS::Audio.singleton" => ["bgs_stop_direct", []]
+    },
+    "_can_play_mem?" => {
+      "RGSS::Audio.singleton" => ["can_play_mem_direct", []]
+    },
     "_decoder_ran?" => {
       "RGSS::Bitmap.singleton" => ["bmp_decoder_ran_direct", []]
     },
@@ -33,14 +60,29 @@ module NativeDirect
     "_load_error" => {
       "RGSS::Bitmap.singleton" => ["bmp_load_error_direct", []]
     },
+    "_me_fade" => {
+      "RGSS::Audio.singleton" => ["me_fade_direct", [:int]]
+    },
+    "_me_stop" => {
+      "RGSS::Audio.singleton" => ["me_stop_direct", []]
+    },
+    "_midi_available" => {
+      "RGSS::Audio.singleton" => ["midi_available_direct", []]
+    },
     "_push" => {
       "RGSS::Input.singleton" => ["input_push_direct", [:int, :bool]]
+    },
+    "_se_stop" => {
+      "RGSS::Audio.singleton" => ["se_stop_direct", []]
     },
     "_stbi_error" => {
       "RGSS::Bitmap.singleton" => ["bmp_stbi_error_direct", []]
     },
     "_transition_alpha" => {
       "RGSS::Bitmap" => ["bmp_transition_alpha_direct", [:value, :float, :float]]
+    },
+    "_update" => {
+      "RGSS::Audio.singleton" => ["audio_update_direct", []]
     },
     "active=" => {
       "RGSS::Window" => ["window_active_set_direct", [:bool]]
@@ -50,6 +92,9 @@ module NativeDirect
     },
     "angle=" => {
       "RGSS::Sprite" => ["spr_set_angle_direct", [:float]]
+    },
+    "available?" => {
+      "RGSS::Tts.singleton" => ["tts_available_direct", []]
     },
     "back_opacity=" => {
       "RGSS::Window" => ["window_set_back_opacity_direct", [:int]]
@@ -206,8 +251,14 @@ module NativeDirect
       "RGSS::Color" => ["color_red_direct", []],
       "RGSS::Tone" => ["tone_red_direct", []]
     },
+    "speak" => {
+      "RGSS::Tts.singleton" => ["tts_speak_direct", [:cstr]]
+    },
     "src_rect=" => {
       "RGSS::Sprite" => ["spr_set_src_rect_direct", [:value]]
+    },
+    "stop" => {
+      "RGSS::Tts.singleton" => ["tts_stop_direct", []]
     },
     "stretch=" => {
       "RGSS::Window" => ["window_set_stretch_direct", [:bool]]

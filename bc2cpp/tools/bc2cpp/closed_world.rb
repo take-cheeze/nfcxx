@@ -22,6 +22,8 @@ class ClosedWorld
   # Sends that define methods the registry walk may not attribute to an owner.
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
   MIXIN_SENDS = %w[include prepend extend].freeze
+  # Sends that change a method's visibility by name (NATIVE_EXACT_DIRECT).
+  VISIBILITY_SENDS = %w[private public protected private_class_method public_class_method module_function].freeze
   # Sends that rebind a constant a guard chain resolves.
   CONST_REBINDERS = %w[const_set remove_const].freeze
   # Constants whose `.new` makes a class (or members) the registry cannot see.
@@ -41,6 +43,12 @@ class ClosedWorld
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
+  # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
+  # refusal already, see scan_send). ADR 0280.
+  SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
+  # A project native that makes a singleton class by hand.
+  NATIVE_SINGLETON = /\bmrb_singleton_class(?:_ptr|_clone)?\b|\bmrb_define_singleton_method(?:_id)?\b|\bmrb_obj_extend\b/
+  RUBY_SINGLETON = /\b(?:#{SINGLETON_MAKERS.join('|')}|extend)\b|\bclass\s*<<|\bdef\s+(?!self\b)[a-z_]\w*\./
   # PROVEN_MISS (ADR 0275): a name passed to one of these is probed for or looked up
   # by name, so a send of it is guarded, not a bug.
   PROBE_SENDS = %w[respond_to? respond_to_missing? method_defined? public_method_defined?
@@ -69,11 +77,15 @@ class ClosedWorld
     # (TouchScan, ADR 0256).
     @touches = []
     @unknown_defs = Set.new
+    @visibility_names = Set.new
+    @dynamic_visibility = false
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
     @class_constant_names = Set.new
     @deferred_constant_writes = Set.new
     @dynamic_constant_mutation = false
+    @singleton_makers = []
+    @singleton_opens = []
     @outside_constant_writes = Set.new
     @dynamic_subclassed = Set.new
     @probed_names = Set.new
@@ -87,6 +99,7 @@ class ClosedWorld
     build_hierarchy
     build_method_missing
     warn touch_report.join("\n") if ENV['BC2CPP_TOUCH_REPORT'] == '1'
+    warn "== singleton makers ==\n#{singleton_makers.map(&:inspect).join("\n")}" if ENV['BC2CPP_SINGLETON_REPORT'] == '1'
   end
 
   # BC2CPP_TOUCH_REPORT=1: every class the touch analysis makes opaque, the
@@ -202,6 +215,17 @@ class ClosedWorld
     return false if @global_refusal || @unknown_defs.include?(name)
 
     !ForeignDefiners.defines?(@ruby_paths, owner, name)
+  end
+
+  # NATIVE_EXACT_DIRECT (ADR 0281): nothing outside the registry can replace or
+  # hide the RGSS native `name` on the class it is registered for: it is spelled
+  # only by the RGSS sources (so no outside Ruby, no other native), no dynamic
+  # definer or visibility change (private, module_function ...) names it. The
+  # registry-visible definers and installers are checked by the caller.
+  def native_exact_direct_name_safe?(name, path_fragment)
+    return false if @global_refusal || @dynamic_visibility
+
+    !@unknown_defs.include?(name) && !@visibility_names.include?(name) && native_only_in?(name, path_fragment)
   end
 
   # BLOCK_CORE_DIRECT (ADR 0270): like core_native_arm_safe?, for a method that mruby's own
@@ -373,6 +397,13 @@ class ClosedWorld
     @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
+  # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
+  # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
+  # method, opens a singleton class on a non-class object, or creates one from native code.
+  def exact_instances_singleton_free?
+    !@global_refusal && singleton_makers.empty?
+  end
+
   private
 
   def native_arms_lift?(name)
@@ -440,6 +471,7 @@ class ClosedWorld
       text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
       record_native_touches(path, text, defines_class)
       @clone_sent = true if !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING)
+      @singleton_makers << [path, :native] if !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON)
       names.merge(text.scan(C_STRING).flatten) if dynamic
       @outside_names.merge(names)
       names.each { |n| (@outside_name_paths[n] ||= Set.new) << path }
@@ -471,6 +503,7 @@ class ClosedWorld
       text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
       record_ruby_touches(path, text)
       @clone_sent = true if text.match?(/\bclone\b/)
+      @singleton_makers << [path, :ruby] if !CoreDefs.core_source?(path) && text.match?(RUBY_SINGLETON)
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
       @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
@@ -483,9 +516,12 @@ class ClosedWorld
   def scan_closed_world
     registered = Set.new
     @registry.each_value { |defs| defs.each { |d| registered << d.irep if d.irep } }
-    @ireps.each_value do |irep|
+    children = @ireps.values.flat_map(&:reps).compact.to_set
+    @ireps.each do |label, irep|
       insns = irep.instructions
+      own_source = !(children.include?(label) && CoreDefs.core_source?(irep.file))
       insns.each_with_index do |insn, idx|
+        scan_singleton_maker(irep, insns, idx, insn) if own_source
         case insn.op
         when 'TDEF', 'SDEF'
           child = irep.reps[insn.block_index]
@@ -500,6 +536,7 @@ class ClosedWorld
         when 'LOADSYM'
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
+          @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
           @probed_names << sym if insns[idx + 1, 3].any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
@@ -518,9 +555,53 @@ class ClosedWorld
     end
   end
 
+  # -- singleton classes (ADR 0280) --------------------------------------------
+
+  # Judged after the scan: class_constant? needs every SETCONST counted.
+  def singleton_makers
+    @singleton_makers_all ||= @singleton_makers + @singleton_opens.filter_map do |irep, idx, insn|
+      [irep.label, insn.op] unless class_object_register?(irep, idx, insn.reg.to_s)
+    end
+  end
+
+  def scan_singleton_maker(irep, insns, idx, insn)
+    case insn.op
+    when 'SDEF', 'SCLASS'
+      @singleton_opens << [irep, idx, insn]
+    when 'LOADSYM'
+      @singleton_makers << [irep.label, insn.sym_token] if SINGLETON_MAKERS.include?(insn.sym_token)
+    when *SEND_OPS
+      @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
+    end
+  end
+
+  # `reg` holds a class or module object (`self` in a class body, a constant nothing assigns a
+  # value to) or a fresh `Object.new` at `idx`, never an Array/Hash/Range/String.
+  def class_object_register?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg, follow_moves: true) do |writer, i, cur|
+      case writer.op
+      when 'LOADSELF' then @walked.include?(irep.label)
+      when 'GETCONST', 'GETMCNST' then class_constant?(writer.op == 'GETCONST' ? writer.const_name : writer.mcnst_name)
+      when 'SEND0' then writer.sym == 'new' && fresh_object_class?(irep, i, cur)
+      else false
+      end
+    end || false
+  end
+
+  # No SETCONST binds a value to the name, so it can only name a class or module.
+  def class_constant?(name)
+    @constant_write_counts[name].zero?
+  end
+
+  def fresh_object_class?(irep, idx, reg)
+    standard_constructor_lookup? &&
+      irep.constant_path(idx - 1, reg)&.then { |path| path.root == :const && path.name == 'Object' && path.segments.empty? }
+  end
+
   def scan_send(irep, insns, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
+    scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
     @self_rebound = true if SELF_REBINDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
@@ -549,6 +630,32 @@ class ClosedWorld
       @unknown_defs << s
       @unknown_defs << "#{s}="
     end
+  end
+
+  # `private :a, :b` / `private def a`: the names it hides. Any other argument
+  # shape could name anything.
+  def scan_visibility_send(insns, idx, insn)
+    n = insn.op.end_with?('0') ? 0 : insn.argc
+    return if n&.zero?
+
+    syms = n ? preceding_name_args(insns, idx, n) : packed_syms(insns, idx, insn)
+    syms ? @visibility_names.merge(syms) : @dynamic_visibility = true
+  end
+
+  # The n names LOADSYM'd (or `def`ed) right before the send at idx, skipping the
+  # EXT prefix of a wide operand; nil when anything else feeds an argument.
+  def preceding_name_args(insns, idx, n)
+    syms = []
+    (idx - 1).downto(0) do |i|
+      break if syms.size == n
+
+      op = insns[i].op
+      next if op.start_with?('EXT')
+      return nil unless %w[LOADSYM DEF].include?(op)
+
+      syms.unshift(insns[i].sym_token)
+    end
+    syms if syms.size == n
   end
 
   # The n Symbol arguments LOADSYM'd right before the send at idx, or nil.
