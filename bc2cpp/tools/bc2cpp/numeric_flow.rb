@@ -243,7 +243,14 @@ module NumericFlow
 
   def transfer(index, insn, state, ctx)
     op = insn.op
-    return state if NO_WRITE_OPS.include?(op)
+    if NO_WRITE_OPS.include?(op)
+      # SETIDX writes no register but may call a user #[]=.
+      return state unless op == 'SETIDX' && silent_call?(insn, state, ctx)
+
+      out = state.dup
+      refresh_slots(out, ctx)
+      return out
+    end
 
     oracle = ctx[:oracle]
     irep = ctx[:irep]
@@ -279,10 +286,7 @@ module NumericFlow
       # SENDB/SSENDB are excluded: a `break` in the caller's block becomes the result.
       mask = %w[SEND SEND0 SSEND SSEND0].include?(op) ? oracle.send_mask(irep, index, insn, state) : OTHER
       ((a + 1)...nregs).each { |r| out[r] = OTHER }
-      # A callee may store anything its whole-program fact allows, so no register
-      # still mirrors a slot.
-      ctx[:facts].each_with_index { |fact, k| out[nregs + k] |= fact }
-      nregs.times { |r| out[pb + r] = 0 }
+      refresh_slots(out, ctx)
       set.call(a, mask)
       return out
     end
@@ -340,6 +344,40 @@ module NumericFlow
     else
       set.call(a, OTHER)
     end
+    refresh_slots(out, ctx) if silent_call?(insn, state, ctx)
     out
+  end
+
+  # Non-call ops that dispatch to Ruby the flow does not follow, with the same `self`
+  # (ADR 0276 addendum): an operator on a non-number, an index on anything but an exact
+  # Array with an Integer index, interpolation, hash/array splat, range or constant lookup.
+  SILENT_CALL_OPS = Set['ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE', 'GETIDX', 'GETIDX0', 'SETIDX',
+                        'STRCAT', 'HASH', 'HASHADD', 'HASHCAT', 'ARYCAT', 'ARYSPLAT', 'AREF', 'RANGE_INC',
+                        'RANGE_EXC', 'GETCONST', 'GETMCNST'].freeze
+
+  # Judged on the state before the op, whose operands are still intact.
+  def silent_call?(insn, state, ctx)
+    return false unless SILENT_CALL_OPS.include?(insn.op)
+    return false if ctx[:slots].empty?
+
+    a = insn.reg.to_i
+    at = ->(r) { r < ctx[:nregs] ? state[r] : nil }
+    plain = ->(m) { m.is_a?(Integer) && m.positive? && (m & ~NUM).zero? }
+    case insn.op
+    when 'ADD', 'SUB', 'MUL', 'DIV', 'EQ', 'LT', 'LE', 'GT', 'GE'
+      !(plain.call(at.call(a)) && plain.call(at.call(insn.paren_reg.to_i)))
+    when 'GETIDX', 'SETIDX' then !(at.call(a) == ARR && at.call(a + 1) == INT)
+    when 'GETIDX0' then at.call(insn.regs[1].to_i) != ARR
+    when 'STRCAT' then at.call(a + 1) != STR
+    else true
+    end
+  end
+
+  # Every slot may now hold what any callee could have stored, and no register still
+  # mirrors a slot.
+  def refresh_slots(out, ctx)
+    nregs = ctx[:nregs]
+    ctx[:facts].each_with_index { |fact, k| out[nregs + k] |= fact }
+    nregs.times { |r| out[ctx[:prov_base] + r] = 0 }
   end
 end
