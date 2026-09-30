@@ -557,6 +557,15 @@ class ClosedWorld
 
   # Names outside code can call Ruby methods by: native funcall names and every identifier of the
   # foreign Ruby sources, minus the Ruby files the caller analyses itself (`except_files`).
+  # DEFINE_METHOD_SITES (ADR 0288): `define_method` in a class body still reaches mruby's own
+  # Module#define_method, so a recognized site installs exactly the method it spells. Anything
+  # that could rename, wrap or intercept that send withdraws every site.
+  def define_method_sites_trusted?
+    return @define_method_trusted if defined?(@define_method_trusted)
+
+    @define_method_trusted = !@global_refusal && !define_method_intercepted?
+  end
+
   def outside_call_names(except_files)
     names = @native_tokens.dup
     @ruby_tokens.each { |path, toks| names.merge(toks) unless except_files.include?(path) }
@@ -566,6 +575,20 @@ class ClosedWorld
   private
 
   # -- the closed world's own dynamic definitions ------------------------------
+
+  def define_method_intercepted?
+    name = 'define_method'
+    return true if @registry.key?(name) || @unknown_defs.include?(name)
+    return true if @outside_def_names.include?(name) || @outside_ruby_names.include?(name)
+    return true if @outside_name_paths.fetch(name, []).any? { |path| !path.match?(NATIVE_CORE) }
+
+    @ireps.each_value.any? do |irep|
+      irep.instructions.any? do |insn|
+        (%w[ALIAS UNDEF LOADSYM].include?(insn.op) && insn.typed.any? { |operand| operand.value.to_s == name })
+      end
+    end
+  end
+
 
   def scan_closed_world
     registered = Set.new
