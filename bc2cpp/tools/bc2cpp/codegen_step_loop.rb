@@ -62,12 +62,34 @@ class CodeGen
   end
 
   # A C++ `long long` expression for a loop operand, or nil if it is not provably an Integer.
-  def step_loop_operand(irep, region, reg, d)
+  # An Integer that may be a bignum (an arithmetic result, ADR 0279) goes into `guards` when
+  # the caller can test it at run time (STEP_LOOP_GUARD); a nil `guards` refuses it.
+  def step_loop_operand(irep, region, reg, d, guards)
     literal = step_loop_literal(irep, region[:sendb_idx] - 1, reg)
     return "#{literal}LL" if literal
-    return nil unless proven_fixnum_operand?(irep, region[:sendb_idx], reg, d)
 
+    unless proven_fixnum_operand?(irep, region[:sendb_idx], reg, d)
+      return nil unless guards && numeric_operand_mask(irep, region[:sendb_idx], reg, d) == NumericFlow::INT
+
+      guards << "r#{reg}"
+    end
     "(long long)mrb_integer(r#{reg})"
+  end
+
+  # STEP_LOOP_GUARD: the original call, as the `else` of a per-loop Fixnum test. A bignum
+  # bound needs Integer#step's own body, which a `long long` counter cannot stand in for. The
+  # block becomes the ordinary BLOCK_FALLBACK cfunc; nil when it is not fallback-safe.
+  def step_loop_guard_fallback(region, irep, d)
+    fallback = recognize_block_fallback_regions(irep, blk_available: frame_block_available?(irep))
+               .find { |r| r[:block_addr] == region[:block_addr] }
+    return nil unless fallback
+
+    fn_result = emit_proc_fallback_fn(fallback, d)
+    return nil unless fn_result
+
+    fn_name, fn_code = fn_result
+    @inline_nested_pre << fn_code
+    emit_block_fallback_glue(fallback, fn_name, owner_def: d)
   end
 
   # A `for` over a `long long` counter, so `i += step` cannot wrap a 32-bit `mrb_int` (both
@@ -79,13 +101,16 @@ class CodeGen
     offset = irep.nregs
     dest = region[:dest_reg]
     addr = region[:block_addr]
-    start = step_loop_operand(irep, region, dest, d)
-    limit = step_loop_operand(irep, region, region[:limit_reg], d)
+    pre_start = @inline_nested_pre.length
+    flat = !@resumable.nil?
+    # A flat (resumable) body may yield, which the fallback call could not resume.
+    guards = flat ? nil : []
+    start = step_loop_operand(irep, region, dest, d, guards)
+    limit = step_loop_operand(irep, region, region[:limit_reg], d, guards)
     return nil unless start && limit
 
     iter_label = "Lbc2cpp_step_iter_#{addr}"
     break_label = "Lbc2cpp_step_end_#{addr}"
-    flat = !@resumable.nil?
     body = with_resumable_flat(flat) do
       compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
     end
@@ -123,7 +148,17 @@ class CodeGen
     end
     # Integer#step/upto/downto return the receiver, which r<dest> still holds (the
     # recognizer's `break` path overwrites it with the break value).
-    out
+    return out if guards.nil? || guards.empty?
+
+    fallback = step_loop_guard_fallback(region, irep, d)
+    unless fallback
+      @inline_nested_pre.slice!(pre_start..) # the body's nested cfuncs are not used either
+      return nil
+    end
+
+    test = guards.uniq.map { |reg| "mrb_fixnum_p(#{reg})" }.join(' && ')
+    "  // STEP_LOOP_GUARD -- a bound that may be a bignum: inlined for Fixnums, the call otherwise (ADR 0287)\n" \
+      "  if (#{test}) {\n#{out}  } else {\n#{fallback}  }\n"
   end
 
   # inline_block_frame's declarations as assignments, for a frame whose registers are

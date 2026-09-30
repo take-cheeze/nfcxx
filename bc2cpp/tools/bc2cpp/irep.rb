@@ -115,7 +115,9 @@ CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: 
 # not ivars; module_function copies; NATIVE_SRCS names) must stay untagged:
 # tagging them would be a silent wrong-value bug, not a missed optimization.
 # `core`: the body comes from mruby's own Ruby (CoreDefs, set by the driver).
-MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, keyword_init: true)
+# `installer`: :define_method for a `define_method(:x) { }` body (DefineMethodSites), else nil.
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, :installer,
+                       keyword_init: true)
 
 # ---------------------------------------------------------------------------
 # mrbc compiles several files on one command line as one program (with class

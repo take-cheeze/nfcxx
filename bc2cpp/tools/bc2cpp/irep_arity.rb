@@ -147,12 +147,14 @@ end
 #     before adding that gem.
 #   - `step`: this program's domain `def step` methods take no block and no
 #     `.step {` call site exists, so only Numeric#step is reachable.
+#   - `upto`, `downto`: no program definition takes a block; Integer/String#upto
+#     yield synchronously (STEP_LOOP_GUARD's fallback, ADR 0287).
 BLOCK_FALLBACK_UPVAR_SAFE_METHODS = %w[
   each each_with_index each_index each_key each_event_position
   times map select reject reject! delete_if
   find find_index any? all? none? count index sort_by
   _rgss_native_sort _rgss_native_sort! loop each_char
-  page_field section open new reduce inject each_with_object downto
+  page_field section open new reduce inject each_with_object upto downto
   auto_battle_best_target cached_bitmap flat_map gsub gsub! scan zip each_value
   sub sub! with_index step
 ].freeze

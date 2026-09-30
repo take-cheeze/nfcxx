@@ -2,6 +2,7 @@
 
 require_relative 'core_mixins'
 require_relative 'core_defs'
+require_relative 'define_method_sites'
 
 # Step 6: the whole-program class/method registry.
 
@@ -409,6 +410,16 @@ def build_registry(ireps, root_label)
                                                        core: CoreDefs.core_source?(irep.file))
             end
           end
+        end
+      when 'SSENDB'
+        # DEFINE_METHOD_SITES (docs/adr/0288). Whether the program may trust the site is
+        # decided after the closed world exists (demote_define_method_defs); until then
+        # it is only a candidate that symbol_installed_names still counts as an installer.
+        site = DefineMethodSites.site(irep, idx, ireps)
+        if site && namespace && !namespace.include?('.singleton') && !namespace.start_with?('<') &&
+           default_visibility == :public && !CoreDefs.core_source?(irep.file)
+          registry[site.name] << MethodDef.new(name: site.name, owner: namespace, irep: site.child,
+                                                visibility: :public, installer: :define_method)
         end
       when 'SENDB'
         # STRUCT_MEMBERS_ANALYSIS for the block-taking form; additive only.

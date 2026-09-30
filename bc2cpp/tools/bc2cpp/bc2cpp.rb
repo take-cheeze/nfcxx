@@ -167,6 +167,15 @@ if $PROGRAM_NAME == __FILE__
     warn ''
   end
 
+  # DEFINE_METHOD_SITES (ADR 0288): the class-body `define_method(:x) { }` candidates the registry
+  # collected stay definitions only in a closed world that trusts `define_method` itself.
+  define_method_kept, define_method_dropped =
+    DefineMethodSites.settle(registry, trusted: closed_world&.define_method_sites_trusted? || false)
+  if define_method_kept + define_method_dropped > 0
+    warn "== define_method sites (#{define_method_kept} registered as definitions, " \
+         "#{define_method_dropped} left as installers) =="
+  end
+
   # NATIVE_SRCS: C/C++ sources to scan for mrb_define_method-family calls (see
   # extract_native_method_names). Without it the registry cannot see native
   # definitions.
@@ -1110,6 +1119,17 @@ if $PROGRAM_NAME == __FILE__
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
+  # IO_PUTS_MODEL (ADR 0284): one shared body for every explicit-receiver `puts`, so the
+  # by-name fallback exists once instead of once per site.
+  puts <<~'IO_PUTS'
+    static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+    #ifdef HAVE_MRUBY_IO_GEM
+      mrb_value result;
+      if (mrb_io_puts_direct(M, recv, argc, argv, &result)) return result;
+    #endif
+      return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+    }
+  IO_PUTS
   # ENSURE_RAII_SUPPORT: the runtime guard for a recognized `ensure`
   # (recognize_ensure_region / emit_ensure_guard_open). A C++ destructor runs on
   # every exit:
