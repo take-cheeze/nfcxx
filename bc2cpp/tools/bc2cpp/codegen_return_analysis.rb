@@ -11,7 +11,9 @@ class CodeGen
   #   1. @registry[N] has exactly one MethodDef, with a bytecode body (the MONO
   #      test; a native definition adds a second, irep-nil entry).
   #   2. N is not in foreign_method_names: stricter than MONO on purpose, since
-  #      a wrong proof is an unchecked mrb_fixnum() (UB), not a wrong call.
+  #      a wrong proof is an unchecked mrb_fixnum() (UB), not a wrong call. Nor is it
+  #      renamed by alias/define_method, or a name a computed-name send could build
+  #      (numeric_dynamically_named?): another body could then answer under N (ADR 0279).
   #   3. The body is return-analyzable (fixnum_return_analyzable?): no catch
   #      handlers, no child ireps, at least one RETURN.
   #   4. Every return site proves (fixnum_return_sites_proven?) against the
@@ -38,11 +40,14 @@ class CodeGen
 
     cand = {}
     accessors = Set.new
+    aliased = numeric_aliased_names
     @registry.each do |name, defs|
       next unless defs.size == 1
 
       d = defs.first
       next if @foreign_method_names.include?(name)
+      # ADR 0279: a computed-name send/define_method/alias can install another body under N.
+      next if aliased.include?(name) || numeric_dynamically_named?(name)
 
       # ADMISSION VARIANT B: a MONO attr_reader/attr_accessor whose ivar is embedded
       # as :fixnum (no irep; proof source 3 moved to the callee's return).

@@ -41,6 +41,7 @@ require_relative 'core_methods'
 
 require_relative 'integer_constants'
 require_relative 'native_construct_schema'
+require_relative 'dynamic_names'
 require_relative 'ivar_layout'
 require_relative 'annotations'
 require_relative 'class_layout'
