@@ -1455,7 +1455,11 @@ class CodeGen
         # guard.
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
-        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        # PROVEN_MISS: MONO trusts the name alone, so a receiver proven to be another class
+        # would run this owner's body instead of raising.
+        miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                                  trace_reg_offset)
+        "#{note}#{miss}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     elsif lexical_self_ivar_accessor
       # LEXICAL_SELF_IVAR_ACCESSOR codegen: no guard, no fallback; IVAR_ACCESS picks
@@ -1524,6 +1528,21 @@ class CodeGen
         return constant_code if constant_code
       end
 
+      if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+        kernel_code = kernel_direct_code(name, d, recv, argv)
+        return kernel_code if kernel_code
+      end
+
+      if name == 'call' && !self_implicit && call_receiver.nil?
+        call_code = block_param_call_code(irep, new_proof_idx, new_proof_reg, d, recv, argv)
+        return call_code if call_code
+      end
+
+      if !self_implicit && call_receiver.nil? && @native_name_sources
+        rest_code = rest_param_native_code(irep, new_proof_idx, new_proof_reg, name, d, recv, argv)
+        return rest_code if rest_code
+      end
+
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
              compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
@@ -1566,7 +1585,9 @@ class CodeGen
       exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
                                                              exact_class, recv: recv, name: name)
-      "#{diag}#{note}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
+      miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                                trace_reg_offset, exact_class: exact_class)
+      "#{diag}#{note}#{miss}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
     end
   end
 

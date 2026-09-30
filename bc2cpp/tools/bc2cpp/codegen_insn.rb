@@ -185,7 +185,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
+            #{numeric_arith_operands?('+', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('+', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});"}
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -210,7 +210,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));
+            #{numeric_arith_operands?('+', d, s, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('+', d, "r#{s}") : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));"}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) + mrb_integer(r#{s}));
@@ -243,7 +243,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
+            #{numeric_arith_operands?('-', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('-', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});"}
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -268,7 +268,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));
+            #{numeric_arith_operands?('-', d, s, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('-', d, "r#{s}") : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));"}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) - mrb_integer(r#{s}));
@@ -303,7 +303,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));
+            #{numeric_arith_operands?('*', d, s, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('*', d, "r#{s}") : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));"}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) * mrb_integer(r#{s}));
@@ -369,8 +369,8 @@ class CodeGen
       compile_send(insn, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                    trace_idx: idx, trace_reg_offset: reg_offset)
     when 'SSEND0', 'SSEND'
-      if insn.op == 'SSEND0' && insn.sym == 'block_given?' && block_given_modelled?
-        compile_block_given(insn, reg_offset)
+      if insn.op == 'SSEND0' && BLOCK_GIVEN_NAMES.include?(insn.sym) && block_given_modelled?
+        compile_block_given(insn)
       else
         compile_send(insn, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                      trace_idx: idx, trace_reg_offset: reg_offset)
@@ -767,7 +767,7 @@ class CodeGen
       else
         <<~CPP
           if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});
+            #{numeric_arith_operands?('+', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('+', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});"}
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -783,7 +783,7 @@ class CodeGen
       else
         <<~CPP
           if (mrb_integer_p(r#{d})) {
-            r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});
+            #{numeric_arith_operands?('-', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('-', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});"}
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -1037,6 +1037,9 @@ class CodeGen
   # MONO/TYPED resolution. ADDI/SUBI pass the immediate as an expression rather
   # than borrowing a possibly live register.
   def compile_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
+    numeric = numeric_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
+    return numeric if numeric
+
     argument = arg_reg ? "r#{arg_reg}" : arg_expr
     send_insn = Insn.synthetic('SEND', "R#{dest_reg} :#{name} n=1")
     send = compile_send(send_insn, self_implicit: false, irep: irep,
