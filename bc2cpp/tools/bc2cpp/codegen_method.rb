@@ -45,10 +45,14 @@ class CodeGen
     if d.core && @closed_world
       saved_world = @closed_world
       @closed_world = nil
+      # BLOCK_CORE_DIRECT (ADR 0270): the program-wide facts (no outside definer, no installer)
+      # hold for core bodies too; only the static-binding proofs are withheld from them.
+      @core_program_world = saved_world
       begin
         return compile_method(label)
       ensure
         @closed_world = saved_world
+        @core_program_world = nil
       end
     end
     @compiling_core = d.core ? true : false

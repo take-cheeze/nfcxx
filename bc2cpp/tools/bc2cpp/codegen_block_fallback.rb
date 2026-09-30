@@ -483,7 +483,7 @@ class CodeGen
       nfn_name, nfn_code = fn_result
       nested_pre << nfn_code
       nested_suppressed << nregion[:block_addr] << nregion[:sendb_addr]
-      nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name)
+      nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name, owner_def: d)
     end
     # EXPLICIT_BLOCK_ARG_SUPPORT: `&expr` sites in this body: suppress/glue only,
     # no body to compile.

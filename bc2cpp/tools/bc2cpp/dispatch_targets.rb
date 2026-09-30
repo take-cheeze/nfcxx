@@ -452,6 +452,18 @@ def construct_resolution_known?(name)
   (ConstructClassNames.table || {}).include?(name)
 end
 
+# REST_ENTRY_ARRAY: the register ENTER's rest parameter arrives in holds exactly an Array. OP_ENTER
+# builds it, and so does every caller of a compiled `_impl` (the entry wrapper and the block entries
+# with mrb_ary_new_from_values, direct_call_args with mrb_ary_new). Read only at method entry: any
+# later write is seen by the walk before it gets here.
+def rest_entry_class(irep, reg)
+  enter = irep.enter
+  return nil unless enter
+
+  mand, opt, rest = enter.enter_fields
+  reg.to_i == mand.to_i + opt.to_i + 1 && rest.to_i.positive? ? 'Array' : nil
+end
+
 # Class of the value `reg` holds at `idx`. The backward walk (trace_new_target_walk)
 # answers first; when it finds nothing, the fact is asked of EVERY definition
 # reaching the read (BytecodeIR.reaching_definitions) and accepted only when
@@ -524,7 +536,7 @@ def trace_new_target_reaching(irep, idx, reg, rest, opts)
       if definition.entry?
         # Register N is argument N for N <= mand; only an annotation names its class.
         pos = definition.reg.to_i
-        arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)
+        (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand.to_i)) || rest_entry_class(irep, pos)
       else
         trace_new_target_walk(irep, definition.index + 1, definition.reg, *rest, dominated: nil, **opts)
       end
@@ -561,7 +573,7 @@ def trace_new_target_walk(irep, idx, reg, ivar_classes = nil, mand = 0, arg_clas
     next nil if dominated && !dominated.call(-1, use, entry_reg)
 
     pos = entry_reg.to_i
-    arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)
+    (arg_classes[pos - 1] if arg_classes && pos.between?(1, mand)) || rest_entry_class(irep, pos)
   end
   irep.walk_writers(idx - 1, reg, skip_ops: skip_ops, barrier: rescue_write, exhausted: at_entry) do |insn, i, cur|
     if dominated && !READ_ONLY_OPCODE_SKIP.include?(insn.op)

@@ -83,7 +83,7 @@ module ArgShapeCalls
   def takes_block_param?(irep)
     @takes_block_param_cache ||= {}.compare_by_identity
     @takes_block_param_cache.fetch(irep) do
-      @takes_block_param_cache[irep] = block_param_arity?(irep) || yields_block_param?(irep)
+      @takes_block_param_cache[irep] = block_param_arity?(irep) || yields_block_param?(irep) || optional_block_callee?(irep)
     end
   end
 
@@ -113,12 +113,20 @@ module ArgShapeCalls
   end
 
   def pure_mandatory_or_optional_arity?(irep)
-    ok = super || (@extended_callee_shapes && (block_only_callee?(irep) || rest_only_callee?(irep)))
+    ok = super || (@extended_callee_shapes &&
+                   (block_only_callee?(irep) || rest_only_callee?(irep) || optional_block_callee?(irep)))
     ok && (!(@call_block_expr || takes_block_param?(irep)) || block_transparent_callee?(irep))
   end
 
   def optional_arity(irep)
     @extended_callee_shapes && rest_only_callee?(irep) ? REST_ARGC_MAX : super
+  end
+
+  # ENTER n:o:0:0:0:0:1:0 with the optional jump table compile_method models (CORE_BLOCK_OPT):
+  # `any?(pattern = NONE, &block)`. Its `_impl` takes the optionals, then the block, then
+  # `bc2cpp_given_opt`, which is the order direct_call_args builds.
+  def optional_block_callee?(irep)
+    !optional_block_arg_table(irep).nil?
   end
 
   # ENTER 1:0:0:0:0:0:1:0: mandatory positionals plus `&blk` only.
