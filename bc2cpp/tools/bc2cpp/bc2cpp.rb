@@ -1105,6 +1105,17 @@ if $PROGRAM_NAME == __FILE__
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
+  # IO_PUTS_MODEL (ADR 0284): one shared body for every explicit-receiver `puts`, so the
+  # by-name fallback exists once instead of once per site.
+  puts <<~'IO_PUTS'
+    static inline mrb_value bc2cpp_io_puts(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+    #ifdef HAVE_MRUBY_IO_GEM
+      mrb_value result;
+      if (mrb_io_puts_direct(M, recv, argc, argv, &result)) return result;
+    #endif
+      return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+    }
+  IO_PUTS
   # ENSURE_RAII_SUPPORT: the runtime guard for a recognized `ensure`
   # (recognize_ensure_region / emit_ensure_guard_open). A C++ destructor runs on
   # every exit:

@@ -79,27 +79,17 @@ class CodeGen
              "  }\n"
     end
 
-    # IO_PUTS_MODEL: mruby-io's public helper checks the actual resolved method
-    # against its registered C body, then calls the same implementation with
-    # explicit argv. Any override, prepend, or non-IO receiver keeps Ruby dispatch.
-    if name == 'puts' && !self_implicit && n <= 14
+    # IO_PUTS_MODEL (ADR 0284): the target check stays because `$stderr` is reassigned in
+    # the closed world (ErrorReport.install); only the fallback is shared. A literal block
+    # keeps the per-site dispatch, the one that carries it.
+    if name == 'puts' && !self_implicit && n <= 14 && !@call_block_expr
       direct_argv = argv.empty? ? 'NULL' : "bc2cpp_puts_argv_#{d}"
       args_decl = argv.empty? ? '' : "    mrb_value bc2cpp_puts_argv_#{d}[#{n}] = { #{argv.join(', ')} };\n"
-      return "  // IO_PUTS_MODEL: calls core IO#puts with explicit arguments after exact runtime target check.\n" \
-             "#ifdef HAVE_MRUBY_IO_GEM\n" \
+      return "  // IO_PUTS_MODEL: shared bc2cpp_io_puts; exact core IO#puts body, else dispatch by name.\n" \
              "  {\n" \
              "#{args_decl}" \
-             "    mrb_value bc2cpp_puts_result_#{d};\n" \
-             "    if (mrb_io_puts_direct(M, #{recv}, #{n}, #{direct_argv}, " \
-             "&bc2cpp_puts_result_#{d})) {\n" \
-             "      r#{d} = bc2cpp_puts_result_#{d};\n" \
-             "    } else {\n" \
-             "      #{dynamic_dispatch_line(d, recv, name, argv)}" \
-             "    }\n" \
-             "  }\n" \
-             "#else\n" \
-             "  #{dynamic_dispatch_line(d, recv, name, argv)}" \
-             "#endif\n"
+             "    r#{d} = bc2cpp_io_puts(M, #{recv}, mrb_intern_lit(M, \"puts\"), #{n}, #{direct_argv});\n" \
+             "  }\n"
     end
 
     implicit_new_target = name == 'new' && self_implicit ? implicit_singleton_self_class(owner_def) : nil
