@@ -16,6 +16,7 @@ class CodeGen
   # regions (#1909, RESCUE_INLINE_BLOCK_FIX in compile_method).
   INLINE_LOOP_PASSES = [
     InlineLoopPass.new(:recognize_times_regions, :emit_times_inline, :block_addr, false), # BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_step_regions, :emit_step_inline, :block_addr, false), # STEP_LOOP_SUPPORT (ADR 0273)
     InlineLoopPass.new(:recognize_each_regions, :emit_each_inline, :block_addr, true), # EACH_BLOCK_SUPPORT
     InlineLoopPass.new(:recognize_each_index_regions, :emit_each_index_inline, :block_addr, true), # EACH_INDEX_SUPPORT
     InlineLoopPass.new(:recognize_hash_each_regions, :emit_hash_each_inline, :block_addr, true), # HASH_EACH_SUPPORT
@@ -139,15 +140,27 @@ class CodeGen
                arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
     end
 
+    resumable = nil
     if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label)
       # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: never compile
       # a method that calls Fiber.yield or is reachable from a Fiber.new block (see
-      # those methods).
-      reason = calls_fiber_yield?(irep) ? 'calls Fiber.yield directly' : 'is reachable from a Fiber.new block'
-      code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
-             "#error #{d.owner}##{d.name} #{reason} -- not in this prototype's supported subset\n\n"
-      return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
-               arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
+      # those methods), unless it is a Fiber.new root that qualifies as a resumable
+      # step function (RESUMABLE_ROOTS, ADR 0273).
+      plan = resumable_plan(label)
+      if plan.is_a?(ResumablePlan)
+        resumable = plan
+      else
+        reason = if plan.is_a?(String)
+                   warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{plan}" if (@resumable_warned ||= Set.new).add?(label)
+                   "is a Fiber.new root that cannot be compiled resumable: #{plan}"
+                 else
+                   calls_fiber_yield?(irep) ? 'calls Fiber.yield directly' : 'is reachable from a Fiber.new block'
+                 end
+        code = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
+               "#error #{d.owner}##{d.name} #{reason} -- not in this prototype's supported subset\n\n"
+        return { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
+                 arity: arg_names.size, code: code, unsupported: true, visibility: d.visibility }
+      end
     end
 
     out = String.new
@@ -174,45 +187,57 @@ class CodeGen
       arg_params << "mrb_value #{kwarg_param_name(kw[:name])}"
       arg_params << "mrb_int #{kw_given_param_name(kw[:name])}" unless kw[:required]
     end
-    out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
-    out << errinfo_scope_line(irep)
-    # EXCEPTION_RETURN_SUPPORT: wrap the body in one try/catch only when a
-    # BLOCK_FALLBACK region can throw bc2cpp_method_return. Cheap under zero-cost
-    # exceptions but not free, hence the gate. Statements inside the `try` behave
-    # the same; only a throw changes control flow.
-    # BLOCK_SEMANTICS: the method is a frame a block's `return` may unwind to; the
-    # blocks it builds carry the guard's token.
-    out << "  Bc2cppFrameGuard bc2cpp_ret_guard(&bc2cpp_return_frames);\n" if needs_return_catch
-    out << "  Bc2cppVmMark bc2cpp_ret_mark = bc2cpp_vm_mark(M);\n  try {\n" if needs_return_catch
-    (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
-    # A native-typed argument's register is still an mrb_value (NATIVE_ARG_TARGETS
-    # moves the coercion, it does not specialize registers), so box it with
-    # TYPE_OPS[:box] on entry.
-    arg_names.each_with_index do |a, i|
-      t = arg_native_types[i]
-      out << if t
-                "  r#{i + 1} = #{TYPE_OPS.fetch(t)[:box]}(#{a});\n"
-              else
-                "  r#{i + 1} = #{a};\n"
-              end
-    end
-    # EXPLICIT_BLOCK_PARAM_SUPPORT: store the block into its register once, where
-    # ENTER would put it: mand+1, or mand+rest+1 with a rest parameter (ENTER
-    # 1:0:1:0:0:0:1:0 puts it in R3); `total_args + 1` covers both. The following
-    # MOVE etc. is ordinary bytecode.
-    out << "  r#{total_args + 1} = bc2cpp_blk;\n" if has_blk
-    if embedded_ivars && d.name == 'initialize'
-      # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
-      # allocate the struct before any embedded SETIV.
-      sname = struct_name(d.owner)
-      out << "  {\n"
-      out << "    #{sname}* embedded = (#{sname}*)mrb_calloc(M, 1, sizeof(#{sname}));\n"
-      embedded_ivars.each do |ivar, type|
-        initial = type == :value ? 'mrb_undef_value()' : '{}'
-        out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+    step_name = "#{cpp_name(d.owner, d.name)}_step"
+    step_body_start = nil
+    if resumable
+      # RESUMABLE_ENTRY: the frame, registers and dispatch open the function once the body has
+      # said how many registers it uses (resumable_step_function).
+      return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'is initialize') if d.name == 'initialize'
+      return resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, 'reads its block') if needs_blk_param || has_blk
+
+      @resumable = ResumableCtx.new(label, resumable.helpers)
+      step_body_start = out.length
+    else
+      out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
+      out << errinfo_scope_line(irep)
+      # EXCEPTION_RETURN_SUPPORT: wrap the body in one try/catch only when a
+      # BLOCK_FALLBACK region can throw bc2cpp_method_return. Cheap under zero-cost
+      # exceptions but not free, hence the gate. Statements inside the `try` behave
+      # the same; only a throw changes control flow.
+      # BLOCK_SEMANTICS: the method is a frame a block's `return` may unwind to; the
+      # blocks it builds carry the guard's token.
+      out << "  Bc2cppFrameGuard bc2cpp_ret_guard(&bc2cpp_return_frames);\n" if needs_return_catch
+      out << "  Bc2cppVmMark bc2cpp_ret_mark = bc2cpp_vm_mark(M);\n  try {\n" if needs_return_catch
+      (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
+      # A native-typed argument's register is still an mrb_value (NATIVE_ARG_TARGETS
+      # moves the coercion, it does not specialize registers), so box it with
+      # TYPE_OPS[:box] on entry.
+      arg_names.each_with_index do |a, i|
+        t = arg_native_types[i]
+        out << if t
+                  "  r#{i + 1} = #{TYPE_OPS.fetch(t)[:box]}(#{a});\n"
+                else
+                  "  r#{i + 1} = #{a};\n"
+                end
       end
-      out << "    mrb_data_init(self, embedded, &#{type_var(d.owner)});\n"
-      out << "  }\n"
+      # EXPLICIT_BLOCK_PARAM_SUPPORT: store the block into its register once, where
+      # ENTER would put it: mand+1, or mand+rest+1 with a rest parameter (ENTER
+      # 1:0:1:0:0:0:1:0 puts it in R3); `total_args + 1` covers both. The following
+      # MOVE etc. is ordinary bytecode.
+      out << "  r#{total_args + 1} = bc2cpp_blk;\n" if has_blk
+      if embedded_ivars && d.name == 'initialize'
+        # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
+        # allocate the struct before any embedded SETIV.
+        sname = struct_name(d.owner)
+        out << "  {\n"
+        out << "    #{sname}* embedded = (#{sname}*)mrb_calloc(M, 1, sizeof(#{sname}));\n"
+        embedded_ivars.each do |ivar, type|
+          initial = type == :value ? 'mrb_undef_value()' : '{}'
+          out << "    embedded->#{ivar_field_name(ivar)} = #{initial};\n"
+        end
+        out << "    mrb_data_init(self, embedded, &#{type_var(d.owner)});\n"
+        out << "  }\n"
+      end
     end
     # Goto-threaded control flow: every JMP/JMPNOT/JMPIF target gets a C label and
     # jumps become `goto`, reproducing any control flow without rebuilding a CFG.
@@ -415,6 +440,8 @@ class CodeGen
         targets -= (ensure_region[:except_addr]..ensure_region[:raiseif_addr]).to_a
       end
     end
+    # RESUMABLE_ENTRY: the method's own instructions are the flat part of the step function.
+    @resumable.flat = true if @resumable
     irep.instructions.each_with_index do |insn, idx|
       out << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
@@ -422,23 +449,44 @@ class CodeGen
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
       out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
     end
+    @resumable.flat = false if @resumable
     @blk_param_name = nil
     @ensure_except_remaps = nil
     out << fell_off_end("#{d.owner}##{d.name}")
-    if needs_return_catch
+    if @resumable
+      body = out.slice!(step_body_start..)
+      # A block that stays a separate function throws its `return` to a catch around the whole
+      # body, and a try block cannot be jumped into.
+      if needs_return_catch && [body, block_fallback_pre, @inline_nested_pre].any? { |code| code.include?('bc2cpp_return_from_block') }
+        body << resumable_error('a block that is not inlined returns from the method')
+      end
+      out << resumable_step_function(step_name, body)
+      out << "}\n\n"
+    elsif needs_return_catch
       out << "  } catch (bc2cpp_method_return& bc2cpp_ret) {\n"
       out << "    if (bc2cpp_ret.token != bc2cpp_ret_guard.frame.token) throw;\n"
       out << "    bc2cpp_vm_restore(M, bc2cpp_ret_mark);\n"
       out << "    return bc2cpp_ret.value;\n"
       out << "  }\n"
+      out << "}\n\n"
+    else
+      out << "}\n\n"
     end
-    out << "}\n\n"
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
     out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
     @runtime_installed_names = nil
+    if @resumable
+      out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}")
+      first_error = @resumable.reasons.first || out[/^\s*#error (.*)$/, 1]
+      first_error = 'a block call that is neither an inlined step/upto/downto loop nor a plain block function' if first_error&.match?(/unhandled opcode (BLOCK|SENDB|SSENDB)/)
+      if first_error && (@resumable_warned ||= Set.new).add?(label)
+        warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{first_error}"
+      end
+    end
+    @resumable = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
     guard = core_block_guard(label, d)
@@ -597,7 +645,17 @@ class CodeGen
     aspec << 'MRB_ARGS_BLOCK()' if needs_blk_param || has_blk
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
-      code: out, visibility: d.visibility, guard: guard&.fetch(:index) }
+      code: out, visibility: d.visibility, guard: guard&.fetch(:index), resumable: !resumable.nil? }
+  end
+
+  # The stub compile_method returns for a Fiber.new root that turned out not to qualify.
+  def resumable_refusal(label, d, irep, entry_name, impl_name, arg_names, reason)
+    warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{reason}" if (@resumable_warned ||= Set.new).add?(label)
+    { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name, arity: arg_names.size,
+      code: "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n" \
+            "#error #{d.owner}##{d.name} is a Fiber.new root that cannot be compiled resumable: #{reason} -- " \
+            "not in this prototype's supported subset\n\n",
+      unsupported: true, visibility: d.visibility }
   end
 
   # CORE_BLOCK_GUARD (ADR 0269): the entry of a core method that touches a block first

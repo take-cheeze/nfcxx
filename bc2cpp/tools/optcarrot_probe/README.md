@@ -24,9 +24,11 @@ publishes each run's numbers and relative slowdown in the job summary. All
 three produce checksum `59662`. `compiled_run.rb` compiles and installs
 `Optcarrot::Config`, `Optcarrot::Opt`, `Optcarrot::CPU`, `Optcarrot::NES`, the
 `Optcarrot::ROM` setup methods, and the post-Fiber `Optcarrot::Video#tick`/
-`Optcarrot::APU#flush_sound`/`#vsync` hooks. `Optcarrot::PPU` alone stays
-excluded, for its own separate, unrelated `Fiber.new` bug (see "Compiled
-runtime check" below). The other four were excluded too for a while, for a
+`Optcarrot::APU#flush_sound`/`#vsync` hooks, and `Optcarrot::PPU` -- whose
+`main_loop` is a resumable step function driven from the interpreted Fiber
+block (see "Resumable `PPU#main_loop`" at the end; the older "Compiled runtime
+check" section below is the history of how the Fiber was first kept safe).
+The other four were excluded too for a while, for a
 real, CI-reproducible SIGSEGV in bc2cpp's own generated code for
 `Array#last` -- see that section's own "Update (ARY_PTR/ARY_LEN root cause)"
 for the actual bc2cpp code-generation bug this was root-caused and fixed to,
@@ -1330,3 +1332,48 @@ with or without it), and the dominant compiled-mode cost is the GC
 arena -- `gc_gray_rescan` at 31.6% of sampled time, from arena growth
 across devirtualized calls that never re-enter `mrb_vm_exec`. The union
 is infrastructure for nilable scalars, not an FPS win here.
+
+## Resumable `PPU#main_loop` (ADR 0273)
+
+Until ADR 0273 every method the Fiber block reaches by same-class self sends was
+refused, so `PPU#main_loop`, its four `wait_*` helpers and the 35 methods they call
+(`render_pixel`, `open_name`, `load_tiles`, ...) all ran as bytecode. Now:
+
+- `main_loop` (the one method `Fiber.new { main_loop; :done }` calls) is compiled as a step
+  function: its 4 `N.step(M, 8) do ... end` loops are inlined with their counters in a heap
+  frame, its 49 `wait_*` calls are expanded in place (each is 3-4 instructions around a
+  `Fiber.yield`), and each of the 49 yield points is a `switch` case in the step function.
+  The Fiber block itself stays bytecode: the compiled `main_loop` entry replaces its own
+  frame by a small bytecode driver that calls the step function and does the
+  `Fiber.yield`, so no compiled frame is ever below a yield.
+- The callees that cannot reach `Fiber.yield` compile like any method and the step function
+  calls them directly. `PPU#run` (it builds the Fiber from a block) and `wait_frame`,
+  `wait_zero_clocks`, `wait_one_clock`, `wait_two_clocks` (inlined into `main_loop`) stay
+  bytecode. bc2cpp prints `bc2cpp: resumable: Owner#name stays interpreted: <reason>` for a
+  root that does not qualify; none of optcarrot's does.
+- 290 compiled methods before, 326 after (the 35 callees and `main_loop`).
+
+Checksum `59662` on CRuby, the interpreter and bc2cpp in every run below. Wall times, this
+probe's own configuration (`enable_debug`, i.e. `-O0 -g3` and `MRB_DEBUG` for mruby and the
+generated code), machine load 1-2 on 4 cores, the three compiled binaries and the
+interpreter run in turn in one session (`ab.rb`-style alternation; the machine is shared, so
+treat differences under about 10 percent as noise):
+
+| 180 frames | interpreter | bc2cpp |
+| --- | ---: | ---: |
+| before (master) | 80.8 s | 93.5 s |
+| callees compiled, `main_loop` still bytecode | 80.8 s | 63.3 s |
+| after (resumable `main_loop`) | 80.8 s | 45.7 s |
+
+60 frames, median of three alternating rounds: interpreter 36.8 s; bc2cpp 44.1 s before,
+33.4 s callees only, 27.5 s after. The same comparison built without `enable_debug` (`-O3`,
+no `MRB_DEBUG`): interpreter 15.5 s; bc2cpp 21.7 s before, 17.2 s callees only, 15.9 s
+after -- there the compiled build is only level with the interpreter, as before this change
+it was slower than it. Most of the gain comes from compiling the callees that used to be
+refused; the step function itself is worth another 10-30 percent in these builds.
+
+Two pitfalls when repeating this locally after changing bc2cpp: mruby's rake keeps the
+object files of an earlier run's temporary gem directory and can relink them (the
+preprocessed `.pi` changes, the `.o` does not), so `rm -rf 3rd/mruby/build` first or the
+benchmark measures the previous generator's output; and a run under load (other builds on
+the machine) moved the same binary by 10 percent or more between repeats.

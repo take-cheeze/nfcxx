@@ -166,8 +166,21 @@ module SymbolCache
   # mruby's own dispatch can only raise NoMethodError there; running it keeps
   # the error (message, args, call-depth and memory limits) exactly the same.
   NOMETHOD = <<~CPP
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #endif
     [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
       mrb_sym mid = bc2cpp_sym(M, i);
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      // ADR 0275: reaching a site the closed world proved dead is the finding. Dispatching
+      // first would let a wrong proof run a method, and a rescue hide the raise, so abort.
+      // Two calls: mrb_class_name and mrb_sym_name may share one scratch buffer.
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: dead site reached: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s (%d arg(s))\\n", mrb_sym_name(M, mid), (int)argc);
+      fflush(stderr);
+      abort();
+    #endif
       mrb_funcall_argv(M, recv, mid, argc, argv);
       // The dispatch above found a method: the proof was wrong (ADR 0262). A
       // NoMethodError here would look like an ordinary user error.
