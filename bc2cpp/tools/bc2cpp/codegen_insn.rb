@@ -418,11 +418,11 @@ class CodeGen
       out << "    mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"wrong type %T (expected Proc)\", r#{d});\n"
       out << "  }\n"
       if blkn.zero?
-        out << "  r#{d} = mrb_yield_argv(M, r#{d}, 0, NULL);\n"
+        out << "  r#{d} = bc2cpp_yield_argv(M, r#{d}, 0, NULL);\n"
       else
         out << "  {\n"
         out << "    mrb_value blkcall_args[] = { #{(1..blkn).map { |i| "r#{d + i}" }.join(', ')} };\n"
-        out << "    r#{d} = mrb_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
+        out << "    r#{d} = bc2cpp_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
         out << "  }\n"
       end
       out

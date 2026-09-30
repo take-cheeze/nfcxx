@@ -603,6 +603,19 @@ class CodeGen
     out << fell_off_end(impl_name)
     out << "}\n\n"
 
+    kind = region[:kind] || 'block_fallback'
+    # BLOCK_SEMANTICS: a break or return of a strict proc (Kernel#lambda over
+    # this block) only leaves the proc; compile_insn throws bc2cpp_proc_exit for
+    # it, caught here so it never reaches a call site.
+    exits = kind == 'block_fallback' &&
+            (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
+    # BLOCK_DIRECT_ENTRY (ADR 0271): the entry replaces the cfunc wrapper for this block.
+    region[:direct_entry] = block_direct_entry?(region, kind, exits)
+    if region[:direct_entry]
+      out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
+      return [fn_name, out]
+    end
+
     # RUNTIME_DEF_FALLBACK_SUPPORT: method bodies and EXEC-opened class bodies take
     # self from the receiver mruby passes (the opposite of a block body). For an
     # installed method that is the object the call dispatched on. For an EXEC body
@@ -631,12 +644,6 @@ class CodeGen
       out << "  mrb_value bc2cpp_blk = mrb_proc_cfunc_env_get(M, #{upvar_regs.size + 1});\n"
     end
     call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
-    kind = region[:kind] || 'block_fallback'
-    # BLOCK_SEMANTICS: a break or return of a strict proc (Kernel#lambda over
-    # this block) only leaves the proc; compile_insn throws bc2cpp_proc_exit for
-    # it, caught here so it never reaches a call site.
-    exits = kind == 'block_fallback' &&
-            (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
     call_impl = lambda do |args|
       if exits
         "  Bc2cppVmMark bc2cpp_exit_mark = bc2cpp_vm_mark(M);\n  try {\n    return #{impl_name}(#{args});\n" \
@@ -697,6 +704,56 @@ class CodeGen
     [fn_name, out]
   end
 
+  # BLOCK_DIRECT_ENTRY (ADR 0271): a block whose body neither breaks nor returns reads nothing from
+  # the frame it is called in (those tokens are read from the calling cfunc's env), so a yield can
+  # call it without pushing one. BC2CPP_BLOCK_DIRECT_ENTRY=0 keeps the cfunc wrapper everywhere.
+  def block_direct_entry?(region, kind, exits)
+    return false if ENV['BC2CPP_BLOCK_DIRECT_ENTRY'] == '0'
+
+    kind == 'block_fallback' && region[:self_source] != :receiver && !region[:needs_ret] &&
+      !region[:needs_brk] && !exits
+  end
+
+  # The entry itself: the captured self, upvar pointers and forwarded block come from the env
+  # (`bc2cpp_env->stack`, where mrb_proc_cfunc_env_get finds them for a cfunc frame), the
+  # arguments are bound as OP_ENTER binds them for a non-strict proc, and a strict copy
+  # (Kernel#lambda over the block) raises on any other count.
+  def emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
+    out = String.new
+    out << "static mrb_value #{fn_name}_direct(mrb_state* M, struct REnv* bc2cpp_env, bool bc2cpp_strict, " \
+           "mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {\n"
+    out << "  (void)bc2cpp_strict; (void)bc2cpp_argc; (void)bc2cpp_argv;\n"
+    out << "  mrb_value bc2cpp_captured_self = bc2cpp_env->stack[0];\n"
+    upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
+      vname = upvar_var_name(l, b)
+      out << "  mrb_value* #{vname} = static_cast<mrb_value*>(mrb_cptr(bc2cpp_env->stack[#{i + 1}]));\n"
+      vname
+    end
+    out << "  mrb_value bc2cpp_blk = bc2cpp_env->stack[#{upvar_regs.size + 1}];\n" if needs_blk
+    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
+    if rest_block
+      out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
+    elsif mand.zero?
+      out << "  if (bc2cpp_strict && bc2cpp_argc != 0) mrb_argnum_error(M, bc2cpp_argc, 0, 0);\n"
+      out << "  return #{impl_name}(M, #{call_args});\n"
+    else
+      out << "  if (bc2cpp_strict && bc2cpp_argc != #{mand}) mrb_argnum_error(M, bc2cpp_argc, #{mand}, #{mand});\n"
+      arg_names.each { |a| out << "  mrb_value #{a};\n" }
+      if mand > 1
+        out << "  if (bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) {\n"
+        arg_names.each_with_index { |a, i| out << "    #{a} = mrb_ary_ref(M, bc2cpp_argv[0], #{i});\n" }
+        out << "  } else {\n"
+        arg_names.each_with_index { |a, i| out << "    #{a} = bc2cpp_argc > #{i} ? bc2cpp_argv[#{i}] : mrb_nil_value();\n" }
+        out << "  }\n"
+      else
+        out << "  #{arg_names.first} = bc2cpp_argc > 0 ? bc2cpp_argv[0] : mrb_nil_value();\n"
+      end
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
+    end
+    out << "}\n\n"
+    out
+  end
+
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: build the RProc with
   # mrb_proc_new_cfunc_with_env and an env holding the enclosing method's `self`
   # (captured here, where it is a local; read back with
@@ -709,8 +766,10 @@ class CodeGen
   # previous output.
   # BLOCK_SEMANTICS: `ret_token` / `brk_token` are the C++ expressions for the
   # method's return token and this site's break token (nil: the body has none).
+  # BLOCK_DIRECT_ENTRY (ADR 0271): `direct_entry` names the block's entry function; the proc is
+  # then built over bc2cpp_block_thunk with the entry as the last env slot.
   def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
-                              ret_token: nil, brk_token: nil)
+                              ret_token: nil, brk_token: nil, direct_entry: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -733,9 +792,10 @@ class CodeGen
     env_entries << 'bc2cpp_blk' if needs_blk
     env_entries << ret_token if ret_token
     env_entries << brk_token if brk_token
+    env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))" if direct_entry
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
-    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, #{env_entries.size}, " \
-           "bc2cpp_blk_env_#{addr});\n"
+    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
+           "#{env_entries.size}, bc2cpp_blk_env_#{addr});\n"
     [var, out]
   end
 
@@ -770,7 +830,8 @@ class CodeGen
                 end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
                                               region[:needs_blk] ? true : false, inline_offset: inline_offset,
-                                              ret_token: ret_token, brk_token: brk_token)
+                                              ret_token: ret_token, brk_token: brk_token,
+                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil)
     # ARG_SHAPES_BLOCK (ADR 0265): a top-level site whose call resolves to compiled code.
     direct = inline_offset.nil? ? compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def) : nil
     out = String.new
@@ -793,7 +854,7 @@ class CodeGen
       name = "mrb_intern_cstr(M, \"#{region[:name]}\")"
       if PROC_CALL_NAMES.include?(region[:name])
         out << "#{indent}if (mrb_type(#{recv}) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, #{recv}, #{name})) {\n"
-        out << "#{indent}  r#{dest_reg} = mrb_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
+        out << "#{indent}  r#{dest_reg} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
         out << "#{indent}} else\n"
       end
       out << "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, #{argv.size}, #{args}, " \

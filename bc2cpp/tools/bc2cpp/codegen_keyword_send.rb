@@ -633,7 +633,7 @@ class CodeGen
       return <<~CPP
         // SPLAT n=* :call in a core body: a Proc is yielded to (CORE_PROC_CALL)
         if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {
-          r#{d} = mrb_yield_argv(M, #{recv}, RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
+          r#{d} = bc2cpp_yield_argv(M, #{recv}, RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
         } else {
           r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_cstr(M, "call"), RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));
         }

@@ -40,7 +40,7 @@ module BlockCoreDirectFallback
   # Only a literal-block site of engine code in a closed world: the proofs below are about the
   # engine's Ruby, and a core body never binds an engine method (ADR 0264).
   def block_core_direct_wrap(d, recv, name, argv, tail)
-    return tail unless @call_block_expr && @closed_world && @native_name_sources && !@compiling_core
+    return tail unless block_core_direct_enabled? && @call_block_expr && @closed_world && @native_name_sources && !@compiling_core
     return tail if tail.include?('bc2cpp_nomethod')
 
     arms = block_core_arms(name, argv.size)
@@ -57,6 +57,11 @@ module BlockCoreDirectFallback
       "  #{branches}{\n" \
       "    #{tail.chomp}\n" \
       "  }\n"
+  end
+
+  # BC2CPP_BLOCK_CORE_DIRECT=0 turns the arms off, to measure them against the plain send.
+  def block_core_direct_enabled?
+    ENV['BC2CPP_BLOCK_CORE_DIRECT'] != '0'
   end
 
   # [{class:, guard:, target:, impl:}] for `name` called with `arity` arguments and a block.
