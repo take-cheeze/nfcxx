@@ -5,6 +5,7 @@ require_relative 'compiled_gems'
 require_relative 'touch_scan'
 require_relative 'foreign_definers'
 require_relative 'core_defs'
+require_relative 'native_names'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -40,6 +41,13 @@ class ClosedWorld
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
+  # PROVEN_MISS (ADR 0275): a name passed to one of these is probed for or looked up
+  # by name, so a send of it is guarded, not a bug.
+  PROBE_SENDS = %w[respond_to? respond_to_missing? method_defined? public_method_defined?
+                   private_method_defined? instance_method public_instance_method method public_method
+                   instance_methods public_methods].freeze
+  # Sends that run a block with another `self`, which breaks "self is its lexical owner".
+  SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
   attr_reader :global_refusal
 
@@ -70,6 +78,9 @@ class ClosedWorld
     @dynamic_constant_mutation = false
     @outside_constant_writes = Set.new
     @dynamic_subclassed = Set.new
+    @probed_names = Set.new
+    @outside_def_names = Set.new
+    @self_rebound = false
     @memo = {}
     @desc_memo = {}
     scan_native(native_paths)
@@ -145,6 +156,30 @@ class ClosedWorld
     (required - listed.to_set).to_a.sort
   end
 
+  # PROVEN_MISS (ADR 0275): a send of `name` to a receiver PROVEN to be `klass` (or, for
+  # kind :lexical_self, a descendant) reaches no definition and no method_missing, so
+  # it can only raise NoMethodError. `installed` is CodeGen#symbol_installed_names.
+  # Every question defaults to "not a miss": the answer only ever adds a build error.
+  # A module's or class object's `self` is never modelled here (instance_self?).
+  def proven_miss?(name, klass, installed, kind)
+    return false if @global_refusal || installed.nil? || installed.include?(name)
+    return false if @unknown_defs.include?(name) || @outside_names.include?(name) ||
+                    @outside_def_names.include?(name) || @probed_names.include?(name)
+    return false if %w[method_missing respond_to_missing? initialize].include?(name)
+
+    reason, required = required_classes(name, kind != :constant_object)
+    return false if reason
+
+    # A class object also answers singleton definers and Class/Module/Object/Kernel ones,
+    # which required_classes refuses (`reason`) for the non-instance lookup.
+    return false if kind == :lexical_self && (@self_rebound || !instance_self?(klass))
+    return false if required.include?(klass) || descendants(klass).intersect?(required)
+
+    # An exact receiver is klass itself, which no hook reaches unless klass is a listed
+    # method_missing class; only `self` may also be a descendant.
+    kind == :lexical_self ? method_missing_free?(klass) : !@mm_classes.include?(klass)
+  end
+
   # A `class` (never a module) declared in the closed world: the only owners an
   # exact-class guard can name, since modules never are `mrb_obj_class`.
   def class_declared?(owner)
@@ -183,6 +218,27 @@ class ClosedWorld
   # Names an outside (native or foreign Ruby) source defines.
   def outside_names
     @outside_names
+  end
+
+  # KERNEL_DIRECT (ADR 0274): an implicit-self send of `name` reaches the audited
+  # Kernel/BasicObject native for every receiver. That needs the same name-level proof as
+  # ownerless_native_dispatch_safe? plus a receiver that includes Kernel, which only a
+  # BasicObject subclass lacks (the class may be declared, created or subclassed anywhere).
+  def kernel_native_dispatch_safe?(name)
+    return false unless ownerless_native_dispatch_safe?(name)
+    return false if @dynamic_subclassed.include?('BasicObject') || @outside_ruby_supers.include?('BasicObject')
+
+    supers = @class_decls.values.flatten.map { |decl| decl[:super] }
+    supers.all? { |sup| sup == :none || sup.is_a?(String) } && supers.none? { |sup| sup.is_a?(String) && simple(sup) == 'BasicObject' }
+  end
+
+  # BLOCK_PARAM_CALL (ADR 0274): no Ruby code in the build defines or installs `name`
+  # and NilClass has no method_missing, so `nil.name` can only be a NoMethodError once the
+  # native registrations are read (CodeGen#block_param_nil_call_dead?).
+  def nil_call_free?(name)
+    return false if @global_refusal || @unknown_defs.include?(name) || @outside_ruby_names.include?(name)
+
+    !@mm_classes.include?('NilClass')
   end
 
   # `name` is spelled only by the given native files, and no outside Ruby.
@@ -302,6 +358,13 @@ class ClosedWorld
     end
   end
 
+  # NUMERIC_RETURN_PROOF: can a call to `name` reach only the definitions the
+  # registry lists? False for a name some native or foreign source defines or
+  # calls a runtime installer with, or whenever a method_missing hook exists.
+  def name_fully_visible?(name)
+    !@global_refusal && @mm_classes.empty? && !@unknown_defs.include?(name) && !@outside_names.include?(name)
+  end
+
   # Inherited dispatch additionally needs every possible method installer for
   # this name to be represented in the registry.
   def inherited_lookup_safe?(name, owner)
@@ -395,11 +458,21 @@ class ClosedWorld
     end
   end
 
+  # Every `def name` anywhere in the text, not only at a line start: foreign_method_names
+  # misses `private def loop` (mruby's Kernel#loop), which a proven miss must not call absent.
+  def broad_def_names(paths)
+    Array(paths).each_with_object(Set.new) do |path, names|
+      text = File.read(path, encoding: 'BINARY')
+      text.scan(/(?:^|[\s;(])def\s+(?:[A-Za-z_]\w*\.)?(#{FOREIGN_METHOD_NAME_RE})/o) { |(n)| names << n }
+    end
+  end
+
   def scan_outside_ruby(paths)
     ruby_names = foreign_method_names(paths)
     global!(:outside_method_missing) if ruby_names.include?('method_missing')
     global!(:outside_respond_to_missing) if ruby_names.include?('respond_to_missing?')
     @outside_ruby_names.merge(ruby_names)
+    @outside_def_names.merge(broad_def_names(paths))
     @outside_names.merge(ruby_names)
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
@@ -475,6 +548,7 @@ class ClosedWorld
         when 'LOADSYM'
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
+          @probed_names << sym if insns[idx + 1, 3].any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
           const = insn.const_name
@@ -495,6 +569,7 @@ class ClosedWorld
   def scan_send(irep, insns, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
+    @self_rebound = true if SELF_REBINDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
       global!(:dynamic_install)

@@ -65,8 +65,15 @@ class CodeGen
                  foreign_method_names = nil, outside_tokens = nil,
                   native_name_sources = nil, included_modules = {}, prepended_modules = {},
                   unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {},
-                  native_registered_expressions: {}, closed_world: nil)
+                  native_registered_expressions: {}, closed_world: nil, outside_ivar_names: nil,
+                  nil_operator_names: nil, outside_const_names: nil)
     @ireps = ireps
+    # NUMERIC_OPERAND_PROOF (ADR 0276): ivar names spelled by sources outside the
+    # closed world, and operators they define on NilClass. nil means the scan did
+    # not run; the proofs that need them then prove nothing.
+    @outside_ivar_names = outside_ivar_names
+    @nil_operator_names = nil_operator_names
+    @outside_const_names = outside_const_names
     # CLOSED_WORLD: a ClosedWorld (closed_world.rb) when BC2CPP_CLOSED_WORLD=1.
     @closed_world = closed_world
     # ENTRY_ARG_CALLSITE_PROOF: identifier tokens from NATIVE_SRCS and
@@ -244,6 +251,10 @@ class CodeGen
       compute_fixnum_return_names
       break if @entry_arg_fixnum == before_args && @fixnum_return_names == before_rets
     end
+    # NUMERIC_OPERAND_PROOF reads the sets above; drop flows memoized by the
+    # compile probes that ran with weaker facts.
+    reset_numeric_flow!
+    compute_numeric_facts
   end
 
   def const_lookup_helper_used?

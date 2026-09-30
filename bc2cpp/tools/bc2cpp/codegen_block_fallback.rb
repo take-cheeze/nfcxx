@@ -633,6 +633,7 @@ class CodeGen
     out << "static mrb_value #{impl_name}(mrb_state* M, mrb_value self" \
            "#{upvar_params.map { |p| ", #{p}" }.join}#{blk_param.map { |p| ", #{p}" }.join}" \
            "#{arg_names.map { |a| ", mrb_value #{a}" }.join}) {\n"
+    out << errinfo_scope_line(block_irep)
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     out << body
