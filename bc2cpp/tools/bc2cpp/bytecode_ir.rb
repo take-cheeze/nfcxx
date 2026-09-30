@@ -166,6 +166,15 @@ module BytecodeIR
         end
         next_index = instruction.index + 1
         targets << next_index if next_index < @instructions.length && !NO_FALLTHROUGH.include?(instruction.op)
+        # OP_ENTER lands on one of the `o + 1` JMP table entries that follow it (vm.c
+        # `ci->pc += o*3` and its argc form), so each entry has ENTER as a predecessor.
+        if instruction.op == 'ENTER'
+          optional = instruction.source.enter_fields[1].to_i
+          (1..optional).each do |k|
+            table = instruction.index + 1 + k
+            targets << table if table < @instructions.length
+          end
+        end
         instruction.successors = targets.uniq.freeze
       end
     end
