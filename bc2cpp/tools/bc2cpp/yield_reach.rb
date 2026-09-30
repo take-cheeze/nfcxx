@@ -46,7 +46,7 @@ class YieldReach
   OP_NAMES = {
     'ADD' => '+', 'ADDI' => '+', 'ADDILV' => '+', 'SUB' => '-', 'SUBI' => '-', 'SUBILV' => '-', 'MUL' => '*',
     'DIV' => '/', 'EQ' => '==', 'LT' => '<', 'LE' => '<=', 'GT' => '>', 'GE' => '>=', 'AREF' => '[]',
-    'ASET' => '[]=', 'STRCAT' => 'to_s', 'ARYCAT' => 'to_a', 'ARYSPLAT' => 'to_a', 'APOST' => 'to_a',
+    'ASET' => '[]=', 'GETIDX' => '[]', 'GETIDX0' => '[]', 'SETIDX' => '[]=', 'STRCAT' => 'to_s', 'ARYCAT' => 'to_a', 'ARYSPLAT' => 'to_a', 'APOST' => 'to_a',
     'HASHCAT' => 'to_hash', 'RANGE_INC' => '<=>', 'RANGE_EXC' => '<=>', 'GETCONST' => 'const_missing',
     'GETMCNST' => 'const_missing', 'CLASS' => 'inherited', 'TDEF' => 'singleton_method_added',
     'DEF' => 'method_added', 'SDEF' => 'singleton_method_added', 'EXCEPT' => 'exception'
@@ -278,6 +278,7 @@ class YieldReach
           child = irep.reps[insn.block_index]
           node.bodies << child if child
         end
+        note_index_read(node, program, insn, idx) if %w[GETIDX GETIDX0].include?(op)
         fiber_classified += scan_send(node, program, insn, idx) if SEND_OPS.include?(op)
       end
     end
@@ -303,6 +304,18 @@ class YieldReach
         @nodes[child].generator = true if child
       end
     end
+  end
+
+  # Values that are never a Proc, so `x[i]` on them does not run one.
+  NON_PROC_WRITERS = %w[ARRAY ARRAY2 STRING HASH LOADI__1 LOADI_0 LOADI_1 LOADI_2 LOADI_3 LOADI_4 LOADI_5 LOADI_6
+                        LOADI_7 LOADI8 LOADINEG LOADI16 LOADI32 LOADL LOADSYM LOADNIL LOADTRUE LOADFALSE INTERN
+                        SYMBOL RANGE_INC RANGE_EXC STRCAT].freeze
+
+  # `pr[1]` runs a Proc like `pr.call(1)`; the index ops do not say what the receiver is.
+  def note_index_read(node, program, insn, idx)
+    reg = insn.regs.last
+    w = reg && node.irep.source_writer(idx - 1, reg)
+    node.proc_call = true unless w && NON_PROC_WRITERS.include?(w.op)
   end
 
   def seed_unknown_yield(node)
@@ -1109,7 +1122,8 @@ class YieldReach
   def fiber_unsafe(labels)
     crossable = fiber_crossable
     labels.select do |l|
-      (crossable.include?(l) && may_yield_unsealed?(l)) || nested_crossable_yielder?(@nodes[l], crossable)
+      node = @nodes[l]
+      node && ((crossable.include?(l) && may_yield_unsealed?(l)) || nested_crossable_yielder?(node, crossable))
     end
   end
 

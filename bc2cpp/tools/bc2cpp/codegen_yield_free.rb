@@ -16,7 +16,7 @@ class CodeGen
     key = @closed_world || @ireps
     memo = (YIELD_REACH_MEMO[@ireps] ||= {}.compare_by_identity)
     memo[key] ||= begin
-      cw = @closed_world
+      cw = @closed_world.is_a?(ClosedWorld) ? @closed_world : nil
       sound = !cw.nil? && cw.global_refusal.nil?
       native = @registry.values.flatten.select { |d| d.owner == '<native>' }.to_set(&:name)
       native.merge(cw.outside_names) if cw

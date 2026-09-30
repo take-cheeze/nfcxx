@@ -231,14 +231,15 @@ module ArgShapeCalls
   # A nested compile (compiles_clean? -> compile_method) is a different call
   # site: it must not inherit this one's block.
   def with_fresh_method_state
-    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono]
+    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region]
     @call_block_expr = nil
     @call_block_direct_calls = 0
     @extended_callee_shapes = false
     @no_by_name_mono = false
+    @call_block_region = nil
     super
   ensure
-    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono = saved if saved
+    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region = saved if saved
   end
 
   # ARG_SHAPES_BLOCK: the SENDB `region` (a literal block already built into
