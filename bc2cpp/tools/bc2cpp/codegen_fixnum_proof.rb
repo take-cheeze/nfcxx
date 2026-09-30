@@ -701,6 +701,11 @@ class CodeGen
           # A def naming itself is neither a site nor poison (ENTRY_ARG_DEF_OPS).
           next if ENTRY_ARG_DEF_OPS.include?(insn.op)
 
+          # `alias new old` reaches old's body through a call to `new`, a site of no
+          # registry name; its second token is the body's own name.
+          old_name = insn.first_of(:name)&.value if insn.op == 'ALIAS'
+          poisoned << old_name if old_name
+
           unless ENTRY_ARG_CALL_OPS.include?(insn.op) && owner
             poisoned << name
             next

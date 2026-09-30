@@ -84,13 +84,15 @@ module BytecodeIR
 
     # [source, target] instruction-index pairs of the given jump ops located
     # before +limit+, or nil when a jump's target address is not an instruction.
+    # A JMPUW named in +ops+ is an edge too (branch_target): jump_target would
+    # be nil for it and read as an unresolved jump.
     def jump_edges_before(limit, ops)
       edges = []
       @instructions.each do |instruction|
         break if instruction.index >= limit
         next unless ops.include?(instruction.op)
 
-        target = @address_to_index[instruction.source.jump_target]
+        target = @address_to_index[instruction.source.branch_target]
         return nil unless target
 
         edges << [instruction.index, target]
