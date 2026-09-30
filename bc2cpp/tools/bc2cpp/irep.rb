@@ -171,7 +171,10 @@ def irep_pool_entry(entry)
   when :float then { type: :float, raw: ".f=#{c_double(entry.value)}" }
   when :bigint
     bytes = [entry.value.bytesize - 1].pack('C') + entry.value
-    { type: :bigint, raw: "\"#{bytes.unpack('C*').map { |b| format('\\x%02x', b) }.join}\"" }
+    # `base` is signed (negative = negative literal) and `digits` are ASCII in
+    # that base, exactly what vm.c's OP_LOADL hands to mrb_bint_new_str.
+    { type: :bigint, raw: "\"#{bytes.unpack('C*').map { |b| format('\\x%02x', b) }.join}\"",
+      base: entry.value.unpack1('c'), digits: entry.value.byteslice(1..) }
   else raise "bc2cpp: unknown pool entry kind #{entry.kind}"
   end
 end

@@ -116,6 +116,11 @@ class CodeGen
     # EXCEPTION_BREAK_SUPPORT: true only while compiling a BLOCK_FALLBACK body;
     # BREAK then throws bc2cpp_block_break instead of returning.
     @block_fallback_active = false
+    # BLOCK_SEMANTICS (ADR 0266): the env slots of the BLOCK_FALLBACK body being
+    # compiled that hold the method's return token and the call site's break
+    # token (nil: this block has none). Saved and restored like @blk_param_name.
+    @block_ret_slot = nil
+    @block_brk_slot = nil
     # BLKPUSH_YIELD_SUPPORT: the method's block parameter name ('bc2cpp_blk'), set
     # by compile_method around its body; read by BLKPUSH. nil elsewhere.
     # BLOCK_FALLBACK_YIELD_SUPPORT: also set by emit_proc_fallback_fn for a body
@@ -261,7 +266,24 @@ class CodeGen
   # callers still need pure arity because they call `_impl` directly, bypassing
   # the entry wrapper.)
   def drop_unsafe_embeddings(ivar_layout)
-    demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout))
+    demote_typed_ivars_maybe_unassigned(demote_typed_ivars_read_by_interpreter(select_embeddings(ivar_layout)))
+  end
+
+  # INIT_ASSIGNED (ADR 0261): the slots whose zeroed state reads as a value.
+  # fixnum_nil is left out: its zero state is nil.
+  ZEROED_READS_AS_VALUE = %i[fixnum symbol bool].freeze
+
+  # A zeroed typed slot reads 0/false where an ivar some path observes before
+  # #initialize assigns it reads nil: such an ivar stays a :value slot.
+  def demote_typed_ivars_maybe_unassigned(layout)
+    layout.to_h do |owner, ivars|
+      init = @registry['initialize']&.find { |d| d.owner == owner }
+      program = init&.irep && BytecodeIR.for(@ireps.fetch(init.irep))
+      [owner, ivars.to_h do |name, type|
+        assigned = !ZEROED_READS_AS_VALUE.include?(type) || (program && program.ivar_assigned_before_exposure?(name))
+        [name, assigned ? type : :value]
+      end]
+    end
   end
 
   def select_embeddings(ivar_layout)
@@ -335,10 +357,10 @@ class CodeGen
     end
   end
 
-  # TYPED_SLOT_INTERPRETED_ACCESS: a typed slot holds a raw C value, but the
-  # RData ivar descriptor (patches/mruby-rdata-ivar-slots.patch) only
-  # understands mrb_value slots, so a method left on the interpreter would
-  # read/write it as a boxed value. Such an ivar stays a plain :value slot.
+  # TYPED_SLOT_INTERPRETED_ACCESS: a method left on the interpreter reaches a
+  # typed slot through the RData ivar descriptor, which boxes on every read and
+  # type-checks on every write (patches/mruby-rdata-ivar-slots.patch). Such an
+  # ivar stays a plain :value slot instead.
   def demote_typed_ivars_read_by_interpreter(layout)
     typed = layout.flat_map { |owner, ivars| ivars.filter_map { |name, type| [owner, name] if type != :value } }
     return layout if typed.empty?

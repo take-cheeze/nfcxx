@@ -28,7 +28,7 @@ class CodeGen
         if insn.op == 'GETUPVAR'
           "  r#{insn.reg} = *#{vname};\n"
         else
-          "  *#{vname} = r#{insn.reg};\n"
+          "  *#{vname} = r#{insn.reg};\n  bc2cpp_upvar_root(M, #{vname}, r#{insn.reg});\n"
         end
       else
         "  #error unhandled opcode #{insn.op} -- not in this prototype's supported subset\n"
@@ -79,14 +79,21 @@ class CodeGen
       "  r#{d} = mrb_fixnum_value(#{lit});\n"
     when 'LOADL'
       # "LOADL R5 L[0]": a pool literal (vm.c OP_LOADL). Only FLOAT is modelled:
-      # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002").
-      # INT32/INT64/BIGINT are not decoded and keep `#error`.
+      # the pool entry's `raw` is a valid C double literal (".f=0.33000000000000002")
+      # and BIGINT (LOADL_BIGINT); INT32/INT64 never occur (the parser
+      # emits LOADI* up to int32 and BIGINT beyond) and keep `#error`.
       d = insn.reg
       pidx = insn.pool_index.to_i
       entry = irep.pool.fetch(pidx)
       if entry.is_a?(Hash) && entry[:type] == :float
         lit = entry[:raw][/\.f\s*=\s*(.+)/, 1]
         "  r#{d} = mrb_float_value(M, #{lit});\n"
+      elsif entry.is_a?(Hash) && entry[:type] == :bigint && entry[:digits].match?(/\A[0-9a-zA-Z]{1,255}\z/)
+        # LOADL_BIGINT (ADR 0260): rebuilt from its digits as OP_LOADL does, never
+        # from a 64-bit C constant a 32-bit mrb_int target could not hold.
+        "#ifdef MRB_USE_BIGINT\n" \
+          "  r#{d} = mrb_bint_new_str(M, \"#{entry[:digits]}\", #{entry[:digits].size}, #{entry[:base]});\n" \
+          "#else\n  #{inline_raise_exact('RangeError', 'integer overflow')}\n#endif\n"
       else
         kind = entry.is_a?(Hash) ? entry[:type] : :string
         "  #error LOADL references a non-float pool entry (#{kind}) -- not in this prototype's supported subset\n"
@@ -358,8 +365,12 @@ class CodeGen
       compile_send(insn, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                    trace_idx: idx, trace_reg_offset: reg_offset)
     when 'SSEND0', 'SSEND'
-      compile_send(insn, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
-                   trace_idx: idx, trace_reg_offset: reg_offset)
+      if insn.op == 'SSEND0' && insn.sym == 'block_given?' && block_given_modelled?
+        compile_block_given(insn, reg_offset)
+      else
+        compile_send(insn, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
+                     trace_idx: idx, trace_reg_offset: reg_offset)
+      end
     when 'BLKPUSH'
       # BLKPUSH_YIELD_SUPPORT: `BLKPUSH R4 2:0:0:0 (0)`: vm.c OP_BLKPUSH with lv == 0
       # reads regs[1 + offset], this frame's block (lv > 0 walks uvenv). Compiled
@@ -375,7 +386,7 @@ class CodeGen
       if lv == @blk_param_level.to_s && @blk_param_name
         <<~CPP
           if (mrb_nil_p(#{@blk_param_name})) {
-            mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "bc2cpp: unexpected yield");
+            mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "unexpected yield");
           }
           r#{d} = #{@blk_param_name};
         CPP
@@ -391,7 +402,7 @@ class CodeGen
       # a Proc (`mrb_raisef(mrb, E_TYPE_ERROR, "wrong type %T (expected Proc)",
       # recv)`) and runs the proc body, ignoring any #call method. mrb_funcall(...,
       # "call") would be wrong (an object with its own #call would be invoked), so
-      # the type check is reproduced (fixed message, as elsewhere here) and the call
+      # the type check is reproduced and the call
       # goes through mrb_yield_argv (public). For an irep-backed Proc (every real
       # site passes a literal block) both take self from the proc's env
       # (mrb_proc_get_self, src/proc.c), and `break` unwinds normally past this
@@ -404,14 +415,14 @@ class CodeGen
       blkn = insn.uint_operand.to_i
       out = String.new
       out << "  if (!mrb_proc_p(r#{d})) {\n"
-      out << "    mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"bc2cpp: BLKCALL (yield) expected a Proc\");\n"
+      out << "    mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"wrong type %T (expected Proc)\", r#{d});\n"
       out << "  }\n"
       if blkn.zero?
-        out << "  r#{d} = mrb_yield_argv(M, r#{d}, 0, NULL);\n"
+        out << "  r#{d} = bc2cpp_yield_argv(M, r#{d}, 0, NULL);\n"
       else
         out << "  {\n"
         out << "    mrb_value blkcall_args[] = { #{(1..blkn).map { |i| "r#{d + i}" }.join(', ')} };\n"
-        out << "    r#{d} = mrb_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
+        out << "    r#{d} = bc2cpp_yield_argv(M, r#{d}, #{blkn}, blkcall_args);\n"
         out << "  }\n"
       end
       out
@@ -435,10 +446,10 @@ class CodeGen
       target = ensure_remapped_jump_target(irep, insn.jmp_addr)
       "  goto L#{target};\n"
     when 'JMPUW'
-      # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when this irep has no
-      # catch handlers (see jmpuw_is_plain_jump?). `.to_i` as for JMP.
-      if jmpuw_is_plain_jump?(irep)
-        "  goto L#{insn.jmp_addr};\n"
+      # JMPUW_SUPPORT: break/next/redo/retry; a plain JMP when no ensure handler
+      # can intercept it (see jmpuw_plain_jump_at?). `.to_i` as for JMP.
+      if jmpuw_plain_jump_at?(irep, insn)
+        "  goto L#{ensure_remapped_jump_target(irep, insn.jmp_addr)};\n"
       else
         "  #error unhandled opcode JMPUW -- not in this prototype's supported subset\n"
       end
@@ -634,7 +645,7 @@ class CodeGen
           # INDEX_CHAIN: send the untyped `x[i]` fallback through the exact-class chain
           # (compile_poly_small_n), so program-defined `#[]` (Game::Variables,
           # LCF::Array1D, ...) is called directly; nil keeps the funcall.
-          tail = compile_poly_small_n('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
+          tail = compile_poly_dispatch('[]', d.to_i, "r#{d}", ["r#{s}"], 1)
           tail = tail ? tail.gsub(/^/, '  ').lstrip : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
           fallback = <<~CPP
             if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
@@ -794,9 +805,14 @@ class CodeGen
       #     `throw bc2cpp_method_return{...}`, caught by compile_method's top-level
       #     try/catch (needs_return_catch). The per-call-site
       #     `catch (bc2cpp_block_break&)` cannot match it (exact C++ catch types).
+      #     BLOCK_SEMANTICS: the method's token comes from this block's env, and a
+      #     strict proc (Kernel#lambda) only returns from itself.
       r = insn.no_operands? ? '0' : insn.reg
-      if @block_fallback_active
-        "  throw bc2cpp_method_return{r#{r}};\n"
+      if @block_fallback_active && @block_ret_slot
+        "  if (bc2cpp_proc_strict_p(M)) throw bc2cpp_proc_exit{r#{r}};\n" \
+          "  bc2cpp_return_from_block(M, r#{r}, mrb_proc_cfunc_env_get(M, #{@block_ret_slot}));\n"
+      elsif @block_fallback_active
+        "  #error RETURN_BLK in a block whose env carries no method token\n"
       else
         "  return r#{r};\n"
       end
@@ -807,9 +823,14 @@ class CodeGen
       # (2) EXCEPTION_BREAK_SUPPORT: a BLOCK_FALLBACK body, where a non-strict break
       #     unwinds to the SENDB call site, past mrb_funcall_with_block: `throw`,
       #     caught by emit_block_fallback_glue's `catch (bc2cpp_block_break&)`.
+      #     BLOCK_SEMANTICS: unwinds only to the call site that built this proc
+      #     (its token, from this block's env) and only while that site is live.
       r = insn.no_operands? ? '0' : insn.reg
-      if @block_fallback_active
-        "  throw bc2cpp_block_break{r#{r}};\n"
+      if @block_fallback_active && @block_brk_slot
+        "  if (bc2cpp_proc_strict_p(M)) throw bc2cpp_proc_exit{r#{r}};\n" \
+          "  bc2cpp_break(M, r#{r}, mrb_proc_cfunc_env_get(M, #{@block_brk_slot}));\n"
+      elsif @block_fallback_active
+        "  #error BREAK in a block whose env carries no call site token\n"
       else
         "  return r#{r};\n"
       end

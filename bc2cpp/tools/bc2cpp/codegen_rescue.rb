@@ -34,6 +34,22 @@ class CodeGen
     !BytecodeIR.for(irep).handlers?
   end
 
+  # JMPUW_RESCUE_SUPPORT (ADR 0260): vm.c's OP_JMPUW only consults an ENSURE
+  # handler that covers it and whose range the target leaves; otherwise it is a
+  # plain jump. The rescue recognizers count JMPUW as a branch, so one leaving a
+  # try body still rejects that region.
+  def jmpuw_plain_jump_at?(irep, insn)
+    return true if jmpuw_is_plain_jump?(irep)
+
+    target = insn.jmp_addr
+    irep.catch_handlers.none? do |ch|
+      next false unless ch.type == :ensure
+      next false unless ch.begin_addr <= insn.addr && insn.addr < ch.end_addr
+
+      !(ch.begin_addr..ch.end_addr).cover?(target)
+    end
+  end
+
   # ENSURE_DISPATCH_MERGE_SUPPORT: compile_method's per-irep remap of jumps onto
   # an ensure handler address. nil outside compile_method (hence `&.`); keyed on
   # the irep object so a nested irep's same numeric address is unaffected.
@@ -272,11 +288,14 @@ class CodeGen
       # connector_reg is always exc_reg (see the header). tail_return stays a
       # checked distinction: emit_rescue_glue takes the early return only then, and
       # verifies connector_reg against the RETURN operand.
+      # RESCUE_JOIN_RETURN_SUPPORT: a join `RETURN Rx` with Rx other than the
+      # connector is not a tail return of the result; it takes the `goto
+      # shared_target` path, correct for any join.
       tail_return = %w[RETURN RETURN_BLK].include?(shared_i.op)
       connector_reg = exc_reg
       if tail_return
         tail_reg = shared_i.no_operands? ? '0' : shared_i.reg
-        next unless tail_reg == connector_reg
+        tail_return = false unless tail_reg == connector_reg
       end
 
       # Containment, checked by jump SOURCE address:
@@ -294,6 +313,76 @@ class CodeGen
                    connector_reg: connector_reg, tail_return: tail_return, kind: handler[:kind] }
     end
     regions
+  end
+
+  # RESCUE_LIVE_OUT (ADR 0260): the try body is its own function, so locals it
+  # writes (any local for an unmodelled op) or that a block created outside the
+  # range touches are passed by reference, not copied. Temporaries stay copies:
+  # only the connector is live across the region. Returns register numbers.
+  def rescue_ref_regs(irep, region)
+    nlocals = irep.nlocals.to_i
+    b = region[:begin_addr]
+    e = region[:end_addr]
+    written = Set.new
+    touched = Set.new
+    irep.instructions.each do |i|
+      inside = (b..e).cover?(i.addr)
+      if inside
+        regs = rescue_insn_written_regs(i)
+        return (1...nlocals).to_a unless regs
+
+        written.merge(regs)
+        if BytecodeIR::CALLEE_FRAME_OPS.include?(i.op) && i.reg
+          written.merge((i.reg.to_i...irep.nregs.to_i).map(&:to_s))
+        end
+      end
+      next unless i.block_index && irep.reps
+
+      child = @ireps[irep.reps[i.block_index]]
+      next unless child
+
+      all, child_written = upvar_refs_into(child, 0)
+      inside ? written.merge(child_written) : touched.merge(all)
+    end
+    (written | touched).map(&:to_i).select { |r| r.between?(1, nlocals - 1) && r.to_s != region[:connector_reg] }.sort
+  end
+
+  # Registers (digits) of the frame `level` levels above +irep+'s parent that
+  # +irep+ and its nested blocks touch through GETUPVAR/SETUPVAR: [all, written].
+  def upvar_refs_into(irep, level)
+    all = Set.new
+    written = Set.new
+    irep.instructions.each do |insn|
+      ref = insn.upvar_ref
+      if ref && ref.last == level
+        all << ref.first.to_s
+        written << ref.first.to_s if insn.op == 'SETUPVAR'
+      end
+      next unless insn.block_index && irep.reps
+
+      child = @ireps[irep.reps[insn.block_index]]
+      next unless child
+
+      sub_all, sub_written = upvar_refs_into(child, level + 1)
+      all.merge(sub_all)
+      written.merge(sub_written)
+    end
+    [all, written]
+  end
+
+  # Registers (digits) an instruction can write, or nil for an op whose writes
+  # are not modelled. WRITES_LEADING_REG_OPS is the audited leading-operand set.
+  def rescue_insn_written_regs(insn)
+    op = insn.op
+    if BytecodeIR::READS_LEADING_REG_OPS.include?(op) || op == 'JMPUW'
+      []
+    elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+      [insn.reg].compact
+    elsif op == 'RESCUE'
+      [insn.regs[1]].compact
+    elsif op == 'EXCEPT'
+      [insn.reg].compact
+    end
   end
 
   # RESCUE_SUPPORT: the classic `rescue SomeClass` handler shape. Returns nil
@@ -515,9 +604,25 @@ class CodeGen
   # ...; return; end` guard) can have any register set, so the whole register
   # file is captured by value, as for NESTED_RESCUE_SUPPORT.
   def rescue_entry_saved_fields(irep, region)
-    return [] if irep.instructions_at(0...region[:begin_addr]).all? { |insn| insn.op == 'ENTER' }
+    refs = rescue_ref_regs(irep, region)
+    saved = if irep.instructions_at(0...region[:begin_addr]).all? { |insn| insn.op == 'ENTER' }
+              []
+            else
+              (1...irep.nregs).reject { |i| refs.include?(i) }.map do |i|
+                { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' }
+              end
+            end
+    saved + rescue_ref_fields(refs)
+  end
 
-    (1...irep.nregs).map { |i| { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' } }
+  # Ctx fields aliasing the outer function's registers (see rescue_ref_regs).
+  def rescue_ref_fields(regs)
+    regs.map { |i| { name: "bc2cpp_ref_r#{i}", c_type: 'mrb_value*', value: "&r#{i}" } }
+  end
+
+  # The C++ expression an extra Ctx field is initialised from at the glue.
+  def rescue_field_value(field)
+    field[:value] || field[:name].sub('bc2cpp_saved_', '')
   end
 
   def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
@@ -561,15 +666,19 @@ class CodeGen
     # own extra_fields are inherited too. arg_names/arg_native_types are empty for
     # the recursive call (no named argument locals exist here). The init loop
     # below uses a `bc2cpp_saved_r<N>` field instead of nil when present.
-    saved_regs = (1...irep.nregs).to_a
-    nested_saved_fields = saved_regs.map { |i| { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' } }
-    # This body's own saved-register fields are superseded by the fresh capture.
-    inherited_fields = extra_fields.reject { |f| f[:name].start_with?('bc2cpp_saved_r') }
-    nested_extra_fields = inherited_fields + nested_saved_fields
-    nested_extra_values = inherited_fields.map { |f| f[:name] } + saved_regs.map { |i| "r#{i}" }
+    # This body's own saved-register and alias fields are superseded by the fresh
+    # capture; a nested region aliases what it writes through this body's names
+    # (already aliases: the nested range lies inside this one).
+    inherited_fields = extra_fields.reject { |f| f[:name].start_with?('bc2cpp_saved_r', 'bc2cpp_ref_r') }
     nested_rescue_regions.each_with_index do |nregion, ni|
       # (Already claimed into local_suppressed above.)
       nested_try_name = "#{try_name}_nested#{nested_rescue_regions.size > 1 ? "_#{ni}" : ''}"
+      nested_refs = rescue_ref_regs(irep, nregion)
+      nested_saved_fields = (1...irep.nregs).reject { |i| nested_refs.include?(i) }.map do |i|
+        { name: "bc2cpp_saved_r#{i}", c_type: 'mrb_value' }
+      end
+      nested_extra_fields = inherited_fields + nested_saved_fields + rescue_ref_fields(nested_refs)
+      nested_extra_values = nested_extra_fields.map { |f| f[:value] || f[:name].sub('bc2cpp_saved_', '') }
       out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields,
                                                                             available_upvars: available_upvars)
       local_glue_at[nregion[:begin_addr]] =
@@ -579,13 +688,19 @@ class CodeGen
     out << "struct #{ctx_struct} { #{ctx_fields.join('; ')}; };\n"
     out << "static mrb_value #{try_name}(mrb_state* M, void* ud) {\n"
     out << "  #{ctx_struct}* ctx = (#{ctx_struct}*)ud;\n"
-    extra_fields.each { |f| out << "  #{f[:c_type]} #{f[:name]} = ctx->#{f[:name]};\n" }
+    extra_fields.each do |f|
+      out << "  #{f[:c_type]} #{f[:name]} = ctx->#{f[:name]};\n" unless f[:name].start_with?('bc2cpp_ref_r')
+    end
     (0...irep.nregs).each do |i|
       if i.zero?
         # GETIV/SETIV codegen uses the bare identifier `self`; this function receives
         # it through ctx, so alias it.
         out << "  mrb_value self = ctx->self;\n"
         out << "  mrb_value r0 = self;\n"
+      elsif extra_fields.any? { |f| f[:name] == "bc2cpp_ref_r#{i}" }
+        # RESCUE_LIVE_OUT: an alias of the outer register, so a write here is the
+        # write the bytecode makes (see rescue_ref_regs).
+        out << "  mrb_value& r#{i} = *ctx->bc2cpp_ref_r#{i};\n"
       elsif (saved = extra_fields.find { |f| f[:name] == "bc2cpp_saved_r#{i}" })
         # A saved-register capture is the register's value at begin_addr, so it wins
         # over the raw argument (an optional default may have replaced it).
@@ -604,6 +719,8 @@ class CodeGen
     end
     body_targets = jump_targets(irep).select { |t| range.cover?(t) } -
                    (local_suppressed.to_a - local_glue_at.keys)
+    saved_blk_param_name = @blk_param_name
+    @blk_param_name = 'bc2cpp_blk' if extra_fields.any? { |f| f[:name] == 'bc2cpp_blk' }
     irep.instructions_at(range).each do |insn|
       idx = irep.index_of_addr(insn.addr)
       next if local_suppressed.include?(insn.addr) && !local_glue_at.key?(insn.addr)
@@ -615,7 +732,8 @@ class CodeGen
                 local_glue_at[insn.addr] || compile_insn(insn, irep, d, idx)
               end
     end
-    out << "  return mrb_nil_value(); // unreachable\n"
+    @blk_param_name = saved_blk_param_name
+    out << fell_off_end(try_name)
     out << "}\n\n"
     out
   end

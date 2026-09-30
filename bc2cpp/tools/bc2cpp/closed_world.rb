@@ -3,6 +3,8 @@
 require 'set'
 require_relative 'compiled_gems'
 require_relative 'touch_scan'
+require_relative 'foreign_definers'
+require_relative 'core_defs'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -37,11 +39,14 @@ class ClosedWorld
   RUBY_DYNAMIC = /\b(?:define_method|define_singleton_method|alias_method|attr_reader|attr_writer|attr_accessor)
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
+  CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
 
   attr_reader :global_refusal
 
-  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:)
+  def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
+    @module_names = module_names.to_set
+    @clone_sent = false
     @registry = registry
     @class_decls = class_decls
     @walked = walked
@@ -51,6 +56,7 @@ class ClosedWorld
     @outside_name_paths = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
+    @ruby_paths = ruby_paths
     # Per outside file: the constants it can create, reopen, subclass or rebind
     # (TouchScan, ADR 0256).
     @touches = []
@@ -154,6 +160,24 @@ class ClosedWorld
     @native_arms_name = previous
   end
 
+  # NATIVE_CORE_DIRECT (ADR 0257): nothing outside the registry (an outside Ruby
+  # definition, alias, visibility change or prepend on `owner`, a dynamic
+  # installer) can replace core `owner`'s native `name`.
+  def core_native_arm_safe?(name, owner)
+    return false if @global_refusal || @unknown_defs.include?(name)
+
+    !ForeignDefiners.defines?(@ruby_paths, owner, name)
+  end
+
+  # BLOCK_CORE_DIRECT (ADR 0270): like core_native_arm_safe?, for a method that mruby's own
+  # Ruby defines on `owner`. That Ruby is what the arm calls, so only an outside definer that
+  # is not core source (an engine-side reopening, a dynamic installer) can replace it.
+  def core_ruby_arm_safe?(name, owner)
+    return false if @global_refusal || @unknown_defs.include?(name)
+
+    !ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
+  end
+
   # `name` is spelled only by the given native files, and no outside Ruby.
   def native_only_in?(name, path_fragment)
     paths = @outside_name_paths[name]
@@ -194,6 +218,21 @@ class ClosedWorld
     { descendants: sub, wild: @wild & sub }
   end
 
+  # ADR 0259: the superclass of a declared, non-opaque class: its full path, or
+  # :none for an implicit Object. nil when it cannot be named with certainty
+  # (an unresolved or ambiguous superclass expression, or an opaque class).
+  def class_parent(klass)
+    return nil if @global_refusal || opaque?(klass)
+
+    supers = @class_decls.fetch(klass).map { |decl| decl[:super] }.uniq - [:none]
+    return :none if supers.empty?
+    return nil unless supers.one? && supers.first.is_a?(String)
+
+    candidates = @by_simple[simple(supers.first)]
+    parent = candidates.first
+    candidates.one? && (parent == supers.first || parent.end_with?("::#{supers.first}")) ? parent : nil
+  end
+
   # Can an instance of `owner` or of a descendant answer through method_missing?
   def self_method_missing_free?(owner)
     method_missing_free?(owner)
@@ -225,6 +264,15 @@ class ClosedWorld
     return true if UniqueClassNames.table&.value?(owner)
 
     !@rebound.include?(simple(owner))
+  end
+
+  # ADR 0259: `self` in a `def self.x` of a declared module is that module's
+  # constant object. Only Kernel#clone copies a module's singleton methods, so
+  # nothing else can run them with another self; a `clone` spelled anywhere in
+  # the closed world or its outside sources refuses.
+  def module_object_self?(owner)
+    !@global_refusal && !@clone_sent && @module_names.include?(owner) && !@class_decls.key?(owner) &&
+      stable_constant_identity?(owner)
   end
 
   # A value constant is single-assignment only when bytecode has one binding
@@ -328,6 +376,7 @@ class ClosedWorld
       dynamic ||= text.match?(/"Struct"|MRB_SYM\(Struct\)/)
       text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
       record_native_touches(path, text, defines_class)
+      @clone_sent = true if !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING)
       names.merge(text.scan(C_STRING).flatten) if dynamic
       @outside_names.merge(names)
       names.each { |n| (@outside_name_paths[n] ||= Set.new) << path }
@@ -348,6 +397,7 @@ class ClosedWorld
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
       text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
       record_ruby_touches(path, text)
+      @clone_sent = true if text.match?(/\bclone\b/)
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
       @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
@@ -376,6 +426,7 @@ class ClosedWorld
           scan_send(irep, insns, idx, insn)
         when 'LOADSYM'
           sym = insn.sym_token
+          @clone_sent = true if sym == 'clone'
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
           const = insn.const_name
@@ -395,6 +446,7 @@ class ClosedWorld
 
   def scan_send(irep, insns, idx, insn)
     name = insn.sym
+    @clone_sent = true if name == 'clone'
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
       global!(:dynamic_install)

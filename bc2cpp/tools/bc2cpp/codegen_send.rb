@@ -113,7 +113,7 @@ class CodeGen
                                    element_annotations: @element_annotations,
                                    known_owners: @known_owners,
                                    capture_hints: @block_hash_capture_hints,
-                                   method_return_class: ->(method_name) { class_return_for_dispatch(method_name) })
+                                   method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
                  end
 
     # LITERAL_EQQ_SUPPORT: `LITERAL === x` from `case x; when LITERAL` (receiver a
@@ -451,8 +451,8 @@ class CodeGen
             "  r#{d} = rgss::#{helper}(M, #{recv});\n} else "
         end.join
         fallback = with_native_arms_emitted(name, owners) do
-          compile_poly_small_n(name, d, recv, argv, n,
-                               closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+          compile_poly_dispatch(name, d, recv, argv, n,
+                                closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
             dynamic_dispatch_line(d, recv, name, argv)
         end
         return "  // RGSS ##{name} -- exact native class identities select frame independent wrappers\n" \
@@ -479,8 +479,8 @@ class CodeGen
             "  r#{d} = rgss::#{function}(M, #{recv});\n} else "
         end.join
         fallback = with_native_arms_emitted(name, owners) do
-          compile_poly_small_n(name, d, recv, argv, n,
-                               closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
+          compile_poly_dispatch(name, d, recv, argv, n,
+                                closed_world_site: closed_world_site(recv, irep, idx || trace_idx, owner_def)) ||
             dynamic_dispatch_line(d, recv, name, argv)
         end
         return "  // RGSS #dispose -- captured exact-class registrations select frame-independent native bodies\n" \
@@ -584,7 +584,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Sprite' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Sprite'
@@ -609,7 +609,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -635,7 +635,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -664,7 +664,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -692,7 +692,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -718,7 +718,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if traced_class == 'RGSS::Bitmap' ||
          UniqueClassNames.resolve(traced_class, owner_def&.owner) == 'RGSS::Bitmap'
@@ -756,7 +756,7 @@ class CodeGen
         container_constants: @container_constants,
         element_annotations: @element_annotations,
         known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
-        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }
+        method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true
       )
       if %w[openness= tone=].include?(name) &&
          (traced_class == 'RGSS::Window' ||
@@ -989,6 +989,14 @@ class CodeGen
     integer_unary = compile_integer_unary(name, n, d, recv, argv)
     return integer_unary if integer_unary
 
+    # CORE_MIXINS (ADR 0261): core Ruby methods whose definition the build's core
+    # sources are verified to match.
+    core_sign = compile_core_numeric_sign(name, n, d, recv, argv)
+    return core_sign if core_sign
+
+    core_extreme = compile_core_min_max(insn, name, n, d, recv, argv)
+    return core_extreme if core_extreme
+
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
       fallback = dynamic_dispatch_line(d, recv, name, argv)
@@ -1187,6 +1195,10 @@ class CodeGen
       return compile_native_primitive_send(name, d, recv, argv)
     end
 
+    keywordless = compile_keywordless_call(name: name, d: d, recv: recv, n: n, argv: argv, self_implicit: self_implicit,
+                                           owner_def: owner_def, irep: irep, idx: idx)
+    return keywordless if keywordless
+
     target = monomorphic_target(name)
     # A MONO name is only safe to devirtualize if its definition fits the calling
     # convention (pure_mandatory_or_optional_arity?).
@@ -1219,7 +1231,7 @@ class CodeGen
         module_function_self = true
       end
       lex_owner = lexical_self_owner(owner_def)
-      # SINGLETON_LEXICAL_SELF: only the irep branch below; accessors stay dynamic.
+      # SINGLETON_LEXICAL_SELF: a singleton attr accessor never embeds (IVAR_ACCESS).
       singleton_candidate = lex_owner.nil? && lexical_self_singleton_def(name, owner_def)
       if target.nil? && (lex_owner || singleton_candidate)
         lex_candidate = singleton_candidate || @registry[name]&.find { |md| md.owner == lex_owner }
@@ -1229,6 +1241,9 @@ class CodeGen
                       mandatory_arity(@ireps.fetch(lex_candidate.irep)) + optional_arity(@ireps.fetch(lex_candidate.irep)))
           target = lex_candidate
           lexical_self = true
+        elsif lex_candidate&.irep && @registry[name].one? { |md| md.owner == lex_candidate.owner } &&
+              (argc_error = static_argc_error_code(lex_candidate, @ireps.fetch(lex_candidate.irep), n, d))
+          return argc_error
         elsif lex_candidate&.kind == :ivar_accessor && n == (name.end_with?('=') ? 1 : 0)
           # LEXICAL_SELF_IVAR_ACCESSOR: the :ivar_accessor analogue (an attr_* candidate
           # has no irep; see IVAR_ACCESSOR_DEVIRT). Same certainty, no guard; IVAR_ACCESS
@@ -1274,7 +1289,7 @@ class CodeGen
                                       element_annotations: @element_annotations,
                                       known_owners: @known_owners,
                                       capture_hints: @block_hash_capture_hints,
-                                      method_return_class: ->(method_name) { class_return_for_dispatch(method_name) })
+                                      method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)
@@ -1505,35 +1520,8 @@ class CodeGen
         constant_owner = constant_object_owner(irep, constant_site_idx,
                                                unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
                                                owner_def&.owner)
-        singleton_owner = "#{constant_owner}.singleton" if constant_owner
-        singleton_defs = @registry[name]&.select { |md| md.owner == singleton_owner } if singleton_owner
-        candidate = singleton_defs&.one? ? singleton_defs.first : nil
-        copied_module_function = candidate&.kind == :module_function
-        candidate_label = candidate&.irep || (candidate.copy_irep if copied_module_function)
-        candidate_irep = candidate_label && @ireps.fetch(candidate_label)
-        target = if copied_module_function
-                   @registry[name]&.find do |md|
-                     md.owner == candidate.copy_owner && md.irep == candidate.copy_irep
-                   end
-                 else
-                   candidate
-                 end
-        if candidate && candidate_irep && candidate.visibility == :public && !devirt_blocked_name?(name) &&
-           Array(@included_modules[singleton_owner]).empty? && Array(@prepended_modules[singleton_owner]).empty? &&
-           !@unknown_mixins.include?(singleton_owner) && pure_mandatory_arity?(candidate_irep) &&
-           mandatory_arity(candidate_irep) == n && !hot_only_excluded?(candidate_label) &&
-           constant_object_candidate_clean?(candidate_label) &&
-           (!copied_module_function || module_function_copy_self_safe?(candidate_irep)) &&
-           target &&
-           native_arg_types(target, n).compact.empty? &&
-           (!@only_owners || @only_owners.include?(singleton_owner) || @other_owners&.include?(singleton_owner))
-          impl = cpp_name(target.owner, target.name) + '_impl'
-          via = copied_module_function ? "module_function copy of #{target.owner}##{target.name}" : "#{candidate.owner}##{candidate.name}"
-          note = "  // CLOSED_WORLD_CONSTANT_OBJECT :#{name} -> #{via} " \
-                 "(stable class/module constant, unique public singleton definition), direct C++ call " \
-                 "without mrb_funcall.\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + argv).join(', ')});\n"
-        end
+        constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
+        return constant_code if constant_code
       end
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
@@ -1856,7 +1844,7 @@ class CodeGen
       generic = dynamic_dispatch_line_generic(d, recv, name, argv)
       return "if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {\n" \
              "    mrb_value bc2cpp_call_argv[] = { #{(argv + ['mrb_nil_value()']).join(', ')} };\n" \
-             "    r#{d} = mrb_yield_argv(M, #{recv}, #{argv.size}, bc2cpp_call_argv);\n" \
+             "    r#{d} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, bc2cpp_call_argv);\n" \
              "  } else {\n    #{generic}  }\n"
     end
     dynamic_dispatch_line_generic(d, recv, name, argv)
@@ -1870,7 +1858,7 @@ class CodeGen
       # (Game::Battle.from_actor's 22-field `Combatant.new(*[...])`).
       # mrb_funcall_argv has no such cap: it packs 15+ into a splat itself.
       "{ mrb_value bc2cpp_argv[] = { #{argv.join(', ')} }; " \
-        "r#{d} = mrb_funcall_argv(M, #{recv}, mrb_intern_lit(M, \"#{name}\"), #{argv.size}, bc2cpp_argv); }\n"
+        "r#{d} = bc2cpp_funcall_argv(M, #{recv}, mrb_intern_lit(M, \"#{name}\"), #{argv.size}, bc2cpp_argv); }\n"
     else
       "r#{d} = mrb_funcall(M, #{recv}, \"#{name}\", #{argv.size}, #{argv.join(', ')});\n"
     end
@@ -1891,7 +1879,8 @@ class CodeGen
       extra = unlisted_class_guards(name, listed, site)
       if extra
         extra_branches = extra.map do |klass|
-          "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{dispatch.chomp}\n    } else "
+          arm = unlisted_class_call(klass, name, d, recv, argv)&.chomp&.gsub("\n", "\n      ") || dispatch.chomp
+          "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
         end.join
         listed += extra
         reason = @closed_world.refusal(name, listed, site[:self_owner], symbol_installed_names)

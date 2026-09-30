@@ -33,6 +33,7 @@ class CodeGen
   METHOD_COMPILE_STATE = {
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
     :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
+    :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
     :@compiling_core => false
@@ -352,8 +353,14 @@ class CodeGen
 
   RDATA_IVAR_HASH_EMPTY = 0xFFFF
 
+  # enum mrb_data_ivar_kind (patches/mruby-rdata-ivar-slots.patch) per TYPE_OPS key.
+  RDATA_IVAR_KIND = {
+    value: 'MRB_DATA_IVAR_VALUE', fixnum: 'MRB_DATA_IVAR_INT', symbol: 'MRB_DATA_IVAR_SYMBOL',
+    bool: 'MRB_DATA_IVAR_BOOL', fixnum_nil: 'MRB_DATA_IVAR_INT_OR_NIL'
+  }.freeze
+
   # RDATA_IVAR_HASH: open-addressing index (FNV-1a 32 of the "@name", linear
-  # probing, half full) over a descriptor, so rdata_ivar_slot in
+  # probing, half full) over a descriptor, so rdata_ivar_find in
   # patches/mruby-rdata-ivar-slots.patch stops scanning every slot per access.
   def rdata_ivar_hash(names)
     raise "too many RData ivar slots (#{names.size})" if names.size >= RDATA_IVAR_HASH_EMPTY
@@ -371,9 +378,9 @@ class CodeGen
     table
   end
 
-  # One mrb_value slot + mrb_data_type marker per statically named ivar. The
-  # marker lets mruby's normal ivar APIs and GC find slots; dynamic names remain
-  # in RData's ordinary iv_tbl.
+  # One slot + mrb_data_type marker per statically named ivar. The marker lets
+  # mruby's normal ivar APIs and GC find slots; dynamic names remain in RData's
+  # ordinary iv_tbl.
   def emit_structs
     out = String.new
     out << emit_nullable_structs
@@ -412,11 +419,14 @@ class CodeGen
       out << "  mrb_free(mrb, p);\n"
       out << "}\n"
       out << "static const mrb_data_ivar #{sanitize(owner)}_ivar_slots[] = {\n"
-      # Typed fields hold raw C values, which the descriptor consumers (GC mark,
-      # mrb_iv_get/set) would misread as mrb_value; see interpreted_access?.
-      slots = ivars.select { |_, type| type == :value }.keys
+      # Typed fields are listed with their kind: the runtime boxes a raw C value on
+      # read and type-checks a store, so instance_variable_get/set,
+      # instance_variables, inspect, Marshal and dup see them (ADR 0261). The GC
+      # marks VALUE slots only.
+      slots = ivars.keys
       slots.each do |name|
-        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}) },\n"
+        out << "  { \"@#{name}\", offsetof(#{struct_name(owner)}, #{ivar_field_name(name)}), " \
+               "#{RDATA_IVAR_KIND.fetch(ivars.fetch(name))} },\n"
       end
       out << "  { \"\", 0 }, // placeholder: a zero-length array is not standard C++\n" if slots.empty?
       out << "};\n"
@@ -451,6 +461,11 @@ class CodeGen
       // NILABLE_EMBED_SUPPORT: a tagged Integer-or-nil ivar field. Immediate-only
       // by construction, so it needs no GC rooting; see IvarLayout::FIXNUM_NIL.
       struct Bc2cppFixnumOrNil { mrb_bool present; mrb_int value; };
+      // The runtime reads this slot as struct mrb_data_int_or_nil.
+      static_assert(sizeof(Bc2cppFixnumOrNil) == sizeof(mrb_data_int_or_nil) &&
+                    offsetof(Bc2cppFixnumOrNil, present) == offsetof(mrb_data_int_or_nil, present) &&
+                    offsetof(Bc2cppFixnumOrNil, value) == offsetof(mrb_data_int_or_nil, value),
+                    "Bc2cppFixnumOrNil must match struct mrb_data_int_or_nil");
       static inline mrb_bool bc2cpp_fixnum_or_nil_p(mrb_value v) {
         return mrb_nil_p(v) || mrb_fixnum_p(v);
       }
@@ -514,6 +529,15 @@ class CodeGen
       static inline mrb_bool bc2cpp_integer_operand_p(mrb_value v) { return bc2cpp_integer_recv_p(v) || mrb_float_p(v); }
 
     CPP
+  end
+
+  # NATIVE_CORE_DIRECT (ADR 0257) mirrors of core natives whose bodies are
+  # static, emitted only for the ones the output calls. NativeCoreDirect::ENTRIES
+  # pins each to the audited core body.
+  def emit_native_core_helpers(compiled)
+    NativeCoreDirect::HELPERS.filter_map do |name, text|
+      "#{text}\n" if compiled.any? { |m| m[:code].include?("#{name}(") }
+    end.join
   end
 
   # bc2cpp_bool_p (TYPE_OPS :bool check), emitted only when the output uses it.

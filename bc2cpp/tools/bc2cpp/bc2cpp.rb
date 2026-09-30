@@ -52,6 +52,8 @@ require_relative 'codegen'
 require_relative 'codegen_ivar_poly'
 require_relative 'codegen_native_send'
 require_relative 'codegen_native_direct'
+require_relative 'codegen_native_core_direct'
+require_relative 'codegen_core_methods'
 require_relative 'codegen_receiver_facts'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
@@ -65,6 +67,9 @@ require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
+require_relative 'codegen_constant_object'
+require_relative 'codegen_arg_shapes'
+require_relative 'codegen_block_core_direct'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -96,11 +101,11 @@ if $PROGRAM_NAME == __FILE__
   order = dfs_order(ireps, root_label)
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
-    module_names, alias_sites = build_registry(ireps, root_label)
+    declared_modules, alias_sites = build_registry(ireps, root_label)
   # CORE_DEFS (ADR 0264): a core-source definition a later one replaces is not the
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
-  CodeGen.module_names = module_names
+  CodeGen.module_names = declared_modules
   core_shadowed = CoreDefs.shadowed_labels(registry, ireps)
   core_shadowed_pairs = registry.values.flatten.select { |d| d.irep && core_shadowed.include?(d.irep) }
                                 .to_set { |d| [d.owner, d.name] }
@@ -137,7 +142,8 @@ if $PROGRAM_NAME == __FILE__
     engine_registry = registry.transform_values { |defs| defs.reject(&:core) }.reject { |_, defs| defs.empty? }
     closed_world = ClosedWorld.new(ireps: engine_ireps, registry: engine_registry, class_decls: class_decls,
                                    walked: walked_ireps & engine_ireps.keys,
-                                   native_paths: outside_native, ruby_paths: outside_ruby)
+                                   native_paths: outside_native, ruby_paths: outside_ruby,
+                                   module_names: declared_modules)
     warn "== closed world (#{build_name}: #{build_gems.size} gems, #{outside_native.size} native + " \
          "#{outside_ruby.size} Ruby outside sources) =="
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
@@ -435,6 +441,9 @@ if $PROGRAM_NAME == __FILE__
   # sets this to skip the allowlist; drop_unsafe_embeddings' other checks still
   # run.
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
+  # CORE_MIXINS: the modelled core methods this build's core sources still match.
+  CodeGen.core_methods = CoreMixins.verified(foreign_ruby_srcs, native_name_sources)
+  warn "== core Ruby methods verified against the build's sources (CORE_MIXINS): #{CodeGen.core_methods.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},
                                     Set.new, foreign_methods, nil, nil,
@@ -840,6 +849,7 @@ if $PROGRAM_NAME == __FILE__
 
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
+  puts '#include <string.h>'
   # isnan/isinf/floor/ceil for to_i's Float case (TO_I_TYPE_TAG_DISPATCH).
   puts '#include <math.h>'
   puts '#include <mruby/numeric.h>'
@@ -865,11 +875,16 @@ if $PROGRAM_NAME == __FILE__
   # EXCEPTION_BREAK_SUPPORT: the exception a BLOCK_FALLBACK BREAK throws and the
   # call-site glue catches (mruby is built with MRB_USE_CXX_EXCEPTION). Always
   # emitted: a header-only struct with nothing to link.
-  puts 'struct bc2cpp_block_break { mrb_value value; };'
+  # BLOCK_SEMANTICS (ADR 0266): each carries the token of the frame it unwinds
+  # to, so a catch takes only its own.
+  puts 'struct bc2cpp_block_break { mrb_value value; mrb_int token; };'
   # EXCEPTION_RETURN_SUPPORT: a DIFFERENT type from bc2cpp_block_break, so the
   # method-level catch and the per-call-site catch never catch each other's
   # exception (exact C++ catch matching).
-  puts 'struct bc2cpp_method_return { mrb_value value; };'
+  puts 'struct bc2cpp_method_return { mrb_value value; mrb_int token; };'
+  # A `break` or `return` of a strict proc (Kernel#lambda over a block) only
+  # leaves the proc; caught by its entry function.
+  puts 'struct bc2cpp_proc_exit { mrb_value value; };'
   # VM_UNWIND_RESTORE: bc2cpp_block_break / bc2cpp_method_return are foreign
   # C++ exceptions, which mruby's own MRB_TRY/MRB_CATCH (`catch (mrb_jmpbuf*)`)
   # does not intercept. When one unwinds through real VM frames (a compiled block
@@ -898,6 +913,124 @@ if $PROGRAM_NAME == __FILE__
         c->ci--;
       }
       if (M->errinfo && (c->ci - c->cibase) < M->errinfo_ci_depth) M->errinfo = NULL;
+    }
+    // BLOCK_SEMANTICS (ADR 0266): a cfunc-backed Proc (every BLOCK_FALLBACK
+    // block) cannot be reached through Proc#call from a compiled frame: OP_CALL
+    // pops back to that cfunc frame and reads ci->proc->body.irep, which is NULL
+    // there. Such a call yields to the proc directly, as OP_BLKCALL does.
+    static bool bc2cpp_cfunc_proc_call_p(mrb_state* M, mrb_value recv, mrb_sym mid) {
+      if (!MRB_PROC_CFUNC_P(mrb_proc_ptr(recv)) || mrb_obj_ptr(recv)->c != M->proc_class) return false;
+      const char* name = mrb_sym_name(M, mid);
+      if (!name || !(!strcmp(name, "call") || !strcmp(name, "yield") || !strcmp(name, "[]") || !strcmp(name, "==="))) return false;
+      // Only where the name is Proc's own bytecode method: without mruby-proc-ext
+      // `===` is Object's, and `[]` may be missing altogether.
+      struct RClass* found = M->proc_class;
+      mrb_method_t m = mrb_method_search_vm(M, &found, mid);
+      return !MRB_METHOD_UNDEF_P(m) && found == M->proc_class && !MRB_METHOD_CFUNC_P(m);
+    }
+    // ADR 0266: a break or return may only unwind to a frame still on the C++
+    // stack; the frames that can be one are chained, each with a token that a
+    // block keeps in its env. A block outliving its frame (a stored or returned
+    // proc) finds no live token and raises LocalJumpError, as the VM does.
+    // Tokens are 30-bit serials, so a stale one matches a live frame only after
+    // 2^30 frames.
+    struct Bc2cppFrame { mrb_int token; Bc2cppFrame* parent; };
+    static Bc2cppFrame* bc2cpp_break_frames = nullptr;
+    static Bc2cppFrame* bc2cpp_return_frames = nullptr;
+    static mrb_int bc2cpp_frame_serial = 0;
+    struct Bc2cppFrameGuard {
+      Bc2cppFrame frame;
+      Bc2cppFrame** head;
+      explicit Bc2cppFrameGuard(Bc2cppFrame** h) : head(h) {
+        bc2cpp_frame_serial = bc2cpp_frame_serial % 0x3fffffff + 1;
+        frame.token = bc2cpp_frame_serial;
+        frame.parent = *h;
+        *h = &frame;
+      }
+      ~Bc2cppFrameGuard() { *head = frame.parent; }
+      Bc2cppFrameGuard(const Bc2cppFrameGuard&) = delete;
+      Bc2cppFrameGuard& operator=(const Bc2cppFrameGuard&) = delete;
+    };
+    static bool bc2cpp_frame_live(const Bc2cppFrame* head, mrb_value token) {
+      if (!mrb_integer_p(token)) return false;
+      for (const Bc2cppFrame* f = head; f; f = f->parent) if (f->token == mrb_integer(token)) return true;
+      return false;
+    }
+    // The method frame a block built right now returns to; 0 (never live) if none.
+    static inline mrb_value bc2cpp_return_token(mrb_state* M) {
+      return mrb_int_value(M, bc2cpp_return_frames ? bc2cpp_return_frames->token : 0);
+    }
+    [[noreturn]] static void bc2cpp_break(mrb_state* M, mrb_value value, mrb_value token) {
+      if (!bc2cpp_frame_live(bc2cpp_break_frames, token)) {
+        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "break from proc-closure");
+      }
+      throw bc2cpp_block_break{ value, mrb_integer(token) };
+    }
+    [[noreturn]] static void bc2cpp_return_from_block(mrb_state* M, mrb_value value, mrb_value token) {
+      if (!bc2cpp_frame_live(bc2cpp_return_frames, token)) {
+        mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "LocalJumpError")), "unexpected return");
+      }
+      throw bc2cpp_method_return{ value, mrb_integer(token) };
+    }
+    // ADR 0266: OP_ENTER reports every positional arity error as `expected
+    // <mandatory>` (vm.c argnum_error); mrb_get_args would say `1+` or `1..2`.
+    // A call carrying keywords is left to mrb_get_args, which folds them in.
+    static inline void bc2cpp_check_argc(mrb_state* M, mrb_int min, mrb_int max) {
+      mrb_int argc = mrb_get_argc(M);
+      if (M->c->ci->nk == 0 && (argc < min || (max >= 0 && argc > max))) mrb_argnum_error(M, argc, min, min);
+    }
+    // Kernel#lambda flags a copy of the RProc strict after the block was built.
+    static inline bool bc2cpp_proc_strict_p(mrb_state* M) {
+      const struct RProc* p = M->c->ci->proc;
+      return p && MRB_PROC_STRICT_P(p);
+    }
+    // BLOCK_DIRECT_ENTRY (ADR 0271): a compiled block without break or return has a direct entry
+    // taking its captured environment and arguments. Its proc is a cfunc proc over this one
+    // function (inline: one address in every translation unit of the link) with the entry as the
+    // last env slot, so a yield from compiled code calls the entry without a VM frame, and
+    // anything else (an interpreted iterator, a Fiber) reaches it through the VM like any cfunc.
+    typedef mrb_value (*Bc2cppBlockEntry)(mrb_state*, struct REnv*, bool, mrb_int, const mrb_value*);
+    static inline Bc2cppBlockEntry bc2cpp_block_entry(struct REnv* e) {
+      return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 1])));
+    }
+    inline mrb_value bc2cpp_block_thunk(mrb_state* M, mrb_value) {
+      mrb_value* argv;
+      mrb_int argc;
+      mrb_get_args(M, "*", &argv, &argc);
+      const struct RProc* p = M->c->ci->proc;
+      return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
+    }
+    // SETUPVAR writes into the enclosing compiled frame, which the GC cannot see; the arena that
+    // held the value is restored when the block returns (ADR 0272). Roots stay per slot address.
+    static inline void bc2cpp_upvar_root(mrb_state* M, mrb_value* slot, mrb_value v) {
+      if (mrb_immediate_p(v)) return;
+      mrb_sym id = mrb_intern_lit(M, "$__bc2cpp_upvar_roots");
+      mrb_value roots = mrb_gv_get(M, id);
+      if (!mrb_hash_p(roots)) {
+        roots = mrb_hash_new(M);
+        mrb_gv_set(M, id, roots);
+      }
+      mrb_hash_set(M, roots, mrb_int_value(M, (mrb_int)((uintptr_t)slot >> 2)), v);
+    }
+    // mrb_yield_argv, minus the frame when `blk` is a non-strict block with a direct entry. The
+    // arena is restored and the result protected as mrb_yield_with_class does.
+    static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
+      if (mrb_type(blk) == MRB_TT_PROC) {
+        struct RProc* p = mrb_proc_ptr(blk);
+        if (MRB_PROC_CFUNC_P(p) && MRB_PROC_CFUNC(p) == bc2cpp_block_thunk && !MRB_PROC_STRICT_P(p)) {
+          struct REnv* e = MRB_PROC_ENV(p);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value result = bc2cpp_block_entry(e)(M, e, false, argc, argv);
+          mrb_gc_arena_restore(M, ai);
+          mrb_gc_protect(M, result);
+          return result;
+        }
+      }
+      return mrb_yield_argv(M, blk, argc, argv);
+    }
+    static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
+      if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
+      return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
   # ENSURE_RAII_SUPPORT: the runtime guard for a recognized `ensure`
@@ -990,6 +1123,10 @@ if $PROGRAM_NAME == __FILE__
   puts 'extern "C" mrb_bool mrb_num_shift(mrb_state*, mrb_int, mrb_int, mrb_int*);'
   # DIV_FASTPATH_SUPPORT: same internal.h situation as mrb_str_aref.
   puts 'extern "C" mrb_value mrb_div_int_value(mrb_state*, mrb_int, mrb_int);'
+  # LOADL_BIGINT: same internal.h situation; only where mruby-bigint is built.
+  puts '#ifdef MRB_USE_BIGINT'
+  puts 'extern "C" mrb_value mrb_bint_new_str(mrb_state*, const char*, mrb_int, mrb_int);'
+  puts '#endif'
   # ZSUPER_NATIVE_SUPPORT: same internal.h situation (see ZSUPER_NATIVE_TARGETS).
   # Declared as internal.h does, `mrb_noreturn` included, so g++ treats the
   # following RETURN as unreachable.
@@ -1016,6 +1153,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
+  print gen.emit_native_core_helpers(compiled)
   print gen.emit_integer_operand_helpers(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls

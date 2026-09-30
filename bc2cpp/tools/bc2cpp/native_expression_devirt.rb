@@ -164,119 +164,11 @@ module NativeExpressionDevirt
   # MRB_MT_INIT_ROM, and the class's instance tag comes from
   # MRB_SET_INSTANCE_TT. Both are needed to emit a guarded call-site path.
   def analyze_exact_class_expressions(paths)
-    registrations = Hash.new { |hash, name| hash[name] = [] }
+    registrations, opaque_owners = class_registrations(paths)
     implementations = Hash.new { |hash, function| hash[function] = [] }
-    opaque_owners = Hash.new { |hash, name| hash[name] = [] }
     target_classes = BUILTIN_CLASS_TAGS.keys.to_set
     mruby_root = mruby_core_root(paths)
     public_mrb_value_functions = public_mrb_value_functions(mruby_root)
-
-    Array(paths).each do |path|
-      next unless File.file?(path)
-
-      source = read_source(path)
-      class_variables = {}
-      scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
-        class_variables[variable] = { field: field, class_name: class_name }
-      end
-      scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
-        class_variables[variable] ||= { field: nil, class_name: class_name }
-      end
-      scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
-        class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
-      end
-      source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
-        info = class_variables[variable]
-        info[:field] ||= field if info
-      end
-      scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
-        field = field.first
-        class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
-      end
-      scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
-        class_variables[variable] ||= { field: nil, class_name: class_name }
-      end
-      # class.c boots BasicObject/Object/Module/Class through boot_defclass and
-      # only names them afterwards, so their method tables (`==`, `equal?`, ...)
-      # would otherwise have an unknown owner, which disables every name they
-      # share with a built-in class. Read the names off the source's own
-      # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-      booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
-      source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
-        class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
-      end
-      scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
-        class_variables[variable] ||= { field: nil, class_name: class_name }
-      end
-      tags = {}
-      source.scan(/MRB_SET_INSTANCE_TT\s*\(\s*(\w+)\s*,\s*(MRB_TT_\w+)\s*\)/) do |variable, tag|
-        tags[variable] = tag
-      end
-      table_owners = {}
-      macro_calls(source, 'MRB_MT_INIT_ROM').each do |arguments|
-        next unless arguments.length == 3
-
-        _mrb, variable, table = arguments
-        class_info = class_variables[variable]
-        if class_info.nil? && (field = variable.match(/\Amrb->(\w+_class)\z/)&.[](1))
-          class_info = { field: field, class_name: field.sub(/_class\z/, '').capitalize }
-        end
-        tag = tags[variable]
-        table_owners[table] ||= []
-        # Core mrbgems often attach ROM methods to an existing built-in via
-        # `mrb->array_class` without repeating the core's
-        # `MRB_SET_INSTANCE_TT` declaration in the gem source. Recover that
-        # closed set of tag values from the built-in class name; custom class
-        # owners still require a tag declaration in their own source.
-        resolved_tag = tag || (class_info && BUILTIN_CLASS_TAGS[class_info[:class_name]])
-        table_owners[table] << (class_info && class_info.merge(tag: resolved_tag))
-      end
-
-      rom_entries(source).each do |table, arguments|
-        function, symbol, aspec = arguments
-        name = symbol_name(symbol)
-        next unless name
-
-        owners = Array(table_owners[table]).uniq
-        owner = owners.one? ? owners.first : nil
-        registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner }
-      end
-
-      # Singleton/class methods live on the class object's method table and
-      # cannot shadow the same name in an instance receiver's method lookup.
-      # Only instance registration forms belong in this ambiguity set.
-      %w[mrb_define_method_id mrb_define_private_method_id].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5
-
-          name = symbol_name(arguments[2])
-          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-        end
-      end
-      %w[mrb_define_method mrb_define_private_method].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 5 && arguments[2].start_with?('"')
-
-          name = unescape_c_string(arguments[2][1...-1])
-          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-        end
-      end
-      %w[mrb_define_method_raw mrb_define_alias_id].each do |macro|
-        macro_calls(source, macro).each do |arguments|
-          next unless arguments.length == 4
-
-          name = symbol_name(arguments[2])
-          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-        end
-      end
-      macro_calls(source, 'mrb_define_alias').each do |arguments|
-        next unless arguments.length == 4 && arguments[2].start_with?('"')
-
-        name = unescape_c_string(arguments[2][1...-1])
-        opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
-      end
-
-    end
 
     needed_arities = registrations.values.flatten(1).filter_map do |entry|
       [entry[:function], entry[:arity]] unless entry[:arity].nil?
@@ -354,6 +246,136 @@ module NativeExpressionDevirt
       end
       result[name] = generated unless generated.empty?
     end.tap { |built| add_named_twin_calls(names, registrations, opaque_owners, built) }
+  end
+
+  REGISTRATION_CACHE = {}
+
+  # Registrations of the ROM tables and mrb_define_method forms in `paths`,
+  # shared by analyze_exact_class_expressions and NativeCoreDirect (ADR 0257).
+  # Keyed by file identity so an in-process caller that rewrites a source never
+  # sees a stale scan.
+  def class_registrations(paths)
+    files = Array(paths).select { |path| File.file?(path) }
+    key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
+    REGISTRATION_CACHE.fetch(key) do
+      REGISTRATION_CACHE.clear
+      REGISTRATION_CACHE[key] = scan_class_registrations(files)
+    end
+  end
+
+  def scan_class_registrations(paths)
+    registrations = Hash.new { |hash, name| hash[name] = [] }
+    opaque_owners = Hash.new { |hash, name| hash[name] = [] }
+
+    Array(paths).each do |path|
+      next unless File.file?(path)
+
+      source = read_source(path)
+      class_variables = {}
+      scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+        class_variables[variable] = { field: field, class_name: class_name }
+      end
+      scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+        class_variables[variable] ||= { field: nil, class_name: class_name }
+      end
+      scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+        class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
+      end
+      source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
+        info = class_variables[variable]
+        info[:field] ||= field if info
+      end
+      scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
+        field = field.first
+        class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
+      end
+      scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+        class_variables[variable] ||= { field: nil, class_name: class_name }
+      end
+      # class.c boots BasicObject/Object/Module/Class through boot_defclass and
+      # only names them afterwards, so their method tables (`==`, `equal?`, ...)
+      # would otherwise have an unknown owner, which disables every name they
+      # share with a built-in class. Read the names off the source's own
+      # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
+      booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+      source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
+        class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
+      end
+      scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+        class_variables[variable] ||= { field: nil, class_name: class_name }
+      end
+      tags = {}
+      source.scan(/MRB_SET_INSTANCE_TT\s*\(\s*(\w+)\s*,\s*(MRB_TT_\w+)\s*\)/) do |variable, tag|
+        tags[variable] = tag
+      end
+      table_owners = {}
+      macro_calls(source, 'MRB_MT_INIT_ROM').each do |arguments|
+        next unless arguments.length == 3
+
+        _mrb, variable, table = arguments
+        class_info = class_variables[variable]
+        if class_info.nil? && (field = variable.match(/\Amrb->(\w+_class)\z/)&.[](1))
+          class_info = { field: field, class_name: field.sub(/_class\z/, '').capitalize }
+        end
+        tag = tags[variable]
+        table_owners[table] ||= []
+        # Core mrbgems often attach ROM methods to an existing built-in via
+        # `mrb->array_class` without repeating the core's
+        # `MRB_SET_INSTANCE_TT` declaration in the gem source. Recover that
+        # closed set of tag values from the built-in class name; custom class
+        # owners still require a tag declaration in their own source.
+        resolved_tag = tag || (class_info && BUILTIN_CLASS_TAGS[class_info[:class_name]])
+        table_owners[table] << (class_info && class_info.merge(tag: resolved_tag))
+      end
+
+      rom_entries(source).each do |table, arguments|
+        function, symbol, aspec = arguments
+        name = symbol_name(symbol)
+        next unless name
+
+        owners = Array(table_owners[table]).uniq
+        owner = owners.one? ? owners.first : nil
+        registrations[name] << { function: function.strip, arity: safe_arity(aspec, function.strip, name), owner: owner,
+                                 aspec: aspec.strip, path: path }
+      end
+
+      # Singleton/class methods live on the class object's method table and
+      # cannot shadow the same name in an instance receiver's method lookup.
+      # Only instance registration forms belong in this ambiguity set.
+      %w[mrb_define_method_id mrb_define_private_method_id].each do |macro|
+        macro_calls(source, macro).each do |arguments|
+          next unless arguments.length == 5
+
+          name = symbol_name(arguments[2])
+          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
+        end
+      end
+      %w[mrb_define_method mrb_define_private_method].each do |macro|
+        macro_calls(source, macro).each do |arguments|
+          next unless arguments.length == 5 && arguments[2].start_with?('"')
+
+          name = unescape_c_string(arguments[2][1...-1])
+          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
+        end
+      end
+      %w[mrb_define_method_raw mrb_define_alias_id].each do |macro|
+        macro_calls(source, macro).each do |arguments|
+          next unless arguments.length == 4
+
+          name = symbol_name(arguments[2])
+          opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
+        end
+      end
+      macro_calls(source, 'mrb_define_alias').each do |arguments|
+        next unless arguments.length == 4 && arguments[2].start_with?('"')
+
+        name = unescape_c_string(arguments[2][1...-1])
+        opaque_owners[name] << class_variables.dig(arguments[1], :class_name)
+      end
+
+    end
+
+    [registrations, opaque_owners]
   end
 
   # NAMED_TWIN_CALLS, applied to the per-class map the body scan above built.

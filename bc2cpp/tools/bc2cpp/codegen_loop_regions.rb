@@ -73,7 +73,9 @@ class CodeGen
     regions = []
     layout = ->(insn) { 1 if insn.sym == 'times' && insn.argc_text == 'n=0' }
     each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, _idx, block_insn, dest_reg, block_irep|
-      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      # TIMES_NO_PARAM_SUPPORT: `n.times { ... }` (no block parameter) is the same
+      # loop; only the counter binding is dropped (emit_times_inline).
+      next unless [0, 1].include?(mandatory_arity(block_irep)) && pure_mandatory_arity?(block_irep)
 
       needs_blk = block_blk_needs(block_irep)
       if needs_blk.nil? || (!needs_blk.empty? &&
@@ -83,7 +85,8 @@ class CodeGen
       end
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg,
-                   block_irep: block_irep, needs_blk: needs_blk == [1] }
+                   block_irep: block_irep, needs_blk: needs_blk == [1],
+                   bind_counter: mandatory_arity(block_irep) == 1 }
     end
     regions
   end
@@ -425,7 +428,7 @@ class CodeGen
   RANGE_RETURN_METHODS = Set['Game::Interpreter#range'].freeze
 
   def range_return_call(irep, idx, dest_reg)
-    pin = irep.last_writer(idx - 1, dest_reg)
+    pin = irep.walk_dominating_writers(idx - 1, dest_reg, use: idx) { |insn| insn }
     # Only a `range` call made FROM a Game::Interpreter method counts (checked via
     # the irep's MethodDef owner), not just the name.
     return nil unless pin && %w[SEND SSEND SEND0 SSEND0].include?(pin.op) && pin.sym == 'range'

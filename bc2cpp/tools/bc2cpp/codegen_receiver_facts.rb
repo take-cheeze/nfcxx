@@ -102,7 +102,8 @@ class CodeGen
   def exact_new_receiver_class(irep, idx, dest_reg, owner:, expected_class:)
     return nil unless stable_standard_constructor_class?(expected_class)
 
-    irep.walk_writers(idx - 1, dest_reg, follow_moves: true) do |insn|
+    # JOIN_DOMINANCE: unguarded, so the `new` must be the only value the register can hold.
+    irep.walk_dominating_writers(idx - 1, dest_reg, use: idx, follow_moves: true) do |insn|
       # The known-class trace already resolved this SEND's constant path;
       # stability above proves that path still denotes the same class.
       expected_class if %w[SEND SEND0].include?(insn.op) && insn.sym == 'new'
@@ -147,7 +148,7 @@ class CodeGen
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg)
-    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT])
+    branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT JMPNIL JMPUW])
     return nil unless branch_edges
 
     ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP,
@@ -190,15 +191,27 @@ class CodeGen
   end
 
   # A module_function copy shares its instance method's irep but runs with the
-  # module object as self. The instance-owner proof is reusable only when that
-  # body never observes self or creates a block that could capture it.
-  def module_function_copy_self_safe?(irep)
-    return false unless irep
-    return false unless irep.reps.empty?
+  # module object as self (ADR 0241 already passes it for the body's own bare
+  # calls), so the instance-owner proof is reusable only when the body neither
+  # observes self nor ties itself to instance state: ivars, class variables,
+  # `super` or ARGARY, anywhere in its blocks too (ADR 0258, 0259).
+  MODULE_FUNCTION_INSTANCE_OPS = %w[GETIV SETIV GETCV SETCV SUPER ARGARY].freeze
 
-    irep.instructions.none? do |insn|
-      %w[GETIV SETIV SUPER BLOCK].include?(insn.op) || insn.mentions_reg?(0)
+  def module_function_copy_self_safe?(irep, owner)
+    return false unless irep
+    return false if @ivar_layout.key?(owner)
+
+    seen = Set.new
+    pending = [irep]
+    until pending.empty?
+      current = pending.pop
+      next unless seen.add?(current.label)
+
+      return false if current.instructions.any? { |insn| MODULE_FUNCTION_INSTANCE_OPS.include?(insn.op) || insn.mentions_reg?(0) || insn.upvar_ref&.first&.zero? }
+
+      pending.concat(current.reps.map { |label| @ireps.fetch(label) })
     end
+    true
   end
 
   def stable_standard_constructor_class?(klass)
@@ -267,9 +280,21 @@ class CodeGen
     owner
   end
 
+  # MODULE_SINGLETON_SELF (ADR 0258): ClosedWorld#exact_class? has no answer for
+  # a module (only classes are declared), so `def self.x` in a module M never
+  # reached SINGLETON_LEXICAL_SELF under a closed world. ClosedWorld#module_object_self?
+  # proves self is M (ADR 0259); inherited_lookup_safe? covers outside reopening
+  # and by-name installers.
+  def module_singleton_self?(base, name)
+    return false unless name && @closed_world&.module_object_self?(base)
+
+    @closed_world.inherited_lookup_safe?(name, base)
+  end
+
   # SINGLETON_LEXICAL_SELF: `self` in `def self.x` of X is X itself unless X is a
-  # subclassed class (a module never is), and X's own singleton def wins lookup.
-  def lexical_self_singleton_owner(owner_def)
+  # subclassed class or a declared module that never has its singleton methods
+  # cloned (ADR 0258, 0259), and X's own singleton def wins lookup.
+  def lexical_self_singleton_owner(owner_def, name: nil)
     return nil unless owner_def && self_class(owner_def)
 
     owner = owner_def.owner
@@ -277,21 +302,22 @@ class CodeGen
 
     base = owner.delete_suffix('.singleton')
     # Top-level `def self.x` is main's singleton, also spelled "Object.singleton".
-    return nil if base == 'Object' || !exact_receiver_class?(base)
+    return nil if base == 'Object' || !(exact_receiver_class?(base) || module_singleton_self?(base, name))
     return nil unless Array(@prepended_modules[owner]).empty?
     return nil if @unknown_mixins.include?(owner) || @unknown_mixins.include?(base)
 
     owner
   end
 
-  # The one irep def `name` has on that singleton owner (module_function copies
-  # have no irep; a second def would make "which one is live" order-dependent).
+  # The one irep def (or `attr_*` accessor) `name` has on that singleton owner
+  # (module_function copies have no irep; a second def would make "which one is
+  # live" order-dependent).
   def lexical_self_singleton_def(name, owner_def)
-    owner = lexical_self_singleton_owner(owner_def)
+    owner = lexical_self_singleton_owner(owner_def, name: name)
     return nil unless owner
 
     defs = (@registry[name] || []).select { |md| md.owner == owner }
-    defs.size == 1 && defs.first.irep ? defs.first : nil
+    defs.size == 1 && (defs.first.irep || defs.first.kind == :ivar_accessor) ? defs.first : nil
   end
 
   # A compiled module_function copy runs the source body with the module object

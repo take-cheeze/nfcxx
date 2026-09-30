@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'source_text'
+
 # Step 5b: method names defined or called outside the compiled bytecode.
 
 # ---------------------------------------------------------------------------
@@ -64,11 +66,7 @@ FOREIGN_METHOD_NAME_RE = %r{[\w+\-*/<>=!?\[\]&|^~%@]+}
 def foreign_method_names(paths)
   names = Set.new
   Array(paths).each do |path|
-    src = begin
-      File.read(path, encoding: 'UTF-8')
-    rescue StandardError
-      next
-    end
+    src = SourceText.read(path, 'foreign_method_names') or next
     # `def name`, `def self.name`, `def obj.name`.
     src.scan(/^\s*def\s+(?:[A-Za-z_][A-Za-z_0-9]*\.)?(#{FOREIGN_METHOD_NAME_RE})/o) do
       names << Regexp.last_match(1)
@@ -110,11 +108,7 @@ OUTSIDE_TOKEN_RE = /[A-Za-z_][A-Za-z_0-9]*[?!=]?/.freeze
 def outside_world_tokens(paths)
   names = Set.new
   Array(paths).each do |path|
-    src = begin
-      File.binread(path)
-    rescue StandardError
-      next
-    end
+    src = SourceText.read(path, 'outside_world_tokens', binary: true) or next
     src.scan(OUTSIDE_TOKEN_RE) { |t| names << t }
   end
   names
@@ -130,14 +124,7 @@ def extract_native_method_names(src_paths)
   # alternatives must come before bare SYM in the regex, or SYM matches first
   # and "_Q(empty)" is left unconsumed.
   Array(src_paths).each do |path|
-    # A missing path (an uninitialized submodule) contributes nothing: that only
-    # costs a missed proof or MONO->POLY flip. Rescued broadly like the other
-    # native-source readers; an unreadable file is equally unusable.
-    src = begin
-      File.read(path, encoding: 'UTF-8')
-    rescue StandardError
-      next
-    end
+    src = SourceText.read(path, 'extract_native_method_names') or next
     # Multi-line call shapes match too; the regex ignores newlines between args.
     src.scan(/mrb_define_(?:method|class_method|module_function)\s*\(\s*\w+\s*,\s*\w+\s*,\s*"((?:[^"\\]|\\.)*)"/m) do |name|
       names << unescape_c_string(name.first)
@@ -189,13 +176,7 @@ end
 def extract_native_call_names(src_paths)
   names = Set.new
   Array(src_paths).each do |path|
-    # Same missing-path skip as extract_native_method_names; a missed call name
-    # only costs a diagnostic line.
-    src = begin
-      File.read(path, encoding: 'UTF-8')
-    rescue StandardError
-      next
-    end
+    src = SourceText.read(path, 'extract_native_call_names') or next
     src.scan(/mrb_funcall(?:_id|_argv|_with_block)?\s*\(.{0,200}?(?:"((?:[^"\\]|\\.)*)"|#{MRB_SYM_TOKEN_RE})/m) do |str, macro, sym|
       names << (str ? unescape_c_string(str) : resolve_mrb_sym_token(macro, sym))
     end

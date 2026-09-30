@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'source_text'
+
 # NATIVE_CONSTRUCT_SCHEMA_AUDIT (audit only, never read by codegen).
 
 # ---------------------------------------------------------------------------
@@ -92,11 +94,7 @@ module NativeConstructSchema
   # FN), the format from FN's first mrb_get_args. nil means :unresolved.
   def self.scrape(native_paths, klass)
     Array(native_paths).each do |path|
-      src = begin
-        File.read(path, encoding: 'UTF-8')
-      rescue StandardError
-        next
-      end
+      src = SourceText.read(path, 'NativeConstructSchema.scrape') or next
       # The `(\w+)`-led pattern below has no literal prefix Onigmo can search for.
       next unless src.include?("\"#{klass}\"")
 

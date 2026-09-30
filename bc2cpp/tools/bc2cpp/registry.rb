@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'core_mixins'
 require_relative 'core_defs'
 
 # Step 6: the whole-program class/method registry.
@@ -491,6 +492,10 @@ def build_registry(ireps, root_label)
     if resolved && declared_modules.include?(resolved)
       table = site[:kind] == 'include' ? included_modules : prepended_modules
       (table[site[:owner]] ||= []) << resolved
+    elsif resolved.nil? && site[:kind] == 'include' && CoreMixins.core_mixin?(ref[:name])
+      # CORE_MIXINS (ADR 0261): no closed-world module of that name is in scope,
+      # so the constant is mruby's own.
+      (included_modules[site[:owner]] ||= []) << ref[:name]
     else
       unknown_mixins << site[:owner]
     end

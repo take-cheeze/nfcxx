@@ -17,6 +17,8 @@ class CodeGen
   # `return` always throws bc2cpp_method_return and must find the top-level
   # catch.
   def block_fallback_region_has_return_blk?(region)
+    return region[:needs_ret] unless region[:needs_ret].nil?
+
     block_irep = region[:block_irep]
     return true if BytecodeIR.for(block_irep).op?('RETURN_BLK')
 
@@ -90,7 +92,9 @@ class CodeGen
   # Returns the sorted set of levels this frame must supply, with
   # block_upvar_needs' propagation (a child's l becomes l - 1 for l >= 1; a
   # child's l == 0 is a nested def's own block). nil means an unparsable BLKPUSH.
-  def block_blk_needs(irep, depth = 0)
+  # BLOCK_SEMANTICS (ADR 0266): `given: false` leaves out the `block_given?`
+  # reads, which only test the block for nil and so need no synchronous callee.
+  def block_blk_needs(irep, depth = 0, given: true)
     return nil if depth > MAX_UPVAR_NEST_DEPTH
 
     needs = []
@@ -100,11 +104,14 @@ class CodeGen
 
       needs << lv.to_i
     end
+    # `block_given?` reads the method's block like a BLKPUSH from `depth + 1`
+    # levels up (the root is one level below its method).
+    needs << depth + 1 if given && block_given_modelled? && calls_block_given?(irep)
     (irep.reps || []).each do |child_label|
       child = child_label && @ireps[child_label]
       next unless child
 
-      child_needs = block_blk_needs(child, depth + 1)
+      child_needs = block_blk_needs(child, depth + 1, given: given)
       return nil if child_needs.nil?
 
       child_needs.each { |l| needs << l - 1 if l >= 1 }
@@ -124,8 +131,16 @@ class CodeGen
   # MOVEs only. A miss only means the site is treated as before. Generic name
   # because calls_fiber_yield? reuses it for a plain SEND receiver.
   def fiber_const_receiver?(irep, call_idx, dest_reg)
+    const_receiver?(irep, call_idx, dest_reg, 'Fiber')
+  end
+
+  def array_const_receiver?(irep, call_idx, dest_reg)
+    const_receiver?(irep, call_idx, dest_reg, 'Array')
+  end
+
+  def const_receiver?(irep, call_idx, dest_reg, const_name)
     writer = irep.source_writer(call_idx - 1, dest_reg)
-    writer&.op == 'GETCONST' && writer.const_name == 'Fiber'
+    writer&.op == 'GETCONST' && writer.const_name == const_name
   end
 
   # FIBER_YIELD_UNSAFE_SUPPORT: `Fiber.yield` is a plain SEND (`GETCONST R2
@@ -305,6 +320,11 @@ class CodeGen
       # block runs.
       next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
 
+      # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
+      # keeps its block as the default proc and Proc.new returns it, either of
+      # which outlives this frame and would hold pointers into it.
+      next if upvars.any? && name == 'new' && !array_const_receiver?(irep, idx, dest_reg)
+
       # BLOCK_FALLBACK_YIELD_SUPPORT: does this body's `yield` need the enclosing
       # method's block forwarded into the cfunc? Only `[1]` is modelled (every
       # BLKPUSH in the subtree resolves to the frame this call site is in, whose
@@ -320,12 +340,18 @@ class CodeGen
       # would be an escaped block (vm.c raises "unexpected yield" for that).
       blk_needs = block_blk_needs(block_irep)
       needs_blk = blk_available && blk_needs == [1] &&
-                  BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
+                  (BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name) || block_blk_needs(block_irep, given: false) == [])
 
-      regions << { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
-                   block_irep: block_irep, name: name, n: n,
-                   self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk,
-                   parent_irep: irep }
+      region = { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
+                 block_irep: block_irep, name: name, n: n,
+                 self_implicit: paired.op == 'SSENDB', upvars: upvars, needs_blk: needs_blk,
+                 parent_irep: irep }
+      # BLOCK_SEMANTICS: the tokens this block's env must carry. A return token is
+      # forwarded by every enclosing block, so it is needed for a `return` at any depth.
+      region[:needs_brk] = BytecodeIR.for(block_irep).op?('BREAK')
+      region[:needs_ret] = BytecodeIR.for(block_irep).op?('RETURN_BLK') ||
+                           recognize_block_fallback_regions(block_irep, available_upvars: upvars).any? { |nested| nested[:needs_ret] }
+      regions << region
     end
     regions
   end
@@ -407,6 +433,15 @@ class CodeGen
     # needs_blk; a lambda can escape the frame whose block it would capture.
     needs_blk = region[:needs_blk] ? true : false
     blk_param = needs_blk ? ['mrb_value bc2cpp_blk'] : []
+    # BLOCK_SEMANTICS: env layout is self, upvars, blk, return token, break token
+    # (emit_rproc_construction builds the same order from the same region flags).
+    next_slot = upvar_regs.size + 1 + (needs_blk ? 1 : 0)
+    ret_slot = region[:needs_ret] ? next_slot : nil
+    brk_slot = region[:needs_brk] ? next_slot + (ret_slot ? 1 : 0) : nil
+    saved_ret_slot = @block_ret_slot
+    saved_brk_slot = @block_brk_slot
+    @block_ret_slot = ret_slot
+    @block_brk_slot = brk_slot
     # Function names: block_addr is unique only within one irep, so prefix with
     # cpp_name(d.owner, d.name) (as emit_rescue_try_body does); `region[:kind]` is
     # only for readability.
@@ -448,7 +483,7 @@ class CodeGen
       nfn_name, nfn_code = fn_result
       nested_pre << nfn_code
       nested_suppressed << nregion[:block_addr] << nregion[:sendb_addr]
-      nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name)
+      nested_glue_at[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name, owner_def: d)
     end
     # EXPLICIT_BLOCK_ARG_SUPPORT: `&expr` sites in this body: suppress/glue only,
     # no body to compile.
@@ -528,7 +563,7 @@ class CodeGen
       nested_glue_at[rregion[:begin_addr]] =
         emit_rescue_glue(try_name, rregion, arg_names, Array.new(arg_names.size),
                          extra_field_values: extra_fields.map { |f| f[:name] } +
-                                             saved.map { |f| f[:name].sub('bc2cpp_saved_', '') })
+                                             saved.map { |f| rescue_field_value(f) })
     end
     body = String.new
     # NESTED_BLOCK_FALLBACK_SUPPORT: the JUMP_TARGET_GLUE_FIX label rule.
@@ -551,6 +586,8 @@ class CodeGen
     @block_fallback_active = false
     @blk_param_name = saved_blk_param_name
     @blk_param_level = saved_blk_param_level
+    @block_ret_slot = saved_ret_slot
+    @block_brk_slot = saved_brk_slot
     return nil if nested_pre.include?('#error') || body.include?('#error')
 
     out = nested_pre
@@ -563,8 +600,21 @@ class CodeGen
     (0...block_irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
     arg_names.each_with_index { |a, i| out << "  r#{i + 1} = #{a};\n" }
     out << body
-    out << "  return mrb_nil_value(); // unreachable if every path RETURNs\n"
+    out << fell_off_end(impl_name)
     out << "}\n\n"
+
+    kind = region[:kind] || 'block_fallback'
+    # BLOCK_SEMANTICS: a break or return of a strict proc (Kernel#lambda over
+    # this block) only leaves the proc; compile_insn throws bc2cpp_proc_exit for
+    # it, caught here so it never reaches a call site.
+    exits = kind == 'block_fallback' &&
+            (BytecodeIR.for(block_irep).op?('BREAK') || BytecodeIR.for(block_irep).op?('RETURN_BLK'))
+    # BLOCK_DIRECT_ENTRY (ADR 0271): the entry replaces the cfunc wrapper for this block.
+    region[:direct_entry] = block_direct_entry?(region, kind, exits)
+    if region[:direct_entry]
+      out << emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
+      return [fn_name, out]
+    end
 
     # RUNTIME_DEF_FALLBACK_SUPPORT: method bodies and EXEC-opened class bodies take
     # self from the receiver mruby passes (the opposite of a block body). For an
@@ -594,31 +644,55 @@ class CodeGen
       out << "  mrb_value bc2cpp_blk = mrb_proc_cfunc_env_get(M, #{upvar_regs.size + 1});\n"
     end
     call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
+    call_impl = lambda do |args|
+      if exits
+        "  Bc2cppVmMark bc2cpp_exit_mark = bc2cpp_vm_mark(M);\n  try {\n    return #{impl_name}(#{args});\n" \
+          "  } catch (bc2cpp_proc_exit& bc2cpp_exit) {\n    bc2cpp_vm_restore(M, bc2cpp_exit_mark);\n" \
+          "    return bc2cpp_exit.value;\n  }\n"
+      else
+        "  return #{impl_name}(#{args});\n"
+      end
+    end
     if rest_block
+      # REST_ONLY_BLOCK: the block's single parameter is the whole argument array.
       out << "  mrb_value* bc2cpp_argv;\n"
       out << "  mrb_int bc2cpp_argc;\n"
       out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
-      out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
+      out << call_impl.call("M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv)")
+    elsif kind == 'block_fallback'
+      # BLOCK_SEMANTICS: a block is called like OP_ENTER of a non-strict proc:
+      # missing arguments are nil, extra ones are dropped, and one Array
+      # argument is spread over several parameters (vm.c `len > 1 && argc == 1
+      # && mrb_array_p`). Kernel#lambda makes the same RProc strict later, and a
+      # strict proc raises on any other count instead.
+      if mand.zero?
+        out << "  if (bc2cpp_proc_strict_p(M) && mrb_get_argc(M) != 0) mrb_argnum_error(M, mrb_get_argc(M), 0, 0);\n"
+        out << call_impl.call("M, #{call_args}")
+      else
+        out << "  mrb_value* bc2cpp_argv;\n"
+        out << "  mrb_int bc2cpp_argc;\n"
+        out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
+        out << "  if (bc2cpp_proc_strict_p(M) && bc2cpp_argc != #{mand}) mrb_argnum_error(M, bc2cpp_argc, #{mand}, #{mand});\n"
+        arg_names.each { |a| out << "  mrb_value #{a};\n" }
+        if mand > 1
+          out << "  if (bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) {\n"
+          arg_names.each_with_index do |a, i|
+            out << "    #{a} = mrb_ary_ref(M, bc2cpp_argv[0], #{i});\n"
+          end
+          out << "  } else {\n"
+          arg_names.each_with_index do |a, i|
+            out << "    #{a} = bc2cpp_argc > #{i} ? bc2cpp_argv[#{i}] : mrb_nil_value();\n"
+          end
+          out << "  }\n"
+        else
+          out << "  #{arg_names.first} = bc2cpp_argc > 0 ? bc2cpp_argv[0] : mrb_nil_value();\n"
+        end
+        out << call_impl.call("M, #{call_args}, #{arg_names.join(', ')}")
+      end
     elsif mand.zero?
+      # A lambda is strict.
+      out << "  if (mrb_get_argc(M) != 0) mrb_argnum_error(M, mrb_get_argc(M), 0, 0);\n" if kind == 'lambda_fallback'
       out << "  return #{impl_name}(M, #{call_args});\n"
-    elsif (region[:kind] || 'block_fallback') == 'block_fallback' && mand > 1
-      # Blocks are lenient about argument count, and Hash#each passes one [key,
-      # value] Array; the interpreter expands it for a multi-parameter block, a
-      # cfunc proc does not, so do it here.
-      out << "  mrb_value* bc2cpp_argv;\n"
-      out << "  mrb_int bc2cpp_argc;\n"
-      out << "  mrb_get_args(M, \"*\", &bc2cpp_argv, &bc2cpp_argc);\n"
-      arg_names.each { |a| out << "  mrb_value #{a};\n" }
-      out << "  if (bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) {\n"
-      arg_names.each_with_index do |a, i|
-        out << "    #{a} = mrb_ary_ref(M, bc2cpp_argv[0], #{i});\n"
-      end
-      out << "  } else {\n"
-      arg_names.each_with_index do |a, i|
-        out << "    #{a} = bc2cpp_argc > #{i} ? bc2cpp_argv[#{i}] : mrb_nil_value();\n"
-      end
-      out << "  }\n"
-      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
     else
       arg_names.each { |a| out << "  mrb_value #{a};\n" }
       fmt = 'o' * mand
@@ -628,6 +702,56 @@ class CodeGen
     end
     out << "}\n\n"
     [fn_name, out]
+  end
+
+  # BLOCK_DIRECT_ENTRY (ADR 0271): a block whose body neither breaks nor returns reads nothing from
+  # the frame it is called in (those tokens are read from the calling cfunc's env), so a yield can
+  # call it without pushing one. BC2CPP_BLOCK_DIRECT_ENTRY=0 keeps the cfunc wrapper everywhere.
+  def block_direct_entry?(region, kind, exits)
+    return false if ENV['BC2CPP_BLOCK_DIRECT_ENTRY'] == '0'
+
+    kind == 'block_fallback' && region[:self_source] != :receiver && !region[:needs_ret] &&
+      !region[:needs_brk] && !exits
+  end
+
+  # The entry itself: the captured self, upvar pointers and forwarded block come from the env
+  # (`bc2cpp_env->stack`, where mrb_proc_cfunc_env_get finds them for a cfunc frame), the
+  # arguments are bound as OP_ENTER binds them for a non-strict proc, and a strict copy
+  # (Kernel#lambda over the block) raises on any other count.
+  def emit_block_direct_entry(fn_name, impl_name, region, upvar_regs, needs_blk, mand, arg_names, rest_block)
+    out = String.new
+    out << "static mrb_value #{fn_name}_direct(mrb_state* M, struct REnv* bc2cpp_env, bool bc2cpp_strict, " \
+           "mrb_int bc2cpp_argc, const mrb_value* bc2cpp_argv) {\n"
+    out << "  (void)bc2cpp_strict; (void)bc2cpp_argc; (void)bc2cpp_argv;\n"
+    out << "  mrb_value bc2cpp_captured_self = bc2cpp_env->stack[0];\n"
+    upvar_args = upvar_regs.each_with_index.map do |(l, b), i|
+      vname = upvar_var_name(l, b)
+      out << "  mrb_value* #{vname} = static_cast<mrb_value*>(mrb_cptr(bc2cpp_env->stack[#{i + 1}]));\n"
+      vname
+    end
+    out << "  mrb_value bc2cpp_blk = bc2cpp_env->stack[#{upvar_regs.size + 1}];\n" if needs_blk
+    call_args = (['bc2cpp_captured_self'] + upvar_args + (needs_blk ? ['bc2cpp_blk'] : [])).join(', ')
+    if rest_block
+      out << "  return #{impl_name}(M, #{call_args}, mrb_ary_new_from_values(M, bc2cpp_argc, bc2cpp_argv));\n"
+    elsif mand.zero?
+      out << "  if (bc2cpp_strict && bc2cpp_argc != 0) mrb_argnum_error(M, bc2cpp_argc, 0, 0);\n"
+      out << "  return #{impl_name}(M, #{call_args});\n"
+    else
+      out << "  if (bc2cpp_strict && bc2cpp_argc != #{mand}) mrb_argnum_error(M, bc2cpp_argc, #{mand}, #{mand});\n"
+      arg_names.each { |a| out << "  mrb_value #{a};\n" }
+      if mand > 1
+        out << "  if (bc2cpp_argc == 1 && mrb_array_p(bc2cpp_argv[0])) {\n"
+        arg_names.each_with_index { |a, i| out << "    #{a} = mrb_ary_ref(M, bc2cpp_argv[0], #{i});\n" }
+        out << "  } else {\n"
+        arg_names.each_with_index { |a, i| out << "    #{a} = bc2cpp_argc > #{i} ? bc2cpp_argv[#{i}] : mrb_nil_value();\n" }
+        out << "  }\n"
+      else
+        out << "  #{arg_names.first} = bc2cpp_argc > 0 ? bc2cpp_argv[0] : mrb_nil_value();\n"
+      end
+      out << "  return #{impl_name}(M, #{call_args}, #{arg_names.join(', ')});\n"
+    end
+    out << "}\n\n"
+    out
   end
 
   # BLOCK_CFUNC_FALLBACK_SUPPORT / LAMBDA_FALLBACK_SUPPORT: build the RProc with
@@ -640,7 +764,12 @@ class CodeGen
   # parameters: level 0 is `r<b + inline_offset>`, level 1 the method's `r<b>`
   # (see inline_nested_block_pass). Level >= 2 never gets here. nil keeps the
   # previous output.
-  def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil)
+  # BLOCK_SEMANTICS: `ret_token` / `brk_token` are the C++ expressions for the
+  # method's return token and this site's break token (nil: the body has none).
+  # BLOCK_DIRECT_ENTRY (ADR 0271): `direct_entry` names the block's entry function; the proc is
+  # then built over bc2cpp_block_thunk with the entry as the last env slot.
+  def emit_rproc_construction(addr, fn_name, upvar_regs = [], needs_blk = false, inline_offset: nil,
+                              ret_token: nil, brk_token: nil, direct_entry: nil)
     var = "bc2cpp_blk_proc_#{addr}"
     out = String.new
     # UPVAR_CAPTURE_SUPPORT: `&r#{b}` is the address of this function's register
@@ -661,9 +790,12 @@ class CodeGen
       end
     end
     env_entries << 'bc2cpp_blk' if needs_blk
+    env_entries << ret_token if ret_token
+    env_entries << brk_token if brk_token
+    env_entries << "mrb_int_value(M, static_cast<mrb_int>(reinterpret_cast<uintptr_t>(&#{direct_entry})))" if direct_entry
     out << "    mrb_value bc2cpp_blk_env_#{addr}[] = { #{env_entries.join(', ')} };\n"
-    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{fn_name}, #{env_entries.size}, " \
-           "bc2cpp_blk_env_#{addr});\n"
+    out << "    struct RProc* #{var} = mrb_proc_new_cfunc_with_env(M, #{direct_entry ? 'bc2cpp_block_thunk' : fn_name}, " \
+           "#{env_entries.size}, bc2cpp_blk_env_#{addr});\n"
     [var, out]
   end
 
@@ -676,33 +808,65 @@ class CodeGen
   # compile_block_body_insn shift) and is passed on for the capture levels.
   # `self` is not shifted: the block shares the method's self. nil keeps the
   # previous output.
-  def emit_block_fallback_glue(region, fn_name, inline_offset: nil)
+  # The Proc methods that run the proc (bc2cpp_cfunc_proc_call_p spells the same set).
+  PROC_CALL_NAMES = %w[call yield [] ===].freeze
+
+  def emit_block_fallback_glue(region, fn_name, inline_offset: nil, owner_def: nil)
     dest_reg = region[:dest_reg].to_i + (inline_offset || 0)
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
+    # BLOCK_SEMANTICS: a `break` in the body unwinds to this site while the site
+    # is on the stack, so the site owns a frame (and its token) only then. The
+    # method's return token is the innermost method frame at method level, or
+    # the enclosing block's own copy of it.
+    site = "bc2cpp_site_#{region[:block_addr]}"
+    brk_token = region[:needs_brk] ? "mrb_int_value(M, #{site}.frame.token)" : nil
+    ret_token = if !region[:needs_ret]
+                  nil
+                elsif @block_ret_slot
+                  "mrb_proc_cfunc_env_get(M, #{@block_ret_slot})"
+                else
+                  'bc2cpp_return_token(M)'
+                end
     rproc_var, ctor = emit_rproc_construction(region[:block_addr], fn_name, region[:upvars] || [],
-                                              region[:needs_blk] ? true : false, inline_offset: inline_offset)
+                                              region[:needs_blk] ? true : false, inline_offset: inline_offset,
+                                              ret_token: ret_token, brk_token: brk_token,
+                                              direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil)
+    # ARG_SHAPES_BLOCK (ADR 0265): a top-level site whose call resolves to compiled code.
+    direct = inline_offset.nil? ? compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def) : nil
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
-           "(self captured at construction time), dynamic dispatch\n"
+           "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"
     out << "  {\n"
+    out << "    Bc2cppFrameGuard #{site}(&bc2cpp_break_frames);\n" if region[:needs_brk]
     out << ctor
-    # EXCEPTION_BREAK_SUPPORT: the dispatch is always wrapped (cheap under
-    # zero-cost exceptions, and no need to know whether this body has a BREAK); a
-    # body without one never throws.
-    out << "    Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n    try {\n"
-    if argv.empty?
-      out << "      r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
-             "mrb_obj_value(#{rproc_var}));\n"
+    # EXCEPTION_BREAK_SUPPORT: only a body with a BREAK can throw to this site.
+    indent = region[:needs_brk] ? '      ' : '    '
+    out << "    Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n    try {\n" if region[:needs_brk]
+    if direct
+      out << direct.lines.map { |line| "#{indent}#{line}" }.join
     else
-      out << "      mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n"
-      out << "      r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
-             "#{argv.size}, bc2cpp_blk_argv_#{region[:block_addr]}, mrb_obj_value(#{rproc_var}));\n"
+      # BLOCK_SEMANTICS: `pr.call(x) { ... }` on a cfunc Proc cannot use Proc#call
+      # (see bc2cpp_cfunc_proc_call_p); the block is dropped, as a cfunc proc
+      # takes none.
+      args = argv.empty? ? 'NULL' : "bc2cpp_blk_argv_#{region[:block_addr]}"
+      out << "#{indent}mrb_value bc2cpp_blk_argv_#{region[:block_addr]}[] = { #{argv.join(', ')} };\n" unless argv.empty?
+      name = "mrb_intern_cstr(M, \"#{region[:name]}\")"
+      if PROC_CALL_NAMES.include?(region[:name])
+        out << "#{indent}if (mrb_type(#{recv}) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, #{recv}, #{name})) {\n"
+        out << "#{indent}  r#{dest_reg} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, #{args});\n"
+        out << "#{indent}} else\n"
+      end
+      out << "#{indent}r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, #{name}, #{argv.size}, #{args}, " \
+             "mrb_obj_value(#{rproc_var}));\n"
     end
-    out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
-    out << "      bc2cpp_vm_restore(M, bc2cpp_brk_mark);\n"
-    out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
-    out << "    }\n"
+    if region[:needs_brk]
+      out << "    } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
+      out << "      if (bc2cpp_brk.token != #{site}.frame.token) throw;\n"
+      out << "      bc2cpp_vm_restore(M, bc2cpp_brk_mark);\n"
+      out << "      r#{dest_reg} = bc2cpp_brk.value;\n"
+      out << "    }\n"
+    end
     out << "  }\n"
     out
   end
@@ -752,30 +916,29 @@ class CodeGen
     dest_reg = region[:dest_reg].to_i
     recv = region[:self_implicit] ? 'self' : "r#{dest_reg}"
     out = String.new
+    # BLOCK_SEMANTICS: no catch here. The value may be one of our own
+    # BLOCK_FALLBACK procs, but a `break` in it unwinds to the site that built
+    # it (its token), which is further out on the stack.
     out << "  // EXPLICIT_BLOCK_ARG :#{region[:name]} -- &expr forwarded directly as the block " \
            "(mrb_funcall_with_block's own ensure_block coerces Symbol/Proc/anything with #to_proc), dynamic dispatch\n"
-    out << "  {\n  Bc2cppVmMark bc2cpp_brk_mark = bc2cpp_vm_mark(M);\n  try {\n"
     if region[:n] == '*'
       # EXPLICIT_BLOCK_ARG_DYNAMIC_SPLAT_SUPPORT: R(dest+1) is a real Array, so
       # RARRAY_LEN/RARRAY_PTR go straight into mrb_funcall_with_block.
-      out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
+      out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
              "RARRAY_LEN(r#{region[:argv_reg]}), RARRAY_PTR(r#{region[:argv_reg]}), r#{region[:blk_reg]});\n"
     else
       argv = (1..region[:n]).map { |k| "r#{dest_reg + k}" }
       if argv.empty?
-        out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
+        out << "  r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), 0, NULL, " \
                "r#{region[:blk_reg]});\n"
       else
+        out << "  {\n"
         out << "    mrb_value bc2cpp_ebarg_argv_#{region[:sendb_addr]}[] = { #{argv.join(', ')} };\n"
         out << "    r#{dest_reg} = mrb_funcall_with_block(M, #{recv}, mrb_intern_cstr(M, \"#{region[:name]}\"), " \
                "#{argv.size}, bc2cpp_ebarg_argv_#{region[:sendb_addr]}, r#{region[:blk_reg]});\n"
+        out << "  }\n"
       end
     end
-    out << "  } catch (bc2cpp_block_break& bc2cpp_brk) {\n"
-    out << "    bc2cpp_vm_restore(M, bc2cpp_brk_mark);\n"
-    out << "    r#{dest_reg} = bc2cpp_brk.value;\n"
-    out << "  }\n"
-    out << "  }\n"
     out
   end
 
@@ -794,7 +957,7 @@ class CodeGen
       fn_name, fn_code = fn_result
       pre << fn_code
       suppressed << region[:block_addr] << region[:sendb_addr]
-      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name)
+      glue_at[region[:block_addr]] = emit_block_fallback_glue(region, fn_name, owner_def: d)
     end
     explicit_arg_regions.each do |region|
       next if suppressed.include?(region[:sendb_addr])
