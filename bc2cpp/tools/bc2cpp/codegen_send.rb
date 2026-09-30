@@ -1844,7 +1844,7 @@ class CodeGen
       generic = dynamic_dispatch_line_generic(d, recv, name, argv)
       return "if (mrb_proc_p(#{recv}) && mrb_class(M, #{recv}) == M->proc_class) {\n" \
              "    mrb_value bc2cpp_call_argv[] = { #{(argv + ['mrb_nil_value()']).join(', ')} };\n" \
-             "    r#{d} = mrb_yield_argv(M, #{recv}, #{argv.size}, bc2cpp_call_argv);\n" \
+             "    r#{d} = bc2cpp_yield_argv(M, #{recv}, #{argv.size}, bc2cpp_call_argv);\n" \
              "  } else {\n    #{generic}  }\n"
     end
     dynamic_dispatch_line_generic(d, recv, name, argv)

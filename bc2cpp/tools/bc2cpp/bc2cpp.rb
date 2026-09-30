@@ -69,6 +69,7 @@ require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_arg_shapes'
+require_relative 'codegen_block_core_direct'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -983,8 +984,40 @@ if $PROGRAM_NAME == __FILE__
       const struct RProc* p = M->c->ci->proc;
       return p && MRB_PROC_STRICT_P(p);
     }
+    // BLOCK_DIRECT_ENTRY (ADR 0271): a compiled block without break or return has a direct entry
+    // taking its captured environment and arguments. Its proc is a cfunc proc over this one
+    // function (inline: one address in every translation unit of the link) with the entry as the
+    // last env slot, so a yield from compiled code calls the entry without a VM frame, and
+    // anything else (an interpreted iterator, a Fiber) reaches it through the VM like any cfunc.
+    typedef mrb_value (*Bc2cppBlockEntry)(mrb_state*, struct REnv*, bool, mrb_int, const mrb_value*);
+    static inline Bc2cppBlockEntry bc2cpp_block_entry(struct REnv* e) {
+      return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 1])));
+    }
+    inline mrb_value bc2cpp_block_thunk(mrb_state* M, mrb_value) {
+      mrb_value* argv;
+      mrb_int argc;
+      mrb_get_args(M, "*", &argv, &argc);
+      const struct RProc* p = M->c->ci->proc;
+      return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
+    }
+    // mrb_yield_argv, minus the frame when `blk` is a non-strict block with a direct entry. The
+    // arena is restored and the result protected as mrb_yield_with_class does.
+    static inline mrb_value bc2cpp_yield_argv(mrb_state* M, mrb_value blk, mrb_int argc, const mrb_value* argv) {
+      if (mrb_type(blk) == MRB_TT_PROC) {
+        struct RProc* p = mrb_proc_ptr(blk);
+        if (MRB_PROC_CFUNC_P(p) && MRB_PROC_CFUNC(p) == bc2cpp_block_thunk && !MRB_PROC_STRICT_P(p)) {
+          struct REnv* e = MRB_PROC_ENV(p);
+          int ai = mrb_gc_arena_save(M);
+          mrb_value result = bc2cpp_block_entry(e)(M, e, false, argc, argv);
+          mrb_gc_arena_restore(M, ai);
+          mrb_gc_protect(M, result);
+          return result;
+        }
+      }
+      return mrb_yield_argv(M, blk, argc, argv);
+    }
     static inline mrb_value bc2cpp_funcall_argv(mrb_state* M, mrb_value recv, mrb_sym mid, mrb_int argc, const mrb_value* argv) {
-      if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return mrb_yield_argv(M, recv, argc, argv);
+      if (mrb_type(recv) == MRB_TT_PROC && bc2cpp_cfunc_proc_call_p(M, recv, mid)) return bc2cpp_yield_argv(M, recv, argc, argv);
       return mrb_funcall_argv(M, recv, mid, argc, argv);
     }
   CPP
