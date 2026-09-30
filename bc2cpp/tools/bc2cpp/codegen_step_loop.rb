@@ -70,9 +70,10 @@ class CodeGen
     "(long long)mrb_integer(r#{reg})"
   end
 
-  # One `for` loop over a `long long` counter, so `i += step` cannot wrap a 32-bit `mrb_int`
-  # (both bounds are fixnums, hence so is every counter value that reaches the block). A
-  # `break` assigns the send's destination and leaves the loop.
+  # A `for` over a `long long` counter, so `i += step` cannot wrap a 32-bit `mrb_int` (both
+  # bounds are fixnums, hence so is every counter value that reaches the block). A flat loop (in
+  # a resumable method) keeps the counter and the bound in frame slots and uses `goto`, because
+  # a yield inside it must be resumable. A `break` assigns the send's destination and leaves it.
   def emit_step_inline(region, irep, d)
     block_irep = region[:block_irep]
     offset = irep.nregs
@@ -84,25 +85,52 @@ class CodeGen
 
     iter_label = "Lbc2cpp_step_iter_#{addr}"
     break_label = "Lbc2cpp_step_end_#{addr}"
-    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    flat = !@resumable.nil?
+    body = with_resumable_flat(flat) do
+      compile_inline_block_body(region, irep, d, iter_label, break_label: break_label)
+    end
     return nil unless body
 
     cmp = region[:step].positive? ? '<=' : '>='
     param = "r#{1 + offset} = mrb_fixnum_value((mrb_int)"
     out = String.new
-    i = "bc2cpp_step_i_#{addr}"
-    out << "  {\n"
-    out << "    const long long bc2cpp_step_limit_#{addr} = #{limit};\n"
-    out << "    for (long long #{i} = #{start}; #{i} #{cmp} bc2cpp_step_limit_#{addr}; #{i} += #{region[:step]}) {\n"
-    out << inline_block_frame(block_irep, offset)
-    out << "      #{param}#{i});\n" if region[:bind_counter]
-    out << body
-    out << "      #{iter_label}:;\n"
-    out << "    }\n"
-    out << "    #{break_label}:;\n"
-    out << "  }\n"
+    if flat
+      i = "F->slots[#{@resumable.new_slot}]"
+      bound = "F->slots[#{@resumable.new_slot}]"
+      out << "  #{bound} = #{limit};\n"
+      out << "  #{i} = #{start};\n"
+      out << "  Lbc2cpp_step_top_#{addr}:;\n"
+      out << "  if (!(#{i} #{cmp} #{bound})) goto #{break_label};\n"
+      out << inline_block_reset(block_irep, offset)
+      out << "  #{param}#{i});\n" if region[:bind_counter]
+      out << body
+      out << "  #{iter_label}:;\n"
+      out << "  #{i} += #{region[:step]};\n"
+      out << "  goto Lbc2cpp_step_top_#{addr};\n"
+      out << "  #{break_label}:;\n"
+    else
+      i = "bc2cpp_step_i_#{addr}"
+      out << "  {\n"
+      out << "    const long long bc2cpp_step_limit_#{addr} = #{limit};\n"
+      out << "    for (long long #{i} = #{start}; #{i} #{cmp} bc2cpp_step_limit_#{addr}; #{i} += #{region[:step]}) {\n"
+      out << inline_block_frame(block_irep, offset)
+      out << "      #{param}#{i});\n" if region[:bind_counter]
+      out << body
+      out << "      #{iter_label}:;\n"
+      out << "    }\n"
+      out << "    #{break_label}:;\n"
+      out << "  }\n"
+    end
     # Integer#step/upto/downto return the receiver, which r<dest> still holds (the
     # recognizer's `break` path overwrites it with the break value).
     out
+  end
+
+  # inline_block_frame's declarations as assignments, for a frame whose registers are
+  # declared once at function scope.
+  def inline_block_reset(block_irep, offset)
+    out = String.new
+    (1...block_irep.nregs).each { |i| out << "  r#{i + offset} = mrb_nil_value();\n" }
+    out << "  r#{offset} = self;\n"
   end
 end

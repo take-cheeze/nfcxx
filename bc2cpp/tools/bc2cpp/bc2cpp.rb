@@ -63,6 +63,7 @@ require_relative 'codegen_fixnum_proof'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
+require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
@@ -1160,7 +1161,8 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
-  print gen.emit_instance_tt_setup
+  print gen.emit_resumable_helpers(compiled)
+  print gen.emit_instance_tt_setup(compiled)
   print gen.emit_core_guard_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache

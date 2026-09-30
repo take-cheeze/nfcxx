@@ -8,6 +8,10 @@ class CodeGen
   # registers and is undone with unshift_proof_reg wherever a register reaches a
   # proof rather than the output.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
+    if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
+      return resumable_code
+    end
+
     case insn.op
     when 'ENTER'
       "  // #{insn.raw.strip} (args already bound above)\n"
