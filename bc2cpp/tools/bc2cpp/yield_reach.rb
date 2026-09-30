@@ -454,7 +454,8 @@ class YieldReach
     if CODE_EVAL.include?(name)
       return node.calls << name if lit_block
 
-      node.seed = true
+      # Code built at run time is unknown; outside a closed world nothing about unknown code is claimed.
+      node.seed = true if @sound
       @reasons[:eval] += 1
     elsif BLOCK_EXEC.include?(name)
       node.unknown_call = true unless lit_block
@@ -1018,13 +1019,14 @@ class YieldReach
 
     x = n.bodies.find { |y| @nb[y] }
     return [:lit, x] if x
+    return nil unless @sound # unknown code is only accounted for in a closed world
+
     return [:unknown_call] if n.unknown_call && ctx[:any_code]
 
     if n.callable_send
       d = callable.find { |y| @nb[y] }
       return [:call, nil, d] if d
     end
-
     if n.proc_call || n.unknown_block
       return [:proc_call] if ctx[:any_block]
 
@@ -1088,10 +1090,12 @@ class YieldReach
       n.calls.each { |c| queue.concat(callee_defs(n, c)) }
       queue.concat(n.lit.reject { |b| @nodes[b].fiber_body })
       queue.concat(n.bodies)
-      queue.concat(all_methods) if n.unknown_call
       queue.concat(enum_defs) if n.enum_send
-      queue.concat(callable_defs) if n.callable_send
       queue.concat(@yielder_methods.map(&:label)) if @sealed && !n.yielder_calls.empty?
+      next unless @sound
+
+      queue.concat(all_methods) if n.unknown_call
+      queue.concat(callable_defs) if n.callable_send
       queue.concat(escaping + callable_defs) if n.proc_call || n.unknown_block || n.stored_read
       queue.concat(opaque) if n.native
     end
