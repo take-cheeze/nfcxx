@@ -95,6 +95,14 @@ module NativeDirect
     end
   end
 
+  # How many times `paths` register `name` on `owner`; 0 when the name has a
+  # spelling that is not a parsed registration (see registered_owners).
+  def registration_count(name, owner, paths)
+    return 0 if registered_owners(name, paths).nil?
+
+    Array(paths).sum { |path| file_registrations(path)[name]&.fetch(:owners)&.count(owner) || 0 }
+  end
+
   # The classes that register `name` in `paths`, or nil when that cannot be
   # proven: a spelling of the name that is not a parsed registration on a
   # class variable of the same file means some registration was missed.

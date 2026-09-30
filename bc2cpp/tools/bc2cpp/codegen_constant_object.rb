@@ -9,7 +9,7 @@ class CodeGen
   # proved its identity), so its singleton lookup is the class's own singleton,
   # then its superclasses' singletons (ClosedWorld#class_parent).
   def constant_object_send_code(name, n, d, recv, argv, constant_owner)
-    return nil if devirt_blocked_name?(name)
+    return nil if devirt_blocked_name?(name) || constant_object_name_rebound?(name)
 
     candidate = constant_object_singleton_def(name, constant_owner)
     return nil unless candidate&.visibility == :public
@@ -41,6 +41,13 @@ class CodeGen
            "(stable class/module constant, unique public singleton definition#{inherited}), direct C++ call " \
            "without mrb_funcall#{native_note}.\n"
     "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+  end
+
+  # An `alias`/`undef` (including one inside `class << Const`) can give the name a
+  # body the registry does not list, and a world with a dynamic installer or mixin
+  # (a refused ClosedWorld) can prepend to a singleton at run time.
+  def constant_object_name_rebound?(name)
+    @closed_world.global_refusal || symbol_installed_names.nil? || symbol_installed_names.include?(name)
   end
 
   # The one singleton definition of `name` mruby's lookup reaches from

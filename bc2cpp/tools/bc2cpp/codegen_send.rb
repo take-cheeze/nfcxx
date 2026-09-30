@@ -1252,6 +1252,12 @@ class CodeGen
         end
       end
     end
+    # NATIVE_EXACT_DIRECT (ADR 0281): `self` is exactly the enclosing class's instance or
+    # class/module object, and the name is one of its RGSS natives.
+    if target.nil? && self_implicit && lexical_self_ivar_accessor.nil? && @closed_world
+      native_self_code = native_exact_direct_code(name, d, recv, argv, native_exact_self_owner(owner_def))
+      return native_self_code if native_self_code
+    end
     # CHA_SELF: a call on self whose every possible receiver (the enclosing class
     # and its descendants) resolves the name to known definitions; see cha_self_plan.
     if target.nil? && lexical_self_ivar_accessor.nil? && @closed_world
@@ -1522,6 +1528,9 @@ class CodeGen
                                                owner_def&.owner)
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
+
+        native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton")
+        return native_code if native_code
       end
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
