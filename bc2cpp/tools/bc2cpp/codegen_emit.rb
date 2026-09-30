@@ -521,14 +521,59 @@ class CodeGen
   # int_add/int_sub/int_mul, mrb_num_add/sub/mul) handle without coercion, so the
   # direct helper call can neither raise a TypeError nor differ from the send.
   def emit_integer_operand_helpers(compiled)
-    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_integer_recv_p(') }
+    out = +''
+    if compiled.any? { |m| m[:code].include?('bc2cpp_integer_recv_p(') }
+      # mrb_bigint_p / mrb_float_p are FALSE when mruby is built without them.
+      out << <<~CPP
+        static inline mrb_bool bc2cpp_integer_recv_p(mrb_value v) { return mrb_integer_p(v) || mrb_bigint_p(v); }
+        static inline mrb_bool bc2cpp_integer_operand_p(mrb_value v) { return bc2cpp_integer_recv_p(v) || mrb_float_p(v); }
 
-    # mrb_bigint_p / mrb_float_p are FALSE when mruby is built without them.
-    <<~CPP
-      static inline mrb_bool bc2cpp_integer_recv_p(mrb_value v) { return mrb_integer_p(v) || mrb_bigint_p(v); }
-      static inline mrb_bool bc2cpp_integer_operand_p(mrb_value v) { return bc2cpp_integer_recv_p(v) || mrb_float_p(v); }
+      CPP
+    end
+    out << emit_numeric_proof_helpers(compiled)
+  end
 
-    CPP
+  # NUMERIC_OPERAND_PROOF helpers (ADR 0276): the core Integer/Float compare and
+  # divide bodies for operands proven Integer or Float, so the sites need no
+  # dynamic send. Emitted only when the output uses them.
+  def emit_numeric_proof_helpers(compiled)
+    out = +''
+    if compiled.any? { |m| m[:code].include?('bc2cpp_num_cmp(') }
+      # Integer#</<=/>/>= and Float#... are all num_lt & co. over cmpnum
+      # (src/numeric.c); mrb_cmp is cmpnum for Integer/Float/bigint receivers.
+      out << <<~CPP
+        static inline mrb_int bc2cpp_num_cmp(mrb_state *M, mrb_value a, mrb_value b) {
+          mrb_state *mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+          mrb_int c = mrb_cmp(M, a, b);
+          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
+          return c;
+        }
+
+      CPP
+    end
+    if compiled.any? { |m| m[:code].include?('bc2cpp_num_div(') }
+      # flo_div / int_div (src/numeric.c) for Integer-or-Float operands.
+      # mrb_bint_div/mrb_as_bint are internal.h-only (see bc2cpp.rb's extern "C" block).
+      out << <<~CPP
+        #ifdef MRB_USE_BIGINT
+        extern "C" mrb_value mrb_bint_div(mrb_state*, mrb_value, mrb_value);
+        extern "C" mrb_value mrb_as_bint(mrb_state*, mrb_value);
+        #endif
+        static inline mrb_value bc2cpp_num_div(mrb_state *M, mrb_value x, mrb_value y) {
+        #ifndef MRB_NO_FLOAT
+          if (mrb_float_p(x)) return mrb_float_value(M, mrb_div_float(mrb_float(x), mrb_as_float(M, y)));
+          if (mrb_float_p(y)) return mrb_float_value(M, mrb_div_float(mrb_as_float(M, x), mrb_float(y)));
+        #endif
+        #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(x)) return mrb_bint_div(M, x, y);
+          if (mrb_bigint_p(y)) return mrb_bint_div(M, mrb_as_bint(M, x), y);
+        #endif
+          return mrb_div_int_value(M, mrb_integer(x), mrb_integer(y));
+        }
+
+      CPP
+    end
+    out
   end
 
   # NATIVE_CORE_DIRECT (ADR 0257) mirrors of core natives whose bodies are

@@ -721,12 +721,13 @@ class CodeGen
     end
   end
 
-  # ENTRY_ARG_CALLSITE_PROOF greatest fixpoint (see the header). Returns a Set
-  # of [irep label, mandatory argument register].
-  def compute_entry_arg_fixnum
-    @entry_arg_fixnum = Set.new
-    # A missing scan is a missing poison source: prove nothing.
-    return @entry_arg_fixnum unless @foreign_method_names && @outside_tokens
+  # ENTRY_ARG_CALLSITE_PROOF admission rules 1-8 (see the header): (irep label,
+  # argument register) -> [sites, k] for every argument that could be proven from
+  # its call sites. Shared with NUMERIC_ENTRY_ARG_PROOF, which asks a weaker
+  # question of the same sites. Empty unless both outside scans ran (a missing
+  # scan is a missing poison source).
+  def entry_arg_candidates
+    return {} unless @foreign_method_names && @outside_tokens
 
     sites, poisoned = entry_arg_call_index
     cand = {}
@@ -753,7 +754,17 @@ class CodeGen
 
       (1..mand).each { |k| cand[[d.irep, k]] = [here, k] }
     end
+    cand
+  end
 
+  # ENTRY_ARG_CALLSITE_PROOF greatest fixpoint (see the header). Returns a Set
+  # of [irep label, mandatory argument register].
+  def compute_entry_arg_fixnum
+    @entry_arg_fixnum = Set.new
+    # A missing scan is a missing poison source: prove nothing.
+    return @entry_arg_fixnum unless @foreign_method_names && @outside_tokens
+
+    cand = entry_arg_candidates
     @entry_arg_fixnum = Set.new(cand.keys)
     loop do
       dropped = cand.keys.select do |key|

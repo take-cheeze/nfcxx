@@ -114,6 +114,40 @@ def outside_world_tokens(paths)
   names
 end
 
+# ---------------------------------------------------------------------------
+# NUMERIC_OPERAND_PROOF (ADR 0276) out-of-closed-world poison sources.
+#
+# nil_class_operator_names: every operator a native source that touches
+# `nil_class` mentions (spelled MRB_OPSYM(x) or as a quoted operator). A file
+# that never names nil_class cannot define a NilClass method; one that does is
+# read blunt-ly, so over-collection costs a proof, never soundness.
+#
+# outside_ivar_names: every `@name` a native or foreign-Ruby source spells, plus
+# MRB_IVSYM(name). Those sources can write an ivar the closed-world bytecode
+# scan never sees, so the ivar is not provable.
+# ---------------------------------------------------------------------------
+def nil_class_operator_names(paths)
+  names = Set.new
+  Array(paths).each do |path|
+    src = SourceText.read(path, 'nil_class_operator_names', binary: true) or next
+    next unless src.include?('nil_class')
+
+    src.scan(/MRB_OPSYM\((\w+)\)/) { |(n)| names << (OPSYM_TO_RUBY[n] || n) }
+    src.scan(/"([+\-*\/%<>=!&|^~\[\]]+@?)"/) { |(n)| names << n }
+  end
+  names
+end
+
+def outside_ivar_names(paths)
+  names = Set.new
+  Array(paths).each do |path|
+    src = SourceText.read(path, 'outside_ivar_names', binary: true) or next
+    src.scan(/@([A-Za-z_][A-Za-z_0-9]*)/) { |(n)| names << n }
+    src.scan(/MRB_IVSYM\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { |(n)| names << n }
+  end
+  names
+end
+
 def extract_native_method_names(src_paths)
   names = Set.new
   # MRB_SYM(name) is the bare name, MRB_OPSYM(op) an operator (OPSYM_TO_RUBY).
