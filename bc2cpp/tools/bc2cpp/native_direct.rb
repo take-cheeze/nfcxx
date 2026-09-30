@@ -40,7 +40,7 @@ module NativeDirect
   # The table is by variable name, not scope: a name with several definitions
   # is kept only when they all resolve to one owner, which makes its
   # registrations unproven rather than attributed to the wrong class.
-  def class_variables(text)
+  def class_variables(text, param_owners = {})
     defs = Hash.new { |h, k| h[k] = [] }
     text.scan(/RClass\s*\*\s*(\w+)\s*=\s*mrb_define_(module|class)(_under)?\s*\(([^;]*?)\)\s*;/m) do |var, _kind, under, args|
       parts = args.split(',').map(&:strip)
@@ -48,7 +48,7 @@ module NativeDirect
     end
     text.scan(/(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*RClass\s*\*\s*(\w+)\s*\)\s*\{/) do |func, param|
       callers = text.scan(/\b#{Regexp.escape(func)}\s*\(\s*\w+\s*,\s*(\w+)\s*\)\s*;/).flatten
-      defs[param] << [:param, callers]
+      defs[param] << [:param, callers, param_owners[func]]
     end
     owners = {}
     resolve = lambda do |definition|
@@ -58,7 +58,9 @@ module NativeDirect
         parent = owners[definition[1]]
         parent && definition[2] ? "#{parent}::#{definition[2]}" : nil
       else
-        found = definition[1].map { |arg| owners[arg] }.uniq
+        found = definition[1].map { |arg| owners[arg] }
+        found << definition[2] if definition[2]
+        found.uniq!
         found.size == 1 ? found.first : nil
       end
     end
@@ -74,6 +76,31 @@ module NativeDirect
     owners
   end
 
+  # RClass* parameters of functions one file defines and another calls (lib.cxx's
+  # gem init hands its module to rgss_audio_define): function => the owner every
+  # call site passes. `texts` is path => comment-stripped source. A function some
+  # call site passes something unresolved gets no entry.
+  def cross_file_param_owners(texts)
+    per_file = texts.transform_values { |text| class_variables(text) }
+    seen = Hash.new { |h, k| h[k] = [] }
+    texts.each do |path, text|
+      text.scan(/\b(\w+)\s*\(\s*\w+\s*,\s*(\w+)\s*\)\s*;/) { |func, var| seen[func] << per_file[path][var] }
+    end
+    seen.each_with_object({}) do |(func, owners), out|
+      out[func] = owners.first if owners.uniq.size == 1 && owners.first
+    end
+  end
+
+  # cross_file_param_owners over the sibling sources of `path`, memoized per directory.
+  def sibling_param_owners(path)
+    dir = File.dirname(path)
+    @sibling_owners ||= {}
+    @sibling_owners[dir] ||= begin
+      texts = Dir[File.join(dir, '*.cxx')].to_h { |file| [file, strip_comments(File.binread(file).force_encoding('UTF-8'))] }
+      cross_file_param_owners(texts)
+    end
+  end
+
   # Every "name" registration in `path` as [owner, kind]; owner is nil when
   # the class expression is not a variable defined in the same file. Class
   # methods and module functions register on "<owner>.singleton".
@@ -81,7 +108,7 @@ module NativeDirect
   def file_registrations(path)
     @registrations[path] ||= begin
       text = strip_comments(File.binread(path).force_encoding('UTF-8'))
-      owners = class_variables(text)
+      owners = class_variables(text, sibling_param_owners(path))
       table = Hash.new { |h, k| h[k] = { owners: [], literals: 0 } }
       text.scan(/"((?:[^"\\\n]|\\.)*)"/) { |(lit)| table[lit][:literals] += 1 }
       text.scan(MRB_SYM_TOKEN_RE) { |macro, tok| table[resolve_mrb_sym_token(macro, tok)][:literals] += 1 }
@@ -93,6 +120,14 @@ module NativeDirect
       table.default_proc = nil
       table
     end
+  end
+
+  # How many times `paths` register `name` on `owner`; 0 when the name has a
+  # spelling that is not a parsed registration (see registered_owners).
+  def registration_count(name, owner, paths)
+    return 0 if registered_owners(name, paths).nil?
+
+    Array(paths).sum { |path| file_registrations(path)[name]&.fetch(:owners)&.count(owner) || 0 }
   end
 
   # The classes that register `name` in `paths`, or nil when that cannot be

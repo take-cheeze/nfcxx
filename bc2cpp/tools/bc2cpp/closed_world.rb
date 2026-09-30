@@ -22,6 +22,8 @@ class ClosedWorld
   # Sends that define methods the registry walk may not attribute to an owner.
   INSTALLER_SENDS = %w[attr_reader attr_writer attr_accessor attr define_singleton_method].freeze
   MIXIN_SENDS = %w[include prepend extend].freeze
+  # Sends that change a method's visibility by name (NATIVE_EXACT_DIRECT).
+  VISIBILITY_SENDS = %w[private public protected private_class_method public_class_method module_function].freeze
   # Sends that rebind a constant a guard chain resolves.
   CONST_REBINDERS = %w[const_set remove_const].freeze
   # Constants whose `.new` makes a class (or members) the registry cannot see.
@@ -69,6 +71,8 @@ class ClosedWorld
     # (TouchScan, ADR 0256).
     @touches = []
     @unknown_defs = Set.new
+    @visibility_names = Set.new
+    @dynamic_visibility = false
     @rebound = Set.new
     @constant_write_counts = Hash.new(0)
     @class_constant_names = Set.new
@@ -202,6 +206,17 @@ class ClosedWorld
     return false if @global_refusal || @unknown_defs.include?(name)
 
     !ForeignDefiners.defines?(@ruby_paths, owner, name)
+  end
+
+  # NATIVE_EXACT_DIRECT (ADR 0281): nothing outside the registry can replace or
+  # hide the RGSS native `name` on the class it is registered for: it is spelled
+  # only by the RGSS sources (so no outside Ruby, no other native), no dynamic
+  # definer or visibility change (private, module_function ...) names it. The
+  # registry-visible definers and installers are checked by the caller.
+  def native_exact_direct_name_safe?(name, path_fragment)
+    return false if @global_refusal || @dynamic_visibility
+
+    !@unknown_defs.include?(name) && !@visibility_names.include?(name) && native_only_in?(name, path_fragment)
   end
 
   # BLOCK_CORE_DIRECT (ADR 0270): like core_native_arm_safe?, for a method that mruby's own
@@ -500,6 +515,7 @@ class ClosedWorld
         when 'LOADSYM'
           sym = insn.sym_token
           @clone_sent = true if sym == 'clone'
+          @dynamic_visibility = true if VISIBILITY_SENDS.include?(sym)
           @probed_names << sym if insns[idx + 1, 3].any? { |n| SEND_OPS.include?(n.op) && PROBE_SENDS.include?(n.sym) }
           global!(:dynamic_install) if INSTALLER_SENDS.include?(sym) || CONST_REBINDERS.include?(sym)
         when 'GETCONST', 'GETMCNST'
@@ -521,6 +537,7 @@ class ClosedWorld
   def scan_send(irep, insns, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
+    scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
     @self_rebound = true if SELF_REBINDERS.include?(name)
     if CONST_REBINDERS.include?(name)
       @dynamic_constant_mutation = true
@@ -549,6 +566,32 @@ class ClosedWorld
       @unknown_defs << s
       @unknown_defs << "#{s}="
     end
+  end
+
+  # `private :a, :b` / `private def a`: the names it hides. Any other argument
+  # shape could name anything.
+  def scan_visibility_send(insns, idx, insn)
+    n = insn.op.end_with?('0') ? 0 : insn.argc
+    return if n&.zero?
+
+    syms = n ? preceding_name_args(insns, idx, n) : packed_syms(insns, idx, insn)
+    syms ? @visibility_names.merge(syms) : @dynamic_visibility = true
+  end
+
+  # The n names LOADSYM'd (or `def`ed) right before the send at idx, skipping the
+  # EXT prefix of a wide operand; nil when anything else feeds an argument.
+  def preceding_name_args(insns, idx, n)
+    syms = []
+    (idx - 1).downto(0) do |i|
+      break if syms.size == n
+
+      op = insns[i].op
+      next if op.start_with?('EXT')
+      return nil unless %w[LOADSYM DEF].include?(op)
+
+      syms.unshift(insns[i].sym_token)
+    end
+    syms if syms.size == n
   end
 
   # The n Symbol arguments LOADSYM'd right before the send at idx, or nil.
