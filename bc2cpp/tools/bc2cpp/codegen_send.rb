@@ -1534,6 +1534,11 @@ class CodeGen
         return call_code if call_code
       end
 
+      if !self_implicit && call_receiver.nil? && @native_name_sources
+        rest_code = rest_param_native_code(irep, new_proof_idx, new_proof_reg, name, d, recv, argv)
+        return rest_code if rest_code
+      end
+
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
              compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)

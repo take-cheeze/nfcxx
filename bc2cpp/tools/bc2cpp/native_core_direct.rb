@@ -144,6 +144,31 @@ module NativeCoreDirect
                 }
                 return mrb_nil_value();
               C
+    # mrb_ary_svalue is static, so the call is a mirror in emit_native_core_helpers.
+    Entry.new(name: '__svalue', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'bc2cpp_ary_svalue(M, recv)', helper: 'bc2cpp_ary_svalue',
+              apis: [],
+              checks: [['mrb_ary_svalue', <<~C, :exact]]),
+                switch (RARRAY_LEN(ary)) {
+                case 0:
+                  return mrb_nil_value();
+                case 1:
+                  return RARRAY_PTR(ary)[0];
+                default:
+                  return ary;
+                }
+              C
+    # Only an exact Array reaches the arm, and for one mrb_ary_to_a returns the receiver itself.
+    Entry.new(name: 'to_a', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'recv',
+              apis: [],
+              checks: [['mrb_ary_to_a', <<~C, :exact]]),
+                if (mrb_obj_class(mrb, self) != mrb->array_class) {
+                  /* Convert subclass to Array */
+                  return mrb_ary_dup(mrb, self);
+                }
+                return self;
+              C
     Entry.new(name: 'bytes', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_str_bytes(M, recv)', helper: 'bc2cpp_str_bytes',
               apis: [],
@@ -230,6 +255,18 @@ module NativeCoreDirect
           if (mrb_equal(M, RARRAY_PTR(self)[i], obj)) return mrb_int_value(M, i);
         }
         return mrb_nil_value();
+      }
+    CPP
+    'bc2cpp_ary_svalue' => <<~CPP,
+      static inline mrb_value bc2cpp_ary_svalue(mrb_state* M, mrb_value ary) {
+        switch (RARRAY_LEN(ary)) {
+        case 0:
+          return mrb_nil_value();
+        case 1:
+          return RARRAY_PTR(ary)[0];
+        default:
+          return ary;
+        }
       }
     CPP
     'bc2cpp_str_bytes' => <<~CPP,
