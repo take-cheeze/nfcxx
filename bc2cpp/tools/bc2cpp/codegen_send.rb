@@ -1278,6 +1278,7 @@ class CodeGen
     inherited_typed = false
     exact_class_dispatch = false
     exact_via_record = false
+    exact_via_flow = false
     typed_guard_class = nil
     ivar_accessor_target = nil
     known_class = nil
@@ -1305,6 +1306,12 @@ class CodeGen
       if exact_class.nil? && (record_class = record_hash_exact_class(irep, proof_idx, proof_reg))
         known_class = exact_class = record_class
         exact_via_record = true
+      end
+      # RETURN_CLASS_TABLE (ADR 0287): the receiver is a fresh instance of one class on every path,
+      # through a local, an ivar slot or a call whose name only returns such instances.
+      if exact_class.nil? && (flow_class = exact_flow_user_class(irep, proof_idx, proof_reg))
+        known_class = exact_class = flow_class
+        exact_via_flow = true
       end
       if exact_class
         exact_target = closed_world_exact_target(name, exact_class)
@@ -1383,7 +1390,10 @@ class CodeGen
       call_argv, native_note = direct_call_args(target, argv, impl)
       if typed
         if exact_class_dispatch
-          origin = exact_via_record ? 'record key holds only fresh' : 'fresh'
+          origin = if exact_via_record then 'record key holds only fresh'
+                   elsif exact_via_flow then 'return-class flow: every path holds a fresh'
+                   else 'fresh'
+                   end
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
                  "(#{origin} #{typed_guard_class}.new; stable class constant and standard constructor), " \
                  "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
@@ -1392,6 +1402,14 @@ class CodeGen
 
         check_owner = typed_guard_class || target.owner
         check = "#{owner_class_ptr_expr(check_owner)} == mrb_obj_class(M, #{recv})"
+        # EXACT_TYPED_UNGUARDED (ADR 0287): the receiver is proven to be exactly check_owner, so
+        # the guard below can only be true and its fallback is dead.
+        if exact_class && exact_class == check_owner && !via_element
+          note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
+                 "#{check_owner}), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
         # ELEMENT_CLASS_SUPPORT: the tag records which fact proved the receiver.
         kind = inherited_typed ? 'CLOSED_WORLD_TYPED_INHERITED' : (via_element ? 'ELEMENT' : 'TYPED')
         traced_note = if inherited_typed
@@ -1515,6 +1533,12 @@ class CodeGen
              "#{kind} devirtualized to a direct #{storage} (no mrb_funcall) -- see " \
              "MethodDef's own kind: :ivar_accessor comment for the real 3rd/mruby/src/class.c " \
              "citation this reproduces exactly (a writer yields the assigned value).\n"
+      # EXACT_TYPED_UNGUARDED (ADR 0287): proven exactly `owner`, so the guard can only be true.
+      if exact_class && exact_class == owner && !via_element
+        return "#{note.sub('receiver traced to', 'receiver proven exactly')}  " \
+               "#{ivar_accessor_call_code(owner, recv, name, d, argv)}\n"
+      end
+
       fallback = guarded_fallback_line(d, recv, name, argv, [owner], closed_world_site(recv, irep, idx, owner_def))
       "#{note}  if (#{check}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
