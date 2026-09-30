@@ -15,10 +15,8 @@ class CodeGen
   #      entry: the C++ parameter is an mrb_int (fixnum_proof_entry_arg?).
   #   3. A GETIV of an ivar embedded as :fixnum: an mrb_int struct field whose
   #      every write is guarded by mrb_integer_p.
-  #   4. ADD/SUB/MUL/ADDI/SUBI whose operands prove (bounded by
-  #      FIXNUM_PROOF_MAX_DEPTH): such an op is emitted as a bare
-  #      mrb_fixnum_value(a <op> b). DIV is not a source: mrb_div_int_value's
-  #      result type is not audited.
+  #   4. (retired, ADR 0279: an ADD/SUB/MUL/ADDI/SUBI result can leave the Fixnum range,
+  #      so it is an Integer -- see NumericFlow -- not a proven Fixnum.)
   #   5. GETCONST/GETMCNST of an IntegerConstants name.
   #   (6. FIXNUM_RETURN_PROOF and 7. ENTRY_ARG_CALLSITE_PROOF, below.)
   # MOVE chains are followed (`regs[a] = regs[b]`).
@@ -375,12 +373,6 @@ class CodeGen
     when 'GETIV'
       ivar = insn.ivar
       !ivar.nil? && embed_type(owner_def.owner, ivar) == :fixnum
-    when 'ADD', 'SUB', 'MUL'
-      s = insn.paren_reg
-      !s.nil? && proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1) &&
-        proven_fixnum_operand?(irep, j, s, owner_def, depth + 1)
-    when 'ADDI', 'SUBI'
-      proven_fixnum_operand?(irep, j, reg, owner_def, depth + 1)
     when 'GETCONST'
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.

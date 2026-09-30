@@ -167,7 +167,7 @@ class CodeGen
       # FIXNUM_OPERAND_PROOF: the immediate is a Fixnum, so only the destination
       # needs proving.
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
       else
         guarded = guarded_game_integer_immediate('ADD', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
                                                  owner_def)
@@ -180,8 +180,8 @@ class CodeGen
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_integer_p(r#{d})) {
-            #{numeric_arith_operands?('+', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('+', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});"}
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d})) {
+            #{fixnum_exact_tier('+', d, lit)}
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -192,7 +192,7 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, "r#{s}")}\n"
       else
         guarded = guarded_game_integer_pair('ADD', irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -206,7 +206,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            #{numeric_arith_operands?('+', d, s, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('+', d, "r#{s}") : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + mrb_fixnum(r#{s}));"}
+            #{fixnum_exact_tier('+', d, "r#{s}")}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) + mrb_integer(r#{s}));
@@ -225,7 +225,7 @@ class CodeGen
       d = insn.reg
       lit = insn.imm_operand
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
         guarded = guarded_game_integer_immediate('SUB', irep, idx, unshift_proof_reg(d, reg_offset), lit.to_i,
                                                  owner_def)
@@ -238,8 +238,8 @@ class CodeGen
                         ''
                       end
         <<~CPP
-          #{guarded_arm}  if (mrb_integer_p(r#{d})) {
-            #{numeric_arith_operands?('-', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('-', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});"}
+          #{guarded_arm}  if (mrb_fixnum_p(r#{d})) {
+            #{fixnum_exact_tier('-', d, lit)}
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -250,7 +250,7 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, "r#{s}")}\n"
       else
         guarded = guarded_game_integer_pair('SUB', irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -264,7 +264,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            #{numeric_arith_operands?('-', d, s, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('-', d, "r#{s}") : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - mrb_fixnum(r#{s}));"}
+            #{fixnum_exact_tier('-', d, "r#{s}")}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) - mrb_integer(r#{s}));
@@ -285,7 +285,7 @@ class CodeGen
       d = insn.reg
       s = insn.paren_reg
       if proven_fixnum_pair?(irep, idx, unshift_proof_reg(d, reg_offset), unshift_proof_reg(s, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('*', d, "r#{s}")}\n"
       else
         guarded = guarded_game_integer_pair('MUL', irep, idx, unshift_proof_reg(d, reg_offset),
                                             unshift_proof_reg(s, reg_offset), owner_def)
@@ -299,7 +299,7 @@ class CodeGen
                       end
         <<~CPP
           #{guarded_arm}  if (mrb_fixnum_p(r#{d}) && mrb_fixnum_p(r#{s})) {
-            #{numeric_arith_operands?('*', d, s, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('*', d, "r#{s}") : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) * mrb_fixnum(r#{s}));"}
+            #{fixnum_exact_tier('*', d, "r#{s}")}
           #ifndef MRB_NO_FLOAT
           } else if (mrb_float_p(r#{d}) && mrb_integer_p(r#{s})) {
             r#{d} = mrb_float_value(M, mrb_float(r#{d}) * mrb_integer(r#{s}));
@@ -750,8 +750,7 @@ class CodeGen
     when 'ADDILV'
       # "ADDILV Rd Rb N ; Rd:name": vm.c OP_MATHILV(add) updates regs[a] in place
       # (`b` is never touched), falling back to `+` for non-Integers, like ADDI.
-      # Overflow wraps instead of promoting to Bignum, the same simplification ADDI
-      # accepts. The immediate is the third operand (`^R\d+\s+R\d+\s+(-?\d+)`): `a`
+      # The immediate is the third operand (`^R\d+\s+R\d+\s+(-?\d+)`): `a`
       # is a named local, so a trailing "; Rd:name" comment is normal and
       # `.split.last` would pick it up.
       d = insn.reg
@@ -759,11 +758,11 @@ class CodeGen
       # FIXNUM_OPERAND_PROOF: as ADDI; rarely provable (a loop back-edge sits
       # between the write and this use).
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('+', d, lit)}\n"
       else
         <<~CPP
-          if (mrb_integer_p(r#{d})) {
-            #{numeric_arith_operands?('+', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('+', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) + #{lit});"}
+          if (mrb_fixnum_p(r#{d})) {
+            #{fixnum_exact_tier('+', d, lit)}
           } else {
             #{compile_operator_fallback('+', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }
@@ -775,11 +774,11 @@ class CodeGen
       d = insn.reg
       lit = insn.src_and_literal&.last
       if proven_fixnum_operand?(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
-        "#{FIXNUM_PROOF_NOTE}  r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});\n"
+        "#{FIXNUM_PROOF_NOTE}  #{fixnum_exact_tier('-', d, lit)}\n"
       else
         <<~CPP
-          if (mrb_integer_p(r#{d})) {
-            #{numeric_arith_operands?('-', d, nil, irep, idx, owner_def, reg_offset) ? numeric_fixnum_tier('-', d, lit) : "r#{d} = mrb_fixnum_value(mrb_fixnum(r#{d}) - #{lit});"}
+          if (mrb_fixnum_p(r#{d})) {
+            #{fixnum_exact_tier('-', d, lit)}
           } else {
             #{compile_operator_fallback('-', d, nil, "mrb_fixnum_value(#{lit})", irep, idx, owner_def, reg_offset)}
           }

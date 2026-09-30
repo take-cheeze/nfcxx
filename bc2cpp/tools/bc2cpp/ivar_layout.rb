@@ -148,11 +148,11 @@ class IvarLayout
             #
             # It must NOT excuse a contribution the analysis can read and finds
             # to be something else. That distinction is the whole safety
-            # argument, and it is why the ADD arm now recurses into both
-            # operands (see that arm's comment): without that, `ary + ary`
-            # reads UNKNOWN here and a declaration would admit the Array field
-            # as Integer-or-nil. `readable_but_other` is exactly the set the
-            # analysis has already resolved to a different concrete type.
+            # argument: `ary + ary` reads UNKNOWN here (an arithmetic write is
+            # never a Fixnum, ADR 0279), and readable_but_other steps over the
+            # ADD to the Array literal, so a declaration cannot admit the Array
+            # field as Integer-or-nil. `readable_but_other` is exactly the set
+            # the analysis has already resolved to a different concrete type.
             unreadable = inferred == UNKNOWN && !readable_but_other(irep, idx, src_reg)
             seen[klass][ivar] = infer_join(seen[klass][ivar], inferred) if inferred != UNKNOWN
             merged = if fixnum_nil[klass]&.include?(ivar) && unreadable
@@ -246,9 +246,8 @@ class IvarLayout
   # value the analysis positively resolved to a non-Fixnum, so a false "readable"
   # can only cost an embedding, never admit a wrong one.
   def self.readable_but_other(irep, idx, src_reg)
-    # An arithmetic site is a Fixnum only when its operands prove (see the ADD
-    # arm of trace_type); it was refused here, so the value is not readable and
-    # the walk steps over it.
+    # An arithmetic site is never a Fixnum (see the ADD arm of trace_type), so the
+    # value is not readable and the walk steps over it.
     irep.walk_writers(idx - 1, src_reg, skip_ops: %w[ADD ADDI SUB SUBI MUL DIV], follow_moves: true) do |insn|
       case insn.op
       when /^LOADI/, 'LOADNIL'
@@ -321,7 +320,8 @@ class IvarLayout
     end
   end
 
-  # ADD/SUB/MUL are Fixnum only when both operands are; a cyclic one is BOTTOM.
+  # `% & | ^` are Fixnum only when both operands are (they never leave the Fixnum range);
+  # a cyclic one is BOTTOM. ADD/SUB/MUL/ADDI/SUBI are never Fixnum (ADR 0279).
   def self.fixnum_operands(left, right)
     fix = ->(t) { t == :fixnum || t == BOTTOM }
     return nil unless fix.call(left) && fix.call(right)
@@ -398,55 +398,11 @@ class IvarLayout
         next :fixnum if name && integer_constants&.include?(name)
 
         next UNKNOWN
-      when 'ADDI'
-        # ADDI is `+= <literal>`: OP_ADDI is a plain integer add on the
-        # destination, so it keeps the destination's own type. When the
-        # destination is not known to be a Fixnum the value is not one either
-        # (`1 + []` would not reach here, but `@x = @y += 1` with an Array
-        # `@y` would), so trace the destination rather than assume.
-        next trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-      when 'ADD'
-        # ADD is `+`, which is Integer#+ ONLY when both operands are Integers;
-        # for two Arrays it is Array#+ and yields an Array. This is the same
-        # rule codegen_insn's own ADD arm uses before it emits the bare
-        # `mrb_fixnum_value(a + b)` fast path (codegen_insn.rb:177,
-        # proven_fixnum_pair?), so inference here and the emitted fast path
-        # cannot disagree.
-        #
-        # This is what makes inferred fixnum_nil sound. Returning an
-        # unconditional :fixnum here was a real pre-existing hole -- it typed
-        # `ary + ary` as a Fixnum -- which stayed invisible only because a
-        # nilable field's nil write used to poison the join (RPG2k::Scene::
-        # EquipMenu#@candidates, `@candidates = real + [[0, 0]]`, hit it once
-        # NILABLE_EMBED_SUPPORT stopped poisoning). A nonnil Array field
-        # still escapes through some other writer's own evidence, so this
-        # arm is a missed embedding, not a wrong one.
-        s = insn.paren_reg
-        if s
-          left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          fixnum = fixnum_operands(left, right)
-          next fixnum if fixnum
-        end
+      when 'ADD', 'SUB', 'MUL', 'ADDI', 'SUBI'
+        # ADR 0279: the result can leave the Fixnum range, where Integer#+ (and the
+        # compiled arm) builds a bigint that a mrb_int field cannot hold. An
+        # arithmetic write therefore keeps the ivar an ordinary :value slot.
         next UNKNOWN
-      when 'SUB', 'MUL'
-        # FIXNUM_SUBMUL_EMBED_SUPPORT: SUB/MUL (vm.c OP_MATH) dispatch on both operand
-        # types, so they are Fixnum only when both operands are proven Fixnum
-        # recursively. Overflow could make the value wrong but not the type, and the
-        # embedded SETIV re-checks the type before storing (TypeError, not memory
-        # corruption).
-        s = insn.paren_reg
-        if s
-          left = trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          right = trace_type(irep, i, s, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
-          fixnum = fixnum_operands(left, right)
-          next fixnum if fixnum
-        end
-        next UNKNOWN
-      when 'SUBI'
-        # FIXNUM_SUBMUL_EMBED_SUPPORT for the immediate form: only the destination's
-        # prior value needs proving.
-        next trace_type(irep, i, cur, known_ivar_types, arg_types, mand, method_name, annotations, registry, integer_constants, fixnum_return_names)
       when 'GETIV'
         other_ivar = insn.ivar
         known = known_ivar_types[other_ivar]

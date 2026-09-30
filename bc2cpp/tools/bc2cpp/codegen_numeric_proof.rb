@@ -250,34 +250,21 @@ class CodeGen
     lines.sort
   end
 
-  # Are both operands of the ADD/SUB/MUL-family op at +idx+ proven Integer/Float?
-  # +s+ nil means the right operand is an Integer immediate.
-  def numeric_arith_operands?(name, d, s, irep, idx, owner_def, reg_offset)
-    return false unless numeric_op_native?(name)
-    return false unless numeric_operand_mask(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+  # The Fixnum tier of every ADD/SUB/MUL-family arm (ADR 0279): the result is
+  # stored as an immediate only when the C op did not overflow AND it is
+  # FIXABLE (mrb_int is wider than a fixnum under word boxing, and a 32-bit
+  # mrb_int leaves 31 bits), else mrb_num_* runs Integer#+ etc. and builds the
+  # bigint. The operands must be immediates, hence the callers' mrb_fixnum_p.
+  FIXNUM_TIER_OPS = { '+' => %w[mrb_int_add_overflow mrb_num_add], '-' => %w[mrb_int_sub_overflow mrb_num_sub],
+                      '*' => %w[mrb_int_mul_overflow mrb_num_mul] }.freeze
 
-    s.nil? || !numeric_operand_mask(irep, idx, unshift_proof_reg(s, reg_offset), owner_def).nil?
-  end
-
-  # The fixnum tier of an ADD/SUB/MUL-family arm when the operands are proven
-  # numeric. The plain tier stores `mrb_fixnum_value(a op b)`, which wraps when
-  # the result leaves the C type and mis-tags one that leaves the fixnum range
-  # (2^30 on the 32-bit targets); here the tier keeps only results the VM's own
-  # OP_ADD/OP_SUB/OP_MUL would keep (mrb_int_value re-checks the fixnum range and
-  # builds the bigint) and hands an overflow to mrb_num_*, as int_add does.
-  NUMERIC_TIER_OPS = { '+' => %w[mrb_int_add_overflow mrb_num_add], '-' => %w[mrb_int_sub_overflow mrb_num_sub],
-                       '*' => %w[mrb_int_mul_overflow mrb_num_mul] }.freeze
-
-  def numeric_fixnum_tier(name, d, rhs)
-    overflow, helper = NUMERIC_TIER_OPS.fetch(name)
-    right_value = rhs.start_with?('r') ? "mrb_fixnum(#{rhs})" : rhs
-    "{ mrb_int bc2cpp_z;\n" \
-      "              if (#{overflow}(mrb_fixnum(r#{d}), #{right_value}, &bc2cpp_z)) {\n" \
-      "                r#{d} = #{helper}(M, r#{d}, #{rhs.start_with?('r') ? rhs : "mrb_fixnum_value(#{rhs})"});\n" \
-      "              } else {\n" \
-      "                r#{d} = mrb_int_value(M, bc2cpp_z);\n" \
-      "              }\n" \
-      "            }"
+  def fixnum_exact_tier(name, dest, rhs)
+    overflow, helper = FIXNUM_TIER_OPS.fetch(name)
+    register = rhs.start_with?('r')
+    "{ mrb_int bc2cpp_z; " \
+      "if (#{overflow}(mrb_fixnum(r#{dest}), #{register ? "mrb_fixnum(#{rhs})" : rhs}, &bc2cpp_z) || !FIXABLE(bc2cpp_z)) " \
+      "{ r#{dest} = #{helper}(M, r#{dest}, #{register ? rhs : "mrb_fixnum_value(#{rhs})"}); } " \
+      "else { r#{dest} = mrb_fixnum_value(bc2cpp_z); } }"
   end
 
   # The C++ that finishes an operator whose operands are both proven numeric, or
