@@ -175,6 +175,7 @@ class CodeGen
       arg_params << "mrb_int #{kw_given_param_name(kw[:name])}" unless kw[:required]
     end
     out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
+    out << errinfo_scope_line(irep)
     # EXCEPTION_RETURN_SUPPORT: wrap the body in one try/catch only when a
     # BLOCK_FALLBACK region can throw bc2cpp_method_return. Cheap under zero-cost
     # exceptions but not free, hence the gate. Statements inside the `try` behave
