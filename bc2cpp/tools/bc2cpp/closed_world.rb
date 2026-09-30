@@ -144,6 +144,12 @@ class ClosedWorld
     @mm_classes
   end
 
+  # RECORD_HASH_PROOF: could a definer the registry cannot see (a computed
+  # attr_*, an outside Ruby or native definition) install method +name+?
+  def invisibly_definable?(name)
+    @unknown_defs.include?(name) || @outside_ruby_names.include?(name) || @outside_names.include?(name)
+  end
+
   # No Ruby code in the closed world defines or installs `respond_to_missing?`
   # (nor could an outside Ruby file), so Kernel#respond_to?'s hook call after a
   # method-table miss can only reach the core default, which answers false.
