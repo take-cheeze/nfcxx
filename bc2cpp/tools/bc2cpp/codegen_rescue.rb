@@ -385,6 +385,15 @@ class CodeGen
     end
   end
 
+  # RESCUE_ERRINFO: a function with a rescue or ensure handler owns the `$!` it
+  # sets. vm.c's cipop clears `$!` once the frame that set it returns, and a
+  # direct `_impl` call has no callinfo of its own to do that (Bc2cppErrinfoScope).
+  def errinfo_scope_line(irep)
+    return '' if irep.catch_handlers.nil? || irep.catch_handlers.empty?
+
+    "  Bc2cppErrinfoScope bc2cpp_errinfo_scope(M);\n"
+  end
+
   # RESCUE_SUPPORT: the classic `rescue SomeClass` handler shape. Returns nil
   # unless it matches completely.
   #
@@ -765,6 +774,7 @@ class CodeGen
             else
               "    if (!#{err_var}) { r#{region[:connector_reg]} = #{result_var}; goto L#{region[:shared_target]}; }\n"
             end
+    out << "    bc2cpp_set_errinfo(M, #{result_var});\n"
     out << "    r#{region[:exc_reg]} = #{result_var};\n"
     out << "  }\n"
     out
