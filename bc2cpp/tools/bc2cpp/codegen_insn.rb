@@ -8,6 +8,10 @@ class CodeGen
   # registers and is undone with unshift_proof_reg wherever a register reaches a
   # proof rather than the output.
   def compile_insn(insn, irep, owner_def, idx = nil, reg_offset = 0)
+    if @resumable && (resumable_code = resumable_intercept(insn, irep, owner_def, idx, reg_offset))
+      return resumable_code
+    end
+
     case insn.op
     when 'ENTER'
       "  // #{insn.raw.strip} (args already bound above)\n"
@@ -365,8 +369,8 @@ class CodeGen
       compile_send(insn, self_implicit: false, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                    trace_idx: idx, trace_reg_offset: reg_offset)
     when 'SSEND0', 'SSEND'
-      if insn.op == 'SSEND0' && insn.sym == 'block_given?' && block_given_modelled?
-        compile_block_given(insn, reg_offset)
+      if insn.op == 'SSEND0' && BLOCK_GIVEN_NAMES.include?(insn.sym) && block_given_modelled?
+        compile_block_given(insn)
       else
         compile_send(insn, self_implicit: true, irep: irep, idx: reg_offset.zero? ? idx : nil, owner_def: owner_def,
                      trace_idx: idx, trace_reg_offset: reg_offset)
