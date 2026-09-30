@@ -161,8 +161,8 @@ class ClosedWorld
   # A module's or class object's `self` is never modelled here (instance_self?).
   def proven_miss?(name, klass, installed, kind)
     return false if @global_refusal || installed.nil? || installed.include?(name)
-    return false if @unknown_defs.include?(name) || @outside_names.include?(name) || @outside_def_names.include?(name) ||
-                @probed_names.include?(name)
+    return false if @unknown_defs.include?(name) || @outside_names.include?(name) ||
+                    @outside_def_names.include?(name) || @probed_names.include?(name)
     return false if %w[method_missing respond_to_missing? initialize].include?(name)
 
     reason, required = required_classes(name, kind != :constant_object)
