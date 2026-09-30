@@ -1455,7 +1455,11 @@ class CodeGen
         # guard.
         note = "  // MONO :#{name} -> #{target.owner}##{target.name}, direct C++ call (no mrb_funcall)" \
                "#{native_note}\n"
-        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        # PROVEN_MISS: MONO trusts the name alone, so a receiver proven to be another class
+        # would run this owner's body instead of raising.
+        miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                                  trace_reg_offset)
+        "#{note}#{miss}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
       end
     elsif lexical_self_ivar_accessor
       # LEXICAL_SELF_IVAR_ACCESSOR codegen: no guard, no fallback; IVAR_ACCESS picks
@@ -1578,7 +1582,9 @@ class CodeGen
                         end
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      "#{diag}#{note}  #{native_direct_dynamic_line(d, recv, name, argv)}"
+      miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
+                                trace_reg_offset, exact_class: exact_class)
+      "#{diag}#{note}#{miss}  #{native_direct_dynamic_line(d, recv, name, argv)}"
     end
   end
 
