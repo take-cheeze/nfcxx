@@ -36,6 +36,7 @@ require_relative 'annotation_contradictions'
 require_relative 'class_arg_types'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
+require_relative 'proven_miss_reviewed'
 require_relative 'hot_methods'
 require_relative 'core_methods'
 
@@ -62,6 +63,8 @@ require_relative 'codegen_loop_regions'
 require_relative 'codegen_fixnum_proof'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
+require_relative 'codegen_step_loop'
+require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
@@ -70,6 +73,7 @@ require_relative 'codegen_send'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_block_core_direct'
+require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -1159,7 +1163,8 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
   print gen.emit_forward_decls(compiled)
-  print gen.emit_instance_tt_setup
+  print gen.emit_resumable_helpers(compiled)
+  print gen.emit_instance_tt_setup(compiled)
   print gen.emit_core_guard_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
@@ -1190,6 +1195,21 @@ if $PROGRAM_NAME == __FILE__
             "#{violations.join("\n  ")}\n" \
             'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
             'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp_nomethod_reviewed_update.rb).'
+      abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
+
+      warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
+    end
+    # PROVEN_MISS_REVIEWED (docs/adr/0275): a send to a proven class that nothing answers.
+    miss_sites = ProvenMiss.sites(compiled)
+    warn "== closed world proven-class miss sites: #{miss_sites.size} =="
+    miss_sites.each { |s| warn "  PROVEN_MISS #{s[:key]}" }
+    warn ''
+    miss_violations = ProvenMiss.violations(miss_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
+    unless miss_violations.empty?
+      msg = "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) (docs/adr/0275):\n  " \
+            "#{miss_violations.join("\n  ")}\n" \
+            'Read each site: fix the missing method, or list defensive code in ' \
+            'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp_proven_miss_update.rb).'
       abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
 
       warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")

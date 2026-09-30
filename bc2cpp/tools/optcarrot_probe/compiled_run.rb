@@ -36,10 +36,12 @@ ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 # happens to call `Fiber.yield` directly. See both SUPPORT comments in
 # `bc2cpp.rb` and `tools/optcarrot_probe/README.md` for the full mechanism.
 # `Optcarrot::PPU` is back in `ONLY_OWNERS` below now that both fixes are
-# landed; its own fiber-body-reachable methods (`main_loop` and everything
-# it calls, `run` itself) still compile to an honest `#error` and stay
-# interpreted, same as always -- only the REST of PPU's own methods
-# (`sync`/`vsync`/accessors/setup) newly compile.
+# landed. ADR 0273 then went further: `main_loop`, the one method the
+# `Fiber.new` block calls, compiles as a resumable step function (the
+# yielding `wait_*` helpers are expanded into it and its `step` loops are
+# inlined), and the methods it calls that cannot reach `Fiber.yield` compile
+# too. Only `run` (it builds the Fiber) and the four `wait_*` helpers (they
+# call `Fiber.yield`; `main_loop` inlines them) stay interpreted.
 #
 # CPU/NES/Video/APU used to be excluded here too, for a real,
 # CI-reproducible SIGSEGV that took several rounds to root-cause: every
@@ -486,7 +488,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
   compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
   puts "bc2cpp installed #{count} compiled methods, including CPU/NES/Video/APU's own and " \
-       "PPU's own fiber-safe subset (main_loop and everything reachable from it stay interpreted)"
+       "PPU's (main_loop as a resumable step function, ADR 0273; run and the wait_* helpers stay interpreted)"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -524,7 +526,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Config, Opt, CPU, NES, ROM.load, ROM#initialize, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are all compiled; PPU (and its own Fiber-driven #run loop) stays interpreted, and Video/APU besides those two hooks remain interpreted too.'
+      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Config, Opt, CPU, NES, ROM.load, ROM#initialize, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are all compiled; PPU is compiled too, with main_loop a resumable step function driven by the interpreted Fiber block (ADR 0273) and #run, which builds the Fiber, interpreted; Video/APU besides those two hooks remain interpreted.'
     end
   end
 
