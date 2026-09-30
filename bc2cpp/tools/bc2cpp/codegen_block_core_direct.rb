@@ -37,14 +37,24 @@ module BlockCoreDirectFallback
     block_core_direct_wrap(d, recv, name, argv, super)
   end
 
-  # Only a literal-block site of engine code in a closed world: the proofs below are about the
-  # engine's Ruby, and a core body never binds an engine method (ADR 0264).
+  # A literal-block site in a closed world: engine code, or a core body of the same program (the
+  # core compile hides the world from its own static-binding proofs but the outside-definer and
+  # installer facts below are about the whole program).
+  def block_core_world
+    @closed_world || @core_program_world
+  end
+
   def block_core_direct_wrap(d, recv, name, argv, tail)
-    return tail unless block_core_direct_enabled? && @call_block_expr && @closed_world && @native_name_sources && !@compiling_core
+    return tail unless block_core_direct_enabled? && @call_block_expr && block_core_world && @native_name_sources
     return tail if tail.include?('bc2cpp_nomethod')
 
     arms = block_core_arms(name, argv.size)
-    return tail if arms.empty?
+    if arms.empty?
+      reasons = @block_core_reasons && @block_core_reasons[[name, argv.size]]
+      return tail unless reasons&.any?
+
+      return "// BLOCK_CORE_WHY :#{name}/#{argv.size} -- #{reasons.uniq.join('; ')}\n  #{tail}"
+    end
 
     branches = arms.map do |arm|
       args, = direct_call_args(arm[:target], argv, arm[:impl])
@@ -57,6 +67,13 @@ module BlockCoreDirectFallback
       "  #{branches}{\n" \
       "    #{tail.chomp}\n" \
       "  }\n"
+  end
+
+  # BC2CPP_BLOCK_CORE_WHY=1 reports, on stderr, why a class gets no arm for a name.
+  def block_core_refuse(klass, name, arity, reason)
+    (@block_core_reasons ||= Hash.new { |hash, key| hash[key] = [] })[[name, arity]] << "#{klass}: #{reason}" if
+      ENV['BC2CPP_BLOCK_CORE_WHY'] == '1'
+    nil
   end
 
   # BC2CPP_BLOCK_CORE_DIRECT=0 turns the arms off, to measure them against the plain send.
@@ -82,17 +99,19 @@ module BlockCoreDirectFallback
   # could: a native or engine definition on the way, a prepend or unattributed mixin, an
   # outside definer, a dynamic installer.
   def block_core_target(klass, chain, name, arity)
-    return nil if symbol_installed_names.nil? || symbol_installed_names.include?(name)
-    return nil if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) }
+    return block_core_refuse(klass, name, arity, 'a dynamic installer names it') if symbol_installed_names.nil? || symbol_installed_names.include?(name)
+    if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) }
+      return block_core_refuse(klass, name, arity, 'a project definition on the chain')
+    end
 
     chain.each do |owner|
-      return nil unless block_core_owner_plain?(owner, name)
+      return block_core_refuse(klass, name, arity, "#{owner} is not plain (native, prepend, mixin or outside definer)") unless block_core_owner_plain?(owner, name)
 
       defs = block_core_index[[owner, name]]
-      return block_core_callable(defs.first, arity) if defs&.one?
-      return nil if defs
+      return block_core_callable(defs.first, arity, klass, name) if defs&.one?
+      return block_core_refuse(klass, name, arity, "#{defs.size} compiled definitions on #{owner}") if defs
     end
-    nil
+    block_core_refuse(klass, name, arity, 'no compiled core definition on the chain')
   end
 
   # Nothing on `owner` could take `name` from the compiled core definition (or hide it from
@@ -101,7 +120,7 @@ module BlockCoreDirectFallback
     return false if Array(@prepended_modules[owner]).any? || @unknown_mixins.include?(owner)
     return false if block_core_native_registered?(owner, name)
 
-    @closed_world.core_ruby_arm_safe?(name, owner)
+    block_core_world.core_ruby_arm_safe?(name, owner)
   end
 
   def block_core_native_registered?(owner, name)
@@ -135,14 +154,20 @@ module BlockCoreDirectFallback
   # `definition` when a call with `arity` arguments and a block can be a plain `_impl` call:
   # the callee takes the block, the arity is one its signature models, its body reads nothing
   # of the caller's frame, it compiles clean and its owner is emitted by this link.
-  def block_core_callable(definition, arity)
+  def block_core_callable(definition, arity, klass = nil, name = nil)
     irep = @ireps.fetch(definition.irep)
-    return nil unless takes_block_param?(irep) && pure_mandatory_or_optional_arity?(irep)
+    why = ->(reason) { block_core_refuse(klass, name, arity, "#{definition.owner}##{definition.name}: #{reason}") }
+    return why.call('does not take a block') unless takes_block_param?(irep)
+    return why.call('signature or frame use not modelled by direct calls') unless pure_mandatory_or_optional_arity?(irep)
 
     mand = mandatory_arity(irep)
-    return nil unless arity >= mand && arity <= mand + optional_arity(irep)
-    return nil unless !@only_owners || @only_owners.include?(definition.owner) || @other_owners&.include?(definition.owner)
-    return nil unless block_core_clean?(definition.irep)
+    unless arity >= mand && arity <= mand + optional_arity(irep)
+      return why.call("arity #{arity} outside #{mand}..#{mand + optional_arity(irep)}")
+    end
+    unless !@only_owners || @only_owners.include?(definition.owner) || @other_owners&.include?(definition.owner)
+      return why.call('owner not emitted by this link')
+    end
+    return why.call('does not compile clean') unless block_core_clean?(definition.irep)
 
     definition
   end
