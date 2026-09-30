@@ -19,7 +19,7 @@ require_relative 'bytecode_ir'
 #   OTHER anything else, including false and an unassigned local's other uses
 #   RNG   exactly ::Range; EXC a pending exception object (what EXCEPT reads); and the bits from 1 << 9 up: exactly one closed-world class each
 #         (CodeGen#numeric_class_bit). They enter only through a proven `Klass.new` or a
-#         Range literal and reach other methods only through return values (ADR 0287).
+#         Range literal and reach other methods only through return values (ADR 0289).
 # 0 is "no value yet" (unreached). Join is bitwise OR, so the answer cannot
 # depend on visiting order. A register is numeric when its set is a non-empty
 # subset of INT|FLT.
@@ -157,7 +157,7 @@ module NumericFlow
 
       out = transfer(i, insns[i], st, ctx)
       # Every instruction of a protected range may raise into its handler, where the registers
-      # are as they were at the raise (ADR 0287): the state before the op, widened by what a
+      # are as they were at the raise (ADR 0289): the state before the op, widened by what a
       # callee can do, or after it.
       raises.fetch(i, []).each do |target|
         edge = raise_state(insns[i], st, out, ctx)

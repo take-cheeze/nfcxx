@@ -3,7 +3,7 @@
 # EXACT_CORE_RECEIVER (ADR 0280): an unguarded proof that a receiver is exactly an Array, Hash,
 # Range or String (or a fresh `Klass.new`), so the arms of ADR 0253/0257/0270 can drop their
 # class test. Nothing checks the class at run time, so only a dominating literal or `*rest`
-# write counts (plus exact_flow_core_class, ADR 0287), and only while ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint,
+# write counts (plus exact_flow_core_class, ADR 0289), and only while ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint,
 # an annotation or a branch join is a guarded fact and never enters here.
 class CodeGen
   EXACT_LITERAL_CLASS = {

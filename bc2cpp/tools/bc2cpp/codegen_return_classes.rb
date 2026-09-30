@@ -2,7 +2,7 @@
 
 require_relative 'numeric_flow'
 
-# CodeGen: RETURN_CLASS_TABLE (ADR 0287).
+# CodeGen: RETURN_CLASS_TABLE (ADR 0289).
 #
 # A second run of NumericFlow whose oracle knows nothing outside the method, so an exact class never
 # rests on a pooled argument, ivar or constant fact. Sources: literals, a provably fresh `Klass.new`

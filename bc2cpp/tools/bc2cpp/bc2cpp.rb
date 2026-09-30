@@ -882,7 +882,7 @@ if $PROGRAM_NAME == __FILE__
   warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
   gen.numeric_facts_report.each { |l| warn l }
   warn ''
-  # RETURN_CLASS_TABLE (ADR 0287): names whose every definition returns one exact class.
+  # RETURN_CLASS_TABLE (ADR 0289): names whose every definition returns one exact class.
   warn '== return class table (RETURN_CLASS_TABLE) =='
   gen.return_class_report.each { |l| warn l }
   warn ''
