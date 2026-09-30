@@ -47,6 +47,42 @@ module NativeCoreDirectFallback
       @closed_world.core_native_arm_safe?(entry.name, entry.owner)
   end
 
+  # KERNEL_DIRECT (ADR 0274): the audited Kernel/BasicObject native for an implicit-self
+  # send, called with no dispatch. Nothing here can name a receiver class, so the proof
+  # is by name: the native is the only definition anywhere in the build, and no
+  # receiver can lack Kernel (ClosedWorld#kernel_native_dispatch_safe?). Core bodies
+  # get it too: these are program-wide facts, not the static-binding proofs a core
+  # body is denied (block_core_world).
+  def kernel_direct_code(name, d, recv, argv)
+    entry = !devirt_blocked_name?(name) && kernel_direct_entry(name, argv.size)
+    return nil unless entry
+
+    "  // KERNEL_DIRECT :#{name} -- implicit-self #{entry.owner}##{name} is the only definition; " \
+      "the audited native body runs with no dispatch\n" \
+      "  r#{d} = #{entry.call(recv, argv)};\n"
+  end
+
+  def kernel_direct_entry(name, arity)
+    return nil unless block_core_world && @native_name_sources
+
+    @kernel_direct_entries ||= {}
+    @kernel_direct_entries.fetch([name, arity]) do
+      @kernel_direct_entries[[name, arity]] =
+        NativeCoreDirect::KERNEL_ENTRIES.find do |entry|
+          entry.name == name && entry.arity == arity && kernel_direct_entry_safe?(entry)
+        end
+    end
+  end
+
+  def kernel_direct_entry_safe?(entry)
+    paths = @native_name_sources.values.flatten.uniq
+    return false unless NativeCoreDirect.verified?(paths, entry)
+    return false if symbol_installed_names.nil? || symbol_installed_names.include?(entry.name)
+    return false unless (@registry[entry.name] || []).all? { |definition| definition.owner == '<native>' }
+
+    block_core_world.kernel_native_dispatch_safe?(entry.name)
+  end
+
   def native_core_direct_wrap(d, recv, name, argv, tail)
     entries = native_core_entries(name, argv.size)
     return tail if entries.empty? || tail.include?('bc2cpp_nomethod')

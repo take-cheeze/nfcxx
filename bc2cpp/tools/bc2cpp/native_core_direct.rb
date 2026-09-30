@@ -32,9 +32,11 @@ module NativeCoreDirect
     nil_or_string: '(mrb_nil_p(%<a>s) || mrb_string_p(%<a>s))'
   }.freeze
 
-  # `checks` are [function, expected body, :exact | :prefix]; the first is the
-  # registered function. Bodies are compared with whitespace and comments removed.
-  Entry = Struct.new(:name, :owner, :arity, :arg, :aspec, :expression, :checks, :apis, :helper, keyword_init: true) do
+  # `checks` are [function, expected body, :exact | :prefix, optional file next to the
+  # registration's]; the first is the registered function. Bodies are compared with
+  # whitespace and comments removed. `internals` and `implicit_self` are KERNEL_ENTRIES' (below).
+  Entry = Struct.new(:name, :owner, :arity, :arg, :aspec, :expression, :checks, :apis, :helper, :internals,
+                     :implicit_self, keyword_init: true) do
     def function
       checks.first.first
     end
@@ -47,7 +49,7 @@ module NativeCoreDirect
     end
 
     def call(recv, argv)
-      expression.gsub('recv', recv).gsub('ARG0', argv.first.to_s)
+      expression.gsub('recv', recv).gsub('ARG0', argv.first.to_s).gsub('ARG1', argv[1].to_s)
     end
   end
 
@@ -157,6 +159,60 @@ module NativeCoreDirect
               C
   ].freeze
 
+  # KERNEL_DIRECT (docs/adr/0274): natives every object inherits, sent with an implicit
+  # self. No receiver class is guarded: the row is taken only while the name has no other
+  # definition anywhere (CodeGen#kernel_direct_entry), so `owner` names the audited
+  # registration. `internals` are declared in mruby/internal.h without MRB_API.
+  #
+  # mrb_f_raise reads its arguments with mrb_get_args, which needs a frame, so the helpers
+  # replay its one- and two-argument arms; a bare raise (`$!` is not set by compiled
+  # rescue), a third argument and `cause:` keep their send.
+  MRB_F_RAISE = <<~C
+      mrb_value exc, mesg;
+      mrb_int argc = mrb_get_args(mrb, "|oo", &exc, &mesg);
+      mrb->c->ci->mid = 0;
+      switch (argc) {
+      case 0:
+        if (mrb->errinfo) {
+          mrb_exc_raise(mrb, mrb_obj_value(mrb->errinfo));
+        }
+        mrb_raise(mrb, E_RUNTIME_ERROR, "");
+        break;
+      case 1:
+        if (mrb_string_p(exc)) {
+          mesg = exc;
+          exc = mrb_obj_value(E_RUNTIME_ERROR);
+        }
+        else {
+          mesg = mrb_nil_value();
+        }
+      default:
+        exc = mrb_make_exception(mrb, exc, mesg);
+        mrb_exc_raise(mrb, exc);
+        break;
+      }
+      return mrb_nil_value();
+  C
+
+  KERNEL_ENTRIES = [
+    Entry.new(name: 'raise', owner: 'Kernel', arity: 1, arg: :none, aspec: 'MRB_ARGS_OPT(2) | MRB_MT_PRIVATE',
+              expression: 'bc2cpp_raise1(M, ARG0)', helper: 'bc2cpp_raise1', implicit_self: true,
+              apis: [%w[mruby.h mrb_exc_raise]],
+              internals: [%w[mruby/internal.h mrb_make_exception]],
+              checks: [['mrb_f_raise', MRB_F_RAISE, :exact]]),
+    Entry.new(name: 'raise', owner: 'Kernel', arity: 2, arg: :none, aspec: 'MRB_ARGS_OPT(2) | MRB_MT_PRIVATE',
+              expression: 'bc2cpp_raise2(M, ARG0, ARG1)', helper: 'bc2cpp_raise2', implicit_self: true,
+              apis: [%w[mruby.h mrb_exc_raise]],
+              internals: [%w[mruby/internal.h mrb_make_exception]],
+              checks: [['mrb_f_raise', MRB_F_RAISE, :exact]]),
+    Entry.new(name: '__id__', owner: 'BasicObject', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'mrb_fixnum_value(mrb_obj_id(recv))', implicit_self: true,
+              apis: [%w[mruby.h mrb_obj_id]],
+              checks: [['mrb_obj_id_m', <<~C, :exact, 'kernel.c']])
+                return mrb_fixnum_value(mrb_obj_id(self));
+              C
+  ].freeze
+
   # The C text of each helper, emitted once per output that calls it.
   HELPERS = {
     'bc2cpp_ary_compact' => <<~CPP,
@@ -176,13 +232,32 @@ module NativeCoreDirect
         return mrb_nil_value();
       }
     CPP
-    'bc2cpp_str_bytes' => <<~CPP
+    'bc2cpp_str_bytes' => <<~CPP,
       static inline mrb_value bc2cpp_str_bytes(mrb_state* M, mrb_value str) {
         mrb_value a = mrb_ary_new_capa(M, RSTRING_LEN(str));
         for (mrb_int i = 0; i < RSTRING_LEN(str); i++) {
           mrb_ary_push(M, a, mrb_fixnum_value((unsigned char)RSTRING_PTR(str)[i]));
         }
         return a;
+      }
+    CPP
+    # mrb_f_raise's one- and two-argument arms. The declaration is internal.h's,
+    # which has no C linkage guard (see the mrb_str_aref note in bc2cpp.rb).
+    'bc2cpp_raise1' => <<~CPP,
+      extern "C" mrb_value mrb_make_exception(mrb_state*, mrb_value, mrb_value);
+      static inline mrb_value bc2cpp_raise1(mrb_state* M, mrb_value exc) {
+        mrb_value mesg = mrb_nil_value();
+        if (mrb_string_p(exc)) {
+          mesg = exc;
+          exc = mrb_obj_value(mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")));
+        }
+        mrb_exc_raise(M, mrb_make_exception(M, exc, mesg));
+      }
+    CPP
+    'bc2cpp_raise2' => <<~CPP
+      extern "C" mrb_value mrb_make_exception(mrb_state*, mrb_value, mrb_value);
+      static inline mrb_value bc2cpp_raise2(mrb_state* M, mrb_value exc, mrb_value mesg) {
+        mrb_exc_raise(M, mrb_make_exception(M, exc, mesg));
       }
     CPP
   }.freeze
@@ -216,7 +291,8 @@ module NativeCoreDirect
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
-    key += ENTRIES.flat_map(&:apis).map(&:first).uniq.map do |header|
+    headers = (ENTRIES + KERNEL_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+    key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
       [path, stat && stat.mtime, stat && stat.size]
@@ -230,12 +306,12 @@ module NativeCoreDirect
   def audit_files(files)
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
-    ENTRIES.to_h { |entry| [entry, audit_entry(entry, registrations, opaque_owners, include_dir)] }
+    (ENTRIES + KERNEL_ENTRIES).to_h { |entry| [entry, audit_entry(entry, registrations, opaque_owners, include_dir)] }
   end
 
   def audit_entry(entry, registrations, opaque_owners, include_dir)
     return 'no mruby core include directory' unless include_dir
-    unattributed = opaque_owners.fetch(entry.name, []).any? { |owner| owner.nil? || owner == entry.owner }
+    unattributed = opaque_owners.fetch(entry.name, []).any? { |owner| entry.implicit_self || owner.nil? || owner == entry.owner }
     return 'spelled by an unattributed native registration' if unattributed
 
     matches = registrations.fetch(entry.name, []).select do |registration|
@@ -243,13 +319,20 @@ module NativeCoreDirect
     end
     return "expected exactly one #{entry.owner}##{entry.name} registration, found #{matches.size}" unless matches.one?
 
+    # An implicit-self call reaches any receiver, so a registration of the name on any
+    # other class is a second candidate too.
+    if entry.implicit_self && registrations.fetch(entry.name, []).size != 1
+      return "#{entry.name} is registered on more than #{entry.owner}"
+    end
+
     registration = matches.first
     unless registration[:function] == entry.function && registration[:aspec] == entry.aspec
       return "#{entry.owner}##{entry.name} is registered as #{registration[:function]} #{registration[:aspec]}"
     end
 
-    entry.checks.each do |function, expected, mode|
+    entry.checks.each do |function, expected, mode, file|
       path = registration[:path]
+      path = File.join(File.dirname(path), file) if file
       body = function_body(path, function)
       return "#{function} not found in #{File.basename(path)}" unless body
 
@@ -261,6 +344,10 @@ module NativeCoreDirect
     entry.apis.each do |header, function|
       text = File.read(File.join(include_dir, header), encoding: 'UTF-8')
       return "#{function} is not declared MRB_API in #{header}" unless text.match?(/\bMRB_API\s+\w[\w\s*]*\b#{function}\s*\(/)
+    end
+    Array(entry.internals).each do |header, function|
+      text = File.read(File.join(include_dir, header), encoding: 'UTF-8')
+      return "#{function} is not declared in #{header}" unless text.match?(/^mrb_value\s+#{function}\s*\(/)
     end
     nil
   end

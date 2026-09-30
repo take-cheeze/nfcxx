@@ -1524,6 +1524,11 @@ class CodeGen
         return constant_code if constant_code
       end
 
+      if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
+        kernel_code = kernel_direct_code(name, d, recv, argv)
+        return kernel_code if kernel_code
+      end
+
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
              compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)

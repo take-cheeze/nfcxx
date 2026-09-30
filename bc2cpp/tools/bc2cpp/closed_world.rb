@@ -178,6 +178,18 @@ class ClosedWorld
     !ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
   end
 
+  # KERNEL_DIRECT (ADR 0274): an implicit-self send of `name` reaches the audited
+  # Kernel/BasicObject native for every receiver. That needs the same name-level proof as
+  # ownerless_native_dispatch_safe? plus a receiver that includes Kernel, which only a
+  # BasicObject subclass lacks (the class may be declared, created or subclassed anywhere).
+  def kernel_native_dispatch_safe?(name)
+    return false unless ownerless_native_dispatch_safe?(name)
+    return false if @dynamic_subclassed.include?('BasicObject') || @outside_ruby_supers.include?('BasicObject')
+
+    supers = @class_decls.values.flatten.map { |decl| decl[:super] }
+    supers.all? { |sup| sup == :none || sup.is_a?(String) } && supers.none? { |sup| sup.is_a?(String) && simple(sup) == 'BasicObject' }
+  end
+
   # `name` is spelled only by the given native files, and no outside Ruby.
   def native_only_in?(name, path_fragment)
     paths = @outside_name_paths[name]
