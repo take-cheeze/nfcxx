@@ -40,6 +40,12 @@ class ClosedWorld
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
+  # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
+  # refusal already, see scan_send). ADR 0280.
+  SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
+  # A project native that makes a singleton class by hand.
+  NATIVE_SINGLETON = /\bmrb_singleton_class(?:_ptr|_clone)?\b|\bmrb_define_singleton_method(?:_id)?\b|\bmrb_obj_extend\b/
+  RUBY_SINGLETON = /\b(?:#{SINGLETON_MAKERS.join('|')}|extend)\b|\bclass\s*<<|\bdef\s+(?!self\b)[a-z_]\w*\./
 
   attr_reader :global_refusal
 
@@ -66,6 +72,8 @@ class ClosedWorld
     @class_constant_names = Set.new
     @deferred_constant_writes = Set.new
     @dynamic_constant_mutation = false
+    @singleton_makers = []
+    @singleton_opens = []
     @outside_constant_writes = Set.new
     @dynamic_subclassed = Set.new
     @memo = {}
@@ -76,6 +84,7 @@ class ClosedWorld
     build_hierarchy
     build_method_missing
     warn touch_report.join("\n") if ENV['BC2CPP_TOUCH_REPORT'] == '1'
+    warn "== singleton makers ==\n#{singleton_makers.map(&:inspect).join("\n")}" if ENV['BC2CPP_SINGLETON_REPORT'] == '1'
   end
 
   # BC2CPP_TOUCH_REPORT=1: every class the touch analysis makes opaque, the
@@ -310,6 +319,13 @@ class ClosedWorld
     @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
+  # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
+  # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
+  # method, opens a singleton class on a non-class object, or creates one from native code.
+  def exact_instances_singleton_free?
+    !@global_refusal && singleton_makers.empty?
+  end
+
   private
 
   def native_arms_lift?(name)
@@ -377,6 +393,7 @@ class ClosedWorld
       text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
       record_native_touches(path, text, defines_class)
       @clone_sent = true if !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING)
+      @singleton_makers << [path, :native] if !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON)
       names.merge(text.scan(C_STRING).flatten) if dynamic
       @outside_names.merge(names)
       names.each { |n| (@outside_name_paths[n] ||= Set.new) << path }
@@ -398,6 +415,7 @@ class ClosedWorld
       text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
       record_ruby_touches(path, text)
       @clone_sent = true if text.match?(/\bclone\b/)
+      @singleton_makers << [path, :ruby] if !CoreDefs.core_source?(path) && text.match?(RUBY_SINGLETON)
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
       @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
@@ -410,9 +428,12 @@ class ClosedWorld
   def scan_closed_world
     registered = Set.new
     @registry.each_value { |defs| defs.each { |d| registered << d.irep if d.irep } }
-    @ireps.each_value do |irep|
+    children = @ireps.values.flat_map(&:reps).compact.to_set
+    @ireps.each do |label, irep|
       insns = irep.instructions
+      own_source = !(children.include?(label) && CoreDefs.core_source?(irep.file))
       insns.each_with_index do |insn, idx|
+        scan_singleton_maker(irep, insns, idx, insn) if own_source
         case insn.op
         when 'TDEF', 'SDEF'
           child = irep.reps[insn.block_index]
@@ -442,6 +463,49 @@ class ClosedWorld
         end
       end
     end
+  end
+
+  # -- singleton classes (ADR 0280) --------------------------------------------
+
+  # Judged after the scan: class_constant? needs every SETCONST counted.
+  def singleton_makers
+    @singleton_makers_all ||= @singleton_makers + @singleton_opens.filter_map do |irep, idx, insn|
+      [irep.label, insn.op] unless class_object_register?(irep, idx, insn.reg.to_s)
+    end
+  end
+
+  def scan_singleton_maker(irep, insns, idx, insn)
+    case insn.op
+    when 'SDEF', 'SCLASS'
+      @singleton_opens << [irep, idx, insn]
+    when 'LOADSYM'
+      @singleton_makers << [irep.label, insn.sym_token] if SINGLETON_MAKERS.include?(insn.sym_token)
+    when *SEND_OPS
+      @singleton_makers << [irep.label, insn.sym] if SINGLETON_MAKERS.include?(insn.sym)
+    end
+  end
+
+  # `reg` holds a class or module object (`self` in a class body, a constant nothing assigns a
+  # value to) or a fresh `Object.new` at `idx`, never an Array/Hash/Range/String.
+  def class_object_register?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg, follow_moves: true) do |writer, i, cur|
+      case writer.op
+      when 'LOADSELF' then @walked.include?(irep.label)
+      when 'GETCONST', 'GETMCNST' then class_constant?(writer.op == 'GETCONST' ? writer.const_name : writer.mcnst_name)
+      when 'SEND0' then writer.sym == 'new' && fresh_object_class?(irep, i, cur)
+      else false
+      end
+    end || false
+  end
+
+  # No SETCONST binds a value to the name, so it can only name a class or module.
+  def class_constant?(name)
+    @constant_write_counts[name].zero?
+  end
+
+  def fresh_object_class?(irep, idx, reg)
+    standard_constructor_lookup? &&
+      irep.constant_path(idx - 1, reg)&.then { |path| path.root == :const && path.name == 'Object' && path.segments.empty? }
   end
 
   def scan_send(irep, insns, idx, insn)

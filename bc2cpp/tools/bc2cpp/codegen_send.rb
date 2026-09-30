@@ -1563,7 +1563,10 @@ class CodeGen
                         end
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      "#{diag}#{note}  #{native_direct_dynamic_line(d, recv, name, argv)}"
+      exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+      exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
+                                                             exact_class, recv: recv, name: name)
+      "#{diag}#{note}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
     end
   end
 
