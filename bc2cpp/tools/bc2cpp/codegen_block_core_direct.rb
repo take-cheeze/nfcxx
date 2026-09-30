@@ -56,13 +56,19 @@ module BlockCoreDirectFallback
       return "// BLOCK_CORE_WHY :#{name}/#{argv.size} -- #{reasons.uniq.join('; ')}\n  #{tail}"
     end
 
+    # EXACT_CORE_RECEIVER (ADR 0280): a proven exact class leaves one arm and no class test. The
+    # else stays: a Fiber's frames need a real callinfo to reach the bytecode (ADR 0269).
+    site = exact_core_site_for(recv, name)
+    exact = site ? arms.select { |arm| arm[:class] == site[:klass] } : []
+    exact_class = !exact.empty?
+    arms = exact if exact_class
     branches = arms.map do |arm|
       args, = direct_call_args(arm[:target], argv, arm[:impl])
-      "if (M->c == M->root_c && #{format(arm[:guard], r: recv)}) {\n" \
+      "if (M->c == M->root_c#{exact_class ? '' : " && #{format(arm[:guard], r: recv)}"}) {\n" \
         "    r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});\n" \
         '  } else '
     end.join
-    "// BLOCK_CORE_DIRECT :#{name} -- exact #{arms.map { |arm| arm[:class] }.join('/')} receiver at the root " \
+    "// BLOCK_CORE_DIRECT :#{name} -- #{exact_class ? 'proven' : 'exact'} #{arms.map { |arm| arm[:class] }.join('/')} receiver at the root " \
       "context calls the compiled core body with the block\n" \
       "  #{branches}{\n" \
       "    #{tail.chomp}\n" \
