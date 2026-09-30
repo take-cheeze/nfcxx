@@ -65,6 +65,7 @@ require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
 require_relative 'codegen_resumable'
 require_relative 'codegen_block_fallback'
+require_relative 'codegen_yield_free'
 require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
@@ -989,11 +990,11 @@ if $PROGRAM_NAME == __FILE__
     // BLOCK_DIRECT_ENTRY (ADR 0271): a compiled block without break or return has a direct entry
     // taking its captured environment and arguments. Its proc is a cfunc proc over this one
     // function (inline: one address in every translation unit of the link) with the entry as the
-    // last env slot, so a yield from compiled code calls the entry without a VM frame, and
+    // second-to-last env slot, so a yield from compiled code calls the entry without a VM frame, and
     // anything else (an interpreted iterator, a Fiber) reaches it through the VM like any cfunc.
     typedef mrb_value (*Bc2cppBlockEntry)(mrb_state*, struct REnv*, bool, mrb_int, const mrb_value*);
     static inline Bc2cppBlockEntry bc2cpp_block_entry(struct REnv* e) {
-      return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 1])));
+      return reinterpret_cast<Bc2cppBlockEntry>(static_cast<uintptr_t>(mrb_integer(e->stack[MRB_ENV_LEN(e) - 2])));
     }
     inline mrb_value bc2cpp_block_thunk(mrb_state* M, mrb_value) {
       mrb_value* argv;
@@ -1001,6 +1002,16 @@ if $PROGRAM_NAME == __FILE__
       mrb_get_args(M, "*", &argv, &argc);
       const struct RProc* p = M->c->ci->proc;
       return bc2cpp_block_entry(MRB_PROC_ENV(p))(M, MRB_PROC_ENV(p), MRB_PROC_STRICT_P(p), argc, argv);
+    }
+    // YIELD_REACH (ADR 0283): the last env slot of a direct-entry block says its body, and everything
+    // it can call, provably never suspends a Fiber. A compiled core iterator running such a block
+    // may then stay compiled under a Fiber (its frame cannot be crossed by a yield).
+    static inline bool bc2cpp_block_yield_free(mrb_value blk) {
+      if (mrb_type(blk) != MRB_TT_PROC) return false;
+      const struct RProc* p = mrb_proc_ptr(blk);
+      if (!MRB_PROC_CFUNC_P(p) || MRB_PROC_CFUNC(p) != bc2cpp_block_thunk) return false;
+      const struct REnv* e = MRB_PROC_ENV(p);
+      return mrb_integer(e->stack[MRB_ENV_LEN(e) - 1]) != 0;
     }
     // SETUPVAR writes into the enclosing compiled frame, which the GC cannot see; the arena that
     // held the value is restored when the block returns (ADR 0272). Roots stay per slot address.
@@ -1245,6 +1256,21 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn "== core-source compiled entry points (#{core_entries.size}) =="
   core_entries.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+
+  # YIELD_REACH (ADR 0283): what the yield-free proof gave this build.
+  yf = gen.yield_free_report(compiled.filter_map { |m| m[:label] })
+  warn ''
+  warn '== yield-free proof (YIELD_REACH) =='
+  warn "  world: #{yf[:sound] ? 'closed, proof in force' : 'not a closed world, nothing is proved yield-free'}" \
+       "#{yf[:seal] == true ? '' : " (Enumerator machinery not sealed: #{yf[:seal].inspect})"}"
+  warn "  compiled methods: #{yf[:methods]}: #{yf[:methods_free]} yield-free, #{yf[:methods] - yf[:methods_free]} may yield " \
+       "(#{yf[:methods_body_free]} have a body that cannot suspend a Fiber given a yield-free block)"
+  warn "  compiled blocks with a direct entry: #{yf[:blocks]}: #{yf[:blocks_free]} yield-free, #{yf[:blocks] - yf[:blocks_free]} may yield"
+  warn "  block-taking core methods with a run-time guard: #{yf[:guarded_core]}, #{yf[:guarded_core_relaxable]} stay compiled under a " \
+       'Fiber when the block is yield-free'
+  warn "  BLOCK_CORE_DIRECT sites: #{yf[:arm_sites]}, #{yf[:arm_sites_free]} with a yield-free block; " \
+       "arms: #{yf[:arms]}, #{yf[:arms_unguarded]} with the root-context test dropped"
+  warn "  methods refused as crossable under a Fiber (FIBER_REACHABILITY_UNSAFE): #{yf[:unsafe_methods]}"
 
   warn ''
   warn '== classes needing MRB_SET_INSTANCE_TT(..., MRB_TT_DATA) =='

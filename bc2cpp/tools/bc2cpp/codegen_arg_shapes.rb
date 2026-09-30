@@ -271,14 +271,15 @@ module ArgShapeCalls
 
     insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
                           "R#{region[:dest_reg]} :#{region[:name]} n=#{region[:n]}")
-    saved = [@call_block_expr, @call_block_direct_calls]
+    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region]
     @call_block_expr = block_expr
     @call_block_direct_calls = 0
+    @call_block_region = region
     begin
       code = compile_send(insn, self_implicit: region[:self_implicit], irep: irep, idx: idx, owner_def: owner_def)
       accepted = direct_block_code?(code, @call_block_direct_calls)
     ensure
-      @call_block_expr, @call_block_direct_calls = saved
+      @call_block_expr, @call_block_direct_calls, @call_block_region = saved
     end
     accepted ? code : nil
   end

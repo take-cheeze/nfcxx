@@ -52,6 +52,8 @@ class ClosedWorld
     @walked = walked
     @global_refusal = nil
     @outside_names = Set.new
+    @native_tokens = Set.new
+    @ruby_tokens = {}
     @outside_ruby_names = Set.new
     @outside_name_paths = {}
     @outside_ruby_supers = Set.new
@@ -176,6 +178,11 @@ class ClosedWorld
     return false if @global_refusal || @unknown_defs.include?(name)
 
     !ForeignDefiners.defines?(@ruby_paths.reject { |path| CoreDefs.core_source?(path) }, owner, name)
+  end
+
+  # Names an outside (native or foreign Ruby) source defines.
+  def outside_names
+    @outside_names
   end
 
   # `name` is spelled only by the given native files, and no outside Ruby.
@@ -330,6 +337,7 @@ class ClosedWorld
         tok.start_with?('/') ? ' ' : tok
       end
       names = Set.new
+      merge_native_funcall_names(text)
       dynamic = text.match?(NATIVE_DYNAMIC)
       defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
       unless path.match?(NATIVE_CORE)
@@ -395,6 +403,7 @@ class ClosedWorld
     @outside_names.merge(ruby_names)
     paths.each do |path|
       text = File.read(path, encoding: 'BINARY').gsub(/^\s*#.*$/, '')
+      merge_outside_tokens(path, text)
       text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
       record_ruby_touches(path, text)
       @clone_sent = true if text.match?(/\bclone\b/)
@@ -404,6 +413,45 @@ class ClosedWorld
       global!(:outside_class_factory) if text.match?(/\b(?:Class|Struct)\.new\b/)
     end
   end
+
+  # YIELD_REACH (ADR 0283): the method names outside code can call back into Ruby by. Native code
+  # names them in the funcall family (a variable name is one of the send-like natives, which the
+  # yield analysis treats as seeds); foreign Ruby can call any identifier it spells.
+  FUNCALL_CALL = /\bmrb_(?:funcall(?:_id|_argv|_with_block)?|check_funcall|obj_respond_to|respond_to)\s*\(([^;]*)/m
+  # What the VM and mruby core invoke on user objects implicitly.
+  IMPLICIT_HOOKS = %w[initialize initialize_copy respond_to_missing? const_missing inherited included extended
+                      prepended method_added singleton_method_added method_removed to_s inspect to_str to_ary to_a
+                      to_hash to_proc to_i to_f to_int hash eql? equal? coerce exception message backtrace each
+                      call].freeze
+
+  def merge_native_funcall_names(text)
+    @native_tokens.merge(IMPLICIT_HOOKS)
+    text.scan(FUNCALL_CALL) do |(body)|
+      arg = bc2cpp_c_call_args(body)[2].to_s
+      arg.scan(MRB_SYM_TOKEN_RE) { |m, n| @native_tokens << resolve_mrb_sym_token(m, n) }
+      arg.scan(C_STRING) { |(lit)| @native_tokens << lit }
+    end
+  end
+
+  def merge_outside_tokens(path, text)
+    tokens = (@ruby_tokens[path] = Set.new)
+    text.scan(/[A-Za-z_]\w*[?!=]?/) do |tok|
+      tokens << tok
+      tokens << tok.chomp('=').chomp('?').chomp('!')
+    end
+  end
+
+  public
+
+  # Names outside code can call Ruby methods by: native funcall names and every identifier of the
+  # foreign Ruby sources, minus the Ruby files the caller analyses itself (`except_files`).
+  def outside_call_names(except_files)
+    names = @native_tokens.dup
+    @ruby_tokens.each { |path, toks| names.merge(toks) unless except_files.include?(path) }
+    names
+  end
+
+  private
 
   # -- the closed world's own dynamic definitions ------------------------------
 

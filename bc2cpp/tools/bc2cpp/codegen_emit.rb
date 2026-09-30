@@ -179,6 +179,12 @@ class CodeGen
       // CORE_BLOCK_GUARD -- see core_block_guard in codegen_method.rb.
       #include <stdio.h>
       extern "C" mrb_value mrb_exec_irep(mrb_state*, mrb_value, const struct RProc*);
+      extern "C" mrb_int mrb_ci_bidx(mrb_callinfo*);
+      // The block of the cfunc frame being entered (nil when none was given).
+      static mrb_value bc2cpp_entry_block(mrb_state* M) {
+        mrb_callinfo* ci = M->c->ci;
+        return ci->stack[mrb_ci_bidx(ci)];
+      }
       static mrb_value bc2cpp_core_interpreted(mrb_state* M, mrb_value self, mrb_int index) {
         mrb_value table = mrb_iv_get(M, mrb_obj_value(M->object_class), mrb_intern_lit(M, "__bc2cpp_core_interpreted__"));
         return mrb_exec_irep(M, self, mrb_proc_ptr(mrb_ary_ref(M, table, index)));
