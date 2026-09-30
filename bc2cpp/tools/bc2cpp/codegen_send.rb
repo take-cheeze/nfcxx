@@ -1271,6 +1271,7 @@ class CodeGen
     via_element = false
     inherited_typed = false
     exact_class_dispatch = false
+    exact_via_record = false
     typed_guard_class = nil
     ivar_accessor_target = nil
     known_class = nil
@@ -1293,6 +1294,12 @@ class CodeGen
       exact_class = known_class && exact_new_receiver_class(irep, proof_idx, proof_reg,
                                                             owner: owner_def&.owner,
                                                             expected_class: known_class)
+      # RECORD_HASH_PROOF (ADR 0285): a literal-key read of a record Hash whose key only ever holds
+      # fresh instances of one class is as exact as a `Klass.new` in this method.
+      if exact_class.nil? && (record_class = record_hash_exact_class(irep, proof_idx, proof_reg))
+        known_class = exact_class = record_class
+        exact_via_record = true
+      end
       if exact_class
         exact_target = closed_world_exact_target(name, exact_class)
         if exact_target&.irep && pure_mandatory_or_optional_arity?(@ireps.fetch(exact_target.irep)) &&
@@ -1370,8 +1377,9 @@ class CodeGen
       call_argv, native_note = direct_call_args(target, argv, impl)
       if typed
         if exact_class_dispatch
+          origin = exact_via_record ? 'record key holds only fresh' : 'fresh'
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
-                 "(fresh #{typed_guard_class}.new; stable class constant and standard constructor), " \
+                 "(#{origin} #{typed_guard_class}.new; stable class constant and standard constructor), " \
                  "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
@@ -1436,6 +1444,15 @@ class CodeGen
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self in " \
                  "#{cw_site[:self_owner]}; class hierarchy analysis: no descendant defines or mixes in " \
                  "the name), direct C++ call#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
+
+        # RECORD_HASH_PROOF (ADR 0285): the receiver is a record key that only holds fresh instances of
+        # target.owner, so the guard can only be true.
+        if irep && (idx || trace_idx) &&
+           record_hash_exact_class(irep, idx || trace_idx, unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)) == target.owner
+          note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} (record key holds only " \
+                 "fresh #{target.owner}.new), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         end
 

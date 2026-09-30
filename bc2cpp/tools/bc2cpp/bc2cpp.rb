@@ -45,6 +45,7 @@ require_relative 'ivar_layout'
 require_relative 'annotations'
 require_relative 'class_layout'
 require_relative 'element_layouts'
+require_relative 'record_hash'
 require_relative 'diagnostics'
 require_relative 'dispatch_targets'
 require_relative 'irep_arity'
@@ -55,6 +56,7 @@ require_relative 'codegen_native_direct'
 require_relative 'codegen_native_core_direct'
 require_relative 'codegen_core_methods'
 require_relative 'codegen_receiver_facts'
+require_relative 'codegen_record_hash'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
 require_relative 'codegen_rescue'
@@ -345,6 +347,32 @@ if $PROGRAM_NAME == __FILE__
   profile_phase.call('global facts + annotations')
   warn "== integer constant literal values proven (INTEGER_CONSTANT_VALUE_PROOF): #{integer_constant_values.size} of #{integer_constants.size} =="
   integer_constant_values.sort.each { |n, v| warn "  CONST #{n} = #{v}" }
+
+  # RECORD_HASH_PROOF (docs/adr/0285): needs the same outside-source picture as
+  # IntegerConstants, and a closed world (no open-world caller can see every writer).
+  # The trusted tier classifies a writer with the tripwire-backed Array scan
+  # the block recognizers already rely on; the default consumer tier is strict.
+  record_hash = profile_call.call('RecordHash.analyze') do
+    RecordHash.analyze(ireps, registry, native_paths: native_paths, foreign_paths: foreign_ruby_srcs,
+                                        closed_world: closed_world,
+                                        outside_tokens: (outside_world_tokens(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs),
+                                        trusted: ->(irep, idx, reg) { proven_array_source_scan(irep, idx, reg.to_s, registry) == 'Array' })
+  end
+  RecordHash.table = record_hash.table
+  RecordHash.readers = record_hash.readers
+  warn '== record hash slots (RECORD_HASH_PROOF) =='
+  warn "  global refusal: #{record_hash.global_refusal}" if record_hash.global_refusal
+  record_hash.slots.sort.each do |name, slot|
+    arrays = slot.keys.count { |_, t| t[:strict] == Set['Array'] }
+    trusted = slot.keys.count { |_, t| t[:trusted] == Set['Array'] }
+    warn "  RECORD_HASH  @#{name}  (#{slot.literals} literal#{'s' unless slot.literals == 1}, #{slot.keys.size} keys, " \
+         "#{slot.reads} reads, #{slot.stores} stores; non-nil Array keys: #{arrays} strict, #{trusted} trusted)"
+    next unless ENV['BC2CPP_RECORD_HASH_KEYS'] == '1'
+
+    slot.keys.sort.each { |key, t| warn "    :#{key} strict=#{t[:strict].map(&:to_s).sort.join('|')} trusted=#{t[:trusted].map(&:to_s).sort.join('|')}" }
+  end
+  record_hash.refused.sort.each { |name, why| warn "  RECORD_HASH_REFUSED  @#{name}  (#{why})" }
+  warn ''
 
   # FIXNUM_NIL_DECLARATION: a reviewed "Owner#@ivar" list for the nullable
   # embedding (NILABLE_EMBED_SUPPORT). Opt-in per field, never inferred --
