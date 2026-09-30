@@ -26,6 +26,9 @@ module NativeCoreDirectFallback
   # keeps the ordinary arm.
   def rest_param_native_code(irep, idx, reg, name, d, recv, argv)
     return nil unless irep && idx && reg && !devirt_blocked_name?(name)
+    # The rest Array is fresh, but a singleton maker in the world could still give it a singleton
+    # class before the call (ADR 0280).
+    return nil unless block_core_world&.exact_instances_singleton_free?
 
     entry = rest_param_native_entry(name, argv.size)
     return nil unless entry && rest_param_receiver?(irep, idx, reg.to_s)
@@ -133,15 +136,54 @@ module NativeCoreDirectFallback
     entries = native_core_entries(name, argv.size)
     return tail if entries.empty? || tail.include?('bc2cpp_nomethod')
 
+    exact = native_core_exact_entry(entries, recv, name, argv)
+    return exact_code_line(d, recv, argv, exact) if exact
+
+    site = exact_core_site_for(recv, name)
     branches = entries.map do |entry|
-      "if (#{entry.guard(recv, argv)}) {\n" \
+      "if (#{native_core_guard(entry, recv, argv, site)}) {\n" \
         "    r#{d} = #{entry.call(recv, argv)};\n" \
         '  } else '
     end.join
-    "// NATIVE_CORE_DIRECT :#{name} -- exact #{entries.map(&:owner).uniq.join('/')} receiver calls the verified core body\n" \
+    proven = site && entries.any? { |entry| entry.owner == site[:klass] }
+    what = proven ? "proven #{site[:klass]} receiver, argument guarded," : "exact #{entries.map(&:owner).uniq.join('/')} receiver"
+    "// NATIVE_CORE_DIRECT :#{name} -- #{what} calls the verified core body\n" \
       "  #{branches}{\n" \
       "    #{tail.chomp}\n" \
       "  }\n"
+  end
+
+  # EXACT_CORE_RECEIVER (ADR 0280): the entry whose owner the receiver provably is, when its
+  # argument guard is proven too; the send is then dead code.
+  def native_core_exact_entry(entries, recv, name, argv)
+    site = exact_core_site_for(recv, name)
+    return nil unless site
+
+    entries.find do |entry|
+      entry.owner == site[:klass] && native_core_arg_proven?(entry, argv, site)
+    end
+  end
+
+  def native_core_arg_proven?(entry, argv, site)
+    case entry.arg
+    when :none then true
+    when :nil_or_string then %w[NilClass String].include?(site[:arg_class].call(0))
+    when :integer then false
+    end
+  end
+
+  # The class test is a fact at an exact site; the argument guard stays unless proven.
+  def native_core_guard(entry, recv, argv, site)
+    return entry.guard(recv, argv) unless site && entry.owner == site[:klass]
+
+    arg_guard = NativeCoreDirect::ARG_GUARDS.fetch(entry.arg)
+    arg_guard ? format(arg_guard, a: argv.first) : 'true'
+  end
+
+  def exact_code_line(d, recv, argv, entry)
+    "// NATIVE_CORE_EXACT :#{entry.name} -- receiver is a literal or rest #{entry.owner} (unguarded proof), " \
+      "verified core body, no dispatch\n" \
+      "  r#{d} = #{entry.call(recv, argv)};\n"
   end
 end
 
