@@ -1529,6 +1529,11 @@ class CodeGen
         return kernel_code if kernel_code
       end
 
+      if name == 'call' && !self_implicit && call_receiver.nil?
+        call_code = block_param_call_code(irep, new_proof_idx, new_proof_reg, d, recv, argv)
+        return call_code if call_code
+      end
+
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
              compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
