@@ -522,19 +522,27 @@ class CodeGen
     value, extra_guard = INTEGER_UNARY_OPS[name]
     return nil unless value && n.zero? && native_only_mono?(name) && integer_ancestry_native?(name)
 
+    # NUMERIC_SLOW_PATH: a Float receiver runs Numeric#-@ / #zero? too (both Ruby over Numeric), so
+    # it joins only when Float's ancestry is as clean as Integer's; `zero?` has nothing to add otherwise.
+    float = integer_ancestry_native?(name, 'Float')
+    fallback = if name == 'zero?' && !float
+                 dynamic_dispatch_line(d, recv, name, argv)
+               else
+                 numeric_slow_call(name, d, recv, argv, float: name == '-@' && float)
+               end
     <<~CPP
-        // INTEGER_UNARY :#{name} -- Integer receiver computed inline; anything else keeps the dispatch
+        // INTEGER_UNARY :#{name} -- Integer receiver computed inline; bigint, Float and other classes take NUMERIC_SLOW_PATH
         if (mrb_integer_p(#{recv})#{format(extra_guard, r: recv)}) {
           r#{d} = #{format(value, r: recv)};
         } else {
-          #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          #{fallback.chomp}
         }
     CPP
   end
 
-  # builtin_class_send_safe? over Integer's ancestry and every module mixed into it.
-  def integer_ancestry_native?(name)
-    owners = %w[Integer Numeric Comparable]
+  # builtin_class_send_safe? over `klass`'s ancestry (Integer by default) and every module mixed into it.
+  def integer_ancestry_native?(name, klass = 'Integer')
+    owners = [klass, 'Numeric', 'Comparable']
     queue = owners.dup
     until queue.empty?
       owner = queue.shift

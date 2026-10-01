@@ -71,6 +71,7 @@ require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_numeric_consts'
+require_relative 'codegen_numeric_slow'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
@@ -1275,7 +1276,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
   print gen.emit_native_core_helpers(compiled)
-  print gen.emit_integer_operand_helpers(compiled)
+  print gen.emit_numeric_proof_helpers(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
@@ -1336,6 +1337,10 @@ if $PROGRAM_NAME == __FILE__
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
+  # NUMERIC_SLOW_PATH (ADR 0290): the by-name calls of the numeric arms' else live here once per helper.
+  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
+  warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
+  warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
   warn ''
   poly_table_sites = gen.poly_table_site_counts(compiled)
@@ -1344,6 +1349,7 @@ if $PROGRAM_NAME == __FILE__
   print SymbolCache.emit(symbol_table)
   print const_site_cache_code
   print index_helpers_code
+  print numeric_slow_code
   print gen.emit_poly_tables(compiled)
   compiled.each { |m| print m[:code] }
 
