@@ -454,6 +454,14 @@ class ClosedWorld
     @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
+  # ownerless_native_dispatch_safe? for a name only instances are asked: a definition on a class or
+  # module object (owner "X.singleton") never answers one.
+  def instance_native_dispatch_safe?(name)
+    return false if @global_refusal || @unknown_defs.include?(name) || @outside_ruby_names.include?(name)
+
+    @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' || definition.owner.end_with?('.singleton') }
+  end
+
   # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
   # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
   # method, opens a singleton class on a non-class object, or creates one from native code.

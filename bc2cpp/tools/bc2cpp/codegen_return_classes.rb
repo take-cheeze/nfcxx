@@ -15,15 +15,15 @@ class CodeGen
                         NumericFlow::RNG => 'Range' }.freeze
   RETURN_BITLESS_CLASSES = %w[Array Hash String Range Integer Float NilClass Symbol TrueClass FalseClass].freeze
 
-  # NumericFlow's oracle for the exact-class run: constants, captured locals and literals pool
-  # nothing; arguments and ivars know only what the class pools of ADR 0295 prove.
+  # NumericFlow's oracle for the exact-class run: captured locals and literals pool nothing; arguments,
+  # ivars and constants know only what the class pools of ADR 0296 and ADR 0301 prove.
   class ExactOracle
     def initialize(codegen)
       @cg = codegen
     end
 
     def entry_mask(irep, reg) = @cg.class_pool_entry_mask(irep, reg)
-    def const_mask(_insn) = NumericFlow::OTHER
+    def const_mask(insn) = @cg.class_pool_const_mask(insn)
     def ivar_entry_mask(irep, name) = @cg.class_pool_ivar_entry_mask(irep, name)
     def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
     def upvar_mask(_irep, _insn) = NumericFlow::OTHER
@@ -35,8 +35,8 @@ class CodeGen
       irep.instructions.filter_map { |insn| insn.ivar if %w[GETIV SETIV].include?(insn.op) }.uniq.sort
     end
 
-    def send_mask(irep, index, insn, _state)
-      @cg.return_class_send_mask(irep, index, insn)
+    def send_mask(irep, index, insn, state)
+      @cg.return_class_send_mask(irep, index, insn, state)
     end
   end
 
@@ -166,19 +166,52 @@ class CodeGen
     joined
   end
 
-  # Class set of a SEND-family result: a tracked name's set, or the class bit of a stable `Klass.new`.
-  def return_class_send_mask(irep, index, insn)
+  # Class set of a SEND-family result: a tracked name's set, the receiver's own set for `freeze`, or the
+  # class bit of a stable `Klass.new`.
+  def return_class_send_mask(irep, index, insn, state)
     name = insn.sym
     return NumericFlow::OTHER unless name
 
     tracked = @rc_return[name]
     return tracked if tracked
+    return return_class_freeze_mask(insn, state) if name == 'freeze' && insn.op == 'SEND0'
     return NumericFlow::OTHER unless name == 'new' && %w[SEND SEND0].include?(insn.op)
 
     key = [irep.label, index]
     @rc_new_class[key] = exact_new_class_at(irep, index + 1, insn.reg, numeric_owner_of(irep)) unless @rc_new_class.key?(key)
     klass = @rc_new_class[key]
     klass && !RETURN_BITLESS_CLASSES.include?(klass) ? numeric_class_bit(klass) : NumericFlow::OTHER
+  end
+
+  # `x.freeze` is x when the only `freeze` in the build is Kernel#freeze.
+  def return_class_freeze_mask(insn, state)
+    mask = kernel_freeze_only? && state[insn.reg.to_i]
+    mask.is_a?(Integer) ? mask : NumericFlow::OTHER
+  end
+
+  KERNEL_FREEZE_BODY = /MRB_API mrb_value\s+mrb_obj_freeze\(mrb_state \*mrb, mrb_value self\)\s*\{.*?\n  return self;\n\}/m
+
+  # No Ruby definition, alias or installer of `freeze` reaches an instance (Graphics.freeze is a singleton
+  # method), and every native registration of it is kernel.c's mrb_obj_freeze, whose body answers its
+  # receiver (checked against the source on every run).
+  def kernel_freeze_only?
+    return @kernel_freeze_only if defined?(@kernel_freeze_only)
+
+    @kernel_freeze_only = kernel_freeze_audit
+  end
+
+  def kernel_freeze_audit
+    world = block_core_world
+    installed = symbol_installed_names
+    return false unless world && @native_name_sources && world.instance_native_dispatch_safe?('freeze') && installed &&
+                        !installed.include?('freeze') && !devirt_blocked_name?('freeze')
+
+    paths = world.native_paths_spelling('freeze')
+    registrations, opaque = NativeExpressionDevirt.class_registrations(paths)
+    entries = registrations.fetch('freeze', [])
+    kernel = paths.find { |path| File.basename(path) == 'kernel.c' }
+    !entries.empty? && opaque.fetch('freeze', []).empty? && entries.all? { |entry| entry[:function] == 'mrb_obj_freeze' } &&
+      !kernel.nil? && File.read(kernel).match?(KERNEL_FREEZE_BODY)
   end
 
   # The one class +mask+ names, or nil when it is empty, mixed (nil, another class) or unmodelled.

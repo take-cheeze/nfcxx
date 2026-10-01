@@ -1589,6 +1589,13 @@ class CodeGen
         "    #{fallback}" \
         "  }\n"
     else
+      # Inlined block bodies pass no `idx` (their registers are shifted) but carry
+      # the unshifted site in `trace_idx`/`trace_reg_offset`, as the other proofs use it.
+      constant_site_idx = idx || trace_idx
+      # One receiver proof for every arm wrapper below (registered expression, poly chain tail, final send).
+      exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+      exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
+                                                             exact_class, recv: recv, name: name)
       if builtin_native_expression_send
         exact_entry = if exact_class && known_class
                         native_expression_entries.find do |entry|
@@ -1603,12 +1610,11 @@ class CodeGen
                  "  r#{d} = #{expression};\n"
         end
 
-        return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
+        return with_exact_core_site(exact_site) do
+          compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
+        end
       end
 
-      # Inlined block bodies pass no `idx` (their registers are shifted) but carry
-      # the unshifted site in `trace_idx`/`trace_reg_offset`, as the other proofs use it.
-      constant_site_idx = idx || trace_idx
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          %w[SEND0 SEND SSEND0 SSEND].include?(irep.instructions[constant_site_idx].op)
         constant_owner = constant_object_owner(irep, constant_site_idx,
@@ -1637,8 +1643,10 @@ class CodeGen
       end
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
-      poly = compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
-             compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
+      poly = with_exact_core_site(exact_site) do
+        compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
+          compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
+      end
       return poly if poly
 
       candidates = poly_candidates(name, n) || []
@@ -1675,9 +1683,6 @@ class CodeGen
                         end
       diag = poly_diagnostic(name, n, path, candidates, receiver: receiver_fact, origin: receiver_origin)
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
-      exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
-      exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
-                                                             exact_class, recv: recv, name: name)
       miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
                                 trace_reg_offset, exact_class: exact_class)
       "#{diag}#{note}#{miss}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
