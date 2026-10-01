@@ -98,6 +98,7 @@ class ClosedWorld
     @singleton_makers = []
     @singleton_opens = []
     @outside_constant_writes = Set.new
+    @outside_constant_write_counts = Hash.new(0)
     @dynamic_subclassed = Set.new
     @probed_names = Set.new
     @outside_def_names = Set.new
@@ -139,16 +140,18 @@ class ClosedWorld
   # nil when a fallback for `name` on a chain listing `listed` can only raise
   # NoMethodError, else why not. `self_owner` is the enclosing method's owner
   # when the receiver is its `self`; `installed` is CodeGen#symbol_installed_names.
-  def refusal(name, listed, self_owner, installed)
+  # INSTANCE_RECEIVER (ADR 0302): `instances` names the exact classes the exact-class flow proves
+  # the receiver holds (nil allowed), none a class or module object (CodeGen#receiver_instances).
+  def refusal(name, listed, self_owner, installed, instances: nil)
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if @unknown_defs.include?(name)
     return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name)
 
-    reason, required = required_classes(name, instance_self?(self_owner))
+    reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
     return reason if reason
     return :unlisted_class unless required.subset?(listed.to_set)
-    return :method_missing_receiver unless method_missing_free?(self_owner)
+    return :method_missing_receiver unless method_missing_free?(self_owner, instances)
 
     nil
   end
@@ -178,11 +181,11 @@ class ClosedWorld
   # check runs first, the receiver is method_missing-free). Each returned class
   # answers `name` itself or inherits it, so a guarded send to it reaches its
   # definition and every other class can only raise NoMethodError.
-  def unlisted_classes(name, listed, self_owner, installed)
-    return [] unless refusal(name, listed, self_owner, installed) == :unlisted_class
-    return [] unless method_missing_free?(self_owner)
+  def unlisted_classes(name, listed, self_owner, installed, instances: nil)
+    return [] unless refusal(name, listed, self_owner, installed, instances: instances) == :unlisted_class
+    return [] unless method_missing_free?(self_owner, instances)
 
-    _reason, required = required_classes(name, instance_self?(self_owner))
+    _reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
     (required - listed.to_set).to_a.sort
   end
 
@@ -411,6 +414,23 @@ class ClosedWorld
       !@deferred_constant_writes.include?(simple) && !@outside_constant_writes.include?(simple)
   end
 
+  # INSTANCE_RECEIVER (ADR 0302): instances of the declared class are never class or module
+  # objects (instance_self?, stated for `self`; an exact instance has the same property).
+  def instance_class?(klass)
+    instance_self?(klass)
+  end
+
+  # NATIVE_RESULT_FACTS (ADR 0302): a class a native defines (RGSS::Rect) is what its constant
+  # names for the whole run. Exactly one outside write binds the simple name (the native
+  # definition itself; a second define, const_set, const_remove or Ruby `Name =` makes two), no
+  # bytecode SETCONST binds it, and no dynamic constant mutation exists.
+  def native_class_constant_stable?(full)
+    return false if @global_refusal || @dynamic_constant_mutation || !full.is_a?(String)
+
+    name = simple(full)
+    @constant_write_counts[name].zero? && @outside_constant_write_counts[name] == 1
+  end
+
   # A literal `Klass.new` has an exact-class result only while ordinary
   # construction is visible: no unresolved installer can replace `new` or
   # `allocate`, and no outside Ruby file defines either name.
@@ -425,6 +445,14 @@ class ClosedWorld
   # calls a runtime installer with, or whenever a method_missing hook exists.
   def name_fully_visible?(name)
     !@global_refusal && @mm_classes.empty? && !@unknown_defs.include?(name) && !@outside_names.include?(name)
+  end
+
+  # NATIVE_RESULT_FACTS (ADR 0302): name_fully_visible?, except that natives under
+  # +path_fragment+ may define the name (the caller proves what each one returns).
+  def name_visible_except_natives_in?(name, path_fragment)
+    return false if @global_refusal || !@mm_classes.empty? || @unknown_defs.include?(name)
+
+    !@outside_names.include?(name) || native_only_in?(name, path_fragment)
   end
 
   # Inherited dispatch additionally needs every possible method installer for
@@ -494,6 +522,11 @@ class ClosedWorld
     @native_arms_name == name && native_only_in?(name, '/mruby-rgss/src/')
   end
 
+  def note_outside_constant_write(name)
+    @outside_constant_writes << name
+    @outside_constant_write_counts[name] += 1
+  end
+
   def global!(reason)
     @global_refusal ||= reason
   end
@@ -519,14 +552,14 @@ class ClosedWorld
                      target[/\bMRB_SYM\((\w+)\)/, 1]
           if constant
             names << constant
-            @outside_constant_writes << constant
+            note_outside_constant_write(constant)
           else
             @dynamic_constant_mutation = true
           end
         end
         source.scan(/\bmrb_define_global_const\s*\(\s*\w+\s*,\s*"([A-Z]\w*)"/) do |m|
           names << m.first
-          @outside_constant_writes << m.first
+          note_outside_constant_write(m.first)
         end
       end
       text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
@@ -538,7 +571,7 @@ class ClosedWorld
           positions = kind.match?(/\A(?:class|module)/) ? [1, 2] : [2]
           positions.each do |position|
             constant = args[position].to_s[/\bMRB_SYM\((\w+)\)/, 1] || args[position].to_s[/"(\w+)"/, 1]
-            @outside_constant_writes << constant if constant
+            note_outside_constant_write(constant) if constant
           end
           next
         end
@@ -592,7 +625,7 @@ class ClosedWorld
       @clone_sent = true if text.match?(/\bclone\b/)
       @freeze_possible = true if !CoreDefs.core_source?(path) && text.match?(/\bfreeze\b/)
       @singleton_makers << [path, :ruby] if !CoreDefs.core_source?(path) && text.match?(RUBY_SINGLETON)
-      text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
+      text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| note_outside_constant_write(m.first) }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
       @dynamic_constant_mutation = true if text.match?(RUBY_CONST_DYNAMIC)
       global!(:outside_class_factory) if text.match?(/\b(?:Class|Struct)\.new\b/)
@@ -1079,8 +1112,10 @@ class ClosedWorld
   # Can the fallback's receiver be an instance of a method_missing class? Only
   # `self` is known: every entry into a compiled method passes a kind_of? its
   # owner (dispatch, a guarded or lexical-self direct call, super).
-  def method_missing_free?(self_owner)
+  def method_missing_free?(self_owner, instances = nil)
     return true if @mm_classes.empty?
+    # A proven class set: a class inherits method_missing exactly when @mm_classes holds it.
+    return instances.none? { |c| @mm_classes.include?(c) } if instances && !self_owner
     return false unless self_owner
     # A class or module object: only a hook on Class/Module/Object or a
     # singleton method_missing reaches it, and both are global refusals.
