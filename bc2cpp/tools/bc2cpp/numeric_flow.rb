@@ -17,6 +17,9 @@ require_relative 'bytecode_ir'
 #   STR   exactly ::String
 #   NIL   nil
 #   OTHER anything else, including false and an unassigned local's other uses
+# Bits from FIRST_OBJECT_BIT up are object kinds the oracle names (LcfRowFlow, ADR 0286): each is
+# "exactly an instance of that kind" and truthy, like ARR. The flow only moves them around; what a
+# bit means, and what `[]` on it returns, is the oracle's (`index_mask`).
 # 0 is "no value yet" (unreached). Join is bitwise OR, so the answer cannot
 # depend on visiting order. A register is numeric when its set is a non-empty
 # subset of INT|FLT.
@@ -37,6 +40,7 @@ module NumericFlow
   STR = 16
   NIL = 32
   OTHER = 64
+  FIRST_OBJECT_BIT = 7
   NUM = INT | FLT
   CONTAINERS = ARR | HSH | STR
   FALSY = NIL | OTHER
@@ -95,6 +99,7 @@ module NumericFlow
   #   send_mask(irep, index, insn, state)  class set of a SEND-family result
   #   upvar_mask(irep, insn)               class set of a GETUPVAR (a captured local)
   #   pool_mask(irep, insn)                class set of a LOADL
+  #   index_mask(irep, index, insn, state) class set of a GETIDX/GETIDX0 result (optional)
   #   op_native?(symbol)                   `+ - * /` are the core Integer/Float bodies
   #   nil_raises?(symbol)                  nil answers `symbol` only by raising
   # Each answers OTHER (or false) when it proves nothing.
@@ -341,6 +346,8 @@ module NumericFlow
       b = insn.paren_reg.to_i
       ok = oracle.op_native?('/') && b < nregs
       set.call(a, ok ? arith(state[a], state[b], nil_raises.call('/')) : OTHER)
+    when 'GETIDX', 'GETIDX0'
+      set.call(a, oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER)
     else
       set.call(a, OTHER)
     end

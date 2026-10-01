@@ -143,9 +143,12 @@ class CodeGen
   # NUMERIC_RETURN_PROOF, the rest are core bodies whose result class is fixed by
   # the receiver's proven class and gated by builtin_class_send_safe? (no Ruby
   # override, no prepend).
-  def numeric_send_mask(_irep, _index, insn, state)
+  def numeric_send_mask(irep, index, insn, state)
     name = insn.sym
     return NumericFlow::OTHER unless name
+
+    lcf = lcf_new_mask(irep, index, insn) if name == 'new'
+    return lcf if lcf
 
     tracked = @numeric_return && @numeric_return[name]
     return tracked if tracked

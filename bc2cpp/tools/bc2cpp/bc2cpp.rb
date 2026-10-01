@@ -61,6 +61,7 @@ require_relative 'codegen_native_core_direct'
 require_relative 'codegen_core_methods'
 require_relative 'codegen_receiver_facts'
 require_relative 'codegen_record_hash'
+require_relative 'codegen_lcf_rows'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
 require_relative 'codegen_rescue'
@@ -880,6 +881,10 @@ if $PROGRAM_NAME == __FILE__
   # dynamic-send-free arithmetic/compare arms.
   warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
   gen.numeric_facts_report.each { |l| warn l }
+  warn ''
+  # LCF_ROW_FLOW (ADR 0286): whether the LCF object-kind proof is on, and why not.
+  warn '== LCF row flow (LCF_ROW_FLOW) =='
+  warn(gen.lcf_rows_model ? "  on (#{gen.lcf_rows_model.kinds.size} kinds)" : "  off: #{gen.lcf_rows_refusal}")
   warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).

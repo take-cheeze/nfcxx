@@ -57,6 +57,10 @@ class CodeGen
       @cg.numeric_send_mask(irep, index, insn, state)
     end
 
+    def index_mask(irep, index, insn, state)
+      @cg.lcf_index_mask(irep, index, insn, state)
+    end
+
     def upvar_mask(irep, insn)
       @cg.numeric_upvar_mask(irep, insn)
     end
@@ -123,6 +127,7 @@ class CodeGen
     reset_numeric_flow!
     setup_numeric_entry_args
     setup_numeric_ivar_groups
+    setup_lcf_rows
     setup_numeric_returns
     setup_numeric_consts
     loop do
@@ -229,6 +234,7 @@ class CodeGen
               NumericFlow::HSH => 'HSH', NumericFlow::STR => 'STR', NumericFlow::NIL => 'NIL',
               NumericFlow::OTHER => 'OTHER' }
     found = names.filter_map { |bit, name| name if mask.anybits?(bit) }
+    @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
     found.empty? ? 'NONE' : found.join('|')
   end
 
