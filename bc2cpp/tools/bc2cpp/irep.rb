@@ -116,7 +116,9 @@ CatchHandler = Struct.new(:type, :begin_addr, :end_addr, :target, keyword_init: 
 # tagging them would be a silent wrong-value bug, not a missed optimization.
 # `core`: the body comes from mruby's own Ruby (CoreDefs, set by the driver).
 # `installer`: :define_method for a `define_method(:x) { }` body (DefineMethodSites), else nil.
-MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, :installer,
+# `site`: for an accessor a loop installs (LoopInstallers), the [irep label, index] of each attr_* send
+# of that loop, else nil.
+MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :copy_owner, :core, :installer, :site,
                        keyword_init: true)
 
 # ---------------------------------------------------------------------------
