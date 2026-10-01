@@ -40,7 +40,7 @@ Getting there took:
    `pad.rb`, `opt.rb`, `cpu.rb`, `apu.rb`, `ppu.rb`, `palette.rb`,
    `driver.rb`, `config.rb`) in real dependency order in place of
    `require_relative`, which mruby doesn't have (`build_bundle.rb`).
-2. Five small pure-Ruby shims (`shims.rb`, ~30 lines) for mruby stdlib gaps:
+2. Five small pure-Ruby shims (`shims.rb` and `shim_integer_aref.rb`, ~30 lines) for mruby stdlib gaps:
    - `File.binread` -- missing; trivially backed by `IO.read(path, mode: "rb")`.
    - `Integer#[]` (bit read, e.g. `n[3]`) -- missing everywhere in mruby core
      and every bundled gem.
@@ -1256,7 +1256,8 @@ these.
   hardcodes optcarrot's content -- output isn't checked in since it's fully
   mechanical to regenerate, and stays in sync with whatever commit
   `3rd/optcarrot` is pinned to.
-- `shims.rb` -- the 5 stdlib shims, prepended to the bundle.
+- `shims.rb`, `shim_integer_aref.rb` -- the 5 stdlib shims, prepended to the bundle. The Integer shim is also
+  compiled by `compiled_run.rb` (ADR 0305).
 - `runner_tail.rb` -- headless `Optcarrot::NES.new(...).run` driver, appended
   to the bundle.
 - `bc2cpp_probe.rb` -- runs `tools/bc2cpp/bc2cpp.rb` against optcarrot's real
