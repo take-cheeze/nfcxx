@@ -6,7 +6,7 @@ require_relative 'numeric_flow'
 #
 # RETURN_CLASS_TABLE's flow (codegen_return_classes.rb) knows nothing outside the method, so an ivar
 # read in another method than the one that wrote it, and an argument read in the callee, were
-# unknown. These two pools carry the exact-class bits (a proven `Klass.new`, ARR/HSH/STR/RNG) and
+# unknown. These pools carry the exact-class bits (a proven `Klass.new`, ARR/HSH/STR/RNG) and
 # NIL across methods the way ADR 0276's pools carry INT/FLT, with the same admission:
 #
 #   * ivar pools reuse NumericIvarGroup's structure: one pool per (family, name), keyed by the
@@ -19,6 +19,9 @@ require_relative 'numeric_flow'
 #   * argument pools reuse entry_arg_candidates: a mandatory argument of a name with one
 #     definition, called only from visible, non-computed, same-arity sites, holds the join of the
 #     class sets those sites pass.
+#   * constant pools (ADR 0301) reuse NumericConstGroup: one pool per bare constant name, the join of
+#     the class sets its SETCONST sites store, for a name every definition of which is visible and no
+#     const_missing can answer.
 #
 # A pool is a least fixpoint of may-sets that only grows and is dropped for good when a site
 # stores a value the flow cannot name (OTHER, a pending exception) or sits in an irep it does not
@@ -31,11 +34,21 @@ class CodeGen
   def setup_class_pools
     @class_ivar_pools = {}
     @class_arg_pools = {}
+    @class_const_pools = {}
     @class_pools_on = class_pools_enabled?
     return unless @class_pools_on
 
     (@numeric_ivar_groups || {}).each { |key, group| @class_ivar_pools[key] = 0 unless group.structural }
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
+    return unless const_missing_free?
+
+    (@numeric_const_groups || {}).each { |name, group| @class_const_pools[name] = 0 unless group.structural }
+  end
+
+  # A lookup that finds no constant runs const_missing, whose answer is no definition's value.
+  def const_missing_free?
+    installed = symbol_installed_names
+    !installed.nil? && !installed.include?('const_missing') && ownerless_native_dispatch_safe?('const_missing')
   end
 
   # BC2CPP_CLASS_POOLS=0 turns the pools off. A Marshal.load can build an object of any class with
@@ -105,6 +118,15 @@ class CodeGen
     @class_arg_pools[[irep.label, reg.to_i]] || NumericFlow::OTHER
   end
 
+  # The pooled class set of a GETCONST/GETMCNST: the join of what every definition of the bare name
+  # stores (ADR 0301). A name the numeric proof poisons has no pool.
+  def class_pool_const_mask(insn)
+    name = insn.const_name
+    return NumericFlow::OTHER unless @class_pools_on && name && const_missing_free?
+
+    @class_const_pools[name] || (@integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER)
+  end
+
   # One growth pass over every pool; true when a mask grew or a pool was dropped.
   def grow_class_pools
     return false unless @class_pools_on
@@ -121,6 +143,12 @@ class CodeGen
       sites, k = @entry_cand.fetch(key)
       reads = sites.map { |(irep, idx, recv, _argc, _own)| [irep, idx, (recv + k).to_s] }
       next unless grow_class_pool(@class_arg_pools, key, reads) { return_class_invalidate(key[0]) }
+
+      changed = true
+    end
+    @class_const_pools.keys.each do |name|
+      group = @numeric_const_groups.fetch(name)
+      next unless grow_class_pool(@class_const_pools, name, group.sites) { group.readers.each { |l| return_class_invalidate(l) } }
 
       changed = true
     end
@@ -158,6 +186,7 @@ class CodeGen
       d = @owner_of[label]
       lines << "  CLASSARG #{d ? "#{d.owner}##{d.name}" : "<irep #{label}>"} arg#{k} (#{class_mask_name(mask)})"
     end
+    (@class_const_pools || {}).each { |name, mask| lines << "  CLASSCONST #{name} (#{class_mask_name(mask)})" }
     lines.sort
   end
 
