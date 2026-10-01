@@ -119,11 +119,18 @@ module ComputedSendNames
       end
     end
 
-    def self.rebinder?(ireps)
-      ireps.each_value.any? do |irep|
-        irep.instructions.any? { |insn| insn.op.include?('SEND') && CONST_REBINDERS.include?(insn.sym) }
-      end
+# Also a name spelled as data (`send(:remove_const, ...)`, `send("const_set", ...)`).
+def self.rebinder?(ireps)
+  ireps.each_value.any? do |irep|
+    irep.instructions.any? do |insn|
+      name = case insn.op
+             when 'STRING', 'SYMBOL' then irep.pool[insn.pool_index.to_i]
+             else insn.sym
+             end
+      CONST_REBINDERS.include?(name)
     end
+  end
+end
 
     # The symbols of the frozen literal the constant is assigned from `reg`, or nil.
     def self.definition_names(irep, idx, reg)
