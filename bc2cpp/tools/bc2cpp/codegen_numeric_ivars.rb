@@ -293,7 +293,7 @@ class CodeGen
       ok = true
       group.sites.each do |irep, idx, reg|
         mask = numeric_raw_mask(irep, idx, reg, numeric_irep_owner[irep.label])
-        if mask.nil? || (mask & NumericFlow::OTHER) != 0
+        if mask.nil? || (mask & NumericFlow::OPAQUE) != 0
           ok = false
           break
         end

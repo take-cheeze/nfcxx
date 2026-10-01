@@ -45,7 +45,7 @@ class CodeGen
       joined = 0
       sites.each do |(irep, idx, recv, _argc, owner)|
         mask = numeric_raw_mask(irep, idx, (recv + k).to_s, owner)
-        if mask.nil? || (mask & NumericFlow::OTHER) != 0
+        if mask.nil? || (mask & NumericFlow::OPAQUE) != 0
           joined = nil
           break
         end
