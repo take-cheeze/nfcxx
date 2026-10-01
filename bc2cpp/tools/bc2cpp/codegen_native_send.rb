@@ -178,7 +178,8 @@ class CodeGen
   # Guarded direct C++ for one NATIVE_PRIMITIVE_SEND_ARITY name, or an exact-class
   # expression generated from registered native C methods. The per-method
   # soundness notes are at compile_send's call site.
-  def compile_native_primitive_send(name, d, recv, argv)
+  # `proof` is [irep, site index] of the call (GUARD_VIOLATION, ADR 0290), nil without one.
+  def compile_native_primitive_send(name, d, recv, argv, proof: nil)
     if @native_registered_expressions.key?(name) && name != 'to_s'
       return compile_native_registered_expression(name, d, recv, argv)
     end
@@ -219,12 +220,18 @@ class CodeGen
       "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
     when 'is_a?', 'kind_of?'
       arg = argv.first
+      # GUARD_VIOLATION: a stable class/module constant argument always passes the type test.
+      else_arm = if proof && constant_argument_proven?(*proof, name, 0)
+                   guard_violation_line(d, recv, name, argv, 'CLASS_ARGUMENT')
+                 else
+                   dynamic_dispatch_line(d, recv, name, argv)
+                 end
       "  // #{name} -- native primitive, no lookup needed (argument type-checked at " \
       "runtime -- see compile_send's own comment)\n" \
       "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg})) {\n" \
       "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
       "  } else {\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    #{else_arm}" \
       "  }\n"
     when 'equal?'
       arg = argv.first
@@ -393,6 +400,13 @@ class CodeGen
         else
           "  case MRB_TT_INTEGER:\n"
         end
+      # GUARD_VIOLATION: a stable class/module constant receiver always takes the
+      # CLASS/MODULE arm, so the default arm is an error rather than a dispatch.
+      eqq_default = if proof && constant_receiver_proven?(*proof, name)
+                      guard_violation_line(d, recv, name, argv, 'CLASS_EQQ')
+                    else
+                      dynamic_dispatch_line(d, recv, name, argv)
+                    end
       "  // === -- native primitive, runtime-guarded per real receiver type\n" \
       "  // (see compile_native_primitive_send's own EQQ_TYPE_TAG_DISPATCH\n" \
       "  // comment for why MRB_TT_DATA/MRB_TT_PROC and everything else fall\n" \
@@ -436,7 +450,7 @@ class CodeGen
       "    r#{d} = mrb_bool_value(mrb_equal(M, #{recv}, #{arg}));\n" \
       "    break;\n" \
       "  default:\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    #{eqq_default}" \
       "    break;\n" \
       "  }\n"
     when 'dup'

@@ -1290,6 +1290,10 @@ if $PROGRAM_NAME == __FILE__
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
+  # GUARD_VIOLATION (ADR 0290): name the method a violation site sits in.
+  compiled.each do |m|
+    m[:code] = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
+  end
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
   if closed_world
     kept = Hash.new(0)
@@ -1298,6 +1302,12 @@ if $PROGRAM_NAME == __FILE__
     dropped = compiled.sum { |m| m[:code].scan(%r{^\s*// CLOSED_WORLD_SELF :}).size }
     warn "== closed world fallbacks: #{dropped} guards dropped, #{converted} bc2cpp_nomethod, " \
          "#{kept.values.sum} kept dispatching =="
+    # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
+    violation_families = Hash.new(0)
+    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ)\)"/) { |(f)| violation_families[f] += 1 } }
+    warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
+    violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
+    NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
     kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
     warn ''
     # NOMETHOD_REVIEWED (docs/adr/0226): a dead fallback nobody reviewed fails

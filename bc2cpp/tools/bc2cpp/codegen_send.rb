@@ -52,6 +52,9 @@ class CodeGen
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_proof_idx = idx || trace_idx
     new_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    # GUARD_VIOLATION: the original SEND whose own registers the proofs read; an inlined
+    # loop body that substitutes its receiver or arguments has none.
+    guard_proof_site = call_receiver.nil? && call_arguments.nil? && n <= FUNCALL_ARGC_MAX ? new_proof_idx : nil
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.enter
@@ -190,7 +193,11 @@ class CodeGen
           padded_dims = dims + Array.new(3 - dims.size, '1')
           call = "r#{d} = #{native[:fn]}(M, #{native[:class_fn]}(), #{n}, #{padded_dims.join(', ')});"
           class_guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
-          fallback = dynamic_dispatch_line(d, recv, name, argv).chomp
+          fallback = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+                       guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY').chomp
+                     else
+                       dynamic_dispatch_line(d, recv, name, argv).chomp
+                     end
           return <<~CPP
               // RGSS Table.new -- integer conversion and allocation match Table#initialize
               if (#{class_guard}) {
@@ -248,6 +255,17 @@ class CodeGen
                 "and passes #{class_value} as the exact native class pointer.\n"].join
         call = "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n"
         return "#{note}  #{call}" unless guard
+
+        # GUARD_VIOLATION: the class test cannot fail; only the argument tags still can.
+        if class_guard && new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+          inner = arg_checks ? "if (#{arg_checks}) {\n      #{call}    } else {\n      #{dynamic_dispatch_line(d, recv, name, argv)}    }\n" : call
+          return "#{note}  // GUARD_VIOLATION: #{recv} is the stable constant #{known}; a failed class test is an error\n" \
+                 "  if (#{class_guard}) {\n" \
+                 "    #{inner}" \
+                 "  } else {\n" \
+                 "    #{guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')}" \
+                 "  }\n"
+        end
 
         return "#{note}" \
                "  if (#{guard}) {\n" \
@@ -379,12 +397,17 @@ class CodeGen
                      "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
             end
 
+            else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+                         guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')
+                       else
+                         dynamic_dispatch_line(d, recv, name, argv)
+                       end
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
                    "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
                    "  } else {\n" \
-                   "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+                   "    #{else_arm}" \
                    "  }\n"
           end
         end
@@ -420,8 +443,13 @@ class CodeGen
                "standard Class#new/allocate lookup is proven and #initialize remains ordinary runtime dispatch.\n"
         class_expr = builtin_class_expr || owner_class_ptr_expr(known)
         guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{class_expr}"
+        else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+                     guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')
+                   else
+                     dynamic_dispatch_line(d, recv, name, argv)
+                   end
         return [note, "  if (#{guard}) {\n", construction,
-                "  } else {\n", "    #{dynamic_dispatch_line(d, recv, name, argv)}", "  }\n"].join
+                "  } else {\n", "    #{else_arm}", "  }\n"].join
       end
     end
 
@@ -1153,13 +1181,13 @@ class CodeGen
 
     if name == 'key?' && n == 1 && !@native_registered_expressions.key?(name) &&
        builtin_class_send_safe?(name, %w[Hash])
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     if name == 'to_s' && n.zero? && !devirt_blocked_name?(name) &&
        builtin_class_send_safe?(name, %w[Array Hash Integer String]) &&
        builtin_class_send_safe?('inspect', %w[Array Hash])
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     # TO_I_BUILTIN_TYPE_TAG_DISPATCH: the native registry has class-specific
@@ -1167,7 +1195,7 @@ class CodeGen
     # and keeps ordinary dispatch for receiver types it does not implement.
     if name == 'to_i' && n.zero? &&
        builtin_class_send_safe?(name, %w[Integer Float String])
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     # Resolve compiled MONO/TYPED targets first; only the final POLY fallback uses
@@ -1182,7 +1210,7 @@ class CodeGen
 
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && ownerless_native_dispatch_safe?(name) &&
        (!@native_registered_expressions.key?(name) || name == 'to_s')
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     keywordless = compile_keywordless_call(name: name, d: d, recv: recv, n: n, argv: argv, self_implicit: self_implicit,
@@ -1526,7 +1554,7 @@ class CodeGen
                  "  r#{d} = #{expression};\n"
         end
 
-        return compile_native_primitive_send(name, d, recv, argv)
+        return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
       end
 
       # Inlined block bodies pass no `idx` (their registers are shifted) but carry
@@ -1936,6 +1964,16 @@ class CodeGen
     return error if extra_branches.empty?
 
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
+  end
+
+  # GUARD_VIOLATION (docs/adr/0290): the else arm of a guard whose test the closed world
+  # proves cannot fail. The marker keeps the name past SymbolCache's rewrite (as for
+  # nomethod) and `@@SITE@@` becomes the enclosing `Owner#method` in bc2cpp.rb; the site's
+  # arguments are kept only for -DBC2CPP_GUARD_VIOLATION_DISPATCH.
+  def guard_violation_line(d, recv, name, argv, family)
+    args = ", #{argv.size}#{argv.map { |a| ", #{a}" }.join}"
+    "r#{d} = bc2cpp_guard_violation_named(M, #{recv}, \"#{name}\", \"@@SITE@@ (#{family})\"#{args}); " \
+      "#{NomethodReviewed.violation_marker(name)}\n"
   end
 
   # UNLISTED_CLASS_GUARDS: a definer class the chain leaves out (its definition

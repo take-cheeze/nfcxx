@@ -19,10 +19,13 @@ module SymbolCache
   class Table
     # CLOSED_WORLD: set once a bc2cpp_nomethod call is rewritten, so emit adds it.
     attr_accessor :nomethod_used
+    # GUARD_VIOLATION (ADR 0290): the same for bc2cpp_guard_violation.
+    attr_accessor :violation_used
 
     def initialize
       @index = {}
       @nomethod_used = false
+      @violation_used = false
     end
 
     def index_for(literal)
@@ -53,22 +56,30 @@ module SymbolCache
   # receiver is delimited with a bracket/quote-aware scan; a call whose name is
   # not a plain string literal is left alone.
   # CLOSED_WORLD's `bc2cpp_nomethod_named(M, RECV, "name"...)` becomes
-  # `bc2cpp_nomethod(M, RECV, i...)` the same way.
+  # `bc2cpp_nomethod(M, RECV, i...)` the same way, and GUARD_VIOLATION's
+  # `bc2cpp_guard_violation_named(M, RECV, "name", "site", ...)` becomes
+  # `bc2cpp_guard_violation(M, RECV, i, "site", ...)`.
   def rewrite_funcalls(code, table)
     out = +''
     pos = 0
-    while (start = code.index(/\b(mrb_funcall|bc2cpp_nomethod_named)\(M,\s*/, pos))
-      nomethod = Regexp.last_match(1) == 'bc2cpp_nomethod_named'
+    while (start = code.index(/\b(mrb_funcall|bc2cpp_nomethod_named|bc2cpp_guard_violation_named)\(M,\s*/, pos))
+      kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
-      name = recv_end && code[recv_end..].match(nomethod ? /\A,\s*(#{STRING})(?=\s*[,)])/ : /\A,\s*(#{STRING})\s*,/)
+      name = recv_end && code[recv_end..].match(kind == 'mrb_funcall' ? /\A,\s*(#{STRING})\s*,/ : /\A,\s*(#{STRING})(?=\s*[,)])/)
       if name
         # The receiver may itself contain a funcall; rewrite it first so its
         # names take their slots before this call's own.
         receiver = rewrite_funcalls(code[head_end...recv_end], table)
         index = table.index_for(name[1])
-        table.nomethod_used = true if nomethod
-        out << code[pos...start] << (nomethod ? "bc2cpp_nomethod(M, #{receiver}, #{index}" : "bc2cpp_send(M, #{receiver}, #{index},")
+        table.nomethod_used = true if kind == 'bc2cpp_nomethod_named'
+        table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
+        replacement = case kind
+                      when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
+                      when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
+                      else "bc2cpp_send(M, #{receiver}, #{index},"
+                      end
+        out << code[pos...start] << replacement
         pos = recv_end + name[0].length
       else
         out << code[pos...head_end]
@@ -84,7 +95,7 @@ module SymbolCache
   def send_indices(code)
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|guard_violation)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*[,)]/, 1]
@@ -158,6 +169,7 @@ module SymbolCache
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
       #{table.nomethod_used ? NOMETHOD : ''}
+      #{table.violation_used ? GUARD_VIOLATION : ''}
     CPP
   end
 
@@ -202,4 +214,47 @@ module SymbolCache
     }
   CPP
   private_constant :NOMETHOD
+
+  # GUARD_VIOLATION (docs/adr/0290): the else arm of a guard whose register the
+  # closed world proves holds a stable class constant. Unlike bc2cpp_nomethod it
+  # never dispatches: reaching it means the proof is wrong, so it logs to $stderr
+  # and raises a NoMethodError subclass (a rescue written for the old dispatch's
+  # NoMethodError still sees it, after the log line). -DBC2CPP_NOMETHOD_VERIFY
+  # aborts as the nomethod helper does; -DBC2CPP_GUARD_VIOLATION_DISPATCH restores
+  # the plain send for debugging a suspected wrong proof.
+  GUARD_VIOLATION = <<~CPP
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #endif
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_guard_violation_raise(mrb_state* M, mrb_value recv, mrb_sym mid, const char* site) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: guard violation reached: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s at %s\\n", mrb_sym_name(M, mid), site);
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_value msg = mrb_format(M, "closed-world guard violation: %T#%n at %s", recv, mid, site);
+      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_sym puts_id = mrb_intern_lit(M, "puts");
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] "), msg));
+      struct RClass* klass = mrb_define_class(M, "BC2cppGuardViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, msg));
+    }
+    // Typed as returning, like bc2cpp_nomethod, so GCC keeps the call in place.
+    [[gnu::noipa]] static mrb_value bc2cpp_guard_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    #ifdef BC2CPP_GUARD_VIOLATION_DISPATCH
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
+    #else
+      (void)argc;
+      bc2cpp_guard_violation_raise(M, recv, bc2cpp_sym(M, i), site);
+    #endif
+    }
+  CPP
+  private_constant :GUARD_VIOLATION
 end
