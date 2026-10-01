@@ -109,6 +109,17 @@ class CodeGen
                                    method_return_class: ->(method_name) { class_return_for_dispatch(method_name) }, guarded: true)
                  end
 
+    # EQQ_DIRECT (ADR 0293): a `===` receiver whose class the bytecode proves (a stable
+    # class/module constant, an Integer constant or literal, a String/nil/true/false literal)
+    # is decided by that class's own body, no dispatch and no tag switch. Inlined block bodies
+    # carry the site in trace_idx/trace_reg_offset.
+    if name == '===' && n == 1 && !self_implicit && irep && (idx || trace_idx)
+      eqq_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+      eqq_code = eqq_reg && compile_eqq_direct(irep, idx || trace_idx, eqq_reg, d, recv, argv.first,
+                                                  guard: [irep, guard_proof_site, owner_def&.owner])
+      return eqq_code if eqq_code
+    end
+
     # LITERAL_EQQ_SUPPORT: `LITERAL === x` from `case x; when LITERAL` (receiver a
     # literal Fixnum or Symbol, see trace_eqq_literal_receiver) is compiled to
     # mruby's native semantics (mrb_eqq_m -> mrb_equal) directly. Soundness:

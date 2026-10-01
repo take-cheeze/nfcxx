@@ -83,6 +83,7 @@ require_relative 'codegen_runtime_def'
 require_relative 'codegen_insn'
 require_relative 'codegen_keyword_send'
 require_relative 'codegen_send'
+require_relative 'codegen_eqq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_block_core_direct'
@@ -1358,12 +1359,16 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
   warn ''
+  eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
+  warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="
+  warn ''
   poly_table_sites = gen.poly_table_site_counts(compiled)
   warn "== poly table dispatch: #{poly_table_sites.map { |t, n| "#{t} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   print SymbolCache.emit(symbol_table)
   print const_site_cache_code
   print index_helpers_code
+  print eqq_helper_code
   print numeric_slow_code
   print gen.emit_poly_tables(compiled)
   compiled.each { |m| print m[:code] }
