@@ -385,7 +385,7 @@ class CodeGen
       # FIXNUM_RETURN_PROOF (source 6): see compute_fixnum_return_names. SENDB/SSENDB
       # are excluded: a `break` in the caller's block becomes the send's result.
       nm = insn.sym
-      !nm.nil? && @fixnum_return_names.include?(nm)
+      !nm.nil? && (@fixnum_return_names.include?(nm) || native_fixnum_result?(irep, j, insn))
     else
       false
     end

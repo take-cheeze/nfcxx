@@ -49,7 +49,7 @@ class CodeGen
     @registry.filter_map do |name, defs|
       next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
       next if defs.empty? || @foreign_method_names.include?(name) || aliased.include?(name)
-      next unless @closed_world.name_fully_visible?(name)
+      next unless @closed_world.name_fully_visible?(name) || native_result_name_kinds(name)
       next unless defs.all? { |d| numeric_return_def_usable?(d) }
 
       name
@@ -57,6 +57,7 @@ class CodeGen
   end
 
   def numeric_return_def_usable?(d)
+    return d.irep.nil? && !native_result_name_kinds(d.name).nil? if d.owner == '<native>'
     return false if d.owner.start_with?('<') || (d.owner.end_with?('.singleton') && d.irep.nil?)
     return d.kind == :ivar_accessor && !d.name.end_with?('=') if d.irep.nil?
 
@@ -81,6 +82,7 @@ class CodeGen
 
   # Class set of the value one definition returns, or OTHER.
   def numeric_return_def_mask(d)
+    return native_result_def_mask(d, classes: false) if d.owner == '<native>'
     return numeric_accessor_return_mask(d) if d.irep.nil?
 
     irep = @ireps[d.irep]
@@ -191,6 +193,9 @@ class CodeGen
     return NumericFlow::INT if @fixnum_return_names.include?(name)
     return NumericFlow::ARR if @array_return_names.include?(name)
     return NumericFlow::OTHER if insn.op.start_with?('SS')
+
+    native = native_result_numeric_mask(irep, index, insn)
+    return native if native
 
     recv = state[insn.reg.to_i]
     return NumericFlow::OTHER unless recv
