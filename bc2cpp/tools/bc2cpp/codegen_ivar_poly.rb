@@ -191,9 +191,10 @@ class CodeGen
         return "{ mrb_value bc2cpp_iv_val = #{src}; #{store} }#{tail}"
       end
 
+      frozen = embedded_store_frozen_check(recv)
       if type == :value
         field = "((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)}"
-        return "#{indent}#{field} = #{src};\n#{indent}mrb_field_write_barrier_value(M, " \
+        return "#{"#{indent}#{frozen}\n" if frozen}#{indent}#{field} = #{src};\n#{indent}mrb_field_write_barrier_value(M, " \
                "(struct RBasic*)mrb_obj_ptr(#{recv}), #{src});#{tail}"
       end
 
@@ -209,11 +210,20 @@ class CodeGen
         else
           "#{indent}((#{struct_name(klass)}*)DATA_PTR(#{recv}))->#{ivar_field_name(ivar)} = #{ops[:unbox]}(#{src});"
         end
-      "if (!#{ops[:check]}(#{src})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
+      "#{"#{frozen}\n#{indent}" if frozen}if (!#{ops[:check]}(#{src})) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"@#{ivar}: expected #{ops[:err]}\");\n" \
         "#{store}#{tail}"
     elsif embedded_accessor_linkable?(klass, "#{ivar}=")
       "#{dst ? "#{dst} = " : ''}#{sanitize(klass)}_#{sanitize(ivar)}_eq_impl(M, #{recv}, #{src});"
     end
+  end
+
+  # The frozen test mrb_iv_set makes and a direct struct store would skip (ADR 0299), or nil when
+  # the closed world proves no user object is ever frozen (ClosedWorld#user_objects_unfrozen?).
+  # Inline flag test; only a frozen receiver pays for the out-of-line raise.
+  def embedded_store_frozen_check(recv)
+    return nil if @closed_world&.user_objects_unfrozen?
+
+    "if (mrb_unlikely(mrb_frozen_p(mrb_obj_ptr(#{recv})))) mrb_check_frozen(M, mrb_obj_ptr(#{recv}));"
   end
 
   # IVAR_ACCESS for an attr_reader/attr_writer call `name` on `recv`: the
