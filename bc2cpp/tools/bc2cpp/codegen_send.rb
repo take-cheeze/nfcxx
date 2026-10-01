@@ -470,6 +470,14 @@ class CodeGen
       end
     end
 
+    # NATIVE_EXACT_DIRECT, ahead of the class-guard arms below: a receiver the exact-class flow
+    # proves to be one RGSS native class needs neither the guard chain nor its dispatch tail.
+    if n.zero? && !self_implicit && irep && drawing_proof_idx && NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name)
+      exact = exact_flow_user_class(irep, drawing_proof_idx, drawing_proof_reg)
+      exact_code = exact && NATIVE_WRAPPER_CLASS_ACCESSORS.key?(exact) && native_exact_direct_code(name, d, recv, argv, exact)
+      return exact_code if exact_code
+    end
+
     # Frame-independent RGSS entry points need only a native class identity
     # guard. Static tracing may narrow the common cases, but is not required for
     # these wrappers because every other receiver retains ordinary dispatch.
@@ -2010,8 +2018,9 @@ class CodeGen
     dispatch = dynamic_dispatch_line(d, recv, name, argv)
     return dispatch unless @closed_world && site
 
+    instances = receiver_instances(site, name)
     reason = argv.size > FUNCALL_ARGC_MAX ? :argc : @closed_world.refusal(name, listed, site[:self_owner],
-                                                                          symbol_installed_names)
+                                                                          symbol_installed_names, instances: instances)
     extra_branches = ''
     if reason == :unlisted_class
       extra = unlisted_class_guards(name, listed, site)
@@ -2021,7 +2030,7 @@ class CodeGen
           "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
         end.join
         listed += extra
-        reason = @closed_world.refusal(name, listed, site[:self_owner], symbol_installed_names)
+        reason = @closed_world.refusal(name, listed, site[:self_owner], symbol_installed_names, instances: instances)
       end
     end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
@@ -2059,7 +2068,8 @@ class CodeGen
     # NOMETHOD_REVIEWED, which is the full build's list (ADR 0226): keep the dispatch.
     return nil if hot_only_active?
 
-    extra = @closed_world.unlisted_classes(name, listed, site[:self_owner], symbol_installed_names)
+    extra = @closed_world.unlisted_classes(name, listed, site[:self_owner], symbol_installed_names,
+                                           instances: receiver_instances(site, name))
     return nil if extra.empty? || extra.size > UNLISTED_CLASS_GUARDS_MAX
     return nil unless extra.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.stable_class_constant?(klass) }
 
@@ -2081,7 +2091,7 @@ class CodeGen
     end
     # The instruction is kept for unlisted_class_call, which checks that it is
     # the send of its own name before trusting SSEND vs SEND.
-    { self_owner: self_owner, insn: irep && idx && irep.instructions[idx] }
+    { self_owner: self_owner, insn: irep && idx && irep.instructions[idx], irep: irep, idx: idx }
   end
 
   def c_string_literal(s)

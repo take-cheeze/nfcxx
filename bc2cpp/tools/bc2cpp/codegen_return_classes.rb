@@ -57,6 +57,7 @@ class CodeGen
 
   # Build the table. Runs once the facts `exact_new_class_at` reads (ClassLayout, class_return_names) are final.
   def compute_return_classes
+    @native_results_ready = false
     @rc_states = {}
     @rc_return = {}
     @rc_send_ireps = Hash.new { |h, k| h[k] = Set.new }
@@ -76,6 +77,9 @@ class CodeGen
       changed |= grow_class_pools
       break unless changed
     end
+    # The numeric flow and the Fixnum proof ask for a register's class set; mid-fixpoint that would
+    # recurse into the flow still being built (NATIVE_RESULT_FACTS, ADR 0302).
+    @native_results_ready = true
   end
 
   # One growth pass; true when a name's set grew or the name was dropped (it may return an unmodelled class).
@@ -115,6 +119,7 @@ class CodeGen
 
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.
   def return_class_def_mask(d)
+    return native_result_def_mask(d, classes: true) if d.owner == '<native>'
     return NumericFlow::OTHER unless d.irep
 
     irep = @ireps[d.irep]
@@ -166,15 +171,18 @@ class CodeGen
     joined
   end
 
-  # Class set of a SEND-family result: a tracked name's set, the receiver's own set for `freeze`, or the
-  # class bit of a stable `Klass.new`.
-  def return_class_send_mask(irep, index, insn, state)
+  # Class set of a SEND-family result: a tracked name's set, the receiver's own set for `freeze`, a native
+  # result fact, or the class bit of a stable `Klass.new`.
+  def return_class_send_mask(irep, index, insn, state = nil)
     name = insn.sym
     return NumericFlow::OTHER unless name
 
     tracked = @rc_return[name]
     return tracked if tracked
-    return return_class_freeze_mask(insn, state) if name == 'freeze' && insn.op == 'SEND0'
+    return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == 'SEND0'
+
+    native = state && %w[SEND SEND0].include?(insn.op) && native_result_flow_mask(name, state[insn.reg.to_i])
+    return native if native
     return NumericFlow::OTHER unless name == 'new' && %w[SEND SEND0].include?(insn.op)
 
     key = [irep.label, index]
