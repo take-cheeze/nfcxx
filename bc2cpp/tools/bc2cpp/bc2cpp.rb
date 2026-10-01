@@ -71,6 +71,7 @@ require_relative 'codegen_numeric_proof'
 require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
+require_relative 'codegen_return_classes'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
@@ -882,9 +883,13 @@ if $PROGRAM_NAME == __FILE__
   warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
   gen.numeric_facts_report.each { |l| warn l }
   warn ''
-  # LCF_ROW_FLOW (ADR 0286): whether the LCF object-kind proof is on, and why not.
+  # LCF_ROW_FLOW (ADR 0294): whether the LCF object-kind proof is on, and why not.
   warn '== LCF row flow (LCF_ROW_FLOW) =='
   warn(gen.lcf_rows_model ? "  on (#{gen.lcf_rows_model.kinds.size} kinds)" : "  off: #{gen.lcf_rows_refusal}")
+  warn ''
+  # RETURN_CLASS_TABLE (ADR 0289): names whose every definition returns one exact class.
+  warn '== return class table (RETURN_CLASS_TABLE) =='
+  gen.return_class_report.each { |l| warn l }
   warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).

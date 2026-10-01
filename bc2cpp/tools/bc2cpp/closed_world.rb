@@ -292,7 +292,7 @@ class ClosedWorld
     end
   end
 
-  # LCF_ROW_FLOW (ADR 0286): no outside file can reopen, subclass or rebind `owner`, so a method
+  # LCF_ROW_FLOW (ADR 0294): no outside file can reopen, subclass or rebind `owner`, so a method
   # lookup that ends at one of its registry definitions cannot be redirected by a native installer.
   def untouched_class?(owner)
     !@global_refusal && !opaque?(owner)

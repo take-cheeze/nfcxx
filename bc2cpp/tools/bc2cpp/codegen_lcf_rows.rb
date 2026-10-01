@@ -2,7 +2,7 @@
 
 require_relative 'lcf_row_flow'
 
-# CodeGen: LCF_ROW_FLOW (docs/adr/0286). Feeds LcfRowFlow's object kinds into the NumericFlow fixpoint and
+# CodeGen: LCF_ROW_FLOW (docs/adr/0294). Feeds LcfRowFlow's object kinds into the NumericFlow fixpoint and
 # reads them back as unguarded exact receiver classes.
 #
 # The proof is on only when the program is exactly what lcf_row_flow.rb models:

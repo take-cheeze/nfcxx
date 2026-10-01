@@ -3,7 +3,7 @@
 # EXACT_CORE_RECEIVER (ADR 0280): an unguarded proof that a receiver is exactly an Array, Hash,
 # Range or String (or a fresh `Klass.new`), so the arms of ADR 0253/0257/0270 can drop their
 # class test. Nothing checks the class at run time, so only a dominating literal or `*rest`
-# write counts, and only while ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint,
+# write counts (plus exact_flow_core_class, ADR 0289), and only while ClosedWorld#exact_instances_singleton_free?. A ClassLayout hint,
 # an annotation or a branch join is a guarded fact and never enters here.
 class CodeGen
   EXACT_LITERAL_CLASS = {
@@ -19,13 +19,14 @@ class CodeGen
     return nil unless @closed_world&.exact_instances_singleton_free? && irep && idx&.positive? && reg
 
     at_entry = ->(entry_reg) { rest_entry_class(irep, entry_reg.to_i) }
-    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, exhausted: at_entry) do |insn, _i, _cur|
+    written = irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, exhausted: at_entry) do |insn, _i, _cur|
       case insn.op
       when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
       when *EXACT_EXTEND_OPS then IrepScans::KEEP
       else EXACT_LITERAL_CLASS[insn.op]
       end
     end
+    written || exact_flow_core_class(irep, idx, reg)
   end
 
   # The site's proof for the arm wrappers: the receiver's exact class, and a lambda that answers

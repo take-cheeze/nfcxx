@@ -232,7 +232,7 @@ class CodeGen
   def numeric_mask_name(mask)
     names = { NumericFlow::INT => 'INT', NumericFlow::FLT => 'FLT', NumericFlow::ARR => 'ARR',
               NumericFlow::HSH => 'HSH', NumericFlow::STR => 'STR', NumericFlow::NIL => 'NIL',
-              NumericFlow::OTHER => 'OTHER' }
+              NumericFlow::OTHER => 'OTHER', NumericFlow::RNG => 'RNG' }
     found = names.filter_map { |bit, name| name if mask.anybits?(bit) }
     @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
     found.empty? ? 'NONE' : found.join('|')
