@@ -6,6 +6,7 @@ require_relative 'touch_scan'
 require_relative 'foreign_definers'
 require_relative 'core_defs'
 require_relative 'native_names'
+require_relative 'native_direct'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -405,6 +406,28 @@ class ClosedWorld
   # this name to be represented in the registry.
   def inherited_lookup_safe?(name, owner)
     stable_class_constant?(owner) && !@unknown_defs.include?(name) && !@outside_names.include?(name)
+  end
+
+  # ADR 0297: inherited_lookup_safe? for a name the RGSS natives register, judged on
+  # the exact class's own lookup chain (`chain`: the class, its superclasses and
+  # every mixin) instead of the global name. Every outside spelling must be a
+  # registration NativeDirect parsed to a class, and none of those classes may sit
+  # on the chain.
+  def exact_chain_lookup_safe?(name, owner, chain)
+    return false unless stable_class_constant?(owner) && !@unknown_defs.include?(name)
+    return true unless @outside_names.include?(name)
+    return false unless native_only_in?(name, '/mruby-rgss/src/')
+
+    registered = NativeDirect.registered_owners(name, @outside_name_paths[name])
+    !registered.nil? && registered.none? { |native_owner| chain.include?(native_owner) }
+  end
+
+  # ADR 0297: the registry's visibility for `name` is the one mruby ends up with.
+  # build_registry follows `private`/`public` in the defining class body only; a
+  # `private :name` that names an inherited method, or one sent dynamically, makes a
+  # copy it never sees.
+  def visibility_stable?(name)
+    !@global_refusal && !@dynamic_visibility && !@visibility_names.include?(name)
   end
 
   # OWNERLESS_NATIVE_DISPATCH: class-independent native bodies may bypass

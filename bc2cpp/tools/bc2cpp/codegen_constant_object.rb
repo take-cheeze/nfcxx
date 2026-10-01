@@ -73,29 +73,6 @@ class CodeGen
     nil
   end
 
-  # ADR 0259: the arm of an UNLISTED_CLASS_GUARDS branch. The receiver is
-  # exactly `klass`, so its lookup is the one closed_world_lookup_target
-  # proves; the send then calls that definition (optional parameters padded), or
-  # raises the ArgumentError its ENTER would. nil keeps the dispatching arm.
-  def unlisted_class_call(klass, name, d, recv, argv)
-    return nil if devirt_blocked_name?(name) || !@closed_world.inherited_lookup_safe?(name, klass)
-
-    target, known = closed_world_lookup_target(name, klass, Set.new)
-    return nil unless known && target&.irep
-
-    irep = @ireps.fetch(target.irep)
-    n = argv.size
-    argc_error = static_argc_error_code(target, irep, n, d)
-    return argc_error if argc_error
-
-    return nil unless poly_arity_fits?(irep, n, true) && !hot_only_excluded?(target.irep) && compiles_clean?(target.irep)
-    return nil unless !@only_owners || @only_owners.include?(target.owner) || @other_owners&.include?(target.owner)
-
-    impl = cpp_name(target.owner, target.name) + '_impl'
-    call_argv, = direct_call_args(target, argv, impl)
-    "// UNLISTED_CLASS_CALL :#{name} -> #{target.owner}##{target.name} (receiver exactly #{klass}), direct C++ call\n" \
-      "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
-  end
   # `attr_accessor` inside `class << self`: a bare ivar access on the class
   # object, which never embeds its ivars.
   def constant_object_accessor_code(candidate, n, d, recv, argv)

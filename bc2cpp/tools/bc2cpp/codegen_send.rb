@@ -1723,14 +1723,14 @@ class CodeGen
   # Follow the proven mruby ancestor order: prepended modules, the owner,
   # included modules (latest include first), then the superclass. An unknown or
   # unstable mixin before the first definition makes the lookup ambiguous.
-  def closed_world_lookup_target(name, owner, active, self_call: false)
+  def closed_world_lookup_target(name, owner, active, self_call: false, any_visibility: false)
     return [nil, false] unless active.add?(owner)
     return [nil, false] if @unknown_mixins.include?(owner)
 
     Array(@prepended_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
-      target, known = closed_world_lookup_target(name, mod, active.dup, self_call: self_call)
+      target, known = closed_world_lookup_target(name, mod, active.dup, self_call: self_call, any_visibility: any_visibility)
       return [nil, false] unless known
       return [target, true] if target
     end
@@ -1739,10 +1739,12 @@ class CodeGen
     unless definitions.empty?
       # CHA_SELF: a self call also reaches a private def, and an attr_* def
       # (no irep) is resolved by its accessor code, not an `_impl`.
+      # any_visibility: the caller decides what a non-public def means for its
+      # send (unlisted_class_call), and takes an attr_* def as well.
       only = definitions.first
       usable = definitions.one? &&
-               (self_call ? (only.irep || (only.kind == :ivar_accessor && only.owner != '<native>')) :
-                            (only.irep && only.visibility == :public))
+               (self_call || any_visibility ? (only.irep || (only.kind == :ivar_accessor && only.owner != '<native>')) :
+                                              (only.irep && only.visibility == :public))
       return [nil, false] unless usable
 
       return [definitions.first, true]
@@ -1753,7 +1755,7 @@ class CodeGen
     Array(@included_modules[owner]).reverse.each do |mod|
       return [nil, false] unless @closed_world.stable_constant_identity?(mod)
 
-      target, known = closed_world_lookup_target(name, mod, active.dup, self_call: self_call)
+      target, known = closed_world_lookup_target(name, mod, active.dup, self_call: self_call, any_visibility: any_visibility)
       return [nil, false] unless known
       return [target, true] if target
     end
@@ -1762,7 +1764,7 @@ class CodeGen
     superclass = 'Object' if superclass == :none && owner != 'Object'
     return [nil, true] if superclass.nil?
 
-    closed_world_lookup_target(name, superclass, active, self_call: self_call)
+    closed_world_lookup_target(name, superclass, active, self_call: self_call, any_visibility: any_visibility)
   end
 
   # DIRECT_CALLABLE: can a call with `n` positional arguments reach `definition`'s compiled `_impl` as a
@@ -2000,7 +2002,7 @@ class CodeGen
       extra = unlisted_class_guards(name, listed, site)
       if extra
         extra_branches = extra.map do |klass|
-          arm = unlisted_class_call(klass, name, d, recv, argv)&.chomp&.gsub("\n", "\n      ") || dispatch.chomp
+          arm = unlisted_class_call(klass, name, d, recv, argv, site)&.chomp&.gsub("\n", "\n      ") || dispatch.chomp
           "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
         end.join
         listed += extra
@@ -2062,7 +2064,9 @@ class CodeGen
                     fixnum_proof_preds(irep)&.fetch(idx, nil).to_a == [idx - 1]
       self_owner = nil unless self_loaded
     end
-    { self_owner: self_owner }
+    # The instruction is kept for unlisted_class_call, which checks that it is
+    # the send of its own name before trusting SSEND vs SEND.
+    { self_owner: self_owner, insn: irep && idx && irep.instructions[idx] }
   end
 
   def c_string_literal(s)

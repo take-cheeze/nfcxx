@@ -333,6 +333,7 @@ class CodeGen
         // (3rd/mruby/src/class.c: `mrb_iv_set(...); return val;`, see
         // MethodDef's own kind: :ivar_accessor comment for the citation).
         mrb_value #{impl}(mrb_state* M, mrb_value self, mrb_value arg) {
+          mrb_check_frozen(M, mrb_obj_ptr(self));
           #{guard}
         #{store.chomp}
           #{guard}
