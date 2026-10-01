@@ -7,6 +7,7 @@ require_relative 'foreign_definers'
 require_relative 'core_defs'
 require_relative 'native_names'
 require_relative 'native_direct'
+require_relative 'dynamic_names'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -44,6 +45,13 @@ class ClosedWorld
                   \b[ \t]*\(?[ \t]*(?![:"'\s])/x
   RUBY_CONST_DYNAMIC = /\b(?:const_set|remove_const|autoload)\b/
   CLONE_SPELLING = /\bmrb_obj_clone\b|"clone"|MRB_SYM\(clone\)/
+  # Project native code that freezes an object, or asks Ruby to (registering a method named
+  # `freeze` is not one). ADR 0299.
+  NATIVE_FREEZE = /\bmrb_obj_freeze\b|\bMRB_SET_FROZEN_FLAG\b|->\s*frozen\s*=(?!=)|
+                   \bmrb_(?:funcall|check_funcall)\w*\s*\([^;]*(?:"freeze"|MRB_SYM\(freeze\))/x
+  # What `x.freeze` leaves of a receiver that is one of these: a builtin value, never an instance of
+  # a user class (ADR 0299).
+  FREEZE_LITERAL_WRITERS = %w[ARRAY ARRAY2 HASH STRING STRCAT RANGE_INC RANGE_EXC].freeze
   # Kernel methods that give an arbitrary receiver a singleton class (`extend` is a global
   # refusal already, see scan_send). ADR 0280.
   SINGLETON_MAKERS = %w[singleton_class define_singleton_method instance_eval instance_exec].freeze
@@ -94,6 +102,8 @@ class ClosedWorld
     @probed_names = Set.new
     @outside_def_names = Set.new
     @self_rebound = false
+    @freeze_possible = false
+    @frozen_constants = Set.new
     @memo = {}
     @desc_memo = {}
     scan_native(native_paths)
@@ -454,6 +464,23 @@ class ClosedWorld
     @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
+  # ADR 0299: no instance of a class the closed world defines can ever be frozen, so a store into
+  # one of its embedded ivars needs no frozen check. Every route to a frozen user object is a
+  # `freeze` (Ruby or native), and each is refused unless provably aimed at a builtin literal:
+  # a send on anything else, `:freeze` or "freeze" spelled where a computed name could reach it
+  # (DynamicNames), project native or foreign Ruby that freezes. mruby's own core freezes only
+  # its builtin values and Data instances (audited against 3rd/mruby), and its Ruby is exempt
+  # from the send scan for the same reason. clone copies a frozen flag, it never sets one.
+  def user_objects_unfrozen?
+    return false if @global_refusal || @freeze_possible
+
+    unless defined?(@user_objects_unfrozen)
+      @user_objects_unfrozen = @frozen_constants.all? { |name| class_constant?(name) } &&
+                               !DynamicNames.universe(@ireps).include?('freeze')
+    end
+    @user_objects_unfrozen
+  end
+
   # No Array/Hash/Range/String instance can gain a singleton class or a mixin: nothing in the
   # world (mruby's own Ruby aside, which never does it to those) names a singleton-making
   # method, opens a singleton class on a non-class object, or creates one from native code.
@@ -529,6 +556,7 @@ class ClosedWorld
       text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
       record_native_touches(path, text, defines_class)
       @clone_sent = true if !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING)
+      @freeze_possible = true if !path.match?(NATIVE_CORE) && text.match?(NATIVE_FREEZE)
       @singleton_makers << [path, :native] if !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON)
       names.merge(text.scan(C_STRING).flatten) if dynamic
       @outside_names.merge(names)
@@ -562,6 +590,7 @@ class ClosedWorld
       text.scan(/^\s*class\s+[\w:]+\s*<\s*([\w:]+)/) { |(sup)| @outside_ruby_supers << simple(sup) }
       record_ruby_touches(path, text)
       @clone_sent = true if text.match?(/\bclone\b/)
+      @freeze_possible = true if !CoreDefs.core_source?(path) && text.match?(/\bfreeze\b/)
       @singleton_makers << [path, :ruby] if !CoreDefs.core_source?(path) && text.match?(RUBY_SINGLETON)
       text.scan(/\b(?:[A-Z]\w*::)*([A-Z]\w*)\s*=(?!=|>)/) { |m| @outside_constant_writes << m.first }
       global!(:outside_dynamic_definition) if text.match?(RUBY_DYNAMIC)
@@ -727,6 +756,7 @@ class ClosedWorld
   def scan_send(irep, insns, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
+    scan_freeze_send(irep, idx, insn) if name == 'freeze'
     scan_visibility_send(insns, idx, insn) if VISIBILITY_SENDS.include?(name)
     @self_rebound = true if SELF_REBINDERS.include?(name)
     if CONST_REBINDERS.include?(name)
@@ -756,6 +786,28 @@ class ClosedWorld
       @unknown_defs << s
       @unknown_defs << "#{s}="
     end
+  end
+
+  # A `freeze` send in the closed world's own Ruby (user_objects_unfrozen?): harmless only when its
+  # receiver is a builtin literal, or a class/module constant (freezing the class object leaves its
+  # instances alone), on every path (dominance, not the nearest writer). The constant is judged
+  # after the scan, when every SETCONST is counted.
+  def scan_freeze_send(irep, idx, insn)
+    return if @freeze_possible
+    return if CoreDefs.core_source?(irep.file) # mruby's own Ruby: builtin values only
+
+    constant = nil
+    harmless = insn.op.start_with?('SEND') && insn.argc.to_i.zero? &&
+               irep.walk_dominating_writers(idx - 1, insn.reg.to_s, use: idx, follow_moves: true) do |writer|
+                 case writer.op
+                 when *FREEZE_LITERAL_WRITERS then true
+                 when 'GETCONST' then (constant = writer.const_name) && true
+                 when 'GETMCNST' then (constant = writer.mcnst_name) && true
+                 end
+               end
+    return @freeze_possible = true unless harmless == true
+
+    @frozen_constants << constant if constant
   end
 
   # `private :a, :b` / `private def a`: the names it hides. Any other argument
