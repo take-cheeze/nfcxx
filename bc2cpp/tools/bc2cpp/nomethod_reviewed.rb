@@ -16,14 +16,29 @@ require 'set'
 
 module NomethodReviewed
   MARKER = %r{/\* CLOSED_WORLD nomethod: (self|recv)\.(\S+) \*/}
+  # GUARD_VIOLATION (ADR 0290): a guard whose else arm the closed world proves dead because
+  # its register holds a stable class constant. Listed, not gated: which of these exist
+  # depends on which callees compile (a hot-only build has sites a full one lacks), so no
+  # two-way list can be exact; the proof is the gate.
+  VIOLATION_MARKER = %r{/\* CLOSED_WORLD guard-violation: (\S+) \*/}
   # Test-only escape for fixture worlds (scripts/bc2cpp_closed_world_check.rb):
   # their dead sites are the point of the fixture, not code a build ships.
   ALLOW_ENV = 'BC2CPP_NOMETHOD_UNREVIEWED'
+  # Generator kill switch: =0 keeps every guard's dispatch fallback (ADR 0290).
+  GUARD_VIOLATION_ENV = 'BC2CPP_GUARD_VIOLATION'
 
   module_function
 
   def marker(name, self_receiver:)
     "/* CLOSED_WORLD nomethod: #{self_receiver ? 'self' : 'recv'}.#{name} */"
+  end
+
+  def violation_marker(name)
+    "/* CLOSED_WORLD guard-violation: #{name} */"
+  end
+
+  def guard_violation_enabled?
+    ENV[GUARD_VIOLATION_ENV] != '0'
   end
 
   def key(owner, method, called)
@@ -37,6 +52,13 @@ module NomethodReviewed
         { key: key(m[:owner], m[:name], called), owner: m[:owner], method: m[:name], called: called,
           self_receiver: recv == 'self' }
       end
+    end
+  end
+
+  # The GUARD_VIOLATION keys of `compiled`, for the stderr listing.
+  def violation_sites(compiled)
+    compiled.flat_map do |m|
+      m[:code].scan(VIOLATION_MARKER).map { |(called)| key(m[:owner], m[:name], called) }
     end
   end
 

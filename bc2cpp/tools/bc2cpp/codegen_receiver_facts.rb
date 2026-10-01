@@ -215,6 +215,53 @@ class CodeGen
     stable ? owner : nil
   end
 
+  # GUARD_VIOLATION (ADR 0290): the bare name of the stable class/module constant that
+  # every definition of `reg` at SEND `idx` reads, or nil. StableClassConstants makes
+  # the name denote one class object for the VM's life, so a guard that only tests
+  # "is this class/module (that class)" cannot fail. Closed world only: the open
+  # world keeps its fallbacks.
+  def stable_constant_register(irep, idx, reg, lexical_owner)
+    return nil unless @closed_world && @closed_world.global_refusal.nil? && guard_violation_enabled? &&
+                      @call_block_expr.nil? && irep && idx && reg && idx < irep.instructions.length
+
+    name = irep.agreed_constant_name(idx, reg.to_s)
+    return name if name && !name.include?('::') && CodeGen.stable_class_constants&.include?(name)
+
+    # A qualified or declared-class constant: the proof behind CLOSED_WORLD_CONSTANT_OBJECT.
+    constant_object_owner(irep, idx, reg, lexical_owner)
+  end
+
+  # The explicit-receiver SEND at `idx` of `irep` when it is the call `name` being compiled,
+  # so its own receiver/argument registers can be asked about.
+  def proof_send_insn(irep, idx, name)
+    insn = irep && idx && irep.instructions[idx]
+    insn if insn && %w[SEND SEND0].include?(insn.op) && insn.sym == name
+  end
+
+  # GUARD_VIOLATION: `Klass.new`'s receiver is the stable constant naming `klass`, so the
+  # class-identity guard cannot fail.
+  def new_receiver_constant_proven?(irep, idx, name, klass, lexical_owner)
+    insn = klass && proof_send_insn(irep, idx, name)
+    constant = insn && stable_constant_register(irep, idx, insn.reg, lexical_owner)
+    !constant.nil? && (klass == constant || klass.to_s.end_with?("::#{constant}"))
+  end
+
+  # GUARD_VIOLATION: the `arg_index`th argument of the call is a stable class/module constant.
+  def constant_argument_proven?(irep, idx, lexical_owner, name, arg_index)
+    insn = proof_send_insn(irep, idx, name)
+    !insn.nil? && !stable_constant_register(irep, idx, (insn.reg.to_i + 1 + arg_index).to_s, lexical_owner).nil?
+  end
+
+  # GUARD_VIOLATION: the call's receiver is a stable class/module constant.
+  def constant_receiver_proven?(irep, idx, lexical_owner, name)
+    insn = proof_send_insn(irep, idx, name)
+    !insn.nil? && !stable_constant_register(irep, idx, insn.reg, lexical_owner).nil?
+  end
+
+  def guard_violation_enabled?
+    NomethodReviewed.guard_violation_enabled?
+  end
+
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
   def straight_line_constant_name(irep, idx, dest_reg)
