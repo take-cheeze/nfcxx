@@ -82,7 +82,7 @@ class CodeGen
 
     @eqq_literal_devirt_safe = %w[== ===].all? do |n|
       defs = @registry[n]
-      defs && defs.size == 1 && defs.first.owner == '<native>'
+      defs && defs.size == 1 && defs.first.owner == '<native>' && eqq_name_unrebound?(n)
     end
   end
 
@@ -219,12 +219,23 @@ class CodeGen
       "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
     when 'is_a?', 'kind_of?'
       arg = argv.first
+      # An alias, undef or Symbol-named install of the name hides the native body from the registry.
+      return dynamic_dispatch_line(d, recv, name, argv) if block_core_world && !name_unrebound?(name)
+
+      # KIND_OF_TYPE_ERROR: any other argument is mrb_get_args' 'c' failure (class.c
+      # ensure_class_type), so a proven-Kernel receiver raises it here; else dispatch.
+      # A singleton class is accepted by 'c' too.
+      other = if kind_of_type_error_direct?(name)
+                "mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, \"TypeError\")), \"%v is not class/module\", #{arg});\n"
+              else
+                dynamic_dispatch_line(d, recv, name, argv)
+              end
       "  // #{name} -- native primitive, no lookup needed (argument type-checked at " \
       "runtime -- see compile_send's own comment)\n" \
-      "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg})) {\n" \
+      "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg}) || mrb_sclass_p(#{arg})) {\n" \
       "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
       "  } else {\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    #{other}" \
       "  }\n"
     when 'equal?'
       arg = argv.first
@@ -361,84 +372,13 @@ class CodeGen
       "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
       "  }\n"
     when '==='
-      # EQQ_TYPE_TAG_DISPATCH: `===` has three native bodies, all static and reading
-      # their argument via mrb_get_arg1 (a frame read), so each is reproduced from
-      # public APIs:
-      #   - CLASS/MODULE/SCLASS: mrb_mod_eqq is mrb_obj_is_kind_of(mrb, arg,
-      #     mrb_class_ptr(mod)).
-      #   - RANGE: range_include (range.c) with mrb_range_beg/end/excl_p and mrb_cmp
-      #     in place of its static r_le/r_gt/r_ge; the switch is the type guard.
-      #   - INTEGER/FLOAT/STRING/SYMBOL/TRUE/FALSE/ARRAY/HASH: mrb_eqq_m is
-      #     mrb_bool_value(mrb_equal(mrb, self, arg)). nil is MRB_TT_FALSE
-      #     (mruby/value.h), so no MRB_TT_NIL case exists (it would not compile).
-      # Excluded: MRB_TT_DATA (mruby-onig-regexp's Regexp has a bytecode `#===`
-      # outside closed_world_mrblib_srcs, and many wrapper types share the tag) and
-      # MRB_TT_PROC (mruby-proc-ext's bytecode Proc#===). They use mrb_funcall.
-      arg = argv.first
-      # EQQ_INTEGER_FAST: `case cmd.code when Cmd::X` is one `===` per arm, and for
-      # an Integer receiver mrb_equal falls back to funcall("==") whenever the values
-      # differ (Integer#== is not the basic identity method). Two Integers are
-      # decided natively whenever no Ruby-defined Integer#== is observable (the
-      # closed-world gate); mixed Integer/Float or bigint still goes through
-      # mrb_equal.
-      integer_case =
-        if builtin_class_send_safe?('==', %w[Integer])
-          "  case MRB_TT_INTEGER:\n" \
-            "    if (mrb_integer_p(#{arg})) {\n" \
-            "      r#{d} = mrb_bool_value(mrb_integer(#{recv}) == mrb_integer(#{arg}));\n" \
-            "      break;\n" \
-            "    }\n" \
-            "    r#{d} = mrb_bool_value(mrb_equal(M, #{recv}, #{arg}));\n" \
-            "    break;\n"
-        else
-          "  case MRB_TT_INTEGER:\n"
-        end
-      "  // === -- native primitive, runtime-guarded per real receiver type\n" \
-      "  // (see compile_native_primitive_send's own EQQ_TYPE_TAG_DISPATCH\n" \
-      "  // comment for why MRB_TT_DATA/MRB_TT_PROC and everything else fall\n" \
-      "  // through to ordinary dispatch)\n" \
-      "  switch (mrb_type(#{recv})) {\n" \
-      "  case MRB_TT_CLASS:\n" \
-      "  case MRB_TT_MODULE:\n" \
-      "  case MRB_TT_SCLASS:\n" \
-      "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{arg}, mrb_class_ptr(#{recv})));\n" \
-      "    break;\n" \
-      "  case MRB_TT_RANGE: {\n" \
-      "    mrb_value bc2cpp_eqq_beg#{d} = mrb_range_beg(M, #{recv});\n" \
-      "    mrb_value bc2cpp_eqq_end#{d} = mrb_range_end(M, #{recv});\n" \
-      "    mrb_bool bc2cpp_eqq_excl#{d} = mrb_range_excl_p(M, #{recv});\n" \
-      "    mrb_bool bc2cpp_eqq_r#{d} = FALSE;\n" \
-      "    if (mrb_nil_p(bc2cpp_eqq_beg#{d})) {\n" \
-      "      mrb_int bc2cpp_eqq_c#{d} = mrb_cmp(M, bc2cpp_eqq_end#{d}, #{arg});\n" \
-      "      bc2cpp_eqq_r#{d} = bc2cpp_eqq_excl#{d} ? (bc2cpp_eqq_c#{d} == 1) : (bc2cpp_eqq_c#{d} == 0 || bc2cpp_eqq_c#{d} == 1);\n" \
-      "    } else {\n" \
-      "      mrb_int bc2cpp_eqq_cb#{d} = mrb_cmp(M, bc2cpp_eqq_beg#{d}, #{arg});\n" \
-      "      if (bc2cpp_eqq_cb#{d} == 0 || bc2cpp_eqq_cb#{d} == -1) {\n" \
-      "        if (mrb_nil_p(bc2cpp_eqq_end#{d})) {\n" \
-      "          bc2cpp_eqq_r#{d} = TRUE;\n" \
-      "        } else {\n" \
-      "          mrb_int bc2cpp_eqq_ce#{d} = mrb_cmp(M, bc2cpp_eqq_end#{d}, #{arg});\n" \
-      "          bc2cpp_eqq_r#{d} = bc2cpp_eqq_excl#{d} ? (bc2cpp_eqq_ce#{d} == 1) : (bc2cpp_eqq_ce#{d} == 0 || bc2cpp_eqq_ce#{d} == 1);\n" \
-      "        }\n" \
-      "      }\n" \
-      "    }\n" \
-      "    r#{d} = mrb_bool_value(bc2cpp_eqq_r#{d});\n" \
-      "    break;\n" \
-      "  }\n" \
-      "#{integer_case}" \
-      "  case MRB_TT_FLOAT:\n" \
-      "  case MRB_TT_STRING:\n" \
-      "  case MRB_TT_SYMBOL:\n" \
-      "  case MRB_TT_TRUE:\n" \
-      "  case MRB_TT_FALSE:\n" \
-      "  case MRB_TT_ARRAY:\n" \
-      "  case MRB_TT_HASH:\n" \
-      "    r#{d} = mrb_bool_value(mrb_equal(M, #{recv}, #{arg}));\n" \
-      "    break;\n" \
-      "  default:\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
-      "    break;\n" \
-      "  }\n"
+      # EQQ_TYPE_TAG_DISPATCH: the tag switch (Module#===, Range#===, Kernel#=== bodies, all
+      # static in mruby and reading their argument from the frame, so reproduced from public
+      # APIs) is the shared bc2cpp_eqq, see eqq_helper_code. MRB_TT_DATA (mruby-onig-regexp's
+      # bytecode Regexp#===) and MRB_TT_PROC (mruby-proc-ext's Proc#===) dispatch by name.
+      return dynamic_dispatch_line(d, recv, name, argv) unless eqq_name_unrebound?('===')
+
+      outlined_eqq_call("r#{d}", recv, argv.first)
     when 'dup'
       # DUP_TYPE_TAG_DISPATCH: exhaustive, no mrb_funcall arm. `dup` has two native
       # registrations: mrb_obj_dup (Kernel, MRB_API; immediates return self, others
