@@ -43,7 +43,12 @@ class CodeGen
   # The bit standing for "exactly +klass+", allocated on first use.
   def numeric_class_bit(klass)
     @numeric_class_bits ||= {}
-    @numeric_class_bits[klass] ||= 1 << (NumericFlow::CLASS_BIT_BASE + @numeric_class_bits.size)
+    @numeric_class_bits[klass] ||= begin
+      bit = NumericFlow::CLASS_BIT_BASE + @numeric_class_bits.size
+      raise 'numeric class bits reached the LCF object kinds (NumericFlow::OBJECT_KIND_BASE)' if bit >= NumericFlow::OBJECT_KIND_BASE
+
+      1 << bit
+    end
   end
 
   def return_class_name_of_bit(bit)

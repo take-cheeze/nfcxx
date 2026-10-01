@@ -1300,6 +1300,8 @@ class CodeGen
     inherited_typed = false
     exact_class_dispatch = false
     exact_via_record = false
+    exact_via_lcf = false
+    lcf_nilable = false
     exact_via_flow = false
     typed_guard_class = nil
     ivar_accessor_target = nil
@@ -1329,6 +1331,13 @@ class CodeGen
         known_class = exact_class = record_class
         exact_via_record = true
       end
+      # LCF_ROW_FLOW (ADR 0294): the flow proves the receiver is exactly one LCF kind (or nil, which only
+      # raises for this name and is tested below).
+      if exact_class.nil? && (lcf_receiver = lcf_exact_receiver(irep, proof_idx, proof_reg, owner_def, name))
+        known_class = exact_class = lcf_receiver.first
+        exact_via_lcf = true
+        lcf_nilable = lcf_receiver.last
+      end
       # RETURN_CLASS_TABLE (ADR 0289): the receiver is a fresh instance of one class on every path,
       # through a local, an ivar slot or a call whose name only returns such instances.
       if exact_class.nil? && (flow_class = exact_flow_user_class(irep, proof_idx, proof_reg))
@@ -1336,7 +1345,7 @@ class CodeGen
         exact_via_flow = true
       end
       if exact_class
-        exact_target = closed_world_exact_target(name, exact_class)
+        exact_target = exact_via_lcf ? lcf_exact_target(name, exact_class) : closed_world_exact_target(name, exact_class)
         if direct_callable?(exact_target, n)
           target = exact_target
           typed = true
@@ -1407,6 +1416,17 @@ class CodeGen
                    elsif exact_via_flow then 'return-class flow: every path holds a fresh'
                    else 'fresh'
                    end
+          if exact_via_lcf
+            note = "  // LCF_ROW_FLOW :#{name} -> #{target.owner}##{target.name} (the class flow proves the receiver is " \
+                   "exactly #{typed_guard_class}#{lcf_nilable ? ' or nil' : ''}), closed-world lookup, direct C++ call " \
+                   "with no class guard or mrb_funcall fallback#{native_note}\n"
+            call = "r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});"
+            return "#{note}  #{call}\n" unless lcf_nilable
+
+            nil_args = argv.empty? ? '' : ", #{argv.size}, #{argv.join(', ')}"
+            return "#{note}  if (mrb_nil_p(#{recv})) {\n    r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{nil_args});\n" \
+                   "  } else {\n    #{call}\n  }\n"
+          end
           note = "  // CLOSED_WORLD_EXACT_CLASS :#{name} -> #{target.owner}##{target.name} " \
                  "(#{origin} #{typed_guard_class}.new; stable class constant and standard constructor), " \
                  "closed-world lookup, direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
