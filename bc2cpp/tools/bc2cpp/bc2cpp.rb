@@ -62,6 +62,7 @@ require_relative 'codegen_core_methods'
 require_relative 'codegen_receiver_facts'
 require_relative 'codegen_record_hash'
 require_relative 'codegen_lcf_rows'
+require_relative 'codegen_frozen_tables'
 require_relative 'codegen_emit'
 require_relative 'codegen_method'
 require_relative 'codegen_rescue'
@@ -893,6 +894,11 @@ if $PROGRAM_NAME == __FILE__
   # LCF_ROW_FLOW (ADR 0294): whether the LCF object-kind proof is on, and why not.
   warn '== LCF row flow (LCF_ROW_FLOW) =='
   warn(gen.lcf_rows_model ? "  on (#{gen.lcf_rows_model.kinds.size} kinds)" : "  off: #{gen.lcf_rows_refusal}")
+  warn ''
+  # FROZEN_TABLES (ADR 0306): frozen Array/Hash literals whose slot classes are tracked.
+  warn '== frozen tables (FROZEN_TABLES) =='
+  warn(gen.frozen_tables_model ? "  on (#{gen.frozen_tables_model.shapes.size} shapes)" : "  off: #{gen.frozen_tables_refusal}")
+  gen.frozen_tables_report.each { |l| warn l }
   warn ''
   # RETURN_CLASS_TABLE (ADR 0289): names whose every definition returns one exact class.
   warn '== return class table (RETURN_CLASS_TABLE) =='

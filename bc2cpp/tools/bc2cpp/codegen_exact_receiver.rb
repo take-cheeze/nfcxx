@@ -26,7 +26,7 @@ class CodeGen
       else EXACT_LITERAL_CLASS[insn.op]
       end
     end
-    written || exact_flow_core_class(irep, idx, reg)
+    written || exact_flow_core_class(irep, idx, reg) || frozen_table_exact_class(irep, idx, reg)
   end
 
   INDEX_EXACT_NOTE = "// INDEX_EXACT -- receiver is exactly this class (unguarded proof, ADR 0296)\n  "
