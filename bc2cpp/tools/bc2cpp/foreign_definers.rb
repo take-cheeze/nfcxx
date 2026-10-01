@@ -128,7 +128,8 @@ module ForeignDefiners
     end
 
     def record(name)
-      owner = current_owner
+      # A top-level `def` defines a private method on Object.
+      owner = current_owner || (@stack.empty? ? 'Object' : nil)
       @names[owner] << name if owner
     end
 

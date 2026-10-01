@@ -29,6 +29,15 @@ class CodeGen
     written || exact_flow_core_class(irep, idx, reg)
   end
 
+  INDEX_EXACT_NOTE = "// INDEX_EXACT -- receiver is exactly this class (unguarded proof, ADR 0296)\n  "
+
+  # 'Array' | 'Hash' when GETIDX/GETIDX0/SETIDX's receiver register is exactly that class, so its
+  # fast path needs no class test.
+  def index_exact_class(irep, idx, reg)
+    klass = irep && idx && reg && exact_core_value_class(irep, idx, reg)
+    %w[Array Hash].include?(klass) ? klass : nil
+  end
+
   # The site's proof for the arm wrappers: the receiver's exact class, and a lambda that answers
   # the exact class of an argument register (nil when it is not a plain register or unproven).
   # `new_class` is the fresh `Klass.new` proof of compile_send (exact_new_receiver_class).

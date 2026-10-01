@@ -1354,6 +1354,16 @@ class CodeGen
         end
       end
     end
+    # An RGSS native instance the flow proves exact (an ivar-held Bitmap, Sprite, Window ...) calls
+    # its registered entry point directly (ADR 0281's arm, ADR 0296's proof).
+    if target.nil? && !self_implicit && exact_via_flow && NATIVE_WRAPPER_CLASS_ACCESSORS.key?(exact_class) && irep && proof_idx
+      int_proven = lambda do |position|
+        reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
+        reg && proven_fixnum_operand?(irep, proof_idx, unshift_proof_reg(reg.to_i, trace_reg_offset).to_s, owner_def)
+      end
+      native_exact = native_exact_direct_code(name, d, recv, argv, exact_class, int_proven: int_proven)
+      return native_exact if native_exact
+    end
     # ELEMENT_CLASS_SUPPORT: the same TYPED/IVAR_ACCESSOR resolution fed by the
     # element hint (with_element_hint) for an inlined-loop parameter, which no
     # instruction writes. After the ordinary trace, so that path keeps priority by

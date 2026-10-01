@@ -169,3 +169,60 @@ class CodeGen
     parts.empty? ? 'NONE' : parts.join('|')
   end
 end
+
+# CodeGen: the nil half of a pooled class set (ADR 0296).
+class CodeGen
+  # Classes whose methods nil answers: itself and what it inherits. The ROM scan names a class
+  # after its `mrb->nil_class` field ("Nil"), its boot variable ("Basic_object") or its constant.
+  NIL_OWNER_NAMES = %w[NilClass Nil Object Kernel BasicObject Basic_object].freeze
+
+  # Modules that reach nil through an include or prepend on one of its ancestors.
+  def nil_ancestor_modules
+    @nil_ancestor_modules ||= begin
+      found = Set.new(NIL_OWNER_NAMES)
+      queue = NIL_OWNER_NAMES.dup
+      until queue.empty?
+        owner = queue.shift
+        (Array(@included_modules[owner]) + Array(@prepended_modules[owner])).each { |mod| queue << mod if found.add?(mod) }
+      end
+      found
+    end
+  end
+
+  # nil has no method +name+ anywhere in the build, so `nil.name` only raises NoMethodError: no
+  # Ruby definition on nil's ancestors (outside sources and dynamic installers included), no
+  # method_missing on them, and every native registration of the name belongs to a resolved class
+  # that nil does not descend from. Anything unresolved answers false.
+  def nil_unanswerable?(name)
+    @nil_unanswerable ||= {}
+    return @nil_unanswerable[name] if @nil_unanswerable.key?(name)
+
+    @nil_unanswerable[name] = compute_nil_unanswerable(name)
+  end
+
+  def compute_nil_unanswerable(name)
+    nil_unanswerable_refusal(name).nil?
+  end
+
+  # nil, or why nil may answer +name+. The native registrations are read from the build's own
+  # sources that spell the name (the closed world's scan, not the caller's NATIVE_SRCS list, so a gem
+  # that list leaves out cannot hide a NilClass method). Class-method registrations are skipped by the
+  # scan on purpose (they never shadow an instance lookup); a definition through a helper that takes
+  # the name as a literal is outside what any bc2cpp native scan sees.
+  def nil_unanswerable_refusal(name)
+    world = block_core_world
+    return :no_world unless world && name
+    return :installed if symbol_installed_names.nil? || symbol_installed_names.include?(name)
+    return :foreign_ruby unless world.nil_foreign_definition_free?(name, nil_ancestor_modules.to_a)
+    return :method_missing if (world.method_missing_classes.to_a & nil_ancestor_modules.to_a).any?
+    return :registry if (@registry[name] || []).any? { |definition| nil_ancestor_modules.include?(definition.owner) }
+
+    world.native_paths_spelling(name).each do |path|
+      registrations, opaque = NativeExpressionDevirt.scan_class_registrations([path])
+      owners = registrations.fetch(name, []).map { |entry| entry[:owner]&.fetch(:class_name, nil) } + opaque.fetch(name, [])
+      return :unresolved_native_owner if owners.any?(&:nil?)
+      return :native_on_nil if owners.any? { |owner| nil_ancestor_modules.include?(owner) }
+    end
+    nil
+  end
+end

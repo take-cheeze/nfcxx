@@ -271,6 +271,21 @@ class ClosedWorld
     !@mm_classes.include?('NilClass')
   end
 
+  # NIL_RECEIVER (ADR 0296): no foreign Ruby source defines, aliases or re-scopes +name+ on any of
+  # +owners+ (the classes and modules nil answers through), nothing defines it by a computed name,
+  # and NilClass has no method_missing. Finer than nil_call_free?, which refuses a name any outside
+  # class defines (`size`, `first` on Array).
+  def nil_foreign_definition_free?(name, owners)
+    return false if @global_refusal || @unknown_defs.include?(name) || @mm_classes.include?('NilClass')
+
+    owners.none? { |owner| ForeignDefiners.defines?(@ruby_paths, owner, name) }
+  end
+
+  # Every native source of the build that spells +name+ (a definition, an alias or a funcall).
+  def native_paths_spelling(name)
+    (@outside_name_paths[name] || []).to_a.sort
+  end
+
   # `name` is spelled only by the given native files, and no outside Ruby.
   def native_only_in?(name, path_fragment)
     paths = @outside_name_paths[name]

@@ -197,7 +197,32 @@ class CodeGen
 
     states = return_class_states(irep)
     state = states && states[idx]
-    state && return_class_of_mask(state[r])
+    state && return_class_of_mask(exact_flow_strip_nil(irep, idx, r, state[r]))
+  end
+
+  # The raw class set of a register at an instruction (NIL included), nil when unproven.
+  def exact_flow_mask(irep, idx, reg)
+    return nil unless @rc_states && irep && idx && reg && @closed_world&.exact_instances_singleton_free?
+
+    r = reg.to_i
+    return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+
+    states = return_class_states(irep)
+    state = states && states[idx]
+    state && state[r]
+  end
+
+  # Inside a NILABLE_RECEIVER non-nil arm the one receiver register the arm tested is not nil.
+  def exact_flow_strip_nil(irep, idx, reg, mask)
+    @nonnil_receiver == [irep.label, idx, reg] ? mask & ~NumericFlow::NIL : mask
+  end
+
+  def with_nonnil_receiver(key)
+    previous = @nonnil_receiver
+    @nonnil_receiver = key
+    yield
+  ensure
+    @nonnil_receiver = previous
   end
 
   # 'Array' | 'Hash' | 'String' | 'Range' (a core class the ADR 0253/0257/0270 arms use), or nil.

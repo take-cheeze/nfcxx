@@ -21,11 +21,14 @@ module SymbolCache
     attr_accessor :nomethod_used
     # GUARD_VIOLATION (ADR 0290): the same for bc2cpp_guard_violation.
     attr_accessor :violation_used
+    # NIL_RECEIVER (ADR 0296): the same for bc2cpp_nil_receiver.
+    attr_accessor :nil_receiver_used
 
     def initialize
       @index = {}
       @nomethod_used = false
       @violation_used = false
+      @nil_receiver_used = false
     end
 
     def index_for(literal)
@@ -58,11 +61,12 @@ module SymbolCache
   # CLOSED_WORLD's `bc2cpp_nomethod_named(M, RECV, "name"...)` becomes
   # `bc2cpp_nomethod(M, RECV, i...)` the same way, and GUARD_VIOLATION's
   # `bc2cpp_guard_violation_named(M, RECV, "name", "site", ...)` becomes
-  # `bc2cpp_guard_violation(M, RECV, i, "site", ...)`.
+  # `bc2cpp_guard_violation(M, RECV, i, "site", ...)`; NIL_RECEIVER's
+  # `bc2cpp_nil_receiver_named(M, RECV, "name", ...)` becomes `bc2cpp_nil_receiver(M, RECV, i, ...)`.
   def rewrite_funcalls(code, table)
     out = +''
     pos = 0
-    while (start = code.index(/\b(mrb_funcall|bc2cpp_nomethod_named|bc2cpp_guard_violation_named)\(M,\s*/, pos))
+    while (start = code.index(/\b(mrb_funcall|bc2cpp_nomethod_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
@@ -74,9 +78,11 @@ module SymbolCache
         index = table.index_for(name[1])
         table.nomethod_used = true if kind == 'bc2cpp_nomethod_named'
         table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
+        table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
                       when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
+                      when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
         out << code[pos...start] << replacement
@@ -95,7 +101,7 @@ module SymbolCache
   def send_indices(code)
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|guard_violation)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|guard_violation|nil_receiver)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*[,)]/, 1]
@@ -170,6 +176,7 @@ module SymbolCache
       }
       #{table.nomethod_used ? NOMETHOD : ''}
       #{table.violation_used ? GUARD_VIOLATION : ''}
+      #{table.nil_receiver_used ? NIL_RECEIVER : ''}
     CPP
   end
 
@@ -257,4 +264,29 @@ module SymbolCache
     }
   CPP
   private_constant :GUARD_VIOLATION
+
+  # NIL_RECEIVER (docs/adr/0296): the nil arm of a receiver the class pools prove is nil or one
+  # class, for a name nil does not answer. It is a real program path (a nil dereference), so it
+  # dispatches and lets mruby raise its own NoMethodError; only a dispatch that finds a method,
+  # which means nil_unanswerable? was wrong, is an error of its own.
+  NIL_RECEIVER = <<~CPP
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nil_receiver_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
+      mrb_sym mid = bc2cpp_sym(M, i);
+      bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+      mrb_raisef(M, mrb_exc_get_id(M, mrb_intern_lit(M, "RuntimeError")),
+                 "bc2cpp: closed-world proof violated: nil#%n was proven undefined but dispatched", mid);
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i) {
+      bc2cpp_nil_receiver_argv(M, recv, i, 0, nullptr);
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_nil_receiver(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      bc2cpp_nil_receiver_argv(M, recv, i, argc, argv);
+    }
+  CPP
+  private_constant :NIL_RECEIVER
 end
