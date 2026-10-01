@@ -1337,7 +1337,7 @@ if $PROGRAM_NAME == __FILE__
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
-  # NUMERIC_SLOW_PATH (ADR 0290): the by-name calls of the numeric arms' else live here once per helper.
+  # NUMERIC_SLOW_PATH (ADR 0292): the by-name calls of the numeric arms' else live here once per helper.
   numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''

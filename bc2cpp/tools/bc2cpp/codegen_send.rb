@@ -935,7 +935,7 @@ class CodeGen
     if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
       call = numeric_slow_call(name, d, recv, argv, float: numeric_slow_float_safe?(name))
       return <<~CPP
-          // FIXNUM_ARITHMETIC :#{name} -- NUMERIC_SLOW_PATH (ADR 0290): mruby's own Integer/Float body, by-name call only inside the helper
+          // FIXNUM_ARITHMETIC :#{name} -- NUMERIC_SLOW_PATH (ADR 0292): mruby's own Integer/Float body, by-name call only inside the helper
           #{call.chomp}
       CPP
     end

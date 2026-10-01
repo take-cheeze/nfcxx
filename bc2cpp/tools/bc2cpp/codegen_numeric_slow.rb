@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-# CodeGen: NUMERIC_SLOW_PATH (ADR 0290). The else of a guarded numeric arm is one typed helper per
+# CodeGen: NUMERIC_SLOW_PATH (ADR 0292). The else of a guarded numeric arm is one typed helper per
 # operator that runs the C function the Integer/Float method (or vm.c's inline pair) runs for the
 # operand tags, and dispatches by name only for a class it does not own. What it cannot match
 # exactly (zero divisor, MRB_INT_MIN count, Float#%) stays on the by-name call.
 class CodeGen
   NUMERIC_SLOW_PRELUDE = <<~CPP
-    // NUMERIC_SLOW_PATH (ADR 0290): mruby's bigint entry points are declared only in
+    // NUMERIC_SLOW_PATH (ADR 0292): mruby's bigint entry points are declared only in
     // mruby/internal.h, which has no C linkage guard.
     #ifdef MRB_USE_BIGINT
     extern "C" mrb_value mrb_bint_div(mrb_state*, mrb_value, mrb_value);
