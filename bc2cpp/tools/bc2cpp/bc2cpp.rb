@@ -938,6 +938,12 @@ if $PROGRAM_NAME == __FILE__
     lost.map { |d| HotMethods.key(d) }.uniq.sort.each { |k| warn "  NOT_COMPILED #{k}" }
   end
 
+  # SITE_PROFILE (ADR 0298): opt-in counters on by-name dispatch; unset leaves stdout untouched.
+  if (site_profile_dir = ENV['BC2CPP_SITE_PROFILE']) && !site_profile_dir.empty?
+    require_relative 'site_profile'
+    SiteProfile.capture_stdout(site_profile_dir, symbol)
+  end
+
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <string.h>'
