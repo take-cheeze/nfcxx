@@ -52,6 +52,9 @@ class CodeGen
     argv = call_arguments || (1..n).map { |k| "r#{d.to_i + k}" }
     new_proof_idx = idx || trace_idx
     new_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
+    # GUARD_VIOLATION: the original SEND whose own registers the proofs read; an inlined
+    # loop body that substitutes its receiver or arguments has none.
+    guard_proof_site = call_receiver.nil? && call_arguments.nil? && n <= FUNCALL_ARGC_MAX ? new_proof_idx : nil
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.enter
@@ -154,7 +157,13 @@ class CodeGen
     # Keep dispatch for other receiver classes and Complex arguments.
     if name == '/' && n == 1 && builtin_class_send_safe?(name, %w[Float])
       arg = argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      # An Integer receiver (a bigint operand, or one the tag pairs of OP_DIV did not cover) runs
+      # int_div in the helper when Integer#/ cannot have been replaced; else every other class dispatches.
+      fallback = if builtin_class_send_safe?(name, %w[Integer Numeric])
+                   numeric_slow_call(name, d, recv, argv)
+                 else
+                   dynamic_dispatch_line(d, recv, name, argv)
+                 end
       return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, guarded by exact Float type\n" \
              "  #ifdef MRB_USE_COMPLEX\n" \
              "  if (mrb_type(#{recv}) == MRB_TT_FLOAT && mrb_type(#{arg}) != MRB_TT_COMPLEX) {\n" \
@@ -190,7 +199,11 @@ class CodeGen
           padded_dims = dims + Array.new(3 - dims.size, '1')
           call = "r#{d} = #{native[:fn]}(M, #{native[:class_fn]}(), #{n}, #{padded_dims.join(', ')});"
           class_guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
-          fallback = dynamic_dispatch_line(d, recv, name, argv).chomp
+          fallback = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+                       guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY').chomp
+                     else
+                       dynamic_dispatch_line(d, recv, name, argv).chomp
+                     end
           return <<~CPP
               // RGSS Table.new -- integer conversion and allocation match Table#initialize
               if (#{class_guard}) {
@@ -248,6 +261,17 @@ class CodeGen
                 "and passes #{class_value} as the exact native class pointer.\n"].join
         call = "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n"
         return "#{note}  #{call}" unless guard
+
+        # GUARD_VIOLATION: the class test cannot fail; only the argument tags still can.
+        if class_guard && new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+          inner = arg_checks ? "if (#{arg_checks}) {\n      #{call}    } else {\n      #{dynamic_dispatch_line(d, recv, name, argv)}    }\n" : call
+          return "#{note}  // GUARD_VIOLATION: #{recv} is the stable constant #{known}; a failed class test is an error\n" \
+                 "  if (#{class_guard}) {\n" \
+                 "    #{inner}" \
+                 "  } else {\n" \
+                 "    #{guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')}" \
+                 "  }\n"
+        end
 
         return "#{note}" \
                "  if (#{guard}) {\n" \
@@ -379,12 +403,17 @@ class CodeGen
                      "  #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n"
             end
 
+            else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+                         guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')
+                       else
+                         dynamic_dispatch_line(d, recv, name, argv)
+                       end
             return "#{note}" \
                    "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
                    "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
                    "    #{init_impl}(M, #{(['r' + d] + call_args).join(', ')});\n" \
                    "  } else {\n" \
-                   "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+                   "    #{else_arm}" \
                    "  }\n"
           end
         end
@@ -420,8 +449,13 @@ class CodeGen
                "standard Class#new/allocate lookup is proven and #initialize remains ordinary runtime dispatch.\n"
         class_expr = builtin_class_expr || owner_class_ptr_expr(known)
         guard = "mrb_class_p(#{recv}) && mrb_class_ptr(#{recv}) == #{class_expr}"
+        else_arm = if new_receiver_constant_proven?(irep, guard_proof_site, name, known, owner_def&.owner)
+                     guard_violation_line(d, recv, name, argv, 'NEW_IDENTITY')
+                   else
+                     dynamic_dispatch_line(d, recv, name, argv)
+                   end
         return [note, "  if (#{guard}) {\n", construction,
-                "  } else {\n", "    #{dynamic_dispatch_line(d, recv, name, argv)}", "  }\n"].join
+                "  } else {\n", "    #{else_arm}", "  }\n"].join
       end
     end
 
@@ -927,16 +961,10 @@ class CodeGen
     end
 
     if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
-      left, right = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      helper = { '+' => 'mrb_num_add', '-' => 'mrb_num_sub', '*' => 'mrb_num_mul' }.fetch(name)
+      call = numeric_slow_call(name, d, recv, argv, float: numeric_slow_float_safe?(name))
       return <<~CPP
-          // FIXNUM_ARITHMETIC :#{name} -- an Integer receiver (Fixnum or bigint) with a Fixnum/bigint/Float operand runs Integer##{name}'s own body through mruby's overflow-aware numeric helper
-          if (bc2cpp_integer_recv_p(#{left}) && bc2cpp_integer_operand_p(#{right})) {
-            r#{d} = #{helper}(M, #{left}, #{right});
-          } else {
-            #{fallback.chomp}
-          }
+          // FIXNUM_ARITHMETIC :#{name} -- NUMERIC_SLOW_PATH (ADR 0292): mruby's own Integer/Float body, by-name call only inside the helper
+          #{call.chomp}
       CPP
     end
 
@@ -948,7 +976,7 @@ class CodeGen
     # that was ARRAY_PUSH-only stays so when Integer#<< is overridden in Ruby.
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Integer])
       value = argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv).chomp
+      fallback = numeric_slow_call(name, d, recv, argv).chomp
       array_arm = ''
       if builtin_class_send_safe?(name, %w[Array])
         array_arm = <<~CPP
@@ -960,7 +988,7 @@ class CodeGen
         CPP
       end
       return <<~CPP
-          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers; overflow keeps ordinary dispatch
+          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers inline; overflow to a bigint, a bigint receiver and other classes take NUMERIC_SLOW_PATH
           if (mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN) {
             mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
             if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
@@ -1038,7 +1066,7 @@ class CodeGen
 
     if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      fallback = numeric_slow_call(name, d, recv, argv)
       operation = if name == '%'
                     <<~CPP.chomp
                       mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
@@ -1058,7 +1086,7 @@ class CodeGen
                     "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));"
                   end
       return <<~CPP
-          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics with Ruby fallback
+          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
           if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}) {
             #{operation}
           } else {
@@ -1069,9 +1097,9 @@ class CodeGen
 
     if name == '>>' && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
       value, width = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      fallback = numeric_slow_call(name, d, recv, argv)
       return <<~CPP
-          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases retain Ruby dispatch
+          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases take NUMERIC_SLOW_PATH
           {
           mrb_bool bc2cpp_shift_fast = FALSE;
           mrb_int bc2cpp_shift_result = 0;
@@ -1119,10 +1147,10 @@ class CodeGen
 
     if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      fallback = numeric_slow_call(name, d, recv, argv)
       operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
       return <<~CPP
-          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison with Ruby fallback
+          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
           if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
             r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
           } else {
@@ -1153,13 +1181,13 @@ class CodeGen
 
     if name == 'key?' && n == 1 && !@native_registered_expressions.key?(name) &&
        builtin_class_send_safe?(name, %w[Hash])
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     if name == 'to_s' && n.zero? && !devirt_blocked_name?(name) &&
        builtin_class_send_safe?(name, %w[Array Hash Integer String]) &&
        builtin_class_send_safe?('inspect', %w[Array Hash])
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     # TO_I_BUILTIN_TYPE_TAG_DISPATCH: the native registry has class-specific
@@ -1167,7 +1195,7 @@ class CodeGen
     # and keeps ordinary dispatch for receiver types it does not implement.
     if name == 'to_i' && n.zero? &&
        builtin_class_send_safe?(name, %w[Integer Float String])
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     # Resolve compiled MONO/TYPED targets first; only the final POLY fallback uses
@@ -1182,7 +1210,7 @@ class CodeGen
 
     if (expected_n = NATIVE_PRIMITIVE_SEND_ARITY[name]) && n == expected_n && ownerless_native_dispatch_safe?(name) &&
        (!@native_registered_expressions.key?(name) || name == 'to_s')
-      return compile_native_primitive_send(name, d, recv, argv)
+      return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
     end
 
     keywordless = compile_keywordless_call(name: name, d: d, recv: recv, n: n, argv: argv, self_implicit: self_implicit,
@@ -1554,7 +1582,7 @@ class CodeGen
                  "  r#{d} = #{expression};\n"
         end
 
-        return compile_native_primitive_send(name, d, recv, argv)
+        return compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
       end
 
       # Inlined block bodies pass no `idx` (their registers are shifted) but carry
@@ -1978,6 +2006,16 @@ class CodeGen
     return error if extra_branches.empty?
 
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
+  end
+
+  # GUARD_VIOLATION (docs/adr/0290): the else arm of a guard whose test the closed world
+  # proves cannot fail. The marker keeps the name past SymbolCache's rewrite (as for
+  # nomethod) and `@@SITE@@` becomes the enclosing `Owner#method` in bc2cpp.rb; the site's
+  # arguments are kept only for -DBC2CPP_GUARD_VIOLATION_DISPATCH.
+  def guard_violation_line(d, recv, name, argv, family)
+    args = ", #{argv.size}#{argv.map { |a| ", #{a}" }.join}"
+    "r#{d} = bc2cpp_guard_violation_named(M, #{recv}, \"#{name}\", \"@@SITE@@ (#{family})\"#{args}); " \
+      "#{NomethodReviewed.violation_marker(name)}\n"
   end
 
   # UNLISTED_CLASS_GUARDS: a definer class the chain leaves out (its definition

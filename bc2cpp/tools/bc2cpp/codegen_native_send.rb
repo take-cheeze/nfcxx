@@ -97,8 +97,8 @@ class CodeGen
   # clear (RGSS::ErrorReport.clear), include? (mruby-rgss array_include.rb),
   # member? (Game::Battle::Combatant#member?). empty? and size also have
   # bytecode definitions (Game::MoveRoute#empty?, Game::Party#size), so they use
-  # per-class guards below; size excludes String because its body uses the
-  # private, build-flag-dependent RSTRING_CHAR_LEN.
+  # per-class guards below; String#size comes from NativeCoreDirect instead, because
+  # its body uses the string.c-private RSTRING_CHAR_LEN (ADR 0291).
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'values' => 0,
@@ -178,7 +178,8 @@ class CodeGen
   # Guarded direct C++ for one NATIVE_PRIMITIVE_SEND_ARITY name, or an exact-class
   # expression generated from registered native C methods. The per-method
   # soundness notes are at compile_send's call site.
-  def compile_native_primitive_send(name, d, recv, argv)
+  # `proof` is [irep, site index] of the call (GUARD_VIOLATION, ADR 0290), nil without one.
+  def compile_native_primitive_send(name, d, recv, argv, proof: nil)
     if @native_registered_expressions.key?(name) && name != 'to_s'
       return compile_native_registered_expression(name, d, recv, argv)
     end
@@ -219,12 +220,18 @@ class CodeGen
       "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
     when 'is_a?', 'kind_of?'
       arg = argv.first
+      # GUARD_VIOLATION: a stable class/module constant argument always passes the type test.
+      else_arm = if proof && constant_argument_proven?(*proof, name, 0)
+                   guard_violation_line(d, recv, name, argv, 'CLASS_ARGUMENT')
+                 else
+                   dynamic_dispatch_line(d, recv, name, argv)
+                 end
       "  // #{name} -- native primitive, no lookup needed (argument type-checked at " \
       "runtime -- see compile_send's own comment)\n" \
       "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg})) {\n" \
       "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
       "  } else {\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    #{else_arm}" \
       "  }\n"
     when 'equal?'
       arg = argv.first
@@ -393,6 +400,13 @@ class CodeGen
         else
           "  case MRB_TT_INTEGER:\n"
         end
+      # GUARD_VIOLATION: a stable class/module constant receiver always takes the
+      # CLASS/MODULE arm, so the default arm is an error rather than a dispatch.
+      eqq_default = if proof && constant_receiver_proven?(*proof, name)
+                      guard_violation_line(d, recv, name, argv, 'CLASS_EQQ')
+                    else
+                      dynamic_dispatch_line(d, recv, name, argv)
+                    end
       "  // === -- native primitive, runtime-guarded per real receiver type\n" \
       "  // (see compile_native_primitive_send's own EQQ_TYPE_TAG_DISPATCH\n" \
       "  // comment for why MRB_TT_DATA/MRB_TT_PROC and everything else fall\n" \
@@ -436,7 +450,7 @@ class CodeGen
       "    r#{d} = mrb_bool_value(mrb_equal(M, #{recv}, #{arg}));\n" \
       "    break;\n" \
       "  default:\n" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv)}" \
+      "    #{eqq_default}" \
       "    break;\n" \
       "  }\n"
     when 'dup'
@@ -522,19 +536,27 @@ class CodeGen
     value, extra_guard = INTEGER_UNARY_OPS[name]
     return nil unless value && n.zero? && native_only_mono?(name) && integer_ancestry_native?(name)
 
+    # NUMERIC_SLOW_PATH: a Float receiver runs Numeric#-@ / #zero? too (both Ruby over Numeric), so
+    # it joins only when Float's ancestry is as clean as Integer's; `zero?` has nothing to add otherwise.
+    float = integer_ancestry_native?(name, 'Float')
+    fallback = if name == 'zero?' && !float
+                 dynamic_dispatch_line(d, recv, name, argv)
+               else
+                 numeric_slow_call(name, d, recv, argv, float: name == '-@' && float)
+               end
     <<~CPP
-        // INTEGER_UNARY :#{name} -- Integer receiver computed inline; anything else keeps the dispatch
+        // INTEGER_UNARY :#{name} -- Integer receiver computed inline; bigint, Float and other classes take NUMERIC_SLOW_PATH
         if (mrb_integer_p(#{recv})#{format(extra_guard, r: recv)}) {
           r#{d} = #{format(value, r: recv)};
         } else {
-          #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+          #{fallback.chomp}
         }
     CPP
   end
 
-  # builtin_class_send_safe? over Integer's ancestry and every module mixed into it.
-  def integer_ancestry_native?(name)
-    owners = %w[Integer Numeric Comparable]
+  # builtin_class_send_safe? over `klass`'s ancestry (Integer by default) and every module mixed into it.
+  def integer_ancestry_native?(name, klass = 'Integer')
+    owners = [klass, 'Numeric', 'Comparable']
     queue = owners.dup
     until queue.empty?
       owner = queue.shift
@@ -548,6 +570,12 @@ class CodeGen
     builtin_class_send_safe?(name, owners)
   end
 
+  # The send after the last generated arm. NativeCoreDirectFallback adds the audited core arms
+  # the registered expressions could not derive (String#size).
+  def registered_expression_fallback(_d, _recv, _name, _argv, dispatch)
+    dispatch
+  end
+
   # Emit a generated native expression behind a runtime type-tag guard. Heap
   # objects also require their exact built-in class pointer; Float and Symbol
   # are immediate values and use only their unambiguous type tags.
@@ -556,6 +584,8 @@ class CodeGen
     fallback = dynamic_dispatch_line(d, recv, name, argv)
     return fallback unless entries && !entries.empty?
     return fallback unless entries.all? { |entry| entry[:arity] == argv.length }
+
+    fallback = registered_expression_fallback(d, recv, name, argv, fallback)
 
     arms = entries.map do |entry|
       owner = entry[:owner]
