@@ -169,6 +169,22 @@ module NativeCoreDirect
                 }
                 return self;
               C
+    # String#size and #length are one function, mrb_str_size. Its RSTRING_CHAR_LEN is a string.c
+    # macro whose meaning follows MRB_UTF8_STRING, so the helper mirrors only the byte-length
+    # meaning (pinned by the :source check) and keeps the send for the UTF-8 meaning.
+    *%w[size length].map do |name|
+      Entry.new(name: name, owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+                expression: "bc2cpp_str_#{name}(M, recv)", helper: "bc2cpp_str_#{name}",
+                apis: [],
+                checks: [['mrb_str_size', <<~C, :exact],
+                  mrb_int len = RSTRING_CHAR_LEN(self);
+                  return mrb_int_value(mrb, len);
+                C
+                         ['string.c', <<~C, :source]])
+                  #else
+                  #define RSTRING_CHAR_LEN(s) RSTRING_LEN(s)
+                C
+    end,
     Entry.new(name: 'bytes', owner: 'String', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
               expression: 'bc2cpp_str_bytes(M, recv)', helper: 'bc2cpp_str_bytes',
               apis: [],
@@ -267,6 +283,24 @@ module NativeCoreDirect
         default:
           return ary;
         }
+      }
+    CPP
+    'bc2cpp_str_size' => <<~CPP,
+      static inline mrb_value bc2cpp_str_size(mrb_state* M, mrb_value str) {
+      #ifdef MRB_UTF8_STRING
+        return mrb_funcall(M, str, "size", 0);
+      #else
+        return mrb_int_value(M, RSTRING_LEN(str));
+      #endif
+      }
+    CPP
+    'bc2cpp_str_length' => <<~CPP,
+      static inline mrb_value bc2cpp_str_length(mrb_state* M, mrb_value str) {
+      #ifdef MRB_UTF8_STRING
+        return mrb_funcall(M, str, "length", 0);
+      #else
+        return mrb_int_value(M, RSTRING_LEN(str));
+      #endif
       }
     CPP
     'bc2cpp_str_bytes' => <<~CPP,
@@ -370,6 +404,13 @@ module NativeCoreDirect
     entry.checks.each do |function, expected, mode, file|
       path = registration[:path]
       path = File.join(File.dirname(path), file) if file
+      if mode == :source
+        # A macro or other text outside any function body, found anywhere in the file.
+        found = File.file?(path) && normalize(NativeExpressionDevirt.read_source(path)).include?(normalize(expected))
+        return "#{File.basename(path)} no longer contains the audited text" unless found
+        next
+      end
+
       body = function_body(path, function)
       return "#{function} not found in #{File.basename(path)}" unless body
 

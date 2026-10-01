@@ -97,8 +97,8 @@ class CodeGen
   # clear (RGSS::ErrorReport.clear), include? (mruby-rgss array_include.rb),
   # member? (Game::Battle::Combatant#member?). empty? and size also have
   # bytecode definitions (Game::MoveRoute#empty?, Game::Party#size), so they use
-  # per-class guards below; size excludes String because its body uses the
-  # private, build-flag-dependent RSTRING_CHAR_LEN.
+  # per-class guards below; String#size comes from NativeCoreDirect instead, because
+  # its body uses the string.c-private RSTRING_CHAR_LEN (ADR 0291).
   NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'values' => 0,
@@ -548,6 +548,12 @@ class CodeGen
     builtin_class_send_safe?(name, owners)
   end
 
+  # The send after the last generated arm. NativeCoreDirectFallback adds the audited core arms
+  # the registered expressions could not derive (String#size).
+  def registered_expression_fallback(_d, _recv, _name, _argv, dispatch)
+    dispatch
+  end
+
   # Emit a generated native expression behind a runtime type-tag guard. Heap
   # objects also require their exact built-in class pointer; Float and Symbol
   # are immediate values and use only their unambiguous type tags.
@@ -556,6 +562,8 @@ class CodeGen
     fallback = dynamic_dispatch_line(d, recv, name, argv)
     return fallback unless entries && !entries.empty?
     return fallback unless entries.all? { |entry| entry[:arity] == argv.length }
+
+    fallback = registered_expression_fallback(d, recv, name, argv, fallback)
 
     arms = entries.map do |entry|
       owner = entry[:owner]

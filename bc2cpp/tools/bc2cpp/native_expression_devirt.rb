@@ -22,8 +22,8 @@ module NativeExpressionDevirt
     mrb_as_int mrb_ary_entry mrb_str_equal mrb_obj_equal isfinite isinf isnan signbit
   ].freeze
   # Keep this list to macros exported by mruby headers. RSTRING_CHAR_LEN is
-  # private to string.c (and calls a private UTF-8 helper), so generated C++
-  # must leave String#size on ordinary dispatch.
+  # private to string.c (and calls a private UTF-8 helper), so String#size is
+  # NativeCoreDirect's audited row (ADR 0291), not an expression generated here.
   CLASS_EXPRESSION_MACROS = %w[ARY_LEN RSTR_LEN RSTRING_LEN].freeze
   PUBLIC_API_HEADERS = %w[
     mruby/array.h mruby/class.h mruby/data.h mruby/error.h mruby/hash.h mruby/numeric.h mruby/proc.h mruby/range.h
