@@ -157,7 +157,13 @@ class CodeGen
     # Keep dispatch for other receiver classes and Complex arguments.
     if name == '/' && n == 1 && builtin_class_send_safe?(name, %w[Float])
       arg = argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      # An Integer receiver (a bigint operand, or one the tag pairs of OP_DIV did not cover) runs
+      # int_div in the helper when Integer#/ cannot have been replaced; else every other class dispatches.
+      fallback = if builtin_class_send_safe?(name, %w[Integer Numeric])
+                   numeric_slow_call(name, d, recv, argv)
+                 else
+                   dynamic_dispatch_line(d, recv, name, argv)
+                 end
       return "  // FLOAT_DIV_RECEIVER :/ -> Float#/, guarded by exact Float type\n" \
              "  #ifdef MRB_USE_COMPLEX\n" \
              "  if (mrb_type(#{recv}) == MRB_TT_FLOAT && mrb_type(#{arg}) != MRB_TT_COMPLEX) {\n" \
@@ -955,16 +961,10 @@ class CodeGen
     end
 
     if ['+', '-', '*'].include?(name) && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
-      left, right = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
-      helper = { '+' => 'mrb_num_add', '-' => 'mrb_num_sub', '*' => 'mrb_num_mul' }.fetch(name)
+      call = numeric_slow_call(name, d, recv, argv, float: numeric_slow_float_safe?(name))
       return <<~CPP
-          // FIXNUM_ARITHMETIC :#{name} -- an Integer receiver (Fixnum or bigint) with a Fixnum/bigint/Float operand runs Integer##{name}'s own body through mruby's overflow-aware numeric helper
-          if (bc2cpp_integer_recv_p(#{left}) && bc2cpp_integer_operand_p(#{right})) {
-            r#{d} = #{helper}(M, #{left}, #{right});
-          } else {
-            #{fallback.chomp}
-          }
+          // FIXNUM_ARITHMETIC :#{name} -- NUMERIC_SLOW_PATH (ADR 0292): mruby's own Integer/Float body, by-name call only inside the helper
+          #{call.chomp}
       CPP
     end
 
@@ -976,7 +976,7 @@ class CodeGen
     # that was ARRAY_PUSH-only stays so when Integer#<< is overridden in Ruby.
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Integer])
       value = argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv).chomp
+      fallback = numeric_slow_call(name, d, recv, argv).chomp
       array_arm = ''
       if builtin_class_send_safe?(name, %w[Array])
         array_arm = <<~CPP
@@ -988,7 +988,7 @@ class CodeGen
         CPP
       end
       return <<~CPP
-          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers; overflow keeps ordinary dispatch
+          #{array_arm.chomp}// INTEGER_LSHIFT :<< -- two immediate Integers inline; overflow to a bigint, a bigint receiver and other classes take NUMERIC_SLOW_PATH
           if (mrb_integer_p(#{recv}) && mrb_integer_p(#{value}) && mrb_integer(#{value}) != MRB_INT_MIN) {
             mrb_int bc2cpp_shl_v = mrb_integer(#{recv}), bc2cpp_shl_w = mrb_integer(#{value}), bc2cpp_shl_out;
             if (bc2cpp_shl_w == 0 || bc2cpp_shl_v == 0) {
@@ -1066,7 +1066,7 @@ class CodeGen
 
     if ['%', '&', '|', '^'].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      fallback = numeric_slow_call(name, d, recv, argv)
       operation = if name == '%'
                     <<~CPP.chomp
                       mrb_int bc2cpp_mod_left = mrb_fixnum(#{left});
@@ -1086,7 +1086,7 @@ class CodeGen
                     "r#{d} = mrb_fixnum_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));"
                   end
       return <<~CPP
-          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics with Ruby fallback
+          // FIXNUM_BINARY :#{name} -- fixnum-only native semantics; bigint and other classes take NUMERIC_SLOW_PATH
           if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})#{' && mrb_fixnum(' + right + ') != 0' if name == '%'}) {
             #{operation}
           } else {
@@ -1097,9 +1097,9 @@ class CodeGen
 
     if name == '>>' && n == 1 && builtin_class_send_safe?(name, %w[Integer Numeric])
       value, width = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      fallback = numeric_slow_call(name, d, recv, argv)
       return <<~CPP
-          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases retain Ruby dispatch
+          // FIXNUM_SHIFT :>> -- guarded shifts; overflow and non-Fixnum cases take NUMERIC_SLOW_PATH
           {
           mrb_bool bc2cpp_shift_fast = FALSE;
           mrb_int bc2cpp_shift_result = 0;
@@ -1147,10 +1147,10 @@ class CodeGen
 
     if ['<', '<=', '>', '>='].include?(name) && n == 1 && native_only_mono?(name)
       left, right = recv, argv.first
-      fallback = dynamic_dispatch_line(d, recv, name, argv)
+      fallback = numeric_slow_call(name, d, recv, argv)
       operator = { '<' => '<', '<=' => '<=', '>' => '>', '>=' => '>=' }.fetch(name)
       return <<~CPP
-          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison with Ruby fallback
+          // FIXNUM_COMPARE :#{name} -- fixnum-only native comparison; Float, bigint and other classes take NUMERIC_SLOW_PATH
           if (mrb_fixnum_p(#{left}) && mrb_fixnum_p(#{right})) {
             r#{d} = mrb_bool_value(mrb_fixnum(#{left}) #{operator} mrb_fixnum(#{right}));
           } else {
