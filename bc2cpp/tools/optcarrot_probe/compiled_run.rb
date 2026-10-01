@@ -367,10 +367,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   owners = section_lines(scan_diagnostics, 'compiled entry points').filter_map do |line|
     line[/\(([^#]+)#/, 1]
   end.uniq
-  compiled_cpp, diagnostics = run_bc2cpp(sources, scan_env.merge(
-    'OUT_DIR' => temp,
-    'ONLY_OWNERS' => owners.join(',')
-  ))
+  # SITE_PROFILE (ADR 0298): only the pass whose C++ is built gets the counters; the
+  # binary dumps them to BC2CPP_SITE_PROFILE_OUT, so timings from such a run mean nothing.
+  site_profile = ENV['BC2CPP_SITE_PROFILE']
+  site_profile = nil if site_profile&.empty?
+  compiled_env = scan_env.merge('OUT_DIR' => temp, 'ONLY_OWNERS' => owners.join(','))
+  compiled_env['BC2CPP_SITE_PROFILE'] = site_profile if site_profile
+  compiled_cpp, diagnostics = run_bc2cpp(sources, compiled_env)
   File.write(File.join(output_dir, 'optcarrot_probe_gen.cpp'), compiled_cpp)
   FileUtils.cp(File.join(temp, 'optcarrot_probe_decls.h'), output_dir)
   count = emit_register(diagnostics, output_dir)
@@ -406,11 +409,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
       enable_debug
     end
-    MRuby::Build.new(#{interpreted_target.dump}) do
-      instance_eval(&base)
-      if #{profiling}
-        cc.flags << '-pg'
-        linker.flags << '-pg'
+    unless #{site_profile ? true : false}
+      MRuby::Build.new(#{interpreted_target.dump}) do
+        instance_eval(&base)
+        if #{profiling}
+          cc.flags << '-pg'
+          linker.flags << '-pg'
+        end
       end
     end
     MRuby::Build.new(#{compiled_target.dump}) do
@@ -470,6 +475,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # still -- that sets the EMPTY STRING, leaving mruby's link command blank,
   # "sh: 1: -o: not found".) The linker has to go through the compiler driver,
   # which is what adds libc: LD=CC, the same `cc` the compile half already uses.
+  # A kept build dir does not rebuild the gem when only its (temp-dir) sources change, and
+  # counters from an old binary would be ranked against this run's site table.
+  FileUtils.rm_rf(File.join(MRUBY, "build/#{compiled_target}/mrbgems/optcarrot-compiled")) if site_profile
   rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
   rake_env['LD'] = rake_env['CC'] || 'cc'
   output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
@@ -495,8 +503,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   interpreted_profile_dir = File.join(profile_dir, 'interpreted')
   compiled_profile_dir = File.join(profile_dir, 'compiled')
   FileUtils.mkdir_p([interpreted_profile_dir, compiled_profile_dir]) if profiling
-  benchmarks << run_benchmark('mruby interpreter', [interpreted_binary, bundle, ROM, FRAMES.to_s],
-                              chdir: (interpreted_profile_dir if profiling))
+  unless site_profile
+    benchmarks << run_benchmark('mruby interpreter', [interpreted_binary, bundle, ROM, FRAMES.to_s],
+                                chdir: (interpreted_profile_dir if profiling))
+  end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
   compiled_result = run_benchmark(core_label, [compiled_binary, compiled_bundle, ROM, FRAMES.to_s],
                                   chdir: (compiled_profile_dir if profiling))
@@ -513,7 +523,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   checksums = benchmarks.map { |result| result[:checksum] }.uniq
   raise "benchmark checksums differ: #{benchmarks.map { |result| "#{result[:label]}=#{result[:checksum]}" }.join(', ')}" unless checksums.size == 1
 
-  if (summary_path = ENV['GITHUB_STEP_SUMMARY']) && !summary_path.empty?
+  if !site_profile && (summary_path = ENV['GITHUB_STEP_SUMMARY']) && !summary_path.empty?
     File.open(summary_path, 'a') do |summary|
       summary.puts "## Optcarrot benchmark (#{FRAMES} frames)", '',
                    '| Runtime | Wall time | Wall fps | Optcarrot fps | Checksum |',
