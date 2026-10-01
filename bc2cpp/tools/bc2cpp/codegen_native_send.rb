@@ -519,6 +519,19 @@ class CodeGen
 
     fallback = registered_expression_fallback(d, recv, name, argv, fallback)
 
+    # EXACT_CORE_RECEIVER (ADR 0280, ADR 0301): a proven exact class takes its own arm without the tag
+    # test, or none when no registration is its own (the arms' classes are all other ones).
+    site = exact_core_site_for(recv, name)
+    if site
+      exact = entries.find { |entry| entry[:owner][:class_name] == site[:klass] }
+      return fallback unless exact
+
+      expression = exact[:expression].gsub('recv', recv)
+      expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if exact[:arity] == 1
+      return "// CLOSED_WORLD_NATIVE_EXACT :#{name} -> #{site[:klass]} registered body; exact receiver (unguarded proof), no dispatch fallback\n" \
+             "  r#{d} = #{expression};\n"
+    end
+
     arms = entries.map do |entry|
       owner = entry[:owner]
       expression = entry[:expression].gsub('recv', recv)

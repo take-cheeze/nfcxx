@@ -492,6 +492,14 @@ class ClosedWorld
     @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
+  # ownerless_native_dispatch_safe? for a name only instances are asked: a definition on a class or
+  # module object (owner "X.singleton") never answers one.
+  def instance_native_dispatch_safe?(name)
+    return false if @global_refusal || @unknown_defs.include?(name) || @outside_ruby_names.include?(name)
+
+    @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' || definition.owner.end_with?('.singleton') }
+  end
+
   # ADR 0299: no instance of a class the closed world defines can ever be frozen, so a store into
   # one of its embedded ivars needs no frozen check. Every route to a frozen user object is a
   # `freeze` (Ruby or native), and each is refused unless provably aimed at a builtin literal:

@@ -20,7 +20,7 @@ require_relative 'numeric_flow'
 # class fails it. A never-assigned constant raises NameError before any value
 # exists, so it contributes nothing.
 class CodeGen
-  NumericConstGroup = Struct.new(:name, :mask, :sites, :readers, :failed)
+  NumericConstGroup = Struct.new(:name, :mask, :sites, :readers, :failed, :structural)
 
   def setup_numeric_consts
     @numeric_const_groups = {}
@@ -36,17 +36,17 @@ class CodeGen
           name = insn.const_name
           next unless name
 
-          group = (@numeric_const_groups[name] ||= NumericConstGroup.new(name, 0, [], Set.new, false))
+          group = (@numeric_const_groups[name] ||= NumericConstGroup.new(name, 0, [], Set.new, false, false))
           group.sites << [irep, idx, insn.regs.last]
         when 'GETCONST', 'GETMCNST'
           name = insn.const_name
           next unless name
 
-          (@numeric_const_groups[name] ||= NumericConstGroup.new(name, 0, [], Set.new, false)).readers << irep.label
+          (@numeric_const_groups[name] ||= NumericConstGroup.new(name, 0, [], Set.new, false, false)).readers << irep.label
         end
       end
     end
-    @numeric_const_groups.each_value { |g| g.failed = poisoned.include?(g.name) || g.sites.empty? }
+    @numeric_const_groups.each_value { |g| g.failed = g.structural = poisoned.include?(g.name) || g.sites.empty? }
   end
 
   def numeric_const_group(insn)
