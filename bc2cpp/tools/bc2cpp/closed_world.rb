@@ -555,6 +555,11 @@ class ClosedWorld
 
   public
 
+  # Does any outside (foreign Ruby) source spell the identifier +token+?
+  def outside_ruby_token?(token)
+    @ruby_tokens.each_value.any? { |tokens| tokens.include?(token) }
+  end
+
   # Names outside code can call Ruby methods by: native funcall names and every identifier of the
   # foreign Ruby sources, minus the Ruby files the caller analyses itself (`except_files`).
   # DEFINE_METHOD_SITES (ADR 0288): `define_method` in a class body still reaches mruby's own

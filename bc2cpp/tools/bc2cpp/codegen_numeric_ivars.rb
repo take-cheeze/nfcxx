@@ -32,7 +32,9 @@ require_relative 'numeric_flow'
 # (numeric_ivar_assured?), and the flow's SETIV then narrows it. IvarLayout's
 # Fixnum-embedded fields keep their own guarantee: Integer, never unassigned.
 class CodeGen
-  NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed)
+  # `structural` is the part of `failed` that does not depend on a flow (a poisoned name, a wild family,
+  # an attr_writer), which the class pools of ADR 0295 reuse.
+  NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed, :structural)
 
   # Sends that write an ivar by computed name: only a Symbol literal argument
   # (poisoned by name) is tolerated.
@@ -74,7 +76,7 @@ class CodeGen
         end
 
         group = (@numeric_ivar_groups[[numeric_family(owner.owner), name]] ||=
-                   NumericIvarGroup.new(numeric_family(owner.owner), name, 0, [], Set.new, false))
+                   NumericIvarGroup.new(numeric_family(owner.owner), name, 0, [], Set.new, false, false))
         group.readers << irep.label
         group.sites << [irep, idx, insn.regs.first] if insn.op == 'SETIV'
       end
@@ -212,6 +214,7 @@ class CodeGen
     @numeric_ivar_groups.each_value do |group|
       group.failed = poisoned.include?(group.name) || wild.include?(group.family) ||
                      writers.include?([group.family, group.name])
+      group.structural = group.failed
     end
   end
 

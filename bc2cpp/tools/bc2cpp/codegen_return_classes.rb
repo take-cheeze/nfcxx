@@ -4,8 +4,8 @@ require_relative 'numeric_flow'
 
 # CodeGen: RETURN_CLASS_TABLE (ADR 0289).
 #
-# A second run of NumericFlow whose oracle knows nothing outside the method, so an exact class never
-# rests on a pooled argument, ivar or constant fact. Sources: literals, a provably fresh `Klass.new`
+# A second run of NumericFlow whose oracle knows nothing outside the method except the class pools
+# of ADR 0295, so an exact class never rests on the numeric pools or a hint. Sources: literals, a provably fresh `Klass.new`
 # (exact_new_class_at) and calls of names in the return table, admitted as NUMERIC_RETURN_PROOF admits
 # them. Everything needs ClosedWorld#exact_instances_singleton_free? (ADR 0280).
 class CodeGen
@@ -15,16 +15,17 @@ class CodeGen
                         NumericFlow::RNG => 'Range' }.freeze
   RETURN_BITLESS_CLASSES = %w[Array Hash String Range Integer Float NilClass Symbol TrueClass FalseClass].freeze
 
-  # NumericFlow's oracle for the exact-class run: nothing outside the method is known.
+  # NumericFlow's oracle for the exact-class run: constants, captured locals and literals pool
+  # nothing; arguments and ivars know only what the class pools of ADR 0295 prove.
   class ExactOracle
     def initialize(codegen)
       @cg = codegen
     end
 
-    def entry_mask(_irep, _reg) = NumericFlow::OTHER
+    def entry_mask(irep, reg) = @cg.class_pool_entry_mask(irep, reg)
     def const_mask(_insn) = NumericFlow::OTHER
-    def ivar_entry_mask(_irep, _name) = NumericFlow::OTHER
-    def ivar_fact_mask(_irep, _name) = NumericFlow::OTHER
+    def ivar_entry_mask(irep, name) = @cg.class_pool_ivar_entry_mask(irep, name)
+    def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
     def upvar_mask(_irep, _insn) = NumericFlow::OTHER
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     def op_native?(_sym) = false
@@ -58,13 +59,18 @@ class CodeGen
     @rc_oracle = ExactOracle.new(self)
     return unless @foreign_method_names && @closed_world&.exact_instances_singleton_free?
 
+    setup_class_pools
     numeric_return_candidates.each { |name| @rc_return[name] = 0 }
     @ireps.each_value do |irep|
       irep.instructions.each do |insn|
         @rc_send_ireps[insn.sym] << irep.label if RETURN_CALL_OPS.include?(insn.op) && @rc_return.key?(insn.sym)
       end
     end
-    loop { break unless grow_return_classes }
+    loop do
+      changed = grow_return_classes
+      changed |= grow_class_pools
+      break unless changed
+    end
   end
 
   # One growth pass; true when a name's set grew or the name was dropped (it may return an unmodelled class).
