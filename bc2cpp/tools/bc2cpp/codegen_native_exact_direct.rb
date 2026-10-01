@@ -24,14 +24,17 @@ module NativeExactDirect
 
   # The code for `recv.name(*argv)` where `recv` is exactly `owner` (an RGSS
   # class name, or "X.singleton" for the class or module object X), or nil.
-  def native_exact_direct_code(name, d, recv, argv, owner)
+  # `int_proven` (`->(position)`) says an :int argument is provably a Fixnum, which drops its
+  # mrb_integer_p test and with it the by-name else (ADR 0296).
+  def native_exact_direct_code(name, d, recv, argv, owner, int_proven: nil)
     return nil if @call_block_expr
 
     entry = owner && NativeDirect::ENTRIES.dig(name, owner)
     return nil unless entry && entry.kinds.size == argv.size && native_exact_owner_safe?(name, owner)
 
     @native_construct_used << owner
-    guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int }.map { |i| "mrb_integer_p(#{argv[i]})" }
+    guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int && !int_proven&.call(i) }
+                 .map { |i| "mrb_integer_p(#{argv[i]})" }
     args = entry.kinds.each_index.map do |i|
       case entry.kinds[i]
       when :int then "mrb_integer(#{argv[i]})"

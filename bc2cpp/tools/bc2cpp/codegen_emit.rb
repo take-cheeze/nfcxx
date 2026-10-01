@@ -39,7 +39,7 @@ class CodeGen
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
     :@compiling_core => false, :@resumable => nil,
-    :@exact_core_site => nil
+    :@exact_core_site => nil, :@nonnil_receiver => nil
   }.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's

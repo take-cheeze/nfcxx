@@ -623,24 +623,30 @@ class CodeGen
       # index-type check; an Array still needs mrb_integer_p (bc2cpp_ary_entry only
       # takes a fixnum).
       d, s = insn.regs.first(2)
-      index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      exact = index_exact_class(irep, idx, unshift_proof_reg(d, reg_offset))
+      index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
+        array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
         <<~CPP
-          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{s})) {
+          #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
             r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
           } else {
             r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
           }
         CPP
       when 'Hash'
-        <<~CPP
-          if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-            r#{d} = mrb_hash_get(M, r#{d}, r#{s});
-          } else {
-            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
-          }
-        CPP
+        if exact
+          "#{INDEX_EXACT_NOTE}r#{d} = mrb_hash_get(M, r#{d}, r#{s});\n"
+        else
+          <<~CPP
+            if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
+              r#{d} = mrb_hash_get(M, r#{d}, r#{s});
+            } else {
+              r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+            }
+          CPP
+        end
       else
         # STRUCT_INDEX_CACHE (see compile_struct_literal_index_read); a miss is "".
         struct_read = compile_struct_literal_index_read(irep, idx, s, d)
@@ -673,24 +679,33 @@ class CodeGen
       # else a real `[]` send with 0, as vm.c's getidx0_fallback.
       # GETIDX_STATIC_RECEIVER_SUPPORT applies to `s`, the receiver here.
       d, s = insn.regs.first(2)
-      index_class = static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+      exact = index_exact_class(irep, idx, unshift_proof_reg(s, reg_offset))
+      index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
       case index_class
       when 'Array'
-        <<~CPP
-          if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
-            r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
-          } else {
-            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
-          }
-        CPP
+        if exact
+          "#{INDEX_EXACT_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);\n"
+        else
+          <<~CPP
+            if (mrb_array_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->array_class) {
+              r#{d} = bc2cpp_ary_entry(M, r#{s}, 0);
+            } else {
+              r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+            }
+          CPP
+        end
       when 'Hash'
-        <<~CPP
-          if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
-            r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
-          } else {
-            r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
-          }
-        CPP
+        if exact
+          "#{INDEX_EXACT_NOTE}r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));\n"
+        else
+          <<~CPP
+            if (mrb_hash_p(r#{s}) && mrb_obj_ptr(r#{s})->c == M->hash_class) {
+              r#{d} = mrb_hash_get(M, r#{s}, mrb_fixnum_value(0));
+            } else {
+              r#{d} = mrb_funcall(M, r#{s}, "[]", 1, mrb_fixnum_value(0));
+            }
+          CPP
+        end
       else
         # OUTLINED_INDEX_OPS: the Array/Hash/funcall chain is bc2cpp_getidx0.
         fallback = outlined_index_call('getidx0', "r#{d}", "r#{s}")
@@ -707,11 +722,13 @@ class CodeGen
       # `idx_reg`: `idx` would shadow compile_insn's instruction position, which
       # static_indexable_class needs.
       d, idx_reg, val = insn.regs.first(3)
-      index_class = static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
+      exact = index_exact_class(irep, idx, unshift_proof_reg(d, reg_offset))
+      index_class = exact || static_indexable_class(irep, idx, unshift_proof_reg(d, reg_offset), owner_def)
       case index_class
       when 'Array'
+        array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
         <<~CPP
-          if (mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && mrb_integer_p(r#{idx_reg})) {
+          #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{idx_reg})) {
             mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
             r#{d} = r#{val};
           } else {
@@ -719,14 +736,18 @@ class CodeGen
           }
         CPP
       when 'Hash'
-        <<~CPP
-          if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
-            mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
-            r#{d} = r#{val};
-          } else {
-            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
-          }
-        CPP
+        if exact
+          "#{INDEX_EXACT_NOTE}mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
+        else
+          <<~CPP
+            if (mrb_hash_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->hash_class) {
+              mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});
+              r#{d} = r#{val};
+            } else {
+              r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+            }
+          CPP
+        end
       else
         # OUTLINED_INDEX_OPS: the Array/Hash/funcall chain is bc2cpp_setidx.
         fallback = outlined_index_call('setidx', "r#{d}", "r#{d}", "r#{idx_reg}", "r#{val}")

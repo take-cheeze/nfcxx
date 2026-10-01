@@ -71,7 +71,9 @@ require_relative 'codegen_numeric_proof'
 require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
+require_relative 'codegen_class_pools'
 require_relative 'codegen_return_classes'
+require_relative 'codegen_nilable_receiver'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
 require_relative 'codegen_return_analysis'
@@ -91,6 +93,7 @@ require_relative 'codegen_arg_shapes'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
+require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
 
 if $PROGRAM_NAME == __FILE__
   srcs = ARGV
@@ -894,6 +897,10 @@ if $PROGRAM_NAME == __FILE__
   warn '== return class table (RETURN_CLASS_TABLE) =='
   gen.return_class_report.each { |l| warn l }
   warn ''
+  # CLASS_POOLS (ADR 0295): ivar and argument class sets pooled across methods.
+  warn '== class pools (CLASS_POOLS) =='
+  gen.class_pool_report.each { |l| warn l }
+  warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).
   only_owners = ENV['ONLY_OWNERS']&.split(',')
@@ -1322,6 +1329,12 @@ if $PROGRAM_NAME == __FILE__
     violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
     NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
     kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
+    warn ''
+    # NIL_RECEIVER (ADR 0296): nil arms of receivers proven nil-or-one-class.
+    nil_sites = NomethodReviewed.nil_receiver_sites(compiled)
+    warn "== closed world nil receivers: #{nil_sites.size} bc2cpp_nil_receiver =="
+    warn "  NILABLE_RECEIVER sites: #{compiled.sum { |m| m[:code].scan(%r{^\s*// NILABLE_RECEIVER :}).size }}"
+    nil_sites.uniq.sort.each { |k| warn "  NIL_RECEIVER_SITE #{k}" }
     warn ''
     # NOMETHOD_REVIEWED (docs/adr/0226): a dead fallback nobody reviewed fails
     # the gem build here, not in a later check.
