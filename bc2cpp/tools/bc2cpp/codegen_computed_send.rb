@@ -12,7 +12,10 @@ require_relative 'computed_send_names'
 # (ADR 0290), and the one non-Symbol value a table can yield, nil, raises the TypeError `send`
 # raises for it.
 module ComputedSend
-  SEND_NAMES = %w[send __send__ public_send].freeze
+  # Only `__send__`: `send`/`public_send` come from mruby-metaprog, which a build (or a test harness
+  # compiling against more gems than it links) may lack, and a direct arm would then answer where the
+  # interpreter raises NoMethodError.
+  SEND_NAMES = %w[__send__].freeze
   # =0 keeps every computed send as one by-name call (the before side of a measurement).
   KILL_SWITCH = 'BC2CPP_COMPUTED_SEND'
   # Core containers whose [] / freeze the table proof reads through.
@@ -60,7 +63,6 @@ module ComputedSend
     names = ComputedSendNames.names_at(irep, idx, insn.reg.to_i + 1, computed_send_tables)
     return nil unless names && names.names.none? { |name| computed_send_name_rebound?(name) }
     return nil if names.source.include?('table') && !computed_send_tables_trusted?
-    return nil if insn.sym == 'public_send' && !names.names.all? { |name| computed_send_public_only?(name) }
 
     { names: names, irep: irep, idx: idx, owner_def: kwargs[:owner_def] }
   end
@@ -80,24 +82,12 @@ module ComputedSend
     devirt_blocked_name?(name) || symbol_installed_names.include?(name)
   end
 
-  # The send being replaced is mruby's own Kernel#send: a Ruby or native `send` of another class
-  # could be the receiver's, and `send`/`public_send` come from a gem the build may lack
-  # (`__send__` is core).
+  # The send being replaced is mruby's own core `__send__`: a Ruby or native definition of it on another
+  # class could be the receiver's.
   def computed_send_kernel?(name)
     return false if devirt_blocked_name?(name)
 
-    defs = @registry.fetch(name, [])
-    return false unless defs.all? { |definition| definition.owner == '<native>' }
-
-    name == '__send__' || !defs.empty?
-  end
-
-  # public_send checks visibility, which a direct arm does not: every definition of each name
-  # must be public and stay so.
-  def computed_send_public_only?(name)
-    defs = @registry.fetch(name, [])
-    !defs.empty? && defs.all? { |definition| definition.visibility == :public } &&
-      @closed_world.visibility_stable?(name)
+    @registry.fetch(name, []).all? { |definition| definition.owner == '<native>' }
   end
 
   # The table proof reads the constant through Array#[] / Hash#[] and trusts `freeze`: nothing may
