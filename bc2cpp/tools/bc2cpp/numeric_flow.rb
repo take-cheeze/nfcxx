@@ -17,6 +17,9 @@ require_relative 'bytecode_ir'
 #   STR   exactly ::String
 #   NIL   nil
 #   OTHER anything else, including false and an unassigned local's other uses
+#   RNG   exactly ::Range; EXC a pending exception object (what EXCEPT reads); and the bits from 1 << 9 up: exactly one closed-world class each
+#         (CodeGen#numeric_class_bit). They enter only through a proven `Klass.new` or a
+#         Range literal and reach other methods only through return values (ADR 0289).
 # 0 is "no value yet" (unreached). Join is bitwise OR, so the answer cannot
 # depend on visiting order. A register is numeric when its set is a non-empty
 # subset of INT|FLT.
@@ -37,9 +40,15 @@ module NumericFlow
   STR = 16
   NIL = 32
   OTHER = 64
+  RNG = 128
+  EXC = 256
   NUM = INT | FLT
   CONTAINERS = ARR | HSH | STR
   FALSY = NIL | OTHER
+  # Bits a fact outside one method (argument, ivar, constant) may not carry: OTHER, Range and
+  # every class bit. Only return values ship them across methods.
+  OPAQUE = OTHER | (-1 << 7)
+  CLASS_BIT_BASE = 9
 
   module_function
 
@@ -72,8 +81,10 @@ module NumericFlow
 
   # Ops whose only effect on registers is writing their leading register (the
   # audited BytecodeIR::WRITES_LEADING_REG_OPS list), plus the read-only
-  # leaders. Any other op, or an irep with a catch handler, has no facts.
-  SUPPORTED_OPS = (BytecodeIR::WRITES_LEADING_REG_OPS | BytecodeIR::READS_LEADING_REG_OPS).freeze
+  # leaders and the two a rescue clause adds: EXCEPT writes its leading register,
+  # RESCUE its second. Any other op has no facts.
+  SUPPORTED_OPS = (BytecodeIR::WRITES_LEADING_REG_OPS | BytecodeIR::READS_LEADING_REG_OPS |
+                   Set['EXCEPT', 'RESCUE']).freeze
   # A callee frame starts at R(a) and may reuse every register above it.
   CALL_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC', 'BLKCALL'].freeze
   # Leading register is only read (or the op writes an enclosing frame).
@@ -107,7 +118,7 @@ module NumericFlow
   def states(irep, oracle, opaque_regs, writes = nil)
     program = BytecodeIR.for(irep)
     return nil unless program.resolved?
-    return nil if program.handlers?
+    return nil if program.handlers? && !program.handlers_resolved?
 
     insns = irep.instructions
     return nil if insns.empty?
@@ -120,6 +131,11 @@ module NumericFlow
             facts: slots.map { |name| oracle.ivar_fact_mask(irep, name) },
             prov_base: nregs + slots.size, writes: writes }
     extra = enter_edges(irep)
+    raises = program.handler_edges.group_by(&:src).transform_values { |edges| edges.map(&:target).uniq }
+    # A rescue target is entered only by a raise, so its EXCEPT always reads an exception; an ensure
+    # target is also reached by falling in, where there is none.
+    by_kind = program.handler_edges.group_by(&:kind).transform_values { |edges| edges.map(&:target).to_set }
+    ctx[:rescue_only] = by_kind.fetch(:rescue, Set.new) - by_kind.fetch(:ensure, Set.new)
     entry = Array.new(nregs, OTHER)
     (1..nregs - 1).each do |r|
       m = oracle.entry_mask(irep, r)
@@ -140,6 +156,17 @@ module NumericFlow
       next unless st
 
       out = transfer(i, insns[i], st, ctx)
+      # Every instruction of a protected range may raise into its handler, where the registers
+      # are as they were at the raise (ADR 0289): the state before the op, widened by what a
+      # callee can do, or after it.
+      raises.fetch(i, []).each do |target|
+        edge = raise_state(insns[i], st, out, ctx)
+        merged = join_state(ins[target], edge, ctx[:prov_base])
+        next if merged == ins[target]
+
+        ins[target] = merged
+        work << target if queued.add?(target)
+      end
       next if outs[i] == out
 
       outs[i] = out
@@ -155,6 +182,21 @@ module NumericFlow
       end
     end
     ins
+  end
+
+  # The state a handler starts from when +insn+ raises. A callee frame starts at R(a) and may
+  # reuse every register from there up; any Ruby the op runs may have stored into an ivar.
+  def raise_state(insn, before, after, ctx)
+    state = before
+    if CALL_OPS.include?(insn.op)
+      state = before.dup
+      (insn.reg.to_i...ctx[:nregs]).each { |r| state[r] = OTHER }
+      refresh_slots(state, ctx)
+    elsif silent_call?(insn, before, ctx)
+      state = before.dup
+      refresh_slots(state, ctx)
+    end
+    join_state(state, after, ctx[:prov_base])
   end
 
   def successors(program, extra, index)
@@ -182,6 +224,7 @@ module NumericFlow
   # tested register (and whatever it was loaded or copied from) by truthiness; nil
   # and false are the only falsy values. nil when the edge is infeasible.
   def refine_edge(program, insn, index, target, state, ctx)
+    return refine_raiseif(insn, state) if insn.op == 'RAISEIF'
     return state unless COND_BRANCHES.include?(insn.op)
 
     goto = program.address_to_index[insn.branch_target]
@@ -189,6 +232,22 @@ module NumericFlow
     return state if goto == fall || (target != goto && target != fall)
 
     narrow_chain(state, insn.reg.to_i, insn.op, target == goto, ctx, Set.new)
+  end
+
+  # `RAISEIF Ra` raises unless Ra is nil, so the fall-through edge holds only a nil (or unknown) Ra.
+  def refine_raiseif(insn, state)
+    reg = insn.reg.to_i
+    mask = state[reg]
+    return state if mask.nil? || mask.zero?
+
+    narrowed = mask & FALSY
+    return nil if narrowed.zero?
+
+    return state if narrowed == mask
+
+    out = state.dup
+    out[reg] = narrowed
+    out
   end
 
   # Provenance values: 0 none, 1..K slot k-1, K+1+r register r.
@@ -314,6 +373,14 @@ module NumericFlow
       slot = ctx[:slot_of][insn.ivar]
       set.call(a, slot ? state[slot] : OTHER)
       out[pb + a] = slot - nregs + 1 if slot && !ctx[:opaque].include?(a.to_s)
+    when 'EXCEPT'
+      set.call(a, ctx[:rescue_only].include?(index) ? EXC : EXC | NIL)
+    when 'RESCUE'
+      # Reads the exception in its first register, writes the match flag to its second.
+      b = insn.regs[1].to_i
+      set.call(b, OTHER) if b < nregs
+    when 'RANGE_INC', 'RANGE_EXC'
+      set.call(a, RNG)
     when 'ARRAY', 'ARRAY2'
       set.call(a, ARR)
     when 'HASH'

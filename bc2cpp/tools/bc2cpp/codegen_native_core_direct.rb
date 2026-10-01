@@ -19,6 +19,10 @@ module NativeCoreDirectFallback
     native_core_direct_wrap(d, recv, name, argv, super)
   end
 
+  def registered_expression_fallback(d, recv, name, argv, dispatch)
+    native_core_direct_wrap(d, recv, name, argv, super)
+  end
+
   # NATIVE_CORE_DIRECT_REST (ADR 0274): the audited Array native for a receiver that is the
   # method's or block's own `*rest` parameter. ENTER (and every compiled entry, see
   # rest_only_callee?) builds that Array fresh, so it is an exact Array with no singleton
@@ -133,13 +137,15 @@ module NativeCoreDirectFallback
   end
 
   def native_core_direct_wrap(d, recv, name, argv, tail)
+    site = exact_core_site_for(recv, name)
     entries = native_core_entries(name, argv.size)
+    # An exact-literal receiver (ADR 0280) is never another builtin, so their arms are dead code.
+    entries = entries.select { |entry| entry.owner == site[:klass] } if site && CodeGen::EXACT_LITERAL_CLASS.value?(site[:klass])
     return tail if entries.empty? || tail.include?('bc2cpp_nomethod')
 
     exact = native_core_exact_entry(entries, recv, name, argv)
     return exact_code_line(d, recv, argv, exact) if exact
 
-    site = exact_core_site_for(recv, name)
     branches = entries.map do |entry|
       "if (#{native_core_guard(entry, recv, argv, site)}) {\n" \
         "    r#{d} = #{entry.call(recv, argv)};\n" \

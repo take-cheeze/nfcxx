@@ -339,13 +339,19 @@ class CodeGen
       kw_hash << "    mrb_hash_set(M, bc2cpp_kwh, " \
                  "mrb_symbol_value(mrb_intern_cstr(M, \"#{kn}\")), #{kw_val_exprs[k]});\n"
     end
+    # GUARD_VIOLATION: a stable class constant cannot have been reassigned, so the miss is an error.
+    else_arm = if argv.size < FUNCALL_ARGC_MAX && new_receiver_constant_proven?(irep, idx, name, known, owner_def&.owner)
+                 guard_violation_line(d, recv, name, argv + ['bc2cpp_kwh'], 'NEW_IDENTITY')
+               else
+                 dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])
+               end
     "#{note}" \
       "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
       "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
       "    #{init_impl}(M, #{(["r#{d}"] + argv + opt_args + kw_args).join(', ')});\n" \
       "  } else {\n" \
       "#{kw_hash}" \
-      "    #{dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])}" \
+      "    #{else_arm}" \
       "  }\n"
   end
 

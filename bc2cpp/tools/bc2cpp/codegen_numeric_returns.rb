@@ -30,23 +30,29 @@ class CodeGen
   def setup_numeric_returns
     @numeric_return = {}
     @numeric_return_send_ireps = Hash.new { |h, k| h[k] = Set.new }
-    return unless @foreign_method_names && @closed_world && @closed_world.global_refusal.nil?
-
-    aliased = numeric_aliased_names
-    @registry.each do |name, defs|
-      next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
-      next if defs.empty? || @foreign_method_names.include?(name) || aliased.include?(name)
-      next unless @closed_world.name_fully_visible?(name)
-      next unless defs.all? { |d| numeric_return_def_usable?(d) }
-
-      @numeric_return[name] = 0
-    end
+    numeric_return_candidates.each { |name| @numeric_return[name] = 0 }
     @ireps.each_value do |irep|
       irep.instructions.each do |insn|
         next unless %w[SEND SEND0 SSEND SSEND0].include?(insn.op) && @numeric_return.key?(insn.sym)
 
         @numeric_return_send_ireps[insn.sym] << irep.label
       end
+    end
+  end
+
+  # Names a call can reach only through the definitions the registry lists (see the header), each a
+  # bytecode body or a plain attr_reader. Shared with the exact-class table (RETURN_CLASS_TABLE).
+  def numeric_return_candidates
+    return [] unless @foreign_method_names && @closed_world && @closed_world.global_refusal.nil?
+
+    aliased = numeric_aliased_names
+    @registry.filter_map do |name, defs|
+      next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
+      next if defs.empty? || @foreign_method_names.include?(name) || aliased.include?(name)
+      next unless @closed_world.name_fully_visible?(name)
+      next unless defs.all? { |d| numeric_return_def_usable?(d) }
+
+      name
     end
   end
 
@@ -78,12 +84,12 @@ class CodeGen
     return numeric_accessor_return_mask(d) if d.irep.nil?
 
     irep = @ireps[d.irep]
-    return NumericFlow::OTHER if subtree_has_nonlocal_exit?(irep)
-
     states = numeric_states_for(irep)
     return NumericFlow::OTHER unless states
 
-    joined = 0
+    joined = numeric_block_return_mask(irep)
+    return NumericFlow::OTHER if joined.nil?
+
     irep.instructions.each_with_index do |insn, idx|
       state = states[idx]
       next unless state
@@ -96,6 +102,36 @@ class CodeGen
       when 'RETSELF', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'
         joined |= NumericFlow::OTHER
       end
+    end
+    joined
+  end
+
+  # What a `return` inside a block nested in +irep+ hands back from the method (RETURN_BLK, at
+  # any depth), or nil when a block the flow does not model has one. A `break` is the result of
+  # the call that took the block, which SENDB never reads, so it adds nothing. A lambda's own
+  # RETURN_BLK is counted too: a superset of the classes, never a subset.
+  def numeric_block_return_mask(irep, seen = Set.new)
+    joined = 0
+    (irep.reps || []).each do |label|
+      next unless seen.add?(label)
+
+      child = @ireps[label]
+      next unless child
+
+      if child.instructions.any? { |i| i.op == 'RETURN_BLK' }
+        states = numeric_states_for(child)
+        return nil unless states
+
+        child.instructions.each_with_index do |insn, idx|
+          next unless insn.op == 'RETURN_BLK' && states[idx]
+
+          joined |= states[idx][insn.reg.to_i] || NumericFlow::OTHER
+        end
+      end
+      nested = numeric_block_return_mask(child, seen)
+      return nil if nested.nil?
+
+      joined |= nested
     end
     joined
   end

@@ -40,7 +40,7 @@ class CodeGen
   # `r<d> = <Class|Integer|String|...> === arg` for a receiver whose class the bytecode proves,
   # or nil to keep bc2cpp_eqq. The register `recv` holds that very value (the dominating
   # write), so the body is the tag's own `===`.
-  def compile_eqq_direct(irep, idx, reg, d, recv, arg)
+  def compile_eqq_direct(irep, idx, reg, d, recv, arg, guard: nil)
     return nil unless eqq_direct_safe? && irep && idx
 
     kind = eqq_receiver_kind(irep, idx, reg)
@@ -48,8 +48,17 @@ class CodeGen
 
     case kind.first
     when :class
+      # The tag test stays (a rebound constant is not a class); its else arm is GUARD_VIOLATION
+      # CLASS_EQQ (ADR 0290) when that proof holds for the site, else the by-name send.
+      else_arm = if guard && constant_receiver_proven?(*guard, '===')
+                   guard_violation_line(d, recv, '===', [arg], 'CLASS_EQQ')
+                 else
+                   dynamic_dispatch_line(d, recv, '===', [arg])
+                 end
       "  // EQQ_DIRECT class/module constant: Module#=== is mrb_obj_is_kind_of (class.c mrb_mod_eqq)\n" \
-        "  r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{arg}, mrb_class_ptr(#{recv})));\n"
+        "  if (mrb_class_p(#{recv}) || mrb_module_p(#{recv}) || mrb_sclass_p(#{recv})) {\n" \
+        "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{arg}, mrb_class_ptr(#{recv})));\n" \
+        "  } else {\n    #{else_arm}  }\n"
     when :fixnum
       # Integer-vs-Integer is decided here while no Ruby Integer#== exists (EQQ_INTEGER_FAST);
       # every other argument takes Kernel#===, which is mrb_equal.

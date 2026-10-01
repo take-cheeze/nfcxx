@@ -70,7 +70,9 @@ require_relative 'codegen_numeric_proof'
 require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
+require_relative 'codegen_return_classes'
 require_relative 'codegen_numeric_consts'
+require_relative 'codegen_numeric_slow'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
 require_relative 'codegen_step_loop'
@@ -882,6 +884,10 @@ if $PROGRAM_NAME == __FILE__
   warn '== numeric operand facts (NUMERIC_OPERAND_PROOF) =='
   gen.numeric_facts_report.each { |l| warn l }
   warn ''
+  # RETURN_CLASS_TABLE (ADR 0289): names whose every definition returns one exact class.
+  warn '== return class table (RETURN_CLASS_TABLE) =='
+  gen.return_class_report.each { |l| warn l }
+  warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).
   only_owners = ENV['ONLY_OWNERS']&.split(',')
@@ -1276,7 +1282,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_ary_entry_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
   print gen.emit_native_core_helpers(compiled)
-  print gen.emit_integer_operand_helpers(compiled)
+  print gen.emit_numeric_proof_helpers(compiled)
   print gen.emit_const_lookup_helper
   print gen.emit_native_construct_decls
   print gen.emit_direct_construct_decls
@@ -1291,6 +1297,10 @@ if $PROGRAM_NAME == __FILE__
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
+  # GUARD_VIOLATION (ADR 0290): name the method a violation site sits in.
+  compiled.each do |m|
+    m[:code] = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
+  end
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
   if closed_world
     kept = Hash.new(0)
@@ -1299,6 +1309,12 @@ if $PROGRAM_NAME == __FILE__
     dropped = compiled.sum { |m| m[:code].scan(%r{^\s*// CLOSED_WORLD_SELF :}).size }
     warn "== closed world fallbacks: #{dropped} guards dropped, #{converted} bc2cpp_nomethod, " \
          "#{kept.values.sum} kept dispatching =="
+    # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
+    violation_families = Hash.new(0)
+    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ)\)"/) { |(f)| violation_families[f] += 1 } }
+    warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
+    violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
+    NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
     kept.sort_by { |r, n| [-n, r] }.each { |r, n| warn "  KEPT #{r}: #{n}" }
     warn ''
     # NOMETHOD_REVIEWED (docs/adr/0226): a dead fallback nobody reviewed fails
@@ -1337,6 +1353,10 @@ if $PROGRAM_NAME == __FILE__
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
+  # NUMERIC_SLOW_PATH (ADR 0292): the by-name calls of the numeric arms' else live here once per helper.
+  numeric_slow_code = SymbolCache.rewrite(gen.emit_numeric_slow_helpers(compiled), symbol_table)
+  warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
+  warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
   warn ''
   eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
@@ -1349,6 +1369,7 @@ if $PROGRAM_NAME == __FILE__
   print const_site_cache_code
   print index_helpers_code
   print eqq_helper_code
+  print numeric_slow_code
   print gen.emit_poly_tables(compiled)
   compiled.each { |m| print m[:code] }
 
