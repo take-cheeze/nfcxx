@@ -20,6 +20,10 @@ require_relative 'bytecode_ir'
 #   RNG   exactly ::Range; EXC a pending exception object (what EXCEPT reads); and the bits from 1 << 9 up: exactly one closed-world class each
 #         (CodeGen#numeric_class_bit). They enter only through a proven `Klass.new` or a
 #         Range literal and reach other methods only through return values (ADR 0289).
+# Bits from OBJECT_KIND_BASE up are object kinds the oracle names (LcfRowFlow, ADR 0294): each is
+# "exactly an instance of that kind" and truthy, like ARR. Unlike the class bits they ride through
+# pooled arguments, ivars and constants; what a bit means, and what `[]` on it returns, is the
+# oracle's (`index_mask`).
 # 0 is "no value yet" (unreached). Join is bitwise OR, so the answer cannot
 # depend on visiting order. A register is numeric when its set is a non-empty
 # subset of INT|FLT.
@@ -45,10 +49,12 @@ module NumericFlow
   NUM = INT | FLT
   CONTAINERS = ARR | HSH | STR
   FALSY = NIL | OTHER
-  # Bits a fact outside one method (argument, ivar, constant) may not carry: OTHER, Range and
-  # every class bit. Only return values ship them across methods.
-  OPAQUE = OTHER | (-1 << 7)
   CLASS_BIT_BASE = 9
+  # LCF object kinds (LcfRowFlow) live above every class bit; CodeGen#numeric_class_bit refuses to grow into them.
+  OBJECT_KIND_BASE = 320
+  # Bits a fact outside one method (argument, ivar, constant) may not carry: OTHER, Range, EXC and
+  # every class bit. Only return values ship them across methods. Object kinds are not among them.
+  OPAQUE = OTHER | (((1 << OBJECT_KIND_BASE) - 1) & (-1 << 7))
 
   module_function
 
@@ -106,6 +112,7 @@ module NumericFlow
   #   send_mask(irep, index, insn, state)  class set of a SEND-family result
   #   upvar_mask(irep, insn)               class set of a GETUPVAR (a captured local)
   #   pool_mask(irep, insn)                class set of a LOADL
+  #   index_mask(irep, index, insn, state) class set of a GETIDX/GETIDX0 result (optional)
   #   op_native?(symbol)                   `+ - * /` are the core Integer/Float bodies
   #   nil_raises?(symbol)                  nil answers `symbol` only by raising
   # Each answers OTHER (or false) when it proves nothing.
@@ -408,6 +415,8 @@ module NumericFlow
       b = insn.paren_reg.to_i
       ok = oracle.op_native?('/') && b < nregs
       set.call(a, ok ? arith(state[a], state[b], nil_raises.call('/')) : OTHER)
+    when 'GETIDX', 'GETIDX0'
+      set.call(a, oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER)
     else
       set.call(a, OTHER)
     end

@@ -19,7 +19,7 @@ require 'set'
 #   An absent chunk reads the schema `default` (an Integer default that is a lambda is called) and nil
 #   when the field has none.
 module LcfSchemaOracle
-  Fact = Struct.new(:path, :name, :type, :classes, :range, :nilable, keyword_init: true)
+  Fact = Struct.new(:path, :id, :name, :type, :classes, :range, :nilable, :has_elements, keyword_init: true)
 
   TYPE_CLASSES = {
     'int' => %w[Integer], 'uint8' => %w[Integer], 'bool' => %w[TrueClass FalseClass], 'string' => %w[String],
@@ -40,12 +40,20 @@ module LcfSchemaOracle
     JSON.parse(out).map { |row| fact(row) }
   end
 
+  # File class name => the schema constant its root record is read from (an Array1D root only).
+  def roots(mrblib_dir)
+    out, err, status = Open3.capture3(RbConfig.ruby, DUMP, mrblib_dir, '--roots')
+    raise "lcf_schema_dump --roots failed: #{err}" unless status.success?
+
+    JSON.parse(out)
+  end
+
   def fact(row)
     type = row['type']
     classes = TYPE_CLASSES.fetch(type) { raise "LcfSchemaOracle: unmodelled field type #{type} at #{row['path']}" }.to_set
     classes = Set['Hash'] if type == 'int16_array' && row['order']
     absent = row['has_default'] ? row['default_class'] : 'NilClass'
-    Fact.new(path: row['path'], name: row['name'], type: type, classes: (classes | [absent]).freeze,
+    Fact.new(path: row['path'], id: row['id'], name: row['name'], type: type, has_elements: row['has_elements'], classes: (classes | [absent]).freeze,
              range: TYPE_RANGES[type], nilable: !row['has_default'] || row['default_class'] == 'NilClass')
   end
 

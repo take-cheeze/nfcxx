@@ -255,6 +255,9 @@ class CodeGen
       @registry[name]&.any? { |md| md.owner == traced && md.irep }
     end
 
+    lcf = lcf_exact_receiver(irep, idx, reg, owner_def, '[]')
+    return lcf.first if lcf
+
     proven_array_source(irep, idx, reg) == 'Array' ? 'Array' : nil
   end
 
@@ -265,7 +268,9 @@ class CodeGen
   def compile_typed_index_send(irep, idx, owner_def, dest_reg, receiver_reg, index_expr, reg_offset, receiver_class,
                                fallback_code)
     return nil unless owner_def && idx && receiver_class
-    return nil unless @registry['[]']&.any? { |md| md.owner == receiver_class && md.irep }
+    # A file class inherits `[]` from LCF::File (LCF_ROW_FLOW).
+    return nil unless @registry['[]']&.any? { |md| md.owner == receiver_class && md.irep } ||
+                      @lcf_rows&.file_bit(receiver_class)
 
     saved_hint = @elem_class_hint
     code = compile_send(Insn.synthetic('SEND', "R#{dest_reg} :[] n=1"), self_implicit: false, irep: irep,
@@ -273,7 +278,7 @@ class CodeGen
                         call_receiver: "r#{receiver_reg}", call_arguments: [index_expr],
                         trace_idx: idx, trace_reg_offset: reg_offset,
                         trace_receiver_reg: receiver_reg, typed_fallback: fallback_code)
-    return code if code.include?('TYPED :[] ->')
+    return code if code.include?('TYPED :[] ->') || code.include?('LCF_ROW_FLOW :[] ->')
 
     @elem_class_hint = saved_hint
     nil
