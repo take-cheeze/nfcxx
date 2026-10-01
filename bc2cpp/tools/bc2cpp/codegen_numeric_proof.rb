@@ -130,6 +130,10 @@ class CodeGen
     setup_lcf_rows
     setup_numeric_returns
     setup_numeric_consts
+    # The numeric flow reads the exact-class flow (NATIVE_RESULT_FACTS, ADR 0302), which reads
+    # none of the numeric pools, so it is final before the first numeric pass.
+    compute_return_classes
+    reset_numeric_flow!
     loop do
       changed = grow_entry_arg_numeric
       changed |= grow_numeric_ivar_groups
