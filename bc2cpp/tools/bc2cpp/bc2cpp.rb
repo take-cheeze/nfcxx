@@ -81,6 +81,7 @@ require_relative 'codegen_exact_core_arms'
 require_relative 'codegen_captured_locals'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
+require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
 require_relative 'codegen_checked_send'
 require_relative 'codegen_numeric_consts'
@@ -111,6 +112,8 @@ require_relative 'escape_report' if ENV['BC2CPP_ESCAPE_REPORT']
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
 require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT']
+require_relative 'refine_report' if ENV['BC2CPP_REFINE_REPORT']
+require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 
 if $PROGRAM_NAME == __FILE__
