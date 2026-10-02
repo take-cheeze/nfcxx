@@ -876,7 +876,12 @@ class CodeGen
                                               direct_entry: region[:direct_entry] ? "#{fn_name}_direct" : nil,
                                               yield_free: region[:yield_free])
     # ARG_SHAPES_BLOCK (ADR 0265): a top-level site whose call resolves to compiled code.
-    direct = inline_offset.nil? ? compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def) : nil
+    # BLOCK_ARM_REACH (ADR 0310): a block nested in an inlined loop body takes the same arms, shifted.
+    direct = if inline_offset.nil?
+               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def)
+             elsif owner_def && block_arm_reach?
+               compile_direct_block_send(region, "mrb_obj_value(#{rproc_var})", owner_def, inline_offset: inline_offset)
+             end
     out = String.new
     out << "  // BLOCK_FALLBACK :#{region[:name]} -- block body compiled as a standalone cfunc, wrapped as a real RProc " \
            "(self captured at construction time), #{direct ? 'direct call with the block' : 'dynamic dispatch'}\n"

@@ -86,7 +86,7 @@ class CodeGen
       nfn_name, nfn_code = fn_result
       nested.pre << nfn_code
       nested.suppressed << nregion[:block_addr] << nregion[:sendb_addr]
-      nested.glue[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name, inline_offset: offset)
+      nested.glue[nregion[:block_addr]] = emit_block_fallback_glue(nregion, nfn_name, inline_offset: offset, owner_def: d)
     end
     nested
   end

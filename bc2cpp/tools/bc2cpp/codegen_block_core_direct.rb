@@ -62,6 +62,7 @@ module BlockCoreDirectFallback
     exact = site ? arms.select { |arm| arm[:class] == site[:klass] } : []
     exact_class = !exact.empty?
     arms = exact if exact_class
+    sole_call = nil
     branches = arms.map do |arm|
       args, = direct_call_args(arm[:target], argv, arm[:impl])
       # YIELD_REACH (ADR 0283): with a yield-free block and a body that cannot suspend a Fiber on its
@@ -70,10 +71,19 @@ module BlockCoreDirectFallback
       tests = []
       tests << 'M->c == M->root_c' unless unguarded
       tests << format(arm[:guard], r: recv) unless exact_class
+      call = "r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});"
+      sole_call = call if tests.empty? && exact_class && arms.size == 1 && block_arm_reach?
       "if (#{tests.empty? ? 'true' : tests.join(' && ')}) {\n" \
-        "    r#{d} = #{arm[:impl]}(M, #{([recv] + args).join(', ')});\n" \
+        "    #{call}\n" \
         '  } else '
     end.join
+    # BLOCK_ARM_REACH (ADR 0310): a proven class and a block that cannot reach a yield leave nothing
+    # for the dynamic else to answer.
+    if sole_call
+      return "// BLOCK_CORE_DIRECT :#{name} -- proven #{arms.first[:class]} receiver, yield-free block: " \
+             "calls the compiled core body, no dynamic send\n  #{sole_call}\n"
+    end
+
     "// BLOCK_CORE_DIRECT :#{name} -- #{exact_class ? 'proven' : 'exact'} #{arms.map { |arm| arm[:class] }.join('/')} receiver at the root " \
       "context calls the compiled core body with the block\n" \
       "  #{branches}{\n" \
