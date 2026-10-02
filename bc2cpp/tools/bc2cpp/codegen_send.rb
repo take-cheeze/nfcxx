@@ -967,6 +967,9 @@ class CodeGen
 
     if name == 'push' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
+      exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
+      return exact_push if exact_push
+
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
           // ARRAY_PUSH :push -- exact base Array and one value; preserve overrides and other arities
@@ -995,6 +998,10 @@ class CodeGen
     # that was ARRAY_PUSH-only stays so when Integer#<< is overridden in Ruby.
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Integer])
       value = argv.first
+      exact_push = builtin_class_send_safe?(name, %w[Array]) &&
+                   exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
+      return exact_push if exact_push
+
       fallback = numeric_slow_call(name, d, recv, argv).chomp
       array_arm = ''
       if builtin_class_send_safe?(name, %w[Array])
@@ -1036,6 +1043,9 @@ class CodeGen
 
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
       value = argv.first
+      exact_push = exact_array_push_code(irep, new_proof_idx, new_proof_reg, self_implicit, name, d, recv, value)
+      return exact_push if exact_push
+
       fallback = dynamic_dispatch_line(d, recv, name, argv)
       return <<~CPP
           // ARRAY_PUSH :<< -- exact Array only; preserve subclass and override dispatch
@@ -1352,6 +1362,9 @@ class CodeGen
         known_class = exact_class = flow_class
         exact_via_flow = true
       end
+      # EXACT_CORE_ARMS (ADR 0309): a core class the flow proves exact; only the TYPED guard below uses it.
+      exact_core_typed = exact_class.nil? && !known_class.nil? &&
+                         exact_core_arm_class(irep, proof_idx, proof_reg, self_implicit) == known_class
       if exact_class
         exact_target = exact_via_lcf ? lcf_exact_target(name, exact_class) : closed_world_exact_target(name, exact_class)
         if direct_callable?(exact_target, n)
@@ -1455,7 +1468,7 @@ class CodeGen
         check = "#{owner_class_ptr_expr(check_owner)} == mrb_obj_class(M, #{recv})"
         # EXACT_TYPED_UNGUARDED (ADR 0289): the receiver is proven to be exactly check_owner, so
         # the guard below can only be true and its fallback is dead.
-        if exact_class && exact_class == check_owner && !via_element
+        if ((exact_class && exact_class == check_owner) || (exact_core_typed && known_class == check_owner)) && !via_element
           note = "  // EXACT_TYPED :#{name} -> #{target.owner}##{target.name} (receiver proven exactly " \
                  "#{check_owner}), direct C++ call with no guard or mrb_funcall fallback#{native_note}\n"
           return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
