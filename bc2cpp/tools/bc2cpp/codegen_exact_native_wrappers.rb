@@ -60,7 +60,16 @@ module ExactNativeWrappers
     return nil unless exact_native_wrapper_call(name, klass, argc)
     return nil if symbol_installed_names.nil? || symbol_installed_names.include?(name) || devirt_blocked_name?(name)
 
+    return nil if argc.zero? && CodeGen::NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name) && exact_native_direct_covers?(name, klass)
+
     native_wrapper_owner_safe?(name, klass) ? klass : nil
+  end
+
+  # compile_send tries NATIVE_EXACT_DIRECT (ADR 0281, a stricter name proof) on the flow class for a zero-argument
+  # wrapper before its guarded arm; this call is for what that refuses. The other names meet their hint arm first.
+  def exact_native_direct_covers?(name, klass)
+    entry = NativeDirect::ENTRIES.dig(name, klass)
+    !entry.nil? && entry.kinds.none? { |k| k == :int } && native_exact_owner_safe?(name, klass)
   end
 
   # Names some wrapper table above handles, so a send of any other name never asks the flow.
