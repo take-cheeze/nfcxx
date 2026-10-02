@@ -89,7 +89,7 @@ class CodeGen
         arrays[df.index] = n
       end
     end
-    arrays.to_a unless arrays.empty?
+    arrays.to_a unless arrays.empty? || arrays.values.uniq.size != 1
   end
 
   # A `return` inside a block of +irep+ leaves the method with a value this shape does not see.
