@@ -4,20 +4,10 @@ require_relative 'numeric_flow'
 
 # CodeGen: CAPTURED_LOCAL_CLASS (ADR 0308).
 #
-# The exact-class flow (ADR 0289, 0296) read every GETUPVAR as unknown, so `acc = []; xs.each { |x| acc.push(x) }`
-# kept a class-tag chain on `acc` inside the block and `index[k] = v` kept the by-name `[]=` helper, although the
-# defining frame had just assigned a literal. The class of a local is a property of the assignments to its
-# register, not of who aliases the object, so no points-to information is needed (ADR 0296 refuses element
-# classes for that reason; this is the variable's own class): a block reading register +i+ of an enclosing frame sees
-# the value the frame held when the closure was created or any value the frame stored there afterwards
-# (ADR 0276's numeric_upvar_mask, now for class bits too).
-#
-#   * a register a nested block writes (SETUPVAR) stays unknown, as in the numeric flow;
-#   * only a frame the flow models has a state, and the join includes every write NumericFlow recorded for it;
-#   * the creating BLOCK/LAMBDA is unique per block irep (numeric_block_parents).
-#
-# Nothing else may write a frame's local: `Binding#local_variable_set` and string `eval` do, so the proof is off
-# whenever a build can name one (captured_local_writers_absent?). BC2CPP_CAPTURED_LOCAL_CLASS=0 turns it off.
+# A block's GETUPVAR is the defining frame's register: the class set is that frame's state at the creating BLOCK/LAMBDA
+# joined with every value stored into the register since (numeric_upvar_mask's argument, for class bits). A class belongs
+# to the variable, not to its aliases, so ADR 0296's refusal of element classes does not apply. Only a write by name
+# (Binding#local_variable_set, eval) could bypass the flow, so the proof is off when a build can reach one.
 class CodeGen
   # Sends that can store into a local without a SETUPVAR the flow could see.
   CAPTURED_LOCAL_WRITER_NAMES = %w[binding local_variable_set eval].freeze
