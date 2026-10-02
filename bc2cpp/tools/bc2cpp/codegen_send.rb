@@ -470,6 +470,12 @@ class CodeGen
       end
     end
 
+    # EXACT_NATIVE_WRAPPER (ADR 0307): the guarded wrapper arms below with the class test proven.
+    if !self_implicit && guard_proof_site && call_receiver.nil? && call_arguments.nil? &&
+       (exact_wrapper = exact_native_wrapper_code(name, d, recv, argv, irep, guard_proof_site, drawing_proof_reg))
+      return exact_wrapper
+    end
+
     # NATIVE_EXACT_DIRECT, ahead of the class-guard arms below: a receiver the exact-class flow
     # proves to be one RGSS native class needs neither the guard chain nor its dispatch tail.
     if n.zero? && !self_implicit && irep && drawing_proof_idx && NATIVE_WRAPPER_ZERO_ARG_DIRECT.key?(name)
