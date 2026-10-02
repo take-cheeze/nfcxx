@@ -144,14 +144,18 @@ class ClosedWorld
   # when the receiver is its `self`; `installed` is CodeGen#symbol_installed_names.
   # INSTANCE_RECEIVER (ADR 0302): `instances` names the exact classes the exact-class flow proves
   # the receiver holds (nil allowed), none a class or module object (CodeGen#receiver_instances).
-  def refusal(name, listed, self_owner, installed, instances: nil)
+  # CALL_FACTS (ADR 0317): `scoped` says `instances` is the whole receiver set, so only its classes need an
+  # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
+  def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false)
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if @unknown_defs.include?(name)
-    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name)
+    return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
 
     reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
     return reason if reason
+
+    required &= instances.to_set if scoped && instances
     return :unlisted_class unless required.subset?(listed.to_set)
     return :method_missing_receiver unless method_missing_free?(self_owner, instances)
 
@@ -189,11 +193,13 @@ class ClosedWorld
   # check runs first, the receiver is method_missing-free). Each returned class
   # answers `name` itself or inherits it, so a guarded send to it reaches its
   # definition and every other class can only raise NoMethodError.
-  def unlisted_classes(name, listed, self_owner, installed, instances: nil)
-    return [] unless refusal(name, listed, self_owner, installed, instances: instances) == :unlisted_class
+  def unlisted_classes(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false)
+    return [] unless refusal(name, listed, self_owner, installed, instances: instances, scoped: scoped,
+                                                                  native_free: native_free) == :unlisted_class
     return [] unless method_missing_free?(self_owner, instances)
 
     _reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
+    required &= instances.to_set if scoped && instances
     (required - listed.to_set).to_a.sort
   end
 
@@ -250,6 +256,20 @@ class ClosedWorld
   # The constant +name+ can only name a class or module: no bytecode binds a value to it.
   def class_valued_constant?(name)
     !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
+  end
+
+  # CALL_FACTS (ADR 0317): the classes (never modules) the closed world declares.
+  def declared_class_names
+    @class_decls.keys.select { |k| !k.include?('.') && !k.include?('<') }
+  end
+
+  # Foreign Ruby sources the closed world scanned, and whether one defines +name+.
+  def outside_ruby_paths
+    @ruby_paths
+  end
+
+  def outside_ruby_name?(name)
+    @outside_ruby_names.include?(name)
   end
 
   # A DEF the registry does not hold (installed by code the walk cannot place) defines +name+.

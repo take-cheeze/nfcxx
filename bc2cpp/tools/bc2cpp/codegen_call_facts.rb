@@ -1,0 +1,80 @@
+# frozen_string_literal: true
+
+require_relative 'call_facts'
+
+# CodeGen: CALL_FACTS (ADR 0317). The receiver of `x.m2` after `x.m1` returned normally is an instance
+# of a class that answers `m1`; when only declared classes do, that set is a proven receiver set for the
+# guard chain of `m2` (ClosedWorld#refusal), with the same soundness conditions as INSTANCE_RECEIVER
+# (ADR 0302). BC2CPP_CALL_FACTS=0 turns it off.
+class CodeGen
+  # Larger sets stop being a useful proof: the chain would list most of the program.
+  CALL_FACTS_MAX_CLASSES = 32
+
+  # Not memoized: a core method's body compiles with @closed_world swapped out (ADR 0264).
+  def call_facts_enabled?
+    ENV['BC2CPP_CALL_FACTS'] != '0' && !@closed_world.nil? && !@native_name_sources.nil? &&
+      @closed_world.global_refusal.nil? && @closed_world.exact_instances_singleton_free?
+  end
+
+  def call_facts_answers
+    @call_facts_answers ||= CallFacts::Answers.new(
+      CallFacts::World.new(closed_world: @closed_world, registry: @registry, superclass_of: @superclass_of,
+                           included: @included_modules, prepended: @prepended_modules,
+                           unknown_mixins: @unknown_mixins, native_sources: @native_name_sources,
+                           installed: symbol_installed_names)
+    )
+  end
+
+  def call_facts_states(irep)
+    @call_facts_states ||= {}
+    return @call_facts_states[irep.label] if @call_facts_states.key?(irep.label)
+
+    @call_facts_states[irep.label] = CallFacts::Flow.states(irep, fixnum_proof_ctx(irep)[:upvars])
+  end
+
+  # The declared classes the receiver register of the SEND at +site+ must be an instance of because an
+  # earlier call on the same value returned, or nil. Every fact is a name some call answered, and the
+  # set is the classes that can answer all of them.
+  def refined_receiver_instances(site, name)
+    return nil unless call_facts_enabled? && @native_results_ready
+
+    irep = site[:irep]
+    idx = site[:idx]
+    insn = site[:insn]
+    return nil unless irep && idx && insn&.sym == name && %w[SEND SEND0].include?(insn.op)
+
+    reg = insn.reg.to_i
+    return nil if reg >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+
+    states = call_facts_states(irep)
+    names = states && CallFacts::Flow.facts(states[idx], reg)
+    names && call_facts_classes(names)
+  end
+
+  def call_facts_classes(names)
+    @call_facts_classes ||= {}
+    return @call_facts_classes[names] if @call_facts_classes.key?(names)
+
+    answers = call_facts_answers
+    sets = names.filter_map { |m| answers.members(m) }
+    set = sets.reduce(:&) unless sets.empty?
+    ok = set && !set.empty? && set.size <= CALL_FACTS_MAX_CLASSES && set.all? { |k| answers.user_instance?(k) }
+    @call_facts_classes[names] = ok ? set.to_a.sort : nil
+  end
+
+  # No native, outside Ruby, module or method_missing definition of +name+ reaches any class of +classes+.
+  def call_facts_native_free?(name, classes)
+    answers = call_facts_answers
+    classes.all? { |k| answers.native_free?(k, name) }
+  end
+
+  # [instances, scoped, native_free] for ClosedWorld#refusal: the exact-class flow's set when it has
+  # one, else the call-fact set, which is also the whole receiver set (so only its classes need an arm).
+  def receiver_instance_scope(site, name)
+    exact = receiver_instances(site, name)
+    return [exact, false, false] if exact
+
+    refined = refined_receiver_instances(site, name)
+    refined ? [refined, true, call_facts_native_free?(name, refined)] : [nil, false, false]
+  end
+end
