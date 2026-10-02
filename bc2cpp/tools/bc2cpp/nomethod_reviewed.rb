@@ -2073,7 +2073,6 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#draw_vehicles -> x=",
   "RPG2k::Scene::Map#draw_vehicles -> y",
   "RPG2k::Scene::Map#draw_vehicles -> y=",
-  "RPG2k::Scene::Map#draw_weather -> type",
   "RPG2k::Scene::Map#draw_weather -> weather",
   "RPG2k::Scene::Map#drive_battle -> battle_request",
   "RPG2k::Scene::Map#drive_battle -> owner",
