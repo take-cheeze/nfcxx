@@ -74,7 +74,10 @@ require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
+require_relative 'codegen_constructor_pools'
 require_relative 'codegen_return_classes'
+require_relative 'codegen_return_accessors'
+require_relative 'codegen_exact_core_arms'
 require_relative 'codegen_captured_locals'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
@@ -100,12 +103,14 @@ require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_computed_send'
 require_relative 'codegen_block_core_direct'
+require_relative 'codegen_core_exact_direct'
 require_relative 'codegen_block_param_call'
 require_relative 'escape_analysis'
 require_relative 'codegen_escape'
 require_relative 'escape_report' if ENV['BC2CPP_ESCAPE_REPORT']
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
+require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 
 if $PROGRAM_NAME == __FILE__
@@ -947,6 +952,10 @@ if $PROGRAM_NAME == __FILE__
   # CLASS_POOLS (ADR 0295): ivar and argument class sets pooled across methods.
   warn '== class pools (CLASS_POOLS) =='
   gen.class_pool_report.each { |l| warn l }
+  warn ''
+  # CONSTRUCTOR_POOLS (ADR 0313): initialize arguments joined over every constructor site.
+  warn '== constructor pools (CONSTRUCTOR_POOLS) =='
+  gen.constructor_pool_report.each { |l| warn l }
   warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).

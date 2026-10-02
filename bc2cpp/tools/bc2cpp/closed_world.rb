@@ -82,6 +82,7 @@ class ClosedWorld
     @ruby_tokens = {}
     @outside_ruby_names = Set.new
     @outside_name_paths = {}
+    @native_code_tokens = {}
     @outside_ruby_supers = Set.new
     @native_arms_name = nil
     @ruby_paths = ruby_paths
@@ -224,6 +225,36 @@ class ClosedWorld
   # exact-class guard can name, since modules never are `mrb_obj_class`.
   def class_declared?(owner)
     @class_decls.key?(owner)
+  end
+
+  # A `module` declared in the closed world (its methods run with any includer as `self`).
+  def module_declared?(name)
+    @module_names.include?(name)
+  end
+
+  # CONSTRUCTOR_POOLS (ADR 0313): every declared class whose last path segment is +name+, the
+  # classes a constant of that name can denote when no SETCONST binds a value to it.
+  def classes_named(name)
+    @by_simple.fetch(name, [])
+  end
+
+  # An outside source (native code without its comments, or foreign Ruby) spells both the root and the last
+  # segment of +klass+'s path: the pair that could reach the class object, the test `opaque?` applies to
+  # sources that create, reopen or subclass it.
+  def outside_spells_class?(klass)
+    root = klass.split('::').first
+    last = simple(klass)
+    [@native_code_tokens, @ruby_tokens].any? { |files| files.each_value.any? { |tokens| tokens.include?(root) && tokens.include?(last) } }
+  end
+
+  # The constant +name+ can only name a class or module: no bytecode binds a value to it.
+  def class_valued_constant?(name)
+    !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
+  end
+
+  # A DEF the registry does not hold (installed by code the walk cannot place) defines +name+.
+  def unknown_def?(name)
+    @unknown_defs.include?(name)
   end
 
   # NATIVE_DIRECT (ADR 0253): while a caller emits exact-class arms for every
@@ -556,6 +587,7 @@ class ClosedWorld
         tok.start_with?('/') ? ' ' : tok
       end
       names = Set.new
+      @native_code_tokens[path] = Set.new(text.scan(/[A-Za-z_]\w*/))
       merge_native_funcall_names(text)
       dynamic = text.match?(NATIVE_DYNAMIC)
       defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
