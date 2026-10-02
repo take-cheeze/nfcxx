@@ -167,6 +167,12 @@ class ClosedWorld
     @unknown_defs.include?(name) || @outside_ruby_names.include?(name) || @outside_names.include?(name)
   end
 
+  # ESCAPE_ANALYSIS (ADR 0316): can an installer the registry cannot enumerate (computed names) define
+  # +name+? Outside Ruby sources are judged by the caller, which knows which ones it compiled itself.
+  def unknown_definer?(name)
+    @global_refusal ? true : @unknown_defs.include?(name)
+  end
+
   # No Ruby code in the closed world defines or installs `respond_to_missing?`
   # (nor could an outside Ruby file), so Kernel#respond_to?'s hook call after a
   # method-table miss can only reach the core default, which answers false.

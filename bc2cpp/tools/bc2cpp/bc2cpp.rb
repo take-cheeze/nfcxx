@@ -101,6 +101,9 @@ require_relative 'codegen_arg_shapes'
 require_relative 'codegen_computed_send'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_block_param_call'
+require_relative 'escape_analysis'
+require_relative 'codegen_escape'
+require_relative 'escape_report' if ENV['BC2CPP_ESCAPE_REPORT']
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
@@ -135,6 +138,9 @@ if $PROGRAM_NAME == __FILE__
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = build_registry(ireps, root_label)
+  # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
+  # the core filtering below drops the methods the build keeps interpreted.
+  escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
   # CORE_DEFS (ADR 0264): a core-source definition a later one replaces is not the
   # method the interpreter ends up with, so it must not make the name POLY nor be
   # emitted. Dropped before anything reads the registry.
@@ -233,6 +239,26 @@ if $PROGRAM_NAME == __FILE__
     warn ''
   end
   profile_phase.call('closed world + native scans')
+
+  # Only a closed world can enumerate callees: with an open one the analysis stays uninstalled and every
+  # consumer keeps its earlier gate. Ruby the build interprets (an outside source this run did not
+  # compile) may define any name it spells; the compiled core Ruby is in the ireps.
+  if escape_registry && closed_world && closed_world.global_refusal.nil? && closed_world.method_missing_classes.empty?
+    escape_aliases = Hash.new { |h, k| h[k] = [] }
+    alias_sites.each { |site| escape_aliases[site[:new]] << site[:old] }
+    compiled_files = ireps.each_value.to_set(&:file)
+    hidden_ruby_names = foreign_method_names(outside_ruby.reject { |path| compiled_files.include?(path) })
+    warn "== escape analysis (ADR 0316): #{ireps.size} ireps, #{hidden_ruby_names.size} method names defined by " \
+         "Ruby this run does not compile =="
+    EscapeAnalysis.install(EscapeAnalysis::World.new(ireps: ireps, defs: escape_registry, aliases: escape_aliases,
+                                                     native_names: ENV['NATIVE_SRCS'] ? native_names : nil,
+                                                     superclass_of: superclass_of, included: included_modules,
+                                                     prepended: prepended_modules, unknown_mixins: unknown_mixins,
+                                                     modules: declared_modules, struct_classes: struct_member_lists.keys,
+                                                     invisible: lambda { |name|
+                                                       hidden_ruby_names.include?(name) || closed_world.unknown_definer?(name)
+                                                     }))
+  end
 
   # CORE_VISIBILITY (ADR 0264): a core method is compiled and registered whenever it is
   # eligible, but only one whose name no native method shares (and no fast-path
