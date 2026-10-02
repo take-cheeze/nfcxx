@@ -58,7 +58,7 @@ class CodeGen
     end
 
     def index_mask(irep, index, insn, state)
-      @cg.lcf_index_mask(irep, index, insn, state)
+      @cg.element_index_mask(irep, index, insn, state)
     end
 
     def aref_mask(irep, index, insn, _state)
@@ -132,6 +132,7 @@ class CodeGen
     setup_numeric_entry_args
     setup_numeric_ivar_groups
     setup_lcf_rows
+    setup_frozen_tables
     setup_numeric_returns
     setup_tuple_returns
     setup_numeric_consts
@@ -245,6 +246,7 @@ class CodeGen
               NumericFlow::OTHER => 'OTHER', NumericFlow::RNG => 'RNG' }
     found = names.filter_map { |bit, name| name if mask.anybits?(bit) }
     @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
+    @frozen_tables&.each_shape_in(mask) { |s| found << @frozen_tables.name(s.bit) }
     found.empty? ? 'NONE' : found.join('|')
   end
 
