@@ -61,6 +61,10 @@ class CodeGen
       @cg.lcf_index_mask(irep, index, insn, state)
     end
 
+    def aref_mask(irep, index, insn, _state)
+      @cg.tuple_aref_mask(irep, index, insn)
+    end
+
     def upvar_mask(irep, insn)
       @cg.numeric_upvar_mask(irep, insn)
     end
@@ -129,6 +133,7 @@ class CodeGen
     setup_numeric_ivar_groups
     setup_lcf_rows
     setup_numeric_returns
+    setup_tuple_returns
     setup_numeric_consts
     # The numeric flow reads the exact-class flow (NATIVE_RESULT_FACTS, ADR 0302), which reads
     # none of the numeric pools, so it is final before the first numeric pass.
@@ -138,6 +143,7 @@ class CodeGen
       changed = grow_entry_arg_numeric
       changed |= grow_numeric_ivar_groups
       changed |= grow_numeric_returns
+      changed |= grow_tuple_returns
       changed |= grow_numeric_consts
       break unless changed
     end
@@ -257,6 +263,7 @@ class CodeGen
     (@numeric_const_groups || {}).each_value do |g|
       lines << "  NUMCONST #{g.name} (#{numeric_mask_name(g.mask)})" unless g.failed
     end
+    lines.concat(tuple_facts_report)
     lines.sort
   end
 

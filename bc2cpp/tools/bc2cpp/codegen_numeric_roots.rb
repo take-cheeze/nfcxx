@@ -133,8 +133,33 @@ class CodeGen
     numeric_mask_name(group.mask)
   end
 
+  # Run the block one level deep only: leaves of leaves would recurse through ivar stores and index reads.
+  def numeric_root_nest(default)
+    return default if @numeric_root_depth.to_i.positive?
+
+    @numeric_root_depth = 1
+    begin
+      yield
+    ensure
+      @numeric_root_depth = 0
+    end
+  end
+
+  # The leaves of the stores into a failed ivar group that were not provably numeric.
+  def numeric_root_flowfail(group)
+    numeric_root_nest('flowfail') do
+      leaves = group.sites.flat_map do |sirep, idx, reg|
+        mask = numeric_raw_mask(sirep, idx, reg, numeric_irep_owner[sirep.label])
+        next [] if mask && (mask & NumericFlow::OPAQUE).zero?
+
+        numeric_root_leaves(sirep, idx - 1, reg, numeric_irep_owner[sirep.label])
+      end
+      "flowfail<#{leaves.uniq.first(4).join(';')}>"
+    end
+  end
+
   def numeric_root_ivar_failure(owner, group)
-    return 'flowfail' unless group.structural
+    return numeric_root_flowfail(group) unless group.structural
 
     return 'native-spelled' if @outside_ivar_names.include?(group.name)
     return 'wild-family' if @numeric_wild_families.include?(group.family)
@@ -181,8 +206,25 @@ class CodeGen
       defs = (@registry[sname] || []).map { |d| d.owner == '<native>' ? 'native' : 'ruby' }.tally
       ["send:#{sname}@#{kind}[#{tracked ? "ret=#{numeric_mask_name(tracked)}" : 'untracked'} defs=#{defs.map { |k, v| "#{k}#{v}" }.join(',')}]"]
     when 'GETIDX', 'GETIDX0'
-      recv = numeric_raw_mask(irep, i, insn.reg.to_i, owner_def)
-      ["idx@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}"]
+      src = op == 'GETIDX0' ? insn.regs[1].to_i : insn.reg.to_i
+      recv = numeric_raw_mask(irep, i, src, owner_def)
+      key = if op == 'GETIDX0' then '0'
+            else
+              kw = irep.last_writer_index(i - 1, (insn.reg.to_i + 1).to_s)
+              kins = kw && irep.instructions[kw]
+              kins&.op == 'LOADSYM' ? ":#{kins.sym}" : (kins&.op || '?')
+            end
+      inner = numeric_root_nest('') { numeric_root_leaves(irep, i - 1, src, owner_def).first(2).join('+') }
+      ["idx[#{key}]@#{recv.nil? ? 'unmodelled' : numeric_mask_name(recv)}<#{inner}>"]
+    when 'AREF'
+      src = insn.regs[1].to_i
+      w = irep.last_writer_index(i - 1, src.to_s)
+      wi = w && irep.instructions[w]
+      what = if wi.nil? then 'param'
+             elsif wi.op.start_with?('SEND', 'SSEND') then "send:#{wi.sym}"
+             else wi.op
+             end
+      ["aref<#{what}>"]
     when 'GETIV' then ["iv:#{insn.args[/@\w+/]}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
     when 'GETCONST', 'GETMCNST'
       cname = insn.const_name || insn.mcnst_name
