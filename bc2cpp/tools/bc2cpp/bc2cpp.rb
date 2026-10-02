@@ -74,6 +74,7 @@ require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
+require_relative 'codegen_constructor_pools'
 require_relative 'codegen_return_classes'
 require_relative 'codegen_captured_locals'
 require_relative 'codegen_native_results'
@@ -921,6 +922,10 @@ if $PROGRAM_NAME == __FILE__
   # CLASS_POOLS (ADR 0295): ivar and argument class sets pooled across methods.
   warn '== class pools (CLASS_POOLS) =='
   gen.class_pool_report.each { |l| warn l }
+  warn ''
+  # CONSTRUCTOR_POOLS (ADR 0313): initialize arguments joined over every constructor site.
+  warn '== constructor pools (CONSTRUCTOR_POOLS) =='
+  gen.constructor_pool_report.each { |l| warn l }
   warn ''
   # ONLY_OWNERS narrows emitted code (e.g. "LCF::File,LCF::Database"), not the
   # registry: srcs must still be the whole program (see compile_all).
