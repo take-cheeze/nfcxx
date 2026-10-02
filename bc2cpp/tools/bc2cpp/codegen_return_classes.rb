@@ -26,7 +26,7 @@ class CodeGen
     def const_mask(insn) = @cg.class_pool_const_mask(insn)
     def ivar_entry_mask(irep, name) = @cg.class_pool_ivar_entry_mask(irep, name)
     def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
-    def upvar_mask(_irep, _insn) = NumericFlow::OTHER
+    def upvar_mask(irep, insn) = @cg.class_upvar_mask(irep, insn)
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
     def op_native?(_sym) = false
     def nil_raises?(_sym) = false
@@ -59,6 +59,7 @@ class CodeGen
   def compute_return_classes
     @native_results_ready = false
     @rc_states = {}
+    @rc_writes = {}
     @rc_return = {}
     @rc_send_ireps = Hash.new { |h, k| h[k] = Set.new }
     @rc_new_class = {}
@@ -107,6 +108,7 @@ class CodeGen
     until stack.empty?
       cur = stack.pop
       @rc_states.delete(cur)
+      @rc_writes.delete(cur)
       stack.concat(Array(@ireps[cur]&.reps))
     end
   end
@@ -114,7 +116,9 @@ class CodeGen
   def return_class_states(irep)
     return @rc_states[irep.label] if @rc_states.key?(irep.label)
 
-    @rc_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars])
+    writes = {}
+    @rc_writes[irep.label] = writes
+    @rc_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
   end
 
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.
