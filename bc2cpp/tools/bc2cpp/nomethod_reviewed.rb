@@ -1177,7 +1177,6 @@ NOMETHOD_REVIEWED = Set[
   "Game::State.singleton#from_lsd -> restore_base",
   "Game::State.singleton#from_lsd -> restore_class",
   "Game::State.singleton#from_lsd -> restore_tint",
-  "Game::State.singleton#from_lsd -> roster",
   "Game::State.singleton#from_lsd -> running=",
   "Game::State.singleton#from_lsd -> save_access=",
   "Game::State.singleton#from_lsd -> save_count=",
