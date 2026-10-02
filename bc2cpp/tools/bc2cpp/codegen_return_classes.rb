@@ -124,7 +124,7 @@ class CodeGen
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.
   def return_class_def_mask(d)
     return native_result_def_mask(d, classes: true) if d.owner == '<native>'
-    return NumericFlow::OTHER unless d.irep
+    return return_class_accessor_mask(d) unless d.irep
 
     irep = @ireps[d.irep]
     states = return_class_states(irep)
