@@ -1058,8 +1058,12 @@ class CodeGen
   # than borrowing a possibly live register.
   def compile_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
     numeric = numeric_operator_fallback(name, dest_reg, arg_reg, arg_expr, irep, idx, owner_def, reg_offset)
-    return numeric if numeric
+    if numeric
+      numeric_root_forget(irep, idx) if ENV['BC2CPP_NUMERIC_ROOTS']
+      return numeric
+    end
 
+    numeric_root_probe(name, dest_reg, arg_reg, irep, idx, owner_def, reg_offset) if ENV['BC2CPP_NUMERIC_ROOTS']
     argument = arg_reg ? "r#{arg_reg}" : arg_expr
     send_insn = Insn.synthetic('SEND', "R#{dest_reg} :#{name} n=1")
     send = compile_send(send_insn, self_implicit: false, irep: irep,
