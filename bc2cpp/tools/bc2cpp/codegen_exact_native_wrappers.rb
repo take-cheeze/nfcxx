@@ -53,7 +53,7 @@ module ExactNativeWrappers
 
   # The exact RGSS native class the flow proves for the receiver register of this send, or nil.
   def exact_native_wrapper_class(irep, idx, reg, name, argc)
-    return nil unless exact_native_wrappers_enabled? && irep && idx && @closed_world
+    return nil unless exact_native_wrappers_enabled? && irep && idx && @closed_world && exact_native_wrapper_name?(name)
 
     klass = exact_flow_user_class(irep, idx, reg)
     return nil unless klass && CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.key?(klass)
@@ -61,6 +61,12 @@ module ExactNativeWrappers
     return nil if symbol_installed_names.nil? || symbol_installed_names.include?(name) || devirt_blocked_name?(name)
 
     native_wrapper_owner_safe?(name, klass) ? klass : nil
+  end
+
+  # Names some wrapper table above handles, so a send of any other name never asks the flow.
+  def exact_native_wrapper_name?(name)
+    @exact_native_wrapper_names ||= (CALLS.keys + CodeGen::NATIVE_WRAPPER_ZERO_ARG_DIRECT.keys + %w[draw_text dispose]).to_set
+    @exact_native_wrapper_names.include?(name)
   end
 
   # [kind, builder] for `name` on +klass+ at +argc+ arguments, or nil.

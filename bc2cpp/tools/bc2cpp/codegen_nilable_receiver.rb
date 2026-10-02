@@ -14,7 +14,7 @@ module NilableReceiverSend
   # Plain SEND/SEND0 only: SENDB carries a block register and SSEND has no receiver.
   NILABLE_OPS = %w[SEND SEND0].freeze
   # An unguarded exact-receiver path: no class test, so a nil test is the cheaper guard.
-  EXACT_MARK = %r{^\s*// (?:EXACT_TYPED|CLOSED_WORLD_EXACT_CLASS|NATIVE_EXACT_DIRECT|NATIVE_DIRECT_EXACT|NATIVE_CORE_EXACT|CLOSED_WORLD_NATIVE_EXACT|INDEX_EXACT)\b}
+  EXACT_MARK = %r{^\s*// (?:EXACT_TYPED|CLOSED_WORLD_EXACT_CLASS|NATIVE_EXACT_DIRECT|EXACT_NATIVE_WRAPPER|NATIVE_DIRECT_EXACT|NATIVE_CORE_EXACT|CLOSED_WORLD_NATIVE_EXACT|INDEX_EXACT)\b}
 
   def compile_send(insn, **kwargs)
     plan = nilable_receiver_plan(insn, kwargs)
