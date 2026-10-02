@@ -101,6 +101,7 @@ require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_computed_send'
 require_relative 'codegen_block_core_direct'
+require_relative 'codegen_core_exact_direct'
 require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
