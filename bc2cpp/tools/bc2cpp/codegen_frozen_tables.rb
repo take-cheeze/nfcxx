@@ -136,9 +136,15 @@ end
 
     cw = @closed_world
     return 'no closed world' unless cw
+    # Without the outside-source scans (an analysis-only CodeGen) no proof the numeric facts use is on either.
+    return 'no outside-source scan' unless @foreign_method_names && @outside_const_names
     return 'closed world refused globally' unless cw.global_refusal.nil?
     return 'instances may gain singleton methods' unless cw.exact_instances_singleton_free?
     return 'a method installer has a computed name' if symbol_installed_names.nil?
+    # The gates of ADR 0301's constant pools: a table is read through a constant and a `freeze` is folded.
+    return 'BC2CPP_CLASS_POOLS withdraws the exact-class proofs' unless class_pools_enabled?
+    return 'a const_missing can answer a failed constant lookup' unless const_missing_free?
+    return 'freeze is not only Kernel#freeze' unless kernel_freeze_only?
     return 'LCF object kinds overlap the table kinds' if @lcf_rows && @lcf_rows.kinds.size > 256
 
     nil

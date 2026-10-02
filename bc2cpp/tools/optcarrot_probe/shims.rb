@@ -6,6 +6,14 @@ unless File.respond_to?(:binread)
   end
 end
 
+unless 0.respond_to?(:[])
+  class Integer
+    def [](i)
+      (self >> i) & 1
+    end
+  end
+end
+
 # Real identity semantics (keyed by object_id), not a value-equality Hash --
 # only implements the []/[]= subset optcarrot's ppu.rb actually calls.
 class IdentityHashShim
