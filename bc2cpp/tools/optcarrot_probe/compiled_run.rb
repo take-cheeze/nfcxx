@@ -114,6 +114,9 @@ abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless Fil
 
 require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
 
+# The bundle prepends this shim, so bc2cpp must see it: it is the only `[]` definer on the numbers optcarrot
+# indexes, and the GETIDX helper's exact-class arm needs it (ADR 0305). shims.rb stays out: its classes embed.
+SHIMS = File.join(ROOT, 'tools/optcarrot_probe/shim_integer_aref.rb')
 sources = %w[
   optcarrot.rb
   optcarrot/nes.rb
@@ -126,7 +129,7 @@ sources = %w[
   optcarrot/palette.rb
   optcarrot/driver.rb
   optcarrot/config.rb
-].map { |path| File.join(ROOT, '3rd/optcarrot/lib', path) }
+].map { |path| File.join(ROOT, '3rd/optcarrot/lib', path) }.unshift(SHIMS)
 
 native_sources = core_native_srcs(MRUBY) + Dir[File.join(ROOT, '3rd/mruby-onig-regexp/src/*.c')]
 foreign_sources = Dir[File.join(MRUBY, 'mrblib/**/*.rb')] +
