@@ -243,7 +243,8 @@ class CodeGen
     when 'GETCONST', 'GETMCNST'
       cname = insn.const_name || insn.mcnst_name
       group = @numeric_const_groups && @numeric_const_groups[cname]
-      ["const:#{cname}[#{group ? (group.failed ? (group.structural ? 'structural' : 'flowfail') : numeric_mask_name(group.mask)) : 'nogroup'}]"]
+      state = group ? (group.failed ? (group.structural ? 'structural' : 'flowfail') : numeric_mask_name(group.mask)) : 'nogroup'
+      ["const:#{cname}[#{state}#{@integer_constants&.include?(cname) ? ',intconst' : ''}]"]
     when 'GETUPVAR' then ['upvar']
     when 'LOADI_0', 'LOADI_1', 'LOADI8', 'LOADI16', 'LOADI32', 'LOADL' then []
     else ["op:#{op}"]

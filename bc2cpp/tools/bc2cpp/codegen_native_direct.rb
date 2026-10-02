@@ -109,6 +109,10 @@ module NativeDirectFallback
   def native_direct_wrap(d, recv, name, argv, arms, tail)
     return tail if arms.empty?
 
+    if ENV['BC2CPP_NATIVE_INT_ARGS'] && @native_int_site && arms.values.any? { |_, kinds| kinds.include?(:int) }
+      native_int_arg_probe("arms:#{name}", *@native_int_site[0, 2], argv, @native_int_site[2], @native_int_site[3])
+    end
+
     @native_construct_used.merge(arms.keys)
     generic = dynamic_dispatch_line(d, recv, name, argv)
     site = exact_core_site_for(recv, name)

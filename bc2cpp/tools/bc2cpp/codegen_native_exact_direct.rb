@@ -33,6 +33,9 @@ module NativeExactDirect
     return nil unless entry && entry.kinds.size == argv.size && native_exact_owner_safe?(name, owner)
 
     @native_construct_used << owner
+    if ENV['BC2CPP_NATIVE_INT_ARGS'] && @native_int_site && entry.kinds.include?(:int)
+      native_int_arg_probe("exact:#{owner}##{name}", *@native_int_site[0, 2], argv, @native_int_site[2], @native_int_site[3])
+    end
     guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int && !int_proven&.call(i) }
                  .map { |i| "mrb_integer_p(#{argv[i]})" }
     args = entry.kinds.each_index.map do |i|

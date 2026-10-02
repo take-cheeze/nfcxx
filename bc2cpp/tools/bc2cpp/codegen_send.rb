@@ -55,6 +55,7 @@ class CodeGen
     # GUARD_VIOLATION: the original SEND whose own registers the proofs read; an inlined
     # loop body that substitutes its receiver or arguments has none.
     guard_proof_site = call_receiver.nil? && call_arguments.nil? && n <= FUNCALL_ARGC_MAX ? new_proof_idx : nil
+    @native_int_site = [irep, new_proof_idx, owner_def, trace_reg_offset] if ENV['BC2CPP_NATIVE_INT_ARGS']
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.enter
@@ -239,6 +240,7 @@ class CodeGen
         class_value = stable_constructor ? "#{native[:class_fn]}()" : "mrb_class_ptr(#{recv})"
         class_guard = stable_constructor ? nil : "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
         if native[:type_guard] == :int
+          native_int_arg_probe("#{known}.new", irep, new_proof_idx, argv, owner_def, trace_reg_offset) if ENV['BC2CPP_NATIVE_INT_ARGS']
           arg_checks = argv.map { |a| "mrb_integer_p(#{a})" }.join(' && ')
           unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
           guard = [class_guard, arg_checks].compact.join(' && ')
