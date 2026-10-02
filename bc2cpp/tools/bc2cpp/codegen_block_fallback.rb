@@ -354,7 +354,8 @@ class CodeGen
       # every level in between passed this same gate (a forwarding outer site has a
       # non-empty capture set), so the whole frame chain is live while the inner
       # block runs.
-      next if upvars.any? && !BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name)
+      synchronous = BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name) || block_proven_to_stay?(irep, idx)
+      next if upvars.any? && !synchronous
 
       # BLOCK_SEMANTICS: `new` is on the allowlist for Array.new only. Hash.new
       # keeps its block as the default proc and Proc.new returns it, either of
@@ -376,7 +377,7 @@ class CodeGen
       # would be an escaped block (vm.c raises "unexpected yield" for that).
       blk_needs = block_blk_needs(block_irep)
       needs_blk = blk_available && blk_needs == [1] &&
-                  (BLOCK_FALLBACK_UPVAR_SAFE_METHODS.include?(name) || block_blk_needs(block_irep, given: false) == [])
+                  (synchronous || block_blk_needs(block_irep, given: false) == [])
 
       region = { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
                  block_irep: block_irep, name: name, n: n,
