@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Debug report for the interface-table question (ADR 0313): with BC2CPP_ITAB_REPORT=<path>, every
+# Debug report for the interface-table question (ADR 0315): with BC2CPP_ITAB_REPORT=<path>, every
 # explicit-receiver send whose guard chain has an else arm is written as one TSV row (the last compile of
 # a site wins). Columns:
 #
