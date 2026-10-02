@@ -8,7 +8,6 @@ require_relative 'core_defs'
 require_relative 'native_names'
 require_relative 'native_direct'
 require_relative 'dynamic_names'
-require_relative 'loop_installers'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -795,10 +794,6 @@ class ClosedWorld
       irep.constant_path(idx - 1, reg)&.then { |path| path.root == :const && path.name == 'Object' && path.segments.empty? }
   end
 
-  def loop_installer_sites
-    @loop_installer_sites ||= LoopInstallers.sites(@registry)
-  end
-
   def scan_send(irep, insns, idx, insn)
     name = insn.sym
     @clone_sent = true if name == 'clone'
@@ -819,8 +814,6 @@ class ClosedWorld
       return
     end
     return unless INSTALLER_SENDS.include?(name)
-    # LOOP_INSTALLERS (ADR 0304): the registry holds every name this send installs.
-    return if loop_installer_sites.include?([irep.label, idx])
 
     n = insn.argc
     syms = n ? literal_syms(insns, idx, n) : packed_syms(insns, idx, insn)
