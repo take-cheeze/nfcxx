@@ -113,6 +113,7 @@ module NumericFlow
   #   upvar_mask(irep, insn)               class set of a GETUPVAR (a captured local)
   #   pool_mask(irep, insn)                class set of a LOADL
   #   index_mask(irep, index, insn, state) class set of a GETIDX/GETIDX0 result (optional)
+  #   aref_mask(irep, index, insn, state)  class set of an AREF result (optional; TUPLE_RETURN_FACTS)
   #   op_native?(symbol)                   `+ - * /` are the core Integer/Float bodies
   #   nil_raises?(symbol)                  nil answers `symbol` only by raising
   # Each answers OTHER (or false) when it proves nothing.
@@ -417,6 +418,8 @@ module NumericFlow
       set.call(a, ok ? arith(state[a], state[b], nil_raises.call('/')) : OTHER)
     when 'GETIDX', 'GETIDX0'
       set.call(a, oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER)
+    when 'AREF'
+      set.call(a, oracle.respond_to?(:aref_mask) ? oracle.aref_mask(irep, index, insn, state) : OTHER)
     else
       set.call(a, OTHER)
     end
