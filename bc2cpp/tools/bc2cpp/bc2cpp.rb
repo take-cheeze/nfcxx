@@ -103,6 +103,7 @@ require_relative 'codegen_block_core_direct'
 require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
+require_relative 'interface_table_report' if ENV['BC2CPP_ITAB_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 
 if $PROGRAM_NAME == __FILE__
