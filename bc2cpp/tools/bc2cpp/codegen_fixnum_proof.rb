@@ -595,7 +595,7 @@ class CodeGen
   #   3. N is not in outside_tokens.
   #   4. N starts with a letter or underscore (operator names cannot be
   #      tokenized for rule 3).
-  #   5. N is not `initialize`.
+  #   5. N is not `initialize` (CONSTRUCTOR_POOLS enumerates its sites by class instead).
   #   6. pure_mandatory_arity? on M, and 1 <= k <= mand.
   #   7. N is not poisoned: no LOADSYM :N, no other DEF/SDEF/TDEF :N, no
   #      SEND0/SSEND0 :N (a zero-argument call to a mand >= 1 method means this
@@ -755,7 +755,8 @@ class CodeGen
 
       (1..mand).each { |k| cand[[d.irep, k]] = [here, k] }
     end
-    cand
+    # CONSTRUCTOR_POOLS (ADR 0313): rule 5 refuses initialize by name; its sites are enumerated by class.
+    cand.merge!(constructor_pool_candidates)
   end
 
   # ENTRY_ARG_CALLSITE_PROOF greatest fixpoint (see the header). Returns a Set
