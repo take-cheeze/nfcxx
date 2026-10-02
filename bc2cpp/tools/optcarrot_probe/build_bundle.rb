@@ -86,6 +86,7 @@ RUBY
 File.open(out_file, 'w') do |out|
   unless ENV['OPTCARROT_NO_SHIMS'] == '1'
     out.write(File.read(File.join(PROBE_DIR, 'shims.rb')))
+    out.write(File.read(File.join(PROBE_DIR, 'shim_integer_aref.rb')))
   end
   cpu_dispatch_rewritten = false
   FILES.each do |f|
