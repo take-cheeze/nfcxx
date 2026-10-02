@@ -110,6 +110,7 @@ require_relative 'codegen_escape'
 require_relative 'escape_report' if ENV['BC2CPP_ESCAPE_REPORT']
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
+require_relative 'interface_table_report' if ENV['BC2CPP_ITAB_REPORT']
 require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 
