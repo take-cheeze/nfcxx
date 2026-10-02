@@ -2,7 +2,7 @@
 
 require_relative 'codegen_block_core_direct'
 
-# CORE_EXACT_DIRECT (docs/adr/0313): a send with no block whose receiver is proven an exact
+# CORE_EXACT_DIRECT (docs/adr/0314): a send with no block whose receiver is proven an exact
 # Array, Hash, Range or Integer (ADR 0280) and whose name that class answers with a
 # compiled mruby core body (hidden from the registry, ADR 0264; possibly guarded, ADR 0269) is a
 # direct `_impl` call. Nothing else could answer: the receiver's class is a fact, so the by-name
