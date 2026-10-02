@@ -1,20 +1,8 @@
 # frozen_string_literal: true
 
-# CodeGen: TUPLE_RETURN_FACTS (ADR 0311).
-#
-# `a, b = pair(x)` is `SEND R5 :pair; AREF R3 R5 0; AREF R4 R5 1`, and AREF reads an element of whatever the
-# call returned, so NumericFlow knew nothing about `a` and `b`. When every definition of `pair` ends in a
-# literal `[e0, e1, ...]` of the same length, the call's result is a fresh Array nobody else holds, its element
-# j holds exactly what the flow proved for register j at the ARRAY, and the AREFs that read it straight after
-# the call see those classes. Each position is its own class set (`[x + 1, flag]` is INT and OTHER).
-#
-# Producer (`tuple_shape`): the name is a numeric-return candidate (a call reaches only the listed bytecode
-# definitions), every definition is handler-free, has no RETURN_BLK anywhere in its blocks and no other kind of
-# return, and each RETURN's register is defined only by ARRAY instructions of one length, each followed by
-# nothing but JMP/NOP up to that RETURN, so the Array cannot be read, stored or changed before it leaves.
-# Consumer (`tuple_aref_call`): the AREF reads the call's own result register with no branch target and no
-# other instruction between the call and the AREF, so nothing can change the Array first. An index past the
-# length reads nil, as OP_AREF does. Facts grow in the numeric fixpoint like the other pools.
+# CodeGen: TUPLE_RETURN_FACTS (ADR 0311). `a, b = pair(x)` is `SEND; AREF; AREF`: when every definition of `pair`
+# returns a fresh literal `[e0, e1, ...]` of one length, each AREF reads the class set the flow proved for that
+# position. The producer and consumer conditions are `tuple_shape` and `tuple_aref_call`; the argument is in the ADR.
 class CodeGen
   TUPLE_CALL_OPS = %w[SEND SEND0 SSEND SSEND0].freeze
   # Any other way out of a method: the result is not an Array literal.

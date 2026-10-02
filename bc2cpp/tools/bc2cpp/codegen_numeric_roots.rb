@@ -1,9 +1,8 @@
 # frozen_string_literal: true
 
-# CodeGen: BC2CPP_NUMERIC_ROOTS=FILE writes one line per guarded numeric operator whose operands NumericFlow
-# could not prove (the sites that keep a by-name or slow-helper else arm): the owner method, the operator, the
-# class set of each operand and the leaf values it was computed from (ADR 0311). A measurement aid only; it
-# never changes the generated code.
+# CodeGen: BC2CPP_NUMERIC_ROOTS=FILE writes, per guarded numeric operator whose operands NumericFlow could not prove,
+# the class set of each operand and the leaves it is computed from (ADR 0311). Measurement only: the generated code
+# is byte-identical with it on.
 class CodeGen
   ROOT_ARITH = { 'ADD' => 1, 'SUB' => 1, 'MUL' => 1, 'DIV' => 1 }.freeze
   ROOT_ARITH_IMM = %w[ADDI SUBI ADDILV SUBILV].freeze
