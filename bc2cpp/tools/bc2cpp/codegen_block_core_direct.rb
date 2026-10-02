@@ -134,7 +134,7 @@ module BlockCoreDirectFallback
   # The compiled core definition that `klass` answers `name` with, or nil when anything else
   # could: a native or engine definition on the way, a prepend or unattributed mixin, an
   # outside definer, a dynamic installer.
-  def block_core_target(klass, chain, name, arity)
+  def block_core_target(klass, chain, name, arity, blockless: false)
     return block_core_refuse(klass, name, arity, 'a dynamic installer names it') if symbol_installed_names.nil? || symbol_installed_names.include?(name)
     if (@registry[name] || []).any? { |definition| chain.include?(definition.owner) }
       return block_core_refuse(klass, name, arity, 'a project definition on the chain')
@@ -144,7 +144,7 @@ module BlockCoreDirectFallback
       return block_core_refuse(klass, name, arity, "#{owner} is not plain (native, prepend, mixin or outside definer)") unless block_core_owner_plain?(owner, name)
 
       defs = block_core_index[[owner, name]]
-      return block_core_callable(defs.first, arity, klass, name) if defs&.one?
+      return block_core_callable(defs.first, arity, klass, name, blockless: blockless) if defs&.one?
       return block_core_refuse(klass, name, arity, "#{defs.size} compiled definitions on #{owner}") if defs
     end
     block_core_refuse(klass, name, arity, 'no compiled core definition on the chain')
@@ -190,10 +190,10 @@ module BlockCoreDirectFallback
   # `definition` when a call with `arity` arguments and a block can be a plain `_impl` call:
   # the callee takes the block, the arity is one its signature models, its body reads nothing
   # of the caller's frame, it compiles clean and its owner is emitted by this link.
-  def block_core_callable(definition, arity, klass = nil, name = nil)
+  def block_core_callable(definition, arity, klass = nil, name = nil, blockless: false)
     irep = @ireps.fetch(definition.irep)
     why = ->(reason) { block_core_refuse(klass, name, arity, "#{definition.owner}##{definition.name}: #{reason}") }
-    return why.call('does not take a block') unless takes_block_param?(irep)
+    return why.call('does not take a block') unless blockless || takes_block_param?(irep)
     return why.call('signature or frame use not modelled by direct calls') unless pure_mandatory_or_optional_arity?(irep)
 
     mand = mandatory_arity(irep)

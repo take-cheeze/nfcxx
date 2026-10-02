@@ -1037,7 +1037,8 @@ class CodeGen
     core_sign = compile_core_numeric_sign(name, n, d, recv, argv)
     return core_sign if core_sign
 
-    core_extreme = compile_core_min_max(insn, name, n, d, recv, argv)
+    core_extreme = core_min_max_with_site(insn, name, n, d, recv, argv, irep, idx || trace_idx,
+                                          trace_receiver_reg || d, trace_reg_offset, self_implicit)
     return core_extreme if core_extreme
 
     if name == '<<' && n == 1 && builtin_class_send_safe?(name, %w[Array])
@@ -1699,7 +1700,11 @@ class CodeGen
       note = "  // POLY :#{name} -- real dynamic dispatch, receiver's runtime class decides\n"
       miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
                                 trace_reg_offset, exact_class: exact_class)
-      "#{diag}#{note}#{miss}  #{with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }}"
+      line = with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }
+      # CORE_EXACT_DIRECT: no dispatch is left, so the site is not a dynamic one to diagnose.
+      return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
+
+      "#{diag}#{note}#{miss}  #{line}"
     end
   end
 

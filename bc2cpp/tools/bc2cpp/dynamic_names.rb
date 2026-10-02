@@ -16,6 +16,13 @@ module DynamicNames
   # this adds names a program spells as a string, and, once any name is computed, the setter
   # `stem=` of every stem (the only composition the closed-world lint baseline contains).
   def self.universe(ireps)
+    stems, computed = analyze(ireps)
+    computed ? stems | stems.map { |n| "#{n}=" } : stems
+  end
+
+  # [the names a program spells as a Symbol or String literal, whether any send turns a computed
+  # value into a name].
+  def self.analyze(ireps)
     stems = Set.new
     computed = false
     ireps.each_value do |irep|
@@ -32,6 +39,6 @@ module DynamicNames
         computed = true unless literal
       end
     end
-    computed ? stems | stems.map { |n| "#{n}=" } : stems
+    [stems, computed]
   end
 end
