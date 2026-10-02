@@ -73,6 +73,7 @@ require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
 require_relative 'codegen_return_classes'
+require_relative 'codegen_return_accessors'
 require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_nilable_receiver'
@@ -98,6 +99,7 @@ require_relative 'codegen_block_core_direct'
 require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
+require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT']
 
 if $PROGRAM_NAME == __FILE__
   srcs = ARGV
