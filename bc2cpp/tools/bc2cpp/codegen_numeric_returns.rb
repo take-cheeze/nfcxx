@@ -188,6 +188,10 @@ class CodeGen
     lcf = lcf_new_mask(irep, index, insn) if name == 'new'
     return lcf if lcf
 
+    # A literal frozen in place: the kind of its slots (FROZEN_TABLES, ADR 0306).
+    table = name == 'freeze' && insn.op == 'SEND0' && frozen_table_freeze_site(irep, index)
+    return (state[insn.reg.to_i] || 0).zero? ? 0 : table if table
+
     tracked = @numeric_return && @numeric_return[name]
     return tracked if tracked
     return NumericFlow::INT if @fixnum_return_names.include?(name)
@@ -203,6 +207,11 @@ class CodeGen
     # SEND0 carries no operand count; a keyword or splat form has no plain count.
     argc = insn.op.end_with?('0') ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
     mask = 0
+    tables = @frozen_tables ? @frozen_tables.tables(recv) : 0
+    if tables.nonzero?
+      mask |= frozen_table_send_mask(tables, name, argc)
+      recv &= ~tables
+    end
     NUMERIC_SEND_OWNERS.each_key do |bit|
       mask |= numeric_send_on_class(bit, name, argc, insn, state) if (recv & bit).nonzero?
     end
