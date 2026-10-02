@@ -3,6 +3,7 @@
 require_relative 'core_mixins'
 require_relative 'core_defs'
 require_relative 'define_method_sites'
+require_relative 'loop_installers'
 
 # Step 6: the whole-program class/method registry.
 
@@ -117,6 +118,9 @@ def build_registry(ireps, root_label)
   walked = Set.new
   # CORE_ALIASES (ADR 0269): every `alias new old` of a class body, in walk order.
   alias_sites = []
+  # LOOP_INSTALLERS (ADR 0304): [irep label, index, namespace, visibility] of each container loop
+  # in a body whose block sends attr_*; settled once the walk has seen every definition.
+  loop_sites = []
 
   walk = lambda do |label, namespace|
     walked << label
@@ -422,6 +426,7 @@ def build_registry(ireps, root_label)
                                                 visibility: :public, installer: :define_method)
         end
       when 'SENDB'
+        loop_sites << [label, idx, namespace, default_visibility] if LoopInstallers.candidate?(irep, idx, ireps)
         # STRUCT_MEMBERS_ANALYSIS for the block-taking form; additive only.
         found = detect_struct_new_members(irep, idx, insn, namespace)
         struct_member_lists[found[0]] = found[1] if found
@@ -481,6 +486,11 @@ def build_registry(ireps, root_label)
   end
 
   walk.call(root_label, nil)
+  unless loop_sites.empty?
+    recognized, refused = LoopInstallers.install(registry, ireps, loop_sites)
+    warn "== loop installers (#{recognized} of #{loop_sites.size} registered as accessor definitions) =="
+    refused.sort.each { |why, count| warn "  left dynamic: #{why}#{count > 1 ? " (x#{count})" : ''}" }
+  end
   declared_modules = module_names.to_set
   declared_types = declared_modules | class_decls.keys.to_set
   mixin_sites.each do |site|
