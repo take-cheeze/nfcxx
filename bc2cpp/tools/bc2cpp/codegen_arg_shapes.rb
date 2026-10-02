@@ -104,7 +104,7 @@ module ArgShapeCalls
     code = super
     if @extended_shape_used && !kwargs[:self_implicit] && code.include?("  // MONO :")
       @no_by_name_mono = true
-      @call_block_direct_calls = 0 if @call_block_expr
+      reset_call_block_counts if @call_block_expr
       code = super
     end
     code
@@ -154,7 +154,7 @@ module ArgShapeCalls
   # The `_impl` signature is mandatory..., rest Array, `bc2cpp_blk`, in that
   # order (compile_method). The rest Array is built fresh per call, as ENTER does.
   def direct_call_args(target, argv, impl)
-    @call_block_direct_calls += 1 if @call_block_expr
+    note_call_block_direct(impl) if @call_block_expr
     t_irep = @ireps.fetch(target.irep)
     rest = rest_only_callee?(t_irep)
     return super unless rest || takes_block_param?(t_irep)
@@ -235,15 +235,17 @@ module ArgShapeCalls
   # A nested compile (compiles_clean? -> compile_method) is a different call
   # site: it must not inherit this one's block.
   def with_fresh_method_state
-    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region]
+    saved = [@call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region,
+             @call_block_direct_impls]
     @call_block_expr = nil
-    @call_block_direct_calls = 0
+    reset_call_block_counts
     @extended_callee_shapes = false
     @no_by_name_mono = false
     @call_block_region = nil
     super
   ensure
-    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region = saved if saved
+    @call_block_expr, @call_block_direct_calls, @extended_callee_shapes, @no_by_name_mono, @call_block_region,
+      @call_block_direct_impls = saved if saved
   end
 
   # ARG_SHAPES_BLOCK: the SENDB `region` (a literal block already built into
@@ -252,8 +254,9 @@ module ArgShapeCalls
   # threaded through; the result is accepted only when every direct call in it
   # went through direct_call_args (so carries the block) and no block-less
   # dynamic call remains.
-  def compile_direct_block_send(region, block_expr, owner_def)
-    with_private_poly_diag_cache { compile_direct_block_send_body(region, block_expr, owner_def) }
+  # `inline_offset` is the register shift of a block nested in an inlined loop body (ADR 0310).
+  def compile_direct_block_send(region, block_expr, owner_def, inline_offset: nil)
+    with_private_poly_diag_cache { compile_direct_block_send_body(region, block_expr, owner_def, inline_offset) }
   end
 
   # An attempt that is dropped must not leave its diagnostic reasons behind: a
@@ -267,34 +270,62 @@ module ArgShapeCalls
     @poly_diagnostic_reason_cache = saved
   end
 
-  def compile_direct_block_send_body(region, block_expr, owner_def)
+  def compile_direct_block_send_body(region, block_expr, owner_def, inline_offset = nil)
     irep = region[:parent_irep]
     return nil unless irep && owner_def
 
     idx = irep.instructions.index { |insn| insn.addr == region[:sendb_addr] }
     return nil unless idx
 
+    offset = inline_offset || 0
     insn = Insn.synthetic(region[:self_implicit] ? 'SSEND' : 'SEND',
-                          "R#{region[:dest_reg]} :#{region[:name]} n=#{region[:n]}")
-    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region]
+                          "R#{region[:dest_reg].to_i + offset} :#{region[:name]} n=#{region[:n]}")
+    saved = [@call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls]
     @call_block_expr = block_expr
-    @call_block_direct_calls = 0
+    reset_call_block_counts
     @call_block_region = region
     begin
-      code = compile_send(insn, self_implicit: region[:self_implicit], irep: irep, idx: idx, owner_def: owner_def)
-      accepted = direct_block_code?(code, @call_block_direct_calls)
+      # A shifted body passes no `idx` and carries the unshifted site as the trace (BLOCK_BODY_INDEX_SUPPORT).
+      sites = offset.zero? ? { idx: idx } : { idx: nil, trace_idx: idx, trace_reg_offset: offset }
+      code = compile_send(insn, self_implicit: region[:self_implicit], irep: irep, owner_def: owner_def, **sites)
+      accepted = direct_block_code?(code, @call_block_direct_calls, @call_block_direct_impls)
     ensure
-      @call_block_expr, @call_block_direct_calls, @call_block_region = saved
+      @call_block_expr, @call_block_direct_calls, @call_block_region, @call_block_direct_impls = saved
     end
     accepted ? code : nil
   end
 
-  def direct_block_code?(code, direct_calls)
+  def reset_call_block_counts
+    @call_block_direct_calls = 0
+    @call_block_direct_impls = Hash.new(0)
+  end
+
+  def note_call_block_direct(impl)
+    @call_block_direct_calls += 1
+    @call_block_direct_impls[impl] += 1
+  end
+
+  # Every `_impl` call of the code carries the block. The count is exact when no attempt was
+  # dropped; a compile that built an arm chain twice and kept one counts the dropped calls too,
+  # so BLOCK_ARM_REACH (ADR 0310) also accepts code whose live calls are each covered, by name,
+  # by a direct_call_args call.
+  def direct_block_code?(code, direct_calls, direct_impls = nil)
     return false if direct_calls.zero?
 
     live = code.lines.reject { |line| line.lstrip.start_with?('//') }.join
-    live.scan('_impl(M').size == direct_calls && !live.match?(/\bmrb_funcall(_argv|_id)?\(/) &&
-      !live.include?('#error')
+    return false if live.match?(/\bmrb_funcall(_argv|_id)?\(/) || live.include?('#error')
+
+    live_calls = live.scan('_impl(M').size
+    return true if live_calls == direct_calls
+    return false unless direct_impls && block_arm_reach?
+
+    live_by_name = live.scan(/\b(\w+_impl)\(M\b/).flatten.tally
+    live_by_name.sum { |_, count| count } == live_calls && live_by_name.all? { |name, count| count <= direct_impls[name] }
+  end
+
+  # BC2CPP_BLOCK_ARM_REACH=0 returns every part of ADR 0310 to the earlier output.
+  def block_arm_reach?
+    ENV['BC2CPP_BLOCK_ARM_REACH'] != '0'
   end
 
   # ARG_SHAPES_SPLAT: a splat call site (`f(*a)`) with a resolved target. A
