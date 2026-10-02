@@ -94,6 +94,7 @@ require_relative 'codegen_eqq'
 require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
+require_relative 'codegen_computed_send'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_block_param_call'
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
@@ -768,6 +769,12 @@ if $PROGRAM_NAME == __FILE__
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
+  # COMPUTED_SEND_EXPANSION (ADR 0303): frozen Symbol tables a computed-name send may index.
+  CodeGen.computed_send_tables = profile_call.call('ComputedSendNames::SymbolTables.analyze') do
+    ComputedSendNames::SymbolTables.analyze(ireps, native_paths, foreign_ruby_srcs)
+  end
+  warn "== frozen Symbol tables (COMPUTED_SEND_EXPANSION): #{CodeGen.computed_send_tables.size} =="
+  CodeGen.computed_send_tables.sort.each { |n, names| warn "  SYMBOL_TABLE #{n}  (#{names.size} names)" }
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
@@ -1339,7 +1346,7 @@ if $PROGRAM_NAME == __FILE__
          "#{kept.values.sum} kept dispatching =="
     # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
     violation_families = Hash.new(0)
-    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ)\)"/) { |(f)| violation_families[f] += 1 } }
+    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|COMPUTED_SEND)\)"/) { |(f)| violation_families[f] += 1 } }
     warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
     violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
     NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
