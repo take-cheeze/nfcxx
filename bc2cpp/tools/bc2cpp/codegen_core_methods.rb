@@ -110,7 +110,7 @@ class CodeGen
             }
           }
           if (!#{array}_done) {
-            #{dynamic_dispatch_line(d, recv, name, argv).chomp}
+            #{core_exact_else(d, recv, name, argv)}
           }
         }
     CPP
