@@ -63,14 +63,14 @@ class CodeGen
     @captured_local_class_enabled = ENV.fetch('BC2CPP_CAPTURED_LOCAL_CLASS', '1') != '0' && captured_local_writers_absent?
   end
 
-  # No send, symbol or string in the build names a way to write a local by name, and no outside source or native
-  # spells one. A rebinding send with a literal block is fine (its SETUPVARs are visible); without one it may eval text.
+  # No native of the build implements or calls a way to write a local by name (so a computed-name send has nothing
+  # to reach), no outside Ruby spells one, and no send, symbol or string of the world names one. A rebinding send
+  # with a literal block is fine (its SETUPVARs are visible); without one it may eval text.
   def captured_local_writers_absent?
     return false unless @closed_world && @closed_world.global_refusal.nil?
 
     names = CAPTURED_LOCAL_WRITER_NAMES
-    outside = @closed_world.outside_call_names(Set.new)
-    return false if names.any? { |name| outside.include?(name) }
+    return false if names.any? { |name| !@closed_world.native_paths_spelling(name).empty? || @closed_world.outside_ruby_token?(name) }
 
     @ireps.each_value do |irep|
       irep.instructions.each_with_index do |insn, idx|
