@@ -178,6 +178,7 @@ class CodeGen
 
   # For the diagnostic: `NUMTUPLE name (INT, INT|FLT, OTHER)`.
   def tuple_facts_report
+    numeric_root_tuple_dump if ENV['BC2CPP_NUMERIC_ROOTS']
     (@tuple_returns || {}).filter_map do |name, masks|
       next if masks.all?(&:zero?)
 

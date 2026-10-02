@@ -38,6 +38,21 @@ class CodeGen
     CodeGen.numeric_root_lines[[irep.label, idx]] = line.gsub(/[\r\n]/, ' ')
   end
 
+  # One TUPLE line per position of every tuple fact that is not fully proven: the leaves its definitions put there.
+  def numeric_root_tuple_dump
+    (@tuple_returns || {}).each do |name, masks|
+      masks.each_with_index do |mask, pos|
+        next if NumericFlow.numeric?(mask)
+
+        leaves = @tuple_sites[name].flat_map do |irep, idx, d, _n|
+          numeric_root_leaves(irep, idx - 1, irep.instructions[idx].reg.to_i + pos, d)
+        end
+        CodeGen.numeric_root_lines[[:tuple, name, pos]] =
+          ['TUPLE', name, pos, numeric_mask_name(mask), leaves.uniq.join('|')].join("\t").gsub(/[\r\n]/, ' ')
+      end
+    end
+  end
+
   def numeric_root_forget(irep, idx)
     CodeGen.numeric_root_lines.delete([irep.label, idx])
   end
