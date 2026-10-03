@@ -7,6 +7,7 @@ require_relative 'source_text'
 # A result fact joins successful returns; it never bypasses the original call.
 module NativeClassResults
   FILES = {
+    '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => 'de872dbf521cd005aaacf397e53508ec04851d7a4a0fd9de94261c8887de50e1',
     '3rd/mruby/src/hash.c' => '42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16',
     '3rd/mruby/src/string.c' => '1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00',
     '3rd/mruby/src/array.c' => '5e0541466b6aa9c8eaab0bcc7d51db15babae7059871854eeef81f08ac53dc11',
@@ -60,7 +61,7 @@ module NativeClassResults
   STRUCT_ALIAS_PATH = '3rd/mruby/mrbgems/mruby-struct/mrblib/struct.rb'
   STRUCT_ALIAS_SHA = '6d651f44caf2f46e15ee6569426cdaabe8721c1405fdcfa6592a767aca1cb5e1'
 
-  EXACT_CORE_KINDS = { 'Array' => { 'to_a' => 'Array' }, 'String' => { 'bytes' => 'Array' } }.freeze
+  EXACT_CORE_KINDS = { 'Array' => { 'to_a' => 'Array', 'compact' => 'Array', 'join' => 'String' }, 'String' => { 'bytes' => 'Array' } }.freeze
 
   module_function
 
@@ -69,6 +70,20 @@ module NativeClassResults
 
     source = SourceText.read(path, 'native class results', binary: true)
     source && Array(digest).include?(Digest::SHA256.hexdigest(source))
+  end
+
+  # compact delegates allocation to core Array; both complete bodies are pinned.
+  def core_result_pinned?(name, klass, paths)
+    if klass == 'Array' && name == 'compact'
+      relative = '3rd/mruby/mrbgems/mruby-array-ext/src/array.c'
+      path = paths.find { |candidate| source_matches?(candidate, relative) }
+      return false unless path
+
+      helper = path.delete_suffix('/mrbgems/mruby-array-ext/src/array.c') + '/src/array.c'
+      return source_matches?(helper, '3rd/mruby/src/array.c')
+    end
+    relative = klass == 'Array' ? '3rd/mruby/src/array.c' : '3rd/mruby/src/string.c'
+    paths.any? { |path| source_matches?(path, relative) }
   end
 
   def kinds(name, paths, string_subclass_free: false)

@@ -184,6 +184,12 @@ class CodeGen
     core_result = state && native_core_class_result(insn, state)
     return core_result if core_result
 
+    if name == 'dup' && insn.op == 'SEND0' && state && native_dup_result_safe?
+      mask = state[insn.reg.to_i]
+      allowed = RETURN_CORE_CLASS.keys.reduce(NumericFlow::NIL, :|) | (@numeric_class_bits || {}).values.reduce(0, :|)
+      return mask if mask.is_a?(Integer) && (mask & ~allowed).zero?
+    end
+
     tracked = @rc_return[name]
     return tracked if tracked
     return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == 'SEND0'
@@ -196,6 +202,25 @@ class CodeGen
     @rc_new_class[key] = exact_new_class_at(irep, index + 1, insn.reg, numeric_owner_of(irep)) unless @rc_new_class.key?(key)
     klass = @rc_new_class[key]
     klass && !RETURN_BITLESS_CLASSES.include?(klass) ? numeric_class_bit(klass) : NumericFlow::OTHER
+  end
+
+  # ADR 0335: initialize_copy's answer is discarded; only a fresh object's class survives.
+  def native_dup_result_safe?
+    return @native_dup_result_safe if defined?(@native_dup_result_safe)
+
+    @native_dup_result_safe = audit_native_dup_result
+  end
+
+  def audit_native_dup_result
+    return false if ENV['BC2CPP_NATIVE_COLLECTION_RESULTS'] == '0'
+    return false unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && ownerless_native_dispatch_safe?('dup')
+
+    paths = @closed_world.native_paths_spelling('dup')
+    allowed = %w[3rd/mruby/src/class.c 3rd/mruby/src/kernel.c]
+    !paths.empty? && paths.all? do |path|
+      relative = allowed.find { |suffix| path.end_with?("/#{suffix}") }
+      relative && NativeClassResults.source_matches?(path, relative)
+    end && allowed.all? { |relative| paths.any? { |path| path.end_with?("/#{relative}") } }
   end
 
   # `x.freeze` is x when the only `freeze` in the build is Kernel#freeze.
