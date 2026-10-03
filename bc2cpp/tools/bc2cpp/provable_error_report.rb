@@ -246,4 +246,4 @@ module ProvableErrorReport
 end
 
 CodeGen.prepend(ProvableErrorReport)
-at_exit { ProvableErrorReport.write(ENV.fetch('BC2CPP_PROVABLE_ERROR_REPORT')) }
+at_exit { ProvableErrorReport.write(ENV.fetch('BC2CPP_PROVABLE_ERROR_REPORT')) } if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
