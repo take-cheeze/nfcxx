@@ -78,6 +78,7 @@ require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
 require_relative 'codegen_constructor_pools'
 require_relative 'codegen_return_classes'
+require_relative 'codegen_core_ruby_results'
 require_relative 'codegen_return_accessors'
 require_relative 'codegen_exact_core_arms'
 require_relative 'codegen_captured_locals'
@@ -175,6 +176,9 @@ if $PROGRAM_NAME == __FILE__
   # CORE_METHODS: what mruby's own Ruby must keep interpreted is no registry definition either.
   core_refused = CoreMethods.load_refused(ENV['BC2CPP_CORE_REFUSED'] || CoreMethods::DEFAULT_PATH)
   core_ineligible = CoreMethods.excluded_labels(registry, ireps, core_refused)
+  # ADR 0338: an interpreted core replacement still intercepts inherited lookup.
+  CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
+  CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
   core_stale_refusals = CoreMethods.stale(registry, ireps, core_refused)
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
   # A core attr_* accessor or module_function copy has no body to compile: it stays the interpreter's.
