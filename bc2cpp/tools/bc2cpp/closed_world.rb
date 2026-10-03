@@ -377,8 +377,9 @@ class ClosedWorld
   # +owners+ (the classes and modules nil answers through), nothing defines it by a computed name,
   # and NilClass has no method_missing. Finer than nil_call_free?, which refuses a name any outside
   # class defines (`size`, `first` on Array).
-  def nil_foreign_definition_free?(name, owners)
-    return false if @global_refusal || @unknown_defs.include?(name) || @mm_classes.include?('NilClass')
+  def nil_foreign_definition_free?(name, owners, instance_scope: false)
+    return false if @global_refusal || @mm_classes.include?('NilClass')
+    return false if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
 
     owners.none? { |owner| ForeignDefiners.defines?(@ruby_paths, owner, name) }
   end
