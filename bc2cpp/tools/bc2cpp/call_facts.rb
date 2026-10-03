@@ -29,8 +29,9 @@ module CallFacts
   HOOK_NAMES = %w[method_missing respond_to_missing? initialize].freeze
 
   # The world Answers reads; nil fields make every question "unknown".
+  # instance_installed (NATIVE_CLASS_ARMS, ADR 0323) is installed without the names only a class object sees.
   World = Struct.new(:closed_world, :registry, :superclass_of, :included, :prepended, :unknown_mixins,
-                     :native_sources, :installed, keyword_init: true)
+                     :native_sources, :installed, :instance_installed, keyword_init: true)
 
   # Which classes answer a method name. A name nothing bounds (installed by computed code, a hook, a
   # definer on Object/Kernel/BasicObject, a native whose owner the scan cannot read) answers for every
@@ -74,11 +75,14 @@ module CallFacts
       @ancestors[klass] ||= compute_ancestors(klass)
     end
 
-    # What defines +name+: {ruby:, modules:, native:, foreign:, singleton:}, or nil when unbounded.
-    def definers(name)
-      return @memo[name] if @memo.key?(name)
+    # What defines +name+: {ruby:, modules:, native:, foreign:, singleton:}, or nil when unbounded. +instance+
+    # ignores the definers and installs that only a class or module object sees (ADR 0323); only a question
+    # about instances of non-Module classes may ask for it.
+    def definers(name, instance: false)
+      key = [name, instance]
+      return @memo[key] if @memo.key?(key)
 
-      @memo[name] = compute_definers(name)
+      @memo[key] = compute_definers(name, instance)
     end
 
     def method_missing_classes = @cw.method_missing_classes
@@ -130,7 +134,61 @@ module CallFacts
       !unknown && anc.none? { |a| d[:native].include?(a) || d[:foreign].include?(a) || d[:modules].include?(a) }
     end
 
+    # NATIVE_CLASS_ARMS (ADR 0323): a send of +name+ to an instance of +klass+ can only reach a Ruby definition
+    # of the registry, or none (a NoMethodError): the first definer on its lookup path is such a definition and
+    # no native or outside Ruby definer sits at or before it. The Ruby side is judged by full class name, so a
+    # namesake class elsewhere cannot stand in for a missing definition.
+    def resolves_in_ruby?(klass, name)
+      d = definers(name, instance: true)
+      return false if d.nil? || method_missing_classes.include?(klass)
+
+      path = lookup_path(klass)
+      return false if path.nil?
+
+      ruby = @w.registry.fetch(name, []).reject { |x| x.owner == '<native>' || x.owner.end_with?('.singleton') }
+                 .to_set(&:owner)
+      # Outside sources name classes by their last segment; a declared class is only theirs when some outside
+      # source spells its whole path's root too (ClosedWorld#outside_spells_class?).
+      outside = lambda do |owner|
+        (d[:native].include?(simple(owner)) || d[:foreign].include?(simple(owner))) &&
+          (!@cw.class_declared?(owner) || @cw.outside_spells_class?(owner))
+      end
+      first = path.find { |owner| ruby.include?(owner) || outside.(owner) }
+      first.nil? || (ruby.include?(first) && !outside.(first))
+    end
+
     private
+
+    # The owners of +klass+'s method lookup in order (prepends, class, includes, superclass, ...), or nil when
+    # part of the chain is unknown.
+    def lookup_path(klass)
+      out = []
+      seen = Set.new
+      cur = klass
+      while cur.is_a?(String) && seen.add?(cur)
+        return nil if @w.unknown_mixins.include?(cur)
+
+        Array(@w.prepended[cur]).reverse.each { |m| return nil unless module_path(m, out, Set.new) }
+        out << cur
+        Array(@w.included[cur]).reverse.each { |m| return nil unless module_path(m, out, Set.new) }
+        out.concat(CORE_MIXINS.fetch(simple(cur), []))
+        sup = superclass_of(cur)
+        return nil if sup == :unknown
+
+        cur = sup
+      end
+      out + EVERYTHING.to_a
+    end
+
+    def module_path(mod, out, seen)
+      return true unless seen.add?(mod)
+      return false if @w.unknown_mixins.include?(mod)
+
+      Array(@w.prepended[mod]).reverse.each { |m| return false unless module_path(m, out, seen) }
+      out << mod
+      Array(@w.included[mod]).reverse.each { |m| return false unless module_path(m, out, seen) }
+      true
+    end
 
     def compute_ancestors(klass)
       out = []
@@ -169,8 +227,10 @@ module CallFacts
       Array(@w.included[mod]).reverse.each { |m| mixin_chain(m, out, seen) }
     end
 
-    def compute_definers(name)
-      return nil if @cw.global_refusal || @w.installed.nil? || @w.installed.include?(name) || @cw.unknown_def?(name)
+    def compute_definers(name, instance)
+      installed = instance ? @w.instance_installed : @w.installed
+      unknown = instance ? @cw.instance_unknown_def?(name) : @cw.unknown_def?(name)
+      return nil if @cw.global_refusal || installed.nil? || installed.include?(name) || unknown
       return nil if HOOK_NAMES.include?(name)
 
       ruby = Set.new

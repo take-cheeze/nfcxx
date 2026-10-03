@@ -44,6 +44,15 @@ module CoreExactDirect
       "body, no dispatch\n  r#{d} = #{impl}(M, #{([recv] + args).join(', ')});\n"
   end
 
+  # FLOW_CORE_DIRECT (ADR 0323): the direct call of an exact-receiver site that would otherwise get a guard
+  # chain over user classes (a name some project class also defines). The receiver is exactly the core
+  # class, so those arms are dead and the compiled core body is the only candidate.
+  def flow_core_direct_line(d, recv, name, argv)
+    return nil unless ENV['BC2CPP_NATIVE_CLASS_ARMS'] != '0' && exact_core_site_for(recv, name)
+
+    core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv))
+  end
+
   # compile_core_min_max with the receiver proof of this site, which compile_send builds only after it.
   def core_min_max_with_site(insn, name, n, d, recv, argv, irep, site_idx, reg, offset, self_implicit)
     site = core_extend_enabled? && !self_implicit && irep &&

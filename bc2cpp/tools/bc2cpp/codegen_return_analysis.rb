@@ -365,6 +365,19 @@ class CodeGen
   def symbol_installed_names
     return @symbol_installed_names if defined?(@symbol_installed_names)
 
+    @symbol_installed_names = collect_installed_names(skip_class_object: false)
+  end
+
+  # NATIVE_CLASS_ARMS (ADR 0323): symbol_installed_names without the installs that land on a class or module
+  # object (`class << Const; alias_method ...`), which no instance of a proven set can see. nil when
+  # symbol_installed_names is.
+  def symbol_instance_installed_names
+    return @symbol_instance_installed_names if defined?(@symbol_instance_installed_names)
+
+    @symbol_instance_installed_names = symbol_installed_names && collect_installed_names(skip_class_object: true)
+  end
+
+  def collect_installed_names(skip_class_object:)
     names = Set.new
     children = @ireps.values.flat_map(&:reps).compact.to_set
     @ireps.each do |label, irep|
@@ -373,25 +386,27 @@ class CodeGen
       # compiled input. The root irep spans every file, so it is always scanned.
       next if children.include?(label) && CoreDefs.core_source?(irep.file)
 
+      scoped = skip_class_object && @closed_world&.class_object_body?(label)
       irep.instructions.each_with_index do |insn, idx|
         case insn.op
         when 'ALIAS', 'UNDEF'
-          names << insn.sym
+          names << insn.sym unless scoped
         when 'LOADSYM'
-          return @symbol_installed_names = nil if NAME_INSTALLER_SENDS.include?(insn.sym)
+          return nil if NAME_INSTALLER_SENDS.include?(insn.sym)
         when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB'
           next unless NAME_INSTALLER_SENDS.include?(insn.sym)
           # DEFINE_METHOD_SITES (ADR 0288): the registry defines this one, so it names nothing unknown.
           next if insn.sym == 'define_method' && DefineMethodSites.settled?(@registry, irep, idx, @ireps)
 
           syms = insn.plain_fixed_argc? && literal_symbol_args(irep, idx, insn.reg.to_i, insn.argc)
-          return @symbol_installed_names = nil unless syms && !syms.empty?
+          return nil unless syms && !syms.empty?
 
-          names.merge(syms)
+          # An implicit-receiver installer in a class-object body acts on that body's own cref.
+          names.merge(syms) unless scoped && insn.op.start_with?('SSEND')
         end
       end
     end
-    @symbol_installed_names = names
+    names
   end
 
   # A self-call from `owner` never reaches method_missing when `owner`'s own
