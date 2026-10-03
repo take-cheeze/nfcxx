@@ -16,10 +16,11 @@ class CodeGen
   end
 
   def compute_native_result_kind(name, klass)
-    if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && @closed_world&.exact_instances_singleton_free? && @native_name_sources &&
-       NativeClassResults::EXACT_CORE_KINDS.dig(klass, name)
+    core_kind = native_core_declared_result(name, klass)
+    if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && @closed_world&.exact_instances_singleton_free? && @native_name_sources && core_kind
       entry = NativeCoreDirect::ENTRIES.find { |candidate| candidate.owner == klass && candidate.name == name }
-      return 'Array' if entry && native_core_entry_safe?(entry)
+      pinned = NativeClassResults.core_result_pinned?(name, klass, @closed_world.native_paths_spelling(name))
+      return core_kind if pinned && entry && native_core_entry_safe?(entry)
     end
     kind = NativeResultFacts.kind(name, klass)
     return nil unless kind && @closed_world&.exact_instances_singleton_free?
@@ -30,16 +31,57 @@ class CodeGen
     kind
   end
 
+  def native_core_declared_result(name, klass)
+    return nil if ENV['BC2CPP_NATIVE_COLLECTION_RESULTS'] == '0' && %w[compact join].include?(name)
+
+    NativeClassResults::EXACT_CORE_KINDS.dig(klass, name)
+  end
+
   # Only the exact-class oracle supplies this receiver: numeric masks alone
   # do not prove lookup reaches the built-in class's audited body.
   def native_core_class_result(insn, state)
     return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
 
     owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
-    return nil unless owner && NativeClassResults::EXACT_CORE_KINDS.dig(owner, insn.sym)
+    return nil unless owner && native_core_declared_result(insn.sym, owner)
 
     kind = native_result_kind(insn.sym, owner)
     kind && native_result_bits(kind, true)
+  end
+
+  # The core Struct alias copies its native inspect entry. Any unmodelled
+  # replacement of that entry or another alias of to_s withdraws this bridge.
+  def native_struct_string_alias_safe?
+    return @native_struct_string_alias_safe if defined?(@native_struct_string_alias_safe)
+
+    @native_struct_string_alias_safe = audit_native_struct_string_alias
+  end
+
+  def audit_native_struct_string_alias
+    return false if ENV['BC2CPP_NATIVE_STRING_RESULTS'] == '0' || ENV['BC2CPP_NATIVE_CLASS_RESULTS'] == '0'
+    return false unless @closed_world && @native_name_sources && @closed_world.native_class_constant_stable?('Struct')
+    return false unless @closed_world.core_native_arm_safe?('inspect', 'Struct')
+    return false if symbol_installed_names.nil? || symbol_installed_names.include?('inspect')
+    return false if (@registry['inspect'] || []).any? { |definition| definition.owner == 'Struct' }
+    return false unless Array(@prepended_modules['Struct']).empty? && !@unknown_mixins.include?('Struct')
+
+    @ireps.each_value do |irep|
+      aliasing = irep.instructions.any? { |insn| insn.op == 'ALIAS' || insn.sym == 'alias_method' }
+      irep.instructions.each do |insn|
+        return false if %w[UNDEF ALIAS].include?(insn.op) && insn.sym == 'inspect'
+        next unless aliasing && insn.sym == 'to_s' && %w[ALIAS LOADSYM].include?(insn.op)
+
+        return false unless insn.op == 'ALIAS' && insn.first_of(:name)&.value == 'inspect' &&
+                            NativeClassResults.source_matches?(irep.file, NativeClassResults::STRUCT_ALIAS_PATH, NativeClassResults::STRUCT_ALIAS_SHA)
+      end
+    end
+    paths = @closed_world.native_paths_spelling('inspect')
+    registrations, opaque = NativeExpressionDevirt.class_registrations(paths)
+    return false if opaque.fetch('inspect', []).any? { |owner| owner.nil? || owner == 'Struct' }
+
+    entries = registrations.fetch('inspect', []).select { |entry| entry[:owner]&.fetch(:class_name, nil) == 'Struct' }
+    entries.one? && entries.first[:function] == 'mrb_struct_to_s' &&
+      NativeClassResults.source_matches?(entries.first[:path], '3rd/mruby/mrbgems/mruby-struct/src/struct.c')
   end
 
   # Every linked native definition must have an audited return kind; outside Ruby withdraws
@@ -52,9 +94,18 @@ class CodeGen
 
   def compute_native_result_name_kinds(name)
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources
+    return nil if name == 'to_s' && !native_struct_string_alias_safe?
+
     paths = @closed_world.native_paths_spelling(name)
-    audited = NativeClassResults.kinds(name, paths)
-    if audited && @closed_world.name_visible_except_natives_in?(name, '/')
+    audited = NativeClassResults.kinds(name, paths, string_subclass_free: %w[to_s join].include?(name) && @closed_world.native_subclass_free?(['String']))
+    ruby_aliases = []
+    if name == 'to_s'
+      ruby_aliases = @closed_world.outside_ruby_paths_defining(name).select do |path|
+        NativeClassResults.source_matches?(path, NativeClassResults::STRUCT_ALIAS_PATH, NativeClassResults::STRUCT_ALIAS_SHA)
+      end
+    end
+    visible = name == 'to_s' ? @closed_world.native_return_sources_visible?(name, ruby_aliases) : @closed_world.name_visible_except_natives_in?(name, '/')
+    if audited && visible
       kinds = audited.values.flat_map { |kind| Array(kind) }
       return audited if kinds.all? { |kind| !kind.is_a?(String) || !kind.include?('::') || @closed_world.native_class_constant_stable?(kind) }
     end
