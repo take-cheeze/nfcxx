@@ -544,6 +544,18 @@ class ClosedWorld
     !@outside_names.include?(name) || native_only_in?(name, path_fragment)
   end
 
+  # Audited outside Ruby aliases may join a native return table (ADR 0334).
+  def native_return_sources_visible?(name, audited_ruby_paths = [])
+    return false if @global_refusal || !@mm_classes.empty? || @unknown_defs.include?(name)
+
+    outside_ruby_paths_defining(name).all? { |path| audited_ruby_paths.include?(path) }
+  end
+
+  def outside_ruby_paths_defining(name)
+    @outside_return_def_paths ||= {}
+    @outside_return_def_paths[name] ||= @ruby_paths.select { |path| foreign_method_names([path]).include?(name) }
+  end
+
   # Inherited dispatch additionally needs every possible method installer for
   # this name to be represented in the registry.
   def inherited_lookup_safe?(name, owner)
