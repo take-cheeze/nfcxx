@@ -124,6 +124,7 @@ require_relative 'block_send_report' if ENV['BC2CPP_BLOCK_SEND_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'dead_arm_report' if ENV['BC2CPP_DEAD_ARM_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
+require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
 
 if $PROGRAM_NAME == __FILE__
   srcs = ARGV
