@@ -137,7 +137,7 @@ class CodeGen
   # Names no group may track; sets @numeric_ivar_disabled when reflection could
   # write any ivar.
   def numeric_ivar_poisoned_names
-    names = Set.new(@outside_ivar_names)
+    names = Set.new(@outside_ivar_names - @native_ivar_scopes.keys)
     @ireps.each_value do |irep|
       irep.instructions.each_with_index do |insn, idx|
         sym = insn.sym
@@ -212,10 +212,16 @@ class CodeGen
       end
     end
     @numeric_ivar_groups.each_value do |group|
-      group.failed = poisoned.include?(group.name) || wild.include?(group.family) ||
+      native_family = numeric_ivar_native_poisoned?(group.family, group.name)
+      group.failed = native_family || poisoned.include?(group.name) || wild.include?(group.family) ||
                      writers.include?([group.family, group.name])
       group.structural = group.failed
     end
+  end
+
+  def numeric_ivar_native_poisoned?(family, name)
+    scopes = @native_ivar_scopes[name]
+    @outside_ivar_names.include?(name) && (scopes.nil? || scopes.any? { |owner| numeric_family(owner) == family })
   end
 
   # Tracked ivar names of +irep+, in a stable order: those with a live group and

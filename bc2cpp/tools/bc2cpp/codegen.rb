@@ -66,12 +66,13 @@ class CodeGen
                   native_name_sources = nil, included_modules = {}, prepended_modules = {},
                   unknown_mixins = Set.new, analysis_only: false, native_expression_devirt: {},
                   native_registered_expressions: {}, closed_world: nil, outside_ivar_names: nil,
-                  nil_operator_names: nil, outside_const_names: nil)
+                  nil_operator_names: nil, outside_const_names: nil, native_ivar_scopes: {})
     @ireps = ireps
     # NUMERIC_OPERAND_PROOF (ADR 0276): ivar names spelled by sources outside the
     # closed world, and operators they define on NilClass. nil means the scan did
     # not run; the proofs that need them then prove nothing.
     @outside_ivar_names = outside_ivar_names
+    @native_ivar_scopes = native_ivar_scopes
     @nil_operator_names = nil_operator_names
     @outside_const_names = outside_const_names
     # CLOSED_WORLD: a ClosedWorld (closed_world.rb) when BC2CPP_CLOSED_WORLD=1.

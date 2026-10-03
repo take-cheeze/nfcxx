@@ -25,6 +25,7 @@ require_relative 'irep'
 require_relative 'bytecode_ir'
 require_relative 'registry'
 require_relative 'native_names'
+require_relative 'native_ivar_scopes'
 
 require_relative 'native_expression_devirt'
 require_relative 'symbol_cache'
@@ -803,6 +804,11 @@ if $PROGRAM_NAME == __FILE__
   # NUMERIC_OPERAND_PROOF: the same two outside inputs, as ivar names they spell
   # and operators they define on NilClass; nil when either input is absent.
   outside_ivars = (outside_ivar_names(native_paths + foreign_ruby_srcs) if native_paths && foreign_ruby_srcs)
+  native_ivar_scopes = {}
+  if closed_world && native_paths && foreign_ruby_srcs
+    native_ivar_scopes, refusal = NativeIvarScopes.analyze(native_paths + outside_native, foreign_ruby_srcs + outside_ruby)
+    warn "== native ivar scopes (ADR 0332): #{refusal || native_ivar_scopes.inspect} =="
+  end
   nil_operators = (nil_class_operator_names(native_paths) if native_paths && foreign_ruby_srcs)
   outside_consts = if native_paths && foreign_ruby_srcs
                      IntegerConstants.native_defined_const_names(native_paths) |
@@ -893,6 +899,7 @@ if $PROGRAM_NAME == __FILE__
                     native_expression_devirt: native_expression_devirt,
                     native_registered_expressions: native_registered_expressions,
                     closed_world: closed_world, outside_ivar_names: outside_ivars,
+                    native_ivar_scopes: native_ivar_scopes,
                     nil_operator_names: nil_operators, outside_const_names: outside_consts)
   warn '== typed slots demoted to boxed slots (foreign writers, ADR 0279) =='
   if gen.typed_demotions.empty?
