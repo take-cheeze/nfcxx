@@ -21,7 +21,7 @@ class CodeGen
       CallFacts::World.new(closed_world: @closed_world, registry: @registry, superclass_of: @superclass_of,
                            included: @included_modules, prepended: @prepended_modules,
                            unknown_mixins: @unknown_mixins, native_sources: @native_name_sources,
-                           installed: symbol_installed_names)
+                           installed: symbol_installed_names, instance_installed: symbol_instance_installed_names)
     )
   end
 
@@ -68,13 +68,32 @@ class CodeGen
     classes.all? { |k| answers.native_free?(k, name) }
   end
 
-  # [instances, scoped, native_free] for ClosedWorld#refusal: the exact-class flow's set when it has
-  # one, else the call-fact set, which is also the whole receiver set (so only its classes need an arm).
+  # NATIVE_CLASS_ARMS (ADR 0323): BC2CPP_NATIVE_CLASS_ARMS=0 turns it off. Same world conditions as CALL_FACTS.
+  def native_class_arms_enabled?
+    ENV['BC2CPP_NATIVE_CLASS_ARMS'] != '0' && !@closed_world.nil? && !@native_name_sources.nil? &&
+      @closed_world.global_refusal.nil? && @closed_world.exact_instances_singleton_free?
+  end
+
+  # [instances, scoped, native_free, instance_scope] for ClosedWorld#refusal: the exact-class flow's set when it
+  # has one, else the call-fact set. Both are the whole receiver set of instance classes (so only their classes
+  # need an arm). With NATIVE_CLASS_ARMS the exact set is scoped too, a class counts as native free when its
+  # lookup reaches a Ruby definition first (Answers#resolves_in_ruby?), and `instance_scope` drops the
+  # definers and installs only a class object sees.
   def receiver_instance_scope(site, name)
+    arms = native_class_arms_enabled?
     exact = receiver_instances(site, name)
-    return [exact, false, false] if exact
+    return [exact, false, false, false] if exact && !arms
+    return [exact, true, native_class_free?(name, exact), true] if exact
 
     refined = refined_receiver_instances(site, name)
-    refined ? [refined, true, call_facts_native_free?(name, refined)] : [nil, false, false]
+    return [nil, false, false, false] unless refined
+    return [refined, true, call_facts_native_free?(name, refined), false] unless arms
+
+    [refined, true, call_facts_native_free?(name, refined) || native_class_free?(name, refined), true]
+  end
+
+  def native_class_free?(name, classes)
+    answers = call_facts_answers
+    classes.all? { |k| answers.resolves_in_ruby?(k, name) }
   end
 end

@@ -90,6 +90,7 @@ class ClosedWorld
     # (TouchScan, ADR 0256).
     @touches = []
     @unknown_defs = Set.new
+    @unknown_def_sources = Hash.new { |h, k| h[k] = [] }
     @visibility_names = Set.new
     @dynamic_visibility = false
     @rebound = Set.new
@@ -146,10 +147,11 @@ class ClosedWorld
   # the receiver holds (nil allowed), none a class or module object (CodeGen#receiver_instances).
   # CALL_FACTS (ADR 0317): `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
-  def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false)
+  def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
+              instance_scope: false)
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
-    return :unknown_definer if @unknown_defs.include?(name)
+    return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
     return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
 
     reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
@@ -193,9 +195,11 @@ class ClosedWorld
   # check runs first, the receiver is method_missing-free). Each returned class
   # answers `name` itself or inherits it, so a guarded send to it reaches its
   # definition and every other class can only raise NoMethodError.
-  def unlisted_classes(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false)
+  def unlisted_classes(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
+                       instance_scope: false)
     return [] unless refusal(name, listed, self_owner, installed, instances: instances, scoped: scoped,
-                                                                  native_free: native_free) == :unlisted_class
+                                                                  native_free: native_free,
+                                                                  instance_scope: instance_scope) == :unlisted_class
     return [] unless method_missing_free?(self_owner, instances)
 
     _reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
@@ -281,6 +285,26 @@ class ClosedWorld
   # A DEF the registry does not hold (installed by code the walk cannot place) defines +name+.
   def unknown_def?(name)
     @unknown_defs.include?(name)
+  end
+
+  # NATIVE_CLASS_ARMS (ADR 0323): a DEF the registry does not hold, as unknown_def?, but ignoring the ones that
+  # land on a class or module object (`class << Const; def x`, `alias_method` inside it). Those answer only
+  # that object's own sends, so a receiver set of instance classes never reaches them.
+  def instance_unknown_def?(name)
+    @unknown_defs.include?(name) && @unknown_def_sources[name].any? { |label| label.nil? || !class_object_body?(label) }
+  end
+
+  # +label+ is the irep of a direct `class << <class or module constant>` body (or `class << self` in a class
+  # body): its cref is that object's singleton class.
+  def class_object_body?(label)
+    @class_object_bodies ||= @singleton_opens.each_with_object(Set.new) do |(irep, idx, insn), out|
+      next unless insn.op == 'SCLASS' && class_constant_target?(irep, idx, insn.reg.to_s)
+
+      exec = irep.instructions[idx + 1]
+      body = exec && exec.op == 'EXEC' && exec.reg.to_s == insn.reg.to_s && irep.reps[exec.block_index.to_i]
+      out << body if body
+    end
+    @class_object_bodies.include?(label)
   end
 
   # NATIVE_DIRECT (ADR 0253): while a caller emits exact-class arms for every
@@ -786,12 +810,12 @@ class ClosedWorld
         case insn.op
         when 'TDEF', 'SDEF'
           child = irep.reps[insn.block_index]
-          @unknown_defs << insn.sym unless registered.include?(child)
+          note_unknown_def(insn.sym, insn.op == 'TDEF' ? irep.label : nil) unless registered.include?(child)
         when 'DEF'
           sym = insn.sym_token
           method = insns[0...idx].reverse.find { |i| i.op == 'METHOD' }
           child = method && irep.reps[method.block_index.to_i]
-          @unknown_defs << sym unless child && registered.include?(child)
+          note_unknown_def(sym, irep.label) unless child && registered.include?(child)
         when *SEND_OPS
           scan_send(irep, insns, idx, insn)
         when 'LOADSYM'
@@ -849,6 +873,20 @@ class ClosedWorld
     end || false
   end
 
+  # `reg` holds a class or module object on every path: a constant nothing assigns a value to, or `self` in a
+  # class body. Unlike class_object_register? it refuses a fresh `Object.new`, whose singleton class an
+  # instance of a proven set can have.
+  def class_constant_target?(irep, idx, reg)
+    irep.walk_writers(idx - 1, reg, follow_moves: true) do |writer|
+      case writer.op
+      when 'LOADSELF' then @walked.include?(irep.label)
+      when 'GETCONST' then class_constant?(writer.const_name)
+      when 'GETMCNST' then class_constant?(writer.mcnst_name)
+      else false
+      end
+    end || false
+  end
+
   # No SETCONST binds a value to the name, so it can only name a class or module.
   def class_constant?(name)
     @constant_write_counts[name].zero?
@@ -894,10 +932,19 @@ class ClosedWorld
     trusted = name.start_with?('attr') && @walked.include?(irep.label) && insn.op.start_with?('SSEND')
     return if trusted
 
+    scoped_label = insn.op.start_with?('SSEND') ? irep.label : nil
     syms.each do |s|
-      @unknown_defs << s
-      @unknown_defs << "#{s}="
+      note_unknown_def(s, scoped_label)
+      note_unknown_def("#{s}=", scoped_label)
     end
+  end
+
+  # +label+ is the irep a definer sits in when its target is that irep's own cref (a `def`/`alias_method` with
+  # an implicit receiver), else nil: only the former can be proven to land on a class object (see
+  # instance_unknown_def?).
+  def note_unknown_def(name, label)
+    @unknown_defs << name
+    @unknown_def_sources[name] << label
   end
 
   # A `freeze` send in the closed world's own Ruby (user_objects_unfrozen?): harmless only when its
@@ -999,8 +1046,8 @@ class ClosedWorld
         next unless i.op == 'LOADSYM'
 
         s = i.sym_token
-        @unknown_defs << s
-        @unknown_defs << "#{s}="
+        note_unknown_def(s, nil)
+        note_unknown_def("#{s}=", nil)
       end
     when 'Class'
       n = insns[send_idx].argc
