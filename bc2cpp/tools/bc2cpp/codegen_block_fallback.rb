@@ -376,7 +376,13 @@ class CodeGen
       # own env is on the caller's stack, so invoking it after that caller returned
       # would be an escaped block (vm.c raises "unexpected yield" for that).
       blk_needs = block_blk_needs(block_irep)
-      needs_blk = blk_available && blk_needs == [1] &&
+      # BLOCK_FALLBACK_YIELD_SUPPORT: `lv == 1` is this METHOD's block, which
+      # the wrapper extracted. `lv == 2` with no `lv == 1` is the enclosing
+      # REGION's block: this block is itself nested (NESTED_BLOCK_FORWARD,
+      # ADR 0330), so uvenv(lv-1) resolves to its parent cfunc, which holds that
+      # block in its own `bc2cpp_blk`. `blk_available` is therefore the caller's
+      # needs_blk, not the method's -- see the nested recognize call below.
+      needs_blk = blk_available && (blk_needs == [1] || blk_needs == [2]) &&
                   (synchronous || block_blk_needs(block_irep, given: false) == [])
 
       region = { block_addr: insn.addr, sendb_addr: paired.addr, dest_reg: dest_reg,
@@ -508,7 +514,22 @@ class CodeGen
     end
     # DEEP_UPVAR_CAPTURE_SUPPORT: this body's own captured set, which nested
     # regions may forward.
-    recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs).each do |nregion|
+    #
+    # NESTED_BLOCK_FORWARD (ADR 0330): a nested region is entered from inside
+    # this body's cfunc, so the block it can forward is the one THIS body holds
+    # (an `lv == 2` BLKPUSH resolves to its parent region), not the method's.
+    # The DEPTH is fixed here, before the recursion: a child's level is this
+    # body's level plus one, so this body's own must already be set.
+    saved_nested_depth = @block_fallback_depth
+    @block_fallback_depth = fn_prefix ? @block_fallback_depth.to_i + 1 : 1
+    # BLOCK_FALLBACK_YIELD_SUPPORT: the level a BLKPUSH in THIS body is matched
+    # against is this body's own nesting depth (NESTED_BLOCK_FORWARD, ADR 0330):
+    # depth 1 reads the method's block, depth 2 its parent region's, and
+    # uvenv(lv-1) is a different frame for each. Set here, before the nested
+    # pass, so a child can derive its own level from it.
+    @blk_param_level = @block_fallback_depth
+    recognize_block_fallback_regions(block_irep, available_upvars: upvar_regs,
+                                     blk_available: needs_blk).each do |nregion|
       # BLOCK_FALLBACK_RESCUE_SUPPORT: regions inside a rescue range belong to that
       # range's own pass (emit_rescue_try_body); emitting them here too would
       # duplicate them.
@@ -574,12 +595,11 @@ class CodeGen
       runtime_def_fallback_kind?(region[:kind]) && region[:self_source] != :receiver
     @block_fallback_active = [nil, 'block_fallback'].include?(region[:kind])
     # BLOCK_FALLBACK_YIELD_SUPPORT: gates BLKPUSH. Saved and restored, not cleared:
-    # compile_method sets @blk_param_name too and this function recurses. Level 1
-    # only, matching the admitted `blk_needs == [1]` (`BLKPUSH Rx m1:r:m2:kd (1)`).
+    # compile_method sets @blk_param_name too and this function recurses. The
+    # level is this body's nesting depth, fixed before the nested pass above.
     saved_blk_param_name = @blk_param_name
     saved_blk_param_level = @blk_param_level
     @blk_param_name = needs_blk ? 'bc2cpp_blk' : nil
-    @blk_param_level = 1
     # BLOCK_FALLBACK_RESCUE_SUPPORT: a `rescue` inside the block body
     # (`cached_bitmap(cache, key) { Bitmap.new(...) rescue StandardError => e;
     # ...; end }`) uses the top-level rescue machinery unchanged. Must run AFTER the
@@ -623,6 +643,7 @@ class CodeGen
     @block_fallback_active = false
     @blk_param_name = saved_blk_param_name
     @blk_param_level = saved_blk_param_level
+    @block_fallback_depth = saved_nested_depth
     @block_ret_slot = saved_ret_slot
     @block_brk_slot = saved_brk_slot
     return nil if nested_pre.include?('#error') || body.include?('#error')
