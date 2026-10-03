@@ -373,7 +373,7 @@ module ReceiverProofReport
   end
 
   def rp_structural_cause(family, name)
-    return 'outside' if @outside_ivar_names.include?(name)
+    return 'outside' if numeric_ivar_native_poisoned?(family, name)
     return 'writer' if (@registry["#{name}="] || []).any? { |d| d.kind == :ivar_accessor && d.irep.nil? && numeric_family(d.owner) == family }
 
     @numeric_wild_families.include?(family) ? 'wild' : 'poisoned'

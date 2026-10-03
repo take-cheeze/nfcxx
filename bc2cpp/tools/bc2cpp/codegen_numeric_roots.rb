@@ -175,7 +175,7 @@ class CodeGen
   def numeric_root_ivar_failure(owner, group)
     return numeric_root_flowfail(group) unless group.structural
 
-    return 'native-spelled' if @outside_ivar_names.include?(group.name)
+    return 'native-spelled' if numeric_ivar_native_poisoned?(group.family, group.name)
     return 'wild-family' if @numeric_wild_families.include?(group.family)
 
     "writer/other(#{owner.owner})"
