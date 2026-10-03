@@ -51,7 +51,9 @@ class CodeGen
       next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
       next if defs.empty?
       string_native = name == 'to_s' && native_result_name_kinds(name)
-      next if @foreign_method_names.include?(name) && !string_native
+      # The linked-source audit is stricter than the broad foreign-name census (ADR 0336).
+      collection_native = NativeClassResults::ARRAY_TRANSFORMS.include?(name) && native_result_name_kinds(name)
+      next if @foreign_method_names.include?(name) && !string_native && !collection_native
       next if aliased.include?(name) && !(string_native && native_struct_string_alias_safe?)
       next unless @closed_world.name_fully_visible?(name) || native_result_name_kinds(name)
       next unless defs.all? { |d| numeric_return_def_usable?(d) }

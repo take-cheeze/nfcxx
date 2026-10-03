@@ -3,10 +3,11 @@
 require 'digest'
 require_relative 'source_text'
 
-# ADRs 0333/0334: all native spellings of a name must belong to pinned, audited files.
+# ADRs 0333–0336: all native spellings of a name must belong to pinned, audited files.
 # A result fact joins successful returns; it never bypasses the original call.
 module NativeClassResults
   FILES = {
+    '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e],
     '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => 'de872dbf521cd005aaacf397e53508ec04851d7a4a0fd9de94261c8887de50e1',
     '3rd/mruby/src/hash.c' => '42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16',
     '3rd/mruby/src/string.c' => '1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00',
@@ -27,7 +28,12 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
     'mruby-rgss/src/lib.cxx' => '664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e'
   }.freeze
+  ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
   FACTS = {
+    'join' => ['String', %w[3rd/mruby/src/array.c 3rd/mruby/mrbgems/mruby-io/src/file.c]],
+    'compact' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
+    'flatten' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
+    '__uniq' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     'keys' => ['Array', %w[3rd/mruby/src/hash.c]],
     'values' => ['Array', %w[3rd/mruby/src/hash.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c]],
     'bytes' => ['Array', %w[3rd/mruby/src/string.c]],
@@ -89,6 +95,9 @@ module NativeClassResults
   def kinds(name, paths, string_subclass_free: false)
     return nil if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] == '0'
 
+    return nil if ARRAY_TRANSFORMS.include?(name) && ENV['BC2CPP_NATIVE_ARRAY_TRANSFORMS'] == '0'
+    return nil if %w[compact join].include?(name) && ENV['BC2CPP_NATIVE_COLLECTION_RESULTS'] == '0'
+
     return nil if name == 'to_s' && (ENV['BC2CPP_NATIVE_STRING_RESULTS'] == '0' || !string_subclass_free)
 
     fact = FACTS[name]
@@ -101,6 +110,24 @@ module NativeClassResults
 
       source = SourceText.read(path, 'native class results', binary: true)
       return nil unless source && Array(FILES.fetch(relative)).include?(Digest::SHA256.hexdigest(source))
+    end
+    # File.join's single-component path returns its argument unchanged (ADR 0336).
+    if name == 'join' && paths.any? { |path| path.end_with?('/mruby-io/src/file.c') }
+      return nil unless string_subclass_free
+    end
+    if ARRAY_TRANSFORMS.include?(name)
+      paths.each do |path|
+        relative = name == 'join' ? '3rd/mruby/src/string.c' : '3rd/mruby/src/array.c'
+        if name == 'join'
+          root = path.end_with?('/src/array.c') ? path.delete_suffix('/src/array.c') : path.delete_suffix('/mrbgems/mruby-io/src/file.c')
+          return nil unless source_matches?(root + '/src/array.c', '3rd/mruby/src/array.c')
+
+          helper = root + '/src/string.c'
+        else
+          helper = path.delete_suffix('/mrbgems/mruby-array-ext/src/array.c') + '/src/array.c'
+        end
+        return nil unless source_matches?(helper, relative)
+      end
     end
     if name == 'to_s'
       numeric = paths.find { |path| path.end_with?('/3rd/mruby/src/numeric.c') }

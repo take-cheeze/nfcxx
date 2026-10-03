@@ -97,7 +97,7 @@ class CodeGen
     return nil if name == 'to_s' && !native_struct_string_alias_safe?
 
     paths = @closed_world.native_paths_spelling(name)
-    audited = NativeClassResults.kinds(name, paths, string_subclass_free: name == 'to_s' && @closed_world.native_subclass_free?(['String']))
+    audited = NativeClassResults.kinds(name, paths, string_subclass_free: %w[to_s join].include?(name) && @closed_world.native_subclass_free?(['String']))
     ruby_aliases = []
     if name == 'to_s'
       ruby_aliases = @closed_world.outside_ruby_paths_defining(name).select do |path|
