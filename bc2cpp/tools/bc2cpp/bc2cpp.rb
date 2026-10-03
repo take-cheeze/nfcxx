@@ -125,6 +125,7 @@ require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
 require_relative 'dead_arm_report' if ENV['BC2CPP_DEAD_ARM_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 require_relative 'receiver_proof_report' if ENV['BC2CPP_RECEIVER_PROOF_REPORT']
+require_relative 'native_setter_report' if ENV['BC2CPP_NATIVE_SETTER_REPORT']
 
 if $PROGRAM_NAME == __FILE__
   srcs = ARGV
@@ -1571,5 +1572,6 @@ if $PROGRAM_NAME == __FILE__
   else
     never_called.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
   end
+  gen.write_native_setter_report(ENV.fetch('BC2CPP_NATIVE_SETTER_REPORT')) if ENV['BC2CPP_NATIVE_SETTER_REPORT']
   profile_phase.call('diagnostics + sidecar writes')
 end
