@@ -783,13 +783,109 @@ class CodeGen
     "  r#{d_reg} = #{cpp_name(target_def.owner, target_def.name)}_impl(M, self#{args});\n"
   end
 
-  # SUPER_SUPPORT: the target of `super` in owner_def's method: the same-named
-  # MethodDef on the declared superclass, only when "Owner#name" is in
-  # SUPER_TARGETS (see it for the block-forwarding fact). The no-include fact is
-  # re-derived by super_reaches_superclass?. Owner-relative, so a POLY name
+  # SUPER_NO_CALLER_BLOCK (ADR 0332): may `super` here become a direct `_impl`
+  # call with NO block?
+  #
+  # A compiled `_impl` has no block parameter, so OP_SUPER's forwarded block
+  # would be dropped -- correct only when no caller ever passes one. ADR 0146
+  # established that as a hand-vetted allowlist (SUPER_TARGETS), re-checked by
+  # hand on every entry. It is derived here instead: a block reaches a method
+  # only through a block-carrying send (SENDB/SSENDB, or `&expr` beside a plain
+  # one), so if NO instruction in the build sends `name` with a block to a
+  # receiver that can be an instance of this owner (or a subclass), none can
+  # arrive.
+  #
+  # The scan is over every compiled irep's instructions, so a caller added later
+  # is covered without touching a list. Anything it cannot read stays a refusal:
+  # an open world, a dynamic send whose receiver class is unproven, or a name
+  # something installs at runtime all leave the question open, and an open
+  # question must keep the `#error` rather than assume the safe answer.
+  def super_direct_call_allowed?(owner_def)
+    return nil unless owner_def
+    return false if ENV['BC2CPP_SUPER_DIRECT'] == '0'
+
+    key = "#{owner_def.owner}##{owner_def.name}"
+    return true if SUPER_TARGETS.include?(key)
+
+    @super_no_caller_block ||= {}
+    return @super_no_caller_block[key] if @super_no_caller_block.key?(key)
+
+    @super_no_caller_block[key] = no_caller_passes_block?(owner_def)
+  end
+
+  # True only when the build shows no block-carrying call of `owner_def.name`
+  # that can reach this owner. See super_direct_call_allowed?.
+  def no_caller_passes_block?(owner_def)
+    name = owner_def.name
+    owner = owner_def.owner
+    subclasses = superclass_closure.call(owner)
+    callers = block_carrying_callers_of(name)
+    # A send whose receiver class is not proven cannot be excluded, and neither
+    # can one naming any class that could be this owner or a subclass of it.
+    return false if callers.nil?
+    return false if callers.any? { |recv| recv.nil? || (recv & subclasses).empty? }
+
+    true
+  end
+
+  # Every block-carrying send of `name` in the build, as the set of receiver
+  # class names it can provably hold. nil when some send's receiver class is
+  # unproven (the caller must treat the question as open).
+  def block_carrying_callers_of(name)
+    @block_carrying_callers ||= {}
+    return @block_carrying_callers[name] if @block_carrying_callers.key?(name)
+    return @block_carrying_callers[name] = nil unless call_facts_enabled?
+
+    found = []
+    unknown = false
+    @ireps.each_value do |irep|
+      states = call_facts_states(irep)
+      next unless states
+
+      irep.instructions.each do |insn|
+        next unless %w[SENDB SSENDB].include?(insn.op)
+        next unless insn.sym == name
+
+        idx = irep.index_of_addr(insn.addr)
+        reg = insn.reg.to_i
+        names = idx && states[idx] && CallFacts::Flow.facts(states[idx], reg)
+        classes = names && call_facts_classes(names)
+        if classes.nil?
+          unknown = true
+        else
+          found << classes
+        end
+      end
+    end
+    @block_carrying_callers[name] = unknown ? nil : found
+  end
+
+  # The superclass closure: every class whose instances can be an instance of
+  # +owner+, i.e. owner plus its subclasses, so a call proved to hold a
+  # subclass still counts as a possible caller.
+  def superclass_closure
+    @superclass_closure ||= lambda do |owner|
+      set = Set.new([owner])
+      changed = true
+      while changed
+        changed = false
+        @superclass_of.each do |child, parent|
+          next unless parent.is_a?(String) && set.include?(parent) && set.add?(child)
+
+          changed = true
+        end
+      end
+      set
+    end
+  end
+
+  # SUPER_SUPPORT: the target of `super` in owner_def's method: the
+  # same-named MethodDef on the declared superclass. The block-forwarding fact
+  # (SUPER_NO_CALLER_BLOCK) is derived, not listed; see it. The no-include fact
+  # is re-derived by super_reaches_superclass?. Owner-relative, so a POLY name
   # still resolves, as real `super` does.
   def super_target(owner_def)
-    return nil unless SUPER_TARGETS.include?("#{owner_def.owner}##{owner_def.name}")
+    return nil unless super_direct_call_allowed?(owner_def)
 
     superclass = @superclass_of[owner_def.owner]
     return nil unless superclass.is_a?(String)

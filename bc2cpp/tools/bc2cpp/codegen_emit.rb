@@ -39,6 +39,10 @@ class CodeGen
     # which @blk_param_level is derived from. Scoped like @blk_param_level (the
     # two are saved and restored together), so it resets per method too.
     :@block_fallback_depth => 0,
+    # SUPER_NO_CALLER_BLOCK (ADR 0332): whole-program memos, not per-method state
+    # (they answer about every caller of a name, which is fixed once the ireps
+    # are). nil is the "no memo yet" marker each writes with `||=`.
+    :@super_no_caller_block => nil, :@block_carrying_callers => nil, :@superclass_closure => nil,
     :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
