@@ -147,7 +147,12 @@ module CallFacts
 
       ruby = @w.registry.fetch(name, []).reject { |x| x.owner == '<native>' || x.owner.end_with?('.singleton') }
                  .to_set(&:owner)
-      outside = ->(owner) { d[:native].include?(simple(owner)) || d[:foreign].include?(simple(owner)) }
+      # Outside sources name classes by their last segment; a declared class is only theirs when some outside
+      # source spells its whole path's root too (ClosedWorld#outside_spells_class?).
+      outside = lambda do |owner|
+        (d[:native].include?(simple(owner)) || d[:foreign].include?(simple(owner))) &&
+          (!@cw.class_declared?(owner) || @cw.outside_spells_class?(owner))
+      end
       first = path.find { |owner| ruby.include?(owner) || outside.(owner) }
       first.nil? || (ruby.include?(first) && !outside.(first))
     end

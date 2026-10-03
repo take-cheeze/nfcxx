@@ -42,7 +42,10 @@ module NativeArmsReport
     return code unless irep && site && !kwargs[:self_implicit] && %w[SEND SEND0 SENDB].include?(insn.op)
 
     lines = code.each_line.reject { |l| l.lstrip.start_with?('//') }
-    return code unless lines.any? { |l| l.match?(BY_NAME) }
+    unless lines.any? { |l| l.match?(BY_NAME) }
+      ROWS.delete([irep.label, site])
+      return code
+    end
 
     NativeArmsReport.world = self
     ROWS[[irep.label, site]] = arms_row(insn, kwargs, irep, site, code, fallbacks.last, lines)
@@ -178,21 +181,8 @@ module NativeArmsReport
     out
   end
 
-  # Per-class resolution (proof 2 of ADR 0315): the first definer of +name+ along +klass+'s ancestors is a Ruby
-  # definition of the registry, or no ancestor defines it (a NoMethodError), so a native or outside definer
-  # further up cannot be reached.
   def arms_resolves_in_ruby?(klass, name)
-    answers = call_facts_answers
-    return true unless answers.answers?(klass, name)
-
-    d = answers.definers(name)
-    return false if d.nil? || answers.method_missing_classes.include?(klass)
-
-    anc, unknown = answers.ancestors(klass)
-    return false if unknown
-
-    first = anc.find { |a| d[:ruby].include?(a) || d[:native].include?(a) || d[:foreign].include?(a) || d[:modules].include?(a) }
-    !first.nil? && d[:ruby].include?(first) && !d[:native].include?(first) && !d[:foreign].include?(first)
+    call_facts_answers.resolves_in_ruby?(klass, name) || !call_facts_answers.answers?(klass, name)
   end
 
   # name -> ["file:line", ...] of every ALIAS/UNDEF/alias_method/define_method/undef_method/remove_method and of

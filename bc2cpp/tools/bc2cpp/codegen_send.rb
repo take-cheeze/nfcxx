@@ -1678,6 +1678,10 @@ class CodeGen
         return rest_code if rest_code
       end
 
+      # FLOW_CORE_DIRECT (ADR 0323): a flow-proven core receiver has no user class to chain for.
+      flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
+      return flow_core if flow_core
+
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = with_exact_core_site(exact_site) do
         compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
