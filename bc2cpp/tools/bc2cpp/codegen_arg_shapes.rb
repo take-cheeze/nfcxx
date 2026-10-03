@@ -49,8 +49,28 @@ module ArgShapeCalls
   end
 
   # The wrapper of this method extracts `bc2cpp_blk` (see compile_method).
+  #
+  # CORE_BLOCK_OPT counts too: `def permutation(n = size, &block)` has an
+  # optional argument AND a block, so block_param_arity? declines it (it
+  # requires opt.zero?) and compile_method reaches it through
+  # optional_block_arg_table instead, setting has_blk and extracting
+  # `bc2cpp_blk` all the same. Without this arm a BLOCK_FALLBACK region inside
+  # such a method was compiled with blk_available false, so its body could not
+  # forward the block and kept its `#error` -- `Array#permutation` and
+  # `Enumerable#cycle` are exactly that shape.
+  #
+  # `yields_block_param?` is the yield-only sibling: `File.singleton#foreach`
+  # declares no `&block`, but calls `block_given?` and `yield`s inside a nested
+  # `open` block. compile_method extracts `bc2cpp_blk` for that shape too
+  # (through `needs_blk_param`), on the same pure-mandatory condition, so its
+  # regions may forward the block as well. yields_block_param? itself starts
+  # with `return false unless pure_mandatory_arity?`, so this arm cannot widen
+  # any optional/rest/keyword shape.
   def frame_block_available?(irep)
-    pure_mandatory_arity?(irep) || block_param_arity?(irep)
+    return false if ENV['BC2CPP_OPT_BLOCK_FRAME'] == '0'
+
+    pure_mandatory_arity?(irep) || block_param_arity?(irep) ||
+      !optional_block_arg_table(irep).nil? || yields_block_param?(irep)
   end
 
   # Only mruby's own native `block_given?` and `iterator?` exist: a Ruby definition of
