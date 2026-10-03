@@ -376,11 +376,11 @@ class CodeGen
     when 'GETCONST'
       # "GETCONST R4 WEAPON_SLOT": register first, bare name second
       # (`"GETCONST\tR%d\t%s"`); a trailing print_lv_a comment follows the name.
-      @integer_constants.include?(insn.const_name)
+      !@fixnum_proof_skip_constants && @integer_constants.include?(insn.const_name)
     when 'GETMCNST'
       # "GETMCNST R4 (R4)::DEPTH": only the bare name after `::`, as IntegerConstants
       # keys on (the scope register is not modelled).
-      @integer_constants.include?(insn.mcnst_name)
+      !@fixnum_proof_skip_constants && @integer_constants.include?(insn.mcnst_name)
     when 'SEND', 'SEND0', 'SSEND', 'SSEND0'
       # FIXNUM_RETURN_PROOF (source 6): see compute_fixnum_return_names. SENDB/SSENDB
       # are excluded: a `break` in the caller's block becomes the send's result.

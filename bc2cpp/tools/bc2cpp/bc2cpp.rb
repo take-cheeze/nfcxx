@@ -832,6 +832,7 @@ if $PROGRAM_NAME == __FILE__
       ranges
     end
   warn "== constants with a proven Fixnum interval (NUMERIC_CONSTANT_RANGES): #{CodeGen.integer_constant_ranges&.size.to_i} =="
+  (CodeGen.integer_constant_ranges || {}).sort.each { |n, (lo, hi)| warn "  CONST_RANGE #{n} #{lo} #{hi}" }
   CodeGen.stable_class_constants.sort.each { |n| warn "  STABLE_CLASS #{n}" }
 
   # ---------------------------------------------------------------------------

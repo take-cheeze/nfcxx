@@ -15,7 +15,7 @@ module NativeIntArgs
   # True when argument +position+ of the call is a register the Fixnum proof covers at the call.
   # +legacy+: the caller already used the Fixnum proof before ADR 0318 (the exact-flow arm), which the kill switch keeps.
   def native_int_arg_proven?(irep, proof_idx, owner_def, reg_offset, argv, position, legacy: false)
-    on = native_int_args_on?
+    on = native_int_args_on? && static_constant_world?
     return false unless on || legacy
 
     reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
@@ -24,8 +24,17 @@ module NativeIntArgs
     shifted = unshift_proof_reg(reg.to_i, reg_offset)
     return false if shifted.nil?
 
-    proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def) ||
-      (on && !fixnum_interval(irep, proof_idx, shifted.to_s, owner_def).nil?)
+    return proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def) unless on
+    return true if fixnum_interval(irep, proof_idx, shifted.to_s, owner_def)
+
+    # A constant leaf is the interval's to prove: INTEGER_CONSTANT_PROOF's name scan misses a native definition
+    # (ADR 0318), so it does not vouch for one here.
+    @fixnum_proof_skip_constants = true
+    begin
+      proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)
+    ensure
+      @fixnum_proof_skip_constants = false
+    end
   end
 
   # One NINT line per :int argument the Fixnum proof does not cover: the writer it comes from and the leaves behind it.

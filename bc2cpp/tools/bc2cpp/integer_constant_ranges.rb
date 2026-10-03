@@ -56,7 +56,7 @@ module IntegerConstantRanges
       why << 'native' if native.include?(name)
       why << 'foreign-ruby' if foreign.include?(name)
       why << "unclassified-def(#{kinds.count(&:nil?)}/#{kinds.size})" if kinds.any?(&:nil?)
-      unresolved = kinds.compact.flat_map { |kind| aliases(kind) }.reject { |n| known.key?(n) }.uniq
+      unresolved = kinds.compact.flat_map { |kind| aliases(kind) }.reject { |n| n == name || known.key?(n) }.uniq
       why << "unresolved-alias(#{unresolved.first(4).join(',')})" unless unresolved.empty?
       why << 'range-or-cycle' if why.empty?
       report << "#{name}\t#{kinds.size}\t#{why.join(' ')}"
@@ -79,8 +79,10 @@ module IntegerConstantRanges
       defs.each do |name, kinds|
         next if known.key?(name) || poisoned.include?(name) || kinds.empty? || kinds.any?(&:nil?)
 
-        ranges = kinds.map { |kind| eval_kind(kind, known) }
-        next if ranges.any?(&:nil?)
+        # `Scene::Map::TILE = Game::TILE` reads a value of its own name: by induction on assignment order it adds
+        # nothing the other definitions do not bound.
+        ranges = kinds.reject { |kind| kind == [:alias, name] }.map { |kind| eval_kind(kind, known) }
+        next if ranges.empty? || ranges.any?(&:nil?)
 
         known[name] = [ranges.map(&:first).min, ranges.map(&:last).max]
         grew = true
