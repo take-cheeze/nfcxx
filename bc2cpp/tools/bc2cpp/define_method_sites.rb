@@ -23,8 +23,7 @@ module DefineMethodSites
   module_function
 
   # Site for the `define_method` SSENDB at insns[idx] of +irep+, or nil unless it has the
-  # exact shape mrbc emits for `define_method(:sym) { ... }` in a body (no EXT widening,
-  # so a huge body is conservatively left alone).
+  # exact shape mrbc emits for `define_method(:sym) { ... }` in a body.
   def site(irep, idx, ireps)
     insn = irep.instructions[idx]
     return nil unless insn.op == 'SSENDB' && insn.sym == 'define_method' && insn.plain_fixed_argc? && insn.argc == 1
