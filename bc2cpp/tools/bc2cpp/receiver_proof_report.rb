@@ -41,7 +41,6 @@ module ReceiverProofReport
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/
   NOMETHOD = /\bbc2cpp_nomethod\w*\(/
   NIL_RECEIVER = /\bbc2cpp_nil_receiver\w*\(/
-  MAX_ANSWERERS = 40
   LITERAL_CLASS = { 'ARRAY' => 'Array', 'ARRAY2' => 'Array', 'HASH' => 'Hash', 'STRING' => 'String', 'STR' => 'String',
                     'RANGE_INC' => 'Range', 'RANGE_EXC' => 'Range' }.freeze
   CORE_BIT = { NumericFlow::INT => 'Integer', NumericFlow::FLT => 'Float', NumericFlow::ARR => 'Array',
@@ -144,7 +143,7 @@ module ReceiverProofReport
   # The instance classes that answer +name+, [] when none, or :unbounded when nothing bounds the name.
   def rp_answerers(name)
     set = call_facts_answers.members(name) or return :unbounded
-    set.select { |k| instance_class?(k) || CORE_BIT.value?(k) }.sort.first(MAX_ANSWERERS)
+    set.select { |k| instance_class?(k) || CORE_BIT.value?(k) }.sort
   end
 
   def rp_answerers_text(answerers)
