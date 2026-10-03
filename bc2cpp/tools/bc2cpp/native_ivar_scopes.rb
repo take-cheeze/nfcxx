@@ -33,8 +33,8 @@ module NativeIvarScopes
 
       audited[path] = text
     end
-    functions = audited.fetch(canonical_path(File.join(root, 'mruby-rgss/src/lib.cxx'))).scan(/\bwindow_(?!title_)\w+(?=\s*\()/).uniq
-    references = /\b(?:#{functions.map { |f| Regexp.escape(f) }.join('|')})\b/
+    # Include the bare prefix so window_ ## name cannot hide a helper caller.
+    references = /\bwindow_(?!title(?:\b|_))\w*/
     outside = paths - audited.keys
     outside.each do |path|
       text = SourceText.read(path, 'native ivar scopes', binary: true)
