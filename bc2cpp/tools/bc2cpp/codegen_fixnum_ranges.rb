@@ -12,19 +12,14 @@ class CodeGen
   # The gate for every use of a constant interval: a closed world with no runtime constant rebinding, no
   # const_missing, and Integer's + - * / still the core bodies (a definition-time `A / B` runs them).
   def fixnum_intervals_on?
-    return @fixnum_intervals_on if defined?(@fixnum_intervals_on)
-
-    @fixnum_intervals_on =
-      !self.class.integer_constant_ranges.nil? && static_constant_world? && %w[+ - * /].all? { |op| numeric_op_native?(op) }
+    !self.class.integer_constant_ranges.nil? && static_constant_world? && %w[+ - * /].all? { |op| numeric_op_native?(op) }
   end
 
   # BC2CPP_NUMERIC_CONSTANTS=0 off, and every constant binding visible: no const_set, remove_const, autoload or
   # const_missing, no global refusal.
+  # Not memoized: @closed_world is swapped for the world of a core method (ADR 0264).
   def static_constant_world?
-    return @static_constant_world if defined?(@static_constant_world)
-
-    @static_constant_world =
-      ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0' && !@closed_world.nil? && @closed_world.constants_static? && const_missing_free?
+    ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0' && !@closed_world.nil? && @closed_world.constants_static? && const_missing_free?
   end
 
   # [lo, hi] or nil; +why+ (an Array) collects the leaf that stopped a nil answer, for the probe.

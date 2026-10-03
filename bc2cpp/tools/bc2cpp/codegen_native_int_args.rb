@@ -7,6 +7,13 @@
 # Fixnum here", and, behind BC2CPP_NATIVE_INT_ARGS=<file>, writes why the answer is no (a read-only probe: the generated
 # code is byte-identical with it on).
 module NativeIntArgs
+  # One table for every CodeGen of the run, written once at exit (the last compile of a site wins).
+  def self.lines
+    @lines ||= {}.tap do |lines|
+      at_exit { File.write(ENV.fetch('BC2CPP_NATIVE_INT_ARGS'), "#{lines.values.join("\n")}\n") }
+    end
+  end
+
   # BC2CPP_NUMERIC_CONSTANTS=0 restores master's tag tests.
   def native_int_args_on?
     ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0'
@@ -47,20 +54,20 @@ module NativeIntArgs
       key = [:nint, irep.label, proof_idx, pos]
       id = "#{irep.label}:#{proof_idx}"
       if shifted.nil?
-        CodeGen.native_int_arg_lines[key] = ['NINT', id, site, owner_def.owner, pos, 'substituted', '-', '-'].join("\t")
+        NativeIntArgs.lines[key] = ['NINT', id, site, owner_def.owner, pos, 'substituted', '-', '-'].join("\t")
         next
       end
       if proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)
-        CodeGen.native_int_arg_lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'PROVEN', '-', '-'].join("\t")
+        NativeIntArgs.lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'PROVEN', '-', '-'].join("\t")
         next
       end
       why = []
       if fixnum_interval(irep, proof_idx, shifted.to_s, owner_def, 0, why)
-        CodeGen.native_int_arg_lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'RANGE', '-', '-'].join("\t")
+        NativeIntArgs.lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'RANGE', '-', '-'].join("\t")
         next
       end
 
-      CodeGen.native_int_arg_lines[key] =
+      NativeIntArgs.lines[key] =
         ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, native_int_arg_top(irep, proof_idx, shifted.to_i),
          "#{native_int_arg_mask(irep, proof_idx, shifted.to_i, owner_def)} first=#{why.first}",
          native_int_arg_leaves(irep, proof_idx, shifted.to_i, owner_def)].join("\t").gsub(/[\r\n]/, ' ')
@@ -95,11 +102,4 @@ end
 
 class CodeGen
   include NativeIntArgs
-
-  # One table for every CodeGen of the run, written once at exit (the last compile of a site wins).
-  def self.native_int_arg_lines
-    @native_int_arg_lines ||= {}.tap do |lines|
-      at_exit { File.write(ENV.fetch('BC2CPP_NATIVE_INT_ARGS'), "#{lines.values.join("\n")}\n") }
-    end
-  end
 end

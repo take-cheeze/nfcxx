@@ -15,6 +15,7 @@ module IntegerConstantRanges
   FIXNUM_MIN = -1_073_741_824
   FIXNUM_MAX = 1_073_741_823
   OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
+  LOADS = %w[GETCONST GETMCNST].freeze
 
   # name => [lo, hi]
   def self.analyze(ireps, native_paths, foreign_paths, report: nil)
@@ -30,7 +31,7 @@ module IntegerConstantRanges
           next unless name
 
           src = insn.regs.last
-          defs[name] << (src && source_kind(irep, i, src, entries))
+          defs[name] << (src && !entries.include?(insn.addr) ? source_kind(irep, i, src, entries) : nil)
         when 'CLASS', 'MODULE'
           poisoned << insn.sym_token
           class_names << insn.sym_token
@@ -59,7 +60,7 @@ module IntegerConstantRanges
       unresolved = kinds.compact.flat_map { |kind| aliases(kind) }.reject { |n| n == name || known.key?(n) }.uniq
       why << "unresolved-alias(#{unresolved.first(4).join(',')})" unless unresolved.empty?
       why << 'range-or-cycle' if why.empty?
-      report << "#{name}\t#{kinds.size}\t#{why.join(' ')}"
+      report << "#{name}\t#{kinds.size}\t#{why.join(' ')}\t#{kinds.first(3).map(&:inspect).join(' ')}"
     end
   end
 
@@ -93,10 +94,14 @@ module IntegerConstantRanges
   end
 
   # How `reg` is written at this point of the class body: [:literal, v], [:alias, NAME], [:arith, op, l, r] or nil.
-  # The walk does not step over a jump target (see IntegerConstants.const_source_kind).
+  # The walk does not step over a jump target (see IntegerConstants.const_source_kind), except that a target may itself
+  # be the load that writes the register: control reaching it runs that load.
   def self.source_kind(irep, idx, reg, entries)
-    irep.walk_writers(idx - 1, reg.to_s, barrier: ->(insn, _cur) { entries.include?(insn.addr) },
-                                         follow_moves: true) do |insn, j, cur|
+    barrier = lambda do |insn, cur|
+      load_here = insn.reg == cur.to_s && (LOADS.include?(insn.op) || insn.op.start_with?('LOADI'))
+      entries.include?(insn.addr) && !load_here
+    end
+    irep.walk_writers(idx - 1, reg.to_s, barrier: barrier, follow_moves: true) do |insn, j, cur|
       if insn.op.start_with?('LOADI')
         value = literal(insn)
         next value.nil? ? nil : [:literal, value]
@@ -122,6 +127,8 @@ module IntegerConstantRanges
   end
 
   def self.arith_kind(irep, idx, insn, cur, entries)
+    return nil if entries.include?(insn.addr)
+
     left = source_kind(irep, idx, cur, entries)
     right = if %w[ADDI SUBI].include?(insn.op)
               imm = insn.imm_operand
