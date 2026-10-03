@@ -83,13 +83,21 @@ class CodeGen
     arms = native_class_arms_enabled?
     exact = receiver_instances(site, name)
     return [exact, false, false, false] if exact && !arms
-    return [exact, true, native_class_free?(name, exact), true] if exact
+    return [exact, true, native_class_free?(name, exact), true] if exact && !nil_may_answer?(site, name)
+    return [exact, false, false, false] if exact
 
     refined = refined_receiver_instances(site, name)
     return [nil, false, false, false] unless refined
     return [refined, true, call_facts_native_free?(name, refined), false] unless arms
 
     [refined, true, call_facts_native_free?(name, refined) || native_class_free?(name, refined), true]
+  end
+
+  # The exact set leaves nil out (receiver_instances), but a nil the flow cannot exclude reaches the else arm
+  # too: it must raise what dispatch raises, so a name NilClass may answer keeps the whole-name gates.
+  def nil_may_answer?(site, name)
+    mask = exact_flow_mask(site[:irep], site[:idx], site[:insn].reg)
+    (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::NIL)) && !nil_unanswerable_for_instances?(name)
   end
 
   def native_class_free?(name, classes)
