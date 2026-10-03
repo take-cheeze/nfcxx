@@ -89,7 +89,7 @@ class CodeGen
     @rc_return.keys.each do |name|
       current = @rc_return[name]
       joined = 0
-      @registry[name].each { |d| joined |= return_class_def_mask(d) }
+      return_table_definitions(name).each { |d| joined |= return_class_def_mask(d) }
       if (joined & NumericFlow::OTHER) != 0
         @rc_return.delete(name)
       elsif (joined | current) == current
@@ -180,6 +180,9 @@ class CodeGen
   def return_class_send_mask(irep, index, insn, state = nil)
     name = insn.sym
     return NumericFlow::OTHER unless name
+
+    core_result = state && native_core_class_result(insn, state)
+    return core_result if core_result
 
     tracked = @rc_return[name]
     return tracked if tracked

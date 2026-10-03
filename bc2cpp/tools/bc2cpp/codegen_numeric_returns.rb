@@ -46,7 +46,8 @@ class CodeGen
     return [] unless @foreign_method_names && @closed_world && @closed_world.global_refusal.nil?
 
     aliased = numeric_aliased_names
-    @registry.filter_map do |name, defs|
+    @registry.filter_map do |name, _definitions|
+      defs = return_table_definitions(name)
       next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
       next if defs.empty? || @foreign_method_names.include?(name) || aliased.include?(name)
       next unless @closed_world.name_fully_visible?(name) || native_result_name_kinds(name)
@@ -54,6 +55,16 @@ class CodeGen
 
       name
     end
+  end
+
+  # ADR 0333: a registry placeholder is not a runtime definition when the
+  # build's complete closed-world scan proves that no native defines the name.
+  def return_table_definitions(name)
+    definitions = @registry[name] || []
+    return definitions if ENV['BC2CPP_ABSENT_NATIVE_RETURNS'] == '0'
+    return definitions unless @native_name_sources && @foreign_method_names && @closed_world&.name_fully_visible?(name)
+
+    definitions.reject { |definition| definition.owner == '<native>' && definition.irep.nil? }
   end
 
   def numeric_return_def_usable?(d)
@@ -155,7 +166,7 @@ class CodeGen
     @numeric_return.keys.each do |name|
       current = @numeric_return[name]
       joined = 0
-      @registry[name].each { |d| joined |= numeric_return_def_mask(d) }
+      return_table_definitions(name).each { |d| joined |= numeric_return_def_mask(d) }
       if (joined & NumericFlow::OTHER) != 0
         @numeric_return.delete(name)
       elsif (joined | current) == current
