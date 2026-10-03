@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'native_result_facts'
+require_relative 'native_class_results'
 require_relative 'numeric_flow'
 
 # CodeGen: NATIVE_RESULT_FACTS (ADR 0302). A fact is used only for a receiver the exact-class flow
@@ -15,6 +16,11 @@ class CodeGen
   end
 
   def compute_native_result_kind(name, klass)
+    if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && @closed_world&.exact_instances_singleton_free? && @native_name_sources &&
+       NativeClassResults::EXACT_CORE_KINDS.dig(klass, name)
+      entry = NativeCoreDirect::ENTRIES.find { |candidate| candidate.owner == klass && candidate.name == name }
+      return 'Array' if entry && native_core_entry_safe?(entry)
+    end
     kind = NativeResultFacts.kind(name, klass)
     return nil unless kind && @closed_world&.exact_instances_singleton_free?
     return nil unless native_exact_owner_safe?(name, klass)
@@ -24,9 +30,20 @@ class CodeGen
     kind
   end
 
-  # The kinds covering EVERY native definition of +name+ as { owner => kind }, or nil when one is
-  # undeclared, not a unique parsed registration, or defined outside mruby-rgss/src. A Ruby
-  # definition of the name is not checked here: the callers join it in (numeric_return_def_usable?).
+  # Only the exact-class oracle supplies this receiver: numeric masks alone
+  # do not prove lookup reaches the built-in class's audited body.
+  def native_core_class_result(insn, state)
+    return nil unless ENV['BC2CPP_NATIVE_CLASS_RESULTS'] != '0' && %w[SEND SEND0].include?(insn.op)
+
+    owner = RETURN_CORE_CLASS[state[insn.reg.to_i]]
+    return nil unless owner && NativeClassResults::EXACT_CORE_KINDS.dig(owner, insn.sym)
+
+    kind = native_result_kind(insn.sym, owner)
+    kind && native_result_bits(kind, true)
+  end
+
+  # Every linked native definition must have an audited return kind; outside Ruby withdraws
+  # the proof. Compiled Ruby definitions join separately (numeric_return_def_usable?).
   def native_result_name_kinds(name)
     @native_result_name_kinds ||= {}
     @native_result_name_kinds[name] = compute_native_result_name_kinds(name) unless @native_result_name_kinds.key?(name)
@@ -35,6 +52,12 @@ class CodeGen
 
   def compute_native_result_name_kinds(name)
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources
+    paths = @closed_world.native_paths_spelling(name)
+    audited = NativeClassResults.kinds(name, paths)
+    if audited && @closed_world.name_visible_except_natives_in?(name, '/')
+      kinds = audited.values.flat_map { |kind| Array(kind) }
+      return audited if kinds.all? { |kind| !kind.is_a?(String) || !kind.include?('::') || @closed_world.native_class_constant_stable?(kind) }
+    end
     return nil unless @closed_world.name_visible_except_natives_in?(name, NativeExactDirect::RGSS_SRC)
 
     paths = @closed_world.native_paths_spelling(name)
@@ -63,12 +86,13 @@ class CodeGen
   # any other bit, makes the result unknown; nil only raises when nothing answers `name` on it.
   # +classes+ keeps a class result as OTHER for the numeric flow, which carries no class bits.
   def native_result_flow_mask(name, recv, classes: true)
-    return nil unless recv.is_a?(Integer) && @numeric_class_bits
+    return nil unless recv.is_a?(Integer)
 
     mask = 0
     rest = recv
     found = false
-    @numeric_class_bits.to_a.each do |klass, bit|
+    class_bits = (@numeric_class_bits || {}).to_a + RETURN_CORE_CLASS.map { |bit, klass| [klass, bit] }
+    class_bits.each do |klass, bit|
       next unless recv.anybits?(bit)
 
       rest &= ~bit
@@ -86,7 +110,11 @@ class CodeGen
     case kind
     when :fixnum then NumericFlow::INT
     when :float then NumericFlow::FLT
-    when String then classes ? numeric_class_bit(kind) : NumericFlow::OTHER
+    when :nil then NumericFlow::NIL
+    when Array then kind.reduce(0) { |mask, member| mask | native_result_bits(member, classes) }
+    when String
+      core = RETURN_CORE_CLASS.key(kind)
+      core || (classes ? numeric_class_bit(kind) : NumericFlow::OTHER)
     else NumericFlow::OTHER
     end
   end
