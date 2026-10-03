@@ -3,7 +3,7 @@
 require 'digest'
 require_relative 'native_names'
 
-# ADR 0332: audited native writes preserve their registered receiver family.
+# ADRs 0332/0337: audited native writes preserve their registered receiver family.
 # Only unrelated Ruby families may pool the same names.
 module NativeIvarScopes
   FILES = {
@@ -13,6 +13,7 @@ module NativeIvarScopes
   }.freeze
   SCOPES = {
     'contents' => ['RGSS::Window'],
+    'bitmap' => %w[RGSS::Sprite RGSS::Plane],
     'cursor_rect' => ['RGSS::Window'],
     'viewport' => %w[RGSS::Sprite RGSS::Plane RGSS::Tilemap RGSS::Window]
   }.freeze
@@ -39,7 +40,7 @@ module NativeIvarScopes
       audited[path] = text
     end
     # Reject address taking and token pasting as well as ordinary writer calls.
-    references = /\bwindow_(?!title(?:\b|_))\w*|\b(?:spr_init|sprite_new_direct|plane_init|tilemap_init)\b|\b(?:spr_|sprite_|plane_|tilemap_)\s*\#\#/
+    references = /\bwindow_(?!title(?:\b|_))\w*|\b(?:spr_init|sprite_new_direct|plane_init|tilemap_init|spr_set_bmp|sprite_bitmap_set_direct|plane_set_bmp\w*)\b|\b(?:spr_|sprite_|plane_|tilemap_)\s*\#\#/
     outside = paths - audited.keys
     outside.each do |path|
       text = SourceText.read(path, 'native ivar scopes', binary: true)
@@ -47,7 +48,7 @@ module NativeIvarScopes
       return [{}, "outside audited receiver reference: #{path}"] if text.match?(references)
     end
     globally_spelled = outside_ivar_names(outside)
-    scopes = NAMES.reject { |name| globally_spelled.include?(name) }.to_h { |name| [name, SCOPES.fetch(name)] }
+    scopes = NAMES.reject { |name| globally_spelled.include?(name) || (name == 'bitmap' && ENV['BC2CPP_NATIVE_BITMAP_IVAR_SCOPE'] == '0') }.to_h { |name| [name, SCOPES.fetch(name)] }
     [scopes, scopes.empty? ? 'names spelled outside the audit' : nil]
   end
 end
