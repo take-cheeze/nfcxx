@@ -17,7 +17,7 @@ module InterfaceTableReport
   class << self
     attr_accessor :names_source
   end
-  CHAIN_FAMILIES = %w[TYPED IVAR_ACCESSOR MONO_EMBED_GUARD POLY_SMALL_N POLY_TABLE ELEMENT POLY].freeze
+  CHAIN_FAMILIES = %w[INTERFACE_TABLE TYPED IVAR_ACCESSOR MONO_EMBED_GUARD POLY_SMALL_N POLY_TABLE ELEMENT POLY].freeze
 
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     line = super
