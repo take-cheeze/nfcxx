@@ -17,7 +17,8 @@ require_relative 'source_text'
 #      (literal_int_const_source?);
 #   2. a CLASS/MODULE naming it (OP_CLASS binds the constant itself);
 #   3. a native mrb_define_const / mrb_define_global_const /
-#      mrb_define_const_id;
+#      mrb_define_const_id / mrb_const_set / mrb_define_class
+#      (native_defined_const_names; ADR 0324);
 #   4. a definition in a foreign Ruby source sharing the VM
 #      (foreign_mrblib_srcs, compiled_gems.rb).
 # A name with no integer definition is never admitted, so an unseen constant
@@ -46,14 +47,15 @@ module IntegerConstants
           next unless name
 
           src = insn.regs.last
-          defs[name] << (src && const_source_kind(irep, i, src, entries))
+          # A jump landing on the SETCONST (`X = c || 1`) leaves `c` in the register on the other path.
+          defs[name] << (src && !entries.include?(insn.addr) ? const_source_kind(irep, i, src, entries) : nil)
         when 'CLASS', 'MODULE'
           nm = insn.sym_token
           poisoned << nm if nm
         end
       end
     end
-    poisoned.merge(native_const_names(native_paths))
+    poisoned.merge(native_defined_const_names(native_paths))
     poisoned.merge(foreign_const_names(foreign_paths))
     admitted = resolve_integral(defs, poisoned)
     loop do
@@ -307,24 +309,8 @@ module IntegerConstants
     value
   end
 
-  # Poison source 3 -- see the header above for the three real call forms.
-  def self.native_const_names(paths)
-    names = Set.new
-    Array(paths).each do |path|
-      src = SourceText.read(path, 'IntegerConstants.native_const_names') or next
-      src.scan(/mrb_define_(?:global_)?const(?:_id)?\s*\(.{0,200}?/m) do
-        seg = Regexp.last_match(0)
-        seg.scan(/"([A-Za-z_][A-Za-z_0-9]*)"/) { names << Regexp.last_match(1) }
-        seg.scan(/MRB_SYM[A-Z_]*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*\)/) { names << Regexp.last_match(1) }
-      end
-    end
-    names
-  end
-
   # KEYWORD_NEVER_DEFINED_CONST_RECEIVER_SUPPORT: native constant definitions,
-  # with a bounded `[^;]{0,200}` window over the call's arguments. It does not
-  # reuse native_const_names, whose lazy `.{0,200}?` matches zero characters (a
-  # latent miss left alone because INTEGER_CONSTANT_PROOF depends on it); a missed
+  # with a bounded `[^;]{0,200}` window over the call's arguments; a missed
   # definition is the unsound direction for a never-defined proof. Reads:
   #   * mrb_define_const / mrb_define_global_const (+ _id);
   #   * mrb_const_set;
