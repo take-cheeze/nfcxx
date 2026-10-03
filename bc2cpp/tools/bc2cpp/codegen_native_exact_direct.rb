@@ -24,19 +24,17 @@ module NativeExactDirect
 
   # The code for `recv.name(*argv)` where `recv` is exactly `owner` (an RGSS
   # class name, or "X.singleton" for the class or module object X), or nil.
-  # `int_proven` (`->(position)`) says an :int argument is provably a Fixnum, which drops its
-  # mrb_integer_p test and with it the by-name else (ADR 0296).
-  def native_exact_direct_code(name, d, recv, argv, owner, int_proven: nil)
+  # `int_site` ([irep, call index, owner_def, register offset]) lets an :int argument that is provably a Fixnum drop
+  # its mrb_integer_p test and with it the by-name else (ADR 0296, 0318).
+  def native_exact_direct_code(name, d, recv, argv, owner, int_site: nil, legacy_int_proof: false)
     return nil if @call_block_expr
 
     entry = owner && NativeDirect::ENTRIES.dig(name, owner)
     return nil unless entry && entry.kinds.size == argv.size && native_exact_owner_safe?(name, owner)
 
     @native_construct_used << owner
-    if ENV['BC2CPP_NATIVE_INT_ARGS'] && @native_int_site && entry.kinds.include?(:int)
-      native_int_arg_probe("exact:#{owner}##{name}", *@native_int_site[0, 2], argv, @native_int_site[2], @native_int_site[3])
-    end
-    guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int && !int_proven&.call(i) }
+    native_int_arg_probe("exact:#{owner}##{name}", *int_site, argv) if int_site && ENV['BC2CPP_NATIVE_INT_ARGS']
+    guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int && !(int_site && native_int_arg_proven?(*int_site, argv, i, legacy: legacy_int_proof)) }
                  .map { |i| "mrb_integer_p(#{argv[i]})" }
     args = entry.kinds.each_index.map do |i|
       case entry.kinds[i]

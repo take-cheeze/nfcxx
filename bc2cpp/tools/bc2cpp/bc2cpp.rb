@@ -41,6 +41,7 @@ require_relative 'hot_methods'
 require_relative 'core_methods'
 
 require_relative 'integer_constants'
+require_relative 'integer_constant_ranges'
 require_relative 'native_construct_schema'
 require_relative 'dynamic_names'
 require_relative 'ivar_layout'
@@ -88,6 +89,7 @@ require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
 require_relative 'codegen_numeric_roots'
 require_relative 'codegen_native_int_args'
+require_relative 'codegen_fixnum_ranges'
 require_relative 'codegen_tuple_returns'
 require_relative 'codegen_return_analysis'
 require_relative 'codegen_loop_inline'
@@ -819,6 +821,17 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.struct_members = struct_member_lists
   warn "== Struct.new owners with a known member list (STRUCT_INDEX_CACHE): #{CodeGen.struct_members.size} =="
   CodeGen.integer_constant_values = integer_constant_values
+  # NUMERIC_CONSTANT_RANGES (ADR 0318); BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
+  CodeGen.integer_constant_ranges =
+    if ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0' && native_paths && foreign_ruby_srcs
+      range_report = ENV['BC2CPP_NUMERIC_CONSTANTS_REPORT'] ? [] : nil
+      ranges = profile_call.call('IntegerConstantRanges.analyze') do
+        IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, report: range_report)
+      end
+      File.write(ENV.fetch('BC2CPP_NUMERIC_CONSTANTS_REPORT'), "#{range_report.sort.join("\n")}\n") if range_report
+      ranges
+    end
+  warn "== constants with a proven Fixnum interval (NUMERIC_CONSTANT_RANGES): #{CodeGen.integer_constant_ranges&.size.to_i} =="
   CodeGen.stable_class_constants.sort.each { |n| warn "  STABLE_CLASS #{n}" }
 
   # ---------------------------------------------------------------------------

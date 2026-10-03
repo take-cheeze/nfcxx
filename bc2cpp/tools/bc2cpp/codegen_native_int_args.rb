@@ -7,35 +7,53 @@
 # Fixnum here", and, behind BC2CPP_NATIVE_INT_ARGS=<file>, writes why the answer is no (a read-only probe: the generated
 # code is byte-identical with it on).
 module NativeIntArgs
+  # BC2CPP_NUMERIC_CONSTANTS=0 restores master's tag tests.
+  def native_int_args_on?
+    ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0'
+  end
+
   # True when argument +position+ of the call is a register the Fixnum proof covers at the call.
-  def native_int_arg_proven?(irep, proof_idx, argv, position, owner_def, reg_offset)
+  # +legacy+: the caller already used the Fixnum proof before ADR 0318 (the exact-flow arm), which the kill switch keeps.
+  def native_int_arg_proven?(irep, proof_idx, owner_def, reg_offset, argv, position, legacy: false)
+    on = native_int_args_on?
+    return false unless on || legacy
+
     reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
     return false unless reg
 
     shifted = unshift_proof_reg(reg.to_i, reg_offset)
-    !shifted.nil? && proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)
+    return false if shifted.nil?
+
+    proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def) ||
+      (on && !fixnum_interval(irep, proof_idx, shifted.to_s, owner_def).nil?)
   end
 
   # One NINT line per :int argument the Fixnum proof does not cover: the writer it comes from and the leaves behind it.
-  def native_int_arg_probe(site, irep, proof_idx, argv, owner_def, reg_offset)
+  def native_int_arg_probe(site, irep, proof_idx, owner_def, reg_offset, argv)
     return unless ENV['SKIP_UNSUPPORTED'] == '1' && irep && proof_idx && owner_def
 
     argv.each_index do |pos|
       reg = argv[pos].to_s[/\Ar(\d+)\z/, 1]
       shifted = reg && unshift_proof_reg(reg.to_i, reg_offset)
       key = [:nint, irep.label, proof_idx, pos]
+      id = "#{irep.label}:#{proof_idx}"
       if shifted.nil?
-        CodeGen.native_int_arg_lines[key] = ['NINT', site, owner_def.owner, pos, 'substituted', '-', '-'].join("\t")
+        CodeGen.native_int_arg_lines[key] = ['NINT', id, site, owner_def.owner, pos, 'substituted', '-', '-'].join("\t")
         next
       end
       if proven_fixnum_operand?(irep, proof_idx, shifted.to_s, owner_def)
-        CodeGen.native_int_arg_lines.delete(key)
+        CodeGen.native_int_arg_lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'PROVEN', '-', '-'].join("\t")
+        next
+      end
+      why = []
+      if fixnum_interval(irep, proof_idx, shifted.to_s, owner_def, 0, why)
+        CodeGen.native_int_arg_lines[key] = ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, 'RANGE', '-', '-'].join("\t")
         next
       end
 
       CodeGen.native_int_arg_lines[key] =
-        ['NINT', site, "#{owner_def.owner}##{owner_def.name}", pos, native_int_arg_top(irep, proof_idx, shifted.to_i),
-         native_int_arg_mask(irep, proof_idx, shifted.to_i, owner_def),
+        ['NINT', id, site, "#{owner_def.owner}##{owner_def.name}", pos, native_int_arg_top(irep, proof_idx, shifted.to_i),
+         "#{native_int_arg_mask(irep, proof_idx, shifted.to_i, owner_def)} first=#{why.first}",
          native_int_arg_leaves(irep, proof_idx, shifted.to_i, owner_def)].join("\t").gsub(/[\r\n]/, ' ')
     end
   end

@@ -55,7 +55,6 @@ class CodeGen
     # GUARD_VIOLATION: the original SEND whose own registers the proofs read; an inlined
     # loop body that substitutes its receiver or arguments has none.
     guard_proof_site = call_receiver.nil? && call_arguments.nil? && n <= FUNCALL_ARGC_MAX ? new_proof_idx : nil
-    @native_int_site = [irep, new_proof_idx, owner_def, trace_reg_offset] if ENV['BC2CPP_NATIVE_INT_ARGS']
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.enter
@@ -240,13 +239,21 @@ class CodeGen
         class_value = stable_constructor ? "#{native[:class_fn]}()" : "mrb_class_ptr(#{recv})"
         class_guard = stable_constructor ? nil : "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
         if native[:type_guard] == :int
-          native_int_arg_probe("#{known}.new", irep, new_proof_idx, argv, owner_def, trace_reg_offset) if ENV['BC2CPP_NATIVE_INT_ARGS']
-          arg_checks = argv.map { |a| "mrb_integer_p(#{a})" }.join(' && ')
+          int_site = [irep, new_proof_idx, owner_def, trace_reg_offset]
+          native_int_arg_probe("#{known}.new", *int_site, argv) if ENV['BC2CPP_NATIVE_INT_ARGS']
+          arg_checks = argv.each_index.reject { |i| native_int_arg_proven?(*int_site, argv, i) }
+                           .map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
+          arg_checks = nil if arg_checks.empty?
           unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
           guard = [class_guard, arg_checks].compact.join(' && ')
-          note_extra = " Argument tags checked first (#{arg_checks}), " \
-                       "falling back to ordinary dispatch for any other shape -- " \
-                       "see that entry's own `type_guard` comment."
+          guard = nil if guard.empty?
+          note_extra = if arg_checks
+                         " Argument tags checked first (#{arg_checks}), " \
+                           "falling back to ordinary dispatch for any other shape -- " \
+                           "see that entry's own `type_guard` comment."
+                       else
+                         " Every argument is a proven Fixnum (NATIVE_INT_ARGS, ADR 0318): no tag test, no dispatch."
+                       end
         else
           unboxed_argv = case native[:arg_type]
                          when :int then argv.map { |a| "mrb_as_int(M, #{a})" }
@@ -1304,7 +1311,8 @@ class CodeGen
     # NATIVE_EXACT_DIRECT (ADR 0281): `self` is exactly the enclosing class's instance or
     # class/module object, and the name is one of its RGSS natives.
     if target.nil? && self_implicit && lexical_self_ivar_accessor.nil? && @closed_world
-      native_self_code = native_exact_direct_code(name, d, recv, argv, native_exact_self_owner(owner_def))
+      native_self_code = native_exact_direct_code(name, d, recv, argv, native_exact_self_owner(owner_def),
+                                                int_site: [irep, new_proof_idx, owner_def, trace_reg_offset])
       return native_self_code if native_self_code
     end
     # CHA_SELF: a call on self whose every possible receiver (the enclosing class
@@ -1387,11 +1395,8 @@ class CodeGen
     # An RGSS native instance the flow proves exact (an ivar-held Bitmap, Sprite, Window ...) calls
     # its registered entry point directly (ADR 0281's arm, ADR 0296's proof).
     if target.nil? && !self_implicit && exact_via_flow && NATIVE_WRAPPER_CLASS_ACCESSORS.key?(exact_class) && irep && proof_idx
-      int_proven = lambda do |position|
-        reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
-        reg && proven_fixnum_operand?(irep, proof_idx, unshift_proof_reg(reg.to_i, trace_reg_offset).to_s, owner_def)
-      end
-      native_exact = native_exact_direct_code(name, d, recv, argv, exact_class, int_proven: int_proven)
+      native_exact = native_exact_direct_code(name, d, recv, argv, exact_class, legacy_int_proof: true,
+                                              int_site: [irep, proof_idx, owner_def, trace_reg_offset])
       return native_exact if native_exact
     end
     # ELEMENT_CLASS_SUPPORT: the same TYPED/IVAR_ACCESSOR resolution fed by the
@@ -1653,7 +1658,8 @@ class CodeGen
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
 
-        native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton")
+        native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton",
+                                                                      int_site: [irep, new_proof_idx, owner_def, trace_reg_offset])
         return native_code if native_code
       end
 

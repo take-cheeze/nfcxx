@@ -253,6 +253,12 @@ class ClosedWorld
     [@native_code_tokens, @ruby_tokens].any? { |files| files.each_value.any? { |tokens| tokens.include?(root) && tokens.include?(last) } }
   end
 
+  # No const_set, remove_const or autoload anywhere and no global refusal: every constant binding is a visible
+  # SETCONST/CLASS/MODULE or a scanned native/foreign definition (NUMERIC_CONSTANT_RANGES).
+  def constants_static?
+    !@global_refusal && !@dynamic_constant_mutation
+  end
+
   # The constant +name+ can only name a class or module: no bytecode binds a value to it.
   def class_valued_constant?(name)
     !@global_refusal && !@dynamic_constant_mutation && class_constant?(name)
