@@ -883,8 +883,10 @@ class CodeGen
     when 'SUPER'
       # "SUPER Ra n=N": vm.c looks up ci->mid one level above the current class, with
       # self as receiver and N args in R(a+1)..R(a+N), plus one register forwarding
-      # the current block. That block is never read: a compiled `_impl` has none
-      # (see SUPER_TARGETS). super_target applies the allowlist.
+      # the current block. super_target applies the allowlist and calls the target
+      # with NO block (correct only where SUPER_TARGETS proves no caller passes
+      # one); module_super_call resolves the same call through an included
+      # module and forwards this frame's block, as OP_SUPER does.
        target_def = super_target(owner_def)
        d_reg = insn.reg
        n = insn.plain_fixed_argc? ? insn.n_spec : nil
@@ -897,6 +899,8 @@ class CodeGen
          compile_zsuper_native(zsuper_kind, d_reg)
        elsif zsuper_plan && d_reg
          compile_zsuper_forward(zsuper_plan[:target_def], d_reg, zsuper_plan[:m])
+       elsif (call = d_reg && module_super_call(owner_def, irep, d_reg, n))
+         call
        else
          "  #error unhandled opcode SUPER -- not in this prototype's supported subset\n"
        end

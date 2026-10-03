@@ -589,6 +589,124 @@ class CodeGen
     Array(@included_modules[owner]).empty?
   end
 
+  # MODULE_SUPER_SUPPORT (ADR 0329): the MethodDef that `super` in owner_def
+  # actually reaches when the owner includes modules -- mruby searches
+  # [class, included modules newest-first, superclass, ...], so the winner is
+  # the first ancestor in that order carrying the name. Returns nil when the
+  # winner is not a single statically known bytecode method, which keeps the
+  # `#error`.
+  #
+  # Soundness differs from SUPER_TARGETS in one way that makes this stricter,
+  # not looser: OP_SUPER always forwards the current method's block, so the
+  # target is called WITH this frame's block (super_block_arg), never with the
+  # nil a compiled `_impl` has no way to invent. `super` with no block in
+  # flight therefore forwards nil, which is what the interpreter does too.
+  def module_super_target(owner_def)
+    return nil unless owner_def
+
+    name = owner_def.name
+    return nil if @unknown_mixins.include?(owner_def.owner)
+
+    seen = Set.new([owner_def.owner])
+    # mruby walks the included modules newest-first.
+    Array(@included_modules[owner_def.owner]).reverse_each do |mod|
+      next unless seen.add?(mod)
+
+      found = module_super_lookup(name, mod)
+      return nil if found == :ambiguous || (found && !found.irep)
+
+      return found if found&.irep && module_super_body_usable?(found.irep)
+    end
+    superclass = @superclass_of[owner_def.owner]
+    return nil unless superclass.is_a?(String) && seen.add?(superclass)
+
+    found = module_super_lookup(name, superclass)
+    return nil unless found&.irep && module_super_body_usable?(found.irep)
+
+    found
+  end
+
+  # MODULE_SUPER_SUPPORT (ADR 0329): can `super` reach this body directly?
+  #
+  # compiles_clean? also refuses every CORE_BLOCK_GUARD body (ADR 0269), which
+  # is right for the existing direct-call sites but too strict here: that guard
+  # lives in the method's ENTRY wrapper, and a `super` reaching the body is
+  # already inside a compiled frame. The extra condition is core_body_relaxable?
+  # -- the build's own yield-reach proof that the body, and every block nested in
+  # it, never yields. That is what the guard's `M->c != M->root_c` arm tests at
+  # run time (`bc2cpp_block_yield_free`), so a body passing it is not one whose
+  # Fiber safety depended on the guard.
+  #
+  # The guard's other arm, `!bc2cpp_core_each_is_builtin(M, self)`, is a
+  # receiver-side runtime fact about `each`. This path only fires when the super
+  # target is statically the module's own method on the receiver's own class, so
+  # reaching the body does not bypass that check for any other receiver.
+  def module_super_body_usable?(label)
+    return false if hot_only_excluded?(label) || resumable_method?(label)
+    return true unless self.class.core_guarded&.include?(label)
+
+    core_body_relaxable?(label)
+  end
+
+  # The definitions of `name` on `owner` across BOTH registries: the engine
+  # gems' @registry and mruby's own compiled core (block_core_index, which also
+  # resolves `alias to_a entries`). `Range` is a core class whose `super` lands
+  # in core `Enumerable#max`, and core owners never appear in @registry at
+  # codegen time, so a lookup consulting only @registry finds nothing there.
+  # :ambiguous when one owner has two live definitions -- mruby would use the
+  # last, and picking either by name alone would be a guess.
+  def module_super_lookup(name, owner)
+    defs = Array(@registry[name]).select { |d| d.owner == owner }
+    defs += Array(block_core_index[[owner, name]])
+    return nil if defs.empty?
+    return :ambiguous unless defs.one?
+
+    defs.first
+  end
+
+  # The C++ expression for the block this frame was entered with, or nil when
+  # the frame cannot hold one (no block parameter and no yield-only frame).
+  # OP_SUPER reads the caller's block out of the frame the same way a yield
+  # does, so a frame with neither has nothing to forward.
+  def super_block_arg(owner_def, irep)
+    return nil unless irep
+
+    return 'bc2cpp_blk' if takes_block_param?(irep) || yields_block_param?(irep)
+
+    nil
+  end
+
+  # MODULE_SUPER_SUPPORT (ADR 0329): the C++ for `SUPER Rd n=N` when the target
+  # is reached THROUGH an included module -- `Range#max`'s `super` lands in
+  # `Enumerable#max`, which reads the block, so the call must carry this frame's
+  # block rather than the nil a bare `_impl` call passes.
+  #
+  # Returns nil (keeping the `#error`) unless every part holds:
+  #   - a plain fixed argument count (no splat, no keyword variant): the argument
+  #     registers are R(d+1)..R(d+N), which is what the emitted call passes;
+  #   - a statically known, clean bytecode target (module_super_target);
+  #   - the target's own `_impl` accepts this frame's block, or needs no block.
+  #     A target that takes a block parameter but is handed nil is exactly the
+  #     bug this avoids, so a mismatch keeps the `#error` rather than guessing.
+  #
+  # BC2CPP_MODULE_SUPER=0 restores the previous `#error` at these sites.
+  def module_super_call(owner_def, irep, d_reg, n)
+    return nil unless n
+    return nil unless ENV.fetch('BC2CPP_MODULE_SUPER', '1') == '1'
+
+    target = module_super_target(owner_def)
+    return nil unless target
+
+    t_irep = @ireps.fetch(target.irep)
+    block = super_block_arg(owner_def, irep)
+    return nil if takes_block_param?(t_irep) && block.nil?
+    return nil if block.nil? && yields_block_param?(t_irep)
+
+    args = (1..n.to_i).map { |i| "r#{d_reg.to_i + i}" }
+    args << block if takes_block_param?(t_irep)
+    "  r#{d_reg} = #{cpp_name(target.owner, target.name)}_impl(M, self#{args.map { |x| ", #{x}" }.join});\n"
+  end
+
   # ZSUPER_GENERAL_SUPPORT (ADR 0159): a bare `super` forwarding the current
   # method's arguments to a COMPILED superclass method. codegen_zsuper emits:
   #
