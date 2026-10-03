@@ -43,7 +43,7 @@ module IntegerConstantRanges
         end
       end
     end
-    native = IntegerConstants.native_const_names(native_paths) | IntegerConstants.native_defined_const_names(native_paths)
+    native = IntegerConstants.native_defined_const_names(native_paths)
     foreign = IntegerConstants.foreign_const_names(foreign_paths)
     poisoned.merge(native)
     poisoned.merge(foreign)
