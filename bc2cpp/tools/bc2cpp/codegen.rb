@@ -139,6 +139,11 @@ class CodeGen
     # body's nesting depth below its method (codegen.c counts scopes up to the
     # method scope, so a direct child block has lv == 1). Other lv keep `#error`.
     @blk_param_level = 0
+    # NESTED_BLOCK_FORWARD (ADR 0330): the BLOCK_FALLBACK body's nesting depth,
+    # which @blk_param_level is derived from (a nested body's `lv == 2` BLKPUSH
+    # resolves against its parent region, not the method). Reset per method with
+    # the rest of METHOD_COMPILE_STATE.
+    @block_fallback_depth = 0
     # ADR 0264: true while compiling a method of mruby's own Ruby (see core_targets).
     @compiling_core = false
     @registry = registry
