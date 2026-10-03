@@ -22,6 +22,23 @@ class CodeGen
     IntegerConstantRanges.enabled? && !@closed_world.nil? && @closed_world.constants_static? && const_missing_free?
   end
 
+  # NUMERIC_INTERVAL_OPERANDS (ADR 0326): the interval proof also vouches for operands of the Fixnum proof's consumers.
+  # BC2CPP_NUMERIC_INTERVALS=0 turns that off (the output is master's).
+  def numeric_intervals_on?
+    ENV['BC2CPP_NUMERIC_INTERVALS'] != '0' && fixnum_intervals_on?
+  end
+
+  PROVEN_INDEX_NOTE = "// NUMERIC_INTERVAL_OPERANDS -- index operand proven Fixnum (ADR 0326)\n  "
+
+  # An Array index the Fixnum proof (with the interval sources) covers: no integer test, no `[]` funcall else.
+  def proven_index_operand?(irep, idx, reg, owner_def)
+    ENV['BC2CPP_NUMERIC_INTERVALS'] != '0' && !reg.nil? && proven_fixnum_operand?(irep, idx, reg.to_s, owner_def)
+  end
+
+  def fixnum_interval_const?(name)
+    numeric_intervals_on? && !name.nil? && !self.class.integer_constant_ranges[name].nil?
+  end
+
   # [lo, hi] or nil; +why+ (an Array) collects the leaf that stopped a nil answer, for the probe.
   def fixnum_interval(irep, idx, reg, owner_def, depth = 0, why = nil)
     return nil unless irep && idx && reg && owner_def && fixnum_intervals_on?

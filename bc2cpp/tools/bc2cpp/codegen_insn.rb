@@ -628,13 +628,17 @@ class CodeGen
       case index_class
       when 'Array'
         array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
-        <<~CPP
-          #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
-            r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
-          } else {
-            r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
-          }
-        CPP
+        if exact && proven_index_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
+          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));\n"
+        else
+          <<~CPP
+            #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
+              r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
+            } else {
+              r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+            }
+          CPP
+        end
       when 'Hash'
         if exact
           "#{INDEX_EXACT_NOTE}r#{d} = mrb_hash_get(M, r#{d}, r#{s});\n"
@@ -727,14 +731,18 @@ class CodeGen
       case index_class
       when 'Array'
         array_test = exact ? '' : "mrb_array_p(r#{d}) && mrb_obj_ptr(r#{d})->c == M->array_class && "
-        <<~CPP
-          #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{idx_reg})) {
-            mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
-            r#{d} = r#{val};
-          } else {
-            r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
-          }
-        CPP
+        if exact && proven_index_operand?(irep, idx, unshift_proof_reg(idx_reg, reg_offset), owner_def)
+          "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});\n  r#{d} = r#{val};\n"
+        else
+          <<~CPP
+            #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{idx_reg})) {
+              mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
+              r#{d} = r#{val};
+            } else {
+              r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+            }
+          CPP
+        end
       when 'Hash'
         if exact
           "#{INDEX_EXACT_NOTE}mrb_hash_set(M, r#{d}, r#{idx_reg}, r#{val});\n  r#{d} = r#{val};\n"
