@@ -121,6 +121,7 @@ require_relative 'refine_report' if ENV['BC2CPP_REFINE_REPORT']
 require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
 require_relative 'block_send_report' if ENV['BC2CPP_BLOCK_SEND_REPORT']
 require_relative 'provable_error_report' if ENV['BC2CPP_PROVABLE_ERROR_REPORT']
+require_relative 'dead_arm_report' if ENV['BC2CPP_DEAD_ARM_REPORT']
 require_relative 'element_site_report' if ENV['BC2CPP_ELEMENT_REPORT']
 
 if $PROGRAM_NAME == __FILE__
