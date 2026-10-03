@@ -29,6 +29,10 @@ module InsnDecoder
   OPERAND_BYTES = { 'B' => 1, 'S' => 2, 'W' => 3 }.freeze
   Operand = OperandSchema::Operand
 
+  # EXT1/EXT2/EXT3 are folded into the instruction they widen (ADR 0320), so no pass sees a prefix
+  # between a producer and its consumer. BC2CPP_EXT_PREFIX=0 keeps the prefix as its own Insn.
+  def self.fold_ext_prefix? = ENV['BC2CPP_EXT_PREFIX'] != '0'
+
   # Tab padding codedump.c prints between an op name and its operands.
   TWO_TABS = %w[
     MOVE LOADL GETGV SETGV GETSV SETSV GETIV SETIV GETCV SETCV JMP JMPUW JMPIF SSEND SEND SEND0 SENDB
@@ -163,6 +167,8 @@ module InsnDecoder
       file = nil
       pc = 0
       ext = 0
+      ext_start = nil
+      fold = InsnDecoder.fold_ext_prefix?
       while pc < @iseq.bytesize
         start = pc
         name, format = FORMATS.fetch(@iseq.getbyte(pc)) { raise "bc2cpp: unknown opcode at #{pc}" }
@@ -178,9 +184,21 @@ module InsnDecoder
           pc += size
           value
         end
-        insns << build(name, values, pc, start)
-        ext = EXT_WIDTH.fetch(name, 0)
+        if fold && EXT_WIDTH.key?(name)
+          raise "bc2cpp: EXT prefix at #{start} follows another prefix" if ext_start
+
+          ext = EXT_WIDTH.fetch(name)
+          ext_start = start
+          next
+        end
+        # The folded Insn starts at the prefix byte (branch and handler addresses name it) but takes
+        # its line from the widened opcode, as the unfolded listing does.
+        insns << build(name, values, pc, ext_start || start, start)
+        ext = fold ? 0 : EXT_WIDTH.fetch(name, 0)
+        ext_start = nil
       end
+      raise "bc2cpp: EXT prefix at #{ext_start} ends the iseq" if ext_start
+
       [insns, file]
     end
 
@@ -382,11 +400,11 @@ module InsnDecoder
       SEPS.fetch(name)
     end
 
-    def build(name, values, next_pc, start)
+    def build(name, values, next_pc, start, line_pc = start)
       rest, operands = body(name, values, next_pc)
       op = name == 'ARRAY2' ? 'ARRAY' : name
-      lineno = line_at(start)
-      raise "bc2cpp: no line info for #{op} at #{start}" if lineno.negative?
+      lineno = line_at(line_pc)
+      raise "bc2cpp: no line info for #{op} at #{line_pc}" if lineno.negative?
 
       # The disassembly is line-oriented: a pool string with a newline is cut there.
       # scrub: a binary pool string (mruby-wolf's data.rb) is not valid UTF-8.
