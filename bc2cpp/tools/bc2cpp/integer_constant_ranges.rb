@@ -17,6 +17,11 @@ module IntegerConstantRanges
   OPS = %w[ADD SUB MUL DIV ADDI SUBI].freeze
   LOADS = %w[GETCONST GETMCNST].freeze
 
+  # BC2CPP_NUMERIC_CONSTANTS=0 turns the analysis and every use of it off (the output is master's).
+  def self.enabled?
+    ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0'
+  end
+
   # name => [lo, hi]
   def self.analyze(ireps, native_paths, foreign_paths, report: nil)
     defs = Hash.new { |h, k| h[k] = [] }

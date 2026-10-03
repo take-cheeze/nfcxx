@@ -19,7 +19,7 @@ class CodeGen
   # const_missing, no global refusal.
   # Not memoized: @closed_world is swapped for the world of a core method (ADR 0264).
   def static_constant_world?
-    ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0' && !@closed_world.nil? && @closed_world.constants_static? && const_missing_free?
+    IntegerConstantRanges.enabled? && !@closed_world.nil? && @closed_world.constants_static? && const_missing_free?
   end
 
   # [lo, hi] or nil; +why+ (an Array) collects the leaf that stopped a nil answer, for the probe.

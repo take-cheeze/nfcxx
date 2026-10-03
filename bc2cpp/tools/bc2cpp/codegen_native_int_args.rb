@@ -16,7 +16,7 @@ module NativeIntArgs
 
   # BC2CPP_NUMERIC_CONSTANTS=0 restores master's tag tests.
   def native_int_args_on?
-    ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0'
+    IntegerConstantRanges.enabled?
   end
 
   # True when argument +position+ of the call is a register the Fixnum proof covers at the call.

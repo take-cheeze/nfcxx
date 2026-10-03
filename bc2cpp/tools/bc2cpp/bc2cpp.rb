@@ -823,7 +823,7 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.integer_constant_values = integer_constant_values
   # NUMERIC_CONSTANT_RANGES (ADR 0318); BC2CPP_NUMERIC_CONSTANTS=0 computes nothing, so the output is master's.
   CodeGen.integer_constant_ranges =
-    if ENV['BC2CPP_NUMERIC_CONSTANTS'] != '0' && native_paths && foreign_ruby_srcs
+    if IntegerConstantRanges.enabled? && native_paths && foreign_ruby_srcs
       range_report = ENV['BC2CPP_NUMERIC_CONSTANTS_REPORT'] ? [] : nil
       ranges = profile_call.call('IntegerConstantRanges.analyze') do
         IntegerConstantRanges.analyze(ireps, native_paths, foreign_ruby_srcs, report: range_report)
