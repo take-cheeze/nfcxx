@@ -1678,11 +1678,9 @@ class CodeGen
         return rest_code if rest_code
       end
 
-      # Flow-proven core receivers need no user-class poly chain (ADR 0327).
-      core_call = with_exact_core_site(exact_site) do
-        core_exact_direct_line(d, recv, name, argv, dynamic_dispatch_line(d, recv, name, argv))
-      end
-      return "  #{core_call}" if core_call
+      # FLOW_CORE_DIRECT (ADR 0323): a flow-proven core receiver has no user class to chain for.
+      flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
+      return flow_core if flow_core
 
       cw_site = closed_world_site(recv, irep, idx, owner_def)
       poly = with_exact_core_site(exact_site) do
@@ -2056,10 +2054,12 @@ class CodeGen
     dispatch = dynamic_dispatch_line(d, recv, name, argv)
     return dispatch unless @closed_world && site
 
-    instances, scoped, native_free = receiver_instance_scope(site, name)
-    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : @closed_world.refusal(name, listed, site[:self_owner],
-                                                                          symbol_installed_names, instances: instances,
-                                                                          scoped: scoped, native_free: native_free)
+    instances, scoped, native_free, instance_scope = receiver_instance_scope(site, name)
+    installed = instance_scope ? symbol_instance_installed_names : symbol_installed_names
+    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : @closed_world.refusal(name, listed, site[:self_owner], installed,
+                                                                          instances: instances, scoped: scoped,
+                                                                          native_free: native_free,
+                                                                          instance_scope: instance_scope)
     extra_branches = ''
     if reason == :unlisted_class
       extra = unlisted_class_guards(name, listed, site)
@@ -2069,8 +2069,9 @@ class CodeGen
           "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
         end.join
         listed += extra
-        reason = @closed_world.refusal(name, listed, site[:self_owner], symbol_installed_names, instances: instances,
-                                                                          scoped: scoped, native_free: native_free)
+        reason = @closed_world.refusal(name, listed, site[:self_owner], installed, instances: instances,
+                                                                          scoped: scoped, native_free: native_free,
+                                                                          instance_scope: instance_scope)
       end
     end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
@@ -2108,9 +2109,11 @@ class CodeGen
     # NOMETHOD_REVIEWED, which is the full build's list (ADR 0226): keep the dispatch.
     return nil if hot_only_active?
 
-    instances, scoped, native_free = receiver_instance_scope(site, name)
-    extra = @closed_world.unlisted_classes(name, listed, site[:self_owner], symbol_installed_names,
-                                           instances: instances, scoped: scoped, native_free: native_free)
+    instances, scoped, native_free, instance_scope = receiver_instance_scope(site, name)
+    installed = instance_scope ? symbol_instance_installed_names : symbol_installed_names
+    extra = @closed_world.unlisted_classes(name, listed, site[:self_owner], installed, instances: instances,
+                                                                           scoped: scoped, native_free: native_free,
+                                                                           instance_scope: instance_scope)
     return nil if extra.empty? || extra.size > UNLISTED_CLASS_GUARDS_MAX
     return nil unless extra.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.stable_class_constant?(klass) }
 

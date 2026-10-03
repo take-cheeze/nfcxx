@@ -229,6 +229,15 @@ class CodeGen
     @nil_unanswerable[name] = compute_nil_unanswerable(name)
   end
 
+  # NATIVE_CLASS_ARMS (ADR 0323): nil_unanswerable? with the installs only a class object sees left out; nil is
+  # an instance of a non-Module class, as every set a lever of that ADR judges.
+  def nil_unanswerable_for_instances?(name)
+    @nil_unanswerable_instances ||= {}
+    return @nil_unanswerable_instances[name] if @nil_unanswerable_instances.key?(name)
+
+    @nil_unanswerable_instances[name] = nil_unanswerable_refusal(name, installed: symbol_instance_installed_names, instance_scope: true).nil?
+  end
+
   def compute_nil_unanswerable(name)
     nil_unanswerable_refusal(name).nil?
   end
@@ -238,11 +247,11 @@ class CodeGen
   # that list leaves out cannot hide a NilClass method). Class-method registrations are skipped by the
   # scan on purpose (they never shadow an instance lookup); a definition through a helper that takes
   # the name as a literal is outside what any bc2cpp native scan sees.
-  def nil_unanswerable_refusal(name)
+  def nil_unanswerable_refusal(name, installed: symbol_installed_names, instance_scope: false)
     world = block_core_world
     return :no_world unless world && name
-    return :installed if symbol_installed_names.nil? || symbol_installed_names.include?(name)
-    return :foreign_ruby unless world.nil_foreign_definition_free?(name, nil_ancestor_modules.to_a)
+    return :installed if installed.nil? || installed.include?(name)
+    return :foreign_ruby unless world.nil_foreign_definition_free?(name, nil_ancestor_modules.to_a, instance_scope: instance_scope)
     return :method_missing if (world.method_missing_classes.to_a & nil_ancestor_modules.to_a).any?
     return :registry if (@registry[name] || []).any? { |definition| nil_ancestor_modules.include?(definition.owner) }
 
