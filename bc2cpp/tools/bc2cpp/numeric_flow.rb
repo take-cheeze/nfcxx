@@ -145,6 +145,7 @@ module NumericFlow
     by_kind = program.handler_edges.group_by(&:kind).transform_values { |edges| edges.map(&:target).to_set }
     ctx[:rescue_only] = by_kind.fetch(:rescue, Set.new) - by_kind.fetch(:ensure, Set.new)
     entry = Array.new(nregs, OTHER)
+    entry[0] = oracle.self_mask if oracle.respond_to?(:self_mask)
     (1..nregs - 1).each do |r|
       m = oracle.entry_mask(irep, r)
       entry[r] = m if m && !opaque_regs.include?(r.to_s)
@@ -350,8 +351,13 @@ module NumericFlow
     end
 
     if CALL_OPS.include?(op)
-      # SENDB/SSENDB are excluded: a `break` in the caller's block becomes the result.
-      mask = %w[SEND SEND0 SSEND SSEND0].include?(op) ? oracle.send_mask(irep, index, insn, state) : OTHER
+      # A block result needs its own proof: `break` replaces the callee's answer.
+      mask = if %w[SEND SEND0 SSEND SSEND0].include?(op)
+               oracle.send_mask(irep, index, insn, state)
+             elsif %w[SENDB SSENDB].include?(op) && oracle.respond_to?(:block_send_mask)
+               oracle.block_send_mask(irep, index, insn, state)
+             else OTHER
+             end
       ((a + 1)...nregs).each { |r| out[r] = OTHER }
       refresh_slots(out, ctx)
       set.call(a, mask)

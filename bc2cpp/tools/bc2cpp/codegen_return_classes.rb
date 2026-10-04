@@ -38,6 +38,10 @@ class CodeGen
     def send_mask(irep, index, insn, state)
       @cg.return_class_send_mask(irep, index, insn, state)
     end
+
+    def block_send_mask(irep, index, insn, state)
+      @cg.core_ruby_class_result(irep, index, insn, state) || NumericFlow::OTHER
+    end
   end
 
   # The bit standing for "exactly +klass+", allocated on first use.
@@ -180,6 +184,9 @@ class CodeGen
   def return_class_send_mask(irep, index, insn, state = nil)
     name = insn.sym
     return NumericFlow::OTHER unless name
+
+    ruby_result = state && core_ruby_class_result(irep, index, insn, state)
+    return ruby_result if ruby_result
 
     core_result = state && native_core_class_result(insn, state)
     return core_result if core_result

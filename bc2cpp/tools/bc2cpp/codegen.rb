@@ -27,7 +27,7 @@ class CodeGen
   class << self
     attr_accessor :wired_embeddings, :stable_class_constants, :struct_members,
                   :integer_constant_values, :integer_constant_ranges, :hot_only_excluded, :module_names, :core_hidden_defs,
-                  :core_guarded, :core_aliases
+                  :core_guarded, :core_aliases, :core_result_opaque_defs, :core_result_installed_names
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
