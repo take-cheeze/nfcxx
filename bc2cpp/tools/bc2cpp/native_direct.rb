@@ -11,14 +11,14 @@ require_relative 'native_direct_table'
 # classification that split the bindings, and checked against the entry
 # points and the registrations by scripts/bc2cpp_native_direct_check.rb.
 module NativeDirect
-  # kinds: :int (guarded by mrb_integer_p, passed as mrb_int), :bool
-  # (mrb_test, what mrb_get_args "b" does), :value (passed through).
+  # kinds: :int (guarded by mrb_integer_p, passed as mrb_int), :float
+  # (mrb_as_float, matching mrb_get_args "f"), :bool (mrb_test), :value.
   Entry = Struct.new(:function, :kinds)
 
   # The bindings' own argument kinds (scripts/native_binding_split.rb reads
   # them from the mrb_get_args formats); only these are passed by generated
   # code, an entry needing any other keeps dispatching to the binding.
-  COMPILER_KINDS = %i[int bool value].freeze
+  COMPILER_KINDS = %i[int float bool value].freeze
 
   ENTRIES = GENERATED.to_h do |name, owners|
     supported = owners.select { |_owner, (_function, kinds)| kinds.all? { |k| COMPILER_KINDS.include?(k) } }
