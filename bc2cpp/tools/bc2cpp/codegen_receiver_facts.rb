@@ -264,12 +264,12 @@ class CodeGen
 
   # The constant the straight-line walk finds when no branch can bypass its
   # load; nil otherwise (agreed_constant_name then asks every reaching definition).
-  def straight_line_constant_name(irep, idx, dest_reg)
+  def straight_line_constant_name(irep, idx, dest_reg, skip_blocks: false)
     branch_edges = BytecodeIR.for(irep).jump_edges_before(idx, %w[JMP JMPIF JMPNOT JMPNIL JMPUW])
     return nil unless branch_edges
 
-    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP,
-                                                     barrier: %w[JMPUW ONERR RESCUE EXCEPT BLOCK])
+    barriers = skip_blocks ? %w[JMPUW ONERR RESCUE EXCEPT] : %w[JMPUW ONERR RESCUE EXCEPT BLOCK]
+    ref = irep.constant_path(idx - 1, dest_reg.to_s, skip_ops: READ_ONLY_OPCODE_SKIP, barrier: barriers)
     return nil unless ref&.root == :const
 
     # A forward edge from before this write into the send's block could

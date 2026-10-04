@@ -119,14 +119,13 @@ class CodeGen
     return InlineNested.none if regions.empty?
 
     nested = InlineNested.none
-    inner_offset = offset + outer_block_irep.nregs
     regions.each do |nregion|
       nested_upvars = block_upvar_needs(nregion[:block_irep])
       next if nested_upvars.nil?
       next if inline_nested_region_has_break?({ block_irep: nregion[:block_irep], upvars: nested_upvars },
                                                nested_upvars)
 
-      inlined = emit_profiler_section_inline(nregion, block_irep, d, reg_offset: inner_offset,
+      inlined = emit_profiler_section_inline(nregion, block_irep, d, reg_offset: offset,
                                                                dest_offset: offset, pre: nested.pre)
       next unless inlined
 
@@ -713,40 +712,25 @@ class CodeGen
     # function); the nested pass passes its own buffer, because that body's file
     # code is collected by the enclosing compile_inline_block_body.
     pre ||= @inline_nested_pre
-    # The body is a STANDALONE function, so its frame starts at r0 exactly like a
-    # block-fallback cfunc: r0 is the block's self, the rest are nil, and a
-    # level-0 capture arrives as a `mrb_value*` parameter, dereferenced once at
-    # the top into the `bc2cpp_upvar_*` name the body reads. That is what lets a
-    # method-level `goto` in the caller jump across this call: nothing here is
-    # declared in the caller's scope.
-    body = compile_profiler_section_body(region, irep, d, 0, "#{fn_name}_tail", "#{fn_name}_v",
+    # Captures alias the caller's slots; the block frame must not overwrite them.
+    upvars = block_upvar_needs(block_irep)
+    return nil unless upvars && upvars.all? { |level, _index| level.zero? }
+
+    offset = (upvars.map(&:last).max || -1) + 1
+    body = compile_profiler_section_body(region, irep, d, offset, "#{fn_name}_tail", "#{fn_name}_v",
                                          "LBLK#{addr}_", pre)
     return nil unless body
 
     pre << "// PROFILER_SECTION_INLINE :#{region[:section_name] || meth} -- " \
             "the profiling body compiled inline and called directly\n"
-    # A level-0 capture is the enclosing method's own register. The body reads
-    # it as a plain `r<n>` (compile_block_body_insn's GETUPVAR arm), so the
-    # capture arrives as a parameter under a name that CANNOT collide with the
-    # block's own frame -- the frame is declared r0..r<nregs-1> below and a
-    # capture index can be inside that range -- and is copied in only for
-    # registers the frame does not already declare.
-    upvars = block_upvar_needs(block_irep) || []
-    params = upvars.each_with_index.map { |(_level, index), i| "mrb_value bc2cpp_prof_up_#{i}" }
+    params = upvars.each_with_index.map { |(_level, _index), i| "mrb_value* bc2cpp_prof_up_#{i}" }
     pre << "static mrb_value #{fn_name}(mrb_state* M, mrb_value self" \
            "#{params.map { |p| ", #{p}" }.join}) {\n"
-    pre << "  mrb_value r0 = self;\n"
-    (1...block_irep.nregs).each { |i| pre << "  mrb_value r#{i} = mrb_nil_value();\n" }
-    # A capture whose register lies OUTSIDE the block's own frame has no
-    # declaration here, so declare it and bind it; one inside the frame is
-    # already declared, and binding it after the frame's nil-initializer is
-    # exactly right (the block's own register 0 is `self`, which no capture uses).
     upvars.each_with_index do |(_level, index), i|
-      pre << "  mrb_value r#{index} = bc2cpp_prof_up_#{i};\n" if index >= block_irep.nregs
-      next if index.positive? && index < block_irep.nregs
-
-      pre << "  r#{index} = bc2cpp_prof_up_#{i};\n"
+      pre << "  mrb_value& r#{index} = *bc2cpp_prof_up_#{i};\n"
     end
+    pre << "  mrb_value r#{offset} = self;\n"
+    (1...block_irep.nregs).each { |i| pre << "  mrb_value r#{i + offset} = mrb_nil_value();\n" }
     # The block's tail value, which the call site returns: the `next`/tail stores
     # it here, and the call assigns it to the SENDB destination. Declared with
     # the frame so the body's own jumps never cross an initialization.
@@ -761,7 +745,7 @@ class CodeGen
     pre << "}\n\n"
 
     out = String.new
-    call_args = upvars.map { |level, index| ", r#{index}" }.join
+    call_args = upvars.map { |_level, index| ", &r#{index + (reg_offset || 0)}" }.join
     if meth == 'section'
       out << "  {\n"
       out << "    uint64_t bc2cpp_prof_start_#{addr} = profiler_section_begin();\n"
@@ -781,14 +765,7 @@ class CodeGen
   # Same shape as compile_block_body_insn, with the ordinary return forms
   # (`next`, with or without a value, and the implicit tail) storing into
   # result_var and jumping to the tail label instead of an iteration end.
-  # RETURN_BLK is deliberately NOT special-cased: a `return` out of the block
-  # returns from the enclosing METHOD, and prof_section's own
-  # `mrb_yield_argv` then never reaches its profiler_section_end either -- so
-  # letting it compile to a plain C++ return reproduces the native behavior
-  # exactly, closing primitive included. A nested region is claimed by
-  # inline_nested_block_pass, as in every other inline body; an unclaimable one
-  # leaves `#error` here, which the emitter turns into "no inlining" and the
-  # site keeps its BLOCK_FALLBACK.
+  # Nonlocal returns retain the fallback: this function has its own C++ frame.
   def compile_profiler_section_body(region, irep, d, offset, tail_label, result_var, body_label_prefix, pre)
     block_irep = region[:block_irep]
     # The body's own jump targets, in the containing region's label namespace.
