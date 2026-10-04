@@ -56,11 +56,14 @@ module CoreRubyResults
   # No pooled or growing return facts enter this analysis; caller states therefore
   # need no extra dependency edges into the core body's fixpoint.
   class Oracle
-    def initialize(codegen, receiver, block_given, block_register)
+    def initialize(codegen, receiver, block_given, block_register, seen, target, call_name)
       @cg = codegen
       @receiver = receiver
       @block_given = block_given
       @block_register = block_register
+      @seen = seen
+      @target = target
+      @call_name = call_name
     end
 
     def self_mask = @receiver
@@ -78,11 +81,24 @@ module CoreRubyResults
     def send_mask(_irep, _index, insn, state)
       @cg.core_ruby_static_send_mask(insn, state)
     end
+
+    def block_send_mask(irep, index, insn, state)
+      @cg.core_ruby_class_result(irep, index, insn, state, seen: @seen, name_results: false) || NumericFlow::OTHER
+    end
+
+    def super_mask(_irep, _index, insn, _state)
+      return NumericFlow::OTHER if @block_given || ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
+      return NumericFlow::OTHER unless @call_name == @target.name
+      return NumericFlow::OTHER unless insn.plain_fixed_argc? && insn.argc.zero?
+
+      target = @cg.core_ruby_super_result_target(@target, @receiver)
+      target && @cg.core_ruby_body_result(target, @receiver, false, seen: @seen) || NumericFlow::OTHER
+    end
   end
 end
 
 class CodeGen
-  def core_ruby_class_result(irep, index, insn, state)
+  def core_ruby_class_result(irep, index, insn, state, seen: Set.new, name_results: true)
     return nil if ENV['BC2CPP_CORE_RUBY_RESULTS'] == '0'
     return nil unless %w[SEND0 SSEND0 SENDB SSENDB].include?(insn.op)
     return nil unless insn.sym && (%w[SEND0 SSEND0].include?(insn.op) || (insn.argc == 0 && insn.plain_fixed_argc?))
@@ -91,7 +107,8 @@ class CodeGen
     receiver &= ~NumericFlow::NIL if receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL) && nil_unanswerable?(insn.sym)
     klass = RETURN_CORE_CLASS[receiver]
     chain = klass && BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
-    return core_ruby_name_result(irep, index, insn) unless chain
+    return name_results ? core_ruby_name_result(irep, index, insn) : nil unless chain
+    return nil if !seen.empty? && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
 
     block_given = insn.op.end_with?('B')
@@ -100,7 +117,7 @@ class CodeGen
     target = core_ruby_result_target(chain, insn.sym)
     return nil unless target
 
-    core_ruby_body_result(target, receiver, block_given)
+    core_ruby_body_result(target, receiver, block_given, seen: seen, call_name: insn.sym)
   end
 
   # Every answering definition must be modelled; receiver class knowledge is
@@ -136,22 +153,26 @@ class CodeGen
     return nil if definitions.empty?
 
     definitions.reduce(0) do |mask, definition|
-      result = core_ruby_body_result(definition, NumericFlow::OTHER, block_given)
+      result = core_ruby_body_result(definition, NumericFlow::OTHER, block_given, call_name: name)
       return nil unless result
 
       mask | result
     end
   end
 
-  def core_ruby_body_result(target, receiver, block_given)
+  def core_ruby_body_result(target, receiver, block_given, seen: Set.new, call_name: target.name)
     return nil unless target.irep
+
+    key = [target.irep, receiver, block_given]
+    # Recursive specializations contribute no class fact until their result is known.
+    return nil if seen.include?(key)
 
     body = @ireps.fetch(target.irep)
     fields = body.enter&.enter_fields
     return nil unless fields && fields.size == 8 && fields.values_at(0, 1, 2, 3, 4, 5, 7).all?(&:zero?)
     return nil unless core_ruby_result_exits_safe?(body)
 
-    oracle = CoreRubyResults::Oracle.new(self, receiver, block_given, fields[6] == 1 ? 1 : nil)
+    oracle = CoreRubyResults::Oracle.new(self, receiver, block_given, fields[6] == 1 ? 1 : nil, seen | Set[key], target, call_name)
     states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
     return nil unless states
 
@@ -186,6 +207,19 @@ class CodeGen
       return definitions.one? ? definitions.first : nil unless definitions.empty?
     end
     nil
+  end
+
+  def core_ruby_super_result_target(target, receiver)
+    klass = RETURN_CORE_CLASS[receiver]
+    chain = klass && BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
+    position = chain&.index(target.owner)
+    return nil unless position
+    # The fixed core chain cannot skip a newly included module's super method.
+    return nil unless chain.each_with_index.all? do |owner, index|
+      Array(@included_modules[owner]).all? { |mod| chain.drop(index + 1).include?(mod) }
+    end
+
+    core_ruby_result_target(chain.drop(position + 1), target.name)
   end
 
   def core_ruby_literal_block_safe?(irep, index, insn)
