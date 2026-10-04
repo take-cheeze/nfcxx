@@ -228,13 +228,14 @@ module ReceiverProofReport
                         why: rp_argument_why(key, pool) }]
   end
 
-  # `pooled`, `no_candidate` (the method is not a pool candidate: no visible caller or an escaping entry) or
+  # `pooled`, `no_candidate:<rule>` (the method fails one of entry_arg_candidates' admission rules 1-8 -- the rule
+  # `numeric_root_not_admitted` names, so the 173 non-candidates split by what they actually need) or
   # `dropped:<kinds>`: the producers of the argument at the call sites whose class set is unmodelled.
   def rp_argument_why(key, pool)
     return pool.anybits?(NumericFlow::OTHER) ? 'pool_has_other' : 'pooled' if pool
 
     cand = @entry_cand && @entry_cand[key]
-    return 'no_candidate' unless cand
+    return rp_no_candidate_why(key) unless cand
 
     sites, k = cand
     kinds = sites.filter_map do |ci, cx, recv, _argc, _own|
@@ -243,6 +244,49 @@ module ReceiverProofReport
       rp_producer_kind(ci, cx, reg) if m.nil? || m.anybits?(CodeGen::CLASS_POOL_UNSHIPPABLE)
     end
     "dropped:#{kinds.uniq.sort.first(4).join(',')}"
+  end
+
+  # The admission rule this parameter's method fails (entry_arg_candidates rules 1-8, named by the same enumerator
+  # NUMERIC_ROOTS uses), or :block_param when the register is a block parameter, whose value is whatever the callee
+  # yields (a `|c|` in `@allies.each`), which no admission rule describes.
+  def rp_no_candidate_why(key)
+    label, reg = key
+    irep = @ireps[label]
+    return 'no_candidate:unattributed' unless irep
+
+    # `numeric_irep_owner` maps a block body to its ENCLOSING method, so a rule read through it would describe the
+    # method, not the block. A register a block body binds as a parameter is the callee's yield, not the method's
+    # argument: ADMITTED rules do not apply (ENTRY_ARG_CLASSIFIED_OPS' own note on block parameters).
+    return 'no_candidate:block_param' if rp_block_parameter?(irep, reg)
+
+    defn = numeric_irep_owner[label]
+    return 'no_candidate:unattributed' unless defn
+
+    rule = numeric_root_not_admitted(defn)
+    # `no_irep` is a native-only definition: the method has no bytecode body, so no call site can be enumerated for it.
+    rule == 'no_irep' ? 'no_candidate:native_entry' : "no_candidate:#{rule}"
+  end
+
+  # True when +irep+ is a block body and +reg+ is one of the registers its own ENTER binds: a block parameter, whose
+  # value is whatever the callee yields, rather than a captured local. A block binds R1..R(mand+opt+rest+post);
+  # anything above that is a local or a captured upvar (see `block_param_incoming_slot?` for the same convention).
+  def rp_block_parameter?(irep, reg)
+    return false unless rp_block_body?(irep)
+
+    enter = irep.enter
+    return false unless enter
+
+    mand, opt, rest, post = enter.enter_fields[0, 4].map(&:to_i)
+    bound = 1 + mand + opt + rest + post
+    reg = reg.to_i
+    reg >= 1 && reg <= bound
+  end
+
+  # A block body is a nested rep: no definition owns it outright. `@owner_of` holds the labels a definition owns, and
+  # `numeric_irep_owner` extends those over nested reps precisely so a block can be attributed to its method; a label
+  # in neither is a block body. The same test as `block_param_incoming_slot?`'s own `@owner_of.key?(irep.label)`.
+  def rp_block_body?(irep)
+    !@owner_of.key?(irep.label)
   end
 
   def rp_writer(irep, site, reg, ins, index, hypothesis)
