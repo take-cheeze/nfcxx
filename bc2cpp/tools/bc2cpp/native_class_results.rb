@@ -34,6 +34,7 @@ module NativeClassResults
     'compact' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     'flatten' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
     '__uniq' => ['Array', %w[3rd/mruby/mrbgems/mruby-array-ext/src/array.c]],
+    '__num_to_a' => [['Array', :nil], %w[3rd/mruby/src/range.c]],
     'keys' => ['Array', %w[3rd/mruby/src/hash.c]],
     'values' => ['Array', %w[3rd/mruby/src/hash.c 3rd/mruby/mrbgems/mruby-struct/src/struct.c]],
     'bytes' => ['Array', %w[3rd/mruby/src/string.c]],
@@ -94,6 +95,7 @@ module NativeClassResults
 
   def kinds(name, paths, string_subclass_free: false)
     return nil if ENV['BC2CPP_NATIVE_CLASS_RESULTS'] == '0'
+    return nil if name == '__num_to_a' && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
 
     return nil if ARRAY_TRANSFORMS.include?(name) && ENV['BC2CPP_NATIVE_ARRAY_TRANSFORMS'] == '0'
     return nil if %w[compact join].include?(name) && ENV['BC2CPP_NATIVE_COLLECTION_RESULTS'] == '0'
@@ -127,6 +129,12 @@ module NativeClassResults
           helper = path.delete_suffix('/mrbgems/mruby-array-ext/src/array.c') + '/src/array.c'
         end
         return nil unless source_matches?(helper, relative)
+      end
+    end
+    if name == '__num_to_a'
+      paths.each do |path|
+        helper = path.delete_suffix('/src/range.c') + '/src/array.c'
+        return nil unless source_matches?(helper, '3rd/mruby/src/array.c')
       end
     end
     if name == 'to_s'

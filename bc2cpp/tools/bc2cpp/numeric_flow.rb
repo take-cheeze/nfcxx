@@ -356,6 +356,8 @@ module NumericFlow
                oracle.send_mask(irep, index, insn, state)
              elsif %w[SENDB SSENDB].include?(op) && oracle.respond_to?(:block_send_mask)
                oracle.block_send_mask(irep, index, insn, state)
+             elsif op == 'SUPER' && oracle.respond_to?(:super_mask)
+               oracle.super_mask(irep, index, insn, state)
              else OTHER
              end
       ((a + 1)...nregs).each { |r| out[r] = OTHER }
