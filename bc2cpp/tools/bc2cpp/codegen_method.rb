@@ -141,14 +141,18 @@ class CodeGen
     end
 
     resumable = nil
+    fiber_guarded = false
     if calls_fiber_yield?(irep) || @fiber_unsafe_methods.include?(label)
-      # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: never compile
-      # a method that calls Fiber.yield or is reachable from a Fiber.new block (see
-      # those methods), unless it is a Fiber.new root that qualifies as a resumable
-      # step function (RESUMABLE_ROOTS, ADR 0273).
+      # FIBER_YIELD_UNSAFE_SUPPORT / FIBER_REACHABILITY_UNSAFE_SUPPORT: a method that
+      # calls Fiber.yield, or is reachable from a Fiber.new block, is not compiled
+      # outright -- unless it is a Fiber.new root that qualifies as a resumable step
+      # function (RESUMABLE_ROOTS, ADR 0273), or its own body cannot suspend, in which
+      # case it compiles behind a run-time hand-off (FIBER_BODY_GUARD, ADR 0333).
       plan = resumable_plan(label)
       if plan.is_a?(ResumablePlan)
         resumable = plan
+      elsif fiber_body_guard?(label, d)
+        fiber_guarded = true
       else
         reason = if plan.is_a?(String)
                    warn "bc2cpp: resumable: #{d.owner}##{d.name} stays interpreted: #{plan}" if (@resumable_warned ||= Set.new).add?(label)
@@ -489,7 +493,7 @@ class CodeGen
     @resumable = nil
 
     out << "static mrb_value #{entry_name}(mrb_state* M, mrb_value self) {\n"
-    guard = core_block_guard(label, d)
+    guard = core_block_guard(label, d) || fiber_body_guard_prologue(label, fiber_guarded)
     out << guard[:prologue] if guard
     if arg_names.empty? && !kw_table && !needs_blk_param && !has_blk
       out << "  return #{impl_name}(M, self);\n"
@@ -667,6 +671,47 @@ class CodeGen
   # An Enumerable method also needs an `each` that the core defines, since a block
   # captured by pointer must not outlive the frame (BLOCK_FALLBACK_UPVAR_SAFE_METHODS).
   # Returns { index:, prologue: } or nil for an unguarded method.
+  # FIBER_BODY_GUARD (ADR 0333): may this Fiber-reachable method compile behind a
+  # run-time hand-off instead of staying interpreted?
+  #
+  # Only when its OWN body cannot suspend. `core_body_relaxable?` is YieldReach
+  # (ADR 0283) answering exactly that, and it is the same question CORE_BLOCK_GUARD
+  # already asks of a core body before narrowing its guard condition (below). The
+  # yield that matters happens in the block the CALLER supplied, which is not
+  # running inside this frame -- and it is not proved yield-free, because it cannot
+  # be. That is what the hand-off is for.
+  #
+  # A method that calls Fiber.yield itself is never admitted: there the yield IS in
+  # its own frame, which no hand-off from its own entry can step around.
+  #
+  # Neither is a method that builds an Enumerator: mruby-enumerator runs a
+  # generator on a Fiber (CoreDefs.fiber_gem?), so that block's frame is below a
+  # fiber entry by construction, not by a caller. YieldReach marks only
+  # `Fiber.new` blocks as fiber bodies (scan_fiber_call), so `body_yield_free?`
+  # reads such a builder as yield-free when its block is not. That gap predates
+  # this guard -- nothing compiled it before -- and admitting one would put a
+  # compiled frame under a Fiber for real.
+  #
+  # BC2CPP_FIBER_BODY_GUARD=0 restores the blanket refusal.
+  def fiber_body_guard?(label, d = nil)
+    return false if ENV['BC2CPP_FIBER_BODY_GUARD'] == '0'
+    return false if d && calls_fiber_yield?(@ireps.fetch(label))
+    return false if @yield_reach&.builds_enumerator?(label)
+
+    core_body_relaxable?(label)
+  end
+
+  # The entry half, mirroring core_block_guard: with a Fiber other than the root
+  # live, run this method bytecode instead, so no compiled frame is left between
+  # the fiber entry and a yield in the caller block.
+  def fiber_body_guard_prologue(label, enabled)
+    return nil unless enabled
+
+    index = (@core_guard_index[label] ||= @core_guard_index.size)
+    { index: index,
+      prologue: "  if (mrb_unlikely(M->c != M->root_c)) return bc2cpp_core_interpreted(M, self, #{index});\n" }
+  end
+
   def core_block_guard(label, d)
     return nil unless d.core && self.class.core_guarded&.include?(label)
 
