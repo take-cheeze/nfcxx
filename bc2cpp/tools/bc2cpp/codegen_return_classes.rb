@@ -251,7 +251,6 @@ class CodeGen
 
     receiver_class = return_class_of_mask(state[insn.reg.to_i])
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
-    return nil unless @closed_world&.name_fully_visible?(name)
 
     key = [receiver_class, name]
     return @rc_scoped_return_cache[key] if @rc_scoped_return_cache.key?(key)
