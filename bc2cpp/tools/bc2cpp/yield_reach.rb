@@ -107,6 +107,26 @@ class YieldReach
     @sound && @nb.key?(label) && !@nb[label]
   end
 
+  # #builds_enumerator? (FIBER_BODY_GUARD, ADR 0333): does this method hand a
+  # literal block to `Enumerator.new` / `Lazy.new` / `Generator.new`? Those blocks
+  # are generators -- mruby-enumerator runs them on a Fiber (CoreDefs.fiber_gem?)
+  # -- so the method cannot compile behind a hand-off from its own entry: the
+  # frame that matters is the BLOCK's, and it sits below a fiber entry by
+  # construction rather than by a caller. YieldReach marks only `Fiber.new`
+  # blocks as fiber bodies (scan_fiber_call), so `body_yield_free?` otherwise
+  # reads a generator builder as yield-free.
+  def builds_enumerator?(label)
+    irep = @ireps[label]
+    return false unless irep
+
+    irep.instructions.each_with_index.any? do |insn, idx|
+      next false unless insn.op == 'SENDB' && GENERATOR_CLASSES.include?(const_receiver(irep, idx, insn.reg))
+
+      prev = irep.instructions[idx - 1]
+      prev&.op == 'BLOCK'
+    end
+  end
+
   def may_yield?(label) = !yield_free?(label)
 
   # The raw answer, also for a world the proof does not cover (open world): the refusal of methods

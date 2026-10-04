@@ -684,10 +684,19 @@ class CodeGen
   # A method that calls Fiber.yield itself is never admitted: there the yield IS in
   # its own frame, which no hand-off from its own entry can step around.
   #
+  # Neither is a method that builds an Enumerator: mruby-enumerator runs a
+  # generator on a Fiber (CoreDefs.fiber_gem?), so that block's frame is below a
+  # fiber entry by construction, not by a caller. YieldReach marks only
+  # `Fiber.new` blocks as fiber bodies (scan_fiber_call), so `body_yield_free?`
+  # reads such a builder as yield-free when its block is not. That gap predates
+  # this guard -- nothing compiled it before -- and admitting one would put a
+  # compiled frame under a Fiber for real.
+  #
   # BC2CPP_FIBER_BODY_GUARD=0 restores the blanket refusal.
   def fiber_body_guard?(label, d = nil)
     return false if ENV['BC2CPP_FIBER_BODY_GUARD'] == '0'
     return false if d && calls_fiber_yield?(@ireps.fetch(label))
+    return false if @yield_reach&.builds_enumerator?(label)
 
     core_body_relaxable?(label)
   end
