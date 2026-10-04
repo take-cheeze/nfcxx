@@ -496,6 +496,9 @@ class CodeGen
     each_block_site(irep, send_ops: %w[SENDB], layout: layout) do |insn, idx, block_insn, dest_reg, block_irep|
       meth = insn.sym
       next unless mandatory_arity(block_irep).zero? && pure_mandatory_arity?(block_irep)
+      next if @closed_world && !profiler_result_lookup_safe?(meth)
+      # A standalone helper cannot return from the enclosing Ruby method.
+      next unless core_ruby_result_exits_safe?(block_irep)
 
       # The receiver must be the literal constant path RGSS::Profiler (see
       # profiler_section_receiver?), and a :section's name must be a String pool

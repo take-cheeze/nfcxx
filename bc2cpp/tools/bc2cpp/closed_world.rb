@@ -513,11 +513,12 @@ class ClosedWorld
   # names for the whole run. Exactly one outside write binds the simple name (the native
   # definition itself; a second define, const_set, const_remove or Ruby `Name =` makes two), no
   # bytecode SETCONST binds it, and no dynamic constant mutation exists.
-  def native_class_constant_stable?(full)
+  # A caller auditing mutually exclusive native definitions may supply their binding count.
+  def native_class_constant_stable?(full, bindings: 1)
     return false if @global_refusal || @dynamic_constant_mutation || !full.is_a?(String)
 
     name = simple(full)
-    @constant_write_counts[name].zero? && @outside_constant_write_counts[name] == 1
+    @constant_write_counts[name].zero? && @outside_constant_write_counts[name] == bindings
   end
 
   # A literal `Klass.new` has an exact-class result only while ordinary
