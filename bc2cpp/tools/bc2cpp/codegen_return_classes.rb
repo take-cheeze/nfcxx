@@ -67,6 +67,9 @@ class CodeGen
     @rc_return = {}
     @rc_send_ireps = Hash.new { |h, k| h[k] = Set.new }
     @rc_new_class = {}
+    @rc_scoped_return_cache = {}
+    @rc_scoped_return_active = Set.new
+    @rc_scoped_ready = false
     @rc_oracle = ExactOracle.new(self)
     return unless @foreign_method_names && @closed_world&.exact_instances_singleton_free?
 
@@ -83,6 +86,11 @@ class CodeGen
       changed |= grow_class_pools
       break unless changed
     end
+    # Receiver-specific summaries read the settled name-wide and class-pool facts.
+    @rc_scoped_ready = true
+    @rc_scoped_states = {}
+    @rc_scoped_writes = {}
+    @rc_scoped_active_labels = Set.new
     # The numeric flow and the Fixnum proof ask for a register's class set; mid-fixpoint that would
     # recurse into the flow still being built (NATIVE_RESULT_FACTS, ADR 0302).
     @native_results_ready = true
@@ -130,16 +138,32 @@ class CodeGen
     @rc_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
   end
 
+  # On-demand counterpart to the table-building flow. It can use stable scoped
+  # return facts without changing the global name summaries or class pools.
+  def return_class_scoped_states(irep)
+    return nil unless @rc_scoped_ready
+    return @rc_scoped_states[irep.label] if @rc_scoped_states.key?(irep.label)
+    return nil if @rc_scoped_active_labels.include?(irep.label)
+
+    writes = {}
+    @rc_scoped_writes[irep.label] = writes
+    @rc_scoped_active_labels << irep.label
+    building = true
+    @rc_scoped_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
+  ensure
+    @rc_scoped_active_labels&.delete(irep.label) if building
+  end
+
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.
-  def return_class_def_mask(d)
+  def return_class_def_mask(d, scoped: false)
     return native_result_def_mask(d, classes: true) if d.owner == '<native>'
     return return_class_accessor_mask(d) unless d.irep
 
     irep = @ireps[d.irep]
-    states = return_class_states(irep)
+    states = scoped ? return_class_scoped_states(irep) : return_class_states(irep)
     return NumericFlow::OTHER unless states
 
-    joined = return_class_block_returns(irep)
+    joined = return_class_block_returns(irep, Set.new, scoped: scoped)
     return NumericFlow::OTHER if joined.nil?
 
     irep.instructions.each_with_index do |insn, idx|
@@ -160,7 +184,7 @@ class CodeGen
   # any depth); nil when such a block is not modelled. A `break` is the result of the call that took
   # the block, which a SENDB never reads. A lambda's own RETURN_BLK is counted as well: only ever a
   # superset.
-  def return_class_block_returns(irep, seen = Set.new)
+  def return_class_block_returns(irep, seen = Set.new, scoped: false)
     joined = 0
     (irep.reps || []).each do |label|
       next unless seen.add?(label)
@@ -169,14 +193,14 @@ class CodeGen
       next unless child
 
       if child.instructions.any? { |i| i.op == 'RETURN_BLK' }
-        states = return_class_states(child)
+        states = scoped ? return_class_scoped_states(child) : return_class_states(child)
         return nil unless states
 
         child.instructions.each_with_index do |insn, idx|
           joined |= states[idx][insn.reg.to_i] || NumericFlow::OTHER if insn.op == 'RETURN_BLK' && states[idx]
         end
       end
-      nested = return_class_block_returns(child, seen)
+      nested = return_class_block_returns(child, seen, scoped: scoped)
       return nil if nested.nil?
 
       joined |= nested
@@ -203,6 +227,9 @@ class CodeGen
     end
 
     tracked = @rc_return[name]
+    return tracked if tracked && return_class_of_mask(tracked)
+    scoped = state && @rc_scoped_ready && return_class_scoped_send_mask(name, insn, state)
+    return scoped if scoped
     return tracked if tracked
     return return_class_freeze_mask(insn, state) if state && name == 'freeze' && insn.op == 'SEND0'
 
@@ -214,6 +241,41 @@ class CodeGen
     @rc_new_class[key] = exact_new_class_at(irep, index + 1, insn.reg, numeric_owner_of(irep)) unless @rc_new_class.key?(key)
     klass = @rc_new_class[key]
     klass && !RETURN_BITLESS_CLASSES.include?(klass) ? numeric_class_bit(klass) : NumericFlow::OTHER
+  end
+
+  # A name-wide summary can be ambiguous even when this exact receiver selects one
+  # body. Analyze that body with the CFG-aware flow; the element tracer's linear
+  # writer scan is only suitable for guarded hints.
+  def return_class_scoped_send_mask(name, insn, state)
+    return nil unless %w[SEND SEND0].include?(insn.op)
+
+    receiver_class = return_class_of_mask(state[insn.reg.to_i])
+    return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
+    return nil unless @closed_world&.name_fully_visible?(name)
+
+    key = [receiver_class, name]
+    return @rc_scoped_return_cache[key] if @rc_scoped_return_cache.key?(key)
+    return nil if @rc_scoped_return_active.include?(key)
+
+    definition = closed_world_exact_target(name, receiver_class)
+    return nil unless definition&.irep
+    return nil if @rc_scoped_active_labels.include?(definition.irep)
+
+    @rc_scoped_return_active << key
+    mask = return_class_scoped_def_mask(definition)
+    return nil unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
+
+    klass = return_class_of_mask(mask)
+    result = klass && numeric_class_bit(klass) == mask ? mask : nil
+    @rc_scoped_return_cache[key] = result
+  ensure
+    @rc_scoped_return_active.delete(key) if key
+  end
+
+  def return_class_scoped_def_mask(definition)
+    return NumericFlow::OTHER unless definition&.irep
+
+    return_class_def_mask(definition, scoped: true)
   end
 
   # ADR 0335: initialize_copy's answer is discarded; only a fresh object's class survives.
@@ -280,7 +342,7 @@ class CodeGen
     r = reg.to_i
     return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
 
-    states = return_class_states(irep)
+    states = return_class_scoped_states(irep)
     state = states && states[idx]
     state && return_class_of_mask(exact_flow_strip_nil(irep, idx, r, state[r]))
   end
@@ -292,7 +354,7 @@ class CodeGen
     r = reg.to_i
     return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
 
-    states = return_class_states(irep)
+    states = return_class_scoped_states(irep)
     state = states && states[idx]
     state && state[r]
   end

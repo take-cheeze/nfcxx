@@ -1848,6 +1848,9 @@ class CodeGen
   def closed_world_exact_target(name, receiver_class)
     return nil unless @closed_world&.inherited_lookup_safe?(name, receiver_class)
     return nil if devirt_blocked_name?(name)
+    # A different class body can install this instance name after its `def` is scanned.
+    installed = symbol_installed_names
+    return nil unless installed && !installed.include?(name)
 
     klass = receiver_class
     seen = Set.new
