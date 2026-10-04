@@ -1846,7 +1846,8 @@ class CodeGen
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
   # is a proven fresh instance, so its own class method may be selected too.
   def closed_world_exact_target(name, receiver_class)
-    return nil unless @closed_world&.inherited_lookup_safe?(name, receiver_class)
+    return nil unless @closed_world&.stable_class_constant?(receiver_class)
+    return nil unless call_facts_enabled? && call_facts_answers.resolves_in_ruby?(receiver_class, name)
     return nil if devirt_blocked_name?(name)
     # A different class body can install this instance name after its `def` is scanned.
     installed = symbol_installed_names
