@@ -105,19 +105,32 @@ class CodeGen
 
     receiver = state[insn.reg.to_i]
     receiver &= ~NumericFlow::NIL if receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL) && nil_unanswerable?(insn.sym)
-    klass = RETURN_CORE_CLASS[receiver]
-    chain = klass && BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
-    return name_results ? core_ruby_name_result(irep, index, insn) : nil unless chain
+    core_bits = RETURN_CORE_CLASS.keys.reduce(0, :|)
+    classes = if receiver.is_a?(Integer) && receiver.positive? && (receiver & ~core_bits).zero?
+                RETURN_CORE_CLASS.select { |bit, _klass| receiver.anybits?(bit) }
+              else {}
+              end
+    return name_results ? core_ruby_name_result(irep, index, insn) : nil if classes.empty?
+    if (classes.size > 1 && ENV['BC2CPP_CORE_RUBY_RECEIVER_UNIONS'] == '0') ||
+       classes.values.any? { |klass| !BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain) }
+      return name_results ? core_ruby_name_result(irep, index, insn) : nil
+    end
     return nil if !seen.empty? && ENV['BC2CPP_CORE_RUBY_NESTED_RESULTS'] == '0'
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
 
     block_given = insn.op.end_with?('B')
     return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
 
-    target = core_ruby_result_target(chain, insn.sym)
-    return nil unless target
+    # Every member must resolve and return a modelled class; a missing member
+    # must not turn an exhaustive receiver set into a partial proof.
+    classes.reduce(0) do |joined, (bit, klass)|
+      chain = BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
+      target = chain && core_ruby_result_target(chain, insn.sym)
+      result = target && core_ruby_body_result(target, bit, block_given, seen: seen, call_name: insn.sym)
+      return nil unless result
 
-    core_ruby_body_result(target, receiver, block_given, seen: seen, call_name: insn.sym)
+      joined | result
+    end
   end
 
   # Every answering definition must be modelled; receiver class knowledge is
