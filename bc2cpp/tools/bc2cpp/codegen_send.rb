@@ -1645,6 +1645,9 @@ class CodeGen
                  "  r#{d} = #{expression};\n"
         end
 
+        union = !self_implicit && native_expression_union_code(name, d, recv, argv, irep, constant_site_idx, exact_reg)
+        return union if union
+
         return with_exact_core_site(exact_site) do
           compile_native_primitive_send(name, d, recv, argv, proof: [irep, guard_proof_site, owner_def&.owner])
         end

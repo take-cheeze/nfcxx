@@ -91,7 +91,7 @@ class CodeGen
     receiver &= ~NumericFlow::NIL if receiver.is_a?(Integer) && receiver.anybits?(NumericFlow::NIL) && nil_unanswerable?(insn.sym)
     klass = RETURN_CORE_CLASS[receiver]
     chain = klass && BlockCoreDirectFallback::RECEIVERS.dig(klass, :chain)
-    return nil unless chain
+    return core_ruby_name_result(irep, index, insn) unless chain
     return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
 
     block_given = insn.op.end_with?('B')
@@ -99,6 +99,52 @@ class CodeGen
 
     target = core_ruby_result_target(chain, insn.sym)
     return nil unless target
+
+    core_ruby_body_result(target, receiver, block_given)
+  end
+
+  # Every answering definition must be modelled; receiver class knowledge is
+  # unnecessary when every body allocates its result independently of self.
+  def core_ruby_name_result(irep, index, insn)
+    return nil if ENV['BC2CPP_CORE_RUBY_NAME_RESULTS'] == '0'
+    return nil unless @closed_world&.exact_instances_singleton_free? && @native_name_sources && captured_local_class_enabled?
+    block_given = insn.op.end_with?('B')
+    return nil if block_given && !core_ruby_literal_block_safe?(irep, index, insn)
+
+    @core_ruby_name_results ||= {}
+    key = [insn.sym, block_given]
+    return @core_ruby_name_results[key] if @core_ruby_name_results.key?(key)
+
+    @core_ruby_name_results[key] = compute_core_ruby_name_result(insn.sym, block_given)
+  end
+
+  def compute_core_ruby_name_result(name, block_given)
+    return nil unless @closed_world.native_paths_spelling(name).empty?
+    paths = @closed_world.outside_ruby_paths_defining(name).select { |path| CoreDefs.core_source?(path) }
+    return nil unless @closed_world.native_return_sources_visible?(name, paths)
+    installed = symbol_installed_names
+    core_installed = self.class.core_result_installed_names
+    return nil unless installed && core_installed && !installed.include?(name) && !core_installed.include?(name)
+    return nil if numeric_aliased_names.include?(name)
+    opaque = self.class.core_result_opaque_defs
+    return nil unless opaque && opaque.none? { |_owner, method| method == name }
+    return nil unless (@registry[name] || []).all? { |definition| definition.core }
+
+    definitions = block_core_index.select { |(_owner, method), _defs| method == name }.values.flatten
+    definitions += (@registry[name] || [])
+    definitions = definitions.uniq
+    return nil if definitions.empty?
+
+    definitions.reduce(0) do |mask, definition|
+      result = core_ruby_body_result(definition, NumericFlow::OTHER, block_given)
+      return nil unless result
+
+      mask | result
+    end
+  end
+
+  def core_ruby_body_result(target, receiver, block_given)
+    return nil unless target.irep
 
     body = @ireps.fetch(target.irep)
     fields = body.enter&.enter_fields

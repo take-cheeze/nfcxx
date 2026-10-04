@@ -508,6 +508,34 @@ class CodeGen
     dispatch
   end
 
+  # Exhaustive exact-class sets need only select a native expression by tag.
+  # The caller has already proved every registration's body and lookup safe.
+  def native_expression_union_code(name, d, recv, argv, irep, idx, reg)
+    return nil if ENV['BC2CPP_NATIVE_EXPRESSION_UNIONS'] == '0'
+    return nil unless @closed_world&.exact_instances_singleton_free? && irep && idx && reg
+
+    mask = exact_flow_mask(irep, idx, reg)
+    return nil unless mask.is_a?(Integer) && mask.positive?
+
+    classes = RETURN_CORE_CLASS.select { |bit, _klass| mask.anybits?(bit) }
+    return nil unless classes.size > 1 && classes.keys.reduce(0, :|) == mask
+
+    entries = classes.values.map do |klass|
+      matches = @native_registered_expressions.fetch(name, []).select { |entry| entry[:owner][:class_name] == klass && entry[:arity] == argv.size }
+      return nil unless matches.one?
+
+      matches.first
+    end
+    arms = entries.map do |entry|
+      expression = entry[:expression].gsub('recv', recv)
+      expression = expression.gsub('BC2CPP_ARG0', argv.fetch(0)) if entry[:arity] == 1
+      "case #{entry[:owner][:tag]}: r#{d} = #{expression}; break;"
+    end.join("\n    ")
+    "  // NATIVE_EXPRESSION_UNION :#{name} -- proven #{classes.values.join('/')} receiver set, no dispatch\n" \
+      "  switch (mrb_type(#{recv})) {\n    #{arms}\n" \
+      "    default: mrb_raise(M, mrb_exc_get(M, \"RuntimeError\"), \"bc2cpp: invalid exact native receiver set\");\n  }\n"
+  end
+
   # Emit a generated native expression behind a runtime type-tag guard. Heap
   # objects also require their exact built-in class pointer; Float and Symbol
   # are immediate values and use only their unambiguous type tags.
