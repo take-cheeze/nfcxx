@@ -2,6 +2,7 @@
 
 require 'set'
 require_relative 'bytecode_ir'
+require_relative 'literal_element_proof'
 
 # NUMERIC_FLOW (ADR 0276): a forward dataflow over one irep that says which
 # registers provably hold an Integer (fixnum or bigint), a Float, an exact
@@ -427,7 +428,8 @@ module NumericFlow
       ok = oracle.op_native?('/') && b < nregs
       set.call(a, ok ? arith(state[a], state[b], nil_raises.call('/')) : OTHER)
     when 'GETIDX', 'GETIDX0'
-      set.call(a, oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER)
+      literal = LiteralElementProof.mask(irep, index, ctx[:opaque])
+      set.call(a, literal || (oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER))
     when 'AREF'
       set.call(a, oracle.respond_to?(:aref_mask) ? oracle.aref_mask(irep, index, insn, state) : OTHER)
     else
