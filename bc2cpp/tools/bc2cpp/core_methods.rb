@@ -22,8 +22,20 @@ module CoreMethods
   # would switch those fast paths off, so it is compiled without being a registry
   # definition (bc2cpp.rb CORE_VISIBILITY).
   OPERATOR_NAMES = %w[+ - * / % ** & | ^ ~ << >> < <= > >= == != === <=> =~ !~ ! [] []= -@ +@ zero?].freeze
+  ENUMERATOR_WRAPPERS = %w[inspect size rewind feed next peek peek_values].freeze
 
   module_function
+
+  # These wrappers create no compiled closure. Their delegated callbacks may
+  # suspend, so every entry still requires the root context (ADR 0350).
+  def enumerator_wrapper?(definition, ireps)
+    return false if ENV['BC2CPP_ENUMERATOR_WRAPPERS'] == '0'
+    return false unless definition && definition.owner == 'Enumerator' && ENUMERATOR_WRAPPERS.include?(definition.name)
+
+    body = definition.irep && ireps[definition.irep]
+    body && body.file.to_s.end_with?('/mruby-enumerator/mrblib/enumerator.rb') &&
+      !CoreDefs.touches_block?(body, ireps) && !CoreDefs.references_fiber?(body, ireps)
+  end
 
   # BC2CPP_CORE_REFUSED=none: refuse nothing, to see what the compiler takes.
   def load_refused(path = DEFAULT_PATH)
@@ -31,7 +43,7 @@ module CoreMethods
   end
 
   # Irep labels of the core-source definitions in `registry` that must not be
-  # compiled: refused, conditional, Fiber-naming, lambda-building or mruby-enumerator's
+  # compiled: refused, conditional, Fiber-naming, lambda-building or unaudited mruby-enumerator bodies
   # (shadowed ones are dropped from the registry by the driver before this runs).
   def excluded_labels(registry, ireps, refused)
     conditional = CoreDefs.conditional_def_labels(ireps)
@@ -42,7 +54,7 @@ module CoreMethods
 
         irep = ireps.fetch(d.irep)
         out << d.irep if refused.include?(HotMethods.key(d)) || conditional.include?(d.irep) ||
-                         CoreDefs.fiber_gem?(irep.file) ||
+                         (CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(d, ireps)) ||
                          CoreDefs.builds_lambda?(irep, ireps) || CoreDefs.references_fiber?(irep, ireps)
       end
     end
@@ -50,9 +62,9 @@ module CoreMethods
   end
 
   # Irep labels of the compiled core methods whose entry is guarded (CORE_BLOCK_GUARD,
-  # CodeGen#core_block_guard): the ones that touch a block.
+  # CodeGen#core_block_guard): the ones that touch a block or are audited Enumerator wrappers.
   def guarded_labels(defs, ireps)
-    defs.select { |d| d.irep && d.core && CoreDefs.touches_block?(ireps.fetch(d.irep), ireps) }.to_set(&:irep)
+    defs.select { |d| d.irep && d.core && (CoreDefs.touches_block?(ireps.fetch(d.irep), ireps) || enumerator_wrapper?(d, ireps)) }.to_set(&:irep)
   end
 
   # Refused entries no core-source method answers to (renamed or removed).
