@@ -53,6 +53,25 @@ module NativeCoreDirect
     end
   end
 
+  NUMERIC_CONVERSION_ENTRIES = [
+    Entry.new(name: 'to_s', owner: 'Integer', arity: 0, arg: :none, aspec: 'MRB_ARGS_OPT(1)',
+              expression: 'mrb_integer_to_str(M, recv, 10)',
+              apis: [%w[mruby/numeric.h mrb_integer_to_str]],
+              checks: [['int_to_s', <<~C, :exact]]),
+                mrb_int base;
+                if (mrb_get_argc(mrb) > 0) {
+                  base = mrb_integer(mrb_get_arg1(mrb));
+                }
+                else {
+                  base = 10;
+                }
+                return mrb_integer_to_str(mrb, self, base);
+              C
+    Entry.new(name: 'to_i', owner: 'Integer', arity: 0, arg: :none, aspec: 'MRB_ARGS_NONE()',
+              expression: 'recv', apis: [],
+              checks: [['mrb_obj_itself', 'return self;', :exact, 'object.c']]),
+  ].freeze
+
   ENTRIES = [
     Entry.new(name: 'join', owner: 'Array', arity: 0, arg: :none, aspec: 'MRB_ARGS_OPT(1)',
               expression: 'mrb_ary_join(M, recv, mrb_nil_value())',
@@ -362,7 +381,7 @@ module NativeCoreDirect
     files = Array(paths).select { |path| File.file?(path) }
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     include_dir = mruby_include_dir(files)
-    headers = (ENTRIES + KERNEL_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
+    headers = (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES).flat_map { |entry| entry.apis + Array(entry.internals) }
     key += headers.map(&:first).uniq.map do |header|
       path = include_dir && File.join(include_dir, header)
       stat = path && File.file?(path) && File.stat(path)
@@ -377,7 +396,7 @@ module NativeCoreDirect
   def audit_files(files)
     registrations, opaque_owners = NativeExpressionDevirt.class_registrations(files)
     include_dir = mruby_include_dir(files)
-    (ENTRIES + KERNEL_ENTRIES).to_h { |entry| [entry, audit_entry(entry, registrations, opaque_owners, include_dir)] }
+    (ENTRIES + KERNEL_ENTRIES + NUMERIC_CONVERSION_ENTRIES).to_h { |entry| [entry, audit_entry(entry, registrations, opaque_owners, include_dir)] }
   end
 
   def audit_entry(entry, registrations, opaque_owners, include_dir)

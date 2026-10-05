@@ -55,6 +55,10 @@ class CodeGen
     # GUARD_VIOLATION: the original SEND whose own registers the proofs read; an inlined
     # loop body that substitutes its receiver or arguments has none.
     guard_proof_site = call_receiver.nil? && call_arguments.nil? && n <= FUNCALL_ARGC_MAX ? new_proof_idx : nil
+    if !self_implicit && guard_proof_site && !@call_block_expr && n.zero?
+      numeric_native = numeric_native_direct_code(name, d, recv, irep, guard_proof_site, new_proof_reg, owner_def)
+      return numeric_native if numeric_native
+    end
     drawing_proof_idx = idx || trace_idx
     drawing_proof_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
     drawing_enter = irep&.enter
