@@ -75,6 +75,17 @@ class CodeGen
     def entry_mask(_irep, reg) = @arguments.fetch(reg - 1, NumericFlow::OTHER)
   end
 
+  class ContextBlockOracle < ExactOracle
+    def initialize(codegen, contexts)
+      super(codegen)
+      @contexts = contexts
+    end
+
+    def upvar_mask(irep, insn)
+      @cg.return_class_context_upvar_mask(irep, insn, @contexts)
+    end
+  end
+
   # The bit standing for "exactly +klass+", allocated on first use.
   def numeric_class_bit(klass)
     @numeric_class_bits ||= {}
@@ -406,19 +417,26 @@ class CodeGen
       "  {\n  struct RClass* bc2cpp_union_class = mrb_obj_class(M, #{recv});\n  #{branches}{\n    #{last}\n  }\n  }\n"
   end
 
-  # Bound the context to a plain method frame; nested closures have their own
-  # argument registers and captured writes (ADR 0351).
+  # Nested returns use independent block flows; caller masks belong only to the
+  # method frame. Captured writes remain opaque (ADR 0353).
   def return_class_context_def_mask(definition, receiver, arguments)
     body = @ireps.fetch(definition.irep)
     fields = body.enter&.enter_fields
     return nil unless fields && fields.size == 8 && fields[0] == arguments.size && fields.drop(1).all?(&:zero?)
-    return nil unless Array(body.reps).empty?
+    unless Array(body.reps).empty?
+      return nil if ENV['BC2CPP_BLOCK_CONTEXT_RESULTS'] == '0'
+      return nil unless captured_local_class_enabled?
+    end
 
     oracle = ContextOracle.new(self, receiver, arguments)
-    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
+    writes = {}
+    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars], writes)
     return nil unless states
 
-    body.instructions.each_with_index.reduce(0) do |joined, (insn, index)|
+    block_returns = return_class_context_block_returns(body, states, writes)
+    return nil if block_returns.nil?
+
+    body.instructions.each_with_index.reduce(block_returns) do |joined, (insn, index)|
       state = states[index]
       next joined unless state
 
@@ -430,6 +448,49 @@ class CodeGen
                else 0
                end
     end
+  end
+
+  # Captures include every later store; aliases never gain the captured slot's fact.
+  def return_class_context_upvar_mask(irep, insn, contexts)
+    index, level = insn.upvar_ref
+    return NumericFlow::OTHER unless index
+
+    ancestor, creation = captured_local_frame(irep, level)
+    return NumericFlow::OTHER unless ancestor && index < ancestor.nregs.to_i
+    return NumericFlow::OTHER if fixnum_proof_ctx(ancestor)[:upvars].include?(index.to_s)
+
+    frame = contexts[ancestor.label]
+    state = frame && frame[:states]&.[](creation)
+    return NumericFlow::OTHER unless state
+
+    (state[index] || NumericFlow::OTHER) | (frame[:writes][index] || 0)
+  end
+
+  def return_class_context_block_returns(body, states, writes)
+    contexts = { body.label => { states: states, writes: writes } }
+    oracle = ContextBlockOracle.new(self, contexts)
+    joined = 0
+    seen = Set.new
+    walk = lambda do |parent|
+      Array(parent.reps).each do |label|
+        next unless seen.add?(label)
+
+        child = @ireps.fetch(label)
+        child_writes = {}
+        child_states = NumericFlow.states(child, oracle, fixnum_proof_ctx(child)[:upvars], child_writes)
+        contexts[label] = { states: child_states, writes: child_writes }
+        child.instructions.each_with_index do |insn, index|
+          next unless insn.op == 'RETURN_BLK'
+          return nil unless child_states
+
+          state = child_states[index]
+          joined |= state[insn.reg.to_i] || NumericFlow::OTHER if state
+        end
+        return nil if walk.call(child).nil?
+      end
+      joined
+    end
+    walk.call(body)
   end
 
   def return_class_scoped_def_mask(definition)
