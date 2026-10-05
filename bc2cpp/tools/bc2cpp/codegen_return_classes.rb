@@ -44,6 +44,37 @@ class CodeGen
     end
   end
 
+  # Receiver facts belong to this flow, not to the method's global pools.
+  class ReceiverOracle < ExactOracle
+    def initialize(codegen, receiver)
+      super(codegen)
+      @receiver = receiver
+    end
+
+    def send_mask(irep, index, insn, state)
+      return super unless %w[SSEND SSEND0].include?(insn.op)
+
+      # SSEND reads self, not the previous contents of its result register.
+      explicit = insn.dup
+      explicit.op = insn.op.delete_prefix('S')
+      inputs = state.dup
+      inputs[insn.reg.to_i] = @receiver
+      @cg.return_class_send_mask(irep, index, explicit, inputs)
+    end
+
+    def self_mask = @receiver
+    def loadself_mask = @receiver
+  end
+
+  class ContextOracle < ReceiverOracle
+    def initialize(codegen, receiver, arguments)
+      super(codegen, receiver)
+      @arguments = arguments
+    end
+
+    def entry_mask(_irep, reg) = @arguments.fetch(reg - 1, NumericFlow::OTHER)
+  end
+
   # The bit standing for "exactly +klass+", allocated on first use.
   def numeric_class_bit(klass)
     @numeric_class_bits ||= {}
@@ -149,9 +180,27 @@ class CodeGen
     @rc_scoped_writes[irep.label] = writes
     @rc_scoped_active_labels << irep.label
     building = true
-    @rc_scoped_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_scoped_states[irep.label] = NumericFlow.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
   ensure
     @rc_scoped_active_labels&.delete(irep.label) if building
+  end
+
+  # Only a method frame of one declared leaf class has this lexical self fact.
+  # A shared body, a module body or a nested closure may run with another self.
+  def return_class_method_oracle(irep)
+    return @rc_oracle if ENV['BC2CPP_CALL_CONTEXT_RESULTS'] == '0'
+
+    definition = @owner_of[irep.label]
+    owner = definition&.owner
+    return @rc_oracle unless definition && !definition.core && @closed_world.class_declared?(owner) &&
+                            @closed_world.instance_class?(owner) && @closed_world.exact_class?(owner)
+
+    @rc_body_owners ||= (@registry.values.flatten + Array(self.class.core_hidden_defs))
+                       .flat_map { |d| [d.irep, d.copy_irep].compact.uniq.map { |label| [label, d.owner] } }
+                       .group_by(&:first).transform_values { |entries| entries.to_set(&:last) }
+    return @rc_oracle unless @rc_body_owners[irep.label] == Set[owner]
+
+    ReceiverOracle.new(self, numeric_class_bit(owner))
   end
 
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.
@@ -252,7 +301,10 @@ class CodeGen
     receiver_class = return_class_of_mask(state[insn.reg.to_i])
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
 
-    key = [receiver_class, name]
+    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    arguments = argc && (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
+    contextual = arguments && ENV['BC2CPP_CALL_CONTEXT_RESULTS'] != '0'
+    key = [receiver_class, name, contextual ? arguments : nil]
     return @rc_scoped_return_cache[key] if @rc_scoped_return_cache.key?(key)
     return nil if @rc_scoped_return_active.include?(key)
 
@@ -261,14 +313,43 @@ class CodeGen
     return nil if @rc_scoped_active_labels.include?(definition.irep)
 
     @rc_scoped_return_active << key
-    mask = return_class_scoped_def_mask(definition)
+    acquired = true
+    mask = contextual && return_class_context_def_mask(definition, state[insn.reg.to_i], arguments)
+    mask ||= return_class_scoped_def_mask(definition)
     return nil unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
 
     klass = return_class_of_mask(mask)
-    result = klass && numeric_class_bit(klass) == mask ? mask : nil
+    valid = klass && (contextual || !RETURN_CORE_CLASS.value?(klass))
+    result = valid ? mask : nil
     @rc_scoped_return_cache[key] = result
   ensure
-    @rc_scoped_return_active.delete(key) if key
+    @rc_scoped_return_active.delete(key) if acquired
+  end
+
+  # Bound the context to a plain method frame; nested closures have their own
+  # argument registers and captured writes (ADR 0351).
+  def return_class_context_def_mask(definition, receiver, arguments)
+    body = @ireps.fetch(definition.irep)
+    fields = body.enter&.enter_fields
+    return nil unless fields && fields.size == 8 && fields[0] == arguments.size && fields.drop(1).all?(&:zero?)
+    return nil unless Array(body.reps).empty?
+
+    oracle = ContextOracle.new(self, receiver, arguments)
+    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
+    return nil unless states
+
+    body.instructions.each_with_index.reduce(0) do |joined, (insn, index)|
+      state = states[index]
+      next joined unless state
+
+      joined | case insn.op
+               when 'RETURN' then state[insn.reg.to_i] || NumericFlow::OTHER
+               when 'RETSELF' then receiver
+               when 'RETNIL' then NumericFlow::NIL
+               when 'RETTRUE', 'RETFALSE', 'RETURN_BLK', 'BREAK', 'STOP' then NumericFlow::OTHER
+               else 0
+               end
+    end
   end
 
   def return_class_scoped_def_mask(definition)

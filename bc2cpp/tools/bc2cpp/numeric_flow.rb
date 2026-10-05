@@ -372,6 +372,8 @@ module NumericFlow
       set.call(a, INT)
     when 'LOADL'
       set.call(a, oracle.pool_mask(irep, insn))
+    when 'LOADSELF'
+      set.call(a, oracle.respond_to?(:loadself_mask) ? oracle.loadself_mask : OTHER)
     when 'LOADNIL'
       set.call(a, NIL)
     when 'MOVE'
