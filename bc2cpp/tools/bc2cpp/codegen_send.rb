@@ -1651,7 +1651,7 @@ class CodeGen
       # One receiver proof for every arm wrapper below (registered expression, poly chain tail, final send).
       exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
-                                                             exact_class, recv: recv, name: name, owner_def: owner_def)
+                                                             exact_class, recv: recv, name: name, owner_def: owner_def, dest: d)
       if builtin_native_expression_send
         exact_entry = if exact_class && known_class
                         native_expression_entries.find do |entry|
