@@ -1334,6 +1334,7 @@ class CodeGen
     via_element = false
     inherited_typed = false
     exact_class_dispatch = false
+    user_receiver_union = false
     exact_via_record = false
     exact_via_lcf = false
     lcf_nilable = false
@@ -1438,6 +1439,17 @@ class CodeGen
         end
       end
     end
+    if !self_implicit && !via_element && !exact_class_dispatch && irep && (idx || trace_idx)
+      union_plan = exact_flow_user_union_plan(irep, idx || trace_idx,
+                                              unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset), name, n)
+      if union_plan
+        return user_receiver_union_code(union_plan, name, d, recv, argv) if union_plan.map(&:last).uniq.size > 1
+
+        target = union_plan.first.last
+        typed = true
+        user_receiver_union = true
+      end
+    end
     # A target whose owner this run does not emit (ONLY_OWNERS) has no `_impl`
     # here (LCF::File#to_lcf calling LCF.write_ber would fail to link), so use
     # dynamic dispatch, unless another gem emits it (@other_owners; see
@@ -1456,6 +1468,11 @@ class CodeGen
       impl = cpp_name(target.owner, target.name) + '_impl'
       call_argv, native_note = direct_call_args(target, argv, impl)
       if typed
+        if user_receiver_union
+          note = "  // USER_RECEIVER_UNION :#{name} -> #{target.owner}##{target.name}, every exact receiver selects this body, " \
+                 "direct C++ call with no class guard or fallback#{native_note}\n"
+          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        end
         if exact_class_dispatch
           origin = if exact_via_record then 'record key holds only fresh'
                    elsif exact_via_flow then 'return-class flow: every path holds a fresh'
