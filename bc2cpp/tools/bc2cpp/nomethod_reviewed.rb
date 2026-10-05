@@ -1611,7 +1611,6 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::DebugMenu#editor_digits -> rpg2003?",
   "RPG2k::Scene::DebugMenu#initialize -> id",
   "RPG2k::Scene::DebugMenu#max_id -> switches",
-  "RPG2k::Scene::DebugMenu#max_id -> to_h",
   "RPG2k::Scene::DebugMenu#max_id -> variables",
   "RPG2k::Scene::DebugMenu#open_editor -> variables",
   "RPG2k::Scene::DebugMenu#open_map_viewer -> id",
