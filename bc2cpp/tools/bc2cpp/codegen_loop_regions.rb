@@ -50,6 +50,14 @@ class CodeGen
   def region_receiver?(irep, idx, insn, dest_reg, klass, owner_name, mand, ivar_classes, arg_classes)
     return owner_name == klass if insn.op == 'SSENDB'
 
+    # A complete flow set takes precedence over the older chained-return hints.
+    # In particular, reject can return Hash as well as Array.
+    mask = exact_flow_mask(irep, idx, dest_reg)
+    core_bits = RETURN_CORE_CLASS.keys.reduce(0, :|)
+    if mask.is_a?(Integer) && mask.positive? && (mask & ~core_bits).zero?
+      return RETURN_CORE_CLASS[mask] == klass
+    end
+
     traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                class_layout: @class_layout, registry: @registry,
                                container_constants: @container_constants)

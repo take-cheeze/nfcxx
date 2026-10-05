@@ -23,9 +23,8 @@ require_relative 'record_hash'
 # `return to_enum(...) unless block`), and an attr_reader is always a
 # blockless send; the bare-name rule misclassified `@map = map || state.map`
 # (Game::State#map is an attr_accessor) as Array.
-# Known narrowing: select/reject on a Hash returns a Hash (hash.rb). Every
-# block consumer has an mrb_array_p raise-tripwire and ClassLayout readers
-# re-check the class at runtime.
+# select/reject preserve their receiver's collection class: a Hash result must
+# not enter an Array-only block region. Their hint requires an Array receiver.
 CHAINED_ARRAY_METHODS = %w[select reject map].freeze
 
 # CORE_ARRAY_CHAIN: core methods that return a fresh Array whenever they
@@ -107,7 +106,9 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     block_carrying = %w[SENDB SSENDB].include?(pin.op)
     # SEND0/SSEND0 print no `n=` field: absent means 0 args.
     argc = pin.argc || 0
-    next 'Array' if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
+    if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
+      next 'Array' if called == 'map' || trace_new_target(irep, pin_idx, pin.reg, registry: registry) == 'Array'
+    end
     next 'Array' if annotated&.call(called)
     next 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
     # ARRAY_RETURN_PROOF: non-block sends only (see ret_proof above).
