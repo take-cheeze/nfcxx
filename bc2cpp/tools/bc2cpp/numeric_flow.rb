@@ -180,7 +180,12 @@ module NumericFlow
       next if outs[i] == out
 
       outs[i] = out
-      successors(program, extra, i).each do |s|
+      targets = if oracle.respond_to?(:context_enter_edges) && oracle.context_enter_edges.key?(i)
+                  oracle.context_enter_edges.fetch(i)
+                else
+                  successors(program, extra, i)
+                end
+      targets.each do |s|
         edge = refine_edge(program, insns[i], i, s, out, ctx)
         next unless edge
 

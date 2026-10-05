@@ -2,6 +2,7 @@
 
 require_relative 'numeric_flow'
 require_relative 'readonly_call_effects'
+require_relative 'call_context_arguments'
 
 # CodeGen: RETURN_CLASS_TABLE (ADR 0289).
 #
@@ -82,9 +83,12 @@ class CodeGen
   end
 
   class ContextOracle < ReceiverOracle
-    def initialize(codegen, receiver, arguments)
+    attr_reader :context_enter_edges
+
+    def initialize(codegen, receiver, binding)
       super(codegen, receiver)
-      @arguments = arguments
+      @arguments = binding.masks
+      @context_enter_edges = binding.enter_edges
     end
 
     def entry_mask(_irep, reg) = @arguments.fetch(reg - 1, NumericFlow::OTHER)
@@ -436,14 +440,14 @@ class CodeGen
   # method frame. Captured writes remain opaque (ADR 0353).
   def return_class_context_def_mask(definition, receiver, arguments)
     body = @ireps.fetch(definition.irep)
-    fields = body.enter&.enter_fields
-    return nil unless fields && fields.size == 8 && fields[0] == arguments.size && fields.drop(1).all?(&:zero?)
+    binding = CallContextArguments.bind(body, arguments)
+    return nil unless binding
     unless Array(body.reps).empty?
       return nil if ENV['BC2CPP_BLOCK_CONTEXT_RESULTS'] == '0'
       return nil unless captured_local_class_enabled?
     end
 
-    oracle = ContextOracle.new(self, receiver, arguments)
+    oracle = ContextOracle.new(self, receiver, binding)
     writes = {}
     states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars], writes)
     return nil unless states
