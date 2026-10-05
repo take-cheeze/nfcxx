@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'yield_reach'
+require_relative 'core_methods'
 
 # CodeGen: the yield-free proof (ADR 0283). YieldReach answers, per irep, whether anything above
 # its compiled frame can suspend the current Fiber; the queries below turn that into the facts the
@@ -43,6 +44,8 @@ class CodeGen
   # The body of this core method, given a yield-free block, cannot suspend a Fiber (its frame is safe
   # under any Fiber as long as the block it runs is).
   def core_body_relaxable?(label)
+    return false if CoreMethods.enumerator_wrapper?(@owner_of[label], @ireps)
+
     !!@yield_reach&.body_yield_free?(label)
   end
 
