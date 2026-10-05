@@ -11,6 +11,16 @@ require_relative 'native_direct'
 # Prepended to CodeGen, so it wraps guarded_fallback_line (codegen_send.rb)
 # without editing it.
 module NativeDirectFallback
+  # ADR 0358: the :int tag test of an arm wrapper is dropped when the Fixnum proof covers
+  # the argument (the same test codegen_send.rb and codegen_native_exact_direct.rb already
+  # drop). BC2CPP_NATIVE_INT_GUARDS=0 is the control.
+  def native_int_guard_needed?(int_site, argv, position)
+    return true unless ENV['BC2CPP_NATIVE_INT_GUARDS'] != '0'
+    return true unless int_site
+
+    !native_int_arg_proven?(*int_site, argv, position)
+  end
+
   def guarded_fallback_line(d, recv, name, argv, listed, site)
     plan = native_direct_plan(name, argv.size, closed_world_site: !site.nil?)
     return super unless plan
@@ -113,8 +123,10 @@ module NativeDirectFallback
     generic = dynamic_dispatch_line(d, recv, name, argv)
     site = exact_core_site_for(recv, name)
     exact = site && arms.slice(site[:klass])
-    return native_direct_exact_line(d, recv, name, argv, exact.first, generic) if exact && !exact.empty?
+    return native_direct_exact_line(d, recv, name, argv, exact.first, generic, site[:int_site]) if exact && !exact.empty?
 
+    # The class-tested branches below run only when no exact-core site matched (or matched a
+    # class with no entry point), so there is no int_site to ask: they keep every tag test.
     branches = arms.group_by { |_, spec| spec }.map do |(function, kinds), owners|
       check = owners.map { |owner, _| "bc2cpp_native_class == rgss::#{CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.fetch(owner)}()" }
                     .join(' || ')
@@ -145,8 +157,10 @@ module NativeDirectFallback
   end
 
   # EXACT_CORE_RECEIVER (ADR 0280): the receiver is a fresh `Klass.new`, so the class test is a
-  # fact. An integer argument that is not one still takes the ordinary send.
-  def native_direct_exact_line(d, recv, name, argv, (owner, (function, kinds)), generic)
+  # fact. An integer argument that is not one still takes the ordinary send -- unless the Fixnum
+  # proof covers it, which drops the test and with it the by-name else (ADR 0358).
+  def native_direct_exact_line(d, recv, name, argv, (owner, (function, kinds)), generic, int_site = nil)
+    native_int_arg_probe("exact:#{owner}##{name}", *int_site, argv) if int_site && ENV['BC2CPP_NATIVE_INT_ARGS']
     args = kinds.each_index.map do |i|
       case kinds[i]
       when :int then "mrb_integer(#{argv[i]})"
@@ -156,7 +170,8 @@ module NativeDirectFallback
       end
     end
     call = "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});"
-    guards = kinds.each_index.select { |i| kinds[i] == :int }.map { |i| "mrb_integer_p(#{argv[i]})" }
+    guards = kinds.each_index.select { |i| kinds[i] == :int && native_int_guard_needed?(int_site, argv, i) }
+                             .map { |i| "mrb_integer_p(#{argv[i]})" }
     note = "// NATIVE_DIRECT_EXACT :#{name} -- fresh #{owner} (unguarded proof) calls the shared native entry point\n"
     return "#{note}  #{call}\n" if guards.empty?
 

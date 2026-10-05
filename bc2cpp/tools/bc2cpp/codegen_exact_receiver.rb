@@ -41,13 +41,16 @@ class CodeGen
   # The site's proof for the arm wrappers: the receiver's exact class, and a lambda that answers
   # the exact class of an argument register (nil when it is not a plain register or unproven).
   # `new_class` is the fresh `Klass.new` proof of compile_send (exact_new_receiver_class).
-  def exact_core_site(irep, idx, receiver_reg, argv, reg_offset, new_class = nil, recv: nil, name: nil)
+  # `owner_def` is carried so an arm wrapper can ask native_int_arg_proven? about an :int
+  # argument (ADR 0358); without it the wrapper cannot reach the Fixnum proof at all.
+  def exact_core_site(irep, idx, receiver_reg, argv, reg_offset, new_class = nil, recv: nil, name: nil, owner_def: nil)
     return nil unless @closed_world&.exact_instances_singleton_free?
 
     klass = exact_core_value_class(irep, idx, receiver_reg) || new_class
     return nil unless klass
 
     { klass: klass, recv: recv, name: name,
+      int_site: [irep, idx, owner_def, reg_offset],
       arg_class: lambda do |position|
         reg = argv[position].to_s[/\Ar(\d+)\z/, 1]
         reg && exact_core_value_class(irep, idx, reg.to_i - reg_offset)
