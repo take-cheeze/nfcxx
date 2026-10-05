@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'numeric_flow'
+require_relative 'readonly_call_effects'
 
 # CodeGen: RETURN_CLASS_TABLE (ADR 0289).
 #
@@ -39,6 +40,10 @@ class CodeGen
       @cg.return_class_send_mask(irep, index, insn, state)
     end
 
+    def preserves_ivar_slots?(irep, _index, insn, state)
+      @cg.readonly_class_call?(irep, insn, state)
+    end
+
     def block_send_mask(irep, index, insn, state)
       @cg.profiler_class_result(irep, index, insn) || @cg.core_ruby_class_result(irep, index, insn, state) || NumericFlow::OTHER
     end
@@ -60,6 +65,16 @@ class CodeGen
       inputs = state.dup
       inputs[insn.reg.to_i] = @receiver
       @cg.return_class_send_mask(irep, index, explicit, inputs)
+    end
+
+    def preserves_ivar_slots?(irep, index, insn, state)
+      return super unless %w[SSEND SSEND0].include?(insn.op)
+
+      explicit = insn.dup
+      explicit.op = insn.op.delete_prefix('S')
+      inputs = state.dup
+      inputs[insn.reg.to_i] = @receiver
+      super(irep, index, explicit, inputs)
     end
 
     def self_mask = @receiver

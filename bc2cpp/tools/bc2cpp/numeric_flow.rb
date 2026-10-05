@@ -362,7 +362,12 @@ module NumericFlow
              else OTHER
              end
       ((a + 1)...nregs).each { |r| out[r] = OTHER }
-      refresh_slots(out, ctx)
+      preserve = oracle.respond_to?(:preserves_ivar_slots?) && oracle.preserves_ivar_slots?(irep, index, insn, state)
+      if preserve
+        nregs.times { |r| out[pb + r] = 0 }
+      else
+        refresh_slots(out, ctx)
+      end
       set.call(a, mask)
       return out
     end
