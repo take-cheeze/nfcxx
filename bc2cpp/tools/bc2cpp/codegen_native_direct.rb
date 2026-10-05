@@ -122,6 +122,7 @@ module NativeDirectFallback
       args = kinds.each_index.map do |i|
         case kinds[i]
         when :int then "mrb_integer(#{argv[i]})"
+        when :float then "mrb_as_float(M, #{argv[i]})"
         when :bool then "mrb_test(#{argv[i]})"
         else argv[i]
         end
@@ -149,6 +150,7 @@ module NativeDirectFallback
     args = kinds.each_index.map do |i|
       case kinds[i]
       when :int then "mrb_integer(#{argv[i]})"
+      when :float then "mrb_as_float(M, #{argv[i]})"
       when :bool then "mrb_test(#{argv[i]})"
       else argv[i]
       end
