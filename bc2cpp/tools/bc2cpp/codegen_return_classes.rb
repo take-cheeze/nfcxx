@@ -44,6 +44,37 @@ class CodeGen
     end
   end
 
+  # Receiver facts belong to this flow, not to the method's global pools.
+  class ReceiverOracle < ExactOracle
+    def initialize(codegen, receiver)
+      super(codegen)
+      @receiver = receiver
+    end
+
+    def send_mask(irep, index, insn, state)
+      return super unless %w[SSEND SSEND0].include?(insn.op)
+
+      # SSEND reads self, not the previous contents of its result register.
+      explicit = insn.dup
+      explicit.op = insn.op.delete_prefix('S')
+      inputs = state.dup
+      inputs[insn.reg.to_i] = @receiver
+      @cg.return_class_send_mask(irep, index, explicit, inputs)
+    end
+
+    def self_mask = @receiver
+    def loadself_mask = @receiver
+  end
+
+  class ContextOracle < ReceiverOracle
+    def initialize(codegen, receiver, arguments)
+      super(codegen, receiver)
+      @arguments = arguments
+    end
+
+    def entry_mask(_irep, reg) = @arguments.fetch(reg - 1, NumericFlow::OTHER)
+  end
+
   # The bit standing for "exactly +klass+", allocated on first use.
   def numeric_class_bit(klass)
     @numeric_class_bits ||= {}
@@ -149,9 +180,40 @@ class CodeGen
     @rc_scoped_writes[irep.label] = writes
     @rc_scoped_active_labels << irep.label
     building = true
-    @rc_scoped_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_scoped_states[irep.label] = NumericFlow.states(irep, return_class_method_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
   ensure
     @rc_scoped_active_labels&.delete(irep.label) if building
+  end
+
+  # Only a uniquely owned instance method frame has this lexical self fact.
+  # A shared body, a module body or a nested closure may run with another self.
+  def return_class_method_oracle(irep)
+    return @rc_oracle if ENV['BC2CPP_CALL_CONTEXT_RESULTS'] == '0'
+
+    definition = @owner_of[irep.label]
+    owner = definition&.owner
+    return @rc_oracle unless definition && !definition.core && @closed_world.class_declared?(owner) &&
+                            @closed_world.instance_class?(owner)
+
+    @rc_body_owners ||= (@registry.values.flatten + Array(self.class.core_hidden_defs))
+                       .flat_map { |d| [d.irep, d.copy_irep].compact.uniq.map { |label| [label, d.owner] } }
+                       .group_by(&:first).transform_values { |entries| entries.to_set(&:last) }
+    return @rc_oracle unless @rc_body_owners[irep.label] == Set[owner]
+
+    receiver = if @closed_world.exact_class?(owner)
+                 numeric_class_bit(owner)
+               else
+                 return @rc_oracle if ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
+
+                 hierarchy = @closed_world.class_hierarchy(owner)
+                 return @rc_oracle unless hierarchy && hierarchy[:wild].empty?
+
+                 classes = [owner] + hierarchy[:descendants].to_a
+                 return @rc_oracle unless classes.size <= 8 && classes.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.instance_class?(klass) }
+
+                 classes.reduce(0) { |mask, klass| mask | numeric_class_bit(klass) }
+               end
+    ReceiverOracle.new(self, receiver)
   end
 
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.
@@ -237,6 +299,14 @@ class CodeGen
     return native if native
     return NumericFlow::OTHER unless name == 'new' && %w[SEND SEND0].include?(insn.op)
 
+    # Read the constructor input before its result joins another CFG path.
+    if ENV['BC2CPP_USER_RECEIVER_UNIONS'] != '0'
+      klass = constant_object_owner(irep, index, insn.reg, numeric_owner_of(irep)&.owner)
+      if klass && !RETURN_BITLESS_CLASSES.include?(klass) && stable_standard_constructor_class?(klass)
+        return numeric_class_bit(klass)
+      end
+    end
+
     key = [irep.label, index]
     @rc_new_class[key] = exact_new_class_at(irep, index + 1, insn.reg, numeric_owner_of(irep)) unless @rc_new_class.key?(key)
     klass = @rc_new_class[key]
@@ -249,10 +319,15 @@ class CodeGen
   def return_class_scoped_send_mask(name, insn, state)
     return nil unless %w[SEND SEND0].include?(insn.op)
 
-    receiver_class = return_class_of_mask(state[insn.reg.to_i])
+    receiver = state[insn.reg.to_i]
+    receiver_class = return_class_of_mask(receiver)
+    return return_class_union_send_mask(name, insn, state, receiver) unless receiver_class
     return nil unless receiver_class && !RETURN_CORE_CLASS.value?(receiver_class)
 
-    key = [receiver_class, name]
+    argc = insn.op == 'SEND0' ? 0 : (insn.plain_fixed_argc? ? insn.argc : nil)
+    arguments = argc && (1..argc).map { |arg| state[insn.reg.to_i + arg] || NumericFlow::OTHER }
+    contextual = arguments && ENV['BC2CPP_CALL_CONTEXT_RESULTS'] != '0'
+    key = [receiver_class, name, contextual ? arguments : nil]
     return @rc_scoped_return_cache[key] if @rc_scoped_return_cache.key?(key)
     return nil if @rc_scoped_return_active.include?(key)
 
@@ -261,14 +336,100 @@ class CodeGen
     return nil if @rc_scoped_active_labels.include?(definition.irep)
 
     @rc_scoped_return_active << key
-    mask = return_class_scoped_def_mask(definition)
+    acquired = true
+    mask = contextual && return_class_context_def_mask(definition, state[insn.reg.to_i], arguments)
+    mask ||= return_class_scoped_def_mask(definition)
     return nil unless mask.is_a?(Integer) && mask.positive? && (mask & NumericFlow::OTHER).zero?
 
     klass = return_class_of_mask(mask)
-    result = klass && numeric_class_bit(klass) == mask ? mask : nil
+    valid = klass && (contextual || !RETURN_CORE_CLASS.value?(klass))
+    result = valid ? mask : nil
     @rc_scoped_return_cache[key] = result
   ensure
-    @rc_scoped_return_active.delete(key) if key
+    @rc_scoped_return_active.delete(key) if acquired
+  end
+
+  # Every possible exact user receiver must select a stable Ruby body and agree
+  # on one result class; unknown, nil and core receiver bits cannot be dropped.
+  def return_class_union_send_mask(name, insn, state, receiver)
+    return nil if ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
+    return nil unless receiver.is_a?(Integer) && receiver.positive?
+
+    bits = (@numeric_class_bits || {}).values.select { |bit| receiver.anybits?(bit) }
+    return nil unless (2..8).cover?(bits.size) && bits.reduce(0, :|) == receiver
+
+    result = nil
+    bits.each do |bit|
+      inputs = state.dup
+      inputs[insn.reg.to_i] = bit
+      mask = return_class_scoped_send_mask(name, insn, inputs)
+      return nil unless mask && return_class_of_mask(mask)
+      return nil if result && result != mask
+
+      result = mask
+    end
+    result
+  end
+
+  def exact_flow_user_union_plan(irep, index, reg, name, argc)
+    return nil if ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
+
+    receiver = exact_flow_mask(irep, index, reg)
+    return nil unless receiver.is_a?(Integer) && receiver.positive?
+
+    bits = (@numeric_class_bits || {}).values.select { |bit| receiver.anybits?(bit) }
+    return nil unless (2..8).cover?(bits.size) && bits.reduce(0, :|) == receiver
+
+    bits.map do |bit|
+      klass = return_class_name_of_bit(bit)
+      candidate = closed_world_exact_target(name, klass)
+      return nil unless direct_callable?(candidate, argc)
+      return nil if @only_owners && !@only_owners.include?(candidate.owner) && !@other_owners&.include?(candidate.owner)
+
+      [klass, candidate]
+    end
+  end
+
+  # The final arm is exhaustive because the flow contains only these class bits.
+  def user_receiver_union_code(plan, name, dest, recv, argv)
+    groups = plan.group_by(&:last).map { |target, entries| [target, entries.map(&:first)] }
+    calls = groups.map do |target, classes|
+      impl = cpp_name(target.owner, target.name) + '_impl'
+      args, = direct_call_args(target, argv, impl)
+      call = "r#{dest} = #{impl}(M, #{([recv] + args).join(', ')});"
+      check = classes.map { |klass| "#{owner_class_ptr_expr(klass)} == bc2cpp_union_class" }.join(' || ')
+      [check, call]
+    end
+    last = calls.pop.last
+    branches = calls.map { |check, call| "if (#{check}) {\n    #{call}\n  } else " }.join
+    "  // USER_RECEIVER_CASES :#{name}, exhaustive exact class set, direct C++ calls with no dynamic fallback\n" \
+      "  {\n  struct RClass* bc2cpp_union_class = mrb_obj_class(M, #{recv});\n  #{branches}{\n    #{last}\n  }\n  }\n"
+  end
+
+  # Bound the context to a plain method frame; nested closures have their own
+  # argument registers and captured writes (ADR 0351).
+  def return_class_context_def_mask(definition, receiver, arguments)
+    body = @ireps.fetch(definition.irep)
+    fields = body.enter&.enter_fields
+    return nil unless fields && fields.size == 8 && fields[0] == arguments.size && fields.drop(1).all?(&:zero?)
+    return nil unless Array(body.reps).empty?
+
+    oracle = ContextOracle.new(self, receiver, arguments)
+    states = NumericFlow.states(body, oracle, fixnum_proof_ctx(body)[:upvars])
+    return nil unless states
+
+    body.instructions.each_with_index.reduce(0) do |joined, (insn, index)|
+      state = states[index]
+      next joined unless state
+
+      joined | case insn.op
+               when 'RETURN' then state[insn.reg.to_i] || NumericFlow::OTHER
+               when 'RETSELF' then receiver
+               when 'RETNIL' then NumericFlow::NIL
+               when 'RETTRUE', 'RETFALSE', 'RETURN_BLK', 'BREAK', 'STOP' then NumericFlow::OTHER
+               else 0
+               end
+    end
   end
 
   def return_class_scoped_def_mask(definition)
