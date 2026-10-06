@@ -24,6 +24,7 @@ require 'set'
 require_relative 'irep'
 require_relative 'bytecode_ir'
 require_relative 'registry'
+require_relative 'lint_crosscheck'
 require_relative 'native_names'
 require_relative 'native_ivar_scopes'
 
@@ -213,6 +214,7 @@ if $PROGRAM_NAME == __FILE__
     warn "  global refusal: #{closed_world.global_refusal || 'none'}"
     warn "  method_missing classes: #{closed_world.method_missing_classes.to_a.sort.join(', ')}"
     warn ''
+    LintCrosscheck.enforce!(repo_root, closed_world)
   end
 
   # DEFINE_METHOD_SITES (ADR 0288): the class-body `define_method(:x) { }` candidates the registry
