@@ -56,7 +56,7 @@ module CoreExactDirect
   # compile_core_min_max with the receiver proof of this site, which compile_send builds only after it.
   def core_min_max_with_site(insn, name, n, d, recv, argv, irep, site_idx, reg, offset, self_implicit)
     site = core_extend_enabled? && !self_implicit && irep &&
-           exact_core_site(irep, site_idx, unshift_proof_reg(reg, offset), argv, offset, nil, recv: recv, name: name)
+           exact_core_site(irep, site_idx, unshift_proof_reg(reg, offset), argv, offset, nil, recv: recv, name: name, dest: d)
     return compile_core_min_max(insn, name, n, d, recv, argv) unless site
 
     with_exact_core_site(site) { compile_core_min_max(insn, name, n, d, recv, argv) }
