@@ -5,6 +5,11 @@
 # operand tags, and dispatches by name only for a class it does not own. What it cannot match
 # exactly (zero divisor, MRB_INT_MIN count, Float#%) stays on the by-name call.
 class CodeGen
+  class << self
+    # CoreCompare::OPS the build's core sources still match (ADR 0362); nil proves nothing.
+    attr_accessor :core_compare
+  end
+
   NUMERIC_SLOW_PRELUDE = <<~CPP
     // NUMERIC_SLOW_PATH (ADR 0292): mruby's bigint entry points are declared only in
     // mruby/internal.h, which has no C linkage guard.
@@ -69,9 +74,7 @@ class CodeGen
   # classes whose method the helper's arms run.
   def numeric_slow_closed?(name)
     owners = NUMERIC_SLOW_CLOSED[name]
-    return false unless owners && ENV['BC2CPP_NUMERIC_SLOW_CLOSED'] != '0'
-    return false unless @closed_world && @native_name_sources && @closed_world.global_refusal.nil?
-    return false unless @closed_world.exact_instances_singleton_free? && @closed_world.method_missing_classes.empty?
+    return false unless owners && numeric_slow_closed_world?
 
     answers = call_facts_answers
     definers = answers.definers(name)
@@ -102,6 +105,61 @@ class CodeGen
     return members if timed.any? { |k| @closed_world.class_declared?(k) }
 
     members - timed
+  end
+
+  # NUMERIC_SLOW_CLOSED_CMP (ADR 0362): `<` `<=` `>` `>=` are answered by the numeric natives, Comparable's Ruby
+  # body (String, Symbol and any Numeric that is not an Integer or Float, through the mixin) and the Hash subset
+  # tests. The helper mirrors the first two and keeps the by-name call for Hash; every other receiver is a proven
+  # NoMethodError.
+  NUMERIC_SLOW_CMP_OWNERS = %w[Integer Float Numeric String Symbol Hash].freeze
+  # Where `<=>` of a String, a Symbol or another Numeric is looked up; no Ruby may define it there, which keeps it
+  # an Integer or nil answer (`cmp < 0`), and String's and Symbol's are the natives mrb_cmp reads directly.
+  NUMERIC_SLOW_CMP_LOOKUP = %w[String Symbol Numeric Comparable Object Kernel BasicObject].freeze
+  NUMERIC_SLOW_SPACESHIP = { 'String' => 'mrb_str_cmp_m', 'Symbol' => 'sym_cmp' }.freeze
+
+  def numeric_slow_closed_cmp?(name)
+    return false unless NUMERIC_SLOW_CMP.value?(name) && numeric_slow_closed_world?
+
+    @numeric_slow_closed_cmp ||= {}
+    @numeric_slow_closed_cmp.fetch(name) { @numeric_slow_closed_cmp[name] = numeric_slow_cmp_proof(name) }
+  end
+
+  # The Comparable body this arm mirrors is the build's own, and nothing but the numeric natives, that body and
+  # Hash's Ruby answers `name` (members), so only String and Symbol reach it.
+  def numeric_slow_cmp_proof(name)
+    return false unless self.class.core_compare&.include?(name)
+
+    answers = call_facts_answers
+    definers = answers.definers(name)
+    return false if definers.nil? || definers[:singleton] || !definers[:ruby].empty? || !definers[:modules].empty?
+    return false unless definers[:foreign].subset?(%w[Comparable Hash].to_set)
+    return false unless definers[:native].subset?(%w[Integer Float Numeric].to_set)
+
+    members = answers.members(name)
+    !members.nil? && members.subset?(NUMERIC_SLOW_CMP_OWNERS.to_set) && numeric_slow_spaceship_core?(answers)
+  end
+
+  # Comparable's `self <=> other` is mrb_cmp: it calls mrb_str_cmp for a String and dispatches `<=>` otherwise, and
+  # `cmp < 0` needs an Integer or nil answer, so no Ruby `<=>` may sit on the receivers' lookup (ADR 0362).
+  def numeric_slow_spaceship_core?(answers)
+    return false unless core_ancestry(*NUMERIC_SLOW_CMP_LOOKUP)
+    return false unless NUMERIC_SLOW_CMP_LOOKUP.all? { |owner| @closed_world.core_native_arm_safe?('<=>', owner) }
+
+    installed = symbol_installed_names
+    return false if installed.nil? || installed.include?('<=>') || devirt_blocked_name?('<=>')
+    return false if answers.opaque_owners.fetch('<=>', []).any? { |owner| owner.nil? || NUMERIC_SLOW_CMP_LOOKUP.include?(owner) }
+    return false if @registry.fetch('<=>', []).any? { |d| NUMERIC_SLOW_CMP_LOOKUP.include?(d.owner) }
+
+    natives = answers.registrations.fetch('<=>', []).group_by { |e| e[:owner]&.fetch(:class_name, nil) }
+    NUMERIC_SLOW_SPACESHIP.all? do |owner, function|
+      entries = natives.fetch(owner, [])
+      entries.size == 1 && entries.first[:function] == function && entries.first[:path].end_with?("/src/#{owner.downcase}.c")
+    end && !natives.key?(nil)
+  end
+
+  def numeric_slow_closed_world?
+    ENV['BC2CPP_NUMERIC_SLOW_CLOSED'] != '0' && @closed_world && @native_name_sources && @closed_world.global_refusal.nil? &&
+      @closed_world.exact_instances_singleton_free? && @closed_world.method_missing_classes.empty?
   end
 
   # File-scope definitions of the helpers `codes` call; '' when none.
@@ -136,20 +194,12 @@ class CodeGen
         "#else\n#{numeric_slow_closed_arith_source(key, op, helper, head)}#endif\n"
     elsif NUMERIC_SLOW_CMP.key?(key)
       op = NUMERIC_SLOW_CMP.fetch(key)
-      <<~CPP
-        #{head}, mrb_value b) {
-          // num_lt & co. (cmpnum): a Float pair never gets here from an operator opcode, the inline
-          // OP_CMP pairs in compile_cmp take it, so NaN keeps the method's answer for an explicit send.
-          if (!bc2cpp_slow_num_p(a)) return mrb_funcall(M, a, "#{op}", 1, b);
-          mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
-          int ai = mrb_gc_arena_save(M);
-          mrb_int c = mrb_cmp(M, a, b);
-          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
-          mrb_gc_arena_restore(M, ai);
-          return mrb_bool_value(c #{op} 0);
-        }
+      by_name = numeric_slow_cmp_source(head, op)
+      return by_name unless numeric_slow_closed_cmp?(op)
 
-      CPP
+      # A build that links the Complex or Rational gem has more receivers than the world scan lists.
+      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{by_name}" \
+        "#else\n#{numeric_slow_closed_cmp_source(head, op)}#endif\n"
     elsif key == 'div' && numeric_slow_closed?('/')
       # A build that links the Complex or Rational gem has more `/` definers than the world scan lists.
       "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_div_source(head)}" \
@@ -331,6 +381,23 @@ class CodeGen
     CPP
   end
 
+  def numeric_slow_cmp_source(head, op)
+    <<~CPP
+      #{head}, mrb_value b) {
+        // num_lt & co. (cmpnum): a Float pair never gets here from an operator opcode, the inline
+        // OP_CMP pairs in compile_cmp take it, so NaN keeps the method's answer for an explicit send.
+        if (!bc2cpp_slow_num_p(a)) return mrb_funcall(M, a, "#{op}", 1, b);
+        mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_int c = mrb_cmp(M, a, b);
+        if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
+        mrb_gc_arena_restore(M, ai);
+        return mrb_bool_value(c #{op} 0);
+      }
+
+    CPP
+  end
+
   def numeric_slow_closed_plus_arms
     {
       string: '    r = mrb_str_plus(M, a, mrb_ensure_string_type(M, b));',
@@ -384,6 +451,33 @@ class CodeGen
         }
       CPP
     }
+  end
+
+  # CMP_CLOSED (ADR 0362). Integer and Float are num_lt & co.; a String, a Symbol and any other Numeric are
+  # Comparable's body, whose `<=>` is mrb_cmp's (the message names `.class`, hence %T, not num_lt's %t); a Hash keeps
+  # the method, Ruby over `==` of its values; any other receiver answers `#{op}` nowhere.
+  def numeric_slow_closed_cmp_source(head, op)
+    <<~CPP
+      #{head}, mrb_value b) {
+        mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_int c;
+        if (bc2cpp_slow_num_p(a)) {
+          c = mrb_cmp(M, a, b);
+          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %t with %t failed", a, b);
+        } else if (mrb_string_p(a) || mrb_symbol_p(a) || mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
+          c = mrb_cmp(M, a, b);
+          if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %T with %T failed", a, b);
+        } else if (mrb_type(a) == MRB_TT_HASH) {
+          return mrb_funcall(M, a, "#{op}", 1, b);
+        } else {
+          return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
+        }
+        mrb_gc_arena_restore(M, ai);
+        return mrb_bool_value(c #{op} 0);
+      }
+
+    CPP
   end
 
   # int_div; a Float receiver is the arm in front of this call.
