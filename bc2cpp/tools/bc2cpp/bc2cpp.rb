@@ -63,6 +63,7 @@ require_relative 'codegen_exact_native_wrappers'
 require_relative 'codegen_native_core_direct'
 require_relative 'codegen_numeric_native_direct'
 require_relative 'codegen_core_methods'
+require_relative 'core_compare'
 require_relative 'codegen_receiver_facts'
 require_relative 'codegen_record_hash'
 require_relative 'codegen_lcf_rows'
@@ -195,6 +196,7 @@ if $PROGRAM_NAME == __FILE__
     repo_root = File.expand_path('../..', __dir__)
     build_name = ENV['BC2CPP_BUILD_NAME'].to_s
     build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS'].to_s).to_h { |kv| kv.split('=', 2) }
+    CodeGen.build_gem_names = build_gems.keys.to_set
     errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root)
     abort "bc2cpp: BC2CPP_CLOSED_WORLD refused for build '#{build_name}':\n  #{errors.join("\n  ")}" unless errors.empty?
 
@@ -562,6 +564,8 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.wired_embeddings = BC2CPP_WIRED_EMBEDDINGS unless ENV['BC2CPP_SELF_REGISTERING'] == '1'
   # CORE_MIXINS: the modelled core methods this build's core sources still match.
   CodeGen.core_methods = CoreMixins.verified(foreign_ruby_srcs, native_name_sources)
+  CodeGen.core_compare = CoreCompare.verified(foreign_ruby_srcs, native_name_sources)
+  warn "== Comparable comparison operators verified against the build's sources (CORE_COMPARE): #{CodeGen.core_compare.to_a.sort.join(', ')} =="
   warn "== core Ruby methods verified against the build's sources (CORE_MIXINS): #{CodeGen.core_methods.to_a.sort.join(', ')} =="
   return_names_probe = CodeGen.new(ireps, registry, ivar_layout, class_layout_probe, class_annotations,
                                     annotations, superclass_of, {}, {}, container_constants, {},

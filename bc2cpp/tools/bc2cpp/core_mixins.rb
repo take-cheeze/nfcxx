@@ -18,7 +18,7 @@ module CoreMixins
 
   # A def body without comments and blank lines, whitespace collapsed.
   def self.normalize(lines)
-    lines.map { |line| line.chomp.sub(/\s#.*\z/, '').strip }.reject { |line| line.empty? || line.start_with?('#') }
+    lines.map { |line| line.chomp.sub(/\s#(?!\{).*\z/, '').strip }.reject { |line| line.empty? || line.start_with?('#') }
          .join(' ').gsub(/\s+/, ' ')
   end
 
@@ -78,12 +78,12 @@ module CoreMixins
         stack.pop
       end
       owner = stack.last ? stack.last[1] : '<top>'
-      if (m = line.match(/\A(\s*)def\s+(self\.)?#{Regexp.escape(name)}(?![\w?!=])/))
+      if (m = line.match(/\A(\s*)def\s+(self\.)?#{Regexp.escape(name)}(?![\w?!=<>])/))
         stop = (index + 1...lines.size).find { |i| lines[i].match?(/\A#{m[1]}end\b/) } || lines.size - 1
         Definer.new(owner: m[2] ? "#{owner}.singleton" : owner, path: path,
                     body: normalize(lines[index..stop]), alias_only: false)
-      elsif line.match?(/\A\s*alias(?:_method)?\b.*[\s:,(]#{Regexp.escape(name)}(?![\w?!=])/) ||
-            line.match?(/define_method\s*\(?\s*:#{Regexp.escape(name)}(?![\w?!=])/)
+      elsif line.match?(/\A\s*alias(?:_method)?\b.*[\s:,(]#{Regexp.escape(name)}(?![\w?!=<>])/) ||
+            line.match?(/define_method\s*\(?\s*:#{Regexp.escape(name)}(?![\w?!=<>])/)
         Definer.new(owner: owner, path: path, body: nil, alias_only: true)
       end
     end
