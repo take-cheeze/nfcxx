@@ -10,6 +10,7 @@ module LintCrosscheck
   # Lint cops whose offences the analysis must also see: a clean cop with a non-empty analysis
   # answer (or the reverse) means one of the two scanners is wrong.
   METHOD_MISSING = 'Dynamic/MethodMissing'
+  LINTED = %r{(?:\A|/)mruby-(?:rpg2k|lcf|rgss)/mrblib/}
 
   module_function
 
@@ -31,9 +32,10 @@ module LintCrosscheck
   def agreement(run, closed_world)
     problems = []
     lint_mm = run[:offences].any? { |o| o.cop == METHOD_MISSING }
-    mm = closed_world.method_missing_classes.to_a.sort
-    if !lint_mm && !mm.empty?
-      problems << "lint finds no #{METHOD_MISSING} offence but the analysis sees method_missing classes: #{mm.join(', ')}"
+    # Only definitions in files the lint scans: a fixture or another gem may define its own.
+    files = closed_world.method_missing_files.select { |f| LINTED.match?(f) }
+    if !lint_mm && !files.empty?
+      problems << "lint finds no #{METHOD_MISSING} offence but the analysis sees method_missing in: #{files.join(', ')}"
     end
     problems
   end
