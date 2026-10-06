@@ -58,6 +58,27 @@ class CodeGen
     builtin_class_send_safe?(name, owners + ['Float'])
   end
 
+  # NUMERIC_SLOW_CLOSED (ADR 0360): operators whose every definer in the build is on these classes, which the
+  # helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError.
+  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float] }.freeze
+
+  # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
+  # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners).
+  def numeric_slow_closed?(name)
+    owners = NUMERIC_SLOW_CLOSED[name]
+    return false unless owners && ENV['BC2CPP_NUMERIC_SLOW_CLOSED'] != '0'
+    return false unless @closed_world && @native_name_sources && @closed_world.global_refusal.nil?
+    return false unless @closed_world.exact_instances_singleton_free? && @closed_world.method_missing_classes.empty?
+
+    answers = call_facts_answers
+    definers = answers.definers(name)
+    return false if definers.nil? || definers[:singleton]
+    return false unless %i[ruby foreign modules].all? { |kind| definers[kind].empty? }
+
+    members = answers.members(name)
+    !members.nil? && members.subset?(owners.to_set)
+  end
+
   # File-scope definitions of the helpers `codes` call; '' when none.
   def emit_numeric_slow_helpers(codes)
     texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
@@ -126,27 +147,12 @@ class CodeGen
         }
 
       CPP
+    elsif key == 'div' && numeric_slow_closed?('/')
+      # A build that links the Complex or Rational gem has more `/` definers than the world scan lists.
+      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_div_source(head)}" \
+        "#else\n#{numeric_slow_closed_div_source(head)}#endif\n"
     elsif key == 'div'
-      # int_div; a Float receiver is the arm in front of this call.
-      <<~CPP
-        #{head}, mrb_value b) {
-          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return mrb_funcall(M, a, "/", 1, b);
-          int ai = mrb_gc_arena_save(M);
-          mrb_value r;
-        #ifndef MRB_NO_FLOAT
-          if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
-          else
-        #endif
-        #ifdef MRB_USE_BIGINT
-          if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
-          else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
-          else
-        #endif
-          r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
-          #{NUMERIC_SLOW_DONE}
-        }
-
-      CPP
+      numeric_slow_div_source(head)
     elsif key == 'mod'
       # int_mod for two Integers; a Float operand needs flodivmod (static), a zero divisor
       # the method's ZeroDivisionError.
@@ -247,6 +253,64 @@ class CodeGen
     else
       raise "unknown NUMERIC_SLOW_PATH helper #{key}"
     end
+  end
+
+  # int_div; a Float receiver is the arm in front of this call.
+  def numeric_slow_div_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return mrb_funcall(M, a, "/", 1, b);
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+      #ifndef MRB_NO_FLOAT
+        if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
+        else
+      #endif
+      #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
+        else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
+        else
+      #endif
+        r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_div and flo_div with no Complex or Rational operand (the caller selects this form only when those gems'
+  # macros are unset); any other receiver class answers `/` nowhere, which is what the dispatch raised.
+  def numeric_slow_closed_div_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        mrb_state* mrb = M;  // E_TYPE_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+        if (bc2cpp_slow_int_p(a)) {
+          if (!bc2cpp_slow_num_p(b)) mrb_raisef(M, E_TYPE_ERROR, "can't convert %Y into Integer", b);
+      #ifndef MRB_NO_FLOAT
+          if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
+          else
+      #endif
+      #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
+          else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
+          else
+      #endif
+          r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
+        }
+      #ifndef MRB_NO_FLOAT
+        else if (mrb_float_p(a)) {
+          r = mrb_float_value(M, mrb_div_float(mrb_float(a), mrb_as_float(M, b)));
+        }
+      #endif
+        else {
+          return bc2cpp_nomethod_named(M, a, "/", 1, b);
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
   end
 
   # int_lshift / int_rshift for an Integer count; MRB_INT_MIN, a Float or bigint count keep the method.
