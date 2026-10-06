@@ -36,9 +36,17 @@ module SiteCensus
   # the closed-world targets do not: the lines of that copy (up to its `#else`) are not live there.
   def open_form_mask(lines, first_method)
     open_form = false
+    depth = 0
     lines.each_with_index.map do |l, i|
-      open_form = true if i < first_method && l.start_with?(NUMERIC_OPEN_FORM_GUARD)
-      open_form = false if open_form && l =~ /\A#else\s*\z/
+      if open_form
+        # The open copy has its own `#ifdef MRB_USE_BIGINT ... #else`; only the guard's own `#else` ends it.
+        depth += 1 if l =~ /\A#if/
+        depth -= 1 if l =~ /\A#endif/ && depth.positive?
+        open_form = false if depth.zero? && l =~ /\A#else\s*\z/
+      elsif i < first_method && l.start_with?(NUMERIC_OPEN_FORM_GUARD)
+        open_form = true
+        depth = 0
+      end
       open_form
     end
   end
