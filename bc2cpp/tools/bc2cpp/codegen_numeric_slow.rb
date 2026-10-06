@@ -63,11 +63,12 @@ class CodeGen
     builtin_class_send_safe?(name, owners + ['Float'])
   end
 
-  # NUMERIC_SLOW_CLOSED (ADR 0360, 0361): operators whose every definer in the build is on these classes, which the
-  # helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `-` is absent:
+  # NUMERIC_SLOW_CLOSED (ADR 0360, 0361, 0364): operators whose every definer in the build is on these classes, which
+  # the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `-` is absent:
   # Array#- (mruby-array-ext) is a hash/`==` walk with no public entry point to mirror.
   NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String],
-                          '*' => %w[Integer Float Array String] }.freeze
+                          '*' => %w[Integer Float Array String], '^' => %w[Integer NilClass TrueClass FalseClass],
+                          '>>' => %w[Integer], 'round' => %w[Integer Float] }.freeze
 
   # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
   # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners). `owners` are the
@@ -182,28 +183,47 @@ class CodeGen
   private
 
   def numeric_slow_source(key, float)
-    suffix = float ? '_f' : ''
-    head = "static mrb_value bc2cpp_slow_#{key}#{suffix}(mrb_state* M, mrb_value a"
+    head = numeric_slow_head(key, float)
+    closed = numeric_slow_closed_source(key, head)
+    return numeric_slow_open_source(key, head, float) unless closed
+
+    # A build that links the Complex or Rational gem has more definers (or receivers) than the world scan lists
+    # (`/`, `+ *`, `< <= > >=`, `round`), so it keeps the by-name body.
+    "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_open_source(key, head, float)}" \
+      "#else\n#{closed}#endif\n"
+  end
+
+  def numeric_slow_head(key, float)
+    "static mrb_value bc2cpp_slow_#{key}#{float ? '_f' : ''}(mrb_state* M, mrb_value a"
+  end
+
+  # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
+  # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364).
+  def numeric_slow_closed_source(key, head)
+    op = NUMERIC_SLOW_KEYS.key(key)
+    if NUMERIC_SLOW_ARITH.key?(key)
+      return nil unless numeric_slow_closed?(op)
+
+      numeric_slow_closed_arith_source(key, op, NUMERIC_SLOW_ARITH.fetch(key).last, head)
+    elsif NUMERIC_SLOW_CMP.key?(key)
+      numeric_slow_closed_cmp?(op) ? numeric_slow_closed_cmp_source(head, op) : nil
+    elsif numeric_slow_closed?(op)
+      case key
+      when 'div' then numeric_slow_closed_div_source(head)
+      when 'xor' then numeric_slow_closed_xor_source(head)
+      when 'rshift' then numeric_slow_closed_rshift_source(head)
+      when 'round' then numeric_slow_closed_round_source(head)
+      else raise "no closed form for NUMERIC_SLOW_PATH helper #{key}"
+      end
+    end
+  end
+
+  def numeric_slow_open_source(key, head, float)
     if NUMERIC_SLOW_ARITH.key?(key)
       op, helper = NUMERIC_SLOW_ARITH.fetch(key)
-      open_form = numeric_slow_arith_source(key, op, helper, head, float)
-      return open_form unless numeric_slow_closed?(op)
-
-      # A build that links the Complex or Rational gem has more definers than the world scan lists.
-      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{open_form}" \
-        "#else\n#{numeric_slow_closed_arith_source(key, op, helper, head)}#endif\n"
+      numeric_slow_arith_source(key, op, helper, head, float)
     elsif NUMERIC_SLOW_CMP.key?(key)
-      op = NUMERIC_SLOW_CMP.fetch(key)
-      by_name = numeric_slow_cmp_source(head, op)
-      return by_name unless numeric_slow_closed_cmp?(op)
-
-      # A build that links the Complex or Rational gem has more receivers than the world scan lists.
-      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{by_name}" \
-        "#else\n#{numeric_slow_closed_cmp_source(head, op)}#endif\n"
-    elsif key == 'div' && numeric_slow_closed?('/')
-      # A build that links the Complex or Rational gem has more `/` definers than the world scan lists.
-      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_div_source(head)}" \
-        "#else\n#{numeric_slow_closed_div_source(head)}#endif\n"
+      numeric_slow_cmp_source(head, NUMERIC_SLOW_CMP.fetch(key))
     elsif key == 'div'
       numeric_slow_div_source(head)
     elsif key == 'mod'
@@ -533,6 +553,96 @@ class CodeGen
           return bc2cpp_nomethod_named(M, a, "/", 1, b);
         }
         #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_xor, true_xor, false_xor (nil shares false's): an Integer operand is read as the method reads it, any
+  # other operand only through mrb_test; every other receiver class answers `^` nowhere.
+  def numeric_slow_closed_xor_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (bc2cpp_slow_int_p(a)) {
+          int ai = mrb_gc_arena_save(M);
+          mrb_value r;
+      #ifdef MRB_USE_BIGINT
+          if (mrb_bigint_p(a)) r = mrb_bint_xor(M, a, b);
+          else if (mrb_bigint_p(b)) r = mrb_bint_xor(M, mrb_as_bint(M, a), b);
+          else
+      #endif
+          r = mrb_int_value(M, mrb_integer(a) ^ mrb_integer(b));
+          #{NUMERIC_SLOW_DONE}
+        }
+        if (mrb_nil_p(a) || mrb_false_p(a)) return mrb_bool_value(mrb_test(b));
+        if (mrb_true_p(a)) return mrb_bool_value(!mrb_test(b));
+        return bc2cpp_nomethod_named(M, a, "^", 1, b);
+      }
+
+    CPP
+  end
+
+  # int_rshift for any count the method accepts (mrb_as_int coerces it); Integer is the only receiver class.
+  def numeric_slow_closed_rshift_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!bc2cpp_slow_int_p(a)) return bc2cpp_nomethod_named(M, a, ">>", 1, b);
+        mrb_state* mrb = M;  // E_RANGE_ERROR names the state `mrb`
+        mrb_int width = mrb_as_int(M, b);
+        if (width == 0) return a;
+        if (width == MRB_INT_MIN) mrb_raise(M, E_RANGE_ERROR, "integer overflow in bit shift");
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+      #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(a)) r = mrb_bint_rshift(M, a, width);
+        else
+      #endif
+        {
+          mrb_int val = mrb_integer(a);
+          if (val == 0) return a;
+          if (mrb_num_shift(M, val, -width, &val)) {
+            r = mrb_int_value(M, val);
+          } else {
+      #ifdef MRB_USE_BIGINT
+            r = mrb_bint_rshift(M, mrb_bint_new_int(M, val), width);
+      #else
+            mrb_raise(M, E_RANGE_ERROR, "integer overflow in bit shift");
+      #endif
+          }
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_round and flo_round without digits; the Float body is flo_round's for ndigits == 0.
+  def numeric_slow_closed_round_source(head)
+    <<~CPP
+      #{head}) {
+        if (bc2cpp_slow_int_p(a)) return a;
+      #ifndef MRB_NO_FLOAT
+        if (mrb_float_p(a)) {
+          mrb_state* mrb = M;  // E_FLOATDOMAIN_ERROR names the state `mrb`
+          double number = mrb_float(a), d;
+          if (isinf(number)) mrb_raise(M, E_FLOATDOMAIN_ERROR, number < 0 ? "-Infinity" : "Infinity");
+          if (isnan(number)) mrb_raise(M, E_FLOATDOMAIN_ERROR, "NaN");
+          if (number > 0.0) {
+            d = floor(number);
+            number = d + (number - d >= 0.5);
+          } else if (number < 0.0) {
+            d = ceil(number);
+            number = d - (d - number >= 0.5);
+          }
+          if (!FIXABLE_FLOAT(number)) {
+            int ai = mrb_gc_arena_save(M);
+            mrb_value r = mrb_float_value(M, number);
+            #{NUMERIC_SLOW_DONE}
+          }
+          return mrb_int_value(M, (mrb_int)number);
+        }
+      #endif
+        return bc2cpp_nomethod_named(M, a, "round");
       }
 
     CPP
