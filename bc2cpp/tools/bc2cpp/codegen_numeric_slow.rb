@@ -58,12 +58,15 @@ class CodeGen
     builtin_class_send_safe?(name, owners + ['Float'])
   end
 
-  # NUMERIC_SLOW_CLOSED (ADR 0360): operators whose every definer in the build is on these classes, which the
-  # helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError.
-  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float] }.freeze
+  # NUMERIC_SLOW_CLOSED (ADR 0360, 0361): operators whose every definer in the build is on these classes, which the
+  # helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `-` is absent:
+  # Array#- (mruby-array-ext) is a hash/`==` walk with no public entry point to mirror.
+  NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String],
+                          '*' => %w[Integer Float Array String] }.freeze
 
   # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
-  # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners).
+  # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners). `owners` are the
+  # classes whose method the helper's arms run.
   def numeric_slow_closed?(name)
     owners = NUMERIC_SLOW_CLOSED[name]
     return false unless owners && ENV['BC2CPP_NUMERIC_SLOW_CLOSED'] != '0'
@@ -75,8 +78,30 @@ class CodeGen
     return false if definers.nil? || definers[:singleton]
     return false unless %i[ruby foreign modules].all? { |kind| definers[kind].empty? }
 
+    members = numeric_slow_members(answers, name)
+    !members.nil? && members.all? { |klass| numeric_slow_inherits_owner?(answers, klass, owners) }
+  end
+
+  # `klass` is an owner, or a class whose whole lookup path is known and runs through an owner: with no Ruby, module
+  # or foreign definer of the name it resolves to the owner's native method, whose tag the helper switches on.
+  def numeric_slow_inherits_owner?(answers, klass, owners)
+    return true if owners.include?(klass)
+
+    ancestors, unknown = answers.ancestors(klass)
+    !unknown && ancestors.any? { |name| owners.include?(name) }
+  end
+
+  # `members` less Time and its subclasses when mruby-time is not in the build's gem list: the host scan reads
+  # every core gem's sources, and `Time#+` / `Time#-` are static in mruby-time (no mirror possible).
+  def numeric_slow_members(answers, name)
     members = answers.members(name)
-    !members.nil? && members.subset?(owners.to_set)
+    gems = CodeGen.build_gem_names
+    return members if members.nil? || gems.nil? || gems.include?('mruby-time')
+
+    timed = members.select { |k| answers.ancestors(k).first.include?('Time') }
+    return members if timed.any? { |k| @closed_world.class_declared?(k) }
+
+    members - timed
   end
 
   # File-scope definitions of the helpers `codes` call; '' when none.
@@ -103,34 +128,12 @@ class CodeGen
     head = "static mrb_value bc2cpp_slow_#{key}#{suffix}(mrb_state* M, mrb_value a"
     if NUMERIC_SLOW_ARITH.key?(key)
       op, helper = NUMERIC_SLOW_ARITH.fetch(key)
-      # Two Integers are vm.c OP_MATH: the overflow goes to mrb_bint_*_ii (Integer#op's mrb_bint_* path
-      # mishandles an MRB_INT_MIN operand on the 32-bit targets). Everything else the VM sends, so it is
-      # mrb_num_*, Integer#op's body for an Integer/bigint receiver and Float#op's for these operands
-      # (a Complex operand keeps the method).
-      float_arm = float ? ' || (mrb_float_p(a) && bc2cpp_slow_num_p(b))' : ''
-      <<~CPP
-        #{head}, mrb_value b) {
-          if (!((bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))#{float_arm})) return mrb_funcall(M, a, "#{op}", 1, b);
-          if (mrb_integer_p(a) && mrb_integer_p(b)) {
-            mrb_int x = mrb_integer(a), y = mrb_integer(b), z;
-            if (!mrb_int_#{key}_overflow(x, y, &z)) return mrb_int_value(M, z);
-        #ifdef MRB_USE_BIGINT
-            int ai = mrb_gc_arena_save(M);
-            mrb_value r = mrb_bint_#{key}_ii(M, x, y);
-            mrb_gc_arena_restore(M, ai);
-            mrb_gc_protect(M, r);
-            return r;
-        #else
-            mrb_state* mrb = M;  // E_RANGE_ERROR names the state `mrb`
-            mrb_raise(M, E_RANGE_ERROR, "integer overflow");
-        #endif
-          }
-          int ai = mrb_gc_arena_save(M);
-          mrb_value r = #{helper}(M, a, b);
-          #{NUMERIC_SLOW_DONE}
-        }
+      open_form = numeric_slow_arith_source(key, op, helper, head, float)
+      return open_form unless numeric_slow_closed?(op)
 
-      CPP
+      # A build that links the Complex or Rational gem has more definers than the world scan lists.
+      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{open_form}" \
+        "#else\n#{numeric_slow_closed_arith_source(key, op, helper, head)}#endif\n"
     elsif NUMERIC_SLOW_CMP.key?(key)
       op = NUMERIC_SLOW_CMP.fetch(key)
       <<~CPP
@@ -253,6 +256,134 @@ class CodeGen
     else
       raise "unknown NUMERIC_SLOW_PATH helper #{key}"
     end
+  end
+
+  # The by-name form of `+ - *` (ADR 0292).
+  def numeric_slow_arith_source(key, op, helper, head, float)
+    # Two Integers are vm.c OP_MATH: the overflow goes to mrb_bint_*_ii (Integer#op's mrb_bint_* path
+    # mishandles an MRB_INT_MIN operand on the 32-bit targets). Everything else the VM sends, so it is
+    # mrb_num_*, Integer#op's body for an Integer/bigint receiver and Float#op's for these operands
+    # (a Complex operand keeps the method).
+    float_arm = float ? ' || (mrb_float_p(a) && bc2cpp_slow_num_p(b))' : ''
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!((bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))#{float_arm})) return mrb_funcall(M, a, "#{op}", 1, b);
+      #{numeric_slow_int_pair_source(key)}
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = #{helper}(M, a, b);
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # The two-Fixnum arm of `+ - *`, shared by the by-name and the closed forms: it always returns.
+  def numeric_slow_int_pair_source(key)
+    <<~CPP.chomp.gsub(/^(?=[^#\n])/, '  ')
+      if (mrb_integer_p(a) && mrb_integer_p(b)) {
+        mrb_int x = mrb_integer(a), y = mrb_integer(b), z;
+        if (!mrb_int_#{key}_overflow(x, y, &z)) return mrb_int_value(M, z);
+      #ifdef MRB_USE_BIGINT
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r = mrb_bint_#{key}_ii(M, x, y);
+        mrb_gc_arena_restore(M, ai);
+        mrb_gc_protect(M, r);
+        return r;
+      #else
+        mrb_state* mrb = M;  // E_RANGE_ERROR names the state `mrb`
+        mrb_raise(M, E_RANGE_ERROR, "integer overflow");
+      #endif
+      }
+    CPP
+  end
+
+  # NUMERIC_SLOW_CLOSED `+` and `*` (ADR 0361): Integer, bigint and Float take mrb_num_*, Integer#op's and Float#op's
+  # body (a non-numeric operand is its TypeError); String and Array take the C++ of mrb_str_plus_m, mrb_str_times,
+  # mrb_ary_plus and mrb_ary_times, built from the public entry points they call; no other class answers.
+  def numeric_slow_closed_arith_source(key, op, helper, head)
+    arms = key == 'add' ? numeric_slow_closed_plus_arms : numeric_slow_closed_times_arms
+    <<~CPP
+      #{head}, mrb_value b) {
+      #{numeric_slow_int_pair_source(key)}
+        mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+        if (bc2cpp_slow_int_p(a)) {
+          r = #{helper}(M, a, b);
+        }
+      #ifndef MRB_NO_FLOAT
+        else if (mrb_float_p(a)) {
+          r = #{helper}(M, a, b);
+        }
+      #endif
+        else if (mrb_string_p(a)) {
+      #{arms.fetch(:string)}
+        }
+        else if (mrb_array_p(a)) {
+      #{arms.fetch(:array)}
+        }
+        else {
+          return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
+        }
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  def numeric_slow_closed_plus_arms
+    {
+      string: '    r = mrb_str_plus(M, a, mrb_ensure_string_type(M, b));',
+      array: <<~CPP.chomp.gsub(/^(?=.)/, '    ')
+        mrb_ensure_array_type(M, b);
+        mrb_int total;
+        if (mrb_int_add_overflow(RARRAY_LEN(a), RARRAY_LEN(b), &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+        r = mrb_ary_new_capa(M, total);
+        mrb_ary_concat(M, r, a);
+        mrb_ary_concat(M, r, b);
+      CPP
+    }
+  end
+
+  def numeric_slow_closed_times_arms
+    {
+      string: <<~'CPP'.chomp.gsub(/^(?=.)/, '    '),
+        mrb_int times = mrb_as_int(M, b), len;
+        if (times < 0) mrb_raise(M, E_ARGUMENT_ERROR, "negative argument");
+        if (mrb_int_mul_overflow(RSTRING_LEN(a), times, &len)) mrb_raise(M, E_ARGUMENT_ERROR, "argument too big");
+        r = mrb_str_new(M, NULL, len);
+        char* p = RSTRING_PTR(r);
+        if (len > 0) {
+          mrb_int n = RSTRING_LEN(a);
+          memcpy(p, RSTRING_PTR(a), n);
+          while (n <= len / 2) {
+            memcpy(p + n, p, n);
+            n *= 2;
+          }
+          memcpy(p + n, p, len - n);
+        }
+        p[len] = '\0';
+        RSTR_COPY_SINGLE_BYTE_FLAG(mrb_str_ptr(r), mrb_str_ptr(a));
+      CPP
+      array: <<~CPP.chomp.gsub(/^(?=.)/, '    ')
+        mrb_value sep = mrb_check_string_type(M, b);
+        if (!mrb_nil_p(sep)) {
+          r = mrb_ary_join(M, a, sep);
+        }
+        else {
+          mrb_int times = mrb_as_int(M, b), total;
+          if (times < 0) mrb_raise(M, E_ARGUMENT_ERROR, "negative argument");
+          if (times == 0) {
+            r = mrb_ary_new(M);
+          }
+          else {
+            if (mrb_int_mul_overflow(RARRAY_LEN(a), times, &total)) mrb_raise(M, E_ARGUMENT_ERROR, "array size too big");
+            r = mrb_ary_new_capa(M, total);
+            if (total > 0) for (mrb_int i = 0; i < times; i++) mrb_ary_concat(M, r, a);
+          }
+        }
+      CPP
+    }
   end
 
   # int_div; a Float receiver is the arm in front of this call.

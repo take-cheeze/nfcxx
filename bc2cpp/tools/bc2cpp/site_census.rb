@@ -14,6 +14,8 @@ module SiteCensus
   FAM_RE = %r{^\s*//\s*([A-Z][A-Z0-9_]+)\b}
   # Non-bc2cpp_send by-name calls; the lookbehind keeps `mrb_funcall_id` from matching as `mrb_funcall`.
   FUNCALL_RE = /(?<![\w.])(mrb_funcall_with_block|mrb_funcall_argv|mrb_funcall_id|mrb_funcall)\(/
+  # The `#if` that opens the by-name copy of a closed helper (codegen_numeric_slow.rb); the copy ends at `#else`.
+  NUMERIC_OPEN_FORM_GUARD = '#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)'
 
   module_function
 
@@ -28,6 +30,17 @@ module SiteCensus
   # Shared helpers precede the first generated method body.
   def first_method_line(lines)
     lines.index { |l| l =~ /^(?:static )?mrb_value \w+_impl\(.*\{\s*$/ }
+  end
+
+  # A helper written twice (ADR 0360, 0361) keeps its by-name form for builds that link Complex or Rational, which
+  # the closed-world targets do not: the lines of that copy (up to its `#else`) are not live there.
+  def open_form_mask(lines, first_method)
+    open_form = false
+    lines.each_with_index.map do |l, i|
+      open_form = true if i < first_method && l.start_with?(NUMERIC_OPEN_FORM_GUARD)
+      open_form = false if open_form && l =~ /\A#else\s*\z/
+      open_form
+    end
   end
 
   # Where the receiver register was last assigned before the guard chain. Heuristic: a
@@ -79,7 +92,10 @@ module SiteCensus
     sites = []
     helper_sends = Hash.new(0)
     cur = nil
+    open_form = open_form_mask(lines, first_method)
     lines.each_with_index do |l, i|
+      next if open_form[i]
+
       cur = fn_name(l) || cur
       next unless l =~ SEND_RE
 
