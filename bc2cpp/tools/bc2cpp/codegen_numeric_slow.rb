@@ -148,28 +148,11 @@ class CodeGen
 
       CPP
     elsif key == 'div' && numeric_slow_closed?('/')
-      numeric_slow_closed_div_source(head)
+      # A build that links the Complex or Rational gem has more `/` definers than the world scan lists.
+      "#if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)\n#{numeric_slow_div_source(head)}" \
+        "#else\n#{numeric_slow_closed_div_source(head)}#endif\n"
     elsif key == 'div'
-      # int_div; a Float receiver is the arm in front of this call.
-      <<~CPP
-        #{head}, mrb_value b) {
-          if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return mrb_funcall(M, a, "/", 1, b);
-          int ai = mrb_gc_arena_save(M);
-          mrb_value r;
-        #ifndef MRB_NO_FLOAT
-          if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
-          else
-        #endif
-        #ifdef MRB_USE_BIGINT
-          if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
-          else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
-          else
-        #endif
-          r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
-          #{NUMERIC_SLOW_DONE}
-        }
-
-      CPP
+      numeric_slow_div_source(head)
     elsif key == 'mod'
       # int_mod for two Integers; a Float operand needs flodivmod (static), a zero divisor
       # the method's ZeroDivisionError.
@@ -272,14 +255,34 @@ class CodeGen
     end
   end
 
-  # int_div and flo_div with no Complex or Rational operand (nothing in the world defines them, so the gems'
+  # int_div; a Float receiver is the arm in front of this call.
+  def numeric_slow_div_source(head)
+    <<~CPP
+      #{head}, mrb_value b) {
+        if (!(bc2cpp_slow_int_p(a) && bc2cpp_slow_num_p(b))) return mrb_funcall(M, a, "/", 1, b);
+        int ai = mrb_gc_arena_save(M);
+        mrb_value r;
+      #ifndef MRB_NO_FLOAT
+        if (mrb_float_p(b)) r = mrb_float_value(M, mrb_div_float(mrb_as_float(M, a), mrb_float(b)));
+        else
+      #endif
+      #ifdef MRB_USE_BIGINT
+        if (mrb_bigint_p(a)) r = mrb_bint_div(M, a, b);
+        else if (mrb_bigint_p(b)) r = mrb_bint_div(M, mrb_as_bint(M, a), b);
+        else
+      #endif
+        r = mrb_div_int_value(M, mrb_integer(a), mrb_integer(b));
+        #{NUMERIC_SLOW_DONE}
+      }
+
+    CPP
+  end
+
+  # int_div and flo_div with no Complex or Rational operand (the caller selects this form only when those gems'
   # macros are unset); any other receiver class answers `/` nowhere, which is what the dispatch raised.
   def numeric_slow_closed_div_source(head)
     <<~CPP
       #{head}, mrb_value b) {
-      #if defined(MRB_USE_COMPLEX) || defined(MRB_USE_RATIONAL)
-      #error "NUMERIC_SLOW_CLOSED: the closed world proved no Complex/Rational operand"
-      #endif
         mrb_state* mrb = M;  // E_TYPE_ERROR names the state `mrb`
         int ai = mrb_gc_arena_save(M);
         mrb_value r;
