@@ -67,7 +67,7 @@ class ClosedWorld
   # Sends that run a block with another `self`, which breaks "self is its lexical owner".
   SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
-  attr_reader :global_refusal
+  attr_reader :global_refusal, :native_paths
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -111,6 +111,7 @@ class ClosedWorld
     @frozen_constants = Set.new
     @memo = {}
     @desc_memo = {}
+    @native_paths = native_paths
     scan_native(native_paths)
     scan_outside_ruby(ruby_paths)
     scan_closed_world

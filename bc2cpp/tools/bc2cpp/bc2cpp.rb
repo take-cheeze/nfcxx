@@ -94,6 +94,7 @@ require_relative 'codegen_checked_send'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
 require_relative 'codegen_numeric_slow_misc'
+require_relative 'codegen_index_closed'
 require_relative 'codegen_numeric_roots'
 require_relative 'codegen_native_int_args'
 require_relative 'codegen_fixnum_ranges'
@@ -1410,6 +1411,8 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_resumable_helpers(compiled)
   print gen.emit_instance_tt_setup(compiled)
   print gen.emit_core_guard_helpers(compiled)
+  # OUTLINED_INDEX_OPS: built before the owner-class slots are numbered and printed (INDEX_CLOSED, ADR 0365).
+  gen.prepare_index_helpers(compiled)
   gen.reserve_poly_table_slots(compiled)
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
@@ -1484,6 +1487,7 @@ if $PROGRAM_NAME == __FILE__
   warn "== numeric slow-path helpers: #{gen.numeric_slow_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
+  warn "== index helpers closed (INDEX_CLOSED, ADR 0365): #{gen.index_closed_summary(compiled)} =="
   warn ''
   eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
   warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="

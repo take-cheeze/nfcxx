@@ -257,6 +257,8 @@ class CodeGen
   # lookup of `name` provably ends at `owner`'s own def: no class on the way
   # defines it or mixes anything in, and nothing aliases/undefines the name.
   def inheriting_subclasses(name, owner)
+    return index_closed_subclasses(owner) if @index_closed_build && name == @index_closed_build[:plan].name
+
     installed = symbol_installed_names
     return [] if installed.nil? || installed.include?(name)
     return [] unless Array(@prepended_modules[owner]).empty? && !@unknown_mixins.include?(owner)
@@ -721,58 +723,79 @@ class CodeGen
     "#{struct_read.delete_prefix('else ')}else {\n  #{call}}\n"
   end
 
-  # Built once per run under with_fresh_method_state, so the enclosing method's
-  # RUNTIME_DEF_DEVIRT_GUARD cannot leak into the shared chain; building during
-  # compilation allocates OWNER_CLASS_CACHE slots before that table is printed.
+  # Which helpers a compiled body asked for. They are built by prepare_index_helpers, once the bodies are compiled and
+  # outside any method (core bodies compile with the closed world withdrawn, INDEX_CLOSED needs it).
   def index_helper_code(kind)
-    @index_helper_code ||= {}
-    @index_helper_code[kind] ||= with_fresh_method_state { build_index_helper(kind) }
+    (@index_helper_requested ||= {})[kind] = true
   end
 
+  # Builds the helpers `codes` call under with_fresh_method_state, so the enclosing method's
+  # RUNTIME_DEF_DEVIRT_GUARD cannot leak into the shared chain. Building allocates OWNER_CLASS_CACHE slots, so it
+  # must run before that table is printed (reserve_poly_table_slots).
+  def prepare_index_helpers(codes)
+    texts = codes.map { |c| c.is_a?(Hash) ? c[:code] : c }
+    @index_helper_code ||= {}
+    INDEX_HELPERS.each_key do |kind|
+      next if @index_helper_code.key?(kind) || !@index_helper_requested&.key?(kind)
+      next unless texts.any? { |t| t.include?("bc2cpp_#{kind}(M,") }
+
+      @index_helper_code[kind] = with_fresh_method_state { build_index_helper(kind) }
+    end
+  end
+
+  # The inline fast paths of each helper; the rest is the chain, by-name or INDEX_CLOSED.
+  INDEX_FAST_PATHS = {
+    'getidx' => <<~CPP,
+      if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {
+        return bc2cpp_ary_entry(M, recv, mrb_integer(key));
+      } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
+        return mrb_hash_get(M, recv, key);
+      } else if (mrb_string_p(recv) && mrb_obj_ptr(recv)->c == M->string_class &&
+                 (mrb_integer_p(key) || mrb_string_p(key) || mrb_range_p(key))) {
+        return mrb_str_aref(M, recv, key, mrb_undef_value());
+      }
+    CPP
+    'getidx0' => <<~CPP,
+      if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class) {
+        return bc2cpp_ary_entry(M, recv, 0);
+      } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
+        return mrb_hash_get(M, recv, mrb_fixnum_value(0));
+      }
+    CPP
+    # The fast paths leave the assigned value in the register, the fallback whatever `[]=` returned (vm.c's OP_SETIDX).
+    'setidx' => <<~CPP
+      if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(idx)) {
+        mrb_ary_set(M, recv, mrb_integer(idx), val);
+        return val;
+      } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
+        mrb_hash_set(M, recv, idx, val);
+        return val;
+      }
+    CPP
+  }.freeze
+
+  INDEX_CHAIN_ARGS = { 'getidx' => ['[]', ['key']], 'getidx0' => ['[]', ['mrb_fixnum_value(0)']],
+                       'setidx' => ['[]=', %w[idx val]] }.freeze
+
   def build_index_helper(kind)
-    body = case kind
-           when 'getidx'
-             # INDEX_CHAIN's tail, with the result in r0 (the name
-             # compile_poly_small_n spells as `r<d>`).
-             tail = compile_poly_dispatch('[]', 0, 'recv', ['key'], 1) ||
-                    "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"
-             <<~CPP.chomp + "\n#{tail}  return r0;\n"
-               if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(key)) {
-                 return bc2cpp_ary_entry(M, recv, mrb_integer(key));
-               } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
-                 return mrb_hash_get(M, recv, key);
-               } else if (mrb_string_p(recv) && mrb_obj_ptr(recv)->c == M->string_class &&
-                          (mrb_integer_p(key) || mrb_string_p(key) || mrb_range_p(key))) {
-                 return mrb_str_aref(M, recv, key, mrb_undef_value());
-               }
-               mrb_value r0 = mrb_nil_value();
-             CPP
-           when 'getidx0'
-             <<~CPP
-               if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class) {
-                 return bc2cpp_ary_entry(M, recv, 0);
-               } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
-                 return mrb_hash_get(M, recv, mrb_fixnum_value(0));
-               }
-               return mrb_funcall(M, recv, "[]", 1, mrb_fixnum_value(0));
-             CPP
-           when 'setidx'
-             # The fast paths leave the assigned value in the register, the
-             # fallback whatever `[]=` returned (vm.c's OP_SETIDX).
-             <<~CPP
-               if (mrb_array_p(recv) && mrb_obj_ptr(recv)->c == M->array_class && mrb_integer_p(idx)) {
-                 mrb_ary_set(M, recv, mrb_integer(idx), val);
-                 return val;
-               } else if (mrb_hash_p(recv) && mrb_obj_ptr(recv)->c == M->hash_class) {
-                 mrb_hash_set(M, recv, idx, val);
-                 return val;
-               }
-               return mrb_funcall(M, recv, "[]=", 2, idx, val);
-             CPP
-           end
+    fast = INDEX_FAST_PATHS.fetch(kind)
+    name, argv = INDEX_CHAIN_ARGS.fetch(kind)
+    # INDEX_CLOSED (ADR 0365) when every class that can answer has an arm; else the by-name tail.
+    body = index_helper_closed_source(fast, name, argv) || index_helper_open_source(kind, fast, name, argv)
     "// OUTLINED_INDEX_OPS -- #{kind.upcase}'s generic chain, see bc2cpp.rb's INDEX_HELPERS comment.\n" \
       "static mrb_value bc2cpp_#{kind}(mrb_state* M, #{INDEX_HELPERS.fetch(kind)}) {\n" \
       "#{body.gsub(/^(?=.)/, '  ')}}\n\n"
+  end
+
+  # The by-name helper: INDEX_CHAIN's tail (getidx, with the result in r0, the name compile_poly_small_n spells as
+  # `r<d>`) then mrb_funcall.
+  def index_helper_open_source(kind, fast, name, argv)
+    return "#{fast}return mrb_funcall(M, recv, \"[]\", 1, mrb_fixnum_value(0));\n" if kind == 'getidx0'
+    return "#{fast}return mrb_funcall(M, recv, \"[]=\", 2, idx, val);\n" if kind == 'setidx'
+
+    tail = compile_poly_dispatch(name, 0, 'recv', argv, 1) ||
+           "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"
+    "#{fast}mrb_value r0 = mrb_nil_value();\n#{tail}  return r0;\n"
   end
 
   # The helpers `codes` (generated C++ texts, or compiled entries' hashes)
@@ -785,9 +808,12 @@ class CodeGen
     end
   end
 
-  # File-scope definitions of the helpers `codes` call; '' when none.
+  # File-scope definitions of the helpers `codes` call; '' when none. A closed helper (INDEX_CLOSED) is preceded by the
+  # declarations of the exported mruby bodies it calls.
   def emit_index_helpers(codes)
-    index_helpers_used(codes).map { |kind| @index_helper_code.fetch(kind) }.join
+    prepare_index_helpers(codes)
+    helpers = index_helpers_used(codes).map { |kind| @index_helper_code.fetch(kind) }.join
+    "#{index_closed_prelude(helpers)}#{helpers}"
   end
 
   # How many sites call each helper, for the stderr summary.
