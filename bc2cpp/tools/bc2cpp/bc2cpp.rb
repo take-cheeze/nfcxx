@@ -186,6 +186,7 @@ if $PROGRAM_NAME == __FILE__
   CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
   core_stale_refusals = CoreMethods.stale(registry, ireps, core_refused)
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
+  core_all_defs = registry.values.flatten.select { |d| d.irep && d.core }
   # A core attr_* accessor or module_function copy has no body to compile: it stays the interpreter's.
   registry.each_value { |defs| defs.reject! { |d| d.irep ? core_ineligible.include?(d.irep) : d.core } }
   registry.delete_if { |_, defs| defs.empty? }
@@ -1017,6 +1018,7 @@ if $PROGRAM_NAME == __FILE__
   # SKIP_UNSUPPORTED=1 drops methods containing `#error` from the output; they
   # stay interpreted. CLI exploration keeps the markers visible; real builds
   # (mrbgem.rake) set this, since a `#error` stops the C++ build.
+  unsupported_core_codes = compiled.select { |m| m[:code].include?('#error') && m[:label] && CoreDefs.core_source?(ireps[m[:label]]&.file) }
   if ENV['SKIP_UNSUPPORTED'] == '1'
     skipped, compiled = compiled.partition { |m| m[:code].include?('#error') }
     unless skipped.empty?
@@ -1024,6 +1026,19 @@ if $PROGRAM_NAME == __FILE__
       warn '== skipped (unsupported, left on the interpreter) =='
       skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
     end
+  end
+
+  # CORE_INTERPRETED_REPORT (ADR 0371): every core-source bytecode method this run leaves
+  # interpreted, with the reason and the language features it uses.
+  if core_bytecode.positive?
+    unsupported = unsupported_core_codes.to_h do |m|
+      key = "#{m[:owner]}##{m[:name]}"
+      [key, m[:code][/^\s*#error (.*?) -- not in this/, 1].to_s.delete_prefix("#{key} ")]
+    end
+    report = CoreMethods.interpreted_report(core_all_defs, ireps, core_refused, unsupported)
+    warn ''
+    warn "== core-source methods left interpreted (#{report.size}) =="
+    report.each { |l| warn "  #{l}" }
   end
 
   # HOT_ONLY: listed methods that still did not compile run as bytecode; name

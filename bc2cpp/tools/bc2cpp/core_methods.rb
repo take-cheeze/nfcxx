@@ -52,13 +52,57 @@ module CoreMethods
       defs.each do |d|
         next unless d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file)
 
-        irep = ireps.fetch(d.irep)
-        out << d.irep if refused.include?(HotMethods.key(d)) || conditional.include?(d.irep) ||
-                         (CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(d, ireps)) ||
-                         CoreDefs.builds_lambda?(irep, ireps) || CoreDefs.references_fiber?(irep, ireps)
+        out << d.irep if exclusion_reason(d, ireps, refused, conditional)
       end
     end
     out
+  end
+
+  # Why a core-source definition stays bytecode by decision (nil when eligible). One place for
+  # excluded_labels and the interpreted report, so the two cannot disagree.
+  def exclusion_reason(definition, ireps, refused, conditional)
+    irep = ireps.fetch(definition.irep)
+    return 'refused (core_refused.txt)' if refused.include?(HotMethods.key(definition))
+    return 'conditional def' if conditional.include?(definition.irep)
+    return 'mruby-enumerator (Fiber machinery)' if CoreDefs.fiber_gem?(irep.file) && !enumerator_wrapper?(definition, ireps)
+    return 'builds a lambda' if CoreDefs.builds_lambda?(irep, ireps)
+
+    'names Fiber' if CoreDefs.references_fiber?(irep, ireps)
+  end
+
+  # Language features a body uses, for grouping the interpreted report by what an unsupported
+  # shape needs (a method may carry several).
+  def shape_tags(irep, ireps)
+    ops = all_ops(irep, ireps)
+    tags = []
+    tags << 'block' if CoreDefs.touches_block?(irep, ireps)
+    tags << 'rescue' if %w[RESCUE EXCEPT ONERR POPERR].any? { |op| ops.include?(op) }
+    tags << 'super' if ops.include?('SUPER')
+    tags << 'lambda' if ops.include?('LAMBDA')
+    fields = irep.enter&.enter_fields&.map(&:to_i)
+    tags << 'optargs' if fields && fields[1..5].any?(&:positive?)
+    tags
+  end
+
+  def all_ops(irep, ireps)
+    irep.reps.compact.reduce(irep.instructions.to_set(&:op)) { |acc, child| acc | all_ops(ireps.fetch(child), ireps) }
+  end
+
+  # One line per core-source bytecode definition the build keeps interpreted (ADR 0371).
+  # `unsupported` maps "Owner#name" to the compiler's own #error reason for definitions the
+  # exclusion rules let through but codegen cannot express.
+  def interpreted_report(defs, ireps, refused, unsupported = {})
+    conditional = CoreDefs.conditional_def_labels(ireps)
+    defs.filter_map do |d|
+      next unless d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file)
+
+      key = "#{d.owner}##{d.name}"
+      reason = exclusion_reason(d, ireps, refused, conditional) ||
+               (unsupported[key] && "unsupported shape: #{unsupported[key]}")
+      next unless reason
+
+      "#{key} | #{reason} | #{shape_tags(ireps.fetch(d.irep), ireps).join(',')}"
+    end.sort
   end
 
   # Irep labels of the compiled core methods whose entry is guarded (CORE_BLOCK_GUARD,
