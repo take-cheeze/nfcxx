@@ -16,7 +16,7 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c' => %w[01a0156d300517eba92d8a00d36d8ee1b9d3cb7a29420d7b815711ab00a39e45 912d1b2ba1f94dbcb802e542844d9af4c10a7f1650c0bb6d14f529878a437c9f],
     '3rd/mruby/mrbgems/mruby-method/src/method.c' => 'd2a780ca6a3ef25297c8f60356ad56a61fb826a2d5759059a25cdddb9820b0eb',
     '3rd/mruby/src/symbol.c' => %w[2fc364c65eda66d2bc4f2345150c394e1666678b55b93bf6f2d0fb47e5bc1c09 4c4326db94944063fc45340b57bd98e3f3ee2c7df49d3e9455e85061a4f737ee],
-    '3rd/mruby/src/numeric.c' => 'acbb9d47dd61e15a87ffbdae468884e977ce09f73e2a8fa5f52e63cb71a7400e',
+    '3rd/mruby/src/numeric.c' => %w[acbb9d47dd61e15a87ffbdae468884e977ce09f73e2a8fa5f52e63cb71a7400e f0aca40e0aa523deaa32325a6bca09ddd6ad6626b05e089323461dc45739c33f],
     '3rd/mruby/src/error.c' => %w[8c87c4fd2d130cd3dab0309c23ec5d7948f6f0c9e8f44a59e6c0e574ff02b4ea 96399cfebc605a210926137a909c4b9eba51bf6f5119c0421c4f5071d566200f],
     '3rd/mruby/src/range.c' => '9125dd2ce60f6055e1f81a645a5bf752e96cc44438e90384b8dcb4870dc12326',
     '3rd/mruby/src/class.c' => %w[71a68c2a3624847a6b0b96702c11b2b19e379eda5b2218290c59579825717d34 2eb5cdb68a72c0ab7dbc7649ede45305608e73a558fbcef3250d5138edf3df3d],
