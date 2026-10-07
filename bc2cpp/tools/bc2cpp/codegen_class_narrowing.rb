@@ -3,9 +3,9 @@
 require_relative 'numeric_flow'
 
 # CLASS_NARROWING (ADR 0375): occurrence typing for the exact-class flow. A branch on the boolean of a class test
-# (`x.is_a?(C)`, `kind_of?`, `instance_of?`, `C === x` and so `case x when C`, `x.nil?` and `!x` as a value)
-# narrows the tested variable's class set on each edge, so the receivers dominated by the test see a smaller
-# proven set. NumericFlow keeps the bookkeeping (which register holds which test, aimed at which variables, and
+# (`x.is_a?(C)`, `kind_of?`, `instance_of?`, `C === x` and so `case x when C`, `x.nil?` and `!x` as a value,
+# `x.respond_to?(:m)`, `x.class == C`) narrows the tested variable's class set on each edge, so the receivers
+# dominated by the test see a smaller proven set. NumericFlow keeps the bookkeeping (which register holds which test, aimed at which variables, and
 # when a rewrite or a call forgets it); this file decides what a test means in the closed world, and
 # ClassNarrowingGuard checks the claim at run time.
 #
@@ -147,7 +147,11 @@ class CodeGen
     return false if installed.nil? || installed.include?('==') || @closed_world.unknown_def?('==')
     return false unless CLASS_OBJECT_OWNERS.all? { |owner| @closed_world.core_native_arm_safe?('==', owner) }
     return false if @registry.fetch('==', []).any? { |d| d.owner.end_with?('.singleton') || CLASS_OBJECT_OWNERS.include?(d.owner) }
-    return false if CLASS_OBJECT_OWNERS.any? { |o| !Array(@included_modules[o]).empty? || !Array(@prepended_modules[o]).empty? || @unknown_mixins.include?(o) }
+
+    mixed = CLASS_OBJECT_OWNERS.any? do |owner|
+      !Array(@included_modules[owner]).empty? || !Array(@prepended_modules[owner]).empty? || @unknown_mixins.include?(owner)
+    end
+    return false if mixed
 
     registrations, opaque = NativeExpressionDevirt.class_registrations(@closed_world.native_paths_spelling('=='))
     unnamed = opaque.fetch('==', [])
