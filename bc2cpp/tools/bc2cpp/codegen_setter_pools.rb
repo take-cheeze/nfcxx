@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'codegen_nilable_receiver'
+require_relative 'dynamic_names'
 require_relative 'numeric_flow'
 
 # CodeGen: SETTER_POOLS and CHECKED_POOL_EXACT (ADR 0370).
@@ -56,7 +57,7 @@ class CodeGen
     stem = setter.chomp('=')
     sites, poisoned = entry_arg_call_index
     return :poisoned if poisoned.include?(setter)
-    return :dynamic_name if numeric_dynamically_named?(setter)
+    return :spelled_name if setter_spelled_as_literal?(setter)
     return :foreign_definition if @foreign_method_names.include?(setter)
     return :unknown_definition if @closed_world.unknown_def?(setter)
     return :outside_call if setter_called_outside?(setter, stem)
@@ -69,6 +70,15 @@ class CodeGen
     return :no_definition if definitions.empty?
 
     setter_definition_refusal(definitions)
+  end
+
+  # The program spells `x=` as a String (a Symbol is a poisoned name already): evidence of a by-name call the sites
+  # do not show. numeric_dynamically_named? would also refuse every `x=` once any send takes a computed name (mruby's
+  # Symbol#to_proc does); that clause is a precision rule for the unchecked proofs. A composed name that stores
+  # outside the pool is a guard violation at the reader (scripts/bc2cpp_setter_pools_check.rb).
+  def setter_spelled_as_literal?(setter)
+    @setter_literal_names ||= DynamicNames.analyze(@ireps).first
+    @setter_literal_names.include?(setter)
   end
 
   # A native funcall or a foreign Ruby identifier names it, or an outside native source spells it as anything but a
