@@ -2722,6 +2722,7 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#step_parallel -> id",
   "RPG2k::Scene::Map#step_parallel -> reset_frame_steps",
   "RPG2k::Scene::Map#step_parallel -> running?",
+  "RPG2k::Scene::Map#step_parallel -> start",
   "RPG2k::Scene::Map#step_parallel -> switches",
   "RPG2k::Scene::Map#step_parallel -> update",
   "RPG2k::Scene::Map#step_parallel -> wait_kind",

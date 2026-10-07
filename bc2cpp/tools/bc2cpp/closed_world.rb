@@ -638,11 +638,13 @@ class ClosedWorld
   # NUMERIC_SLOW_CLOSED `%` (ADR 0367): the constant +name+ of a core class names that class in every scope
   # core Ruby looks it up from: no bytecode binds it, no outside source rebinds it (the core's own definition is
   # the one write), and no nested class of that name is declared.
-  def core_constant_plain?(name)
+  # `global_only` asks about the top-level constant a C++ `mrb_class_get` reads: a class of that name nested in another
+  # namespace (LCF::File) cannot rebind it, only the lexical lookups of Ruby code.
+  def core_constant_plain?(name, global_only: false)
     return false if @global_refusal || @dynamic_constant_mutation
 
-    @constant_write_counts[name].zero? && !@deferred_constant_writes.include?(name) &&
-      @outside_constant_write_counts[name] <= 1 && @class_decls.keys.none? { |key| key != name && simple(key) == name }
+    @constant_write_counts[name].zero? && !@deferred_constant_writes.include?(name) && @outside_constant_write_counts[name] <= 1 &&
+      (global_only || @class_decls.keys.none? { |key| key != name && simple(key) == name })
   end
 
   # No bytecode of the world spells the constant BasicObject, the one way to an object that lacks Kernel's methods
