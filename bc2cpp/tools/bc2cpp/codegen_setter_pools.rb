@@ -92,8 +92,8 @@ class CodeGen
   def setter_definition_refusal(definitions)
     definitions.each do |d|
       next if d.irep.nil?
-      return :installed_body if d.installer || d.copy_irep
 
+      # A define_method or module_function installer spells the name as a Symbol, so setter_spelled_as_literal? has refused it.
       irep = @ireps[d.irep]
       return :no_body unless irep
       return :arity unless pure_mandatory_arity?(irep) && mandatory_arity(irep) == 1
