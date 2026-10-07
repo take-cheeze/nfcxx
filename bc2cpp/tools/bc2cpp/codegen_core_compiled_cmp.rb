@@ -49,7 +49,7 @@ class CodeGen
     return nil unless defs&.one? && call_facts_answers.foreign_definer?(op, 'Hash')
 
     target = block_core_target('Hash', %w[Hash Enumerable], op, 1, blockless: true)
-    target if target.equal?(defs.first) && @yield_reach.yield_free?(target.irep)
+    target if target && target.owner == 'Hash' && @yield_reach.yield_free?(target.irep)
   end
 
   # The Hash arm of a closed comparison helper: the compiled body for an exact Hash, a by-name dispatch (that
