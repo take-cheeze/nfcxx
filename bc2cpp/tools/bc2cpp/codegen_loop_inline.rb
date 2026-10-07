@@ -280,13 +280,14 @@ class CodeGen
     block_irep = region[:block_irep]
     offset = irep.nregs
     recv_expr = inline_recv_expr(region)
-    param_reg = 1 + offset # the block's own single mandatory arg, R1 in its own numbering.
+    param_reg = 1 + offset # the block's first mandatory arg (its only one without EACH_SPREAD), R1 in its own numbering.
     addr = region[:block_addr]
     iter_label = "Lbc2cpp_each_iter_#{addr}"
     break_label = "Lbc2cpp_each_end_#{addr}"
     # ELEMENT_CLASS_SUPPORT: the block's single parameter R1 is bound to the
     # element below, so R1 is the loop element.
-    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label, elem_reg: '1',
+    body = compile_inline_block_body(region, irep, d, iter_label, break_label: break_label,
+                                                                  elem_reg: region[:spread] ? nil : '1',
                                                                   hash_capture: true)
     return nil unless body
 
@@ -297,12 +298,34 @@ class CodeGen
            "bc2cpp_each_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
            "++bc2cpp_each_i_#{addr}) {\n"
     out << inline_block_frame(block_irep, offset)
-    out << "      r#{param_reg} = bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{addr});\n"
+    entry = "bc2cpp_ary_entry(M, #{recv_expr}, bc2cpp_each_i_#{addr})"
+    if region[:spread]
+      out << each_spread_binding(entry, addr, param_reg, region[:spread])
+    else
+      out << "      r#{param_reg} = #{entry};\n"
+    end
     out << body
     out << "      #{iter_label}:;\n"
     out << "    }\n"
     out << "    #{break_label}:;\n"
     out << "  }\n"
+    out
+  end
+
+  # EACH_SPREAD: OP_ENTER's rule for a block of `n` > 1 parameters given one argument: an Array (by
+  # type, no #to_ary) is spread, missing parameters stay nil (inline_block_frame), extras are dropped;
+  # any other value is the first parameter. Nothing is allocated, so the receiver keeps the row alive.
+  def each_spread_binding(entry, addr, first_reg, n)
+    row = "bc2cpp_row_#{addr}"
+    out = String.new
+    out << "      mrb_value #{row} = #{entry};\n"
+    out << "      if (mrb_array_p(#{row})) {\n"
+    n.times do |k|
+      out << "        if (RARRAY_LEN(#{row}) > #{k}) { r#{first_reg + k} = RARRAY_PTR(#{row})[#{k}]; }\n"
+    end
+    out << "      } else {\n"
+    out << "        r#{first_reg} = #{row};\n"
+    out << "      }\n"
     out
   end
 
