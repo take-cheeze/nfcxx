@@ -33,7 +33,8 @@ module CoreCompare
       primary = found.select { |d| d.owner == 'Comparable' && CoreMixins.suffix?(d.path, FILE) && !d.alias_only }
       rest = found - primary
       next unless primary.one? && primary.first.body == body(op)
-      next unless rest.map { |d| [d.owner, OTHERS.find { |_, f| CoreMixins.suffix?(d.path, f) }&.last] }.sort == expected
+      # nil-safe: an outside definer in a file that is not a model one sorts as ''.
+      next unless rest.map { |d| [d.owner, OTHERS.find { |_, f| CoreMixins.suffix?(d.path, f) }&.last.to_s] }.sort == expected
       next unless native_sources.fetch(op, []).all? { |path| NATIVES.any? { |f| CoreMixins.suffix?(path, f) } }
 
       ok << op

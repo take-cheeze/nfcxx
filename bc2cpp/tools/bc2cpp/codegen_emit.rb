@@ -49,7 +49,9 @@ class CodeGen
     :@compiling_core => false, :@resumable => nil,
     :@exact_core_site => nil, :@nonnil_receiver => nil,
     # CHECKED_POOL_EXACT (ADR 0370): the one register its arm is being compiled under a class test for.
-    :@checked_pool_override => nil
+    :@checked_pool_override => nil,
+    # INDEX_CLOSED (ADR 0365): set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
+    :@index_closed_build => nil
   }.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's

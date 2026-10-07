@@ -7,7 +7,7 @@ require_relative 'native_names'
 # Only unrelated Ruby families may pool the same names.
 module NativeIvarScopes
   FILES = {
-    'mruby-rgss/src/lib.cxx' => '664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e',
+    'mruby-rgss/src/lib.cxx' => '24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c',
     'include/rgss_construct.hxx' => 'f1c476607ff9bba32f33d77a088466150e717e329dff1fa8792027fa05d45e28',
     'include/rgss_native_direct.hxx' => '4e43a533ce6371f47b9ccb3dafb342405c4e63ad942347236fb0c4de71b11386'
   }.freeze

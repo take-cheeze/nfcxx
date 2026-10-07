@@ -436,7 +436,7 @@ def bc2cpp_closed_world_env(spec, repo_root)
     raise "#{spec.name}: BC2CPP_CLOSED_WORLD refused for build '#{spec.build.name}':\n  #{errors.join("\n  ")}"
   end
 
-  { 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => spec.build.name,
+  { 'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => spec.build.name, 'BC2CPP_COLLECTION_EXPORTS' => '1',
     'BC2CPP_BUILD_GEMS' => Shellwords.join(gems.map { |name, dir| "#{name}=#{dir}" }) }
 end
 

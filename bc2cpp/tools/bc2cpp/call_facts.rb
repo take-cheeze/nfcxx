@@ -31,7 +31,7 @@ module CallFacts
   # The world Answers reads; nil fields make every question "unknown".
   # instance_installed (NATIVE_CLASS_ARMS, ADR 0323) is installed without the names only a class object sees.
   World = Struct.new(:closed_world, :registry, :superclass_of, :included, :prepended, :unknown_mixins,
-                     :native_sources, :installed, :instance_installed, keyword_init: true)
+                     :native_sources, :installed, :instance_installed, :compiled_core, keyword_init: true)
 
   # Which classes answer a method name. A name nothing bounds (installed by computed code, a hook, a
   # definer on Object/Kernel/BasicObject, a native whose owner the scan cannot read) answers for every
@@ -62,6 +62,15 @@ module CallFacts
 
     def opaque_owners = native_scan[1]
 
+    # name => [{owner:, function:, path:, macro:}] of the registrations a class or module object answers
+    # (`Array.[]`, a Struct class's `.[]`, module functions), which `registrations` leaves out.
+    def class_registrations
+      @class_registrations ||= begin
+        paths = @w.native_sources ? @w.native_sources.values.flatten.uniq : []
+        NativeExpressionDevirt.class_method_registrations(paths)
+      end
+    end
+
     def native_scan
       @native_scan ||= begin
         paths = @w.native_sources ? @w.native_sources.values.flatten.uniq : []
@@ -85,6 +94,27 @@ module CallFacts
       @memo[key] = compute_definers(name, instance)
     end
 
+    # The names' foreign Ruby definers (mruby's own Ruby the build links) that CodeGen compiled in this run
+    # (ADR 0371). A view next to `definers`, never merged into it: the foreign set still says who may
+    # answer, this says whose body a helper may call directly.
+    def foreign_definer?(name, owner)
+      d = definers(name)
+      !d.nil? && d[:foreign].include?(owner)
+    end
+
+    def compiled_foreign_owners(name)
+      d = definers(name)
+      return Set.new if d.nil? || @w.compiled_core.nil?
+
+      d[:foreign] & @w.compiled_core.call(name).keys
+    end
+
+    # Every foreign Ruby definer of +name+ is a compiled core method of this run.
+    def foreign_fully_compiled?(name)
+      d = definers(name)
+      !d.nil? && (d[:foreign] - compiled_foreign_owners(name)).empty?
+    end
+
     def method_missing_classes = @cw.method_missing_classes
 
     # May an instance of +klass+ answer +name+? true for an unbounded name.
@@ -93,7 +123,7 @@ module CallFacts
       return true if d.nil?
 
       if klass == CLASS_OBJECT
-        return d[:singleton] || [d[:ruby], d[:native], d[:foreign]].any? { |s| s.intersect?(CLASS_OR_MODULE) }
+        return d[:singleton] || !d[:class_native].empty? || [d[:ruby], d[:native], d[:foreign]].any? { |s| s.intersect?(CLASS_OR_MODULE) }
       end
       return true if method_missing_classes.include?(klass)
 
@@ -249,7 +279,9 @@ module CallFacts
       return nil unless foreign
       return nil if (ruby | native | foreign).intersect?(EVERYTHING)
 
-      { ruby: ruby, modules: modules, native: native, foreign: foreign, singleton: singleton }
+      # A native singleton method is only seen by a class or module object, never by an instance (ADR 0365).
+      class_native = class_registrations.fetch(name, []).to_set { |e| e[:owner] || '?' }
+      { ruby: ruby, modules: modules, native: native, foreign: foreign, singleton: singleton, class_native: class_native }
     end
 
     # Owners of the native registrations of +name+; nil when one cannot be read.

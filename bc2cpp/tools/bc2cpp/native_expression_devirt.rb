@@ -263,6 +263,44 @@ module NativeExpressionDevirt
     end
   end
 
+  # Class and module variables of a native source: C variable => {field:, class_name:}.
+  def class_variable_map(source)
+    class_variables = {}
+    scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+      class_variables[variable] = { field: field, class_name: class_name }
+    end
+    scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+      class_variables[variable] ||= { field: nil, class_name: class_name }
+    end
+    scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+      class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
+    end
+    source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
+      info = class_variables[variable]
+      info[:field] ||= field if info
+    end
+    scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
+      field = field.first
+      class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
+    end
+    scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      class_variables[variable] ||= { field: nil, class_name: class_name }
+    end
+    # class.c boots BasicObject/Object/Module/Class through boot_defclass and
+    # only names them afterwards, so their method tables (`==`, `equal?`, ...)
+    # would otherwise have an unknown owner, which disables every name they
+    # share with a built-in class. Read the names off the source's own
+    # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
+    booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+    source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
+      class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
+    end
+    scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+      class_variables[variable] ||= { field: nil, class_name: class_name }
+    end
+    class_variables
+  end
+
   def scan_class_registrations(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     opaque_owners = Hash.new { |hash, name| hash[name] = [] }
@@ -271,39 +309,7 @@ module NativeExpressionDevirt
       next unless File.file?(path)
 
       source = read_source(path)
-      class_variables = {}
-      scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
-        class_variables[variable] = { field: field, class_name: class_name }
-      end
-      scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
-        class_variables[variable] ||= { field: nil, class_name: class_name }
-      end
-      scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
-        class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
-      end
-      source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
-        info = class_variables[variable]
-        info[:field] ||= field if info
-      end
-      scan_with(source, %w[mrb->], /\bmrb->(\w+_class)\b/) do |field|
-        field = field.first
-        class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
-      end
-      scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
-        class_variables[variable] ||= { field: nil, class_name: class_name }
-      end
-      # class.c boots BasicObject/Object/Module/Class through boot_defclass and
-      # only names them afterwards, so their method tables (`==`, `equal?`, ...)
-      # would otherwise have an unknown owner, which disables every name they
-      # share with a built-in class. Read the names off the source's own
-      # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-      booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
-      source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
-        class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
-      end
-      scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
-        class_variables[variable] ||= { field: nil, class_name: class_name }
-      end
+      class_variables = class_variable_map(source)
       tags = {}
       source.scan(/MRB_SET_INSTANCE_TT\s*\(\s*(\w+)\s*,\s*(MRB_TT_\w+)\s*\)/) do |variable, tag|
         tags[variable] = tag
@@ -376,6 +382,53 @@ module NativeExpressionDevirt
     end
 
     [registrations, opaque_owners]
+  end
+
+  CLASS_METHOD_CACHE = {}
+
+  # The registrations a class or module object answers: `Array.[]`, the `.[]` of every Struct class,
+  # module functions. They sit on a singleton, so scan_class_registrations leaves them out (they cannot
+  # shadow an instance method); CallFacts::Answers reads them as the names a Class/Module object answers.
+  def class_method_registrations(paths)
+    files = Array(paths).select { |path| File.file?(path) }
+    key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
+    CLASS_METHOD_CACHE.fetch(key) do
+      CLASS_METHOD_CACHE.clear
+      CLASS_METHOD_CACHE[key] = scan_class_method_registrations(files)
+    end
+  end
+
+  CLASS_METHOD_MACROS = %w[
+    mrb_define_class_method mrb_define_class_method_id mrb_define_singleton_method mrb_define_singleton_method_id
+    mrb_define_module_function mrb_define_module_function_id
+  ].freeze
+
+  # name => [{owner:, function:, path:, macro:}]; owner is the registering class variable's class name, nil
+  # when it is a local the scan cannot name (Struct.new's fresh class).
+  def scan_class_method_registrations(paths)
+    registrations = Hash.new { |hash, name| hash[name] = [] }
+    Array(paths).each do |path|
+      source = read_source(path)
+      next unless CLASS_METHOD_MACROS.any? { |macro| source.include?(macro) }
+
+      class_variables = class_variable_map(source)
+      CLASS_METHOD_MACROS.each do |macro|
+        macro_calls(source, macro).each do |arguments|
+          next unless arguments.length == 5
+
+          name = if macro.end_with?('_id')
+                   symbol_name(arguments[2])
+                 elsif arguments[2].start_with?('"')
+                   unescape_c_string(arguments[2][1...-1])
+                 end
+          next unless name
+
+          registrations[name] << { owner: class_variables.dig(arguments[1], :class_name), function: arguments[3].strip,
+                                   path: path, macro: macro }
+        end
+      end
+    end
+    registrations.to_h
   end
 
   # NAMED_TWIN_CALLS, applied to the per-class map the body scan above built.
