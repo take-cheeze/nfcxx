@@ -165,6 +165,11 @@ class ClosedWorld
     nil
   end
 
+  # Source files of the Ruby `method_missing` definitions (lint cross-check, ADR 0368).
+  def method_missing_files
+    @registry.fetch('method_missing', []).reject { |d| d.owner == '<native>' }.filter_map { |d| @ireps[d.irep]&.file }.uniq
+  end
+
   def method_missing_classes
     @mm_classes
   end
