@@ -38,8 +38,20 @@ class CodeGen
     @class_pools_on = class_pools_enabled?
     return unless @class_pools_on
 
-    (@numeric_ivar_groups || {}).each { |key, group| @class_ivar_pools[key] = 0 unless group.structural }
+    (@numeric_ivar_groups || {}).each do |key, group|
+      if !group.structural
+        @class_ivar_pools[key] = 0
+      elsif (stores = checked_group_stores(group))
+        # SETTER_POOLS (ADR 0370): the setter calls and audited natives are this group's other writers.
+        @class_ivar_pools[key] = stores[:classes].reduce(NumericFlow::CHECKED) { |mask, klass| mask | numeric_class_bit(klass) }
+        @checked_pools_used = true
+      end
+    end
     (@entry_cand || {}).each_key { |key| @class_arg_pools[key] = 0 }
+    setter_arg_candidates.each_key do |key|
+      @class_arg_pools[key] = NumericFlow::CHECKED
+      @checked_pools_used = true
+    end
     return unless const_missing_free?
 
     (@numeric_const_groups || {}).each { |name, group| @class_const_pools[name] = 0 unless group.structural }
@@ -135,13 +147,17 @@ class CodeGen
     @class_ivar_pools.keys.each do |key|
       group = @numeric_ivar_groups.fetch(key)
       sites = group.sites.map { |irep, idx, reg| [irep, idx, reg] }
+      sites += checked_group_reads(group) if group.structural
       next unless grow_class_pool(@class_ivar_pools, key, sites) { group.readers.each { |l| return_class_invalidate(l) } }
 
       changed = true
     end
     @class_arg_pools.keys.each do |key|
-      sites, k = @entry_cand.fetch(key)
-      reads = sites.map { |(irep, idx, recv, _argc, _own)| [irep, idx, (recv + k).to_s] }
+      reads = setter_arg_candidates[key]
+      unless reads
+        sites, k = @entry_cand.fetch(key)
+        reads = sites.map { |(irep, idx, recv, _argc, _own)| [irep, idx, (recv + k).to_s] }
+      end
       next unless grow_class_pool(@class_arg_pools, key, reads) { return_class_invalidate(key[0]) }
 
       changed = true
@@ -187,12 +203,14 @@ class CodeGen
       lines << "  CLASSARG #{d ? "#{d.owner}##{d.name}" : "<irep #{label}>"} arg#{k} (#{class_mask_name(mask)})"
     end
     (@class_const_pools || {}).each { |name, mask| lines << "  CLASSCONST #{name} (#{class_mask_name(mask)})" }
+    lines.concat(setter_pool_report)
     lines.sort
   end
 
   # "NIL|Game::Foo" style name of a class mask.
   def class_mask_name(mask)
     parts = []
+    parts << 'CHECKED' if mask.anybits?(NumericFlow::CHECKED)
     parts << numeric_mask_name(mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)) if (mask & ((1 << NumericFlow::CLASS_BIT_BASE) - 1)).nonzero?
     (@numeric_class_bits || {}).each { |klass, bit| parts << klass if mask.anybits?(bit) }
     parts.empty? ? 'NONE' : parts.join('|')

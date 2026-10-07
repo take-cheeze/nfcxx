@@ -56,6 +56,9 @@ module NumericFlow
   # Bits a fact outside one method (argument, ivar, constant) may not carry: OTHER, Range, EXC and
   # every class bit. Only return values ship them across methods. Object kinds are not among them.
   OPAQUE = OTHER | (((1 << OBJECT_KIND_BASE) - 1) & (-1 << 7))
+  # Provenance, not a class (ADR 0370): the set came from a pool whose completeness is a runtime-checked claim. A mask
+  # that carries it never equals a class bit, so every unguarded decoder refuses it; only CHECKED_POOL_EXACT reads it.
+  CHECKED = 1 << (OBJECT_KIND_BASE - 1)
 
   module_function
 

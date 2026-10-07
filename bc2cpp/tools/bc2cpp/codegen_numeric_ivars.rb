@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative 'native_ivar_scopes'
 require_relative 'numeric_flow'
 
 # CodeGen: NUMERIC_IVAR_PROOF (ADR 0276).
@@ -34,7 +35,9 @@ require_relative 'numeric_flow'
 class CodeGen
   # `structural` is the part of `failed` that does not depend on a flow (a poisoned name, a wild family,
   # an attr_writer), which the class pools of ADR 0295 reuse.
-  NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed, :structural)
+  # `checked` (ADR 0370) is nil, or the stores outside the group's own SETIVs that its class pool may account for
+  # instead: { setters: [setter names], classes: [classes natives construct] }. The numeric proof ignores it.
+  NumericIvarGroup = Struct.new(:family, :name, :mask, :sites, :readers, :failed, :structural, :checked)
 
   # Sends that write an ivar by computed name: only a Symbol literal argument
   # (poisoned by name) is tolerated.
@@ -76,12 +79,24 @@ class CodeGen
         end
 
         group = (@numeric_ivar_groups[[numeric_family(owner.owner), name]] ||=
-                   NumericIvarGroup.new(numeric_family(owner.owner), name, 0, [], Set.new, false, false))
+                   NumericIvarGroup.new(numeric_family(owner.owner), name, 0, [], Set.new, false, false, nil))
         group.readers << irep.label
         group.sites << [irep, idx, insn.regs.first] if insn.op == 'SETIV'
       end
     end
+    add_native_store_groups
     fail_numeric_ivar_groups(poisoned)
+  end
+
+  # An audited native store (NativeIvarScopes::STORES) is a writer the bytecode scan cannot see, so a scoped
+  # slot no Ruby touches still needs a group for its class pool to join the native stores into.
+  def add_native_store_groups
+    NativeIvarScopes::STORES.each_key do |name|
+      Array(@native_ivar_scopes[name]).each do |owner|
+        family = numeric_family(owner)
+        @numeric_ivar_groups[[family, name]] ||= NumericIvarGroup.new(family, name, 0, [], Set.new, false, false, nil)
+      end
+    end
   end
 
   def numeric_ivar_prerequisites_missing?
@@ -213,10 +228,24 @@ class CodeGen
     end
     @numeric_ivar_groups.each_value do |group|
       native_family = numeric_ivar_native_poisoned?(group.family, group.name)
-      group.failed = native_family || poisoned.include?(group.name) || wild.include?(group.family) ||
-                     writers.include?([group.family, group.name])
+      wrote = writers.include?([group.family, group.name])
+      group.failed = native_family || poisoned.include?(group.name) || wild.include?(group.family) || wrote
       group.structural = group.failed
+      group.checked = checked_pool_stores(group, native_family, wrote) unless poisoned.include?(group.name) || wild.include?(group.family)
     end
+  end
+
+  # SETTER_POOLS (ADR 0370): a group the numeric proof refuses only because an attr_writer or an audited native
+  # writes it still has a class pool when every such store is a visible setter call or a class the audit names.
+  def checked_pool_stores(group, native_family, wrote)
+    return nil unless wrote || native_family
+
+    # A native spelling counts as audited only inside the families the scope analysis accepted.
+    audited = NativeIvarScopes::STORES[group.name] if native_family && @native_ivar_scopes[group.name]
+    return nil if native_family && audited.nil?
+
+    setters = (wrote ? ["#{group.name}="] : []) + (audited ? audited[:setters] : [])
+    { setters: setters.uniq, classes: audited ? audited[:classes] : [] }
   end
 
   def numeric_ivar_native_poisoned?(family, name)

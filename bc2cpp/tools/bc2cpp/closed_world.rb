@@ -79,6 +79,7 @@ class ClosedWorld
     @global_refusal = nil
     @outside_names = Set.new
     @native_tokens = Set.new
+    @native_other_literals = Set.new
     @ruby_tokens = {}
     @outside_ruby_names = Set.new
     @outside_name_paths = {}
@@ -677,6 +678,7 @@ class ClosedWorld
       names = Set.new
       @native_code_tokens[path] = Set.new(text.scan(/[A-Za-z_]\w*/))
       merge_native_funcall_names(text)
+      record_native_other_literals(text)
       dynamic = text.match?(NATIVE_DYNAMIC)
       defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
       unless path.match?(NATIVE_CORE)
@@ -786,6 +788,22 @@ class ClosedWorld
     end
   end
 
+  # SETTER_POOLS (ADR 0370): every string literal of an outside native source except the name a registration
+  # (`mrb_define_method(M, cls, "x=", ...)`) gives, so a setter only a registration spells is not one native code calls.
+  NATIVE_REGISTRATION_KINDS = %w[method class_method module_function].freeze
+
+  def record_native_other_literals(text)
+    counts = Hash.new(0)
+    text.scan(C_STRING) { |(lit)| counts[lit] += 1 }
+    text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
+      next unless NATIVE_REGISTRATION_KINDS.include?(kind)
+
+      lit = bc2cpp_c_call_args(body)[2].to_s[/\A\s*#{C_STRING}\s*\z/o, 1]
+      counts[lit] -= 1 if lit
+    end
+    counts.each { |lit, n| @native_other_literals << lit if n.positive? }
+  end
+
   def merge_outside_tokens(path, text)
     tokens = (@ruby_tokens[path] = Set.new)
     text.scan(/[A-Za-z_]\w*[?!=]?/) do |tok|
@@ -795,6 +813,11 @@ class ClosedWorld
   end
 
   public
+
+  # Does an outside native source spell +literal+ as a string other than a registration's method name?
+  def outside_native_literal?(literal)
+    @native_other_literals.include?(literal)
+  end
 
   # Does any outside (foreign Ruby) source spell the identifier +token+?
   def outside_ruby_token?(token)
