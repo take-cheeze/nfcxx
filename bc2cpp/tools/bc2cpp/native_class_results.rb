@@ -8,7 +8,7 @@ require_relative 'source_text'
 module NativeClassResults
   FILES = {
     '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e],
-    '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => 'de872dbf521cd005aaacf397e53508ec04851d7a4a0fd9de94261c8887de50e1',
+    '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => '8065d3073a5bb5290cafe20df0785ccdfecc0563ef14ac211f203915c1a2fc29',
     '3rd/mruby/src/hash.c' => '42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16',
     '3rd/mruby/src/string.c' => '1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00',
     '3rd/mruby/src/array.c' => '5e0541466b6aa9c8eaab0bcc7d51db15babae7059871854eeef81f08ac53dc11',
