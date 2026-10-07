@@ -21,7 +21,8 @@ class CodeGen
       CallFacts::World.new(closed_world: @closed_world, registry: @registry, superclass_of: @superclass_of,
                            included: @included_modules, prepended: @prepended_modules,
                            unknown_mixins: @unknown_mixins, native_sources: @native_name_sources,
-                           installed: symbol_installed_names, instance_installed: symbol_instance_installed_names)
+                           installed: symbol_installed_names, instance_installed: symbol_instance_installed_names,
+                           compiled_core: ->(name) { core_compiled_definers(name) })
     )
   end
 

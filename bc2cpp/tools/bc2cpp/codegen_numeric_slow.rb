@@ -505,7 +505,7 @@ class CodeGen
           c = mrb_cmp(M, a, b);
           if (c == -2) mrb_raisef(M, E_ARGUMENT_ERROR, "comparison of %T with %T failed", a, b);
         } else if (mrb_type(a) == MRB_TT_HASH) {
-          return mrb_funcall(M, a, "#{op}", 1, b);
+          #{numeric_slow_hash_cmp_arm(op)}
         } else {
           return bc2cpp_nomethod_named(M, a, "#{op}", 1, b);
         }
