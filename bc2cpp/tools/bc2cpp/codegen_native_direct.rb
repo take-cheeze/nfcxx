@@ -130,6 +130,15 @@ module NativeDirectFallback
     branches = arms.group_by { |_, spec| spec }.map do |(function, kinds), owners|
       check = owners.map { |owner, _| "bc2cpp_native_class == rgss::#{CodeGen::NATIVE_WRAPPER_CLASS_ACCESSORS.fetch(owner)}()" }
                     .join(' || ')
+      if native_param_unbox_on?
+        guards, call = native_param_unbox_call(name, d, recv, argv, function, kinds)
+        body = if guards.empty?
+                 "    #{call.chomp}\n"
+               else
+                 "    if (#{guards.join(' && ')}) {\n      #{call.chomp}\n    } else {\n      #{generic.chomp}\n    }\n"
+               end
+        next "if (#{check}) {\n#{body}  } else "
+      end
       guards = kinds.each_index.select { |i| kinds[i] == :int }.map { |i| "mrb_integer_p(#{argv[i]})" }
       args = kinds.each_index.map do |i|
         case kinds[i]
@@ -157,10 +166,19 @@ module NativeDirectFallback
   end
 
   # EXACT_CORE_RECEIVER (ADR 0280): the receiver is a fresh `Klass.new`, so the class test is a
-  # fact. An integer argument that is not one still takes the ordinary send -- unless the Fixnum
+  # fact. Behind native_param_unbox_name? each :int/:float argument is converted as mrb_get_args does (ADR 0372);
+  # without it an integer argument that is not a Fixnum still takes the ordinary send, unless the Fixnum
   # proof covers it, which drops the test and with it the by-name else (ADR 0358).
   def native_direct_exact_line(d, recv, name, argv, (owner, (function, kinds)), generic, int_site = nil)
     native_int_arg_probe("exact:#{owner}##{name}", *int_site, argv) if int_site && ENV['BC2CPP_NATIVE_INT_ARGS']
+    note = "// NATIVE_DIRECT_EXACT :#{name} -- fresh #{owner} (unguarded proof) calls the shared native entry point\n"
+    if native_param_unbox_on?
+      proven = kinds.each_index.select { |i| kinds[i] == :int && !native_int_guard_needed?(int_site, argv, i) }
+      guards, call = native_param_unbox_call(name, d, recv, argv, function, kinds, proven: proven)
+      return "#{note}  #{call.chomp}\n" if guards.empty?
+
+      return "#{note}  if (#{guards.join(' && ')}) {\n    #{call.chomp}\n  } else {\n    #{generic.chomp}\n  }\n"
+    end
     args = kinds.each_index.map do |i|
       case kinds[i]
       when :int then "mrb_integer(#{argv[i]})"
@@ -172,7 +190,6 @@ module NativeDirectFallback
     call = "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});"
     guards = kinds.each_index.select { |i| kinds[i] == :int && native_int_guard_needed?(int_site, argv, i) }
                              .map { |i| "mrb_integer_p(#{argv[i]})" }
-    note = "// NATIVE_DIRECT_EXACT :#{name} -- fresh #{owner} (unguarded proof) calls the shared native entry point\n"
     return "#{note}  #{call}\n" if guards.empty?
 
     "#{note}  if (#{guards.join(' && ')}) {\n    #{call}\n  } else {\n    #{generic.chomp}\n  }\n"
