@@ -289,7 +289,17 @@ module CallFacts
       return Set.new unless defs.any? { |d| d.owner == '<native>' } || !@cw.native_paths_spelling(name).empty?
 
       owners = registrations.fetch(name, []).map { |e| e[:owner]&.fetch(:class_name, nil) } + opaque_owners.fetch(name, [])
+      return Set.new if owners.empty? && class_registered_only?(name)
+
       owners.empty? || owners.include?(nil) ? nil : owners.to_set
+    end
+
+    # Every native source that spells +name+ registers it on a class or module object (`definers[:class_native]`),
+    # and the instance scan found no registration or alias of it: the spelling is not an instance definer.
+    def class_registered_only?(name)
+      paths = @cw.native_paths_spelling(name)
+      registered = class_registrations.fetch(name, []).map { |e| e[:path] }
+      !registered.empty? && paths.all? { |path| registered.include?(path) }
     end
 
     # Owners outside Ruby defines +name+ on; nil when a wildcard owner could.

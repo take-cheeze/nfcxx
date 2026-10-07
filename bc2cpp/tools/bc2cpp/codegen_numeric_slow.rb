@@ -203,7 +203,7 @@ class CodeGen
 
   # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
   # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `% -@` ADR 0367,
-  # `- & | <<` ADR 0366).
+  # `- & | <<` ADR 0366, `zero?` ADR 0373).
   def numeric_slow_closed_source(key, head)
     op = NUMERIC_SLOW_KEYS.key(key)
     if NUMERIC_SLOW_ARITH.key?(key)
@@ -217,6 +217,9 @@ class CodeGen
       return nil unless misc
 
       key == 'mod' ? numeric_slow_closed_mod_source(head, misc) : numeric_slow_closed_neg_source(head, misc)
+    elsif key == 'zero'
+      zero = numeric_slow_zero
+      zero ? numeric_slow_closed_zero_source(head, zero) : nil
     elsif numeric_slow_closed?(op)
       case key
       when 'div' then numeric_slow_closed_div_source(head)
