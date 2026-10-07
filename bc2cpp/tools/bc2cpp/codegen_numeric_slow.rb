@@ -63,19 +63,23 @@ class CodeGen
     builtin_class_send_safe?(name, owners + ['Float'])
   end
 
-  # NUMERIC_SLOW_CLOSED (ADR 0360, 0361, 0364): operators whose every definer in the build is on these classes, which
-  # the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `-` is absent:
-  # Array#- (mruby-array-ext) is a hash/`==` walk with no public entry point to mirror.
+  # NUMERIC_SLOW_CLOSED (ADR 0360, 0361, 0364, 0366): operators whose every definer in the build is on these classes,
+  # which the helper's own arms cover, so its by-name fallback is dead and becomes a proven NoMethodError. `- & | <<`
+  # run bodies that mruby keeps static, which patches/mruby-expose-collection-op-bodies.patch exports; they also need
+  # numeric_slow_collection_ready?.
   NUMERIC_SLOW_CLOSED = { '/' => %w[Integer Float], '+' => %w[Integer Float Array String],
                           '*' => %w[Integer Float Array String], '^' => %w[Integer NilClass TrueClass FalseClass],
-                          '>>' => %w[Integer], 'round' => %w[Integer Float] }.freeze
+                          '>>' => %w[Integer], 'round' => %w[Integer Float], '-' => %w[Integer Float Array],
+                          '&' => %w[Integer NilClass TrueClass FalseClass Array],
+                          '|' => %w[Integer NilClass TrueClass FalseClass Array],
+                          '<<' => %w[Integer Array String IO] }.freeze
 
   # `members` is CallFacts::Answers' set of every class that may answer `name`; it is nil for a name
   # nothing bounds (computed installers, Object/Kernel definers, unreadable native owners). `owners` are the
   # classes whose method the helper's arms run.
   def numeric_slow_closed?(name)
     owners = NUMERIC_SLOW_CLOSED[name]
-    return false unless owners && numeric_slow_closed_world?
+    return false unless owners && numeric_slow_closed_world? && numeric_slow_collection_ready?(name)
 
     answers = call_facts_answers
     definers = answers.definers(name)
@@ -198,7 +202,8 @@ class CodeGen
   end
 
   # The closed form of helper `key`, or nil when its operator is not proven closed in this world (each key is
-  # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `% -@` ADR 0367).
+  # independent: `+ *` ADR 0361, `< <= > >=` ADR 0362, `/` ADR 0360, `^ >> round` ADR 0364, `% -@` ADR 0367,
+  # `- & | <<` ADR 0366).
   def numeric_slow_closed_source(key, head)
     op = NUMERIC_SLOW_KEYS.key(key)
     if NUMERIC_SLOW_ARITH.key?(key)
@@ -218,6 +223,8 @@ class CodeGen
       when 'xor' then numeric_slow_closed_xor_source(head)
       when 'rshift' then numeric_slow_closed_rshift_source(head)
       when 'round' then numeric_slow_closed_round_source(head)
+      when 'and', 'or' then numeric_slow_closed_bits_source(key, head)
+      when 'lshift' then numeric_slow_closed_lshift_source(head)
       else raise "no closed form for NUMERIC_SLOW_PATH helper #{key}"
       end
     end
@@ -376,9 +383,16 @@ class CodeGen
   # body (a non-numeric operand is its TypeError); String and Array take the C++ of mrb_str_plus_m, mrb_str_times,
   # mrb_ary_plus and mrb_ary_times, built from the public entry points they call; no other class answers.
   def numeric_slow_closed_arith_source(key, op, helper, head)
-    arms = key == 'add' ? numeric_slow_closed_plus_arms : numeric_slow_closed_times_arms
+    arms = case key
+           when 'add' then numeric_slow_closed_plus_arms
+           when 'sub' then numeric_slow_closed_minus_arms
+           else numeric_slow_closed_times_arms
+           end
+    # `-` has no String arm (String#- does not exist), so that receiver falls to the proven NoMethodError.
+    string_arm = arms[:string] ? "\n  else if (mrb_string_p(a)) {\n#{arms[:string]}\n  }" : ''
+    extern = key == 'sub' ? numeric_slow_extern('mrb_ary_ext_sub_impl') : ''
     <<~CPP
-      #{head}, mrb_value b) {
+      #{extern}#{head}, mrb_value b) {
       #{numeric_slow_int_pair_source(key)}
         mrb_state* mrb = M;  // E_ARGUMENT_ERROR names the state `mrb`
         int ai = mrb_gc_arena_save(M);
@@ -390,10 +404,7 @@ class CodeGen
         else if (mrb_float_p(a)) {
           r = #{helper}(M, a, b);
         }
-      #endif
-        else if (mrb_string_p(a)) {
-      #{arms.fetch(:string)}
-        }
+      #endif#{string_arm}
         else if (mrb_array_p(a)) {
       #{arms.fetch(:array)}
         }
