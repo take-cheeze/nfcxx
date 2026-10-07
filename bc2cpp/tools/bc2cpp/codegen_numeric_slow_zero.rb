@@ -2,7 +2,7 @@
 
 require_relative 'core_misc'
 
-# NUMERIC_SLOW_CLOSED `zero?` (ADR 0373). Numeric#zero? is Ruby (`self == 0`, mruby-numeric-ext), so the helper kept a
+# NUMERIC_SLOW_CLOSED `zero?` (ADR 0374). Numeric#zero? is Ruby (`self == 0`, mruby-numeric-ext), so the helper kept a
 # by-name call for every receiver that is not a Float. Its definers are that one Ruby method and, on class objects,
 # mruby-io's File.zero? / FileTest.zero?; the first is a compiled core body this run may call (the ADR 0371 view), the
 # second raises the ArgumentError of its own first statement for the zero arguments the helper always passes.
@@ -100,7 +100,7 @@ class CodeGen
       #ifndef MRB_NO_FLOAT
         if (mrb_float_p(a)) return mrb_bool_value(mrb_float(a) == 0);
       #endif
-        // CORE_COMPILED_ZERO -- every other Numeric runs the compiled Numeric#zero? body, no by-name call (ADR 0373)
+        // CORE_COMPILED_ZERO -- every other Numeric runs the compiled Numeric#zero? body, no by-name call (ADR 0374)
         if (mrb_obj_is_kind_of(M, a, mrb_class_get(M, "Numeric"))) {
           int ai = mrb_gc_arena_save(M);
           mrb_value r = #{impl}(M, a);
