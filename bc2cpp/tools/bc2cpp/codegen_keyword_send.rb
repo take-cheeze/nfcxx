@@ -633,7 +633,11 @@ class CodeGen
   # before the SEND (ARRAY-then-ARYCAT, or LOADNIL-then-ARYCAT when the first
   # argument is a splat), so mrb_funcall_argv with its RARRAY_LEN/RARRAY_PTR is
   # exact. Keyword variants have no such translation and keep `#error`.
-  def compile_dynamic_splat_send(name, recv, d, argv_reg)
+  def compile_dynamic_splat_send(name, recv, d, argv_reg, irep: nil, idx: nil, self_implicit: false)
+    if name == 'call' && !self_implicit && (code = block_param_call_splat_code(irep, idx, d, recv, argv_reg))
+      return code
+    end
+
     # CORE_PROC_CALL: see dynamic_dispatch_line.
     if @compiling_core && name == 'call'
       return <<~CPP
@@ -669,7 +673,7 @@ class CodeGen
       if positional.nil?
         return nil if nk_spec
 
-        return compile_dynamic_splat_send(name, recv, d, next_reg)
+        return compile_dynamic_splat_send(name, recv, d, next_reg, irep: irep, idx: idx, self_implicit: self_implicit)
       end
 
       next_reg += 1 # the single register the splatted array itself occupied.

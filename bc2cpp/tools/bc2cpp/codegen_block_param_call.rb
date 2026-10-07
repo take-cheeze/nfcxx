@@ -29,6 +29,37 @@ module BlockParamCall
       "  }\n"
   end
 
+  # BLOCK_PARAM_CALL_SPLAT: `blk.call(*args)` with a runtime-sized Array (mrbc builds it in
+  # R(d+1) before the SEND, see compile_dynamic_splat_send). The same proof as above; the
+  # else arm is nil's NoMethodError, raised with no arguments since the message does not
+  # name them. A Proc is yielded to with the Array's own length and elements, so the splat
+  # needs no fixed size.
+  def block_param_call_splat_code(irep, idx, d, recv, argv_reg)
+    return nil unless @compiling_core && irep && !idx.nil?
+    return nil if devirt_blocked_name?('call')
+    return nil unless block_param_receiver?(irep, idx, d.to_s) || blkpush_receiver?(irep, idx, d.to_s)
+    return nil unless block_param_nil_call_dead?
+
+    "  // BLOCK_PARAM_CALL_SPLAT :call -- receiver is the method's own &block (nil or a Proc): a Proc is " \
+      "yielded to with the splatted Array, nil raises NoMethodError\n" \
+      "  if (mrb_proc_p(#{recv})) {\n" \
+      "    r#{d} = bc2cpp_yield_argv(M, #{recv}, RARRAY_LEN(r#{argv_reg}), RARRAY_PTR(r#{argv_reg}));\n" \
+      "  } else {\n" \
+      "    r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"call\");\n" \
+      "  }\n"
+  end
+
+  # `yield *args` compiles to BLKPUSH + `call`: every definition is a BLKPUSH, which raises
+  # LocalJumpError for a nil block (codegen_insn), so the receiver is a Proc.
+  def blkpush_receiver?(irep, idx, reg)
+    return false unless idx.between?(0, irep.instructions.length - 1)
+
+    defs = BytecodeIR.reaching_definitions(irep, idx, reg)
+    return false if defs.nil? || defs.empty?
+
+    defs.none?(&:entry?) && defs.all? { |definition| irep.instructions[definition.index].op == 'BLKPUSH' }
+  end
+
   # Every definition of the register at `idx` is the block a method was entered with,
   # in that method or (through GETUPVAR) an enclosing one, and nothing rewrites it.
   def block_param_receiver?(irep, idx, reg)
