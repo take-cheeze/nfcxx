@@ -110,7 +110,7 @@ class CodeGen
     @numeric_class_bits ||= {}
     @numeric_class_bits[klass] ||= begin
       bit = NumericFlow::CLASS_BIT_BASE + @numeric_class_bits.size
-      raise 'numeric class bits reached the LCF object kinds (NumericFlow::OBJECT_KIND_BASE)' if bit >= NumericFlow::OBJECT_KIND_BASE
+      raise 'numeric class bits reached the CHECKED provenance bit (NumericFlow::CHECKED)' if bit >= NumericFlow::OBJECT_KIND_BASE - 1
 
       1 << bit
     end
@@ -581,6 +581,9 @@ class CodeGen
 
     r = reg.to_i
     return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+
+    # The one register CHECKED_POOL_EXACT is compiling under its class test (ADR 0370).
+    return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]
