@@ -2084,22 +2084,29 @@ class CodeGen
 
     instances, scoped, native_free, instance_scope = receiver_instance_scope(site, name)
     installed = instance_scope ? symbol_instance_installed_names : symbol_installed_names
-    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : @closed_world.refusal(name, listed, site[:self_owner], installed,
-                                                                          instances: instances, scoped: scoped,
-                                                                          native_free: native_free,
-                                                                          instance_scope: instance_scope)
+    refuse = lambda do |chain, arms = nil|
+      @closed_world.refusal(name, chain, site[:self_owner], installed, instances: instances, scoped: scoped,
+                                                                       native_free: native_free,
+                                                                       instance_scope: instance_scope,
+                                                                       singleton_arms: arms)
+    end
+    reason = argv.size > FUNCALL_ARGC_MAX ? :argc : refuse.call(listed)
+    singleton_arms = nil
+    singleton_branches = ''
+    if reason == :singleton_definer && (arms = singleton_arm_branches(name, d, recv, argv))
+      singleton_arms, singleton_branches = arms
+      reason = refuse.call(listed, singleton_arms)
+    end
     extra_branches = ''
     if reason == :unlisted_class
-      extra = unlisted_class_guards(name, listed, site)
+      extra = unlisted_class_guards(name, listed, site, singleton_arms)
       if extra
         extra_branches = extra.map do |klass|
           arm = unlisted_class_call(klass, name, d, recv, argv, site)&.chomp&.gsub("\n", "\n      ") || dispatch.chomp
           "if (#{owner_class_ptr_expr(klass)} == mrb_obj_class(M, #{recv})) {\n      #{arm}\n    } else "
         end.join
         listed += extra
-        reason = @closed_world.refusal(name, listed, site[:self_owner], installed, instances: instances,
-                                                                          scoped: scoped, native_free: native_free,
-                                                                          instance_scope: instance_scope)
+        reason = refuse.call(listed, singleton_arms)
       end
     end
     return dispatch.sub(/\n\z/, " /* CLOSED_WORLD kept: #{reason} */\n") if reason
@@ -2109,9 +2116,30 @@ class CodeGen
     # to hold every such site to NOMETHOD_REVIEWED (ADR 0226).
     marker = NomethodReviewed.marker(name, self_receiver: !site[:self_owner].nil?)
     error = "r#{d} = bc2cpp_nomethod_named(M, #{recv}, \"#{name}\"#{args}); #{marker}\n"
+    extra_branches = singleton_branches + extra_branches
     return error if extra_branches.empty?
 
     "#{extra_branches}{\n      #{error.chomp}\n    }\n"
+  end
+
+  # SINGLETON_ARMS (ADR 0369): one identity arm per module whose `.singleton` definition answers `name`,
+  # so a chain whose only open reason is :singleton_definer can close its else. [modules, branches], or
+  # nil when any singleton definer cannot be called directly (constant_object_send_code also proves the
+  # singleton chain free of mixins and the name unrebound).
+  def singleton_arm_branches(name, d, recv, argv)
+    return nil if hot_only_active? || ENV['BC2CPP_SINGLETON_ARMS'] == '0'
+
+    modules = @closed_world.singleton_arm_modules(name)
+    return nil if modules.nil? || modules.size > UNLISTED_CLASS_GUARDS_MAX
+
+    branches = modules.sort.map do |mod|
+      code = constant_object_send_code(name, argv.size, d, recv, argv, mod)
+      return nil unless code && code.include?('CLOSED_WORLD_CONSTANT_OBJECT')
+
+      "if (mrb_type(#{recv}) == MRB_TT_MODULE && mrb_class_ptr(#{recv}) == #{owner_class_ptr_expr(mod)}) {\n" \
+        "#{code.gsub(/^/, '    ').chomp}\n    } else "
+    end
+    [modules, branches.join]
   end
 
   # GUARD_VIOLATION (docs/adr/0290): the else arm of a guard whose test the closed world
@@ -2131,7 +2159,7 @@ class CodeGen
   # module owner has no class to compare), and a bounded number of them.
   UNLISTED_CLASS_GUARDS_MAX = 8
 
-  def unlisted_class_guards(name, listed, site)
+  def unlisted_class_guards(name, listed, site, singleton_arms = nil)
     # HOT_ONLY leaves definers uncompiled, so they look unlisted for a reason a full
     # build would not have, and the dead fallback this creates could not be in
     # NOMETHOD_REVIEWED, which is the full build's list (ADR 0226): keep the dispatch.
