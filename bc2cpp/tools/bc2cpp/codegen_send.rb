@@ -242,13 +242,21 @@ class CodeGen
         stable_constructor = stable_standard_constructor_class?(native_owner)
         class_value = stable_constructor ? "#{native[:class_fn]}()" : "mrb_class_ptr(#{recv})"
         class_guard = stable_constructor ? nil : "mrb_class_ptr(#{recv}) == #{native[:class_fn]}()"
+        unbox_stmts = []
         if native[:type_guard] == :int
           int_site = [irep, new_proof_idx, owner_def, trace_reg_offset]
           native_int_arg_probe("#{known}.new", *int_site, argv) if ENV['BC2CPP_NATIVE_INT_ARGS']
-          arg_checks = argv.each_index.reject { |i| native_int_arg_proven?(*int_site, argv, i) }
-                           .map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
+          if native_param_unbox_on?
+            # Bitmap#initialize branches on `f.kind_of? String` (a dispatched test), so only the first argument keeps
+            # its tag test; _init_size then converts both as "ii" (ADR 0372).
+            arg_checks = native_int_arg_proven?(*int_site, argv, 0) ? '' : "mrb_integer_p(#{argv[0]})"
+            unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [:int] * argv.size, unboxed: [0])
+          else
+            arg_checks = argv.each_index.reject { |i| native_int_arg_proven?(*int_site, argv, i) }
+                             .map { |i| "mrb_integer_p(#{argv[i]})" }.join(' && ')
+            unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
+          end
           arg_checks = nil if arg_checks.empty?
-          unboxed_argv = argv.map { |a| "mrb_integer(#{a})" }
           guard = [class_guard, arg_checks].compact.join(' && ')
           guard = nil if guard.empty?
           note_extra = if arg_checks
@@ -259,11 +267,15 @@ class CodeGen
                          " Every argument is a proven Fixnum (NATIVE_INT_ARGS, ADR 0318): no tag test, no dispatch."
                        end
         else
-          unboxed_argv = case native[:arg_type]
-                         when :int then argv.map { |a| "mrb_as_int(M, #{a})" }
-                         when :float then argv.map { |a| "mrb_as_float(M, #{a})" }
-                         else argv
-                         end
+          if native_param_unbox_on? && %i[int float].include?(native[:arg_type])
+            unbox_stmts, unboxed_argv = native_param_unbox_args(d, argv, [native[:arg_type]] * argv.size)
+          else
+            unboxed_argv = case native[:arg_type]
+                           when :int then argv.map { |a| "mrb_as_int(M, #{a})" }
+                           when :float then argv.map { |a| "mrb_as_float(M, #{a})" }
+                           else argv
+                           end
+          end
           unboxed_argv = ['mrb_nil_value()'] if unboxed_argv.empty?
           guard = class_guard
           note_extra = ''
@@ -283,7 +295,7 @@ class CodeGen
                 "  //#{note_extra} #{native[:fn]}'s own parameters are native mrb_int/",
                 "mrb_float, not mrb_value (except :object, passed straight through), so this call site #{unbox_phrase}, ",
                 "and passes #{class_value} as the exact native class pointer.\n"].join
-        call = "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n"
+        call = native_param_unbox_block(unbox_stmts, "r#{d} = #{native[:fn]}(M, #{class_value}, #{unboxed_argv.join(', ')});\n")
         return "#{note}  #{call}" unless guard
 
         # GUARD_VIOLATION: the class test cannot fail; only the argument tags still can.
