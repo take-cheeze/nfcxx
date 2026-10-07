@@ -203,6 +203,7 @@ class CodeGen
       lines << "  CLASSARG #{d ? "#{d.owner}##{d.name}" : "<irep #{label}>"} arg#{k} (#{class_mask_name(mask)})"
     end
     (@class_const_pools || {}).each { |name, mask| lines << "  CLASSCONST #{name} (#{class_mask_name(mask)})" }
+    lines.concat(setter_pool_report)
     lines.sort
   end
 

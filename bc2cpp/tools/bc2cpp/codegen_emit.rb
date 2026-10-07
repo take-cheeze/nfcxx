@@ -47,7 +47,9 @@ class CodeGen
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
     :@compiling_core => false, :@resumable => nil,
-    :@exact_core_site => nil, :@nonnil_receiver => nil
+    :@exact_core_site => nil, :@nonnil_receiver => nil,
+    # CHECKED_POOL_EXACT (ADR 0370): the one register its arm is being compiled under a class test for.
+    :@checked_pool_override => nil
   }.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's

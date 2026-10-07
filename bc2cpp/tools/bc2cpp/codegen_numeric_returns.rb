@@ -80,18 +80,43 @@ class CodeGen
     !@ireps[d.irep].nil?
   end
 
-  # Names an `alias`/`alias_method`/`define_method` gives a body another name:
-  # the registry lists the body under its original name only.
-  def numeric_aliased_names
-    names = Set.new
-    @ireps.each_value do |irep|
-      insns = irep.instructions
-      aliasing = insns.any? do |i|
-        i.op == 'ALIAS' || (i.op.include?('SEND') && %w[alias_method alias define_method define_singleton_method].include?(i.sym))
-      end
-      next unless aliasing
+  # Sends that give a body another name, with how many leading arguments name methods.
+  ALIAS_NAME_ARGUMENTS = { 'alias_method' => 2, 'alias' => 2, 'define_method' => 1, 'define_singleton_method' => 1 }.freeze
 
-      insns.each { |i| names << i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') }
+  # Names an `alias`/`alias_method`/`define_method` gives a body another name:
+  # the registry lists the body under its original name only. An irep whose aliasing operands are all
+  # Symbol literals contributes exactly those names (ADR 0370); any other aliasing send keeps every
+  # Symbol the irep loads, as before, so `attr_reader :contents` next to an unrelated `alias_method` no
+  # longer withdraws `contents`.
+  def numeric_aliased_names
+    @numeric_aliased_names ||= begin
+      names = Set.new
+      @ireps.each_value do |irep|
+        insns = irep.instructions
+        next unless insns.any? { |i| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+
+        names.merge(aliased_operand_names(irep) || insns.filter_map { |i| i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') })
+      end
+      names
+    end
+  end
+
+  # The names an irep's aliasing operations spell, or nil when one of them takes a name that is not a Symbol literal.
+  def aliased_operand_names(irep)
+    names = Set.new
+    irep.instructions.each_with_index do |insn, idx|
+      if insn.op == 'ALIAS'
+        names << insn.sym
+        old = insn.first_of(:name)&.value
+        names << old if old
+      elsif insn.op.include?('SEND') && (count = ALIAS_NAME_ARGUMENTS[insn.sym])
+        return nil unless insn.plain_fixed_argc? && insn.argc.to_i >= count
+
+        literal = (1..count).all? do |k|
+          irep.walk_writers(idx - 1, (insn.reg.to_i + k).to_s, follow_moves: true) { |w| w.op == 'LOADSYM' && w.sym ? names << w.sym : false }
+        end
+        return nil unless literal
+      end
     end
     names
   end

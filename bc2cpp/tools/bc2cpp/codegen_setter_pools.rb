@@ -128,6 +128,18 @@ class CodeGen
     group.checked[:setters].flat_map { |setter| setter_pool_reads(setter) }
   end
 
+  # One line per setter a pool depends on that was refused, and why (an admitted one shows as a CHECKED pool).
+  def setter_pool_report
+    return [] unless @numeric_ivar_groups
+
+    setters = @numeric_ivar_groups.each_value.flat_map { |group| group.structural && group.checked ? group.checked[:setters] : [] }
+    setters |= @registry.keys.select { |name| name.match?(SETTER_POOL_NAME) && @registry[name].any?(&:irep) }
+    setters.sort.filter_map do |setter|
+      reason = setter_pool_refusal(setter)
+      "  SETTERPOOL #{setter} refused (#{reason})" if reason && reason != :no_sites
+    end
+  end
+
   # [irep label, 1] => the argument reads of a Ruby setter definition the argument pools do not already hold.
   def setter_arg_candidates
     @setter_arg_candidates ||= begin
