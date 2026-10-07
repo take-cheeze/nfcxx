@@ -25,7 +25,7 @@ module NativeExactDirect
   # The code for `recv.name(*argv)` where `recv` is exactly `owner` (an RGSS
   # class name, or "X.singleton" for the class or module object X), or nil.
   # `int_site` ([irep, call index, owner_def, register offset]) lets an :int argument that is provably a Fixnum drop
-  # its mrb_integer_p test and with it the by-name else (ADR 0296, 0318). Behind native_param_unbox_on? no :int/:float
+  # its mrb_integer_p test and with it the by-name else (ADR 0296, 0318). Behind native_param_unbox_name? no :int/:float
   # argument is tested at all: each is converted as mrb_get_args does (ADR 0372).
   def native_exact_direct_code(name, d, recv, argv, owner, int_site: nil, legacy_int_proof: false)
     return nil if @call_block_expr
@@ -35,16 +35,18 @@ module NativeExactDirect
 
     @native_construct_used << owner
     native_int_arg_probe("exact:#{owner}##{name}", *int_site, argv) if int_site && ENV['BC2CPP_NATIVE_INT_ARGS']
-    proven = ->(i) { int_site && native_int_arg_proven?(*int_site, argv, i, legacy: legacy_int_proof) }
+    proven = entry.kinds.each_index.select { |i| int_site && native_int_arg_proven?(*int_site, argv, i, legacy: legacy_int_proof) }
     note = "  // NATIVE_EXACT_DIRECT :#{name} -> #{owner} (exact receiver, unique RGSS native registration), " \
            "direct entry point #{entry.function} without dispatch.\n"
     if native_param_unbox_on?
-      stmts, args = native_param_unbox_args(d, argv, entry.kinds, unboxed: entry.kinds.each_index.select { |i| proven.call(i) })
-      call = native_param_unbox_block(stmts, "r#{d} = rgss::#{entry.function}(#{(['M', recv] + args).join(', ')});")
-      return "#{note}  #{call.chomp}\n"
+      guards, call = native_param_unbox_call(name, d, recv, argv, entry.function, entry.kinds, proven: proven)
+      return "#{note}  #{call.chomp}\n" if guards.empty?
+
+      return "#{note}  if (#{guards.join(' && ')}) {\n    #{call.chomp}\n  } else {\n" \
+             "    #{dynamic_dispatch_line(d, recv, name, argv).chomp}\n  }\n"
     end
 
-    guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int && !proven.call(i) }
+    guards = entry.kinds.each_index.select { |i| entry.kinds[i] == :int && !proven.include?(i) }
                  .map { |i| "mrb_integer_p(#{argv[i]})" }
     args = entry.kinds.each_index.map do |i|
       case entry.kinds[i]

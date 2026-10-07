@@ -246,7 +246,7 @@ class CodeGen
         if native[:type_guard] == :int
           int_site = [irep, new_proof_idx, owner_def, trace_reg_offset]
           native_int_arg_probe("#{known}.new", *int_site, argv) if ENV['BC2CPP_NATIVE_INT_ARGS']
-          if native_param_unbox_on?
+          if native_param_unbox_name?('_init_size')
             # Bitmap#initialize branches on `f.kind_of? String` (a dispatched test), so only the first argument keeps
             # its tag test; _init_size then converts both as "ii" (ADR 0372).
             arg_checks = native_int_arg_proven?(*int_site, argv, 0) ? '' : "mrb_integer_p(#{argv[0]})"

@@ -14,6 +14,16 @@ module NativeParamUnbox
     ENV['BC2CPP_NATIVE_PARAM_UNBOX'] != '0'
   end
 
+  # The arm for `name` may drop its tag test and by-name else: the switch is on and no alias, Symbol definition, undef,
+  # computed-name installer, visibility change or outside source can make `name` reach something other than the RGSS
+  # native (the proof of native_exact_owner_safe?). Without it the old gate keeps dispatching what it does not test.
+  def native_param_unbox_name?(name)
+    return false unless native_param_unbox_on? && @closed_world && !symbol_installed_names.nil?
+
+    !symbol_installed_names.include?(name) && !devirt_blocked_name?(name) &&
+      @closed_world.native_exact_direct_name_safe?(name, NativeExactDirect::RGSS_SRC)
+  end
+
   # [statements, argument expressions] for `kinds` over the argument registers `argv`. A converting kind is a
   # statement of its own, in argument order: operands of one call expression are unsequenced, and the order decides which
   # TypeError/RangeError wins and when each to_int runs. +unboxed+ lists the positions already known to be a Fixnum
@@ -36,6 +46,17 @@ module NativeParamUnbox
       end
     end
     [stmts, args]
+  end
+
+  # [guards, call] for `r<d> = rgss::<function>(M, recv, args)`: when the name is proven (native_param_unbox_name?) there
+  # is no guard and every unproven :int argument is converted; otherwise each :int argument not in +proven+ keeps its
+  # Integer tag test (the caller dispatches by name when it fails) and only the sequencing of the :float ones changes.
+  def native_param_unbox_call(name, d, recv, argv, function, kinds, proven: [])
+    safe = native_param_unbox_name?(name)
+    ints = kinds.each_index.select { |i| kinds[i] == :int }
+    guards = safe ? [] : (ints - proven).map { |i| "mrb_integer_p(#{argv[i]})" }
+    stmts, args = native_param_unbox_args(d, argv, kinds, unboxed: safe ? proven : ints)
+    [guards, native_param_unbox_block(stmts, "r#{d} = rgss::#{function}(#{(['M', recv] + args).join(', ')});")]
   end
 
   # `call` run after `stmts`, in a block of its own so the locals stay out of the case labels around it.
