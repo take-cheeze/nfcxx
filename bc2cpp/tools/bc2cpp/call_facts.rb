@@ -31,7 +31,7 @@ module CallFacts
   # The world Answers reads; nil fields make every question "unknown".
   # instance_installed (NATIVE_CLASS_ARMS, ADR 0323) is installed without the names only a class object sees.
   World = Struct.new(:closed_world, :registry, :superclass_of, :included, :prepended, :unknown_mixins,
-                     :native_sources, :installed, :instance_installed, keyword_init: true)
+                     :native_sources, :installed, :instance_installed, :compiled_core, keyword_init: true)
 
   # Which classes answer a method name. A name nothing bounds (installed by computed code, a hook, a
   # definer on Object/Kernel/BasicObject, a native whose owner the scan cannot read) answers for every
@@ -83,6 +83,27 @@ module CallFacts
       return @memo[key] if @memo.key?(key)
 
       @memo[key] = compute_definers(name, instance)
+    end
+
+    # The names' foreign Ruby definers (mruby's own Ruby the build links) that CodeGen compiled in this run
+    # (ADR 0371). A view next to `definers`, never merged into it: the foreign set still says who may
+    # answer, this says whose body a helper may call directly.
+    def foreign_definer?(name, owner)
+      d = definers(name)
+      !d.nil? && d[:foreign].include?(owner)
+    end
+
+    def compiled_foreign_owners(name)
+      d = definers(name)
+      return Set.new if d.nil? || @w.compiled_core.nil?
+
+      d[:foreign] & @w.compiled_core.call(name).keys
+    end
+
+    # Every foreign Ruby definer of +name+ is a compiled core method of this run.
+    def foreign_fully_compiled?(name)
+      d = definers(name)
+      !d.nil? && (d[:foreign] - compiled_foreign_owners(name)).empty?
     end
 
     def method_missing_classes = @cw.method_missing_classes
