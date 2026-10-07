@@ -105,16 +105,27 @@ class CodeGen
   # trace (trace_new_target) to exactly "Array". An SSENDB (self receiver) is
   # admitted only when the owner is Array itself. Anything unproven gives no
   # region.
+  #
+  # EACH_SPREAD (ADR 0376): a 2..EACH_SPREAD_MAX parameter block gets `spread: n`; OP_ENTER spreads
+  # an Array element over the parameters (vm.c). BC2CPP_EACH_SPREAD=0 keeps those blocks as calls.
+  EACH_SPREAD_MAX = 8
+
+  def each_spread_enabled?
+    ENV['BC2CPP_EACH_SPREAD'] != '0'
+  end
+
   def recognize_each_regions(irep, owner_name, mand, ivar_classes, arg_classes)
     regions = []
     each_block_site(irep, send_ops: %w[SENDB SSENDB], layout: named_layout('each')) do |insn, idx, block_insn, dest_reg, block_irep|
-      next unless mandatory_arity(block_irep) == 1 && pure_mandatory_arity?(block_irep)
+      arity = mandatory_arity(block_irep)
+      next unless pure_mandatory_arity?(block_irep)
+      next unless arity == 1 || (arity.between?(2, EACH_SPREAD_MAX) && each_spread_enabled?)
       next unless region_receiver?(irep, idx, insn, dest_reg, 'Array', owner_name, mand, ivar_classes, arg_classes)
 
       regions << { block_addr: block_insn.addr, sendb_addr: insn.addr, dest_reg: dest_reg, block_irep: block_irep,
-                   ssendb: insn.op == 'SSENDB',
-                   elem_class: region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
-                                                   owner_name) }
+                   ssendb: insn.op == 'SSENDB', spread: arity > 1 ? arity : nil,
+                   elem_class: arity == 1 ? region_element_class(insn, irep, idx, dest_reg, ivar_classes, mand, arg_classes,
+                                                                 owner_name) : nil }
     end
     regions
   end

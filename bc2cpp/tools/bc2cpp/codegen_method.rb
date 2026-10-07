@@ -38,6 +38,40 @@ class CodeGen
     InlineLoopPass.new(:recognize_sort_regions, :emit_sort_inline, :block_addr, true) # SORT_BLOCK_SUPPORT
   ].freeze
 
+  # RESCUE_TRY_INLINE (ADR 0376): the passes a rescue try body runs. Not the profiler one: a raise
+  # would skip its end call, which the block-call fallback it replaces makes.
+  RESCUE_TRY_INLINE_PASSES = (INLINE_LOOP_PASSES.map(&:recognize) - [:recognize_profiler_section_regions]).freeze
+
+  # INLINE_LOOP_PASSES over one scope: a region not in `claimed` is emitted, its addresses join
+  # `suppressed` and its code `glue_at`. `try_range` (emit_rescue_try_body, ADR 0376) filters the
+  # whole-method regions to a protected range (rescue_try_inlinable?).
+  def run_inline_loop_passes(irep, d, mand, claimed, suppressed, glue_at, try_range: nil)
+    ctx_ivar = @class_layout[d.owner]
+    ctx_args = @class_annotations[irep.label]&.args
+    INLINE_LOOP_PASSES.each do |pass|
+      next if try_range && !RESCUE_TRY_INLINE_PASSES.include?(pass.recognize)
+
+      ctx = pass.context ? [d.owner, mand, ctx_ivar, ctx_args] : []
+      send(pass.recognize, irep, *ctx).each do |region|
+        anchor = region[pass.anchor]
+        next if claimed.include?(anchor) || claimed.include?(region[:sendb_addr])
+        next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
+
+        pre_start = @inline_nested_pre.length
+        inlined = send(pass.emit, region, irep, d)
+        next unless inlined
+
+        if try_range && !rescue_try_glue_safe?(inlined, try_range)
+          @inline_nested_pre.slice!(pre_start..) # the refused body's nested cfuncs are not used either
+          next
+        end
+
+        suppressed << anchor << region[:sendb_addr]
+        glue_at[anchor] = inlined
+      end
+    end
+  end
+
   def compile_method(label)
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
@@ -286,7 +320,8 @@ class CodeGen
       suppressed << region[:except_addr]
       try_name = "#{impl_name}_rescue_try#{rescue_regions.size > 1 ? "_#{i}" : ''}"
       saved = rescue_entry_saved_fields(irep, region) + blk_field
-      rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved)
+      rescue_pre << emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: saved,
+                                                                                                  inline_mand: mand)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
                                                       extra_field_values: saved.map { |f| rescue_field_value(f) })
     end
@@ -303,28 +338,10 @@ class CodeGen
     # not drop the outer one's code.
     bc2cpp_saved_inline_pre = @inline_nested_pre
     @inline_nested_pre = String.new
-    # RESCUE_INLINE_BLOCK_FIX: the inlined-loop passes below must skip regions
-    # whose addresses the rescue loop above already claimed. That range lives in
-    # the extracted try body; here, a loop registered at its block_addr would be
-    # emitted after the rescue glue, on the exception-only path, with its receiver
-    # register holding whatever that path left (possibly the exception), not the
-    # value the recognizer proved (scripts/bc2cpp_rescue_inline_block_check.rb).
-    rescue_claimed = suppressed.dup
-    each_ctx_ivar = @class_layout[d.owner]
-    each_ctx_args = @class_annotations[irep.label]&.args
-    INLINE_LOOP_PASSES.each do |pass|
-      ctx = pass.context ? [d.owner, mand, each_ctx_ivar, each_ctx_args] : []
-      send(pass.recognize, irep, *ctx).each do |region|
-        anchor = region[pass.anchor]
-        next if rescue_claimed.include?(anchor) || rescue_claimed.include?(region[:sendb_addr])
-
-        inlined = send(pass.emit, region, irep, d)
-        next unless inlined
-
-        suppressed << anchor << region[:sendb_addr]
-        glue_at[anchor] = inlined
-      end
-    end
+    # RESCUE_INLINE_BLOCK_FIX: a loop emitted here for an address the rescue loop claimed would run
+    # after the rescue glue, on the exception-only path, with the exception as its receiver
+    # (scripts/bc2cpp_rescue_inline_block_check.rb). The range's own loops are inlined in the try body.
+    run_inline_loop_passes(irep, d, mand, suppressed.dup, suppressed, glue_at)
 
     # BLOCK_CFUNC_FALLBACK_SUPPORT: the catch-all, run last, for BLOCK/SENDB pairs
     # no named inliner claimed (checked via `suppressed`). A qualifying region

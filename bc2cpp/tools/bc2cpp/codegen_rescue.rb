@@ -592,6 +592,45 @@ class CodeGen
     end
   end
 
+  # RESCUE_TRY_INLINE kill switch (ADR 0376): BC2CPP_RESCUE_INLINE_BLOCKS=0 keeps block calls.
+  def rescue_inline_blocks_enabled?
+    ENV['BC2CPP_RESCUE_INLINE_BLOCKS'] != '0'
+  end
+
+  # RESCUE_TRY_INLINE: may a region the whole-method recognizers found be inlined into the
+  # try body of `range`? The receiver proof and arity gate are already the method's own; this
+  # checks where the region sits (anchor and SENDB inside, before the exit JMP that becomes the
+  # try function's return), that no RETURN_BLK (a C++ `return` would only leave the try function,
+  # whose result is the range's value) is in the block tree, and that the block does not forward
+  # the method's block (the try function has bc2cpp_blk only when the method declares it).
+  def rescue_try_inlinable?(region, anchor, range)
+    sendb = region[:sendb_addr]
+    return false unless anchor && sendb
+    return false unless range.cover?(anchor) && range.cover?(sendb) && anchor < range.end && sendb < range.end
+    return false if region[:needs_blk]
+
+    block_irep = region[:block_irep]
+    block_irep.nil? || !irep_tree_has_op?(block_irep, 'RETURN_BLK')
+  end
+
+  def irep_tree_has_op?(irep, op)
+    return true if BytecodeIR.for(irep).op?(op)
+
+    (irep.reps || []).any? do |label|
+      child = @ireps[label]
+      child && irep_tree_has_op?(child, op)
+    end
+  end
+
+  # RESCUE_TRY_INLINE: a second layer behind rescue_try_inlinable?: refuse emitted glue that
+  # returns or jumps to a label outside the range. Strings and `//` comments are dropped first.
+  def rescue_try_glue_safe?(code, range)
+    text = code.gsub(%r{"(?:[^"\\]|\\.)*"|//[^\n]*}, '')
+    return false if text.match?(/\breturn\b/)
+
+    text.scan(/\bgoto L(\d+);/).all? { |(addr)| range.cover?(addr.to_i) }
+  end
+
   # RESCUE_SUPPORT: the extracted try body for one region, a top-level static
   # function (mrb_protect_error takes a C function pointer; see
   # emit_const_lookup_helper). It covers [begin_addr, end_addr] including the
@@ -635,7 +674,7 @@ class CodeGen
   end
 
   def emit_rescue_try_body(try_name, region, irep, d, arg_names, arg_native_types, extra_fields: [],
-                           available_upvars: [])
+                           available_upvars: [], inline_mand: nil)
     ctx_struct = "#{try_name}_Ctx"
     ctx_fields = ['mrb_value self'] + arg_names.each_with_index.map { |a, i| "#{native_c_type(arg_native_types[i])} #{a}" } +
                  extra_fields.map { |f| "#{f[:c_type]} #{f[:name]}" }
@@ -662,10 +701,25 @@ class CodeGen
       local_suppressed.merge((nregion[:begin_addr]..nregion[:end_addr]).to_a)
       local_suppressed << nregion[:except_addr]
     end
+    # RESCUE_TRY_INLINE (ADR 0376): the named inliners run before the block-call fallback, as in
+    # compile_method. Only compile_method sets `inline_mand`: the inliners assume a method irep,
+    # not a block body's own rescue. A resumable method's loops belong to its step function.
+    out = String.new
+    if inline_mand && !@resumable && rescue_inline_blocks_enabled?
+      saved_inline_pre = @inline_nested_pre
+      @inline_nested_pre = String.new
+      begin
+        run_inline_loop_passes(irep, d, inline_mand, local_suppressed.dup, local_suppressed, local_glue_at,
+                               try_range: range)
+        out << @inline_nested_pre
+      ensure
+        @inline_nested_pre = saved_inline_pre
+      end
+    end
     nested_block_regions = recognize_block_fallback_regions(irep, available_upvars: available_upvars)
                            .select { |r| range.cover?(r[:block_addr]) }
     nested_arg_regions = recognize_explicit_block_arg_regions(irep).select { |r| range.cover?(r[:sendb_addr]) }
-    out = emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
+    out << emit_block_fallback_glue_pass(nested_block_regions, nested_arg_regions, d, local_suppressed, local_glue_at)
 
     # NESTED_RESCUE_SUPPORT: each direct child region gets its own further-nested
     # try body. Its begin_addr is reached after arbitrary code in this body, so
@@ -689,7 +743,8 @@ class CodeGen
       nested_extra_fields = inherited_fields + nested_saved_fields + rescue_ref_fields(nested_refs)
       nested_extra_values = nested_extra_fields.map { |f| f[:value] || f[:name].sub('bc2cpp_saved_', '') }
       out << emit_rescue_try_body(nested_try_name, nregion, irep, d, [], [], extra_fields: nested_extra_fields,
-                                                                            available_upvars: available_upvars)
+                                                                            available_upvars: available_upvars,
+                                                                            inline_mand: inline_mand)
       local_glue_at[nregion[:begin_addr]] =
         emit_rescue_glue(nested_try_name, nregion, [], [], extra_field_values: nested_extra_values)
     end
