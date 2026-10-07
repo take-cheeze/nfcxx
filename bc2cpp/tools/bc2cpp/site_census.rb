@@ -51,29 +51,79 @@ module SiteCensus
     end
   end
 
-  # Where the receiver register was last assigned before the guard chain. Heuristic: a
-  # register copy hides the real origin, so "register_copy" is a floor on what is unknown.
+  # A register copy (`rN = rM;`, `rN = self;`) is followed back to its source. The walk is text order, not control
+  # flow: the nearest preceding assignment wins, as it does for the guard's own receiver.
+  COPY_HOPS = 8
+
+  # Index and right-hand side of the nearest assignment to `reg` in lines[floor...from] (a declaration included).
+  def last_assignment(lines, from, floor, reg)
+    (from - 1).downto(floor) do |j|
+      m = lines[j].match(/^\s*(?:mrb_value )?#{reg} = (.*);\s*$/)
+      return [j, m[1]] if m
+    end
+    nil
+  end
+
+  # The generated method header that opens the body holding `i`; nil outside any function.
+  def function_start(lines, i)
+    k = i
+    k -= 1 while k.positive? && fn_name(lines[k]).nil?
+    fn_name(lines[k]) ? k : nil
+  end
+
+  def parameter_names(header)
+    header[/\((.*)\)\s*\{\s*$/, 1].to_s.split(',').filter_map { |p| p[/(\w+)\s*\z/, 1] }
+  end
+
+  # Where the receiver register was last assigned before the guard chain. Heuristic: the origin is read from the
+  # right-hand side of that assignment, and a register copy is followed up to COPY_HOPS assignments.
   def receiver_origin(lines, line, recv)
+    # A receiver that is not a register is named directly: `self`, or a parameter of the method.
+    unless recv =~ /\Ar\d+\z/
+      fn = function_start(lines, line - 1)
+      return origin_of(lines, line - 1, recv, fn, parameter_list(lines, fn), COPY_HOPS)
+    end
+
     i = line - 2
     i -= 1 while i.positive? && line - i < 80 && !(lines[i] =~ %r{^(if \(|\{$|// [^ ]+ -- generated)} && lines[i - 1] !~ /\} else|else\s*$/)
-    (1..60).each do |k|
-      x = lines[i - k] or break
-      next unless x =~ /^\s*#{recv} = (.*);\s*$/
+    found = last_assignment(lines, i, [i - 60, 0].max, recv)
+    return 'unknown' unless found
 
-      return case Regexp.last_match(1)
-             when /mrb_iv_get/ then 'ivar_read'
-             when /_ivars\*\)DATA_PTR/ then 'embedded_ivar'
-             when /bc2cpp_getidx|bc2cpp_ary_entry|mrb_hash_get/ then 'indexed_result'
-             when /bc2cpp_cconst|mrb_const_get|bc2cpp_const_try/ then 'constant'
-             when /upvar/ then 'captured_upvar'
-             when /\A(?:r\d+|self)\z/ then 'register_copy'
-             when /_impl\(/ then 'direct_call_result'
-             when /bc2cpp_send|mrb_funcall|bc2cpp_slow|bc2cpp_eqq/ then 'dynamic_call_result'
-             when /mrb_ary_new|mrb_hash_new|mrb_str_new|mrb_obj_new|mrb_float_value|mrb_fixnum_value|mrb_int_value/ then 'literal_or_fresh'
-             else 'other'
-             end
+    fn = function_start(lines, found[0])
+    origin_of(lines, found[0], found[1], fn, parameter_list(lines, fn), COPY_HOPS)
+  end
+
+  def parameter_list(lines, fn)
+    fn ? parameter_names(lines[fn]) : []
+  end
+
+  # `at` is the index of the assignment whose right-hand side is `rhs`; `fn` and `params` describe its method.
+  def origin_of(lines, at, rhs, fn, params, hops)
+    case rhs
+    when /mrb_iv_get/ then 'ivar_read'
+    when /_ivars\*\)DATA_PTR/ then 'embedded_ivar'
+    when /bc2cpp_getidx|bc2cpp_ary_entry|mrb_hash_get/ then 'indexed_result'
+    when /bc2cpp_cconst|mrb_const_get|bc2cpp_const_try/ then 'constant'
+    when /upvar/ then 'captured_upvar'
+    when 'self' then 'self'
+    when /\Ar\d+\z/ then follow_copy(lines, at, rhs, fn, params, hops)
+    when /\A\w+\z/ then params.include?(rhs) ? 'parameter' : 'other'
+    when /_impl\(/ then 'direct_call_result'
+    when /bc2cpp_send|mrb_funcall|bc2cpp_slow|bc2cpp_eqq/ then 'dynamic_call_result'
+    when /mrb_ary_new|mrb_hash_new|mrb_str_new|mrb_obj_new|mrb_float_value|mrb_fixnum_value|mrb_int_value|mrb_nil_value|mrb_bool_value|mrb_true_value|mrb_false_value/
+      'literal_or_fresh'
+    else 'other'
     end
-    'unknown'
+  end
+
+  # Out of hops (a long or cyclic copy chain) the copy is left unresolved, so `register_copy` stays a floor.
+  def follow_copy(lines, at, reg, fn, params, hops)
+    return 'register_copy' unless hops.positive?
+
+    found = last_assignment(lines, at, fn || 0, reg)
+    return 'unknown' unless found
+
+    origin_of(lines, found[0], found[1], fn, params, hops - 1)
   end
 
   # Nearest preceding family comment (`// POLY_SMALL_N ...`) within the 25 lines before `i`.
