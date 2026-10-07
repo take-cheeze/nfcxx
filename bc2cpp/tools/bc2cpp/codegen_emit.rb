@@ -47,7 +47,9 @@ class CodeGen
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
     :@compiling_core => false, :@resumable => nil,
-    :@exact_core_site => nil, :@nonnil_receiver => nil
+    :@exact_core_site => nil, :@nonnil_receiver => nil,
+    # INDEX_CLOSED (ADR 0365): set while a shared index helper builds its chain; a probe compiled meanwhile must not see it.
+    :@index_closed_build => nil
   }.freeze
 
   # Runs a nested compile against top-level state, then restores the caller's

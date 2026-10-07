@@ -2079,6 +2079,11 @@ class CodeGen
   # not model. A proven fallback raises what dispatch would (bc2cpp_nomethod);
   # a refused one keeps dispatch and names the reason for the summary.
   def guarded_fallback_line(d, recv, name, argv, listed, site)
+    # INDEX_CLOSED (ADR 0365): the shared index helper's own chain, built outside any site.
+    if site.equal?(INDEX_CLOSED_SITE) && (closed = index_closed_fallback(d, recv, name, argv, listed))
+      return closed
+    end
+
     dispatch = dynamic_dispatch_line(d, recv, name, argv)
     return dispatch unless @closed_world && site
 

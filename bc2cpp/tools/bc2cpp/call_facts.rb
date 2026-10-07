@@ -62,6 +62,15 @@ module CallFacts
 
     def opaque_owners = native_scan[1]
 
+    # name => [{owner:, function:, path:, macro:}] of the registrations a class or module object answers
+    # (`Array.[]`, a Struct class's `.[]`, module functions), which `registrations` leaves out.
+    def class_registrations
+      @class_registrations ||= begin
+        paths = @w.native_sources ? @w.native_sources.values.flatten.uniq : []
+        NativeExpressionDevirt.class_method_registrations(paths)
+      end
+    end
+
     def native_scan
       @native_scan ||= begin
         paths = @w.native_sources ? @w.native_sources.values.flatten.uniq : []
@@ -93,7 +102,7 @@ module CallFacts
       return true if d.nil?
 
       if klass == CLASS_OBJECT
-        return d[:singleton] || [d[:ruby], d[:native], d[:foreign]].any? { |s| s.intersect?(CLASS_OR_MODULE) }
+        return d[:singleton] || !d[:class_native].empty? || [d[:ruby], d[:native], d[:foreign]].any? { |s| s.intersect?(CLASS_OR_MODULE) }
       end
       return true if method_missing_classes.include?(klass)
 
@@ -249,7 +258,9 @@ module CallFacts
       return nil unless foreign
       return nil if (ruby | native | foreign).intersect?(EVERYTHING)
 
-      { ruby: ruby, modules: modules, native: native, foreign: foreign, singleton: singleton }
+      # A native singleton method is only seen by a class or module object, never by an instance (ADR 0365).
+      class_native = class_registrations.fetch(name, []).to_set { |e| e[:owner] || '?' }
+      { ruby: ruby, modules: modules, native: native, foreign: foreign, singleton: singleton, class_native: class_native }
     end
 
     # Owners of the native registrations of +name+; nil when one cannot be read.
