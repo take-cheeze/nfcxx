@@ -10,9 +10,9 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e],
     '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => '8065d3073a5bb5290cafe20df0785ccdfecc0563ef14ac211f203915c1a2fc29',
     '3rd/mruby/src/hash.c' => '42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16',
-    '3rd/mruby/src/string.c' => '1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00',
-    '3rd/mruby/src/array.c' => '5e0541466b6aa9c8eaab0bcc7d51db15babae7059871854eeef81f08ac53dc11',
-    '3rd/mruby/mrbgems/mruby-struct/src/struct.c' => '2e536e12e4bcfc62d7581966860789eb31edcf6282e2ec67ec70e85db34fbec5',
+    '3rd/mruby/src/string.c' => %w[1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00 d4cbdaef5a4e33016077ee8f3855df407edb065a749f0c7ecffc9bf53d6d78bb],
+    '3rd/mruby/src/array.c' => %w[5e0541466b6aa9c8eaab0bcc7d51db15babae7059871854eeef81f08ac53dc11 7cc81d821c7893fd5bbc510cdaa3c2601d752e7fbf3947466c55620732cdf815],
+    '3rd/mruby/mrbgems/mruby-struct/src/struct.c' => %w[2e536e12e4bcfc62d7581966860789eb31edcf6282e2ec67ec70e85db34fbec5 bb57a55a157602b58e0218f3f5e2d1f5175a0d1b36e43388af390896fb672027],
     '3rd/mruby/mrbgems/mruby-proc-ext/src/proc.c' => %w[01a0156d300517eba92d8a00d36d8ee1b9d3cb7a29420d7b815711ab00a39e45 912d1b2ba1f94dbcb802e542844d9af4c10a7f1650c0bb6d14f529878a437c9f],
     '3rd/mruby/mrbgems/mruby-method/src/method.c' => 'd2a780ca6a3ef25297c8f60356ad56a61fb826a2d5759059a25cdddb9820b0eb',
     '3rd/mruby/src/symbol.c' => %w[2fc364c65eda66d2bc4f2345150c394e1666678b55b93bf6f2d0fb47e5bc1c09 4c4326db94944063fc45340b57bd98e3f3ee2c7df49d3e9455e85061a4f737ee],
@@ -26,7 +26,7 @@ module NativeClassResults
     '3rd/mruby/mrbgems/mruby-bigint/core/bigint.c' => 'dcc607215eb53346f5a2e5b760314f06afa9f629ad3c2f14e18f56059a29117f',
     '3rd/mruby-onig-regexp/src/mruby_onig_regexp.c' => '2c2bf2d5a96850e22b791b7e191e37867d1a3f2892e0ae5be632d71cc97d1884',
     '3rd/mruby/mrbgems/mruby-fiber/src/fiber.c' => '5b8aa22575a772a0fb0a194c1720233307f7034a0704e362a315bd30fb44512f',
-    'mruby-rgss/src/lib.cxx' => '664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e'
+    'mruby-rgss/src/lib.cxx' => %w[664be94f4af8b7081cbf5679267d6fca1a4ce713423d850ae5478ed2c4921f1e 24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c]
   }.freeze
   ARRAY_TRANSFORMS = %w[compact flatten __uniq join].freeze
   FACTS = {

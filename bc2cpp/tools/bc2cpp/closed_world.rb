@@ -67,7 +67,7 @@ class ClosedWorld
   # Sends that run a block with another `self`, which breaks "self is its lexical owner".
   SELF_REBINDERS = %w[instance_eval instance_exec class_eval class_exec module_eval module_exec].freeze
 
-  attr_reader :global_refusal
+  attr_reader :global_refusal, :native_paths
 
   def initialize(ireps:, registry:, class_decls:, walked:, native_paths:, ruby_paths:, module_names: Set.new)
     @ireps = ireps
@@ -111,6 +111,7 @@ class ClosedWorld
     @frozen_constants = Set.new
     @memo = {}
     @desc_memo = {}
+    @native_paths = native_paths
     scan_native(native_paths)
     scan_outside_ruby(ruby_paths)
     scan_closed_world
@@ -149,13 +150,13 @@ class ClosedWorld
   # CALL_FACTS (ADR 0317): `scoped` says `instances` is the whole receiver set, so only its classes need an
   # arm, and `native_free` that no native or outside definer of `name` reaches any of them.
   def refusal(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
-              instance_scope: false)
+              instance_scope: false, singleton_arms: nil)
     return @global_refusal if @global_refusal
     return :dynamic_install if installed.nil? || installed.include?(name)
     return :unknown_definer if instance_scope ? instance_unknown_def?(name) : @unknown_defs.include?(name)
     return :core_or_native if @outside_names.include?(name) && !native_arms_lift?(name) && !(scoped && native_free)
 
-    reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
+    reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?, singleton_arms)
     return reason if reason
 
     required &= instances.to_set if scoped && instances
@@ -202,13 +203,14 @@ class ClosedWorld
   # answers `name` itself or inherits it, so a guarded send to it reaches its
   # definition and every other class can only raise NoMethodError.
   def unlisted_classes(name, listed, self_owner, installed, instances: nil, scoped: false, native_free: false,
-                       instance_scope: false)
+                       instance_scope: false, singleton_arms: nil)
     return [] unless refusal(name, listed, self_owner, installed, instances: instances, scoped: scoped,
                                                                   native_free: native_free,
-                                                                  instance_scope: instance_scope) == :unlisted_class
+                                                                  instance_scope: instance_scope,
+                                                                  singleton_arms: singleton_arms) == :unlisted_class
     return [] unless method_missing_free?(self_owner, instances)
 
-    _reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?)
+    _reason, required = required_classes(name, instance_self?(self_owner) || !instances.nil?, singleton_arms)
     required &= instances.to_set if scoped && instances
     (required - listed.to_set).to_a.sort
   end
@@ -1227,14 +1229,30 @@ class ClosedWorld
     end
   end
 
-  def required_classes(name, instance_self = false)
-    @memo[[name, instance_self]] ||= begin
+  # SINGLETON_ARMS (ADR 0369): the modules whose `.singleton` definition of `name` a guard chain can
+  # answer with an identity arm, or nil when some singleton definer cannot be armed. A module object is
+  # reached only by its own constant: no subclasses (module_object_self? also bars a class and any
+  # `clone`, the one way to copy singleton methods). The caller proves the singleton chain has no mixin.
+  public def singleton_arm_modules(name)
+    return nil if @global_refusal
+
+    owners = @registry.fetch(name, []).map(&:owner).select { |o| o.end_with?('.singleton') }.uniq
+    return nil if owners.empty?
+
+    modules = owners.map { |o| o.delete_suffix('.singleton') }
+    return nil unless modules.all? { |m| module_object_self?(m) }
+
+    modules
+  end
+
+  def required_classes(name, instance_self = false, singleton_arms = nil)
+    @memo[[name, instance_self, singleton_arms]] ||= begin
       defs = @registry.fetch(name, []).reject { |d| d.owner == '<native>' }
       required = Set.new
       reason = nil
       defs.each do |d|
         if d.owner.end_with?('.singleton')
-          next if instance_self
+          next if instance_self || singleton_arms&.include?(d.owner.delete_suffix('.singleton'))
 
           break reason = :singleton_definer
         end
