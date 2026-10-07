@@ -102,6 +102,10 @@ module NumericFlow
                      'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP', 'SETUPVAR', 'SETIDX', 'DEBUG',
                      'KEYEND', 'RAISEIF', 'MATCHERR'].freeze
   COND_BRANCHES = Set['JMPIF', 'JMPNOT', 'JMPNIL'].freeze
+  # How many copies of one variable a recorded class test follows.
+  CLASS_TEST_CHAIN_MAX = 8
+  # How many branches on one test boolean a narrowed edge is carried through.
+  CLASS_TEST_THREAD_MAX = 4
   ARITH_OPS = { 'ADD' => '+', 'SUB' => '-', 'MUL' => '*' }.freeze
   IMM_ARITH_OPS = { 'ADDI' => '+', 'SUBI' => '-', 'ADDILV' => '+', 'SUBILV' => '-' }.freeze
   # In-place container builders: the register keeps its exact class.
@@ -142,6 +146,15 @@ module NumericFlow
             slot_of: slots.each_with_index.to_h { |name, k| [name, nregs + k] },
             facts: slots.map { |name| oracle.ivar_fact_mask(irep, name) },
             prov_base: nregs + slots.size, writes: writes }
+    # CLASS_NARROWING (ADR 0375): a third block of nregs entries after the provenance, one per register, naming the
+    # class test whose boolean result the register holds. Off (nil) unless the oracle can recognise a test.
+    if oracle.respond_to?(:class_narrowing_active?) && oracle.class_narrowing_active?
+      ctx[:test_base] = ctx[:prov_base] + nregs
+      ctx[:tests] = []
+      ctx[:test_ids] = {}
+      # A constant lookup runs Ruby only through const_missing; without one, `is_a?(Foo)` does not forget the ivars.
+      ctx[:const_quiet] = oracle.respond_to?(:const_lookup_quiet?) && oracle.const_lookup_quiet?
+    end
     extra = enter_edges(irep)
     raises = program.handler_edges.group_by(&:src).transform_values { |edges| edges.map(&:target).uniq }
     # A rescue target is entered only by a raise, so its EXCEPT always reads an exception; an ensure
@@ -156,6 +169,7 @@ module NumericFlow
     end
     slots.each { |name| entry << oracle.ivar_entry_mask(irep, name) }
     nregs.times { entry << 0 } # provenance: which slot (+1) each register was loaded from
+    nregs.times { entry << 0 } if ctx[:test_base] # class tests: which test each register's boolean holds
 
     ins = Array.new(insns.length)
     outs = Array.new(insns.length)
@@ -188,10 +202,13 @@ module NumericFlow
                 else
                   successors(program, extra, i)
                 end
+      # A call that never returns (`raise`) has no normal successor; its handler edges are above.
+      targets = [] if oracle.respond_to?(:noreturn_call?) && oracle.noreturn_call?(irep, i, insns[i])
       targets.each do |s|
         edge = refine_edge(program, insns[i], i, s, out, ctx)
         next unless edge
 
+        s = thread_class_test(program, insns, insns[i], i, s, edge, ctx) if ctx[:test_base]
         merged = join_state(ins[s], edge, ctx[:prov_base])
         next if merged == ins[s]
 
@@ -249,7 +266,120 @@ module NumericFlow
     fall = index + 1
     return state if goto == fall || (target != goto && target != fall)
 
-    narrow_chain(state, insn.reg.to_i, insn.op, target == goto, ctx, Set.new)
+    taken = target == goto
+    edge = narrow_chain(state, insn.reg.to_i, insn.op, taken, ctx, Set.new)
+    return edge unless edge && ctx[:test_base] && insn.op != 'JMPNIL'
+
+    narrow_by_class_test(edge, insn.reg.to_i, (insn.op == 'JMPIF') == taken, ctx)
+  end
+
+  # The edge out of `JMPIF R` / `JMPNOT R` into another branch on the same register R, which holds a class test's
+  # boolean, already decides that branch (`a || b` and `a && b` in a condition compile to two of them): continue at
+  # its successor, so the narrowing the edge carries is not joined away with the path that tests again.
+  def thread_class_test(program, insns, src, index, target, edge, ctx)
+    return target unless src.op == 'JMPIF' || src.op == 'JMPNOT'
+
+    reg = src.reg.to_i
+    id = edge[ctx[:test_base] + reg].to_i
+    return target if id.zero? || !ctx[:tests].fetch(id - 1)[1].respond_to?(:narrow)
+
+    goto = program.address_to_index[src.branch_target]
+    return target if goto == index + 1 || (target != goto && target != index + 1)
+
+    truth = (src.op == 'JMPIF') == (target == goto)
+    CLASS_TEST_THREAD_MAX.times do
+      branch = insns[target]
+      break unless branch && (branch.op == 'JMPIF' || branch.op == 'JMPNOT') && branch.reg.to_i == reg
+
+      jump = program.address_to_index[branch.branch_target]
+      break if jump == target + 1
+
+      target = (branch.op == 'JMPIF') == truth ? jump : target + 1
+    end
+    target
+  end
+
+  # CLASS_NARROWING (ADR 0375): the register tested by the branch holds the boolean of a class test, so on the edge
+  # where it is +truth+ the tested value and every variable it was copied from (the chain, recorded when the test
+  # ran) is narrowed by the test's predicate. nil when no value can take the edge.
+  def narrow_by_class_test(state, reg, truth, ctx)
+    id = state[ctx[:test_base] + reg].to_i
+    return state if id.zero?
+
+    codes, pred = ctx[:tests].fetch(id - 1)
+    return state unless pred.respond_to?(:narrow)
+
+    slots = ctx[:slots].size
+    out = state
+    codes.each do |code|
+      at = code <= slots ? ctx[:nregs] + code - 1 : code - slots - 1
+      mask = state[at]
+      next if mask.nil? || mask.zero?
+
+      narrowed = pred.narrow(mask, truth)
+      return nil if narrowed.zero?
+      next if narrowed == mask
+
+      out = out.dup if out.equal?(state)
+      out[at] = narrowed
+    end
+    out
+  end
+
+  # Remember that +reg+ holds the boolean of the class test +test+ ([subject offset, predicate]) of the SEND at
+  # +index+, aimed at every variable the subject register was a copy of when the call started. A call clears the
+  # provenance, so the chain (`case x`: the argument copies the case temporary, which copies x) is read here.
+  def record_class_test(out, state, insn, test, ctx)
+    a = insn.reg.to_i
+    subject = a + test[0]
+    return if subject >= ctx[:nregs]
+
+    slots = ctx[:slots].size
+    codes = []
+    code = state[ctx[:prov_base] + subject].to_i
+    while code.positive? && codes.size < CLASS_TEST_CHAIN_MAX
+      if code > slots
+        reg = code - slots - 1
+        # At or above the callee frame, or captured: no longer (or never) the tested variable.
+        break if reg >= a || ctx[:opaque].include?(reg.to_s) || codes.include?(code)
+
+        codes << code
+        code = state[ctx[:prov_base] + reg].to_i
+      else
+        codes << code
+        break
+      end
+    end
+    return if codes.empty?
+
+    key = [codes.freeze, test[1]]
+    id = (ctx[:test_ids][key] ||= (ctx[:tests] << key).size)
+    out[ctx[:test_base] + a] = id
+  end
+
+  def record_class_eq(out, insn, index, id, ctx)
+    codes, marker = ctx[:tests].fetch(id - 1)
+    a = insn.reg.to_i
+    b = insn.paren_reg.to_i
+    oracle = ctx[:oracle]
+    return if b >= ctx[:nregs] || codes.include?(ctx[:slots].size + 1 + a) || !oracle.respond_to?(:class_eq_test)
+    # The guard of an EQ reads the subject from a register: an ivar-only chain is not narrowed.
+    return if codes.none? { |code| code > ctx[:slots].size }
+
+    pred = oracle.class_eq_test(ctx[:irep], index, insn, marker)
+    return unless pred
+
+    key = [codes, pred]
+    out[ctx[:test_base] + a] = (ctx[:test_ids][key] ||= (ctx[:tests] << key).size)
+    oracle.note_class_test(ctx[:irep], index, codes, ctx[:slots].size, pred) if oracle.respond_to?(:note_class_test)
+  end
+
+  # Forget every test aimed at provenance +code+ (the variable it narrows was rewritten).
+  def clear_class_tests(out, ctx, code)
+    ctx[:nregs].times do |q|
+      id = out[ctx[:test_base] + q]
+      out[ctx[:test_base] + q] = 0 if id.positive? && ctx[:tests].fetch(id - 1)[0].include?(code)
+    end
   end
 
   # `RAISEIF Ra` raises unless Ra is nil, so the fall-through edge holds only a nil (or unknown) Ra.
@@ -341,6 +471,7 @@ module NumericFlow
       out[slot] = state[insn.regs.first.to_i]
       # Registers loaded from the old value no longer mirror the slot.
       nregs.times { |r| out[pb + r] = 0 if out[pb + r] == slot - nregs + 1 }
+      clear_class_tests(out, ctx, slot - nregs + 1) if ctx[:test_base]
       return out
     end
 
@@ -357,6 +488,10 @@ module NumericFlow
       out[pb + r] = 0
       # Registers that mirrored the old value of r no longer do.
       nregs.times { |q| out[pb + q] = 0 if out[pb + q] == slot_count + 1 + r }
+      if ctx[:test_base]
+        out[ctx[:test_base] + r] = 0
+        clear_class_tests(out, ctx, slot_count + 1 + r)
+      end
     end
 
     if CALL_OPS.include?(op)
@@ -369,14 +504,17 @@ module NumericFlow
                oracle.super_mask(irep, index, insn, state)
              else OTHER
              end
+      test = ctx[:test_base] && %w[SEND SEND0].include?(op) ? oracle.class_test(irep, index, insn, state) : nil
       ((a + 1)...nregs).each { |r| out[r] = OTHER }
       preserve = oracle.respond_to?(:preserves_ivar_slots?) && oracle.preserves_ivar_slots?(irep, index, insn, state)
       if preserve
-        nregs.times { |r| out[pb + r] = 0 }
+        nregs.times { |r| out[pb + r] = 0 } unless ctx[:test_base]
       else
         refresh_slots(out, ctx)
       end
+      clobber_class_test_copies(out, ctx, a) if ctx[:test_base]
       set.call(a, mask)
+      record_class_test(out, state, insn, test, ctx) if test
       return out
     end
 
@@ -396,6 +534,7 @@ module NumericFlow
       # `a` now mirrors `src` (and whatever `src` mirrored is reached through it).
       if src < nregs && src != a && !ctx[:opaque].include?(a.to_s) && !ctx[:opaque].include?(src.to_s)
         out[pb + a] = slot_count + 1 + src
+        copy_class_test(out, state, a, src, ctx) if ctx[:test_base]
       end
     when 'GETCONST', 'GETMCNST'
       set.call(a, oracle.const_mask(insn))
@@ -445,6 +584,11 @@ module NumericFlow
       set.call(a, literal || (oracle.respond_to?(:index_mask) ? oracle.index_mask(irep, index, insn, state) : OTHER))
     when 'AREF'
       set.call(a, oracle.respond_to?(:aref_mask) ? oracle.aref_mask(irep, index, insn, state) : OTHER)
+    when 'EQ'
+      # `x.class == C`: the class-of boolean meets a class constant, which makes it the instance_of test of x.
+      id = ctx[:test_base] ? state[ctx[:test_base] + a].to_i : 0
+      set.call(a, OTHER)
+      record_class_eq(out, insn, index, id, ctx) if id.positive?
     else
       set.call(a, OTHER)
     end
@@ -463,6 +607,7 @@ module NumericFlow
   def silent_call?(insn, state, ctx)
     return false unless SILENT_CALL_OPS.include?(insn.op)
     return false if ctx[:slots].empty?
+    return false if ctx[:const_quiet] && (insn.op == 'GETCONST' || insn.op == 'GETMCNST')
 
     a = insn.reg.to_i
     at = ->(r) { r < ctx[:nregs] ? state[r] : nil }
@@ -482,6 +627,38 @@ module NumericFlow
   def refresh_slots(out, ctx)
     nregs = ctx[:nregs]
     ctx[:facts].each_with_index { |fact, k| out[nregs + k] |= fact }
-    nregs.times { |r| out[ctx[:prov_base] + r] = 0 }
+    if ctx[:test_base]
+      # CLASS_NARROWING: a call cannot write a local no block captures, so two registers that held the same value
+      # still do; only the copies of a slot are forgotten (and, in the call, the callee's frame).
+      slots = ctx[:slots].size
+      nregs.times { |r| out[ctx[:prov_base] + r] = 0 if out[ctx[:prov_base] + r] <= slots }
+      slots.times { |k| clear_class_tests(out, ctx, k + 1) }
+    else
+      nregs.times { |r| out[ctx[:prov_base] + r] = 0 }
+    end
+  end
+
+  # The callee frame starts at R(a): whatever mirrored a register from there up, or was tested through one, is gone.
+  def clobber_class_test_copies(out, ctx, a)
+    slots = ctx[:slots].size
+    pb = ctx[:prov_base]
+    tb = ctx[:test_base]
+    ctx[:nregs].times do |q|
+      code = out[pb + q]
+      out[pb + q] = 0 if q >= a || (code > slots && code - slots - 1 >= a)
+      id = out[tb + q]
+      next unless id.positive?
+
+      codes = ctx[:tests].fetch(id - 1)[0]
+      out[tb + q] = 0 if q > a || codes.any? { |c| c > slots && c - slots - 1 >= a }
+    end
+  end
+
+  # `v = x.is_a?(C)`: the copy holds the same boolean, unless the test was aimed at the register being overwritten.
+  def copy_class_test(out, state, dst, src, ctx)
+    id = state[ctx[:test_base] + src].to_i
+    return if id.zero? || ctx[:tests].fetch(id - 1)[0].include?(ctx[:slots].size + 1 + dst)
+
+    out[ctx[:test_base] + dst] = id
   end
 end

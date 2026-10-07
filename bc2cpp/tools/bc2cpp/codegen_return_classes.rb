@@ -48,6 +48,13 @@ class CodeGen
     def block_send_mask(irep, index, insn, state)
       @cg.profiler_class_result(irep, index, insn) || @cg.core_ruby_class_result(irep, index, insn, state) || NumericFlow::OTHER
     end
+
+    def class_test(irep, index, insn, _state) = @cg.class_test_for(irep, index, insn)
+    def noreturn_call?(irep, index, insn) = @cg.class_narrowing_noreturn_call?(irep, index, insn)
+    def class_narrowing_active? = @cg.class_narrowing_enabled?
+    def const_lookup_quiet? = @cg.const_missing_free?
+    def class_eq_test(irep, index, insn, marker) = @cg.class_eq_test(irep, index, insn, marker)
+    def note_class_test(irep, index, codes, slots, pred) = @cg.note_class_test(irep, index, codes, slots, pred)
   end
 
   # Receiver facts belong to this flow, not to the method's global pools.

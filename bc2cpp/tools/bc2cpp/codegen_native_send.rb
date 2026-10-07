@@ -99,7 +99,7 @@ class CodeGen
   # bytecode definitions (Game::MoveRoute#empty?, Game::Party#size), so they use
   # per-class guards below; String#size comes from NativeCoreDirect instead, because
   # its body uses the string.c-private RSTRING_CHAR_LEN (ADR 0291).
-  NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1,
+  NATIVE_PRIMITIVE_SEND_ARITY = { '!' => 0, 'nil?' => 0, 'is_a?' => 1, 'kind_of?' => 1, 'instance_of?' => 1,
                                    'equal?' => 1, 'class' => 0, 'object_id' => 0, 'keys' => 0,
                                    'values' => 0,
                                    'to_s' => 0, 'length' => 0, 'first' => 0, 'dup' => 0,
@@ -218,8 +218,10 @@ class CodeGen
     when 'nil?'
       "  // nil? -- native primitive, no lookup needed\n" \
       "  r#{d} = mrb_bool_value(mrb_nil_p(#{recv}));\n"
-    when 'is_a?', 'kind_of?'
+    when 'is_a?', 'kind_of?', 'instance_of?'
       arg = argv.first
+      # kernel.c obj_is_instance_of is mrb_obj_class(self) == c where is_a? walks the ancestors.
+      answer = name == 'instance_of?' ? "mrb_obj_class(M, #{recv}) == mrb_class_ptr(#{arg})" : "mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg}))"
       # An alias, undef or Symbol-named install of the name hides the native body from the registry.
       return dynamic_dispatch_line(d, recv, name, argv) if block_core_world && !name_unrebound?(name)
 
@@ -237,7 +239,7 @@ class CodeGen
       "  // #{name} -- native primitive, no lookup needed (argument type-checked at " \
       "runtime -- see compile_send's own comment)\n" \
       "  if (mrb_class_p(#{arg}) || mrb_module_p(#{arg}) || mrb_sclass_p(#{arg})) {\n" \
-      "    r#{d} = mrb_bool_value(mrb_obj_is_kind_of(M, #{recv}, mrb_class_ptr(#{arg})));\n" \
+      "    r#{d} = mrb_bool_value(#{answer});\n" \
       "  } else {\n" \
       "    #{other}" \
       "  }\n"

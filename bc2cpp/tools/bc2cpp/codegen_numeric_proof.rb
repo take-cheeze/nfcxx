@@ -57,6 +57,13 @@ class CodeGen
       @cg.numeric_send_mask(irep, index, insn, state)
     end
 
+    def class_test(irep, index, insn, _state) = @cg.class_test_for(irep, index, insn)
+    def noreturn_call?(irep, index, insn) = @cg.class_narrowing_noreturn_call?(irep, index, insn)
+    def class_narrowing_active? = @cg.class_narrowing_enabled?
+    def const_lookup_quiet? = @cg.const_missing_free?
+    def class_eq_test(irep, index, insn, marker) = @cg.class_eq_test(irep, index, insn, marker)
+    def note_class_test(irep, index, codes, slots, pred) = @cg.note_class_test(irep, index, codes, slots, pred)
+
     def index_mask(irep, index, insn, state)
       @cg.element_index_mask(irep, index, insn, state)
     end
