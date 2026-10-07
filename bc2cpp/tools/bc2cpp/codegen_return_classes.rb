@@ -110,7 +110,7 @@ class CodeGen
     @numeric_class_bits ||= {}
     @numeric_class_bits[klass] ||= begin
       bit = NumericFlow::CLASS_BIT_BASE + @numeric_class_bits.size
-      raise 'numeric class bits reached the LCF object kinds (NumericFlow::OBJECT_KIND_BASE)' if bit >= NumericFlow::OBJECT_KIND_BASE
+      raise 'numeric class bits reached the CHECKED provenance bit (NumericFlow::CHECKED)' if bit >= NumericFlow::OBJECT_KIND_BASE - 1
 
       1 << bit
     end
@@ -142,9 +142,12 @@ class CodeGen
         @rc_send_ireps[insn.sym] << irep.label if RETURN_CALL_OPS.include?(insn.op) && @rc_return.key?(insn.sym)
       end
     end
+    @rc_checked_alias_names = checked_alias_name_candidates
+    @rc_admitted_alias_names = Set.new
     loop do
       changed = grow_return_classes
       changed |= grow_class_pools
+      changed |= admit_checked_alias_names
       break unless changed
     end
     # Receiver-specific summaries read the settled name-wide and class-pool facts.
@@ -155,6 +158,31 @@ class CodeGen
     # The numeric flow and the Fixnum proof ask for a register's class set; mid-fixpoint that would
     # recurse into the flow still being built (NATIVE_RESULT_FACTS, ADR 0302).
     @native_results_ready = true
+  end
+
+  # SETTER_POOLS (ADR 0370): names the irep-wide alias rule withdraws although no aliasing operation spells them.
+  def checked_alias_name_candidates
+    return Set.new unless @checked_pools_used
+
+    Set.new(numeric_return_candidates(alias_mode: :operands) - numeric_return_candidates)
+  end
+
+  # A name of checked_alias_name_candidates joins the table once every definition is an attr_reader whose pool
+  # carries CHECKED, once (a name the table later drops stays dropped). True when one was admitted.
+  def admit_checked_alias_names
+    admitted = false
+    @rc_checked_alias_names.each do |name|
+      next if @rc_return.key?(name) || @rc_admitted_alias_names.include?(name) || !checked_accessor_name?(name)
+
+      @rc_admitted_alias_names << name
+      @rc_return[name] = 0
+      @ireps.each_value do |irep|
+        irep.instructions.each { |insn| @rc_send_ireps[name] << irep.label if RETURN_CALL_OPS.include?(insn.op) && insn.sym == name }
+      end
+      @rc_send_ireps[name].each { |label| return_class_invalidate(label) }
+      admitted = true
+    end
+    admitted
   end
 
   # One growth pass; true when a name's set grew or the name was dropped (it may return an unmodelled class).
@@ -581,6 +609,9 @@ class CodeGen
 
     r = reg.to_i
     return nil if r >= irep.nregs.to_i || fixnum_proof_ctx(irep)[:upvars].include?(reg.to_s)
+
+    # The one register CHECKED_POOL_EXACT is compiling under its class test (ADR 0370).
+    return @checked_pool_override[:klass] if @checked_pool_override && @checked_pool_override[:key] == [irep.label, idx, r]
 
     states = return_class_scoped_states(irep)
     state = states && states[idx]

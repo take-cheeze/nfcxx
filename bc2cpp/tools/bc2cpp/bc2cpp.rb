@@ -90,6 +90,7 @@ require_relative 'codegen_native_results'
 require_relative 'codegen_instance_receivers'
 require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
+require_relative 'codegen_setter_pools'
 require_relative 'codegen_checked_send'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
@@ -1452,7 +1453,7 @@ if $PROGRAM_NAME == __FILE__
          "#{kept.values.sum} kept dispatching =="
     # GUARD_VIOLATION (ADR 0290): else arms of guards on a stable class constant, by family.
     violation_families = Hash.new(0)
-    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|COMPUTED_SEND|CORE_BODY_EXACT)\)"/) { |(f)| violation_families[f] += 1 } }
+    compiled.each { |m| m[:code].scan(/"[^"\n]* \((NEW_IDENTITY|CLASS_ARGUMENT|CLASS_EQQ|COMPUTED_SEND|CORE_BODY_EXACT|CHECKED_POOL_EXACT)\)"/) { |(f)| violation_families[f] += 1 } }
     warn "== closed world guard violations: #{violation_families.values.sum} bc2cpp_guard_violation =="
     violation_families.sort.each { |f, n| warn "  GUARD_VIOLATION #{f}: #{n}" }
     NomethodReviewed.violation_sites(compiled).uniq.sort.each { |k| warn "  GUARD_VIOLATION_SITE #{k}" }
