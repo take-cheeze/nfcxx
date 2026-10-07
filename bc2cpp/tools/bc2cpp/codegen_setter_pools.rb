@@ -9,9 +9,9 @@ require_relative 'numeric_flow'
 # The class pools of ADR 0295 refuse an ivar an attr_writer or an audited native writes (the value is the
 # caller's) and a setter's parameter whenever its name has several definitions. Every way to call `x=` is a
 # send named `x=`, so the one fact those stores need is the join of the class sets of the argument at every
-# such send (setter_pool_reads), under the same name rules as ENTRY_ARG_CALLSITE_PROOF plus: no native
-# call spells the name (a registration is not a call), no definition of it calls `super`, every Ruby
-# definition takes exactly one mandatory argument.
+# such send (setter_pool_reads), under ENTRY_ARG_CALLSITE_PROOF's name rules minus the computed-name clause
+# (see setter_spelled_as_literal?) plus: no native call spells the name (a registration is not a call), no
+# definition of it calls `super`, every Ruby definition takes exactly one mandatory argument.
 #
 # The pools this builds carry NumericFlow::CHECKED, which no unguarded decoder accepts (each reads a class
 # only from a mask equal to one class bit). The one reader is CHECKED_POOL_EXACT: a SEND whose receiver is nil
@@ -213,7 +213,9 @@ module CheckedPoolReceiverSend
     return plain unless NilableReceiverSend::EXACT_MARK.match?(inner) &&
                         dispatch_count(inner) + dispatch_count(nil_arm) < dispatch_count(plain)
 
-    body = inner.lines.map { |line| line.strip.empty? ? line : "    #{line}" }.join
+    # The arm's own note says "no guard": here the class test above it is the guard.
+    body = inner.gsub(/with no (?:class )?guard or mrb_funcall fallback/, 'behind the CHECKED_POOL_EXACT class test')
+                .lines.map { |line| line.strip.empty? ? line : "    #{line}" }.join
     violation = guard_violation_line(insn.reg, recv, plan[:name], plan[:argv], 'CHECKED_POOL_EXACT')
     nil_test = plan[:nilable] ? "if (mrb_nil_p(#{recv})) {\n    #{nil_arm}  } else " : ''
     "  // CHECKED_POOL_EXACT :#{plan[:name]} -- receiver is #{plan[:nilable] ? 'nil or ' : ''}exactly #{plan[:klass]} by a checked " \
