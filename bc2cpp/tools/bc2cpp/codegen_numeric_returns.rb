@@ -42,10 +42,10 @@ class CodeGen
 
   # Names a call can reach only through the definitions the registry lists (see the header), each a
   # bytecode body or a plain attr_reader. Shared with the exact-class table (RETURN_CLASS_TABLE).
-  def numeric_return_candidates
+  def numeric_return_candidates(alias_mode: :irep)
     return [] unless @foreign_method_names && @closed_world && @closed_world.global_refusal.nil?
 
-    aliased = numeric_aliased_names
+    aliased = alias_mode == :operands ? aliased_operand_name_set : numeric_aliased_names
     @registry.filter_map do |name, _definitions|
       defs = return_table_definitions(name)
       next unless name.match?(NUMERIC_RETURN_NAME) && name != 'initialize'
@@ -84,20 +84,41 @@ class CodeGen
   ALIAS_NAME_ARGUMENTS = { 'alias_method' => 2, 'alias' => 2, 'define_method' => 1, 'define_singleton_method' => 1 }.freeze
 
   # Names an `alias`/`alias_method`/`define_method` gives a body another name:
-  # the registry lists the body under its original name only. An irep whose aliasing operands are all
-  # Symbol literals contributes exactly those names (ADR 0370); any other aliasing send keeps every
-  # Symbol the irep loads, as before, so `attr_reader :contents` next to an unrelated `alias_method` no
-  # longer withdraws `contents`.
+  # the registry lists the body under its original name only.
   def numeric_aliased_names
-    @numeric_aliased_names ||= begin
-      names = Set.new
-      @ireps.each_value do |irep|
-        insns = irep.instructions
-        next unless insns.any? { |i| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
-
-        names.merge(aliased_operand_names(irep) || insns.filter_map { |i| i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') })
+    names = Set.new
+    @ireps.each_value do |irep|
+      insns = irep.instructions
+      aliasing = insns.any? do |i|
+        i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
       end
-      names
+      next unless aliasing
+
+      insns.each { |i| names << i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') }
+    end
+    names
+  end
+
+  # The names the aliasing operations of the program spell (an irep with a computed operand keeps every Symbol it
+  # loads). numeric_aliased_names takes every Symbol of an irep that aliases anything; a name whose every definition
+  # is an attr_reader of a checked pool (ADR 0370) is withdrawn only when an operation spells it, so
+  # `attr_reader :contents` next to `alias_method :a, :initialize` keeps its return fact. The fact carries
+  # NumericFlow::CHECKED and so only ever reaches a class-tested arm; admit_checked_alias_names adds the name once
+  # its pool has grown that provenance.
+  def aliased_operand_name_set
+    @aliased_operand_names ||= @ireps.each_value.with_object(Set.new) do |irep, names|
+      next unless irep.instructions.any? { |i| i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym)) }
+
+      names.merge(aliased_operand_names(irep) || irep.instructions.filter_map { |i| i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') })
+    end
+  end
+
+  # Every definition of +name+ is an attr_reader whose ivar pool carries the CHECKED provenance.
+  def checked_accessor_name?(name)
+    defs = return_table_definitions(name)
+    !defs.empty? && defs.all? do |d|
+      d.irep.nil? && d.kind == :ivar_accessor && !d.name.end_with?('=') && !d.owner.start_with?('<') && !d.owner.end_with?('.singleton') &&
+        @class_ivar_pools&.dig([numeric_family(d.owner), d.name])&.anybits?(NumericFlow::CHECKED)
     end
   end
 
