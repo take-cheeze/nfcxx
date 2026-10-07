@@ -58,7 +58,7 @@ class CodeGen
     return numeric_slow_zero_refuse('the File.zero? registrations are not the pinned ones') if file && !numeric_slow_zero_file_ready?(answers, definers[:class_native])
     stray = members.reject { |klass| klass == CallFacts::CLASS_OBJECT ? file : numeric_slow_inherits_owner?(answers, klass, %w[Numeric]) }
     return numeric_slow_zero_refuse("members outside Numeric: #{stray.to_a.first(5)}") unless stray.empty?
-    return numeric_slow_zero_refuse('the constant Numeric is rebound') unless @closed_world.core_constant_plain?('Numeric')
+    return numeric_slow_zero_refuse('the constant Numeric is rebound') unless @closed_world.core_constant_plain?('Numeric', global_only: true)
 
     { target: target, file: file }
   end
@@ -86,7 +86,7 @@ class CodeGen
       entry[:function] == spec[:function] && entry[:path].to_s.end_with?("/#{spec[:file]}")
     end
     return false unless answers.opaque_owners.fetch('zero?', []).empty?
-    return false unless spec[:owners].all? { |name| @closed_world.core_constant_plain?(name) }
+    return false unless spec[:owners].all? { |name| @closed_world.core_constant_plain?(name, global_only: true) }
 
     body = CoreMisc.function_body(File.read(entries.first[:path]), spec[:function])
     !body.nil? && body.start_with?(spec[:body_start])
