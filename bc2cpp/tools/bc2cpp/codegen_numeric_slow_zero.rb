@@ -29,27 +29,36 @@ class CodeGen
 
   private
 
+  # BC2CPP_ZERO_WHY=1 reports, on stderr, why the helper stays by name.
+  def numeric_slow_zero_refuse(reason)
+    warn "[bc2cpp] zero? helper by name: #{reason}" if ENV['BC2CPP_ZERO_WHY'] == '1'
+    nil
+  end
+
   # Nothing but the compiled body, the pinned File natives and the numeric receivers' own lookup answers `zero?`:
   # every other receiver is a proven NoMethodError (bc2cpp_nomethod_named dispatches first, so a wrong proof is the
   # right answer or "closed-world proof violated").
   def numeric_slow_zero_proof
-    return nil unless @yield_reach && block_core_world && @native_name_sources
+    return numeric_slow_zero_refuse('no core program: no compiled body') unless @yield_reach && block_core_world && @native_name_sources
 
     answers = call_facts_answers
     definers = answers.definers('zero?')
-    return nil if definers.nil? || definers[:singleton] || definers[:native].any?
-    return nil unless definers[:ruby].empty? && definers[:modules].empty? && definers[:foreign] == Set['Numeric']
+    return numeric_slow_zero_refuse('zero? is unbounded or has a singleton or native instance definer') if definers.nil? || definers[:singleton] || definers[:native].any?
+    unless definers[:ruby].empty? && definers[:modules].empty? && definers[:foreign] == Set['Numeric']
+      return numeric_slow_zero_refuse("definers other than Numeric#zero?: #{definers.inspect}")
+    end
 
     target = numeric_slow_zero_target(answers)
-    return nil unless target
+    return numeric_slow_zero_refuse('the compiled Numeric#zero? is not a direct-call target') unless target
 
     members = numeric_slow_members(answers, 'zero?')
-    return nil unless members
+    return numeric_slow_zero_refuse('members of zero? are unbounded') unless members
 
     file = !definers[:class_native].empty?
-    return nil if file && !numeric_slow_zero_file_ready?(answers, definers[:class_native])
-    return nil unless members.all? { |klass| klass == CallFacts::CLASS_OBJECT ? file : numeric_slow_inherits_owner?(answers, klass, %w[Numeric]) }
-    return nil unless @closed_world.core_constant_plain?('Numeric')
+    return numeric_slow_zero_refuse('the File.zero? registrations are not the pinned ones') if file && !numeric_slow_zero_file_ready?(answers, definers[:class_native])
+    stray = members.reject { |klass| klass == CallFacts::CLASS_OBJECT ? file : numeric_slow_inherits_owner?(answers, klass, %w[Numeric]) }
+    return numeric_slow_zero_refuse("members outside Numeric: #{stray.to_a.first(5)}") unless stray.empty?
+    return numeric_slow_zero_refuse('the constant Numeric is rebound') unless @closed_world.core_constant_plain?('Numeric')
 
     { target: target, file: file }
   end
