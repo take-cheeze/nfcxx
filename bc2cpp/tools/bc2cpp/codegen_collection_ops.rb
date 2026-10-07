@@ -43,7 +43,12 @@ class CodeGen
     @numeric_slow_collection_ready.fetch(name) { @numeric_slow_collection_ready[name] = numeric_slow_collection_proof(name) }
   end
 
+  # BC2CPP_COLLECTION_EXPORTS=1 says the libmruby the output links is built from the patched tree with the gems of
+  # BC2CPP_BUILD_GEMS: a real build (bc2cpp_closed_world_env) and the checks that run against a full-core build set it.
+  # A harness that links a core-only libmruby leaves it unset and keeps the helpers by name.
   def numeric_slow_collection_proof(name)
+    return false unless ENV['BC2CPP_COLLECTION_EXPORTS'] == '1'
+
     gems = CodeGen.build_gem_names
     return false unless gems && NUMERIC_SLOW_COLLECTION_GEMS.fetch(name).all? { |gem| gems.include?(gem) }
 
