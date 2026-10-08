@@ -66,14 +66,17 @@ module BytecodeIR
     # instead of refusing at them: an instruction that can raise into a handler
     # contributes both the value it leaves (a completed write) and the value
     # it was entered with, since the raise happens before or after the write.
+    #
+    # +refusal+, when a Hash, receives `:cause` (the first reason the query
+    # refused) and is otherwise not read: the answer is the same with or without it.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                             through_handlers: false)
+                             through_handlers: false, refusal: nil)
       preds = instruction_predecessors
-      return nil unless preds
-      return nil unless index.between?(0, @instructions.length - 1)
+      return refused(refusal, :unresolved) unless preds
+      return refused(refusal, :bad_index) unless index.between?(0, @instructions.length - 1)
 
       all_preds = through_handlers ? instruction_predecessors(include_handlers: true) : nil
-      return nil if through_handlers && !all_preds
+      return refused(refusal, :unresolved) if through_handlers && !all_preds
 
       guarded = through_handlers ? Set.new : dataflow_handler_addrs
       seen = Set.new
@@ -82,12 +85,12 @@ module BytecodeIR
       until work.empty?
         i, r = work.pop
         next unless seen.add?([i, r])
-        return nil if seen.size > max_states
-        return nil if opaque_regs&.include?(r)
-        return nil if guarded.include?(@instructions[i].addr)
+        return refused(refusal, :state_cap) if seen.size > max_states
+        return refused(refusal, :opaque_reg) if opaque_regs&.include?(r)
+        return refused(refusal, :query_guarded) if guarded.include?(@instructions[i].addr)
 
         ps = all_preds ? all_preds[i] : preds[i]
-        return nil if ps.empty?
+        return refused(refusal, :no_predecessor) if ps.empty?
 
         ps.each do |p|
           if p == ENTRY
@@ -96,17 +99,18 @@ module BytecodeIR
           end
 
           insn = @instructions[p].source
-          return nil if guarded.include?(insn.addr)
+          return refused(refusal, :query_guarded) if guarded.include?(insn.addr)
 
           # A handler-only edge may fire before the write completes.
           work << [p, r] if all_preds && !preds[i].include?(p)
           case dataflow_effect(insn, r)
-          when :refuse then return nil
+          when :refuse then return refused(refusal, "unmodelled:#{insn.op}")
+          when :callee_clobber then return refused(refusal, :callee_frame_clobber)
           when :pass then work << [p, r]
           when :define
             if follow_moves && insn.op == 'MOVE'
               source = insn.regs[1]
-              return nil unless source
+              return refused(refusal, :move_without_source) unless source
 
               work << [p, source]
             else
@@ -196,16 +200,23 @@ module BytecodeIR
       READS_LEADING_REG_OPS.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
     end
 
-    # :pass (writes nothing relevant), :define (writes +reg+) or :refuse.
+    # :pass (writes nothing relevant), :define (writes +reg+), :callee_clobber
+    # (a callee frame at a lower register may overwrite +reg+) or :refuse.
     def dataflow_effect(insn, reg)
       op = insn.op
       return :pass if READS_LEADING_REG_OPS.include?(op)
       return :refuse unless WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
 
       lead = insn.reg
-      return :refuse if CALLEE_FRAME_OPS.include?(op) && lead && lead.to_i < reg.to_i
+      return :callee_clobber if CALLEE_FRAME_OPS.include?(op) && lead && lead.to_i < reg.to_i
 
       lead == reg ? :define : :pass
+    end
+
+    # Records the first refusal reason in +refusal+ (when given) and returns nil.
+    def refused(refusal, cause)
+      refusal[:cause] ||= cause if refusal
+      nil
     end
 
     # Addresses the dataflow refuses to reason across: handler targets and the
