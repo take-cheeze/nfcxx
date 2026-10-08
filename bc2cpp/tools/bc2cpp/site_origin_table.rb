@@ -94,7 +94,7 @@ module SiteOriginTable
     STATE_CAP = 200_000
 
     def origin(irep, index, reg)
-      defs = BytecodeIR.reaching_definitions(irep, index, reg, max_states: STATE_CAP)
+      defs = BytecodeIR.reaching_definitions(irep, index, reg, max_states: STATE_CAP, origin_transfers: true)
       return ['refused', '-', '-'] unless defs
       return ['none', '-', '-'] if defs.empty?
       return ['ambiguous', '-', '-'] if defs.size > 1
