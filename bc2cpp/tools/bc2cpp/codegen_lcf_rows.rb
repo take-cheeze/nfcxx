@@ -100,8 +100,6 @@ class CodeGen
   private
 
   def lcf_rows_refusal_reason
-    return 'disabled by BC2CPP_LCF_ROW_FLOW=0' if ENV['BC2CPP_LCF_ROW_FLOW'] == '0'
-
     cw = @closed_world
     return 'no closed world' unless cw
     return 'numeric ivar proof unavailable' if numeric_ivar_prerequisites_missing? || @numeric_ivar_disabled
