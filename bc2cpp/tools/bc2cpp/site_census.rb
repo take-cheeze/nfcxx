@@ -99,18 +99,18 @@ module SiteCensus
 
   # The `/*SR:*/` and `/*SO:*/` join tags are comments the text walk must not see (a trailing tag hides `;`).
   TAG_RE = %r{ /\*S[RO]:[^*]*\*/}
-  # The SiteOriginTable tag on a by-name line: `/*SO:<label>:<index>*/`.
-  ORIGIN_TAG_RE = %r{/\*SO:(.+?):(\d+)\*/}
+  # The SiteOriginTable tag on a by-name line: `/*SO:<label>:<index>:<reg>:<walk>*/` (see site_origin_table.rb).
+  ORIGIN_TAG_RE = %r{/\*SO:(.+?):(\d+):(\d+):(\d+)\*/}
 
   def strip_tags(src)
     src.gsub(TAG_RE, '')
   end
 
-  # [label, index] => [reg, status, category, definition] from a BC2CPP_SITE_ORIGIN_TABLE file.
+  # [label, index, reg, walk] => [status, category, definition] from a BC2CPP_SITE_ORIGIN_TABLE file.
   def origin_table(path)
     File.foreach(path).each_with_object({}) do |row, table|
-      label, index, reg, status, category, definition = row.chomp.split("\t")
-      table[[label, index.to_i]] = [reg, status, category, definition]
+      label, index, reg, status, category, definition, walk = row.chomp.split("\t")
+      table[[label, index.to_i, reg, walk]] = [status, category, definition]
     end
   end
 
@@ -123,12 +123,12 @@ module SiteCensus
     m = line.match(ORIGIN_TAG_RE)
     return ['unknown', 'untagged'] unless m
 
-    row = origins[[m[1], m[2].to_i]]
+    row = origins[[m[1], m[2].to_i, m[3], m[4]]]
     return ['unknown', 'no_table_row'] unless row
 
-    reg, status, category, _definition = row
+    status, category, _definition = row
     return ['unknown', status] unless status == 'exact'
-    return ['unknown', 'reg_mismatch'] unless recv == "r#{reg}"
+    return ['unknown', 'reg_mismatch'] unless recv == "r#{m[3]}"
 
     [category, status]
   end
