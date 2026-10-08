@@ -65,7 +65,8 @@ module BytecodeIR
     # provable. +follow_moves+ replaces a `MOVE Ra Rb` definition by the
     # definitions of Rb at that MOVE. +opaque_regs+ are registers written
     # outside this instruction list (nested blocks' SETUPVAR); asking about one
-    # refuses. Exception flow is not modelled: a query that touches a handler
+    # refuses, unless origin_transfers and no closure-creating op reaches +index+
+    # (origin_closure_reach). Exception flow is not modelled: a query that touches a handler
     # target or a protected instruction refuses (RESCUE_SUPPORT compiles that
     # range apart, with re-initialised registers).
     #
@@ -84,6 +85,15 @@ module BytecodeIR
 
       all_preds = through_handlers ? instruction_predecessors(include_handlers: true) : nil
       return refused(refusal, :unresolved) if through_handlers && !all_preds
+
+      live = origin_transfers ? origin_reachable : nil
+      if live
+        # SETUPVAR writes into this frame only from a closure of it, which exists only after a closure-creating op
+        # ran: with none reaching the query, opaque_regs cannot supply its value (see ORIGIN_CLOSURE_OPS).
+        opaque_regs = nil unless origin_closure_reach.include?(index)
+        # A query no execution reaches has no value to report, so it keeps its refusal.
+        return refused(refusal, :no_predecessor) unless live.include?(index)
+      end
 
       guarded = through_handlers ? Set.new : dataflow_handler_addrs
       seen = Set.new
@@ -104,6 +114,8 @@ module BytecodeIR
             defs << Definition.new(ENTRY, r)
             next
           end
+          # Origin only: a predecessor no execution reaches (a jump left dead after a return) supplies no value.
+          next if live && !live.include?(p)
 
           insn = @instructions[p].source
           # An origin-only EXCEPT defines its own register on every entry (origin_effect), so its handler
@@ -234,6 +246,52 @@ module BytecodeIR
           dataflow_effect(insn, reg)
         end
       end
+    end
+
+    # Instruction indices reachable from the method entry over normal and handler edges (origin only), or nil
+    # when a handler target does not resolve: the edge set is then incomplete, and a predecessor outside it
+    # cannot be called dead.
+    def origin_reachable
+      return @origin_reachable if defined?(@origin_reachable)
+
+      @origin_reachable = nil
+      return nil unless handlers_resolved?
+
+      extra = Hash.new { |h, k| h[k] = [] }
+      handler_edges.each { |edge| extra[edge.src] << edge.target }
+      @origin_reachable = forward_reachable([0], extra)
+    end
+
+    # Instruction indices a closure-creating op can reach (origin only): a block or lambda of this frame, or a
+    # body run in place (EXEC, CLASS, MODULE, SCLASS), can write an outer register only once one of those ops
+    # has run. Nil when handler edges do not resolve, as origin_reachable.
+    ORIGIN_CLOSURE_OPS = Set['BLOCK', 'LAMBDA', 'EXEC', 'CLASS', 'MODULE', 'SCLASS'].freeze
+
+    def origin_closure_reach
+      return @origin_closure_reach if defined?(@origin_closure_reach)
+
+      @origin_closure_reach = nil
+      return nil unless handlers_resolved?
+
+      extra = Hash.new { |h, k| h[k] = [] }
+      handler_edges.each { |edge| extra[edge.src] << edge.target }
+      starts = @instructions.filter_map { |i| i.index if ORIGIN_CLOSURE_OPS.include?(i.source.op) }
+                            .flat_map { |c| @instructions[c].successors + extra[c] }
+      @origin_closure_reach = forward_reachable(starts, extra)
+    end
+
+    # Indices reached from +starts+ (inclusive) over normal successors and the +extra+ edges.
+    def forward_reachable(starts, extra)
+      seen = Set.new
+      work = starts.dup
+      until work.empty?
+        i = work.pop
+        next unless seen.add?(i)
+
+        @instructions[i].successors.each { |s| work << s }
+        extra[i].each { |t| work << t }
+      end
+      seen.freeze
     end
 
     # vm.c OP_ENTER binds the arguments to R[1..req+opt] as passed, so a passed argument is its entry value.
