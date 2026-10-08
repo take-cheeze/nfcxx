@@ -47,7 +47,7 @@ module BytecodeIR
   READS_LEADING_REG_OPS = Set['JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'].freeze
 
   # A callee's frame starts at R(a): it may overwrite every register above a.
-  CALLEE_FRAME_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC'].freeze
+  CALLEE_FRAME_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC', 'BLKCALL'].freeze
 
   # Expanded (instruction, register) states before a query gives up.
   DATAFLOW_MAX_STATES = 400
