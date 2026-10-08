@@ -67,7 +67,7 @@ module BytecodeIR
     # contributes both the value it leaves (a completed write) and the value
     # it was entered with, since the raise happens before or after the write.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
-                             through_handlers: false)
+                             through_handlers: false, origin_transfers: false)
       preds = instruction_predecessors
       return nil unless preds
       return nil unless index.between?(0, @instructions.length - 1)
@@ -96,11 +96,15 @@ module BytecodeIR
           end
 
           insn = @instructions[p].source
-          return nil if guarded.include?(insn.addr)
+          # An origin-only EXCEPT defines its own register on every entry (origin_effect), so its handler
+          # edges need not be known for that register.
+          exact_entry = origin_transfers && insn.op == 'EXCEPT' && insn.reg == r
+          return nil if guarded.include?(insn.addr) && !exact_entry
 
           # A handler-only edge may fire before the write completes.
           work << [p, r] if all_preds && !preds[i].include?(p)
-          case dataflow_effect(insn, r)
+          effect = origin_transfers ? origin_effect(insn, r) : dataflow_effect(insn, r)
+          case effect
           when :refuse then return nil
           when :pass then work << [p, r]
           when :define
@@ -194,6 +198,22 @@ module BytecodeIR
     def dataflow_steps_over?(insn)
       op = insn.op
       READS_LEADING_REG_OPS.include?(op) || WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
+    end
+
+    # Origin-only transfers (SiteOriginTable's walk; codegen never passes origin_transfers:, so its answers
+    # do not change). Each one follows vm.c for the op. JMPUW writes no register: its ensure unwinding needs
+    # a protected range, and a protected predecessor is refused before this runs. RESCUE a b (vm.c OP_RESCUE)
+    # reads R[a] and writes only R[b] (the match result). EXCEPT a (vm.c OP_EXCEPT) stores the exception or
+    # nil into R[a] on every entry; the walk reaches it only for R[a] (see reaching_definitions).
+    def origin_effect(insn, reg)
+      case insn.op
+      when 'JMPUW' then :pass
+      when 'RESCUE'
+        second = insn.typed[1]
+        second&.kind == :reg && second.value.to_s == reg ? :define : :pass
+      when 'EXCEPT' then insn.reg == reg ? :define : :refuse
+      else dataflow_effect(insn, reg)
+      end
     end
 
     # :pass (writes nothing relevant), :define (writes +reg+) or :refuse.
