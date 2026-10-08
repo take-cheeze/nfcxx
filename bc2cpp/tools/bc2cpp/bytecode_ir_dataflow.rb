@@ -49,6 +49,13 @@ module BytecodeIR
   # A callee's frame starts at R(a): it may overwrite every register above a.
   CALLEE_FRAME_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC'].freeze
 
+  # Origin-only (Program#origin_effect; codegen's dataflow_effect keeps the audited model). The vm.c fallback
+  # dispatch (L_SEND_SYM / L_SENDB_SYM) starts a frame at R(a) and writes R(a+2) (nil); GETIDX0 and ADDI/SUBI
+  # also write R(a+1), SETIDX R(a+3). BLKCALL clears every register above its arguments. Every such write is
+  # above a. ADDILV/SUBILV are not listed: their fallback is mrb_funcall, whose frame sits above the caller's nregs.
+  ORIGIN_FRAME_OPS = Set['GETIDX', 'GETIDX0', 'SETIDX', 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI',
+                         'EQ', 'LT', 'LE', 'GT', 'GE', 'BLKCALL'].freeze
+
   # Expanded (instruction, register) states before a query gives up.
   DATAFLOW_MAX_STATES = 400
 
@@ -209,6 +216,8 @@ module BytecodeIR
     # a protected range, and a protected predecessor is refused before this runs. RESCUE a b (vm.c OP_RESCUE)
     # reads R[a] and writes only R[b] (the match result). EXCEPT a (vm.c OP_EXCEPT) stores the exception or
     # nil into R[a] on every entry; the walk reaches it only for R[a] (see reaching_definitions).
+    # ORIGIN_FRAME_OPS clobber or write above R(a) on a path the leading-register model misses. ENTER's rest,
+    # post, keyword and block slots and its locals take values ENTER builds (see enter_passes?).
     def origin_effect(insn, reg)
       case insn.op
       when 'JMPUW' then :pass
@@ -216,8 +225,27 @@ module BytecodeIR
         second = insn.typed[1]
         second&.kind == :reg && second.value.to_s == reg ? :define : :pass
       when 'EXCEPT' then insn.reg == reg ? :define : :refuse
-      else dataflow_effect(insn, reg)
+      when 'ENTER' then enter_passes?(insn, reg) ? :pass : :refuse
+      else
+        lead = insn.reg
+        if ORIGIN_FRAME_OPS.include?(insn.op) && (lead.nil? || lead.to_i < reg.to_i)
+          :callee_clobber
+        else
+          dataflow_effect(insn, reg)
+        end
       end
+    end
+
+    # vm.c OP_ENTER binds the arguments to R[1..req+opt] as passed, so a passed argument is its entry value.
+    # The one exception is R[1] without keywords: argc==14 with a keyword hash packs the arguments into an
+    # array there. R[0] (self) is never written.
+    def enter_passes?(insn, reg)
+      return true if reg == '0'
+
+      req, opt, _rest, _post, kw, kwrest = insn.enter_fields
+      keywords = kw.to_i.positive? || kwrest.to_i.positive?
+      n = reg.to_i
+      n.between?(1, req.to_i + opt.to_i) && (n != 1 || keywords)
     end
 
     # :pass (writes nothing relevant), :define (writes +reg+), :callee_clobber
