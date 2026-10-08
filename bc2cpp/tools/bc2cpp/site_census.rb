@@ -51,8 +51,7 @@ module SiteCensus
     end
   end
 
-  # A register copy (`rN = rM;`, `rN = self;`) is followed back to its source. The walk is text order, not control
-  # flow: the nearest preceding assignment wins, as it does for the guard's own receiver.
+  # Hop limit of the text-mode copy walk (see receiver_origin).
   COPY_HOPS = 8
 
   # Index and right-hand side of the nearest assignment to `reg` in lines[floor...from] (a declaration included).
@@ -75,8 +74,9 @@ module SiteCensus
     header[/\((.*)\)\s*\{\s*$/, 1].to_s.split(',').filter_map { |p| p[/(\w+)\s*\z/, 1] }
   end
 
-  # Where the receiver register was last assigned before the guard chain. Heuristic: the origin is read from the
-  # right-hand side of that assignment, and a register copy is followed up to COPY_HOPS assignments.
+  # Text-mode baseline (no origin table): the origin is read from the right-hand side of the register's last
+  # assignment, and a register copy is followed up to COPY_HOPS assignments in text order. The default census
+  # uses origin_table (SiteOriginTable's reaching definitions) instead; this stays for before/after comparisons.
   def receiver_origin(lines, line, recv)
     # A receiver that is not a register is named directly: `self`, or a parameter of the method.
     unless recv =~ /\Ar\d+\z/
@@ -95,6 +95,42 @@ module SiteCensus
 
   def parameter_list(lines, fn)
     fn ? parameter_names(lines[fn]) : []
+  end
+
+  # The `/*SR:*/` and `/*SO:*/` join tags are comments the text walk must not see (a trailing tag hides `;`).
+  TAG_RE = %r{ /\*S[RO]:[^*]*\*/}
+  # The SiteOriginTable tag on a by-name line: `/*SO:<label>:<index>*/`.
+  ORIGIN_TAG_RE = %r{/\*SO:(.+?):(\d+)\*/}
+
+  def strip_tags(src)
+    src.gsub(TAG_RE, '')
+  end
+
+  # [label, index] => [reg, status, category, definition] from a BC2CPP_SITE_ORIGIN_TABLE file.
+  def origin_table(path)
+    File.foreach(path).each_with_object({}) do |row, table|
+      label, index, reg, status, category, definition = row.chomp.split("\t")
+      table[[label, index.to_i]] = [reg, status, category, definition]
+    end
+  end
+
+  # The receiver origin from the exact walk (SiteOriginTable): [origin, status]. A site the table
+  # cannot prove, or cannot find, is `unknown` with the reason as its status.
+  def exact_origin(line, recv, origins)
+    return ['self', 'exact'] if recv == 'self'
+    return ['unknown', 'not_a_register'] unless recv =~ /\Ar\d+\z/
+
+    m = line.match(ORIGIN_TAG_RE)
+    return ['unknown', 'untagged'] unless m
+
+    row = origins[[m[1], m[2].to_i]]
+    return ['unknown', 'no_table_row'] unless row
+
+    reg, status, category, _definition = row
+    return ['unknown', status] unless status == 'exact'
+    return ['unknown', 'reg_mismatch'] unless recv == "r#{reg}"
+
+    [category, status]
   end
 
   # `at` is the index of the assignment whose right-hand side is `rhs`; `fn` and `params` describe its method.
@@ -140,8 +176,10 @@ module SiteCensus
     'NONE'
   end
 
-  def scan(src)
-    lines = src.lines
+  # With +origins+ (origin_table), the receiver origin comes from the exact walk and the join tags are kept;
+  # without it, the text walk runs over the untagged text.
+  def scan(src, origins: nil)
+    lines = (origins ? src : strip_tags(src)).lines
     names = sym_names(src)
     first_method = first_method_line(lines)
     raise 'bc2cpp_sym_names table not found' if names.empty?
@@ -164,12 +202,12 @@ module SiteCensus
         helper_sends[[cur, name]] += 1
         next
       end
-      sites << classify_send(lines, i, l, cur, name, argc)
+      sites << classify_send(lines, i, l, cur, name, argc, origins)
     end
     Scan.new(lines: lines, names: names, first_method: first_method, sites: sites, helper_sends: helper_sends)
   end
 
-  def classify_send(lines, i, l, cur, name, argc)
+  def classify_send(lines, i, l, cur, name, argc, origins = nil)
     prev = lines[0...i].reverse.find { |x| x !~ /^\s*$/ }.to_s
     class_arm = prev =~ /(?:if|else if) \(.*(?:bc2cpp_owner_class_\d+\(M\) == mrb_obj_class|native_class ==)/ ? true : false
     else_arm = prev =~ /\belse\s*\{?\s*$/ || prev =~ /if \(!\w*(?:done|ok)\w*\)/ ? true : false
@@ -191,7 +229,8 @@ module SiteCensus
             'no_diag'
           end
     kept = l[/CLOSED_WORLD kept: (\w+)/, 1]
-    origin = receiver_origin(lines, i + 1, l[/bc2cpp_send\(M, (\w+)/, 1])
+    recv = l[/bc2cpp_send\(M, (\w+)/, 1]
+    origin, origin_status = origins ? exact_origin(l, recv, origins) : [receiver_origin(lines, i + 1, recv), 'text_walk']
     category = if kept then "closed_world_kept:#{kept}"
                elsif class_arm then 'known_class_arm_still_by_name'
                elsif shape == 'rgss_native_class_guard' then 'rgss_native_exact_class_else'
@@ -201,7 +240,7 @@ module SiteCensus
                elsif shape == 'owner_class_chain' then 'owner_chain_default_else'
                else "other:#{shape}"
                end
-    { line: i + 1, origin: origin, category: category, kept: kept, fn: cur, name: name, argc: argc, else_arm: else_arm, class_arm: class_arm, marker: marker, shape: shape, why: why,
+    { line: i + 1, origin: origin, origin_status: origin_status, category: category, kept: kept, fn: cur, name: name, argc: argc, else_arm: else_arm, class_arm: class_arm, marker: marker, shape: shape, why: why,
       excluded: diag && diag[/excluded=(\S+)/, 1] }
   end
 
