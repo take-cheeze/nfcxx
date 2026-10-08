@@ -93,13 +93,14 @@ module SiteOriginTable
     # unmodelled state, so the table raises it. Refusals left are the sound ones (handlers, unmodelled ops).
     STATE_CAP = 200_000
 
-    # BC2CPP_SITE_ORIGIN_EXCEPTIONS=1 re-asks a refused query through the handler edges, taking only one
-    # definition as the answer (docs/bc2cpp-dynamic-site-census.md). Read only here: no generated code changes.
+    # A refused query is re-asked through the handler edges, taking only one definition as the answer. On by
+    # default; BC2CPP_SITE_ORIGIN_EXCEPTIONS=0 turns it off (docs/bc2cpp-dynamic-site-census.md). Read only here:
+    # no generated code changes.
     def origin(irep, index, reg)
       refusal = {}
       defs = BytecodeIR.reaching_definitions(irep, index, reg, max_states: STATE_CAP, origin_transfers: true,
                                                                   refusal: refusal)
-      if defs.nil? && ENV['BC2CPP_SITE_ORIGIN_EXCEPTIONS'] == '1'
+      if defs.nil? && ENV['BC2CPP_SITE_ORIGIN_EXCEPTIONS'] != '0'
         refusal = {}
         defs = BytecodeIR.reaching_definitions(irep, index, reg, max_states: STATE_CAP, origin_transfers: true,
                                                                     through_handlers: true, refusal: refusal)
