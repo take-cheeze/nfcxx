@@ -132,7 +132,7 @@ S-expressions, one statement per line, indented by nesting. Identifiers are doub
 
 ```
 module    ::= (ir-module "FILE") global* data* function*
-global    ::= (global "NAME" TYPE BYTES ALIGN INIT)       static storage object, see INIT below
+global    ::= (global "NAME" TYPE BYTES ALIGN [(static)] INIT)  static storage object; (static) = internal linkage
 INIT      ::= (extern)                                    declared here, defined elsewhere: no storage
             | (init ITEM*)                                 static initializer (see ITEM)
             | (unsupported init KIND)                      not lowered (dynamic initialization)
