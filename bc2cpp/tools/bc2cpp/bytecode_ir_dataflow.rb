@@ -143,6 +143,12 @@ module BytecodeIR
           # edges need not be known for that register.
           exact_entry = origin_transfers && insn.op == 'EXCEPT' && insn.reg == r
           return refused(refusal, :query_guarded) if guarded.include?(insn.addr) && !exact_entry
+          # A protected JMPUW on a normal edge unwinds through its ensure (vm.c OP_JMPUW): the ensure body runs,
+          # then RAISEIF jumps to the target, so that body's writes reach the target by no normal edge. The guard
+          # above is off under through_handlers, so refuse here. The JMPUW's handler edge into the ensure stays
+          # exact: the JMPUW writes nothing, so the ensure is entered with the values the JMPUW saw.
+          return refused(refusal, :unwinding_jump) if insn.op == 'JMPUW' && preds[i].include?(p) &&
+                                                     dataflow_handler_addrs.include?(insn.addr)
 
           # A handler-only edge may fire before the write completes.
           work << [p, r] if all_preds && !preds[i].include?(p)
