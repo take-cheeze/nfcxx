@@ -2,9 +2,9 @@
 # Hexagon check for the generated C of every tests/cases/*.cpp (see docs/notes/hexagon.md).
 #   1. EDG generates C for a 32-bit little-endian target (scripts/gen-c-target.sh, linux_riscv32).
 #   2. clang --target=hexagon compiles it (-fwrapv -fno-strict-aliasing, as the gcc backend does).
-#   3. If qemu-hexagon (Linux user mode) is installed, the object is flattened (flatlink.py,
+#   3. If qemu-hexagon (Linux user mode) is installed, the object is flattened (flatlink.rb,
 #      since no Hexagon linker exists here), run, and its exit code compared with `// EXPECT:`.
-# Cases that throw get tests/hexagon/eh_rt.c appended. Cases needing relocations or libc that flatlink.py lacks, and template
+# Cases that throw get tests/hexagon/eh_rt.c appended. Cases needing relocations or libc that flatlink.rb lacks, and template
 # instantiation (edg_prelink), are reported as SKIP with the reason. Exits 0 with SKIP when clang
 # has no Hexagon backend.
 # Env: CLANG (default clang), QEMU_HEXAGON (default qemu-hexagon), EDG_TARGET (default linux_riscv32).
@@ -46,7 +46,7 @@ for f in "$root"/tests/cases/*.cpp; do
     echo "FAIL (clang) $n"; head -3 "$tmp/$n.cc"; fail=1; continue
   fi
   if [ $run = 0 ]; then echo "ok   compile $n"; pass=$((pass+1)); continue; fi
-  if ! python3 "$here/flatlink.py" "$tmp/$n.o" "$tmp/$n.elf" _start 2>"$tmp/$n.link"; then
+  if ! "$root/scripts/mrb" "$here/flatlink.rb" "$tmp/$n.o" "$tmp/$n.elf" _start 2>"$tmp/$n.link"; then
     case $(cat "$tmp/$n.link") in
       *SKIP-*) echo "skip $n: $(sed 's/^flatlink: //' "$tmp/$n.link")"; skip=$((skip+1)) ;;
       *) echo "FAIL (link) $n"; cat "$tmp/$n.link"; fail=1 ;;
@@ -62,7 +62,7 @@ done
 if $clang --target=$triple -ffreestanding -fno-pic -O2 -mhvx -mhvx-length=128b -w \
       -c "$here/hvx_vaddh.c" -o "$tmp/hvx.o" 2>"$tmp/hvx.cc"; then
   if [ $run = 0 ]; then echo "ok   compile hvx_vaddh"; pass=$((pass+1));
-  elif ! python3 "$here/flatlink.py" "$tmp/hvx.o" "$tmp/hvx.elf" _start 2>"$tmp/hvx.link"; then
+  elif ! "$root/scripts/mrb" "$here/flatlink.rb" "$tmp/hvx.o" "$tmp/hvx.elf" _start 2>"$tmp/hvx.link"; then
     echo "FAIL (link) hvx_vaddh"; cat "$tmp/hvx.link"; fail=1
   else
     chmod +x "$tmp/hvx.elf"

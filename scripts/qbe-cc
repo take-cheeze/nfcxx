@@ -49,7 +49,7 @@ else
 fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
 # cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.py rewrites
-# just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after weak-symbols.py.
+# just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after weak-symbols.rb.
 t=$(trace_start)
 python3 "$(dirname "$0")/qbe-prep.py" "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
 trace_end "$t" "qbe-prep.py (rewrite for cproc)" qbe-backend
@@ -62,9 +62,9 @@ trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
 t=$(trace_start)
-python3 "$(dirname "$0")/weak-symbols.py" "$tmp/prep.c" "$tmp/out.s"
+"$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" "$tmp/prep.c" "$tmp/out.s"
 cat "$tmp/tail.s" >> "$tmp/out.s"
-trace_end "$t" "weak-symbols.py" qbe-backend
+trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)
 cc -c -o "${out:-${src%.c}.o}" "$tmp/out.s"
 trace_end "$t" "cc -c (assemble)" qbe-backend
