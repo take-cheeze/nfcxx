@@ -392,6 +392,7 @@ static int ir_nreg;
 static char *ir_sret;
 static a_type_ptr ir_ret_type;
 static int ir_in_main;   /* the routine being lowered is main */
+static a_routine_ptr ir_cur_rout;   /* the routine being lowered (thunks: enk_result_of_overriding_function) */
 
 /* Indentation of the next expression-level line. Statement lowering sets it before lowering. */
 static int ir_depth;
@@ -651,6 +652,7 @@ static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_lval_op(an_expr_node_ptr e);
+static ir_val ir_roof(an_expr_node_ptr e);
 
 /* Pointer that may be null: emit (nonnull P) unless the operand is known to be an address. */
 static void ir_nonnull(an_expr_node_ptr src, ir_val p)
@@ -680,6 +682,8 @@ static ir_val ir_rval(an_expr_node_ptr e)
       return ir_rval(e->variant.object_lifetime.expr);
     case enk_operation:
       return ir_rval_op(e);
+    case enk_result_of_overriding_function:
+      return ir_roof(e);
     default:
       return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name(e->kind) != NULL ? nfcxx_enk_name(e->kind) : "?"),
                     2, (int)e->kind);
@@ -696,6 +700,11 @@ static ir_val ir_lval(an_expr_node_ptr e)
   }
   if (e->kind == enk_object_lifetime) return ir_lval(e->variant.object_lifetime.expr);
   if (e->kind == enk_operation) return ir_lval_op(e);
+  if (e->kind == enk_routine) {
+    /* A function designator (the operand of & outside a constant expression, for example `throw &f`): its address. */
+    ir_note(2, enk_routine, 1);
+    return ir_mk_addr(ir_fmt("&\"%s\"", ir_name_or(e->variant.routine.ptr->source_corresp.name, "fn")), e->type, 0);
+  }
   if (ir_is_aggregate(e->type)) return ir_rval(e);
   return ir_gap(e->type, "lvalue", 2, (int)e->kind);
 }
@@ -1134,6 +1143,50 @@ static ir_val ir_call(an_expr_node_ptr e)
       int named = agg_ret ? 1 : 0;
       for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) named++;
       callee = ir_fmt("%s (variadic %d)", callee, named);
+    }
+  }
+  ir_note(0, eok_call, 1);
+  if (ir_is_void(e->type) || agg_ret) {
+    ir_emit(ir_fmt("(eval (call void %s%s))", callee, args));
+    if (agg_ret) return ir_mk_addr(sret.s, e->type, 0);
+    return ir_mk_void();
+  }
+  return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(call %s %s%s)", ir_valtext(e->type), callee, args)), e->type);
+}
+
+/* enk_result_of_overriding_function: the body of an IA-64 this-adjusting thunk (for example the destructor of a
+   second base class) or of a covariant-return wrapper calls the underlying function with the thunk's own
+   parameters, as c_gen_be.c's dump_result_of_overriding_function writes it. The thunk has already adjusted its
+   `this` parameter in its slot. */
+static ir_val ir_roof(an_expr_node_ptr e)
+{
+  a_routine_ptr under = ir_cur_rout != NULL ? ir_cur_rout->overriding_function_for_wrapper : NULL;
+  a_scope_ptr scope = ir_cur_rout != NULL ? scope_for_routine(ir_cur_rout) : NULL;
+  a_variable_ptr param;
+  char *args = ir_dup("");
+  int agg_ret = ir_is_aggregate(e->type);
+  ir_val sret = ir_mk_void();
+  char *callee;
+  a_type_ptr ft;
+  if (under == NULL || scope == NULL) return ir_gap(e->type, "node result_of_overriding_function", 2, (int)e->kind);
+  ft = skip_typerefs(ir_cur_rout->type);
+  if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
+    return ir_gap(e->type, "node result_of_overriding_function (variadic)", 2, (int)e->kind);
+  }
+  ir_note(2, enk_result_of_overriding_function, 1);
+  callee = ir_fmt("&\"%s\"", ir_name_or(under->source_corresp.name, "fn"));
+  if (agg_ret) {
+    sret = ir_temp(e->type);
+    args = ir_fmt("%s %s", args, sret.s);
+  }
+  for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
+    ir_val a = ir_var_addr(param, param->type, 0);
+    if (ir_is_aggregate(param->type)) {
+      ir_val tmp = ir_temp(param->type);
+      ir_copy(param->type, tmp.s, a.s);
+      args = ir_fmt("%s %s", args, tmp.s);
+    } else {
+      args = ir_fmt("%s %s", args, ir_load(a).s);
     }
   }
   ir_note(0, eok_call, 1);
@@ -1868,6 +1921,7 @@ static void ir_function(a_routine_ptr rout)
   ir_sret = NULL;
   ir_ret_type = ret;
   ir_in_main = rout->source_corresp.name != NULL && strcmp(rout->source_corresp.name, "main") == 0;
+  ir_cur_rout = rout;
   ir_slots.n = 0;
   ir_labels.n = 0;
   ir_loop_n = 0;
