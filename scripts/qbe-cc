@@ -18,8 +18,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   case $a in
     -c) compile=1 ;;
     -o) out=${args[++i]} ;;
-    -D?*|-I?*|-U?*) cppflags+=("$a") ;;
+    -D?*|-I?*|-U?*|-std=*|-ansi|-iquote?*|-isystem?*|-idirafter?*|-include?*|-imacros?*) cppflags+=("$a") ;;
     -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
+    -isystem|-iquote|-idirafter|-include|-imacros) cppflags+=("$a" "${args[++i]}") ;;
     *.c) src=$a ;;
   esac
 done
