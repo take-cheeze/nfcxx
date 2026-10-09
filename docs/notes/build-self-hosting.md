@@ -5,11 +5,12 @@ not cover CI, code review or hosting of the repository.
 
 ## What the build fetches
 
-Only the setup scripts reach the network, and only through git submodules:
+Only the setup scripts reach the network, through git submodules (and, for mruby, one pinned shallow fetch):
 
 | Script | Fetches | Pinned to |
 | --- | --- | --- |
 | `scripts/setup-edg.sh`, `scripts/setup-pathb.sh` | `3rd/edg` (`https://github.com/edgcpp/compiler`, shallow) | the submodule commit |
+| `scripts/setup-mruby.sh` | `mruby/mruby` at tag 4.0.0 (`831da26b`), shallow, into `build/mruby-tool/src` | the commit |
 | `scripts/setup-qbe.sh` | `3rd/qbe` (`take-cheeze/qbe`, a daily mirror of `c9x.me/git/qbe.git`) and `3rd/cproc` (`michaelforney/cproc`) | the submodule commits |
 
 The EDG CMake files do not fetch anything (no `FetchContent`, `ExternalProject` or downloads). After a
@@ -26,7 +27,12 @@ Two inputs are used only by the tests, not by the build:
 - A C and C++ compiler: gcc and g++. The driver takes the header search path and the GNU version
   from `g++` (`NFCXX_CXX` overrides it), and the current results come from gcc 13.
 - `cmake` and `ninja` for EDG; `make` for QBE and cproc.
-- `python3` for `scripts/weak-symbols.py` and `scripts/pathb-qbe-emit.py`.
+- `python3` for `scripts/qbe-prep.py` and `scripts/pathb-qbe-emit.py` (being ported to mruby, see
+  `mruby-scripting.md`; `scripts/weak-symbols.rb` and `tests/hexagon/flatlink.rb` already run on mruby).
+- `ruby` with the `rake` gem, once, to build the mruby interpreter that runs those scripts
+  (`scripts/setup-mruby.sh`, output `build/mruby-tool/bin/mruby`). mruby's `minirake` only execs `rake`, so
+  CRuby and rake are both needed; nothing needs them after the build. `tests/mruby/run.sh` also uses
+  `python3`, for the Python originals kept in `tests/mruby/oracle/` as comparison oracles.
 - `git`, `patch`, `sed`, `realpath` and `date` (GNU coreutils) for the setup and wrapper scripts.
 - `sccache` is used by CI only. The build works without it.
 
@@ -35,7 +41,7 @@ cproc) is ours to vendor.
 
 ## Self-hosting plan
 
-1. **Mirror the submodules.** Put copies of the three repositories on an internal git server. Point
+1. **Mirror the submodules** (and `mruby/mruby`, fetched by `setup-mruby.sh`). Put copies of the three repositories on an internal git server. Point
    the submodule URLs at it: either change `.gitmodules`, or set `submodule.<name>.url` in the local
    git config. Each pinned commit must exist on the mirror. The pins are the only versions the build
    uses.
@@ -43,7 +49,7 @@ cproc) is ours to vendor.
    (`d1c53dd`). It must be regenerated if cproc moves. `setup-edg.sh` edits the EDG base config
    with `sed`, so a new EDG pin needs that edit checked.
 3. **Pin the host toolchain.** A container image or an apt list with gcc-13, cmake, ninja, make,
-   python3, patch and git. The driver's header discovery depends on the GCC version, so the image
+   python3, ruby, rake, patch and git. The driver's header discovery depends on the GCC version, so the image
    should not change it silently.
 4. **Vendor or mirror the test inputs** (optional for the build): tinyxml2 and doctest. Both are
    small. Their licences travel with them.

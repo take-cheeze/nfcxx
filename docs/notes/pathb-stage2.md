@@ -172,7 +172,7 @@ Linkage. Without a marker a definition is external (strong). `(static)` is inter
 puts in a COMDAT group: `a_routine.use_comdat` for functions (inline functions, template instances, implicit members)
 and `a_variable.comdat_group != NULL` for variables (inline variables, function-local statics of such functions,
 vtables, typeinfo). These are the objects `c_gen_be.c` writes with `__attribute__((__weak__))` and that
-`scripts/weak-symbols.py` finds in the production path. Every translation unit that needs one defines it; the
+`scripts/weak-symbols.rb` finds in the production path. Every translation unit that needs one defines it; the
 definitions are identical and the link must keep one. A backend emits a weak symbol (ELF `.weak`, or COMDAT/linkonce).
 Declarations (`(extern)`) carry no marker. A `(static)` object is never `(weak)`.
 
