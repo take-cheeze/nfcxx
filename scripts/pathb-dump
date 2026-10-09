@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Path B stage 1: print the lowered IL of a C++ file as s-expressions (see be/nfcxx_be.h for the format).
-# Runs the harness front end (build/pathb, from scripts/setup-pathb.sh) from the EDG base dir, with the same
-# flags as the nfcxx --emit-c branch. Front-end errors go to stderr and give a non-zero exit status.
-# Usage: scripts/pathb-dump [-std=c++NN] file.cpp...
+# Path B: print the lowered IL of a C++ file as s-expressions (stage 1, see be/nfcxx_be.h for the format), or
+# with --ir the mid-level IR (stage 2, see docs/notes/pathb-stage2.md). Runs the harness front end
+# (build/pathb, from scripts/setup-pathb.sh) from the EDG base dir, with the same flags as the nfcxx --emit-c
+# branch. Front-end errors go to stderr and give a non-zero exit status.
+# Usage: scripts/pathb-dump [--ir] [-std=c++NN] file.cpp...
+# NFCXX_PATHB_STATS=1 prints per-node-kind lowered/unsupported counts to stderr (--ir only).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
-std=--c++23; files=()
+std=--c++23; files=(); mode=il
 for arg in "$@"; do
   case $arg in
+    --ir) mode=ir ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;
     *) files+=("$arg") ;;
   esac
 done
 [ ${#files[@]} -gt 0 ] || { echo "pathb-dump: no input files" >&2; exit 2; }
 
+export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" selects be/nfcxx_ir.c
 status=0
 for file in "${files[@]}"; do
   f=$(realpath "$file")
