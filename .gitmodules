@@ -4,7 +4,7 @@
 	shallow = true
 [submodule "3rd/qbe"]
 	path = 3rd/qbe
-	url = https://github.com/michaelforney/qbe
+	url = https://github.com/take-cheeze/qbe
 [submodule "3rd/cproc"]
 	path = 3rd/cproc
 	url = https://github.com/michaelforney/cproc

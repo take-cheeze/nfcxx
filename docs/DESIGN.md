@@ -40,11 +40,11 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
 - **Signed overflow wraps without any flags**: cproc/QBE don't exploit C UB, so `tests/cases/signed_overflow_wraps.cpp`
   passes on the QBE backend without `-fwrapv`. Division by zero, `INT_MIN / -1` and float->int overflow are still
   machine-dependent in QBE and need checks inserted by us (Path B).
-- **Pinning**: upstream QBE (c9x.me) is unreachable from the sandbox, so `3rd/qbe` is `michaelforney/qbe`
-  (2021-10). `3rd/cproc` is pinned at `5d6c4cd`, the last commit before cproc emits `call extern` (unknown to that QBE).
-  Newer cproc also emits `neg`, which the old QBE lacks; `qbe-cc` lowers it to `sub 0, x` (and `sub -0.0, x` for
-  floats, which keeps the sign of zero). Older cproc (<= Feb 2022) can't parse `extern __attribute__(...)`, so there is
-  no single cproc commit that avoids the rewrite. Move qbe and cproc forward together once upstream QBE is reachable.
+- **Sources**: `3rd/qbe` is [take-cheeze/qbe](https://github.com/take-cheeze/qbe), a daily mirror of upstream
+  `https://c9x.me/git/qbe.git` (its `master` and tags; sync workflow + `scripts/sync-c9x.sh` live on that repo's `main`).
+  Plain `git clone` of c9x.me fails (dumb-HTTP server resets connections), hence the curl-based sync script.
+  `3rd/cproc` is michaelforney/cproc (needs a QBE new enough to parse `call extern`, i.e. current upstream).
+  Move both forward together.
 - **EDG output quirk**: EDG emits a top-level `__asm__(".align 2");` after functions; cproc has no top-level asm, so the
   wrapper strips it (alignment hint only).
 - **Not yet covered**: C++ exceptions (the EH runtime in `libC.a` is only linked, never exercised by tests), `volatile`

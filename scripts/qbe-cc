@@ -31,8 +31,6 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # EDG follows functions with a top-level `__asm__(".align 2");` hint; cproc has no
 # top-level asm, and the alignment is only a hint, so drop it.
 cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" | sed 's/__asm__(".align 2");//g' > "$tmp/pp.c"
-# This cproc emits `neg`, which the pinned (older) QBE lacks; lower it to
-# `sub 0, x` (integers) and `sub -0.0, x` (floats; keeps the sign of zero).
-"$cproc" < "$tmp/pp.c" | sed -E 's/=([wl]) neg /=\1 sub 0, /; s/=([sd]) neg /=\1 sub \1_-0, /' > "$tmp/out.ssa"
+"$cproc" < "$tmp/pp.c" > "$tmp/out.ssa"
 "$qbe" "$tmp/out.ssa" > "$tmp/out.s"
 cc -c -o "${out:-${src%.c}.o}" "$tmp/out.s"
