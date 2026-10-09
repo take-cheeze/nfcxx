@@ -1,4 +1,4 @@
-(ir-module "exceptions.cpp")
+(ir-module "exceptions.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 (global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
 (global "_ZTS1E" (const (array 3 (const char))) 3 1 (weak) (init
     (bytes 0 3 @"const")))

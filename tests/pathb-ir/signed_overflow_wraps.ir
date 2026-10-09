@@ -1,4 +1,4 @@
-(ir-module "signed_overflow_wraps.cpp")
+(ir-module "signed_overflow_wraps.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 
 (function "_Z5wrapsi"
   (ret bool)

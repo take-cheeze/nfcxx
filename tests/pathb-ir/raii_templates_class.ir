@@ -1,4 +1,4 @@
-(ir-module "raii_templates_class.cpp")
+(ir-module "raii_templates_class.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 (global "live" int 4 4 (static) (init
     (scalar 0 int (const int 0))))
 (global "__eh_curr_region" unsigned_short 2 2 (extern))

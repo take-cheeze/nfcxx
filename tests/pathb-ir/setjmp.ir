@@ -1,0 +1,47 @@
+(ir-module "setjmp.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "buf" (array 64 long) 512 8 (static) (init (zero 0 512)))
+
+(function "_ZN28_INTERNAL_10_setjmp_cpp_main4jumpEi"
+  (ret void)
+  (params (param %0 "v" int))
+  (static)
+  (slot "v" int 4 4)
+  (store int $"v" %0)
+  (let %1 int (load int $"v"))
+  (eval (call void &"longjmp" @"buf" %1))
+  (return))
+
+(function "_ZN28_INTERNAL_10_setjmp_cpp_main3runEv"
+  (ret int)
+  (params)
+  (static)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (slot "hits" int 4 4)
+  (store int $"a" (const int 1))
+  (store int $"b" (const int 2))
+  (store int $"hits" (const int 0))
+  (let %0 int (call int &"_setjmp" @"buf"))
+  (let %1 bool (eq int %0 (const int 0)))
+  (if %1
+    (then
+      (block
+        (store int $"a" (const int 10))
+        (let %2 int (load int $"b"))
+        (let %3 int (wadd int %2 (const int 30)))
+        (store int $"b" %3)
+        (store int $"hits" (const int 5))
+        (eval (call void &"_ZN28_INTERNAL_10_setjmp_cpp_main4jumpEi" (const int 3))))))
+  (let %4 int (load int $"a"))
+  (let %5 int (load int $"b"))
+  (let %6 int (wadd int %4 %5))
+  (let %7 int (load int $"hits"))
+  (let %8 int (wadd int %6 %7))
+  (let %9 int (wadd int %8 (const int 30)))
+  (return %9))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (call int &"_ZN28_INTERNAL_10_setjmp_cpp_main3runEv"))
+  (return %0))
