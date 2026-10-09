@@ -1068,6 +1068,16 @@ if $PROGRAM_NAME == __FILE__
     SiteProfile.capture_stdout(site_profile_dir, symbol)
   end
 
+  # ELSE_TRACE (tools/bc2cpp/else_trace.rb): opt-in counters on the else arm of a core class-tag chain;
+  # unset (or any value but 1) leaves stdout untouched.
+  if ENV['BC2CPP_TRACE_ELSE'] == '1'
+    if ENV['BC2CPP_SITE_PROFILE'] && !ENV['BC2CPP_SITE_PROFILE'].empty?
+      abort 'bc2cpp: BC2CPP_TRACE_ELSE and BC2CPP_SITE_PROFILE both rewrite bc2cpp_send; set one of them'
+    end
+    require_relative 'else_trace'
+    ElseTrace.capture_stdout(symbol, compiled.to_h { |m| [m[:impl], "#{m[:owner]}##{m[:name]}"] })
+  end
+
   puts '#include <mruby.h>'
   puts '#include <stddef.h>'
   puts '#include <string.h>'
