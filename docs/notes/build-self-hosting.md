@@ -49,17 +49,28 @@ cproc) is ours to vendor.
    small. Their licences travel with them.
 5. **Optional:** a local package mirror for apt, so Hexagon checks run offline.
 
-## Verification still to do
+## Verified offline
 
-No offline build has been run yet. The submodules were already initialised in the development
-checkout, so the setup scripts never reached the network there. A real check needs a fresh clone with
-the submodule URLs pointed at a local mirror, then:
+Checked on commit `1fae33e`. In a fresh clone, with the submodule URLs set to local bare mirrors and the
+network removed (`unshare -rn`, no proxy variables, `GIT_ALLOW_PROTOCOL=file`; `curl` to
+`https://github.com` and to `1.1.1.1` both failed inside it), these all pass:
 
-```
-scripts/setup-edg.sh
-scripts/setup-qbe.sh
-tests/run.sh               # NFCXX_BACKEND=qbe and gcc
-```
+- `scripts/setup-edg.sh` (about 2 minutes)
+- `scripts/setup-qbe.sh` (seconds)
+- `NFCXX_BACKEND=qbe tests/run.sh` and `NFCXX_BACKEND=gcc tests/run.sh` (15 of 15 cases each)
 
-with the network disabled for the duration. Until that is done, the claim that the build works
-offline is untested.
+Not exercised: `scripts/setup-pathb.sh`, the Hexagon checks, and `tests/realworld/*` (which clone
+tinyxml2 and doctest and so need the network).
+
+Notes from the check:
+
+- A mirror is a plain `git clone --bare` of each submodule's gitdir. `git submodule update --depth 1`
+  fetches by SHA and worked against these bare mirrors, including the shallow EDG one, so no
+  `uploadpack.allowAnySHA1InWant` setting was needed.
+- The `file://` protocol must be allowed: `git -c protocol.file.allow=always`, or `GIT_ALLOW_PROTOCOL=file`
+  in the environment. The environment variable was enough for `setup-qbe.sh`.
+- `setup-qbe.sh` runs `git submodule update --init 3rd/qbe 3rd/cproc` every time. `setup-edg.sh` and
+  `setup-pathb.sh` only update `3rd/edg` when it is missing.
+- Disk: a full build tree plus the mirrors takes about 4.2 GB.
+- Nothing else in the build or in `tests/run.sh` reaches the network or files outside the clone, apart
+  from the host toolchain listed above.
