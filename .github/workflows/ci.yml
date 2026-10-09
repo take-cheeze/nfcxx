@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      # sccache stores compiler outputs in the GitHub Actions cache.
+      SCCACHE_GHA_ENABLED: "true"
+      # CMake reads these when configuring the EDG build (scripts/setup-edg.sh).
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Build EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: Test
+        run: tests/run.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
