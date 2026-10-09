@@ -8,6 +8,9 @@
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
 #                                 `continue`, bool loads, unreachable code. A probe with a `// GCC: undefined` line
 #                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
+#                                 volatile.cpp and tls.cpp: volatile accesses and thread-local objects (a second pthread).
+#                                 A probe may carry `// ASM-COUNT: FUNCTION PREFIX N` lines: the assembly of FUNCTION must
+#                                 call exactly N functions whose name starts with PREFIX (check_asm below).
 #                                 A probe with a `// STDOUT: same` line also needs the same standard output as the gcc
 #                                 backend (dyn_*.cpp: constructor/destructor order of global, static and heap objects).
 #                                 eh_*.cpp: C++ exceptions through EDG's setjmp/longjmp ABI and the runtime in libC.a
@@ -46,6 +49,23 @@ expect_of() { sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$1" | head -1; }
 # C++ exceptions: dynamic exception specifications exist only before C++17.
 std_of() { sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$1" | head -1; }
 
+# check_asm <source> <asm>: the "// ASM-COUNT: FUNCTION PREFIX N" lines of a probe. The assembly of FUNCTION must
+# contain exactly N call instructions whose callee starts with PREFIX. Volatile accesses are calls of helper
+# functions (docs/notes/pathb-stage3.md), so this shows that QBE kept every one of them (and, with N = 0 on the same
+# code without volatile, that the count means something). Prints the reason and fails when a count is wrong.
+check_asm() {
+  local src=$1 asm=$2 fnname prefix want got
+  while read -r fnname prefix want; do
+    got=$(awk -v f="$fnname" -v p="$prefix" '
+      $0 == f ":" { on = 1; next }
+      on && /^\.size / { on = 0 }
+      on && $1 == "callq" && index($2, p) == 1 { n++ }
+      END { print n + 0 }' "$asm")
+    if [ "$got" != "$want" ]; then echo "asm check: $fnname has $got calls to $prefix*, expected $want"; return 1; fi
+  done < <(sed -n 's,^// ASM-COUNT: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([0-9]*\).*,\1 \2 \3,p' "$src")
+  return 0
+}
+
 # run_one <file> <mode: exit|trap>. Prints one table line and updates the counters.
 run_one() {
   local f=$1 mode=$2 n name ir ssa s obj exe want got gcc_rc rc msg std
@@ -71,6 +91,9 @@ run_one() {
     failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$n.qbe")"); return
   fi
   "$mrb" "$emit" --append-weak "$ssa" "$s"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
+  if ! check_asm "$f" "$s" > "$tmp/$n.asmcheck"; then
+    failed=$((failed + 1)); lines+=("FAIL     $name: $(head -1 "$tmp/$n.asmcheck")"); return
+  fi
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi

@@ -571,6 +571,7 @@
       (let %92 (ptr (ptr (fn void ((const (ptr (struct "Base"))))))) (bitcast (ptr (ptr (fn void ((const (ptr (struct "Base"))))))) %91))
       (nonnull %92)
       (let %93 (ptr (fn void ((const (ptr (struct "Base")))))) (load (ptr (fn void ((const (ptr (struct "Base")))))) %92))
+      (nonnull %93)
       (let %94 (ptr (struct "Base")) (load (ptr (struct "Base")) $"b"))
       (eval (call void %93 %94)))
     (else))

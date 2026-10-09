@@ -1,0 +1,260 @@
+(ir-module "tls.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "t_counter" int 4 4 (thread) (init
+    (scalar 0 int (const int 5))))
+(global "t_zero" long 8 8 (thread) (init (zero 0 8)))
+(global "t_arr" (array 8 char) 8 1 (thread) (init
+    (scalar 0 char (const char 1))
+    (scalar 1 char (const char 2))
+    (scalar 2 char (const char 3))
+    (scalar 3 char (const char 4))
+    (zero 4 4)))
+(global "t_pair" (struct "Pair") 16 8 (thread) (init
+    (scalar 0 int (const int 7))
+    (scalar 8 double (const double 2.5))))
+(global "t_static" unsigned_short 2 2 (static) (thread) (init
+    (scalar 0 unsigned_short (const unsigned_short 9))))
+(global "g_shared" int 4 4 (init
+    (scalar 0 int (const int 100))))
+(global "child_bad" int 4 4 (static) (init (zero 0 4)))
+(global "calls" int 4 4 (static) (thread) (init
+    (scalar 0 int (const int 10))))
+
+(function "_Z4bumpv"
+  (ret int)
+  (params)
+  (let %0 int (load int @"t_counter"))
+  (let %1 int (wadd int %0 (const int 1)))
+  (store int @"t_counter" %1)
+  (return %1))
+
+(function "_Z9local_tlsv"
+  (ret int)
+  (params)
+  (let %0 int (load int @"calls"))
+  (let %1 int (wadd int %0 (const int 1)))
+  (store int @"calls" %1)
+  (return %1))
+
+(function "_Z15addr_of_counterv"
+  (ret (ptr int))
+  (params)
+  (return @"t_counter"))
+
+(function "child"
+  (ret (ptr void))
+  (params (param %0 "tmp" (ptr void)))
+  (slot "tmp" (ptr void) 8 8)
+  (slot "bad" int 4 4)
+  (slot "p" (ptr int) 8 8)
+  (store (ptr void) $"tmp" %0)
+  (store int $"bad" (const int 0))
+  (let %1 int (load int @"t_counter"))
+  (let %2 bool (ne int %1 (const int 5)))
+  (if %2
+    (then
+      (block
+        (let %3 int (load int $"bad"))
+        (let %4 int (or int %3 (const int 1)))
+        (store int $"bad" %4))))
+  (let %5 long (load long @"t_zero"))
+  (let %6 bool (ne long %5 (const long 0)))
+  (if %6
+    (then
+      (block
+        (let %7 int (load int $"bad"))
+        (let %8 int (or int %7 (const int 2)))
+        (store int $"bad" %8))))
+  (let %9 (ptr char) (bitcast (ptr char) @"t_arr"))
+  (bounds (const int 3) 8)
+  (let %10 (ptr char) (index %9 (const int 3) 1))
+  (let %11 char (load char %10))
+  (let %12 int (iconv int %11))
+  (let %13 bool (ne int %12 (const int 4)))
+  (let %14 bool (const bool 1))
+  (if %13
+    (then)
+    (else
+      (let %15 (ptr char) (bitcast (ptr char) @"t_arr"))
+      (bounds (const int 7) 8)
+      (let %16 (ptr char) (index %15 (const int 7) 1))
+      (let %17 char (load char %16))
+      (let %18 int (iconv int %17))
+      (let %19 bool (ne int %18 (const int 0)))
+      (set %14 %19)))
+  (if %14
+    (then
+      (block
+        (let %20 int (load int $"bad"))
+        (let %21 int (or int %20 (const int 4)))
+        (store int $"bad" %21))))
+  (let %22 int (load int @"t_pair"))
+  (let %23 bool (ne int %22 (const int 7)))
+  (let %24 bool (const bool 1))
+  (if %23
+    (then)
+    (else
+      (let %25 (ptr double) (offset @"t_pair" 8))
+      (let %26 double (load double %25))
+      (let %27 bool (ne double %26 (const double 2.5)))
+      (set %24 %27)))
+  (if %24
+    (then
+      (block
+        (let %28 int (load int $"bad"))
+        (let %29 int (or int %28 (const int 8)))
+        (store int $"bad" %29))))
+  (let %30 unsigned_short (load unsigned_short @"t_static"))
+  (let %31 int (iconv int %30))
+  (let %32 bool (ne int %31 (const int 9)))
+  (if %32
+    (then
+      (block
+        (let %33 int (load int $"bad"))
+        (let %34 int (or int %33 (const int 16)))
+        (store int $"bad" %34))))
+  (let %35 int (call int &"_Z9local_tlsv"))
+  (let %36 bool (ne int %35 (const int 11)))
+  (if %36
+    (then
+      (block
+        (let %37 int (load int $"bad"))
+        (let %38 int (or int %37 (const int 32)))
+        (store int $"bad" %38))))
+  (store int @"t_counter" (const int 1000))
+  (store long @"t_zero" (const long -1))
+  (let %39 (ptr char) (bitcast (ptr char) @"t_arr"))
+  (bounds (const int 3) 8)
+  (let %40 (ptr char) (index %39 (const int 3) 1))
+  (store char %40 (const char 99))
+  (store int @"t_pair" (const int 77))
+  (store unsigned_short @"t_static" (const unsigned_short 1))
+  (let %41 (ptr int) (call (ptr int) &"_Z15addr_of_counterv"))
+  (store (ptr int) $"p" %41)
+  (let %42 (ptr int) (load (ptr int) $"p"))
+  (nonnull %42)
+  (let %43 int (load int %42))
+  (let %44 bool (ne int %43 (const int 1000)))
+  (if %44
+    (then
+      (block
+        (let %45 int (load int $"bad"))
+        (let %46 int (or int %45 (const int 64)))
+        (store int $"bad" %46))))
+  (let %47 int (load int @"g_shared"))
+  (let %48 int (wadd int %47 (const int 1)))
+  (store int @"g_shared" %48)
+  (let %49 int (load int $"bad"))
+  (store int @"child_bad" %49)
+  (return (null (ptr void))))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "bad" int 4 4)
+  (slot "mine" (ptr int) 8 8)
+  (slot "th" unsigned_long 8 8)
+  (store int $"bad" (const int 0))
+  (store int @"t_counter" (const int 42))
+  (store long @"t_zero" (const long 3))
+  (let %0 (ptr char) (bitcast (ptr char) @"t_arr"))
+  (bounds (const int 3) 8)
+  (let %1 (ptr char) (index %0 (const int 3) 1))
+  (store char %1 (const char 5))
+  (let %2 (ptr double) (offset @"t_pair" 8))
+  (store double %2 (const double 0.5))
+  (store unsigned_short @"t_static" (const unsigned_short 2))
+  (let %3 (ptr int) (call (ptr int) &"_Z15addr_of_counterv"))
+  (store (ptr int) $"mine" %3)
+  (let %4 int (call int &"_Z9local_tlsv"))
+  (let %5 int (call int &"pthread_create" $"th" (null (ptr (const void))) &"child" (null (ptr void))))
+  (let %6 unsigned_long (load unsigned_long $"th"))
+  (let %7 int (call int &"pthread_join" %6 (null (ptr (ptr void)))))
+  (let %8 int (load int @"child_bad"))
+  (let %9 int (load int $"bad"))
+  (let %10 int (or int %9 %8))
+  (store int $"bad" %10)
+  (let %11 int (load int @"t_counter"))
+  (let %12 bool (ne int %11 (const int 42)))
+  (let %13 bool (const bool 1))
+  (if %12
+    (then)
+    (else
+      (let %14 (ptr int) (load (ptr int) $"mine"))
+      (nonnull %14)
+      (let %15 int (load int %14))
+      (let %16 bool (ne int %15 (const int 42)))
+      (set %13 %16)))
+  (if %13
+    (then
+      (block
+        (let %17 int (load int $"bad"))
+        (let %18 int (or int %17 (const int 256)))
+        (store int $"bad" %18))))
+  (let %19 long (load long @"t_zero"))
+  (let %20 bool (ne long %19 (const long 3)))
+  (let %21 bool (const bool 1))
+  (if %20
+    (then)
+    (else
+      (let %22 (ptr char) (bitcast (ptr char) @"t_arr"))
+      (bounds (const int 3) 8)
+      (let %23 (ptr char) (index %22 (const int 3) 1))
+      (let %24 char (load char %23))
+      (let %25 int (iconv int %24))
+      (let %26 bool (ne int %25 (const int 5)))
+      (set %21 %26)))
+  (let %27 bool (const bool 1))
+  (if %21
+    (then)
+    (else
+      (let %28 int (load int @"t_pair"))
+      (let %29 bool (ne int %28 (const int 7)))
+      (set %27 %29)))
+  (let %30 bool (const bool 1))
+  (if %27
+    (then)
+    (else
+      (let %31 (ptr double) (offset @"t_pair" 8))
+      (let %32 double (load double %31))
+      (let %33 bool (ne double %32 (const double 0.5)))
+      (set %30 %33)))
+  (let %34 bool (const bool 1))
+  (if %30
+    (then)
+    (else
+      (let %35 unsigned_short (load unsigned_short @"t_static"))
+      (let %36 int (iconv int %35))
+      (let %37 bool (ne int %36 (const int 2)))
+      (set %34 %37)))
+  (if %34
+    (then
+      (block
+        (let %38 int (load int $"bad"))
+        (let %39 int (or int %38 (const int 512)))
+        (store int $"bad" %39))))
+  (let %40 int (call int &"_Z9local_tlsv"))
+  (let %41 bool (ne int %40 (const int 12)))
+  (if %41
+    (then
+      (block
+        (let %42 int (load int $"bad"))
+        (let %43 int (or int %42 (const int 1024)))
+        (store int $"bad" %43))))
+  (let %44 int (call int &"_Z4bumpv"))
+  (let %45 bool (ne int %44 (const int 43)))
+  (if %45
+    (then
+      (block
+        (let %46 int (load int $"bad"))
+        (let %47 int (or int %46 (const int 2048)))
+        (store int $"bad" %47))))
+  (let %48 int (load int @"g_shared"))
+  (let %49 bool (ne int %48 (const int 101)))
+  (if %49
+    (then
+      (block
+        (let %50 int (load int $"bad"))
+        (let %51 int (or int %50 (const int 4096)))
+        (store int $"bad" %51))))
+  (let %52 int (load int $"bad"))
+  (return %52))

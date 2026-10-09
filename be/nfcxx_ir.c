@@ -179,6 +179,18 @@ static int ir_is_volatile(a_type_ptr t)
   return t != NULL && (get_type_qualifiers(t) & TQ_VOLATILE) != 0;
 }
 
+/* Is the object that a pointer or array type designates volatile? EDG strips cv-qualifiers from the node type of
+   an rvalue use (the lvalue-to-rvalue conversion), so a read of `*p` for `volatile int *p` has the type `int`.
+   The qualifier has to be taken from the operand's type instead. */
+static int ir_pointee_is_volatile(a_type_ptr t)
+{
+  if (t == NULL) return 0;
+  t = skip_typerefs(t);
+  if (t->kind == tk_pointer) return ir_is_volatile(t->variant.pointer.type);
+  if (t->kind == tk_array) return ir_is_volatile(t->variant.array.element_type);
+  return 0;
+}
+
 static unsigned long ir_size_of(a_type_ptr t)
 {
   return (unsigned long)f_size_of_type(skip_typerefs(t));
@@ -543,6 +555,14 @@ static ir_val ir_ptr_add(const char *base, const char *idx, a_type_ptr ptr_t, a_
 }
 
 static void ir_global_print(a_variable_ptr var, const char *name);
+
+/* Thread storage duration: thread_local sets is_thread_local; the GNU __thread only sets DM_THREAD in decl_modifiers
+   (il_def.h: "Not used for variables declared with __thread"). */
+static int ir_var_is_thread(a_variable_ptr var)
+{
+  return (var->is_thread_local || (var->decl_modifiers & DM_THREAD) != 0) &&
+         var_has_static_or_thread_storage_duration(var);
+}
 
 /* Static object (global, static local, or string data) operand; the module entry is printed on first use. */
 static const char *ir_global_op(a_variable_ptr var)
@@ -985,7 +1005,8 @@ static ir_val ir_lval(an_expr_node_ptr e)
   if (e == NULL) return ir_mk_void();
   if (e->kind == enk_variable) {
     ir_note(2, enk_variable, 1);
-    return ir_var_addr(e->variant.variable.ptr, e->type, ir_is_volatile(e->type));
+    return ir_var_addr(e->variant.variable.ptr, e->type,
+                       ir_is_volatile(e->type) || ir_is_volatile(e->variant.variable.ptr->type));
   }
   if (e->kind == enk_object_lifetime) return ir_lval(e->variant.object_lifetime.expr);
   if (e->kind == enk_operation) return ir_lval_op(e);
@@ -1091,6 +1112,8 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       if (fe == NULL || fe->kind != enk_field) break;
       ir_note(0, k, 1);
       base = ir_lval(a0);
+      /* a member of a volatile object is volatile, and so is a volatile member */
+      vol = vol || base.vol || ir_is_volatile(fe->variant.field.ptr->type);
       if (fe->variant.field.ptr->is_bit_field) return ir_bf_lval(base.s, fe->variant.field.ptr, a0->type, e->type, vol);
       return ir_subobject(base.s, (unsigned long)fe->variant.field.ptr->offset, e->type, vol);
     }
@@ -1101,6 +1124,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       ir_note(0, k, 1);
       p = ir_rval(a0);
       ir_nonnull(a0, p);
+      vol = vol || ir_pointee_is_volatile(a0->type) || ir_is_volatile(fe->variant.field.ptr->type);
       if (fe->variant.field.ptr->is_bit_field) {
         return ir_bf_lval(p.s, fe->variant.field.ptr, skip_typerefs(a0->type)->variant.pointer.type, e->type, vol);
       }
@@ -1122,6 +1146,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
           ir_emit(ir_fmt("(bounds %s %lu)", idx.s, n));
         }
       }
+      vol = vol || (ir_is_aggregate(a0->type) ? base.vol : 0) || ir_pointee_is_volatile(a0->type);
       return ir_elem_addr(base.s, idx.s, e->type, vol);
     }
     case eok_indirect: {
@@ -1130,7 +1155,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       ir_note(0, k, 1);
       p = ir_rval(a0);
       ir_nonnull(a0, p);
-      return ir_mk_addr(p.s, e->type, vol);
+      return ir_mk_addr(p.s, e->type, vol || ir_pointee_is_volatile(a0->type));
     }
     case eok_assign:
     case eok_add_assign:
@@ -1416,6 +1441,7 @@ static ir_val ir_call(an_expr_node_ptr e)
     callee = ir_fmt("&\"%s\"", ir_rout_name(f->variant.routine.ptr));
   } else {
     ir_val fv = ir_rval(f);
+    ir_nonnull(f, fv); /* a call through a null function pointer traps (stage 2, gap 9) */
     callee = fv.s;
   }
   if (agg_ret) {
@@ -1962,6 +1988,7 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   fprintf(nf_out, " %lu %lu", ir_size_of(var->type), ir_align_of(var->type));
   if (var->storage_class == sc_static) fputs(" (static)", nf_out);
   else if (var->comdat_group != NULL) fputs(" (weak)", nf_out); /* EDG: COMDAT, which c_gen_be.c writes as __weak__ */
+  if (ir_var_is_thread(var)) fputs(" (thread)", nf_out); /* __thread / thread_local: one copy per thread */
   ir_global_init(var);
   fputs(")\n", nf_out);
   ir_buf_end(&g);

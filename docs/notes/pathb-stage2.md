@@ -208,8 +208,10 @@ S-expressions, one statement per line, indented by nesting. Identifiers are doub
 
 ```
 module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* function*
-global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT)  static storage object; (static) = internal linkage,
-                                                                    (weak) = COMDAT/weak definition
+global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] [(thread)] INIT)
+                                                               static storage object; (static) = internal linkage,
+                                                               (weak) = COMDAT/weak definition,
+                                                               (thread) = thread storage duration (one copy per thread)
 INIT      ::= (extern)                                    declared here, defined elsewhere: no storage
             | (init ITEM*)                                 static initializer (see ITEM)
             | (unsupported init KIND)                      not lowered (dynamic initialization)
@@ -256,7 +258,27 @@ and `a_variable.comdat_group != NULL` for variables (inline variables, function-
 vtables, typeinfo). These are the objects `c_gen_be.c` writes with `__attribute__((__weak__))` and that
 `scripts/weak-symbols.rb` finds in the production path. Every translation unit that needs one defines it; the
 definitions are identical and the link must keep one. A backend emits a weak symbol (ELF `.weak`, or COMDAT/linkonce).
-Declarations (`(extern)`) carry no marker. A `(static)` object is never `(weak)`.
+Declarations (`(extern)`) carry no linkage marker. A `(static)` object is never `(weak)`.
+
+Thread storage. `(thread)` follows the linkage marker (so `(global "x" int 4 4 (static) (thread) INIT)` is an internal
+`static __thread int x`) and is printed for every variable with `var_has_thread_storage_duration`: `__thread`,
+`thread_local`, a function-local `static thread_local`, and a declaration `extern thread_local int x;` (then with
+INIT `(extern)`). The operand `@"x"` of a thread-local global is not an address of fixed storage: it is the address of
+the current thread's copy and has to be computed at each use (it is the same for the whole lifetime of the thread,
+but different between threads). Its initializer is the initial image every new thread starts from. The address of a
+thread-local object is never an `(addr ...)` item of a static initializer (it is not a constant), and an emitter may
+refuse one.
+
+Volatile. A volatile lvalue is loaded with `(load.v TYPE ADDR)` and stored with `(store.v TYPE ADDR VAL)`; the TYPE is
+the unqualified scalar type. An access is volatile when the object it reads or writes is volatile: a variable whose
+declared type is volatile, a member of a volatile object, a volatile member, an element of a volatile array, or an
+object reached through a pointer whose pointee type is volatile. (EDG drops cv-qualifiers from the node type of an
+rvalue use, so the lowering derives the flag from the declaration, the base object and the pointer's pointee type,
+not from the node type.) Object and pointee types keep their `(volatile ...)` wrapper in type text, so an emitter must
+accept `(volatile T)` wherever `(const T)` is accepted. A `(load.v ...)`/`(store.v ...)` must happen exactly once and
+in program order with respect to the other volatile accesses and calls; it must not be merged, removed or reordered
+across another volatile access. Aggregate copies `(copy N DST SRC)` of volatile objects are not marked (a copy is
+a call of a memory-copy routine in the QBE emitter, which a compiler cannot elide).
 
 Start-up and exit. `(constructor [PRIO])` on a function means it runs before `main`; `(destructor [PRIO])` means it
 runs at exit (a function may carry both). They come from two sources, and the IR does not say which:
@@ -305,9 +327,13 @@ exceptions, volatile or `long double` (cproc does not support those). The IR map
   relied on.
 - `wadd`/`wsub`/`wmul` map to QBE `add`/`sub`/`mul` on `w` or `l`. Signed and unsigned comparisons use QBE's `s`/`u`
   forms. Narrow integer types are widened with `extsb`/`extub`/... at loads and conversions.
-- `volatile` (`load.v`, `store.v`) has no QBE equivalent: QBE does not order or preserve volatile accesses, so these
-  must be refused or lowered to a runtime call. This is the same gap cproc has, and it is needed for MMIO on the
-  Hexagon target.
+- `volatile` (`load.v`, `store.v`) has no QBE equivalent: QBE's optimiser forwards a store to a later load of the same
+  address, merges equal loads and deletes unused ones (`load.c`, `gcm.c`), and it promotes a stack slot to a register
+  when only loads and stores use it. The emitter lowers each volatile access to a call of a small helper function
+  defined in the module (one real `load`/`store` inside), which QBE neither merges nor removes nor reorders, and whose
+  address argument makes a slot escape. See `docs/notes/pathb-stage3.md`, "volatile".
+- Thread-local objects (`(thread)`) become QBE `thread` data; references are `thread $x` (local-exec, a definition in
+  the same module) or `extern thread $x` (initial-exec through the GOT, a declaration). See stage 3, "thread-local".
 - `copy` maps to a call to `memmove` or an inline sequence of loads and stores for small sizes.
 
 ## 8. Requirements for SPIR-V and WGSL
@@ -353,8 +379,7 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    `(unsupported init dynamic)`, not lowered.
 3. **Constructor initializers** (`dik_constructor`) and inline asm print unsupported markers. None of these appears in
    `tests/cases` after lowering. (Bit-fields, VLAs and GNU statement expressions were in this list; they are lowered
-   since stage 3 round 3, sections 5a-5c. Still open there: `volatile` bit-fields are IR (`bfload.v`) but the QBE emitter
-   refuses them; a VLA has no scope-exit free (5b); no `bounds` check on VLA subscripts; a statement expression that
+   since stage 3 round 3, sections 5a-5c. Still open there: a VLA has no scope-exit free (5b); no `bounds` check on VLA subscripts; a statement expression that
    returns a class by copy constructor; bit-fields wider than 64 bits.)
 
    the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization after
@@ -370,12 +395,14 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    `(label "L")` at the end of the loop body; the lowering recognises that pair for the innermost loop, prints
    `(continue)` and drops the label. A goto to any other label stays a goto.
 5. **Loads of `bool`** are not normalized in the IR; the QBE emitter normalizes them (nonzero is true).
-6. **Pointer subscripts are not bounds-checked** (no length), and **pointer dereferences are null-checked** only when the
-   pointer is not an address constant.
-7. **Uninitialized reads** of slots are unspecified; the IR has no `undef` yet.
-8. **Thread-local objects** are treated like static objects.
-9. **Indirect calls** through a null function pointer are not checked explicitly; the rule in section 4 applies once a
-   `nonnull` is emitted before the call.
+6. **Pointer subscripts are not bounds-checked** (a pointer carries no length: `p[i]` has nothing to be checked
+   against, see stage 3, "Decisions"), and **pointer dereferences are null-checked** only when the pointer is not an
+   address constant. Subscripts of arrays, which have a length, are checked.
+7. **Uninitialized reads** of slots are unspecified; the IR has no `undef` (decision and reasons in stage 3).
+8. **Thread-local objects** are marked `(thread)` since stage 3 round 3.
+9. **Indirect calls** through a null function pointer are checked: the lowering prints `(nonnull F)` before the call
+   (a call through a function pointer, including the lowered form of virtual calls and calls through a pointer member),
+   unless the callee operand is an address constant. This closes the gap.
 10. **No SSA, no mem2reg, no constant folding.** The output is correct but verbose: every named variable is a slot.
 11. **C++ exceptions** need no IR construct. EDG lowers try/catch/throw/cleanups/exception specifications to its setjmp/longjmp
     ABI before the back end runs, so the IR holds a call of `_setjmp` on a slot of the EH stack entry type, calls of

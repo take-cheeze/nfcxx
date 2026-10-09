@@ -1,0 +1,459 @@
+(ir-module "volatile.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "g_flag" (volatile int) 4 4 (init (zero 0 4)))
+(global "g_count" (volatile int) 4 4 (init (zero 0 4)))
+(global "g_byte" (volatile unsigned_char) 1 1 (init (zero 0 1)))
+(global "g_long" (volatile long) 8 8 (init
+    (scalar 0 long (const long 7))))
+(global "g_dbl" (volatile double) 8 8 (init
+    (scalar 0 double (const double 1.5))))
+(global "g_bool" (volatile bool) 1 1 (init (zero 0 1)))
+(global "g_ptr" (volatile (ptr int)) 8 8 (init (zero 0 8)))
+(global "g_ro" (const (volatile int)) 4 4 (init
+    (scalar 0 int (const int 41))))
+(global "g_dev" (struct "Dev") 12 4 (init (zero 0 12)))
+
+(function "setter"
+  (ret (ptr void))
+  (params (param %0 "tmp" (ptr void)))
+  (slot "tmp" (ptr void) 8 8)
+  (store (ptr void) $"tmp" %0)
+  (let %1 int (call int &"sched_yield"))
+  (store.v int @"g_flag" (const int 1))
+  (return (null (ptr void))))
+
+(function "_Z5twicePVi"
+  (ret int)
+  (params (param %0 "p" (ptr (volatile int))))
+  (slot "p" (ptr (volatile int)) 8 8)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (store (ptr (volatile int)) $"p" %0)
+  (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %1)
+  (let %2 int (load.v int %1))
+  (store int $"a" %2)
+  (let %3 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %3)
+  (let %4 int (load.v int %3))
+  (store int $"b" %4)
+  (let %5 int (load int $"a"))
+  (let %6 int (load int $"b"))
+  (let %7 int (wadd int %5 %6))
+  (return %7))
+
+(function "_Z8sum_loopi"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int 4 4)
+  (slot "s" (volatile int) 4 4)
+  (slot "i" int 4 4)
+  (store int $"n" %0)
+  (store.v int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 1))
+    (loop
+      (body
+        (let %1 int (load int $"i"))
+        (let %2 int (load int $"n"))
+        (let %3 bool (le.s int %1 %2))
+        (if %3 (then) (else (break)))
+        (block
+          (let %4 int (load.v int $"s"))
+          (let %5 int (load int $"i"))
+          (let %6 int (wadd int %4 %5))
+          (store.v int $"s" %6)))
+      (step
+        (let %7 int (load int $"i"))
+        (let %8 int (wadd int %7 (const int 1)))
+        (store int $"i" %8))))
+  (let %9 int (load.v int $"s"))
+  (return %9))
+
+(function "_Z8by_parami"
+  (ret int)
+  (params (param %0 "x" (volatile int)))
+  (slot "x" (volatile int) 4 4)
+  (store int $"x" %0)
+  (let %1 int (load.v int $"x"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (store.v int $"x" %2)
+  (let %3 int (load.v int $"x"))
+  (let %4 int (wadd int %3 (const int 1)))
+  (store.v int $"x" %4)
+  (let %5 int (load.v int $"x"))
+  (return %5))
+
+(function "_Z4bumpPV3Dev"
+  (ret void)
+  (params (param %0 "d" (ptr (volatile (struct "Dev")))))
+  (slot "d" (ptr (volatile (struct "Dev"))) 8 8)
+  (store (ptr (volatile (struct "Dev"))) $"d" %0)
+  (let %1 (ptr (volatile (struct "Dev"))) (load (ptr (volatile (struct "Dev"))) $"d"))
+  (nonnull %1)
+  (let %2 int (load.v int %1))
+  (let %3 int (wadd int %2 (const int 1)))
+  (let %4 (ptr (volatile (struct "Dev"))) (load (ptr (volatile (struct "Dev"))) $"d"))
+  (nonnull %4)
+  (store.v int %4 %3)
+  (let %5 (ptr (volatile (struct "Dev"))) (load (ptr (volatile (struct "Dev"))) $"d"))
+  (nonnull %5)
+  (let %6 (ptr unsigned_short) (offset %5 4))
+  (let %7 unsigned_short (load.v unsigned_short %6))
+  (let %8 int (iconv int %7))
+  (let %9 int (wadd int %8 (const int 2)))
+  (let %10 unsigned_short (iconv unsigned_short %9))
+  (let %11 (ptr (volatile (struct "Dev"))) (load (ptr (volatile (struct "Dev"))) $"d"))
+  (nonnull %11)
+  (let %12 (ptr (volatile unsigned_short)) (offset %11 4))
+  (store.v unsigned_short %12 %10)
+  (let %13 (ptr (volatile (struct "Dev"))) (load (ptr (volatile (struct "Dev"))) $"d"))
+  (nonnull %13)
+  (let %14 (ptr int) (offset %13 8))
+  (let %15 int (load.v int %14))
+  (let %16 int (wadd int %15 (const int 3)))
+  (let %17 (ptr (volatile (struct "Dev"))) (load (ptr (volatile (struct "Dev"))) $"d"))
+  (nonnull %17)
+  (let %18 (ptr (volatile int)) (offset %17 8))
+  (store.v int %18 %16)
+  (return))
+
+(function "_Z9sum_arrayv"
+  (ret int)
+  (params)
+  (slot "i" int 4 4)
+  (slot "a" (volatile (array 4 (volatile int))) 16 4)
+  (slot "t" int 4 4)
+  (slot "i.1" int 4 4)
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %0 int (load int $"i"))
+        (let %1 bool (lt.s int %0 (const int 4)))
+        (if %1 (then) (else (break)))
+        (block
+          (let %2 int (load int $"i"))
+          (let %3 int (wmul int %2 (const int 10)))
+          (let %4 (ptr (volatile int)) (bitcast (ptr (volatile int)) $"a"))
+          (let %5 int (load int $"i"))
+          (bounds %5 4)
+          (let %6 (ptr (volatile int)) (index %4 %5 4))
+          (store.v int %6 %3)))
+      (step
+        (let %7 int (load int $"i"))
+        (let %8 int (wadd int %7 (const int 1)))
+        (store int $"i" %8))))
+  (store int $"t" (const int 0))
+  (block
+    (store int $"i.1" (const int 0))
+    (loop
+      (body
+        (let %9 int (load int $"i.1"))
+        (let %10 bool (lt.s int %9 (const int 4)))
+        (if %10 (then) (else (break)))
+        (block
+          (let %11 (ptr (volatile int)) (bitcast (ptr (volatile int)) $"a"))
+          (let %12 int (load int $"i.1"))
+          (bounds %12 4)
+          (let %13 (ptr int) (index %11 %12 4))
+          (let %14 int (load.v int %13))
+          (let %15 int (load int $"t"))
+          (let %16 int (wadd int %15 %14))
+          (store int $"t" %16)))
+      (step
+        (let %17 int (load int $"i.1"))
+        (let %18 int (wadd int %17 (const int 1)))
+        (store int $"i.1" %18))))
+  (let %19 int (load int $"t"))
+  (return %19))
+
+(function "vol_twice"
+  (ret int)
+  (params (param %0 "p" (ptr (volatile int))))
+  (slot "p" (ptr (volatile int)) 8 8)
+  (store (ptr (volatile int)) $"p" %0)
+  (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %1)
+  (let %2 int (load.v int %1))
+  (let %3 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %3)
+  (let %4 int (load.v int %3))
+  (let %5 int (wadd int %2 %4))
+  (return %5))
+
+(function "vol_unused_read"
+  (ret void)
+  (params (param %0 "p" (ptr (volatile int))))
+  (slot "p" (ptr (volatile int)) 8 8)
+  (store (ptr (volatile int)) $"p" %0)
+  (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %1)
+  (let %2 int (load.v int %1))
+  (return))
+
+(function "vol_two_stores"
+  (ret void)
+  (params (param %0 "p" (ptr (volatile int))))
+  (slot "p" (ptr (volatile int)) 8 8)
+  (store (ptr (volatile int)) $"p" %0)
+  (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %1)
+  (store.v int %1 (const int 1))
+  (let %2 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
+  (nonnull %2)
+  (store.v int %2 (const int 2))
+  (return))
+
+(function "vol_local"
+  (ret int)
+  (params)
+  (slot "v" (volatile int) 4 4)
+  (store.v int $"v" (const int 3))
+  (let %0 int (load.v int $"v"))
+  (let %1 int (wadd int %0 (const int 1)))
+  (store.v int $"v" %1)
+  (let %2 int (load.v int $"v"))
+  (return %2))
+
+(function "plain_twice"
+  (ret int)
+  (params (param %0 "p" (ptr int)))
+  (slot "p" (ptr int) 8 8)
+  (store (ptr int) $"p" %0)
+  (let %1 (ptr int) (load (ptr int) $"p"))
+  (nonnull %1)
+  (let %2 int (load int %1))
+  (let %3 (ptr int) (load (ptr int) $"p"))
+  (nonnull %3)
+  (let %4 int (load int %3))
+  (let %5 int (wadd int %2 %4))
+  (return %5))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "bad" int 4 4)
+  (slot "th" unsigned_long 8 8)
+  (slot "i" int 4 4)
+  (slot "x" int 4 4)
+  (slot "y" int 4 4)
+  (store int $"bad" (const int 0))
+  (let %0 int (call int &"pthread_create" $"th" (null (ptr (const void))) &"setter" (null (ptr void))))
+  (loop
+    (body
+      (let %1 int (load.v int @"g_flag"))
+      (let %2 bool (eq int %1 (const int 0)))
+      (if %2 (then) (else (break)))
+      (block))
+    (step))
+  (let %3 unsigned_long (load unsigned_long $"th"))
+  (let %4 int (call int &"pthread_join" %3 (null (ptr (ptr void)))))
+  (let %5 int (load.v int @"g_flag"))
+  (let %6 bool (ne int %5 (const int 1)))
+  (if %6
+    (then
+      (block
+        (let %7 int (load int $"bad"))
+        (let %8 int (or int %7 (const int 1)))
+        (store int $"bad" %8))))
+  (let %9 int (call int &"_Z8sum_loopi" (const int 10)))
+  (let %10 bool (ne int %9 (const int 55)))
+  (if %10
+    (then
+      (block
+        (let %11 int (load int $"bad"))
+        (let %12 int (or int %11 (const int 2)))
+        (store int $"bad" %12))))
+  (let %13 int (call int &"_Z8by_parami" (const int 5)))
+  (let %14 bool (ne int %13 (const int 7)))
+  (if %14
+    (then
+      (block
+        (let %15 int (load int $"bad"))
+        (let %16 int (or int %15 (const int 4)))
+        (store int $"bad" %16))))
+  (store.v int @"g_dev" (const int 1))
+  (let %17 (ptr (volatile unsigned_short)) (offset @"g_dev" 4))
+  (store.v unsigned_short %17 (const unsigned_short 65535))
+  (let %18 (ptr int) (offset @"g_dev" 8))
+  (store int %18 (const int 1))
+  (eval (call void &"_Z4bumpPV3Dev" @"g_dev"))
+  (let %19 int (load.v int @"g_dev"))
+  (let %20 bool (ne int %19 (const int 2)))
+  (let %21 bool (const bool 1))
+  (if %20
+    (then)
+    (else
+      (let %22 (ptr unsigned_short) (offset @"g_dev" 4))
+      (let %23 unsigned_short (load.v unsigned_short %22))
+      (let %24 int (iconv int %23))
+      (let %25 bool (ne int %24 (const int 1)))
+      (set %21 %25)))
+  (let %26 bool (const bool 1))
+  (if %21
+    (then)
+    (else
+      (let %27 (ptr int) (offset @"g_dev" 8))
+      (let %28 int (load int %27))
+      (let %29 bool (ne int %28 (const int 4)))
+      (set %26 %29)))
+  (if %26
+    (then
+      (block
+        (let %30 int (load int $"bad"))
+        (let %31 int (or int %30 (const int 8)))
+        (store int $"bad" %31))))
+  (let %32 int (call int &"_Z9sum_arrayv"))
+  (let %33 bool (ne int %32 (const int 60)))
+  (if %33
+    (then
+      (block
+        (let %34 int (load int $"bad"))
+        (let %35 int (or int %34 (const int 16)))
+        (store int $"bad" %35))))
+  (store.v int @"g_count" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %36 int (load int $"i"))
+        (let %37 bool (lt.s int %36 (const int 100)))
+        (if %37 (then) (else (break)))
+        (block
+          (let %38 int (load.v int @"g_count"))
+          (let %39 int (wadd int %38 (const int 1)))
+          (store.v int @"g_count" %39)))
+      (step
+        (let %40 int (load int $"i"))
+        (let %41 int (wadd int %40 (const int 1)))
+        (store int $"i" %41))))
+  (let %42 int (load.v int @"g_count"))
+  (let %43 int (wadd int %42 (const int 5)))
+  (store.v int @"g_count" %43)
+  (let %44 int (load.v int @"g_count"))
+  (let %45 bool (ne int %44 (const int 105)))
+  (if %45
+    (then
+      (block
+        (let %46 int (load int $"bad"))
+        (let %47 int (or int %46 (const int 32)))
+        (store int $"bad" %47))))
+  (store.v unsigned_char @"g_byte" (const unsigned_char 250))
+  (let %48 unsigned_char (load.v unsigned_char @"g_byte"))
+  (let %49 int (iconv int %48))
+  (let %50 int (wadd int %49 (const int 10)))
+  (let %51 unsigned_char (iconv unsigned_char %50))
+  (store.v unsigned_char @"g_byte" %51)
+  (let %52 unsigned_char (load.v unsigned_char @"g_byte"))
+  (let %53 int (iconv int %52))
+  (let %54 bool (ne int %53 (const int 4)))
+  (if %54
+    (then
+      (block
+        (let %55 int (load int $"bad"))
+        (let %56 int (or int %55 (const int 64)))
+        (store int $"bad" %56))))
+  (let %57 long (load.v long @"g_long"))
+  (let %58 long (wmul long %57 (const long 3)))
+  (store.v long @"g_long" %58)
+  (let %59 double (load.v double @"g_dbl"))
+  (let %60 double (fmul double %59 (const double 2.0)))
+  (store.v double @"g_dbl" %60)
+  (let %61 long (load.v long @"g_long"))
+  (let %62 bool (ne long %61 (const long 21)))
+  (let %63 bool (const bool 1))
+  (if %62
+    (then)
+    (else
+      (let %64 double (load.v double @"g_dbl"))
+      (let %65 bool (ne double %64 (const double 3.0)))
+      (set %63 %65)))
+  (if %63
+    (then
+      (block
+        (let %66 int (load int $"bad"))
+        (let %67 int (or int %66 (const int 128)))
+        (store int $"bad" %67))))
+  (store.v bool @"g_bool" (const bool 0x1))
+  (let %68 bool (load.v bool @"g_bool"))
+  (let %69 bool (eq bool %68 (const bool 0)))
+  (if %69
+    (then
+      (block
+        (let %70 int (load int $"bad"))
+        (let %71 int (or int %70 (const int 256)))
+        (store int $"bad" %71))))
+  (store int $"x" (const int 9))
+  (store.v (ptr int) @"g_ptr" $"x")
+  (let %72 (ptr int) (load.v (ptr int) @"g_ptr"))
+  (nonnull %72)
+  (let %73 int (load int %72))
+  (let %74 int (wadd int %73 (const int 1)))
+  (let %75 (ptr int) (load.v (ptr int) @"g_ptr"))
+  (nonnull %75)
+  (store int %75 %74)
+  (let %76 int (load int $"x"))
+  (let %77 bool (ne int %76 (const int 10)))
+  (if %77
+    (then
+      (block
+        (let %78 int (load int $"bad"))
+        (let %79 int (or int %78 (const int 512)))
+        (store int $"bad" %79))))
+  (store int $"y" (const int 5))
+  (let %80 (ptr (volatile int)) (bitcast (ptr (volatile int)) $"y"))
+  (let %81 int (call int &"_Z5twicePVi" %80))
+  (let %82 bool (ne int %81 (const int 10)))
+  (if %82
+    (then
+      (block
+        (let %83 int (load int $"bad"))
+        (let %84 int (or int %83 (const int 1024)))
+        (store int $"bad" %84))))
+  (let %85 int (load.v int @"g_ro"))
+  (let %86 bool (ne int %85 (const int 41)))
+  (if %86
+    (then
+      (block
+        (let %87 int (load int $"bad"))
+        (let %88 int (or int %87 (const int 2048)))
+        (store int $"bad" %88))))
+  (store int $"y" (const int 7))
+  (let %89 (ptr (volatile int)) (bitcast (ptr (volatile int)) $"y"))
+  (let %90 int (call int &"vol_twice" %89))
+  (let %91 bool (ne int %90 (const int 14)))
+  (let %92 bool (const bool 1))
+  (if %91
+    (then)
+    (else
+      (let %93 int (call int &"vol_local"))
+      (let %94 bool (ne int %93 (const int 4)))
+      (set %92 %94)))
+  (let %95 bool (const bool 1))
+  (if %92
+    (then)
+    (else
+      (let %96 int (call int &"plain_twice" $"y"))
+      (let %97 bool (ne int %96 (const int 14)))
+      (set %95 %97)))
+  (if %95
+    (then
+      (block
+        (let %98 int (load int $"bad"))
+        (let %99 int (or int %98 (const int 4096)))
+        (store int $"bad" %99))))
+  (let %100 (ptr (volatile int)) (bitcast (ptr (volatile int)) $"y"))
+  (eval (call void &"vol_two_stores" %100))
+  (let %101 (ptr (volatile int)) (bitcast (ptr (volatile int)) $"y"))
+  (eval (call void &"vol_unused_read" %101))
+  (let %102 int (load int $"y"))
+  (let %103 bool (ne int %102 (const int 2)))
+  (if %103
+    (then
+      (block
+        (let %104 int (load int $"bad"))
+        (let %105 int (or int %104 (const int 8192)))
+        (store int $"bad" %105))))
+  (let %106 int (load.v int @"g_count"))
+  (let %107 int (load int $"bad"))
+  (return %107))
