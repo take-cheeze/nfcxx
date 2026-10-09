@@ -88,9 +88,23 @@ module SiteCensus
     i -= 1 while i.positive? && line - i < 80 && !(lines[i] =~ %r{^(if \(|\{$|// [^ ]+ -- generated)} && lines[i - 1] !~ /\} else|else\s*$/)
     found = last_assignment(lines, i, [i - 60, 0].max, recv)
     return 'unknown' unless found
+    return 'join' if join_between?(lines, found[0], line - 1, recv)
 
     fn = function_start(lines, found[0])
     origin_of(lines, found[0], found[1], fn, parameter_list(lines, fn), COPY_HOPS)
+  end
+
+  JOIN_LABEL_RE = /^\s*L\d+:/
+  JOIN_BRANCH_RE = /^\s*(?:\}\s*)?(?:else\b|if \(|switch \(|goto )/
+
+  # True when the matched assignment at `from` is not the only definition that can reach the send at `to`
+  # (0-based): a jump label lies between them (another path joins there), or a branch does while the register
+  # is assigned again between them (an arm's value is not the receiver's). Diagnostic only.
+  def join_between?(lines, from, to, reg)
+    between = lines[(from + 1)...to] || []
+    return true if between.any? { |l| l =~ JOIN_LABEL_RE }
+
+    between.any? { |l| l =~ JOIN_BRANCH_RE } && between.any? { |l| l =~ /(?:^|[\s;{(])#{reg} = / }
   end
 
   def parameter_list(lines, fn)
