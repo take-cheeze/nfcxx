@@ -46,6 +46,27 @@ module BytecodeIR
   # non-raising value, and the raise itself is a handler edge (refused below).
   READS_LEADING_REG_OPS = Set['JMPIF', 'JMPNOT', 'JMPNIL', 'RAISEIF', 'MATCHERR', 'SETUPVAR'].freeze
 
+  # Ops that write a run of registers from their leading operand (vm.c), not just that operand. The run's extent
+  # comes from the operands; only its values are runtime. ARGARY R(a) m1:r:m2:kd (vm.c OP_ARGARY, body 2492-2548)
+  # writes R(a) (the rest Array, or the m1+m2 values without a rest), R(a+1) (the block slot, or the kdict with
+  # keywords) and R(a+2) only when kd is set. APOST R(a) pre post (vm.c OP_APOST, body 3292-3324) writes R(a) (the
+  # rest Array) and R(a+1)..R(a+post) (the post values, nil-filled when the array is short), whatever the array's
+  # length. Both write only after their last check: ARGARY raises ("super called outside of method") before any
+  # write, and APOST has no raise path of its own. Neither is a jump target or a block end, so a run opens no entry
+  # point. Nil for every other op.
+  def self.written_run(insn)
+    lead = insn.reg
+    return nil unless lead
+
+    case insn.op
+    when 'ARGARY'
+      spec = insn.typed[1].value # [m1, r, m2, kd]
+      lead.to_i..(lead.to_i + (spec[3] == 1 ? 2 : 1))
+    when 'APOST'
+      lead.to_i..(lead.to_i + insn.typed[2].value)
+    end
+  end
+
   # A callee's frame starts at R(a): it may overwrite every register above a.
   CALLEE_FRAME_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC', 'BLKCALL'].freeze
 
@@ -305,6 +326,8 @@ module BytecodeIR
     def dataflow_effect(insn, reg)
       op = insn.op
       return :pass if READS_LEADING_REG_OPS.include?(op)
+      run = BytecodeIR.written_run(insn)
+      return(run.cover?(reg.to_i) ? :define : :pass) if run
       lead = insn.reg
       return :callee_clobber if ORIGIN_FRAME_OPS.include?(op) && (lead.nil? || lead.to_i < reg.to_i)
       return :refuse unless WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
