@@ -4,7 +4,7 @@
 # Usage: nfcxx [--emit-c] [-o out] [-std=c++NN] file.cpp...
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
-edg=${EDG_DIR:-$root/third_party/edg}/build/gcc-release/bin
+edg=${EDG_BUILD:-$root/build/edg}/bin
 [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 
 std=--c++23; out=a.out; emit_c=0; files=()
@@ -21,7 +21,7 @@ done
 
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
-  base=${EDG_DIR:-$root/third_party/edg}/bases/docker/dev-env/gcc
+  base=${EDG_BASE:-$root/build/edg-base}
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
   f=$(realpath "${files[0]}")
   (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ \

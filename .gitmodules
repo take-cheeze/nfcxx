@@ -1,0 +1,4 @@
+[submodule "3rd/edg"]
+	path = 3rd/edg
+	url = https://github.com/edgcpp/compiler
+	shallow = true
