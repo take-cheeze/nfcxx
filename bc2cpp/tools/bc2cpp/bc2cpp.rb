@@ -1068,6 +1068,18 @@ if $PROGRAM_NAME == __FILE__
     SiteProfile.capture_stdout(site_profile_dir, symbol)
   end
 
+  # PARAM_TRACE (tools/bc2cpp/param_trace.rb): opt-in runtime classes of compiled method and block
+  # parameters; unset (or any value but 1) leaves stdout untouched. Registered BEFORE ELSE_TRACE so the
+  # else trace instruments the plain text first (at_exit runs last-in first-out).
+  if ENV['BC2CPP_TRACE_PARAMS'] == '1'
+    require_relative 'param_trace'
+    ParamTrace.capture_stdout(
+      symbol,
+      ParamTrace.method_infos(compiled, ireps: ireps, registry: registry, arg_types: arg_types,
+                                        class_arg_types: class_arg_types, annotations: annotations, gen: gen)
+    )
+  end
+
   # ELSE_TRACE (tools/bc2cpp/else_trace.rb): opt-in counters on the else arm of a core class-tag chain;
   # unset (or any value but 1) leaves stdout untouched.
   if ENV['BC2CPP_TRACE_ELSE'] == '1'

@@ -94,6 +94,39 @@ module SiteCensus
     origin_of(lines, found[0], found[1], fn, parameter_list(lines, fn), COPY_HOPS)
   end
 
+  # The parameter of the enclosing function whose value the receiver is: the same text walk as
+  # receiver_origin (nearest assignment, then register copies up to COPY_HOPS), but it names the
+  # parameter instead of classifying it. nil when the receiver is not a plain copy of a parameter.
+  # `line` is 1-based, as in a site's :line.
+  def feeding_parameter(lines, line, recv)
+    fn = function_start(lines, line - 1)
+    return nil unless fn
+
+    params = parameter_names(lines[fn])
+    return (params.include?(recv) ? recv : nil) unless recv =~ /\Ar\d+\z/
+
+    i = line - 2
+    i -= 1 while i.positive? && line - i < 80 && !(lines[i] =~ %r{^(if \(|\{$|// [^ ]+ -- generated)} && lines[i - 1] !~ /\} else|else\s*$/)
+    found = last_assignment(lines, i, [i - 60, 0].max, recv)
+    return nil if found.nil? || join_between?(lines, found[0], line - 1, recv)
+
+    at, rhs = found
+    (COPY_HOPS + 1).times do
+      case rhs
+      when /\Ar\d+\z/
+        found = last_assignment(lines, at, fn, rhs)
+        return nil unless found
+
+        at, rhs = found
+      when /\A\w+\z/
+        return params.include?(rhs) ? rhs : nil
+      else
+        return nil
+      end
+    end
+    nil
+  end
+
   JOIN_LABEL_RE = /^\s*L\d+:/
   JOIN_BRANCH_RE = /^\s*(?:\}\s*)?(?:else\b|if \(|switch \(|goto )/
 
