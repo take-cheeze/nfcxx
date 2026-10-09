@@ -2,6 +2,7 @@
 """Path B stage 3: emit QBE IL from the nfcxx mid-level IR text (docs/notes/pathb-stage2.md, sections 6 and 7).
 
 Usage: pathb-qbe-emit.py [FILE.ir | -]        QBE IL on stdout (reads stdin for '-' or no argument)
+       pathb-qbe-emit.py --append-weak IL.ssa ASM.s   append `.weak` lines for the IR (weak) definitions (QBE has no weak)
 
 Exit status:
   0  the module was emitted
@@ -1328,6 +1329,23 @@ def global_items(mod, name, items_form):
     return out
 
 
+# QBE has no weak linkage. A COMDAT definition (IR marker (weak)) is exported, and a comment line in the IL names it;
+# `pathb-qbe-emit.py --append-weak IL ASM` turns those comments into `.weak` directives at the end of the assembly
+# that QBE produced (the same trick as scripts/weak-symbols.py, but driven by the IR instead of EDG's __weak__ text).
+WEAK_MARK = "# pathb-weak "
+
+
+def append_weak(il_path, asm_path):
+    names = []
+    for line in open(il_path, encoding="latin-1"):
+        if line.startswith(WEAK_MARK):
+            names.append(line[len(WEAK_MARK):].strip())
+    if names:
+        with open(asm_path, "a") as f:
+            f.write("\n" + "".join(".weak %s\n" % n for n in names))
+    return 0
+
+
 def emit_global(mod, g):
     # (global "NAME" TYPE BYTES ALIGN [(static)] INIT)
     if len(g) < 6:
@@ -1337,8 +1355,12 @@ def emit_global(mod, g):
     align = as_int(g[4])
     rest = g[5:]
     static = False
+    weak = False
     if rest and head_of(rest[0]) == "static":
         static = True
+        rest = rest[1:]
+    elif rest and head_of(rest[0]) == "weak":
+        weak = True
         rest = rest[1:]
     if len(rest) != 1:
         raise BadIR("global %s: expected one INIT" % name)
@@ -1355,6 +1377,8 @@ def emit_global(mod, g):
     items = global_items(mod, name, init)
     pieces = emit_data_items(mod, name, size, items)
     linkage = "" if static else "export "
+    if weak:
+        mod.out.append(WEAK_MARK + qsym(name))
     mod.out.append("%sdata $%s = align %d { %s }" % (linkage, qsym(name), align, ", ".join(pieces)))
 
 
@@ -1390,6 +1414,7 @@ def emit_function(mod, f):
         raise BadIR("function %s: no (params ...)" % name)
     fn = Fn(mod, name, ret)
     static = False
+    weak = False
     qparams = []
     param_stores = []
     body_forms = []
@@ -1397,6 +1422,8 @@ def emit_function(mod, f):
         h = head_of(part)
         if h == "static":
             static = True
+        elif h == "weak":
+            weak = True
         elif h == "slot":
             # (slot "NAME" TYPE BYTES ALIGN)
             if len(part) != 5:
@@ -1454,6 +1481,8 @@ def emit_function(mod, f):
         fn._put("hlt")
     rc = "" if ret == VOID else qcls(ret) + " "
     linkage = "" if static else "export "
+    if weak:
+        mod.out.append(WEAK_MARK + qsym(name))
     mod.out.append("%sfunction %s$%s(%s) {" % (linkage, rc, qsym(name), ", ".join(qparams)))
     mod.out.append("@start")
     mod.out.extend(fn.allocs)
@@ -1487,8 +1516,13 @@ def emit_module(text):
 
 def main(argv):
     args = argv[1:]
+    if args and args[0] == "--append-weak":
+        if len(args) != 3:
+            sys.stderr.write("usage: pathb-qbe-emit.py --append-weak IL.ssa ASM.s\n")
+            return 1
+        return append_weak(args[1], args[2])
     if len(args) > 1:
-        sys.stderr.write("usage: pathb-qbe-emit.py [FILE.ir | -]\n")
+        sys.stderr.write("usage: pathb-qbe-emit.py [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n")
         return 1
     src = sys.stdin.read() if not args or args[0] == "-" else open(args[0], encoding="latin-1").read()
     try:

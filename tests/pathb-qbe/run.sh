@@ -7,6 +7,8 @@
 #
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow.
 #   tests/cases/*.cpp             the regression programs (same EXPECT values as the production runner).
+#   tests/pathb-qbe/multi/*/      programs of several translation units (all *.cpp of a directory, linked together):
+#                                 COMDAT/weak linkage of inline and template code from a shared header.
 #   tests/pathb-qbe/traps/*.cpp   programs whose checked operations must abort (exit status 134, SIGABRT).
 #                                 Built with NFCXX_IR_OVERFLOW=trap. The gcc backend is not compared: C leaves
 #                                 these cases undefined (gcc dies with SIGFPE or SIGSEGV instead).
@@ -56,6 +58,7 @@ run_one() {
   if ! "$qbe" "$ssa" > "$s" 2> "$tmp/$n.qbe"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$n.qbe")"); return
   fi
+  python3 "$emit" --append-weak "$ssa" "$s"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
@@ -90,6 +93,50 @@ run_one() {
   lines+=("ok       $name: exit $got = EXPECT $want (gcc $gcc_rc)")
 }
 
+# run_multi <dir>: a program of several translation units (every *.cpp in the directory). Each unit goes through
+# the pipeline separately, the objects are linked together, and the exit code must equal the // EXPECT: value of the
+# unit that has one. This is where COMDAT/weak definitions (inline and template code in a shared header) must merge.
+# The gcc backend (all units in one nfcxx call) must agree.
+run_multi() {
+  local d=$1 n name f b obj objs=() want got gcc_rc srcs=() exe
+  total=$((total + 1))
+  n=$(basename "$d"); name=${d#tests/}; exe=$tmp/multi_$n.exe
+  for f in "$d"/*.cpp; do
+    b=multi_${n}_$(basename "$f" .cpp); obj=$tmp/$b.o; srcs+=("$f")
+    scripts/pathb-dump --ir "$f" > "$tmp/$b.ir" 2> "$tmp/$b.fe" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: front end ($f): $(head -1 "$tmp/$b.fe")"); return; }
+    python3 "$emit" "$tmp/$b.ir" > "$tmp/$b.ssa" 2> "$tmp/$b.emit"; rc=$?
+    if [ $rc = 3 ]; then refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$b.emit")"); return; fi
+    if [ $rc != 0 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: emitter: $(head -1 "$tmp/$b.emit")"); return; fi
+    "$qbe" "$tmp/$b.ssa" > "$tmp/$b.s" 2> "$tmp/$b.qbe" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$b.qbe")"); return; }
+    python3 "$emit" --append-weak "$tmp/$b.ssa" "$tmp/$b.s"
+    cc -c -o "$obj" "$tmp/$b.s" 2> "$tmp/$b.as" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
+    objs+=("$obj")
+  done
+  if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lstdc++ -lgcc_s -lpthread -lC 2> "$tmp/multi_$n.ld"; then
+    failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
+  fi
+  built=$((built + 1))
+  sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$exe"; got=$?
+  ran=$((ran + 1))
+  want=$(for f in "$d"/*.cpp; do expect_of "$f"; done | head -1)
+  if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
+  gcc_rc=compile-error
+  if NFCXX_BACKEND=gcc ./nfcxx "${srcs[@]}" -o "$tmp/multi_$n.gcc" > /dev/null 2> "$tmp/multi_$n.gccerr"; then
+    sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$tmp/multi_$n.gcc"; gcc_rc=$?
+  fi
+  if [ $((got & 255)) -ne $((want & 255)) ]; then
+    failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc $gcc_rc)"); return
+  fi
+  if [ "$gcc_rc" != "$((want & 255))" ]; then
+    failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc"); return
+  fi
+  match=$((match + 1))
+  lines+=("ok       $name: exit $got = EXPECT $want (gcc $gcc_rc), ${#objs[@]} translation units")
+}
+
 # Probe the harness: a stage 2 harness has no sizes on slots and the emitter says so.
 probe=$(ls tests/cases/*.cpp | head -1)
 scripts/pathb-dump --ir "$probe" > "$tmp/probe.ir" 2>/dev/null
@@ -103,6 +150,7 @@ for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
   [ -e "$f" ] && run_one "$f" exit
 done
 for f in tests/pathb-qbe/traps/*.cpp; do [ -e "$f" ] && run_one "$f" trap; done
+for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && run_multi "${d%/}"; done
 
 for l in "${lines[@]}"; do echo "$l"; done
 echo

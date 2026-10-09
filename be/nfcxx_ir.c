@@ -1578,6 +1578,7 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   nf_put_type(var->type);
   fprintf(nf_out, " %lu %lu", ir_size_of(var->type), ir_align_of(var->type));
   if (var->storage_class == sc_static) fputs(" (static)", nf_out);
+  else if (var->comdat_group != NULL) fputs(" (weak)", nf_out); /* EDG: COMDAT, which c_gen_be.c writes as __weak__ */
   ir_global_init(var);
   fputs(")\n", nf_out);
   ir_buf_end(&g);
@@ -1902,6 +1903,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_write(&params, nf_out);
   fputs(")", nf_out);
   if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
+  else if (rout->use_comdat) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
   ir_buf_write(&ir_slot_buf, nf_out);
   ir_buf_write(&body, nf_out);
   fputs(")\n", nf_out);

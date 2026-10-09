@@ -47,12 +47,13 @@ A malformed or older IR format exits 1.
 
 `tests/pathb-qbe/run.sh` builds each program with the stage 3 harness, emits QBE, assembles, links the way
 `eccp` does, and runs it. The exit code must equal the `// EXPECT:` value, and the gcc backend must agree.
+The runners skip `tests/cases/qbe_*.cpp`: those are production-path tests that need system headers and GNU forms the Path B harness does not have.
 Trap programs must abort with `SIGABRT`; gcc is not compared for them, because C leaves those cases undefined.
 
 Last run (on `main` at the time of writing):
 
 ```
-26 programs: 26 built, 26 ran, 15 match EXPECT, 11 trapped as required, 0 refused, 0 failed
+28 programs: 28 built, 28 ran, 17 match EXPECT, 11 trapped as required, 0 refused, 0 failed
 ```
 
 | Program | Result |
@@ -62,6 +63,8 @@ Last run (on `main` at the time of writing):
 | `tests/pathb-qbe/cases/control.cpp` | exit 237 = EXPECT 237 |
 | `tests/pathb-qbe/cases/floats.cpp` | exit 13 = EXPECT 13 |
 | `tests/pathb-qbe/cases/globals.cpp` | exit 21 = EXPECT 21 |
+| `tests/pathb-qbe/cases/variadic.cpp` | exit 0 = EXPECT 0 |
+| `tests/pathb-qbe/multi/comdat/` (2 units) | exit 54 = EXPECT 54 |
 | `tests/cases/constexpr_static.cpp` | exit 120 = EXPECT 120 |
 | `tests/cases/exceptions.cpp` | exit 15 = EXPECT 15 |
 | `tests/cases/float_neg_switch.cpp` | exit 42 = EXPECT 42 |
@@ -74,7 +77,7 @@ Last run (on `main` at the time of writing):
 | `tests/cases/virtual_dispatch.cpp` | exit 23 = EXPECT 23 |
 | `tests/pathb-qbe/traps/*.cpp` (11 programs) | SIGABRT as required: bounds, div_zero, div_overflow, rem_overflow, shift_count, shift_negative, float_to_int, null_deref, no_return, signed_add, signed_mul_wide |
 
-The 15 programs that match `EXPECT` also match the gcc backend. The probes are small and hand-written, so
+The 17 programs that match `EXPECT` also match the gcc backend. The probes are small and hand-written, so
 passing them is evidence, not proof of correctness.
 
 Coverage on `tests/cases` (`tests/pathb-ir/run.sh`): 1997 node occurrences lowered, 0 unsupported, 45
@@ -88,6 +91,16 @@ the runner checks.
   float, double, long and more than eight double arguments, compared in the program; exit code = number of wrong
   results). Before the fix: exit 1, EXPECT 0 (MISMATCH). After: exit 0.
 
+- **Linkage of multi-translation-unit programs.** The IR carries `(weak)` on COMDAT definitions (stage 2, section 6),
+  taken from EDG's `use_comdat` (routines) and `comdat_group` (variables). The emitter exports them and writes a
+  `# pathb-weak SYMBOL` comment line in the IL. QBE has no weak linkage, so `pathb-qbe-emit.py --append-weak IL ASM`
+  appends `.weak` directives to QBE's assembly (the runner does this after `qbe`). Probe:
+  `tests/pathb-qbe/multi/comdat/` (`a.cpp` and `b.cpp` include `common.h` with an inline function, a template, an
+  inline function with a static local, an inline variable and a class with inline virtuals). The runner links both
+  objects. Before: the link fails with 14 `multiple definition of` errors. After: exit 54 = EXPECT 54, gcc backend 54.
+  Not covered: per-function `.section` COMDAT groups (`.weak` is enough on ELF for merging; unused weak copies stay
+  in the object), and `static` data that is genuinely different between units (it stays internal).
+
 ## Known gaps
 
 - **`setjmp`.** QBE does not know that `setjmp` returns twice. Slots are promoted, so values changed after
@@ -97,8 +110,6 @@ the runner checks.
 - **Bool loads** are not normalised: a `bool` holding a value other than 0 or 1 is undefined here.
 - **Pointer subscripts** are not bounds-checked, and the IR has no `undef`, SSA or constant folding.
 - **Layout** assumes LP64 scalar sizes (int 4, long 8, pointers 8). The IR prints no scalar sizes.
-- **Linkage.** Defined globals and functions are exported unless marked static. COMDAT and weak symbols are
-  not modelled, so the output is only safe for single-translation-unit programs.
 - **Hexadecimal unsigned constants** are fine for the emitter but not what a consumer might expect.
 
 ## Reproduce

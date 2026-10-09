@@ -18,6 +18,7 @@
 (function "_Z3addIiET_S0_S0_"
   (ret int)
   (params (param %0 "a" int) (param %1 "b" int))
+  (weak)
   (slot "a" int 4 4)
   (slot "b" int 4 4)
   (store int $"a" %0)
@@ -47,6 +48,7 @@
 (function "_ZNK1P3sumEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "P"))))))
+  (weak)
   (slot "tmp" (const (ptr (const (struct "P")))) 8 8)
   (store (ptr (const (struct "P"))) $"tmp" %0)
   (let %1 (ptr (const (struct "P"))) (load (ptr (const (struct "P"))) $"tmp"))
