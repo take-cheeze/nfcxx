@@ -137,8 +137,50 @@ EOF
   echo 'int main( { }' > conf/syn.c
   check "syntax error is an error" bash -c "cd conf && ! '$nfcc' -c syn.c -o syn.o"
 
-  # 6. unsupported options fail loudly and write nothing
-  rejects "-S" "-S" -S util.c -o rej.o
+  # 6. -S, response files, -Wp,/-Wa,, -O/-g
+  check "-S writes assembly named after the source" bash -c "cd '$w' && mkdir -p sdir && cp util.c util.h sdir/ && cd sdir && '$nfcc' -S util.c && grep -q util_add util.s && ! test -e util.o"
+  check "-S -o names the assembly file" "$nfcc" -S util.c -o util_out.s
+  check "-S output assembles and links into a working program" bash -c "'$nfcc' -DEXTRA=100 -Iinc -isystem sys -include pre.h -c main.c -o smain.o && cc -c util_out.s -o sutil.o && '$nfcc' smain.o sutil.o -o sprog && ./sprog >/dev/null; test \$? = 1"
+  check "-S -o - writes to stdout" bash -c "'$nfcc' -S util.c -o - | grep -q util_add"
+  check "-S with several sources gives one .s each" bash -c "cd '$w' && mkdir -p smulti && cp util.c util.h so.c smulti/ && cd smulti && '$nfcc' -S util.c so.c && test -s util.s && test -s so.s"
+  rejects "-S with -o and two sources" "multiple files" -S util.c main.c -o rej.o
+  check "-S -MMD writes the dependency file" bash -c "cd '$w' && '$nfcc' -S -MMD -MF sdep.d -DEXTRA=1 -Iinc -isystem sys -include pre.h main.c -o sdep.s && grep -q util.h sdep.d && test -s sdep.s"
+  mkdir -p "inc dir" && cp inc/cfg.h "inc dir/"
+  printf '%s\n' '-DEXTRA=100 -I"inc dir"' "-isystem 'sys'" '@rsp_inner.txt' > rsp_outer.txt
+  printf '%s\n' '-include' 'pre.h -c' > rsp_inner.txt
+  check "@file: quotes, newlines and nested @file" "$nfcc" @rsp_outer.txt main.c -o rsp.o
+  check "@file: the options took effect" bash -c "'$nfcc' rsp.o util.o -o rspprog && ./rspprog >/dev/null; test \$? = 1"
+  printf '%s' 'int main(void) { return 5; }' > "main five.c"
+  printf '%s\n' '"main five.c" -o five\ prog' > rsp_names.txt
+  check "@file: a quoted name and a backslash-escaped space" bash -c "'$nfcc' @rsp_names.txt && ./five\ prog; test \$? = 5"
+  printf '%s\n' -DEXTRA=7 > rsp_d.txt
+  echo 'int main(void) { return EXTRA; }' > rv.c
+  check "@file with ordinary arguments" bash -c "'$nfcc' @rsp_d.txt rv.c -o rv && ./rv; test \$? = 7"
+  check "@file: a later option overrides the response file's" bash -c "'$nfcc' @rsp_d.txt -UEXTRA -DEXTRA=9 rv.c -o rv && ./rv; test \$? = 9"
+  rejects "unreadable response file" "@no_such_response_file" @no_such_response_file -c util.c -o rej.o
+  check "-Wp,-D,-I,-include" "$nfcc" -Wp,-DEXTRA=100,-Iinc,-isystem,sys,-include,pre.h -c main.c -o wp.o
+  check "-Wp,-MMD,file" bash -c "'$nfcc' -Wp,-DEXTRA=1,-Iinc,-isystem,sys,-include,pre.h,-MMD,wp.d -c main.c -o wp2.o && grep -q util.h wp.d"
+  check "-Wa,... is handed to the assembler" "$nfcc" -Wa,--noexecstack -c util.c -o wa.o
+  rejects "-Wp,-foo" "Wp,-foo.*not supported" -Wp,-foo -c util.c -o rej.o
+  rejects "-Wp,-DX,-foo (every item is checked)" "'-foo' is not supported" -Wp,-DX,-foo -c util.c -o rej.o
+  rejects "-Ofast" "Ofast" -Ofast -c util.c -o rej.o
+  rejects "unknown -O" "optimisation" -Oz -c util.c -o rej.o
+  printf '%s\n' 'int f(int x) { return x * 3; }' > opt.c
+  if [ $b = gcc ]; then
+    "$nfcc" -S opt.c -o opt_def.s; "$nfcc" -O0 -S opt.c -o opt0.s; "$nfcc" -O2 -S opt.c -o opt2.s; "$nfcc" -S -g opt.c -o optg.s
+    "$nfcc" -O0 -O3 -S opt.c -o opt03.s; "$nfcc" -O3 -S opt.c -O0 -o opt30.s
+    if grep -q rbp opt0.s && ! grep -q rbp opt2.s && ! grep -q rbp opt_def.s; then ok "gcc backend: -O0 is unoptimised, -O2 and the default optimise"
+    else bad "gcc backend -O levels" "rbp in -O0: $(grep -c rbp opt0.s) -O2: $(grep -c rbp opt2.s) default: $(grep -c rbp opt_def.s)"; fi
+    if ! grep -q rbp opt03.s && grep -q rbp opt30.s; then ok "gcc backend: the last -O wins"
+    else bad "gcc backend: last -O wins" "-O0 -O3 rbp=$(grep -c rbp opt03.s), -O3 -O0 rbp=$(grep -c rbp opt30.s)"; fi
+    if grep -q '\.loc' optg.s && ! grep -q '\.loc' opt2.s; then ok "gcc backend: -g produces debug info, no -g does not"
+    else bad "gcc backend -g" ".loc with -g: $(grep -c '\.loc' optg.s) without: $(grep -c '\.loc' opt2.s)"; fi
+  else
+    check "qbe backend: -O0 -O3 -g are accepted and ignored" "$nfcc" -O0 -O3 -g -c opt.c -o optq.o
+  fi
+  rm -f "main five.c"
+
+  # 7. unsupported options fail loudly and write nothing
   rejects "-m32" "m32" -m32 -c util.c -o rej.o
   rejects "-fsanitize=address" "fsanitize" -fsanitize=address -c util.c -o rej.o
   rejects "-fopenmp" "fopenmp" -fopenmp -c util.c -o rej.o
@@ -148,17 +190,26 @@ EOF
   rejects "-std=c++17" "C++" -std=c++17 -c util.c -o rej.o
   rejects "-x c++" "c++" -x c++ -c util.c -o rej.o
   rejects ".cpp input" "nfcxx" -c foo.cpp -o rej.o
-  rejects "-Wp," "Wp" -Wp,-MD,x.d -c util.c -o rej.o
   rejects "unknown -f option" "fmade-up" -fmade-up-option -c util.c -o rej.o
   rejects "unknown option" "frobnicate" --frobnicate -c util.c -o rej.o
-  rejects "response file" "response" @args -c util.c -o rej.o
   rejects "no input" "no input" -c -o rej.o
   rejects "-MD without -c" "needs -c" -MD util.c -o rej.o
-  if [ $b = qbe ]; then   # qbe-prep lowers __builtin_add_overflow only for operands of one type; a mix is not converted silently
-    echo 'int main(void) { long a; int x = 1; return __builtin_add_overflow(x, x, &a); }' > mix.c
-    if out=$("$nfcc" mix.c -o mix 2>&1); then bad "mixed-type __builtin_add_overflow" "linked"
-    elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "mixed-type __builtin_add_overflow fails at link, naming the symbol"
-    else bad "mixed-type __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+  # 8. mixed-type overflow builtins (qbe-prep lowers them on the qbe backend; gcc has them natively)
+  cat > mix.c <<'EOC'
+int main(void) {
+  int x = 7; long a; unsigned u = 4000000000u; int i;
+  if (__builtin_add_overflow(x, x, &a) || a != 14) return 1;
+  if (!__builtin_add_overflow(u, u, &i)) return 2;
+  if (__builtin_mul_overflow(u, 2, &a) || a != 8000000000L) return 3;
+  return 0;
+}
+EOC
+  check "mixed-type __builtin_*_overflow compiles, links and is right" bash -c "'$nfcc' mix.c -o mix && ./mix"
+  if [ $b = qbe ]; then   # an operand that is not an integer still must not be converted silently
+    echo 'int main(void) { long a; double d = 1; return __builtin_add_overflow(d, 1, &a); }' > mixd.c
+    if out=$("$nfcc" mixd.c -o mixd 2>&1); then bad "floating operand to __builtin_add_overflow" "linked"
+    elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "floating operand to __builtin_add_overflow fails at link, naming the symbol"
+    else bad "floating operand to __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
   fi
   cd "$root" || exit 1
 done
