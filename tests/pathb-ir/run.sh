@@ -2,16 +2,22 @@
 # Path B stage 2 regression: lower each tests/cases/*.cpp to the mid-level IR (scripts/pathb-dump --ir) and diff
 # the text against the golden tests/pathb-ir/<name>.ir. `tests/pathb-ir/run.sh --update` rewrites the goldens after
 # an intended change. The run also reports coverage: how many IL node kinds were lowered and how many were not
-# (NFCXX_PATHB_STATS=1 counts them in the back end). Needs the harness: scripts/setup-pathb.sh.
+# (NFCXX_PATHB_STATS=1 counts them in the back end). Needs a harness built by scripts/setup-pathb.sh: set
+# PATHB_CPFE (and PATHB_BASE) to a scratch build, or use build/pathb.
 cd "$(dirname "$0")/../.."
 update=0; [ "${1:-}" = --update ] && update=1
-[ -n "${PATHB_CPFE:-}" ] || [ -x build/pathb/cmake/bin/cpfe ] || scripts/setup-pathb.sh >/dev/null
+# No automatic build: a missing harness is an error, so a worktree never rebuilds the shared build/ directory.
+cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
+[ -x "$cpfe" ] || { echo "run.sh: no harness at $cpfe; set PATHB_CPFE (see docs/notes/pathb-stage2.md)" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
 for f in tests/cases/*.cpp; do
   n=$(basename "$f" .cpp)
   if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then
     echo "FAIL (front end) $f"; grep -v '^ir-stat' "$tmp/$n.err" | head -5; fail=1; continue
+  fi
+  if ! head -1 "$tmp/$n.ir" | grep -q '^(ir-module '; then
+    echo "FAIL harness $cpfe has no IR back end (no (ir-module) output); build it with scripts/setup-pathb.sh"; exit 2
   fi
   g=$(grep -c '(unsupported' "$tmp/$n.ir" || true); gaps=$((gaps + g))
   if [ $update = 1 ]; then cp "$tmp/$n.ir" "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
