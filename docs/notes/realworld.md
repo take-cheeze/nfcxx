@@ -31,26 +31,44 @@ the failed-assertion count (`Context::run()` only returns 0 or 1), and `main` re
 exit code 2. Hosted path (no `--freestanding`).
 
 - **gcc backend: passes.** Exit 2, with the 2 deliberate failures and 23 passing assertions.
-- **QBE backend: xfail.** The build stops in cproc. The chain, in the order the errors show up:
-  1. `error: GNU attribute 'aligned' is not supported here`. EDG emits `__attribute__((__aligned__(N)))`
-     for libstdc++'s `__gnu_cxx::__aligned_membuf` (the storage of `std::map` and other node containers),
-     in two shapes: after an array member (`unsigned char _M_storage[40] __attribute__((...));`) and after
-     a struct body (`struct X {char __dummy[8];} __attribute__((...));`, from `std::aligned_storage`).
-     cproc accepts the attribute only after a bare identifier. Proposed fix: EDG emits `_Alignas(N)` on the
-     member, or the QBE wrapper rewrites those two shapes to `_Alignas(N)` (cproc accepts `_Alignas`).
-     Tried in a scratch copy: both rewrites clear this error, and it moves to 2.
-  2. `error: declaration has no type specifier` on `typedef __bf16 _ZN9__gnu_cxx12__bfloat16_tE;`. cproc
-     has no `__bf16`. Proposed fix: drop or map that typedef in the wrapper.
-  3. `error: GNU attribute 'constructor' is not supported here`, on the `__sti_...` static initializer
-     for `REGISTER_LISTENER` and the test-case registrations. cproc defines `ATTRCONSTRUCTOR` but no
-     declaration accepts it. Repro: `int f() { return 1; } int g = f();` fails with the same error on QBE
-     and passes on gcc. Proposed fix: lower namespace-scope dynamic initialization in the QBE path, for
-     example by emitting `.init_array` entries from the wrapper. Larger than the others.
-  4. thread_local with dynamic initialization (doctest uses it). EDG emits a top-level
-     `__asm__(".global _ZTH<name>")` and `__asm__("_ZTH<name> = __tls_init")`; cproc rejects them with
-     `error: expected declaration or function definition`. Repro: `thread_local int g = f();`. Proposed fix:
-     move those asm lines into the `.s` (`.globl`, `.set`) in the wrapper, as `weak-symbols.py` does for
-     `.weak`.
+- **QBE backend: xfail.** The build gets past the four gaps below, then stops at the next cproc limit.
+  The chain, in the order cproc hits them in doctest's C output:
+  1. **Fixed:** `GNU attribute 'aligned' is not supported here`. Two shapes from libstdc++'s
+     `__aligned_membuf` and `std::aligned_storage`. `scripts/qbe-prep.py` moves the attribute after the
+     member name (cproc accepts it there), and turns a struct-body attribute into `_Alignas` on the first
+     member when the size is a multiple of the alignment.
+  2. **Fixed:** `typedef __bf16 ...` (cproc has no `__bf16`). The same pass maps `__bf16` and the
+     `_Float16`/`_Float32`/`_Float64`/`_Float128` types that `<numbers>` uses (the four missing from this
+     list; `<numbers>` is pulled in by libstdc++'s `<map>`). `_Float32` and `_Float64` become `float` and
+     `double` (same IEEE formats on x86-64). The others become 2- or 16-byte structs with no arithmetic,
+     so a real use is a compile error rather than a wrong value. Literals become exact bit patterns.
+  3. **Fixed:** `GNU attribute 'constructor' is not supported here` (global constructors, `__sti_*`).
+     EDG puts `__attribute__((__constructor__))` on each static-initializer declaration. The pass removes
+     the attribute and lists the function in `.init_array` in the assembly tail.
+  4. **Fixed:** thread_local with dynamic initialization. EDG emits top-level `__asm__(".global _ZTHx")`
+     and `__asm__("_ZTHx = __tls_init")`. cproc rejects top-level asm, so the pass moves them to `.globl`
+     and `.set` in the assembly tail, with `.weak` when the `_ZTWx` wrapper is COMDAT.
+  - Regression cases: `tests/cases/qbe_gnu_forms.cpp` (gaps 1, 2, 4) and `tests/cases/qbe_global_ctor.cpp`
+    (gap 3). Both fail on the previous `qbe-cc` and pass on both backends.
+  - **Not fixed, next blockers** (found after gaps 1 to 4; each is a separate change):
+    - *Inline asm* in doctest's `DOCTEST_BREAK_INTO_DEBUGGER`: `__asm__ volatile("int $3\n" : :)`, 20 uses.
+      cproc has no inline asm: the message is `inline assembly is not yet supported`. This is the current xfail.
+      A fix is a call to a weak `int3; ret` stub in the assembly tail. Not done.
+    - *Builtins* cproc does not know (its table is `3rd/cproc/scope.c`): `__builtin_memcpy`, `memmove`,
+      `memset`, `memcmp`, `strlen` (libc names with the same prototypes), `__builtin_isnan`, `__builtin_clzl`,
+      and `__builtin_mul_overflow(x, C, &x)` with `C` an unsigned long constant (20 uses, all this shape).
+      Not done. The same kind of rewrite as gaps 1 to 4 would cover them.
+    - *Sized atomics* `__atomic_load_N`, `__atomic_store_N`, `__atomic_fetch_add_N` (libstdc++'s
+      `atomic_base`): cproc has no atomics. libatomic from GCC 13 exports these. A fix is to declare them and
+      link `-latomic` on the QBE link. Not done.
+    - *`long double`*: `cproc-qbe: long double is not yet supported`. Doctest's `toString(long double)` and
+      `IsNaN<long double>` need it. QBE has no 80-bit float, so there is no faithful lowering. Mapping it to
+      `double` would change results silently.
+    - *Pointer compatibility*: `base types of pointer assignment must be compatible or void` on EDG's
+      temporaries in doctest's `MultiLaneAtomic`. This was seen after items 5 to 7 were lowered in a scratch
+      copy with `long double` replaced by `double`. Not analysed further.
+  - So `tests/realworld/run_doctest.sh` stays an xfail on QBE. Removing it needs at least the `long double`
+    decision and the pointer-compatibility work above.
 
 Fixes made for this check (the driver, not the back ends):
 
@@ -68,6 +86,6 @@ diagnostic`). They do not affect the result.
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a JSON or XML parser or a
-small compression library in C++. The QBE gaps above (global constructors, `aligned` on members, thread_local)
-are the next ones to fix before a larger C++ library can pass on QBE.
+small compression library in C++. The QBE gaps above (inline asm, builtins, atomics, `long double`) are
+the next ones to fix before doctest or a larger C++ library can pass on QBE.
 mruby is C, so it needs a C front-end mode first, which nfcxx does not have yet.

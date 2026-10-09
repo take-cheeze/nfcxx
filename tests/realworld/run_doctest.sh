@@ -22,10 +22,9 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   if ! out=$(NFCXX_BACKEND=$b "$root/nfcxx" -I"$src" "$root/tests/realworld/doctest_main.cpp" \
              -o "$tmp/d-$b" 2>&1); then
-    # xfail: cproc rejects the GNU aligned attribute EDG emits for libstdc++'s __aligned_membuf, which
-    # std::map and friends use (docs/notes/realworld.md, doctest section).
-    if [ "$b" = qbe ] && grep -q "GNU attribute 'aligned' is not supported here" <<<"$out"; then
-      echo "xfail qbe doctest: cproc rejects aligned attribute on libstdc++ __aligned_membuf (docs/notes/realworld.md)"
+    # xfail: cproc has no inline asm; doctest's DOCTEST_BREAK_INTO_DEBUGGER uses one (docs/notes/realworld.md).
+    if [ "$b" = qbe ] && grep -q "inline assembly is not yet supported" <<<"$out"; then
+      echo "xfail qbe doctest: cproc has no inline asm (doctest's debugger break); see docs/notes/realworld.md"
       continue
     fi
     echo "FAIL $b doctest (build)"; grep -E "error|undefined reference" <<<"$out" | head -5; fail=1; continue
