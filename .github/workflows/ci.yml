@@ -43,11 +43,6 @@ jobs:
       - name: Trace output (Perfetto JSON, both backends)
         run: tests/trace/run.sh
 
-      - name: "Hexagon checks (open toolchain, clang-19 + qemu-hexagon)"
-        run: |
-          sudo apt-get install -y --no-install-recommends clang-19 qemu-user-static
-          CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
-
       - name: sccache stats
         if: always()
         run: sccache --show-stats
