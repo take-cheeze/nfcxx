@@ -121,6 +121,9 @@ module SiteOriginTable
       insn = irep.instructions[definition.index]
       return 'self' if insn.op == 'LOADSELF'
 
+      # ENTER's typed definitions (rest, keyword hash, block) are the method's own parameters.
+      return 'parameter' if insn.op == 'ENTER'
+
       text = SiteOriginTable::INSN_TEXT[[irep.label, definition.index]]
       # The read's own opcode decides these: their emitted text can be a multi-line
       # block whose last assignment is a temporary (`r5 = r5_tmp;`), which says nothing.
