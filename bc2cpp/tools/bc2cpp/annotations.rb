@@ -29,7 +29,10 @@ class ArgTypes
       next if mand.zero?
 
       arg_types = Array.new(mand)
+      # A packed caller (`f(*a)`, count nil) may pass any number of arguments: it is no fact for any position.
+      packed = false
       call_sites.fetch(name, []).each do |caller_irep, idx, d, n|
+        packed ||= n.nil?
         next unless n == mand # a real call site to a MONO name matches its one definition's arity.
 
         (1..mand).each do |k|
@@ -40,7 +43,7 @@ class ArgTypes
         end
       end
 
-      types[name] = arg_types.map { |t| t == IvarLayout::UNKNOWN ? nil : t }
+      types[name] = arg_types.map { |t| (t == IvarLayout::UNKNOWN || packed) ? nil : t }
     end
 
     types

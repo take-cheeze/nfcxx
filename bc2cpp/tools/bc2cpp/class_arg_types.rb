@@ -67,7 +67,10 @@ class ClassArgTypes
 
       arg_classes = Array.new(mand)
       conflicts = Array.new(mand, false)
+      # A packed caller (`f(*a)`, count nil) may pass any number of arguments: it is no fact for any position.
+      packed = false
       call_sites.fetch(name, []).each do |caller_irep, idx, d, n|
+        packed ||= n.nil?
         next unless n == mand # a real call site to a MONO name matches its arity.
 
         caller_owner = owner_of[caller_irep.label]
@@ -89,7 +92,7 @@ class ClassArgTypes
         end
       end
 
-      types[name] = arg_classes.each_with_index.map { |c, i| conflicts[i] ? nil : c }
+      types[name] = arg_classes.each_with_index.map { |c, i| (conflicts[i] || packed) ? nil : c }
     end
 
     types
