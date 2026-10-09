@@ -24,13 +24,16 @@ int main() {
     fails += __builtin_isnan(nan) != 1;
     fails += __builtin_isnan(1.5) != 0;
 
-    fails += __builtin_clzl(1UL) != 63;
-    fails += __builtin_clzl(1UL << 40) != 23;
+    // Width-independent: unsigned long is 64-bit on the host and 32-bit on the Hexagon check.
+    const int bits = (int)(8 * sizeof(unsigned long));
+    const int s = bits / 2 + 8;
+    fails += __builtin_clzl(1UL) != bits - 1;
+    fails += __builtin_clzl(1UL << s) != bits - 1 - s;
     fails += __builtin_clzl(~0UL) != 0;
 
     unsigned long n = 3;
     fails += __builtin_mul_overflow(n, 8UL, &n) != 0 || n != 24;
-    unsigned long big = 1UL << 63;
+    unsigned long big = 1UL << (bits - 1);
     fails += __builtin_mul_overflow(big, 2UL, (&big)) != 1 || big != 0;  // wraps, and reports it
     unsigned long zz = 0;
     fails += __builtin_mul_overflow(zz, 72UL, &zz) != 0 || zz != 0;
