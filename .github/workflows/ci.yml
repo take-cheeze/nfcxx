@@ -46,6 +46,9 @@ jobs:
       - name: C inputs (both backends)
         run: tests/c/run.sh
 
+      - name: nfcc drop-in cc mode (both backends)
+        run: tests/c/cc-mode.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats
