@@ -150,16 +150,35 @@ Layout comes from EDG: `a_field.offset` (bytes) and `offset_bit_remainder` (0..7
 its parent, `bit_size` the width. The lowering picks the unit as follows: the declared type's size `U`, at the
 `U`-aligned offset that contains the field, when the field fits there and the unit lies inside the parent object (the
 usual case; gcc does the same). Otherwise it tries 1, 2, 4 and 8 bytes at an aligned offset, then the window of that
-size that ends at the end of the parent (a packed struct, a field that straddles its declared type). A field wider
-than 64 bits, or that fits no window, is `(unsupported lvalue bit-field-layout)`.
+size that ends at the end of the parent (a packed struct, a field that straddles its declared type). A field that
+fits no window is `(unsupported lvalue bit-field-layout)`. **Wider than 64 bits:** EDG truncates a width that exceeds
+the declared type (`long long c : 70` is a 64-bit field with the warning "truncated to 64 bits"), so only a 128-bit
+declared type (`unsigned __int128 f : 100`, a GNU extension) can be wider than 64 bits. Such an access prints
+`(unsupported lvalue bit-field-wider-than-64-bits)`. It cannot be lowered in any case: the emitter has no 128-bit
+type (`refused: type __uint128_t`), and `UNIT` is at most 8 bytes.
 
 Compound assignment and `++`/`--` are `bfload`, the arithmetic in the declared type `T` (so it wraps in `T`, then the
 store truncates to `WIDTH`), `bfstore`. Initialization: aggregate initializers store each named bit-field with `bfstore`
 (unnamed bit-fields take no initializer); a static initializer lists one item per bit-field,
 `(bitfield OFF UNIT BOFF WIDTH T (const T V))` with `OFF` the byte offset of the unit, and the consumer ORs the bits of
 all items together (fields of different declared types have overlapping units, so merging is by bit position).
-Bit-fields in unions and in classes with virtual bases are not covered by the aggregate-initializer path (unions and
-virtual bases have no aggregate initializer in the IR at all); plain reads and writes work in all of them.
+Bit-fields in unions work in aggregate initializers too (below). A class with a virtual base never has an aggregate
+constant: its constructor cannot be `constexpr` (EDG: "a constructor for a class with virtual bases cannot be
+constexpr"), so such an object is zero-initialized at start-up (`(zero 0 N)`) and constructed dynamically, and its
+bit-fields are written by the constructor with `bfstore`. `ir_class_members` still returns -1 for a virtual base, and
+the `(unsupported init virtual-base)` marker stays as a guard that no program reaches.
+
+**Union aggregate constants.** `U u = {5}` and the union members of structs and arrays are `ck_aggregate` constants
+whose list holds the initialized member: an optional `ck_designator` naming the field, else the first non-empty
+initializable field (`next_applicable_field`, EDG's own rule in `dump_initializer_part`), then its value, or nothing for
+`{}`. A local object zeroes the whole union first (stores of 8, 4, 2 or 1 bytes; skipped when the member covers the
+union), then stores the member (a bit-field member with `bfstore`). A static initializer prints the member's items at
+its offset (a bit-field as a `(bitfield ...)` item) followed by `(zero OFF N)` for the remaining bytes. Zeroing an
+aggregate (`ir_zero_object`) is no longer `(unsupported init zero-aggregate)` for objects of up to 128 stores.
+
+**`eok_bassign`** (block assignment): IL lowering copies a static array into an array member when a default member
+initializer is `int arr[3] = {1, 2, 3};` (a class with a base class and a vptr hits this in every constructor). It
+lowers to `(copy N DST SRC)`, `N` the size of the source operand; the result is void.
 The emitter documents its code shape in `scripts/pathb-qbe-emit.rb` (`r_bfload`): extraction is a shift pair, never an `and`
 with a low mask, because QBE's width analysis drops such a mask wrongly in some loops (see `docs/notes/pathb-stage3.md`).
 
@@ -178,15 +197,35 @@ The VLA variable `v` has no slot of its own with the array's size. Its slot `(sl
 *address* of its storage, and every use of the variable loads that pointer first, so `$"v"` is the slot of the pointer,
 not the array. `(array ? T)` is how a VLA type prints (the `?` is the unknown count).
 
-`(vlaalloc $"slot" BYTES)`: allocate `BYTES` bytes of dynamic stack storage, 16-byte aligned, uninitialized, and store the
-address in the slot. **Lifetime.** EDG gives no scope-exit marker for a VLA in this configuration (the lowered IL
-has no `enk_vla_dealloc` and no destruction-list entry). The IR therefore does not free at the end of the block. The
+**Current harness: EDG lowers the VLA itself** (`LOWER_VARIABLE_LENGTH_ARRAYS=1` in the macro config that
+`scripts/setup-pathb.sh` writes; the C generator's configuration has it, the default for a non-C back end does not).
+Then none of the above reaches the IR. A VLA variable is an ordinary `T *` local, `stmk_vla_decl` becomes an
+expression statement `(eval (call void &"__vla_alloc" (bitcast &v) BYTES))` at the declaration, and EDG puts
+`(eval (call void &"__vla_dealloc" ...))` at **every** exit from the scope: the end of the block, `break`, `continue`,
+`goto` and `return` that leave it, and on exceptions an entry of the destruction list that calls `__vla_dealloc_eh`
+(the function-local `(array N (struct "__C8"))` EH tables name it). `__vla_alloc`/`__vla_dealloc` are in EDG's
+run-time library (`lib_src/vla_alloc.c`, in `libC.a`, which the Path B tests already link): a pool over `malloc` that
+also frees allocations made dead by a `longjmp`. This is what the earlier note below asked for: a scope-exit marker.
+Probe: `tests/pathb-qbe/cases/vla_scope.cpp` counts the live allocations with `__vla_number_of_active_allocations()`
+after blocks, nested blocks, loops with `break`/`continue`, a backward and a forward `goto`, early `return`, `switch`,
+recursion, large blocks in a loop and a function whose destructor runs next to a VLA. Limits: the pool is a single
+global (the runtime says it is not thread safe), and each VLA costs two calls and a `malloc`ed block instead of a
+`sub rsp`. `be/nfcxx_ir.c` keeps the code for the unlowered configuration under `#if !LOWER_VARIABLE_LENGTH_ARRAYS`.
+
+**Unlowered configuration (`vlaalloc`).** `(vlaalloc $"slot" BYTES)`: allocate `BYTES` bytes of dynamic stack storage,
+16-byte aligned, uninitialized, and store the
+address in the slot. **Lifetime.** EDG gives no scope-exit marker for a VLA in that configuration (the lowered IL
+has no `enk_vla_dealloc` in C++ mode, where deallocation is an entry of the destruction list, and EDG creates that
+entry (`is_vla_deallocation`) only when `VLA_DEALLOCATION_REQUIRED` is true, which it is only with
+`LOWER_VARIABLE_LENGTH_ARRAYS`). The IR therefore does not free at the end of the block. The
 semantics are: the storage lives until the function returns, *or* until the same `vlaalloc` executes again, when the
 old array's lifetime has ended anyway (C and GNU C end it when execution leaves the block, including a backward `goto`),
 and the backend may reuse the space. A backend with no dynamic stack must refuse the statement. The QBE emitter keeps a
 capacity per `vlaalloc` and allocates only when `BYTES` exceeds it (then for `max(BYTES, 2 * capacity)`), so a loop
 that declares a VLA of at most N bytes uses O(N) stack, not O(N * iterations); a recursion with a VLA uses one
-allocation per frame, released at return.
+allocation per frame, released at return. Even with a marker the stack could not be released: QBE has no stack
+save/restore (`alloc16` outside `@start` is a bare `sub rsp`, and QBE offers no way to read or set `rsp`), which is
+why the lowered form, heap based, is the way to free at scope exit.
 
 `sizeof` of a VLA type or expression (`enk_sizeof` that EDG could not fold) is the product of the dimension variables
 and the element size, computed in registers, and so is the stride of a pointer to a VLA row (`index`/`pdiff` take a
@@ -200,17 +239,40 @@ type is a pointer as in C++ and needs nothing.
 registers they define stay visible), and the value is the last statement when it is an expression statement
 (EDG marks it `stmk_stmt_expr_result`; its expression is lowered like any rvalue). A void result, or a statement
 expression whose last statement is not an expression, has no value. `break`, `continue`, `goto` and `return` inside work as in
-any statement. A result that EDG builds with a copy constructor (`dik_class_result_via_ctor`) is not lowered.
+any statement. **A class result** that IL lowering copies out of the block with a copy constructor does not end the block
+with `stmk_stmt_expr_result`: the block holds the locals' constructors, a nested statement expression in an ordinary
+expression statement (its block copy-constructs the result into the destination object, and its own last statement
+names that object), and then the destructor calls of the locals. The value statement is therefore the last statement of
+the block, or, when the statement expression has a class type, the last expression statement whose expression is itself
+a statement expression (`ir_stmt_expr`); the cleanup statements after it are lowered in order, after the value was
+computed. The value is the address of the destination object. `tests/pathb-qbe/cases/stmtexpr_class.cpp` compares
+copy and destructor counts with the gcc backend. A `stmk_stmt_expr_result` that still carries a `dynamic_init` (expr
+NULL) stays `(unsupported stmt stmt_expr_result)`; this EDG build did not produce one in any probe.
+
+**Inline asm** (`stmk_asm`). QBE has no inline assembly, so only the subset that does nothing but constrain the compiler
+is lowered: an empty template (blank characters only), no operands, no labels, clobbers `"memory"` and/or `"cc"`, or a
+basic `asm("")` (gcc treats a basic asm as clobbering memory). With the `"memory"` clobber (or a basic asm) it prints
+`(barrier)`, a compiler barrier; without it, the statement prints nothing (it constrains no memory). Everything else
+prints `(unsupported stmt REASON)` with `REASON` one of `asm-template` (a non-empty template), `asm-operands`
+(inputs or outputs), `asm-clobbers` (a register clobber) or `asm-goto`, and the emitter refuses the module with that
+text (`refused: (unsupported stmt asm-operands)`; it used to say only `statement (unsupported ...)`). An asm with outputs
+or a template cannot be implemented on QBE at all: it would need an assembler template inserted into QBE's output. The
+emitter's `(barrier)` is a call of an empty module-local function `$__pathb_barrier` (emitted once per module with the
+volatile helpers): QBE cannot look into a call or reorder it, and the call has no operands, so no stack slot escapes.
 
 ## 6. Decision (g): the text form
 
 S-expressions, one statement per line, indented by nesting. Identifiers are double-quoted strings. The grammar as printed:
 
 ```
-module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* function*
-global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] [(thread)] INIT)
+module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* (global|data|declare|function)*
+declare   ::= (declare "NAME" (weak))                          a function declared __attribute__((weak)) that this module
+                                                               refers to and does not define: a weak reference (see Linkage)
+global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)|(weak attr)] [(thread)] INIT)
                                                                static storage object; (static) = internal linkage,
-                                                               (weak) = COMDAT/weak definition,
+                                                               (weak) = COMDAT/weak definition, or, with INIT (extern),
+                                                               a declaration with __attribute__((weak)) (weak reference),
+                                                               (weak attr) = a definition with __attribute__((weak)),
                                                                (thread) = thread storage duration (one copy per thread)
 INIT      ::= (extern)                                    declared here, defined elsewhere: no storage
             | (init ITEM*)                                 static initializer (see ITEM)
@@ -222,7 +284,7 @@ ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte o
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
-function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)] [(constructor [PRIO])]
+function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)|(weak attr)] [(constructor [PRIO])]
               [(destructor [PRIO])] SLOT* STMT*)       PRIO = 1..65535; (constructor)/(destructor): see "Start-up and exit"
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
@@ -233,6 +295,7 @@ STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VAL
             | (if OPERAND (then STMT*) [(else STMT*)]) | (loop (body STMT*) (step STMT*))
             | (switch OPERAND (body STMT*)) | (case CONST) | (default) | (break)
             | (goto "L") | (label "L") | (return [OPERAND]) | (unreachable) | (block STMT*)
+            | (barrier)                                                    compiler barrier (asm volatile("" ::: "memory"))
 RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX SIZE) | (pdiff A B SIZE)
             | (bfload[.v] TYPE UNIT ADDR BOFF WIDTH)                         bit-field load (5a)
             | (wadd|wsub|wmul T A B) | (wneg T A) | (cadd|csub|cmul|cdiv|crem|cshl|cshr T A B) | (cneg T A)
@@ -258,7 +321,21 @@ and `a_variable.comdat_group != NULL` for variables (inline variables, function-
 vtables, typeinfo). These are the objects `c_gen_be.c` writes with `__attribute__((__weak__))` and that
 `scripts/weak-symbols.rb` finds in the production path. Every translation unit that needs one defines it; the
 definitions are identical and the link must keep one. A backend emits a weak symbol (ELF `.weak`, or COMDAT/linkonce).
-Declarations (`(extern)`) carry no linkage marker. A `(static)` object is never `(weak)`.
+A `(static)` object is never `(weak)`. A COMDAT definition that nothing in the module reaches may be dropped (another
+unit has its own copy).
+
+`__attribute__((weak))` (`is_weak` on a routine or variable) is carried in three forms. **A definition** is
+`(weak attr)` (`(global ...)` and `(function ...)`): a weak symbol that is also an interface symbol, so, unlike a COMDAT
+`(weak)`, it is kept when nothing in the module reaches it and a strong definition in another unit overrides it. **A
+variable declaration** is `(global "x" T N A (weak) (extern))`: the object is defined elsewhere or not at all, its
+address is a weak reference. **A function declaration** has no node of its own in the IR (an undefined function is
+only an `&"f"` operand), so a weak one gets a top-level `(declare "f" (weak))`, printed once, when the module first
+refers to the function (a call, an address, an address in an initializer). A weak routine that the module defines
+needs no `declare`. The QBE emitter loads the address of a weak reference from the GOT (`extern $f`, `copy extern $x`),
+so an absent definition reads as null in a PIE too, and marks the symbol `.weak`. This replaced the emitter's earlier
+rule that every undefined function named `_ZTH*` is a weak reference: the `_ZTH<name>` thread-local initialization
+function is a weak routine in EDG's IL and the lowering prints its `declare` like any other. `weakref` aliases
+(`__attribute__((weakref("target")))`) name another symbol and are not handled.
 
 Thread storage. `(thread)` follows the linkage marker (so `(global "x" int 4 4 (static) (thread) INIT)` is an internal
 `static __thread int x`) and is printed for every variable with `var_has_thread_storage_duration`: `__thread`,
@@ -390,8 +467,10 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    `(unsupported init dynamic)`, not lowered.
 3. **Constructor initializers** (`dik_constructor`) and inline asm print unsupported markers. None of these appears in
    `tests/cases` after lowering. (Bit-fields, VLAs and GNU statement expressions were in this list; they are lowered
-   since stage 3 round 3, sections 5a-5c. Still open there: a VLA has no scope-exit free (5b); no `bounds` check on VLA subscripts; a statement expression that
-   returns a class by copy constructor; bit-fields wider than 64 bits.)
+   since stage 3 round 3, sections 5a-5c; the later rounds closed the scope-exit free of a VLA, the class-result
+   statement expression, union aggregate constants and the empty-asm barrier. Still open: no `bounds` check on VLA
+   subscripts; bit-fields wider than 64 bits (128-bit declared type, not implementable); inline asm with a template,
+   operands or register clobbers.)
 
    the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization after
    lowering is explicit statements of the `__sti__` routine (see "Start-up and exit"), so a global never reaches
@@ -400,8 +479,8 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
 3. **Constructor initializers** (`dik_constructor`) in a `stmk_init` print as an ordinary constructor call
    `(eval (call void &"ctor" OBJ ARG*))`; the lowering expands every constructor into such a call before the
    back end sees it, so this path is never taken by the probes (array copies, implied copy sources and value
-   initialization of the unlowered form stay unsupported). VLAs, GNU statement expressions, inline asm and bit-field
-   access print unsupported markers. None of these appears in `tests/cases` after lowering.
+   initialization of the unlowered form stay unsupported). Inline asm beyond the barrier subset (5c) prints an
+   unsupported marker. It does not appear in `tests/cases` after lowering.
 4. **`continue`** is `(continue)` since stage 3 round 2. The lowered IL turns it into `(goto "L")` to an unnamed
    `(label "L")` at the end of the loop body; the lowering recognises that pair for the innermost loop, prints
    `(continue)` and drops the label. A goto to any other label stays a goto.
@@ -439,9 +518,10 @@ The 45 kinds seen are all lowered. "Referenced" is a count of the `case` labels 
 behaviour. The kinds in the table's third column that are not in the fourth are implemented but not exercised by these
 programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: it still contains a
 variable-length array, a GNU statement expression and bit-field reads and writes (lowered now, so they appear in its
-golden as `vlaalloc`, plain statements and `bfload`/`bfstore`) and inline asm, which is the one remaining
-`(unsupported ...)` marker; the runner checks the count (1). The bit-field, VLA and statement-expression probes
-`tests/pathb-qbe/cases/{bitfield,bitfield2,vla,stmtexpr}.cpp` have goldens of their own.
+golden as `__vla_alloc` calls, plain statements and `bfload`/`bfstore`) and an inline asm with an input operand, which
+is the one remaining `(unsupported stmt asm-operands)` marker; the runner checks the count (1). The probes
+`tests/pathb-qbe/cases/{bitfield,bitfield2,bitfield_union,vla,vla_scope,stmtexpr,stmtexpr_class,agg_union,asm_barrier,weak_decl}.cpp`
+have goldens of their own.
 
 Reproduce (from the worktree; the harness is built out of tree):
 

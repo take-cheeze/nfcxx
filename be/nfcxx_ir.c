@@ -315,12 +315,17 @@ static void ir_reserve_name(const char *name)
   ir_mod.n++;
 }
 
+static void ir_weak_decl(a_routine_ptr r);
+
 static const char *ir_rout_name(a_routine_ptr r)
 {
   const char *n = r->source_corresp.name;
   const char *op;
   char *s;
-  if (n != NULL && n[0] != '\0') return n;
+  if (n != NULL && n[0] != '\0') {
+    if (r->is_weak) ir_weak_decl(r);
+    return n;
+  }
   op = ir_tab_get(&ir_mod, r, "__unnamed_fn", "&");
   s = ir_dup(op + 2);
   s[strlen(s) - 1] = '\0';
@@ -451,6 +456,34 @@ static ir_buf ir_out_globals;
 static ir_buf ir_out_data;
 static ir_buf ir_out_funcs;
 static ir_buf ir_slot_buf;
+
+/* A routine declared __attribute__((weak)) and not defined in this translation unit is a weak reference: the symbol
+   may be absent at link time and then reads as a null address. It is carried through as a top-level
+   (declare "NAME" (weak)), printed once, when the module first refers to the routine. A defined weak routine
+   instead has the marker (weak attr) on its (function ...). A weakref alias is not handled (it names another
+   symbol). */
+#define IR_WEAK_DECL_MAX 1024
+static a_routine_ptr ir_weak_decls[IR_WEAK_DECL_MAX];
+static int ir_weak_decl_n;
+static void nf_put_quoted_name(const char *name);
+static void ir_weak_decl(a_routine_ptr r)
+{
+  int i;
+  ir_buf g;
+  if (r->is_tls_init_alias && r->storage_class != sc_extern) return; /* defined here by ir_tls_init_alias */
+  if (r->function_def_number != NULL_function_def_number || r->is_weakref || ir_weak_decl_n >= IR_WEAK_DECL_MAX) return;
+  for (i = 0; i < ir_weak_decl_n; i++)
+    if (ir_weak_decls[i] == r) return;
+  ir_weak_decls[ir_weak_decl_n++] = r;
+  ir_buf_open(&g);
+  ir_buf_begin(&g);
+  fputs("(declare ", nf_out);
+  nf_put_quoted_name(r->source_corresp.name);
+  fputs(" (weak))\n", nf_out);
+  ir_buf_end(&g);
+  ir_buf_write(&g, ir_out_globals.f);
+  ir_buf_close(&g);
+}
 
 static void ir_line(int d, const char *text)
 {
@@ -606,7 +639,9 @@ static ir_val ir_vla_addr(a_variable_ptr var, a_type_ptr t, int vol);
 static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
 {
   const char *op;
-  if (var->is_vla) return ir_vla_addr(var, t, vol);
+#if !LOWER_VARIABLE_LENGTH_ARRAYS
+  if (var->is_vla) return ir_vla_addr(var, t, vol); /* else the lowered VLA variable is an ordinary pointer */
+#endif
   op = ir_tab_find(&ir_slots, var);
   if (op != NULL) return ir_mk_addr((char *)op, t, vol);
   if (var_has_static_or_thread_storage_duration(var)) {
@@ -665,6 +700,11 @@ static char *ir_size_operand(a_type_ptr t)
   if (!ir_type_is_variable(t)) return ir_fmt("(const unsigned_long %lu)", ir_size_of(t));
   esz = ir_size_operand(s->variant.array.element_type);
   if (s->variant.array.is_vla) {
+#if LOWER_VARIABLE_LENGTH_ARRAYS
+    /* The front end lowers VLA types (setup-pathb.sh sets the macro), so none reaches the IR. */
+    ir_note(2, enk_sizeof, 0);
+    return ir_let("unsigned_long", "(unsupported vla-dimension)");
+#else
     a_vla_dimension_ptr d = ir_find_vla_dim(s);
     ir_val dv;
     if (d == NULL || d->dimension_variable == NULL) {
@@ -673,6 +713,7 @@ static char *ir_size_operand(a_type_ptr t)
     }
     dv = ir_load(ir_var_addr(d->dimension_variable, d->dimension_variable->type, 0));
     cnt = ir_let("unsigned_long", ir_fmt("(iconv unsigned_long %s)", dv.s));
+#endif
   } else if (!s->variant.array.is_variable_size_array) {
     cnt = ir_fmt("(const unsigned_long %lu)", (unsigned long)s->variant.array.variant.number_of_elements);
   } else {
@@ -790,7 +831,9 @@ static ir_val ir_bf_lval(const char *base, a_field_ptr f, a_type_ptr parent, a_t
   ir_val a;
   char *bty = ir_bf_type(t, f->bit_field_is_signed != 0);
   if (bty == NULL || !ir_bf_layout(f, ir_size_of(parent), &uoff, &unit, &boff)) {
-    ir_val v = ir_gap(t, "bit-field-layout", 0, (int)eok_dot_field);
+    /* EDG truncates a width larger than the declared type (with a warning), so only a 128-bit declared type
+       (unsigned __int128 f : 100) can be wider than 64 bits; the emitter has no 128-bit type either way. */
+    ir_val v = ir_gap(t, f->bit_size > 64 ? "bit-field-wider-than-64-bits" : "bit-field-layout", 0, (int)eok_dot_field);
     return ir_mk_addr(v.s, t, vol);
   }
   a = ir_subobject(base, uoff, t, vol);
@@ -824,7 +867,7 @@ static ir_val ir_assign_result(an_expr_node_ptr e, ir_val lhs, ir_val nv)
    it is an expression statement (otherwise the expression is void). */
 static ir_val ir_stmt_expr(an_expr_node_ptr e)
 {
-  a_statement_ptr blk = e->variant.statement, s;
+  a_statement_ptr blk = e->variant.statement, s, res = NULL;
   int d = ir_depth;
   ir_val v = ir_mk_void();
   ir_note(2, enk_statement, 1);
@@ -834,9 +877,17 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
     ir_depth = d;
     return v;
   }
+  /* The statement that produces the value: normally the last one. A class result that IL lowering copies out of the
+     block with a copy constructor is a nested statement expression in an ordinary expression statement, followed by
+     the destructor calls of the block's locals, so the value statement is then the last class-typed one. */
   for (s = blk->variant.block.statements; s != NULL; s = s->next) {
-    if (s->next == NULL && (s->kind == stmk_stmt_expr_result || s->kind == stmk_expr) && s->expr != NULL &&
-        !ir_is_void(s->expr->type)) {
+    if ((s->kind == stmk_stmt_expr_result || s->kind == stmk_expr) && s->expr != NULL && !ir_is_void(s->expr->type) &&
+        (s->next == NULL || (ir_is_aggregate(e->type) && s->expr->kind == enk_statement))) {
+      res = s;
+    }
+  }
+  for (s = blk->variant.block.statements; s != NULL; s = s->next) {
+    if (s == res) {
       ir_note(1, (int)s->kind, 1);
       ir_depth = d;
       v = ir_rval(s->expr);
@@ -1265,6 +1316,17 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     case eok_padd_assign:
     case eok_psubtract_assign:
       return ir_assign(e, 0);
+    case eok_bassign: {
+      /* Block assignment (IL lowering: a default member initializer of an array member copies a static array). It is a
+         memcpy of the source operand's size; the result is void. */
+      ir_val dst, src;
+      if (a0 == NULL || a1 == NULL) break;
+      ir_note(0, k, 1);
+      dst = ir_lval(a0);
+      src = ir_rval(a1);
+      ir_emit(ir_fmt("(copy %lu %s %s)", ir_size_of(a1->type), dst.s, src.s));
+      return ir_mk_void();
+    }
     case eok_pre_incr:
     case eok_pre_decr:
     case eok_post_incr:
@@ -1723,14 +1785,58 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
   return n;
 }
 
-/* Zero a scalar object; aggregates are not zeroed yet. */
+/* Store zero bytes over [off, off + n) of the object at base, in the widest naturally aligned integer stores.
+   Returns 0 (and emits nothing) when that would take more than 128 stores. */
+static int ir_zero_bytes(const char *base, unsigned long off, unsigned long n)
+{
+  unsigned long cnt = 0, o = off, left = n;
+  while (left > 0) {
+    unsigned long w = (o % 8 == 0 && left >= 8) ? 8 : (o % 4 == 0 && left >= 4) ? 4 : (o % 2 == 0 && left >= 2) ? 2 : 1;
+    o += w;
+    left -= w;
+    if (++cnt > 128) return 0;
+  }
+  o = off;
+  left = n;
+  while (left > 0) {
+    unsigned long w = (o % 8 == 0 && left >= 8) ? 8 : (o % 4 == 0 && left >= 4) ? 4 : (o % 2 == 0 && left >= 2) ? 2 : 1;
+    a_type_ptr it = integer_type(w == 8 ? ik_unsigned_long : w == 4 ? ik_unsigned_int : w == 2 ? ik_unsigned_short : ik_unsigned_char);
+    ir_val sub = ir_subobject(base, o, it, 0);
+    ir_store(it, sub.s, ir_zero(it), 0);
+    o += w;
+    left -= w;
+  }
+  return 1;
+}
+
+/* Zero an object: a scalar store, or the zero stores over an aggregate's bytes (a pointer's zero is all-bits-zero
+   on every target Path B emits). */
 static void ir_zero_object(ir_val dst, a_type_ptr t)
 {
   if (ir_is_aggregate(t)) {
-    ir_emit("(unsupported init zero-aggregate)");
+    if (!ir_zero_bytes(dst.s, 0, ir_size_of(t))) ir_emit("(unsupported init zero-aggregate)");
     return;
   }
   ir_store(t, dst.s, ir_zero(t), dst.vol);
+}
+
+/* The member a union's aggregate constant initializes: a ck_designator in front of the value names it, else it is
+   the first non-empty initializable field (EDG's own rule in dump_initializer_part). *val is the value constant,
+   NULL for an empty initializer. Returns NULL when there is no field to initialize. */
+static a_field_ptr ir_union_member(a_type_ptr u, a_constant_ptr c, a_constant_ptr *val)
+{
+  a_constant_ptr ce = c->variant.aggregate.first_constant;
+  a_field_ptr f = NULL;
+  *val = NULL;
+  if (ce != NULL && ce->kind == ck_designator) {
+    f = ce->variant.designator.variant.field;
+    ce = ce->next;
+  } else {
+    f = next_applicable_field(skip_typerefs(u)->variant.class_struct_union.field_list,
+                              (a_next_field_options_set)(NF_INITIALIZABLE | NF_SKIP_OPTIMIZED_EMPTY_CLASS | NF_SKIP_PROPERTY_OR_EVENT));
+  }
+  *val = ce;
+  return f;
 }
 
 /* Store constant c (of type t) into the object at address dst. Arrays are element-wise, classes are
@@ -1792,8 +1898,37 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
     ir_note(4, dik_constant, 1);
     return;
   }
+  if (c->kind == ck_aggregate && s->kind == tk_union) {
+    /* One member is initialized (see ir_union_member); the rest of the union's bytes are zero. */
+    a_constant_ptr val;
+    a_field_ptr f = ir_union_member(t, c, &val);
+    unsigned long usz = ir_size_of(t);
+    if (f == NULL || val == NULL || f->is_bit_field || ir_size_of(f->type) != usz) {
+      if (!ir_zero_bytes(dst.s, 0, usz)) {
+        ir_note(4, dik_constant, 0);
+        ir_emit("(unsupported init zero-aggregate)");
+        return;
+      }
+    }
+    if (f != NULL && val != NULL) {
+      if (f->is_bit_field) {
+        ir_val v = ir_constant(val, f->type);
+        ir_store_lv(ir_bf_lval(dst.s, f, t, f->type, 0), v.s);
+      } else {
+        ir_val sub = ir_subobject(dst.s, (unsigned long)f->offset, f->type, 0);
+        if (val->kind == ck_aggregate || ir_is_aggregate(f->type)) {
+          ir_init_constant(sub, val, f->type);
+        } else {
+          ir_val v = ir_constant(val, f->type);
+          ir_store(f->type, sub.s, v.s, 0);
+        }
+      }
+    }
+    ir_note(4, dik_constant, 1);
+    return;
+  }
   if (c->kind == ck_aggregate) {
-    /* A union or any other aggregate kind with an initializer list: not lowered yet. */
+    /* Any other aggregate kind with an initializer list: not lowered yet. */
     ir_note(4, dik_constant, 0);
     ir_emit("(unsupported init aggregate-constant)");
     return;
@@ -1939,6 +2074,31 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
     }
     return;
   }
+  if (c->kind == ck_aggregate && s->kind == tk_union) {
+    /* The initialized member, then zero for the rest of the union (see ir_union_member). */
+    a_constant_ptr val;
+    a_field_ptr f = ir_union_member(t, c, &val);
+    unsigned long usz = ir_size_of(t), done = 0;
+    if (f != NULL && val != NULL) {
+      if (f->is_bit_field) {
+        unsigned long uoff = 0;
+        unsigned unit = 0, boff = 0;
+        if (val->kind != ck_integer || !ir_bf_layout(f, usz, &uoff, &unit, &boff)) {
+          ir_gi_unsupported("bitfield");
+          return;
+        }
+        if (uoff > 0) fprintf(nf_out, "\n    (zero %lu %lu)", off, uoff);
+        fprintf(nf_out, "\n    (bitfield %lu %u %u %u %s %s)", off + uoff, unit, boff, (unsigned)f->bit_size,
+                ir_valtext(f->type), ir_const_value(val, f->type).s);
+        done = uoff + unit;
+      } else {
+        ir_gi_items(off + (unsigned long)f->offset, val, f->type);
+        done = (unsigned long)f->offset + ir_size_of(f->type);
+      }
+    }
+    if (done < usz) fprintf(nf_out, "\n    (zero %lu %lu)", off + done, usz - done);
+    return;
+  }
   if (c->kind == ck_aggregate || ir_is_aggregate(t)) {
     ir_gi_unsupported("aggregate-constant");
     return;
@@ -1988,6 +2148,7 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   fprintf(nf_out, " %lu %lu", ir_size_of(var->type), ir_align_of(var->type));
   if (var->storage_class == sc_static) fputs(" (static)", nf_out);
   else if (var->comdat_group != NULL) fputs(" (weak)", nf_out); /* EDG: COMDAT, which c_gen_be.c writes as __weak__ */
+  else if (var->is_weak) fputs(var->storage_class == sc_extern ? " (weak)" : " (weak attr)", nf_out); /* __attribute__((weak)): declaration / definition */
   if (ir_var_is_thread(var)) fputs(" (thread)", nf_out); /* __thread / thread_local: one copy per thread */
   ir_global_init(var);
   fputs(")\n", nf_out);
@@ -2200,17 +2361,59 @@ static void ir_stmt(a_statement_ptr s, int d)
       /* The dimension of a VLA type is evaluated here, once, into its dimension variable. */
       a_vla_dimension_ptr dim = s->variant.vla_dimension;
       ir_note(1, stmk_set_vla_size, 1);
+#if !LOWER_VARIABLE_LENGTH_ARRAYS
       if (dim != NULL && dim->dimension_variable != NULL && dim->dimension_expr != NULL) (void)ir_rval(dim->dimension_expr);
+#else
+      (void)dim;
+#endif
       return;
     }
     case stmk_vla_decl:
       /* A variable-length array gets its storage here; a typedef of a variably modified type has none. */
+#if !LOWER_VARIABLE_LENGTH_ARRAYS
       if (!s->variant.vla.is_typedef_decl && s->variant.vla.variant.variable->is_vla) {
         ir_vla_alloc(s->variant.vla.variant.variable);
-      } else {
+      } else
+#endif
+      {
         ir_note(1, stmk_vla_decl, 1);
       }
       return;
+    case stmk_asm: {
+      /* Inline assembly. QBE has no inline asm, so the only subset that can be lowered is the one that does nothing
+         but constrain the compiler: an empty template with no operands and no labels, whose clobbers are "memory"
+         and/or "cc" (a basic asm("") counts as having the memory clobber, as in gcc). With "memory" it is a
+         compiler barrier, (barrier); without it, it emits nothing at all.
+         Everything else (a template, operands, a register clobber, asm goto) stays an unsupported marker with the
+         reason, and the emitter refuses the module with that text. */
+      an_asm_entry_ptr ae = s->variant.asm_entry;
+      const char *why = NULL;
+      int mem = 0;
+      a_named_register_list_ptr cl;
+      const char *tx;
+      if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string) why = "asm-template";
+      else {
+        a_constant_ptr sc = ae->asm_string;
+        unsigned long i;
+        tx = sc->variant.string.value;
+        for (i = 0; i < (unsigned long)sc->variant.string.length; i++) {
+          if (tx[i] != '\0' && tx[i] != ' ' && tx[i] != '\t' && tx[i] != '\n') why = "asm-template";
+        }
+      }
+      if (why == NULL && !ae->gnu_asm_form) mem = 1; /* basic asm(""): gcc treats it as clobbering memory */
+      if (why == NULL && ae->is_asm_goto) why = "asm-goto";
+      if (why == NULL && ae->operands != NULL) why = "asm-operands";
+      if (why == NULL) {
+        for (cl = ae->clobbers; cl != NULL; cl = cl->next) {
+          if (cl->reg == anr_memory) mem = 1;
+          else if (cl->reg != anr_flags) why = "asm-clobbers";
+        }
+      }
+      ir_note(1, stmk_asm, why == NULL);
+      if (why != NULL) ir_line(d, ir_fmt("(unsupported stmt %s)", why));
+      else if (mem) ir_line(d, "(barrier)");
+      return;
+    }
     case stmk_init: {
       a_dynamic_init_ptr init = s->variant.dynamic_init;
       ir_note(1, stmk_init, 1);
@@ -2439,7 +2642,10 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_write(&params, nf_out);
   fputs(")", nf_out);
   if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
-  else if (rout->use_comdat || rout->is_weak) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template) or the weak attribute (the _ZTW wrapper of a thread_local), written as __weak__ by c_gen_be.c */
+  else if (rout->use_comdat) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
+  else if (rout->is_weak && rout->source_corresp.name != NULL && strncmp(rout->source_corresp.name, "_ZT", 3) == 0)
+    fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
+  else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
   ir_startup_markers(rout);
   ir_buf_write(&ir_slot_buf, nf_out);
   ir_buf_write(&body, nf_out);

@@ -18,6 +18,8 @@ probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp t
 probes="$probes tests/pathb-qbe/cases/dyn_global.cpp tests/pathb-qbe/cases/dyn_local_static.cpp tests/pathb-qbe/cases/dyn_ctor_attr.cpp tests/pathb-qbe/cases/dyn_ctor_members.cpp tests/pathb-qbe/cases/dyn_new_delete.cpp tests/pathb-qbe/cases/dyn_global_forms.cpp tests/pathb-qbe/cases/dyn_init_forms.cpp"
 probes="$probes tests/pathb-qbe/cases/tls_dyn.cpp tests/pathb-qbe/cases/tls_dyn_forms.cpp"   # thread_local with dynamic initialization (_ZTW wrappers, _ZTH, __tls_init)
 probes="$probes tests/pathb-qbe/cases/bitfield.cpp tests/pathb-qbe/cases/bitfield2.cpp tests/pathb-qbe/cases/vla.cpp tests/pathb-qbe/cases/stmtexpr.cpp"   # bit-fields, VLAs, statement expressions
+# Union aggregate constants, bit-fields in unions, class statement-expression results, VLA scope exit, asm barriers, weak declarations.
+probes="$probes tests/pathb-qbe/cases/agg_union.cpp tests/pathb-qbe/cases/bitfield_union.cpp tests/pathb-qbe/cases/stmtexpr_class.cpp tests/pathb-qbe/cases/vla_scope.cpp tests/pathb-qbe/cases/asm_barrier.cpp tests/pathb-qbe/cases/weak_decl.cpp"
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)

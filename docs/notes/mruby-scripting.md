@@ -167,7 +167,12 @@ Behaviour added to `pathb-qbe-emit.rb` is added to the oracle `tests/mruby/oracl
 change, so the byte-for-byte comparison stays strict: the `(constructor [PRIO])` / `(destructor [PRIO])` function
 markers (`.init_array` / `.fini_array` tables, reachability roots) and the pointer cells for the address of a function
 defined elsewhere (`pathb_got.NAME`). Edge inputs: `tests/mruby/pathb-edge/startup.ir`, `fnaddr.ir`,
-`e_startup_*.ir`. The address of a thread-local object is always `copy extern thread $x` (initial-exec, valid in a
+`e_startup_*.ir`. Later additions, in both files in the same change: the `(barrier)` statement (an empty module-local
+function `$__pathb_barrier`; `barrier.ir`, `e_barrier_form.ir`), the top-level `(declare "NAME" (weak))`, the weak
+undefined object `(global ... (weak) (extern))` (address through the GOT, `.weak`) and `(weak attr)` definitions that
+pruning keeps (`weak_decl.ir`, `e_declare_form.ir`, `weakref_tls_init.ir`; the old `_ZTH` name rule is gone), and a
+refusal of an `(unsupported ...)` statement that prints the marker (`r_unsupported_asm.ir`).
+The address of a thread-local object is always `copy extern thread $x` (initial-exec, valid in a
 shared library) also for a definition in the module; the oracle changed with it (covered by `thread_data.ir`,
 `r_thread_addr.ir` and the `tests/pathb-ir/tls*.ir` goldens).
 

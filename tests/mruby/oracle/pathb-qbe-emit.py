@@ -294,7 +294,8 @@ class Module:
         self.need_sink = False  # a function that returns twice stores slot addresses into SINK
         self.thread = {}       # IR name -> "def" or "ext": thread-local globals ((thread) marker; ext = declaration only)
         self.vhelpers = {}     # volatile access helpers used so far: QBE function name -> its text lines
-        self.weakrefs = {}     # undefined functions that are weak references (TLS init functions, see weak_refs)
+        self.weakrefs = {}     # undefined functions that are weak references ((declare NAME (weak)), see weak_refs)
+        self.weakdata = {}     # extern globals declared (weak): their address is loaded from the GOT, a missing one is null
         self.startup = []      # (".init_array" or ".fini_array", priority (0: none), QBE symbol)
         self.funcs = set()     # IR names of the functions defined in this module
         self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
@@ -481,6 +482,11 @@ class Fn:
                     t = self.tmp()
                     self.emit("%s =l copy extern thread $%s" % (t, qsym(name)))
                     return Val(t, "l", ("ptr", self.mod.globals.get(name)))
+                if name in self.mod.weakdata:
+                    # A weak undefined object: the address comes from the GOT, so an absent definition reads as null in a PIE too.
+                    t = self.tmp()
+                    self.emit("%s =l copy extern $%s" % (t, qsym(name)))
+                    return Val(t, "l", ("ptr", self.mod.globals.get(name)))
                 return Val("$" + qsym(name), "l", ("ptr", self.mod.globals.get(name)))
             if sig == "&":
                 # A weak reference goes through the GOT (`extern`), so that an absent definition reads as null in a PIE too.
@@ -556,6 +562,8 @@ class Fn:
             raise BadIR("statement expected, got %s" % form_text(x))
         h = head_of(x)
         fn = STMT.get(h)
+        if h == "unsupported":
+            raise Refused(form_text(x))
         if fn is None:
             raise Refused("statement (%s ...)" % h)
         fn(self, x)
@@ -1494,6 +1502,13 @@ def s_unreachable(fn, x):
     fn.jmp(fn.abort_label())
 
 
+def s_barrier(fn, x):
+    if len(x) != 1:
+        raise BadIR("barrier form")
+    fn.mod.vhelpers.setdefault("__pathb_barrier", ["function $__pathb_barrier() {", "@start", "\tret", "}", ""])
+    fn.emit("call $__pathb_barrier()")
+
+
 STMT = {
     "block": s_block, "let": s_let, "set": s_set,
     "store": s_store, "store.v": s_store,
@@ -1502,6 +1517,7 @@ STMT = {
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
+    "barrier": s_barrier,
 }
 
 
@@ -1659,6 +1675,8 @@ def emit_global(mod, g):
     init = rest[0]
     h = head_of(init)
     if h == "extern":
+        if weak:
+            mod.out.append(WEAK_MARK + qsym(name))  # a weak undefined object: .weak, see append_weak
         return
     if h == "unsupported":
         raise Refused("global %s: %s" % (name, form_text(init)))
@@ -1843,10 +1861,11 @@ def _is_startup(f):
 
 
 def _is_linked(f):
-    """A function or global that other translation units can see: not (static), not (weak), and a definition."""
+    """A function or global that other translation units can see: not (static), not (weak), and a definition.
+    (weak attr) is a definition the source declared __attribute__((weak)): an interface symbol, unlike a COMDAT (weak)."""
     h = head_of(f)
     for part in f[2:]:
-        if head_of(part) in ("static", "weak", "extern"):
+        if head_of(part) in ("static", "extern") or (head_of(part) == "weak" and len(part) == 1):
             return False
         if h == "global" and head_of(part) == "extern":
             return False
@@ -1881,16 +1900,22 @@ def prune(forms):
             or str(f[1]) in live or (head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]))]
 
 
-# The Itanium C++ ABI declares the thread_local initialization function `_ZTH<name>` of an `extern thread_local`
-# variable as a weak reference: the wrapper `_ZTW<name>` calls it only when it exists (`if (&_ZTH<name>) _ZTH<name>()`).
-# The IR has no weak declarations, so an undefined function with this prefix that the module refers to is taken as one.
+# Weak references. (declare "NAME" (weak)) is a function declared __attribute__((weak)) that the module refers to
+# and does not define: the symbol may be absent at link time. The address of such a function goes through the GOT and
+# the symbol is marked .weak (WEAK_MARK). The thread_local initialization function `_ZTH<name>` of an
+# `extern thread_local` variable (Itanium C++ ABI: the wrapper `_ZTW<name>` calls it only when it exists) is such a
+# declaration: EDG marks it weak and the lowering prints it. There is no special case for the name any more.
 def weak_refs(forms):
     defined = set(str(f[1]) for f in forms[1:] if head_of(f) == "function")
-    refs = set()
+    out = {}
     for f in forms[1:]:
-        if head_of(f) == "function":
-            _symbols(f, refs)
-    return {n: True for n in sorted(refs) if n.startswith("_ZTH") and n not in defined}
+        if head_of(f) != "declare":
+            continue
+        if len(f) != 3 or head_of(f[2]) != "weak" or len(f[2]) != 1:
+            raise BadIR("declare form: %s" % form_text(f))
+        if str(f[1]) not in defined:
+            out[str(f[1])] = True
+    return out
 
 
 def emit_module(text, do_prune=True):
@@ -1906,6 +1931,9 @@ def emit_module(text, do_prune=True):
     for f in all_forms[1:]:
         if head_of(f) == "global":
             mod.globals[str(f[1])] = parse_type(f[2])
+            if (any(head_of(p) == "weak" for p in f[5:]) and any(head_of(p) == "extern" for p in f[5:])
+                    and not any(head_of(p) == "thread" for p in f[5:])):
+                mod.weakdata[str(f[1])] = True
             if any(head_of(p) == "thread" for p in f[5:]):
                 mod.thread[str(f[1])] = "ext" if any(head_of(p) == "extern" for p in f[5:]) else "def"
         if head_of(f) == "function":
@@ -1920,7 +1948,7 @@ def emit_module(text, do_prune=True):
     for f in forms[1:]:
         if head_of(f) == "function":
             emit_function(mod, f)
-        elif head_of(f) not in ("global", "data"):
+        elif head_of(f) not in ("global", "data", "declare"):
             raise Refused("top-level form (%s ...)" % head_of(f))
     emit_startup_tables(mod)
     for name, cell in mod.got.items():
