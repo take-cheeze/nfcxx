@@ -51,9 +51,10 @@ exit code 2. Hosted path (no `--freestanding`).
   - Regression cases: `tests/cases/qbe_gnu_forms.cpp` (gaps 1, 2, 4) and `tests/cases/qbe_global_ctor.cpp`
     (gap 3). Both fail on the previous `qbe-cc` and pass on both backends.
   - **Not fixed, next blockers** (found after gaps 1 to 4; each is a separate change):
-    - *Inline asm* in doctest's `DOCTEST_BREAK_INTO_DEBUGGER`: `__asm__ volatile("int $3\n" : :)`, 20 uses.
-      cproc has no inline asm: the message is `inline assembly is not yet supported`. This is the current xfail.
-      A fix is a call to a weak `int3; ret` stub in the assembly tail. Not done.
+    - **Fixed:** *inline asm* in doctest's `DOCTEST_BREAK_INTO_DEBUGGER`: `__asm__ volatile("int $3\n" : :)`,
+      20 uses. `scripts/qbe-prep.py` matches exactly that statement and calls `__nfcxx_int3()`; the assembly
+      tail defines it as a weak `int3; ret` stub. Any other inline asm still fails with cproc's
+      `inline assembly is not yet supported`. Regression case: `tests/cases/qbe_int3_break.cpp`.
     - *Builtins* cproc does not know (its table is `3rd/cproc/scope.c`): `__builtin_memcpy`, `memmove`,
       `memset`, `memcmp`, `strlen` (libc names with the same prototypes), `__builtin_isnan`, `__builtin_clzl`,
       and `__builtin_mul_overflow(x, C, &x)` with `C` an unsigned long constant (20 uses, all this shape).

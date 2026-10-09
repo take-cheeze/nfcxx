@@ -4,6 +4,10 @@
 cproc (the QBE front end) rejects a few GNU forms that EDG emits. This script tokenizes the
 preprocessed C and rewrites only those forms; everything else passes through unchanged:
 
+  * `__asm__ volatile("int $3\n" : :);` (doctest's DOCTEST_BREAK_INTO_DEBUGGER, a statement with
+    no operands) becomes a call to `__nfcxx_int3()`. The assembly tail defines it as a weak
+    `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
+    is left in place, and cproc rejects it.
   * `__asm__(".align 2");` alignment hints (anywhere): dropped, as the old sed did. The hint
     only matters to EDG's own output, and it is not a semantic change.
   * Top-level `__asm__("...")` statements (not declarator labels) are removed from the C and
@@ -162,6 +166,29 @@ def decode_str(lit):
     return body.encode('latin-1', 'backslashreplace').decode('unicode_escape')
 
 
+INT3_TEXT = ('int $3\n', 'int $3')
+INT3_STUB = """\t.pushsection .text.__nfcxx_int3,"ax",@progbits
+\t.weak __nfcxx_int3
+\t.type __nfcxx_int3,@function
+__nfcxx_int3:
+\tint3
+\tret
+\t.popsection"""
+
+
+def int3_statement_end(toks, i):
+    """If toks[i] starts `__asm__ [volatile] ("int $3\\n" : :);`, return the index just past its `;`, else None."""
+    j = i + 1
+    if tok_at(toks, j) is not None and toks[j].kind == 'id' and toks[j].text in ('volatile', '__volatile__', '__volatile'):
+        j += 1
+    s = tok_at(toks, j + 1)
+    if not is_punct(tok_at(toks, j), '(') or s is None or s.kind != 'str' or decode_str(s.text) not in INT3_TEXT:
+        return None
+    if all(is_punct(tok_at(toks, j + 2 + k), p) for k, p in enumerate([':', ':', ')', ';'])):
+        return j + 6
+    return None
+
+
 def weak_function_names(toks):
     """Names of functions declared or defined with __attribute__((__weak__)), as weak-symbols.py finds them."""
     names = set()
@@ -194,6 +221,7 @@ def main():
     weak_marked = set()
     ctors = []  # constructor functions, in source order
     need_float = set()
+    need_int3 = False
 
     def mark_weak_alias(name):
         # _ZTHx is the thread_local init alias for _ZTWx; if the wrapper is COMDAT (weak), so is the alias.
@@ -222,6 +250,15 @@ def main():
                     ctors.append(name.text)
                 edits.append((t.start, toks[i + 5].end, ''))
                 i += 6
+                continue
+
+        # 1a. __asm__ volatile("int $3\n" : :); (doctest's debugger break): a call to the int3 stub.
+        if t.kind == 'id' and t.text in ('__asm__', '__asm') and stmt_ctx:
+            end = int3_statement_end(toks, i)
+            if end is not None:
+                edits.append((t.start, toks[end - 1].end, '__nfcxx_int3();'))
+                need_int3 = True
+                i = end
                 continue
 
         # 1. __asm__("...") statements.
@@ -315,6 +352,9 @@ def main():
         i += 1
 
     decls = [FLOAT_DECL[n] for n in ('struct __nfcxx_half16', 'struct __nfcxx_float128') if n in need_float]
+    if need_int3:
+        decls.append('void __nfcxx_int3(void);')
+        tail.append(INT3_STUB)
     if decls:
         edits.append((0, 0, '\n'.join(decls) + '\n'))
     if ctors:
