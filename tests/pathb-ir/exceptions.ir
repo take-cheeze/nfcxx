@@ -1,8 +1,8 @@
 (ir-module "exceptions.cpp")
 (global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
-(global "_ZTS1E" (const (array 3 (const char))) 3 1 (init
+(global "_ZTS1E" (const (array 3 (const char))) 3 1 (weak) (init
     (bytes 0 3 @"const")))
-(global "_ZTI1E" (const (struct "__class_type_info")) 16 8 (init
+(global "_ZTI1E" (const (struct "__class_type_info")) 16 8 (weak) (init
     (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv117__class_type_infoE" 16)
     (addr 8 (ptr (const char)) @"_ZTS1E" 0)))
 (global "__curr_eh_stack_entry" (ptr (struct "__C7")) 8 8 (extern))

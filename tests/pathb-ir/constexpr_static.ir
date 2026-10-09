@@ -3,6 +3,7 @@
 (function "_Z4facti"
   (ret int)
   (params (param %0 "n" int))
+  (weak)
   (slot "n" int 4 4)
   (store int $"n" %0)
   (let %1 int (load int $"n"))

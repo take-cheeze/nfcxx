@@ -133,7 +133,8 @@ S-expressions, one statement per line, indented by nesting. Identifiers are doub
 
 ```
 module    ::= (ir-module "FILE") global* data* function*
-global    ::= (global "NAME" TYPE BYTES ALIGN [(static)] INIT)  static storage object; (static) = internal linkage
+global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT)  static storage object; (static) = internal linkage,
+                                                                    (weak) = COMDAT/weak definition
 INIT      ::= (extern)                                    declared here, defined elsewhere: no storage
             | (init ITEM*)                                 static initializer (see ITEM)
             | (unsupported init KIND)                      not lowered (dynamic initialization)
@@ -142,7 +143,7 @@ ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte o
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
-function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)] SLOT* STMT*)
+function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)] SLOT* STMT*)
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
@@ -155,11 +156,25 @@ RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX
             | (fadd|fsub|fmul|fdiv T A B) | (fneg T A) | (and|or|xor T A B) | (not T A)
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
             | (iconv|bitcast|i2p|p2i|cf2i|i2f|u2f|fconv TYPE A)               conversions
-            | (call TYPE CALLEE ARG*) | (eval (call void CALLEE ARG*))
+            | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
             | (array N TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
 ```
+
+`(variadic N)` appears in a call whose callee's function type ends in `...` (a direct call or one through a
+function pointer). `N` is the number of leading `ARG`s that match named parameters, the hidden `sret` pointer included;
+the remaining arguments are the variadic ones (already promoted by the front end). A backend must pass the variadic
+ones with the variadic calling convention (QBE: `...` after the N-th argument, so `%al` is set for the callee). A call
+without the marker is a call of a prototyped, non-variadic callee. A definition's own `...` is the `(ellipsis)` parameter.
+
+Linkage. Without a marker a definition is external (strong). `(static)` is internal. `(weak)` marks a definition that EDG
+puts in a COMDAT group: `a_routine.use_comdat` for functions (inline functions, template instances, implicit members)
+and `a_variable.comdat_group != NULL` for variables (inline variables, function-local statics of such functions,
+vtables, typeinfo). These are the objects `c_gen_be.c` writes with `__attribute__((__weak__))` and that
+`scripts/weak-symbols.py` finds in the production path. Every translation unit that needs one defines it; the
+definitions are identical and the link must keep one. A backend emits a weak symbol (ELF `.weak`, or COMDAT/linkonce).
+Declarations (`(extern)`) carry no marker. A `(static)` object is never `(weak)`.
 
 Unsupported nodes print as `(unsupported KIND NAME)` in place of the statement or of the register's right-hand side.
 The runner counts them.

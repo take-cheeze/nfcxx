@@ -1,11 +1,11 @@
 (ir-module "virtual_dispatch.cpp")
 (global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
-(global "_ZTS1V" (const (array 3 (const char))) 3 1 (init
+(global "_ZTS1V" (const (array 3 (const char))) 3 1 (weak) (init
     (bytes 0 3 @"const")))
-(global "_ZTI1V" (const (struct "__class_type_info")) 16 8 (init
+(global "_ZTI1V" (const (struct "__class_type_info")) 16 8 (weak) (init
     (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv117__class_type_infoE" 16)
     (addr 8 (ptr (const char)) @"_ZTS1V" 0)))
-(global "_ZTV1V" (const (array 5 (const long))) 40 8 (init
+(global "_ZTV1V" (const (array 5 (const long))) 40 8 (weak) (init
     (scalar 0 long (const long 0))
     (addr 8 long @"_ZTI1V" 0)
     (addr 16 long &"_ZNK1V1kEv" 0)
@@ -13,25 +13,25 @@
     (addr 32 long &"_ZN1VD0Ev" 0)))
 (global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
 (global "_ZTVN10__cxxabiv120__si_class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
-(global "_ZTS1W" (const (array 3 (const char))) 3 1 (init
+(global "_ZTS1W" (const (array 3 (const char))) 3 1 (weak) (init
     (bytes 0 3 @"const.1")))
-(global "_ZTI1W" (const (struct "__si_class_type_info")) 24 8 (init
+(global "_ZTI1W" (const (struct "__si_class_type_info")) 24 8 (weak) (init
     (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv120__si_class_type_infoE" 16)
     (addr 8 (ptr (const char)) @"_ZTS1W" 0)
     (addr 16 (ptr (const (struct "__class_type_info"))) @"_ZTI1V" 0)))
-(global "_ZTV1W" (const (array 5 (const long))) 40 8 (init
+(global "_ZTV1W" (const (array 5 (const long))) 40 8 (weak) (init
     (scalar 0 long (const long 0))
     (addr 8 long @"_ZTI1W" 0)
     (addr 16 long &"_ZNK1W1kEv" 0)
     (addr 24 long &"_ZN1WD1Ev" 0)
     (addr 32 long &"_ZN1WD0Ev" 0)))
-(global "_ZTS1X" (const (array 3 (const char))) 3 1 (init
+(global "_ZTS1X" (const (array 3 (const char))) 3 1 (weak) (init
     (bytes 0 3 @"const.2")))
-(global "_ZTI1X" (const (struct "__si_class_type_info")) 24 8 (init
+(global "_ZTI1X" (const (struct "__si_class_type_info")) 24 8 (weak) (init
     (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv120__si_class_type_infoE" 16)
     (addr 8 (ptr (const char)) @"_ZTS1X" 0)
     (addr 16 (ptr (const (struct "__class_type_info"))) @"_ZTI1W" 0)))
-(global "_ZTV1X" (const (array 5 (const long))) 40 8 (init
+(global "_ZTV1X" (const (array 5 (const long))) 40 8 (weak) (init
     (scalar 0 long (const long 0))
     (addr 8 long @"_ZTI1X" 0)
     (addr 16 long &"_ZNK1X1kEv" 0)
@@ -153,6 +153,7 @@
 (function "_ZNK1V1kEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "V"))))))
+  (weak)
   (slot "tmp" (const (ptr (const (struct "V")))) 8 8)
   (store (ptr (const (struct "V"))) $"tmp" %0)
   (return (const int 1)))
@@ -160,6 +161,7 @@
 (function "_ZN1VD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "V")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "V"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "V")) $"tmp" %0)
@@ -180,6 +182,7 @@
 (function "_ZN1VD0Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "V")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "V"))) 8 8)
   (store (ptr (struct "V")) $"tmp" %0)
   (let %1 (ptr (struct "V")) (load (ptr (struct "V")) $"tmp"))
@@ -192,6 +195,7 @@
 (function "_ZN1VD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "V")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "V"))) 8 8)
   (store (ptr (struct "V")) $"tmp" %0)
   (let %1 (ptr (struct "V")) (load (ptr (struct "V")) $"tmp"))
@@ -201,6 +205,7 @@
 (function "_ZN1VC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "V")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "V"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (store (ptr (struct "V")) $"tmp" %0)
@@ -221,6 +226,7 @@
 (function "_ZN1VC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "V")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "V"))) 8 8)
   (store (ptr (struct "V")) $"tmp" %0)
   (let %1 (ptr (struct "V")) (load (ptr (struct "V")) $"tmp"))
@@ -230,6 +236,7 @@
 (function "_ZNK1W1kEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "W"))))))
+  (weak)
   (slot "tmp" (const (ptr (const (struct "W")))) 8 8)
   (store (ptr (const (struct "W"))) $"tmp" %0)
   (return (const int 2)))
@@ -237,6 +244,7 @@
 (function "_ZN1WC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "W")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "W"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (struct "__C8") 240 8)
@@ -293,6 +301,7 @@
 (function "_ZN1WC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "W")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "W"))) 8 8)
   (store (ptr (struct "W")) $"tmp" %0)
   (let %1 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
@@ -302,6 +311,7 @@
 (function "_ZN1WD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "W")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "W"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (struct "__C8") 240 8)
@@ -360,6 +370,7 @@
 (function "_ZN1WD0Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "W")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "W"))) 8 8)
   (store (ptr (struct "W")) $"tmp" %0)
   (let %1 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
@@ -372,6 +383,7 @@
 (function "_ZN1WD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "W")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "W"))) 8 8)
   (store (ptr (struct "W")) $"tmp" %0)
   (let %1 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
@@ -381,6 +393,7 @@
 (function "_ZNK1X1kEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "X"))))))
+  (weak)
   (slot "tmp" (const (ptr (const (struct "X")))) 8 8)
   (store (ptr (const (struct "X"))) $"tmp" %0)
   (return (const int 3)))
@@ -388,6 +401,7 @@
 (function "_ZN1XC1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "X")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "X"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (struct "__C8") 240 8)
@@ -444,6 +458,7 @@
 (function "_ZN1XC2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "X")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "X"))) 8 8)
   (store (ptr (struct "X")) $"tmp" %0)
   (let %1 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
@@ -453,6 +468,7 @@
 (function "_ZN1XD1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "X")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "X"))) 8 8)
   (slot "tmp.1" (struct "__C8") 240 8)
   (slot "tmp.2" (struct "__C8") 240 8)
@@ -511,6 +527,7 @@
 (function "_ZN1XD0Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "X")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "X"))) 8 8)
   (store (ptr (struct "X")) $"tmp" %0)
   (let %1 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
@@ -523,6 +540,7 @@
 (function "_ZN1XD2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "X")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "X"))) 8 8)
   (store (ptr (struct "X")) $"tmp" %0)
   (let %1 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
