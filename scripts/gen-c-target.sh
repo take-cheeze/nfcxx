@@ -36,5 +36,5 @@ inc=$base/include
 [ -e "$inc/exception.h" ] || inc=$root/3rd/edg/include_c++
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ --target "$target" \
-    --sys_include="$inc" --gen_c_file_name="$tmp/out.c" "$src")
+    --sys_include="$inc" -tused --gen_c_file_name="$tmp/out.c" "$src")
 if [ -n "$out" ]; then cp "$tmp/out.c" "$out"; else cat "$tmp/out.c"; fi
