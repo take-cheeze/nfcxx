@@ -146,14 +146,14 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `hvx_add_i16` | ok (exit 67) | |
 | `hvx_mul_i16` | ok (exit 184) | |
 | `hvx_vaddh` (hand-written, `-mhvx -mhvx-length=128b`) | ok (exit 192) | real HVX `vadd` in the object |
-| `float_neg_switch` | skip | `.rodata` (FP constants): needs data relocations |
-| `struct_libc` | skip | `.rodata.str1.1` plus `strlen` (libc) |
-| `raii_templates_class` | skip | `.data` (static objects with pointers) |
-| `virtual_dispatch` | skip | `.rodata` (vtables, typeinfo) |
-| `exceptions` | skip | `.rodata` plus EH runtime (libC) |
+| `float_neg_switch` | ok (exit 42) | `.rodata` (FP constants, switch table) via `R_HEX_32_6_X`/`R_HEX_6_X` |
+| `struct_libc` | ok (exit 9) | `.rodata.str1.1`; `strlen` is defined in `stub.c` |
+| `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
+| `virtual_dispatch` | ok (exit 23) | vtables in `.data` (`R_HEX_32`); typeinfo vtables are stubs in `stub.c` |
+| `exceptions` | skip | needs the unwinder (`__throw`, `__throw_setup`) and `_setjmp` (libc) |
 | `templates_lambdas` | skip | `_Z3addIiET_…` only `edg_prelink` instantiates it |
 
-So 5 of 11 Hexagon checks run (4 generated cases and HVX), 6 are skipped with reasons. Compile-only
+So 9 of 11 Hexagon checks run (8 generated cases and HVX), 2 are skipped with reasons. Compile-only
 mode (no qemu) compiles all 11.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
@@ -177,7 +177,7 @@ instructions; without it the disassembly looks scalar.
 | Hexagon libc (`stdlib.h`, `string.h`, `setjmp.h`, `stdio.h`, `pthread.h`) | none; `runtime.h` fails with `'stdlib.h' file not found` under clang | hexagon libc (QuRT or musl-hexagon) headers + `libc.a` |
 | QuRT (bare-metal runtime) | none | SDK QuRT for the `hexagon-sim`/DSP target. QuRT has its own startup and no Linux syscalls, so the qemu stub does not apply |
 | EH runtime (`lib_src`) | not built for Hexagon | compile `lib_src/*.c` for Hexagon with the libc above; fix `TARG_JMP_BUF_NUM_ELEMENTS` (36 `long long` in riscv32) to the real `jmp_buf` size |
-| Data relocations (`.rodata`/`.data`) | not handled by `flatlink.py` | `R_HEX_32` and the `immext` forms (`R_HEX_32_6_X`, `R_HEX_8_X`) |
+| EH unwinder (`__throw`, `_setjmp`) | not in `stub.c` | a Hexagon `libunwind`/`setjmp` (lib_src, see above); `exceptions` stays SKIP |
 | Template instantiation | `scripts/gen-c-target.sh` emits only the first pass | run `edg_prelink` for the target (as eccp does) |
 | `long double` | 16 bytes in EDG vs 8 in Hexagon | a real `linux_hexagon` target (section 2) |
 | `hexagon-sim` / real DSP | not run | SDK |
@@ -255,11 +255,14 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 5 passed (`constexpr_static`, `signed_overflow_wraps`, `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`
-with HVX), 6 skipped. The skips need either data relocations (`.rodata`/`.data` from string
-literals, vtables, `float` constants: `exceptions`, `float_neg_switch`, `raii_templates_class`,
-`struct_libc`, `virtual_dispatch`) or the template prelinker (`templates_lambdas`).
-`.hexagon.attributes` is metadata and is ignored (non-`SHF_ALLOC` sections are not loaded).
+Result: 9 passed (`constexpr_static`, `float_neg_switch`, `raii_templates_class`, `signed_overflow_wraps`,
+`struct_libc`, `virtual_dispatch`, and the HVX kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 2 skipped:
+`exceptions` (needs the unwinder: `__throw`, `__throw_setup`, `_setjmp`) and `templates_lambdas` (needs
+`edg_prelink`).
 
-Closing the remaining gap means extending `flatlink.py` to lay out `.rodata`/`.data` after `.text` and
-apply absolute `R_HEX_32` relocations, which is what the data-reloc skips need.
+`flatlink.py` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
+and applies the absolute relocations clang emits for `-fno-pic -G0`: `R_HEX_32` (data words) and the
+constant-extender forms (`R_HEX_32_6_X` on `immext`, `R_HEX_6_X`/`R_HEX_16_X`/`R_HEX_8_X` on the consumer
+instruction). The field positions were checked against `llvm-mc` encodings of `##value`. Compiling with `-G0`
+means no small-data GP is needed, so GP-relative relocations are not supported (they SKIP).
+`.hexagon.attributes` is metadata and is ignored (non-`SHF_ALLOC` sections are not loaded).

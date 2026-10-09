@@ -10,4 +10,16 @@ static long nfcxx_sys3(long n, long a, long b, long c) {
 }
 void *memcpy(void *d, const void *s, unsigned n) { char *p = d; const char *q = s; while (n--) *p++ = *q++; return d; }
 void *memset(void *d, int c, unsigned n) { char *p = d; while (n--) *p++ = (char)c; return d; }
+unsigned long strlen(const char *s) { const char *p = s; while (*p) p++; return (unsigned long)(p - s); }
+/* Runtime storage for symbols the EDG code references but nothing here runs: EH bookkeeping
+   (written on every scope entry even without a throw), and the C++ typeinfo vtables and sized
+   operator delete named by typeinfo/vtable data. Throwing still needs the unwinder and is SKIP. */
+__asm__(".pushsection .bss\n"
+        ".p2align 3\n"
+        ".globl __eh_curr_region\n__eh_curr_region: .space 8\n"
+        ".globl __curr_eh_stack_entry\n__curr_eh_stack_entry: .space 8\n"
+        ".globl _ZTVN10__cxxabiv117__class_type_infoE\n_ZTVN10__cxxabiv117__class_type_infoE: .space 16\n"
+        ".globl _ZTVN10__cxxabiv120__si_class_type_infoE\n_ZTVN10__cxxabiv120__si_class_type_infoE: .space 16\n"
+        ".popsection");
+void _ZdlPvj(void *p, unsigned n) { (void)p; (void)n; }
 void _start(void) { int r = main(); nfcxx_sys3(94, r, 0, 0); for (;;) {} }
