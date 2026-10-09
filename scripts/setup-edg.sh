@@ -18,6 +18,9 @@ fi
 base=$root/build/edg-base
 rm -rf "$base"; mkdir -p "$root/build"
 cp -r "$src/bases/docker/dev-env/gcc" "$base"
+# The base dir's include/ is a relative symlink into the submodule, which dangles once
+# the directory is copied; point it at the real headers.
+ln -sfn "$src/include_c++" "$base/include"
 if ! echo 'int main(void){return 0;}' | gcc -Werror=return-mismatch -x c -fsyntax-only - 2>/dev/null; then
   sed -i '/-Wno-error=return-mismatch/d' "$base/edg_eccp_config"
 fi
