@@ -1,4 +1,4 @@
-(ir-module "struct_libc.cpp")
+(ir-module "struct_libc.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 
 (function "_Z4makei"
   (ret void)

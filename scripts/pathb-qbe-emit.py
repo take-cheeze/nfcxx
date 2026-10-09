@@ -293,6 +293,22 @@ class Module:
         self.globals = {}      # IR name -> type
         self.strings = {}      # data name -> bytes
         self.out = []
+        self.need_sink = False  # a function that returns twice stores slot addresses into SINK
+
+
+# Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
+# loads and stores use its address. After longjmp the promoted value would be the one from the setjmp call, not the
+# last one assigned. A function that calls one of these keeps every slot in memory (see escape_slots).
+SINK = "pathb_escape"
+RETURNS_TWICE = frozenset(["setjmp", "_setjmp", "sigsetjmp", "__sigsetjmp", "savectx", "vfork", "getcontext"])
+
+
+def escape_slots(allocs):
+    """Store the address of every slot into a module-level sink. An address that escapes to memory is neither
+    promoted to a temporary nor forwarded across calls by QBE's load optimisation, so each slot's value stays in
+    memory, where longjmp finds the last assignment. (The sink has to be a global: a stack slot used for this would
+    itself be promoted, and the stores would vanish before QBE looks at escapes.)"""
+    return ["\tstorel %s, $%s" % (line.split()[0], SINK) for line in allocs]
 
 
 class Fn:
@@ -304,6 +320,7 @@ class Fn:
         self.ret_ty = ret_ty
         self.body = []
         self.allocs = []
+        self.returns_twice = False  # calls setjmp or another function that returns twice
         self.ntmp = 0
         self.nlab = 0
         self.dead = False
@@ -312,6 +329,7 @@ class Fn:
         self.nslot = 0
         self.labels = {}     # IR label name -> @name
         self.breaks = []     # exit labels of enclosing loops and switches
+        self.conts = []      # step labels of enclosing loops, for (continue)
         self.case_labels = {}  # id(marker) -> @label, for the switch being emitted
         self.abort_used = False
 
@@ -921,6 +939,12 @@ def r_load(fn, x):
     op, cls = _load_op(ty)
     t = fn.tmp()
     fn.emit("%s =%s %s %s" % (t, cls, op, addr.t))
+    if ty[0] == "int" and ty[3]:
+        # A bool object may hold bytes other than 0 and 1 (memcpy, a union, a char alias). The IR and the rest of the
+        # emitter assume a bool operand is 0 or 1 (! is xor 1, == compares bits), so a load normalises: nonzero is true.
+        t0 = t
+        t = fn.tmp()
+        fn.emit("%s =w cnew %s, 0" % (t, t0))
     return Val(t, cls, ty)
 
 
@@ -944,6 +968,8 @@ def r_call(fn, x):
     # and the QBE call gets "..." after them, so the callee's register-save prologue is set up (%al).
     ret = parse_type(x[1])
     callee = fn.opnd(x[2])
+    if isinstance(x[2], Sym) and x[2][1] in RETURNS_TWICE:
+        fn.returns_twice = True
     rest = x[3:]
     nfixed = None
     if rest and head_of(rest[0]) == "variadic":
@@ -1130,7 +1156,9 @@ def s_loop(fn, x):
     lexit = fn.newlab()
     fn.label(head)
     fn.breaks.append(lexit)  # a do-while test in step may break too, so the target covers body and step
+    fn.conts.append(lstep)
     fn.stmts(body)
+    fn.conts.pop()  # (continue) is not allowed in step
     fn.label(lstep)
     fn.stmts(step)
     fn.breaks.pop()
@@ -1208,6 +1236,12 @@ def s_break(fn, x):
     fn.jmp(fn.breaks[-1])
 
 
+def s_continue(fn, x):
+    if not fn.conts:
+        raise BadIR("continue outside a loop body")
+    fn.jmp(fn.conts[-1])
+
+
 def s_goto(fn, x):
     fn.jmp(fn.lab_for(str(x[1])))
 
@@ -1237,7 +1271,7 @@ STMT = {
     "store": s_store, "store.v": s_store,
     "copy": s_copy, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
     "if": s_if, "loop": s_loop, "switch": s_switch,
-    "case": s_case, "default": s_default, "break": s_break,
+    "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
 }
 
@@ -1486,17 +1520,89 @@ def emit_function(mod, f):
     mod.out.append("%sfunction %s$%s(%s) {" % (linkage, rc, qsym(name), ", ".join(qparams)))
     mod.out.append("@start")
     mod.out.extend(fn.allocs)
+    if fn.returns_twice:
+        mod.out.extend(escape_slots(fn.allocs))
+        mod.need_sink = True
     mod.out.extend(fn.body)
     mod.out.append("}")
     mod.out.append("")
 
 
-def emit_module(text):
+LP64 = {"short": 2, "int": 4, "long": 8, "long_long": 8, "pointer": 8, "float": 4, "double": 8}
+
+
+def check_layout(header):
+    """The emitter's scalar sizes are LP64's. The module header carries the target's: (layout (int 4) ...).
+    A target with other sizes is refused, not emitted with wrong sizes. An IR without (layout ...) is older
+    than this check and is taken as LP64."""
+    for part in header[2:]:
+        if head_of(part) != "layout":
+            continue
+        for item in part[1:]:
+            name, size = str(item[0]), as_int(item[1])
+            if name in LP64 and LP64[name] != size:
+                raise Refused("layout: %s is %d bytes, the emitter assumes LP64 (%d)" % (name, size, LP64[name]))
+
+
+def _symbols(x, out):
+    """Collect the names of the global symbols (@"name" and &"name") that the form x refers to."""
+    if isinstance(x, Sym):
+        if x[0] in "@&":
+            out.add(x[1])
+    elif isinstance(x, list):
+        for y in x:
+            _symbols(y, out)
+
+
+def _is_linked(f):
+    """A function or global that other translation units can see: not (static), not (weak), and a definition."""
+    h = head_of(f)
+    for part in f[2:]:
+        if head_of(part) in ("static", "weak", "extern"):
+            return False
+        if h == "global" and head_of(part) == "extern":
+            return False
+    return True
+
+
+def prune(forms):
+    """Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
+    nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
+    to, transitively. A (weak) or (static) definition that nothing reaches is dropped: another translation unit that
+    needs a weak definition has its own copy. Declarations ((extern) globals) and string data always stay."""
+    defs = {}
+    for f in forms[1:]:
+        if head_of(f) in ("function", "global"):
+            defs[str(f[1])] = f
+    live = set()
+    work = []
+    for name, f in defs.items():
+        if head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]):
+            continue  # a declaration emits nothing
+        if _is_linked(f):
+            live.add(name)
+            work.append(name)
+    while work:
+        refs = set()
+        _symbols(defs[work.pop()], refs)
+        for r in refs:
+            if r in defs and r not in live:
+                live.add(r)
+                work.append(r)
+    return [f for f in forms[1:] if head_of(f) not in ("function", "global")
+            or str(f[1]) in live or (head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]))]
+
+
+def emit_module(text, do_prune=True):
     forms = parse_forms(tokenize(text))
     if not forms or head_of(forms[0]) != "ir-module":
         raise BadIR("the input is not an (ir-module ...) IR text")
+    check_layout(forms[0])
     mod = Module()
-    for f in forms[1:]:
+    all_forms = forms
+    if do_prune:
+        forms = [forms[0]] + prune(forms)
+    for f in all_forms[1:]:
         if head_of(f) == "global":
             mod.globals[str(f[1])] = parse_type(f[2])
     # Strings first: a string data item may be referenced from a global initializer.
@@ -1511,6 +1617,8 @@ def emit_module(text):
             emit_function(mod, f)
         elif head_of(f) not in ("global", "data"):
             raise Refused("top-level form (%s ...)" % head_of(f))
+    if mod.need_sink:
+        mod.out.append('data $%s = align 8 { z 8 }' % SINK)
     return "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + "\n".join(mod.out) + "\n"
 
 
@@ -1521,12 +1629,16 @@ def main(argv):
             sys.stderr.write("usage: pathb-qbe-emit.py --append-weak IL.ssa ASM.s\n")
             return 1
         return append_weak(args[1], args[2])
+    do_prune = True
+    if args and args[0] == "--no-prune":
+        do_prune = False
+        args = args[1:]
     if len(args) > 1:
-        sys.stderr.write("usage: pathb-qbe-emit.py [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n")
+        sys.stderr.write("usage: pathb-qbe-emit.py [--no-prune] [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n")
         return 1
     src = sys.stdin.read() if not args or args[0] == "-" else open(args[0], encoding="latin-1").read()
     try:
-        sys.stdout.write(emit_module(src))
+        sys.stdout.write(emit_module(src, do_prune))
     except Refused as e:
         sys.stderr.write("refused: %s\n" % e)
         return 3

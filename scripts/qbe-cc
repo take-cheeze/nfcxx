@@ -11,12 +11,14 @@ cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
 qbe=${QBE:-$root/build/qbe/qbe}
 source "$(dirname "$0")/trace.sh"
 
-compile=0 out="" src="" cppflags=()
+compile=0 asm=0 out="" src="" cppflags=() asflags=()
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   a=${args[i]}
   case $a in
     -c) compile=1 ;;
+    -S) compile=1; asm=1 ;;   # stop at the assembly QBE wrote (-o - is stdout)
+    -Wa,*) asflags+=("$a") ;;
     -o) out=${args[++i]} ;;
     -D?*|-I?*|-U?*|-std=*|-ansi|-iquote?*|-isystem?*|-idirafter?*|-include?*|-imacros?*) cppflags+=("$a") ;;
     -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
@@ -66,5 +68,9 @@ t=$(trace_start)
 cat "$tmp/tail.s" >> "$tmp/out.s"
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)
-cc -c -o "${out:-${src%.c}.o}" "$tmp/out.s"
+if [ $asm = 1 ]; then
+  if [ "$out" = - ]; then cat "$tmp/out.s"; else cp "$tmp/out.s" "${out:-${src%.c}.s}"; fi
+else
+  cc -c "${asflags[@]+"${asflags[@]}"}" -o "${out:-${src%.c}.o}" "$tmp/out.s"
+fi
 trace_end "$t" "cc -c (assemble)" qbe-backend

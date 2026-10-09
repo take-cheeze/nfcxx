@@ -1,0 +1,210 @@
+(ir-module "bool_load.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "wrong" int 4 4 (static) (init
+    (scalar 0 int (const int 0))))
+(global "g" bool 1 1 (static) (init (zero 0 1)))
+
+(function "_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb"
+  (ret void)
+  (params (param %0 "ok" bool))
+  (static)
+  (slot "ok" bool 1 1)
+  (store bool $"ok" %0)
+  (let %1 bool (load bool $"ok"))
+  (let %2 bool (eq bool %1 (const bool 0)))
+  (if %2
+    (then
+      (block
+        (let %3 int (load int @"wrong"))
+        (let %4 int (wadd int %3 (const int 1)))
+        (store int @"wrong" %4))))
+  (return))
+
+(function "_ZN31_INTERNAL_13_bool_load_cpp_main6as_intEb"
+  (ret int)
+  (params (param %0 "b" bool))
+  (static)
+  (slot "b" bool 1 1)
+  (store bool $"b" %0)
+  (let %1 bool (load bool $"b"))
+  (let %2 int (iconv int %1))
+  (return %2))
+
+(function "_ZN31_INTERNAL_13_bool_load_cpp_main12pass_throughEb"
+  (ret bool)
+  (params (param %0 "b" bool))
+  (static)
+  (slot "b" bool 1 1)
+  (store bool $"b" %0)
+  (let %1 bool (load bool $"b"))
+  (return %1))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "b" bool 1 1)
+  (slot "x" int 4 4)
+  (slot "u" (union "U") 1 1)
+  (slot "seen" bool 1 1)
+  (store bool $"b" (const bool 0x0))
+  (let %0 (ptr unsigned_char) (bitcast (ptr unsigned_char) $"b"))
+  (nonnull %0)
+  (store unsigned_char %0 (const unsigned_char 2))
+  (let %1 bool (load bool $"b"))
+  (let %2 bool (eq bool %1 (const bool 0)))
+  (if %2
+    (then
+      (block
+        (let %3 int (load int @"wrong"))
+        (let %4 int (wadd int %3 (const int 1)))
+        (store int @"wrong" %4))))
+  (let %5 bool (load bool $"b"))
+  (if %5
+    (then
+      (block))
+    (else
+      (block
+        (let %6 int (load int @"wrong"))
+        (let %7 int (wadd int %6 (const int 1)))
+        (store int @"wrong" %7))))
+  (let %8 bool (load bool $"b"))
+  (let %9 bool (const bool 0))
+  (if %8
+    (then
+      (set %9 (const bool 0x1)))
+    (else
+      (set %9 (const bool 0x0))))
+  (eval (call void &"_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb" %9))
+  (let %10 bool (load bool $"b"))
+  (let %11 bool (eq bool %10 (const bool 0)))
+  (let %12 bool (eq bool %11 (const bool 0)))
+  (eval (call void &"_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb" %12))
+  (let %13 bool (load bool $"b"))
+  (let %14 int (iconv int %13))
+  (store int $"x" %14)
+  (let %15 int (load int $"x"))
+  (let %16 bool (ne int %15 (const int 1)))
+  (if %16
+    (then
+      (block
+        (let %17 int (load int @"wrong"))
+        (let %18 int (wadd int %17 (const int 1)))
+        (store int @"wrong" %18))))
+  (let %19 bool (load bool $"b"))
+  (let %20 int (call int &"_ZN31_INTERNAL_13_bool_load_cpp_main6as_intEb" %19))
+  (let %21 bool (ne int %20 (const int 1)))
+  (if %21
+    (then
+      (block
+        (let %22 int (load int @"wrong"))
+        (let %23 int (wadd int %22 (const int 1)))
+        (store int @"wrong" %23))))
+  (let %24 bool (load bool $"b"))
+  (let %25 int (iconv int %24))
+  (let %26 bool (ne int %25 (const int 1)))
+  (if %26
+    (then
+      (block
+        (let %27 int (load int @"wrong"))
+        (let %28 int (wadd int %27 (const int 1)))
+        (store int @"wrong" %28))))
+  (let %29 bool (load bool $"b"))
+  (let %30 int (iconv int %29))
+  (let %31 int (wadd int %30 (const int 1)))
+  (let %32 bool (ne int %31 (const int 2)))
+  (if %32
+    (then
+      (block
+        (let %33 int (load int @"wrong"))
+        (let %34 int (wadd int %33 (const int 1)))
+        (store int @"wrong" %34))))
+  (store unsigned_char $"u" (const unsigned_char 128))
+  (let %35 bool (load bool $"u"))
+  (let %36 bool (eq bool %35 (const bool 0)))
+  (if %36
+    (then
+      (block
+        (let %37 int (load int @"wrong"))
+        (let %38 int (wadd int %37 (const int 1)))
+        (store int @"wrong" %38))))
+  (store bool $"seen" (const bool 0x0))
+  (let %39 bool (load bool $"u"))
+  (let %40 bool (const bool 0))
+  (if %39
+    (then
+      (let %41 bool (load bool $"b"))
+      (set %40 %41)))
+  (if %40
+    (then
+      (block
+        (store bool $"seen" (const bool 0x1)))))
+  (let %42 bool (load bool $"seen"))
+  (eval (call void &"_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb" %42))
+  (let %43 bool (load bool $"u"))
+  (let %44 bool (eq bool %43 (const bool 0)))
+  (let %45 bool (const bool 1))
+  (if %44
+    (then)
+    (else
+      (let %46 bool (load bool $"b"))
+      (let %47 bool (eq bool %46 (const bool 0)))
+      (set %45 %47)))
+  (let %48 bool (eq bool %45 (const bool 0)))
+  (eval (call void &"_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb" %48))
+  (let %49 bool (load bool $"u"))
+  (let %50 int (iconv int %49))
+  (let %51 bool (load bool $"b"))
+  (let %52 int (iconv int %51))
+  (let %53 bool (ne int %50 %52))
+  (if %53
+    (then
+      (block
+        (let %54 int (load int @"wrong"))
+        (let %55 int (wadd int %54 (const int 1)))
+        (store int @"wrong" %55))))
+  (let %56 (ptr unsigned_char) (bitcast (ptr unsigned_char) $"b"))
+  (nonnull %56)
+  (store unsigned_char %56 (const unsigned_char 0))
+  (let %57 bool (load bool $"b"))
+  (if %57
+    (then
+      (block
+        (let %58 int (load int @"wrong"))
+        (let %59 int (wadd int %58 (const int 1)))
+        (store int @"wrong" %59))))
+  (let %60 bool (load bool $"b"))
+  (let %61 bool (eq bool %60 (const bool 0)))
+  (eval (call void &"_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb" %61))
+  (let %62 bool (load bool $"b"))
+  (let %63 int (call int &"_ZN31_INTERNAL_13_bool_load_cpp_main6as_intEb" %62))
+  (let %64 bool (ne int %63 (const int 0)))
+  (if %64
+    (then
+      (block
+        (let %65 int (load int @"wrong"))
+        (let %66 int (wadd int %65 (const int 1)))
+        (store int @"wrong" %66))))
+  (let %67 (ptr unsigned_char) (bitcast (ptr unsigned_char) @"g"))
+  (nonnull %67)
+  (store unsigned_char %67 (const unsigned_char 255))
+  (let %68 bool (load bool @"g"))
+  (let %69 bool (eq bool %68 (const bool 0)))
+  (if %69
+    (then
+      (block
+        (let %70 int (load int @"wrong"))
+        (let %71 int (wadd int %70 (const int 1)))
+        (store int @"wrong" %71))))
+  (let %72 bool (load bool @"g"))
+  (let %73 bool (call bool &"_ZN31_INTERNAL_13_bool_load_cpp_main12pass_throughEb" %72))
+  (eval (call void &"_ZN31_INTERNAL_13_bool_load_cpp_main5checkEb" %73))
+  (let %74 bool (load bool @"g"))
+  (let %75 int (call int &"_ZN31_INTERNAL_13_bool_load_cpp_main6as_intEb" %74))
+  (let %76 bool (ne int %75 (const int 1)))
+  (if %76
+    (then
+      (block
+        (let %77 int (load int @"wrong"))
+        (let %78 int (wadd int %77 (const int 1)))
+        (store int @"wrong" %78))))
+  (let %79 int (load int @"wrong"))
+  (return %79))

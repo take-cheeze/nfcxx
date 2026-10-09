@@ -43,7 +43,7 @@ Statements that the IR represents directly:
 | --- | --- |
 | `(block S...)` | sequence |
 | `(if C (then S...) [(else S...)])` | two-way branch on a bool operand |
-| `(loop (body S...) (step S...))` | repeat { body; L_cont: step }. `(break)` leaves the loop. There is no `(continue)` node yet: a source `continue` is a `goto` (see 9) |
+| `(loop (body S...) (step S...))` | repeat { body; L_cont: step }. `(break)` leaves the loop. `(continue)` jumps to `step` (stage 3 round 2; before it was a `goto`, see 9) |
 | `(switch OP (body S...))` | C switch: `(case (const T V))` and `(default)` are markers inside the body; control falls through them. `(break)` leaves the switch |
 | `(goto "L")`, `(label "L")` | unstructured jump, kept as the explicit fallback |
 | `(return [OP])`, `(unreachable)` | return; `unreachable` is a trap (see 4) |
@@ -132,7 +132,7 @@ All sizes and offsets come from EDG's layout (`a_field.offset`, `f_size_of_type`
 S-expressions, one statement per line, indented by nesting. Identifiers are double-quoted strings. The grammar as printed:
 
 ```
-module    ::= (ir-module "FILE") global* data* function*
+module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* function*
 global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT)  static storage object; (static) = internal linkage,
                                                                     (weak) = COMDAT/weak definition
 INIT      ::= (extern)                                    declared here, defined elsewhere: no storage
@@ -245,10 +245,10 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    `(unsupported init dynamic)`, not lowered.
 3. **Constructor initializers** (`dik_constructor`), VLAs, GNU statement expressions, inline asm and bit-field
    access print unsupported markers. None of these appears in `tests/cases` after lowering.
-4. **`continue`** is not a node. The lowered IL turns it into `(goto "L")` to a `(label "L")` at the end of the loop
-   body, and the IR keeps that goto. It is correct but unstructured: a structurizer has to turn it back into a `continue`
-   (the `step` of `loop`) before WGSL emission. The tests do not contain `continue`; the probe in section 9 does.
-5. **Loads of `bool`** are not normalized. A bool object holding a value other than 0 or 1 is undefined here.
+4. **`continue`** is `(continue)` since stage 3 round 2. The lowered IL turns it into `(goto "L")` to an unnamed
+   `(label "L")` at the end of the loop body; the lowering recognises that pair for the innermost loop, prints
+   `(continue)` and drops the label. A goto to any other label stays a goto.
+5. **Loads of `bool`** are not normalized in the IR; the QBE emitter normalizes them (nonzero is true).
 6. **Pointer subscripts are not bounds-checked** (no length), and **pointer dereferences are null-checked** only when the
    pointer is not an address constant.
 7. **Uninitialized reads** of slots are unspecified; the IR has no `undef` yet.
