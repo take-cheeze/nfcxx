@@ -1,0 +1,26 @@
+(ir-module "constexpr_static.cpp")
+
+(function "_Z4facti"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int)
+  (store int $"n" %0)
+  (let %1 int (load int $"n"))
+  (let %2 bool (le.s int %1 (const int 1)))
+  (let %3 int (const int 0))
+  (if %2
+    (then
+      (set %3 (const int 1)))
+    (else
+      (let %4 int (load int $"n"))
+      (let %5 int (load int $"n"))
+      (let %6 int (wsub int %5 (const int 1)))
+      (let %7 int (call int &"_Z4facti" %6))
+      (let %8 int (wmul int %4 %7))
+      (set %3 %8)))
+  (return %3))
+
+(function "main"
+  (ret int)
+  (params)
+  (return (const int 120)))
