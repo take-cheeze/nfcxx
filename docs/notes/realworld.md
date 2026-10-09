@@ -91,8 +91,65 @@ Also seen, not fixed: `nfcxx --emit-c` does not pass user `-I` options to `cpfe`
 also prints many `unrecognized GCC pragma` warnings from the EDG front end (doctest's `#pragma GCC
 diagnostic`). They do not affect the result.
 
+## C inputs and Lua 5.4
+
+`nfcxx` now takes `.c` inputs (alone or mixed with `.cpp`). A `.c` file skips EDG: with the QBE backend it
+goes through `scripts/qbe-cc` (preprocess, `qbe-prep.py`, cproc, QBE, assemble), with the gcc backend through
+`gcc -c -O2 -fwrapv -fno-strict-aliasing`. `-I`, `-D`, `-U` reach both the C compiler and (unchanged) eccp;
+`-l`/`-L`/`.o`/`.a` go to the link. With any `.cpp` the objects are linked by eccp (EDG's runtime); a C-only
+program needs no EDG build and is linked by the C compiler. `--trace` records a `C input: <file>` span per file.
+`tests/c/run.sh` covers it (5 programs per backend, including a mixed `extern "C"` one; all pass on both).
+
+Hand-written C includes real glibc headers, which needed three things in `scripts/` (all active only for
+`.c` inputs, via `NFCXX_C_INPUT=1`, so EDG's generated C is processed as before):
+
+- **Preprocessing:** `qbe-cc` runs `cc -E -undef`, which also removes `__x86_64__` and `__SIZE_TYPE__`; the
+  first error was `gnu/stubs.h:7:11: fatal error: gnu/stubs-32.h: No such file or directory`. For C inputs it
+  now pre-defines the host's macros (`cc -dM -E`), minus the GCC-identity ones (`__GNUC__`, ...). Without
+  `__GNUC__` glibc uses no GNU extensions, which suits cproc.
+- **`typedef float _Float32;`** from `<bits/floatn.h>` collided with qbe-prep's `_Float32` mapping
+  (`multiple types in declaration specifiers`). qbe-prep drops those typedefs.
+- **`volatile` stores:** `cproc-qbe: volatile store is not yet supported` (Lua's `lua_longjmp.status`,
+  `lua_State.hookmask`, `CallInfo.u.l.trap`). qbe-prep drops `volatile` for C inputs. cproc already emits
+  volatile loads as plain loads, and QBE does not touch memory accesses of address-taken objects, so this is
+  sound for struct members and globals. A volatile local whose address is never taken would be promoted to a
+  register by QBE (matters for `setjmp`); that gap existed for loads before.
+
+### Lua
+
+[Lua](https://github.com/lua/lua) (MIT, pure C) tag `v5.4.9`, commit `312b9efa` (2026-08-07, the newest 5.4.x
+tag). `tests/realworld/run_lua.sh` fetches it into `build/realworld/lua` (not vendored), builds the interpreter
+from all `*.c` except `luac.c`, `ltests.c`, `onelua.c` (`-lm`), runs `lua -e "print(1+1)"` and
+`tests/realworld/lua_test.lua` (string, table, closures, coroutines, `pcall`/`error` over setjmp/longjmp,
+integer wraparound). Not in the GitHub workflow.
+
+| backend | result |
+|---|---|
+| gcc | built and ran |
+| QBE | built and ran (after the three fixes above; the first blocker was the `gnu/stubs-32.h` error, then `multiple types in declaration specifiers` at `_Float32`, then `volatile store is not yet supported` in `ldebug.c`, `ldo.c`, `lstate.c`) |
+
+### What mruby would additionally need
+
+I could not read mruby's repository: it is not in this session's allowed GitHub repositories, and I was told
+not to clone it. The following is from memory and **not verified**:
+
+- mruby builds with `rake` (a `Rakefile` plus `build_config.rb` and `lib/mruby/build.rb`), i.e. Ruby is
+  needed on the host, and the build is bootstrapped: `mrbc` (the compiler) is built first, then used to
+  generate C from the mrblib `.rb` files (`mrblib.c`, gem `gem_init.c`), plus the `yacc`/bison-generated
+  `mrbgems/mruby-compiler/core/y.tab.c` (checked in in recent versions, so bison is probably optional).
+- The build driver chooses the C compiler from `build_config.rb` (`conf.cc.command`, flags); nfcxx would be
+  set as `cc` and linker. Its flags (`-std=gnu99`, `-Wall`, `-DMRB_...`) would have to be tolerated or
+  ignored; the driver has no passthrough of arbitrary gcc flags yet (`-std=`, `-W*`, `-O*`, `-c`, `-MMD`
+  are not handled; `nfcxx` compiles and links in one call, with no `-c` mode).
+- mruby's C uses `setjmp`/`longjmp` (or C++ exceptions with `MRB_USE_CXX_EXCEPTION`), `volatile`, `inline`
+  functions and computed goto / `__builtin_expect` in the VM; the last two need a cproc check.
+
+The nfcxx work needed is thus a `-c`/`-o file.o` driver mode and gcc-flag tolerance so rake can drive it,
+or a hand-written file list once the generated files exist (generate them with the host `gcc` build, then
+compile that tree with nfcxx).
+
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a JSON or XML parser or a
 small compression library in C++. Doctest stays on the gcc backend (see the decision above).
-mruby is C, so it needs a C front-end mode first, which nfcxx does not have yet.
+mruby is C: the `.c` input mode now exists; see the mruby notes above for what is still missing.

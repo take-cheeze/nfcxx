@@ -15,9 +15,9 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
-[ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
+cfiles=(); cflags=(); ncpp=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 while [ $# -gt 0 ]; do
   case $1 in
@@ -29,13 +29,26 @@ while [ $# -gt 0 ]; do
     --trace=*) trace=${1#--trace=} ;;
     -o) out=$2; shift ;;
     -std=c++*) std=--c++${1#-std=c++} ;;
-    *) files+=("$1") ;;
+    # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
+    *.c) cfiles+=("$1") ;;
+    -I?*|-D?*|-U?*) cflags+=("$1"); files+=("$1") ;;
+    -*|*.o|*.a|*.so) files+=("$1") ;;
+    *) files+=("$1"); ncpp=$((ncpp + 1)) ;;
   esac
   shift
 done
-[ ${#files[@]} -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+[ $((ncpp + ${#cfiles[@]})) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+if [ $ncpp -gt 0 ] || [ $emit_c = 1 ]; then
+  [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
+fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
 [ -z "$trace" ] || trace_begin "$trace"
+
+# C inputs: a .c file does not go through EDG. It is compiled to an object file by the backend's C compiler
+# (qbe: scripts/qbe-cc, the same cproc -> QBE pipeline as EDG's generated C; gcc: gcc -O2 -fwrapv
+# -fno-strict-aliasing), and the objects are linked with the C++ side (EDG's runtime) when any .cpp is
+# present. -I, -D, -U options reach the C compiler; -l/-L and other options go to the link only.
+# A stand-alone C program therefore needs no EDG build.
 
 # Freestanding: headers come only from lib/. --no_standard_includes drops EDG's default include dirs
 # (EDG ships no <cstdio> etc. for the C++ side anyway). Without --gnu-version the g++ front end rejects
@@ -72,6 +85,9 @@ gnu_opts=()
 [ -n "$gnu" ] && gnu_opts=(--gnu_version="$gnu")
 [ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
 
+if [ $emit_c = 1 ] && [ ${#cfiles[@]} -gt 0 ]; then
+  echo "nfcxx: --emit-c does not apply to .c inputs (they skip the front end)" >&2; exit 2
+fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
@@ -93,6 +109,32 @@ case $backend in
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
 
+# C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
+cobjs=()
+if [ ${#cfiles[@]} -gt 0 ]; then
+  ctmp=$(mktemp -d); trap 'rm -rf "$ctmp"; trace_finish' EXIT
+  n=0
+  for c in "${cfiles[@]}"; do
+    o=$ctmp/$n.o; n=$((n + 1))
+    t=$(trace_start)
+    if [ $backend = qbe ]; then
+      NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
+    else
+      gcc -c -O2 -fwrapv -fno-strict-aliasing ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
+    fi
+    trace_end "$t" "C input: $c" cinput
+    cobjs+=("$o")
+  done
+  if [ $ncpp = 0 ]; then
+    # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
+    t=$(trace_start)
+    if [ $backend = qbe ]; then "$NFCXX_CC" "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
+    else gcc "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
+    trace_end "$t" "link (C only)" cinput
+    exit 0
+  fi
+fi
+
 # With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
 # compiler give those operations defined behavior. -fkeep-static-functions keeps EDG's static __tls_init
 # (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
@@ -100,5 +142,5 @@ esac
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions \
-  "${files[@]}" -o "$out"
+  ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
