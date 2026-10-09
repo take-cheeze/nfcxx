@@ -4,7 +4,7 @@
 # Build once per bc2cpp invocation rather than rescanning all instructions for
 # every monomorphic name.
 class CallSiteIndex
-  SEND_OPS = %w[SEND0 SEND SSEND0 SSEND].freeze
+  SEND_OPS = %w[SEND0 SEND SENDB SSEND0 SSEND SSENDB].freeze
   # OP_SUPER (vm.c) is `goto L_SENDB_SYM` with mid = ci->mid, the ENCLOSING method's name, and the
   # same a/c operand layout as SENDB (args at R[a+1..], count c). It has no :name operand, so
   # `build` keys it by the name of the nearest enclosing `def` body. Without it the one `def set` a
