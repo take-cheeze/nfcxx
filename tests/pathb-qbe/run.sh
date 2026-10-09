@@ -2,7 +2,7 @@
 # Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.rb, run by the mruby interpreter, scripts/mrb).
 #
 # For each program: scripts/pathb-dump --ir (the harness) -> scripts/pathb-qbe-emit.rb -> build/qbe/qbe ->
-# cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lC -lstdc++ -lgcc_s -lpthread; libC.a first, so EDG's EH runtime and operator new/delete win) -> run.
+# cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lC -lstdc++ -lgcc_s -lpthread -lm -latomic; libC.a first, so EDG's EH runtime and operator new/delete win) -> run.
 # The exit code must equal the // EXPECT: value. The gcc backend (NFCXX_BACKEND=gcc ./nfcxx) must agree with it.
 #
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
@@ -30,7 +30,7 @@
 # the QBE binary is missing.
 cd "$(dirname "$0")/../.."
 root=$PWD
-cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
+cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "pathb-qbe: no harness at $cpfe; set PATHB_CPFE and PATHB_BASE (docs/notes/pathb-stage3.md)" >&2; exit 2; }
 qbe=${QBE:-build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
@@ -97,7 +97,7 @@ run_one() {
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
@@ -168,7 +168,7 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))
@@ -198,12 +198,21 @@ if [ $prc = 1 ] && grep -q "rebuild the harness" "$tmp/probe.err"; then
   echo "pathb-qbe: the harness at $cpfe is older than stage 3; rebuild it with scripts/setup-pathb.sh" >&2; exit 2
 fi
 
-for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
-  case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms)
-  [ -e "$f" ] && run_one "$f" exit
-done
-for f in tests/pathb-qbe/traps/*.cpp; do [ -e "$f" ] && run_one "$f" trap; done
-for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && run_multi "${d%/}"; done
+# Arguments select programs (cases only, for iterating on one probe): tests/pathb-qbe/run.sh tests/pathb-qbe/cases/hosted_new.cpp
+if [ $# -gt 0 ]; then
+  for f in "$@"; do run_one "$f" exit; done
+else
+  for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
+    case $(basename "$f") in
+      # qbe_gnu_forms: thread_local with a dynamic initializer (the TLS init function nothing calls yet);
+      # qbe_int3_break: inline asm statements (IR gap, docs/notes/pathb-hosted.md). Both are production-path cases.
+      qbe_gnu_forms.cpp|qbe_int3_break.cpp) continue ;;
+    esac
+    [ -e "$f" ] && run_one "$f" exit
+  done
+  for f in tests/pathb-qbe/traps/*.cpp; do [ -e "$f" ] && run_one "$f" trap; done
+  for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && run_multi "${d%/}"; done
+fi
 
 for l in "${lines[@]}"; do echo "$l"; done
 echo

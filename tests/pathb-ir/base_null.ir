@@ -1,0 +1,96 @@
+(ir-module "base_null.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_ZN31_INTERNAL_13_base_null_cpp_main4to_aEP1D"
+  (ret (ptr (struct "A")))
+  (params (param %0 "p" (ptr (struct "D"))))
+  (static)
+  (slot "p" (ptr (struct "D")) 8 8)
+  (store (ptr (struct "D")) $"p" %0)
+  (let %1 (ptr (struct "D")) (load (ptr (struct "D")) $"p"))
+  (return %1))
+
+(function "_ZN31_INTERNAL_13_base_null_cpp_main4to_bEP1D"
+  (ret (ptr (struct "B")))
+  (params (param %0 "p" (ptr (struct "D"))))
+  (static)
+  (slot "p" (ptr (struct "D")) 8 8)
+  (store (ptr (struct "D")) $"p" %0)
+  (let %1 (ptr (struct "D")) (load (ptr (struct "D")) $"p"))
+  (let %2 bool (ne (ptr (struct "D")) %1 (null (ptr (struct "D")))))
+  (let %3 (ptr (struct "B")) (null (ptr (struct "B"))))
+  (if %2
+    (then
+      (let %4 (ptr (struct "D")) (load (ptr (struct "D")) $"p"))
+      (let %5 (ptr (struct "B")) (offset %4 8))
+      (set %3 %5))
+    (else
+      (set %3 (null (ptr (struct "B"))))))
+  (return %3))
+
+(function "_ZN31_INTERNAL_13_base_null_cpp_main4takeEP1AP1B"
+  (ret long)
+  (params (param %0 "x" (ptr (struct "A"))) (param %1 "y" (ptr (struct "B"))))
+  (static)
+  (slot "x" (ptr (struct "A")) 8 8)
+  (slot "y" (ptr (struct "B")) 8 8)
+  (store (ptr (struct "A")) $"x" %0)
+  (store (ptr (struct "B")) $"y" %1)
+  (let %2 (ptr (struct "A")) (load (ptr (struct "A")) $"x"))
+  (let %3 bool (eq (ptr (struct "A")) %2 (null (ptr (struct "A")))))
+  (let %4 int (const int 0))
+  (if %3
+    (then
+      (set %4 (const int 1)))
+    (else
+      (set %4 (const int 0))))
+  (let %5 (ptr (struct "B")) (load (ptr (struct "B")) $"y"))
+  (let %6 bool (eq (ptr (struct "B")) %5 (null (ptr (struct "B")))))
+  (let %7 int (const int 0))
+  (if %6
+    (then
+      (set %7 (const int 2)))
+    (else
+      (set %7 (const int 0))))
+  (let %8 int (wadd int %4 %7))
+  (let %9 long (iconv long %8))
+  (return %9))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "none" (ptr (struct "D")) 8 8)
+  (slot "tmp" (ptr (struct "A")) 8 8)
+  (slot "tmp.1" (ptr (struct "B")) 8 8)
+  (slot "r" long 8 8)
+  (slot "d" (struct "D") 24 8)
+  (store (ptr (struct "D")) $"none" (null (ptr (struct "D"))))
+  (let %0 (ptr (struct "D")) (load (ptr (struct "D")) $"none"))
+  (let %1 (ptr (struct "A")) (call (ptr (struct "A")) &"_ZN31_INTERNAL_13_base_null_cpp_main4to_aEP1D" %0))
+  (store (ptr (struct "A")) $"tmp" %1)
+  (let %2 (ptr (struct "D")) (load (ptr (struct "D")) $"none"))
+  (let %3 (ptr (struct "B")) (call (ptr (struct "B")) &"_ZN31_INTERNAL_13_base_null_cpp_main4to_bEP1D" %2))
+  (store (ptr (struct "B")) $"tmp.1" %3)
+  (let %4 (ptr (struct "A")) (load (ptr (struct "A")) $"tmp"))
+  (let %5 (ptr (struct "B")) (load (ptr (struct "B")) $"tmp.1"))
+  (let %6 long (call long &"_ZN31_INTERNAL_13_base_null_cpp_main4takeEP1AP1B" %4 %5))
+  (store long $"r" %6)
+  (let %7 (ptr (struct "B")) (call (ptr (struct "B")) &"_ZN31_INTERNAL_13_base_null_cpp_main4to_bEP1D" $"d"))
+  (let %8 (ptr (struct "B")) (offset $"d" 8))
+  (let %9 bool (ne (ptr (struct "B")) %7 %8))
+  (if %9
+    (then
+      (block
+        (return (const int 1)))))
+  (let %10 (ptr (struct "B")) (call (ptr (struct "B")) &"_ZN31_INTERNAL_13_base_null_cpp_main4to_bEP1D" $"d"))
+  (let %11 (ptr char) (bitcast (ptr char) %10))
+  (let %12 (ptr char) (bitcast (ptr char) $"d"))
+  (let %13 long (pdiff %11 %12 1))
+  (let %14 bool (ne long %13 (const long 8)))
+  (if %14
+    (then
+      (block
+        (return (const int 2)))))
+  (let %15 long (load long $"r"))
+  (let %16 long (wadd long %15 (const long 4)))
+  (let %17 int (iconv int %16))
+  (return %17))

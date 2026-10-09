@@ -227,6 +227,7 @@ function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(wea
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
+            | (zero-fill BYTES DST)                                         clear an aggregate
             | (bfstore[.v] TYPE UNIT ADDR BOFF WIDTH VALUE)                  bit-field store (5a)
             | (vlaalloc $"SLOT" OPERAND)                                    VLA storage (5b)
             | (eval RVALUE) | (bounds OPERAND N) | (nonnull OPERAND)

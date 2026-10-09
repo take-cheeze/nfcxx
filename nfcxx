@@ -56,14 +56,7 @@ case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; 
 # Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
 # <cctype>, <string> and friends. Their include directories and the GNU version come from the host
 # g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
-host_sys_includes() {
-  local cxx=${NFCXX_CXX:-g++}
-  if [ -n "${NFCXX_SYS_INCLUDES:-}" ]; then
-    printf '%s\n' "${NFCXX_SYS_INCLUDES//:/$'\n'}"; return
-  fi
-  printf '' | "$cxx" -E -x c++ -v - 2>&1 >/dev/null |
-    sed -n '/search starts here:/,/End of search list/{/^ /p}' | sed 's/^ *//'
-}
+source "$root/scripts/host-sys.sh"   # host_sys_includes, host_gnu_version (shared with scripts/pathb-dump)
 extra=()
 sys_inc=()
 hosted_libs=()
@@ -78,7 +71,7 @@ else
   # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
   hosted_libs=(--c_to_obj_lib=m)
   if [ -z "$gnu" ]; then
-    ver=$("${NFCXX_CXX:-g++}" -dumpfullversion 2>/dev/null) && gnu="${ver%%.*}0000"
+    gnu=$(host_gnu_version)
   fi
 fi
 gnu_opts=()
@@ -93,7 +86,8 @@ if [ $emit_c = 1 ]; then
   base=${EDG_BASE:-$root/build/edg-base}
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"; trace_finish' EXIT
   f=$(realpath "${files[0]}")
-  inc=(--sys_include="$base/include" "${sys_inc[@]}"); [ $freestanding = 1 ] && inc=("-I$root/lib")
+  # host dirs first, then EDG's own, as eccp orders user and default include dirs
+  inc=(${sys_inc[@]+"${sys_inc[@]}"} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
   t=$(trace_start)
   (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
       "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")

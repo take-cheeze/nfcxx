@@ -556,6 +556,8 @@ class Fn:
         h = head_of(x)
         fn = STMT.get(h)
         if fn is None:
+            if h == "unsupported":
+                raise Refused("statement %s" % form_text(x))   # an IR gap marker: say which
             raise Refused("statement (%s ...)" % h)
         fn(self, x)
 
@@ -1298,6 +1300,15 @@ def s_vlaalloc(fn, x):
     fn.label(done)
 
 
+def s_zero_fill(fn, x):
+    # (zero-fill BYTES DST): clear an aggregate object (the part of a constant initializer that names no element).
+    n = as_int(x[1])
+    dst = fn.opnd(x[2], "l")
+    if n == 0:
+        return
+    fn.emit("call $memset(l %s, w 0, l %d)" % (dst.t, n))
+
+
 def s_copy(fn, x):
     n = as_int(x[1])
     dst = fn.opnd(x[2], "l")
@@ -1497,7 +1508,7 @@ STMT = {
     "block": s_block, "let": s_let, "set": s_set,
     "store": s_store, "store.v": s_store,
     "bfstore": s_bfstore, "bfstore.v": s_bfstore, "vlaalloc": s_vlaalloc,
-    "copy": s_copy, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
+    "copy": s_copy, "zero-fill": s_zero_fill, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
@@ -1683,9 +1694,11 @@ def emit_string(mod, d):
     if head_of(text) != "string":
         raise Refused("data %s: %s" % (name, form_text(text)))
     raw = str(text[1])
-    if len(raw) > ty[1]:
+    # The string is bytes; a wide string (wchar_t, char16_t, char32_t) is an array of 2 or 4 byte integers.
+    total = ty[1] * (ty[2][1] if ty[2][0] == "int" else 1)
+    if len(raw) > total:
         raise BadIR("string data %s longer than its array" % name)
-    raw = raw + "\0" * (ty[1] - len(raw))
+    raw = raw + "\0" * (total - len(raw))
     mod.strings[name] = raw
     parts = ["b %d" % ord(c) for c in raw]
     mod.out.append("data $%s = { %s }" % (qsym(name), ", ".join(parts)) if parts else "data $%s = { z 0 }" % qsym(name))
@@ -1856,7 +1869,8 @@ def prune(forms):
     """Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
     nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
     to, transitively. A (weak) or (static) definition that nothing reaches is dropped: another translation unit that
-    needs a weak definition has its own copy. Declarations ((extern) globals) and string data always stay."""
+    needs a weak definition has its own copy. A declaration ((extern) global) that nothing reaches is dropped too (a
+    hosted program's headers declare many objects of types this emitter refuses). String data always stays."""
     defs = {}
     for f in forms[1:]:
         if head_of(f) in ("function", "global"):
@@ -1876,8 +1890,7 @@ def prune(forms):
             if r in defs and r not in live:
                 live.add(r)
                 work.append(r)
-    return [f for f in forms[1:] if head_of(f) not in ("function", "global")
-            or str(f[1]) in live or (head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]))]
+    return [f for f in forms[1:] if head_of(f) not in ("function", "global") or str(f[1]) in live]
 
 
 # The Itanium C++ ABI declares the thread_local initialization function `_ZTH<name>` of an `extern thread_local`
@@ -1903,12 +1916,13 @@ def emit_module(text, do_prune=True):
         forms = [forms[0]] + prune(forms)
     mod.weakrefs = weak_refs(forms)
     for f in all_forms[1:]:
+        if head_of(f) == "function":
+            mod.funcs.add(str(f[1]))
+    for f in forms[1:]:   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
         if head_of(f) == "global":
             mod.globals[str(f[1])] = parse_type(f[2])
             if any(head_of(p) == "thread" for p in f[5:]):
                 mod.thread[str(f[1])] = "ext" if any(head_of(p) == "extern" for p in f[5:]) else "def"
-        if head_of(f) == "function":
-            mod.funcs.add(str(f[1]))
     # Strings first: a string data item may be referenced from a global initializer.
     for f in forms[1:]:
         if head_of(f) == "data":
@@ -1918,7 +1932,10 @@ def emit_module(text, do_prune=True):
             emit_global(mod, f)
     for f in forms[1:]:
         if head_of(f) == "function":
-            emit_function(mod, f)
+            try:
+                emit_function(mod, f)
+            except Refused as e:
+                raise Refused("%s [in %s]" % (e, str(f[1])))   # which function holds the unsupported node
         elif head_of(f) not in ("global", "data"):
             raise Refused("top-level form (%s ...)" % head_of(f))
     emit_startup_tables(mod)

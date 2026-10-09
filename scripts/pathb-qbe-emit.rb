@@ -961,7 +961,10 @@ class Fn
     raise BadIR, "statement expected, got #{form_text(x)}" unless x.is_a?(Array)
     h = head_of(x)
     fn = STMT[h]
-    raise Refused, "statement (#{h || "None"} ...)" if fn.nil?
+    if fn.nil?
+      raise Refused, "statement #{form_text(x)}" if h == "unsupported"   # an IR gap marker: say which
+      raise Refused, "statement (#{h || "None"} ...)"
+    end
     fn.call(self, x)
   end
 
@@ -1693,6 +1696,14 @@ def s_copy(fn, x)
   fn.emit("call $memmove(l #{dst.t}, l #{src.t}, l #{n})")
 end
 
+# (zero-fill BYTES DST): clear an aggregate object (the part of a constant initializer that names no element).
+def s_zero_fill(fn, x)
+  n = as_int(x[1])
+  dst = fn.opnd(x[2], "l")
+  return if n == 0
+  fn.emit("call $memset(l #{dst.t}, w 0, l #{n})")
+end
+
 def s_eval(fn, x)
   e = x[1]
   if head_of(e) == "call"
@@ -1885,7 +1896,7 @@ STMT = {
   "store" => ->(fn, x) { s_store(fn, x) }, "store.v" => ->(fn, x) { s_store(fn, x) },
   "bfstore" => ->(fn, x) { s_bfstore(fn, x) }, "bfstore.v" => ->(fn, x) { s_bfstore(fn, x) },
   "vlaalloc" => ->(fn, x) { s_vlaalloc(fn, x) },
-  "copy" => ->(fn, x) { s_copy(fn, x) }, "eval" => ->(fn, x) { s_eval(fn, x) },
+  "copy" => ->(fn, x) { s_copy(fn, x) }, "zero-fill" => ->(fn, x) { s_zero_fill(fn, x) }, "eval" => ->(fn, x) { s_eval(fn, x) },
   "bounds" => ->(fn, x) { s_bounds(fn, x) }, "nonnull" => ->(fn, x) { s_nonnull(fn, x) },
   "if" => ->(fn, x) { s_if(fn, x) }, "loop" => ->(fn, x) { s_loop(fn, x) },
   "switch" => ->(fn, x) { s_switch(fn, x) },
@@ -2078,8 +2089,10 @@ def emit_string(mod, d)
   text = d[3]
   raise Refused, "data #{name}: #{form_text(text)}" if head_of(text) != "string"
   raw = text[1].is_a?(IRStr) ? text[1].codes : pstr(text[1]).bytes
-  raise BadIR, "string data #{name} longer than its array" if raw.length > ty[1]
-  raw = raw + [0] * (ty[1] - raw.length)
+  # The string is bytes; a wide string (wchar_t, char16_t, char32_t) is an array of 2 or 4 byte integers.
+  total = ty[1] * (ty[2][0] == "int" ? ty[2][1] : 1)
+  raise BadIR, "string data #{name} longer than its array" if raw.length > total
+  raw = raw + [0] * (total - raw.length)
   mod.strings[name] = raw
   parts = raw.map { |c| "b #{c}" }
   if parts.empty?
@@ -2260,7 +2273,8 @@ end
 # Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
 # nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
 # to, transitively. A (weak) or (static) definition that nothing reaches is dropped: another translation unit that
-# needs a weak definition has its own copy. Declarations ((extern) globals) and string data always stay.
+# needs a weak definition has its own copy. A declaration ((extern) global) that nothing reaches is dropped too (a
+# hosted program's headers declare many objects of types this emitter refuses). String data always stays.
 def prune(forms)
   defs = {}
   forms.drop(1).each do |f|
@@ -2288,7 +2302,7 @@ def prune(forms)
   end
   forms.drop(1).select do |f|
     h = head_of(f)
-    (h != "function" && h != "global") || live.key?(pstr(f[1])) || global_extern?(f)
+    (h != "function" && h != "global") || live.key?(pstr(f[1]))
   end
 end
 
@@ -2313,9 +2327,8 @@ def emit_module(text, do_prune = true)
   all_forms = forms
   forms = [forms[0]] + prune(forms) if do_prune
   mod.weakrefs = weak_refs(forms)
-  all_forms.drop(1).each do |f|
-    next if head_of(f) != "global" && head_of(f) != "function"
-    mod.funcs[pstr(f[1])] = true if head_of(f) == "function"
+  all_forms.drop(1).each { |f| mod.funcs[pstr(f[1])] = true if head_of(f) == "function" }
+  forms.drop(1).each do |f|   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
     next if head_of(f) != "global"
     mod.globals[pstr(f[1])] = parse_type(f[2])
     if f.drop(5).any? { |p| head_of(p) == "thread" }
@@ -2328,7 +2341,11 @@ def emit_module(text, do_prune = true)
   forms.drop(1).each do |f|
     h = head_of(f)
     if h == "function"
-      emit_function(mod, f)
+      begin
+        emit_function(mod, f)
+      rescue Refused => e
+        raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
+      end
     elsif h != "global" && h != "data"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
