@@ -172,6 +172,9 @@ function `$__pathb_barrier`; `barrier.ir`, `e_barrier_form.ir`), the top-level `
 undefined object `(global ... (weak) (extern))` (address through the GOT, `.weak`) and `(weak attr)` definitions that
 pruning keeps (`weak_decl.ir`, `e_declare_form.ir`, `weakref_tls_init.ir`; the old `_ZTH` name rule is gone), and a
 refusal of an `(unsupported ...)` statement that prints the marker (`r_unsupported_asm.ir`).
+The address of a thread-local object is always `copy extern thread $x` (initial-exec, valid in a
+shared library) also for a definition in the module; the oracle changed with it (covered by `thread_data.ir`,
+`r_thread_addr.ir` and the `tests/pathb-ir/tls*.ir` goldens).
 
 ## Bootstrap caveat
 

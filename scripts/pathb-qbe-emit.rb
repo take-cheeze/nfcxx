@@ -842,12 +842,13 @@ class Fn
       return slot_val(name) if sig == "$"
       if sig == "@"
         if @mod.thread.key?(name)
-          # Thread-local object: its address is the thread pointer plus the object's TLS offset. A definition in this
-          # module uses the local-exec model (`thread $x`); a declaration uses initial-exec through the GOT
-          # (`extern thread $x`), so the object may live in another object file or in a shared library.
+          # Thread-local object: its address is the thread pointer plus the object's TLS offset. Every access uses the
+          # initial-exec model (`extern thread $x`, the offset comes from the GOT), also for an object defined in this
+          # module: that is valid in an executable (the linker relaxes it to local-exec for a symbol it defines) and in
+          # a shared library (QBE has no general-dynamic form), and the object may live in another object file.
           # The address goes through a temporary so that it is a plain `l` value wherever it is used.
           t = tmp
-          emit("#{t} =l copy #{@mod.thread[name] == "ext" ? "extern thread" : "thread"} $#{qsym(name)}")
+          emit("#{t} =l copy extern thread $#{qsym(name)}")
           return Val.new(t, "l", ["ptr", @mod.globals[name]])
         end
         if @mod.weakdata.key?(name)
