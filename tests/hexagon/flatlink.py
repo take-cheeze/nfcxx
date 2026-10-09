@@ -29,10 +29,10 @@ SHT_INIT_ARRAY, SHT_FINI_ARRAY = 14, 15
 SHF_ALLOC, SHF_TLS = 0x2, 0x400
 SHN_UNDEF, SHN_ABS, SHN_COMMON = 0, 0xfff1, 0xfff2
 
-R_HEX_B22_PCREL, R_HEX_32, R_HEX_32_6_X, R_HEX_16_X, R_HEX_8_X, R_HEX_6_X = 1, 6, 17, 23, 28, 30
+R_HEX_B22_PCREL, R_HEX_32, R_HEX_32_6_X, R_HEX_16_X, R_HEX_10_X, R_HEX_8_X, R_HEX_6_X = 1, 6, 17, 23, 26, 28, 30
 R_HEX_GPREL16 = (9, 10, 11)
 RELOC_NAMES = {1: 'R_HEX_B22_PCREL', 6: 'R_HEX_32', 9: 'R_HEX_GPREL16_0', 10: 'R_HEX_GPREL16_1',
-               11: 'R_HEX_GPREL16_2', 17: 'R_HEX_32_6_X', 23: 'R_HEX_16_X', 28: 'R_HEX_8_X',
+               11: 'R_HEX_GPREL16_2', 17: 'R_HEX_32_6_X', 23: 'R_HEX_16_X', 26: 'R_HEX_10_X', 28: 'R_HEX_8_X',
                30: 'R_HEX_6_X'}
 
 
@@ -58,15 +58,24 @@ def apply_abs(image, place, typ, v, where):
     elif typ == R_HEX_6_X and top in (0x9b, 0x9d):
         # Rd = memw(Rs<<#s + ##u6), Rd = memw(Rs=##u6): the 6-bit field is split into [6:5] and [11:8].
         w = ins(ins(w, 5, 2, v & 3), 8, 4, (v >> 2) & 0xf)
-    elif typ == R_HEX_6_X and top in (0x28, 0x68):
-        # Rd = #u6 (in a compound with another instruction): bits [25:20].
+    elif typ == R_HEX_6_X and (w >> 14) & 3 == 0 and (top & 0x1c) == 0x08:
+        # Rd = #u6 in a duplex (parse bits 00; the sub-instruction class is in the top bits): bits [25:20].
         w = ins(w, 20, 6, v & 0x3f)
-    elif typ == R_HEX_16_X and top in (0x78, 0x49):
-        # Rd = ##u32, Rd = memw(##u32): bits [10:5].
+    elif typ == R_HEX_6_X and top == 0x7c:
+        # Rdd = combine(#s8,##u6): the 6-bit field is split into [20:16] = v[5:1] and bit 13 = v[0].
+        w = ins(ins(w, 16, 5, (v >> 1) & 0x1f), 13, 1, v & 1)
+    elif typ == R_HEX_16_X and top in (0x78, 0x49, 0xb0):
+        # Rd = ##u32, Rd = memw(##u32), Rd = add(Rs,##u32): bits [10:5].
+        w = ins(w, 5, 6, v & 0x3f)
+    elif typ == R_HEX_10_X and top == 0x75:
+        # Pd = cmp.eq(Rs,##u32): bits [10:5].
         w = ins(w, 5, 6, v & 0x3f)
     elif typ == R_HEX_16_X and top == 0x48:
         # memw(##u32) = Rt: bits [5:0].
         w = ins(w, 0, 6, v & 0x3f)
+    elif typ == R_HEX_8_X and top == 0x7c:
+        # Rdd = combine(##u32,#s8): bits [10:5].
+        w = ins(w, 5, 6, v & 0x3f)
     elif typ == R_HEX_8_X and top == 0x3c:
         # memw(Rs+#u6) = ##u32: bits [5:0].
         w = ins(w, 0, 6, v & 0x3f)
@@ -170,7 +179,7 @@ def main():
                 insn &= ~((0x1fff << 1) | (0x1ff << 16))
                 insn |= ((w & 0x1fff) << 1) | (((w >> 13) & 0x1ff) << 16)
                 struct.pack_into('<I', image, place, insn)
-            elif typ in (R_HEX_32, R_HEX_32_6_X, R_HEX_16_X, R_HEX_8_X, R_HEX_6_X):
+            elif typ in (R_HEX_32, R_HEX_32_6_X, R_HEX_16_X, R_HEX_10_X, R_HEX_8_X, R_HEX_6_X):
                 apply_abs(image, place, typ, (s + addend) & 0xffffffff, where)
             else:
                 die('SKIP-data', f'relocation {RELOC_NAMES.get(typ, typ)} at {where} is not supported')

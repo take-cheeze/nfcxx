@@ -2,7 +2,7 @@
 
 Status: **partly done.** The generated C compiles for Hexagon, and a Linux user-mode Hexagon
 binary built from it runs under `qemu-hexagon` (HVX included). The Hexagon SDK, the QuRT and
-hexagon libC runtimes, a Hexagon linker, and an EH runtime for Hexagon are all unavailable here.
+hexagon libC runtimes and a Hexagon linker are unavailable here; the EH runtime is a small one of our own (section 3a).
 EDG has no Hexagon target, so the code is generated for `linux_riscv32` (ILP32, little-endian)
 and checked against clang's Hexagon ABI.
 
@@ -150,10 +150,10 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `struct_libc` | ok (exit 9) | `.rodata.str1.1`; `strlen` is defined in `stub.c` |
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
 | `virtual_dispatch` | ok (exit 23) | vtables in `.data` (`R_HEX_32`); typeinfo vtables are stubs in `stub.c` |
-| `exceptions` | skip | needs the unwinder (`__throw`, `__throw_setup`) and `_setjmp` (libc) |
+| `exceptions` | ok (exit 15) | `tests/hexagon/eh_rt.c` supplies EDG's EH ABI (section 3a) |
 | `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.sh` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
-So 10 of 11 Hexagon checks in this table run (9 generated cases and HVX); only `exceptions` is skipped, with its reason.
+All 11 Hexagon checks in this table run (the generated cases and HVX).
 Compile-only mode (no qemu) compiles all 11.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
@@ -168,6 +168,50 @@ instructions; without it the disassembly looks scalar.
 
 `tests/run.sh` passes all 10 cases including the two new ones.
 
+### 3a. Exception handling on Hexagon
+
+How EDG's generated C does exceptions (as read from `3rd/edg/lib_src/throw.c`, `eh.h` and the generated C of
+`tests/cases/exceptions.cpp`; this is the IA-64-ABI flavour, typeinfo = `{vptr, name}`):
+
+- Each function that has something to unwind pushes a `kind=1` (function) entry on a linked EH stack
+  (`__curr_eh_stack_entry`, entries live in the caller's frame). It points at a static region table
+  (`{dtor, handle, next_region, flags}`), the table of object addresses, and an array table; the current region
+  (`__eh_curr_region`, an index into the table) says which locals are alive. The previous region is saved in the
+  entry and restored on exit.
+- A `try` pushes a `kind=5` entry holding a `jmp_buf` (`long long[36]`, from `TARG_JMP_BUF_*`), the static catch
+  table (`{typeinfo, flags, ptr_flags}`, last entry flagged `0x20`) and the region number at entry. The code is
+  `if (_setjmp(buf) == 0) { body } else if (__catch_clause_number == 1) { e = __caught_object_address; ... }`.
+- `throw X` becomes `p = __throw_setup(&typeinfo, sizeof, flags)` (or `_dtor`/`_ptr` variants), construct `X` into `p`,
+  then `__throw()`. `__throw` marks the in-flight exception (a throw-stack entry whose marker is pushed on the EH
+  stack), walks the EH stack for a matching try (pass 1: exact type, `...`, pointers, void*, derived-to-base via
+  `__si_class_type_info`), then unwinds (pass 2): for every function entry in between it runs the region chain
+  (destructors, array destructors, delete for failed `new`, local-static guard reset), restores `__eh_curr_region`, and
+  finally cleans the try's own region down to its saved number, sets `__catch_clause_number` and
+  `__caught_object_address`, and `longjmp`s to the try's buffer. The catch body ends with `__exception_caught()` (after the
+  parameter copy) and `__destroy_exception_object()`, which runs the exception object's destructor and frees it; `throw;` is
+  `__rethrow()`. Everything else (types, tables) is in the generated C, so the runtime has no compiler-specific unwinder
+  and needs no DWARF/`.eh_frame`.
+
+What is supplied here (`tests/hexagon/eh_rt.c`, appended to the generated C of any case that references
+`__throw_setup`/`__rethrow`, compiled with `-DNFCXX_EH_RT` so `stub.c` leaves the EH globals to it):
+`__throw_setup{,_dtor,_ptr}`, `__throw`, `__rethrow`, `__internal_rethrow`, `__exception_started/caught`,
+`__free_thrown_object`, `__destroy_exception_object`, `__call_terminate/unexpected` (exit status 134), a 16 KiB static arena
+used as a stack for exception objects, the `_setjmp`/longjmp pair in Hexagon asm (saves r16-r27, fp, lr, sp in the 288-byte
+buffer), `typeinfo` objects for the fundamental types (`_ZTIi` etc.) and `__cxa_vec_dtor` (in `stub.c`). The generated C declares the
+EH functions/globals with its own struct types, so `eh_rt.c` reaches them through `__asm__("name")` labels.
+It is a trimmed port of `throw.c` (the real runtime needs `<stdlib.h>`, `<new>`, `<exception>`, `cxxabi.h`, malloc,
+and EDG's own C++ front end to build). Verified beyond the case with a scratch program: unwinding through frames with
+class and array locals, rethrow, `catch(...)`, catch by value/const ref, pointers, `void*`, base-class references, throw from a
+handler, copy-constructor counts; results agree with the host build.
+
+Not supported (terminates with 134 or does not link): multiple/virtual-base catch matching (`__vmi_class_type_info`),
+multi-level pointer qualification conversions, throw specifications / `noexcept` violations, array `new`/`delete` unwinding
+(`__cleanup_vec_new_or_delete`), `std::exception`-style library types, and thrown `double`/`float` (soft-float helpers such as
+`__hexagon_adddf3` are not provided; unrelated to EH).
+
+`flatlink.py` gained the relocation forms this code needed: `R_HEX_6_X` on `combine(#s8,##u6)` and duplex `Rd=#u6`,
+`R_HEX_16_X` on `add(Rs,##u32)`, `R_HEX_10_X` on `cmp.eq(Rs,##u32)` and `R_HEX_8_X` on `combine(##u32,#s8)`.
+
 ## 4. What blocks real Hexagon
 
 | Blocker | Status here | What is needed |
@@ -176,8 +220,7 @@ instructions; without it the disassembly looks scalar.
 | Hexagon linker | no `ld.lld`/`ld.bfd` Hexagon emulation | `hexagon-ld` from the SDK/binutils, or lld with Hexagon support |
 | Hexagon libc (`stdlib.h`, `string.h`, `setjmp.h`, `stdio.h`, `pthread.h`) | none; `runtime.h` fails with `'stdlib.h' file not found` under clang | hexagon libc (QuRT or musl-hexagon) headers + `libc.a` |
 | QuRT (bare-metal runtime) | none | SDK QuRT for the `hexagon-sim`/DSP target. QuRT has its own startup and no Linux syscalls, so the qemu stub does not apply |
-| EH runtime (`lib_src`) | not built for Hexagon | compile `lib_src/*.c` for Hexagon with the libc above; fix `TARG_JMP_BUF_NUM_ELEMENTS` (36 `long long` in riscv32) to the real `jmp_buf` size |
-| EH unwinder (`__throw`, `_setjmp`) | not in `stub.c` | a Hexagon `libunwind`/`setjmp` (lib_src, see above); `exceptions` stays SKIP |
+| EH runtime (`lib_src`) | `tests/hexagon/eh_rt.c`, a trimmed port of `lib_src/throw.c`, with its own `_setjmp`/longjmp (section 3a) | for a real target: compile `lib_src/*.c` with the libc above; fix `TARG_JMP_BUF_NUM_ELEMENTS` (36 `long long` in riscv32) to the real `jmp_buf` size |
 | Template instantiation | `scripts/gen-c-target.sh` emits only the first pass | run `edg_prelink` for the target (as eccp does) |
 | `long double` | 16 bytes in EDG vs 8 in Hexagon | a real `linux_hexagon` target (section 2) |
 | `hexagon-sim` / real DSP | not run | SDK |
@@ -255,9 +298,10 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 10 passed (`constexpr_static`, `float_neg_switch`, `raii_templates_class`, `signed_overflow_wraps`,
-`struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 1 skipped:
-`exceptions` (needs the unwinder: `__throw`, `__throw_setup`, `_setjmp`).
+Result: 13 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_builtins_libc`, `qbe_global_ctor`,
+`raii_templates_class`, `signed_overflow_wraps`, `struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX
+kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
+they include hosted C++ headers that the `linux_riscv32` EDG configuration lacks).
 
 `flatlink.py` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
 and applies the absolute relocations clang emits for `-fno-pic -G0`: `R_HEX_32` (data words) and the
