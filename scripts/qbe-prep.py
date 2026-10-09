@@ -8,6 +8,12 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     no operands) becomes a call to `__nfcxx_int3()`. The assembly tail defines it as a weak
     `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
     is left in place, and cproc rejects it.
+  * Builtins cproc does not know, which doctest uses. `__builtin_memcpy`, `memmove`, `memset`, `memcmp` and
+    `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_isnan` and
+    `__builtin_clzl` become small helpers (`__nfcxx_isnan`, `__nfcxx_clzl`), defined in the prelude.
+    `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
+    uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
+    Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
   * `__asm__(".align 2");` alignment hints (anywhere): dropped, as the old sed did. The hint
     only matters to EDG's own output, and it is not a semantic change.
   * Top-level `__asm__("...")` statements (not declarator labels) are removed from the C and
@@ -176,6 +182,52 @@ __nfcxx_int3:
 \t.popsection"""
 
 
+LIBC_BUILTINS = {  # builtin -> (libc function, prototype); cproc has the builtin names but not the functions
+    '__builtin_memcpy': ('memcpy', 'void *memcpy(void *, const void *, unsigned long);'),
+    '__builtin_memmove': ('memmove', 'void *memmove(void *, const void *, unsigned long);'),
+    '__builtin_memset': ('memset', 'void *memset(void *, int, unsigned long);'),
+    '__builtin_memcmp': ('memcmp', 'int memcmp(const void *, const void *, unsigned long);'),
+    '__builtin_strlen': ('strlen', 'unsigned long strlen(const char *);'),
+}
+HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
+    '__builtin_isnan': ('__nfcxx_isnan',
+                        'static int __nfcxx_isnan(double x) { return x != x; }'),
+    '__builtin_clzl': ('__nfcxx_clzl',
+                       'static int __nfcxx_clzl(unsigned long x) {'
+                       ' if (x == 0) return 64; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n; }'),
+}
+MULOV_NAME = '__nfcxx_mulov_ul'
+MULOV_DEF = ('static int __nfcxx_mulov_ul(unsigned long a, unsigned long b, unsigned long *r) {'
+             ' unsigned long p = a * b; *r = p; return a != 0 && p / a != b; }')
+UL_CONST = re.compile(r'\d+(?:[uU][lL]|[lL][uU])')
+
+
+def mulov_const_shape(toks, lp):
+    """True if toks[lp] is the '(' of `( x , C , &x )` (or `( x , C , (&x) )`), x an identifier and C an unsigned long constant."""
+    if not is_punct(tok_at(toks, lp), '('):
+        return False
+    k = lp + 1
+    x = tok_at(toks, k)
+    if x is None or x.kind != 'id' or not is_punct(tok_at(toks, k + 1), ','):
+        return False
+    c = tok_at(toks, k + 2)
+    if c is None or c.kind != 'num' or not UL_CONST.fullmatch(c.text) or not is_punct(tok_at(toks, k + 3), ','):
+        return False
+    k += 4
+    paren = is_punct(tok_at(toks, k), '(')
+    if paren:
+        k += 1
+    y = tok_at(toks, k + 1)
+    if not is_punct(tok_at(toks, k), '&') or y is None or y.kind != 'id' or y.text != x.text:
+        return False
+    k += 2
+    if paren:
+        if not is_punct(tok_at(toks, k), ')'):
+            return False
+        k += 1
+    return is_punct(tok_at(toks, k), ')')
+
+
 def int3_statement_end(toks, i):
     """If toks[i] starts `__asm__ [volatile] ("int $3\\n" : :);`, return the index just past its `;`, else None."""
     j = i + 1
@@ -222,6 +274,7 @@ def main():
     ctors = []  # constructor functions, in source order
     need_float = set()
     need_int3 = False
+    prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
 
     def mark_weak_alias(name):
         # _ZTHx is the thread_local init alias for _ZTWx; if the wrapper is COMDAT (weak), so is the alias.
@@ -345,6 +398,19 @@ def main():
             i += 1
             continue
 
+        # 4b. Builtins cproc lacks (see the module docstring).
+        if t.kind == 'id' and t.text in LIBC_BUILTINS:
+            name, proto = LIBC_BUILTINS[t.text]
+            edits.append((t.start, t.end, name))
+            prelude[name] = proto
+        elif t.kind == 'id' and t.text in HELPER_BUILTINS:
+            name, definition = HELPER_BUILTINS[t.text]
+            edits.append((t.start, t.end, name))
+            prelude[name] = definition
+        elif t.kind == 'id' and t.text == '__builtin_mul_overflow' and mulov_const_shape(toks, i + 1):
+            edits.append((t.start, t.end, MULOV_NAME))
+            prelude[MULOV_NAME] = MULOV_DEF
+
         # 5. Floating types cproc lacks.
         if t.kind == 'id' and t.text in FLOAT_TYPE:
             edits.append((t.start, t.end, FLOAT_TYPE[t.text]))
@@ -353,8 +419,9 @@ def main():
 
     decls = [FLOAT_DECL[n] for n in ('struct __nfcxx_half16', 'struct __nfcxx_float128') if n in need_float]
     if need_int3:
-        decls.append('void __nfcxx_int3(void);')
+        prelude['__nfcxx_int3'] = 'void __nfcxx_int3(void);'
         tail.append(INT3_STUB)
+    decls += prelude.values()
     if decls:
         edits.append((0, 0, '\n'.join(decls) + '\n'))
     if ctors:

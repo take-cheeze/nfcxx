@@ -22,9 +22,9 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   if ! out=$(NFCXX_BACKEND=$b "$root/nfcxx" -I"$src" "$root/tests/realworld/doctest_main.cpp" \
              -o "$tmp/d-$b" 2>&1); then
-    # xfail: the next QBE blocker in doctest's C output, cproc's builtin table (docs/notes/realworld.md).
-    if [ "$b" = qbe ] && grep -q "undeclared identifier: __builtin_memcmp" <<<"$out"; then
-      echo "xfail qbe doctest: cproc has no __builtin_memcmp (next blocker; see docs/notes/realworld.md)"
+    # xfail: the next QBE blocker in doctest's C output, sized atomics (docs/notes/realworld.md).
+    if [ "$b" = qbe ] && grep -q "undeclared identifier: __atomic_store_1" <<<"$out"; then
+      echo "xfail qbe doctest: cproc has no sized atomics (next blocker; see docs/notes/realworld.md)"
       continue
     fi
     echo "FAIL $b doctest (build)"; grep -E "error|undefined reference" <<<"$out" | head -5; fail=1; continue

@@ -55,10 +55,13 @@ exit code 2. Hosted path (no `--freestanding`).
       20 uses. `scripts/qbe-prep.py` matches exactly that statement and calls `__nfcxx_int3()`; the assembly
       tail defines it as a weak `int3; ret` stub. Any other inline asm still fails with cproc's
       `inline assembly is not yet supported`. Regression case: `tests/cases/qbe_int3_break.cpp`.
-    - *Builtins* cproc does not know (its table is `3rd/cproc/scope.c`): `__builtin_memcpy`, `memmove`,
-      `memset`, `memcmp`, `strlen` (libc names with the same prototypes), `__builtin_isnan`, `__builtin_clzl`,
-      and `__builtin_mul_overflow(x, C, &x)` with `C` an unsigned long constant (20 uses, all this shape).
-      Not done. The same kind of rewrite as gaps 1 to 4 would cover them.
+    - **Fixed:** *builtins* cproc does not know (its table is `3rd/cproc/scope.c`). `__builtin_memcpy`,
+      `memmove`, `memset`, `memcmp` and `strlen` are renamed to the libc functions, with prototypes in the
+      prelude. `__builtin_isnan` and `__builtin_clzl` call small helpers. `__builtin_mul_overflow(x, C, &x)`
+      with `C` an unsigned long constant (20 uses, all this shape) calls a checked-multiply helper. Other
+      builtin uses are left alone and still fail. Regression case: `tests/cases/qbe_builtins_libc.cpp`.
+      `tests/builtins/mem_ops.cpp` now passes on QBE, so its `XFAIL-qbe` marker is stale (the runner reports
+      an XPASS until the marker is removed).
     - *Sized atomics* `__atomic_load_N`, `__atomic_store_N`, `__atomic_fetch_add_N` (libstdc++'s
       `atomic_base`): cproc has no atomics. libatomic from GCC 13 exports these. A fix is to declare them and
       link `-latomic` on the QBE link. Not done.
