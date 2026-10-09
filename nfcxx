@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # nfcxx: experimental C++ compiler driver.
 #   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
-# Usage: nfcxx [--emit-c] [--backend=qbe|gcc] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
+# Usage: nfcxx [--emit-c] [--backend=qbe|gcc|pathb] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
 #   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
 #   qbe (default): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
+#   pathb:         (opt-in; also NFCXX_PATH=b) EDG lowered IL -> typed IR -> QBE, no generated C. Hosted programs only.
+#                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
 #   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
@@ -96,7 +98,11 @@ if [ $emit_c = 1 ]; then
   exit 0
 fi
 
+[ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
 case $backend in
+  pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
+       [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
+       export NFCXX_CC=$root/scripts/qbe-cc ;;   # for the .c inputs
   qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc ;;
   gcc) ;;
@@ -111,7 +117,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   for c in "${cfiles[@]}"; do
     o=$ctmp/$n.o; n=$((n + 1))
     t=$(trace_start)
-    if [ $backend = qbe ]; then
+    if [ $backend != gcc ]; then
       NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
     else
       gcc -c -O2 -fwrapv -fno-strict-aliasing ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
@@ -122,11 +128,33 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   if [ $ncpp = 0 ]; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
-    if [ $backend = qbe ]; then "$NFCXX_CC" "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
+    if [ $backend != gcc ]; then "$NFCXX_CC" "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
     else gcc "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
   fi
+fi
+
+# Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
+# linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
+if [ $backend = pathb ]; then
+  ptmp=$(mktemp -d); trap 'rm -rf "$ptmp"; trace_finish' EXIT
+  pobjs=(); plink=(); n=0
+  for f in "${files[@]}"; do
+    case $f in
+      -I*|-D*|-U*) ;;                       # reach pathb-cc through cflags
+      -*|*.o|*.a|*.so) plink+=("$f") ;;
+      *) o=$ptmp/p$n.o; n=$((n + 1))
+         t=$(trace_start)
+         "$root/scripts/pathb-cc" "-std=c++${std#--c++}" ${cflags[@]+"${cflags[@]}"} "$f" -o "$o"
+         trace_end "$t" "Path B: $f" pathb
+         pobjs+=("$o") ;;
+    esac
+  done
+  t=$(trace_start)
+  cc -o "$out" ${cobjs[@]+"${cobjs[@]}"} "${pobjs[@]}" ${plink[@]+"${plink[@]}"} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  trace_end "$t" "link" pathb
+  exit 0
 fi
 
 # With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C

@@ -526,6 +526,7 @@ static int ir_depth;
 
 /* Module output (globals, data, functions) and per-function output (slots). */
 static ir_buf ir_out_globals;
+static ir_buf ir_out_types;   /* (abi-type ...) forms: the C ABI shape of aggregates passed or returned by value */
 static ir_buf ir_out_data;
 static ir_buf ir_out_funcs;
 static ir_buf ir_slot_buf;
@@ -1008,6 +1009,9 @@ static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
     case ck_string:
       ir_note(3, ck_string, 1);
       return ir_mk_addr((char *)ir_string_data(c), t, 0);
+    case ck_void: /* `(void)0` as a constant expression: no value */
+      ir_note(3, ck_void, 1);
+      return ir_mk_void();
     default:
       return ir_gap(t, ir_fmt("const %s", nfcxx_ck_name(c->kind) != NULL ? nfcxx_ck_name(c->kind) : "?"), 3,
                     (int)c->kind);
@@ -1038,6 +1042,8 @@ static ir_val ir_roof(an_expr_node_ptr e);
    for a null p (std::map's node pointers are null all the time). ir_lval_op reads and clears it on entry, so the
    operands of the operand are checked as usual. */
 static int ir_addr_only;
+
+static char *ir_valist_addr(an_expr_node_ptr n);
 
 /* Pointer that may be null: emit (nonnull P) unless the operand is known to be an address. */
 static void ir_nonnull(an_expr_node_ptr src, ir_val p)
@@ -1341,6 +1347,30 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     }
     case eok_call:
       return ir_call(e);
+    /* <stdarg.h>: the System V va_list is the 24-byte __va_list_tag, which QBE's vastart/vaarg fill and read in the
+       same layout glibc's v*printf functions use. va_end has nothing to do. An aggregate va_arg is a gap marker. */
+    case eok_va_start:
+    case eok_va_start_single_operand:
+      ir_emit(ir_fmt("(vastart %s)", ir_valist_addr(a0)));
+      ir_note(0, k, 1);
+      return ir_mk_void();
+    case eok_va_end:
+      (void)ir_valist_addr(a0);
+      ir_note(0, k, 1);
+      return ir_mk_void();
+    case eok_va_copy: {
+      char *dst = ir_valist_addr(a0), *src = ir_valist_addr(a1);
+      ir_emit(ir_fmt("(copy 24 %s %s)", dst, src));
+      ir_note(0, k, 1);
+      return ir_mk_void();
+    }
+    case eok_va_arg:
+      if (ir_is_aggregate(e->type) || ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (aggregate)", 0, (int)k);
+      {
+        char *ap = ir_valist_addr(a0);
+        ir_note(0, k, 1);
+        return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(vaarg %s %s)", ir_valtext(e->type), ap)), e->type);
+      }
     case eok_cast:
       return ir_cast(e);
     case eok_question:
@@ -1564,6 +1594,14 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
   return pre ? ir_assign_result(e, lhs, nv) : cur;
 }
 
+/* The address of the va_list object an operand of a va_* operation names: an lvalue of the va_list array type (its
+   address), or a pointer (a va_list parameter, which decays to a pointer to the tag). */
+static char *ir_valist_addr(an_expr_node_ptr n)
+{
+  if (n != NULL && n->type != NULL && skip_typerefs(n->type)->kind == tk_array) return ir_lval(n).s;
+  return ir_rval(n).s;
+}
+
 /* The function type a call goes through: the routine's own type, or the pointee of a function pointer. */
 static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f)
 {
@@ -1692,8 +1730,17 @@ static const char *ir_builtin_sym(const char *name)
   return g != NULL ? g : name + 10;
 }
 
-/* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and
-   passed by address; an aggregate result is written to a temporary passed as the first argument. */
+static void ir_abi_note(a_type_ptr t);
+/* The type text of an aggregate in a call: `(struct "N")`, unqualified. */
+static char *ir_abi_ty(a_type_ptr t)
+{
+  ir_abi_note(t);
+  return ir_capture_type(t, 1);
+}
+
+/* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and passed as
+   (byval TYPE ADDR); an aggregate result is written to a temporary passed as the first argument, (sret TYPE ADDR). The
+   emitter turns both into the C calling convention of the target (docs/notes/pathb-hosted.md, "Aggregates by value"). */
 static ir_val ir_call(an_expr_node_ptr e)
 {
   an_expr_node_ptr f = ir_operand(e, 0);
@@ -1717,14 +1764,14 @@ static ir_val ir_call(an_expr_node_ptr e)
   }
   if (agg_ret) {
     sret = ir_temp(e->type);
-    args = ir_fmt("%s %s", args, sret.s);
+    args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) {
     ir_val a = ir_rval(arg);
     if (ir_is_aggregate(a.t)) {
       ir_val tmp = ir_temp(a.t);
       ir_copy(a.t, tmp.s, a.s);
-      args = ir_fmt("%s %s", args, tmp.s);
+      args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(a.t), tmp.s);
     } else {
       args = ir_fmt("%s %s", args, a.s);
     }
@@ -1772,14 +1819,14 @@ static ir_val ir_roof(an_expr_node_ptr e)
   callee = ir_fmt("&\"%s\"", ir_name_or(ir_rout_sym(under), "fn"));
   if (agg_ret) {
     sret = ir_temp(e->type);
-    args = ir_fmt("%s %s", args, sret.s);
+    args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
     ir_val a = ir_var_addr(param, param->type, 0);
     if (ir_is_aggregate(param->type)) {
       ir_val tmp = ir_temp(param->type);
       ir_copy(param->type, tmp.s, a.s);
-      args = ir_fmt("%s %s", args, tmp.s);
+      args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(param->type), tmp.s);
     } else {
       args = ir_fmt("%s %s", args, ir_load(a).s);
     }
@@ -2015,6 +2062,178 @@ static void ir_zero_object(ir_val dst, a_type_ptr t)
   ir_store(t, dst.s, ir_zero(t), dst.vol);
 }
 
+/* The member of union type u that the aggregate constant c initializes: the first named member, or the one whose type is
+   the first constant's (a designated initializer). NULL when c has no element or the member is a bit-field. */
+static a_field_ptr ir_union_member(a_type_ptr u, a_constant_ptr c)
+{
+  a_field_ptr f, pick = NULL;
+  a_constant_ptr ce = c->variant.aggregate.first_constant;
+  if (ce == NULL) return NULL;
+  for (f = skip_typerefs(u)->variant.class_struct_union.field_list; f != NULL; f = f->next) {
+    if (f->is_bit_field || (f->source_corresp.name == NULL && pick != NULL)) continue;
+    if (pick == NULL) pick = f;
+    if (skip_typerefs(f->type) == skip_typerefs(ce->type)) { pick = f; break; }
+  }
+  return (pick != NULL && !pick->is_bit_field) ? pick : NULL;
+}
+
+/* ---------------------------------------------------------------- C ABI shape of aggregates by value
+
+   A struct or class passed or returned by value follows the platform's C calling convention (System V x86-64 here), so
+   that calls to and from code the C++ library, C and other compilers built agree: std::pair<bool, size_t> comes back from
+   libstdc++'s hashtable policy in rax:rdx, a div_t from div(). The IR cannot say how, so every aggregate used in a
+   (sret ...) or (byval ...) gets a module-level form
+     (abi-type "NAME" SIZE ALIGN (leaf OFF K)...)   its scalars, K one of b h w l s d (QBE's names), at their offsets
+     (abi-type "NAME" SIZE ALIGN (memory))          more than 16 bytes: passed in memory
+     (abi-type "NAME" SIZE ALIGN (empty))           no data: not passed at all
+     (abi-type "NAME" SIZE ALIGN (unsupported "WHY"))  a shape the emitter cannot describe (union, bit-field, long double)
+   The emitter classifies the eightbytes from the leaves (QBE does it for its aggregate types). EDG's lowering has
+   already turned classes with a non-trivial copy constructor or destructor into pointer arguments and results, so
+   what reaches here is trivial aggregates, for which the Itanium C++ ABI follows the C rules. */
+struct ir_leaf {
+  unsigned long off;
+  char kind;
+};
+
+#define IR_LEAF_MAX 32
+
+/* The scalars of t at offset base: 1 on success, else 0 with the reason in *why. */
+static int ir_abi_collect(a_type_ptr t, unsigned long base, ir_leaf *lv, int *n, const char **why)
+{
+  a_type_ptr s = skip_typerefs(t);
+  unsigned long sz = ir_size_of(s);
+  switch (s->kind) {
+    case tk_integer: {
+      char k = sz == 1 ? 'b' : sz == 2 ? 'h' : sz == 4 ? 'w' : sz == 8 ? 'l' : 0;
+      if (k == 0) { *why = "integer type of this size"; return 0; }
+      if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = k; (*n)++;
+      return 1;
+    }
+    case tk_pointer:
+      if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+      return 1;
+    case tk_float:
+      if (sz != 4 && sz != 8) { *why = "long double"; return 0; }
+      if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = sz == 4 ? 's' : 'd'; (*n)++;
+      return 1;
+    case tk_ptr_to_member:
+      if (sz != 8 && sz != 16) { *why = "pointer to member of this size"; return 0; }
+      if (*n + 2 > IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+      if (sz == 16) { lv[*n].off = base + 8; lv[*n].kind = 'l'; (*n)++; }
+      return 1;
+    case tk_array: {
+      a_type_ptr el = s->variant.array.element_type;
+      unsigned long cnt = (unsigned long)s->variant.array.variant.number_of_elements, esz = ir_size_of(el), i;
+      if (s->variant.array.is_variable_size_array) { *why = "variable-length array"; return 0; }
+      for (i = 0; i < cnt; i++) {
+        if (!ir_abi_collect(el, base + i * esz, lv, n, why)) return 0;
+      }
+      return 1;
+    }
+    case tk_class:
+    case tk_struct: {
+      ir_member mem[256];
+      int cnt = ir_class_members(t, mem, 256), i, j;
+      if (cnt < 0) { *why = "virtual base"; return 0; }
+      for (i = 0; i < cnt; i++) {
+        if (mem[i].bf != NULL) {
+          /* A bit-field only makes its eightbyte INTEGER: one byte leaf at its byte offset (the size of the type is
+             declared separately). Several fields in one byte give one leaf. */
+          int dup = 0;
+          for (j = 0; j < *n; j++) if (lv[j].off == base + mem[i].off && lv[j].kind == 'b') dup = 1;
+          if (!dup) {
+            if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+            lv[*n].off = base + mem[i].off; lv[*n].kind = 'b'; (*n)++;
+          }
+          continue;
+        }
+        if (!ir_abi_collect(mem[i].t, base + mem[i].off, lv, n, why)) return 0;
+      }
+      return 1;
+    }
+    case tk_union: {
+      /* The members overlap, so each eightbyte of the union is INTEGER when any member puts an integer or pointer in
+         it, else SSE (the psABI merge). The union becomes leaves that are not its members': l (or w, h, b for a tail)
+         for INTEGER, d or s for SSE. */
+      ir_leaf sub[IR_LEAF_MAX];
+      int sn = 0, k, i;
+      a_field_ptr f;
+      unsigned long nb = (sz + 7) / 8;
+      for (f = s->variant.class_struct_union.field_list; f != NULL; f = f->next) {
+        if (f->is_bit_field) {
+          if (sn >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+          sub[sn].off = 0; sub[sn].kind = 'b'; sn++;
+          continue;
+        }
+        if (!ir_abi_collect(f->type, 0, sub, &sn, why)) return 0;
+      }
+      for (k = 0; (unsigned long)k < nb; k++) {
+        int is_int = 0, is_sse = 0;
+        unsigned long left = sz - (unsigned long)k * 8 < 8 ? sz - (unsigned long)k * 8 : 8, off = (unsigned long)k * 8;
+        for (i = 0; i < sn; i++) {
+          if (sub[i].off >= off + 8 || sub[i].off + (sub[i].kind == 'b' ? 1 : sub[i].kind == 'h' ? 2 : (sub[i].kind == 'w' || sub[i].kind == 's') ? 4 : 8) <= off) continue;
+          if (sub[i].kind == 's' || sub[i].kind == 'd') is_sse = 1; else is_int = 1;
+        }
+        if (!is_int && !is_sse) continue;
+        if (!is_int) {
+          if (left != 8 && left != 4) { *why = "union with a float in an odd-sized eightbyte"; return 0; }
+          if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+          lv[*n].off = base + off; lv[*n].kind = left == 8 ? 'd' : 's'; (*n)++;
+          continue;
+        }
+        while (left > 0) {
+          unsigned long chunk = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+          if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+          lv[*n].off = base + off; lv[*n].kind = chunk == 8 ? 'l' : chunk == 4 ? 'w' : chunk == 2 ? 'h' : 'b'; (*n)++;
+          off += chunk; left -= chunk;
+        }
+      }
+      return 1;
+    }
+    default:
+      *why = "type kind";
+      return 0;
+  }
+}
+
+static ir_tab ir_abi_tab;
+
+/* Print the (abi-type ...) form of aggregate type t once. */
+static void ir_abi_note(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  char *txt, *q1, *q2;
+  ir_leaf lv[IR_LEAF_MAX];
+  int n = 0, i;
+  const char *why = "";
+  unsigned long size = ir_size_of(s), align = ir_align_of(s);
+  int fresh = ir_tab_find(&ir_abi_tab, s) == NULL;
+  if (!fresh) return;
+  ir_tab_put(&ir_abi_tab, s, "x");
+  txt = ir_capture_type(s, 1);
+  q1 = strchr(txt, '"');
+  q2 = strrchr(txt, '"');
+  if (q1 == NULL || q2 == q1) return; /* not a named struct type */
+  *q2 = '\0';
+  ir_buf_begin(&ir_out_types);
+  fprintf(nf_out, "(abi-type \"%s\" %lu %lu", q1 + 1, size, align);
+  if (size > 16) {
+    fputs(" (memory))\n", nf_out);
+  } else if (!ir_abi_collect(s, 0, lv, &n, &why)) {
+    fprintf(nf_out, " (unsupported \"%s\"))\n", why);
+  } else if (n == 0) {
+    fputs(" (empty))\n", nf_out);
+  } else {
+    for (i = 0; i < n; i++) fprintf(nf_out, " (leaf %lu %c)", lv[i].off, lv[i].kind);
+    fputs(")\n", nf_out);
+  }
+  ir_buf_end(&ir_out_types);
+}
+
 /* Store constant c (of type t) into the object at address dst. Arrays are element-wise, classes are
    member-wise, and the remaining elements of either are zeroed when they are scalars. */
 static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
@@ -2077,23 +2296,16 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
   if (c->kind == ck_aggregate && s->kind == tk_union) {
     /* A union: the whole object is cleared, then the one member the list names is stored (the first member
        unless the constant's type is another member's: a designated initializer). */
-    a_field_ptr f, pick = NULL;
+    a_field_ptr pick = ir_union_member(t, c);
     a_constant_ptr ce = c->variant.aggregate.first_constant;
     ir_zero_object(dst, t);
-    if (ce != NULL) {
-      for (f = s->variant.class_struct_union.field_list; f != NULL; f = f->next) {
-        if (f->is_bit_field || (f->source_corresp.name == NULL && pick != NULL)) continue;
-        if (pick == NULL) pick = f;
-        if (skip_typerefs(f->type) == skip_typerefs(ce->type)) { pick = f; break; }
-      }
-      if (pick != NULL && !pick->is_bit_field) {
-        ir_val sub = ir_subobject(dst.s, (unsigned long)pick->offset, pick->type, 0);
-        if (ce->kind == ck_aggregate || ir_is_aggregate(pick->type)) {
-          ir_init_constant(sub, ce, pick->type);
-        } else {
-          ir_val v = ir_constant(ce, pick->type);
-          ir_store(pick->type, sub.s, v.s, 0);
-        }
+    if (pick != NULL) {
+      ir_val sub = ir_subobject(dst.s, (unsigned long)pick->offset, pick->type, 0);
+      if (ce->kind == ck_aggregate || ir_is_aggregate(pick->type)) {
+        ir_init_constant(sub, ce, pick->type);
+      } else {
+        ir_val v = ir_constant(ce, pick->type);
+        ir_store(pick->type, sub.s, v.s, 0);
       }
     }
     ir_note(4, dik_constant, 1);
@@ -2259,6 +2471,12 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
     if (ir_size_of(t) != 1) fprintf(nf_out, "\n    (zero %lu %lu)", off, ir_size_of(t));
     return;
   }
+  if (c->kind == ck_aggregate && s->kind == tk_union) {
+    /* the one member the list names; the other bytes are not covered by an item, so they stay zero */
+    a_field_ptr pick = ir_union_member(t, c);
+    if (pick != NULL) ir_gi_items(off + (unsigned long)pick->offset, c->variant.aggregate.first_constant, pick->type);
+    return;
+  }
   if (c->kind == ck_aggregate || ir_is_aggregate(t)) {
     ir_gi_unsupported("aggregate-constant");
     return;
@@ -2420,6 +2638,30 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_note(1, stmk_if_not_consteval, 1);
       ir_stmt(s->variant.if_stmt.then_statement, d);
       return;
+    /* Inline assembly has no IR form. The one statement libstdc++-hosted programs use is doctest's debugger break,
+       `__asm__ volatile("int $3\n" : :)`: it raises SIGTRAP, which is what the instruction does without a debugger
+       (the path A pass qbe-prep.rb calls a stub for it). Any other asm is a gap marker. */
+    case stmk_asm: {
+      an_asm_entry_ptr ae = s->variant.asm_entry;
+      const char *txt = (ae != NULL && ae->asm_string != NULL && ae->asm_string->kind == ck_string)
+                            ? ae->asm_string->variant.string.value : NULL;
+      char norm[16];
+      size_t i, n = 0;
+      if (txt != NULL && ae->operands == NULL && ae->clobbers == NULL && !ae->is_asm_goto) {
+        for (i = 0; txt[i] != '\0' && n < sizeof norm - 1; i++) {
+          if (txt[i] != ' ' && txt[i] != '\t' && txt[i] != '\n') norm[n++] = txt[i];
+        }
+        norm[n] = '\0';
+        if (txt[i] == '\0' && strcmp(norm, "int$3") == 0) {
+          ir_note(1, stmk_asm, 1);
+          ir_line(d, "(eval (call void &\"raise\" (const int 5)))");
+          return;
+        }
+      }
+      ir_note(1, (int)s->kind, 0);
+      ir_line(d, "(unsupported stmt asm)");
+      return;
+    }
     case stmk_while:
       ir_note(1, stmk_while, 1);
       ir_line(d, "(loop");
@@ -2709,6 +2951,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_begin(&params);
   if (ir_is_aggregate(ret)) {
     ir_sret = ir_newreg();
+    ir_abi_note(ret);
     fprintf(nf_out, " (sret %s ", ir_sret);
     nf_put_type(ret);
     fputc(')', nf_out);
@@ -2718,6 +2961,7 @@ static void ir_function(a_routine_ptr rout)
     fprintf(nf_out, " (param %s ", reg);
     nf_put_quoted_name(param->source_corresp.name);
     if (ir_is_aggregate(param->type)) {
+      ir_abi_note(param->type);
       fputs(" (byval ", nf_out);
       nf_put_type(param->type);
       fputs("))", nf_out);
@@ -2806,6 +3050,7 @@ void nfcxx_ir_back_end(void)
 
   ir_trap_overflow = ov != NULL && strcmp(ov, "trap") == 0;
   ir_buf_open(&ir_out_globals);
+  ir_buf_open(&ir_out_types);
   ir_buf_open(&ir_out_data);
   ir_buf_open(&ir_out_funcs);
   ir_mod.n = 0;
@@ -2825,6 +3070,7 @@ void nfcxx_ir_back_end(void)
           slash != NULL ? slash + 1 : file_name, (unsigned long)targ_sizeof_short, (unsigned long)targ_sizeof_int,
           (unsigned long)targ_sizeof_long, (unsigned long)targ_sizeof_long_long, (unsigned long)targ_sizeof_pointer,
           (unsigned long)targ_sizeof_float, (unsigned long)targ_sizeof_double, (unsigned long)targ_sizeof_long_double);
+  ir_buf_write(&ir_out_types, stdout);
   ir_buf_write(&ir_out_globals, stdout);
   ir_buf_write(&ir_out_data, stdout);
   ir_buf_write(&ir_out_funcs, stdout);

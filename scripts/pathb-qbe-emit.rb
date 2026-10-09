@@ -636,7 +636,7 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :startup, :funcs, :got
+  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :startup, :funcs, :got, :abi
 
   def initialize
     @globals = {}       # IR name -> type
@@ -649,7 +649,77 @@ class Module_
     @startup = []       # [".init_array" or ".fini_array", priority (0: none), QBE symbol] of (constructor)/(destructor)
     @funcs = {}         # IR name -> true for every function defined in this module
     @got = {}           # IR name of an external function whose address is taken -> its pointer cell (see opnd_)
+    @abi = {}           # struct name -> AbiType: the C calling convention shape of aggregates by value
   end
+end
+
+# (abi-type "NAME" SIZE ALIGN SHAPE): how a struct or class is passed and returned by value. shape is "leaves" (the
+# scalars to classify), "memory" (more than 16 bytes), "empty" (no data: not passed) or "unsupported" (why: the reason).
+# QBE classifies the eightbytes of its own aggregate type declarations like the System V x86-64 psABI.
+class AbiType
+  attr_reader :tn, :size, :align, :shape, :why
+
+  def initialize(tn, size, align, shape, why)
+    @tn = tn
+    @size = size
+    @align = align
+    @shape = shape
+    @why = why
+  end
+end
+
+LEAF_SIZE = { "b" => 1, "h" => 2, "w" => 4, "l" => 8, "s" => 4, "d" => 8 }
+
+# Read an (abi-type ...) form, add it to the module and write the QBE type declaration.
+def declare_abi_type(mod, f)
+  raise BadIR, "abi-type form" if f.length < 5
+  name = pstr(f[1])
+  size = as_int(f[2])
+  align = as_int(f[3])
+  raise BadIR, "abi-type #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align)
+  spec = f[4]
+  tn = ":ty#{mod.abi.length}"
+  shape = head_of(spec)
+  why = nil
+  fields = nil
+  case shape
+  when "memory"
+    fields = "#{size}"
+  when "empty"
+    fields = ""
+  when "unsupported"
+    why = pstr(spec[1])
+  when "leaf"
+    parts = []
+    cur = 0
+    f.drop(4).each do |lf|
+      raise BadIR, "abi-type #{name}: bad leaf #{form_text(lf)}" if head_of(lf) != "leaf" || lf.length != 3
+      off = as_int(lf[1])
+      k = lf[2]
+      raise BadIR, "abi-type #{name}: leaf kind #{form_text(lf)}" unless k.is_a?(String) && LEAF_SIZE.key?(k)
+      ks = LEAF_SIZE[k]
+      raise BadIR, "abi-type #{name}: leaf at #{off} out of order or overlapping" if off < cur
+      raise Refused, "abi-type #{name}: member at offset #{off} is not naturally aligned" if off % ks != 0
+      parts << "b #{off - cur}" if off > cur
+      parts << k
+      cur = off + ks
+    end
+    raise BadIR, "abi-type #{name}: leaves exceed the size" if cur > size
+    parts << "b #{size - cur}" if size > cur
+    fields = parts.join(", ")
+    shape = "leaves"
+  else
+    raise BadIR, "abi-type #{name}: unknown shape #{form_text(spec)}"
+  end
+  mod.abi[name] = AbiType.new(tn, size, align, shape, why)
+  mod.out << "type #{tn} = align #{align} { #{fields} }" unless fields.nil?
+end
+
+# The AbiType of an aggregate type form, or nil (an IR without (abi-type ...) keeps the pointer convention).
+def abi_of(mod, tyform)
+  ty = parse_type(tyform)
+  return nil if ty[0] != "agg"
+  mod.abi[ty[2]]
 end
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -669,7 +739,7 @@ end
 # One function body. Statements are emitted into body; registers and slots into allocs.
 class Fn
   attr_accessor :mod, :name, :ret_ty, :body, :allocs, :inits, :returns_twice, :dead, :regs, :slots, :nslot,
-                :breaks, :conts, :case_labels, :abort_used, :nvla
+                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf
 
   def initialize(mod, name, ret_ty)
     @mod = mod
@@ -691,6 +761,7 @@ class Fn
     @conts = []             # step labels of enclosing loops, for (continue)
     @case_labels = {}       # object_id(marker) -> @label, for the switch being emitted
     @abort_used = false
+    @sret_buf = nil         # a function returning an aggregate in the C convention: the buffer it returns the address of
   end
 
   # ---- output
@@ -740,7 +811,7 @@ class Fn
 
   def ret(v = nil)
     ensure_live
-    put(v.nil? ? "ret" : "ret #{v}")
+    put(v.nil? ? (@sret_buf.nil? ? "ret" : "ret #{@sret_buf}") : "ret #{v}")
     @dead = true
   end
 
@@ -1424,15 +1495,57 @@ def r_call(fn, x)
     rest = rest.drop(1)
     raise BadIR, "call: (variadic #{nfixed}) with only #{rest.length} arguments" if nfixed > rest.length
   end
-  args = rest.map { |a| fn.opnd(a) }
+  # An aggregate argument is (byval TYPE ADDR), an aggregate result (sret TYPE ADDR) first. With an (abi-type ...) for
+  # the type they are passed the way the C calling convention says (QBE classifies its aggregate types); without one
+  # (older IR) they are plain addresses.
+  sret = nil
+  args = []
+  rest.each_with_index do |a, i|
+    h = head_of(a)
+    if h == "sret" || h == "byval"
+      raise BadIR, "call: bad #{form_text(a)}" if a.length != 3
+      info = abi_of(fn.mod, a[1])
+      if info.nil?
+        args << [fn.opnd(a[2], "l"), nil]
+      else
+        raise Refused, "aggregate #{pstr(parse_type(a[1])[2])} by value: #{info.why}" if info.shape == "unsupported"
+        if h == "sret"
+          raise BadIR, "call: sret is not the first argument" if i != 0
+          sret = [info, fn.opnd(a[2], "l")]
+          args << nil
+        else
+          args << [fn.opnd(a[2], "l"), info]
+        end
+      end
+    else
+      args << [fn.opnd(a), nil]
+    end
+  end
   parts = []
   args.each_with_index do |a, i|
-    raise Refused, "call argument without a class" if a.cls.nil?
     parts << "..." if i == nfixed
-    parts << "#{a.cls} #{a.t}"
+    next if a.nil?
+    v, info = a
+    raise Refused, "call argument without a class" if v.cls.nil?
+    if info.nil?
+      parts << "#{v.cls} #{v.t}"
+    elsif info.shape != "empty"
+      parts << "#{info.tn} #{v.t}"
+    end
   end
   parts << "..." if !nfixed.nil? && nfixed == args.length
   target = callee.t
+  if !sret.nil?
+    info, dest = sret
+    if info.shape == "empty"
+      fn.emit("call #{target}(#{parts.join(", ")})")
+    else
+      t = fn.tmp
+      fn.emit("#{t} =#{info.tn} call #{target}(#{parts.join(", ")})")
+      fn.emit("call $memmove(l #{dest.t}, l #{t}, l #{info.size})")
+    end
+    return nil
+  end
   if ret == VOID
     fn.emit("call #{target}(#{parts.join(", ")})")
     return nil
@@ -1443,7 +1556,20 @@ def r_call(fn, x)
   Val.new(t, cls, ret)
 end
 
+# (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE's vaarg takes w, l, s and d.
+def r_vaarg(fn, x)
+  raise BadIR, "vaarg form" if x.length != 3
+  ty = parse_type(x[1])
+  raise Refused, "vaarg of type #{tyrepr(ty)}" if is_agg(ty) || ty[0] == "fn"
+  cls = qcls(ty)
+  ap = fn.opnd(x[2], "l")
+  t = fn.tmp
+  fn.emit("#{t} =#{cls} vaarg #{ap.t}")
+  Val.new(t, cls, ty)
+end
+
 RVAL = {
+  "vaarg" => ->(fn, x) { r_vaarg(fn, x) },
   "load" => ->(fn, x) { r_load(fn, x) },
   "load.v" => ->(fn, x) { r_load(fn, x) },
   "wadd" => r_wbin("add"), "wsub" => r_wbin("sub"), "wmul" => r_wbin("mul"),
@@ -1704,6 +1830,13 @@ def s_zero_fill(fn, x)
   fn.emit("call $memset(l #{dst.t}, w 0, l #{n})")
 end
 
+# (vastart ADDR): start the va_list at ADDR (the enclosing function must have an (ellipsis) parameter).
+def s_vastart(fn, x)
+  raise BadIR, "vastart form" if x.length != 2
+  ap = fn.opnd(x[1], "l")
+  fn.emit("vastart #{ap.t}")
+end
+
 def s_eval(fn, x)
   e = x[1]
   if head_of(e) == "call"
@@ -1896,7 +2029,7 @@ STMT = {
   "store" => ->(fn, x) { s_store(fn, x) }, "store.v" => ->(fn, x) { s_store(fn, x) },
   "bfstore" => ->(fn, x) { s_bfstore(fn, x) }, "bfstore.v" => ->(fn, x) { s_bfstore(fn, x) },
   "vlaalloc" => ->(fn, x) { s_vlaalloc(fn, x) },
-  "copy" => ->(fn, x) { s_copy(fn, x) }, "zero-fill" => ->(fn, x) { s_zero_fill(fn, x) }, "eval" => ->(fn, x) { s_eval(fn, x) },
+  "copy" => ->(fn, x) { s_copy(fn, x) }, "zero-fill" => ->(fn, x) { s_zero_fill(fn, x) }, "vastart" => ->(fn, x) { s_vastart(fn, x) }, "eval" => ->(fn, x) { s_eval(fn, x) },
   "bounds" => ->(fn, x) { s_bounds(fn, x) }, "nonnull" => ->(fn, x) { s_nonnull(fn, x) },
   "if" => ->(fn, x) { s_if(fn, x) }, "loop" => ->(fn, x) { s_loop(fn, x) },
   "switch" => ->(fn, x) { s_switch(fn, x) },
@@ -2151,20 +2284,45 @@ def emit_function(mod, f)
   end
   # Parameters: each arrives in a QBE temporary %pI and is copied into its register slot.
   pi = 0
+  sret_tn = nil
   params_form.drop(1).each do |p|
     h = head_of(p)
     if h == "sret"
       n = p[1].byteslice(1, p[1].bytesize - 1).to_i
+      info = abi_of(mod, p[2])
       fn.declare_reg(n, ["ptr", nil])
-      qparams << "l %p#{pi}"
-      param_stores << ["l", pi, n]
+      if info.nil?
+        qparams << "l %p#{pi}"
+        param_stores << ["l", pi, n]
+      else
+        raise Refused, "aggregate #{pstr(parse_type(p[2])[2])} returned by value: #{info.why}" if info.shape == "unsupported"
+        # The C convention: no hidden parameter; the function fills a buffer of its own and returns its address.
+        fn.allocs << "\t%sretbuf =l alloc#{info.align >= 16 ? 16 : 8} #{[info.size, 1].max}"
+        fn.inits << "\tstorel %sretbuf, %r#{n}"
+        if info.shape != "empty"
+          fn.sret_buf = "%sretbuf"
+          sret_tn = info.tn
+        end
+      end
     elsif h == "param"
       n = p[1].byteslice(1, p[1].bytesize - 1).to_i
       pty = p[3]
       if head_of(pty) == "byval"
+        info = abi_of(mod, pty[1])
         fn.declare_reg(n, ["ptr", nil])
-        qparams << "l %p#{pi}"
-        param_stores << ["l", pi, n]
+        if info.nil?
+          qparams << "l %p#{pi}"
+          param_stores << ["l", pi, n]
+        else
+          raise Refused, "aggregate #{pstr(parse_type(pty[1])[2])} passed by value: #{info.why}" if info.shape == "unsupported"
+          if info.shape == "empty"
+            fn.allocs << "\t%ebuf#{pi} =l alloc8 8"
+            fn.inits << "\tstorel %ebuf#{pi}, %r#{n}"
+          else
+            qparams << "#{info.tn} %p#{pi}"
+            param_stores << ["l", pi, n]
+          end
+        end
       else
         ty = parse_type(pty)
         cls = qcls(ty)
@@ -2197,6 +2355,7 @@ def emit_function(mod, f)
     fn.put("hlt")
   end
   rc = ret == VOID ? "" : qcls(ret) + " "
+  rc = sret_tn + " " unless sret_tn.nil?
   linkage = static ? "" : "export "
   mod.out << (WEAK_MARK + qsym(name)) if weak
   mod.out << "#{linkage}function #{rc}$#{qsym(name)}(#{qparams.join(", ")}) {"
@@ -2319,14 +2478,43 @@ def weak_refs(forms)
   out
 end
 
-def emit_module(text, do_prune = true)
+# Does the form mention the type long_double (a bare atom, not a string constant)?
+def mentions_long_double?(x)
+  return x.any? { |y| mentions_long_double?(y) } if x.is_a?(Array)
+  x.is_a?(String) && x == "long_double"
+end
+
+# --long-double=trap: QBE has no 80-bit type, so a function that mentions long double cannot be emitted. Instead of
+# refusing the module, such a function becomes a stub that aborts when it runs (its linkage and start-up markers
+# stay), and a global of that type is dropped. A program whose long double code never runs (doctest's
+# toString(long double), the ostream insertion operator the header defines inline) still works, and one that does
+# reach it dies loudly (SIGABRT) instead of computing with a wrong type.
+def stub_long_double(forms)
+  out = [forms[0]]
+  forms.drop(1).each do |f|
+    h = head_of(f)
+    if h == "function" && mentions_long_double?(f)
+      keep = f.drop(2).select { |p| %w[static weak constructor destructor].include?(head_of(p)) }
+      out << (["function", f[1], ["ret", "void"], ["params"]] + keep + [["unreachable"]])
+    elsif h == "global" && mentions_long_double?(f)
+      next
+    else
+      out << f
+    end
+  end
+  out
+end
+
+def emit_module(text, do_prune = true, ld_trap = false)
   forms = parse_forms(tokenize(text))
   raise BadIR, "the input is not an (ir-module ...) IR text" if forms.empty? || head_of(forms[0]) != "ir-module"
   check_layout(forms[0])
+  forms = stub_long_double(forms) if ld_trap
   mod = Module_.new
   all_forms = forms
   forms = [forms[0]] + prune(forms) if do_prune
   mod.weakrefs = weak_refs(forms)
+  forms.drop(1).each { |f| declare_abi_type(mod, f) if head_of(f) == "abi-type" }
   all_forms.drop(1).each { |f| mod.funcs[pstr(f[1])] = true if head_of(f) == "function" }
   forms.drop(1).each do |f|   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
     next if head_of(f) != "global"
@@ -2346,7 +2534,7 @@ def emit_module(text, do_prune = true)
       rescue Refused => e
         raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
       end
-    elsif h != "global" && h != "data"
+    elsif h != "global" && h != "data" && h != "abi-type"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end
@@ -2370,12 +2558,17 @@ def main(argv)
     return append_weak(args[1], args[2])
   end
   do_prune = true
+  ld_trap = false
   if !args.empty? && args[0] == "--no-prune"
     do_prune = false
     args = args.drop(1)
   end
+  if !args.empty? && args[0] == "--long-double=trap"
+    ld_trap = true
+    args = args.drop(1)
+  end
   if args.length > 1
-    return die("usage: pathb-qbe-emit.py [--no-prune] [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n", 1)
+    return die("usage: pathb-qbe-emit.py [--no-prune] [--long-double=trap] [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n", 1)
   end
   if args.empty? || args[0] == "-"
     src = universal_newlines($stdin.read)
@@ -2383,7 +2576,7 @@ def main(argv)
     src = read_text(args[0])
   end
   begin
-    out = emit_module(src, do_prune)
+    out = emit_module(src, do_prune, ld_trap)
   rescue Refused => e
     return die("refused: #{e.message}\n", 3)
   rescue BadIR => e

@@ -168,6 +168,15 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
     objs+=("$obj")
   done
+  # C files of the directory are compiled by the host C compiler (code Path B did not compile: the calling convention
+  # of the two sides has to agree)
+  for f in "$d"/*.c; do
+    [ -e "$f" ] || continue
+    b=multi_${n}_$(basename "$f" .c); obj=$tmp/$b.o; srcs+=("$f")
+    cc -c -O1 -o "$obj" "$f" 2> "$tmp/$b.cc" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: cc ($f): $(head -1 "$tmp/$b.cc")"); return; }
+    objs+=("$obj")
+  done
   if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
@@ -204,9 +213,8 @@ if [ $# -gt 0 ]; then
 else
   for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
     case $(basename "$f") in
-      # qbe_gnu_forms: thread_local with a dynamic initializer (the TLS init function nothing calls yet);
-      # qbe_int3_break: inline asm statements (IR gap, docs/notes/pathb-hosted.md). Both are production-path cases.
-      qbe_gnu_forms.cpp|qbe_int3_break.cpp) continue ;;
+      # qbe_gnu_forms: thread_local with a dynamic initializer (the TLS init function nothing calls yet).
+      qbe_gnu_forms.cpp) continue ;;
     esac
     [ -e "$f" ] && run_one "$f" exit
   done

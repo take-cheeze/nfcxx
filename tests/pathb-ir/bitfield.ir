@@ -1,4 +1,5 @@
 (ir-module "bitfield.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "Mixed" 24 8 (memory))
 (global "g_mixed" (struct "Mixed") 24 8 (static) (init
     (scalar 0 char (const char 7))
     (bitfield 0 4 8 3 unsigned_int (const unsigned_int 5))
@@ -1086,7 +1087,7 @@
     (body
       (block
         (copy 24 $"tmp" $"m")
-        (let %443 int (call int &"_ZN30_INTERNAL_12_bitfield_cpp_main8by_valueE5Mixed" $"tmp"))
+        (let %443 int (call int &"_ZN30_INTERNAL_12_bitfield_cpp_main8by_valueE5Mixed" (byval (struct "Mixed") $"tmp")))
         (let %444 bool (eq int %443 (const int 1)))
         (let %445 bool (eq bool %444 (const bool 0)))
         (if %445

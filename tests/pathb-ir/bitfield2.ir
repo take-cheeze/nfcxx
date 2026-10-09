@@ -1,4 +1,6 @@
 (ir-module "bitfield2.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "Neg" 4 4 (leaf 0 b))
+(abi-type "Tailpad" 8 4 (leaf 0 w) (leaf 4 b) (leaf 5 b))
 (global "bad" int 4 4 (static) (init (zero 0 4)))
 (global "_ZTVN10__cxxabiv121__vmi_class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
 (global "_ZTS3Der" (const (array 5 (const char))) 5 1 (weak) (init
@@ -602,7 +604,7 @@
     (body
       (block
         (copy 4 $"tmp.2" $"n")
-        (let %216 int (call int &"_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg" $"tmp.2"))
+        (let %216 int (call int &"_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg" (byval (struct "Neg") $"tmp.2")))
         (let %217 bool (eq int %216 (const int 10)))
         (let %218 bool (eq bool %217 (const bool 0)))
         (if %218
@@ -619,7 +621,7 @@
     (body
       (block
         (copy 4 $"tmp.3" $"n")
-        (let %222 int (call int &"_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg" $"tmp.3"))
+        (let %222 int (call int &"_ZN31_INTERNAL_13_bitfield2_cpp_main2swE3Neg" (byval (struct "Neg") $"tmp.3")))
         (let %223 bool (eq int %222 (const int 20)))
         (let %224 bool (eq bool %223 (const bool 0)))
         (if %224
@@ -770,7 +772,7 @@
     (step
       (let %288 bool (ne int (const int 0) (const int 0)))
       (if %288 (then) (else (break)))))
-  (eval (call void &"_ZN31_INTERNAL_13_bitfield2_cpp_main2mkEv" $"tmp.5"))
+  (eval (call void &"_ZN31_INTERNAL_13_bitfield2_cpp_main2mkEv" (sret (struct "Tailpad") $"tmp.5")))
   (copy 8 $"t" $"tmp.5")
   (loop
     (body
