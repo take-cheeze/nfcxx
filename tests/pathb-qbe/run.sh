@@ -198,12 +198,15 @@ if [ $prc = 1 ] && grep -q "rebuild the harness" "$tmp/probe.err"; then
   echo "pathb-qbe: the harness at $cpfe is older than stage 3; rebuild it with scripts/setup-pathb.sh" >&2; exit 2
 fi
 
+# PATHB_ONLY=REGEX runs only the programs whose path matches (quick iteration on one probe).
+only=${PATHB_ONLY:-.}
 for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms)
+  [[ $f =~ $only ]] || continue
   [ -e "$f" ] && run_one "$f" exit
 done
-for f in tests/pathb-qbe/traps/*.cpp; do [ -e "$f" ] && run_one "$f" trap; done
-for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && run_multi "${d%/}"; done
+for f in tests/pathb-qbe/traps/*.cpp; do [[ $f =~ $only ]] && [ -e "$f" ] && run_one "$f" trap; done
+for d in tests/pathb-qbe/multi/*/; do [[ $d =~ $only ]] && [ -d "$d" ] && run_multi "${d%/}"; done
 
 for l in "${lines[@]}"; do echo "$l"; done
 echo

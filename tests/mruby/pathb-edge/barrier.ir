@@ -1,0 +1,18 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "f"
+  (ret int)
+  (params (param %0 "p" (ptr int)))
+  (store int %0 (const int 1))
+  (barrier)
+  (let %1 int (load int %0))
+  (barrier)
+  (return %1))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "x" int 4 4)
+  (barrier)
+  (let %0 int (call int &"f" $"x"))
+  (return %0))

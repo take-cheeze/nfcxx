@@ -224,9 +224,10 @@ thread-local object to a temporary, `%t =l copy thread $x`, wherever the IR uses
 in an executable; a shared library would have to use `extern thread` for definitions as well (one line in `opnd_`).
 
 The C++11 wrapper functions for `extern thread_local` variables (`_ZTW<name>` calls `_ZTH<name>` if it is not null)
-refer to a weak undefined function. The IR has no weak declarations, so the emitter treats an undefined function whose
-name starts with `_ZTH` as a weak reference: it is referenced through the GOT (`extern $_ZTH...`) and marked
-`# pathb-weak` (`.weak` through `--append-weak`). Dynamic initialization of thread-locals (`thread_local std::string`)
+refer to a weak undefined function. `_ZTH<name>` is a weak routine in EDG's IL, so the IR carries it as
+`(declare "_ZTH<name>" (weak))` (stage 2, section 6, "Linkage": general weak declarations) and the emitter references
+it through the GOT (`extern $_ZTH...`) and marks it `# pathb-weak` (`.weak` through `--append-weak`). The earlier
+`_ZTH` name rule in the emitter is gone. Dynamic initialization of thread-locals (`thread_local std::string`)
 is not lowered (stage 3 `(unsupported init dynamic)`), so no `_ZTH` function is ever defined by this Path B yet.
 
 Checked: `tls.cpp` has `__thread`, `thread_local`, zero, initialized, array, struct, a `static` (internal) and a
@@ -293,17 +294,67 @@ insertion use shift pairs, and the "keep the other bits" mask is applied with `a
 2^k-1 (the field at the top of the unit uses a shift pair instead). `bitfield2.cpp` uses that macro on purpose. The
 same QBE bug can in principle bite any `and x, 2^k-1` that the emitter produces for other reasons; none is known.
 
-**Still missing**
+**Still missing** (what remains after the fourth round, below)
 
-- VLA storage is not freed at block exit (the IL has no scope marker); it is reused when the same declaration executes
-  again, so loops and recursion are bounded, but a function that declares different VLAs in sequence in one scope
-  keeps all of them until it returns. A VLA subscript has no bounds check.
+- A VLA subscript has no bounds check.
 - Volatile bit-fields (`bfload.v`, `bfstore.v`) are emitted: the whole storage unit is read once and written once through
   the volatile helpers (see "Volatile, thread-local objects", `cases/bitfield_vol.cpp`).
-- Bit-fields in a union or in a class with a virtual base have no aggregate initializer path (the IR has none for those
-  classes); plain access works.
-- A statement expression that returns a class by copy constructor stays `(unsupported stmt stmt_expr_result)`;
-  inline asm is still unsupported (the one marker left in `gaps.cpp`).
+
+## Closed gaps (stage 3, fourth round): aggregates, class results, scope-exit VLAs, asm barriers, weak declarations
+
+Probes in `tests/pathb-qbe/cases` (compared with the gcc backend; exit code = number of wrong results), goldens in
+`tests/pathb-ir`, emitter edge inputs in `tests/mruby/pathb-edge`. Details of each IR form: `docs/notes/pathb-stage2.md`,
+sections 5a-5c and 6.
+
+1. **Union aggregate constants and default member initializers on a class with a base and a vptr** (`agg_union.cpp`,
+   `bitfield_union.cpp`). Two causes behind `(unsupported init aggregate-constant)`: a `ck_aggregate` of a union (the
+   initialized member is a `ck_designator` plus value, or the first non-empty initializable field), and, for the
+   default member initializers, `eok_bassign` (the block copy that initializes an array member from a static array),
+   which printed `(unsupported op bassign)`. Both lowered. Zeroing an aggregate (the unnamed rest of a union, trailing
+   aggregate elements) is real stores now, not `(unsupported init zero-aggregate)`.
+2. **Statement expression that returns a class by copy constructor** (`stmtexpr_class.cpp`): the value statement is a
+   nested statement expression followed by the destructors of the block's locals, not the last statement
+   (stage 2, 5c). `C a = ({ C t(5); t; })`, a by-value argument, a reference binding and a copy of an outer object, with
+   copy and destructor counts equal to the gcc backend.
+3. **Bit-fields in a union or in a class with a virtual base** (`bitfield_union.cpp`): unions (aggregate initializers,
+   anonymous unions, `constexpr` union constructors, static data) are covered by 1. A class with a virtual base has no
+   aggregate constant at all, EDG rejects a `constexpr` constructor in such a class, so it is zeroed and constructed at
+   start-up and its bit-fields go through `bfstore` as before (probe: `D`, `D2`, with default member initializers on
+   bit-fields). Nothing was missing there beyond what the probe now checks.
+4. **Bit-fields wider than 64 bits**: only `unsigned __int128 f : 100` can be (EDG truncates `long long f : 70` to 64
+   bits with a warning). Not implementable here (no 128-bit type in the emitter, units of at most 8 bytes). The marker
+   is now `(unsupported lvalue bit-field-wider-than-64-bits)` instead of the generic layout one.
+5. **VLA storage freed at scope exit** (`vla_scope.cpp`; changed `vla.cpp`, `stmtexpr.cpp` goldens): the default
+   lowered IL has no marker (no `enk_vla_dealloc` in C++, no destruction-list entry, and QBE could not release stack
+   in any case: no save/restore, `alloc16` is a bare `sub rsp`). EDG can lower VLAs itself, though:
+   `LOWER_VARIABLE_LENGTH_ARRAYS=1` (the C generator's configuration) turns a VLA into a pointer, a `__vla_alloc` call at
+   the declaration and `__vla_dealloc` on every exit from the scope plus an EH cleanup-list entry
+   (`__vla_dealloc_eh`). `scripts/setup-pathb.sh` now sets it; the runtime is in `libC.a`. The probe counts live
+   allocations (`__vla_number_of_active_allocations`) after every kind of scope exit. The `vlaalloc` IR op and the
+   emitter's capacity scheme stay for a harness built without the macro (`be/nfcxx_ir.c` compiles both under
+   `#if LOWER_VARIABLE_LENGTH_ARRAYS`) and are not reached by the current harness. Cost and limits: two runtime calls and a
+   `malloc` per VLA, and the runtime pool is one global (not thread safe).
+   **A harness built before this change must be rebuilt** (`scripts/setup-pathb.sh`): the VLA goldens are for the lowered form.
+6. **Inline asm** (`asm_barrier.cpp`): the subset that is implementable on QBE, an empty template with no operands whose
+   clobbers are `memory` and/or `cc` (and a basic `asm("")`), is `(barrier)`; the emitter calls an empty module-local
+   function, an opaque call QBE keeps in order (`ASM-COUNT` lines check the call counts, including that `cc` alone emits
+   none). Everything else is refused with its reason: `(unsupported stmt asm-template | asm-operands | asm-clobbers | asm-goto)`;
+   the emitter prints `refused: (unsupported stmt asm-operands)`. Outputs, inputs, templates and register clobbers
+   cannot be done: QBE has no inline assembly and the template would have to be spliced into its output.
+7. **General weak declarations** (`weak_decl.cpp`, `multi/weak_link`): `(declare "f" (weak))` for an undefined weak
+   function, `(global ... (weak) (extern))` for an undefined weak object, `(weak attr)` on a weak definition. The
+   emitter loads their addresses from the GOT (`extern $f`, `copy extern $x`: a PIE links and an absent symbol is null)
+   and marks them `.weak`; a `(weak attr)` definition is kept by pruning and overridden by a strong definition in
+   another unit (`weak_link`). The `_ZTH` prefix rule is removed: `_ZTH<name>` arrives as an ordinary `declare`
+   (checked with `multi/tls_extern`).
+
+Emitter changes are in both `scripts/pathb-qbe-emit.rb` and the oracle `tests/mruby/oracle/pathb-qbe-emit.py`:
+`(barrier)`, `(declare ...)`, `(weak) (extern)` and `(weak attr)`, and a refusal that prints an `(unsupported ...)` statement
+as it is. Edge inputs: `barrier.ir`, `e_barrier_form.ir`, `r_unsupported_asm.ir`, `weak_decl.ir`, `e_declare_form.ir`,
+`weakref_tls_init.ir` (now with `declare`s).
+
+**Still missing after this round**: bit-fields over 64 bits (128-bit types), inline asm with operands/templates/register
+clobbers (not implementable), a bounds check on VLA subscripts, `weakref` aliases, a thread-safe VLA pool.
 
 ## C++ exceptions (stage 3, third round)
 
@@ -410,9 +461,8 @@ as required, 0 refused, 0 failed; `tests/pathb-ir/run.sh` ok (goldens, 45 kinds,
   so the probes report through the exit code.
 - **`long double`** is refused by the emitter as before: a handler or a throw of `long double` refuses the module. A
   `volatile`-qualified handler type refuses it until the volatile work lands (the probe uses `const int *`).
-- **Union aggregate constants** (a local `{{1,2,3,4}, {7}}` with a union member) and **default member initializers on a class with a
-  base and a vptr** give `(unsupported init aggregate-constant)` (`ir_init_constant`). They showed up while writing EH probes but are
-  not related to exceptions; the probes avoid them.
+- **Union aggregate constants** and **default member initializers on a class with a base and a vptr** gave
+  `(unsupported init aggregate-constant)`; they are lowered in the fourth round (above).
 - **Exceptions in dynamic initialization** (a throwing initializer of a namespace-scope object) depend on the dynamic initialization
   work.
 - **Cost.** Every function with an EH stack entry has a 240-byte slot and, since it calls `_setjmp`, all its slots in memory. A try

@@ -1,0 +1,1133 @@
+(ir-module "agg_union.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "g1" (union "U") 4 4 (init
+    (scalar 0 int (const int 5))))
+(global "g2" (union "W") 4 4 (init
+    (scalar 0 char (const char 1))
+    (scalar 1 char (const char 2))
+    (scalar 2 char (const char 3))
+    (scalar 3 char (const char 4))))
+(global "g3" (struct "S") 24 8 (init
+    (scalar 0 int (const int 7))
+    (scalar 8 int (const int 9))
+    (zero 12 4)
+    (scalar 16 int (const int 11))))
+(global "g4" (struct "T") 16 4 (init
+    (scalar 0 int (const int 3))
+    (scalar 4 int (const int 4))
+    (scalar 8 int (const int 5))
+    (scalar 12 int (const int 6))))
+(global "ga" (array 3 (union "U")) 12 4 (init
+    (scalar 0 int (const int 1))
+    (scalar 4 int (const int 2))
+    (scalar 8 int (const int 3))))
+(global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
+(global "_ZTS4Base" (const (array 6 (const char))) 6 1 (weak) (init
+    (bytes 0 6 @"const")))
+(global "_ZTI4Base" (const (struct "__class_type_info")) 16 8 (weak) (init
+    (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv117__class_type_infoE" 16)
+    (addr 8 (ptr (const char)) @"_ZTS4Base" 0)))
+(global "_ZTV4Base" (const (array 5 (const long))) 40 8 (weak) (init
+    (scalar 0 long (const long 0))
+    (addr 8 long @"_ZTI4Base" 0)
+    (addr 16 long &"_ZN4Base1fEv" 0)
+    (addr 24 long &"_ZN4BaseD1Ev" 0)
+    (addr 32 long &"_ZN4BaseD0Ev" 0)))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "_ZTVN10__cxxabiv120__si_class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
+(global "_ZTS7Derived" (const (array 9 (const char))) 9 1 (weak) (init
+    (bytes 0 9 @"const.1")))
+(global "_ZTI7Derived" (const (struct "__si_class_type_info")) 24 8 (weak) (init
+    (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv120__si_class_type_infoE" 16)
+    (addr 8 (ptr (const char)) @"_ZTS7Derived" 0)
+    (addr 16 (ptr (const (struct "__class_type_info"))) @"_ZTI4Base" 0)))
+(global "_ZTV7Derived" (const (array 5 (const long))) 40 8 (weak) (init
+    (scalar 0 long (const long 0))
+    (addr 8 long @"_ZTI7Derived" 0)
+    (addr 16 long &"_ZN7Derived1fEv" 0)
+    (addr 24 long &"_ZN7DerivedD1Ev" 0)
+    (addr 32 long &"_ZN7DerivedD0Ev" 0)))
+(global "__eh_curr_region" unsigned_short 2 2 (extern))
+(global "_ZTS8Derived2" (const (array 10 (const char))) 10 1 (weak) (init
+    (bytes 0 10 @"const.2")))
+(global "_ZTI8Derived2" (const (struct "__si_class_type_info")) 24 8 (weak) (init
+    (addr 0 (ptr (const long)) @"_ZTVN10__cxxabiv120__si_class_type_infoE" 16)
+    (addr 8 (ptr (const char)) @"_ZTS8Derived2" 0)
+    (addr 16 (ptr (const (struct "__class_type_info"))) @"_ZTI7Derived" 0)))
+(global "_ZTV8Derived2" (const (array 5 (const long))) 40 8 (weak) (init
+    (scalar 0 long (const long 0))
+    (addr 8 long @"_ZTI8Derived2" 0)
+    (addr 16 long &"_ZN7Derived1fEv" 0)
+    (addr 24 long &"_ZN8Derived2D1Ev" 0)
+    (addr 32 long &"_ZN8Derived2D0Ev" 0)))
+(global "tmp" (array 4 (struct "__C2")) 64 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZN7DerivedD1Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 0))
+    (addr 16 (ptr (fn void ())) &"_ZN8Derived2D1Ev" 0)
+    (scalar 24 unsigned_short (const unsigned_short 1))
+    (scalar 26 unsigned_short (const unsigned_short 0))
+    (scalar 28 unsigned_char (const unsigned_char 0))
+    (addr 32 (ptr (fn void ())) &"_ZdlPvm" 0)
+    (scalar 40 unsigned_short (const unsigned_short 0))
+    (scalar 42 unsigned_short (const unsigned_short 1))
+    (scalar 44 unsigned_char (const unsigned_char 14))
+    (scalar 48 (ptr (fn void ())) (null (ptr (fn void ()))))
+    (scalar 56 unsigned_short (const unsigned_short 2))
+    (scalar 58 unsigned_short (const unsigned_short 65535))
+    (scalar 60 unsigned_char (const unsigned_char 0))))
+(global "tmp.1" (array 1 (struct "__C1")) 24 8 (static) (init
+    (scalar 0 unsigned_short (const unsigned_short 3))
+    (scalar 8 unsigned_long (const unsigned_long 40))
+    (scalar 16 long (const long 0))))
+(global "tmp.2" (array 1 (struct "__C2")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZN4BaseD2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
+(global "tmp.3" (array 3 int) 12 4 (static) (init
+    (scalar 0 int (const int 1))
+    (scalar 4 int (const int 2))
+    (scalar 8 int (const int 3))))
+(global "tmp.4" (array 1 (struct "__C2")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZN4BaseD2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
+(global "tmp.5" (array 1 (struct "__C2")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZN7DerivedD2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
+(global "tmp.6" (union "_ZN8Derived2Ut_E") 4 4 (static) (init
+    (scalar 0 int (const int 42))))
+(global "tmp.7" (array 1 (struct "__C2")) 16 8 (static) (init
+    (addr 0 (ptr (fn void ())) &"_ZN7DerivedD2Ev" 0)
+    (scalar 8 unsigned_short (const unsigned_short 0))
+    (scalar 10 unsigned_short (const unsigned_short 65535))
+    (scalar 12 unsigned_char (const unsigned_char 64))))
+(data "const" (const (array 6 (const char))) (string "4Base\000"))
+(data "const.1" (const (array 9 (const char))) (string "7Derived\000"))
+(data "const.2" (const (array 10 (const char))) (string "8Derived2\000"))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "tmp" (struct "__C8") 240 8)
+  (slot "tmp.1" (array 4 (ptr void)) 32 8)
+  (slot "l1" (union "U") 4 4)
+  (slot "l2" (union "W") 4 4)
+  (slot "l3" (struct "S") 24 8)
+  (slot "l4" (struct "T") 16 4)
+  (slot "la" (array 2 (union "U")) 8 4)
+  (slot "lv" (union "V") 8 8)
+  (slot "lf" (union "FU") 4 4)
+  (slot "lg" (union "FU") 4 4)
+  (slot "d" (struct "Derived") 40 8)
+  (slot "p" (ptr (struct "Base")) 8 8)
+  (slot "e" (struct "Derived2") 48 8)
+  (slot "tmp.2" int 4 4)
+  (slot "tmp.3" unsigned_long 8 8)
+  (slot "tmp.4" (ptr (struct "Derived")) 8 8)
+  (slot "q" (ptr (struct "Derived")) 8 8)
+  (slot "tmp.5" int 4 4)
+  (let %0 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %0)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %1 (ptr unsigned_char) (offset $"tmp" 8))
+  (store unsigned_char %1 (const unsigned_char 1))
+  (let %2 (ptr (struct "__C2")) (bitcast (ptr (struct "__C2")) @"tmp"))
+  (let %3 (ptr (union "__C7")) (offset $"tmp" 16))
+  (store (ptr (struct "__C2")) %3 %2)
+  (let %4 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
+  (let %5 (ptr (union "__C7")) (offset $"tmp" 16))
+  (let %6 (ptr (ptr (ptr void))) (offset %5 8))
+  (store (ptr (ptr void)) %6 %4)
+  (let %7 (ptr (struct "__C1")) (bitcast (ptr (struct "__C1")) @"tmp.1"))
+  (let %8 (ptr (union "__C7")) (offset $"tmp" 16))
+  (let %9 (ptr (ptr (struct "__C1"))) (offset %8 16))
+  (store (ptr (struct "__C1")) %9 %7)
+  (let %10 unsigned_short (load unsigned_short @"__eh_curr_region"))
+  (let %11 (ptr (union "__C7")) (offset $"tmp" 16))
+  (let %12 (ptr unsigned_short) (offset %11 24))
+  (store unsigned_short %12 %10)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+  (store int $"l1" (const int 6))
+  (loop
+    (body
+      (block
+        (let %13 int (load int $"l1"))
+        (let %14 bool (eq int %13 (const int 6)))
+        (let %15 bool (eq bool %14 (const bool 0)))
+        (if %15
+          (then
+            (block
+              (let %16 int (load int @"bad"))
+              (let %17 int (wadd int %16 (const int 1)))
+              (store int @"bad" %17))))))
+    (step
+      (let %18 bool (ne int (const int 0) (const int 0)))
+      (if %18 (then) (else (break)))))
+  (store char $"l2" (const char 9))
+  (let %19 (ptr char) (offset $"l2" 1))
+  (store char %19 (const char 8))
+  (let %20 (ptr char) (offset $"l2" 2))
+  (store char %20 (const char 7))
+  (let %21 (ptr char) (offset $"l2" 3))
+  (store char %21 (const char 6))
+  (loop
+    (body
+      (block
+        (let %22 (ptr char) (bitcast (ptr char) $"l2"))
+        (bounds (const int 0) 4)
+        (let %23 (ptr char) (index %22 (const int 0) 1))
+        (let %24 char (load char %23))
+        (let %25 int (iconv int %24))
+        (let %26 bool (eq int %25 (const int 9)))
+        (let %27 bool (const bool 0))
+        (if %26
+          (then
+            (let %28 (ptr char) (bitcast (ptr char) $"l2"))
+            (bounds (const int 3) 4)
+            (let %29 (ptr char) (index %28 (const int 3) 1))
+            (let %30 char (load char %29))
+            (let %31 int (iconv int %30))
+            (let %32 bool (eq int %31 (const int 6)))
+            (set %27 %32)))
+        (let %33 bool (eq bool %27 (const bool 0)))
+        (if %33
+          (then
+            (block
+              (let %34 int (load int @"bad"))
+              (let %35 int (wadd int %34 (const int 1)))
+              (store int @"bad" %35))))))
+    (step
+      (let %36 bool (ne int (const int 0) (const int 0)))
+      (if %36 (then) (else (break)))))
+  (store int $"l3" (const int 1))
+  (let %37 (ptr (union "_ZN1SUt_E")) (offset $"l3" 8))
+  (store unsigned_long %37 (const unsigned_long 0))
+  (store int %37 (const int 2))
+  (let %38 (ptr int) (offset $"l3" 16))
+  (store int %38 (const int 3))
+  (loop
+    (body
+      (block
+        (let %39 int (load int $"l3"))
+        (let %40 bool (eq int %39 (const int 1)))
+        (let %41 bool (const bool 0))
+        (if %40
+          (then
+            (let %42 (ptr (union "_ZN1SUt_E")) (offset $"l3" 8))
+            (let %43 int (load int %42))
+            (let %44 bool (eq int %43 (const int 2)))
+            (set %41 %44)))
+        (let %45 bool (const bool 0))
+        (if %41
+          (then
+            (let %46 (ptr int) (offset $"l3" 16))
+            (let %47 int (load int %46))
+            (let %48 bool (eq int %47 (const int 3)))
+            (set %45 %48)))
+        (let %49 bool (eq bool %45 (const bool 0)))
+        (if %49
+          (then
+            (block
+              (let %50 int (load int @"bad"))
+              (let %51 int (wadd int %50 (const int 1)))
+              (store int @"bad" %51))))))
+    (step
+      (let %52 bool (ne int (const int 0) (const int 0)))
+      (if %52 (then) (else (break)))))
+  (store int $"l4" (const int 8))
+  (let %53 (ptr (array 3 int)) (offset $"l4" 4))
+  (store int %53 (const int 1))
+  (let %54 (ptr int) (offset %53 4))
+  (store int %54 (const int 2))
+  (let %55 (ptr int) (offset %53 8))
+  (store int %55 (const int 3))
+  (loop
+    (body
+      (block
+        (let %56 int (load int $"l4"))
+        (let %57 bool (eq int %56 (const int 8)))
+        (let %58 bool (const bool 0))
+        (if %57
+          (then
+            (let %59 (ptr (array 3 int)) (offset $"l4" 4))
+            (let %60 (ptr int) (bitcast (ptr int) %59))
+            (bounds (const int 2) 3)
+            (let %61 (ptr int) (index %60 (const int 2) 4))
+            (let %62 int (load int %61))
+            (let %63 bool (eq int %62 (const int 3)))
+            (set %58 %63)))
+        (let %64 bool (eq bool %58 (const bool 0)))
+        (if %64
+          (then
+            (block
+              (let %65 int (load int @"bad"))
+              (let %66 int (wadd int %65 (const int 1)))
+              (store int @"bad" %66))))))
+    (step
+      (let %67 bool (ne int (const int 0) (const int 0)))
+      (if %67 (then) (else (break)))))
+  (store int $"la" (const int 4))
+  (let %68 (ptr (union "U")) (offset $"la" 4))
+  (store int %68 (const int 5))
+  (loop
+    (body
+      (block
+        (let %69 (ptr (union "U")) (bitcast (ptr (union "U")) $"la"))
+        (bounds (const int 0) 2)
+        (let %70 (ptr (union "U")) (index %69 (const int 0) 4))
+        (let %71 int (load int %70))
+        (let %72 bool (eq int %71 (const int 4)))
+        (let %73 bool (const bool 0))
+        (if %72
+          (then
+            (let %74 (ptr (union "U")) (bitcast (ptr (union "U")) $"la"))
+            (bounds (const int 1) 2)
+            (let %75 (ptr (union "U")) (index %74 (const int 1) 4))
+            (let %76 int (load int %75))
+            (let %77 bool (eq int %76 (const int 5)))
+            (set %73 %77)))
+        (let %78 bool (eq bool %73 (const bool 0)))
+        (if %78
+          (then
+            (block
+              (let %79 int (load int @"bad"))
+              (let %80 int (wadd int %79 (const int 1)))
+              (store int @"bad" %80))))))
+    (step
+      (let %81 bool (ne int (const int 0) (const int 0)))
+      (if %81 (then) (else (break)))))
+  (store long_long $"lv" (const long_long 123456789012))
+  (loop
+    (body
+      (block
+        (let %82 long_long (load long_long $"lv"))
+        (let %83 bool (eq long_long %82 (const long_long 123456789012)))
+        (let %84 bool (eq bool %83 (const bool 0)))
+        (if %84
+          (then
+            (block
+              (let %85 int (load int @"bad"))
+              (let %86 int (wadd int %85 (const int 1)))
+              (store int @"bad" %86))))))
+    (step
+      (let %87 bool (ne int (const int 0) (const int 0)))
+      (if %87 (then) (else (break)))))
+  (store float $"lf" (const float 1.5))
+  (loop
+    (body
+      (block
+        (let %88 float (load float $"lf"))
+        (let %89 bool (eq float %88 (const float 1.5)))
+        (let %90 bool (eq bool %89 (const bool 0)))
+        (if %90
+          (then
+            (block
+              (let %91 int (load int @"bad"))
+              (let %92 int (wadd int %91 (const int 1)))
+              (store int @"bad" %92))))))
+    (step
+      (let %93 bool (ne int (const int 0) (const int 0)))
+      (if %93 (then) (else (break)))))
+  (store unsigned_int $"lg" (const unsigned_int 0))
+  (loop
+    (body
+      (block
+        (let %94 int (load int $"lg"))
+        (let %95 bool (eq int %94 (const int 0)))
+        (let %96 bool (eq bool %95 (const bool 0)))
+        (if %96
+          (then
+            (block
+              (let %97 int (load int @"bad"))
+              (let %98 int (wadd int %97 (const int 1)))
+              (store int @"bad" %98))))))
+    (step
+      (let %99 bool (ne int (const int 0) (const int 0)))
+      (if %99 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %100 int (load int @"g1"))
+        (let %101 bool (eq int %100 (const int 5)))
+        (let %102 bool (eq bool %101 (const bool 0)))
+        (if %102
+          (then
+            (block
+              (let %103 int (load int @"bad"))
+              (let %104 int (wadd int %103 (const int 1)))
+              (store int @"bad" %104))))))
+    (step
+      (let %105 bool (ne int (const int 0) (const int 0)))
+      (if %105 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %106 (ptr char) (bitcast (ptr char) @"g2"))
+        (bounds (const int 0) 4)
+        (let %107 (ptr char) (index %106 (const int 0) 1))
+        (let %108 char (load char %107))
+        (let %109 int (iconv int %108))
+        (let %110 bool (eq int %109 (const int 1)))
+        (let %111 bool (const bool 0))
+        (if %110
+          (then
+            (let %112 (ptr char) (bitcast (ptr char) @"g2"))
+            (bounds (const int 3) 4)
+            (let %113 (ptr char) (index %112 (const int 3) 1))
+            (let %114 char (load char %113))
+            (let %115 int (iconv int %114))
+            (let %116 bool (eq int %115 (const int 4)))
+            (set %111 %116)))
+        (let %117 bool (eq bool %111 (const bool 0)))
+        (if %117
+          (then
+            (block
+              (let %118 int (load int @"bad"))
+              (let %119 int (wadd int %118 (const int 1)))
+              (store int @"bad" %119))))))
+    (step
+      (let %120 bool (ne int (const int 0) (const int 0)))
+      (if %120 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %121 int (load int @"g3"))
+        (let %122 bool (eq int %121 (const int 7)))
+        (let %123 bool (const bool 0))
+        (if %122
+          (then
+            (let %124 (ptr (union "_ZN1SUt_E")) (offset @"g3" 8))
+            (let %125 int (load int %124))
+            (let %126 bool (eq int %125 (const int 9)))
+            (set %123 %126)))
+        (let %127 bool (const bool 0))
+        (if %123
+          (then
+            (let %128 (ptr int) (offset @"g3" 16))
+            (let %129 int (load int %128))
+            (let %130 bool (eq int %129 (const int 11)))
+            (set %127 %130)))
+        (let %131 bool (eq bool %127 (const bool 0)))
+        (if %131
+          (then
+            (block
+              (let %132 int (load int @"bad"))
+              (let %133 int (wadd int %132 (const int 1)))
+              (store int @"bad" %133))))))
+    (step
+      (let %134 bool (ne int (const int 0) (const int 0)))
+      (if %134 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %135 int (load int @"g4"))
+        (let %136 bool (eq int %135 (const int 3)))
+        (let %137 bool (const bool 0))
+        (if %136
+          (then
+            (let %138 (ptr (array 3 int)) (offset @"g4" 4))
+            (let %139 (ptr int) (bitcast (ptr int) %138))
+            (bounds (const int 0) 3)
+            (let %140 (ptr int) (index %139 (const int 0) 4))
+            (let %141 int (load int %140))
+            (let %142 bool (eq int %141 (const int 4)))
+            (set %137 %142)))
+        (let %143 bool (const bool 0))
+        (if %137
+          (then
+            (let %144 (ptr (array 3 int)) (offset @"g4" 4))
+            (let %145 (ptr int) (bitcast (ptr int) %144))
+            (bounds (const int 2) 3)
+            (let %146 (ptr int) (index %145 (const int 2) 4))
+            (let %147 int (load int %146))
+            (let %148 bool (eq int %147 (const int 6)))
+            (set %143 %148)))
+        (let %149 bool (eq bool %143 (const bool 0)))
+        (if %149
+          (then
+            (block
+              (let %150 int (load int @"bad"))
+              (let %151 int (wadd int %150 (const int 1)))
+              (store int @"bad" %151))))))
+    (step
+      (let %152 bool (ne int (const int 0) (const int 0)))
+      (if %152 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %153 (ptr (union "U")) (bitcast (ptr (union "U")) @"ga"))
+        (bounds (const int 0) 3)
+        (let %154 (ptr (union "U")) (index %153 (const int 0) 4))
+        (let %155 int (load int %154))
+        (let %156 bool (eq int %155 (const int 1)))
+        (let %157 bool (const bool 0))
+        (if %156
+          (then
+            (let %158 (ptr (union "U")) (bitcast (ptr (union "U")) @"ga"))
+            (bounds (const int 1) 3)
+            (let %159 (ptr (union "U")) (index %158 (const int 1) 4))
+            (let %160 int (load int %159))
+            (let %161 bool (eq int %160 (const int 2)))
+            (set %157 %161)))
+        (let %162 bool (const bool 0))
+        (if %157
+          (then
+            (let %163 (ptr (union "U")) (bitcast (ptr (union "U")) @"ga"))
+            (bounds (const int 2) 3)
+            (let %164 (ptr (union "U")) (index %163 (const int 2) 4))
+            (let %165 int (load int %164))
+            (let %166 bool (eq int %165 (const int 3)))
+            (set %162 %166)))
+        (let %167 bool (eq bool %162 (const bool 0)))
+        (if %167
+          (then
+            (block
+              (let %168 int (load int @"bad"))
+              (let %169 int (wadd int %168 (const int 1)))
+              (store int @"bad" %169))))))
+    (step
+      (let %170 bool (ne int (const int 0) (const int 0)))
+      (if %170 (then) (else (break)))))
+  (eval (call void &"_ZN7DerivedC1Ev" $"d"))
+  (let %171 (ptr void) (bitcast (ptr void) $"d"))
+  (let %172 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
+  (bounds (const unsigned_long 0) 4)
+  (let %173 (ptr (ptr void)) (index %172 (const unsigned_long 0) 8))
+  (store (ptr void) %173 %171)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 0))
+  (loop
+    (body
+      (block
+        (let %174 (ptr int) (offset $"d" 12))
+        (let %175 int (load int %174))
+        (let %176 bool (eq int %175 (const int 10)))
+        (let %177 bool (const bool 0))
+        (if %176
+          (then
+            (let %178 (ptr double) (offset $"d" 16))
+            (let %179 double (load double %178))
+            (let %180 bool (eq double %179 (const double 2.5)))
+            (set %177 %180)))
+        (let %181 bool (const bool 0))
+        (if %177
+          (then
+            (let %182 (ptr char) (offset $"d" 24))
+            (let %183 char (load char %182))
+            (let %184 int (iconv int %183))
+            (let %185 bool (eq int %184 (const int 120)))
+            (set %181 %185)))
+        (let %186 bool (const bool 0))
+        (if %181
+          (then
+            (let %187 (ptr (array 3 int)) (offset $"d" 28))
+            (let %188 (ptr int) (bitcast (ptr int) %187))
+            (bounds (const int 2) 3)
+            (let %189 (ptr int) (index %188 (const int 2) 4))
+            (let %190 int (load int %189))
+            (let %191 bool (eq int %190 (const int 3)))
+            (set %186 %191)))
+        (let %192 bool (const bool 0))
+        (if %186
+          (then
+            (let %193 (ptr int) (offset $"d" 8))
+            (let %194 int (load int %193))
+            (let %195 bool (eq int %194 (const int 1)))
+            (set %192 %195)))
+        (let %196 bool (eq bool %192 (const bool 0)))
+        (if %196
+          (then
+            (block
+              (let %197 int (load int @"bad"))
+              (let %198 int (wadd int %197 (const int 1)))
+              (store int @"bad" %198))))))
+    (step
+      (let %199 bool (ne int (const int 0) (const int 0)))
+      (if %199 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %200 int (call int &"_ZN7Derived1fEv" $"d"))
+        (let %201 bool (eq int %200 (const int 11)))
+        (let %202 bool (eq bool %201 (const bool 0)))
+        (if %202
+          (then
+            (block
+              (let %203 int (load int @"bad"))
+              (let %204 int (wadd int %203 (const int 1)))
+              (store int @"bad" %204))))))
+    (step
+      (let %205 bool (ne int (const int 0) (const int 0)))
+      (if %205 (then) (else (break)))))
+  (let %206 (ptr (struct "Base")) (bitcast (ptr (struct "Base")) $"d"))
+  (store (ptr (struct "Base")) $"p" %206)
+  (loop
+    (body
+      (block
+        (let %207 (ptr (struct "Base")) (load (ptr (struct "Base")) $"p"))
+        (nonnull %207)
+        (let %208 (ptr (const long)) (load (ptr (const long)) %207))
+        (let %209 (ptr (const long)) (index %208 (const int 0) 8))
+        (let %210 (ptr (ptr (fn int ((ptr (struct "Base")))))) (bitcast (ptr (ptr (fn int ((ptr (struct "Base")))))) %209))
+        (nonnull %210)
+        (let %211 (ptr (fn int ((ptr (struct "Base"))))) (load (ptr (fn int ((ptr (struct "Base"))))) %210))
+        (nonnull %211)
+        (let %212 (ptr (struct "Base")) (load (ptr (struct "Base")) $"p"))
+        (let %213 int (call int %211 %212))
+        (let %214 bool (eq int %213 (const int 11)))
+        (let %215 bool (eq bool %214 (const bool 0)))
+        (if %215
+          (then
+            (block
+              (let %216 int (load int @"bad"))
+              (let %217 int (wadd int %216 (const int 1)))
+              (store int @"bad" %217))))))
+    (step
+      (let %218 bool (ne int (const int 0) (const int 0)))
+      (if %218 (then) (else (break)))))
+  (eval (call void &"_ZN8Derived2C1Ev" $"e"))
+  (let %219 (ptr void) (bitcast (ptr void) $"e"))
+  (let %220 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
+  (bounds (const unsigned_long 1) 4)
+  (let %221 (ptr (ptr void)) (index %220 (const unsigned_long 1) 8))
+  (store (ptr void) %221 %219)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 1))
+  (loop
+    (body
+      (block
+        (let %222 (ptr (union "_ZN8Derived2Ut_E")) (offset $"e" 40))
+        (let %223 int (load int %222))
+        (let %224 bool (eq int %223 (const int 42)))
+        (let %225 bool (const bool 0))
+        (if %224
+          (then
+            (let %226 (ptr int) (offset $"e" 44))
+            (let %227 int (load int %226))
+            (let %228 bool (eq int %227 (const int 77)))
+            (set %225 %228)))
+        (let %229 bool (const bool 0))
+        (if %225
+          (then
+            (let %230 (ptr int) (offset $"e" 12))
+            (let %231 int (load int %230))
+            (let %232 bool (eq int %231 (const int 10)))
+            (set %229 %232)))
+        (let %233 bool (const bool 0))
+        (if %229
+          (then
+            (let %234 int (call int &"_ZN7Derived1fEv" $"e"))
+            (let %235 bool (eq int %234 (const int 11)))
+            (set %233 %235)))
+        (let %236 bool (eq bool %233 (const bool 0)))
+        (if %236
+          (then
+            (block
+              (let %237 int (load int @"bad"))
+              (let %238 int (wadd int %237 (const int 1)))
+              (store int @"bad" %238))))))
+    (step
+      (let %239 bool (ne int (const int 0) (const int 0)))
+      (if %239 (then) (else (break)))))
+  (block
+    (store int $"tmp.2" (const int 0))
+    (let %240 (ptr void) (bitcast (ptr void) $"tmp.2"))
+    (let %241 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
+    (bounds (const unsigned_long 2) 4)
+    (let %242 (ptr (ptr void)) (index %241 (const unsigned_long 2) 8))
+    (store (ptr void) %242 %240)
+    (store unsigned_long $"tmp.3" (const unsigned_long 40))
+    (let %243 unsigned_long (load unsigned_long $"tmp.3"))
+    (let %244 (ptr void) (call (ptr void) &"_Znwm" %243))
+    (let %245 (ptr (struct "Derived")) (bitcast (ptr (struct "Derived")) %244))
+    (store (ptr (struct "Derived")) $"tmp.4" %245)
+    (store int $"tmp.2" (const int 1))
+    (let %246 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp.4"))
+    (let %247 (ptr void) (bitcast (ptr void) %246))
+    (let %248 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.1"))
+    (bounds (const unsigned_long 3) 4)
+    (let %249 (ptr (ptr void)) (index %248 (const unsigned_long 3) 8))
+    (store (ptr void) %249 %247)
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 2))
+    (let %250 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp.4"))
+    (eval (call void &"_ZN7DerivedC1Ev" %250))
+    (store int $"tmp.2" (const int 0))
+    (let %251 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp.4"))
+    (store (ptr (struct "Derived")) $"q" %251)
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 1)))
+  (loop
+    (body
+      (block
+        (let %252 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"q"))
+        (nonnull %252)
+        (let %253 (ptr (array 3 int)) (offset %252 28))
+        (let %254 (ptr int) (bitcast (ptr int) %253))
+        (bounds (const int 1) 3)
+        (let %255 (ptr int) (index %254 (const int 1) 4))
+        (let %256 int (load int %255))
+        (let %257 bool (eq int %256 (const int 2)))
+        (let %258 bool (const bool 0))
+        (if %257
+          (then
+            (let %259 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"q"))
+            (nonnull %259)
+            (let %260 (ptr (const long)) (load (ptr (const long)) %259))
+            (let %261 (ptr (const long)) (index %260 (const int 0) 8))
+            (let %262 (ptr (ptr (fn int ((ptr (struct "Derived")))))) (bitcast (ptr (ptr (fn int ((ptr (struct "Derived")))))) %261))
+            (nonnull %262)
+            (let %263 (ptr (fn int ((ptr (struct "Derived"))))) (load (ptr (fn int ((ptr (struct "Derived"))))) %262))
+            (nonnull %263)
+            (let %264 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"q"))
+            (let %265 int (call int %263 %264))
+            (let %266 bool (eq int %265 (const int 11)))
+            (set %258 %266)))
+        (let %267 bool (eq bool %258 (const bool 0)))
+        (if %267
+          (then
+            (block
+              (let %268 int (load int @"bad"))
+              (let %269 int (wadd int %268 (const int 1)))
+              (store int @"bad" %269))))))
+    (step
+      (let %270 bool (ne int (const int 0) (const int 0)))
+      (if %270 (then) (else (break)))))
+  (let %271 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"q"))
+  (let %272 bool (ne (ptr (struct "Derived")) %271 (null (ptr (struct "Derived")))))
+  (if %272
+    (then
+      (let %273 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"q"))
+      (nonnull %273)
+      (let %274 (ptr (const long)) (load (ptr (const long)) %273))
+      (let %275 (ptr (const long)) (index %274 (const int 2) 8))
+      (let %276 (ptr (ptr (fn void ((const (ptr (struct "Derived"))))))) (bitcast (ptr (ptr (fn void ((const (ptr (struct "Derived"))))))) %275))
+      (nonnull %276)
+      (let %277 (ptr (fn void ((const (ptr (struct "Derived")))))) (load (ptr (fn void ((const (ptr (struct "Derived")))))) %276))
+      (nonnull %277)
+      (let %278 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"q"))
+      (eval (call void %277 %278)))
+    (else))
+  (block
+    (let %279 int (load int @"bad"))
+    (store int $"tmp.5" %279)
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 0))
+    (eval (call void &"_ZN8Derived2D1Ev" $"e"))
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+    (eval (call void &"_ZN7DerivedD1Ev" $"d"))
+    (block
+      (let %280 (ptr (union "__C7")) (offset $"tmp" 16))
+      (let %281 (ptr unsigned_short) (offset %280 24))
+      (let %282 unsigned_short (load unsigned_short %281))
+      (store unsigned_short @"__eh_curr_region" %282)
+      (let %283 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+      (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %283)
+      (let %284 int (load int $"tmp.5"))
+      (return %284))))
+
+(function "_ZN4BaseC1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Base")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Base"))) 8 8)
+  (store (ptr (struct "Base")) $"tmp" %0)
+  (let %1 (ptr (const long)) (offset @"_ZTV4Base" 16))
+  (let %2 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (nonnull %2)
+  (store (ptr (const long)) %2 %1)
+  (let %3 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (nonnull %3)
+  (let %4 (ptr int) (offset %3 8))
+  (store int %4 (const int 1))
+  (return))
+
+(function "_ZN4BaseC2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Base")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Base"))) 8 8)
+  (store (ptr (struct "Base")) $"tmp" %0)
+  (let %1 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (eval (call void &"_ZN4BaseC1Ev" %1))
+  (return))
+
+(function "_ZN4Base1fEv"
+  (ret int)
+  (params (param %0 "tmp" (const (ptr (struct "Base")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Base"))) 8 8)
+  (store (ptr (struct "Base")) $"tmp" %0)
+  (let %1 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (nonnull %1)
+  (let %2 (ptr int) (offset %1 8))
+  (let %3 int (load int %2))
+  (return %3))
+
+(function "_ZN4BaseD1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Base")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Base"))) 8 8)
+  (slot "tmp.1" (struct "__C8") 240 8)
+  (store (ptr (struct "Base")) $"tmp" %0)
+  (let %1 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.1" %1)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.1")
+  (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
+  (store unsigned_char %2 (const unsigned_char 6))
+  (let %3 (ptr (const long)) (offset @"_ZTV4Base" 16))
+  (let %4 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (nonnull %4)
+  (store (ptr (const long)) %4 %3)
+  (block
+    (let %5 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.1"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %5)
+    (return)))
+
+(function "_ZN4BaseD0Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Base")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Base"))) 8 8)
+  (store (ptr (struct "Base")) $"tmp" %0)
+  (let %1 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (eval (call void &"_ZN4BaseD1Ev" %1))
+  (let %2 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (let %3 (ptr void) (bitcast (ptr void) %2))
+  (eval (call void &"_ZdlPvm" %3 (const unsigned_long 16)))
+  (return))
+
+(function "_ZN4BaseD2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Base")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Base"))) 8 8)
+  (store (ptr (struct "Base")) $"tmp" %0)
+  (let %1 (ptr (struct "Base")) (load (ptr (struct "Base")) $"tmp"))
+  (eval (call void &"_ZN4BaseD1Ev" %1))
+  (return))
+
+(function "_ZN7Derived1fEv"
+  (ret int)
+  (params (param %0 "tmp" (const (ptr (struct "Derived")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived"))) 8 8)
+  (store (ptr (struct "Derived")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %1)
+  (let %2 (ptr int) (offset %1 12))
+  (let %3 int (load int %2))
+  (let %4 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %4)
+  (let %5 (ptr int) (offset %4 8))
+  (let %6 int (load int %5))
+  (let %7 int (wadd int %3 %6))
+  (return %7))
+
+(function "_ZN7DerivedC1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived"))) 8 8)
+  (slot "tmp.1" (struct "__C8") 240 8)
+  (slot "tmp.2" (array 1 (ptr void)) 8 8)
+  (store (ptr (struct "Derived")) $"tmp" %0)
+  (let %1 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.1" %1)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.1")
+  (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
+  (store unsigned_char %2 (const unsigned_char 1))
+  (let %3 (ptr (struct "__C2")) (bitcast (ptr (struct "__C2")) @"tmp.2"))
+  (let %4 (ptr (union "__C7")) (offset $"tmp.1" 16))
+  (store (ptr (struct "__C2")) %4 %3)
+  (let %5 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
+  (let %6 (ptr (union "__C7")) (offset $"tmp.1" 16))
+  (let %7 (ptr (ptr (ptr void))) (offset %6 8))
+  (store (ptr (ptr void)) %7 %5)
+  (let %8 unsigned_short (load unsigned_short @"__eh_curr_region"))
+  (let %9 (ptr (union "__C7")) (offset $"tmp.1" 16))
+  (let %10 (ptr unsigned_short) (offset %9 24))
+  (store unsigned_short %10 %8)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+  (let %11 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (let %12 (ptr (struct "Base")) (bitcast (ptr (struct "Base")) %11))
+  (eval (call void &"_ZN4BaseC2Ev" %12))
+  (let %13 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (let %14 (ptr (struct "Base")) (bitcast (ptr (struct "Base")) %13))
+  (let %15 (ptr void) (bitcast (ptr void) %14))
+  (let %16 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
+  (bounds (const unsigned_long 0) 1)
+  (let %17 (ptr (ptr void)) (index %16 (const unsigned_long 0) 8))
+  (store (ptr void) %17 %15)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 0))
+  (let %18 (ptr (const long)) (offset @"_ZTV7Derived" 16))
+  (let %19 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %19)
+  (store (ptr (const long)) %19 %18)
+  (let %20 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %20)
+  (let %21 (ptr int) (offset %20 12))
+  (store int %21 (const int 10))
+  (let %22 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %22)
+  (let %23 (ptr double) (offset %22 16))
+  (store double %23 (const double 2.5))
+  (let %24 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %24)
+  (let %25 (ptr char) (offset %24 24))
+  (store char %25 (const char 120))
+  (let %26 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %26)
+  (let %27 (ptr (array 3 int)) (offset %26 28))
+  (copy 12 %27 @"tmp.3")
+  (block
+    (let %28 (ptr (union "__C7")) (offset $"tmp.1" 16))
+    (let %29 (ptr unsigned_short) (offset %28 24))
+    (let %30 unsigned_short (load unsigned_short %29))
+    (store unsigned_short @"__eh_curr_region" %30)
+    (let %31 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.1"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %31)
+    (return)))
+
+(function "_ZN7DerivedC2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived"))) 8 8)
+  (store (ptr (struct "Derived")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (eval (call void &"_ZN7DerivedC1Ev" %1))
+  (return))
+
+(function "_ZN7DerivedD1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived"))) 8 8)
+  (slot "tmp.1" (struct "__C8") 240 8)
+  (slot "tmp.2" (struct "__C8") 240 8)
+  (slot "tmp.3" (array 1 (ptr void)) 8 8)
+  (store (ptr (struct "Derived")) $"tmp" %0)
+  (let %1 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.1" %1)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.1")
+  (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
+  (store unsigned_char %2 (const unsigned_char 6))
+  (let %3 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.2" %3)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.2")
+  (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
+  (store unsigned_char %4 (const unsigned_char 1))
+  (let %5 (ptr (struct "__C2")) (bitcast (ptr (struct "__C2")) @"tmp.4"))
+  (let %6 (ptr (union "__C7")) (offset $"tmp.2" 16))
+  (store (ptr (struct "__C2")) %6 %5)
+  (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
+  (let %8 (ptr (union "__C7")) (offset $"tmp.2" 16))
+  (let %9 (ptr (ptr (ptr void))) (offset %8 8))
+  (store (ptr (ptr void)) %9 %7)
+  (let %10 unsigned_short (load unsigned_short @"__eh_curr_region"))
+  (let %11 (ptr (union "__C7")) (offset $"tmp.2" 16))
+  (let %12 (ptr unsigned_short) (offset %11 24))
+  (store unsigned_short %12 %10)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+  (let %13 (ptr (const long)) (offset @"_ZTV7Derived" 16))
+  (let %14 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (nonnull %14)
+  (store (ptr (const long)) %14 %13)
+  (let %15 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (let %16 (ptr (struct "Base")) (bitcast (ptr (struct "Base")) %15))
+  (let %17 (ptr void) (bitcast (ptr void) %16))
+  (let %18 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
+  (bounds (const unsigned_long 0) 1)
+  (let %19 (ptr (ptr void)) (index %18 (const unsigned_long 0) 8))
+  (store (ptr void) %19 %17)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 0))
+  (block
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+    (let %20 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+    (let %21 (ptr (struct "Base")) (bitcast (ptr (struct "Base")) %20))
+    (eval (call void &"_ZN4BaseD2Ev" %21)))
+  (block
+    (let %22 (ptr (union "__C7")) (offset $"tmp.2" 16))
+    (let %23 (ptr unsigned_short) (offset %22 24))
+    (let %24 unsigned_short (load unsigned_short %23))
+    (store unsigned_short @"__eh_curr_region" %24)
+    (let %25 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.2"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %25)
+    (let %26 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.1"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %26)
+    (return)))
+
+(function "_ZN7DerivedD0Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived"))) 8 8)
+  (store (ptr (struct "Derived")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (eval (call void &"_ZN7DerivedD1Ev" %1))
+  (let %2 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (let %3 (ptr void) (bitcast (ptr void) %2))
+  (eval (call void &"_ZdlPvm" %3 (const unsigned_long 40)))
+  (return))
+
+(function "_ZN7DerivedD2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived"))) 8 8)
+  (store (ptr (struct "Derived")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived")) (load (ptr (struct "Derived")) $"tmp"))
+  (eval (call void &"_ZN7DerivedD1Ev" %1))
+  (return))
+
+(function "_ZN8Derived2C1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived2")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived2"))) 8 8)
+  (slot "tmp.1" (struct "__C8") 240 8)
+  (slot "tmp.2" (array 1 (ptr void)) 8 8)
+  (store (ptr (struct "Derived2")) $"tmp" %0)
+  (let %1 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.1" %1)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.1")
+  (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
+  (store unsigned_char %2 (const unsigned_char 1))
+  (let %3 (ptr (struct "__C2")) (bitcast (ptr (struct "__C2")) @"tmp.5"))
+  (let %4 (ptr (union "__C7")) (offset $"tmp.1" 16))
+  (store (ptr (struct "__C2")) %4 %3)
+  (let %5 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
+  (let %6 (ptr (union "__C7")) (offset $"tmp.1" 16))
+  (let %7 (ptr (ptr (ptr void))) (offset %6 8))
+  (store (ptr (ptr void)) %7 %5)
+  (let %8 unsigned_short (load unsigned_short @"__eh_curr_region"))
+  (let %9 (ptr (union "__C7")) (offset $"tmp.1" 16))
+  (let %10 (ptr unsigned_short) (offset %9 24))
+  (store unsigned_short %10 %8)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+  (let %11 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %11)
+  (eval (call void &"_ZN7DerivedC2Ev" %11))
+  (let %12 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %12)
+  (let %13 (ptr void) (bitcast (ptr void) %12))
+  (let %14 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
+  (bounds (const unsigned_long 0) 1)
+  (let %15 (ptr (ptr void)) (index %14 (const unsigned_long 0) 8))
+  (store (ptr void) %15 %13)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 0))
+  (let %16 (ptr (const long)) (offset @"_ZTV8Derived2" 16))
+  (let %17 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %17)
+  (store (ptr (const long)) %17 %16)
+  (let %18 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %18)
+  (let %19 (ptr (union "_ZN8Derived2Ut_E")) (offset %18 40))
+  (copy 4 %19 @"tmp.6")
+  (let %20 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %20)
+  (let %21 (ptr int) (offset %20 44))
+  (store int %21 (const int 77))
+  (block
+    (let %22 (ptr (union "__C7")) (offset $"tmp.1" 16))
+    (let %23 (ptr unsigned_short) (offset %22 24))
+    (let %24 unsigned_short (load unsigned_short %23))
+    (store unsigned_short @"__eh_curr_region" %24)
+    (let %25 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.1"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %25)
+    (return)))
+
+(function "_ZN8Derived2C2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived2")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived2"))) 8 8)
+  (store (ptr (struct "Derived2")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (eval (call void &"_ZN8Derived2C1Ev" %1))
+  (return))
+
+(function "_ZN8Derived2D1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived2")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived2"))) 8 8)
+  (slot "tmp.1" (struct "__C8") 240 8)
+  (slot "tmp.2" (struct "__C8") 240 8)
+  (slot "tmp.3" (array 1 (ptr void)) 8 8)
+  (store (ptr (struct "Derived2")) $"tmp" %0)
+  (let %1 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.1" %1)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.1")
+  (let %2 (ptr unsigned_char) (offset $"tmp.1" 8))
+  (store unsigned_char %2 (const unsigned_char 6))
+  (let %3 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp.2" %3)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp.2")
+  (let %4 (ptr unsigned_char) (offset $"tmp.2" 8))
+  (store unsigned_char %4 (const unsigned_char 1))
+  (let %5 (ptr (struct "__C2")) (bitcast (ptr (struct "__C2")) @"tmp.7"))
+  (let %6 (ptr (union "__C7")) (offset $"tmp.2" 16))
+  (store (ptr (struct "__C2")) %6 %5)
+  (let %7 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
+  (let %8 (ptr (union "__C7")) (offset $"tmp.2" 16))
+  (let %9 (ptr (ptr (ptr void))) (offset %8 8))
+  (store (ptr (ptr void)) %9 %7)
+  (let %10 unsigned_short (load unsigned_short @"__eh_curr_region"))
+  (let %11 (ptr (union "__C7")) (offset $"tmp.2" 16))
+  (let %12 (ptr unsigned_short) (offset %11 24))
+  (store unsigned_short %12 %10)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+  (let %13 (ptr (const long)) (offset @"_ZTV8Derived2" 16))
+  (let %14 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %14)
+  (store (ptr (const long)) %14 %13)
+  (let %15 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (nonnull %15)
+  (let %16 (ptr void) (bitcast (ptr void) %15))
+  (let %17 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
+  (bounds (const unsigned_long 0) 1)
+  (let %18 (ptr (ptr void)) (index %17 (const unsigned_long 0) 8))
+  (store (ptr void) %18 %16)
+  (store unsigned_short @"__eh_curr_region" (const unsigned_short 0))
+  (block
+    (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
+    (let %19 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+    (nonnull %19)
+    (eval (call void &"_ZN7DerivedD2Ev" %19)))
+  (block
+    (let %20 (ptr (union "__C7")) (offset $"tmp.2" 16))
+    (let %21 (ptr unsigned_short) (offset %20 24))
+    (let %22 unsigned_short (load unsigned_short %21))
+    (store unsigned_short @"__eh_curr_region" %22)
+    (let %23 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.2"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %23)
+    (let %24 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp.1"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %24)
+    (return)))
+
+(function "_ZN8Derived2D0Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived2")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived2"))) 8 8)
+  (store (ptr (struct "Derived2")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (eval (call void &"_ZN8Derived2D1Ev" %1))
+  (let %2 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (let %3 (ptr void) (bitcast (ptr void) %2))
+  (eval (call void &"_ZdlPvm" %3 (const unsigned_long 48)))
+  (return))
+
+(function "_ZN8Derived2D2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Derived2")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "Derived2"))) 8 8)
+  (store (ptr (struct "Derived2")) $"tmp" %0)
+  (let %1 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
+  (eval (call void &"_ZN8Derived2D1Ev" %1))
+  (return))

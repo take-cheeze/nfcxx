@@ -51,6 +51,11 @@ BACK_END_IS_C_GEN_BE=0
 BACK_END_IS_CP_GEN_BE=0
 # IL lowering stays on, so the back end sees the lowered IL the C generator would see.
 DO_IL_LOWERING=1
+# Variable-length arrays are lowered by the front end, as the C generator's configuration does: the storage is a
+# __vla_alloc call (EDG runtime, libC.a, malloc based) at the declaration and a __vla_dealloc call at every exit from
+# the scope (end of block, break/continue/goto/return, and the EH cleanup list). QBE has no stack save/restore, so
+# the earlier scheme (QBE alloc16, never released) could not free VLA storage at block exit.
+LOWER_VARIABLE_LENGTH_ARRAYS=1
 import <support/platform/linux/cpfe>
 import <support/build-type/release/cpfe>
 CFG
