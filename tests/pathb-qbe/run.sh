@@ -2,16 +2,21 @@
 # Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.rb, run by the mruby interpreter, scripts/mrb).
 #
 # For each program: scripts/pathb-dump --ir (the harness) -> scripts/pathb-qbe-emit.rb -> build/qbe/qbe ->
-# cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lstdc++ -lgcc_s -lpthread -lC) -> run.
+# cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lC -lstdc++ -lgcc_s -lpthread; libC.a first, so EDG's EH runtime and operator new/delete win) -> run.
 # The exit code must equal the // EXPECT: value. The gcc backend (NFCXX_BACKEND=gcc ./nfcxx) must agree with it.
 #
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
 #                                 `continue`, bool loads, unreachable code. A probe with a `// GCC: undefined` line
 #                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
+#                                 A probe with a `// STDOUT: same` line also needs the same standard output as the gcc
+#                                 backend (dyn_*.cpp: constructor/destructor order of global, static and heap objects).
+#                                 eh_*.cpp: C++ exceptions through EDG's setjmp/longjmp ABI and the runtime in libC.a
+#                                 (docs/notes/pathb-stage3.md, "C++ exceptions"). `// STD: c++14` selects the standard.
 #   tests/cases/*.cpp             the regression programs (same EXPECT values as the production runner).
 #   tests/pathb-qbe/multi/*/      programs of several translation units (all *.cpp of a directory, linked together):
 #                                 COMDAT/weak linkage of inline and template code from a shared header.
-#   tests/pathb-qbe/traps/*.cpp   programs whose checked operations must abort (exit status 134, SIGABRT).
+#   tests/pathb-qbe/traps/*.cpp   programs whose checked operations must abort (exit status 134, SIGABRT); a
+#                                 `// TRAP-STDERR: text` line also requires that text on stderr (EH runtime messages).
 #                                 Built with NFCXX_IR_OVERFLOW=trap. The gcc backend is not compared: C leaves
 #                                 these cases undefined (gcc dies with SIGFPE or SIGSEGV instead).
 #
@@ -37,18 +42,22 @@ total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0
 lines=()
 
 expect_of() { sed -n 's,^// EXPECT: *\(-\?[0-9]*\).*,\1,p' "$1" | head -1; }
+# `// STD: c++14` in a probe selects the language standard (default c++23), for pathb-dump and for the gcc backend.
+# C++ exceptions: dynamic exception specifications exist only before C++17.
+std_of() { sed -n 's,^// STD: *\(c++[0-9]*\).*,-std=\1,p' "$1" | head -1; }
 
 # run_one <file> <mode: exit|trap>. Prints one table line and updates the counters.
 run_one() {
-  local f=$1 mode=$2 n name ir ssa s obj exe want got gcc_rc rc msg
+  local f=$1 mode=$2 n name ir ssa s obj exe want got gcc_rc rc msg std
+  std=$(std_of "$f")
   total=$((total + 1))
   n=$(basename "$f" .cpp); name=${f#tests/}
   ir=$tmp/$n.ir; ssa=$tmp/$n.ssa; s=$tmp/$n.s; obj=$tmp/$n.o; exe=$tmp/$n.exe
   if [ "$mode" = trap ]; then
-    NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   else
-    scripts/pathb-dump --ir "$f" > "$ir" 2> "$tmp/$n.fe" || {
+    scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   fi
   "$mrb" "$emit" "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
@@ -65,15 +74,20 @@ run_one() {
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" -L"$libdir" -lstdc++ -lgcc_s -lpthread -lC 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
-  sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$exe"; got=$?
+  sh -c 'timeout 10 "$0" > "$1" 2> "$2"; exit $?' "$exe" "$tmp/$n.stdout" "$tmp/$n.rt"; got=$?
   ran=$((ran + 1))
   if [ "$mode" = trap ]; then
-    if [ $got = 134 ]; then trapped=$((trapped + 1)); lines+=("trapped  $name (SIGABRT)")
-    else failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap (134)"); fi
+    # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
+    # another reason (a broken unwinder, say) is not taken for the trap it is testing.
+    want=$(sed -n 's,^// TRAP-STDERR: *\(.*\),\1,p' "$f" | head -1)
+    if [ $got != 134 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap (134)")
+    elif [ -n "$want" ] && ! grep -qF "$want" "$tmp/$n.rt"; then
+      failed=$((failed + 1)); lines+=("FAIL     $name: aborted, but stderr lacks '$want'")
+    else trapped=$((trapped + 1)); lines+=("trapped  $name (SIGABRT)"); fi
     return
   fi
   want=$(expect_of "$f")
@@ -86,8 +100,8 @@ run_one() {
     fi
     match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: undefined in C++)"); return
   fi
-  if NFCXX_BACKEND=gcc ./nfcxx "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
-    sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$tmp/$n.gcc"; gcc_rc=$?
+  if NFCXX_BACKEND=gcc ./nfcxx $std "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
+    sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/$n.gcc" "$tmp/$n.gcc.stdout"; gcc_rc=$?
   else
     gcc_rc=compile-error
   fi
@@ -97,6 +111,12 @@ run_one() {
   fi
   if [ "$gcc_rc" != "$((want & 255))" ] && [ "$gcc_rc" != "$want" ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc")
+    return
+  fi
+  # A probe with a `// STDOUT: same` line prints (constructor and destructor order, ...): the output of the Path B
+  # program must be byte for byte the output of the gcc backend's program.
+  if grep -q '^// STDOUT: same' "$f" && ! cmp -s "$tmp/$n.stdout" "$tmp/$n.gcc.stdout"; then
+    failed=$((failed + 1)); lines+=("MISMATCH $name: stdout differs from the gcc backend: $(diff "$tmp/$n.stdout" "$tmp/$n.gcc.stdout" | head -3 | tr '\n' '|')")
     return
   fi
   match=$((match + 1))
@@ -125,7 +145,7 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lstdc++ -lgcc_s -lpthread -lC 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))

@@ -290,6 +290,31 @@ static const char *ir_name_or(const char *name, const char *fallback)
   return (name != NULL && name[0] != '\0') ? name : fallback;
 }
 
+/* Routine names. A routine's symbol is its name; the lowering also makes routines that have none (the helper that
+   destroys an array with static storage, registered with __cxa_atexit). Those get a unique module-level name on first
+   use, and every named routine's name is reserved up front (ir_reserve_routine_names), so that no static object or
+   unnamed routine takes it. */
+static void ir_reserve_name(const char *name)
+{
+  if (name == NULL || name[0] == '\0' || ir_raw_used(&ir_mod, name) || ir_mod.n >= IR_TAB_MAX) return;
+  ir_mod.e[ir_mod.n].key = NULL;
+  ir_mod.e[ir_mod.n].raw = ir_dup(name);
+  ir_mod.e[ir_mod.n].op = ir_fmt("&\"%s\"", name);
+  ir_mod.n++;
+}
+
+static const char *ir_rout_name(a_routine_ptr r)
+{
+  const char *n = r->source_corresp.name;
+  const char *op;
+  char *s;
+  if (n != NULL && n[0] != '\0') return n;
+  op = ir_tab_get(&ir_mod, r, "__unnamed_fn", "&");
+  s = ir_dup(op + 2);
+  s[strlen(s) - 1] = '\0';
+  return s;
+}
+
 /* ================================================================ statistics */
 
 /* Node occurrences that were lowered (ok) and that were not (gap), per node class:
@@ -404,6 +429,7 @@ static int ir_nreg;
 static char *ir_sret;
 static a_type_ptr ir_ret_type;
 static int ir_in_main;   /* the routine being lowered is main */
+static a_routine_ptr ir_cur_rout;   /* the routine being lowered (thunks: enk_result_of_overriding_function) */
 
 /* Indentation of the next expression-level line. Statement lowering sets it before lowering. */
 static int ir_depth;
@@ -838,8 +864,7 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
     case abk_routine:
       if (off == 0) {
         ir_note(3, ck_address, 1);
-        return ir_mk_value(ir_fmt("&\"%s\"", ir_name_or(c->variant.address.variant.routine->source_corresp.name,
-                                                      "fn")),
+        return ir_mk_value(ir_fmt("&\"%s\"", ir_rout_name(c->variant.address.variant.routine)),
                            t);
       }
       break;
@@ -899,6 +924,7 @@ static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_lval_op(an_expr_node_ptr e);
+static ir_val ir_roof(an_expr_node_ptr e);
 
 /* Pointer that may be null: emit (nonnull P) unless the operand is known to be an address. */
 static void ir_nonnull(an_expr_node_ptr src, ir_val p)
@@ -919,7 +945,7 @@ static ir_val ir_rval(an_expr_node_ptr e)
       return ir_constant(e->variant.constant.ptr, e->type);
     case enk_routine:
       ir_note(2, enk_routine, 1);
-      return ir_mk_value(ir_fmt("&\"%s\"", ir_name_or(e->variant.routine.ptr->source_corresp.name, "fn")), e->type);
+      return ir_mk_value(ir_fmt("&\"%s\"", ir_rout_name(e->variant.routine.ptr)), e->type);
     case enk_variable:
       ir_note(2, enk_variable, 1);
       return ir_load(ir_lval(e));
@@ -945,6 +971,8 @@ static ir_val ir_rval(an_expr_node_ptr e)
     }
     case enk_operation:
       return ir_rval_op(e);
+    case enk_result_of_overriding_function:
+      return ir_roof(e);
     default:
       return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name(e->kind) != NULL ? nfcxx_enk_name(e->kind) : "?"),
                     2, (int)e->kind);
@@ -961,6 +989,11 @@ static ir_val ir_lval(an_expr_node_ptr e)
   }
   if (e->kind == enk_object_lifetime) return ir_lval(e->variant.object_lifetime.expr);
   if (e->kind == enk_operation) return ir_lval_op(e);
+  if (e->kind == enk_routine) {
+    /* A function designator (the operand of & outside a constant expression, for example `throw &f`): its address. */
+    ir_note(2, enk_routine, 1);
+    return ir_mk_addr(ir_fmt("&\"%s\"", ir_name_or(e->variant.routine.ptr->source_corresp.name, "fn")), e->type, 0);
+  }
   if (ir_is_aggregate(e->type)) return ir_rval(e);
   return ir_gap(e->type, "lvalue", 2, (int)e->kind);
 }
@@ -1122,10 +1155,14 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       return ir_lval(a1);
     }
     case eok_lvalue_adjust:
-      /* Changes the cv-qualification of an lvalue (the temporary a reference parameter binds to is assigned
-         through one): the same address, scalar or aggregate. */
+      /* Only the qualifiers of the lvalue change (a `const int c = f();` initializer writes through the adjusted
+         lvalue of c), so the address is the operand's. */
       ir_note(0, k, 1);
-      return ir_lval(a0);
+      if (ir_is_aggregate(e->type)) return ir_lval(a0);
+      {
+        ir_val base = ir_lval(a0);
+        return ir_mk_addr(base.s, e->type, vol);
+      }
     default:
       break;
   }
@@ -1376,7 +1413,7 @@ static ir_val ir_call(an_expr_node_ptr e)
   ir_val sret = ir_mk_void();
   if (f->kind == enk_routine) {
     ir_note(2, enk_routine, 1);
-    callee = ir_fmt("&\"%s\"", ir_name_or(f->variant.routine.ptr->source_corresp.name, "fn"));
+    callee = ir_fmt("&\"%s\"", ir_rout_name(f->variant.routine.ptr));
   } else {
     ir_val fv = ir_rval(f);
     callee = fv.s;
@@ -1404,6 +1441,50 @@ static ir_val ir_call(an_expr_node_ptr e)
       int named = agg_ret ? 1 : 0;
       for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) named++;
       callee = ir_fmt("%s (variadic %d)", callee, named);
+    }
+  }
+  ir_note(0, eok_call, 1);
+  if (ir_is_void(e->type) || agg_ret) {
+    ir_emit(ir_fmt("(eval (call void %s%s))", callee, args));
+    if (agg_ret) return ir_mk_addr(sret.s, e->type, 0);
+    return ir_mk_void();
+  }
+  return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(call %s %s%s)", ir_valtext(e->type), callee, args)), e->type);
+}
+
+/* enk_result_of_overriding_function: the body of an IA-64 this-adjusting thunk (for example the destructor of a
+   second base class) or of a covariant-return wrapper calls the underlying function with the thunk's own
+   parameters, as c_gen_be.c's dump_result_of_overriding_function writes it. The thunk has already adjusted its
+   `this` parameter in its slot. */
+static ir_val ir_roof(an_expr_node_ptr e)
+{
+  a_routine_ptr under = ir_cur_rout != NULL ? ir_cur_rout->overriding_function_for_wrapper : NULL;
+  a_scope_ptr scope = ir_cur_rout != NULL ? scope_for_routine(ir_cur_rout) : NULL;
+  a_variable_ptr param;
+  char *args = ir_dup("");
+  int agg_ret = ir_is_aggregate(e->type);
+  ir_val sret = ir_mk_void();
+  char *callee;
+  a_type_ptr ft;
+  if (under == NULL || scope == NULL) return ir_gap(e->type, "node result_of_overriding_function", 2, (int)e->kind);
+  ft = skip_typerefs(ir_cur_rout->type);
+  if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
+    return ir_gap(e->type, "node result_of_overriding_function (variadic)", 2, (int)e->kind);
+  }
+  ir_note(2, enk_result_of_overriding_function, 1);
+  callee = ir_fmt("&\"%s\"", ir_name_or(under->source_corresp.name, "fn"));
+  if (agg_ret) {
+    sret = ir_temp(e->type);
+    args = ir_fmt("%s %s", args, sret.s);
+  }
+  for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
+    ir_val a = ir_var_addr(param, param->type, 0);
+    if (ir_is_aggregate(param->type)) {
+      ir_val tmp = ir_temp(param->type);
+      ir_copy(param->type, tmp.s, a.s);
+      args = ir_fmt("%s %s", args, tmp.s);
+    } else {
+      args = ir_fmt("%s %s", args, ir_load(a).s);
     }
   }
   ir_note(0, eok_call, 1);
@@ -1749,7 +1830,7 @@ static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
     switch (c->variant.address.kind) {
       case abk_routine:
         if (add == 0) {
-          target = ir_fmt("&\"%s\"", ir_name_or(c->variant.address.variant.routine->source_corresp.name, "fn"));
+          target = ir_fmt("&\"%s\"", ir_rout_name(c->variant.address.variant.routine));
         }
         break;
       case abk_variable:
@@ -2123,6 +2204,34 @@ static void ir_stmt(a_statement_ptr s, int d)
         ir_note(4, dik_expression, 1);
         return;
       }
+      if (init->kind == dik_constructor && init->variant.constructor.ptr != NULL &&
+          !init->variant.constructor.is_copy_constructor_with_implied_source && !init->variant.constructor.is_array_copy &&
+          !init->variant.constructor.value_initialization) {
+        /* A constructor call on the object: (eval (call void &"ctor" OBJ ARG*)). DO_IL_LOWERING expands every
+           constructor into an explicit call before we see the IL, so this form is not reached on the programs in
+           tests (it is the shape the unlowered IL would need); array copies, implied copy sources and value
+           initialization stay unsupported. */
+        a_routine_ptr ctor = init->variant.constructor.ptr;
+        a_type_ptr ct = skip_typerefs(ctor->type);
+        if (ct->variant.routine.extra_info == NULL || !ct->variant.routine.extra_info->has_ellipsis) {
+          ir_val dst = ir_var_addr(init->variable, init->variable->type, 0);
+          char *args = ir_fmt(" %s", dst.s);
+          an_expr_node_ptr arg;
+          for (arg = init->variant.constructor.args; arg != NULL; arg = arg->next) {
+            ir_val a = ir_rval(arg);
+            if (ir_is_aggregate(a.t)) {
+              ir_val tmp = ir_temp(a.t);
+              ir_copy(a.t, tmp.s, a.s);
+              args = ir_fmt("%s %s", args, tmp.s);
+            } else {
+              args = ir_fmt("%s %s", args, a.s);
+            }
+          }
+          ir_note(4, dik_constructor, 1);
+          ir_line(d, ir_fmt("(eval (call void &\"%s\"%s))", ir_rout_name(ctor), args));
+          return;
+        }
+      }
       ir_note(4, (int)init->kind, 0);
       ir_line(d, ir_fmt("(unsupported init %s)",
                         nfcxx_dik_name(init->kind) != NULL ? nfcxx_dik_name(init->kind) : "?"));
@@ -2156,6 +2265,39 @@ static void nf_put_quoted_name(const char *name)
   nf_put_quoted(n, strlen(n));
 }
 
+/* Startup and exit markers of a function: (constructor [PRIO]) and (destructor [PRIO]). A routine runs before main
+   when it has __attribute__((constructor [(PRIO)])), or when it is an initialization routine made by IL lowering
+   (the __sti__ routine that runs a translation unit's dynamic initializers; with GNU init_priority there is one
+   per priority, and rout->init_priority is that priority). The C back end marks the same routines with
+   __attribute__((constructor)) (or a .ctors.N section for a priority), which is what path A runs. A destructor
+   routine (__attribute__((destructor [(PRIO)]))) runs at exit. Without a PRIO the routine has the default
+   priority, which runs after every prioritized one. A consumer must keep these routines whatever refers to them. */
+static void ir_startup_markers(a_routine_ptr rout)
+{
+  const char *name = rout->source_corresp.name;
+  int ctor = 0, dtor = 0;
+  unsigned long cprio = 0, dprio = 0;
+  if (rout->is_initialization_routine) {
+    ctor = 1;
+    if (rout->has_ctor_priority && has_gnu_routine_supp(rout)) cprio = (unsigned long)gnu_routine_supp(rout)->ctor_priority;
+  } else if (name != NULL && strncmp(name, IL_LOWERING_INIT_ROUTINE_PREFIX, strlen(IL_LOWERING_INIT_ROUTINE_PREFIX)) == 0) {
+    ctor = 1;
+    cprio = (unsigned long)rout->init_priority;
+  }
+  if (rout->is_finalization_routine) {
+    dtor = 1;
+    if (rout->has_dtor_priority && has_gnu_routine_supp(rout)) dprio = (unsigned long)gnu_routine_supp(rout)->dtor_priority;
+  }
+  if (ctor) {
+    if (cprio != 0) fprintf(nf_out, "\n  (constructor %lu)", cprio);
+    else fputs("\n  (constructor)", nf_out);
+  }
+  if (dtor) {
+    if (dprio != 0) fprintf(nf_out, "\n  (destructor %lu)", dprio);
+    else fputs("\n  (destructor)", nf_out);
+  }
+}
+
 /* Lower one routine body into the function output. Same selection as the IL dump (stage 1). */
 static void ir_function(a_routine_ptr rout)
 {
@@ -2185,6 +2327,7 @@ static void ir_function(a_routine_ptr rout)
   ir_sret = NULL;
   ir_ret_type = ret;
   ir_in_main = rout->source_corresp.name != NULL && strcmp(rout->source_corresp.name, "main") == 0;
+  ir_cur_rout = rout;
   ir_slots.n = 0;
   ir_labels.n = 0;
   ir_loop_n = 0;
@@ -2257,7 +2400,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_open(&hdr);
   ir_buf_begin(&hdr);
   fputs("\n(function ", nf_out);
-  nf_put_quoted_name(rout->source_corresp.name);
+  nf_put_quoted_name(ir_rout_name(rout));
   fputs("\n  (ret ", nf_out);
   if (ir_is_aggregate(ret)) fputs("void", nf_out); /* the result goes through (sret ...) */
   else nf_put_unqualified_type(skip_typerefs(ret));
@@ -2270,6 +2413,7 @@ static void ir_function(a_routine_ptr rout)
   fputs(")", nf_out);
   if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
   else if (rout->use_comdat) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
+  ir_startup_markers(rout);
   ir_buf_write(&ir_slot_buf, nf_out);
   ir_buf_write(&body, nf_out);
   fputs(")\n", nf_out);
@@ -2300,6 +2444,7 @@ void nfcxx_ir_back_end(void)
   for (var = scope->variables; var != NULL; var = var->next) {
     if (!ignore_variable_in_back_end(var)) (void)ir_global_op(var);
   }
+  for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(rout->source_corresp.name);
   for (rout = scope->routines; rout != NULL; rout = rout->next) {
     ir_function(rout);
   }

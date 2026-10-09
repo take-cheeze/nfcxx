@@ -637,13 +637,16 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink
+  attr_accessor :globals, :strings, :out, :need_sink, :startup, :funcs, :got
 
   def initialize
     @globals = {}       # IR name -> type
     @strings = {}       # data name -> array of character codes
     @out = []
     @need_sink = false  # a function that returns twice stores slot addresses into SINK
+    @startup = []       # [".init_array" or ".fini_array", priority (0: none), QBE symbol] of (constructor)/(destructor)
+    @funcs = {}         # IR name -> true for every function defined in this module
+    @got = {}           # IR name of an external function whose address is taken -> its pointer cell (see opnd_)
   end
 end
 
@@ -835,7 +838,17 @@ class Fn
       name = op.name
       return slot_val(name) if sig == "$"
       return Val.new("$" + qsym(name), "l", ["ptr", @mod.globals[name]]) if sig == "@"
-      return Val.new("$" + qsym(name), "l", ["ptr", ["fn"]]) if sig == "&"
+      if sig == "&"
+        return Val.new("$" + qsym(name), "l", ["ptr", ["fn"]]) if @mod.funcs.key?(name)
+        # The address of a function defined elsewhere (a libstdc++ operator delete passed to __cxa_vec_delete, for
+        # example). `leaq f(%rip)` is a PC-relative reference that a PIE link rejects for a symbol of a shared
+        # library, so the address is loaded from a local pointer cell, which takes a dynamic relocation instead.
+        cell = "pathb_got." + qsym(name)
+        @mod.got[name] = cell
+        t = tmp
+        emit("#{t} =l loadl $#{cell}")
+        return Val.new(t, "l", ["ptr", ["fn"]])
+      end
     end
     return const(op) if head_of(op) == "const"
     if head_of(op) == "null"
@@ -1358,7 +1371,8 @@ def r_call(fn, x)
   # (call TYPE CALLEE [(variadic N)] ARG*): with (variadic N) the first N arguments match named parameters
   # and the QBE call gets "..." after them, so the callee's register-save prologue is set up (%al).
   ret = parse_type(x[1])
-  callee = fn.opnd(x[2])
+  # A direct call of a function symbol needs no cell: the linker routes it through the PLT.
+  callee = x[2].is_a?(IRSym) && x[2].sig == "&" ? Val.new("$" + qsym(x[2].name), "l", ["ptr", ["fn"]]) : fn.opnd(x[2])
   fn.returns_twice = true if x[2].is_a?(IRSym) && RETURNS_TWICE.include?(x[2].name)
   rest = x.drop(3)
   nfixed = nil
@@ -2026,6 +2040,7 @@ def emit_function(mod, f)
   fn = Fn.new(mod, name, ret)
   static = false
   weak = false
+  startup = []
   qparams = []
   param_stores = []
   body_forms = []
@@ -2035,6 +2050,12 @@ def emit_function(mod, f)
       static = true
     elsif h == "weak"
       weak = true
+    elsif h == "constructor" || h == "destructor"
+      # (constructor [PRIO]) / (destructor [PRIO]): the function runs before main / at exit (an array entry)
+      raise BadIR, "function #{name}: bad #{form_text(part)}" if part.length > 2
+      prio = part.length == 2 ? as_int(part[1]) : 0
+      raise BadIR, "function #{name}: bad priority in #{form_text(part)}" if prio < 0 || prio > 65535
+      startup << [h == "constructor" ? ".init_array" : ".fini_array", prio, qsym(name)]
     elsif h == "slot"
       # (slot "NAME" TYPE BYTES ALIGN)
       if part.length != 5
@@ -2115,6 +2136,19 @@ def emit_function(mod, f)
   mod.out.concat(fn.body)
   mod.out << "}"
   mod.out << ""
+  startup.each { |s| mod.startup << s }
+end
+
+# The start-up and exit tables. A (constructor [PRIO]) function gets a pointer in .init_array, a (destructor [PRIO])
+# one in .fini_array (the dynamic loader runs .fini_array backwards). A priority P goes to the section
+# .init_array.PPPPP (five digits, as GCC names it): the linker sorts those by name, before the plain section. Every
+# entry is its own object, in the order of the functions in the IR.
+def emit_startup_tables(mod)
+  mod.startup.each_with_index do |(sect, prio, sym), i|
+    sect += format(".%05d", prio) if prio != 0
+    mod.out << "section \"#{sect}\" \"aw\""
+    mod.out << "data $pathb_startup#{i} = align 8 { l $#{sym} }"
+  end
 end
 
 LP64 = { "short" => 2, "int" => 4, "long" => 8, "long_long" => 8, "pointer" => 8, "float" => 4, "double" => 8 }
@@ -2153,6 +2187,11 @@ def is_linked(f)
   true
 end
 
+# A function that runs without being called: (constructor) or (destructor). It stays whatever refers to it.
+def startup_function?(f)
+  head_of(f) == "function" && f.drop(2).any? { |p| h = head_of(p); h == "constructor" || h == "destructor" }
+end
+
 def global_extern?(f)
   head_of(f) == "global" && f.drop(2).any? { |p| head_of(p) == "extern" }
 end
@@ -2171,7 +2210,7 @@ def prune(forms)
   work = []
   defs.each do |name, f|
     next if head_of(f) == "global" && f.drop(2).any? { |p| head_of(p) == "extern" }  # a declaration emits nothing
-    if is_linked(f)
+    if is_linked(f) || startup_function?(f)
       live[name] = true
       work << name
     end
@@ -2201,6 +2240,7 @@ def emit_module(text, do_prune = true)
   forms = [forms[0]] + prune(forms) if do_prune
   all_forms.drop(1).each do |f|
     mod.globals[pstr(f[1])] = parse_type(f[2]) if head_of(f) == "global"
+    mod.funcs[pstr(f[1])] = true if head_of(f) == "function"
   end
   # Strings first: a string data item may be referenced from a global initializer.
   forms.drop(1).each { |f| emit_string(mod, f) if head_of(f) == "data" }
@@ -2213,6 +2253,8 @@ def emit_module(text, do_prune = true)
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end
+  emit_startup_tables(mod)
+  mod.got.each { |name, cell| mod.out << "data $#{cell} = align 8 { l $#{qsym(name)} }" }
   mod.out << "data $#{SINK} = align 8 { z 8 }" if mod.need_sink
   "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + mod.out.join("\n") + "\n"
 end

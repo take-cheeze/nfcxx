@@ -161,6 +161,14 @@ Same method as stage 1, add to `tests/mruby/run.sh` before deleting anything:
 If mruby turns out too slow for the tokenizer on large inputs, the fallback is to write that one tool in
 C and build it with `scripts/setup-qbe.sh`-style `make`; the byte-identical test stays the same.
 
+### Emitter features added after the port
+
+Behaviour added to `pathb-qbe-emit.rb` is added to the oracle `tests/mruby/oracle/pathb-qbe-emit.py` in the same
+change, so the byte-for-byte comparison stays strict: the `(constructor [PRIO])` / `(destructor [PRIO])` function
+markers (`.init_array` / `.fini_array` tables, reachability roots) and the pointer cells for the address of a function
+defined elsewhere (`pathb_got.NAME`). Edge inputs: `tests/mruby/pathb-edge/startup.ir`, `fnaddr.ir`,
+`e_startup_*.ir`.
+
 ## Bootstrap caveat
 
 Building mruby needs a CRuby with the `rake` gem; mruby is not self-hosting in its build. Checked on the
