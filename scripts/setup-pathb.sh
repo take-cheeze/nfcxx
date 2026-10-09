@@ -12,7 +12,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 src=$root/3rd/edg
-out=$root/build/pathb
+out=${PATHB_OUT:-$root/build/pathb}   # PATHB_OUT: build somewhere else (scratch builds, other checkouts)
 tree=$out/tree
 
 if [ ! -f "$src/CMakeLists.txt" ]; then
@@ -37,9 +37,9 @@ link_all "$src/cmake" "$tree/cmake" macro-conf
 link_all "$src/cmake/macro-conf" "$tree/cmake/macro-conf" nfcxx-pathb
 
 # 1. Back end swap: c_gen_be.c is no longer compiled; nfcxx_be.c takes its place in the CORE list.
-sed 's/attribute\.c c_gen_be\.c cfe\.c/attribute.c nfcxx_be.c cfe.c/' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
-grep -q 'attribute.c nfcxx_be.c cfe.c' "$tree/src/CMakeLists.txt" || { echo "setup-pathb: CORE list patch failed" >&2; exit 1; }
-cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_names.h "$tree/src/"
+sed 's/attribute\.c c_gen_be\.c cfe\.c/attribute.c nfcxx_be.c nfcxx_ir.c cfe.c/' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
+grep -q 'attribute.c nfcxx_be.c nfcxx_ir.c cfe.c' "$tree/src/CMakeLists.txt" || { echo "setup-pathb: CORE list patch failed" >&2; exit 1; }
+cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"/be/nfcxx_ir.c "$root"/be/nfcxx_names.h "$tree/src/"
 
 # 2. Macro config. Same lowering options as linux-gcc-release, but the C back end (and its C++ sibling) off.
 cat > "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'

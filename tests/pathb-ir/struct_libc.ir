@@ -1,0 +1,106 @@
+(ir-module "struct_libc.cpp")
+
+(function "_Z4makei"
+  (ret void)
+  (params (sret %0 (struct "V")) (param %1 "x" int))
+  (slot "x" int)
+  (slot "tmp" (struct "V"))
+  (store int $"x" %1)
+  (block
+    (let %2 int (load int $"x"))
+    (store int $"tmp" %2)
+    (let %3 int (load int $"x"))
+    (let %4 int (wadd int %3 (const int 1)))
+    (let %5 (ptr int) (offset $"tmp" 4))
+    (store int %5 %4)
+    (let %6 int (load int $"x"))
+    (let %7 int (wadd int %6 (const int 2)))
+    (let %8 (ptr int) (offset $"tmp" 8))
+    (store int %8 %7)
+    (copy 12 %0 $"tmp")
+    (return)))
+
+(function "_Z3sum1V"
+  (ret int)
+  (params (param %0 "v" (byval (struct "V"))))
+  (let %1 int (load int %0))
+  (let %2 (ptr int) (offset %0 4))
+  (let %3 int (load int %2))
+  (let %4 int (wadd int %1 %3))
+  (let %5 (ptr int) (offset %0 8))
+  (let %6 int (load int %5))
+  (let %7 int (wadd int %4 %6))
+  (return %7))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "arr" (array 4 int))
+  (slot "t" int)
+  (slot "tmp" (ptr (array 4 int)))
+  (slot "tmp.1" (ptr int))
+  (slot "tmp.2" (ptr int))
+  (slot "x" int)
+  (slot "tmp.3" (struct "V"))
+  (slot "tmp.4" (struct "V"))
+  (store int $"arr" (const int 1))
+  (let %0 (ptr int) (offset $"arr" 4))
+  (store int %0 (const int 2))
+  (let %1 (ptr int) (offset $"arr" 8))
+  (store int %1 (const int 3))
+  (let %2 (ptr int) (offset $"arr" 12))
+  (store int %2 (const int 4))
+  (store int $"t" (const int 0))
+  (block
+    (store (ptr (array 4 int)) $"tmp" $"arr")
+    (let %3 (ptr (array 4 int)) (load (ptr (array 4 int)) $"tmp"))
+    (nonnull %3)
+    (let %4 (ptr int) (bitcast (ptr int) %3))
+    (store (ptr int) $"tmp.1" %4)
+    (let %5 (ptr (array 4 int)) (load (ptr (array 4 int)) $"tmp"))
+    (nonnull %5)
+    (let %6 (ptr int) (bitcast (ptr int) %5))
+    (let %7 (ptr int) (index %6 (const unsigned_long 4) 4))
+    (store (ptr int) $"tmp.2" %7)
+    (loop
+      (body
+        (let %8 (ptr int) (load (ptr int) $"tmp.1"))
+        (let %9 (ptr int) (load (ptr int) $"tmp.2"))
+        (let %10 bool (ne (ptr int) %8 %9))
+        (if %10 (then) (else (break)))
+        (block
+          (let %11 (ptr int) (load (ptr int) $"tmp.1"))
+          (nonnull %11)
+          (let %12 int (load int %11))
+          (store int $"x" %12)
+          (block
+            (let %13 int (load int $"x"))
+            (let %14 int (load int $"t"))
+            (let %15 int (wadd int %14 %13))
+            (store int $"t" %15))))
+      (step
+        (let %16 (ptr int) (load (ptr int) $"tmp.1"))
+        (let %17 (ptr int) (index %16 (const long 1) 4))
+        (store (ptr int) $"tmp.1" %17))))
+  (eval (call void &"_Z4makei" $"tmp.3" (const int 2)))
+  (copy 12 $"tmp.4" $"tmp.3")
+  (let %18 int (call int &"_Z3sum1V" $"tmp.4"))
+  (let %19 bool (eq int %18 (const int 9)))
+  (let %20 bool (const bool 0))
+  (if %19
+    (then
+      (let %21 int (load int $"t"))
+      (let %22 bool (eq int %21 (const int 10)))
+      (set %20 %22)))
+  (let %23 bool (const bool 0))
+  (if %20
+    (then
+      (let %24 bool (ne int (const int 1) (const int 0)))
+      (set %23 %24)))
+  (let %25 int (const int 0))
+  (if %23
+    (then
+      (set %25 (const int 9)))
+    (else
+      (set %25 (const int 1))))
+  (return %25))

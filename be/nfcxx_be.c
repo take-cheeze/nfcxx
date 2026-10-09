@@ -20,15 +20,17 @@ appearance within the dump, so output is stable across runs.
 #include "il_to_str.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The EDG names live in namespace edg; back_end() itself must stay global because
    cfe.c declares it at global scope. Everything else in this file is file-local. */
 USING_NAMESPACE_EDG
 
+#include "nfcxx_be_int.h"
 #include "nfcxx_names.h"
 
-static FILE *nf_out;
+FILE *nf_out;
 
 #define NF_MAX_ANON 8192
 static const void *nf_anon_key[NF_MAX_ANON];
@@ -43,13 +45,13 @@ static void nf_indent(int depth)
 
 /* Print a symbol: spaces inside integer type names become underscores so each
    type is a single s-expression atom. */
-static void nf_put_atom(const char *s)
+void nf_put_atom(const char *s)
 {
   for (; *s != '\0'; s++) fputc(*s == ' ' ? '_' : *s, nf_out);
 }
 
 /* Print a quoted string, escaping quotes, backslashes and non-printables. */
-static void nf_put_quoted(const char *s, size_t len)
+void nf_put_quoted(const char *s, size_t len)
 {
   size_t i;
   fputc('"', nf_out);
@@ -96,13 +98,12 @@ static void nf_put_name(a_const_char *name, const void *key, const char *what)
   }
 }
 
-static void nf_put_type(a_type_ptr type);
 static void nf_put_expr(an_expr_node_ptr expr);
 static void nf_put_stmt(a_statement_ptr stmt, int depth);
 
 /* ---------------------------------------------------------------- types */
 
-static void nf_put_unqualified_type(a_type_ptr type)
+void nf_put_unqualified_type(a_type_ptr type)
 {
   switch (type->kind) {
     case tk_void:
@@ -163,7 +164,7 @@ static void nf_put_unqualified_type(a_type_ptr type)
   }
 }
 
-static void nf_put_type(a_type_ptr type)
+void nf_put_type(a_type_ptr type)
 {
   a_type_qualifier_set quals;
   int opened = 0;
@@ -180,7 +181,7 @@ static void nf_put_type(a_type_ptr type)
 
 /* ------------------------------------------------------------ constants */
 
-static void nf_put_constant(a_constant_ptr constant)
+void nf_put_constant(a_constant_ptr constant)
 {
   if (constant == NULL) {
     fputs("nil-const", nf_out);
@@ -578,10 +579,15 @@ static void nf_put_globals(a_scope_ptr scope)
 void back_end(void)
 {
   a_scope_ptr scope = il_header.primary_scope;
+  const char *mode = getenv("NFCXX_PATHB_MODE");
   a_routine_ptr rout;
   const char *file_name = il_header.primary_source_file->file_name;
   const char *slash = strrchr(file_name, '/');
 
+  if (mode != NULL && strcmp(mode, "ir") == 0) {
+    nfcxx_ir_back_end();   /* mid-level IR (nfcxx_ir.c) instead of the IL dump */
+    return;
+  }
   nf_out = stdout;
   nf_anon_count = 0;
   fprintf(nf_out, "(translation-unit \"%s\")\n", slash != NULL ? slash + 1 : file_name);

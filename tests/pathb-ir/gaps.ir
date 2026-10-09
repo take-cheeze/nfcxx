@@ -1,0 +1,137 @@
+(ir-module "gaps.cpp")
+
+(function "_Z3vlai"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int)
+  (slot "tmp" int)
+  (slot "tmp.1" long)
+  (slot "buf" (array ? int))
+  (store int $"n" %0)
+  (unsupported stmt set_vla_size)
+  (let %1 int (load int $"tmp"))
+  (let %2 long (iconv long %1))
+  (store long $"tmp.1" %2)
+  (unsupported stmt vla_decl)
+  (block)
+  (let %3 int (load int $"n"))
+  (let %4 (ptr int) (bitcast (ptr int) $"buf"))
+  (let %5 (ptr int) (index %4 (const int 0) 4))
+  (store int %5 %3)
+  (let %6 (ptr int) (bitcast (ptr int) $"buf"))
+  (let %7 (ptr int) (index %6 (const int 0) 4))
+  (let %8 int (load int %7))
+  (return %8))
+
+(function "_Z8stmtexpri"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int)
+  (store int $"x" %0)
+  (let %1 int (unsupported node statement))
+  (return %1))
+
+(function "_Z6asmishi"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int)
+  (store int $"x" %0)
+  (unsupported stmt asm)
+  (let %1 int (load int $"x"))
+  (return %1))
+
+(function "_Z4bitsP2BF"
+  (ret int)
+  (params (param %0 "p" (ptr (struct "BF"))))
+  (slot "p" (ptr (struct "BF")))
+  (store (ptr (struct "BF")) $"p" %0)
+  (let %1 unsigned_int (unsupported lvalue points_to_field))
+  (store unsigned_int %1 (const unsigned_int 7))
+  (let %2 unsigned_int (unsupported lvalue points_to_field))
+  (let %3 unsigned_int (load unsigned_int %2))
+  (let %4 int (iconv int %3))
+  (let %5 unsigned_int (unsupported lvalue points_to_field))
+  (let %6 unsigned_int (load unsigned_int %5))
+  (let %7 int (iconv int %6))
+  (let %8 int (wadd int %4 %7))
+  (return %8))
+
+(function "_Z4walki"
+  (ret int)
+  (params (param %0 "n" int))
+  (slot "n" int)
+  (slot "s" int)
+  (slot "k" int)
+  (slot "i" int)
+  (store int $"n" %0)
+  (store int $"s" (const int 0))
+  (loop
+    (body
+      (let %1 int (load int $"n"))
+      (let %2 bool (lt.s int (const int 0) %1))
+      (if %2 (then) (else (break)))
+      (block
+        (let %3 int (load int $"n"))
+        (let %4 int (load int $"s"))
+        (let %5 int (wadd int %4 %3))
+        (store int $"s" %5)
+        (let %6 int (load int $"n"))
+        (let %7 int (wsub int %6 (const int 1)))
+        (store int $"n" %7)))
+    (step))
+  (store int $"k" (const int 0))
+  (label "again")
+  (let %8 int (load int $"k"))
+  (let %9 int (wadd int %8 (const int 1)))
+  (store int $"k" %9)
+  (let %10 int (load int $"k"))
+  (let %11 bool (lt.s int %10 (const int 3)))
+  (if %11
+    (then
+      (block
+        (goto "again"))))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %12 int (load int $"i"))
+        (let %13 int (load int $"n"))
+        (let %14 bool (lt.s int %12 %13))
+        (if %14 (then) (else (break)))
+        (block
+          (let %15 int (load int $"i"))
+          (let %16 bool (eq int %15 (const int 2)))
+          (if %16
+            (then
+              (block
+                (goto "label"))))
+          (let %17 int (load int $"i"))
+          (let %18 int (load int $"s"))
+          (let %19 int (wadd int %18 %17))
+          (store int $"s" %19)
+          (label "label")))
+      (step
+        (let %20 int (load int $"i"))
+        (let %21 int (wadd int %20 (const int 1)))
+        (store int $"i" %21))))
+  (let %22 int (load int $"s"))
+  (let %23 int (load int $"k"))
+  (let %24 int (wadd int %22 %23))
+  (return %24))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "b" (struct "BF"))
+  (let %0 unsigned_int (unsupported lvalue dot_field))
+  (store unsigned_int %0 (const unsigned_int 1))
+  (let %1 int (call int &"_Z3vlai" (const int 3)))
+  (let %2 int (call int &"_Z8stmtexpri" (const int 1)))
+  (let %3 int (wadd int %1 %2))
+  (let %4 int (call int &"_Z6asmishi" (const int 1)))
+  (let %5 int (wadd int %3 %4))
+  (let %6 int (call int &"_Z4bitsP2BF" $"b"))
+  (let %7 int (wadd int %5 %6))
+  (let %8 int (call int &"_Z4walki" (const int 4)))
+  (let %9 int (wadd int %7 %8))
+  (return %9))

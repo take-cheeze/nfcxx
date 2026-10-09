@@ -4,7 +4,7 @@
 # intended change. Needs the harness: scripts/setup-pathb.sh (built on first use if missing).
 cd "$(dirname "$0")/../.."
 update=0; [ "${1:-}" = --update ] && update=1
-[ -x build/pathb/cmake/bin/cpfe ] || scripts/setup-pathb.sh >/dev/null
+[ -n "${PATHB_CPFE:-}" ] || [ -x build/pathb/cmake/bin/cpfe ] || scripts/setup-pathb.sh >/dev/null
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
 for f in tests/cases/*.cpp; do

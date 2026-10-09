@@ -1,0 +1,105 @@
+(ir-module "float_neg_switch.cpp")
+
+(function "_Z3negd"
+  (ret double)
+  (params (param %0 "x" double))
+  (slot "x" double)
+  (store double $"x" %0)
+  (let %1 double (load double $"x"))
+  (let %2 double (fneg double %1))
+  (return %2))
+
+(function "_Z4negff"
+  (ret float)
+  (params (param %0 "x" float))
+  (slot "x" float)
+  (store float $"x" %0)
+  (let %1 float (load float $"x"))
+  (let %2 float (fneg float %1))
+  (return %2))
+
+(function "_Z8classifyi"
+  (ret int)
+  (params (param %0 "k" int))
+  (slot "k" int)
+  (store int $"k" %0)
+  (let %1 int (load int $"k"))
+  (switch %1
+    (body
+      (block
+        (case (const int 0))
+        (return (const int 1))
+        (case (const int 1))
+        (return (const int 2))
+        (case (const int 5))
+        (return (const int 10))
+        (default)
+        (return (const int 100)))))
+  (unreachable))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "s" int)
+  (slot "i" int)
+  (slot "d" double)
+  (slot "signbit_ok" bool)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %0 int (load int $"i"))
+        (let %1 bool (lt.s int %0 (const int 4)))
+        (if %1 (then) (else (break)))
+        (block
+          (let %2 int (load int $"i"))
+          (let %3 bool (eq int %2 (const int 3)))
+          (let %4 int (const int 0))
+          (if %3
+            (then
+              (set %4 (const int 5)))
+            (else
+              (let %5 int (load int $"i"))
+              (set %4 %5)))
+          (let %6 int (call int &"_Z8classifyi" %4))
+          (let %7 int (load int $"s"))
+          (let %8 int (wadd int %7 %6))
+          (store int $"s" %8)))
+      (step
+        (let %9 int (load int $"i"))
+        (let %10 int (wadd int %9 (const int 1)))
+        (store int $"i" %10))))
+  (let %11 double (call double &"_Z3negd" (const double 2.5)))
+  (let %12 double (fadd double %11 (const double 2.5)))
+  (store double $"d" %12)
+  (let %13 double (call double &"_Z3negd" (const double 0.0)))
+  (let %14 double (fdiv double (const double 1.0) %13))
+  (let %15 bool (lt.f double %14 (const double 0.0)))
+  (store bool $"signbit_ok" %15)
+  (let %16 int (load int $"s"))
+  (let %17 bool (eq int %16 (const int 113)))
+  (let %18 bool (const bool 0))
+  (if %17
+    (then
+      (let %19 double (load double $"d"))
+      (let %20 bool (eq double %19 (const double 0.0)))
+      (set %18 %20)))
+  (let %21 bool (const bool 0))
+  (if %18
+    (then
+      (let %22 float (call float &"_Z4negff" (const float 1.5)))
+      (let %23 bool (eq float %22 (const float -1.5)))
+      (set %21 %23)))
+  (let %24 bool (const bool 0))
+  (if %21
+    (then
+      (let %25 bool (load bool $"signbit_ok"))
+      (set %24 %25)))
+  (let %26 int (const int 0))
+  (if %24
+    (then
+      (set %26 (const int 42)))
+    (else
+      (set %26 (const int 1))))
+  (return %26))

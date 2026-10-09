@@ -1,0 +1,24 @@
+(ir-module "signed_overflow_wraps.cpp")
+
+(function "_Z5wrapsi"
+  (ret bool)
+  (params (param %0 "a" int))
+  (slot "a" int)
+  (store int $"a" %0)
+  (let %1 int (load int $"a"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (let %3 int (load int $"a"))
+  (let %4 bool (lt.s int %2 %3))
+  (return %4))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 bool (call bool &"_Z5wrapsi" (const int 2147483647)))
+  (let %1 int (const int 0))
+  (if %0
+    (then
+      (set %1 (const int 1)))
+    (else
+      (set %1 (const int 0))))
+  (return %1))
