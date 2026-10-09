@@ -3,7 +3,7 @@
 (function "_Z3negd"
   (ret double)
   (params (param %0 "x" double))
-  (slot "x" double)
+  (slot "x" double 8 8)
   (store double $"x" %0)
   (let %1 double (load double $"x"))
   (let %2 double (fneg double %1))
@@ -12,7 +12,7 @@
 (function "_Z4negff"
   (ret float)
   (params (param %0 "x" float))
-  (slot "x" float)
+  (slot "x" float 4 4)
   (store float $"x" %0)
   (let %1 float (load float $"x"))
   (let %2 float (fneg float %1))
@@ -21,7 +21,7 @@
 (function "_Z8classifyi"
   (ret int)
   (params (param %0 "k" int))
-  (slot "k" int)
+  (slot "k" int 4 4)
   (store int $"k" %0)
   (let %1 int (load int $"k"))
   (switch %1
@@ -40,10 +40,10 @@
 (function "main"
   (ret int)
   (params)
-  (slot "s" int)
-  (slot "i" int)
-  (slot "d" double)
-  (slot "signbit_ok" bool)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (slot "d" double 8 8)
+  (slot "signbit_ok" bool 1 1)
   (store int $"s" (const int 0))
   (block
     (store int $"i" (const int 0))

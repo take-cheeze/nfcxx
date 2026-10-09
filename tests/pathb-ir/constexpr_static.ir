@@ -3,7 +3,7 @@
 (function "_Z4facti"
   (ret int)
   (params (param %0 "n" int))
-  (slot "n" int)
+  (slot "n" int 4 4)
   (store int $"n" %0)
   (let %1 int (load int $"n"))
   (let %2 bool (le.s int %1 (const int 1)))
