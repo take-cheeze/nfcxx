@@ -12,6 +12,7 @@ cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
 for f in tests/cases/*.cpp; do
+  case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)
   if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then
     echo "FAIL (front end) $f"; grep -v '^ir-stat' "$tmp/$n.err" | head -5; fail=1; continue
@@ -43,7 +44,7 @@ else
   fi
 fi
 # Coverage: sum the per-kind counts of tests/cases (the gap probe is reported above, not here). A kind with a nonzero unsupported count is a gap.
-for f in tests/cases/*.cpp; do cat "$tmp/$(basename "$f" .cpp).err"; done 2>/dev/null | awk '
+for f in tests/cases/*.cpp; do case $(basename "$f") in qbe_*) continue ;; esac; cat "$tmp/$(basename "$f" .cpp).err"; done 2>/dev/null | awk '
   $1 == "ir-stat" && $2 != "total" {
     key = $2 " " $3; ok[key] += $5; gap[key] += $7; if (!(key in seen)) { seen[key] = 1; order[++n] = key }
   }

@@ -115,6 +115,7 @@
 (function "_ZN3BoxIiEC1Ei"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIiE")))) (param %1 "x" int))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIiE"))) 8 8)
   (slot "x" int 4 4)
   (store (ptr (struct "_Z3BoxIiE")) $"tmp" %0)
@@ -131,6 +132,7 @@
 (function "_ZN3BoxIiEC2Ei"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIiE")))) (param %1 "tmp" int))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIiE"))) 8 8)
   (slot "tmp.1" int 4 4)
   (store (ptr (struct "_Z3BoxIiE")) $"tmp" %0)
@@ -143,6 +145,7 @@
 (function "_ZN3BoxIiED1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIiE")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIiE"))) 8 8)
   (slot "tmp.1" (struct "__C7") 240 8)
   (store (ptr (struct "_Z3BoxIiE")) $"tmp" %0)
@@ -162,6 +165,7 @@
 (function "_ZN3BoxIiED2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIiE")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIiE"))) 8 8)
   (store (ptr (struct "_Z3BoxIiE")) $"tmp" %0)
   (let %1 (ptr (struct "_Z3BoxIiE")) (load (ptr (struct "_Z3BoxIiE")) $"tmp"))
@@ -171,6 +175,7 @@
 (function "_ZN3BoxIlEC1El"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIlE")))) (param %1 "x" long))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIlE"))) 8 8)
   (slot "x" long 8 8)
   (store (ptr (struct "_Z3BoxIlE")) $"tmp" %0)
@@ -187,6 +192,7 @@
 (function "_ZN3BoxIlEC2El"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIlE")))) (param %1 "tmp" long))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIlE"))) 8 8)
   (slot "tmp.1" long 8 8)
   (store (ptr (struct "_Z3BoxIlE")) $"tmp" %0)
@@ -199,6 +205,7 @@
 (function "_ZN3BoxIlED1Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIlE")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIlE"))) 8 8)
   (slot "tmp.1" (struct "__C7") 240 8)
   (store (ptr (struct "_Z3BoxIlE")) $"tmp" %0)
@@ -218,6 +225,7 @@
 (function "_ZN3BoxIlED2Ev"
   (ret void)
   (params (param %0 "tmp" (const (ptr (struct "_Z3BoxIlE")))))
+  (weak)
   (slot "tmp" (const (ptr (struct "_Z3BoxIlE"))) 8 8)
   (store (ptr (struct "_Z3BoxIlE")) $"tmp" %0)
   (let %1 (ptr (struct "_Z3BoxIlE")) (load (ptr (struct "_Z3BoxIlE")) $"tmp"))
