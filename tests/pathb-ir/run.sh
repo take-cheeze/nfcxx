@@ -12,8 +12,8 @@ cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
 # The probes of tests/pathb-qbe/cases that exercise the lowering itself (continue, bool loads, setjmp, unreachable
-# code) have goldens here too, so a change in the IR text shows up as a diff.
-probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp tests/pathb-qbe/cases/setjmp.cpp tests/pathb-qbe/cases/reachability.cpp"
+# code, EH thunks) have goldens here too, so a change in the IR text shows up as a diff.
+probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp tests/pathb-qbe/cases/setjmp.cpp tests/pathb-qbe/cases/reachability.cpp tests/pathb-qbe/cases/eh_thunk.cpp"
 # Dynamic initialization (global constructors, local statics, constructor/destructor attributes, new/delete).
 probes="$probes tests/pathb-qbe/cases/dyn_global.cpp tests/pathb-qbe/cases/dyn_local_static.cpp tests/pathb-qbe/cases/dyn_ctor_attr.cpp tests/pathb-qbe/cases/dyn_ctor_members.cpp tests/pathb-qbe/cases/dyn_new_delete.cpp tests/pathb-qbe/cases/dyn_global_forms.cpp tests/pathb-qbe/cases/dyn_init_forms.cpp"
 for f in tests/cases/*.cpp $probes; do
