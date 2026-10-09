@@ -7,9 +7,9 @@
 module SiteCensus
   Scan = Struct.new(:lines, :names, :first_method, :sites, :helper_sends, keyword_init: true)
 
-  FN_RE = /^(?:\[\[[^\]]*\]\]\s*)*(?:static |inline )+[\w:*&<>\s]+?\b(\w+)\(.*\{\s*$/
+  FN_RE = /^(?:\[\[[^\]]*\]\]\s*)*(?:static |inline )+[\w:*&<>\s]+?\b([\w$]+)\(.*\{\s*$/
   # Non-static bodies (a gem's own `X_impl`, declared in its decls header).
-  FN_EXTERN_RE = /^mrb_value (\w+)\(.*\{\s*$/
+  FN_EXTERN_RE = /^mrb_value ([\w$]+)\(.*\{\s*$/
   SEND_RE = /bc2cpp_send\(M, [^,]+, (\d+), (\d+)/
   FAM_RE = %r{^\s*//\s*([A-Z][A-Z0-9_]+)\b}
   # Non-bc2cpp_send by-name calls; the lookbehind keeps `mrb_funcall_id` from matching as `mrb_funcall`.
@@ -71,7 +71,7 @@ module SiteCensus
   end
 
   def parameter_names(header)
-    header[/\((.*)\)\s*\{\s*$/, 1].to_s.split(',').filter_map { |p| p[/(\w+)\s*\z/, 1] }
+    header[/\((.*)\)\s*\{\s*$/, 1].to_s.split(',').filter_map { |p| p[/([\w$]+)\s*\z/, 1] }
   end
 
   # Text-mode baseline (no origin table): the origin is read from the right-hand side of the register's last
@@ -96,35 +96,57 @@ module SiteCensus
 
   # The parameter of the enclosing function whose value the receiver is: the same text walk as
   # receiver_origin (nearest assignment, then register copies up to COPY_HOPS), but it names the
-  # parameter instead of classifying it. nil when the receiver is not a plain copy of a parameter.
-  # `line` is 1-based, as in a site's :line.
-  def feeding_parameter(lines, line, recv)
+  # parameter instead of classifying it. `line` is 1-based, as in a site's :line. Returns
+  # [names, exact]: with exact true the single parameter the receiver copies; when a control-flow join
+  # separates the nearest assignment from the send (receiver_origin says 'join'), every parameter that
+  # any earlier assignment of the register in the function copies, exact false (a may-set, the
+  # receiver may also hold something else). [[], true] when the receiver is no copy of a parameter.
+  def feeding_parameters(lines, line, recv)
     fn = function_start(lines, line - 1)
-    return nil unless fn
+    return [[], true] unless fn
 
     params = parameter_names(lines[fn])
-    return (params.include?(recv) ? recv : nil) unless recv =~ /\Ar\d+\z/
+    return [(params.include?(recv) ? [recv] : []), true] unless recv =~ /\Ar\d+\z/
 
     i = line - 2
     i -= 1 while i.positive? && line - i < 80 && !(lines[i] =~ %r{^(if \(|\{$|// [^ ]+ -- generated)} && lines[i - 1] !~ /\} else|else\s*$/)
     found = last_assignment(lines, i, [i - 60, 0].max, recv)
-    return nil if found.nil? || join_between?(lines, found[0], line - 1, recv)
+    if found && !join_between?(lines, found[0], line - 1, recv)
+      at, rhs = found
+      (COPY_HOPS + 1).times do
+        case rhs
+        when /\Ar\d+\z/
+          found = last_assignment(lines, at, fn, rhs)
+          return [[], true] unless found
 
-    at, rhs = found
-    (COPY_HOPS + 1).times do
-      case rhs
-      when /\Ar\d+\z/
-        found = last_assignment(lines, at, fn, rhs)
-        return nil unless found
+          at, rhs = found
+        when /\A[\w$]+\z/
+          return [params.include?(rhs) ? [rhs] : [], true]
+        else
+          return [[], true]
+        end
+      end
+      return [[], true]
+    end
+    [may_feed(lines, fn, line - 1, recv, params, {}, COPY_HOPS).sort, false]
+  end
 
-        at, rhs = found
-      when /\A\w+\z/
-        return params.include?(rhs) ? rhs : nil
-      else
-        return nil
+  # Parameters any assignment of `reg` in lines[fn...to] copies, following register copies.
+  def may_feed(lines, fn, to, reg, params, seen, hops)
+    return [] if seen[[reg, to]] || hops.negative?
+
+    seen[[reg, to]] = true
+    found = []
+    (fn...to).each do |j|
+      m = lines[j].match(/^\s*(?:mrb_value )?#{reg} = (.*);\s*$/) or next
+      rhs = m[1]
+      if rhs =~ /\Ar\d+\z/
+        found.concat(may_feed(lines, fn, j, rhs, params, seen, hops - 1))
+      elsif rhs =~ /\A[\w$]+\z/ && params.include?(rhs)
+        found << rhs
       end
     end
-    nil
+    found.uniq
   end
 
   JOIN_LABEL_RE = /^\s*L\d+:/

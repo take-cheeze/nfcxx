@@ -32,10 +32,10 @@ require_relative 'else_trace'
 module ParamTrace
   MAX_CLASSES = 8
   # The impl header: `mrb_value Foo_bar_impl(mrb_state* M, mrb_value self, <params>) {`.
-  HEADER_RE = /\A(?:static )?mrb_value (\w+_impl)\(mrb_state\* M, mrb_value self((?:, [^,()]+)*)\) \{\s*\z/
+  HEADER_RE = /\A(?:static )?mrb_value ([\w$]+_impl)\(mrb_state\* M, mrb_value self((?:, [^,()]+)*)\) \{\s*\z/
   BARG_RE = /\Abc2cpp_barg(\d+)\z/
-  KWARG_RE = /\Abc2cpp_kwarg_(\w+)\z/
-  KW_GIVEN_RE = /\Abc2cpp_kw_given_(\w+)\z/
+  KWARG_RE = /\Abc2cpp_kwarg_([\w$]+)\z/
+  KW_GIVEN_RE = /\Abc2cpp_kw_given_([\w$]+)\z/
   REG0_RE = /\A\s*mrb_value r0 = self;/
   REG0_WINDOW = 12
   # C parameter type => the expression that boxes it back to an mrb_value (TYPE_OPS[...][:box]).

@@ -17,8 +17,8 @@ require_relative 'site_census'
 # evaluated twice, which is free only for an identifier); other chain sites are
 # counted as skipped. Each binary keeps, per site, the hit count and up to
 # MAX_CLASSES distinct receiver classes (real class, singleton flag, and whether the
-# receiver is a kind of Array/Hash/String/Range), plus the parameter the receiver copies when its origin
-# is a parameter. At exit it appends to the file named
+# receiver is a kind of Array/Hash/String/Range), plus the parameter(s) the receiver copies when its origin
+# is a parameter or a join. At exit it appends to the file named
 # by BC2CPP_TRACE_ELSE_OUT, or writes to stderr when that is unset. Read it with
 # scripts/bc2cpp_else_trace_report.rb.
 module ElseTrace
@@ -63,9 +63,11 @@ module ElseTrace
       recv = lines[i][SEND_CALL, 1]
       id = rows.size
       method = impls.fetch(s[:fn], nil) || "(#{s[:fn] || 'file scope'})"
-      # The parameter a 'parameter' receiver is a copy of (scripts/bc2cpp_param_trace_report.rb joins on it).
-      param = s[:origin] == 'parameter' ? SiteCensus.feeding_parameter(lines, s[:line], recv) : nil
-      meta = [method, s[:fn], s[:name], "line#{s[:line]}", s[:category], s[:origin], recv, param || '-'].join("\t")
+      # The parameter(s) the receiver copies (scripts/bc2cpp_param_trace_report.rb joins on it): `name` when
+      # exact, `~a|b` when a control-flow join made the origin a may-set, `-` when none.
+      names, exact = %w[parameter join].include?(s[:origin]) ? SiteCensus.feeding_parameters(lines, s[:line], recv) : [[], true]
+      param = names.empty? ? '-' : "#{exact ? '' : '~'}#{names.join('|')}"
+      meta = [method, s[:fn], s[:name], "line#{s[:line]}", s[:category], s[:origin], recv, param].join("\t")
       rows << { id: id, line: s[:line], fn: s[:fn], name: s[:name], category: s[:category], origin: s[:origin],
                 recv: recv, method: method, meta: meta, index: i }
       lines[i] = lines[i].sub(SEND_CALL) do
