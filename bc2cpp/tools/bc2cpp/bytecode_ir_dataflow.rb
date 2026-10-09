@@ -170,16 +170,24 @@ module BytecodeIR
     # incoming value) supply +reg+ at +use+ on every path? True when no edge,
     # jump or exception, enters (w, use] from outside [w, use] and every op
     # stepped over is on the audited write list (ADR 0198's region test).
-    # False when an edge set is incomplete or a nested block writes +reg+.
+    # A multi-write op (ADD, GETIDX0, SEND, BLKCALL, ...) writes above its
+    # leading register on a fallback or callee frame: an op stepped over that
+    # does so to +reg+ (origin_effect :callee_clobber), or writes +reg+ itself
+    # (:define), refuses, and so does a +w+ that is only a side write of +reg+.
+    # ENTER's own slots are not refused here yet (see the join check). False
+    # when an edge set is incomplete or a nested block writes +reg+.
     def write_dominates?(w, use, reg, opaque_regs: nil)
       return false if opaque_regs&.include?(reg.to_s)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
 
       preds = instruction_predecessors(include_handlers: true) or return false
       low = [w, 0].max
+      # The write itself must leave +reg+ holding its value on every path (a side write does not).
+      return false if w >= 0 && origin_effect(@instructions[w].source, reg.to_s) != :define
       ((w + 1)..use).each do |k|
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
+        return false if k != use && %i[callee_clobber define].include?(origin_effect(insn, reg.to_s))
 
         preds[k].each do |p|
           return false if p == ENTRY ? w != ENTRY : (p < low || p > use)
