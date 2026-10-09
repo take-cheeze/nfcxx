@@ -1,0 +1,169 @@
+// nfcxx freestanding <optional>: std::optional without exceptions. value() on an empty optional
+// panics (the standard throws bad_optional_access). Storage is a union rather than alignas,
+// because cproc rejects __attribute__((aligned)) on locals.
+#ifndef NFCXX_LIB_OPTIONAL
+#define NFCXX_LIB_OPTIONAL
+
+#include <new>
+#include <nfcxx_panic>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+inline namespace __nfcxx {
+
+struct nullopt_t {
+  constexpr explicit nullopt_t(int) noexcept {}
+};
+inline constexpr nullopt_t nullopt{0};
+
+template <class _Tp>
+class optional {
+  static_assert(!is_reference<_Tp>::value, "optional of a reference type is ill-formed");
+  static_assert(!is_same<typename remove_cv<_Tp>::type, nullopt_t>::value, "optional of nullopt_t is ill-formed");
+
+  union __storage {
+    unsigned char __empty_;
+    _Tp __value_;
+    constexpr __storage() noexcept : __empty_() {}
+    // Initializing the member in the mem-initializer list (not placement new) keeps the
+    // value constructor usable in constant expressions.
+    constexpr explicit __storage(const _Tp& __v) : __value_(__v) {}
+    constexpr explicit __storage(_Tp&& __v) : __value_(std::move(__v)) {}
+    constexpr ~__storage() {}
+  };
+
+public:
+  typedef _Tp value_type;
+
+  constexpr optional() noexcept : __has_(false), __s_() {}
+  constexpr optional(nullopt_t) noexcept : __has_(false), __s_() {}
+
+  optional(const optional& __o) : __has_(__o.__has_), __s_() {
+    if (__has_) ::new (static_cast<void*>(&__s_.__value_)) _Tp(__o.__s_.__value_);
+  }
+  optional(optional&& __o) : __has_(__o.__has_), __s_() {
+    if (__has_) ::new (static_cast<void*>(&__s_.__value_)) _Tp(std::move(__o.__s_.__value_));
+  }
+
+  constexpr optional(const _Tp& __v) : __has_(true), __s_(__v) {}
+  constexpr optional(_Tp&& __v) : __has_(true), __s_(std::move(__v)) {}
+
+  constexpr ~optional() {
+    if (__has_) __s_.__value_.~_Tp();
+  }
+
+  optional& operator=(nullopt_t) noexcept {
+    reset();
+    return *this;
+  }
+  optional& operator=(const optional& __o) {
+    if (this == &__o) return *this;
+    if (__o.__has_) {
+      if (__has_) __s_.__value_ = __o.__s_.__value_;
+      else emplace(__o.__s_.__value_);
+    } else {
+      reset();
+    }
+    return *this;
+  }
+  optional& operator=(optional&& __o) {
+    if (this == &__o) return *this;
+    if (__o.__has_) {
+      if (__has_) __s_.__value_ = std::move(__o.__s_.__value_);
+      else emplace(std::move(__o.__s_.__value_));
+    } else {
+      reset();
+    }
+    return *this;
+  }
+  template <class _Up, class = enable_if_t<is_same<typename remove_cv<typename remove_reference<_Up>::type>::type, _Tp>::value>>
+  optional& operator=(_Up&& __v) {
+    if (__has_) __s_.__value_ = std::forward<_Up>(__v);
+    else emplace(std::forward<_Up>(__v));
+    return *this;
+  }
+
+  template <class... _Args>
+  _Tp& emplace(_Args&&... __args) {
+    reset();
+    ::new (static_cast<void*>(&__s_.__value_)) _Tp(std::forward<_Args>(__args)...);
+    __has_ = true;
+    return __s_.__value_;
+  }
+
+  void reset() noexcept {
+    if (__has_) {
+      __s_.__value_.~_Tp();
+      __has_ = false;
+    }
+  }
+
+  constexpr bool has_value() const noexcept { return __has_; }
+  constexpr explicit operator bool() const noexcept { return __has_; }
+
+  constexpr _Tp& value() & {
+    if (!__has_) __panic("optional::value: no value");
+    return __s_.__value_;
+  }
+  constexpr const _Tp& value() const& {
+    if (!__has_) __panic("optional::value: no value");
+    return __s_.__value_;
+  }
+  constexpr _Tp&& value() && {
+    if (!__has_) __panic("optional::value: no value");
+    return std::move(__s_.__value_);
+  }
+
+  constexpr _Tp& operator*() & noexcept { return __s_.__value_; }
+  constexpr const _Tp& operator*() const& noexcept { return __s_.__value_; }
+  constexpr _Tp&& operator*() && noexcept { return std::move(__s_.__value_); }
+
+  constexpr _Tp* operator->() noexcept { return &__s_.__value_; }
+  constexpr const _Tp* operator->() const noexcept { return &__s_.__value_; }
+
+  template <class _Up>
+  constexpr _Tp value_or(_Up&& __d) const& {
+    return __has_ ? __s_.__value_ : static_cast<_Tp>(std::forward<_Up>(__d));
+  }
+
+  void swap(optional& __o) {
+    if (__has_ && __o.__has_) {
+      std::swap(__s_.__value_, __o.__s_.__value_);
+    } else if (__has_) {
+      __o.emplace(std::move(__s_.__value_));
+      reset();
+    } else if (__o.__has_) {
+      emplace(std::move(__o.__s_.__value_));
+      __o.reset();
+    }
+  }
+
+private:
+  bool __has_;
+  __storage __s_;
+};
+
+template <class _Tp>
+constexpr optional<decay_t<_Tp>> make_optional(_Tp&& __v) {
+  return optional<decay_t<_Tp>>(std::forward<_Tp>(__v));
+}
+
+template <class _Tp, class _Up>
+constexpr bool operator==(const optional<_Tp>& __x, const optional<_Up>& __y) {
+  if (__x.has_value() != __y.has_value()) return false;
+  return !__x.has_value() || bool(*__x == *__y);
+}
+template <class _Tp, class _Up>
+constexpr bool operator!=(const optional<_Tp>& __x, const optional<_Up>& __y) {
+  return !(__x == __y);
+}
+template <class _Tp>
+constexpr bool operator==(const optional<_Tp>& __x, nullopt_t) noexcept { return !__x.has_value(); }
+template <class _Tp>
+constexpr bool operator!=(const optional<_Tp>& __x, nullopt_t) noexcept { return __x.has_value(); }
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_OPTIONAL

@@ -1,0 +1,185 @@
+// nfcxx freestanding <type_traits>: a subset of the standard traits. The compiler-backed
+// predicates use the builtins that the front end accepts in g++ mode with --gnu_version=130000
+// (see docs/notes/builtins.md); the rest are plain partial specializations.
+#ifndef NFCXX_LIB_TYPE_TRAITS
+#define NFCXX_LIB_TYPE_TRAITS
+
+#include <cstddef>
+
+namespace std {
+inline namespace __nfcxx {
+
+// ---- constants and logic -------------------------------------------------
+template <class _Tp, _Tp __v>
+struct integral_constant {
+  static constexpr _Tp value = __v;
+  typedef _Tp value_type;
+  typedef integral_constant type;
+  constexpr operator value_type() const noexcept { return value; }
+  constexpr value_type operator()() const noexcept { return value; }
+};
+
+typedef integral_constant<bool, true> true_type;
+typedef integral_constant<bool, false> false_type;
+
+template <bool __b>
+using bool_constant = integral_constant<bool, __b>;
+
+template <bool, class _Tp = void> struct enable_if {};
+template <class _Tp> struct enable_if<true, _Tp> { typedef _Tp type; };
+template <bool _Bp, class _Tp = void> using enable_if_t = typename enable_if<_Bp, _Tp>::type;
+
+template <bool, class _Tp, class _Fp> struct conditional { typedef _Tp type; };
+template <class _Tp, class _Fp> struct conditional<false, _Tp, _Fp> { typedef _Fp type; };
+template <bool _Bp, class _Tp, class _Fp> using conditional_t = typename conditional<_Bp, _Tp, _Fp>::type;
+
+template <class _Tp> struct __type_identity { typedef _Tp type; };
+template <class _Tp> using type_identity_t = typename __type_identity<_Tp>::type;
+
+template <class...> struct __void_helper { typedef void type; };
+template <class... _Ts> using void_t = typename __void_helper<_Ts...>::type;
+
+template <class...> struct conjunction : true_type {};
+template <class _B1> struct conjunction<_B1> : _B1 {};
+template <class _B1, class... _Bn>
+struct conjunction<_B1, _Bn...> : conditional_t<bool(_B1::value), conjunction<_Bn...>, _B1> {};
+
+template <class...> struct disjunction : false_type {};
+template <class _B1> struct disjunction<_B1> : _B1 {};
+template <class _B1, class... _Bn>
+struct disjunction<_B1, _Bn...> : conditional_t<bool(_B1::value), _B1, disjunction<_Bn...>> {};
+
+template <class _Bp> struct negation : bool_constant<!bool(_Bp::value)> {};
+
+// ---- type identity relations (builtin) -----------------------------------
+template <class _Tp, class _Up> struct is_same : integral_constant<bool, __is_same(_Tp, _Up)> {};
+
+// ---- cv / reference / pointer transformations ----------------------------
+template <class _Tp> struct remove_const { typedef _Tp type; };
+template <class _Tp> struct remove_const<const _Tp> { typedef _Tp type; };
+template <class _Tp> struct remove_volatile { typedef _Tp type; };
+template <class _Tp> struct remove_volatile<volatile _Tp> { typedef _Tp type; };
+template <class _Tp> struct remove_cv { typedef typename remove_volatile<typename remove_const<_Tp>::type>::type type; };
+template <class _Tp> using remove_const_t = typename remove_const<_Tp>::type;
+template <class _Tp> using remove_volatile_t = typename remove_volatile<_Tp>::type;
+template <class _Tp> using remove_cv_t = typename remove_cv<_Tp>::type;
+
+template <class _Tp> struct remove_reference { typedef _Tp type; };
+template <class _Tp> struct remove_reference<_Tp&> { typedef _Tp type; };
+template <class _Tp> struct remove_reference<_Tp&&> { typedef _Tp type; };
+template <class _Tp> using remove_reference_t = typename remove_reference<_Tp>::type;
+
+template <class _Tp> struct add_const { typedef const _Tp type; };
+template <class _Tp> using add_const_t = typename add_const<_Tp>::type;
+
+template <class _Tp> struct add_pointer { typedef typename remove_reference<_Tp>::type* type; };
+template <class _Tp> using add_pointer_t = typename add_pointer<_Tp>::type;
+
+template <class _Tp> struct remove_extent { typedef _Tp type; };
+template <class _Tp> struct remove_extent<_Tp[]> { typedef _Tp type; };
+template <class _Tp, size_t _Np> struct remove_extent<_Tp[_Np]> { typedef _Tp type; };
+
+template <class _Tp> struct __decay_array { typedef _Tp type; };
+template <class _Tp> struct __decay_array<_Tp[]> { typedef _Tp* type; };
+template <class _Tp, size_t _Np> struct __decay_array<_Tp[_Np]> { typedef _Tp* type; };
+
+template <class _Tp>
+struct decay {
+  typedef typename remove_reference<_Tp>::type __noref;
+  typedef typename __decay_array<typename remove_cv<__noref>::type>::type type;
+};
+template <class _Tp> using decay_t = typename decay<_Tp>::type;
+
+// ---- primary type categories ---------------------------------------------
+template <class _Tp> struct is_void : false_type {};
+template <> struct is_void<void> : true_type {};
+template <class _Tp> struct is_void<const _Tp> : is_void<_Tp> {};
+template <class _Tp> struct is_void<volatile _Tp> : is_void<_Tp> {};
+
+template <class _Tp> struct is_null_pointer : is_same<typename remove_cv<_Tp>::type, nullptr_t> {};
+
+template <class _Tp> struct __is_integral_impl : false_type {};
+template <> struct __is_integral_impl<bool> : true_type {};
+template <> struct __is_integral_impl<char> : true_type {};
+template <> struct __is_integral_impl<signed char> : true_type {};
+template <> struct __is_integral_impl<unsigned char> : true_type {};
+template <> struct __is_integral_impl<short> : true_type {};
+template <> struct __is_integral_impl<unsigned short> : true_type {};
+template <> struct __is_integral_impl<int> : true_type {};
+template <> struct __is_integral_impl<unsigned int> : true_type {};
+template <> struct __is_integral_impl<long> : true_type {};
+template <> struct __is_integral_impl<unsigned long> : true_type {};
+template <> struct __is_integral_impl<long long> : true_type {};
+template <> struct __is_integral_impl<unsigned long long> : true_type {};
+template <class _Tp> struct is_integral : __is_integral_impl<typename remove_cv<_Tp>::type> {};
+
+template <class _Tp> struct __is_floating_point_impl : false_type {};
+template <> struct __is_floating_point_impl<float> : true_type {};
+template <> struct __is_floating_point_impl<double> : true_type {};
+template <class _Tp> struct is_floating_point : __is_floating_point_impl<typename remove_cv<_Tp>::type> {};
+
+template <class _Tp> struct is_arithmetic : bool_constant<is_integral<_Tp>::value || is_floating_point<_Tp>::value> {};
+
+template <class _Tp> struct is_pointer_helper : false_type {};
+template <class _Tp> struct is_pointer_helper<_Tp*> : true_type {};
+template <class _Tp> struct is_pointer : is_pointer_helper<typename remove_cv<_Tp>::type> {};
+
+template <class _Tp> struct is_lvalue_reference : false_type {};
+template <class _Tp> struct is_lvalue_reference<_Tp&> : true_type {};
+template <class _Tp> struct is_rvalue_reference : false_type {};
+template <class _Tp> struct is_rvalue_reference<_Tp&&> : true_type {};
+template <class _Tp> struct is_reference : bool_constant<is_lvalue_reference<_Tp>::value || is_rvalue_reference<_Tp>::value> {};
+
+template <class _Tp> struct is_const : false_type {};
+template <class _Tp> struct is_const<const _Tp> : true_type {};
+template <class _Tp> struct is_volatile : false_type {};
+template <class _Tp> struct is_volatile<volatile _Tp> : true_type {};
+
+template <class _Tp> struct is_array : false_type {};
+template <class _Tp> struct is_array<_Tp[]> : true_type {};
+template <class _Tp, size_t _Np> struct is_array<_Tp[_Np]> : true_type {};
+
+
+// ---- compiler-backed class/property predicates (builtins) -----------------
+template <class _Tp> struct is_class : integral_constant<bool, __is_class(_Tp)> {};
+template <class _Tp> struct is_union : integral_constant<bool, __is_union(_Tp)> {};
+template <class _Tp> struct is_enum : integral_constant<bool, __is_enum(_Tp)> {};
+template <class _Tp> struct is_empty : integral_constant<bool, __is_empty(_Tp)> {};
+template <class _Tp> struct is_final : integral_constant<bool, __is_final(_Tp)> {};
+template <class _Tp> struct is_pod : integral_constant<bool, __is_pod(_Tp)> {};
+template <class _Tp> struct is_scalar : bool_constant<is_arithmetic<_Tp>::value || is_pointer<_Tp>::value || is_null_pointer<_Tp>::value || is_enum<_Tp>::value> {};
+template <class _Tp, class _Up> struct is_base_of : integral_constant<bool, __is_base_of(_Tp, _Up)> {};
+
+template <class _Tp> struct is_trivially_copyable : integral_constant<bool, __is_trivially_copyable(_Tp)> {};
+template <class _Tp> struct is_trivially_destructible : integral_constant<bool, __is_trivially_destructible(_Tp)> {};
+
+template <class _Tp, class... _Args>
+struct is_constructible : integral_constant<bool, __is_constructible(_Tp, _Args...)> {};
+template <class _Tp, class... _Args>
+struct is_trivially_constructible : integral_constant<bool, __is_trivially_constructible(_Tp, _Args...)> {};
+
+template <class _Tp> struct underlying_type { typedef __underlying_type(_Tp) type; };
+template <class _Tp> using underlying_type_t = typename underlying_type<_Tp>::type;
+
+// ---- variable templates ----------------------------------------------------
+template <class _Tp, class _Up> inline constexpr bool is_same_v = is_same<_Tp, _Up>::value;
+template <class _Tp> inline constexpr bool is_void_v = is_void<_Tp>::value;
+template <class _Tp> inline constexpr bool is_integral_v = is_integral<_Tp>::value;
+template <class _Tp> inline constexpr bool is_floating_point_v = is_floating_point<_Tp>::value;
+template <class _Tp> inline constexpr bool is_arithmetic_v = is_arithmetic<_Tp>::value;
+template <class _Tp> inline constexpr bool is_pointer_v = is_pointer<_Tp>::value;
+template <class _Tp> inline constexpr bool is_const_v = is_const<_Tp>::value;
+template <class _Tp> inline constexpr bool is_class_v = is_class<_Tp>::value;
+template <class _Tp> inline constexpr bool is_enum_v = is_enum<_Tp>::value;
+template <class _Tp> inline constexpr bool is_union_v = is_union<_Tp>::value;
+template <class _Tp> inline constexpr bool is_empty_v = is_empty<_Tp>::value;
+template <class _Tp> inline constexpr bool is_final_v = is_final<_Tp>::value;
+template <class _Tp, class _Up> inline constexpr bool is_base_of_v = is_base_of<_Tp, _Up>::value;
+template <class _Tp, class... _Args> inline constexpr bool is_constructible_v = is_constructible<_Tp, _Args...>::value;
+template <class _Tp> inline constexpr bool is_trivially_copyable_v = is_trivially_copyable<_Tp>::value;
+template <class _Tp> inline constexpr bool is_trivially_destructible_v = is_trivially_destructible<_Tp>::value;
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_TYPE_TRAITS

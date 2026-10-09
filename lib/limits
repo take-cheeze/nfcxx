@@ -1,0 +1,88 @@
+// nfcxx freestanding <limits>: numeric_limits for the integer types (floating point is not
+// provided yet). Values come from the compiler's predefined macros.
+#ifndef NFCXX_LIB_LIMITS
+#define NFCXX_LIB_LIMITS
+
+namespace std {
+inline namespace __nfcxx {
+
+template <class _Tp>
+class numeric_limits {
+public:
+  static constexpr bool is_specialized = false;
+  static constexpr int digits = 0;
+  static constexpr int digits10 = 0;
+  static constexpr bool is_signed = false;
+  static constexpr bool is_integer = false;
+  static constexpr bool is_exact = false;
+  static constexpr int radix = 0;
+  static constexpr _Tp min() noexcept { return _Tp(); }
+  static constexpr _Tp max() noexcept { return _Tp(); }
+  static constexpr _Tp lowest() noexcept { return _Tp(); }
+};
+
+// Integer types: min/max are derived from the unsigned/signed predefined maxima.
+#define NFCXX_INTEGER_LIMITS(T, MAXV, SIGNED, DIGITS)                                  \
+  template <>                                                                          \
+  class numeric_limits<T> {                                                            \
+  public:                                                                              \
+    static constexpr bool is_specialized = true;                                       \
+    static constexpr bool is_signed = SIGNED;                                          \
+    static constexpr bool is_integer = true;                                           \
+    static constexpr bool is_exact = true;                                             \
+    static constexpr int radix = 2;                                                    \
+    static constexpr int digits = DIGITS;                                              \
+    static constexpr int digits10 = (DIGITS) * 301 / 1000;                             \
+    static constexpr T max() noexcept { return static_cast<T>(MAXV); }                 \
+    static constexpr T min() noexcept { return SIGNED ? static_cast<T>(-(MAXV) - 1) : static_cast<T>(0); } \
+    static constexpr T lowest() noexcept { return min(); }                             \
+  };
+
+NFCXX_INTEGER_LIMITS(signed char, __SCHAR_MAX__, true, 7)
+NFCXX_INTEGER_LIMITS(unsigned char, 2 * __SCHAR_MAX__ + 1, false, 8)
+NFCXX_INTEGER_LIMITS(short, __SHRT_MAX__, true, 15)
+NFCXX_INTEGER_LIMITS(unsigned short, 2 * __SHRT_MAX__ + 1, false, 16)
+NFCXX_INTEGER_LIMITS(int, __INT_MAX__, true, 31)
+NFCXX_INTEGER_LIMITS(unsigned int, 2U * __INT_MAX__ + 1U, false, 32)
+NFCXX_INTEGER_LIMITS(long, __LONG_MAX__, true, 63)
+NFCXX_INTEGER_LIMITS(unsigned long, 2UL * __LONG_MAX__ + 1UL, false, 64)
+NFCXX_INTEGER_LIMITS(long long, __LONG_LONG_MAX__, true, 63)
+NFCXX_INTEGER_LIMITS(unsigned long long, 2ULL * __LONG_LONG_MAX__ + 1ULL, false, 64)
+
+#undef NFCXX_INTEGER_LIMITS
+
+// char: signedness is implementation-defined; ask the compiler.
+template <>
+class numeric_limits<char> {
+public:
+  static constexpr bool is_specialized = true;
+  static constexpr bool is_signed = static_cast<char>(-1) < static_cast<char>(0);
+  static constexpr bool is_integer = true;
+  static constexpr bool is_exact = true;
+  static constexpr int radix = 2;
+  static constexpr int digits = is_signed ? 7 : 8;
+  static constexpr int digits10 = digits * 301 / 1000;
+  static constexpr char max() noexcept { return is_signed ? static_cast<char>(__SCHAR_MAX__) : static_cast<char>(2 * __SCHAR_MAX__ + 1); }
+  static constexpr char min() noexcept { return is_signed ? static_cast<char>(-__SCHAR_MAX__ - 1) : static_cast<char>(0); }
+  static constexpr char lowest() noexcept { return min(); }
+};
+
+template <>
+class numeric_limits<bool> {
+public:
+  static constexpr bool is_specialized = true;
+  static constexpr bool is_signed = false;
+  static constexpr bool is_integer = true;
+  static constexpr bool is_exact = true;
+  static constexpr int radix = 2;
+  static constexpr int digits = 1;
+  static constexpr int digits10 = 0;
+  static constexpr bool max() noexcept { return true; }
+  static constexpr bool min() noexcept { return false; }
+  static constexpr bool lowest() noexcept { return false; }
+};
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_LIMITS

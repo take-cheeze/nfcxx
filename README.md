@@ -10,4 +10,7 @@ scripts/setup-qbe.sh      # build QBE + cproc (3rd/qbe, 3rd/cproc) into build/
 ./nfcxx --backend=gcc ...    # C++ -> C -> gcc -O2 -fwrapv -fno-strict-aliasing
 ./nfcxx --emit-c hello.cpp   # print the generated C
 tests/run.sh              # regression cases in tests/cases (// EXPECT: <exit code>)
+./nfcxx --freestanding x.cpp # headers from lib/ only, no hosted libc++/libstdc++ (docs/notes/freestanding.md)
+tests/lib/run.sh          # freestanding library tests (both backends)
+tests/builtins/run.sh     # compiler builtin probes (docs/notes/builtins.md)
 ```

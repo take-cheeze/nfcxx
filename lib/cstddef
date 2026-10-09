@@ -1,0 +1,53 @@
+// nfcxx freestanding <cstddef>: size_t, ptrdiff_t, nullptr_t, std::byte, offsetof.
+// Everything lives in the private inline namespace std::__nfcxx (see docs/notes/freestanding.md).
+#ifndef NFCXX_LIB_CSTDDEF
+#define NFCXX_LIB_CSTDDEF
+
+namespace std {
+inline namespace __nfcxx {
+
+typedef __SIZE_TYPE__ size_t;
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+typedef decltype(nullptr) nullptr_t;
+
+enum class byte : unsigned char {};
+
+template <class _IntType>
+constexpr byte operator<<(byte __b, _IntType __s) noexcept {
+  return static_cast<byte>(static_cast<unsigned char>(static_cast<unsigned int>(__b) << __s));
+}
+template <class _IntType>
+constexpr byte operator>>(byte __b, _IntType __s) noexcept {
+  return static_cast<byte>(static_cast<unsigned char>(static_cast<unsigned int>(__b) >> __s));
+}
+constexpr byte operator|(byte __l, byte __r) noexcept {
+  return static_cast<byte>(static_cast<unsigned int>(__l) | static_cast<unsigned int>(__r));
+}
+constexpr byte operator&(byte __l, byte __r) noexcept {
+  return static_cast<byte>(static_cast<unsigned int>(__l) & static_cast<unsigned int>(__r));
+}
+constexpr byte operator^(byte __l, byte __r) noexcept {
+  return static_cast<byte>(static_cast<unsigned int>(__l) ^ static_cast<unsigned int>(__r));
+}
+constexpr byte operator~(byte __b) noexcept {
+  return static_cast<byte>(static_cast<unsigned char>(~static_cast<unsigned int>(__b)));
+}
+template <class _IntType>
+constexpr byte& operator<<=(byte& __b, _IntType __s) noexcept { return __b = __b << __s; }
+template <class _IntType>
+constexpr byte& operator>>=(byte& __b, _IntType __s) noexcept { return __b = __b >> __s; }
+constexpr byte& operator|=(byte& __l, byte __r) noexcept { return __l = __l | __r; }
+constexpr byte& operator&=(byte& __l, byte __r) noexcept { return __l = __l & __r; }
+constexpr byte& operator^=(byte& __l, byte __r) noexcept { return __l = __l ^ __r; }
+
+template <class _IntType>
+constexpr _IntType to_integer(byte __b) noexcept {
+  return static_cast<_IntType>(__b);
+}
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#define offsetof(__type, __member) __builtin_offsetof(__type, __member)
+
+#endif // NFCXX_LIB_CSTDDEF

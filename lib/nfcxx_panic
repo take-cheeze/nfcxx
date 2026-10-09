@@ -1,0 +1,31 @@
+// nfcxx freestanding panic helper. There are no exceptions yet, so a failed precondition
+// (out-of-range index, empty optional, ...) writes a message to stderr and aborts.
+// Only the C ABI is used (write, abort), not hosted headers or __builtin_trap: cproc, the
+// QBE front end, does not know __builtin_trap.
+#ifndef NFCXX_LIB_PANIC
+#define NFCXX_LIB_PANIC
+
+extern "C" long write(int __fd, const void* __buf, unsigned long __n);
+extern "C" [[noreturn]] void abort(void);
+
+namespace std {
+inline namespace __nfcxx {
+
+inline unsigned long __cstr_length(const char* __s) noexcept {
+  unsigned long __n = 0;
+  while (__s[__n] != '\0') ++__n;
+  return __n;
+}
+
+[[noreturn]] inline void __panic(const char* __msg) noexcept {
+  const char __prefix[] = "nfcxx panic: ";
+  write(2, __prefix, sizeof(__prefix) - 1);
+  write(2, __msg, __cstr_length(__msg));
+  write(2, "\n", 1);
+  abort();
+}
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_PANIC

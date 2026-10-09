@@ -1,0 +1,99 @@
+// nfcxx freestanding <array>: std::array as an aggregate of one C array. operator[] is
+// unchecked (as in the standard); at() panics (no exceptions).
+#ifndef NFCXX_LIB_ARRAY
+#define NFCXX_LIB_ARRAY
+
+#include <cstddef>
+#include <nfcxx_panic>
+#include <utility>
+
+namespace std {
+inline namespace __nfcxx {
+
+template <class _Tp, size_t _Np>
+struct array {
+  typedef _Tp value_type;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+  typedef _Tp& reference;
+  typedef const _Tp& const_reference;
+  typedef _Tp* pointer;
+  typedef const _Tp* const_pointer;
+  typedef _Tp* iterator;
+  typedef const _Tp* const_iterator;
+
+  // A zero-length C array is not standard C++; N == 0 keeps one unused element.
+  _Tp __elems_[_Np == 0 ? 1 : _Np];
+
+  constexpr size_type size() const noexcept { return _Np; }
+  constexpr size_type max_size() const noexcept { return _Np; }
+  constexpr bool empty() const noexcept { return _Np == 0; }
+
+  reference operator[](size_type __i) noexcept { return __elems_[__i]; }
+  constexpr const_reference operator[](size_type __i) const noexcept { return __elems_[__i]; }
+
+  reference at(size_type __i) {
+    if (__i >= _Np) __panic("array::at: index out of range");
+    return __elems_[__i];
+  }
+  constexpr const_reference at(size_type __i) const {
+    return __i < _Np ? __elems_[__i] : (__panic("array::at: index out of range"), __elems_[0]);
+  }
+
+  reference front() noexcept { return __elems_[0]; }
+  constexpr const_reference front() const noexcept { return __elems_[0]; }
+  reference back() noexcept { return __elems_[_Np - 1]; }
+  constexpr const_reference back() const noexcept { return __elems_[_Np - 1]; }
+
+  pointer data() noexcept { return _Np == 0 ? nullptr : __elems_; }
+  constexpr const_pointer data() const noexcept { return _Np == 0 ? nullptr : __elems_; }
+
+  iterator begin() noexcept { return data(); }
+  const_iterator begin() const noexcept { return data(); }
+  const_iterator cbegin() const noexcept { return data(); }
+  iterator end() noexcept { return data() + _Np; }
+  const_iterator end() const noexcept { return data() + _Np; }
+  const_iterator cend() const noexcept { return data() + _Np; }
+
+  void fill(const _Tp& __u) {
+    for (size_type __i = 0; __i < _Np; ++__i) __elems_[__i] = __u;
+  }
+  void swap(array& __other) {
+    for (size_type __i = 0; __i < _Np; ++__i) std::swap(__elems_[__i], __other.__elems_[__i]);
+  }
+};
+
+template <class _Tp, size_t _Np>
+constexpr bool operator==(const array<_Tp, _Np>& __x, const array<_Tp, _Np>& __y) {
+  for (size_t __i = 0; __i < _Np; ++__i)
+    if (!(__x[__i] == __y[__i])) return false;
+  return true;
+}
+template <class _Tp, size_t _Np>
+constexpr bool operator!=(const array<_Tp, _Np>& __x, const array<_Tp, _Np>& __y) {
+  return !(__x == __y);
+}
+template <class _Tp, size_t _Np>
+constexpr bool operator<(const array<_Tp, _Np>& __x, const array<_Tp, _Np>& __y) {
+  for (size_t __i = 0; __i < _Np; ++__i) {
+    if (__x[__i] < __y[__i]) return true;
+    if (__y[__i] < __x[__i]) return false;
+  }
+  return false;
+}
+
+template <size_t _Ip, class _Tp, size_t _Np>
+constexpr _Tp& get(array<_Tp, _Np>& __a) noexcept {
+  static_assert(_Ip < _Np, "get: index out of range");
+  return __a.__elems_[_Ip];
+}
+template <size_t _Ip, class _Tp, size_t _Np>
+constexpr const _Tp& get(const array<_Tp, _Np>& __a) noexcept {
+  static_assert(_Ip < _Np, "get: index out of range");
+  return __a.__elems_[_Ip];
+}
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_ARRAY

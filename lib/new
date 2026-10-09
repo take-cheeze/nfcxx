@@ -1,0 +1,23 @@
+// nfcxx freestanding <new>: placement new/delete and std::launder. No heap allocation.
+#ifndef NFCXX_LIB_NEW
+#define NFCXX_LIB_NEW
+
+#include <cstddef>
+
+inline void* operator new(std::size_t, void* __p) noexcept { return __p; }
+inline void* operator new[](std::size_t, void* __p) noexcept { return __p; }
+inline void operator delete(void*, void*) noexcept {}
+inline void operator delete[](void*, void*) noexcept {}
+
+namespace std {
+inline namespace __nfcxx {
+
+template <class _Tp>
+constexpr _Tp* launder(_Tp* __p) noexcept {
+  return __builtin_launder(__p);
+}
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_NEW
