@@ -3,7 +3,7 @@
 Status: first implementation. `be/nfcxx_ir.c` lowers the lowered EDG IL of `tests/cases/*.cpp` to the IR below and
 prints it, with no unsupported nodes on those programs. Goldens: `tests/pathb-ir/*.ir`, checked by
 `tests/pathb-ir/run.sh`. Stage 3 adds the first consumer, an IR-to-QBE emitter
-(`scripts/pathb-qbe-emit.py`, see `docs/notes/pathb-stage3.md`). There is still no SPIR-V or WGSL emitter, no
+(`scripts/pathb-qbe-emit.rb`, see `docs/notes/pathb-stage3.md`). There is still no SPIR-V or WGSL emitter, no
 checker, and no execution of the IR itself. Sections 1-8 are the spec; section 9 says what is implemented, what
 is not, and the coverage numbers.
 

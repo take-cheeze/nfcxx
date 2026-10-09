@@ -1,0 +1,7 @@
+(ir-module "e.cpp" (layout (short 2) (int 4) (long 4) (pointer 4)))
+
+(function "main"
+  (ret int)
+  (params)
+  (return (const int 0)))
+
