@@ -2439,7 +2439,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_write(&params, nf_out);
   fputs(")", nf_out);
   if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
-  else if (rout->use_comdat) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
+  else if (rout->use_comdat || rout->is_weak) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template) or the weak attribute (the _ZTW wrapper of a thread_local), written as __weak__ by c_gen_be.c */
   ir_startup_markers(rout);
   ir_buf_write(&ir_slot_buf, nf_out);
   ir_buf_write(&body, nf_out);
@@ -2450,6 +2450,32 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_close(&params);
   ir_buf_close(&body);
   ir_buf_close(&ir_slot_buf);
+}
+
+/* The `_ZTH<name>` initialization routine of a thread_local variable (EDG routine->is_tls_init_alias). IL lowering
+   gives it no body: it is "an alias for the __tls_init routine" of the translation unit, which runs the dynamic
+   initialization of every thread_local object defined here once per thread (a thread_local guard). c_gen_be.c writes
+   `.global _ZTH..; _ZTH.. = __tls_init` for an externally visible one and a one-line routine that calls __tls_init for a
+   static one. The IR has no aliases, so both become that routine. The storage class is the variable's: extern means
+   the variable is defined in another unit (no definition here: the `_ZTW` wrapper refers to a weak undefined
+   function), unspecified is external and (weak) as EDG sets is_weak, static is internal. The wrappers `_ZTW<name>`
+   have an ordinary body and are printed by ir_function. */
+static void ir_tls_init_alias(a_routine_ptr rout, a_scope_ptr scope)
+{
+  a_routine_ptr r, tls_init = NULL;
+  if (rout->storage_class == sc_extern) return;
+  for (r = scope->routines; r != NULL; r = r->next) {
+    if (r->is_tls_init_routine && r->function_def_number != NULL_function_def_number) tls_init = r;
+  }
+  ir_buf_begin(&ir_out_funcs);
+  fputs("\n(function ", nf_out);
+  nf_put_quoted_name(ir_rout_name(rout));
+  fputs("\n  (ret void)\n  (params)", nf_out);
+  if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
+  else if (rout->is_weak || rout->use_comdat) fputs("\n  (weak)", nf_out);
+  if (tls_init != NULL) fprintf(nf_out, "\n  (eval (call void &\"%s\"))", ir_rout_name(tls_init));
+  fputs("\n  (return))\n", nf_out);
+  ir_buf_end(&ir_out_funcs);
 }
 
 /* Entry point. Called by back_end() when NFCXX_PATHB_MODE=ir. */
@@ -2473,7 +2499,8 @@ void nfcxx_ir_back_end(void)
   }
   for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(rout->source_corresp.name);
   for (rout = scope->routines; rout != NULL; rout = rout->next) {
-    ir_function(rout);
+    if (rout->is_tls_init_alias && rout->function_def_number == NULL_function_def_number) ir_tls_init_alias(rout, scope);
+    else ir_function(rout);
   }
 
   nf_out = stdout;

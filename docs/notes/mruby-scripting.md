@@ -167,7 +167,9 @@ Behaviour added to `pathb-qbe-emit.rb` is added to the oracle `tests/mruby/oracl
 change, so the byte-for-byte comparison stays strict: the `(constructor [PRIO])` / `(destructor [PRIO])` function
 markers (`.init_array` / `.fini_array` tables, reachability roots) and the pointer cells for the address of a function
 defined elsewhere (`pathb_got.NAME`). Edge inputs: `tests/mruby/pathb-edge/startup.ir`, `fnaddr.ir`,
-`e_startup_*.ir`.
+`e_startup_*.ir`. The address of a thread-local object is always `copy extern thread $x` (initial-exec, valid in a
+shared library) also for a definition in the module; the oracle changed with it (covered by `thread_data.ir`,
+`r_thread_addr.ir` and the `tests/pathb-ir/tls*.ir` goldens).
 
 ## Bootstrap caveat
 

@@ -473,12 +473,13 @@ class Fn:
                 return self.slot_val(name)
             if sig == "@":
                 if name in self.mod.thread:
-                    # Thread-local object: its address is the thread pointer plus the object's TLS offset. A definition
-                    # in this module uses the local-exec model (`thread $x`); a declaration uses initial-exec through
-                    # the GOT (`extern thread $x`), so the object may live in another object file or in a shared
-                    # library. The address goes through a temporary so that it is a plain `l` value wherever it is used.
+                    # Thread-local object: its address is the thread pointer plus the object's TLS offset. Every access
+                    # uses the initial-exec model (`extern thread $x`, the offset comes from the GOT), also for an object
+                    # defined in this module: that is valid in an executable (the linker relaxes it to local-exec for a
+                    # symbol it defines) and in a shared library (QBE has no general-dynamic form), and the object may
+                    # live in another object file. The address goes through a temporary so that it is a plain `l` value.
                     t = self.tmp()
-                    self.emit("%s =l copy %s $%s" % (t, "extern thread" if self.mod.thread[name] == "ext" else "thread", qsym(name)))
+                    self.emit("%s =l copy extern thread $%s" % (t, qsym(name)))
                     return Val(t, "l", ("ptr", self.mod.globals.get(name)))
                 return Val("$" + qsym(name), "l", ("ptr", self.mod.globals.get(name)))
             if sig == "&":
