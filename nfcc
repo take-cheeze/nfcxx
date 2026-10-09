@@ -5,7 +5,7 @@
 #
 #   nfcc -c a.c -o a.o        compile (several .c files without -o give one .o each in the cwd)
 #   nfcc a.o b.o -lm -o prog  link; .c inputs are compiled to temporary objects first
-#   nfcc -E ... / -M ...      preprocess / dependency query: passed to the host compiler unchanged
+#   nfcc -E ... / -M ... / -fsyntax-only   preprocess / dependency query / syntax check: host compiler, unchanged
 #   nfcc --version, -v, -dumpmachine, -dumpversion, -print-*: answered like gcc (the host compiler answers)
 #   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
 #   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
@@ -49,9 +49,11 @@ done
 if [ $# -eq 1 ] && [ "$1" = -v ]; then exec "$host" -v; fi
 
 # Preprocessing and dependency queries (-E, -M, -MM, -MG) go to the host preprocessor exactly as asked: it
-# understands every -d*, -P, -C, ... option, and there is no code generation to get wrong.
+# understands every -d*, -P, -C, -Wp,* ... option, and there is no code generation to get wrong. So does
+# -fsyntax-only (a check that writes no object; rake builds use `-Wp,-v - -fsyntax-only` to learn the
+# header search path): the host front end answers it.
 for a in "$@"; do
-  case $a in -E|-M|-MM|-MG) exec "$host" "$@" ;; esac
+  case $a in -E|-M|-MM|-MG|-fsyntax-only) exec "$host" "$@" ;; esac
 done
 
 # -f options that do not change what the program means here (or that this pipeline already implies).
@@ -72,7 +74,6 @@ for ((i = 0; i < n; i++)); do
   case $a in
     -c) mode=compile ;;
     -S) die "-S (assembly output) is not supported" ;;
-    -fsyntax-only) die "-fsyntax-only is not supported" ;;
     -o) need; out=${args[++i]}; sawout=1 ;;
     -o?*) out=${a#-o}; sawout=1 ;;
     -x) need; lang=${args[++i]}
@@ -101,7 +102,7 @@ for ((i = 0; i < n; i++)); do
     -O|-O?*|-g|-g?*|-pipe|-v|-time) ;;
     -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); picf+=("$a") ;;   # QBE output is already PIC (GOT-relative); gcc needs the flag
     -m32|-mx32|-m16|-miamcu) die "$a is not supported (x86-64 only)" ;;
-    -m64|-march=*|-mtune=*|-mcpu=*|-msse*|-mavx*|-mno-*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*|-mrdrnd|-mrdseed) ;;
+    -m64|-march=*|-mtune=*|-mcpu=*|-msse*|-mavx*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*|-mrdrnd|-mrdseed) ;;
     -m*) die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
@@ -126,7 +127,6 @@ done
 
 [ ${#inputs[@]} -gt 0 ] || die "no input files"
 if [ "$mode" = compile ]; then
-  [ ${#ld[@]} -eq 0 ] || :   # link options with -c are ignored by gcc as well
   [ "$sawout" = 0 ] || [ ${#inputs[@]} -le 1 ] || die "cannot specify -o with -c and multiple files"
 fi
 if [ -n "$depmode" ] && [ "$mode" != compile ]; then

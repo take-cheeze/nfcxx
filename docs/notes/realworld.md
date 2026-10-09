@@ -128,28 +128,127 @@ integer wraparound). Not in the GitHub workflow.
 | gcc | built and ran |
 | QBE | built and ran (after the three fixes above; the first blocker was the `gnu/stubs-32.h` error, then `multiple types in declaration specifiers` at `_Float32`, then `volatile store is not yet supported` in `ldebug.c`, `ldo.c`, `lstate.c`) |
 
-### What mruby would additionally need
+## `nfcc`: a drop-in `cc` for build systems
 
-I could not read mruby's repository: it is not in this session's allowed GitHub repositories, and I was told
-not to clone it. The following is from memory and **not verified**:
+`nfcc` (a script next to `nfcxx`) behaves like `cc` for make, rake and autoconf-style probes, on the C
+pipeline above. The backend is `NFCXX_BACKEND=qbe|gcc` (default qbe); `NFCC_HOST_CC` names the host compiler
+used for preprocessing, dependency files, assembling and linking (default `cc`). It is C only; C++ stays with
+`nfcxx`.
 
-- mruby builds with `rake` (a `Rakefile` plus `build_config.rb` and `lib/mruby/build.rb`), i.e. Ruby is
-  needed on the host, and the build is bootstrapped: `mrbc` (the compiler) is built first, then used to
-  generate C from the mrblib `.rb` files (`mrblib.c`, gem `gem_init.c`), plus the `yacc`/bison-generated
-  `mrbgems/mruby-compiler/core/y.tab.c` (checked in in recent versions, so bison is probably optional).
-- The build driver chooses the C compiler from `build_config.rb` (`conf.cc.command`, flags); nfcxx would be
-  set as `cc` and linker. Its flags (`-std=gnu99`, `-Wall`, `-DMRB_...`) would have to be tolerated or
-  ignored; the driver has no passthrough of arbitrary gcc flags yet (`-std=`, `-W*`, `-O*`, `-c`, `-MMD`
-  are not handled; `nfcxx` compiles and links in one call, with no `-c` mode).
-- mruby's C uses `setjmp`/`longjmp` (or C++ exceptions with `MRB_USE_CXX_EXCEPTION`), `volatile`, `inline`
-  functions and computed goto / `__builtin_expect` in the VM; the last two need a cproc check.
+- **Modes:** `-c file.c -o file.o` (several sources without `-o` give one object each in the cwd); link of
+  `.o`/`.a`/`.so` inputs with `-o`, `-l`, `-L`, `-Wl,*`, `-Xlinker`, `-shared`, `-static`, `-rdynamic`, `-pie`,
+  `-pthread` (`.c` inputs on a link line are compiled to temporary objects first); `-fPIC` + `-shared` works on
+  both backends (QBE emits GOT-relative code already; gcc gets the flag). `.s`/`.S` go to the host compiler.
+  `-x c`, `-x none`, `-x c -` (stdin) are handled.
+- **Host-answered:** `-E`, `-M`, `-MM`, `-MG` and `-fsyntax-only` run the host compiler with the original
+  arguments (so `-dM`, `-P`, `-Wp,-v` and the like just work); `-dumpmachine`, `-dumpversion`, `-print-*`,
+  `-v` alone and `--help` also go to the host compiler. `--version` prints an `nfcc ... (gcc-compatible driver)`
+  banner followed by the host compiler's version line.
+- **Honoured:** `-std=*` (C only), `-ansi`, `-D`, `-U`, `-I`, `-isystem`, `-iquote`, `-idirafter`, `-include`,
+  `-imacros` (the QBE path preprocesses with the host `cc -E`, so these go to it; `scripts/qbe-cc` learned the
+  extra forms); dependency files `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP` with `-c` come from the host
+  preprocessor (`cc -M`/`-MM`), with gcc's default names (`foo.d` next to `-o foo.o`, target `foo.o`).
+- **Ignored on purpose:** `-O*`, `-g*`, `-W*` (including `-Werror`), `-w`, `-pipe`, `-v` with other arguments,
+  `-m64`, `-march=`, `-mtune=`, other `-m<feature>` x86 options, and an allow list of `-f` options that cannot
+  change what the program means here (`-fPIC`, `-fvisibility=`, `-fno-strict-aliasing`, `-fwrapv`,
+  `-fno-common`, `-fstack-protector*`, `-f(no-)omit-frame-pointer`, `-ffunction-sections`, `-flto`, ...; the full
+  list is `fok` in `nfcc`). The gcc backend always uses `-O2 -fwrapv -fno-strict-aliasing`, as `nfcxx` does.
+- **Rejected with `nfcc: error: ...`, nothing written:** `-S`, `-m32`/`-mx32`, `-fsanitize*`, `-fopenmp`,
+  `-fprofile*`, `--coverage`, `-ffast-math` and friends, `-funsigned-char`, `-fshort-enums`, `-ftrapv`, other
+  `-f` options that change semantics or are not in the allow list, `-std=c++*`, `-x c++`, C++ and other non-C
+  sources, `-Wp,*`/`-Wa,*`, `@response` files, dependency options on a compile-and-link command, and any
+  option it does not know.
 
-The nfcxx work needed is thus a `-c`/`-o file.o` driver mode and gcc-flag tolerance so rake can drive it,
-or a hand-written file list once the generated files exist (generate them with the host `gcc` build, then
-compile that tree with nfcxx).
+`tests/c/cc-mode.sh` (both backends, 105 checks) invokes it the way make does: flag soup, a Makefile with
+`CC=nfcc`, `-MMD -MP` and `-include *.d` (touching a header rebuilds the dependents), `ar`, `-L`/`-l`, a shared
+object, autoconf-style probes, and one check per rejected option.
+
+### Lua through its own makefile
+
+`tests/realworld/run_lua_make.sh` runs `make CC=<repo>/nfcc` with Lua's own `makefile` (the developer's makefile
+that ships in the lua/lua repository; same pinned commit as `run_lua.sh`) in a scratch copy of the sources, then
+runs `lua -e "print(1+1)"` and `lua_test.lua`. Its warning flags, `-march=native`, `-fno-stack-protector`,
+`-fno-common`, `-Wl,-E` all pass through nfcc unchanged; only `MYCFLAGS`/`MYLIBS` are overridden to drop
+`-lreadline` (not installed) and keep `-std=c99 -DLUA_USE_LINUX`. `ar`/`ranlib` come from the makefile.
+
+| backend | result |
+|---|---|
+| gcc | built (`liblua.a`, `lua`) and ran |
+| QBE | built and ran |
+
+## mruby
+
+[mruby](https://github.com/mruby/mruby) (MIT) tag `4.0.0`, commit `831da26b9021de0369d17b71b5667e2941a1a32d`
+(2026-04-20, the newest non-rc tag; `4.1.0-rc` exists but is a release candidate). `tests/realworld/run_mruby.sh`
+fetches it into `build/realworld/mruby` (not vendored), then runs mruby's standard build, `rake all`, with
+`tests/realworld/mruby_build_config.rb`: the default gembox, `toolchain :gcc`, and `cc.command` /
+`linker.command` set to `nfcc` (`MRUBY_CC`). Ruby 3.3.6 and rake 13.1.0 were already installed (rake's
+binary is not on `PATH`; the script finds it through `Gem.bindir`). The build is bootstrapped: it compiles
+`mrbc` first and uses that binary to compile the Ruby parts of the core and the gems, so the QBE-compiled
+parser and VM run during the build. The resulting `mruby` runs `-e 'puts 1+1'` and
+`tests/realworld/mruby_test.rb` (strings, arrays, hashes, blocks, lambdas, `rescue`/`raise`/`ensure` and a
+50-deep re-raise (setjmp/longjmp in the VM), `catch`/`throw`, a memoizing `Hash`). Not in the GitHub workflow.
+
+| backend | result |
+|---|---|
+| host gcc (control, `MRUBY_CONTROL=1`) | built and ran |
+| nfcc, gcc backend | built and ran |
+| nfcc, QBE backend | built and ran |
+
+The QBE build of the whole default gembox (core, 60 gems, `mrbc`, `mruby`, `mirb`, `mrdb`) is clean after the
+fixes below. These were the first blockers, in the order the build hit them (the first column is the exact text):
+
+| first blocker on QBE | cause | fix |
+|---|---|---|
+| `<stdin>:2262:10: error: undeclared identifier: __builtin_add_overflow` (`src/backtrace.c`) | `include/mruby/numeric.h` tests `__has_builtin(__builtin_add_overflow)`, which the host preprocessor answers yes to even with `-undef` | `qbe-prep.py` lowers `__builtin_{add,sub,mul}_overflow` with nested `_Generic` to small helpers, for operands of one type (int, unsigned, long, unsigned long, long long, unsigned long long; integer literals take the result's type); any other mix links against an undefined `__nfcxx_overflow_unsupported_operand_types`. Also `__builtin_popcount*`, `ctz*`, `clz*`. Case `tests/c/builtins_overflow.c` |
+| `<stdin>:...: error: va_arg with non-scalar type is not yet supported` (`src/error.c`: `va_arg(ap, mrb_value)`; also `src/vm.c`) | cproc/QBE `vaarg` is scalar-only (cproc issue 52); `mrb_value` is a 16-byte struct (or 8 bytes with word boxing) | `scripts/cproc-vaarg-aggregate.patch`, applied by `setup-qbe.sh` after the empty-struct patch: va_arg of a struct/union of at most 16 bytes made only of integers/pointers reads the SysV va_list directly (register save area if `gp_offset <= 48 - size`, else the overflow area). Floats in the aggregate, more than 16 bytes, over-alignment and non-x86_64 keep the error. Case `tests/c/va_struct.c`, which also covers the "one register left" corner and was cross-checked against gcc-compiled callers and callees |
+| `undefined reference to 'alloca'` (link of `mrbc`, bison's `y.tab.c`) | without `__GNUC__`, glibc's `<alloca.h>` declares a function; libc has none | `qbe-prep.py` (C inputs) rewrites `alloca(n)` calls to `__builtin_alloca`. Case `tests/c/alloca.c` |
+| `qbe:...: invalid instruction type in truncd` (`mruby-numeric-ext`) | `DBL_MIN` is `((double)2.2250738585072014e-308L)`; cproc types the literal as long double and emits an invalid cast | `qbe-prep.py` drops the `L` of a literal directly cast to `double`/`float`. Case `tests/c/float_limits.c`. (Finding it also fixed `qbe-prep.py`'s tokenizer, which split `1e-308` at the sign.) |
+
+Not needed, although feared: computed goto / labels-as-values. `src/vm.c` uses them only under `#ifdef __GNUC__`
+(`MRB_USE_VM_GOTO`-style direct threading), and `qbe-cc` preprocesses C inputs without `__GNUC__`, so the VM is
+built with the portable `switch` dispatch. `__builtin_expect` is behind `__GNUC__` too (and cproc knows it).
+Compared with host gcc, that makes the QBE VM slower; no timing was taken.
+
+Other things the build exposed, not on cproc's side:
+
+- mruby decides "this is Windows" when any directory `/a/` ... `/z/` exists (`for_windows?` in
+  `lib/mruby/gem.rb`); this machine has `/x/`, so the default build picked `hal-win-io` and failed on
+  `windows.h` with plain gcc already. The build config names the POSIX HAL gems explicitly.
+- `rake` with `-j` keeps going on stale objects after a compiler change; delete the build directory when
+  `nfcc` or `qbe-prep.py` changes (the script builds in a fresh temporary directory every time).
+- `nfcc` rejected `-Wp,-v - -fsyntax-only`, which mruby's gcc toolchain uses to find the header search
+  path; `-fsyntax-only` (and so `-Wp`) is now answered by the host compiler.
+
+**mruby's own test suite (extra, not in `run_mruby.sh`):** `MRUBY_TEST=1 rake test` with the same config
+(`conf.enable_test`) builds `mrbtest` and runs the library tests of all gems. QBE backend: 1714 tests, 1704 OK,
+0 KO, 1 crash, 9 skipped. Host gcc control: identical numbers. The one crash is `UDPSocket.new => socket` raising
+`RuntimeError` in this sandbox (no usable socket), the same with gcc; it makes `rake test` exit 1 before the
+`bintest` stage, which was therefore not run on either.
+
+## What remains
+
+- **`volatile` locals across `setjmp`:** for C inputs `qbe-prep.py` drops `volatile` (cproc rejects volatile
+  stores). QBE promotes a local whose address is never taken to a register, so a "volatile int err" written
+  after `setjmp` and read after `longjmp` may be stale. mruby has such a local (`mrb_core_init_protect`,
+  `src/error.c`) where the stale value happens to be the right one; the test script passes. A fix would keep
+  the object in memory (take its address) when it is `volatile` and the function calls `setjmp`.
+- **`va_arg` of aggregates** is only done for integer-class aggregates up to 16 bytes on x86_64. A struct with a
+  float/double member (SSE class), over 16 bytes (passed in memory) or over-aligned still stops with cproc's
+  error. The cproc change is local to the build copy; it should go upstream (cproc issue 52).
+- **Overflow builtins** only for operands of one type; `unsigned char`/`short` and mixed signedness fail loudly at
+  link time (`tests/builtins/overflow.cpp` stays an xfail for that reason).
+- **`long double`** and `_Complex` are still unsupported by cproc (`mruby-cmath`, which is not in the default
+  gembox, needs `_Complex`).
+- `nfcc` has no `-S`, no response files, no `-Wp,*`/`-Wa,*`, and does not generate dependency files for a
+  compile-and-link command; `-std=c89`/`-ansi` change only the preprocessing (cproc always parses C11 plus
+  its GNU subset).
+- The GCC backend of `nfcc` ignores `-O*`/`-g` (it always uses `-O2`); a build that needs `-g` for debugging
+  gets no debug info.
 
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a JSON or XML parser or a
 small compression library in C++. Doctest stays on the gcc backend (see the decision above).
-mruby is C: the `.c` input mode now exists; see the mruby notes above for what is still missing.
+mruby (C) now builds and runs on both backends through `nfcc`; see "What remains" above. Another C project that
+uses autoconf (`./configure CC=nfcc`) would be the next test of the `cc`-compatibility of `nfcc`.

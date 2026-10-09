@@ -154,6 +154,12 @@ EOF
   rejects "response file" "response" @args -c util.c -o rej.o
   rejects "no input" "no input" -c -o rej.o
   rejects "-MD without -c" "needs -c" -MD util.c -o rej.o
+  if [ $b = qbe ]; then   # qbe-prep lowers __builtin_add_overflow only for operands of one type; a mix is not converted silently
+    echo 'int main(void) { long a; int x = 1; return __builtin_add_overflow(x, x, &a); }' > mix.c
+    if out=$("$nfcc" mix.c -o mix 2>&1); then bad "mixed-type __builtin_add_overflow" "linked"
+    elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "mixed-type __builtin_add_overflow fails at link, naming the symbol"
+    else bad "mixed-type __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
+  fi
   cd "$root" || exit 1
 done
 echo "tests/c/cc-mode: $pass passed, $fail failed"
