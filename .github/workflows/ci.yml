@@ -37,6 +37,9 @@ jobs:
       - name: Test (gcc backend)
         run: NFCXX_BACKEND=gcc tests/run.sh
 
+      - name: Real-world check (tinyxml2)
+        run: tests/realworld/run.sh
+
       - name: "Hexagon checks (open toolchain, clang-19 + qemu-hexagon)"
         run: |
           sudo apt-get install -y --no-install-recommends clang-19 qemu-user-static
