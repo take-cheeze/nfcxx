@@ -2,6 +2,7 @@
 # nfcxx: experimental C++ compiler driver.
 #   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
 # Usage: nfcxx [--emit-c] [--backend=qbe|gcc] [--dialect=g++|clang] [--gnu-version=N] [--freestanding]
+#   Hosted (default): host C++ headers and GNU version from g++ (see host_sys_includes below).
 #              [-o out] [-std=c++NN] file.cpp...
 #   qbe (default): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
 #   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
@@ -35,10 +36,27 @@ case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; 
 # Freestanding: headers come only from lib/. --no_standard_includes drops EDG's default include dirs
 # (EDG ships no <cstdio> etc. for the C++ side anyway). Without --gnu-version the g++ front end rejects
 # __is_same, __builtin_bit_cast and friends, so freestanding defaults to GCC 13 emulation.
+# Hosted mode (default) uses the host C++ library headers, so real code can include <cstdio>,
+# <cctype>, <string> and friends. Their include directories and the GNU version come from the host
+# g++ (override with NFCXX_CXX, or NFCXX_SYS_INCLUDES as a colon-separated list).
+host_sys_includes() {
+  local cxx=${NFCXX_CXX:-g++}
+  if [ -n "${NFCXX_SYS_INCLUDES:-}" ]; then
+    printf '%s\n' "${NFCXX_SYS_INCLUDES//:/$'\n'}"; return
+  fi
+  printf '' | "$cxx" -E -x c++ -v - 2>&1 >/dev/null |
+    sed -n '/search starts here:/,/End of search list/{/^ /p}' | sed 's/^ *//'
+}
 extra=()
+sys_inc=()
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
   [ -n "$gnu" ] || gnu=130000
+else
+  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
+  if [ -z "$gnu" ]; then
+    ver=$("${NFCXX_CXX:-g++}" -dumpfullversion 2>/dev/null) && gnu="${ver%%.*}0000"
+  fi
 fi
 gnu_opts=()
 [ -n "$gnu" ] && gnu_opts=(--gnu_version="$gnu")
@@ -49,7 +67,7 @@ if [ $emit_c = 1 ]; then
   base=${EDG_BASE:-$root/build/edg-base}
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
   f=$(realpath "${files[0]}")
-  inc=(--sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
+  inc=(--sys_include="$base/include" "${sys_inc[@]}"); [ $freestanding = 1 ] && inc=("-I$root/lib")
   (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
       "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")
   cat "$tmp/out.c"
@@ -65,5 +83,5 @@ esac
 
 # With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
 # compiler give those operations defined behavior.
-exec "$edg/eccp" "$std" --"$dialect" "${extra[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
+exec "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
   "${files[@]}" -o "$out"
