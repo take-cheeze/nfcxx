@@ -47,8 +47,42 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
   Move both forward together.
 - **EDG output quirk**: EDG emits a top-level `__asm__(".align 2");` after functions; cproc has no top-level asm, so the
   wrapper strips it (alignment hint only).
-- **Not yet covered**: C++ exceptions (the EH runtime in `libC.a` is only linked, never exercised by tests), `volatile`
-  and `long double` (cproc lacks them), inline asm.
+- **Exceptions work** on the QBE backend (`tests/cases/exceptions.cpp`): EDG lowers them to plain C plus its EH runtime
+  in `libC.a`, so cproc/QBE never see anything special.
+- **Not supported by cproc** (so not by the QBE backend): `long double` ("long double is not yet supported"),
+  `volatile` stores ("volatile store is not yet supported"), inline asm. All three work with `--backend=gcc`.
+  `volatile` matters for MMIO on Hexagon/embedded targets; Path B must handle it itself.
+
+## Path B plan: own back end on EDG's lowered IL
+
+What EDG gives us (from `3rd/edg/doc/source/{lower_il,il,c_gen_be}.rst` and the sources):
+
+- The front end builds a full **C++ IL**. An optional **IL lowering** pass (`lower_il.c`, `lower_init.c`, `lower_eh.c`,
+  `lower_name.c`) rewrites it into a **C89-level, tree-structured IL**: templates already instantiated, classes laid out,
+  constructors/destructors/new/delete expanded, exceptions turned into EH-runtime calls, vtables and name mangling
+  (Itanium) chosen. This is exactly what `c_gen_be.c` prints as C; the generated C is "cfront-like, unreadable".
+- The IL stays a **tree**: ~35 statement kinds (`stmk_block/if/while/for/switch/goto/label/return/try_block/init/...`)
+  and expression nodes, walked with `il_walk.h`. Structured statements survive, which GPU targets (SPIR-V merge
+  blocks, no goto in WGSL) need. `stmk_goto`/`stmk_label`/`stmk_assigned_goto` also exist, so a structurizer is still needed.
+- **Plug point**: the front end calls `back_end()` (`cfe.c`) when `BACK_END_SHOULD_BE_CALLED`. `c_gen_be.c` defines it
+  under `BACK_END_IS_C_GEN_BE`, and is ~12k lines that double as the reference IL traversal. Our back end is a new
+  file that defines `back_end()` (plus a cleanup hook) and is linked into `cpfe` instead of `c_gen_be.c`.
+- The IL is in memory when `back_end()` runs; the `--ii_file` IL-to-file path is compiled out in the stock config, so
+  Path B means building `cpfe` ourselves (a CMake wrapper compiling EDG's sources with our back end and macro config)
+  rather than driving the stock binary.
+- Lowering can be skipped to see the C++ IL (classes, ownership-relevant types) before it is flattened; useful for
+  language-level safety checks (borrowing) that C-level IL can no longer express.
+
+Stages:
+
+1. **Harness**: out-of-tree build of `cpfe` with `BACK_END_IS_C_GEN_BE` off and a stub `nfcxx_be.c`; dump the lowered
+   IL of the existing `tests/cases` programs as an s-expression text form (this also becomes the Lean-side input format).
+2. **Mid-level IR** (own, small): structured control flow, explicit address spaces, no UB-carrying ops. Every
+   arithmetic/memory op that can be UB in C becomes an op with defined semantics or an explicit check that traps
+   (div by zero, `INT_MIN / -1`, shifts >= width, array bounds, null).
+3. **QBE emission straight from the IR** (drops the cproc hop and its gaps: `long double`, `volatile`).
+4. **Translation validation** of IR -> QBE IL; formalize the IR + QBE subset in Lean.
+5. GPU (SPIR-V/WGSL) and Hexagon (C + HVX intrinsics) back ends from the same IR.
 
 ## Still open
 
@@ -59,8 +93,8 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
 
 ## Next steps
 
-1. Replace the gcc assembler/linker with QBE-only tooling where possible; exercise exceptions and `long double` under QBE.
+1. Replace the gcc assembler/linker with QBE-only tooling where possible (QBE emits asm; `cc` still assembles and links).
 2. Hexagon: feed generated C to the SDK clang; test with `hexagon-sim`.
-3. Dump EDG IL, design the mid-level IR (structured CF, address spaces, explicit checks).
+3. Path B stage 1 (see above): harness build of `cpfe` with our own `back_end()`, IL dump.
 4. Path B subset -> QBE with translation validation.
 5. Freestanding core library + shared builtins; SPIR-V/WGSL back end; HVX vectorization.
