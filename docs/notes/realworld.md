@@ -74,9 +74,9 @@ exit code 2. Hosted path (no `--freestanding`).
     - *Pointer compatibility*: `base types of pointer assignment must be compatible or void` on EDG's
       temporaries in doctest's `MultiLaneAtomic`. This was seen after items 5 to 7 were lowered in a scratch
       copy with `long double` replaced by `double`. Not analysed further.
-  - So `tests/realworld/run_doctest.sh` stays an xfail on QBE. Its first QBE error is now `long double`
-    (`cproc-qbe: long double is not yet supported`). Removing the xfail needs the `long double` decision,
-    then the pointer-compatibility work above.
+  - **Decision: doctest is checked on the gcc backend only.** `tests/realworld/run_doctest.sh` defaults to gcc,
+    and asking for `qbe` prints a skip with the `long double` reason. The QBE work above stays: the gaps it
+    fixed are covered by their own cases in `tests/cases`. Revisit if QBE gains a faithful `long double`.
 
 Fixes made for this check (the driver, not the back ends):
 
@@ -94,6 +94,5 @@ diagnostic`). They do not affect the result.
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a JSON or XML parser or a
-small compression library in C++. For doctest on QBE, the open gaps are `long double` (needs a decision)
-and the pointer-compatibility error. The rest of the list above is fixed.
+small compression library in C++. Doctest stays on the gcc backend (see the decision above).
 mruby is C, so it needs a C front-end mode first, which nfcxx does not have yet.
