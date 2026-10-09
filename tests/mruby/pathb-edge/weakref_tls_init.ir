@@ -1,0 +1,33 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "tls_x" int 4 4 (thread) (extern))
+(function "_ZTW5tls_x"
+  (ret (ptr int))
+  (params)
+  (weak)
+  (let %0 bool (ne (ptr (fn void ())) &"_ZTH5tls_x" (null (ptr (fn void ())))))
+  (if %0
+    (then
+      (eval (call void &"_ZTH5tls_x"))))
+  (let %1 (ptr int) (offset @"tls_x" 0))
+  (return %1))
+(function "_ZTW5tls_y"
+  (ret (ptr int))
+  (params)
+  (weak)
+  (let %0 bool (ne (ptr (fn void ())) &"_ZTH5tls_y" (null (ptr (fn void ())))))
+  (if %0
+    (then
+      (eval (call void &"_ZTH5tls_y"))))
+  (return (null (ptr int))))
+(function "_ZTH5tls_z"
+  (ret void)
+  (params)
+  (return))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 (ptr int) (call (ptr int) &"_ZTW5tls_x"))
+  (let %1 (ptr int) (call (ptr int) &"_ZTW5tls_y"))
+  (eval (call void &"_ZTH5tls_z"))
+  (return (const int 0)))

@@ -33,7 +33,6 @@ this note records what stage 3 covers, what it refuses, and the results.
 
 Anything the emitter does not handle is refused, never dropped silently:
 
-- volatile loads and stores;
 - `long double`;
 - variable-length arrays and the other unsupported IR markers (VLA statements, inline asm, bit-fields,
   statement expressions, constructor initializers);
@@ -107,7 +106,8 @@ the runner checks.
 
 ## Known gaps
 
-- **Pointer subscripts** are not bounds-checked, and the IR has no `undef`, SSA or constant folding.
+- **Pointer subscripts** are not bounds-checked (a pointer has no length), and the IR has no `undef`, SSA or constant
+  folding. See "Decisions" in the third round below.
 - **Hexadecimal unsigned constants** are fine for the emitter but not what a consumer might expect.
 - **`setjmp`:** the fix keeps every slot of a function that calls `setjmp` in memory, which is stronger than C
   requires (and costs the promotion in that function). Other functions are unchanged. Functions are recognised by
@@ -148,6 +148,118 @@ Each has a probe in `tests/pathb-qbe/cases` (translation validation) and a golde
 Last run of the second round: `tests/pathb-ir/run.sh` ok (goldens, 45 kinds, 0 unsupported, 8 markers in the gap probe);
 `tests/pathb-qbe/run.sh`: 32 programs, 32 built, 32 ran, 21 match EXPECT, 11 trapped as required, 0 refused, 0 failed;
 `tests/run.sh` ok.
+
+## Third round: volatile, thread-local objects, the indirect-call check
+
+Probes: `tests/pathb-qbe/cases/volatile.cpp`, `tests/pathb-qbe/cases/tls.cpp`, `tests/pathb-qbe/multi/tls_extern/`,
+`tests/pathb-qbe/traps/indirect_null*.cpp`; IR goldens `tests/pathb-ir/{volatile,tls}.ir`; emitter edge cases
+`tests/mruby/pathb-edge/{volatile_access,thread_data,r_thread_addr,weakref_tls_init}.ir`. The Python oracle
+`tests/mruby/oracle/pathb-qbe-emit.py` has the same changes, so `tests/mruby/run.sh` still compares the two byte for byte.
+
+### volatile
+
+IR side (`be/nfcxx_ir.c`): the IR already printed `load.v`/`store.v`, but only for some accesses. EDG drops the
+cv-qualifiers from the node type of an rvalue use, so `*p` for `volatile int *p`, a read of a volatile local or
+parameter, and a plain read of a volatile member printed a plain `load` (writes and `+=` were fine). The flag now also
+comes from the variable's declared type, the base object of a member access (a member of a volatile object), the
+declared type of the field, and the pointee/element type of the pointer or array operand (`ir_pointee_is_volatile`).
+Type text keeps `(volatile T)` wrappers.
+
+What QBE does to a plain load or store (checked on a hand-written module, `qbe` from `build/qbe`): `load.c` merges two
+loads of one address into one (`twice(p)` becomes one `movl (%rdi)` and `addl %eax, %eax`); an unused load is deleted;
+a load in a spin loop is hoisted out of it (`while (!*p);` becomes a single load and an infinite loop); a slot that
+only loads and stores use is promoted to a register. cproc/`qbe-prep.rb` get away with dropping `volatile` for C input
+only for escaped objects, plus the `__nfcxx_keep` call that makes volatile locals escape; that is not enough for
+Path B, because an access through a pointer or to a global can still be merged or removed by `load.c` and by the
+dead-load elimination.
+
+Lowering (`scripts/pathb-qbe-emit.rb`, `r_load`, `s_store`, `vhelper`): a volatile access is a call of a helper function
+that the module defines (non-exported, one per access kind: `__pathb_vld_w`, `__pathb_vst_l`, `__pathb_vld_sb`, ...,
+each with one real QBE `load`/`store`):
+
+```
+%t =w call $__pathb_vld_w(l %addr)            # (load.v int ADDR)
+call $__pathb_vst_h(l %addr, w %val)          # (store.v unsigned_short ADDR VAL)
+```
+
+QBE has no inliner, never merges, moves or deletes a call, and keeps calls in program order, so every volatile access
+is executed exactly once and in order with respect to the others and to every call. The address operand of the call
+makes a stack slot escape, so volatile locals, volatile parameters and volatile arrays stay in memory (the
+mem2reg-style promotion only fires when loads and stores are the sole uses). The same holds for volatile globals and
+for accesses through pointers to volatile objects: nothing is special-cased by storage class. Bool loads are still
+normalised after the helper call; narrow loads use the sign/zero-extending load in the helper.
+
+Checked: the probe runs a loop `while (!g_flag) {}` that a second pthread ends (it hangs if the load is hoisted),
+volatile sums, volatile struct members, a volatile parameter, `volatile` arrays, pointer-to-volatile parameters,
+`int *volatile`, `const volatile`, a volatile bool, long, double, unsigned char (exit 0 = EXPECT 0, gcc 0).
+`tests/pathb-qbe/run.sh` also checks the assembly: `// ASM-COUNT: FUNCTION PREFIX N` lines require N calls
+with that callee prefix in the QBE output of FUNCTION (`vol_twice` has two loads, `vol_unused_read` one, `vol_two_stores`
+two stores, `vol_local` four accesses, and the control `plain_twice` has none, so the check tells the two apart).
+
+Limits:
+
+- One call per access, so volatile code is slow (a `movl` becomes a call and a return). Correctness first; an
+  inline sequence would need QBE support (an instruction that is not eliminated), which it does not have.
+- Volatile is not atomic and not a fence. The helper does one naturally aligned `mov` for sizes up to 8 bytes (x86-64,
+  as C++ gives no more); the call is a compiler barrier for escaped memory only.
+- A copy of a whole volatile aggregate (`(copy N DST SRC)`) is not marked; it is a `memmove` call, which is not
+  elided, but not a per-member volatile access either (C++ leaves this unspecified).
+- Volatile bit-fields and `long double` are still refused (bit-fields are unsupported in the IR anyway).
+- The helpers are emitted per translation unit, only when used, and are not exported, so linking several units is fine.
+
+### Thread-local objects
+
+IR: `(global NAME TYPE BYTES ALIGN [(static)|(weak)] [(thread)] INIT)`. `(thread)` is printed for `thread_local`
+(EDG `is_thread_local`) and for the GNU `__thread` (only `decl_modifiers & DM_THREAD`; the first version missed these),
+for definitions and `extern` declarations alike, and for function-local `static thread_local` objects. The INIT is the
+initial image of the thread's copy.
+
+QBE (checked against `3rd/qbe/amd64`): `thread export data $x = align 4 { w 5 }` goes to `.tdata` (`.tbss` when it is
+all `z`); a reference is an operand with the `thread` prefix. A definition in the module is referenced as `thread $x`
+(local-exec: `movl %fs:x@tpoff, %eax`, `leaq x@tpoff(%rax)`), a declaration as `extern thread $x` (initial-exec through
+`x@gottpoff(%rip)`), so the object can be defined in another object file. The emitter writes the address of a
+thread-local object to a temporary, `%t =l copy thread $x`, wherever the IR uses `@"x"`, so the address is a plain
+`l` value (compares, calls, `memmove`) and the access forms are unchanged. Local-exec needs the object file to end up
+in an executable; a shared library would have to use `extern thread` for definitions as well (one line in `opnd_`).
+
+The C++11 wrapper functions for `extern thread_local` variables (`_ZTW<name>` calls `_ZTH<name>` if it is not null)
+refer to a weak undefined function. The IR has no weak declarations, so the emitter treats an undefined function whose
+name starts with `_ZTH` as a weak reference: it is referenced through the GOT (`extern $_ZTH...`) and marked
+`# pathb-weak` (`.weak` through `--append-weak`). Dynamic initialization of thread-locals (`thread_local std::string`)
+is not lowered (stage 3 `(unsupported init dynamic)`), so no `_ZTH` function is ever defined by this Path B yet.
+
+Checked: `tls.cpp` has `__thread`, `thread_local`, zero, initialized, array, struct, a `static` (internal) and a
+function-local one; the main thread writes its copies, a pthread must see the initializers, change its copies, and main
+must see its own values untouched (exit 0, gcc 0). `multi/tls_extern`: one unit defines, the other declares
+(`extern thread_local int`, `extern __thread double[3]`) and a second thread sees its own copies (exit 0, gcc 0).
+Before the `__thread` fix the probe returned 17 (the `__thread` objects were shared).
+
+Limits: the address of a thread-local object in a static initializer is refused (it is not a constant);
+x86-64 ELF only (QBE's other targets have their own TLS sequences, and `apple`/Windows are not supported).
+
+### Indirect-call null check (stage 2, gap 9)
+
+`ir_call` prints `(nonnull F)` before a call through a function pointer, unless the callee operand is an address.
+Virtual calls and calls through a pointer member go through it. Probes: `traps/indirect_null.cpp` and
+`traps/indirect_null_member.cpp` (both call through a good pointer first, then through nullptr; both abort with
+SIGABRT; without the check the call faults with SIGSEGV instead). Goldens that gained a `(nonnull ...)` line:
+`virtual_dispatch.ir`, `reachability.ir`.
+
+### Decisions: `undef` and pointer subscript bounds
+
+- **`undef`: not implemented.** A read of an uninitialized object is undefined behavior in C++ (apart from copying
+  `unsigned char`), so nothing has to be preserved, and the QBE slot just holds whatever is in memory (or, once QBE
+  promotes the slot to a temporary, an undefined temporary that it reads as 0). An IR `undef` would have to be printed
+  at the read, which needs a definite-assignment analysis over the lowered statements (loops, `goto`, `switch` fallthrough,
+  address-taken slots, partially initialized aggregates). A cheap version, "no store to the slot before this load in
+  source order", is unsound for loops (the store comes later in the text but earlier in time) and wrong for slots that are
+  initialized through a pointer. A sound version is not cheap, and the only consumer (QBE) would ignore it. If a
+  consumer needs it (a GPU back end, a checker), the right place is an IR pass over `(slot ...)` and the statements,
+  not the lowering.
+- **Pointer subscripts: not bounds-checked, by design.** `p[i]` has no length to check against. An array subscript
+  `a[i]` and `array_to_pointer(a)[i]` are checked (`(bounds IDX N)`). Checking pointer subscripts needs fat pointers
+  (an ABI change) or a shadow allocation map (a sanitizer), neither of which belongs to the lowering. Null checks on
+  dereference stay as before.
 
 ## Reproduce
 

@@ -83,6 +83,7 @@
   (let %4 (ptr (ptr (fn int ((ptr (const (struct "V"))))))) (bitcast (ptr (ptr (fn int ((ptr (const (struct "V"))))))) %3))
   (nonnull %4)
   (let %5 (ptr (fn int ((ptr (const (struct "V")))))) (load (ptr (fn int ((ptr (const (struct "V")))))) %4))
+  (nonnull %5)
   (let %6 (ptr (const (struct "V"))) (load (ptr (const (struct "V"))) $"v"))
   (let %7 int (call int %5 %6))
   (return %7))

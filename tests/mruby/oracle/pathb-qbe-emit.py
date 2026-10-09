@@ -149,7 +149,7 @@ def parse_type(x):
     head = x[0]
     if head == "ptr":
         return ("ptr", parse_type(x[1]) if len(x) == 2 else None)
-    if head == "const":
+    if head == "const" or head == "volatile":
         return parse_type(x[1])
     if head == "array":
         if x[1] == "?":
@@ -159,8 +159,6 @@ def parse_type(x):
         return ("agg", head, str(x[1]))
     if head == "fn":
         return ("fn",)
-    if head == "volatile":
-        raise Refused("volatile-qualified type")
     raise Refused("type form (%s ...)" % head)
 
 
@@ -294,6 +292,9 @@ class Module:
         self.strings = {}      # data name -> bytes
         self.out = []
         self.need_sink = False  # a function that returns twice stores slot addresses into SINK
+        self.thread = {}       # IR name -> "def" or "ext": thread-local globals ((thread) marker; ext = declaration only)
+        self.vhelpers = {}     # volatile access helpers used so far: QBE function name -> its text lines
+        self.weakrefs = {}     # undefined functions that are weak references (TLS init functions, see weak_refs)
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -466,9 +467,18 @@ class Fn:
             if sig == "$":
                 return self.slot_val(name)
             if sig == "@":
+                if name in self.mod.thread:
+                    # Thread-local object: its address is the thread pointer plus the object's TLS offset. A definition
+                    # in this module uses the local-exec model (`thread $x`); a declaration uses initial-exec through
+                    # the GOT (`extern thread $x`), so the object may live in another object file or in a shared
+                    # library. The address goes through a temporary so that it is a plain `l` value wherever it is used.
+                    t = self.tmp()
+                    self.emit("%s =l copy %s $%s" % (t, "extern thread" if self.mod.thread[name] == "ext" else "thread", qsym(name)))
+                    return Val(t, "l", ("ptr", self.mod.globals.get(name)))
                 return Val("$" + qsym(name), "l", ("ptr", self.mod.globals.get(name)))
             if sig == "&":
-                return Val("$" + qsym(name), "l", ("ptr", ("fn",)))
+                # A weak reference goes through the GOT (`extern`), so that an absent definition reads as null in a PIE too.
+                return Val(("extern $" if name in self.mod.weakrefs else "$") + qsym(name), "l", ("ptr", ("fn",)))
         if head_of(op) == "const":
             return self.const(op)
         if head_of(op) == "null":
@@ -929,16 +939,38 @@ def r_pdiff(fn, x):
     return Val(t, "l", ("int", 8, True, False))
 
 
+# Volatile accesses. QBE has no volatile: its load optimisation forwards a store to a later load of the same
+# address, merges equal loads, and drops a load whose result is unused. So a volatile access is never written as a
+# QBE load or store. It is a call of a small helper function (defined in the module, so a call QBE cannot look into
+# or inline) that does the one real access. A call is neither merged nor removed, calls keep their order, and the
+# address operand of the call makes a stack slot escape, so a volatile local stays in memory (QBE promotes a slot
+# only when loads and stores are its sole uses). Cost: one call per access.
+def vhelper(mod, op, cls):
+    kind = "ld" if op.startswith("load") else "st"
+    suffix = op[4:] if kind == "ld" else op[5:]
+    name = "__pathb_v%s_%s" % (kind, suffix)
+    if name not in mod.vhelpers:
+        if kind == "ld":
+            mod.vhelpers[name] = ["function %s $%s(l %%p) {" % (cls, name), "@start", "\t%%v =%s %s %%p" % (cls, op), "\tret %v", "}", ""]
+        else:
+            mod.vhelpers[name] = ["function $%s(l %%p, %s %%v) {" % (name, cls), "@start", "\t%s %%v, %%p" % op, "\tret", "}", ""]
+    return name
+
+
 def r_load(fn, x):
     if len(x) != 3:
         raise BadIR("load form")
+    vol = x[0] == "load.v"
     ty = parse_type(x[1])
     if is_agg(ty):
         raise Refused("load of an aggregate (aggregates are addresses)")
     addr = fn.opnd(x[2], "l")
     op, cls = _load_op(ty)
     t = fn.tmp()
-    fn.emit("%s =%s %s %s" % (t, cls, op, addr.t))
+    if vol:
+        fn.emit("%s =%s call $%s(l %s)" % (t, cls, vhelper(fn.mod, op, cls), addr.t))
+    else:
+        fn.emit("%s =%s %s %s" % (t, cls, op, addr.t))
     if ty[0] == "int" and ty[3]:
         # A bool object may hold bytes other than 0 and 1 (memcpy, a union, a char alias). The IR and the rest of the
         # emitter assume a bool operand is 0 or 1 (! is xor 1, == compares bits), so a load normalises: nonzero is true.
@@ -999,6 +1031,7 @@ def r_call(fn, x):
 
 RVAL = {
     "load": r_load,
+    "load.v": r_load,
     "wadd": r_wbin("add"), "wsub": r_wbin("sub"), "wmul": r_wbin("mul"),
     "wneg": r_wneg,
     "cadd": r_cadd_like("add"), "csub": r_cadd_like("sub"), "cmul": r_cadd_like("mul"),
@@ -1050,9 +1083,7 @@ def s_set(fn, x):
 
 
 def s_store(fn, x):
-    h = x[0]
-    if h != "store":
-        raise Refused("(%s ...): volatile stores have no QBE equivalent (docs/notes/pathb-stage2.md, section 7)" % h)
+    vol = x[0] == "store.v"
     ty = parse_type(x[1])
     if is_agg(ty):
         raise Refused("store of an aggregate type")
@@ -1068,7 +1099,10 @@ def s_store(fn, x):
         raise Refused("store of type %s" % (ty,))
     if val.cls != cls:
         raise Refused("store class mismatch: value %s, store %s" % (val.cls, cls))
-    fn.emit("%s %s, %s" % (op, val.t, addr.t))
+    if vol:
+        fn.emit("call $%s(l %s, %s %s)" % (vhelper(fn.mod, op, cls), addr.t, cls, val.t))
+    else:
+        fn.emit("%s %s, %s" % (op, val.t, addr.t))
 
 
 def s_copy(fn, x):
@@ -1332,6 +1366,8 @@ def global_items(mod, name, items_form):
             add = as_int(it[4])
             if not isinstance(target, Sym):
                 raise Refused("address item target %s" % form_text(target))
+            if target[0] == "@" and target[1] in mod.thread:
+                raise Refused("address of the thread-local object %s in a static initializer" % target[1])
             sym = "$" + qsym(target[1])
             if add == 0:
                 text = "l %s" % sym
@@ -1396,6 +1432,10 @@ def emit_global(mod, g):
     elif rest and head_of(rest[0]) == "weak":
         weak = True
         rest = rest[1:]
+    thread = False
+    if rest and head_of(rest[0]) == "thread":
+        thread = True
+        rest = rest[1:]
     if len(rest) != 1:
         raise BadIR("global %s: expected one INIT" % name)
     init = rest[0]
@@ -1410,7 +1450,7 @@ def emit_global(mod, g):
         raise BadIR("global %s: alignment %d" % (name, align))
     items = global_items(mod, name, init)
     pieces = emit_data_items(mod, name, size, items)
-    linkage = "" if static else "export "
+    linkage = ("thread " if thread else "") + ("" if static else "export ")
     if weak:
         mod.out.append(WEAK_MARK + qsym(name))
     mod.out.append("%sdata $%s = align %d { %s }" % (linkage, qsym(name), align, ", ".join(pieces)))
@@ -1593,6 +1633,18 @@ def prune(forms):
             or str(f[1]) in live or (head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]))]
 
 
+# The Itanium C++ ABI declares the thread_local initialization function `_ZTH<name>` of an `extern thread_local`
+# variable as a weak reference: the wrapper `_ZTW<name>` calls it only when it exists (`if (&_ZTH<name>) _ZTH<name>()`).
+# The IR has no weak declarations, so an undefined function with this prefix that the module refers to is taken as one.
+def weak_refs(forms):
+    defined = set(str(f[1]) for f in forms[1:] if head_of(f) == "function")
+    refs = set()
+    for f in forms[1:]:
+        if head_of(f) == "function":
+            _symbols(f, refs)
+    return {n: True for n in sorted(refs) if n.startswith("_ZTH") and n not in defined}
+
+
 def emit_module(text, do_prune=True):
     forms = parse_forms(tokenize(text))
     if not forms or head_of(forms[0]) != "ir-module":
@@ -1602,9 +1654,12 @@ def emit_module(text, do_prune=True):
     all_forms = forms
     if do_prune:
         forms = [forms[0]] + prune(forms)
+    mod.weakrefs = weak_refs(forms)
     for f in all_forms[1:]:
         if head_of(f) == "global":
             mod.globals[str(f[1])] = parse_type(f[2])
+            if any(head_of(p) == "thread" for p in f[5:]):
+                mod.thread[str(f[1])] = "ext" if any(head_of(p) == "extern" for p in f[5:]) else "def"
     # Strings first: a string data item may be referenced from a global initializer.
     for f in forms[1:]:
         if head_of(f) == "data":
@@ -1619,6 +1674,10 @@ def emit_module(text, do_prune=True):
             raise Refused("top-level form (%s ...)" % head_of(f))
     if mod.need_sink:
         mod.out.append('data $%s = align 8 { z 8 }' % SINK)
+    for lines in mod.vhelpers.values():
+        mod.out.extend(lines)
+    for n in mod.weakrefs:
+        mod.out.append(WEAK_MARK + qsym(n))
     return "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + "\n".join(mod.out) + "\n"
 
 

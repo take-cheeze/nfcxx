@@ -31,7 +31,7 @@
   (store (ptr (volatile int)) $"p" %0)
   (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
   (nonnull %1)
-  (let %2 int (load int %1))
+  (let %2 int (load.v int %1))
   (let %3 int (wadd int %2 (const int 1)))
   (return %3))
 
@@ -43,7 +43,7 @@
   (store (ptr (volatile int)) $"p" %0)
   (let %1 (ptr (volatile int)) (load (ptr (volatile int)) $"p"))
   (nonnull %1)
-  (let %2 int (load int %1))
+  (let %2 int (load.v int %1))
   (return %2))
 
 (function "_Z6helperi"
@@ -83,6 +83,7 @@
   (let %5 (ptr (ptr (fn int ((ptr (struct "Used")))))) (bitcast (ptr (ptr (fn int ((ptr (struct "Used")))))) %4))
   (nonnull %5)
   (let %6 (ptr (fn int ((ptr (struct "Used"))))) (load (ptr (fn int ((ptr (struct "Used"))))) %5))
+  (nonnull %6)
   (let %7 (ptr (struct "Used")) (load (ptr (struct "Used")) $"p"))
   (let %8 int (call int %6 %7))
   (let %9 int (wadd int %1 %8))
