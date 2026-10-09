@@ -81,10 +81,15 @@ Coverage on `tests/cases` (`tests/pathb-ir/run.sh`): 1997 node occurrences lower
 distinct kinds, all lowered. The gap probe `tests/pathb-ir/gaps.cpp` prints 8 unsupported markers, which
 the runner checks.
 
+## Closed gaps
+
+- **Variadic calls.** The IR marks a call to a variadic callee with `(variadic N)` (stage 2, section 6) and the
+  emitter writes `...` after the N-th argument. Probe: `tests/pathb-qbe/cases/variadic.cpp` (snprintf/sprintf with
+  float, double, long and more than eight double arguments, compared in the program; exit code = number of wrong
+  results). Before the fix: exit 1, EXPECT 0 (MISMATCH). After: exit 0.
+
 ## Known gaps
 
-- **Variadic calls.** The IR does not mark a callee as variadic, so no `...` is emitted at call sites.
-  Calls with float arguments to printf-like functions are unsafe.
 - **`setjmp`.** QBE does not know that `setjmp` returns twice. Slots are promoted, so values changed after
   `setjmp` may be stale after `longjmp`. `exceptions` passes, but that is not proof.
 - **Reachability.** Every routine EDG marks as needed is still printed.

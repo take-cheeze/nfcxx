@@ -1084,6 +1084,16 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
   return pre ? nv : cur;
 }
 
+/* The function type a call goes through: the routine's own type, or the pointee of a function pointer. */
+static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f)
+{
+  a_type_ptr t = f->kind == enk_routine ? f->variant.routine.ptr->type : f->type;
+  if (t == NULL) return NULL;
+  t = skip_typerefs(t);
+  if (t->kind == tk_pointer) t = skip_typerefs(t->variant.pointer.type);
+  return t->kind == tk_routine ? t : NULL;
+}
+
 /* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and
    passed by address; an aggregate result is written to a temporary passed as the first argument. */
 static ir_val ir_call(an_expr_node_ptr e)
@@ -1113,6 +1123,17 @@ static ir_val ir_call(an_expr_node_ptr e)
       args = ir_fmt("%s %s", args, tmp.s);
     } else {
       args = ir_fmt("%s %s", args, a.s);
+    }
+  }
+  /* A variadic callee: (variadic N) gives the number of leading ARGs (the hidden result pointer included)
+     that match named parameters; the rest are the "..." arguments. */
+  {
+    a_type_ptr ft = ir_callee_fn_type(f);
+    if (ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
+      a_param_type_ptr p;
+      int named = agg_ret ? 1 : 0;
+      for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) named++;
+      callee = ir_fmt("%s (variadic %d)", callee, named);
     }
   }
   ir_note(0, eok_call, 1);

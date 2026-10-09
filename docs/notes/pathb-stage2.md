@@ -155,11 +155,17 @@ RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX
             | (fadd|fsub|fmul|fdiv T A B) | (fneg T A) | (and|or|xor T A B) | (not T A)
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
             | (iconv|bitcast|i2p|p2i|cf2i|i2f|u2f|fconv TYPE A)               conversions
-            | (call TYPE CALLEE ARG*) | (eval (call void CALLEE ARG*))
+            | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
             | (array N TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
 ```
+
+`(variadic N)` appears in a call whose callee's function type ends in `...` (a direct call or one through a
+function pointer). `N` is the number of leading `ARG`s that match named parameters, the hidden `sret` pointer included;
+the remaining arguments are the variadic ones (already promoted by the front end). A backend must pass the variadic
+ones with the variadic calling convention (QBE: `...` after the N-th argument, so `%al` is set for the callee). A call
+without the marker is a call of a prototyped, non-variadic callee. A definition's own `...` is the `(ellipsis)` parameter.
 
 Unsupported nodes print as `(unsupported KIND NAME)` in place of the statement or of the register's right-hand side.
 The runner counts them.

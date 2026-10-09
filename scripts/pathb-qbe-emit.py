@@ -939,14 +939,27 @@ def _load_op(ty):
 
 
 def r_call(fn, x):
+    # (call TYPE CALLEE [(variadic N)] ARG*): with (variadic N) the first N arguments match named parameters
+    # and the QBE call gets "..." after them, so the callee's register-save prologue is set up (%al).
     ret = parse_type(x[1])
     callee = fn.opnd(x[2])
-    args = [fn.opnd(a) for a in x[3:]]
+    rest = x[3:]
+    nfixed = None
+    if rest and head_of(rest[0]) == "variadic":
+        nfixed = as_int(rest[0][1])
+        rest = rest[1:]
+        if nfixed > len(rest):
+            raise BadIR("call: (variadic %d) with only %d arguments" % (nfixed, len(rest)))
+    args = [fn.opnd(a) for a in rest]
     parts = []
-    for a in args:
+    for i, a in enumerate(args):
         if a.cls is None:
             raise Refused("call argument without a class")
+        if i == nfixed:
+            parts.append("...")
         parts.append("%s %s" % (a.cls, a.t))
+    if nfixed is not None and nfixed == len(args):
+        parts.append("...")
     target = callee.t
     if ret == VOID:
         fn.emit("call %s(%s)" % (target, ", ".join(parts)))
