@@ -33,10 +33,10 @@ this note records what stage 3 covers, what it refuses, and the results.
 
 Anything the emitter does not handle is refused, never dropped silently:
 
-- volatile loads and stores;
+- volatile loads and stores (and volatile bit-field accesses, `bfload.v`/`bfstore.v`);
 - `long double`;
-- variable-length arrays and the other unsupported IR markers (VLA statements, inline asm, bit-fields,
-  statement expressions, constructor initializers);
+- a variable-length array *slot* (VLAs themselves are fine since round 3: the IR uses a pointer slot) and the other
+  unsupported IR markers (inline asm, constructor initializers);
 - checked unsigned operations;
 - checked 64-bit multiplication;
 - a non-integer `switch`;
@@ -85,8 +85,8 @@ The 17 programs that match `EXPECT` also match the gcc backend. The probes are s
 passing them is evidence, not proof of correctness.
 
 Coverage on `tests/cases` (`tests/pathb-ir/run.sh`): 1997 node occurrences lowered, 0 unsupported, 45
-distinct kinds, all lowered. The gap probe `tests/pathb-ir/gaps.cpp` prints 8 unsupported markers, which
-the runner checks.
+distinct kinds, all lowered. The gap probe `tests/pathb-ir/gaps.cpp` printed 8 unsupported markers in rounds 1-2
+(1 since round 3: inline asm), which the runner checks.
 
 ## Closed gaps
 
@@ -148,6 +148,48 @@ Each has a probe in `tests/pathb-qbe/cases` (translation validation) and a golde
 Last run of the second round: `tests/pathb-ir/run.sh` ok (goldens, 45 kinds, 0 unsupported, 8 markers in the gap probe);
 `tests/pathb-qbe/run.sh`: 32 programs, 32 built, 32 ran, 21 match EXPECT, 11 trapped as required, 0 refused, 0 failed;
 `tests/run.sh` ok.
+
+## Closed gaps (stage 3, third round): bit-fields, variable-length arrays, statement expressions
+
+IR grammar and semantics: `docs/notes/pathb-stage2.md`, sections 5a-5c. Probes in `tests/pathb-qbe/cases` (all compared
+with the gcc backend, exit code = number of wrong results, EXPECT 0), goldens in `tests/pathb-ir`:
+
+- **Bit-fields** (`bitfield.cpp`, `bitfield2.cpp`): reads and writes of signed and unsigned fields (1 to 64 bits, `bool`,
+  enum, `char`/`short`/`long long` declared types), truncation and sign extension, neighbours untouched, compound
+  assignment and `++`/`--` with the value used, struct copies, static and local aggregate initializers, a packed struct,
+  base and derived classes, a class with a vptr, a union, a reference bound to a bit-field, a switch on a bit-field.
+  Before: `(unsupported lvalue points_to_field)` and the emitter refused the module. After: exit 0 = EXPECT 0, gcc 0.
+- **Variable-length arrays** (`vla.cpp`): `sizeof` of a VLA and of a row, two dimensions, a pointer to a VLA row
+  (`int (*p)[m]`, stride computed at run time), a loop allocating 4-8 KB 200000 times (it would overflow the stack if
+  every iteration kept its space), a growing size, recursion, a backward `goto`, a VLA of structs, a VLA in a `switch`.
+- **Statement expressions** (`stmtexpr.cpp`): value of the last expression, nesting, locals, use in a loop condition,
+  `break`/`continue`/`return`/`goto` leaving one, a struct result, a VLA inside, evaluation order.
+
+Emitter changes: `bfload`/`bfstore` (read-modify-write of the unit), `vlaalloc` (QBE `alloc16` outside `@start` with a
+per-statement capacity, see `s_vlaalloc`), a register `SIZE` for `index` and `pdiff`, `(bitfield ...)` initializer items.
+`tests/mruby/oracle/pathb-qbe-emit.py` has the same changes, and `tests/mruby/pathb-edge/{bitfield,vla}.ir` plus the
+`e_bf*`/`r_bf*` files cover their edge and error paths in the py-vs-rb comparison (mruby's bigint complements negative
+numbers wrongly, so the emitter computes masks with `^` on positive values instead of `~`).
+
+**A QBE bug found on the way.** With the first version of `r_bfload` (a shift and an `and` with a low mask) the probe
+passed, but a program with the `do { if (!(c)) ++bad; } while (0)` macro around bit-field reads gave a wrong result:
+QBE's "redundant and mask" (`3rd/qbe/copy.c`, `defwidthle`/`dwl`) removed `and x, 15` from a value that had bits
+above bit 3. The width analysis marks a phi as visited (`p->visit`) and does not undo it when a path fails, so a
+second query on the same phi in one traversal answers "narrow". The workaround is in the emitter: extraction and
+insertion use shift pairs, and the "keep the other bits" mask is applied with `and` only when it is not of the form
+2^k-1 (the field at the top of the unit uses a shift pair instead). `bitfield2.cpp` uses that macro on purpose. The
+same QBE bug can in principle bite any `and x, 2^k-1` that the emitter produces for other reasons; none is known.
+
+**Still missing**
+
+- VLA storage is not freed at block exit (the IL has no scope marker); it is reused when the same declaration executes
+  again, so loops and recursion are bounded, but a function that declares different VLAs in sequence in one scope
+  keeps all of them until it returns. A VLA subscript has no bounds check.
+- Volatile bit-fields are lowered (`bfload.v`) but the QBE emitter refuses them, like every volatile access.
+- Bit-fields in a union or in a class with a virtual base have no aggregate initializer path (the IR has none for those
+  classes); plain access works.
+- A statement expression that returns a class by copy constructor stays `(unsupported stmt stmt_expr_result)`;
+  inline asm is still unsupported (the one marker left in `gaps.cpp`).
 
 ## Reproduce
 
