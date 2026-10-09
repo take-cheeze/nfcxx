@@ -37,6 +37,11 @@ jobs:
       - name: Test (gcc backend)
         run: NFCXX_BACKEND=gcc tests/run.sh
 
+      - name: "Hexagon checks (open toolchain, clang-19 + qemu-hexagon)"
+        run: |
+          sudo apt-get install -y --no-install-recommends clang-19 qemu-user-static
+          CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats

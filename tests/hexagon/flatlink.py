@@ -32,7 +32,7 @@ def main():
     for i in range(shnum):
         name, typ, fl, addr, off, size, link, info, align, entsize = struct.unpack_from(
             '<IIIIIIIIII', data, shoff + i * shentsize)
-        sec.append(dict(name=name, type=typ, off=off, size=size, link=link, info=info))
+        sec.append(dict(name=name, type=typ, flags=fl, off=off, size=size, link=link, info=info))
 
     def cstr(off):
         return data[off:data.index(b'\0', off)].decode()
@@ -46,7 +46,8 @@ def main():
     ti = texts[0]
     text = sec[ti]
     for s in sec:
-        if s['sname'] in ALLOWED or s['sname'].startswith('.rela') or not s['size']:
+        # SHF_ALLOC (0x2) sections are loaded at run time; others (e.g. .hexagon.attributes) are metadata.
+        if s['sname'] in ALLOWED or s['sname'].startswith('.rela') or not s['size'] or not s['flags'] & 0x2:
             continue
         die('SKIP-data', f"section {s['sname']} ({s['size']} bytes) needs data relocations")
 

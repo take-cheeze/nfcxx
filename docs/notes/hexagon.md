@@ -241,3 +241,25 @@ clang --target=hexagon-unknown-linux-musl -ffreestanding -fno-pic -O2 -fwrapv -f
 python3 tests/hexagon/flatlink.py build/hexagon/k.o build/hexagon/k.elf _start
 chmod +x build/hexagon/k.elf && $QEMU_HEXAGON build/hexagon/k.elf; echo "exit $?"   # expect 67
 ```
+
+## Open toolchain route (what CI runs)
+
+Everything needed is open source and installs from Ubuntu's archive; the Qualcomm SDK is not needed:
+
+- `clang-19` (upstream LLVM 19, has `--target=hexagon`; the Qualcomm 19.x toolchain dropped `hexagonv65`).
+- `qemu-user-static` (provides `qemu-hexagon-static`, Linux user mode).
+- No Hexagon linker: `lld-19` has no Hexagon emulation (`ld.lld -m elf32_hexagon` is rejected), so
+  `tests/hexagon/flatlink.py` still produces the flat image.
+
+Run it the way CI does:
+
+    CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
+
+Result: 5 passed (`constexpr_static`, `signed_overflow_wraps`, `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`
+with HVX), 6 skipped. The skips need either data relocations (`.rodata`/`.data` from string
+literals, vtables, `float` constants: `exceptions`, `float_neg_switch`, `raii_templates_class`,
+`struct_libc`, `virtual_dispatch`) or the template prelinker (`templates_lambdas`).
+`.hexagon.attributes` is metadata and is ignored (non-`SHF_ALLOC` sections are not loaded).
+
+Closing the remaining gap means extending `flatlink.py` to lay out `.rodata`/`.data` after `.text` and
+apply absolute `R_HEX_32` relocations, which is what the data-reloc skips need.
