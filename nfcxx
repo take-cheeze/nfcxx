@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # nfcxx: experimental C++ compiler driver.
 #   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
-# Usage: nfcxx [--emit-c] [-o out] [-std=c++NN] file.cpp...
+# Usage: nfcxx [--emit-c] [--backend=qbe|gcc] [-o out] [-std=c++NN] file.cpp...
+#   qbe (default): generated C -> cproc -> QBE -> asm      (scripts/setup-qbe.sh)
+#   gcc:           generated C -> gcc -O2 -fwrapv -fno-strict-aliasing
 set -euo pipefail
 root=$(cd "$(dirname "$0")" && pwd)
 edg=${EDG_BUILD:-$root/build/edg}/bin
 [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 
-std=--c++23; out=a.out; emit_c=0; files=()
+std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
+    --backend=*) backend=${1#--backend=} ;;
     -o) out=$2; shift ;;
     -std=c++*) std=--c++${1#-std=c++} ;;
     *) files+=("$1") ;;
@@ -30,7 +33,14 @@ if [ $emit_c = 1 ]; then
   exit 0
 fi
 
-# Generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
+case $backend in
+  qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
+       export NFCXX_CC=$root/scripts/qbe-cc ;;
+  gcc) ;;
+  *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
+esac
+
+# With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
 # compiler give those operations defined behavior.
 exec "$edg/eccp" "$std" --g++ --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
   "${files[@]}" -o "$out"

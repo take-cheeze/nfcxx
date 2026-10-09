@@ -22,6 +22,9 @@ if ! echo 'int main(void){return 0;}' | gcc -Werror=return-mismatch -x c -fsynta
   sed -i '/-Wno-error=return-mismatch/d' "$base/edg_eccp_config"
 fi
 
+# Let nfcxx pick the C compiler eccp hands the generated C to (NFCXX_CC).
+sed -i 's|^EDG_C_TO_OBJ_COMPILER=gcc|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-gcc}|' "$base/edg_eccp_config"
+
 cd "$src"
 EDG_BASE=$base cmake --preset linux-gcc-release -B "$out" >/dev/null
 cd "$out"
