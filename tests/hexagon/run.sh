@@ -29,7 +29,8 @@ for f in "$root"/tests/cases/*.cpp; do
     echo "FAIL (edg) $n"; head -3 "$tmp/$n.edg"; fail=1; continue
   fi
   cat "$here/stub.c" >> "$tmp/$n.c"
-  if ! $clang --target=$triple -ffreestanding -fno-pic -O2 -fwrapv -fno-strict-aliasing -w \
+  # -G0: no small-data (GP) base is set up at run time, so every global is addressed absolutely.
+  if ! $clang --target=$triple -ffreestanding -fno-pic -G0 -O2 -fwrapv -fno-strict-aliasing -w \
         -c "$tmp/$n.c" -o "$tmp/$n.o" 2>"$tmp/$n.cc"; then
     echo "FAIL (clang) $n"; head -3 "$tmp/$n.cc"; fail=1; continue
   fi
