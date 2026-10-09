@@ -33,4 +33,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" | sed 's/__asm__(".align 2");//g' > "$tmp/pp.c"
 "$cproc" < "$tmp/pp.c" > "$tmp/out.ssa"
 "$qbe" "$tmp/out.ssa" > "$tmp/out.s"
+# COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
+# assembly too, so the link merges the per-object copies as gcc does.
+python3 "$(dirname "$0")/weak-symbols.py" "$tmp/pp.c" "$tmp/out.s"
 cc -c -o "${out:-${src%.c}.o}" "$tmp/out.s"

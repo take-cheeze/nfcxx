@@ -1,0 +1,60 @@
+Local patch for 3rd/cproc (michaelforney/cproc at d1c53dd), applied to the build copy by scripts/setup-qbe.sh.
+
+EDG emits `struct X {};` for every instantiated empty class (trait classes, nullopt_t, empty
+index_sequence, ...). cproc rejects an empty body ("no type in struct member declaration"). gcc accepts
+it in C as a GNU extension with size 0, alignment 1, and the gcc backend uses that layout, so this patch
+gives the QBE path the same layout:
+- an empty struct or union body is accepted, with size 0 and alignment 1;
+- a zero-size object (an empty struct or union, or a constant-length array of them) is allocated
+  with zero bytes; cproc used to assume only arrays can be zero-size;
+- a constant-length array with a zero-size element type is a static array of size 0, not a VLA.
+Zero-size values are passed by value with no argument register, so QBE never reads them.
+--- a/decl.c
++++ b/decl.c
+@@ -224,10 +224,12 @@
+ 		b.last = &t->u.structunion.members;
+ 		b.bits = 0;
+ 		b.pack = a.kind & ATTRPACKED;
+-		do structdecl(s, &b);
+-		while (tok.kind != TRBRACE);
++		/* GNU extension, accepted by gcc in C: an empty body is size 0 with alignment 1.
++		 * EDG emits `struct X {}` for empty C++ classes. */
++		while (tok.kind != TRBRACE)
++			structdecl(s, &b);
+ 		if (!t->u.structunion.members)
+-			error(&tok.loc, "struct/union has no members");
++			t->align = 1;
+ 		next();
+ 		if (!b.pack)
+ 			t->size = ALIGNUP(t->size, t->align);
+@@ -731,10 +733,10 @@
+ 			t->size = 0;
+ 			if (t->u.array.length) {
+ 				e = eval(t->u.array.length);
+-				if (e->kind == EXPRCONST && base.type->size) {
++				if (e->kind == EXPRCONST && !(t->prop & PROPVM)) {
+ 					if (e->type->u.arith.issigned && e->u.constant.u >> 63)
+ 						error(&tok.loc, "array length must be non-negative");
+-					if (e->u.constant.u > ULLONG_MAX / base.type->size)
++					if (base.type->size && e->u.constant.u > ULLONG_MAX / base.type->size)
+ 						error(&tok.loc, "array length is too large");
+ 					t->size = base.type->size * e->u.constant.u;
+ 				} else {
+--- a/qbe.c
++++ b/qbe.c
+@@ -392,10 +392,14 @@
+ 	if (d->type->size) {
+ 		f->end = f->start;
+ 		v = mkintconst(d->type->size);
+-	} else {
++	} else if (d->type->prop & PROPVM) {
+ 		assert(d->type->kind == TYPEARRAY);
+ 		assert(d->type->u.array.size);
+ 		v = d->type->u.array.size;
++	} else {
++		/* zero-size object: an empty struct or union, or an array of them (GNU extension) */
++		f->end = f->start;
++		v = mkintconst(0);
+ 	}
+ 	align = d->u.obj.align;
+ 	switch (align) {
