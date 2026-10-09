@@ -1,0 +1,9 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(data "s" (array 2 (const char)) (string "ab"))
+(global "g" int 4 4 (init (bytes 0 4 @"s")))
+(function "main"
+  (ret int)
+  (params)
+  (return (const int 0)))
+

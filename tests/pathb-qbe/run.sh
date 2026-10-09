@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.py).
+# Path B stage 3: translation validation of the IR -> QBE emitter (scripts/pathb-qbe-emit.rb, run by the mruby interpreter, scripts/mrb).
 #
-# For each program: scripts/pathb-dump --ir (the harness) -> scripts/pathb-qbe-emit.py -> build/qbe/qbe ->
+# For each program: scripts/pathb-dump --ir (the harness) -> scripts/pathb-qbe-emit.rb -> build/qbe/qbe ->
 # cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lstdc++ -lgcc_s -lpthread -lC) -> run.
 # The exit code must equal the // EXPECT: value. The gcc backend (NFCXX_BACKEND=gcc ./nfcxx) must agree with it.
 #
@@ -29,7 +29,8 @@ qbe=${QBE:-build/qbe/qbe}
 libdir=${EDG_LIB:-$root/build/edg/lib}
 export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
-emit=scripts/pathb-qbe-emit.py
+emit=scripts/pathb-qbe-emit.rb
+mrb=$root/scripts/mrb
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0
@@ -50,7 +51,7 @@ run_one() {
     scripts/pathb-dump --ir "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   fi
-  python3 "$emit" "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
+  "$mrb" "$emit" "$ir" > "$ssa" 2> "$tmp/$n.emit" ; rc=$?
   if [ $rc = 3 ]; then
     refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$n.emit")"); return
   fi
@@ -60,7 +61,7 @@ run_one() {
   if ! "$qbe" "$ssa" > "$s" 2> "$tmp/$n.qbe"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$n.qbe")"); return
   fi
-  python3 "$emit" --append-weak "$ssa" "$s"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
+  "$mrb" "$emit" --append-weak "$ssa" "$s"   # QBE has no weak linkage: .weak for the IR's (weak) definitions
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
@@ -114,12 +115,12 @@ run_multi() {
     b=multi_${n}_$(basename "$f" .cpp); obj=$tmp/$b.o; srcs+=("$f")
     scripts/pathb-dump --ir "$f" > "$tmp/$b.ir" 2> "$tmp/$b.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end ($f): $(head -1 "$tmp/$b.fe")"); return; }
-    python3 "$emit" "$tmp/$b.ir" > "$tmp/$b.ssa" 2> "$tmp/$b.emit"; rc=$?
+    "$mrb" "$emit" "$tmp/$b.ir" > "$tmp/$b.ssa" 2> "$tmp/$b.emit"; rc=$?
     if [ $rc = 3 ]; then refused=$((refused + 1)); lines+=("REFUSED  $name: $(head -1 "$tmp/$b.emit")"); return; fi
     if [ $rc != 0 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: emitter: $(head -1 "$tmp/$b.emit")"); return; fi
     "$qbe" "$tmp/$b.ssa" > "$tmp/$b.s" 2> "$tmp/$b.qbe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: qbe rejected the emitted IL: $(head -1 "$tmp/$b.qbe")"); return; }
-    python3 "$emit" --append-weak "$tmp/$b.ssa" "$tmp/$b.s"
+    "$mrb" "$emit" --append-weak "$tmp/$b.ssa" "$tmp/$b.s"
     cc -c -o "$obj" "$tmp/$b.s" 2> "$tmp/$b.as" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
     objs+=("$obj")
@@ -149,7 +150,7 @@ run_multi() {
 # Probe the harness: a stage 2 harness has no sizes on slots and the emitter says so.
 probe=$(ls tests/cases/*.cpp | head -1)
 scripts/pathb-dump --ir "$probe" > "$tmp/probe.ir" 2>/dev/null
-python3 "$emit" "$tmp/probe.ir" > /dev/null 2> "$tmp/probe.err"; prc=$?
+"$mrb" "$emit" "$tmp/probe.ir" > /dev/null 2> "$tmp/probe.err"; prc=$?
 if [ $prc = 1 ] && grep -q "rebuild the harness" "$tmp/probe.err"; then
   echo "pathb-qbe: the harness at $cpfe is older than stage 3; rebuild it with scripts/setup-pathb.sh" >&2; exit 2
 fi

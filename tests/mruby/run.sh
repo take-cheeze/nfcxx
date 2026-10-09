@@ -5,8 +5,13 @@
 #   1. scripts/weak-symbols.{py,rb}: the assembly QBE produces for generated C of several tests/cases.
 #   2. tests/hexagon/flatlink.{py,rb}: Hexagon objects (clang, if it has the hexagon target) built from
 #      the generated C of several tests/cases and the HVX kernel; output image, stderr and exit status.
-# Parts whose tools are missing (EDG, QBE, hexagon clang) are skipped with a message.
+#   3. scripts/pathb-qbe-emit.{py,rb}: the QBE IL (stdout), stderr text and exit status over every IR in
+#      tests/pathb-ir (goldens), tests/mruby/pathb-edge (hand-written IR: constants, floats, data, every
+#      refusal and error path) and, when the Path B harness exists, the IR of tests/pathb-qbe/{cases,multi,
+#      traps} and tests/cases; plus --no-prune, stdin, usage errors and --append-weak.
+# Parts whose tools are missing (EDG, QBE, hexagon clang, the Path B harness) are skipped with a message.
 #   CLANG (default clang)   MRB (an existing mruby executable; default build/mruby-tool/bin/mruby)
+#   PATHB_CPFE, PATHB_BASE  the Path B harness (default build/pathb/...), as for tests/pathb-qbe/run.sh
 cd "$(dirname "$0")/../.."
 root=$PWD; oracle=$root/tests/mruby/oracle; clang=${CLANG:-clang}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -134,6 +139,107 @@ else
     else report fail "flatlink missing-entry handling differs (py=$rcp rb=$rcr)"; fi
   fi
 fi
+
+# ---- 3. pathb-qbe-emit ----------------------------------------------------------------------------
+# emit_cmp <label> <args...>: run the Python oracle and the mruby port with the same arguments (stdin from
+# $emit_in, if set); stdout, stderr and the exit status must be identical. Sets emit_rc to the status.
+emit_cmp() {
+  local label=$1; shift
+  local in=${emit_in:-/dev/null}
+  python3 "$oracle/pathb-qbe-emit.py" "$@" <"$in" >"$tmp/em.py.out" 2>"$tmp/em.py.err"; local rcp=$?
+  "$mrb" "$root/scripts/pathb-qbe-emit.rb" "$@" <"$in" >"$tmp/em.rb.out" 2>"$tmp/em.rb.err"; local rcr=$?
+  emit_rc=$rcp
+  if [ $rcp -ne $rcr ]; then report fail "pathb-qbe-emit $label: exit status py=$rcp rb=$rcr"; head -2 "$tmp/em.py.err" "$tmp/em.rb.err"; emit_rc=-1
+  elif ! cmp -s "$tmp/em.py.out" "$tmp/em.rb.out"; then report fail "pathb-qbe-emit $label: output differs"; diff "$tmp/em.py.out" "$tmp/em.rb.out" | head -5; emit_rc=-1
+  elif ! cmp -s "$tmp/em.py.err" "$tmp/em.rb.err"; then report fail "pathb-qbe-emit $label: stderr differs"; head -2 "$tmp/em.py.err" "$tmp/em.rb.err"; emit_rc=-1
+  fi
+}
+emit_n=0; emit_ok=0; emit_refused=0; emit_err=0; emit_bytes=0
+# emit_file <label> <file.ir>: with and without pruning
+emit_file() {
+  local label=$1 f=$2 flag
+  for flag in "" --no-prune; do
+    emit_n=$((emit_n + 1))
+    emit_cmp "$label${flag:+ $flag}" ${flag:+"$flag"} "$f"
+    case $emit_rc in
+      0) emit_ok=$((emit_ok + 1)); emit_bytes=$((emit_bytes + $(wc -c <"$tmp/em.py.out"))) ;;
+      3) emit_refused=$((emit_refused + 1)) ;;
+      1) emit_err=$((emit_err + 1)) ;;
+    esac
+    [ $emit_rc -ge 0 ] || return
+  done
+}
+before=$fail
+for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do emit_file "${f#$root/tests/}" "$f"; done
+# The IR of the C++ programs, when the Path B harness is built.
+cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
+if [ -x "$cpfe" ]; then
+  export PATHB_CPFE=$cpfe PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
+  mkdir -p "$tmp/ir"
+  gen=0
+  for f in "$root"/tests/pathb-qbe/cases/*.cpp "$root"/tests/pathb-qbe/multi/*/*.cpp "$root"/tests/cases/*.cpp \
+           "$root"/tests/pathb-qbe/traps/*.cpp; do
+    case $(basename "$f") in qbe_*) continue ;; esac
+    b=$(echo "${f#$root/tests/}" | tr / _)
+    case $f in
+      */traps/*) NFCXX_IR_OVERFLOW=trap "$root/scripts/pathb-dump" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue ;;
+      *) "$root/scripts/pathb-dump" --ir "$f" >"$tmp/ir/$b.ir" 2>/dev/null || continue ;;
+    esac
+    gen=$((gen + 1))
+    emit_file "${f#$root/tests/}" "$tmp/ir/$b.ir"
+  done
+  [ $gen -gt 0 ] || report fail "pathb-qbe-emit: the harness produced no IR"
+else
+  report skip "pathb-qbe-emit: no Path B harness at $cpfe (scripts/setup-pathb.sh), only the stored IR is checked"
+fi
+if [ $fail -eq $before ]; then
+  report ok "pathb-qbe-emit: $emit_n runs identical ($emit_ok emitted, $((emit_bytes / 1024)) KB of QBE IL, $emit_refused refused, $emit_err errors)"
+fi
+# The comparison must not be vacuous: all three exit paths and a sizeable amount of IL were exercised.
+if [ $emit_ok -lt 20 ] || [ $emit_refused -lt 20 ] || [ $emit_err -lt 20 ] || [ $emit_bytes -lt 100000 ]; then
+  report fail "pathb-qbe-emit: too little was compared (ok=$emit_ok refused=$emit_refused errors=$emit_err bytes=$emit_bytes)"
+fi
+# Input from stdin ('-' and no argument) and the usage errors.
+g=$root/tests/pathb-ir/templates_lambdas.ir
+emit_in=$g emit_cmp "stdin" ; r1=$emit_rc
+emit_in=$g emit_cmp "stdin -" -; r2=$emit_rc
+emit_cmp "usage (two files)" "$g" "$g"; r3=$emit_rc
+emit_cmp "usage (append-weak args)" --append-weak "$g"; r4=$emit_rc
+emit_cmp "usage (no-prune twice)" --no-prune --no-prune "$g"; r5=$emit_rc
+# A missing file is an uncaught exception in both (a Python traceback, an mruby backtrace): only the status is compared.
+python3 "$oracle/pathb-qbe-emit.py" "$tmp/no-such-file.ir" >/dev/null 2>&1; r6=$?
+"$mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/no-such-file.ir" >/dev/null 2>&1; r7=$?
+if [ "$r1 $r2 $r3 $r4 $r5" = "0 0 1 1 1" ] && [ "$r6" = 1 ] && [ "$r7" = 1 ]; then report ok "pathb-qbe-emit stdin, usage errors and a missing file behave the same"
+else report fail "pathb-qbe-emit stdin/usage statuses unexpected: $r1 $r2 $r3 $r4 $r5 $r6 $r7"; fi
+# --append-weak: the `# pathb-weak` marks of the IL become .weak lines at the end of the assembly.
+weak_n=0; weak_lines=0
+for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
+  python3 "$oracle/pathb-qbe-emit.py" "$f" >"$tmp/w.ssa" 2>/dev/null || continue
+  grep -q '^# pathb-weak ' "$tmp/w.ssa" || continue
+  printf '\t.text\nfoo:\n\tret\n' >"$tmp/w.py.s"; cp "$tmp/w.py.s" "$tmp/w.rb.s"
+  python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.ssa" "$tmp/w.py.s"; rcp=$?
+  "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/w.ssa" "$tmp/w.rb.s"; rcr=$?
+  if [ $rcp -eq $rcr ] && cmp -s "$tmp/w.py.s" "$tmp/w.rb.s"; then
+    weak_n=$((weak_n + 1)); weak_lines=$((weak_lines + $(grep -c '^\.weak ' "$tmp/w.py.s")))
+  else report fail "pathb-qbe-emit --append-weak ${f#$root/tests/}: differs"; fi
+done
+if [ $weak_lines -gt 0 ]; then report ok "pathb-qbe-emit --append-weak ($weak_n modules, $weak_lines .weak lines identical)"
+else report fail "pathb-qbe-emit --append-weak: no module had a weak definition"; fi
+printf 'x\n' >"$tmp/w.none.s"; cp "$tmp/w.none.s" "$tmp/w.none2.s"
+echo '# no marks' >"$tmp/w.none.ssa"
+python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.none.ssa" "$tmp/w.none.s"
+"$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/w.none.ssa" "$tmp/w.none2.s"
+if cmp -s "$tmp/w.none.s" "$tmp/w.none2.s" && [ "$(cat "$tmp/w.none2.s")" = x ]; then report ok "pathb-qbe-emit --append-weak without marks leaves the assembly alone"
+else report fail "pathb-qbe-emit --append-weak without marks"; fi
+# One deliberate difference: a string constant "(" or ")" in the IR. The Python original compares the token
+# (a str subclass) with "(" and so reads the string as a parenthesis (an "unbalanced" error); the port does not.
+printf '%s\n' '(ir-module "p.cpp" (layout (int 4)))' '(data "p" (array 2 (const char)) (string "("))' \
+  '(function "main" (ret int) (params) (return (const int 0)))' >"$tmp/paren.ir"
+"$mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/paren.ir" >"$tmp/paren.out" 2>&1; rcr=$?
+python3 "$oracle/pathb-qbe-emit.py" "$tmp/paren.ir" >/dev/null 2>&1; rcp=$?
+if [ $rcr -eq 0 ] && grep -q '^data \$p = { b 40, b 0 }' "$tmp/paren.out" && [ $rcp -eq 1 ]; then
+  report ok "pathb-qbe-emit reads a \"(\" string constant (the Python original misreads it as a parenthesis: known bug)"
+else report fail "pathb-qbe-emit parenthesis string constant: rb=$rcr py=$rcp"; fi
 
 echo "tests/mruby: $pass passed, $skip skipped"
 [ $fail -eq 0 ]

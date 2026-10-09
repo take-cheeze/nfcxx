@@ -9,10 +9,11 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | Piece | What it is |
 | --- | --- |
 | `scripts/setup-mruby.sh` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, builds with rake and installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
-| `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bin-mruby`. Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
+| `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bigint` (added for `pathb-qbe-emit.rb`), `mruby-bin-mruby`. Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
 | `scripts/mrb` | `scripts/mrb script.rb args...`; builds the interpreter first when it is missing. `MRB=<exe>` picks another interpreter. |
 | `scripts/weak-symbols.rb` | Port of `weak-symbols.py`; used by `scripts/qbe-cc`. |
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
+| `scripts/pathb-qbe-emit.rb` | Port of `pathb-qbe-emit.py` (done, see the section below); used by `tests/pathb-qbe/run.sh`. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 
 What the test compares:
@@ -25,6 +26,12 @@ What the test compares:
   the stderr text and the exit status. Both parts skip when EDG/QBE/hexagon clang are missing.
   The test also passes with the interpreter built by nfcc (gcc back end):
   `NFCXX_BACKEND=gcc MRUBY_CC=$PWD/nfcc scripts/setup-mruby.sh`, then `MRB=build/mruby-tool/bin/mruby-nfcc tests/mruby/run.sh`.
+- pathb-qbe-emit: the QBE IL, the stderr text and the exit status of the Python original and the port over every
+  `tests/pathb-ir/*.ir`, the 130 hand-written IR files in `tests/mruby/pathb-edge/` (every refusal and error
+  message, 64-bit unsigned constants, float constants and `cf2i` bounds, data initializers, switch/loop/goto,
+  variadic calls, `setjmp`, latin-1 bytes, CRLF input), and the IR of `tests/pathb-qbe/{cases,multi,traps}` and
+  `tests/cases` when the Path B harness is built (`PATHB_CPFE`); each with and without `--no-prune`, plus stdin,
+  usage errors and `--append-weak`. It needs only python3 and the interpreter (no EDG or QBE) for the stored IR.
 
 ### Rules for scripts written for this interpreter
 
@@ -33,14 +40,21 @@ What the test compares:
 - Strings are byte strings (no UTF-8 gem): use `getbyte`/`byteslice` for binary data and pack/unpack with
   `File.open(path, "rb") { |f| f.read }`; there is no `File.binread`.
 - `Integer` is 64 bit. mruby 4 parses a literal above `2**31 - 1` as a bigint, which needs `mruby-bigint`
-  (not in the set): write `(1 << 32) - 1` instead of `0xffffffff`.
+  (now in the set, for `pathb-qbe-emit.rb`; without it `1 << 64` raises and such a literal does not parse): write
+  `(1 << 32) - 1` instead of `0xffffffff` in scripts that should not depend on it.
+- `String#to_f` is not correctly rounded (`"0.10000000149011612".to_f` is one ulp off) and `sprintf("%.17e")` /
+  `Float#to_s` print at most about 15 significant digits. Do exact conversions with bigint arithmetic
+  (`dec_to_double`, `py_float_repr` in `pathb-qbe-emit.rb`). `Float#nan?` works where `v != v` does not, and
+  `-v` loses the sign of a zero (`v * -1.0` does not).
+- No `Enumerator` gem: `each_byte`, `each_with_index` and `each_char` need a block (use `bytes`, `each_with_index { }`).
+  `Array#sort_by` is not stable: add the index to the key when Python's stable `sorted` matters.
 - Operator precedence differs from Python: `a & b == 0` is `a & (b == 0)`; write the parentheses.
 - Exit codes: `exit 1` (from `mruby-exit`); messages to `$stderr`.
 
 ## Stage plan for the other two scripts
 
-`scripts/qbe-prep.py` (614 lines) and `scripts/pathb-qbe-emit.py` (1540 lines) were not touched in stage 1,
-because other work was changing them. Port them when that work has landed.
+`scripts/qbe-prep.py` (614 lines) was not touched in stage 1, because other work was changing it; port it when that
+work has landed. (`pathb-qbe-emit.py` was ported next, see "Stage 3" below; the numbering is historical.)
 
 ### Stage 2: `qbe-prep.py` to `qbe-prep.rb`
 
@@ -51,7 +65,7 @@ Python features it uses, and the mruby answer:
 | `re` tokenizer (`TOKEN_RE`, `finditer`) | hand-written scanner, below |
 | `re.fullmatch` on `.align N`, `.globl X`, `A = B` (asm lines) | small split/`index` checks on whitespace-split fields |
 | `re.search`/`re.fullmatch` for numeric literals (`UL_CONST`, `FLOAT_LIT`, `ATOMIC_RE`) | check the token text with character loops; `ATOMIC_RE` is `__atomic_` + one of eight operation names + an optional size suffix, so `start_with?` plus a table lookup |
-| `fractions.Fraction` in `ieee_bits` (exact decimal-to-IEEE for `_Float16/32/64/128` literals) | `mruby-rational` and `mruby-bigint` (both in mruby core, not in the stage 1 set) if the arithmetic is kept as written; or integer-only: parse the decimal literal into `digits * 10**exp` and do the rounding with bigint shifts. 113-bit mantissas (`_Float128`) exceed 64 bits, so `mruby-bigint` is required for stage 2. |
+| `fractions.Fraction` in `ieee_bits` (exact decimal-to-IEEE for `_Float16/32/64/128` literals) | `mruby-rational` (core, not in the set) and `mruby-bigint` (core, in the set since `pathb-qbe-emit.rb`) if the arithmetic is kept as written; or integer-only: parse the decimal literal into `digits * 10**exp` and do the rounding with bigint shifts. 113-bit mantissas (`_Float128`) exceed 64 bits, so `mruby-bigint` is required for stage 2 (available now). |
 | `class Tok` with `__slots__` | `Struct` (`mruby-struct`) or a plain class |
 | f-strings, `sys.exit(msg)` | interpolation, `$stderr.puts` + `exit 1` |
 | `os.environ.get('NFCXX_C_INPUT')` | no `ENV` in this gem set (there is no `mruby-env` in mruby 4.0.0 core): `scripts/qbe-cc` passes it as an extra argument (`--c-input`) |
@@ -75,13 +89,37 @@ Keep `start`/`end` offsets exactly (the rewriter edits the source by offset), an
 as single-byte puncts or word bytes consistently with Python's `\w` (check what the generated C contains;
 EDG output is ASCII except inside string literals, which the scanner skips whole).
 
-### Stage 3: `pathb-qbe-emit.py` to `pathb-qbe-emit.rb`
+### Stage 3 (done, ported first): `pathb-qbe-emit.py` to `pathb-qbe-emit.rb`
 
-It uses `re` in four places (`REG_RE`, `QNAME_RE`, two more), all anchored-at-end character-class checks
-(`%(\d+)$`, `[A-Za-z_][A-Za-z0-9_.]*$`), plus `struct` for float rounding and `math.isfinite`. In mruby:
-character loops for the regexes; `[v].pack("e").unpack("e")` (single-float round trip, `mruby-pack`) for `struct.pack("f")`; `Float#finite?` for `math.isfinite`. (Checked on the built interpreter:
-`[1.1].pack("e").unpack("e")` round-trips to single precision, and `Float#finite?` exists.) Only
-`math.isfinite` and `struct` are used from those modules; add `mruby-math` if that changes.
+`scripts/pathb-qbe-emit.rb` is a line-by-line port; `tests/pathb-qbe/run.sh` runs it through `scripts/mrb`. The
+Python original is the oracle `tests/mruby/oracle/pathb-qbe-emit.py`. What the port needed:
+
+- `re` (three anchored patterns: `%(\d+)$`, `[A-Za-z_][A-Za-z0-9_.]*$`, the integer atom `-?(0x[0-9a-fA-F]+|\d+)`):
+  character loops (`reg?`, `qname?`, `as_int`). The `$` of the originals also matches before a final newline; the
+  loops do too.
+- `struct.pack("f")`: `[v].pack("e").unpack("e")` (it also raises on overflow, as `struct` does).
+- `math.isfinite`: `Float#finite?`.
+- `repr(float)` (Python prints the shortest digits that read back the same double; the constants end up in the QBE
+  text): rebuilt from exact bigint arithmetic (`shortest_digits`). `float(str)` is `dec_to_double`, exact and
+  round-half-even, with Python's grammar (`inf`, `nan`, `1e999` is inf).
+- Integer constants up to `2**64 - 1`, `1 << 64` and `-(1 << 63)`: **`mruby-bigint` was added to the gem set**
+  (`scripts/mruby-tool-config.rb`; `rational` was not needed). `wrap_int` uses `%` instead of `&` on a bigint.
+- Python tuples in messages (`('int', 4, True, False)`, and the one-element `((...),)` form that
+  `"%s" % (x[0], (ty,))` prints): `tyrepr`/`ty1`; `%r` of a name: `py_str_repr`.
+- The IR is read as latin-1 with universal newlines and stderr is UTF-8: bytes in, `u8()` on the way to stderr. A
+  string token keeps its characters as integer codes (`IRStr#codes`), because an octal escape can exceed 255.
+- Dispatch tables hold lambdas; `case`/`default` markers are matched by `object_id` (Python used `id()`).
+
+Known differences, none reachable from the corpus:
+
+- **Python bug not copied.** The original tests `t == "("` on tokens, and a quoted string token is a `str`
+  subclass, so a string constant `"("` or `")"` in the IR is read as a parenthesis (error `unbalanced`). The port
+  tells the two apart. A C++ program that prints `"("` would have broken Path B before; `tests/mruby/run.sh` checks
+  that the port handles it and the original does not.
+- Uncaught exceptions (a missing input file, `float("abc")`, a float constant that overflows single precision) end
+  with status 1 in both, but the text on stderr is a Python traceback or an mruby backtrace. Malformed forms that
+  make Python raise `IndexError`/`TypeError` make the port raise `NoMethodError` or carry a `nil` on.
+- The header comment of the IL and the usage text still say `pathb-qbe-emit.py`, so the output stays identical.
 
 ### How to verify each port is byte-identical
 

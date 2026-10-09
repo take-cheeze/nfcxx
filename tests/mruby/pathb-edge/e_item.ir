@@ -1,0 +1,8 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "g" int 4 4 (init (frob 1)))
+(function "main"
+  (ret int)
+  (params)
+  (return (const int 0)))
+

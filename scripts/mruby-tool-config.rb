@@ -10,9 +10,10 @@ MRuby::Build.new do |conf|
   %w[hal-posix-io hal-posix-dir hal-posix-socket hal-posix-task].each { |g| conf.gem core: g }
   %w[mruby-io mruby-pack mruby-sprintf mruby-string-ext mruby-array-ext mruby-hash-ext mruby-set
      mruby-enum-ext mruby-numeric-ext mruby-kernel-ext mruby-object-ext mruby-symbol-ext mruby-range-ext
-     mruby-error mruby-exit mruby-bin-mruby].each { |g| conf.gem core: g }
-  # Note: mruby 4 parses an integer literal above 2**31-1 as a bigint, which needs the mruby-bigint gem (not
-  # included); scripts spell such constants as shifts, e.g. (1 << 32) - 1. Integer itself is 64-bit.
+     mruby-error mruby-exit mruby-bigint mruby-bin-mruby].each { |g| conf.gem core: g }
+  # mruby-bigint (arbitrary-precision Integer) is in the set for scripts/pathb-qbe-emit.rb, whose unsigned
+  # 64-bit constants (up to 2**64 - 1) and 1 << 64 do not fit the 64-bit Integer. Without it an integer
+  # literal above 2**31-1 does not even parse, so older scripts spell such constants as (1 << 32) - 1.
   conf.cc.command = ENV.fetch('MRUBY_CC', 'cc')
   conf.linker.command = ENV.fetch('MRUBY_LD', ENV.fetch('MRUBY_CC', 'cc'))
   conf.archiver.command = 'ar'

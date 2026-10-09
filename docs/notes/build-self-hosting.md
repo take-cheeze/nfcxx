@@ -27,8 +27,8 @@ Two inputs are used only by the tests, not by the build:
 - A C and C++ compiler: gcc and g++. The driver takes the header search path and the GNU version
   from `g++` (`NFCXX_CXX` overrides it), and the current results come from gcc 13.
 - `cmake` and `ninja` for EDG; `make` for QBE and cproc.
-- `python3` for `scripts/qbe-prep.py` and `scripts/pathb-qbe-emit.py` (being ported to mruby, see
-  `mruby-scripting.md`; `scripts/weak-symbols.rb` and `tests/hexagon/flatlink.rb` already run on mruby).
+- `python3` for `scripts/qbe-prep.py` (being ported to mruby, see `mruby-scripting.md`;
+  `scripts/weak-symbols.rb`, `tests/hexagon/flatlink.rb` and `scripts/pathb-qbe-emit.rb` already run on mruby).
 - `ruby` with the `rake` gem, once, to build the mruby interpreter that runs those scripts
   (`scripts/setup-mruby.sh`, output `build/mruby-tool/bin/mruby`). mruby's `minirake` only execs `rake`, so
   CRuby and rake are both needed; nothing needs them after the build. `tests/mruby/run.sh` also uses
