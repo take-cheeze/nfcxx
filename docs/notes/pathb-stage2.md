@@ -256,6 +256,14 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
 9. **Indirect calls** through a null function pointer are not checked explicitly; the rule in section 4 applies once a
    `nonnull` is emitted before the call.
 10. **No SSA, no mem2reg, no constant folding.** The output is correct but verbose: every named variable is a slot.
+11. **C++ exceptions** need no IR construct. EDG lowers try/catch/throw/cleanups/exception specifications to its setjmp/longjmp
+    ABI before the back end runs, so the IR holds a call of `_setjmp` on a slot of the EH stack entry type, calls of
+    `__throw_setup`, `__throw`, `__rethrow`, `__exception_caught` and `__destroy_exception_object`, stores to the globals
+    `__curr_eh_stack_entry`, `__eh_curr_region`, `__catch_clause_number` and `__caught_object_address`, and static region/catch tables
+    and typeinfo globals. The lowering handles the two nodes that EH programs added: `enk_result_of_overriding_function` (the body of a
+    this-adjusting thunk, printed as a `(call ... &"underlying" PARAMS...)` with the thunk's own parameters) and a function designator
+    as an lvalue (`&"f"`). The runtime is EDG's `libC.a` (`lib_src/throw.c`); a consumer must keep every slot of a function that calls
+    `_setjmp` in memory (the QBE emitter does). Details, probes and limits: `docs/notes/pathb-stage3.md`, "C++ exceptions".
 
 Coverage on `tests/cases` (10 programs; NFCXX_PATHB_STATS counts every node the lowering visits):
 
