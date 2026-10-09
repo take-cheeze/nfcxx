@@ -24,7 +24,12 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   esac
 done
 
-if [ $compile = 0 ] || [ -z "$src" ]; then
+if [ $compile = 0 ]; then
+  # The link. The sized __atomic_* calls qbe-prep.py leaves in the C (for libstdc++'s std::atomic) are
+  # libatomic functions; gcc inlines them, so only the QBE link adds the library.
+  exec cc "$@" -latomic
+fi
+if [ -z "$src" ]; then
   exec cc "$@"
 fi
 

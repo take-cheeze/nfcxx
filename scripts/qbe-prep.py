@@ -4,6 +4,19 @@
 cproc (the QBE front end) rejects a few GNU forms that EDG emits. This script tokenizes the
 preprocessed C and rewrites only those forms; everything else passes through unchanged:
 
+  * `__asm__ volatile("int $3\n" : :);` (doctest's DOCTEST_BREAK_INTO_DEBUGGER, a statement with
+    no operands) becomes a call to `__nfcxx_int3()`. The assembly tail defines it as a weak
+    `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
+    is left in place, and cproc rejects it.
+  * Builtins cproc does not know, which doctest uses. `__builtin_memcpy`, `memmove`, `memset`, `memcmp` and
+    `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_isnan` and
+    `__builtin_clzl` become small helpers (`__nfcxx_isnan`, `__nfcxx_clzl`), defined in the prelude.
+    `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
+    uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
+    Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
+  * Sized atomics `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}` (what
+    libstdc++'s std::atomic calls) get prototypes for the libatomic functions of the same name. The QBE
+    link adds -latomic (scripts/qbe-cc). The 16-byte forms are left alone; they need __int128.
   * `__asm__(".align 2");` alignment hints (anywhere): dropped, as the old sed did. The hint
     only matters to EDG's own output, and it is not a semantic change.
   * Top-level `__asm__("...")` statements (not declarator labels) are removed from the C and
@@ -162,6 +175,93 @@ def decode_str(lit):
     return body.encode('latin-1', 'backslashreplace').decode('unicode_escape')
 
 
+INT3_TEXT = ('int $3\n', 'int $3')
+INT3_STUB = """\t.pushsection .text.__nfcxx_int3,"ax",@progbits
+\t.weak __nfcxx_int3
+\t.type __nfcxx_int3,@function
+__nfcxx_int3:
+\tint3
+\tret
+\t.popsection"""
+
+
+LIBC_BUILTINS = {  # builtin -> (libc function, prototype); cproc has the builtin names but not the functions
+    '__builtin_memcpy': ('memcpy', 'void *memcpy(void *, const void *, unsigned long);'),
+    '__builtin_memmove': ('memmove', 'void *memmove(void *, const void *, unsigned long);'),
+    '__builtin_memset': ('memset', 'void *memset(void *, int, unsigned long);'),
+    '__builtin_memcmp': ('memcmp', 'int memcmp(const void *, const void *, unsigned long);'),
+    '__builtin_strlen': ('strlen', 'unsigned long strlen(const char *);'),
+}
+HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
+    '__builtin_isnan': ('__nfcxx_isnan',
+                        'static int __nfcxx_isnan(double x) { return x != x; }'),
+    '__builtin_clzl': ('__nfcxx_clzl',
+                       'static int __nfcxx_clzl(unsigned long x) {'
+                       ' if (x == 0) return 64; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n; }'),
+}
+MULOV_NAME = '__nfcxx_mulov_ul'
+MULOV_DEF = ('static int __nfcxx_mulov_ul(unsigned long a, unsigned long b, unsigned long *r) {'
+             ' unsigned long p = a * b; *r = p; return a != 0 && p / a != b; }')
+UL_CONST = re.compile(r'\d+(?:[uU][lL]|[lL][uU])')
+# GCC's sized atomics for 1, 2, 4 and 8 bytes (libstdc++'s std::atomic calls them). GCC inlines them; cproc has
+# no atomics, so they are calls to the functions libatomic exports (GCC 13 has all of them; 16 bytes needs
+# __int128, which cproc lacks, so it is left out and fails loudly). The memory-order arguments are passed on.
+ATOMIC_RE = re.compile(r'__atomic_(load|store|exchange|compare_exchange|fetch_(?:add|sub|and|or|xor|nand)'
+                       r'|(?:add|sub|and|or|xor|nand)_fetch)_([1248])')
+ATOMIC_TYPE = {'1': 'unsigned char', '2': 'unsigned short', '4': 'unsigned int', '8': 'unsigned long'}
+
+
+def atomic_prototype(name):
+    op, size = ATOMIC_RE.fullmatch(name).groups()
+    t = ATOMIC_TYPE[size]
+    if op == 'load':
+        return f'{t} {name}(const volatile void *, int);'
+    if op == 'store':
+        return f'void {name}(volatile void *, {t}, int);'
+    if op == 'compare_exchange':  # EDG passes GCC's six arguments; libatomic reads the first three (always seq_cst)
+        return f'_Bool {name}(volatile void *, void *, {t}, _Bool, int, int);'
+    return f'{t} {name}(volatile void *, {t}, int);'  # exchange, fetch_OP and OP_fetch: (ptr, value, order)
+
+
+def mulov_const_shape(toks, lp):
+    """True if toks[lp] is the '(' of `( x , C , &x )` (or `( x , C , (&x) )`), x an identifier and C an unsigned long constant."""
+    if not is_punct(tok_at(toks, lp), '('):
+        return False
+    k = lp + 1
+    x = tok_at(toks, k)
+    if x is None or x.kind != 'id' or not is_punct(tok_at(toks, k + 1), ','):
+        return False
+    c = tok_at(toks, k + 2)
+    if c is None or c.kind != 'num' or not UL_CONST.fullmatch(c.text) or not is_punct(tok_at(toks, k + 3), ','):
+        return False
+    k += 4
+    paren = is_punct(tok_at(toks, k), '(')
+    if paren:
+        k += 1
+    y = tok_at(toks, k + 1)
+    if not is_punct(tok_at(toks, k), '&') or y is None or y.kind != 'id' or y.text != x.text:
+        return False
+    k += 2
+    if paren:
+        if not is_punct(tok_at(toks, k), ')'):
+            return False
+        k += 1
+    return is_punct(tok_at(toks, k), ')')
+
+
+def int3_statement_end(toks, i):
+    """If toks[i] starts `__asm__ [volatile] ("int $3\\n" : :);`, return the index just past its `;`, else None."""
+    j = i + 1
+    if tok_at(toks, j) is not None and toks[j].kind == 'id' and toks[j].text in ('volatile', '__volatile__', '__volatile'):
+        j += 1
+    s = tok_at(toks, j + 1)
+    if not is_punct(tok_at(toks, j), '(') or s is None or s.kind != 'str' or decode_str(s.text) not in INT3_TEXT:
+        return None
+    if all(is_punct(tok_at(toks, j + 2 + k), p) for k, p in enumerate([':', ':', ')', ';'])):
+        return j + 6
+    return None
+
+
 def weak_function_names(toks):
     """Names of functions declared or defined with __attribute__((__weak__)), as weak-symbols.py finds them."""
     names = set()
@@ -194,6 +294,8 @@ def main():
     weak_marked = set()
     ctors = []  # constructor functions, in source order
     need_float = set()
+    need_int3 = False
+    prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
 
     def mark_weak_alias(name):
         # _ZTHx is the thread_local init alias for _ZTWx; if the wrapper is COMDAT (weak), so is the alias.
@@ -222,6 +324,15 @@ def main():
                     ctors.append(name.text)
                 edits.append((t.start, toks[i + 5].end, ''))
                 i += 6
+                continue
+
+        # 1a. __asm__ volatile("int $3\n" : :); (doctest's debugger break): a call to the int3 stub.
+        if t.kind == 'id' and t.text in ('__asm__', '__asm') and stmt_ctx:
+            end = int3_statement_end(toks, i)
+            if end is not None:
+                edits.append((t.start, toks[end - 1].end, '__nfcxx_int3();'))
+                need_int3 = True
+                i = end
                 continue
 
         # 1. __asm__("...") statements.
@@ -308,6 +419,21 @@ def main():
             i += 1
             continue
 
+        # 4b. Builtins cproc lacks (see the module docstring).
+        if t.kind == 'id' and t.text in LIBC_BUILTINS:
+            name, proto = LIBC_BUILTINS[t.text]
+            edits.append((t.start, t.end, name))
+            prelude[name] = proto
+        elif t.kind == 'id' and t.text in HELPER_BUILTINS:
+            name, definition = HELPER_BUILTINS[t.text]
+            edits.append((t.start, t.end, name))
+            prelude[name] = definition
+        elif t.kind == 'id' and t.text == '__builtin_mul_overflow' and mulov_const_shape(toks, i + 1):
+            edits.append((t.start, t.end, MULOV_NAME))
+            prelude[MULOV_NAME] = MULOV_DEF
+        elif t.kind == 'id' and ATOMIC_RE.fullmatch(t.text):
+            prelude[t.text] = atomic_prototype(t.text)
+
         # 5. Floating types cproc lacks.
         if t.kind == 'id' and t.text in FLOAT_TYPE:
             edits.append((t.start, t.end, FLOAT_TYPE[t.text]))
@@ -315,6 +441,10 @@ def main():
         i += 1
 
     decls = [FLOAT_DECL[n] for n in ('struct __nfcxx_half16', 'struct __nfcxx_float128') if n in need_float]
+    if need_int3:
+        prelude['__nfcxx_int3'] = 'void __nfcxx_int3(void);'
+        tail.append(INT3_STUB)
+    decls += prelude.values()
     if decls:
         edits.append((0, 0, '\n'.join(decls) + '\n'))
     if ctors:

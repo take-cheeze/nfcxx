@@ -1,5 +1,4 @@
 // EXPECT: 0
-// XFAIL-qbe: cproc has no __builtin_memcpy (EDG passes the name through to C)
 // __builtin_memcpy / memmove / memset / memcmp, with values checked at runtime.
 extern "C" int printf(const char*, ...);
 int main() {
