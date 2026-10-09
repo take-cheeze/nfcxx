@@ -29,7 +29,9 @@ for file in "${files[@]}"; do
   # cpfe writes <stem>.ti (template instantiation requests) into its working directory. Remove it afterwards
   # unless it existed before, so the base dir stays as it was.
   ti=$base/$stem.ti; had_ti=0; [ -e "$ti" ] && had_ti=1
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ --sys_include="$base/include" "$f") || status=$?
+  # -tused: instantiate the templates this file uses, as eccp does for a single file that is compiled and linked
+  # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR.
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ -tused --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status

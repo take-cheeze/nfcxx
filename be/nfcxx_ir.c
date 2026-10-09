@@ -391,6 +391,7 @@ static ir_val ir_mk_void(void)
 static int ir_nreg;
 static char *ir_sret;
 static a_type_ptr ir_ret_type;
+static int ir_in_main;   /* the routine being lowered is main */
 
 /* Indentation of the next expression-level line. Statement lowering sets it before lowering. */
 static int ir_depth;
@@ -527,7 +528,7 @@ static ir_val ir_temp(a_type_ptr t)
   ir_buf_begin(&ir_slot_buf);
   fprintf(nf_out, "\n  (slot %s ", op + 1);
   nf_put_type(t);
-  fputc(')', nf_out);
+  fprintf(nf_out, " %lu %lu)", ir_size_of(t), ir_align_of(t));
   ir_buf_end(&ir_slot_buf);
   return ir_mk_addr((char *)op, t, 0);
 }
@@ -957,6 +958,8 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     case eok_not: {
       ir_val a = ir_rval(a0);
       ir_note(0, k, 1);
+      /* A bool operand has no EDG type (a.t is NULL): compare it with false. */
+      if (a.t == NULL) return ir_mk_bool(ir_let("bool", ir_fmt("(eq bool %s (const bool 0))", a.s)));
       return ir_mk_bool(ir_let("bool", ir_fmt("(eq %s %s %s)", a.ty, a.s, ir_zero(a.t))));
     }
     case eok_eq:
@@ -1140,6 +1143,17 @@ static ir_val ir_cast(an_expr_node_ptr e)
   if (ir_is_bool(dst)) {
     ir_note(0, eok_cast, 1);
     return ir_mk_bool(ir_to_bool(a));
+  }
+  if (a.t == NULL) {
+    /* A bool value (a comparison, !, &&, ||) has no EDG type. It converts as the 0 or 1 it holds. */
+    if (ir_is_integer(dst)) {
+      ir_note(0, eok_cast, 1);
+      return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), a.s)), dst);
+    }
+    if (ir_is_float(dst)) {
+      ir_note(0, eok_cast, 1);
+      return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(u2f %s %s)", ir_valtext(dst), a.s)), dst);
+    }
   }
   if (ir_is_integer(dst)) {
     if (ir_is_integer(a.t)) {
@@ -1542,6 +1556,7 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   fprintf(nf_out, "(global %s ", name);
   nf_put_type(var->type);
   fprintf(nf_out, " %lu %lu", ir_size_of(var->type), ir_align_of(var->type));
+  if (var->storage_class == sc_static) fputs(" (static)", nf_out);
   ir_global_init(var);
   fputs(")\n", nf_out);
   ir_buf_end(&g);
@@ -1682,7 +1697,10 @@ static void ir_stmt(a_statement_ptr s, int d)
     case stmk_return:
       ir_note(1, stmk_return, 1);
       if (s->expr == NULL) {
-        ir_line(d, "(return)");
+        /* Falling off the end of a non-void function is undefined; main returns 0 (see ir_function). */
+        if (ir_is_void(ir_ret_type) || ir_is_aggregate(ir_ret_type)) ir_line(d, "(return)");
+        else if (ir_in_main) ir_line(d, ir_fmt("(return %s)", ir_zero(ir_ret_type)));
+        else ir_line(d, "(unreachable)");
       } else if (ir_is_void(s->expr->type)) {
         (void)ir_rval(s->expr);
         ir_line(d, "(return)");
@@ -1780,6 +1798,7 @@ static void ir_function(a_routine_ptr rout)
   ir_nreg = 0;
   ir_sret = NULL;
   ir_ret_type = ret;
+  ir_in_main = rout->source_corresp.name != NULL && strcmp(rout->source_corresp.name, "main") == 0;
   ir_slots.n = 0;
   ir_labels.n = 0;
   ir_buf_open(&ir_slot_buf);

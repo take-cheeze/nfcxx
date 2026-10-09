@@ -1,0 +1,1493 @@
+#!/usr/bin/env python3
+"""Path B stage 3: emit QBE IL from the nfcxx mid-level IR text (docs/notes/pathb-stage2.md, sections 6 and 7).
+
+Usage: pathb-qbe-emit.py [FILE.ir | -]        QBE IL on stdout (reads stdin for '-' or no argument)
+
+Exit status:
+  0  the module was emitted
+  3  refused: the IR has a node, type or marker this emitter does not handle; the reason is on stderr
+  1  error: malformed IR text, or an IR format older than this emitter (rebuild the harness)
+
+The emitter never guesses. Anything it does not know is a refusal, never silently dropped. Checked IR operations
+(cdiv, crem, cshl, cshr, cf2i, cadd, csub, cmul, cneg, bounds, nonnull, unreachable) become a compare and a branch
+to one shared abort block that calls abort(). Registers are stack slots; QBE's own promotion turns them back into
+SSA temporaries. Scalar sizes assume LP64 (int 4, long 8, pointers 8), which is what the x86-64 Linux target uses.
+"""
+import math
+import re
+import struct
+import sys
+
+
+class Refused(Exception):
+    """A node this emitter does not handle (exit status 3)."""
+
+
+class BadIR(Exception):
+    """Malformed IR text or an unknown IR format (exit status 1)."""
+
+
+# ------------------------------------------------------------------ reading the IR text
+
+class Str(str):
+    """A double-quoted string. Each character is one byte (latin-1)."""
+
+
+class Sym(tuple):
+    """A sigil and a quoted name: $"x" (slot), @"x" (static object), &"f" (function)."""
+
+
+def _read_string(text, i):
+    assert text[i] == '"'
+    out = []
+    i += 1
+    n = len(text)
+    while True:
+        if i >= n:
+            raise BadIR("unterminated string in IR")
+        c = text[i]
+        if c == '"':
+            return "".join(out), i + 1
+        if c == "\\":
+            i += 1
+            if i >= n:
+                raise BadIR("bad escape at end of IR")
+            e = text[i]
+            if e == "n":
+                out.append("\n")
+                i += 1
+            elif e in '"\\':
+                out.append(e)
+                i += 1
+            elif e in "01234567" and i + 2 < n and text[i + 1] in "01234567" and text[i + 2] in "01234567":
+                out.append(chr(int(text[i:i + 3], 8)))
+                i += 3
+            else:
+                raise BadIR("unknown escape \\%s in IR string" % e)
+        else:
+            out.append(c)
+            i += 1
+
+
+def tokenize(text):
+    toks = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c.isspace():
+            i += 1
+        elif c in "()":
+            toks.append(c)
+            i += 1
+        elif c == '"':
+            s, i = _read_string(text, i)
+            toks.append(Str(s))
+        elif c in "$@&" and i + 1 < n and text[i + 1] == '"':
+            s, i = _read_string(text, i + 1)
+            toks.append(Sym((c, s)))
+        else:
+            j = i
+            while j < n and not text[j].isspace() and text[j] not in '()"':
+                j += 1
+            toks.append(text[i:j])
+            i = j
+    return toks
+
+
+def parse_forms(toks):
+    """Return the list of top-level forms. A form is a Python list, or an atom (str, Str, Sym)."""
+    stack = [[]]
+    for t in toks:
+        if t == "(":
+            stack.append([])
+        elif t == ")":
+            if len(stack) == 1:
+                raise BadIR("unbalanced ')' in IR")
+            done = stack.pop()
+            stack[-1].append(done)
+        else:
+            stack[-1].append(t)
+    if len(stack) != 1:
+        raise BadIR("unbalanced '(' in IR")
+    return stack[0]
+
+
+# ------------------------------------------------------------------ types
+
+VOID = ("void",)
+SCALARS = {
+    "bool": ("int", 1, False, True),
+    "char": ("int", 1, True, False),
+    "signed_char": ("int", 1, True, False),
+    "unsigned_char": ("int", 1, False, False),
+    "short": ("int", 2, True, False),
+    "unsigned_short": ("int", 2, False, False),
+    "int": ("int", 4, True, False),
+    "unsigned_int": ("int", 4, False, False),
+    "long": ("int", 8, True, False),
+    "unsigned_long": ("int", 8, False, False),
+    "long_long": ("int", 8, True, False),
+    "unsigned_long_long": ("int", 8, False, False),
+    "float": ("float", 4),
+    "double": ("float", 8),
+}
+
+
+def parse_type(x):
+    if isinstance(x, str) and not isinstance(x, Str):
+        if x == "void":
+            return VOID
+        if x in SCALARS:
+            return SCALARS[x]
+        if x == "long_double":
+            raise Refused("type long_double (no QBE type; cproc refuses it too)")
+        raise Refused("type %s" % x)
+    if not isinstance(x, list) or not x:
+        raise BadIR("bad type form %r" % (x,))
+    head = x[0]
+    if head == "ptr":
+        return ("ptr", parse_type(x[1]) if len(x) == 2 else None)
+    if head == "const":
+        return parse_type(x[1])
+    if head == "array":
+        if x[1] == "?":
+            raise Refused("variable-length array type")
+        return ("array", int(x[1]), parse_type(x[2]))
+    if head in ("struct", "class", "union"):
+        return ("agg", head, str(x[1]))
+    if head == "fn":
+        return ("fn",)
+    if head == "volatile":
+        raise Refused("volatile-qualified type")
+    raise Refused("type form (%s ...)" % head)
+
+
+def is_agg(ty):
+    return ty[0] in ("agg", "array")
+
+
+def is_int(ty):
+    return ty[0] == "int"
+
+
+def is_bool(ty):
+    return ty[0] == "int" and ty[3]
+
+
+def ty_size(ty):
+    if ty[0] == "int":
+        return ty[1]
+    if ty[0] == "float":
+        return ty[1]
+    if ty[0] in ("ptr", "fn"):
+        return 8
+    raise Refused("scalar size of aggregate type in value position")
+
+
+def qcls(ty):
+    """QBE class of a value of IR type ty."""
+    if ty[0] == "int":
+        return "w" if ty[1] <= 4 else "l"
+    if ty[0] == "float":
+        return "s" if ty[1] == 4 else "d"
+    if ty[0] in ("ptr", "fn"):
+        return "l"
+    if ty[0] == "void":
+        return None
+    raise Refused("aggregate value of type %s (aggregates are addresses in the IR)" % (ty,))
+
+
+def int_is_signed(ty):
+    return ty[0] == "int" and ty[2]
+
+
+def int_range(ty):
+    bits = ty[1] * 8
+    if int_is_signed(ty):
+        return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    return 0, (1 << bits) - 1
+
+
+def wrap_int(v, cls):
+    bits = 32 if cls == "w" else 64
+    v &= (1 << bits) - 1
+    if v >= 1 << (bits - 1):
+        v -= 1 << bits
+    return v
+
+
+def float_lit(v, size):
+    if not math.isfinite(v):
+        raise Refused("non-finite floating constant %r" % v)
+    if size == 4:
+        v = struct.unpack("f", struct.pack("f", v))[0]
+        return "s_" + repr(v)
+    return "d_" + repr(v)
+
+
+def data_float(v, size):
+    if not math.isfinite(v):
+        raise Refused("non-finite floating constant %r" % v)
+    if size == 4:
+        v = struct.unpack("f", struct.pack("f", v))[0]
+        return "s", "s_" + repr(v)
+    return "d", "d_" + repr(v)
+
+
+# ------------------------------------------------------------------ helpers over forms
+
+def head_of(x):
+    if isinstance(x, list) and x and isinstance(x[0], str) and not isinstance(x[0], Str):
+        return x[0]
+    return None
+
+
+def form_text(x):
+    if isinstance(x, list):
+        return "(" + " ".join(form_text(y) for y in x) + ")"
+    if isinstance(x, Sym):
+        return "%s\"%s\"" % (x[0], x[1])
+    if isinstance(x, Str):
+        return '"%s"' % x
+    return str(x)
+
+
+def as_int(x):
+    """An integer atom. The IR prints unsigned constants in hexadecimal (0x...) as well as in decimal."""
+    if isinstance(x, str) and not isinstance(x, Str) and re.fullmatch(r"-?(0x[0-9a-fA-F]+|\d+)", x):
+        return int(x, 0)
+    raise BadIR("expected an integer, got %s" % form_text(x))
+
+
+REG_RE = re.compile(r"%(\d+)$")
+QNAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*$")
+
+
+def qsym(name):
+    if not QNAME_RE.match(name):
+        raise Refused("symbol name %r needs quoting in QBE" % name)
+    return name
+
+
+# ------------------------------------------------------------------ values
+
+class Val:
+    __slots__ = ("t", "cls", "ty")
+
+    def __init__(self, t, cls, ty):
+        self.t = t
+        self.cls = cls
+        self.ty = ty
+
+
+MEM_LOAD = {"w": "loadw", "l": "loadl", "s": "loads", "d": "loadd"}
+MEM_STORE = {"w": "storew", "l": "storel", "s": "stores", "d": "stored"}
+CMP_INT = {"lt.s": "cslt", "le.s": "csle", "lt.u": "cult", "le.u": "cule"}
+CMP_FLT = {"lt.f": "clt", "le.f": "cle"}
+
+
+class Module:
+    def __init__(self):
+        self.globals = {}      # IR name -> type
+        self.strings = {}      # data name -> bytes
+        self.out = []
+
+
+class Fn:
+    """One function body. Statements are emitted into self.body; registers and slots into self.allocs."""
+
+    def __init__(self, mod, name, ret_ty):
+        self.mod = mod
+        self.name = name
+        self.ret_ty = ret_ty
+        self.body = []
+        self.allocs = []
+        self.ntmp = 0
+        self.nlab = 0
+        self.dead = False
+        self.regs = {}       # N -> (type, cls)
+        self.slots = {}      # IR name -> (qname, type)
+        self.nslot = 0
+        self.labels = {}     # IR label name -> @name
+        self.breaks = []     # exit labels of enclosing loops and switches
+        self.case_labels = {}  # id(marker) -> @label, for the switch being emitted
+        self.abort_used = False
+
+    # ---- output
+    def _put(self, s):
+        self.body.append("\t" + s)
+
+    def tmp(self):
+        self.ntmp += 1
+        return "%%t%d" % self.ntmp
+
+    def newlab(self):
+        self.nlab += 1
+        return "@b%d" % self.nlab
+
+    def start_block(self, lab):
+        if not self.dead:
+            self._put("jmp %s" % lab)
+        self.body.append(lab)
+        self.dead = False
+
+    def ensure_live(self):
+        if self.dead:
+            self.body.append(self.newlab())
+            self.dead = False
+
+    def emit(self, s):
+        self.ensure_live()
+        self._put(s)
+
+    def jmp(self, lab):
+        self.ensure_live()
+        self._put("jmp %s" % lab)
+        self.dead = True
+
+    def jnz(self, c, yes, no):
+        self.ensure_live()
+        self._put("jnz %s, %s, %s" % (c, yes, no))
+        self.dead = True
+
+    def ret(self, v=None):
+        self.ensure_live()
+        self._put("ret" if v is None else "ret %s" % v)
+        self.dead = True
+
+    def label(self, lab):
+        self.start_block(lab)
+
+    def abort_label(self):
+        self.abort_used = True
+        return "@abort"
+
+    def trap_if(self, c):
+        """Abort when the w value c is nonzero."""
+        ok = self.newlab()
+        self.jnz(c, self.abort_label(), ok)
+        self.label(ok)
+
+    def trap_unless(self, c):
+        """Abort when the w value c is zero."""
+        ok = self.newlab()
+        self.jnz(c, ok, self.abort_label())
+        self.label(ok)
+
+    def lab_for(self, name):
+        if name not in self.labels:
+            self.labels[name] = "@L%d" % len(self.labels)
+        return self.labels[name]
+
+    # ---- registers and slots
+    def declare_reg(self, n, ty):
+        if n in self.regs:
+            raise BadIR("register %%%d declared twice in %s" % (n, self.name))
+        cls = qcls(ty)
+        if cls is None:
+            raise Refused("register %%%d of type void" % n)
+        self.regs[n] = (ty, cls)
+        size = 4 if cls == "w" else 8 if cls == "l" else ty_size(ty)
+        self.allocs.append("\t%%r%d =l alloc%d %d" % (n, size, size))
+        return cls
+
+    def reg_val(self, n):
+        if n not in self.regs:
+            raise BadIR("register %%%d used before its declaration in %s" % (n, self.name))
+        ty, cls = self.regs[n]
+        t = self.tmp()
+        self.emit("%s =%s %s %%r%d" % (t, cls, MEM_LOAD[cls], n))
+        return Val(t, cls, ty)
+
+    def set_reg(self, n, v):
+        if n not in self.regs:
+            raise BadIR("assignment to undeclared register %%%d in %s" % (n, self.name))
+        ty, cls = self.regs[n]
+        if v.cls != cls:
+            raise Refused("register %%%d of class %s assigned a value of class %s" % (n, cls, v.cls))
+        self.emit("%s %s, %%r%d" % (MEM_STORE[cls], v.t, n))
+
+    def slot_val(self, name):
+        if name not in self.slots:
+            raise BadIR("slot $\"%s\" not declared in %s" % (name, self.name))
+        q, ty = self.slots[name]
+        return Val(q, "l", ("ptr", ty))
+
+    # ---- operands
+    def const(self, c):
+        if len(c) != 3:
+            raise BadIR("bad constant %s" % form_text(c))
+        ty = parse_type(c[1])
+        v = c[2]
+        if isinstance(v, list) or isinstance(v, Str):
+            raise Refused("constant %s" % form_text(c))
+        if ty[0] == "float":
+            fv = float(str(v))
+            return Val(float_lit(fv, ty[1]), qcls(ty), ty)
+        if ty[0] in ("int", "ptr"):
+            cls = qcls(ty)
+            return Val(str(wrap_int(as_int(v), cls)), cls, ty)
+        raise Refused("constant of type %s" % (ty,))
+
+    def opnd(self, op, want=None):
+        """Value of an operand. want is the expected QBE class (checked)."""
+        v = self._opnd(op)
+        if want is not None and v.cls != want:
+            raise Refused("operand class %s where %s is expected: %s" % (v.cls, want, form_text(op)))
+        return v
+
+    def _opnd(self, op):
+        if isinstance(op, str) and not isinstance(op, Str):
+            if REG_RE.match(op):
+                return self.reg_val(int(op[1:]))
+            raise BadIR("unknown operand %s" % op)
+        if isinstance(op, Sym):
+            sig, name = op
+            if sig == "$":
+                return self.slot_val(name)
+            if sig == "@":
+                return Val("$" + qsym(name), "l", ("ptr", self.mod.globals.get(name)))
+            if sig == "&":
+                return Val("$" + qsym(name), "l", ("ptr", ("fn",)))
+        if head_of(op) == "const":
+            return self.const(op)
+        if head_of(op) == "null":
+            ty = parse_type(op[1])
+            return Val("0", "l", ty)
+        if head_of(op) == "unsupported":
+            raise Refused(form_text(op))
+        raise BadIR("bad operand %s" % form_text(op))
+
+    def ival(self, v, cls):
+        return v
+
+    # ---- conversions
+    def narrow(self, v, ty):
+        """Normalize a w value to a 1- or 2-byte integer type (QBE has no narrow temporaries)."""
+        if ty[0] == "int" and ty[1] in (1, 2) and not ty[3]:
+            op = {(1, True): "extsb", (1, False): "extub", (2, True): "extsh", (2, False): "extuh"}[(ty[1], ty[2])]
+            t = self.tmp()
+            self.emit("%s =w %s %s" % (t, op, v.t))
+            return Val(t, "w", ty)
+        return Val(v.t, v.cls, ty)
+
+    def int_conv(self, v, src, dst):
+        """Integer or pointer conversion from the value v of type src to type dst (both integer or pointer)."""
+        if dst[0] == "int" and dst[3]:  # bool: nonzero is true
+            t = self.tmp()
+            self.emit("%s =w cne%s %s, 0" % (t, v.cls, v.t))
+            return Val(t, "w", dst)
+        dcls = qcls(dst)
+        if dcls == "w":
+            if v.cls == "l":
+                t = self.tmp()
+                self.emit("%s =w copy %s" % (t, v.t))
+                v = Val(t, "w", src)
+            return self.narrow(Val(v.t, "w", dst), dst)
+        # 8-byte destination
+        if v.cls == "w":
+            if src[0] == "int" and int_is_signed(src) and not src[3]:
+                op = "extsw"
+            else:
+                op = "extuw"
+            t = self.tmp()
+            self.emit("%s =l %s %s" % (t, op, v.t))
+            return Val(t, "l", dst)
+        return Val(v.t, "l", dst)
+
+    # ---- rvalues: returns a Val
+    def rval(self, x, declared=None):
+        h = head_of(x)
+        if h is None or h in ("const", "null", "unsupported"):
+            return self.opnd(x)
+        fn = RVAL.get(h)
+        if fn is None:
+            raise Refused("rvalue (%s ...)" % h)
+        return fn(self, x)
+
+    def stmt(self, x):
+        if not isinstance(x, list):
+            raise BadIR("statement expected, got %s" % form_text(x))
+        h = head_of(x)
+        fn = STMT.get(h)
+        if fn is None:
+            raise Refused("statement (%s ...)" % h)
+        fn(self, x)
+
+    def stmts(self, xs):
+        for s in xs:
+            self.stmt(s)
+
+
+# -------- rvalue handlers (x is the form, x[0] the head)
+
+def _arith_cls(ty, x):
+    if not is_int(ty):
+        raise Refused("%s on non-integer type %s" % (x[0], (ty,)))
+    return qcls(ty)
+
+
+def r_wbin(op):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        cls = _arith_cls(ty, x)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        t = fn.tmp()
+        fn.emit("%s =%s %s %s, %s" % (t, cls, op, a.t, b.t))
+        return fn.narrow(Val(t, cls, ty), ty)
+    return f
+
+
+def r_wneg(fn, x):
+    ty = parse_type(x[1])
+    cls = _arith_cls(ty, x)
+    a = fn.opnd(x[2], cls)
+    t = fn.tmp()
+    fn.emit("%s =%s sub 0, %s" % (t, cls, a.t))
+    return fn.narrow(Val(t, cls, ty), ty)
+
+
+def _check_signed(ty, x):
+    if not int_is_signed(ty):
+        raise Refused("%s on unsigned type %s (the IR only emits checked forms for signed types)" % (x[0], (ty,)))
+
+
+def r_cadd_like(op):
+    """Checked signed add, sub or mul. The operation runs in 64 bits and the result must fit the type; a 64-bit
+    add or sub is checked with the sign-bit identities. A 64-bit multiply is refused."""
+    def f(fn, x):
+        ty = parse_type(x[1])
+        _check_signed(ty, x)
+        cls = _arith_cls(ty, x)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        if ty_size(ty) == 8:
+            if op == "mul":
+                raise Refused("checked 64-bit signed multiply (cmul on %s)" % (ty,))
+            r = fn.tmp()
+            fn.emit("%s =l %s %s, %s" % (r, "add" if op == "add" else "sub", fn.ext64(a), fn.ext64(b)))
+            if op == "add":
+                x1, x2, x3 = fn.tmp(), fn.tmp(), fn.tmp()
+                fn.emit("%s =l xor %s, %s" % (x1, fn.ext64(a), r))
+                fn.emit("%s =l xor %s, %s" % (x2, fn.ext64(b), r))
+                fn.emit("%s =l and %s, %s" % (x3, x1, x2))
+            else:
+                x1, x2, x3 = fn.tmp(), fn.tmp(), fn.tmp()
+                fn.emit("%s =l xor %s, %s" % (x1, fn.ext64(a), fn.ext64(b)))
+                fn.emit("%s =l xor %s, %s" % (x2, fn.ext64(a), r))
+                fn.emit("%s =l and %s, %s" % (x3, x1, x2))
+            c = fn.tmp()
+            fn.emit("%s =w csltl %s, 0" % (c, x3))
+            fn.trap_if(c)
+            return Val(r, "l", ty)
+        # 1-, 2- and 4-byte types: 64-bit result, then it must survive truncation to the type
+        r = fn.tmp()
+        fn.emit("%s =l %s %s, %s" % (r, {"add": "add", "sub": "sub", "mul": "mul"}[op], fn.ext64(a), fn.ext64(b)))
+        return fn.fits(r, ty)
+    return f
+
+
+def _ext64(self, v):
+    """A w value as an l value, sign-extended (the operands of checked operations are signed)."""
+    if v.cls == "l":
+        return v.t
+    t = self.tmp()
+    self.emit("%s =l extsw %s" % (t, v.t))
+    return t
+
+
+def _fits(self, r, ty):
+    """Trap unless the 64-bit value r is representable in the integer type ty; return it as a value of ty."""
+    t32 = self.tmp()
+    self.emit("%s =w copy %s" % (t32, r))
+    tn = self.tmp()
+    op = {1: "extsb", 2: "extsh", 4: None}[ty[1]]
+    if op is None:
+        tn = t32
+    else:
+        self.emit("%s =w %s %s" % (tn, op, t32))
+    back = self.tmp()
+    self.emit("%s =l extsw %s" % (back, tn))
+    c = self.tmp()
+    self.emit("%s =w ceql %s, %s" % (c, back, r))
+    self.trap_unless(c)
+    return Val(tn, "w", ty)
+
+
+Fn.ext64 = _ext64
+Fn.fits = _fits
+
+
+def r_divrem(op):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        cls = _arith_cls(ty, x)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        c = fn.tmp()
+        fn.emit("%s =w ceq%s %s, 0" % (c, cls, b.t))
+        fn.trap_if(c)
+        if int_is_signed(ty):
+            lo, _ = int_range(ty)
+            c2, c3, c4 = fn.tmp(), fn.tmp(), fn.tmp()
+            fn.emit("%s =w ceq%s %s, %d" % (c2, cls, a.t, lo))
+            fn.emit("%s =w ceq%s %s, -1" % (c3, cls, b.t))
+            fn.emit("%s =w and %s, %s" % (c4, c2, c3))
+            fn.trap_if(c4)
+            qop = "div" if op == "div" else "rem"
+        else:
+            qop = "udiv" if op == "div" else "urem"
+        t = fn.tmp()
+        fn.emit("%s =%s %s %s, %s" % (t, cls, qop, a.t, b.t))
+        return fn.narrow(Val(t, cls, ty), ty)
+    return f
+
+
+def r_shift(left):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        cls = _arith_cls(ty, x)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3])
+        width = ty[1] * 8
+        bcls = b.cls
+        # Trap unless 0 <= count < width. An unsigned compare also rejects negative counts.
+        c = fn.tmp()
+        fn.emit("%s =w cult%s %s, %d" % (c, bcls, b.t, width))
+        fn.trap_unless(c)
+        if left:
+            op = "shl"
+        else:
+            op = "sar" if int_is_signed(ty) else "shr"
+        t = fn.tmp()
+        fn.emit("%s =%s %s %s, %s" % (t, cls, op, a.t, b.t))
+        return fn.narrow(Val(t, cls, ty), ty) if left else Val(t, cls, ty)
+    return f
+
+
+def r_cneg(fn, x):
+    ty = parse_type(x[1])
+    _check_signed(ty, x)
+    cls = _arith_cls(ty, x)
+    a = fn.opnd(x[2], cls)
+    lo, _ = int_range(ty)
+    c = fn.tmp()
+    fn.emit("%s =w ceq%s %s, %d" % (c, cls, a.t, lo))
+    fn.trap_if(c)
+    t = fn.tmp()
+    fn.emit("%s =%s sub 0, %s" % (t, cls, a.t))
+    return fn.narrow(Val(t, cls, ty), ty)
+
+
+def r_fbin(op):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        if ty[0] != "float":
+            raise Refused("%s on non-float type" % x[0])
+        cls = qcls(ty)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        t = fn.tmp()
+        fn.emit("%s =%s %s %s, %s" % (t, cls, op, a.t, b.t))
+        return Val(t, cls, ty)
+    return f
+
+
+def r_fneg(fn, x):
+    ty = parse_type(x[1])
+    if ty[0] != "float":
+        raise Refused("fneg on non-float type")
+    cls = qcls(ty)
+    a = fn.opnd(x[2], cls)
+    t = fn.tmp()
+    fn.emit("%s =%s neg %s" % (t, cls, a.t))
+    return Val(t, cls, ty)
+
+
+def r_bitop(op):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        if not (is_int(ty) or is_bool(ty)):
+            raise Refused("%s on type %s" % (x[0], (ty,)))
+        cls = qcls(ty)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        t = fn.tmp()
+        fn.emit("%s =%s %s %s, %s" % (t, cls, op, a.t, b.t))
+        return fn.narrow(Val(t, cls, ty), ty)
+    return f
+
+
+def r_not(fn, x):
+    ty = parse_type(x[1])
+    cls = qcls(ty)
+    a = fn.opnd(x[2], cls)
+    t = fn.tmp()
+    if is_bool(ty):
+        fn.emit("%s =w xor %s, 1" % (t, a.t))
+        return Val(t, "w", ty)
+    if not is_int(ty):
+        raise Refused("not on type %s" % (ty,))
+    fn.emit("%s =%s xor %s, -1" % (t, cls, a.t))
+    return fn.narrow(Val(t, cls, ty), ty)
+
+
+def r_eqne(op):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        cls = qcls(ty)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        t = fn.tmp()
+        fn.emit("%s =w c%s%s %s, %s" % (t, op, cls, a.t, b.t))
+        return Val(t, "w", SCALARS["bool"])
+    return f
+
+
+def r_cmp(op):
+    def f(fn, x):
+        ty = parse_type(x[1])
+        cls = qcls(ty)
+        a = fn.opnd(x[2], cls)
+        b = fn.opnd(x[3], cls)
+        if op in CMP_INT:
+            if ty[0] not in ("int", "ptr"):
+                raise Refused("%s on non-integer type" % op)
+            name = CMP_INT[op] + cls
+        else:
+            if ty[0] != "float":
+                raise Refused("%s on non-float type" % op)
+            name = CMP_FLT[op] + cls
+        t = fn.tmp()
+        fn.emit("%s =w %s %s, %s" % (t, name, a.t, b.t))
+        return Val(t, "w", SCALARS["bool"])
+    return f
+
+
+def r_iconv(fn, x):
+    dst = parse_type(x[1])
+    v = fn.opnd(x[2])
+    src = v.ty if v.ty is not None else ("int", 8, False, False)
+    if dst[0] not in ("int", "ptr") or src[0] not in ("int", "ptr"):
+        raise Refused("iconv between %s and %s" % (src, dst))
+    return fn.int_conv(v, src, dst)
+
+
+def r_p2i(fn, x):
+    dst = parse_type(x[1])
+    v = fn.opnd(x[2], "l")
+    return fn.int_conv(v, ("ptr", None), dst)
+
+
+def r_i2p(fn, x):
+    dst = parse_type(x[1])
+    v = fn.opnd(x[2])
+    src = v.ty
+    if src is None or src[0] != "int":
+        raise Refused("i2p from %s" % (src,))
+    return fn.int_conv(v, src, ("ptr", None))
+
+
+def r_bitcast(fn, x):
+    pt = parse_type(x[1])
+    v = fn.opnd(x[2], "l")
+    return Val(v.t, "l", pt)
+
+
+def r_i2f(fn, x):
+    dst = parse_type(x[1])
+    if dst[0] != "float":
+        raise Refused("i2f to non-float")
+    v = fn.opnd(x[2])
+    src = v.ty
+    if src is None or src[0] != "int":
+        raise Refused("i2f from %s" % (src,))
+    signed = int_is_signed(src) and not src[3]
+    op = {("w", True): "swtof", ("l", True): "sltof", ("w", False): "uwtof", ("l", False): "ultof"}[(v.cls, signed)]
+    t = fn.tmp()
+    fn.emit("%s =%s %s %s" % (t, qcls(dst), op, v.t))
+    return Val(t, qcls(dst), dst)
+
+
+def r_fconv(fn, x):
+    dst = parse_type(x[1])
+    v = fn.opnd(x[2])
+    if dst[0] != "float" or v.ty is None or v.ty[0] != "float":
+        raise Refused("fconv between non-float types")
+    if qcls(dst) == v.cls:
+        return Val(v.t, v.cls, dst)
+    t = fn.tmp()
+    if v.cls == "s":
+        fn.emit("%s =d exts %s" % (t, v.t))
+    else:
+        fn.emit("%s =s truncd %s" % (t, v.t))
+    return Val(t, qcls(dst), dst)
+
+
+def r_cf2i(fn, x):
+    """Float to integer with the trap of section 4: NaN or a value that does not fit the type. The test is done
+    in double, where the bounds of each integer range are exact, so a float source is widened first."""
+    dst = parse_type(x[1])
+    if not is_int(dst) or is_bool(dst):
+        raise Refused("cf2i to %s" % (dst,))
+    v = fn.opnd(x[2])
+    if v.ty is None or v.ty[0] != "float":
+        raise Refused("cf2i from non-float")
+    d = v.t
+    if v.cls == "s":
+        d = fn.tmp()
+        fn.emit("%s =d exts %s" % (d, v.t))
+    lo, hi = _cf2i_bounds(dst)
+    c1, c2, c3 = fn.tmp(), fn.tmp(), fn.tmp()
+    fn.emit("%s =w %s %s, %s" % (c1, lo[0], d, lo[1]))
+    fn.emit("%s =w %s %s, %s" % (c2, hi[0], d, hi[1]))
+    fn.emit("%s =w and %s, %s" % (c3, c1, c2))
+    fn.trap_unless(c3)
+    conv = ("dtosi" if int_is_signed(dst) else "dtoui")
+    cls = "l" if dst[1] == 8 else "w"
+    t = fn.tmp()
+    fn.emit("%s =%s %s %s" % (t, cls, conv, d))
+    return fn.narrow(Val(t, cls, dst), dst)
+
+
+def _cf2i_bounds(ty):
+    """Comparisons that a double d must satisfy to truncate into ty: (op, literal) for the lower and the upper bound.
+    Lower: d > MIN-1 (32-bit and smaller), or d >= MIN for 64-bit (no double lies strictly between -2^63-1 and -2^63).
+    Upper: d < MAX+1."""
+    signed = int_is_signed(ty)
+    bits = ty[1] * 8
+    if signed:
+        if bits == 64:
+            lo = ("cged", repr(float(-(1 << 63))))
+        else:
+            lo = ("cgtd", repr(float(-(1 << (bits - 1)) - 1)))
+        hi = ("cltd", repr(float(1 << (bits - 1))))
+    else:
+        lo = ("cgtd", "-1.0")
+        hi = ("cltd", repr(float(1 << 64 if bits == 64 else 1 << bits)))
+    return (lo[0], "d_" + lo[1]), (hi[0], "d_" + hi[1])
+
+
+def r_offset(fn, x):
+    a = fn.opnd(x[1], "l")
+    n = as_int(x[2])
+    t = fn.tmp()
+    fn.emit("%s =l add %s, %d" % (t, a.t, n))
+    return Val(t, "l", ("ptr", None))
+
+
+def r_index(fn, x):
+    base = fn.opnd(x[1], "l")
+    idx = fn.opnd(x[2])
+    size = as_int(x[3])
+    if idx.cls == "l":
+        i64 = idx.t
+    elif idx.ty is not None and idx.ty[0] == "int" and idx.ty[2] and not idx.ty[3]:
+        i64 = fn.tmp()
+        fn.emit("%s =l extsw %s" % (i64, idx.t))
+    else:
+        i64 = fn.tmp()
+        fn.emit("%s =l extuw %s" % (i64, idx.t))
+    m = fn.tmp()
+    fn.emit("%s =l mul %s, %d" % (m, i64, size))
+    t = fn.tmp()
+    fn.emit("%s =l add %s, %s" % (t, base.t, m))
+    return Val(t, "l", ("ptr", None))
+
+
+def r_pdiff(fn, x):
+    a = fn.opnd(x[1], "l")
+    b = fn.opnd(x[2], "l")
+    size = as_int(x[3])
+    if size == 0:
+        raise Refused("pdiff with element size 0")
+    d = fn.tmp()
+    fn.emit("%s =l sub %s, %s" % (d, a.t, b.t))
+    t = fn.tmp()
+    fn.emit("%s =l div %s, %d" % (t, d, size))
+    return Val(t, "l", ("int", 8, True, False))
+
+
+def r_load(fn, x):
+    if len(x) != 3:
+        raise BadIR("load form")
+    ty = parse_type(x[1])
+    if is_agg(ty):
+        raise Refused("load of an aggregate (aggregates are addresses)")
+    addr = fn.opnd(x[2], "l")
+    op, cls = _load_op(ty)
+    t = fn.tmp()
+    fn.emit("%s =%s %s %s" % (t, cls, op, addr.t))
+    return Val(t, cls, ty)
+
+
+def _load_op(ty):
+    if ty[0] == "ptr" or ty[0] == "fn":
+        return "loadl", "l"
+    if ty[0] == "float":
+        return ("loads", "s") if ty[1] == 4 else ("loadd", "d")
+    if ty[0] == "int":
+        size, signed, isbool = ty[1], ty[2], ty[3]
+        if isbool:
+            return "loadub", "w"
+        return {(1, True): "loadsb", (1, False): "loadub", (2, True): "loadsh", (2, False): "loaduh",
+                (4, True): "loadw", (4, False): "loadw", (8, True): "loadl", (8, False): "loadl"}[(size, signed)], \
+            "w" if size <= 4 else "l"
+    raise Refused("load of type %s" % (ty,))
+
+
+def r_call(fn, x):
+    ret = parse_type(x[1])
+    callee = fn.opnd(x[2])
+    args = [fn.opnd(a) for a in x[3:]]
+    parts = []
+    for a in args:
+        if a.cls is None:
+            raise Refused("call argument without a class")
+        parts.append("%s %s" % (a.cls, a.t))
+    target = callee.t
+    if ret == VOID:
+        fn.emit("call %s(%s)" % (target, ", ".join(parts)))
+        return None
+    cls = qcls(ret)
+    t = fn.tmp()
+    fn.emit("%s =%s call %s(%s)" % (t, cls, target, ", ".join(parts)))
+    return Val(t, cls, ret)
+
+
+RVAL = {
+    "load": r_load,
+    "wadd": r_wbin("add"), "wsub": r_wbin("sub"), "wmul": r_wbin("mul"),
+    "wneg": r_wneg,
+    "cadd": r_cadd_like("add"), "csub": r_cadd_like("sub"), "cmul": r_cadd_like("mul"),
+    "cneg": r_cneg,
+    "cdiv": r_divrem("div"), "crem": r_divrem("rem"),
+    "cshl": r_shift(True), "cshr": r_shift(False),
+    "fadd": r_fbin("add"), "fsub": r_fbin("sub"), "fmul": r_fbin("mul"), "fdiv": r_fbin("div"),
+    "fneg": r_fneg,
+    "and": r_bitop("and"), "or": r_bitop("or"), "xor": r_bitop("xor"),
+    "not": r_not,
+    "eq": r_eqne("eq"), "ne": r_eqne("ne"),
+    "lt.s": r_cmp("lt.s"), "le.s": r_cmp("le.s"), "lt.u": r_cmp("lt.u"), "le.u": r_cmp("le.u"),
+    "lt.f": r_cmp("lt.f"), "le.f": r_cmp("le.f"),
+    "iconv": r_iconv, "p2i": r_p2i, "i2p": r_i2p, "bitcast": r_bitcast,
+    "i2f": r_i2f, "u2f": r_i2f, "fconv": r_fconv, "cf2i": r_cf2i,
+    "offset": r_offset, "index": r_index, "pdiff": r_pdiff,
+    "call": r_call,
+}
+
+
+# -------- statement handlers
+
+def s_block(fn, x):
+    fn.stmts(x[1:])
+
+
+def s_let(fn, x):
+    if len(x) != 4:
+        raise BadIR("let form")
+    n = int(x[1][1:]) if REG_RE.match(x[1]) else None
+    if n is None:
+        raise BadIR("let without a register")
+    ty = parse_type(x[2])
+    if is_agg(ty):
+        raise Refused("register of aggregate type")
+    fn.declare_reg(n, ty)
+    v = fn.rval(x[3], ty)
+    if v is None:
+        raise BadIR("void value assigned to a register")
+    if v.cls != fn.regs[n][1]:
+        raise Refused("let %%%d: value class %s, register class %s" % (n, v.cls, fn.regs[n][1]))
+    fn.set_reg(n, v)
+
+
+def s_set(fn, x):
+    n = int(x[1][1:])
+    v = fn.opnd(x[2])
+    fn.set_reg(n, v)
+
+
+def s_store(fn, x):
+    h = x[0]
+    if h != "store":
+        raise Refused("(%s ...): volatile stores have no QBE equivalent (docs/notes/pathb-stage2.md, section 7)" % h)
+    ty = parse_type(x[1])
+    if is_agg(ty):
+        raise Refused("store of an aggregate type")
+    addr = fn.opnd(x[2], "l")
+    val = fn.opnd(x[3])
+    if ty[0] == "ptr" or ty[0] == "fn" or (ty[0] == "int" and ty[1] == 8):
+        op, cls = "storel", "l"
+    elif ty[0] == "float":
+        op, cls = ("stores", "s") if ty[1] == 4 else ("stored", "d")
+    elif ty[0] == "int":
+        op, cls = {1: "storeb", 2: "storeh", 4: "storew"}[ty[1]], "w"
+    else:
+        raise Refused("store of type %s" % (ty,))
+    if val.cls != cls:
+        raise Refused("store class mismatch: value %s, store %s" % (val.cls, cls))
+    fn.emit("%s %s, %s" % (op, val.t, addr.t))
+
+
+def s_copy(fn, x):
+    n = as_int(x[1])
+    dst = fn.opnd(x[2], "l")
+    src = fn.opnd(x[3], "l")
+    if n == 0:
+        return
+    fn.emit("call $memmove(l %s, l %s, l %d)" % (dst.t, src.t, n))
+
+
+def s_eval(fn, x):
+    e = x[1]
+    if head_of(e) == "call":
+        r_call(fn, e)
+        return
+    fn.rval(e)
+
+
+def s_bounds(fn, x):
+    idx = fn.opnd(x[1])
+    n = as_int(x[2])
+    if idx.ty is None or idx.ty[0] != "int":
+        raise Refused("bounds on a non-integer index")
+    cls = idx.cls
+    c = fn.tmp()
+    fn.emit("%s =w cult%s %s, %d" % (c, cls, idx.t, wrap_int(n, cls)))
+    fn.trap_unless(c)
+
+
+def s_nonnull(fn, x):
+    p = fn.opnd(x[1], "l")
+    if p.t.startswith("$"):
+        return  # the address of an object or a function
+    if p.t == "0":
+        fn.jmp(fn.abort_label())
+        return
+    c = fn.tmp()
+    fn.emit("%s =w cnel %s, 0" % (c, p.t))
+    fn.trap_unless(c)
+
+
+def s_if(fn, x):
+    c = fn.opnd(x[1], "w")
+    then = None
+    els = None
+    for part in x[2:]:
+        h = head_of(part)
+        if h == "then":
+            then = part[1:]
+        elif h == "else":
+            els = part[1:]
+        else:
+            raise BadIR("if arm expected, got %s" % form_text(part))
+    if then is None:
+        raise BadIR("if without then")
+    lt = fn.newlab()
+    le = fn.newlab() if els is not None else None
+    lend = fn.newlab()
+    fn.jnz(c.t, lt, le if le is not None else lend)
+    fn.label(lt)
+    fn.stmts(then)
+    fn.jmp(lend)
+    if els is not None:
+        fn.label(le)
+        fn.stmts(els)
+        fn.jmp(lend)
+    fn.label(lend)
+
+
+def s_loop(fn, x):
+    body = step = None
+    for part in x[1:]:
+        h = head_of(part)
+        if h == "body":
+            body = part[1:]
+        elif h == "step":
+            step = part[1:]
+        else:
+            raise BadIR("loop part expected, got %s" % form_text(part))
+    if body is None or step is None:
+        raise BadIR("loop without body or step")
+    head = fn.newlab()
+    lstep = fn.newlab()
+    lexit = fn.newlab()
+    fn.label(head)
+    fn.breaks.append(lexit)  # a do-while test in step may break too, so the target covers body and step
+    fn.stmts(body)
+    fn.label(lstep)
+    fn.stmts(step)
+    fn.breaks.pop()
+    fn.jmp(head)
+    fn.label(lexit)
+
+
+def _switch_markers(xs, out):
+    """Case and default markers in the switch body, in order. Markers may sit in nested blocks only."""
+    for s in xs:
+        h = head_of(s)
+        if h == "block":
+            _switch_markers(s[1:], out)
+        elif h in ("case", "default"):
+            out.append(s)
+    return out
+
+
+def s_switch(fn, x):
+    v = fn.opnd(x[1])
+    if v.cls not in ("w", "l"):
+        raise Refused("switch on a non-integer value")
+    if len(x) != 3 or head_of(x[2]) != "body":
+        raise BadIR("switch form")
+    markers = _switch_markers(x[2][1:], [])
+    lexit = fn.newlab()
+    ldefault = None
+    cases = []
+    seen = set()
+    for m in markers:
+        lab = fn.newlab()
+        fn.case_labels[id(m)] = lab
+        if head_of(m) == "default":
+            if ldefault is not None:
+                raise BadIR("two default labels")
+            ldefault = lab
+        else:
+            cv = fn.const(m[1])
+            key = int(cv.t)
+            if key in seen:
+                raise BadIR("duplicate case value %d" % key)
+            seen.add(key)
+            cases.append((cv, lab))
+    # Dispatch: one compare per case, in order; then the default (or the exit).
+    for cv, lab in cases:
+        c = fn.tmp()
+        fn.emit("%s =w ceq%s %s, %s" % (c, v.cls, v.t, cv.t))
+        nxt = fn.newlab()
+        fn.jnz(c, lab, nxt)
+        fn.label(nxt)
+    fn.jmp(ldefault if ldefault is not None else lexit)
+    fn.breaks.append(lexit)
+    fn.stmts(x[2][1:])
+    fn.breaks.pop()
+    fn.label(lexit)
+
+
+def s_case(fn, x):
+    lab = fn.case_labels.get(id(x))
+    if lab is None:
+        raise Refused("case marker outside a switch body")
+    fn.label(lab)
+
+
+def s_default(fn, x):
+    lab = fn.case_labels.get(id(x))
+    if lab is None:
+        raise Refused("default marker outside a switch body")
+    fn.label(lab)
+
+
+def s_break(fn, x):
+    if not fn.breaks:
+        raise BadIR("break outside a loop or switch")
+    fn.jmp(fn.breaks[-1])
+
+
+def s_goto(fn, x):
+    fn.jmp(fn.lab_for(str(x[1])))
+
+
+def s_label(fn, x):
+    fn.label(fn.lab_for(str(x[1])))
+
+
+def s_return(fn, x):
+    if fn.ret_ty == VOID:
+        if len(x) != 1:
+            raise BadIR("return with a value in a void function")
+        fn.ret()
+        return
+    if len(x) != 2:
+        raise Refused("return without a value in a non-void function")
+    v = fn.opnd(x[1], qcls(fn.ret_ty))
+    fn.ret(v.t)
+
+
+def s_unreachable(fn, x):
+    fn.jmp(fn.abort_label())
+
+
+STMT = {
+    "block": s_block, "let": s_let, "set": s_set,
+    "store": s_store, "store.v": s_store,
+    "copy": s_copy, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
+    "if": s_if, "loop": s_loop, "switch": s_switch,
+    "case": s_case, "default": s_default, "break": s_break,
+    "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
+}
+
+
+# ------------------------------------------------------------------ module and functions
+
+def emit_data_items(mod, name, size, items):
+    """Items of a static initializer, as QBE data items; gaps are zero bytes."""
+    pieces = []
+    pos = 0
+    for off, nbytes, text in sorted(items, key=lambda t: t[0]):
+        if off < pos:
+            raise BadIR("initializer items overlap at offset %d in %s" % (off, name))
+        if off > pos:
+            pieces.append("z %d" % (off - pos))
+        pieces.append(text)
+        pos = off + nbytes
+    if pos > size:
+        raise BadIR("initializer of %s runs past its size" % name)
+    if size > pos:
+        pieces.append("z %d" % (size - pos))
+    return pieces or ["z 0"]
+
+
+def item_scalar(val_text, ty):
+    """A scalar item of IR type ty with the value text val_text. Returns (bytes, QBE data item)."""
+    if ty[0] == "float":
+        cls, lit = data_float(float(str(val_text)), ty[1])
+        return ty[1], "%s %s" % (cls, lit)
+    if ty[0] in ("int", "ptr", "fn"):
+        size = ty_size(ty)
+        v = wrap_int(as_int(val_text), "w" if size <= 4 else "l")
+        letter = {1: "b", 2: "h", 4: "w", 8: "l"}[size]
+        return size, "%s %d" % (letter, v)
+    raise Refused("scalar item of type %s" % (ty,))
+
+
+def global_items(mod, name, items_form):
+    """Translate (init ITEM*) into (offset, bytes, text) triples."""
+    out = []
+    for it in items_form[1:]:
+        h = head_of(it)
+        if h == "scalar":
+            off = as_int(it[1])
+            ty = parse_type(it[2])
+            val = it[3]
+            if head_of(val) == "null":
+                size = ty_size(ty)
+                out.append((off, size, "%s 0" % {8: "l", 4: "w", 2: "h", 1: "b"}[size]))
+                continue
+            if head_of(val) != "const":
+                raise Refused("scalar item operand %s" % form_text(val))
+            size, text = item_scalar(val[2], ty)
+            out.append((off, size, text))
+        elif h == "addr":
+            off = as_int(it[1])
+            target = it[3]
+            add = as_int(it[4])
+            if not isinstance(target, Sym):
+                raise Refused("address item target %s" % form_text(target))
+            sym = "$" + qsym(target[1])
+            if add == 0:
+                text = "l %s" % sym
+            elif add > 0:
+                text = "l %s + %d" % (sym, add)
+            else:
+                text = "l %s - %d" % (sym, -add)
+            out.append((off, 8, text))
+        elif h == "bytes":
+            off = as_int(it[1])
+            n = as_int(it[2])
+            src = it[3]
+            if not isinstance(src, Sym) or src[0] != "@" or src[1] not in mod.strings:
+                raise Refused("bytes item from %s" % form_text(src))
+            data = mod.strings[src[1]]
+            if len(data) != n:
+                raise BadIR("bytes item of %d bytes from a %d-byte string" % (n, len(data)))
+            for i, ch in enumerate(data):
+                out.append((off + i, 1, "b %d" % ord(ch)))
+        elif h == "zero":
+            off = as_int(it[1])
+            n = as_int(it[2])
+            if n:
+                out.append((off, n, "z %d" % n))
+        elif h == "unsupported":
+            raise Refused(form_text(it))
+        else:
+            raise BadIR("unknown initializer item %s" % form_text(it))
+    return out
+
+
+def emit_global(mod, g):
+    # (global "NAME" TYPE BYTES ALIGN [(static)] INIT)
+    if len(g) < 6:
+        raise BadIR("global form too short: %s" % form_text(g))
+    name = str(g[1])
+    size = as_int(g[3])
+    align = as_int(g[4])
+    rest = g[5:]
+    static = False
+    if rest and head_of(rest[0]) == "static":
+        static = True
+        rest = rest[1:]
+    if len(rest) != 1:
+        raise BadIR("global %s: expected one INIT" % name)
+    init = rest[0]
+    h = head_of(init)
+    if h == "extern":
+        return
+    if h == "unsupported":
+        raise Refused("global %s: %s" % (name, form_text(init)))
+    if h != "init":
+        raise BadIR("global %s: unknown INIT %s" % (name, form_text(init)))
+    if align not in (1, 2, 4, 8, 16):
+        raise BadIR("global %s: alignment %d" % (name, align))
+    items = global_items(mod, name, init)
+    pieces = emit_data_items(mod, name, size, items)
+    linkage = "" if static else "export "
+    mod.out.append("%sdata $%s = align %d { %s }" % (linkage, qsym(name), align, ", ".join(pieces)))
+
+
+def emit_string(mod, d):
+    # (data "NAME" TYPE (string "..."))
+    name = str(d[1])
+    ty = parse_type(d[2])
+    if ty[0] != "array":
+        raise BadIR("data %s is not an array" % name)
+    text = d[3]
+    if head_of(text) != "string":
+        raise Refused("data %s: %s" % (name, form_text(text)))
+    raw = str(text[1])
+    if len(raw) > ty[1]:
+        raise BadIR("string data %s longer than its array" % name)
+    raw = raw + "\0" * (ty[1] - len(raw))
+    mod.strings[name] = raw
+    parts = ["b %d" % ord(c) for c in raw]
+    mod.out.append("data $%s = { %s }" % (qsym(name), ", ".join(parts)) if parts else "data $%s = { z 0 }" % qsym(name))
+
+
+def emit_function(mod, f):
+    # (function "NAME" (ret TYPE|void) (params PARAM*) [(static)] SLOT* STMT*)
+    name = str(f[1])
+    ret_form = f[2]
+    if head_of(ret_form) != "ret":
+        raise BadIR("function %s: no (ret ...)" % name)
+    ret = parse_type(ret_form[1])
+    if is_agg(ret):
+        raise BadIR("function %s returns an aggregate; it must use sret" % name)
+    params_form = f[3]
+    if head_of(params_form) != "params":
+        raise BadIR("function %s: no (params ...)" % name)
+    fn = Fn(mod, name, ret)
+    static = False
+    qparams = []
+    param_stores = []
+    body_forms = []
+    for part in f[4:]:
+        h = head_of(part)
+        if h == "static":
+            static = True
+        elif h == "slot":
+            # (slot "NAME" TYPE BYTES ALIGN)
+            if len(part) != 5:
+                raise BadIR("slot form in %s is not (slot NAME TYPE BYTES ALIGN); rebuild the harness" % name)
+            sname = str(part[1])
+            sty = parse_type(part[2])
+            ssize = as_int(part[3])
+            salign = as_int(part[4])
+            q = "%%s%d" % fn.nslot
+            fn.nslot += 1
+            a = 16 if salign >= 16 else 8 if salign >= 8 else 4
+            fn.allocs.append("\t%s =l alloc%d %d" % (q, a, max(ssize, 1)))
+            fn.slots[sname] = (q, sty)
+        else:
+            body_forms.append(part)
+    # Parameters: each arrives in a QBE temporary %pI and is copied into its register slot.
+    pi = 0
+    for p in params_form[1:]:
+        h = head_of(p)
+        if h == "sret":
+            n = int(p[1][1:])
+            fn.declare_reg(n, ("ptr", None))
+            qparams.append("l %%p%d" % pi)
+            param_stores.append(("l", pi, n))
+        elif h == "param":
+            n = int(p[1][1:])
+            pty = p[3]
+            if head_of(pty) == "byval":
+                fn.declare_reg(n, ("ptr", None))
+                qparams.append("l %%p%d" % pi)
+                param_stores.append(("l", pi, n))
+            else:
+                ty = parse_type(pty)
+                cls = qcls(ty)
+                fn.declare_reg(n, ty)
+                qparams.append("%s %%p%d" % (cls, pi))
+                param_stores.append((cls, pi, n))
+        elif h == "ellipsis":
+            qparams.append("...")
+        else:
+            raise Refused("parameter form %s" % form_text(p))
+        pi += 1
+    # Parameter copies into their register slots, at the top of the start block.
+    for cls, idx, n in param_stores:
+        fn._put("%s %%p%d, %%r%d" % (MEM_STORE[cls], idx, n))
+    fn.stmts(body_forms)
+    if not fn.dead:
+        if ret == VOID:
+            fn.ret()
+        else:
+            fn.jmp(fn.abort_label())
+    if fn.abort_used:
+        fn.body.append("@abort")
+        fn._put("call $abort()")
+        fn._put("hlt")
+    rc = "" if ret == VOID else qcls(ret) + " "
+    linkage = "" if static else "export "
+    mod.out.append("%sfunction %s$%s(%s) {" % (linkage, rc, qsym(name), ", ".join(qparams)))
+    mod.out.append("@start")
+    mod.out.extend(fn.allocs)
+    mod.out.extend(fn.body)
+    mod.out.append("}")
+    mod.out.append("")
+
+
+def emit_module(text):
+    forms = parse_forms(tokenize(text))
+    if not forms or head_of(forms[0]) != "ir-module":
+        raise BadIR("the input is not an (ir-module ...) IR text")
+    mod = Module()
+    for f in forms[1:]:
+        if head_of(f) == "global":
+            mod.globals[str(f[1])] = parse_type(f[2])
+    # Strings first: a string data item may be referenced from a global initializer.
+    for f in forms[1:]:
+        if head_of(f) == "data":
+            emit_string(mod, f)
+    for f in forms[1:]:
+        if head_of(f) == "global":
+            emit_global(mod, f)
+    for f in forms[1:]:
+        if head_of(f) == "function":
+            emit_function(mod, f)
+        elif head_of(f) not in ("global", "data"):
+            raise Refused("top-level form (%s ...)" % head_of(f))
+    return "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + "\n".join(mod.out) + "\n"
+
+
+def main(argv):
+    args = argv[1:]
+    if len(args) > 1:
+        sys.stderr.write("usage: pathb-qbe-emit.py [FILE.ir | -]\n")
+        return 1
+    src = sys.stdin.read() if not args or args[0] == "-" else open(args[0], encoding="latin-1").read()
+    try:
+        sys.stdout.write(emit_module(src))
+    except Refused as e:
+        sys.stderr.write("refused: %s\n" % e)
+        return 3
+    except BadIR as e:
+        sys.stderr.write("error: %s\n" % e)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

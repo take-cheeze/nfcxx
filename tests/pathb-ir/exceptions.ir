@@ -9,12 +9,12 @@
 (global "__eh_curr_region" unsigned_short 2 2 (extern))
 (global "__caught_object_address" (ptr void) 8 8 (extern))
 (global "__catch_clause_number" int 4 4 (extern))
-(global "tmp" (array 1 (struct "__C2")) 16 8 (init
+(global "tmp" (array 1 (struct "__C2")) 16 8 (static) (init
     (addr 0 (ptr (fn void ())) &"__destroy_exception_object" 0)
     (scalar 8 unsigned_short (const unsigned_short 0))
     (scalar 10 unsigned_short (const unsigned_short 65535))
     (scalar 12 unsigned_char (const unsigned_char 0))))
-(global "tmp.1" (array 1 (struct "__C4")) 24 8 (init
+(global "tmp.1" (array 1 (struct "__C4")) 24 8 (static) (init
     (addr 0 (ptr (const (struct "__EDG_type_info"))) @"_ZTI1E" 0)
     (scalar 8 unsigned_int (const unsigned_int 40))
     (scalar 16 (ptr unsigned_int) (null (ptr unsigned_int)))))
