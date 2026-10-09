@@ -3,7 +3,7 @@
 (function "_Z5wrapsi"
   (ret bool)
   (params (param %0 "a" int))
-  (slot "a" int)
+  (slot "a" int 4 4)
   (store int $"a" %0)
   (let %1 int (load int $"a"))
   (let %2 int (wadd int %1 (const int 1)))

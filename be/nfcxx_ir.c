@@ -184,6 +184,12 @@ static unsigned long ir_size_of(a_type_ptr t)
   return (unsigned long)f_size_of_type(skip_typerefs(t));
 }
 
+/* Alignment in bytes of an object type (EDG's layout). Printed next to sizes of slots and globals. */
+static unsigned long ir_align_of(a_type_ptr t)
+{
+  return (unsigned long)f_alignment_of_type(skip_typerefs(t));
+}
+
 /* IR text of an object type as a value: unqualified scalar, or the address for aggregates. */
 static char *ir_valtext(a_type_ptr t)
 {
@@ -385,6 +391,7 @@ static ir_val ir_mk_void(void)
 static int ir_nreg;
 static char *ir_sret;
 static a_type_ptr ir_ret_type;
+static int ir_in_main;   /* the routine being lowered is main */
 
 /* Indentation of the next expression-level line. Statement lowering sets it before lowering. */
 static int ir_depth;
@@ -488,18 +495,14 @@ static ir_val ir_ptr_add(const char *base, const char *idx, a_type_ptr ptr_t, a_
   return ir_mk_value(r, ptr_t);
 }
 
+static void ir_global_print(a_variable_ptr var, const char *name);
+
 /* Static object (global, static local, or string data) operand; the module entry is printed on first use. */
 static const char *ir_global_op(a_variable_ptr var)
 {
   int fresh = ir_tab_find(&ir_mod, var) == NULL;
   const char *op = ir_tab_get(&ir_mod, var, ir_name_or(var->source_corresp.name, "tmp"), "@");
-  if (fresh) {
-    ir_buf_begin(&ir_out_globals);
-    fprintf(nf_out, "(global %s ", op + 1);
-    nf_put_type(var->type);
-    fputs(")\n", nf_out);
-    ir_buf_end(&ir_out_globals);
-  }
+  if (fresh) ir_global_print(var, op + 1);
   return op;
 }
 
@@ -512,7 +515,7 @@ static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t)
     ir_buf_begin(&ir_slot_buf);
     fprintf(nf_out, "\n  (slot %s ", op + 1);
     nf_put_type(t);
-    fputc(')', nf_out);
+    fprintf(nf_out, " %lu %lu)", ir_size_of(t), ir_align_of(t));
     ir_buf_end(&ir_slot_buf);
   }
   return op;
@@ -525,7 +528,7 @@ static ir_val ir_temp(a_type_ptr t)
   ir_buf_begin(&ir_slot_buf);
   fprintf(nf_out, "\n  (slot %s ", op + 1);
   nf_put_type(t);
-  fputc(')', nf_out);
+  fprintf(nf_out, " %lu %lu)", ir_size_of(t), ir_align_of(t));
   ir_buf_end(&ir_slot_buf);
   return ir_mk_addr((char *)op, t, 0);
 }
@@ -955,6 +958,8 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     case eok_not: {
       ir_val a = ir_rval(a0);
       ir_note(0, k, 1);
+      /* A bool operand has no EDG type (a.t is NULL): compare it with false. */
+      if (a.t == NULL) return ir_mk_bool(ir_let("bool", ir_fmt("(eq bool %s (const bool 0))", a.s)));
       return ir_mk_bool(ir_let("bool", ir_fmt("(eq %s %s %s)", a.ty, a.s, ir_zero(a.t))));
     }
     case eok_eq:
@@ -1138,6 +1143,17 @@ static ir_val ir_cast(an_expr_node_ptr e)
   if (ir_is_bool(dst)) {
     ir_note(0, eok_cast, 1);
     return ir_mk_bool(ir_to_bool(a));
+  }
+  if (a.t == NULL) {
+    /* A bool value (a comparison, !, &&, ||) has no EDG type. It converts as the 0 or 1 it holds. */
+    if (ir_is_integer(dst)) {
+      ir_note(0, eok_cast, 1);
+      return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), a.s)), dst);
+    }
+    if (ir_is_float(dst)) {
+      ir_note(0, eok_cast, 1);
+      return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(u2f %s %s)", ir_valtext(dst), a.s)), dst);
+    }
   }
   if (ir_is_integer(dst)) {
     if (ir_is_integer(a.t)) {
@@ -1389,6 +1405,165 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
   }
 }
 
+/* ================================================================ static initializers */
+
+/* File-scope objects print their static initializer as items at byte offsets. There is no function to hold
+   the stores that ir_init_constant emits for locals, so each element becomes one item at the same offset, in
+   the same order and with the same member and base ordering:
+     (scalar OFF TYPE (const TYPE V))  a number, or (null PTR) for a null pointer
+     (addr OFF TYPE TARGET ADD)        an address: TARGET is @"x" or &"f", ADD is a byte addend
+     (bytes OFF BYTES @"const")        the bytes of a string literal, copied into an array
+     (zero OFF BYTES)                  elements the initializer does not name (trailing array elements)
+   Bytes that no item covers are padding. Nothing here creates a register, so these items are valid at module
+   scope. */
+static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t);
+
+static void ir_gi_unsupported(const char *what)
+{
+  fprintf(nf_out, "\n    (unsupported init %s)", what);
+}
+
+static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
+{
+  const char *target = NULL;
+  long add = 0;
+  if (c->kind == ck_integer || c->kind == ck_float) {
+    ir_val v = ir_const_value(c, t);
+    ir_note(3, (int)c->kind, 1);
+    fprintf(nf_out, "\n    (scalar %lu %s %s)", off, ir_valtext(t), v.s);
+    return;
+  }
+  if (c->kind == ck_string) {
+    target = ir_string_data(c);
+  } else if (c->kind == ck_address) {
+    add = (long)c->variant.address.offset;
+    switch (c->variant.address.kind) {
+      case abk_routine:
+        if (add == 0) {
+          target = ir_fmt("&\"%s\"", ir_name_or(c->variant.address.variant.routine->source_corresp.name, "fn"));
+        }
+        break;
+      case abk_variable:
+        target = ir_global_op(c->variant.address.variant.variable);
+        break;
+      case abk_constant:
+        if (c->variant.address.variant.constant->kind == ck_string) {
+          target = ir_string_data(c->variant.address.variant.constant);
+        }
+        break;
+      default:
+        break;
+    }
+    if (target == NULL) {
+      ir_note(3, ck_address, 0);
+      ir_gi_unsupported("address-constant");
+      return;
+    }
+    ir_note(3, ck_address, 1);
+  } else {
+    ir_note(3, (int)c->kind, 0);
+    ir_gi_unsupported(ir_fmt("constant %s", nfcxx_ck_name(c->kind) != NULL ? nfcxx_ck_name(c->kind) : "?"));
+    return;
+  }
+  fprintf(nf_out, "\n    (addr %lu %s %s %ld)", off, ir_valtext(t), target, add);
+}
+
+static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  if (c == NULL) {
+    fprintf(nf_out, "\n    (zero %lu %lu)", off, ir_size_of(t));
+    return;
+  }
+  if (c->kind == ck_string && s->kind == tk_array) {
+    if (ir_size_of(t) != ir_size_of(c->type)) {
+      ir_gi_unsupported("string-size");
+      return;
+    }
+    fprintf(nf_out, "\n    (bytes %lu %lu %s)", off, ir_size_of(t), ir_string_data(c));
+    return;
+  }
+  if (c->kind == ck_aggregate && s->kind == tk_array) {
+    a_type_ptr elem = s->variant.array.element_type;
+    unsigned long n = (unsigned long)s->variant.array.variant.number_of_elements;
+    unsigned long i = 0, esz = ir_size_of(elem);
+    a_constant_ptr ce;
+    for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      ir_gi_items(off + i * esz, ce, elem);
+    }
+    if (i < n) fprintf(nf_out, "\n    (zero %lu %lu)", off + i * esz, (n - i) * esz);
+    return;
+  }
+  if (c->kind == ck_aggregate && (s->kind == tk_class || s->kind == tk_struct)) {
+    ir_member mem[256];
+    int n = ir_class_members(t, mem, 256);
+    int i = 0;
+    a_constant_ptr ce;
+    if (n < 0) {
+      ir_gi_unsupported("virtual-base-or-bitfield");
+      return;
+    }
+    for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      ir_gi_items(off + mem[i].off, ce, mem[i].t);
+    }
+    for (; i < n; i++) fprintf(nf_out, "\n    (zero %lu %lu)", off + mem[i].off, ir_size_of(mem[i].t));
+    return;
+  }
+  if (c->kind == ck_aggregate || ir_is_aggregate(t)) {
+    ir_gi_unsupported("aggregate-constant");
+    return;
+  }
+  ir_gi_scalar(off, c, t);
+}
+
+/* The initializer part of a (global ...) entry. See the item grammar above. Function-local statics take their
+   initializer from the function's local-static-variable-init entry (get_variable_initializer). */
+static void ir_global_init(a_variable_ptr var)
+{
+  unsigned long size = ir_size_of(var->type);
+  an_init_kind kind;
+  an_initializer_ptr ini;
+  get_variable_initializer(var, NULL, &kind, &ini);
+  switch (kind) {
+    case initk_static:
+      fputs(" (init", nf_out);
+      ir_gi_items(0, ini->constant, var->type);
+      fputc(')', nf_out);
+      break;
+    case initk_zero:
+      fprintf(nf_out, " (init (zero 0 %lu))", size);
+      break;
+    case initk_none:
+      if (var->storage_class == sc_extern) fputs(" (extern)", nf_out);
+      else fprintf(nf_out, " (init (zero 0 %lu))", size);
+      break;
+    case initk_dynamic:
+      fputs(" (unsupported init dynamic)", nf_out);
+      break;
+    default:
+      fputs(" (unsupported init binding)", nf_out);
+      break;
+  }
+}
+
+/* Print the (global ...) entry of var into the module output. The entry is built in its own buffer, because
+   printing the initializer can print other globals (address constants) and string data first. */
+static void ir_global_print(a_variable_ptr var, const char *name)
+{
+  ir_buf g;
+  ir_buf_open(&g);
+  ir_buf_begin(&g);
+  fprintf(nf_out, "(global %s ", name);
+  nf_put_type(var->type);
+  fprintf(nf_out, " %lu %lu", ir_size_of(var->type), ir_align_of(var->type));
+  if (var->storage_class == sc_static) fputs(" (static)", nf_out);
+  ir_global_init(var);
+  fputs(")\n", nf_out);
+  ir_buf_end(&g);
+  ir_buf_write(&g, ir_out_globals.f);
+  ir_buf_close(&g);
+}
+
 /* ================================================================ statements */
 
 static void ir_stmt(a_statement_ptr s, int d);
@@ -1522,7 +1697,10 @@ static void ir_stmt(a_statement_ptr s, int d)
     case stmk_return:
       ir_note(1, stmk_return, 1);
       if (s->expr == NULL) {
-        ir_line(d, "(return)");
+        /* Falling off the end of a non-void function is undefined; main returns 0 (see ir_function). */
+        if (ir_is_void(ir_ret_type) || ir_is_aggregate(ir_ret_type)) ir_line(d, "(return)");
+        else if (ir_in_main) ir_line(d, ir_fmt("(return %s)", ir_zero(ir_ret_type)));
+        else ir_line(d, "(unreachable)");
       } else if (ir_is_void(s->expr->type)) {
         (void)ir_rval(s->expr);
         ir_line(d, "(return)");
@@ -1620,6 +1798,7 @@ static void ir_function(a_routine_ptr rout)
   ir_nreg = 0;
   ir_sret = NULL;
   ir_ret_type = ret;
+  ir_in_main = rout->source_corresp.name != NULL && strcmp(rout->source_corresp.name, "main") == 0;
   ir_slots.n = 0;
   ir_labels.n = 0;
   ir_buf_open(&ir_slot_buf);
