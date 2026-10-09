@@ -151,7 +151,7 @@ run_one() {
 # unit that has one. This is where COMDAT/weak definitions (inline and template code in a shared header) must merge.
 # The gcc backend (all units in one nfcxx call) must agree.
 run_multi() {
-  local d=$1 n name f b obj objs=() want got gcc_rc srcs=() exe
+  local d=$1 n name f b obj objs=() want got gcc_rc srcs=() exe rpath=
   total=$((total + 1))
   n=$(basename "$d"); name=${d#tests/}; exe=$tmp/multi_$n.exe
   for f in "$d"/*.cpp; do
@@ -166,25 +166,37 @@ run_multi() {
     "$mrb" "$emit" --append-weak "$tmp/$b.ssa" "$tmp/$b.s"
     cc -c -o "$obj" "$tmp/$b.s" 2> "$tmp/$b.as" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$b.as")"); return; }
-    objs+=("$obj")
+    # `// SHARED: yes` in a unit: that unit goes into a shared library the program links against (its object has to
+    # be valid in a shared object: thread-local definitions, for one).
+    if grep -q '^// SHARED: yes' "$f"; then
+      cc -shared -o "$tmp/libmulti_$n.so" "$obj" 2> "$tmp/$b.so.ld" || {
+        failed=$((failed + 1)); lines+=("FAIL     $name: shared library: $(head -2 "$tmp/$b.so.ld" | tr '\n' ' ')"); return; }
+      objs+=("$tmp/libmulti_$n.so"); rpath="-Wl,-rpath,$tmp"
+    else
+      objs+=("$obj")
+    fi
   done
-  if ! cc -o "$exe" "${objs[@]}" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" $rpath -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))
-  sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$exe"; got=$?
+  sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$exe" "$tmp/multi_$n.stdout"; got=$?
   ran=$((ran + 1))
   want=$(for f in "$d"/*.cpp; do expect_of "$f"; done | head -1)
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
   gcc_rc=compile-error
   if NFCXX_BACKEND=gcc ./nfcxx "${srcs[@]}" -o "$tmp/multi_$n.gcc" > /dev/null 2> "$tmp/multi_$n.gccerr"; then
-    sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$tmp/multi_$n.gcc"; gcc_rc=$?
+    sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/multi_$n.gcc" "$tmp/multi_$n.gcc.stdout"; gcc_rc=$?
   fi
   if [ $((got & 255)) -ne $((want & 255)) ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc $gcc_rc)"); return
   fi
   if [ "$gcc_rc" != "$((want & 255))" ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc"); return
+  fi
+  # `// STDOUT: same` in any unit of the program: the standard output must equal the gcc backend's, as for a single unit.
+  if grep -q '^// STDOUT: same' "$d"/*.cpp && ! cmp -s "$tmp/multi_$n.stdout" "$tmp/multi_$n.gcc.stdout"; then
+    failed=$((failed + 1)); lines+=("MISMATCH $name: stdout differs from the gcc backend: $(diff "$tmp/multi_$n.stdout" "$tmp/multi_$n.gcc.stdout" | head -3 | tr '\n' '|')"); return
   fi
   match=$((match + 1))
   lines+=("ok       $name: exit $got = EXPECT $want (gcc $gcc_rc), ${#objs[@]} translation units")
@@ -198,12 +210,14 @@ if [ $prc = 1 ] && grep -q "rebuild the harness" "$tmp/probe.err"; then
   echo "pathb-qbe: the harness at $cpfe is older than stage 3; rebuild it with scripts/setup-pathb.sh" >&2; exit 2
 fi
 
+# PATHB_QBE_ONLY=<grep -E pattern>: run only the programs whose path matches (a quick check of one probe).
+selected() { [ -z "${PATHB_QBE_ONLY:-}" ] || printf '%s\n' "$1" | grep -qE "$PATHB_QBE_ONLY"; }
 for f in tests/pathb-qbe/cases/*.cpp tests/cases/*.cpp; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms)
-  [ -e "$f" ] && run_one "$f" exit
+  [ -e "$f" ] && selected "$f" && run_one "$f" exit
 done
-for f in tests/pathb-qbe/traps/*.cpp; do [ -e "$f" ] && run_one "$f" trap; done
-for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && run_multi "${d%/}"; done
+for f in tests/pathb-qbe/traps/*.cpp; do [ -e "$f" ] && selected "$f" && run_one "$f" trap; done
+for d in tests/pathb-qbe/multi/*/; do [ -d "$d" ] && selected "$d" && run_multi "${d%/}"; done
 
 for l in "${lines[@]}"; do echo "$l"; done
 echo

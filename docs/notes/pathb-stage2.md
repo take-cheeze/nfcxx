@@ -269,6 +269,16 @@ but different between threads). Its initializer is the initial image every new t
 thread-local object is never an `(addr ...)` item of a static initializer (it is not a constant), and an emitter may
 refuse one.
 
+Dynamic initialization of thread-local objects. The IR carries no initializer record for it, as for static
+storage: the lowering writes ordinary functions, and the consumer needs nothing special except that every one of them is
+printed. `__tls_init` (static) runs the constructors and the `__cxa_thread_atexit(dtor, &obj, &__dso_handle)`
+registrations of the unit's thread-locals once per thread (a `static thread_local` guard). Each use of such a variable is
+a call of its wrapper `_ZTW<name>()`, a function that calls `_ZTH<name>()` and returns the object's address
+(`(weak)` unless `(static)`: every unit that uses the variable defines it). `_ZTH<name>` is a function
+`(function "_ZTH.." (ret void) (params) [(static)|(weak)] (eval (call void &"__tls_init")) (return))` in the unit that
+defines the variable, and an undefined function in a unit that only declares it (a weak reference: its wrapper tests
+the address first). See stage 3, "Dynamic initialization of thread-local objects".
+
 Volatile. A volatile lvalue is loaded with `(load.v TYPE ADDR)` and stored with `(store.v TYPE ADDR VAL)`; the TYPE is
 the unqualified scalar type. An access is volatile when the object it reads or writes is volatile: a variable whose
 declared type is volatile, a member of a volatile object, a volatile member, an element of a volatile array, or an
@@ -332,8 +342,9 @@ exceptions, volatile or `long double` (cproc does not support those). The IR map
   when only loads and stores use it. The emitter lowers each volatile access to a call of a small helper function
   defined in the module (one real `load`/`store` inside), which QBE neither merges nor removes nor reorders, and whose
   address argument makes a slot escape. See `docs/notes/pathb-stage3.md`, "volatile".
-- Thread-local objects (`(thread)`) become QBE `thread` data; references are `thread $x` (local-exec, a definition in
-  the same module) or `extern thread $x` (initial-exec through the GOT, a declaration). See stage 3, "thread-local".
+- Thread-local objects (`(thread)`) become QBE `thread` data; every reference is `extern thread $x` (initial-exec
+  through the GOT: valid for a definition in the same module, a declaration, and in a shared library). See stage 3,
+  "thread-local".
 - `copy` maps to a call to `memmove` or an inline sequence of loads and stores for small sizes.
 
 ## 8. Requirements for SPIR-V and WGSL
