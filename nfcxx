@@ -86,6 +86,8 @@ case $backend in
 esac
 
 # With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
-# compiler give those operations defined behavior.
-exec "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
+# compiler give those operations defined behavior. -fkeep-static-functions keeps EDG's static __tls_init
+# (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
+# -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
+exec "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions \
   "${files[@]}" -o "$out"
