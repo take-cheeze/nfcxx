@@ -1,5 +1,4 @@
 // EXPECT: 0
-// XFAIL-qbe: cproc rejects empty class definitions (EDG emits "struct X {}" for instantiated trait classes and empty types); see docs/notes/freestanding.md
 // <utility>: move, forward, swap, exchange, pair, make_pair, index_sequence.
 #include <utility>
 #include <type_traits>

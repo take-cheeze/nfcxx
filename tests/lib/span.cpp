@@ -1,5 +1,4 @@
 // EXPECT: 0
-// XFAIL-qbe: cproc rejects empty class definitions (EDG emits "struct X {}" for instantiated trait classes and empty types); see docs/notes/freestanding.md
 // <span>: construction from arrays and std::array, const conversion, first/last/subspan, bounds.
 #include <array>
 #include <span>

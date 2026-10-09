@@ -57,13 +57,26 @@ anyway, so default mode has no hosted library headers either.
 
 ## cproc (qbe) limitations seen
 
-- **Empty class definitions.** EDG emits every instantiated empty class as `struct X {};`, and cproc rejects that
-  with "no type in struct member declaration". This includes trait metafunctions (`remove_reference<int&>`),
-  `char_traits<char>`, `nullopt_t` and `integer_sequence<>`. The lib tests `array`, `optional`, `span`,
-  `string_view` and `utility` fail on qbe for this reason (`xfail` markers in their headers); they pass on gcc.
-  A `sed` rewrite of `struct X {}` to `struct X { char __pad; }` in `scripts/qbe-cc` was tried and did not
-  produce parseable C in several places, so it is not in the repo. Any real fix is a layout decision:
-  C++ gives an empty class size 1, and the gcc backend currently gives `struct X {}` size 0.
+- **Empty class definitions (fixed by a local cproc patch).** EDG emits every instantiated empty class as
+  `struct X {};`, and cproc rejected that ("no type in struct member declaration"). This covers trait metafunctions
+  (`remove_reference<int&>`), `char_traits<char>`, `nullopt_t` and `integer_sequence<>`. The patch is
+  `scripts/cproc-empty-struct.patch`; `scripts/setup-qbe.sh` applies it to the build copy of cproc (`3rd/cproc`
+  itself is unchanged). It makes three changes in cproc: an empty struct or union body is accepted (size 0,
+  alignment 1, the GNU C rule that gcc follows); a zero-size object, or an array of them, gets a zero-byte
+  allocation (cproc assumed only arrays are zero-size); and a constant-length array of zero-size elements is a
+  static array, not a VLA. Regenerate the patch if `3rd/cproc` moves. An older `build/cproc` without the patch fails on
+  the empty-class tests again.
+- **Layout of empty classes (decision).** On the qbe path an empty class has size 0 and alignment 1, the same as
+  the gcc backend's `struct X {}`, so both backends agree on storage. C++ gives a complete empty object size 1.
+  Size 1 was tried first, as a padding member rewrite (`struct X { char pad; }`) in `scripts/qbe-cc` (a token-aware
+  filter, not a sed). It compiled, but the `utility` test then segfaulted: EDG leaves the temporary for a
+  by-value empty argument such as `index_sequence<>{}` uninitialized (an empty class has nothing to store). QBE
+  reads an uninitialized aggregate argument as a fatal error by design (`mem.c`, slot coalescing, `CON_Z /* crash */`).
+  A zero-size argument uses no register, so QBE never reads it. Size 0 is therefore the layout that works.
+  Known gap, not changed here: EDG folds `sizeof` with C++ rules (`sizeof(E)` is 1 and `struct { E e; int x; }`
+  is 8), while the C struct has 4 bytes of storage because the empty member takes 0. Both backends behave the same
+  way, and no test asserts `sizeof` of an empty class. Matching C++ fully needs layout decisions in EDG's output
+  (padding for empty members, empty-base optimisation), which is out of scope.
 - **`alignas` on a local variable** is emitted as `__attribute__((__aligned__(16)))`, which cproc rejects
   ("GNU attribute 'aligned' is not supported here"). The lib uses unions for storage; the `new_launder` test does too.
 - **Builtins**: see `docs/notes/builtins.md` (`__builtin_mem*`, overflow family, `__builtin_trap`).
@@ -74,15 +87,19 @@ anyway, so default mode has no hosted library headers either.
 `tests/lib/*.cpp` (`// EXPECT:` format; static_assert plus runtime checks, span/array/optional/string_view behaviour,
 `initializer_list` loops). `tests/lib/run.sh` runs each on both backends unless `NFCXX_BACKEND` is set.
 
-Current result: gcc 11 of 11 pass. qbe 6 of 11 pass; 5 are `xfail` for the empty-class cproc gap above.
+Current result: gcc 11 of 11 pass, qbe 11 of 11 pass (the five empty-class tests no longer have `xfail` markers).
 The `panic` test expects exit status 134 (SIGABRT): the abort path is tested as well as the in-range path.
 
 ## Reproduce
 
+The qbe path needs the patched cproc: run `scripts/setup-qbe.sh` (it applies `scripts/cproc-empty-struct.patch`)
+before testing, and rerun it after pulling a change to the patch.
+
 ```
+scripts/setup-qbe.sh                               # build/qbe and build/cproc, with the cproc patch
 tests/lib/run.sh                                   # both backends
 NFCXX_BACKEND=gcc tests/lib/run.sh
 ./nfcxx --freestanding --backend=gcc tests/lib/span.cpp -o /tmp/span && /tmp/span; echo $?   # 0
 ./nfcxx --freestanding tests/lib/initializer_list.cpp -o /tmp/il                            # qbe: works
-./nfcxx --freestanding tests/lib/optional.cpp -o /tmp/opt                                   # qbe: cproc error (xfail)
+./nfcxx --freestanding tests/lib/optional.cpp -o /tmp/opt && /tmp/opt; echo $?               # qbe: 0
 ```
