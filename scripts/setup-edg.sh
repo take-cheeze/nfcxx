@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Fetch and build the EDG C++ front end (Apache 2.0, https://github.com/edgcpp/compiler)
+# into third_party/edg (git-ignored). Builds only the host tools nfcxx needs:
+# eccp (driver), cpfe (front end), edg_prelink (template instantiation), libC.a.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+dest=${EDG_DIR:-$root/third_party/edg}
+
+if [ ! -d "$dest/.git" ]; then
+  mkdir -p "$(dirname "$dest")"
+  git clone --depth 1 https://github.com/edgcpp/compiler "$dest"
+fi
+
+# The dev-env config passes -Wno-error=return-mismatch, a GCC 14+ option.
+# GCC < 14 rejects it, so drop it when building with an older GCC.
+cfg=$dest/bases/docker/dev-env/gcc/edg_eccp_config
+if ! echo 'int main(void){return 0;}' | gcc -Werror=return-mismatch -x c -fsyntax-only - 2>/dev/null; then
+  sed -i '/-Wno-error=return-mismatch/d' "$cfg"
+fi
+
+cd "$dest"
+cmake --preset linux-gcc-release >/dev/null
+cd build/gcc-release
+ninja bin/eccp bin/cpfe bin/edg_prelink lib/libC.a
+echo "EDG built: $dest/build/gcc-release/bin/eccp"

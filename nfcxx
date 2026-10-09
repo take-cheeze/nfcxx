@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# nfcxx: experimental C++ compiler driver.
+#   Path A: C++ --(EDG front end)--> C --(host C compiler)--> executable
+# Usage: nfcxx [--emit-c] [-o out] [-std=c++NN] file.cpp...
+set -euo pipefail
+root=$(cd "$(dirname "$0")" && pwd)
+edg=${EDG_DIR:-$root/third_party/edg}/build/gcc-release/bin
+[ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
+
+std=--c++23; out=a.out; emit_c=0; files=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --emit-c) emit_c=1 ;;
+    -o) out=$2; shift ;;
+    -std=c++*) std=--c++${1#-std=c++} ;;
+    *) files+=("$1") ;;
+  esac
+  shift
+done
+[ ${#files[@]} -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+
+if [ $emit_c = 1 ]; then
+  # Run the front end alone and print the generated C.
+  base=${EDG_DIR:-$root/third_party/edg}/bases/docker/dev-env/gcc
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+  f=$(realpath "${files[0]}")
+  (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ \
+      --sys_include="$base/include" --gen_c_file_name="$tmp/out.c" "$f")
+  cat "$tmp/out.c"
+  exit 0
+fi
+
+# Generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
+# compiler give those operations defined behavior.
+exec "$edg/eccp" "$std" --g++ --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
+  "${files[@]}" -o "$out"

@@ -1,0 +1,6 @@
+third_party/
+*.o
+*.ti
+*.ii
+a.out
+/build/
