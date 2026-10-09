@@ -4,7 +4,7 @@
 # Build once per bc2cpp invocation rather than rescanning all instructions for
 # every monomorphic name.
 class CallSiteIndex
-  SEND_OPS = %w[SEND0 SEND SSEND0 SSEND].freeze
+  SEND_OPS = %w[SEND0 SEND SENDB SSEND0 SSEND SSENDB].freeze
   NAME_RE = /:([\w+\-*\/<>=!?\[\]&|^~%@]+)/
 
   def self.build(ireps)
