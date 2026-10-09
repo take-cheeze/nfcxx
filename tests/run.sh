@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile each tests/cases/*.cpp with nfcxx and compare the exit code with `// EXPECT: N`.
+# Compile each tests/cases/*.cpp with nfcxx (backend: $NFCXX_BACKEND, default qbe) and compare the exit code with `// EXPECT: N`.
 cd "$(dirname "$0")/.."
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for f in tests/cases/*.cpp; do

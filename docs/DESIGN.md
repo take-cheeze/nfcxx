@@ -11,7 +11,8 @@ C++ --EDG front end--+--> Path A: EDG C back end -> C -> host cc            (imp
                      +--> Path B: EDG IL -> own mid-level IR -> QBE / C+HVX / SPIR-V,WGSL (planned)
 ```
 
-Path A is what `./nfcxx` does today. Path B is the long-term design: structured control flow,
+Path A is what `./nfcxx` does today: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default),
+or through gcc with `--backend=gcc`. Path B is the long-term design: structured control flow,
 explicit address spaces, explicit safety checks inserted when lowering from EDG's IL.
 
 ## Findings so far (answers to the handoff's open questions)
@@ -31,6 +32,24 @@ explicit address spaces, explicit safety checks inserted when lowering from EDG'
 - Vtables are emitted as `const long *__vptr` plus dispatch through function-pointer casts; lambdas
   become plain structs (`_ZZ4mainEUliE_`). Names are Itanium-mangled.
 
+## QBE back end (Path A, host)
+
+`scripts/qbe-cc` is a gcc-style compiler wrapper handed to `eccp` (via `NFCXX_CC`, which `setup-edg.sh` wires
+into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link step still uses `cc`.
+
+- **Signed overflow wraps without any flags**: cproc/QBE don't exploit C UB, so `tests/cases/signed_overflow_wraps.cpp`
+  passes on the QBE backend without `-fwrapv`. Division by zero, `INT_MIN / -1` and float->int overflow are still
+  machine-dependent in QBE and need checks inserted by us (Path B).
+- **Sources**: `3rd/qbe` is [take-cheeze/qbe](https://github.com/take-cheeze/qbe), a daily mirror of upstream
+  `https://c9x.me/git/qbe.git` (its `master` and tags; sync workflow + `scripts/sync-c9x.sh` live on that repo's `main`).
+  Plain `git clone` of c9x.me fails (dumb-HTTP server resets connections), hence the curl-based sync script.
+  `3rd/cproc` is michaelforney/cproc (needs a QBE new enough to parse `call extern`, i.e. current upstream).
+  Move both forward together.
+- **EDG output quirk**: EDG emits a top-level `__asm__(".align 2");` after functions; cproc has no top-level asm, so the
+  wrapper strips it (alignment hint only).
+- **Not yet covered**: C++ exceptions (the EH runtime in `libC.a` is only linked, never exercised by tests), `volatile`
+  and `long double` (cproc lacks them), inline asm.
+
 ## Still open
 
 - Runtime needs of generated C for exceptions/RTTI, and porting to Hexagon.
@@ -40,7 +59,7 @@ explicit address spaces, explicit safety checks inserted when lowering from EDG'
 
 ## Next steps
 
-1. Try `cproc` + QBE as the host back end instead of gcc (Path A, no-GCC variant).
+1. Replace the gcc assembler/linker with QBE-only tooling where possible; exercise exceptions and `long double` under QBE.
 2. Hexagon: feed generated C to the SDK clang; test with `hexagon-sim`.
 3. Dump EDG IL, design the mid-level IR (structured CF, address spaces, explicit checks).
 4. Path B subset -> QBE with translation validation.

@@ -27,8 +27,14 @@ jobs:
       - name: Build EDG front end
         run: scripts/setup-edg.sh
 
-      - name: Test
-        run: tests/run.sh
+      - name: Build QBE and cproc
+        run: scripts/setup-qbe.sh
+
+      - name: Test (QBE backend)
+        run: NFCXX_BACKEND=qbe tests/run.sh
+
+      - name: Test (gcc backend)
+        run: NFCXX_BACKEND=gcc tests/run.sh
 
       - name: sccache stats
         if: always()

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# gcc-style C compiler wrapper for eccp (EDG_C_TO_OBJ_COMPILER) that compiles
+# with the QBE back end:  cc -E | cproc-qbe | qbe | cc -c.
+# Anything that isn't a "-c file.c" compile (i.e. the link step) goes to the
+# system cc. Unknown gcc flags (-w, -O2, -fwrapv, ...) are dropped: QBE/cproc
+# don't exploit C undefined behavior, so signed overflow wraps and strict
+# aliasing isn't assumed.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cproc=${CPROC_QBE:-$root/build/cproc/cproc-qbe}
+qbe=${QBE:-$root/build/qbe/qbe}
+
+compile=0 out="" src="" cppflags=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  a=${args[i]}
+  case $a in
+    -c) compile=1 ;;
+    -o) out=${args[++i]} ;;
+    -D?*|-I?*|-U?*) cppflags+=("$a") ;;
+    -D|-I|-U) cppflags+=("$a${args[++i]}") ;;
+    *.c) src=$a ;;
+  esac
+done
+
+if [ $compile = 0 ] || [ -z "$src" ]; then
+  exec cc "$@"
+fi
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# EDG follows functions with a top-level `__asm__(".align 2");` hint; cproc has no
+# top-level asm, and the alignment is only a hint, so drop it.
+cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" | sed 's/__asm__(".align 2");//g' > "$tmp/pp.c"
+"$cproc" < "$tmp/pp.c" > "$tmp/out.ssa"
+"$qbe" "$tmp/out.ssa" > "$tmp/out.s"
+cc -c -o "${out:-${src%.c}.o}" "$tmp/out.s"
