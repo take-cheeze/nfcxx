@@ -1,0 +1,33 @@
+name: Auto-merge label
+
+# Marks a pull request with the "auto-merge" label while GitHub auto-merge is enabled on it:
+# the label is added when auto-merge is enabled and removed when it is disabled. It only labels;
+# it never enables or disables auto-merge itself. Works for pull requests from this repository
+# (a fork's token is read-only and the label step would fail).
+on:
+  pull_request:
+    types: [auto_merge_enabled, auto_merge_disabled]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      LABEL: auto-merge
+    steps:
+      - name: Add the label
+        if: github.event.action == 'auto_merge_enabled'
+        run: |
+          gh api --method POST "repos/$REPO/labels" -f name="$LABEL" -f color=0e8a16 \
+            -f description="Auto-merge is enabled on this pull request" >/dev/null 2>&1 || true
+          gh api --method POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" >/dev/null
+
+      - name: Remove the label
+        if: github.event.action == 'auto_merge_disabled'
+        run: gh api --method DELETE "repos/$REPO/issues/$PR/labels/$LABEL" >/dev/null || true
