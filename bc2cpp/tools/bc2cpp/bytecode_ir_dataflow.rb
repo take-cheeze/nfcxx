@@ -11,8 +11,11 @@
 module BytecodeIR
   # A definition reaching a use: +index+ is the writing instruction (ENTRY for
   # the value the method was entered with) and +reg+ the register it wrote
-  # (the MOVE source when the chain was followed).
-  Definition = Struct.new(:index, :reg) do
+  # (the MOVE source when the chain was followed). +built+ is set when the
+  # writer is an ENTER that stores the slot itself (Program#enter_built_kind,
+  # origin walk only): :rest (an Array), :hash (a Hash) or :block (a Proc or
+  # nil). nil for every other definition.
+  Definition = Struct.new(:index, :reg, :built) do
     def entry?
       index == ENTRY
     end
@@ -158,7 +161,8 @@ module BytecodeIR
 
               work << [p, source]
             else
-              defs << Definition.new(p, r)
+              built = insn.op == 'ENTER' ? enter_built_kind(insn, r) : nil
+              defs << Definition.new(p, r, built)
             end
           end
         end
@@ -175,7 +179,8 @@ module BytecodeIR
     # does so to +reg+ (origin_effect :callee_clobber), or writes +reg+ itself
     # (:define), refuses, and so does a +w+ that is only a side write of +reg+.
     # ENTER's own slots are not refused here yet (see the join check). False
-    # when an edge set is incomplete or a nested block writes +reg+.
+    # when an edge set is incomplete or a nested block writes +reg+. Codegen's answer: ENTER's typed slots
+    # (origin_effect typed_enter) stay refused here, as they were before the origin walk typed them.
     def write_dominates?(w, use, reg, opaque_regs: nil)
       return false if opaque_regs&.include?(reg.to_s)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
@@ -183,11 +188,11 @@ module BytecodeIR
       preds = instruction_predecessors(include_handlers: true) or return false
       low = [w, 0].max
       # The write itself must leave +reg+ holding its value on every path (a side write does not).
-      return false if w >= 0 && origin_effect(@instructions[w].source, reg.to_s) != :define
+      return false if w >= 0 && origin_effect(@instructions[w].source, reg.to_s, typed_enter: false) != :define
       ((w + 1)..use).each do |k|
         insn = @instructions[k].source
         return false unless k == use || dataflow_steps_over?(insn)
-        return false if k != use && %i[callee_clobber define].include?(origin_effect(insn, reg.to_s))
+        return false if k != use && %i[callee_clobber define].include?(origin_effect(insn, reg.to_s, typed_enter: false))
 
         preds[k].each do |p|
           return false if p == ENTRY ? w != ENTRY : (p < low || p > use)
@@ -257,18 +262,50 @@ module BytecodeIR
     # a protected range, and a protected predecessor is refused before this runs. RESCUE a b (vm.c OP_RESCUE)
     # reads R[a] and writes only R[b] (the match result). EXCEPT a (vm.c OP_EXCEPT) stores the exception or
     # nil into R[a] on every entry; the walk reaches it only for R[a] (see reaching_definitions).
-    # ORIGIN_FRAME_OPS clobber or write above R(a) on a path the leading-register model misses. ENTER's rest,
-    # post, keyword and block slots and its locals take values ENTER builds (see enter_passes?).
-    def origin_effect(insn, reg)
+    # ORIGIN_FRAME_OPS clobber or write above R(a) on a path the leading-register model misses. ENTER is answered
+    # by its register layout: a rest, keyword-hash or block slot is a :define (enter_built_kind, the value ENTER
+    # stores); self, a required or optional argument passes to the entry; every other slot (a post argument,
+    # a local, the packed R(1)) refuses. With typed_enter: false (write_dominates?, shared with codegen) the
+    # typed slots refuse as they did before the origin walk typed them.
+    def origin_effect(insn, reg, typed_enter: true)
       case insn.op
       when 'JMPUW' then :pass
       when 'RESCUE'
         second = insn.typed[1]
         second&.kind == :reg && second.value.to_s == reg ? :define : :pass
       when 'EXCEPT' then insn.reg == reg ? :define : :refuse
-      when 'ENTER' then enter_passes?(insn, reg) ? :pass : :refuse
+      when 'ENTER'
+        if typed_enter && enter_built_kind(insn, reg) then :define
+        else enter_passes?(insn, reg) ? :pass : :refuse
+        end
       else dataflow_effect(insn, reg)
       end
+    end
+
+    # The slot of ENTER's own register layout that vm.c OP_ENTER stores on every normal exit, as the kind of
+    # value it stores: :rest, :hash or :block. nil for every other register (self, a required or optional
+    # argument, a local, and a post argument, which is the entered value or nil when none was passed).
+    # With the vm.c register numbers (3rd/mruby/src/vm.c OP_ENTER): len = req + opt + rest + post, kd = 1 when the
+    # method takes keywords or **rest (key > 0 or kdict), and
+    #   rest  R[req+opt+1]     an Array built from the extra arguments (vm.c:2710, :2725)
+    #   hash  R[len+1]         the keyword Hash, passed or new (kd only; vm.c:2741)
+    #   block R[len+kd+1]      the block the caller passed, a Proc or nil (vm.c:2736). In the fast path
+    #                          (no rest, optional, post or keywords; vm.c:2603-2612) ENTER stores nothing here,
+    #                          and the caller has already put the same block in that slot.
+    # Field order is ENTER's operand (req:opt:rest:post:key:kdict:block:_), checked against mrbc output.
+    def enter_built_kind(insn, reg)
+      fields = insn.enter_fields
+      return nil unless fields.size == 8
+
+      req, opt, rest, post, key, kdict = fields
+      n = reg.to_i
+      kd = key.to_i.positive? || kdict.to_i.positive? ? 1 : 0
+      len = req.to_i + opt.to_i + rest.to_i + post.to_i
+      return nil unless n.positive?
+      return :rest if rest.to_i.positive? && n == req.to_i + opt.to_i + 1
+      return :hash if kd == 1 && n == len + 1
+
+      n == len + kd + 1 ? :block : nil
     end
 
     # Instruction indices reachable from the method entry over normal and handler edges (origin only), or nil
