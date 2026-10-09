@@ -1,0 +1,1483 @@
+(ir-module "vla.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main7sum_vlaEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "buf" (ptr (array ? int)) 8 8)
+  (slot "i" int 4 4)
+  (slot "s" int 4 4)
+  (slot "i.1" int 4 4)
+  (store int $"n" %0)
+  (let %1 int (load int $"n"))
+  (store int $"tmp" %1)
+  (let %2 int (load int $"tmp"))
+  (let %3 long (iconv long %2))
+  (store long $"tmp.1" %3)
+  (let %4 long (load long $"tmp.1"))
+  (let %5 unsigned_long (iconv unsigned_long %4))
+  (let %6 unsigned_long (wmul unsigned_long %5 (const unsigned_long 4)))
+  (vlaalloc $"buf" %6)
+  (block)
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %7 int (load int $"i"))
+        (let %8 int (load int $"n"))
+        (let %9 bool (lt.s int %7 %8))
+        (if %9 (then) (else (break)))
+        (block
+          (let %10 int (load int $"i"))
+          (let %11 int (load int $"i"))
+          (let %12 int (wmul int %10 %11))
+          (let %13 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %14 (ptr int) (bitcast (ptr int) %13))
+          (let %15 int (load int $"i"))
+          (let %16 (ptr int) (index %14 %15 4))
+          (store int %16 %12)))
+      (step
+        (let %17 int (load int $"i"))
+        (let %18 int (wadd int %17 (const int 1)))
+        (store int $"i" %18))))
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i.1" (const int 0))
+    (loop
+      (body
+        (let %19 int (load int $"i.1"))
+        (let %20 int (load int $"n"))
+        (let %21 bool (lt.s int %19 %20))
+        (if %21 (then) (else (break)))
+        (block
+          (let %22 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %23 (ptr int) (bitcast (ptr int) %22))
+          (let %24 int (load int $"i.1"))
+          (let %25 (ptr int) (index %23 %24 4))
+          (let %26 int (load int %25))
+          (let %27 int (load int $"s"))
+          (let %28 int (wadd int %27 %26))
+          (store int $"s" %28)))
+      (step
+        (let %29 int (load int $"i.1"))
+        (let %30 int (wadd int %29 (const int 1)))
+        (store int $"i.1" %30))))
+  (let %31 int (load int $"s"))
+  (return %31))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main5sizesEii"
+  (ret int)
+  (params (param %0 "n" int) (param %1 "m" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "m" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "a" (ptr (array ? int)) 8 8)
+  (slot "tmp.2" int 4 4)
+  (slot "tmp.3" long 8 8)
+  (slot "c" (ptr (array ? char)) 8 8)
+  (slot "tmp.4" int 4 4)
+  (slot "tmp.5" int 4 4)
+  (slot "tmp.6" long 8 8)
+  (slot "d" (ptr (array ? (array ? double))) 8 8)
+  (store int $"n" %0)
+  (store int $"m" %1)
+  (let %2 int (load int $"n"))
+  (store int $"tmp" %2)
+  (let %3 int (load int $"tmp"))
+  (let %4 long (iconv long %3))
+  (store long $"tmp.1" %4)
+  (let %5 long (load long $"tmp.1"))
+  (let %6 unsigned_long (iconv unsigned_long %5))
+  (let %7 unsigned_long (wmul unsigned_long %6 (const unsigned_long 4)))
+  (vlaalloc $"a" %7)
+  (block)
+  (let %8 int (load int $"m"))
+  (store int $"tmp.2" %8)
+  (let %9 int (load int $"tmp.2"))
+  (let %10 long (iconv long %9))
+  (store long $"tmp.3" %10)
+  (let %11 long (load long $"tmp.3"))
+  (let %12 unsigned_long (iconv unsigned_long %11))
+  (let %13 unsigned_long (wmul unsigned_long %12 (const unsigned_long 1)))
+  (vlaalloc $"c" %13)
+  (block)
+  (let %14 int (load int $"n"))
+  (store int $"tmp.4" %14)
+  (let %15 int (load int $"m"))
+  (store int $"tmp.5" %15)
+  (let %16 int (load int $"tmp.4"))
+  (let %17 long (iconv long %16))
+  (let %18 int (load int $"tmp.5"))
+  (let %19 long (iconv long %18))
+  (let %20 long (wmul long %17 %19))
+  (store long $"tmp.6" %20)
+  (let %21 long (load long $"tmp.6"))
+  (let %22 unsigned_long (iconv unsigned_long %21))
+  (let %23 unsigned_long (wmul unsigned_long %22 (const unsigned_long 8)))
+  (vlaalloc $"d" %23)
+  (block)
+  (loop
+    (body
+      (block
+        (let %24 int (load int $"tmp"))
+        (let %25 unsigned_long (iconv unsigned_long %24))
+        (let %26 unsigned_long (wmul unsigned_long %25 (const unsigned_long 4)))
+        (let %27 int (load int $"n"))
+        (let %28 unsigned_long (iconv unsigned_long %27))
+        (let %29 unsigned_long (wmul unsigned_long %28 (const unsigned_long 4)))
+        (let %30 bool (eq unsigned_long %26 %29))
+        (let %31 bool (eq bool %30 (const bool 0)))
+        (if %31
+          (then
+            (block
+              (let %32 int (load int @"bad"))
+              (let %33 int (wadd int %32 (const int 1)))
+              (store int @"bad" %33))))))
+    (step
+      (let %34 bool (ne int (const int 0) (const int 0)))
+      (if %34 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %35 int (load int $"tmp.2"))
+        (let %36 unsigned_long (iconv unsigned_long %35))
+        (let %37 unsigned_long (wmul unsigned_long %36 (const unsigned_long 1)))
+        (let %38 int (load int $"m"))
+        (let %39 unsigned_long (iconv unsigned_long %38))
+        (let %40 bool (eq unsigned_long %37 %39))
+        (let %41 bool (eq bool %40 (const bool 0)))
+        (if %41
+          (then
+            (block
+              (let %42 int (load int @"bad"))
+              (let %43 int (wadd int %42 (const int 1)))
+              (store int @"bad" %43))))))
+    (step
+      (let %44 bool (ne int (const int 0) (const int 0)))
+      (if %44 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %45 int (load int $"tmp.5"))
+        (let %46 unsigned_long (iconv unsigned_long %45))
+        (let %47 unsigned_long (wmul unsigned_long %46 (const unsigned_long 8)))
+        (let %48 int (load int $"tmp.4"))
+        (let %49 unsigned_long (iconv unsigned_long %48))
+        (let %50 unsigned_long (wmul unsigned_long %49 %47))
+        (let %51 int (load int $"n"))
+        (let %52 unsigned_long (iconv unsigned_long %51))
+        (let %53 int (load int $"m"))
+        (let %54 unsigned_long (iconv unsigned_long %53))
+        (let %55 unsigned_long (wmul unsigned_long %52 %54))
+        (let %56 unsigned_long (wmul unsigned_long %55 (const unsigned_long 8)))
+        (let %57 bool (eq unsigned_long %50 %56))
+        (let %58 bool (eq bool %57 (const bool 0)))
+        (if %58
+          (then
+            (block
+              (let %59 int (load int @"bad"))
+              (let %60 int (wadd int %59 (const int 1)))
+              (store int @"bad" %60))))))
+    (step
+      (let %61 bool (ne int (const int 0) (const int 0)))
+      (if %61 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %62 int (load int $"tmp.5"))
+        (let %63 unsigned_long (iconv unsigned_long %62))
+        (let %64 unsigned_long (wmul unsigned_long %63 (const unsigned_long 8)))
+        (let %65 int (load int $"m"))
+        (let %66 unsigned_long (iconv unsigned_long %65))
+        (let %67 unsigned_long (wmul unsigned_long %66 (const unsigned_long 8)))
+        (let %68 bool (eq unsigned_long %64 %67))
+        (let %69 bool (eq bool %68 (const bool 0)))
+        (if %69
+          (then
+            (block
+              (let %70 int (load int @"bad"))
+              (let %71 int (wadd int %70 (const int 1)))
+              (store int @"bad" %71))))))
+    (step
+      (let %72 bool (ne int (const int 0) (const int 0)))
+      (if %72 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %73 bool (ne int (const int 0) (const int 0)))
+        (if %73
+          (then
+            (block
+              (let %74 int (load int @"bad"))
+              (let %75 int (wadd int %74 (const int 1)))
+              (store int @"bad" %75))))))
+    (step
+      (let %76 bool (ne int (const int 0) (const int 0)))
+      (if %76 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %77 int (load int $"tmp"))
+        (let %78 unsigned_long (iconv unsigned_long %77))
+        (let %79 unsigned_long (wmul unsigned_long %78 (const unsigned_long 4)))
+        (let %80 unsigned_long (cdiv unsigned_long %79 (const unsigned_long 4)))
+        (let %81 int (load int $"n"))
+        (let %82 unsigned_long (iconv unsigned_long %81))
+        (let %83 bool (eq unsigned_long %80 %82))
+        (let %84 bool (eq bool %83 (const bool 0)))
+        (if %84
+          (then
+            (block
+              (let %85 int (load int @"bad"))
+              (let %86 int (wadd int %85 (const int 1)))
+              (store int @"bad" %86))))))
+    (step
+      (let %87 bool (ne int (const int 0) (const int 0)))
+      (if %87 (then) (else (break)))))
+  (let %88 int (load int $"tmp.5"))
+  (let %89 unsigned_long (iconv unsigned_long %88))
+  (let %90 unsigned_long (wmul unsigned_long %89 (const unsigned_long 8)))
+  (let %91 int (load int $"tmp.4"))
+  (let %92 unsigned_long (iconv unsigned_long %91))
+  (let %93 unsigned_long (wmul unsigned_long %92 %90))
+  (let %94 int (iconv int %93))
+  (return %94))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main4gridEii"
+  (ret int)
+  (params (param %0 "n" int) (param %1 "m" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "m" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" int 4 4)
+  (slot "tmp.2" long 8 8)
+  (slot "g" (ptr (array ? (array ? int))) 8 8)
+  (slot "i" int 4 4)
+  (slot "j" int 4 4)
+  (slot "s" int 4 4)
+  (slot "i.1" int 4 4)
+  (slot "j.1" int 4 4)
+  (slot "tmp.3" int 4 4)
+  (slot "row" (ptr (array ? int)) 8 8)
+  (slot "tmp.4" int 4 4)
+  (slot "p" (ptr (array ? int)) 8 8)
+  (store int $"n" %0)
+  (store int $"m" %1)
+  (let %2 int (load int $"n"))
+  (store int $"tmp" %2)
+  (let %3 int (load int $"m"))
+  (store int $"tmp.1" %3)
+  (let %4 int (load int $"tmp"))
+  (let %5 long (iconv long %4))
+  (let %6 int (load int $"tmp.1"))
+  (let %7 long (iconv long %6))
+  (let %8 long (wmul long %5 %7))
+  (store long $"tmp.2" %8)
+  (let %9 long (load long $"tmp.2"))
+  (let %10 unsigned_long (iconv unsigned_long %9))
+  (let %11 unsigned_long (wmul unsigned_long %10 (const unsigned_long 4)))
+  (vlaalloc $"g" %11)
+  (block)
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %12 int (load int $"i"))
+        (let %13 int (load int $"n"))
+        (let %14 bool (lt.s int %12 %13))
+        (if %14 (then) (else (break)))
+        (block
+          (block
+            (store int $"j" (const int 0))
+            (loop
+              (body
+                (let %15 int (load int $"j"))
+                (let %16 int (load int $"m"))
+                (let %17 bool (lt.s int %15 %16))
+                (if %17 (then) (else (break)))
+                (block
+                  (let %18 int (load int $"i"))
+                  (let %19 int (wmul int %18 (const int 100)))
+                  (let %20 int (load int $"j"))
+                  (let %21 int (wadd int %19 %20))
+                  (let %22 (ptr (array ? (array ? int))) (load (ptr (array ? (array ? int))) $"g"))
+                  (let %23 (ptr (array ? int)) (bitcast (ptr (array ? int)) %22))
+                  (let %24 int (load int $"i"))
+                  (let %25 int (load int $"tmp.1"))
+                  (let %26 unsigned_long (iconv unsigned_long %25))
+                  (let %27 unsigned_long (wmul unsigned_long %26 (const unsigned_long 4)))
+                  (let %28 (ptr (array ? int)) (index %23 %24 %27))
+                  (let %29 (ptr int) (bitcast (ptr int) %28))
+                  (let %30 int (load int $"j"))
+                  (let %31 (ptr int) (index %29 %30 4))
+                  (store int %31 %21)))
+              (step
+                (let %32 int (load int $"j"))
+                (let %33 int (wadd int %32 (const int 1)))
+                (store int $"j" %33))))))
+      (step
+        (let %34 int (load int $"i"))
+        (let %35 int (wadd int %34 (const int 1)))
+        (store int $"i" %35))))
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i.1" (const int 0))
+    (loop
+      (body
+        (let %36 int (load int $"i.1"))
+        (let %37 int (load int $"n"))
+        (let %38 bool (lt.s int %36 %37))
+        (if %38 (then) (else (break)))
+        (block
+          (block
+            (store int $"j.1" (const int 0))
+            (loop
+              (body
+                (let %39 int (load int $"j.1"))
+                (let %40 int (load int $"m"))
+                (let %41 bool (lt.s int %39 %40))
+                (if %41 (then) (else (break)))
+                (block
+                  (let %42 (ptr (array ? (array ? int))) (load (ptr (array ? (array ? int))) $"g"))
+                  (let %43 (ptr (array ? int)) (bitcast (ptr (array ? int)) %42))
+                  (let %44 int (load int $"i.1"))
+                  (let %45 int (load int $"tmp.1"))
+                  (let %46 unsigned_long (iconv unsigned_long %45))
+                  (let %47 unsigned_long (wmul unsigned_long %46 (const unsigned_long 4)))
+                  (let %48 (ptr (array ? int)) (index %43 %44 %47))
+                  (let %49 (ptr int) (bitcast (ptr int) %48))
+                  (let %50 int (load int $"j.1"))
+                  (let %51 (ptr int) (index %49 %50 4))
+                  (let %52 int (load int %51))
+                  (let %53 int (load int $"i.1"))
+                  (let %54 int (wmul int %53 (const int 100)))
+                  (let %55 int (load int $"j.1"))
+                  (let %56 int (wadd int %54 %55))
+                  (let %57 int (wsub int %52 %56))
+                  (let %58 int (load int $"s"))
+                  (let %59 int (wadd int %58 %57))
+                  (store int $"s" %59)))
+              (step
+                (let %60 int (load int $"j.1"))
+                (let %61 int (wadd int %60 (const int 1)))
+                (store int $"j.1" %61))))))
+      (step
+        (let %62 int (load int $"i.1"))
+        (let %63 int (wadd int %62 (const int 1)))
+        (store int $"i.1" %63))))
+  (loop
+    (body
+      (block
+        (let %64 int (load int $"s"))
+        (let %65 bool (eq int %64 (const int 0)))
+        (let %66 bool (eq bool %65 (const bool 0)))
+        (if %66
+          (then
+            (block
+              (let %67 int (load int @"bad"))
+              (let %68 int (wadd int %67 (const int 1)))
+              (store int @"bad" %68))))))
+    (step
+      (let %69 bool (ne int (const int 0) (const int 0)))
+      (if %69 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %70 (ptr (array ? (array ? int))) (load (ptr (array ? (array ? int))) $"g"))
+        (let %71 (ptr (array ? int)) (bitcast (ptr (array ? int)) %70))
+        (let %72 int (load int $"n"))
+        (let %73 int (wsub int %72 (const int 1)))
+        (let %74 int (load int $"tmp.1"))
+        (let %75 unsigned_long (iconv unsigned_long %74))
+        (let %76 unsigned_long (wmul unsigned_long %75 (const unsigned_long 4)))
+        (let %77 (ptr (array ? int)) (index %71 %73 %76))
+        (let %78 (ptr int) (bitcast (ptr int) %77))
+        (let %79 int (load int $"m"))
+        (let %80 int (wsub int %79 (const int 1)))
+        (let %81 (ptr int) (index %78 %80 4))
+        (let %82 int (load int %81))
+        (let %83 int (load int $"n"))
+        (let %84 int (wsub int %83 (const int 1)))
+        (let %85 int (wmul int %84 (const int 100)))
+        (let %86 int (load int $"m"))
+        (let %87 int (wsub int %86 (const int 1)))
+        (let %88 int (wadd int %85 %87))
+        (let %89 bool (eq int %82 %88))
+        (let %90 bool (eq bool %89 (const bool 0)))
+        (if %90
+          (then
+            (block
+              (let %91 int (load int @"bad"))
+              (let %92 int (wadd int %91 (const int 1)))
+              (store int @"bad" %92))))))
+    (step
+      (let %93 bool (ne int (const int 0) (const int 0)))
+      (if %93 (then) (else (break)))))
+  (let %94 int (load int $"m"))
+  (store int $"tmp.3" %94)
+  (let %95 (ptr (array ? (array ? int))) (load (ptr (array ? (array ? int))) $"g"))
+  (let %96 (ptr (array ? int)) (bitcast (ptr (array ? int)) %95))
+  (store (ptr (array ? int)) $"row" %96)
+  (loop
+    (body
+      (block
+        (let %97 (ptr (array ? int)) (load (ptr (array ? int)) $"row"))
+        (nonnull %97)
+        (let %98 (ptr int) (bitcast (ptr int) %97))
+        (let %99 (ptr int) (index %98 (const int 1) 4))
+        (let %100 int (load int %99))
+        (let %101 bool (eq int %100 (const int 1)))
+        (let %102 bool (eq bool %101 (const bool 0)))
+        (if %102
+          (then
+            (block
+              (let %103 int (load int @"bad"))
+              (let %104 int (wadd int %103 (const int 1)))
+              (store int @"bad" %104))))))
+    (step
+      (let %105 bool (ne int (const int 0) (const int 0)))
+      (if %105 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %106 (ptr (array ? int)) (load (ptr (array ? int)) $"row"))
+        (let %107 int (load int $"tmp.3"))
+        (let %108 unsigned_long (iconv unsigned_long %107))
+        (let %109 unsigned_long (wmul unsigned_long %108 (const unsigned_long 4)))
+        (let %110 (ptr (array ? int)) (index %106 (const int 1) %109))
+        (nonnull %110)
+        (let %111 (ptr int) (bitcast (ptr int) %110))
+        (let %112 (ptr int) (index %111 (const int 0) 4))
+        (let %113 int (load int %112))
+        (let %114 bool (eq int %113 (const int 100)))
+        (let %115 bool (eq bool %114 (const bool 0)))
+        (if %115
+          (then
+            (block
+              (let %116 int (load int @"bad"))
+              (let %117 int (wadd int %116 (const int 1)))
+              (store int @"bad" %117))))))
+    (step
+      (let %118 bool (ne int (const int 0) (const int 0)))
+      (if %118 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %119 (ptr (array ? int)) (load (ptr (array ? int)) $"row"))
+        (let %120 int (load int $"n"))
+        (let %121 int (wsub int %120 (const int 1)))
+        (let %122 int (load int $"tmp.3"))
+        (let %123 unsigned_long (iconv unsigned_long %122))
+        (let %124 unsigned_long (wmul unsigned_long %123 (const unsigned_long 4)))
+        (let %125 (ptr (array ? int)) (index %119 %121 %124))
+        (let %126 (ptr int) (bitcast (ptr int) %125))
+        (let %127 int (load int $"m"))
+        (let %128 int (wsub int %127 (const int 1)))
+        (let %129 (ptr int) (index %126 %128 4))
+        (let %130 int (load int %129))
+        (let %131 int (load int $"n"))
+        (let %132 int (wsub int %131 (const int 1)))
+        (let %133 int (wmul int %132 (const int 100)))
+        (let %134 int (load int $"m"))
+        (let %135 int (wsub int %134 (const int 1)))
+        (let %136 int (wadd int %133 %135))
+        (let %137 bool (eq int %130 %136))
+        (let %138 bool (eq bool %137 (const bool 0)))
+        (if %138
+          (then
+            (block
+              (let %139 int (load int @"bad"))
+              (let %140 int (wadd int %139 (const int 1)))
+              (store int @"bad" %140))))))
+    (step
+      (let %141 bool (ne int (const int 0) (const int 0)))
+      (if %141 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %142 (ptr (array ? int)) (load (ptr (array ? int)) $"row"))
+        (let %143 int (load int $"n"))
+        (let %144 int (load int $"tmp.3"))
+        (let %145 unsigned_long (iconv unsigned_long %144))
+        (let %146 unsigned_long (wmul unsigned_long %145 (const unsigned_long 4)))
+        (let %147 (ptr (array ? int)) (index %142 %143 %146))
+        (let %148 (ptr (array ? int)) (load (ptr (array ? int)) $"row"))
+        (let %149 int (load int $"tmp.3"))
+        (let %150 unsigned_long (iconv unsigned_long %149))
+        (let %151 unsigned_long (wmul unsigned_long %150 (const unsigned_long 4)))
+        (let %152 long (pdiff %147 %148 %151))
+        (let %153 int (load int $"n"))
+        (let %154 long (iconv long %153))
+        (let %155 bool (eq long %152 %154))
+        (let %156 bool (eq bool %155 (const bool 0)))
+        (if %156
+          (then
+            (block
+              (let %157 int (load int @"bad"))
+              (let %158 int (wadd int %157 (const int 1)))
+              (store int @"bad" %158))))))
+    (step
+      (let %159 bool (ne int (const int 0) (const int 0)))
+      (if %159 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %160 int (load int $"tmp.3"))
+        (let %161 unsigned_long (iconv unsigned_long %160))
+        (let %162 unsigned_long (wmul unsigned_long %161 (const unsigned_long 4)))
+        (let %163 int (load int $"m"))
+        (let %164 unsigned_long (iconv unsigned_long %163))
+        (let %165 unsigned_long (wmul unsigned_long %164 (const unsigned_long 4)))
+        (let %166 bool (eq unsigned_long %162 %165))
+        (let %167 bool (eq bool %166 (const bool 0)))
+        (if %167
+          (then
+            (block
+              (let %168 int (load int @"bad"))
+              (let %169 int (wadd int %168 (const int 1)))
+              (store int @"bad" %169))))))
+    (step
+      (let %170 bool (ne int (const int 0) (const int 0)))
+      (if %170 (then) (else (break)))))
+  (let %171 int (load int $"m"))
+  (store int $"tmp.4" %171)
+  (let %172 (ptr (array ? (array ? int))) (load (ptr (array ? (array ? int))) $"g"))
+  (let %173 (ptr (array ? int)) (bitcast (ptr (array ? int)) %172))
+  (let %174 int (load int $"tmp.1"))
+  (let %175 unsigned_long (iconv unsigned_long %174))
+  (let %176 unsigned_long (wmul unsigned_long %175 (const unsigned_long 4)))
+  (let %177 (ptr (array ? int)) (index %173 (const int 1) %176))
+  (store (ptr (array ? int)) $"p" %177)
+  (let %178 (ptr (array ? int)) (load (ptr (array ? int)) $"p"))
+  (let %179 int (load int $"tmp.4"))
+  (let %180 unsigned_long (iconv unsigned_long %179))
+  (let %181 unsigned_long (wmul unsigned_long %180 (const unsigned_long 4)))
+  (let %182 (ptr (array ? int)) (index %178 (const long 1) %181))
+  (store (ptr (array ? int)) $"p" %182)
+  (loop
+    (body
+      (block
+        (let %183 (ptr (array ? int)) (load (ptr (array ? int)) $"p"))
+        (let %184 int (load int $"tmp.4"))
+        (let %185 unsigned_long (iconv unsigned_long %184))
+        (let %186 unsigned_long (wmul unsigned_long %185 (const unsigned_long 4)))
+        (let %187 (ptr (array ? int)) (index %183 (const int 0) %186))
+        (let %188 (ptr int) (bitcast (ptr int) %187))
+        (let %189 (ptr int) (index %188 (const int 2) 4))
+        (let %190 int (load int %189))
+        (let %191 bool (eq int %190 (const int 202)))
+        (let %192 bool (eq bool %191 (const bool 0)))
+        (if %192
+          (then
+            (block
+              (let %193 int (load int @"bad"))
+              (let %194 int (wadd int %193 (const int 1)))
+              (store int @"bad" %194))))))
+    (step
+      (let %195 bool (ne int (const int 0) (const int 0)))
+      (if %195 (then) (else (break)))))
+  (let %196 (ptr (array ? int)) (load (ptr (array ? int)) $"p"))
+  (let %197 int (load int $"tmp.4"))
+  (let %198 unsigned_long (iconv unsigned_long %197))
+  (let %199 unsigned_long (wmul unsigned_long %198 (const unsigned_long 4)))
+  (let %200 (ptr (array ? int)) (index %196 (const long -1) %199))
+  (store (ptr (array ? int)) $"p" %200)
+  (loop
+    (body
+      (block
+        (let %201 (ptr (array ? int)) (load (ptr (array ? int)) $"p"))
+        (let %202 int (load int $"tmp.4"))
+        (let %203 unsigned_long (iconv unsigned_long %202))
+        (let %204 unsigned_long (wmul unsigned_long %203 (const unsigned_long 4)))
+        (let %205 (ptr (array ? int)) (index %201 (const int 0) %204))
+        (let %206 (ptr int) (bitcast (ptr int) %205))
+        (let %207 (ptr int) (index %206 (const int 2) 4))
+        (let %208 int (load int %207))
+        (let %209 bool (eq int %208 (const int 102)))
+        (let %210 bool (eq bool %209 (const bool 0)))
+        (if %210
+          (then
+            (block
+              (let %211 int (load int @"bad"))
+              (let %212 int (wadd int %211 (const int 1)))
+              (store int @"bad" %212))))))
+    (step
+      (let %213 bool (ne int (const int 0) (const int 0)))
+      (if %213 (then) (else (break)))))
+  (let %214 (ptr (array ? (array ? int))) (load (ptr (array ? (array ? int))) $"g"))
+  (let %215 (ptr (array ? int)) (bitcast (ptr (array ? int)) %214))
+  (let %216 int (load int $"tmp.1"))
+  (let %217 unsigned_long (iconv unsigned_long %216))
+  (let %218 unsigned_long (wmul unsigned_long %217 (const unsigned_long 4)))
+  (let %219 (ptr (array ? int)) (index %215 (const int 1) %218))
+  (let %220 (ptr int) (bitcast (ptr int) %219))
+  (let %221 (ptr int) (index %220 (const int 1) 4))
+  (let %222 int (load int %221))
+  (return %222))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main10loop_allocEi"
+  (ret long)
+  (params (param %0 "rounds" int))
+  (static)
+  (slot "rounds" int 4 4)
+  (slot "total" long 8 8)
+  (slot "i" int 4 4)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "buf" (ptr (array ? int)) 8 8)
+  (slot "tmp.2" (ptr void) 8 8)
+  (slot "tmp.3" unsigned_long 8 8)
+  (store int $"rounds" %0)
+  (store long $"total" (const long 0))
+  (block
+    (store int $"i" (const int 1))
+    (loop
+      (body
+        (let %1 int (load int $"i"))
+        (let %2 int (load int $"rounds"))
+        (let %3 bool (le.s int %1 %2))
+        (if %3 (then) (else (break)))
+        (block
+          (let %4 int (load int $"i"))
+          (let %5 int (crem int %4 (const int 1000)))
+          (let %6 int (wadd int (const int 1000) %5))
+          (store int $"n" %6)
+          (let %7 int (load int $"n"))
+          (store int $"tmp" %7)
+          (let %8 int (load int $"tmp"))
+          (let %9 long (iconv long %8))
+          (store long $"tmp.1" %9)
+          (let %10 long (load long $"tmp.1"))
+          (let %11 unsigned_long (iconv unsigned_long %10))
+          (let %12 unsigned_long (wmul unsigned_long %11 (const unsigned_long 4)))
+          (vlaalloc $"buf" %12)
+          (block)
+          (let %13 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %14 (ptr int) (bitcast (ptr int) %13))
+          (let %15 (ptr void) (bitcast (ptr void) %14))
+          (store (ptr void) $"tmp.2" %15)
+          (let %16 int (load int $"tmp"))
+          (let %17 unsigned_long (iconv unsigned_long %16))
+          (let %18 unsigned_long (wmul unsigned_long %17 (const unsigned_long 4)))
+          (store unsigned_long $"tmp.3" %18)
+          (let %19 (ptr void) (load (ptr void) $"tmp.2"))
+          (let %20 unsigned_long (load unsigned_long $"tmp.3"))
+          (let %21 (ptr void) (call (ptr void) &"memset" %19 (const int 0) %20))
+          (let %22 int (load int $"i"))
+          (let %23 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %24 (ptr int) (bitcast (ptr int) %23))
+          (let %25 (ptr int) (index %24 (const int 0) 4))
+          (store int %25 %22)
+          (let %26 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %27 (ptr int) (bitcast (ptr int) %26))
+          (let %28 int (load int $"n"))
+          (let %29 int (wsub int %28 (const int 1)))
+          (let %30 (ptr int) (index %27 %29 4))
+          (store int %30 (const int 1))
+          (let %31 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %32 (ptr int) (bitcast (ptr int) %31))
+          (let %33 (ptr int) (index %32 (const int 0) 4))
+          (let %34 int (load int %33))
+          (let %35 (ptr (array ? int)) (load (ptr (array ? int)) $"buf"))
+          (let %36 (ptr int) (bitcast (ptr int) %35))
+          (let %37 int (load int $"n"))
+          (let %38 int (wsub int %37 (const int 1)))
+          (let %39 (ptr int) (index %36 %38 4))
+          (let %40 int (load int %39))
+          (let %41 int (wadd int %34 %40))
+          (let %42 long (iconv long %41))
+          (let %43 int (load int $"tmp"))
+          (let %44 unsigned_long (iconv unsigned_long %43))
+          (let %45 unsigned_long (wmul unsigned_long %44 (const unsigned_long 4)))
+          (let %46 long (iconv long %45))
+          (let %47 long (cdiv long %46 (const long 4000)))
+          (let %48 long (wadd long %42 %47))
+          (let %49 long (load long $"total"))
+          (let %50 long (wadd long %49 %48))
+          (store long $"total" %50)))
+      (step
+        (let %51 int (load int $"i"))
+        (let %52 int (wadd int %51 (const int 1)))
+        (store int $"i" %52))))
+  (let %53 long (load long $"total"))
+  (return %53))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main7growingEi"
+  (ret int)
+  (params (param %0 "rounds" int))
+  (static)
+  (slot "rounds" int 4 4)
+  (slot "ok" int 4 4)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "b" (ptr (array ? char)) 8 8)
+  (store int $"rounds" %0)
+  (store int $"ok" (const int 0))
+  (block
+    (store int $"n" (const int 1))
+    (loop
+      (body
+        (let %1 int (load int $"n"))
+        (let %2 int (load int $"rounds"))
+        (let %3 bool (le.s int %1 %2))
+        (if %3 (then) (else (break)))
+        (block
+          (let %4 int (load int $"n"))
+          (store int $"tmp" %4)
+          (let %5 int (load int $"tmp"))
+          (let %6 long (iconv long %5))
+          (store long $"tmp.1" %6)
+          (let %7 long (load long $"tmp.1"))
+          (let %8 unsigned_long (iconv unsigned_long %7))
+          (let %9 unsigned_long (wmul unsigned_long %8 (const unsigned_long 1)))
+          (vlaalloc $"b" %9)
+          (block)
+          (let %10 (ptr (array ? char)) (load (ptr (array ? char)) $"b"))
+          (let %11 (ptr char) (bitcast (ptr char) %10))
+          (let %12 (ptr char) (index %11 (const int 0) 1))
+          (store char %12 (const char 1))
+          (let %13 (ptr (array ? char)) (load (ptr (array ? char)) $"b"))
+          (let %14 (ptr char) (bitcast (ptr char) %13))
+          (let %15 int (load int $"n"))
+          (let %16 int (wsub int %15 (const int 1)))
+          (let %17 (ptr char) (index %14 %16 1))
+          (store char %17 (const char 2))
+          (let %18 (ptr (array ? char)) (load (ptr (array ? char)) $"b"))
+          (let %19 (ptr char) (bitcast (ptr char) %18))
+          (let %20 (ptr char) (index %19 (const int 0) 1))
+          (let %21 char (load char %20))
+          (let %22 int (iconv int %21))
+          (let %23 (ptr (array ? char)) (load (ptr (array ? char)) $"b"))
+          (let %24 (ptr char) (bitcast (ptr char) %23))
+          (let %25 int (load int $"n"))
+          (let %26 int (wsub int %25 (const int 1)))
+          (let %27 (ptr char) (index %24 %26 1))
+          (let %28 char (load char %27))
+          (let %29 int (iconv int %28))
+          (let %30 int (wadd int %22 %29))
+          (let %31 int (load int $"n"))
+          (let %32 bool (eq int %31 (const int 1)))
+          (let %33 int (const int 0))
+          (if %32
+            (then
+              (set %33 (const int 1)))
+            (else
+              (set %33 (const int 0))))
+          (let %34 int (wsub int %30 %33))
+          (let %35 int (load int $"ok"))
+          (let %36 int (wadd int %35 %34))
+          (store int $"ok" %36)))
+      (step
+        (let %37 int (load int $"n"))
+        (let %38 int (wadd int %37 (const int 1)))
+        (store int $"n" %38))))
+  (let %39 int (load int $"ok"))
+  (return %39))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main3recEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "local" (ptr (array ? int)) 8 8)
+  (slot "r" int 4 4)
+  (store int $"n" %0)
+  (let %1 int (load int $"n"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (store int $"tmp" %2)
+  (let %3 int (load int $"tmp"))
+  (let %4 long (iconv long %3))
+  (store long $"tmp.1" %4)
+  (let %5 long (load long $"tmp.1"))
+  (let %6 unsigned_long (iconv unsigned_long %5))
+  (let %7 unsigned_long (wmul unsigned_long %6 (const unsigned_long 4)))
+  (vlaalloc $"local" %7)
+  (block)
+  (let %8 int (load int $"n"))
+  (let %9 (ptr (array ? int)) (load (ptr (array ? int)) $"local"))
+  (let %10 (ptr int) (bitcast (ptr int) %9))
+  (let %11 (ptr int) (index %10 (const int 0) 4))
+  (store int %11 %8)
+  (let %12 int (load int $"n"))
+  (let %13 int (wmul int %12 (const int 2)))
+  (let %14 (ptr (array ? int)) (load (ptr (array ? int)) $"local"))
+  (let %15 (ptr int) (bitcast (ptr int) %14))
+  (let %16 int (load int $"n"))
+  (let %17 (ptr int) (index %15 %16 4))
+  (store int %17 %13)
+  (let %18 int (load int $"n"))
+  (let %19 bool (eq int %18 (const int 0)))
+  (if %19
+    (then
+      (block
+        (let %20 (ptr (array ? int)) (load (ptr (array ? int)) $"local"))
+        (let %21 (ptr int) (bitcast (ptr int) %20))
+        (let %22 (ptr int) (index %21 (const int 0) 4))
+        (let %23 int (load int %22))
+        (return %23))))
+  (let %24 int (load int $"n"))
+  (let %25 int (wsub int %24 (const int 1)))
+  (let %26 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main3recEi" %25))
+  (store int $"r" %26)
+  (loop
+    (body
+      (block
+        (let %27 (ptr (array ? int)) (load (ptr (array ? int)) $"local"))
+        (let %28 (ptr int) (bitcast (ptr int) %27))
+        (let %29 (ptr int) (index %28 (const int 0) 4))
+        (let %30 int (load int %29))
+        (let %31 int (load int $"n"))
+        (let %32 bool (eq int %30 %31))
+        (let %33 bool (const bool 0))
+        (if %32
+          (then
+            (let %34 (ptr (array ? int)) (load (ptr (array ? int)) $"local"))
+            (let %35 (ptr int) (bitcast (ptr int) %34))
+            (let %36 int (load int $"n"))
+            (let %37 (ptr int) (index %35 %36 4))
+            (let %38 int (load int %37))
+            (let %39 int (load int $"n"))
+            (let %40 int (wmul int %39 (const int 2)))
+            (let %41 bool (eq int %38 %40))
+            (set %33 %41)))
+        (let %42 bool (eq bool %33 (const bool 0)))
+        (if %42
+          (then
+            (block
+              (let %43 int (load int @"bad"))
+              (let %44 int (wadd int %43 (const int 1)))
+              (store int @"bad" %44))))))
+    (step
+      (let %45 bool (ne int (const int 0) (const int 0)))
+      (if %45 (then) (else (break)))))
+  (let %46 int (load int $"r"))
+  (let %47 (ptr (array ? int)) (load (ptr (array ? int)) $"local"))
+  (let %48 (ptr int) (bitcast (ptr int) %47))
+  (let %49 (ptr int) (index %48 (const int 0) 4))
+  (let %50 int (load int %49))
+  (let %51 int (wadd int %46 %50))
+  (return %51))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main9with_gotoEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "count" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "v" (ptr (array ? long)) 8 8)
+  (store int $"n" %0)
+  (store int $"count" (const int 0))
+  (label "again")
+  (block
+    (let %1 int (load int $"n"))
+    (let %2 int (load int $"count"))
+    (let %3 int (wadd int %1 %2))
+    (store int $"tmp" %3)
+    (let %4 int (load int $"tmp"))
+    (let %5 long (iconv long %4))
+    (store long $"tmp.1" %5)
+    (let %6 long (load long $"tmp.1"))
+    (let %7 unsigned_long (iconv unsigned_long %6))
+    (let %8 unsigned_long (wmul unsigned_long %7 (const unsigned_long 8)))
+    (vlaalloc $"v" %8)
+    (block)
+    (let %9 int (load int $"count"))
+    (let %10 long (iconv long %9))
+    (let %11 (ptr (array ? long)) (load (ptr (array ? long)) $"v"))
+    (let %12 (ptr long) (bitcast (ptr long) %11))
+    (let %13 (ptr long) (index %12 (const int 0) 8))
+    (store long %13 %10)
+    (let %14 (ptr (array ? long)) (load (ptr (array ? long)) $"v"))
+    (let %15 (ptr long) (bitcast (ptr long) %14))
+    (let %16 int (load int $"n"))
+    (let %17 int (load int $"count"))
+    (let %18 int (wadd int %16 %17))
+    (let %19 int (wsub int %18 (const int 1)))
+    (let %20 (ptr long) (index %15 %19 8))
+    (store long %20 (const long 10))
+    (loop
+      (body
+        (block
+          (let %21 (ptr (array ? long)) (load (ptr (array ? long)) $"v"))
+          (let %22 (ptr long) (bitcast (ptr long) %21))
+          (let %23 (ptr long) (index %22 (const int 0) 8))
+          (let %24 long (load long %23))
+          (let %25 int (load int $"count"))
+          (let %26 long (iconv long %25))
+          (let %27 bool (eq long %24 %26))
+          (let %28 bool (const bool 0))
+          (if %27
+            (then
+              (let %29 (ptr (array ? long)) (load (ptr (array ? long)) $"v"))
+              (let %30 (ptr long) (bitcast (ptr long) %29))
+              (let %31 int (load int $"n"))
+              (let %32 int (load int $"count"))
+              (let %33 int (wadd int %31 %32))
+              (let %34 int (wsub int %33 (const int 1)))
+              (let %35 (ptr long) (index %30 %34 8))
+              (let %36 long (load long %35))
+              (let %37 bool (eq long %36 (const long 10)))
+              (set %28 %37)))
+          (let %38 bool (eq bool %28 (const bool 0)))
+          (if %38
+            (then
+              (block
+                (let %39 int (load int @"bad"))
+                (let %40 int (wadd int %39 (const int 1)))
+                (store int @"bad" %40))))))
+      (step
+        (let %41 bool (ne int (const int 0) (const int 0)))
+        (if %41 (then) (else (break)))))
+    (let %42 int (load int $"count"))
+    (let %43 int (wadd int %42 (const int 1)))
+    (store int $"count" %43)
+    (let %44 int (load int $"count"))
+    (let %45 bool (lt.s int %44 (const int 5)))
+    (if %45
+      (then
+        (block
+          (goto "again")))))
+  (let %46 int (load int $"count"))
+  (return %46))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main7structsEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "ps" (ptr (array ? (struct "Pair"))) 8 8)
+  (slot "i" int 4 4)
+  (slot "s" long 8 8)
+  (slot "i.1" int 4 4)
+  (slot "last" (ptr (struct "Pair")) 8 8)
+  (store int $"n" %0)
+  (let %1 int (load int $"n"))
+  (store int $"tmp" %1)
+  (let %2 int (load int $"tmp"))
+  (let %3 long (iconv long %2))
+  (store long $"tmp.1" %3)
+  (let %4 long (load long $"tmp.1"))
+  (let %5 unsigned_long (iconv unsigned_long %4))
+  (let %6 unsigned_long (wmul unsigned_long %5 (const unsigned_long 16)))
+  (vlaalloc $"ps" %6)
+  (block)
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %7 int (load int $"i"))
+        (let %8 int (load int $"n"))
+        (let %9 bool (lt.s int %7 %8))
+        (if %9 (then) (else (break)))
+        (block
+          (let %10 int (load int $"i"))
+          (let %11 (ptr (array ? (struct "Pair"))) (load (ptr (array ? (struct "Pair"))) $"ps"))
+          (let %12 (ptr (struct "Pair")) (bitcast (ptr (struct "Pair")) %11))
+          (let %13 int (load int $"i"))
+          (let %14 (ptr (struct "Pair")) (index %12 %13 16))
+          (store int %14 %10)
+          (let %15 int (load int $"i"))
+          (let %16 long (iconv long %15))
+          (let %17 long (wneg long %16))
+          (let %18 (ptr (array ? (struct "Pair"))) (load (ptr (array ? (struct "Pair"))) $"ps"))
+          (let %19 (ptr (struct "Pair")) (bitcast (ptr (struct "Pair")) %18))
+          (let %20 int (load int $"i"))
+          (let %21 (ptr (struct "Pair")) (index %19 %20 16))
+          (let %22 (ptr long) (offset %21 8))
+          (store long %22 %17)))
+      (step
+        (let %23 int (load int $"i"))
+        (let %24 int (wadd int %23 (const int 1)))
+        (store int $"i" %24))))
+  (store long $"s" (const long 0))
+  (block
+    (store int $"i.1" (const int 0))
+    (loop
+      (body
+        (let %25 int (load int $"i.1"))
+        (let %26 int (load int $"n"))
+        (let %27 bool (lt.s int %25 %26))
+        (if %27 (then) (else (break)))
+        (block
+          (let %28 (ptr (array ? (struct "Pair"))) (load (ptr (array ? (struct "Pair"))) $"ps"))
+          (let %29 (ptr (struct "Pair")) (bitcast (ptr (struct "Pair")) %28))
+          (let %30 int (load int $"i.1"))
+          (let %31 (ptr (struct "Pair")) (index %29 %30 16))
+          (let %32 int (load int %31))
+          (let %33 long (iconv long %32))
+          (let %34 (ptr (array ? (struct "Pair"))) (load (ptr (array ? (struct "Pair"))) $"ps"))
+          (let %35 (ptr (struct "Pair")) (bitcast (ptr (struct "Pair")) %34))
+          (let %36 int (load int $"i.1"))
+          (let %37 (ptr (struct "Pair")) (index %35 %36 16))
+          (let %38 (ptr long) (offset %37 8))
+          (let %39 long (load long %38))
+          (let %40 long (wmul long %39 (const long 2)))
+          (let %41 long (wadd long %33 %40))
+          (let %42 long (load long $"s"))
+          (let %43 long (wadd long %42 %41))
+          (store long $"s" %43)))
+      (step
+        (let %44 int (load int $"i.1"))
+        (let %45 int (wadd int %44 (const int 1)))
+        (store int $"i.1" %45))))
+  (loop
+    (body
+      (block
+        (let %46 int (load int $"tmp"))
+        (let %47 unsigned_long (iconv unsigned_long %46))
+        (let %48 unsigned_long (wmul unsigned_long %47 (const unsigned_long 16)))
+        (let %49 int (load int $"n"))
+        (let %50 unsigned_long (iconv unsigned_long %49))
+        (let %51 unsigned_long (wmul unsigned_long %50 (const unsigned_long 16)))
+        (let %52 bool (eq unsigned_long %48 %51))
+        (let %53 bool (eq bool %52 (const bool 0)))
+        (if %53
+          (then
+            (block
+              (let %54 int (load int @"bad"))
+              (let %55 int (wadd int %54 (const int 1)))
+              (store int @"bad" %55))))))
+    (step
+      (let %56 bool (ne int (const int 0) (const int 0)))
+      (if %56 (then) (else (break)))))
+  (let %57 (ptr (array ? (struct "Pair"))) (load (ptr (array ? (struct "Pair"))) $"ps"))
+  (let %58 (ptr (struct "Pair")) (bitcast (ptr (struct "Pair")) %57))
+  (let %59 int (load int $"n"))
+  (let %60 int (wsub int %59 (const int 1)))
+  (let %61 (ptr (struct "Pair")) (index %58 %60 16))
+  (store (ptr (struct "Pair")) $"last" %61)
+  (loop
+    (body
+      (block
+        (let %62 (ptr (struct "Pair")) (load (ptr (struct "Pair")) $"last"))
+        (let %63 (ptr (array ? (struct "Pair"))) (load (ptr (array ? (struct "Pair"))) $"ps"))
+        (let %64 (ptr (struct "Pair")) (bitcast (ptr (struct "Pair")) %63))
+        (let %65 long (pdiff %62 %64 16))
+        (let %66 int (load int $"n"))
+        (let %67 int (wsub int %66 (const int 1)))
+        (let %68 long (iconv long %67))
+        (let %69 bool (eq long %65 %68))
+        (let %70 bool (eq bool %69 (const bool 0)))
+        (if %70
+          (then
+            (block
+              (let %71 int (load int @"bad"))
+              (let %72 int (wadd int %71 (const int 1)))
+              (store int @"bad" %72))))))
+    (step
+      (let %73 bool (ne int (const int 0) (const int 0)))
+      (if %73 (then) (else (break)))))
+  (let %74 long (load long $"s"))
+  (let %75 int (iconv int %74))
+  (return %75))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main9takes_ptrEPii"
+  (ret int)
+  (params (param %0 "p" (ptr int)) (param %1 "n" int))
+  (static)
+  (slot "p" (ptr int) 8 8)
+  (slot "n" int 4 4)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (store (ptr int) $"p" %0)
+  (store int $"n" %1)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %2 int (load int $"i"))
+        (let %3 int (load int $"n"))
+        (let %4 bool (lt.s int %2 %3))
+        (if %4 (then) (else (break)))
+        (block
+          (let %5 (ptr int) (load (ptr int) $"p"))
+          (let %6 int (load int $"i"))
+          (let %7 (ptr int) (index %5 %6 4))
+          (let %8 int (load int %7))
+          (let %9 int (load int $"s"))
+          (let %10 int (wadd int %9 %8))
+          (store int $"s" %10)))
+      (step
+        (let %11 int (load int $"i"))
+        (let %12 int (wadd int %11 (const int 1)))
+        (store int $"i" %12))))
+  (let %13 int (load int $"s"))
+  (return %13))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main8pass_vlaEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "v" (ptr (array ? int)) 8 8)
+  (slot "i" int 4 4)
+  (store int $"n" %0)
+  (let %1 int (load int $"n"))
+  (store int $"tmp" %1)
+  (let %2 int (load int $"tmp"))
+  (let %3 long (iconv long %2))
+  (store long $"tmp.1" %3)
+  (let %4 long (load long $"tmp.1"))
+  (let %5 unsigned_long (iconv unsigned_long %4))
+  (let %6 unsigned_long (wmul unsigned_long %5 (const unsigned_long 4)))
+  (vlaalloc $"v" %6)
+  (block)
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %7 int (load int $"i"))
+        (let %8 int (load int $"n"))
+        (let %9 bool (lt.s int %7 %8))
+        (if %9 (then) (else (break)))
+        (block
+          (let %10 int (load int $"i"))
+          (let %11 int (wadd int %10 (const int 1)))
+          (let %12 (ptr (array ? int)) (load (ptr (array ? int)) $"v"))
+          (let %13 (ptr int) (bitcast (ptr int) %12))
+          (let %14 int (load int $"i"))
+          (let %15 (ptr int) (index %13 %14 4))
+          (store int %15 %11)))
+      (step
+        (let %16 int (load int $"i"))
+        (let %17 int (wadd int %16 (const int 1)))
+        (store int $"i" %17))))
+  (let %18 (ptr (array ? int)) (load (ptr (array ? int)) $"v"))
+  (let %19 (ptr int) (bitcast (ptr int) %18))
+  (let %20 int (load int $"n"))
+  (let %21 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main9takes_ptrEPii" %19 %20))
+  (return %21))
+
+(function "_ZN24_INTERNAL_7_vla_cpp_main9in_switchEii"
+  (ret int)
+  (params (param %0 "k" int) (param %1 "n" int))
+  (static)
+  (slot "k" int 4 4)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "a" (ptr (array ? int)) 8 8)
+  (slot "tmp.2" int 4 4)
+  (slot "tmp.3" long 8 8)
+  (slot "a.1" (ptr (array ? char)) 8 8)
+  (store int $"k" %0)
+  (store int $"n" %1)
+  (let %2 int (load int $"k"))
+  (switch %2
+    (body
+      (block
+        (case (const int 0))
+        (block
+          (let %3 int (load int $"n"))
+          (store int $"tmp" %3)
+          (let %4 int (load int $"tmp"))
+          (let %5 long (iconv long %4))
+          (store long $"tmp.1" %5)
+          (let %6 long (load long $"tmp.1"))
+          (let %7 unsigned_long (iconv unsigned_long %6))
+          (let %8 unsigned_long (wmul unsigned_long %7 (const unsigned_long 4)))
+          (vlaalloc $"a" %8)
+          (block)
+          (let %9 (ptr (array ? int)) (load (ptr (array ? int)) $"a"))
+          (let %10 (ptr int) (bitcast (ptr int) %9))
+          (let %11 (ptr int) (index %10 (const int 0) 4))
+          (store int %11 (const int 11))
+          (let %12 (ptr (array ? int)) (load (ptr (array ? int)) $"a"))
+          (let %13 (ptr int) (bitcast (ptr int) %12))
+          (let %14 (ptr int) (index %13 (const int 0) 4))
+          (let %15 int (load int %14))
+          (return %15))
+        (case (const int 1))
+        (block
+          (let %16 int (load int $"n"))
+          (let %17 int (wadd int %16 (const int 3)))
+          (store int $"tmp.2" %17)
+          (let %18 int (load int $"tmp.2"))
+          (let %19 long (iconv long %18))
+          (store long $"tmp.3" %19)
+          (let %20 long (load long $"tmp.3"))
+          (let %21 unsigned_long (iconv unsigned_long %20))
+          (let %22 unsigned_long (wmul unsigned_long %21 (const unsigned_long 1)))
+          (vlaalloc $"a.1" %22)
+          (block)
+          (let %23 (ptr (array ? char)) (load (ptr (array ? char)) $"a.1"))
+          (let %24 (ptr char) (bitcast (ptr char) %23))
+          (let %25 int (load int $"n"))
+          (let %26 int (wadd int %25 (const int 2)))
+          (let %27 (ptr char) (index %24 %26 1))
+          (store char %27 (const char 22))
+          (let %28 (ptr (array ? char)) (load (ptr (array ? char)) $"a.1"))
+          (let %29 (ptr char) (bitcast (ptr char) %28))
+          (let %30 int (load int $"n"))
+          (let %31 int (wadd int %30 (const int 2)))
+          (let %32 (ptr char) (index %29 %31 1))
+          (let %33 char (load char %32))
+          (let %34 int (iconv int %33))
+          (return %34))
+        (default)
+        (return (const int -1)))))
+  (unreachable))
+
+(function "main"
+  (ret int)
+  (params)
+  (loop
+    (body
+      (block
+        (let %0 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main7sum_vlaEi" (const int 1)))
+        (let %1 bool (eq int %0 (const int 0)))
+        (let %2 bool (eq bool %1 (const bool 0)))
+        (if %2
+          (then
+            (block
+              (let %3 int (load int @"bad"))
+              (let %4 int (wadd int %3 (const int 1)))
+              (store int @"bad" %4))))))
+    (step
+      (let %5 bool (ne int (const int 0) (const int 0)))
+      (if %5 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %6 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main7sum_vlaEi" (const int 10)))
+        (let %7 bool (eq int %6 (const int 285)))
+        (let %8 bool (eq bool %7 (const bool 0)))
+        (if %8
+          (then
+            (block
+              (let %9 int (load int @"bad"))
+              (let %10 int (wadd int %9 (const int 1)))
+              (store int @"bad" %10))))))
+    (step
+      (let %11 bool (ne int (const int 0) (const int 0)))
+      (if %11 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %12 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main7sum_vlaEi" (const int 100)))
+        (let %13 bool (eq int %12 (const int 328350)))
+        (let %14 bool (eq bool %13 (const bool 0)))
+        (if %14
+          (then
+            (block
+              (let %15 int (load int @"bad"))
+              (let %16 int (wadd int %15 (const int 1)))
+              (store int @"bad" %16))))))
+    (step
+      (let %17 bool (ne int (const int 0) (const int 0)))
+      (if %17 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %18 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main5sizesEii" (const int 3) (const int 5)))
+        (let %19 bool (eq int %18 (const int 120)))
+        (let %20 bool (eq bool %19 (const bool 0)))
+        (if %20
+          (then
+            (block
+              (let %21 int (load int @"bad"))
+              (let %22 int (wadd int %21 (const int 1)))
+              (store int @"bad" %22))))))
+    (step
+      (let %23 bool (ne int (const int 0) (const int 0)))
+      (if %23 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %24 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main5sizesEii" (const int 1) (const int 1)))
+        (let %25 bool (eq int %24 (const int 8)))
+        (let %26 bool (eq bool %25 (const bool 0)))
+        (if %26
+          (then
+            (block
+              (let %27 int (load int @"bad"))
+              (let %28 int (wadd int %27 (const int 1)))
+              (store int @"bad" %28))))))
+    (step
+      (let %29 bool (ne int (const int 0) (const int 0)))
+      (if %29 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %30 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main4gridEii" (const int 4) (const int 6)))
+        (let %31 bool (eq int %30 (const int 101)))
+        (let %32 bool (eq bool %31 (const bool 0)))
+        (if %32
+          (then
+            (block
+              (let %33 int (load int @"bad"))
+              (let %34 int (wadd int %33 (const int 1)))
+              (store int @"bad" %34))))))
+    (step
+      (let %35 bool (ne int (const int 0) (const int 0)))
+      (if %35 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %36 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main4gridEii" (const int 3) (const int 3)))
+        (let %37 bool (eq int %36 (const int 101)))
+        (let %38 bool (eq bool %37 (const bool 0)))
+        (if %38
+          (then
+            (block
+              (let %39 int (load int @"bad"))
+              (let %40 int (wadd int %39 (const int 1)))
+              (store int @"bad" %40))))))
+    (step
+      (let %41 bool (ne int (const int 0) (const int 0)))
+      (if %41 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %42 long (call long &"_ZN24_INTERNAL_7_vla_cpp_main10loop_allocEi" (const int 200000)))
+        (let %43 bool (eq long %42 (const long 20000500000)))
+        (let %44 bool (eq bool %43 (const bool 0)))
+        (if %44
+          (then
+            (block
+              (let %45 int (load int @"bad"))
+              (let %46 int (wadd int %45 (const int 1)))
+              (store int @"bad" %46))))))
+    (step
+      (let %47 bool (ne int (const int 0) (const int 0)))
+      (if %47 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %48 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main7growingEi" (const int 300)))
+        (let %49 bool (eq int %48 (const int 900)))
+        (let %50 bool (eq bool %49 (const bool 0)))
+        (if %50
+          (then
+            (block
+              (let %51 int (load int @"bad"))
+              (let %52 int (wadd int %51 (const int 1)))
+              (store int @"bad" %52))))))
+    (step
+      (let %53 bool (ne int (const int 0) (const int 0)))
+      (if %53 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %54 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main3recEi" (const int 10)))
+        (let %55 bool (eq int %54 (const int 55)))
+        (let %56 bool (eq bool %55 (const bool 0)))
+        (if %56
+          (then
+            (block
+              (let %57 int (load int @"bad"))
+              (let %58 int (wadd int %57 (const int 1)))
+              (store int @"bad" %58))))))
+    (step
+      (let %59 bool (ne int (const int 0) (const int 0)))
+      (if %59 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %60 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main9with_gotoEi" (const int 3)))
+        (let %61 bool (eq int %60 (const int 5)))
+        (let %62 bool (eq bool %61 (const bool 0)))
+        (if %62
+          (then
+            (block
+              (let %63 int (load int @"bad"))
+              (let %64 int (wadd int %63 (const int 1)))
+              (store int @"bad" %64))))))
+    (step
+      (let %65 bool (ne int (const int 0) (const int 0)))
+      (if %65 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %66 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main7structsEi" (const int 6)))
+        (let %67 bool (eq int %66 (const int -15)))
+        (let %68 bool (eq bool %67 (const bool 0)))
+        (if %68
+          (then
+            (block
+              (let %69 int (load int @"bad"))
+              (let %70 int (wadd int %69 (const int 1)))
+              (store int @"bad" %70))))))
+    (step
+      (let %71 bool (ne int (const int 0) (const int 0)))
+      (if %71 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %72 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main8pass_vlaEi" (const int 7)))
+        (let %73 bool (eq int %72 (const int 28)))
+        (let %74 bool (eq bool %73 (const bool 0)))
+        (if %74
+          (then
+            (block
+              (let %75 int (load int @"bad"))
+              (let %76 int (wadd int %75 (const int 1)))
+              (store int @"bad" %76))))))
+    (step
+      (let %77 bool (ne int (const int 0) (const int 0)))
+      (if %77 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %78 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main9in_switchEii" (const int 0) (const int 4)))
+        (let %79 bool (eq int %78 (const int 11)))
+        (let %80 bool (eq bool %79 (const bool 0)))
+        (if %80
+          (then
+            (block
+              (let %81 int (load int @"bad"))
+              (let %82 int (wadd int %81 (const int 1)))
+              (store int @"bad" %82))))))
+    (step
+      (let %83 bool (ne int (const int 0) (const int 0)))
+      (if %83 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %84 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main9in_switchEii" (const int 1) (const int 4)))
+        (let %85 bool (eq int %84 (const int 22)))
+        (let %86 bool (eq bool %85 (const bool 0)))
+        (if %86
+          (then
+            (block
+              (let %87 int (load int @"bad"))
+              (let %88 int (wadd int %87 (const int 1)))
+              (store int @"bad" %88))))))
+    (step
+      (let %89 bool (ne int (const int 0) (const int 0)))
+      (if %89 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %90 int (call int &"_ZN24_INTERNAL_7_vla_cpp_main9in_switchEii" (const int 2) (const int 4)))
+        (let %91 bool (eq int %90 (const int -1)))
+        (let %92 bool (eq bool %91 (const bool 0)))
+        (if %92
+          (then
+            (block
+              (let %93 int (load int @"bad"))
+              (let %94 int (wadd int %93 (const int 1)))
+              (store int @"bad" %94))))))
+    (step
+      (let %95 bool (ne int (const int 0) (const int 0)))
+      (if %95 (then) (else (break)))))
+  (let %96 int (load int @"bad"))
+  (return %96))

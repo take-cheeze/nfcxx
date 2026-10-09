@@ -1,0 +1,734 @@
+(ir-module "stmtexpr.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "counter" int 4 4 (static) (init (zero 0 4)))
+(data "const" (const (array 4 (const char))) (string "yes\000"))
+(data "const.1" (const (array 3 (const char))) (string "no\000"))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi"
+  (ret int)
+  (params (param %0 "by" int))
+  (static)
+  (slot "by" int 4 4)
+  (store int $"by" %0)
+  (let %1 int (load int $"by"))
+  (let %2 int (load int @"counter"))
+  (let %3 int (wadd int %2 %1))
+  (store int @"counter" %3)
+  (let %4 int (load int @"counter"))
+  (return %4))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main5plainEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (slot "y" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (store int $"y" %2)
+  (let %3 int (load int $"y"))
+  (let %4 int (wmul int %3 (const int 2)))
+  (return %4))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main6nestedEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (slot "a" int 4 4)
+  (slot "t" int 4 4)
+  (slot "b" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (store int $"a" %1)
+  (let %2 int (load int $"a"))
+  (let %3 int (wmul int %2 (const int 3)))
+  (store int $"t" %3)
+  (let %4 int (load int $"t"))
+  (let %5 int (wadd int %4 (const int 1)))
+  (store int $"b" %5)
+  (let %6 int (load int $"a"))
+  (let %7 int (load int $"b"))
+  (let %8 int (wadd int %6 %7))
+  (return %8))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main7in_loopEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (slot "sq" int 4 4)
+  (store int $"n" %0)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %1 int (load int $"i"))
+        (let %2 int (load int $"n"))
+        (let %3 bool (lt.s int %1 %2))
+        (if %3 (then) (else (break)))
+        (block
+          (let %4 int (load int $"i"))
+          (let %5 int (load int $"i"))
+          (let %6 int (wmul int %4 %5))
+          (store int $"sq" %6)
+          (let %7 int (load int $"sq"))
+          (let %8 int (crem int %7 (const int 3)))
+          (let %9 bool (eq int %8 (const int 0)))
+          (let %10 int (const int 0))
+          (if %9
+            (then
+              (let %11 int (load int $"sq"))
+              (set %10 %11))
+            (else
+              (set %10 (const int -1))))
+          (let %12 int (load int $"s"))
+          (let %13 int (wadd int %12 %10))
+          (store int $"s" %13)))
+      (step
+        (let %14 int (load int $"i"))
+        (let %15 int (wadd int %14 (const int 1)))
+        (store int $"i" %15))))
+  (let %16 int (load int $"s"))
+  (return %16))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main9cond_loopEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "i" int 4 4)
+  (slot "steps" int 4 4)
+  (slot "next" int 4 4)
+  (store int $"n" %0)
+  (store int $"i" (const int 0))
+  (store int $"steps" (const int 0))
+  (loop
+    (body
+      (let %1 int (load int $"i"))
+      (let %2 int (wadd int %1 (const int 2)))
+      (store int $"next" %2)
+      (let %3 int (load int $"steps"))
+      (let %4 int (wadd int %3 (const int 1)))
+      (store int $"steps" %4)
+      (let %5 int (load int $"next"))
+      (let %6 int (load int $"n"))
+      (let %7 bool (le.s int %5 %6))
+      (if %7 (then) (else (break)))
+      (block
+        (let %8 int (load int $"i"))
+        (let %9 int (wadd int %8 (const int 2)))
+        (store int $"i" %9)))
+    (step))
+  (let %10 int (load int $"i"))
+  (let %11 int (wmul int %10 (const int 100)))
+  (let %12 int (load int $"steps"))
+  (let %13 int (wadd int %11 %12))
+  (return %13))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main3brkEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (slot "r" int 4 4)
+  (slot "tmp" int 4 4)
+  (store int $"n" %0)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %1 int (load int $"i"))
+        (let %2 int (load int $"n"))
+        (let %3 bool (lt.s int %1 %2))
+        (if %3 (then) (else (break)))
+        (block
+          (block
+            (let %4 int (load int $"i"))
+            (store int $"r" %4)
+            (let %5 int (load int $"i"))
+            (let %6 bool (eq int %5 (const int 3)))
+            (if %6
+              (then
+                (block
+                  (continue))))
+            (let %7 int (load int $"i"))
+            (let %8 bool (eq int %7 (const int 6)))
+            (if %8
+              (then
+                (block
+                  (goto "label"))))
+            (let %9 int (load int $"r"))
+            (let %10 int (load int $"s"))
+            (let %11 int (wadd int %10 %9))
+            (store int $"s" %11))))
+      (step
+        (let %12 int (load int $"i"))
+        (let %13 int (wadd int %12 (const int 1)))
+        (store int $"i" %13)))
+    (label "label"))
+  (block
+    (let %14 int (load int $"s"))
+    (store int $"tmp" %14)
+    (let %15 int (load int $"tmp"))
+    (return %15)))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main10ret_insideEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (slot "t" int 4 4)
+  (slot "r" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (store int $"t" %1)
+  (let %2 int (load int $"t"))
+  (let %3 bool (lt.s int (const int 10) %2))
+  (if %3
+    (then
+      (block
+        (return (const int 1000)))))
+  (let %4 int (load int $"t"))
+  (let %5 int (wmul int %4 (const int 2)))
+  (store int $"r" %5)
+  (let %6 int (load int $"r"))
+  (let %7 int (wadd int %6 (const int 1)))
+  (return %7))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main8goto_outEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (slot "r" int 4 4)
+  (slot "t" int 4 4)
+  (slot "tmp" int 4 4)
+  (store int $"x" %0)
+  (store int $"r" (const int 0))
+  (let %1 int (load int $"x"))
+  (store int $"t" %1)
+  (let %2 int (load int $"t"))
+  (let %3 bool (eq int %2 (const int 5)))
+  (if %3
+    (then
+      (block
+        (goto "done"))))
+  (let %4 int (load int $"t"))
+  (let %5 int (wadd int %4 (const int 100)))
+  (store int $"r" %5)
+  (block
+    (let %6 int (load int $"r"))
+    (store int $"tmp" %6)
+    (let %7 int (load int $"tmp"))
+    (return %7))
+  (label "done")
+  (return (const int -5)))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main4makeEii"
+  (ret void)
+  (params (sret %0 (struct "P")) (param %1 "a" int) (param %2 "b" int))
+  (static)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (slot "p" (struct "P") 8 4)
+  (slot "tmp" (struct "P") 8 4)
+  (store int $"a" %1)
+  (store int $"b" %2)
+  (let %3 int (load int $"a"))
+  (store int $"p" %3)
+  (let %4 int (load int $"b"))
+  (let %5 (ptr int) (offset $"p" 4))
+  (store int %5 %4)
+  (block
+    (copy 8 $"tmp" $"p")
+    (copy 8 %0 $"tmp")
+    (return)))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main3aggEi"
+  (ret int)
+  (params (param %0 "a" int))
+  (static)
+  (slot "a" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" int 4 4)
+  (slot "tmp.2" (struct "P") 8 4)
+  (slot "q" (struct "P") 8 4)
+  (slot "p" (struct "P") 8 4)
+  (store int $"a" %0)
+  (let %1 int (load int $"a"))
+  (store int $"tmp" %1)
+  (let %2 int (load int $"a"))
+  (let %3 int (wadd int %2 (const int 1)))
+  (store int $"tmp.1" %3)
+  (let %4 int (load int $"tmp"))
+  (let %5 int (load int $"tmp.1"))
+  (eval (call void &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4makeEii" $"tmp.2" %4 %5))
+  (copy 8 $"q" $"tmp.2")
+  (let %6 int (load int $"q"))
+  (let %7 int (wadd int %6 (const int 10)))
+  (store int $"q" %7)
+  (copy 8 $"p" $"q")
+  (let %8 int (load int $"p"))
+  (let %9 int (wmul int %8 (const int 100)))
+  (let %10 (ptr int) (offset $"p" 4))
+  (let %11 int (load int %10))
+  (let %12 int (wadd int %9 %11))
+  (return %12))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main1vEPi"
+  (ret void)
+  (params (param %0 "p" (ptr int)))
+  (static)
+  (slot "p" (ptr int) 8 8)
+  (store (ptr int) $"p" %0)
+  (let %1 (ptr int) (load (ptr int) $"p"))
+  (nonnull %1)
+  (let %2 int (load int %1))
+  (let %3 int (wadd int %2 (const int 5)))
+  (store int %1 %3)
+  (return))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main3vlaEi"
+  (ret int)
+  (params (param %0 "n" int))
+  (static)
+  (slot "n" int 4 4)
+  (slot "tmp" int 4 4)
+  (slot "tmp.1" long 8 8)
+  (slot "a" (ptr (array ? int)) 8 8)
+  (slot "i" int 4 4)
+  (slot "s" int 4 4)
+  (slot "i.1" int 4 4)
+  (store int $"n" %0)
+  (let %1 int (load int $"n"))
+  (store int $"tmp" %1)
+  (let %2 int (load int $"tmp"))
+  (let %3 long (iconv long %2))
+  (store long $"tmp.1" %3)
+  (let %4 long (load long $"tmp.1"))
+  (let %5 unsigned_long (iconv unsigned_long %4))
+  (let %6 unsigned_long (wmul unsigned_long %5 (const unsigned_long 4)))
+  (vlaalloc $"a" %6)
+  (block)
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %7 int (load int $"i"))
+        (let %8 int (load int $"n"))
+        (let %9 bool (lt.s int %7 %8))
+        (if %9 (then) (else (break)))
+        (block
+          (let %10 int (load int $"i"))
+          (let %11 (ptr (array ? int)) (load (ptr (array ? int)) $"a"))
+          (let %12 (ptr int) (bitcast (ptr int) %11))
+          (let %13 int (load int $"i"))
+          (let %14 (ptr int) (index %12 %13 4))
+          (store int %14 %10)))
+      (step
+        (let %15 int (load int $"i"))
+        (let %16 int (wadd int %15 (const int 1)))
+        (store int $"i" %16))))
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i.1" (const int 0))
+    (loop
+      (body
+        (let %17 int (load int $"i.1"))
+        (let %18 int (load int $"n"))
+        (let %19 bool (lt.s int %17 %18))
+        (if %19 (then) (else (break)))
+        (block
+          (let %20 (ptr (array ? int)) (load (ptr (array ? int)) $"a"))
+          (let %21 (ptr int) (bitcast (ptr int) %20))
+          (let %22 int (load int $"i.1"))
+          (let %23 (ptr int) (index %21 %22 4))
+          (let %24 int (load int %23))
+          (let %25 int (load int $"s"))
+          (let %26 int (wadd int %25 %24))
+          (store int $"s" %26)))
+      (step
+        (let %27 int (load int $"i.1"))
+        (let %28 int (wadd int %27 (const int 1)))
+        (store int $"i.1" %28))))
+  (let %29 int (load int $"s"))
+  (return %29))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main5orderEv"
+  (ret int)
+  (params)
+  (static)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (store int @"counter" (const int 0))
+  (let %0 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi" (const int 1)))
+  (let %1 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi" (const int 10)))
+  (let %2 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi" (const int 100)))
+  (store int $"a" %2)
+  (let %3 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi" (const int 1000)))
+  (store int $"b" %3)
+  (let %4 int (load int $"a"))
+  (let %5 bool (eq int %4 (const int 111)))
+  (let %6 int (iconv int %5))
+  (let %7 int (load int $"b"))
+  (let %8 bool (eq int %7 (const int 1111)))
+  (let %9 int (iconv int %8))
+  (let %10 int (wmul int %9 (const int 2)))
+  (let %11 int (wadd int %6 %10))
+  (let %12 int (load int @"counter"))
+  (let %13 bool (eq int %12 (const int 1111)))
+  (let %14 int (iconv int %13))
+  (let %15 int (wmul int %14 (const int 4)))
+  (let %16 int (wadd int %11 %15))
+  (return %16))
+
+(function "_ZN30_INTERNAL_12_stmtexpr_cpp_main3strEi"
+  (ret (ptr (const char)))
+  (params (param %0 "k" int))
+  (static)
+  (slot "k" int 4 4)
+  (slot "s" (ptr (const char)) 8 8)
+  (store int $"k" %0)
+  (let %1 int (load int $"k"))
+  (let %2 bool (ne int %1 (const int 0)))
+  (let %3 (ptr (const char)) (null (ptr (const char))))
+  (if %2
+    (then
+      (let %4 (ptr (const char)) (bitcast (ptr (const char)) @"const"))
+      (set %3 %4))
+    (else
+      (let %5 (ptr (const char)) (bitcast (ptr (const char)) @"const.1"))
+      (set %3 %5)))
+  (store (ptr (const char)) $"s" %3)
+  (let %6 (ptr (const char)) (load (ptr (const char)) $"s"))
+  (return %6))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "_a" int 4 4)
+  (slot "_b" int 4 4)
+  (slot "z" int 4 4)
+  (slot "w" int 4 4)
+  (slot "u" int 4 4)
+  (loop
+    (body
+      (block
+        (let %0 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main5plainEi" (const int 4)))
+        (let %1 bool (eq int %0 (const int 10)))
+        (let %2 bool (eq bool %1 (const bool 0)))
+        (if %2
+          (then
+            (block
+              (let %3 int (load int @"bad"))
+              (let %4 int (wadd int %3 (const int 1)))
+              (store int @"bad" %4))))))
+    (step
+      (let %5 bool (ne int (const int 0) (const int 0)))
+      (if %5 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %6 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main6nestedEi" (const int 2)))
+        (let %7 bool (eq int %6 (const int 9)))
+        (let %8 bool (eq bool %7 (const bool 0)))
+        (if %8
+          (then
+            (block
+              (let %9 int (load int @"bad"))
+              (let %10 int (wadd int %9 (const int 1)))
+              (store int @"bad" %10))))))
+    (step
+      (let %11 bool (ne int (const int 0) (const int 0)))
+      (if %11 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %12 bool (ne int (const int 0) (const int 0)))
+        (if %12
+          (then
+            (block
+              (let %13 int (load int @"bad"))
+              (let %14 int (wadd int %13 (const int 1)))
+              (store int @"bad" %14))))))
+    (step
+      (let %15 bool (ne int (const int 0) (const int 0)))
+      (if %15 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %16 bool (ne int (const int 0) (const int 0)))
+        (if %16
+          (then
+            (block
+              (let %17 int (load int @"bad"))
+              (let %18 int (wadd int %17 (const int 1)))
+              (store int @"bad" %18))))))
+    (step
+      (let %19 bool (ne int (const int 0) (const int 0)))
+      (if %19 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %20 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi" (const int 1)))
+        (store int $"_a" %20)
+        (let %21 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main4bumpEi" (const int 1)))
+        (store int $"_b" %21)
+        (let %22 int (load int $"_a"))
+        (let %23 int (load int $"_b"))
+        (let %24 bool (lt.s int %23 %22))
+        (let %25 int (const int 0))
+        (if %24
+          (then
+            (let %26 int (load int $"_a"))
+            (set %25 %26))
+          (else
+            (let %27 int (load int $"_b"))
+            (set %25 %27)))
+        (let %28 bool (eq int %25 (const int 2)))
+        (let %29 bool (eq bool %28 (const bool 0)))
+        (if %29
+          (then
+            (block
+              (let %30 int (load int @"bad"))
+              (let %31 int (wadd int %30 (const int 1)))
+              (store int @"bad" %31))))))
+    (step
+      (let %32 bool (ne int (const int 0) (const int 0)))
+      (if %32 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %33 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main7in_loopEi" (const int 7)))
+        (let %34 bool (eq int %33 (const int 41)))
+        (let %35 bool (eq bool %34 (const bool 0)))
+        (if %35
+          (then
+            (block
+              (let %36 int (load int @"bad"))
+              (let %37 int (wadd int %36 (const int 1)))
+              (store int @"bad" %37))))))
+    (step
+      (let %38 bool (ne int (const int 0) (const int 0)))
+      (if %38 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %39 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main9cond_loopEi" (const int 7)))
+        (let %40 bool (eq int %39 (const int 604)))
+        (let %41 bool (eq bool %40 (const bool 0)))
+        (if %41
+          (then
+            (block
+              (let %42 int (load int @"bad"))
+              (let %43 int (wadd int %42 (const int 1)))
+              (store int @"bad" %43))))))
+    (step
+      (let %44 bool (ne int (const int 0) (const int 0)))
+      (if %44 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %45 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main3brkEi" (const int 10)))
+        (let %46 bool (eq int %45 (const int 12)))
+        (let %47 bool (eq bool %46 (const bool 0)))
+        (if %47
+          (then
+            (block
+              (let %48 int (load int @"bad"))
+              (let %49 int (wadd int %48 (const int 1)))
+              (store int @"bad" %49))))))
+    (step
+      (let %50 bool (ne int (const int 0) (const int 0)))
+      (if %50 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %51 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main10ret_insideEi" (const int 4)))
+        (let %52 bool (eq int %51 (const int 9)))
+        (let %53 bool (eq bool %52 (const bool 0)))
+        (if %53
+          (then
+            (block
+              (let %54 int (load int @"bad"))
+              (let %55 int (wadd int %54 (const int 1)))
+              (store int @"bad" %55))))))
+    (step
+      (let %56 bool (ne int (const int 0) (const int 0)))
+      (if %56 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %57 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main10ret_insideEi" (const int 40)))
+        (let %58 bool (eq int %57 (const int 1000)))
+        (let %59 bool (eq bool %58 (const bool 0)))
+        (if %59
+          (then
+            (block
+              (let %60 int (load int @"bad"))
+              (let %61 int (wadd int %60 (const int 1)))
+              (store int @"bad" %61))))))
+    (step
+      (let %62 bool (ne int (const int 0) (const int 0)))
+      (if %62 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %63 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main8goto_outEi" (const int 5)))
+        (let %64 bool (eq int %63 (const int -5)))
+        (let %65 bool (eq bool %64 (const bool 0)))
+        (if %65
+          (then
+            (block
+              (let %66 int (load int @"bad"))
+              (let %67 int (wadd int %66 (const int 1)))
+              (store int @"bad" %67))))))
+    (step
+      (let %68 bool (ne int (const int 0) (const int 0)))
+      (if %68 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %69 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main8goto_outEi" (const int 6)))
+        (let %70 bool (eq int %69 (const int 106)))
+        (let %71 bool (eq bool %70 (const bool 0)))
+        (if %71
+          (then
+            (block
+              (let %72 int (load int @"bad"))
+              (let %73 int (wadd int %72 (const int 1)))
+              (store int @"bad" %73))))))
+    (step
+      (let %74 bool (ne int (const int 0) (const int 0)))
+      (if %74 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %75 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main3aggEi" (const int 3)))
+        (let %76 bool (eq int %75 (const int 1304)))
+        (let %77 bool (eq bool %76 (const bool 0)))
+        (if %77
+          (then
+            (block
+              (let %78 int (load int @"bad"))
+              (let %79 int (wadd int %78 (const int 1)))
+              (store int @"bad" %79))))))
+    (step
+      (let %80 bool (ne int (const int 0) (const int 0)))
+      (if %80 (then) (else (break)))))
+  (store int $"z" (const int 1))
+  (eval (call void &"_ZN30_INTERNAL_12_stmtexpr_cpp_main1vEPi" $"z"))
+  (loop
+    (body
+      (block
+        (let %81 int (load int $"z"))
+        (let %82 bool (eq int %81 (const int 6)))
+        (let %83 bool (eq bool %82 (const bool 0)))
+        (if %83
+          (then
+            (block
+              (let %84 int (load int @"bad"))
+              (let %85 int (wadd int %84 (const int 1)))
+              (store int @"bad" %85))))))
+    (step
+      (let %86 bool (ne int (const int 0) (const int 0)))
+      (if %86 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %87 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main3vlaEi" (const int 5)))
+        (let %88 bool (eq int %87 (const int 10)))
+        (let %89 bool (eq bool %88 (const bool 0)))
+        (if %89
+          (then
+            (block
+              (let %90 int (load int @"bad"))
+              (let %91 int (wadd int %90 (const int 1)))
+              (store int @"bad" %91))))))
+    (step
+      (let %92 bool (ne int (const int 0) (const int 0)))
+      (if %92 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %93 int (call int &"_ZN30_INTERNAL_12_stmtexpr_cpp_main5orderEv"))
+        (let %94 bool (eq int %93 (const int 7)))
+        (let %95 bool (eq bool %94 (const bool 0)))
+        (if %95
+          (then
+            (block
+              (let %96 int (load int @"bad"))
+              (let %97 int (wadd int %96 (const int 1)))
+              (store int @"bad" %97))))))
+    (step
+      (let %98 bool (ne int (const int 0) (const int 0)))
+      (if %98 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %99 (ptr (const char)) (call (ptr (const char)) &"_ZN30_INTERNAL_12_stmtexpr_cpp_main3strEi" (const int 1)))
+        (let %100 (ptr char) (index %99 (const int 0) 1))
+        (let %101 char (load char %100))
+        (let %102 int (iconv int %101))
+        (let %103 bool (eq int %102 (const int 121)))
+        (let %104 bool (const bool 0))
+        (if %103
+          (then
+            (let %105 (ptr (const char)) (call (ptr (const char)) &"_ZN30_INTERNAL_12_stmtexpr_cpp_main3strEi" (const int 0)))
+            (let %106 (ptr char) (index %105 (const int 0) 1))
+            (let %107 char (load char %106))
+            (let %108 int (iconv int %107))
+            (let %109 bool (eq int %108 (const int 110)))
+            (set %104 %109)))
+        (let %110 bool (eq bool %104 (const bool 0)))
+        (if %110
+          (then
+            (block
+              (let %111 int (load int @"bad"))
+              (let %112 int (wadd int %111 (const int 1)))
+              (store int @"bad" %112))))))
+    (step
+      (let %113 bool (ne int (const int 0) (const int 0)))
+      (if %113 (then) (else (break)))))
+  (store int $"w" (const int 5))
+  (loop
+    (body
+      (block
+        (let %114 int (load int $"w"))
+        (let %115 bool (eq int %114 (const int 5)))
+        (let %116 bool (eq bool %115 (const bool 0)))
+        (if %116
+          (then
+            (block
+              (let %117 int (load int @"bad"))
+              (let %118 int (wadd int %117 (const int 1)))
+              (store int @"bad" %118))))))
+    (step
+      (let %119 bool (ne int (const int 0) (const int 0)))
+      (if %119 (then) (else (break)))))
+  (store int $"u" (const int 10))
+  (loop
+    (body
+      (block
+        (let %120 int (load int $"u"))
+        (let %121 bool (eq int %120 (const int 10)))
+        (let %122 bool (eq bool %121 (const bool 0)))
+        (if %122
+          (then
+            (block
+              (let %123 int (load int @"bad"))
+              (let %124 int (wadd int %123 (const int 1)))
+              (store int @"bad" %124))))))
+    (step
+      (let %125 bool (ne int (const int 0) (const int 0)))
+      (if %125 (then) (else (break)))))
+  (let %126 int (load int @"bad"))
+  (return %126))

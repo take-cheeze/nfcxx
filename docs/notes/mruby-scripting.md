@@ -119,6 +119,11 @@ Python original is the oracle `tests/mruby/oracle/pathb-qbe-emit.py`. What the p
   round-half-even, with Python's grammar (`inf`, `nan`, `1e999` is inf).
 - Integer constants up to `2**64 - 1`, `1 << 64` and `-(1 << 63)`: **`mruby-bigint` was added to the gem set**
   (`scripts/mruby-tool-config.rb`; `rational` was not needed). `wrap_int` uses `%` instead of `&` on a bigint.
+  Two more mruby bigint defects, both found by the bit-field work and both avoided in the emitter (the py-vs-rb
+  comparison caught them): `~x` of a bigint is wrong (`~((1 << 64) - 1)` gave a value that wraps to 2, not 0), so masks
+  are built with `^` on positive numbers; and comparing a fixnum with a bigint goes through a double, so
+  `9223372036854775807 >= 1 << 63` is true. `wrap_int` tests the sign bit with `v >> (bits - 1) != 0` for that reason.
+  Shifts, `%`, `&`, `|` and `^` on non-negative bigints behaved.
 - Python tuples in messages (`('int', 4, True, False)`, and the one-element `((...),)` form that
   `"%s" % (x[0], (ty,))` prints): `tyrepr`/`ty1`; `%r` of a name: `py_str_repr`.
 - The IR is read as latin-1 with universal newlines and stderr is UTF-8: bytes in, `u8()` on the way to stderr. A

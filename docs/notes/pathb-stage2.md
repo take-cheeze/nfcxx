@@ -115,10 +115,11 @@ emit the checks or refuse the program. Nothing is silently dropped.
 
 Pointer and aggregate addressing has no C-level expression:
 
-- `(offset ADDR N)`: field access. `N` is `a_field.offset` from EDG (bytes). Bit-fields are not lowered yet.
-- `(index BASE IDX SIZE)`: `BASE + sext(IDX) * SIZE`, wrapping. `SIZE` is `f_size_of_type` of the element. `padd`,
+- `(offset ADDR N)`: field access. `N` is `a_field.offset` from EDG (bytes). Bit-fields are different, see 5a.
+- `(index BASE IDX SIZE)`: `BASE + sext(IDX) * SIZE`, wrapping. `SIZE` is `f_size_of_type` of the element, a number, or
+  a register (of type `unsigned_long`) when the element type is a variable-length array type (5b). `padd`,
   `psubtract` and subscripts use it. Subtraction negates the index with `wneg` first.
-- `(pdiff A B SIZE)`: `(A - B) / SIZE` in the pointer difference type.
+- `(pdiff A B SIZE)`: `(A - B) / SIZE` in the pointer difference type. `SIZE` as for `index`.
 - `(bitcast PT OP)`: change of pointee type with the same address. Array decay and `&` produce one.
 - `(bounds IDX N)`: emitted before a subscript when the base is `array_to_pointer` of an array of known length. Pointers
   carry no length, so a subscript through a pointer is unchecked (see 9).
@@ -126,6 +127,80 @@ Pointer and aggregate addressing has no C-level expression:
   are not checked.
 
 All sizes and offsets come from EDG's layout (`a_field.offset`, `f_size_of_type`), not recomputed.
+
+### 5a. Bit-fields
+
+A bit-field is not an addressable object, so the IR has two operations on the *storage unit* that holds it:
+
+- `(bfload T UNIT ADDR BOFF WIDTH)` (an RVALUE): reads the `UNIT`-byte integer at `ADDR` (little-endian, `UNIT` is 1, 2,
+  4 or 8) and extracts bits `BOFF .. BOFF+WIDTH-1`. The result has the integer type `T`: sign-extended when `T` is signed,
+  zero-extended otherwise (`bool`: the bits, 0 or 1 for a 1-bit field).
+- `(bfstore T UNIT ADDR BOFF WIDTH VALUE)` (a STMT): a read-modify-write of the same unit. The low `WIDTH` bits of `VALUE`
+  (which has type `T`) replace those bits; every other bit of the unit is written back unchanged. The store does not
+  report the truncated value; the lowering reads the field again with `bfload` when the value of the assignment is
+  used (`result_is_not_used` is false).
+
+The `.v` forms (`bfload.v`, `bfstore.v`) are the volatile accesses. `ADDR` is the address of the storage unit (not of
+the struct), computed with `offset` like any member. `T` is the declared type of the field with the field's own
+signedness (EDG `bit_field_is_signed`): an unsigned enumeration bit-field prints as `unsigned_int`, not the signed
+`int` that the enumeration's type text gives. A load or store narrower or wider than `T` is allowed (`T` may be 8 bytes
+with a 4-byte unit); the value is converted.
+
+Layout comes from EDG: `a_field.offset` (bytes) and `offset_bit_remainder` (0..7) give the bit position of the field in
+its parent, `bit_size` the width. The lowering picks the unit as follows: the declared type's size `U`, at the
+`U`-aligned offset that contains the field, when the field fits there and the unit lies inside the parent object (the
+usual case; gcc does the same). Otherwise it tries 1, 2, 4 and 8 bytes at an aligned offset, then the window of that
+size that ends at the end of the parent (a packed struct, a field that straddles its declared type). A field wider
+than 64 bits, or that fits no window, is `(unsupported lvalue bit-field-layout)`.
+
+Compound assignment and `++`/`--` are `bfload`, the arithmetic in the declared type `T` (so it wraps in `T`, then the
+store truncates to `WIDTH`), `bfstore`. Initialization: aggregate initializers store each named bit-field with `bfstore`
+(unnamed bit-fields take no initializer); a static initializer lists one item per bit-field,
+`(bitfield OFF UNIT BOFF WIDTH T (const T V))` with `OFF` the byte offset of the unit, and the consumer ORs the bits of
+all items together (fields of different declared types have overlapping units, so merging is by bit position).
+Bit-fields in unions and in classes with virtual bases are not covered by the aggregate-initializer path (unions and
+virtual bases have no aggregate initializer in the IR at all); plain reads and writes work in all of them.
+The emitter documents its code shape in `scripts/pathb-qbe-emit.rb` (`r_bfload`): extraction is a shift pair, never an `and`
+with a low mask, because QBE's width analysis drops such a mask wrongly in some loops (see `docs/notes/pathb-stage3.md`).
+
+### 5b. Variable-length arrays
+
+EDG keeps VLAs in the lowered IL as three things, and the IR follows them:
+
+- `stmk_set_vla_size`: evaluates a dimension expression once into a compiler variable (`dimension_variable`). The IR
+  lowers the dimension expression (an assignment to that variable), so the dimension is an ordinary local slot.
+- an expression statement EDG adds that assigns the total element count (all dimensions multiplied, in `ptrdiff_t`)
+  to `vla_element_count_variable`;
+- `stmk_vla_decl`: the point where the storage appears. It prints `(vlaalloc $"v" BYTES)`:
+  `BYTES` (an `unsigned_long` operand) is the count times the size of the innermost element type.
+
+The VLA variable `v` has no slot of its own with the array's size. Its slot `(slot "v" (ptr (array ? T)) 8 8)` holds the
+*address* of its storage, and every use of the variable loads that pointer first, so `$"v"` is the slot of the pointer,
+not the array. `(array ? T)` is how a VLA type prints (the `?` is the unknown count).
+
+`(vlaalloc $"slot" BYTES)`: allocate `BYTES` bytes of dynamic stack storage, 16-byte aligned, uninitialized, and store the
+address in the slot. **Lifetime.** EDG gives no scope-exit marker for a VLA in this configuration (the lowered IL
+has no `enk_vla_dealloc` and no destruction-list entry). The IR therefore does not free at the end of the block. The
+semantics are: the storage lives until the function returns, *or* until the same `vlaalloc` executes again, when the
+old array's lifetime has ended anyway (C and GNU C end it when execution leaves the block, including a backward `goto`),
+and the backend may reuse the space. A backend with no dynamic stack must refuse the statement. The QBE emitter keeps a
+capacity per `vlaalloc` and allocates only when `BYTES` exceeds it (then for `max(BYTES, 2 * capacity)`), so a loop
+that declares a VLA of at most N bytes uses O(N) stack, not O(N * iterations); a recursion with a VLA uses one
+allocation per frame, released at return.
+
+`sizeof` of a VLA type or expression (`enk_sizeof` that EDG could not fold) is the product of the dimension variables
+and the element size, computed in registers, and so is the stride of a pointer to a VLA row (`index`/`pdiff` take a
+register `SIZE`). No `bounds` check is emitted for a VLA subscript (the length is a run-time value, and `bounds`
+takes a number). VLA typedefs (`stmk_vla_decl` with `is_typedef_decl`) allocate nothing; a function parameter of VLA
+type is a pointer as in C++ and needs nothing.
+
+### 5c. GNU statement expressions
+
+`({ S...; E; })` (`enk_statement`) is lowered inline: the statements run in place (no `(block)` wrapper, so the
+registers they define stay visible), and the value is the last statement when it is an expression statement
+(EDG marks it `stmk_stmt_expr_result`; its expression is lowered like any rvalue). A void result, or a statement
+expression whose last statement is not an expression, has no value. `break`, `continue`, `goto` and `return` inside work as in
+any statement. A result that EDG builds with a copy constructor (`dik_class_result_via_ctor`) is not lowered.
 
 ## 6. Decision (g): the text form
 
@@ -139,6 +214,8 @@ INIT      ::= (extern)                                    declared here, defined
             | (init ITEM*)                                 static initializer (see ITEM)
             | (unsupported init KIND)                      not lowered (dynamic initialization)
 ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte offset OFF
+            | (bitfield OFF UNIT BOFF WIDTH TYPE (const TYPE V))  bits BOFF.. of the UNIT-byte unit at byte OFF (5a);
+                                                           items that share bits of a byte are ORed together
             | (addr OFF TYPE TARGET ADD)                   address TARGET (@"x" or &"f") plus byte addend ADD
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
@@ -148,11 +225,14 @@ function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(wea
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
+            | (bfstore[.v] TYPE UNIT ADDR BOFF WIDTH VALUE)                  bit-field store (5a)
+            | (vlaalloc $"SLOT" OPERAND)                                    VLA storage (5b)
             | (eval RVALUE) | (bounds OPERAND N) | (nonnull OPERAND)
             | (if OPERAND (then STMT*) [(else STMT*)]) | (loop (body STMT*) (step STMT*))
             | (switch OPERAND (body STMT*)) | (case CONST) | (default) | (break)
             | (goto "L") | (label "L") | (return [OPERAND]) | (unreachable) | (block STMT*)
 RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX SIZE) | (pdiff A B SIZE)
+            | (bfload[.v] TYPE UNIT ADDR BOFF WIDTH)                         bit-field load (5a)
             | (wadd|wsub|wmul T A B) | (wneg T A) | (cadd|csub|cmul|cdiv|crem|cshl|cshr T A B) | (cneg T A)
             | (fadd|fsub|fmul|fdiv T A B) | (fneg T A) | (and|or|xor T A B) | (not T A)
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
@@ -160,7 +240,8 @@ RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX
             | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
-            | (array N TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
+            | (array N TYPE) | (array ? TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
+SIZE      ::= N | %N        a byte count: a number, or a register of type unsigned_long (a VLA element type)
 ```
 
 `(variadic N)` appears in a call whose callee's function type ends in `...` (a direct call or one through a
@@ -268,6 +349,14 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    INIT (section 6). The items are the element-wise form that `ir_init_constant` produces for locals, at byte offsets,
    in the same member and base order, with trailing array elements and class members the initializer does not name
    given as `(zero ...)`. Bytes no item covers are padding (zero). Function-local statics take their initializer from
+   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization is still
+   `(unsupported init dynamic)`, not lowered.
+3. **Constructor initializers** (`dik_constructor`) and inline asm print unsupported markers. None of these appears in
+   `tests/cases` after lowering. (Bit-fields, VLAs and GNU statement expressions were in this list; they are lowered
+   since stage 3 round 3, sections 5a-5c. Still open there: `volatile` bit-fields are IR (`bfload.v`) but the QBE emitter
+   refuses them; a VLA has no scope-exit free (5b); no `bounds` check on VLA subscripts; a statement expression that
+   returns a class by copy constructor; bit-fields wider than 64 bits.)
+
    the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization after
    lowering is explicit statements of the `__sti__` routine (see "Start-up and exit"), so a global never reaches
    `(unsupported init dynamic)` on the programs tested (that marker stays for an initializer kind the lowering left
@@ -310,9 +399,11 @@ Coverage on `tests/cases` (10 programs; NFCXX_PATHB_STATS counts every node the 
 On the ten programs, `tests/pathb-ir/run.sh` reports 1991 node occurrences visited, all lowered, 0 `(unsupported ...)`.
 The 45 kinds seen are all lowered. "Referenced" is a count of the `case` labels in `be/nfcxx_ir.c`; it is not a test of
 behaviour. The kinds in the table's third column that are not in the fourth are implemented but not exercised by these
-programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: a variable-length array (2
-statement kinds), a GNU statement expression, inline asm, and bit-field reads and writes give 8 `(unsupported ...)`
-markers, which the runner checks against the expected count.
+programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: it still contains a
+variable-length array, a GNU statement expression and bit-field reads and writes (lowered now, so they appear in its
+golden as `vlaalloc`, plain statements and `bfload`/`bfstore`) and inline asm, which is the one remaining
+`(unsupported ...)` marker; the runner checks the count (1). The bit-field, VLA and statement-expression probes
+`tests/pathb-qbe/cases/{bitfield,bitfield2,vla,stmtexpr}.cpp` have goldens of their own.
 
 Reproduce (from the worktree; the harness is built out of tree):
 

@@ -1,0 +1,8 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "s" (struct "S") 8 8)
+  (bfstore int 4 $"s" 0 4 (const long 1))
+  (return (const int 0)))
