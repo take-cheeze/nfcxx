@@ -56,7 +56,8 @@ class CodeGen
     end
 
     def block_send_mask(irep, index, insn, state)
-      @cg.profiler_class_result(irep, index, insn) || @cg.core_ruby_class_result(irep, index, insn, state) || NumericFlow::OTHER
+      @cg.profiler_class_result(irep, index, insn) || @cg.core_ruby_class_result(irep, index, insn, state) ||
+        @cg.bottom_block_receiver_mask(insn, state) || NumericFlow::OTHER
     end
 
     def class_test(irep, index, insn, _state) = @cg.class_test_for(irep, index, insn)
@@ -417,7 +418,8 @@ class CodeGen
     return @rc_scoped_return_cache[key] if @rc_scoped_return_cache.key?(key)
     return nil if @rc_scoped_return_active.include?(key)
 
-    definition = closed_world_exact_target(name, receiver_class)
+    definition = closed_world_exact_target(name, receiver_class, accessor: argc == 0)
+    return return_class_scoped_accessor_mask(definition, key) if definition && definition.irep.nil?
     return nil unless definition&.irep
     return nil if @rc_scoped_active_labels.include?(definition.irep)
 
@@ -433,6 +435,37 @@ class CodeGen
     @rc_scoped_return_cache[key] = result
   ensure
     @rc_scoped_return_active.delete(key) if acquired
+  end
+
+  # BOTTOM_BLOCK_RECEIVER: the receiver of a literal-block send is a name the table has not given a class yet (its
+  # mask is 0, the optimistic start of the growth loop, not a class nobody can name), so the send has no result yet
+  # either; the loop re-runs it when the name grows. Answering OTHER there dropped `x.keys.select { }` and
+  # `@slot = @slot.select { }` for good, since a dropped name never returns to the table.
+  def bottom_block_receiver_mask(insn, state)
+    return nil unless bottom_block_receivers_enabled? && insn.op == 'SENDB' && !@rc_scoped_ready
+
+    state[insn.reg.to_i] == 0 ? 0 : nil
+  end
+
+  # BC2CPP_BOTTOM_BLOCK_RECEIVERS=0 turns the bottom receiver of a literal-block send back into an unknown result.
+  def bottom_block_receivers_enabled?
+    ENV.fetch('BC2CPP_BOTTOM_BLOCK_RECEIVERS', '1') != '0'
+  end
+
+  # SCOPED_ACCESSOR_RETURN: the exact class selects one attr_reader, so the send answers that slot's class set
+  # (return_class_accessor_mask) even when the name has another, unmodelled definition elsewhere and so is not in
+  # the name-wide table. The receiver is exactly this class (singleton-free), so only this class's reader runs.
+  def return_class_scoped_accessor_mask(definition, key)
+    return nil unless scoped_accessor_return_enabled?
+
+    mask = return_class_accessor_mask(definition)
+    result = mask.positive? && (mask & NumericFlow::OTHER).zero? ? mask : nil
+    @rc_scoped_return_cache[key] = result
+  end
+
+  # BC2CPP_SCOPED_ACCESSOR_RETURNS=0 turns the exact-receiver accessor fact off.
+  def scoped_accessor_return_enabled?
+    ENV.fetch('BC2CPP_SCOPED_ACCESSOR_RETURNS', '1') != '0'
   end
 
   # Every possible exact user receiver must select a stable Ruby body and agree

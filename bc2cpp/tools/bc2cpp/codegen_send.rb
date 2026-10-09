@@ -1878,7 +1878,8 @@ class CodeGen
 
   # Exact-instance counterpart to closed_world_inherited_target: the receiver
   # is a proven fresh instance, so its own class method may be selected too.
-  def closed_world_exact_target(name, receiver_class)
+  # accessor: true also answers an attr_reader (no irep), which only the result-class flow reads.
+  def closed_world_exact_target(name, receiver_class, accessor: false)
     return nil unless @closed_world&.stable_class_constant?(receiver_class)
     return nil unless call_facts_enabled? && call_facts_answers.resolves_in_ruby?(receiver_class, name)
     return nil if devirt_blocked_name?(name)
@@ -1895,7 +1896,9 @@ class CodeGen
 
       here = @registry.fetch(name, []).select { |definition| definition.owner == klass }
       unless here.empty?
-        return here.one? && here.first.irep ? here.first : nil
+        return here.first if here.one? && (here.first.irep || (accessor && here.first.kind == :ivar_accessor))
+
+        return nil
       end
 
       superclass = @superclass_of[klass]
