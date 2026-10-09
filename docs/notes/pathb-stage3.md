@@ -113,8 +113,8 @@ the runner checks.
   requires (and costs the promotion in that function). Other functions are unchanged. Functions are recognised by
   the callee name, so an indirect call to `setjmp` is not.
 - **Reachability** is done by the emitter, not the IR: the IR still prints every routine EDG marks as needed.
-  Routines whose only job is a side effect without a reference (`__attribute__((constructor))` on a `static` function)
-  would be dropped; the IR carries no marker for them.
+  (Routines that run without a reference carry `(constructor)`/`(destructor)` since the dynamic-initialization round
+  below, and are roots.)
 - **Layout:** only the scalar sizes are checked; alignment of scalars is the one printed on slots and globals.
 
 ## Closed gaps (stage 3, second round)
@@ -161,3 +161,44 @@ tests/pathb-qbe/run.sh         # translation validation
 
 `scripts/pathb-dump --ir FILE.cpp | scripts/mrb scripts/pathb-qbe-emit.rb - > x.ssa` shows the emitter output for
 one file.
+
+## Dynamic initialization (round 3)
+
+Probes in `tests/pathb-qbe/cases/dyn_*.cpp` and `tests/pathb-qbe/multi/dyn_init/`; they print, and the runner
+requires the same standard output as the gcc backend (`// STDOUT: same`).
+
+What EDG's lowering gives (checked on the IL and on the path A C output): with `DO_IL_LOWERING=1` every dynamic
+initialization is already explicit. Constructor calls (`dik_constructor`), temporaries and their destructors, `new` /
+`delete`, `new[]` with the cookie and `__cxa_vec_*` helpers, local statics with `__cxa_guard_*`, and the
+destruction of static objects (`__cxa_atexit`) are ordinary statements and calls in the IR. File-scope dynamic
+initializers are collected in one routine per translation unit, `__sti__<file>_<first entity>` (plus one per GNU
+`init_priority`), and the C back end marks it `__attribute__((constructor))`. Before this round the IR printed that
+routine without a marker and the emitter exported it as an ordinary function that nothing called, so no global
+constructor ever ran (and a `static` attribute function would also have been pruned).
+
+Changes:
+
+- **IR:** `(constructor [PRIO])` / `(destructor [PRIO])` on functions (stage 2, section 6, "Start-up and exit"):
+  the `__sti__` routines and `__attribute__((constructor/destructor [(N)]))`. Unnamed routines (the array destroyer
+  registered with `__cxa_atexit`) get a unique `__unnamed_fn` name at definition and references; before, the
+  definition was `"tmp"` (clashing with a static of that name) and the references `"fn"`. Names of routines are
+  reserved against static objects. `dik_constructor` initializers lower to a constructor call. A scalar
+  `lvalue_adjust` used as an lvalue is supported (`const int c = f();` at file scope).
+- **Emitter:** a marked function gets a pointer in `.init_array` / `.fini_array` (`section ".init_array.PPPPP"`
+  `"aw"` for a priority, five decimal places as GCC names it), one data object per entry, and is a reachability
+  root. The address of a function defined in another unit (for example `operator delete[]` passed to
+  `__cxa_vec_delete`) is loaded from a local pointer cell `pathb_got.NAME` instead of a `leaq NAME(%rip)`, which a PIE
+  link rejects for a shared-library symbol; direct calls are unchanged.
+- **Runner:** `// STDOUT: same`.
+
+Order (matches path A on the probes): priorities ascending, then the routines without a priority in module order
+(`dyn_ctor_attr.cpp` mixes `static` attribute functions with a global's `__sti__` routine); destructors from
+`__cxa_atexit` run before `.fini_array` entries, as in path A. Across translation units the order is the link order
+of the objects, as for gcc.
+
+Still missing: thread-local objects (`thread_local` with a dynamic initializer: the lowering makes `TLS init
+function for X` routines; the IR prints them, nothing calls them and the link fails with an undefined reference; that
+belongs with the TLS work), and any check of the order of initialization across translation units beyond "all
+run before main". The local-static guard is whatever `__cxa_guard_acquire` / `__cxa_guard_release` of the linked C++
+runtime does; the probes are single-threaded. The `dik_constructor` lowering is untested because the lowered IL never
+contains one.

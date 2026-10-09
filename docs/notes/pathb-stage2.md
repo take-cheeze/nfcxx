@@ -143,7 +143,8 @@ ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte o
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
-function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)] SLOT* STMT*)
+function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)] [(constructor [PRIO])]
+              [(destructor [PRIO])] SLOT* STMT*)       PRIO = 1..65535; (constructor)/(destructor): see "Start-up and exit"
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
@@ -175,6 +176,32 @@ vtables, typeinfo). These are the objects `c_gen_be.c` writes with `__attribute_
 `scripts/weak-symbols.rb` finds in the production path. Every translation unit that needs one defines it; the
 definitions are identical and the link must keep one. A backend emits a weak symbol (ELF `.weak`, or COMDAT/linkonce).
 Declarations (`(extern)`) carry no marker. A `(static)` object is never `(weak)`.
+
+Start-up and exit. `(constructor [PRIO])` on a function means it runs before `main`; `(destructor [PRIO])` means it
+runs at exit (a function may carry both). They come from two sources, and the IR does not say which:
+
+- `__attribute__((constructor [(PRIO)]))` and `__attribute__((destructor [(PRIO)]))` (EDG `is_initialization_routine`
+  with `ctor_priority`, `is_finalization_routine` with `dtor_priority`).
+- The initialization routine that IL lowering makes for a translation unit, named `__sti__...`
+  (`IL_LOWERING_INIT_ROUTINE_PREFIX`). It runs every dynamic initializer of the file scope in source order: the
+  constructor calls, `__cxa_atexit(dtor, &obj, &__dso_handle)` registrations (so static objects are destroyed in
+  reverse order of construction at exit, by the C library, and nothing else is needed for destructors of statics) and
+  the stores of values computed by calls. A GNU `init_priority(N)` object gets a second `__sti__...__prioN` routine,
+  which carries `(constructor N)`. This is the routine the C back end marks `__attribute__((constructor))` (path A),
+  or puts in a `.ctors.(65535-N)` section for a priority. Variables with dynamic initialization are printed as
+  zero-initialized `(global ... (init (zero 0 N)))`; the IR contains no other record of the dynamic initializer.
+
+A routine with a marker is a root: a consumer must not drop it because no code refers to it (the function may be
+`(static)`). Order: a routine with a PRIO runs before any routine without one, lower PRIO first; routines of equal
+priority run in the order they appear in the module. Destructors run in the reverse order (a destructor without a
+PRIO first). Function-local statics need no marker: the lowering writes the guard (`__cxa_guard_acquire` /
+`__cxa_guard_release`; the guard is the C++ runtime's, as in path A), the constructor call
+and the `__cxa_atexit` registration as ordinary statements of the function.
+
+Unnamed routines. The lowering makes routines without a name (the helper that destroys an array with static storage,
+registered with `__cxa_atexit`). They print as `__unnamed_fn`, `__unnamed_fn.1`, ... (the same name at the definition
+and at every reference), and the name of every named routine is reserved first so that no static object, string or
+unnamed routine takes it.
 
 Unsupported nodes print as `(unsupported KIND NAME)` in place of the statement or of the register's right-hand side.
 The runner counts them.
@@ -241,9 +268,14 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    INIT (section 6). The items are the element-wise form that `ir_init_constant` produces for locals, at byte offsets,
    in the same member and base order, with trailing array elements and class members the initializer does not name
    given as `(zero ...)`. Bytes no item covers are padding (zero). Function-local statics take their initializer from
-   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization is still
-   `(unsupported init dynamic)`, not lowered.
-3. **Constructor initializers** (`dik_constructor`), VLAs, GNU statement expressions, inline asm and bit-field
+   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization after
+   lowering is explicit statements of the `__sti__` routine (see "Start-up and exit"), so a global never reaches
+   `(unsupported init dynamic)` on the programs tested (that marker stays for an initializer kind the lowering left
+   in the IL).
+3. **Constructor initializers** (`dik_constructor`) in a `stmk_init` print as an ordinary constructor call
+   `(eval (call void &"ctor" OBJ ARG*))`; the lowering expands every constructor into such a call before the
+   back end sees it, so this path is never taken by the probes (array copies, implied copy sources and value
+   initialization of the unlowered form stay unsupported). VLAs, GNU statement expressions, inline asm and bit-field
    access print unsupported markers. None of these appears in `tests/cases` after lowering.
 4. **`continue`** is `(continue)` since stage 3 round 2. The lowered IL turns it into `(goto "L")` to an unnamed
    `(label "L")` at the end of the loop body; the lowering recognises that pair for the innermost loop, prints

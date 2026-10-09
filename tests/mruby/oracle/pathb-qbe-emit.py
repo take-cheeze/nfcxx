@@ -294,6 +294,9 @@ class Module:
         self.strings = {}      # data name -> bytes
         self.out = []
         self.need_sink = False  # a function that returns twice stores slot addresses into SINK
+        self.startup = []      # (".init_array" or ".fini_array", priority (0: none), QBE symbol)
+        self.funcs = set()     # IR names of the functions defined in this module
+        self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -468,7 +471,15 @@ class Fn:
             if sig == "@":
                 return Val("$" + qsym(name), "l", ("ptr", self.mod.globals.get(name)))
             if sig == "&":
-                return Val("$" + qsym(name), "l", ("ptr", ("fn",)))
+                if name in self.mod.funcs:
+                    return Val("$" + qsym(name), "l", ("ptr", ("fn",)))
+                # The address of a function defined elsewhere: loaded from a local pointer cell (see the
+                # mruby port; a PIE link rejects a PC-relative reference to a shared-library function).
+                cell = "pathb_got." + qsym(name)
+                self.mod.got[name] = cell
+                t = self.tmp()
+                self.emit("%s =l loadl $%s" % (t, cell))
+                return Val(t, "l", ("ptr", ("fn",)))
         if head_of(op) == "const":
             return self.const(op)
         if head_of(op) == "null":
@@ -967,7 +978,10 @@ def r_call(fn, x):
     # (call TYPE CALLEE [(variadic N)] ARG*): with (variadic N) the first N arguments match named parameters
     # and the QBE call gets "..." after them, so the callee's register-save prologue is set up (%al).
     ret = parse_type(x[1])
-    callee = fn.opnd(x[2])
+    if isinstance(x[2], Sym) and x[2][0] == "&":
+        callee = Val("$" + qsym(x[2][1]), "l", ("ptr", ("fn",)))
+    else:
+        callee = fn.opnd(x[2])
     if isinstance(x[2], Sym) and x[2][1] in RETURNS_TWICE:
         fn.returns_twice = True
     rest = x[3:]
@@ -1449,6 +1463,7 @@ def emit_function(mod, f):
     fn = Fn(mod, name, ret)
     static = False
     weak = False
+    startup = []
     qparams = []
     param_stores = []
     body_forms = []
@@ -1458,6 +1473,14 @@ def emit_function(mod, f):
             static = True
         elif h == "weak":
             weak = True
+        elif h in ("constructor", "destructor"):
+            # (constructor [PRIO]) / (destructor [PRIO]): the function runs before main / at exit
+            if len(part) > 2:
+                raise BadIR("function %s: bad %s" % (name, form_text(part)))
+            prio = as_int(part[1]) if len(part) == 2 else 0
+            if prio < 0 or prio > 65535:
+                raise BadIR("function %s: bad priority in %s" % (name, form_text(part)))
+            startup.append((".init_array" if h == "constructor" else ".fini_array", prio, qsym(name)))
         elif h == "slot":
             # (slot "NAME" TYPE BYTES ALIGN)
             if len(part) != 5:
@@ -1526,6 +1549,19 @@ def emit_function(mod, f):
     mod.out.extend(fn.body)
     mod.out.append("}")
     mod.out.append("")
+    mod.startup.extend(startup)
+
+
+def emit_startup_tables(mod):
+    """A (constructor [PRIO]) function gets a pointer in .init_array, a (destructor [PRIO]) one in .fini_array
+    (the dynamic loader runs .fini_array backwards). A priority P goes to the section .init_array.PPPPP (five
+    decimal places, as GCC names it): the linker sorts those by name, before the plain section. Every entry is its
+    own object, in the order of the functions in the IR."""
+    for i, (sect, prio, sym) in enumerate(mod.startup):
+        if prio != 0:
+            sect += ".%05d" % prio
+        mod.out.append('section "%s" "aw"' % sect)
+        mod.out.append("data $pathb_startup%d = align 8 { l $%s }" % (i, sym))
 
 
 LP64 = {"short": 2, "int": 4, "long": 8, "long_long": 8, "pointer": 8, "float": 4, "double": 8}
@@ -1554,6 +1590,11 @@ def _symbols(x, out):
             _symbols(y, out)
 
 
+def _is_startup(f):
+    """A function that runs without being called: (constructor) or (destructor). It stays whatever refers to it."""
+    return head_of(f) == "function" and any(head_of(p) in ("constructor", "destructor") for p in f[2:])
+
+
 def _is_linked(f):
     """A function or global that other translation units can see: not (static), not (weak), and a definition."""
     h = head_of(f)
@@ -1579,7 +1620,7 @@ def prune(forms):
     for name, f in defs.items():
         if head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]):
             continue  # a declaration emits nothing
-        if _is_linked(f):
+        if _is_linked(f) or _is_startup(f):
             live.add(name)
             work.append(name)
     while work:
@@ -1605,6 +1646,8 @@ def emit_module(text, do_prune=True):
     for f in all_forms[1:]:
         if head_of(f) == "global":
             mod.globals[str(f[1])] = parse_type(f[2])
+        if head_of(f) == "function":
+            mod.funcs.add(str(f[1]))
     # Strings first: a string data item may be referenced from a global initializer.
     for f in forms[1:]:
         if head_of(f) == "data":
@@ -1617,6 +1660,9 @@ def emit_module(text, do_prune=True):
             emit_function(mod, f)
         elif head_of(f) not in ("global", "data"):
             raise Refused("top-level form (%s ...)" % head_of(f))
+    emit_startup_tables(mod)
+    for name, cell in mod.got.items():
+        mod.out.append("data $%s = align 8 { l $%s }" % (cell, qsym(name)))
     if mod.need_sink:
         mod.out.append('data $%s = align 8 { z 8 }' % SINK)
     return "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + "\n".join(mod.out) + "\n"
