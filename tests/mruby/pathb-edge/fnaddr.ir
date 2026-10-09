@@ -1,0 +1,17 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "tbl" (array 2 (ptr (fn void ()))) 16 8 (init (addr 0 (ptr (fn void ())) &"local" 0) (addr 8 (ptr (fn void ())) &"elsewhere" 0)))
+(function "local"
+  (ret void)
+  (params)
+  (return))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 (ptr (fn void ())) (bitcast (ptr (fn void ())) &"elsewhere"))
+  (let %1 (ptr (fn void ())) (bitcast (ptr (fn void ())) &"local"))
+  (let %2 (ptr (fn void ())) (bitcast (ptr (fn void ())) &"elsewhere"))
+  (eval (call void &"elsewhere"))
+  (eval (call void &"local"))
+  (eval (call void %0))
+  (return (const int 0)))

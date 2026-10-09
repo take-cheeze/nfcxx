@@ -8,6 +8,8 @@
 #   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
 #                                 `continue`, bool loads, unreachable code. A probe with a `// GCC: undefined` line
 #                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
+#                                 A probe with a `// STDOUT: same` line also needs the same standard output as the gcc
+#                                 backend (dyn_*.cpp: constructor/destructor order of global, static and heap objects).
 #                                 eh_*.cpp: C++ exceptions through EDG's setjmp/longjmp ABI and the runtime in libC.a
 #                                 (docs/notes/pathb-stage3.md, "C++ exceptions"). `// STD: c++14` selects the standard.
 #   tests/cases/*.cpp             the regression programs (same EXPECT values as the production runner).
@@ -76,7 +78,7 @@ run_one() {
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
-  sh -c 'timeout 10 "$0" > /dev/null 2> "$1"; exit $?' "$exe" "$tmp/$n.rt"; got=$?
+  sh -c 'timeout 10 "$0" > "$1" 2> "$2"; exit $?' "$exe" "$tmp/$n.stdout" "$tmp/$n.rt"; got=$?
   ran=$((ran + 1))
   if [ "$mode" = trap ]; then
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
@@ -99,7 +101,7 @@ run_one() {
     match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: undefined in C++)"); return
   fi
   if NFCXX_BACKEND=gcc ./nfcxx $std "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
-    sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$tmp/$n.gcc"; gcc_rc=$?
+    sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/$n.gcc" "$tmp/$n.gcc.stdout"; gcc_rc=$?
   else
     gcc_rc=compile-error
   fi
@@ -109,6 +111,12 @@ run_one() {
   fi
   if [ "$gcc_rc" != "$((want & 255))" ] && [ "$gcc_rc" != "$want" ]; then
     failed=$((failed + 1)); lines+=("MISMATCH $name: path B matches EXPECT $want but gcc gives $gcc_rc")
+    return
+  fi
+  # A probe with a `// STDOUT: same` line prints (constructor and destructor order, ...): the output of the Path B
+  # program must be byte for byte the output of the gcc backend's program.
+  if grep -q '^// STDOUT: same' "$f" && ! cmp -s "$tmp/$n.stdout" "$tmp/$n.gcc.stdout"; then
+    failed=$((failed + 1)); lines+=("MISMATCH $name: stdout differs from the gcc backend: $(diff "$tmp/$n.stdout" "$tmp/$n.gcc.stdout" | head -3 | tr '\n' '|')")
     return
   fi
   match=$((match + 1))

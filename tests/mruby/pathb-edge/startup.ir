@@ -1,0 +1,40 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "n" int 4 4 (init (zero 0 4)))
+(function "ctor_hi"
+  (ret void)
+  (params)
+  (static)
+  (constructor 101)
+  (store int @"n" (const int 1))
+  (return))
+(function "ctor_default"
+  (ret void)
+  (params)
+  (static)
+  (constructor)
+  (store int @"n" (const int 2))
+  (return))
+(function "unused_static"
+  (ret void)
+  (params)
+  (static)
+  (return))
+(function "both"
+  (ret void)
+  (params)
+  (constructor 65535)
+  (destructor 7)
+  (return))
+(function "dtor_default"
+  (ret void)
+  (params)
+  (static)
+  (destructor)
+  (store int @"n" (const int 3))
+  (return))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (load int @"n"))
+  (return %0))
