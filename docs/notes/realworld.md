@@ -62,17 +62,21 @@ exit code 2. Hosted path (no `--freestanding`).
       builtin uses are left alone and still fail. Regression case: `tests/cases/qbe_builtins_libc.cpp`.
       `tests/builtins/mem_ops.cpp` now passes on QBE, so its `XFAIL-qbe` marker is stale (the runner reports
       an XPASS until the marker is removed).
-    - *Sized atomics* `__atomic_load_N`, `__atomic_store_N`, `__atomic_fetch_add_N` (libstdc++'s
-      `atomic_base`): cproc has no atomics. libatomic from GCC 13 exports these. A fix is to declare them and
-      link `-latomic` on the QBE link. Not done.
+    - **Fixed:** *sized atomics* `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}`
+      (libstdc++'s `atomic_base`). cproc has no atomics, so `scripts/qbe-prep.py` declares the libatomic
+      functions of the same name (GCC 13's libatomic exports them; the prototypes follow its ABI, and
+      EDG passes GCC's six arguments to `compare_exchange`). The QBE link in `scripts/qbe-cc` adds
+      `-latomic`; gcc is unchanged. The 16-byte forms are left out (they need `__int128`). Regression case:
+      `tests/cases/qbe_atomics.cpp`.
     - *`long double`*: `cproc-qbe: long double is not yet supported`. Doctest's `toString(long double)` and
       `IsNaN<long double>` need it. QBE has no 80-bit float, so there is no faithful lowering. Mapping it to
       `double` would change results silently.
     - *Pointer compatibility*: `base types of pointer assignment must be compatible or void` on EDG's
       temporaries in doctest's `MultiLaneAtomic`. This was seen after items 5 to 7 were lowered in a scratch
       copy with `long double` replaced by `double`. Not analysed further.
-  - So `tests/realworld/run_doctest.sh` stays an xfail on QBE. Removing it needs at least the `long double`
-    decision and the pointer-compatibility work above.
+  - So `tests/realworld/run_doctest.sh` stays an xfail on QBE. Its first QBE error is now `long double`
+    (`cproc-qbe: long double is not yet supported`). Removing the xfail needs the `long double` decision,
+    then the pointer-compatibility work above.
 
 Fixes made for this check (the driver, not the back ends):
 
@@ -90,6 +94,6 @@ diagnostic`). They do not affect the result.
 ## Next candidates
 
 Projects with no dependencies and their own tests, to find the next gaps: a JSON or XML parser or a
-small compression library in C++. The QBE gaps above (inline asm, builtins, atomics, `long double`) are
-the next ones to fix before doctest or a larger C++ library can pass on QBE.
+small compression library in C++. For doctest on QBE, the open gaps are `long double` (needs a decision)
+and the pointer-compatibility error. The rest of the list above is fixed.
 mruby is C, so it needs a C front-end mode first, which nfcxx does not have yet.

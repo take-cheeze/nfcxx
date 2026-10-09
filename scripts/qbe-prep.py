@@ -14,6 +14,9 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
     uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
+  * Sized atomics `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}` (what
+    libstdc++'s std::atomic calls) get prototypes for the libatomic functions of the same name. The QBE
+    link adds -latomic (scripts/qbe-cc). The 16-byte forms are left alone; they need __int128.
   * `__asm__(".align 2");` alignment hints (anywhere): dropped, as the old sed did. The hint
     only matters to EDG's own output, and it is not a semantic change.
   * Top-level `__asm__("...")` statements (not declarator labels) are removed from the C and
@@ -200,6 +203,24 @@ MULOV_NAME = '__nfcxx_mulov_ul'
 MULOV_DEF = ('static int __nfcxx_mulov_ul(unsigned long a, unsigned long b, unsigned long *r) {'
              ' unsigned long p = a * b; *r = p; return a != 0 && p / a != b; }')
 UL_CONST = re.compile(r'\d+(?:[uU][lL]|[lL][uU])')
+# GCC's sized atomics for 1, 2, 4 and 8 bytes (libstdc++'s std::atomic calls them). GCC inlines them; cproc has
+# no atomics, so they are calls to the functions libatomic exports (GCC 13 has all of them; 16 bytes needs
+# __int128, which cproc lacks, so it is left out and fails loudly). The memory-order arguments are passed on.
+ATOMIC_RE = re.compile(r'__atomic_(load|store|exchange|compare_exchange|fetch_(?:add|sub|and|or|xor|nand)'
+                       r'|(?:add|sub|and|or|xor|nand)_fetch)_([1248])')
+ATOMIC_TYPE = {'1': 'unsigned char', '2': 'unsigned short', '4': 'unsigned int', '8': 'unsigned long'}
+
+
+def atomic_prototype(name):
+    op, size = ATOMIC_RE.fullmatch(name).groups()
+    t = ATOMIC_TYPE[size]
+    if op == 'load':
+        return f'{t} {name}(const volatile void *, int);'
+    if op == 'store':
+        return f'void {name}(volatile void *, {t}, int);'
+    if op == 'compare_exchange':  # EDG passes GCC's six arguments; libatomic reads the first three (always seq_cst)
+        return f'_Bool {name}(volatile void *, void *, {t}, _Bool, int, int);'
+    return f'{t} {name}(volatile void *, {t}, int);'  # exchange, fetch_OP and OP_fetch: (ptr, value, order)
 
 
 def mulov_const_shape(toks, lp):
@@ -410,6 +431,8 @@ def main():
         elif t.kind == 'id' and t.text == '__builtin_mul_overflow' and mulov_const_shape(toks, i + 1):
             edits.append((t.start, t.end, MULOV_NAME))
             prelude[MULOV_NAME] = MULOV_DEF
+        elif t.kind == 'id' and ATOMIC_RE.fullmatch(t.text):
+            prelude[t.text] = atomic_prototype(t.text)
 
         # 5. Floating types cproc lacks.
         if t.kind == 'id' and t.text in FLOAT_TYPE:
