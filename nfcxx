@@ -53,6 +53,7 @@ host_sys_includes() {
 }
 extra=()
 sys_inc=()
+hosted_libs=()
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
   [ -n "$gnu" ] || gnu=130000
@@ -60,6 +61,9 @@ else
   t=$(trace_start)
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
   trace_end "$t" "host C++ headers" driver
+  # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
+  # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
+  hosted_libs=(--c_to_obj_lib=m)
   if [ -z "$gnu" ]; then
     ver=$("${NFCXX_CXX:-g++}" -dumpfullversion 2>/dev/null) && gnu="${ver%%.*}0000"
   fi
@@ -90,9 +94,11 @@ case $backend in
 esac
 
 # With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
-# compiler give those operations defined behavior.
+# compiler give those operations defined behavior. -fkeep-static-functions keeps EDG's static __tls_init
+# (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
+# -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 t=$(trace_start)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
+"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions \
   "${files[@]}" -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
