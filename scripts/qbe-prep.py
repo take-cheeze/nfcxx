@@ -14,6 +14,20 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
     uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
+  * `__builtin_{add,sub,mul}_overflow(a, b, &r)` in general (mruby's numeric.h and time gem), when `a`, `b`
+    and `*r` all have the same type among int, unsigned, long, unsigned long, long long, unsigned long long
+    (an argument that is a plain integer literal takes the type of `*r`): nested `_Generic`s pick a small
+    helper function (`__nfcxx_addov_l`, ...) that computes the wrapped result and the overflow flag. Any
+    other combination of types selects `__nfcxx_overflow_unsupported_operand_types`, which is declared and
+    never defined, so it is a link error naming that symbol, never a silently converted operand.
+  * `(double)1.5e308L` / `(float)...L` (hand-written C): glibc's <float.h> spells DBL_MIN, DBL_MAX and DBL_EPSILON
+    this way (`((double)2.2250738585072014e-308L)`). cproc types the literal as long double and emits an invalid
+    QBE `truncd` for the cast. The `L` is dropped when the literal is directly cast to double or float, which
+    rounds the same decimal to the target format. A long double literal anywhere else is left alone.
+  * `alloca(n)` (hand-written C only; glibc's <alloca.h> declares a function when `__GNUC__` is unset, and libc
+    has no such symbol) becomes cproc's `__builtin_alloca(n)`. A declaration (`... *alloca(...)`) is left alone.
+  * `__builtin_popcount{,l,ll}`, `__builtin_ctz{,l,ll}`, `__builtin_clz{,ll}` become helper functions
+    (like `__builtin_clzl` above). For a zero argument ctz and clz return the width; GCC leaves that undefined.
   * Sized atomics `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}` (what
     libstdc++'s std::atomic calls) get prototypes for the libatomic functions of the same name. The QBE
     link adds -latomic (scripts/qbe-cc). The 16-byte forms are left alone; they need __int128.
@@ -56,7 +70,7 @@ TOKEN_RE = re.compile(r'''
 | (?P<comment>//[^\n]*|/\*.*?\*/)
 | (?P<str>(?:u8|[LuU])?"(?:[^"\\\n]|\\.)*")
 | (?P<chr>(?:[LuU])?'(?:[^'\\\n]|\\.)*')
-| (?P<num>\.?\d(?:[\w.]|[eEpP][+-])*)
+| (?P<num>\.?\d(?:[eEpP][+-]|[\w.])*)
 | (?P<id>[A-Za-z_$]\w*)
 | (?P<punct>.)
 ''', re.S | re.X)
@@ -206,6 +220,86 @@ HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
                        'static int __nfcxx_clzl(unsigned long x) {'
                        ' if (x == 0) return 64; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n; }'),
 }
+def bit_helpers():
+    h = {}
+    for suffix, t, bits in (('', 'unsigned int', 32), ('l', 'unsigned long', 64), ('ll', 'unsigned long long', 64)):
+        h['__builtin_popcount' + suffix] = (
+            '__nfcxx_popcount' + suffix,
+            f'static int __nfcxx_popcount{suffix}({t} x) {{ int n = 0; while (x) {{ x &= x - 1; ++n; }} return n; }}')
+        h['__builtin_ctz' + suffix] = (
+            '__nfcxx_ctz' + suffix,
+            f'static int __nfcxx_ctz{suffix}({t} x) {{ int n = 0; if (x == 0) return {bits};'
+            f' while (!(x & 1)) {{ x >>= 1; ++n; }} return n; }}')
+        if suffix != 'l':  # clzl is defined above
+            h['__builtin_clz' + suffix] = (
+                '__nfcxx_clz' + suffix,
+                f'static int __nfcxx_clz{suffix}({t} x) {{ if (x == 0) return {bits}; int n = 0;'
+                f' while (!(x >> {bits - 1})) {{ x <<= 1; ++n; }} return n; }}')
+    return h
+
+
+HELPER_BUILTINS.update(bit_helpers())
+
+# Type-generic overflow builtins: (C type, helper suffix, unsigned counterpart of a signed type).
+OV_TYPES = (('int', 'i', 'unsigned int'), ('unsigned int', 'u', None), ('long', 'l', 'unsigned long'),
+            ('unsigned long', 'ul', None), ('long long', 'll', 'unsigned long long'),
+            ('unsigned long long', 'ull', None))
+OV_BAD = '__nfcxx_overflow_unsupported_operand_types'
+OV_OPS = {'__builtin_add_overflow': 'add', '__builtin_sub_overflow': 'sub', '__builtin_mul_overflow': 'mul'}
+
+
+def ov_helper(op, t, suf, u):
+    """(name, definition) of the overflow helper for OP on type T; U is the unsigned counterpart of a signed T."""
+    name = f'__nfcxx_{op}ov_{suf}'
+    head = f'static int {name}({t} a, {t} b, {t} *r) {{ '
+    if u is None:
+        body = {'add': '*r = a + b; return *r < a;',
+                'sub': '*r = a - b; return a < b;',
+                'mul': '*r = a * b; return a != 0 && *r / a != b;'}[op]
+    else:
+        mn = f'(({t})(({u})1 << (sizeof({t}) * 8 - 1)))'
+        body = {'add': f'{u} s = ({u})a + ({u})b; *r = ({t})s; return ((a ^ ({t})s) & (b ^ ({t})s)) < 0;',
+                'sub': f'{u} s = ({u})a - ({u})b; *r = ({t})s; return ((a ^ b) & (a ^ ({t})s)) < 0;',
+                'mul': f'{u} p = ({u})a * ({u})b; *r = ({t})p; if (a == 0 || b == 0) return 0;'
+                       f' if (a == -1) return b == {mn}; if (b == -1) return a == {mn}; return ({t})p / a != b;'}[op]
+    return name, head + body + ' }'
+
+
+def split_args(toks, lp):
+    """Top-level argument token ranges of the call whose '(' is toks[lp]; returns (ranges, index of the ')')."""
+    rp = match_fwd(toks, lp, '(', ')')
+    if rp < 0:
+        return None, -1
+    ranges, start, level = [], lp + 1, 0
+    for k in range(lp + 1, rp):
+        t = toks[k]
+        if t.kind == 'punct':
+            if t.text in '([{':
+                level += 1
+            elif t.text in ')]}':
+                level -= 1
+            elif t.text == ',' and level == 0:
+                ranges.append((start, k))
+                start = k + 1
+    ranges.append((start, rp))
+    return ranges, rp
+
+
+def overflow_call(op, text, lit, prelude):
+    """C expression for __builtin_OP_overflow(a, b, r) given the argument texts and which operands are literals."""
+    cases = []
+    for ty, suf, u in OV_TYPES:
+        hname, hdef = ov_helper(op, ty, suf, u)
+        prelude[hname] = hdef
+        sel = hname
+        for k in (1, 0):  # operands must have the result's type, unless they are integer literals
+            if not lit[k]:
+                sel = f'_Generic(({text[k]}), {ty}: {sel}, default: {OV_BAD})'
+        cases.append(f'{ty} *: {sel}')
+    prelude[OV_BAD] = f'int {OV_BAD}(long long, ...);'
+    return f'(_Generic(({text[2]}), ' + ', '.join(cases) + f', default: {OV_BAD}))({text[0]}, {text[1]}, {text[2]})'
+
+
 MULOV_NAME = '__nfcxx_mulov_ul'
 MULOV_DEF = ('static int __nfcxx_mulov_ul(unsigned long a, unsigned long b, unsigned long *r) {'
              ' unsigned long p = a * b; *r = p; return a != 0 && p / a != b; }')
@@ -450,6 +544,21 @@ def main():
             i += 1
             continue
 
+        # 4c. (double)LITERALL: see the module docstring.
+        if (C_INPUT and t.kind == 'num' and re.fullmatch(r'(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?[lL]', t.text)
+                and re.search(r'[.eE]', t.text)
+                and is_punct(tok_at(toks, i - 3), '(') and tok_at(toks, i - 2) is not None
+                and tok_at(toks, i - 2).text in ('double', 'float') and is_punct(tok_at(toks, i - 1), ')')):
+            edits.append((t.end - 1, t.end, ''))
+            i += 1
+            continue
+
+        # 4a. alloca (hand-written C): a call, not the declaration `void *alloca (size_t)`, is cproc's builtin.
+        if C_INPUT and t.kind == 'id' and t.text == 'alloca' and is_punct(tok_at(toks, i + 1), '(') and not is_punct(prev, '*'):
+            edits.append((t.start, t.end, '__builtin_alloca'))
+            i += 1
+            continue
+
         # 4b. Builtins cproc lacks (see the module docstring).
         if t.kind == 'id' and t.text in LIBC_BUILTINS:
             name, proto = LIBC_BUILTINS[t.text]
@@ -462,6 +571,15 @@ def main():
         elif t.kind == 'id' and t.text == '__builtin_mul_overflow' and mulov_const_shape(toks, i + 1):
             edits.append((t.start, t.end, MULOV_NAME))
             prelude[MULOV_NAME] = MULOV_DEF
+        elif t.kind == 'id' and t.text in OV_OPS and is_punct(tok_at(toks, i + 1), '('):
+            ranges, rp = split_args(toks, i + 1)
+            if ranges is None or len(ranges) != 3:
+                sys.exit(f'qbe-prep: {t.text} expects three arguments')
+            text = [src[toks[a].start:toks[b - 1].end] for a, b in ranges]
+            lit = [b - a == 1 and toks[a].kind == 'num' for a, b in ranges[:2]]
+            edits.append((t.start, toks[rp].end, overflow_call(OV_OPS[t.text], text, lit, prelude)))
+            i = rp + 1
+            continue
         elif t.kind == 'id' and ATOMIC_RE.fullmatch(t.text):
             prelude[t.text] = atomic_prototype(t.text)
 

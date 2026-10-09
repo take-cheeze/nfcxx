@@ -1,5 +1,5 @@
 // EXPECT: 0
-// XFAIL-qbe: cproc has no __builtin_add_overflow family (EDG passes the name through to C)
+// XFAIL-qbe: qbe-prep lowers __builtin_{add,sub,mul}_overflow only for same-type int/long operands; unsigned char and the _p forms fail (link error naming __nfcxx_overflow_unsupported_operand_types)
 // __builtin_{add,sub,mul}_overflow and the _p predicate forms.
 int main() {
   int fails = 0;

@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
+#   NFCXX_BACKEND=qbe|gcc   (default qbe: cproc -> QBE; gcc: host gcc -O2 -fwrapv -fno-strict-aliasing)
+#   NFCC_HOST_CC            host compiler for preprocessing, dependency files, assembling and linking (default cc)
+#
+#   nfcc -c a.c -o a.o        compile (several .c files without -o give one .o each in the cwd)
+#   nfcc a.o b.o -lm -o prog  link; .c inputs are compiled to temporary objects first
+#   nfcc -E ... / -M ... / -fsyntax-only   preprocess / dependency query / syntax check: host compiler, unchanged
+#   nfcc --version, -v, -dumpmachine, -dumpversion, -print-*: answered like gcc (the host compiler answers)
+#   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
+#   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
+#              -l -L -Wl,* -Xlinker -shared -static -rdynamic -pie -no-pie -s -nostdlib -pthread -o
+#   ignored:   -O* -g* -W* (except -Wp, -Wa) -w -pipe -v -m64 -march/-mtune/-m<feature>, and the -f options in
+#              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
+#   rejected with an error: -S, -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -funsigned-char,
+#              -fshort-enums, -ftrapv and other -f options that change semantics, C++ (-x c++, -std=c++*,
+#              .cpp: use nfcxx), -Wp/-Wa, @response files, dependency options on a compile-and-link command,
+#              and any option not listed here.
+# Nothing that changes meaning is dropped silently.
+set -euo pipefail
+shopt -s extglob
+root=$(cd "$(dirname "$0")" && pwd)
+host=${NFCC_HOST_CC:-cc}
+backend=${NFCXX_BACKEND:-qbe}
+version=0.1
+
+die() { echo "nfcc: error: $*" >&2; exit 1; }
+
+case $backend in
+  qbe) [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ] ||
+         die "QBE not built; run scripts/setup-qbe.sh"
+       qcc=$root/scripts/qbe-cc ;;
+  gcc) ;;
+  *) die "unknown NFCXX_BACKEND '$backend' (qbe or gcc)" ;;
+esac
+
+# Queries first: they take no input files.
+if [ $# -eq 0 ]; then die "no input files"; fi
+for a in "$@"; do
+  case $a in
+    --version)
+      echo "nfcc (nfcxx C driver $version, backend $backend) $("$host" -dumpfullversion 2>/dev/null || echo 0)"
+      echo "gcc-compatible driver over cproc/QBE; the host compiler is $("$host" --version | head -1)"
+      exit 0 ;;
+    -dumpmachine|-dumpversion|-dumpfullversion|-dumpspecs|-print-*|-V|-qversion|--help|--target-help)
+      exec "$host" "$@" ;;
+  esac
+done
+if [ $# -eq 1 ] && [ "$1" = -v ]; then exec "$host" -v; fi
+
+# Preprocessing and dependency queries (-E, -M, -MM, -MG) go to the host preprocessor exactly as asked: it
+# understands every -d*, -P, -C, -Wp,* ... option, and there is no code generation to get wrong. So does
+# -fsyntax-only (a check that writes no object; rake builds use `-Wp,-v - -fsyntax-only` to learn the
+# header search path): the host front end answers it.
+for a in "$@"; do
+  case $a in -E|-M|-MM|-MG|-fsyntax-only) exec "$host" "$@" ;; esac
+done
+
+# -f options that do not change what the program means here (or that this pipeline already implies).
+fok='PIC|pic|PIE|pie|wrapv|no-strict-aliasing|strict-aliasing|no-common|common|visibility=*|no-omit-frame-pointer|omit-frame-pointer|exceptions|no-exceptions|asynchronous-unwind-tables|no-asynchronous-unwind-tables|unwind-tables|stack-protector|stack-protector-*|no-stack-protector|stack-clash-protection|function-sections|data-sections|ident|no-ident|diagnostics-color=*|color-diagnostics|no-color-diagnostics|diagnostics-show-option|message-length=*|max-errors=*|no-builtin|builtin|no-builtin-*|lto|no-lto|no-plt|plt|semantic-interposition|no-semantic-interposition|signed-char|no-delete-null-pointer-checks|no-strict-overflow|strict-overflow|trapping-math|no-trapping-math|math-errno|merge-all-constants|no-inline|inline|inline-functions|no-inline-functions|unroll-loops|tree-vectorize|no-tree-vectorize|no-tree-*|tree-*|no-gcse|gcse|ipa-*|no-ipa-*|prefetch-loop-arrays|align-functions=*|align-loops=*|align-jumps=*|reorder-blocks|no-reorder-blocks|schedule-insns|no-schedule-insns|schedule-insns2|no-schedule-insns2|keep-inline-functions|no-keep-static-consts|permissive|no-permissive|no-rtti|stack-protector-all|cf-protection=*|cf-protection|no-cf-protection|no-fat-lto-objects|fat-lto-objects|use-linker-plugin|no-use-linker-plugin|lto-partition=*|file-prefix-map=*|debug-prefix-map=*|macro-prefix-map=*|dwarf2-cfi-asm|no-dwarf2-cfi-asm|var-tracking|no-var-tracking|var-tracking-assignments|no-var-tracking-assignments|no-eliminate-unused-debug-types|eliminate-unused-debug-types|record-gcc-switches|no-record-gcc-switches|verbose-asm|no-verbose-asm|stack-usage|no-stack-usage'
+
+mode=link out="" lang="" depmode="" dfile="" nodep=0 sawout=0
+pp=()        # preprocessor options (-D -I -std ...), given to cc -E / cc -M and to the C compiler
+ld=()        # link options, in order
+inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembly)
+picf=()
+dts=()       # -MT / -MQ pairs
+dp=0
+args=("$@")
+n=${#args[@]}
+need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"; }
+for ((i = 0; i < n; i++)); do
+  a=${args[i]}
+  case $a in
+    -c) mode=compile ;;
+    -S) die "-S (assembly output) is not supported" ;;
+    -o) need; out=${args[++i]}; sawout=1 ;;
+    -o?*) out=${a#-o}; sawout=1 ;;
+    -x) need; lang=${args[++i]}
+        case $lang in c|none|assembler|assembler-with-cpp) ;;
+          *) die "-x $lang is not supported (C only; use nfcxx for C++)" ;; esac ;;
+    -x?*) lang=${a#-x}
+        case $lang in c|none|assembler|assembler-with-cpp) ;;
+          *) die "-x $lang is not supported (C only; use nfcxx for C++)" ;; esac ;;
+    -MD|-MMD) depmode=$a ;;
+    -MF) need; dfile=${args[++i]} ;;
+    -MF?*) dfile=${a#-MF} ;;
+    -MT|-MQ) need; dts+=("$a" "${args[++i]}") ;;
+    -MT?*|-MQ?*) dts+=("${a:0:3}" "${a:3}") ;;
+    -MP) dp=1 ;;
+    -D|-U|-I|-isystem|-iquote|-idirafter|-include|-imacros) need; pp+=("$a" "${args[++i]}") ;;
+    -D?*|-U?*|-I?*|-isystem?*|-iquote?*|-idirafter?*|-include?*|-imacros?*) pp+=("$a") ;;
+    -std=c++*|-std=gnu++*) die "$a: C++ is not supported by nfcc (use nfcxx)" ;;
+    -std=*|-ansi) pp+=("$a") ;;
+    -nostdinc|-undef|--sysroot=*) pp+=("$a"); ld+=("$a") ;;
+    -l|-L) need; ld+=("$a" "${args[++i]}") ;;
+    -l?*|-L?*) ld+=("$a") ;;
+    -Xlinker|-z|-u|-T) need; ld+=("$a" "${args[++i]}") ;;
+    -Wl,*|-shared|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
+    -Wp,*|-Wa,*) die "$a is not supported (the preprocessor/assembler options would be dropped)" ;;
+    -w|-W*) ;;
+    -O|-O?*|-g|-g?*|-pipe|-v|-time) ;;
+    -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); picf+=("$a") ;;   # QBE output is already PIC (GOT-relative); gcc needs the flag
+    -m32|-mx32|-m16|-miamcu) die "$a is not supported (x86-64 only)" ;;
+    -m64|-march=*|-mtune=*|-mcpu=*|-msse*|-mavx*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*|-mrdrnd|-mrdseed) ;;
+    -m*) die "$a is not supported" ;;
+    -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) ;;
+    -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
+    -ffast-math|-Ofast|-ffinite-math-only|-funsafe-math-optimizations|-fassociative-math|-freciprocal-math|-fno-signed-zeros|-fno-math-errno) die "$a is not supported (changes floating-point semantics)" ;;
+    -funsigned-char|-fshort-enums|-fpack-struct*|-ftrapv|-fgnu89-inline|-fms-extensions|-fplan9-extensions|-fno-signed-char|-fshort-wchar|-fshort-double|-fno-short-double|-fleading-underscore|-fno-leading-underscore|-fnon-call-exceptions|-fcheck-pointer-bounds|-fsigned-bitfields|-funsigned-bitfields|-fno-asm|-fno-gnu-keywords|-ffreestanding|-fhosted|-fopenacc*|-fgnu-tm|-fcilkplus|-fsplit-stack|-fgnu-unique|-fno-gnu-unique|-fstack-reuse=*|-fno-zero-initialized-in-bss|-fgraphite*|-fsel-sched*|-fcall-used-*|-fcall-saved-*|-ffixed-*|-finstrument-functions*|-fwhole-program|-fplugin*|-fdump-*|-fchecking*)
+        die "$a is not supported (it changes semantics or code generation that this pipeline cannot honour)" ;;
+    -f*)
+        [[ ${a#-f} == @($fok) ]] || die "$a is not supported (not in nfcc's list of harmless -f options)" ;;
+    @*) die "response files ($a) are not supported" ;;
+    -) inputs+=("c:-") ;;
+    -*) die "unsupported option '$a'" ;;
+    *.c|*.i)
+        case $lang in assembler|assembler-with-cpp) inputs+=("s:$a") ;; *) inputs+=("c:$a") ;; esac ;;
+    *.s|*.S) inputs+=("s:$a") ;;
+    *.cc|*.cpp|*.cxx|*.C|*.c++|*.ii|*.m|*.mm|*.f|*.f90|*.F|*.go|*.d|*.rs)
+        [ "$lang" = c ] && inputs+=("c:$a") || die "$a: not a C source (use nfcxx for C++)" ;;
+    *)  if [ "$lang" = c ]; then inputs+=("c:$a")
+        elif [ "$lang" = assembler ] || [ "$lang" = assembler-with-cpp ]; then inputs+=("s:$a")
+        else inputs+=("o:$a"); fi ;;
+  esac
+done
+
+[ ${#inputs[@]} -gt 0 ] || die "no input files"
+if [ "$mode" = compile ]; then
+  [ "$sawout" = 0 ] || [ ${#inputs[@]} -le 1 ] || die "cannot specify -o with -c and multiple files"
+fi
+if [ -n "$depmode" ] && [ "$mode" != compile ]; then
+  die "$depmode needs -c (dependency files for a compile-and-link command are not supported)"
+fi
+if [ -n "$dfile" ] && [ -z "$depmode" ]; then die "-MF needs -MD or -MMD with -c (or -M/-MM for -E)"; fi
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+k=0
+
+# compile_one KIND SOURCE OBJECT
+compile_one() {
+  local kind=$1 src=$2 obj=$3 base
+  base=$(basename "$src"); base=${base%.*}
+  if [ "$kind" = s ]; then
+    "$host" -c "${pp[@]+"${pp[@]}"}" "$src" -o "$obj"; return
+  fi
+  local csrc=$src extra=()
+  if [ "$src" = - ]; then
+    csrc=$tmp/stdin$k.c; cat > "$csrc"
+  elif [[ $src != *.c ]]; then
+    csrc=$tmp/src$k.c; ln -s "$(realpath "$src")" "$csrc"
+    extra=(-iquote "$(dirname "$src")")
+  fi
+  k=$((k + 1))
+  if [ -n "$depmode" ]; then
+    local df=$dfile tg=("${dts[@]+"${dts[@]}"}") opt=-M
+    [ "$depmode" = -MMD ] && opt=-MM
+    if [ -z "$df" ]; then
+      if [ "$sawout" = 1 ]; then df=${obj%.*}.d; else df=$base.d; fi
+    fi
+    [ ${#tg[@]} -gt 0 ] || tg=(-MT "$obj")
+    [ "$src" = - ] || "$host" "$opt" -MF "$df" "${tg[@]}" $([ $dp = 1 ] && echo -MP) \
+        "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" ||
+      die "dependency generation failed for $src"
+  fi
+  if [ $backend = qbe ]; then
+    NFCXX_C_INPUT=1 "$qcc" -c "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
+  else
+    gcc -c -O2 -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
+  fi
+}
+
+if [ "$mode" = compile ]; then
+  for e in "${inputs[@]}"; do
+    src=${e#?:}
+    if [ "$sawout" = 1 ]; then obj=$out
+    else obj=$(basename "$src"); obj=${obj%.*}.o; fi
+    compile_one "${e%%:*}" "$src" "$obj"
+  done
+  exit 0
+fi
+
+# Link: compile the sources, keep the other inputs in command-line order.
+objs=()
+for e in "${inputs[@]}"; do
+  case ${e%%:*} in
+    o) objs+=("${e#?:}") ;;
+    c|s) o=$tmp/obj$k.o; compile_one "${e%%:*}" "${e#?:}" "$o"; objs+=("$o") ;;
+  esac
+done
+[ "$sawout" = 1 ] || out=a.out
+if [ $backend = qbe ]; then
+  # qbe-cc's non-compile path is the link: cc plus -latomic (the sized __atomic_* calls the QBE path emits).
+  "$qcc" "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
+else
+  gcc "${objs[@]}" "${ld[@]+"${ld[@]}"}" -o "$out"
+fi
