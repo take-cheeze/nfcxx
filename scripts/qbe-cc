@@ -35,7 +35,17 @@ fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 t=$(trace_start)
-cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" > "$tmp/pp.c"
+if [ -n "${NFCXX_C_INPUT:-}" ]; then
+  # Hand-written C (nfcxx's .c inputs) includes host headers, which the -undef below would break:
+  # glibc picks its ABI from __x86_64__ (gnu/stubs-32.h otherwise), gcc's stddef.h needs
+  # __SIZE_TYPE__, limits.h needs __INT_MAX__. So pre-define the host target's macros, but not the
+  # GCC-identity ones (__GNUC__, __VERSION__, ...): without __GNUC__ the headers use no GNU extensions,
+  # which cproc cannot parse. (EDG's generated C is already preprocessed and skips this.)
+  cc -dM -E -x c /dev/null | grep -Ev '^#define (__GNUC|__GNUG|__GXX|__VERSION__|__OPTIMIZE|__GCC_|__SSE|__MMX|__AVX|__FLT(16|32|64|128)|__SIZEOF_(INT128|FLOAT)|__STDC_|__STRICT_ANSI__|__pic__|__PIC__|__pie__|__PIE__|__CET__|__HAVE_SPECULATION|__BFLT16|__DEC|__USER_LABEL_PREFIX__|__REGISTER_PREFIX__|__NO_INLINE__|__tune|__code_model|__k8|__znver|__amd64|__MMX|__SEG|__FXSR|__SSP|__GXX|__LDBL_|__SIZEOF_LONG_DOUBLE__)' > "$tmp/defs.h"
+  cc -E -P -undef -D__CPROC__ -include "$tmp/defs.h" "${cppflags[@]}" "$src" > "$tmp/pp.c"
+else
+  cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" > "$tmp/pp.c"
+fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
 # cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.py rewrites
 # just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after weak-symbols.py.

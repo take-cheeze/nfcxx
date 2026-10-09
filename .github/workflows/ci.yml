@@ -43,6 +43,9 @@ jobs:
       - name: Trace output (Perfetto JSON, both backends)
         run: tests/trace/run.sh
 
+      - name: C inputs (both backends)
+        run: tests/c/run.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats

@@ -38,10 +38,15 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     libstdc++'s std::numbers variables (pulled in by <map>) use all of them. Their literals
     (`2.71875f16`) are rewritten to the exact bit pattern (`f16`, `f128`), or to a plain
     `float`/`double` literal (`f32`, `f64`).
+  * Hand-written C (env NFCXX_C_INPUT=1, set by nfcxx for .c inputs; glibc headers and user code):
+    `volatile` is dropped (cproc errors on any store to a volatile object; it already emits volatile loads
+    as plain loads), and `typedef T _Float32;`-style typedefs of the floating types above are removed
+    (the names are mapped instead), as glibc's <bits/floatn.h> declares them.
 
 Usage: qbe-prep.py PREPROCESSED_C REWRITTEN_C ASM_TAIL
 ASM_TAIL is appended to the QBE assembly by qbe-cc.
 """
+import os
 import re
 import sys
 from fractions import Fraction
@@ -63,6 +68,8 @@ FLOAT_TYPE = {
     '_Float16': 'struct __nfcxx_half16',
     '_Float128': 'struct __nfcxx_float128',
 }
+C_INPUT = bool(os.environ.get('NFCXX_C_INPUT'))
+DROP_TYPEDEF = set(FLOAT_TYPE) | {'_Float32x', '_Float64x', '_Float128x'}
 FLOAT_DECL = {
     'struct __nfcxx_half16': 'struct __nfcxx_half16 { unsigned short bits; };',
     'struct __nfcxx_float128': 'struct __nfcxx_float128 { _Alignas(16) unsigned long bits[2]; };',
@@ -308,6 +315,30 @@ def main():
         t = toks[i]
         prev = tok_at(toks, i - 1)
         stmt_ctx = prev is None or (prev.kind == 'punct' and prev.text in (';', '}', '{'))
+
+        # 0b. Hand-written C only (NFCXX_C_INPUT, set by nfcxx for .c inputs): cproc rejects every store to a
+        # volatile object ("volatile store is not yet supported"), yet it already emits volatile loads as
+        # plain loads and QBE does not reorder or remove memory accesses of an object whose address escapes
+        # (struct members, globals). So the qualifier is dropped, except on inline asm. A volatile local
+        # whose address is never taken is promoted to a register by QBE; that gap exists with or without this.
+        if C_INPUT and t.kind == 'id' and t.text in ('volatile', '__volatile__', '__volatile') and not (
+                prev is not None and prev.kind == 'id' and prev.text in ('__asm__', '__asm', 'asm')):
+            edits.append((t.start, t.end, ''))
+            i += 1
+            continue
+
+        # 0a. glibc's <bits/floatn.h> (hand-written C, no __GNUC__) typedefs `float _Float32;`,
+        # `long double _Float64x;` and the like. The names are mapped below (or have no cproc
+        # equivalent), so the plain typedef of one of them is dropped; a use of an unmapped one is an error.
+        if t.kind == 'id' and t.text == 'typedef':
+            j = i + 1
+            while j < len(toks) and not (toks[j].kind == 'punct' and toks[j].text in (';', '{', '(', '[')):
+                j += 1
+            if (j < len(toks) and toks[j].text == ';' and toks[j - 1].kind == 'id'
+                    and toks[j - 1].text in DROP_TYPEDEF):
+                edits.append((t.start, toks[j].end, ''))
+                i = j + 1
+                continue
 
         # 0. __attribute__((__constructor__)) on a function declaration: remove it, and list the function.
         if t.kind == 'id' and t.text == '__attribute__':
