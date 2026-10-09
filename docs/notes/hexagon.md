@@ -151,10 +151,10 @@ Results (`tests/hexagon/run.sh`, `QEMU_HEXAGON` set):
 | `raii_templates_class` | ok (exit 7) | `.data`/`.bss`; EH bookkeeping globals in `stub.c`, `-G0` |
 | `virtual_dispatch` | ok (exit 23) | vtables in `.data` (`R_HEX_32`); typeinfo vtables are stubs in `stub.c` |
 | `exceptions` | skip | needs the unwinder (`__throw`, `__throw_setup`) and `_setjmp` (libc) |
-| `templates_lambdas` | skip | `_Z3addIiET_…` only `edg_prelink` instantiates it |
+| `templates_lambdas` | ok (exit 12) | `scripts/gen-c-target.sh` passes `-tused` (instantiate used templates), as the host driver does; no `edg_prelink` needed |
 
-So 9 of 11 Hexagon checks run (8 generated cases and HVX), 2 are skipped with reasons. Compile-only
-mode (no qemu) compiles all 11.
+So 10 of 11 Hexagon checks in this table run (9 generated cases and HVX); only `exceptions` is skipped, with its reason.
+Compile-only mode (no qemu) compiles all 11.
 
 Layout: `tests/hexagon/layout.sh` passes (26 facts); with `EDG_TARGET=linux_i686` it fails
 (verified), so it isn't vacuous.
@@ -255,10 +255,9 @@ Run it the way CI does:
 
     CLANG=clang-19 QEMU_HEXAGON=qemu-hexagon-static tests/hexagon/run.sh
 
-Result: 9 passed (`constexpr_static`, `float_neg_switch`, `raii_templates_class`, `signed_overflow_wraps`,
-`struct_libc`, `virtual_dispatch`, and the HVX kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 2 skipped:
-`exceptions` (needs the unwinder: `__throw`, `__throw_setup`, `_setjmp`) and `templates_lambdas` (needs
-`edg_prelink`).
+Result: 10 passed (`constexpr_static`, `float_neg_switch`, `raii_templates_class`, `signed_overflow_wraps`,
+`struct_libc`, `templates_lambdas`, `virtual_dispatch`, and the HVX kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 1 skipped:
+`exceptions` (needs the unwinder: `__throw`, `__throw_setup`, `_setjmp`).
 
 `flatlink.py` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
 and applies the absolute relocations clang emits for `-fno-pic -G0`: `R_HEX_32` (data words) and the
