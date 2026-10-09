@@ -4,7 +4,7 @@
 #   2. clang --target=hexagon compiles it (-fwrapv -fno-strict-aliasing, as the gcc backend does).
 #   3. If qemu-hexagon (Linux user mode) is installed, the object is flattened (flatlink.py,
 #      since no Hexagon linker exists here), run, and its exit code compared with `// EXPECT:`.
-# Cases needing data relocations (.rodata/.data), libc, or the EH runtime, and template
+# Cases that throw get tests/hexagon/eh_rt.c appended. Cases needing relocations or libc that flatlink.py lacks, and template
 # instantiation (edg_prelink), are reported as SKIP with the reason. Exits 0 with SKIP when clang
 # has no Hexagon backend.
 # Env: CLANG (default clang), QEMU_HEXAGON (default qemu-hexagon), EDG_TARGET (default linux_riscv32).
@@ -34,8 +34,14 @@ for f in "$root"/tests/cases/*.cpp; do
     echo "FAIL (edg) $n"; head -3 "$tmp/$n.edg"; fail=1; continue
   fi
   cat "$here/stub.c" >> "$tmp/$n.c"
+  # A case that throws (or rethrows) gets the EH runtime in the same translation unit.
+  ehdef=
+  if grep -q '__throw_setup\|__rethrow\|__internal_rethrow' "$tmp/$n.c"; then
+    ehdef=-DNFCXX_EH_RT
+    cat "$here/eh_rt.c" >> "$tmp/$n.c"
+  fi
   # -G0: no small-data (GP) base is set up at run time, so every global is addressed absolutely.
-  if ! $clang --target=$triple -ffreestanding -fno-pic -G0 -O2 -fwrapv -fno-strict-aliasing -w \
+  if ! $clang --target=$triple -ffreestanding -fno-pic -G0 -O2 -fwrapv -fno-strict-aliasing -w $ehdef \
         -c "$tmp/$n.c" -o "$tmp/$n.o" 2>"$tmp/$n.cc"; then
     echo "FAIL (clang) $n"; head -3 "$tmp/$n.cc"; fail=1; continue
   fi
