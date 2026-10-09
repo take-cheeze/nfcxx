@@ -29,13 +29,16 @@ if [ $compile = 0 ] || [ -z "$src" ]; then
 fi
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-# EDG follows functions with a top-level `__asm__(".align 2");` hint; cproc has no
-# top-level asm, and the alignment is only a hint, so drop it.
 t=$(trace_start)
-cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" | sed 's/__asm__(".align 2");//g' > "$tmp/pp.c"
+cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" > "$tmp/pp.c"
 trace_end "$t" "cc -E (preprocess)" qbe-backend
+# cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.py rewrites
+# just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after weak-symbols.py.
 t=$(trace_start)
-"$cproc" < "$tmp/pp.c" > "$tmp/out.ssa"
+python3 "$(dirname "$0")/qbe-prep.py" "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+trace_end "$t" "qbe-prep.py (rewrite for cproc)" qbe-backend
+t=$(trace_start)
+"$cproc" < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
 t=$(trace_start)
 "$qbe" "$tmp/out.ssa" > "$tmp/out.s"
@@ -43,7 +46,8 @@ trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
 t=$(trace_start)
-python3 "$(dirname "$0")/weak-symbols.py" "$tmp/pp.c" "$tmp/out.s"
+python3 "$(dirname "$0")/weak-symbols.py" "$tmp/prep.c" "$tmp/out.s"
+cat "$tmp/tail.s" >> "$tmp/out.s"
 trace_end "$t" "weak-symbols.py" qbe-backend
 t=$(trace_start)
 cc -c -o "${out:-${src%.c}.o}" "$tmp/out.s"
