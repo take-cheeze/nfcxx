@@ -17,7 +17,7 @@ explicit address spaces, explicit safety checks inserted when lowering from EDG'
 ## Findings so far (answers to the handoff's open questions)
 
 - **EDG builds with GCC 13** (~3 min on 4 cores), after dropping `-Wno-error=return-mismatch`
-  (a GCC 14 flag) from `bases/docker/dev-env/gcc/edg_eccp_config`. `scripts/setup-edg.sh` does this.
+  (a GCC 14 flag) from `bases/docker/dev-env/gcc/edg_eccp_config`. `scripts/setup-edg.sh` does this on a copy of the base dir, keeping the `3rd/edg` submodule clean.
   Cross-target runtime libs (aarch64, armv7, ...) fail without 32-bit headers; only host `libC.a` is needed.
 - **Tools**: `eccp` (driver: cpfe -> gcc -> `edg_prelink` -> link), `cpfe` (front end), `edg_prelink`
   (template instantiation via `.ti` files), `libC.a` (runtime). `cpfe` must run with cwd at the
