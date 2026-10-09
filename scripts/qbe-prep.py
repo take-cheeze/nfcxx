@@ -11,6 +11,9 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     becomes `.set X, Y`. EDG uses these for thread_local initialization aliases
     (`_ZTHx = __tls_init`). A `_ZTHx` alias is marked `.weak` when its `_ZTWx` wrapper is weak
     (COMDAT), as gcc does.
+  * `__attribute__((__constructor__))` on a function declaration (EDG's static initializers, `__sti_*`)
+    is removed from the C, and the function is listed in `.init_array` in the assembly tail, so the
+    C runtime runs it before main. Only the plain form is handled; a priority argument is left alone.
   * `__attribute__((__aligned__(N)))` after an array declarator (`T x[40] __attribute__(...)`)
     moves to just after the declared name, where cproc accepts it. Same alignment.
   * `struct T {char b[L];} __attribute__((__aligned__(N)))` (std::aligned_storage) becomes
@@ -189,6 +192,7 @@ def main():
     tail = []   # assembly directives, in source order
     weak = weak_function_names(toks)
     weak_marked = set()
+    ctors = []  # constructor functions, in source order
     need_float = set()
 
     def mark_weak_alias(name):
@@ -202,6 +206,23 @@ def main():
         t = toks[i]
         prev = tok_at(toks, i - 1)
         stmt_ctx = prev is None or (prev.kind == 'punct' and prev.text in (';', '}', '{'))
+
+        # 0. __attribute__((__constructor__)) on a function declaration: remove it, and list the function.
+        if t.kind == 'id' and t.text == '__attribute__':
+            # Exactly __attribute__((__constructor__)), after a parameter list: NAME ( params ) __attribute__(...)
+            if (is_punct(tok_at(toks, i + 1), '(') and is_punct(tok_at(toks, i + 2), '(')
+                    and tok_at(toks, i + 3) is not None and tok_at(toks, i + 3).text == '__constructor__'
+                    and is_punct(tok_at(toks, i + 4), ')') and is_punct(tok_at(toks, i + 5), ')')
+                    and is_punct(prev, ')')):
+                lp = match_back(toks, i - 1, '(', ')')
+                name = tok_at(toks, lp - 1) if lp > 0 else None
+                if name is None or name.kind != 'id':
+                    sys.exit('qbe-prep: cannot find the name of a constructor declaration')
+                if name.text not in ctors:
+                    ctors.append(name.text)
+                edits.append((t.start, toks[i + 5].end, ''))
+                i += 6
+                continue
 
         # 1. __asm__("...") statements.
         if t.kind == 'id' and t.text in ('__asm__', '__asm') and is_punct(tok_at(toks, i + 1), '(') and stmt_ctx:
@@ -296,6 +317,11 @@ def main():
     decls = [FLOAT_DECL[n] for n in ('struct __nfcxx_half16', 'struct __nfcxx_float128') if n in need_float]
     if decls:
         edits.append((0, 0, '\n'.join(decls) + '\n'))
+    if ctors:
+        tail.append('\t.pushsection .init_array,"aw"')
+        tail.append('\t.p2align 3')
+        tail.extend(f'\t.quad {name}' for name in ctors)
+        tail.append('\t.popsection')
 
     # Apply edits from the end so earlier offsets stay valid.
     out = src

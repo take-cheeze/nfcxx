@@ -22,10 +22,9 @@ fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
   if ! out=$(NFCXX_BACKEND=$b "$root/nfcxx" -I"$src" "$root/tests/realworld/doctest_main.cpp" \
              -o "$tmp/d-$b" 2>&1); then
-    # xfail: cproc rejects the GNU constructor attribute on the static initializer (global constructors).
-    # docs/notes/realworld.md, doctest section, gap 3.
-    if [ "$b" = qbe ] && grep -q "GNU attribute 'constructor' is not supported here" <<<"$out"; then
-      echo "xfail qbe doctest: cproc rejects the constructor attribute on global initializers (docs/notes/realworld.md)"
+    # xfail: cproc has no inline asm; doctest's DOCTEST_BREAK_INTO_DEBUGGER uses one (docs/notes/realworld.md).
+    if [ "$b" = qbe ] && grep -q "inline assembly is not yet supported" <<<"$out"; then
+      echo "xfail qbe doctest: cproc has no inline asm (doctest's debugger break); see docs/notes/realworld.md"
       continue
     fi
     echo "FAIL $b doctest (build)"; grep -E "error|undefined reference" <<<"$out" | head -5; fail=1; continue
