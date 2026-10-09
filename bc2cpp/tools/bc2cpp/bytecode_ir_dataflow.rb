@@ -49,10 +49,10 @@ module BytecodeIR
   # A callee's frame starts at R(a): it may overwrite every register above a.
   CALLEE_FRAME_OPS = Set['SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'EXEC', 'BLKCALL'].freeze
 
-  # Origin-only (Program#origin_effect; codegen's dataflow_effect keeps the audited model). The vm.c fallback
-  # dispatch (L_SEND_SYM / L_SENDB_SYM) starts a frame at R(a) and writes R(a+2) (nil); GETIDX0 and ADDI/SUBI
-  # also write R(a+1), SETIDX R(a+3). BLKCALL clears every register above its arguments. Every such write is
-  # above a. ADDILV/SUBILV are not listed: their fallback is mrb_funcall, whose frame sits above the caller's nregs.
+  # Multi-write ops, refused by both walks (dataflow_effect). The vm.c fallback dispatch (L_SEND_SYM / L_SENDB_SYM)
+  # starts a frame at R(a) and writes R(a+2) (nil); GETIDX0 and ADDI/SUBI also write R(a+1), SETIDX R(a+3). Every
+  # such write is above a. ADDILV/SUBILV are not listed: their fallback is mrb_funcall, whose frame sits above the
+  # caller's nregs.
   ORIGIN_FRAME_OPS = Set['GETIDX', 'GETIDX0', 'SETIDX', 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI',
                          'EQ', 'LT', 'LE', 'GT', 'GE', 'BLKCALL'].freeze
 
@@ -238,13 +238,7 @@ module BytecodeIR
         second&.kind == :reg && second.value.to_s == reg ? :define : :pass
       when 'EXCEPT' then insn.reg == reg ? :define : :refuse
       when 'ENTER' then enter_passes?(insn, reg) ? :pass : :refuse
-      else
-        lead = insn.reg
-        if ORIGIN_FRAME_OPS.include?(insn.op) && (lead.nil? || lead.to_i < reg.to_i)
-          :callee_clobber
-        else
-          dataflow_effect(insn, reg)
-        end
+      else dataflow_effect(insn, reg)
       end
     end
 
@@ -311,9 +305,10 @@ module BytecodeIR
     def dataflow_effect(insn, reg)
       op = insn.op
       return :pass if READS_LEADING_REG_OPS.include?(op)
+      lead = insn.reg
+      return :callee_clobber if ORIGIN_FRAME_OPS.include?(op) && (lead.nil? || lead.to_i < reg.to_i)
       return :refuse unless WRITES_LEADING_REG_OPS.include?(op) || op.start_with?('LOADI')
 
-      lead = insn.reg
       return :callee_clobber if CALLEE_FRAME_OPS.include?(op) && lead && lead.to_i < reg.to_i
 
       lead == reg ? :define : :pass
