@@ -30,6 +30,16 @@ class CodeGen
     def ivar_fact_mask(irep, name) = @cg.class_pool_ivar_fact_mask(irep, name)
     def upvar_mask(irep, insn) = @cg.class_upvar_mask(irep, insn)
     def pool_mask(_irep, _insn) = NumericFlow::OTHER
+    # The class bit of a true, false or Symbol literal (exactly TrueClass, FalseClass or Symbol: each has one instance
+    # or is a Symbol, and its mrb_class is that class, see the mrb_class immediate cases in mruby's class.h).
+    LITERAL_CLASSES = { 'LOADTRUE' => 'TrueClass', 'LOADFALSE' => 'FalseClass', 'LOADSYM' => 'Symbol' }.freeze
+    def literal_class_mask(insn)
+      klass = LITERAL_CLASSES[insn.op]
+      return nil unless klass && @cg.immediate_class_bits_enabled?
+
+      @cg.numeric_class_bit(klass)
+    end
+    def false_class_bit = @cg.numeric_false_class_bit
     def op_native?(_sym) = false
     def nil_raises?(_sym) = false
 
@@ -125,6 +135,17 @@ class CodeGen
 
   def return_class_name_of_bit(bit)
     @numeric_class_bits&.key(bit)
+  end
+
+  # BC2CPP_IMMEDIATE_CLASS_BITS=0 turns off the TrueClass, FalseClass and Symbol bits of true, false and Symbol literals.
+  def immediate_class_bits_enabled?
+    ENV.fetch('BC2CPP_IMMEDIATE_CLASS_BITS', '1') != '0'
+  end
+
+  # FalseClass's bit, or 0 when disabled. Allocated on every call, not on the first LOADFALSE: a flow may narrow on
+  # a falsy edge before the method that loads false is analysed, and every flow must narrow with the same bit.
+  def numeric_false_class_bit
+    immediate_class_bits_enabled? ? numeric_class_bit('FalseClass') : 0
   end
 
   # Build the table. Runs once the facts `exact_new_class_at` reads (ClassLayout, class_return_names) are final.

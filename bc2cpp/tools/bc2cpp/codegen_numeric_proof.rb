@@ -90,6 +90,8 @@ class CodeGen
     def op_native?(sym)
       @cg.numeric_op_native?(sym)
     end
+
+    def false_class_bit = @cg.numeric_false_class_bit
   end
 
   # Drop every memoized flow. Called once the proofs the flow reads are final
