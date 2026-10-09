@@ -15,7 +15,8 @@ class CallSiteIndex
         next unless name
 
         dest = insn.reg.to_i
-        argc = insn.argc.to_i
+        # A packed send (`f(*a)`, n=*, vm.c CALL_MAXARGS) has no count: nil, so no consumer reads it as 0 args.
+        argc = insn.n_spec == '*' ? nil : insn.argc.to_i
         by_name[name] << [irep, idx, dest, argc]
       end
     end
