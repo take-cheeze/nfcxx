@@ -1,0 +1,190 @@
+// nfcxx freestanding <string_view>: basic_string_view with char_traits<char>. No allocation,
+// no libc: lengths and comparisons are plain loops. Out-of-range access panics (no exceptions).
+#ifndef NFCXX_LIB_STRING_VIEW
+#define NFCXX_LIB_STRING_VIEW
+
+#include <cstddef>
+#include <nfcxx_panic>
+#include <type_traits>
+
+namespace std {
+inline namespace __nfcxx {
+
+template <class _CharT>
+struct char_traits;
+
+template <>
+struct char_traits<char> {
+  typedef char char_type;
+
+  static constexpr size_t length(const char* __s) noexcept {
+    size_t __n = 0;
+    while (__s[__n] != '\0') ++__n;
+    return __n;
+  }
+  static constexpr int compare(const char* __a, const char* __b, size_t __n) noexcept {
+    for (size_t __i = 0; __i < __n; ++__i) {
+      if (!eq(__a[__i], __b[__i])) return lt(__a[__i], __b[__i]) ? -1 : 1;
+    }
+    return 0;
+  }
+  static constexpr const char* find(const char* __s, size_t __n, const char& __c) noexcept {
+    for (size_t __i = 0; __i < __n; ++__i)
+      if (eq(__s[__i], __c)) return __s + __i;
+    return nullptr;
+  }
+  static constexpr bool eq(char __a, char __b) noexcept { return __a == __b; }
+  // Ordered as unsigned char, as the standard requires for char_traits<char>.
+  static constexpr bool lt(char __a, char __b) noexcept {
+    return static_cast<unsigned char>(__a) < static_cast<unsigned char>(__b);
+  }
+};
+
+template <class _CharT, class _Traits = char_traits<_CharT>>
+class basic_string_view {
+public:
+  typedef _Traits traits_type;
+  typedef _CharT value_type;
+  typedef _CharT* pointer;
+  typedef const _CharT* const_pointer;
+  typedef _CharT& reference;
+  typedef const _CharT& const_reference;
+  typedef const _CharT* const_iterator;
+  typedef const_iterator iterator;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+
+  static constexpr size_type npos = size_type(-1);
+
+  constexpr basic_string_view() noexcept : __p_(nullptr), __n_(0) {}
+  constexpr basic_string_view(const basic_string_view&) noexcept = default;
+  constexpr basic_string_view(const _CharT* __s, size_type __count) noexcept : __p_(__s), __n_(__count) {}
+  constexpr basic_string_view(const _CharT* __s) noexcept : __p_(__s), __n_(_Traits::length(__s)) {}
+
+  constexpr basic_string_view& operator=(const basic_string_view&) noexcept = default;
+
+  constexpr const_iterator begin() const noexcept { return __p_; }
+  constexpr const_iterator end() const noexcept { return __p_ + __n_; }
+  constexpr const_iterator cbegin() const noexcept { return __p_; }
+  constexpr const_iterator cend() const noexcept { return __p_ + __n_; }
+
+  constexpr size_type size() const noexcept { return __n_; }
+  constexpr size_type length() const noexcept { return __n_; }
+  constexpr bool empty() const noexcept { return __n_ == 0; }
+  constexpr const _CharT* data() const noexcept { return __p_; }
+
+  constexpr const_reference operator[](size_type __i) const noexcept {
+    if (__i >= __n_) __panic("string_view::operator[]: index out of range");
+    return __p_[__i];
+  }
+  constexpr const_reference at(size_type __i) const {
+    if (__i >= __n_) __panic("string_view::at: index out of range");
+    return __p_[__i];
+  }
+  constexpr const_reference front() const noexcept {
+    if (__n_ == 0) __panic("string_view::front: empty");
+    return __p_[0];
+  }
+  constexpr const_reference back() const noexcept {
+    if (__n_ == 0) __panic("string_view::back: empty");
+    return __p_[__n_ - 1];
+  }
+
+  constexpr void remove_prefix(size_type __n) noexcept {
+    if (__n > __n_) __panic("string_view::remove_prefix: count out of range");
+    __p_ += __n;
+    __n_ -= __n;
+  }
+  constexpr void remove_suffix(size_type __n) noexcept {
+    if (__n > __n_) __panic("string_view::remove_suffix: count out of range");
+    __n_ -= __n;
+  }
+  constexpr void swap(basic_string_view& __o) noexcept {
+    basic_string_view __t = *this;
+    *this = __o;
+    __o = __t;
+  }
+
+  constexpr basic_string_view substr(size_type __pos, size_type __count = npos) const {
+    if (__pos > __n_) __panic("string_view::substr: pos out of range");
+    size_type __rest = __n_ - __pos;
+    return basic_string_view(__p_ + __pos, __count < __rest ? __count : __rest);
+  }
+
+  constexpr int compare(basic_string_view __v) const noexcept {
+    size_type __rlen = __n_ < __v.__n_ ? __n_ : __v.__n_;
+    int __r = _Traits::compare(__p_, __v.__p_, __rlen);
+    if (__r == 0) {
+      if (__n_ < __v.__n_) return -1;
+      if (__n_ > __v.__n_) return 1;
+    }
+    return __r;
+  }
+
+  constexpr bool starts_with(basic_string_view __v) const noexcept {
+    return __v.__n_ <= __n_ && _Traits::compare(__p_, __v.__p_, __v.__n_) == 0;
+  }
+  constexpr bool starts_with(_CharT __c) const noexcept { return __n_ != 0 && _Traits::eq(__p_[0], __c); }
+  constexpr bool ends_with(basic_string_view __v) const noexcept {
+    return __v.__n_ <= __n_ && _Traits::compare(__p_ + (__n_ - __v.__n_), __v.__p_, __v.__n_) == 0;
+  }
+  constexpr bool ends_with(_CharT __c) const noexcept { return __n_ != 0 && _Traits::eq(__p_[__n_ - 1], __c); }
+
+  constexpr size_type find(_CharT __c, size_type __pos = 0) const noexcept {
+    for (size_type __i = __pos; __i < __n_; ++__i)
+      if (_Traits::eq(__p_[__i], __c)) return __i;
+    return npos;
+  }
+  constexpr size_type find(basic_string_view __v, size_type __pos = 0) const noexcept {
+    if (__v.__n_ == 0) return __pos <= __n_ ? __pos : npos;
+    for (size_type __i = __pos; __i + __v.__n_ <= __n_; ++__i)
+      if (_Traits::compare(__p_ + __i, __v.__p_, __v.__n_) == 0) return __i;
+    return npos;
+  }
+
+private:
+  const _CharT* __p_;
+  size_type __n_;
+};
+
+template <class _CharT, class _Traits>
+constexpr bool operator==(basic_string_view<_CharT, _Traits> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return __x.size() == __y.size() && __x.compare(__y) == 0;
+}
+template <class _CharT, class _Traits>
+constexpr bool operator!=(basic_string_view<_CharT, _Traits> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return !(__x == __y);
+}
+template <class _CharT, class _Traits>
+constexpr bool operator<(basic_string_view<_CharT, _Traits> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return __x.compare(__y) < 0;
+}
+template <class _CharT, class _Traits>
+constexpr bool operator>(basic_string_view<_CharT, _Traits> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return __x.compare(__y) > 0;
+}
+template <class _CharT, class _Traits>
+constexpr bool operator<=(basic_string_view<_CharT, _Traits> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return __x.compare(__y) <= 0;
+}
+template <class _CharT, class _Traits>
+constexpr bool operator>=(basic_string_view<_CharT, _Traits> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return __x.compare(__y) >= 0;
+}
+
+// Mixed forms with a const char* (the second argument is non-deduced).
+template <class _CharT, class _Traits>
+constexpr bool operator==(basic_string_view<_CharT, _Traits> __x, type_identity_t<basic_string_view<_CharT, _Traits>> __y) noexcept {
+  return __x.size() == __y.size() && __x.compare(__y) == 0;
+}
+template <class _CharT, class _Traits>
+constexpr bool operator==(type_identity_t<basic_string_view<_CharT, _Traits>> __x, basic_string_view<_CharT, _Traits> __y) noexcept {
+  return __x.size() == __y.size() && __x.compare(__y) == 0;
+}
+
+typedef basic_string_view<char> string_view;
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_STRING_VIEW

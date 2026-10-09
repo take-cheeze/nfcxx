@@ -1,0 +1,46 @@
+// nfcxx freestanding <initializer_list>. The front end builds a braced-init-list as
+// (pointer to first element, element count) and calls the private constructor below, so the
+// layout (pointer followed by size) and the constructor signature are fixed by the compiler.
+//
+// initializer_list is declared directly in namespace std, NOT in std::__nfcxx: EDG only
+// treats std::initializer_list as the braced-list type when it is a member of std itself.
+// With the inline namespace, `f({1, 2})` fails with "no instance of constructor".
+#ifndef NFCXX_LIB_INITIALIZER_LIST
+#define NFCXX_LIB_INITIALIZER_LIST
+
+#include <cstddef>
+
+namespace std {
+
+template <class _Ep>
+class initializer_list {
+public:
+  typedef _Ep value_type;
+  typedef const _Ep& reference;
+  typedef const _Ep& const_reference;
+  typedef size_t size_type;
+  typedef const _Ep* iterator;
+  typedef const _Ep* const_iterator;
+
+  constexpr initializer_list() noexcept : __array_(nullptr), __length_(0) {}
+
+  constexpr size_type size() const noexcept { return __length_; }
+  constexpr const_iterator begin() const noexcept { return __array_; }
+  constexpr const_iterator end() const noexcept { return __array_ + __length_; }
+
+private:
+  constexpr initializer_list(const _Ep* __a, size_type __l) noexcept : __array_(__a), __length_(__l) {}
+
+  const _Ep* __array_;
+  size_type __length_;
+};
+
+template <class _Ep>
+constexpr const _Ep* begin(initializer_list<_Ep> __il) noexcept { return __il.begin(); }
+
+template <class _Ep>
+constexpr const _Ep* end(initializer_list<_Ep> __il) noexcept { return __il.end(); }
+
+} // namespace std
+
+#endif // NFCXX_LIB_INITIALIZER_LIST

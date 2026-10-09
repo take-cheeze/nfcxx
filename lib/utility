@@ -1,0 +1,120 @@
+// nfcxx freestanding <utility>: move, forward, swap, exchange, pair, make_pair,
+// integer_sequence / index_sequence.
+#ifndef NFCXX_LIB_UTILITY
+#define NFCXX_LIB_UTILITY
+
+#include <cstddef>
+#include <type_traits>
+
+namespace std {
+inline namespace __nfcxx {
+
+template <class _Tp>
+constexpr typename remove_reference<_Tp>::type&& move(_Tp&& __t) noexcept {
+  return static_cast<typename remove_reference<_Tp>::type&&>(__t);
+}
+
+template <class _Tp>
+constexpr _Tp&& forward(typename remove_reference<_Tp>::type& __t) noexcept {
+  return static_cast<_Tp&&>(__t);
+}
+
+template <class _Tp>
+constexpr _Tp&& forward(typename remove_reference<_Tp>::type&& __t) noexcept {
+  static_assert(!is_lvalue_reference<_Tp>::value, "forward of an rvalue as an lvalue reference");
+  return static_cast<_Tp&&>(__t);
+}
+
+template <class _Tp>
+constexpr void swap(_Tp& __a, _Tp& __b) noexcept {
+  _Tp __tmp = move(__a);
+  __a = move(__b);
+  __b = move(__tmp);
+}
+
+template <class _Tp, class _Up = _Tp>
+constexpr _Tp exchange(_Tp& __obj, _Up&& __new_value) {
+  _Tp __old = move(__obj);
+  __obj = forward<_Up>(__new_value);
+  return __old;
+}
+
+template <class _Tp>
+constexpr const _Tp& as_const(_Tp& __t) noexcept { return __t; }
+
+template <class _Tp, _Tp... _Ip>
+struct integer_sequence {
+  typedef _Tp value_type;
+  static constexpr size_t size() noexcept { return sizeof...(_Ip); }
+};
+
+template <size_t... _Ip> using index_sequence = integer_sequence<size_t, _Ip...>;
+
+// Built by recursive halving over index_sequence, not __make_integer_seq: the g++ front end
+// does not accept that builtin (the clang dialect does; see docs/notes/builtins.md).
+template <class _Seq1, class _Seq2> struct __merge_index_sequences;
+template <size_t... _I1, size_t... _I2>
+struct __merge_index_sequences<index_sequence<_I1...>, index_sequence<_I2...>> {
+  typedef index_sequence<_I1..., (sizeof...(_I1) + _I2)...> type;
+};
+
+template <size_t _Np> struct __index_sequence_impl {
+  typedef typename __merge_index_sequences<typename __index_sequence_impl<_Np / 2>::type,
+                                           typename __index_sequence_impl<_Np - _Np / 2>::type>::type type;
+};
+template <> struct __index_sequence_impl<0> { typedef index_sequence<> type; };
+template <> struct __index_sequence_impl<1> { typedef index_sequence<0> type; };
+
+template <class _Tp, class _Seq> struct __retype_index_sequence;
+template <class _Tp, size_t... _I>
+struct __retype_index_sequence<_Tp, index_sequence<_I...>> {
+  typedef integer_sequence<_Tp, static_cast<_Tp>(_I)...> type;
+};
+
+template <class _Tp, _Tp _Np>
+using make_integer_sequence =
+    typename __retype_index_sequence<_Tp, typename __index_sequence_impl<static_cast<size_t>(_Np)>::type>::type;
+template <size_t _Np> using make_index_sequence = make_integer_sequence<size_t, _Np>;
+
+template <class _T1, class _T2>
+struct pair {
+  typedef _T1 first_type;
+  typedef _T2 second_type;
+
+  _T1 first;
+  _T2 second;
+
+  constexpr pair() : first(), second() {}
+  constexpr pair(const _T1& __x, const _T2& __y) : first(__x), second(__y) {}
+
+  template <class _U1, class _U2>
+  constexpr pair(const pair<_U1, _U2>& __p) : first(__p.first), second(__p.second) {}
+
+  void swap(pair& __p) noexcept {
+    std::swap(first, __p.first);
+    std::swap(second, __p.second);
+  }
+};
+
+template <class _T1, class _T2>
+constexpr bool operator==(const pair<_T1, _T2>& __x, const pair<_T1, _T2>& __y) {
+  return __x.first == __y.first && __x.second == __y.second;
+}
+template <class _T1, class _T2>
+constexpr bool operator!=(const pair<_T1, _T2>& __x, const pair<_T1, _T2>& __y) {
+  return !(__x == __y);
+}
+template <class _T1, class _T2>
+constexpr bool operator<(const pair<_T1, _T2>& __x, const pair<_T1, _T2>& __y) {
+  return __x.first < __y.first || (!(__y.first < __x.first) && __x.second < __y.second);
+}
+
+template <class _T1, class _T2>
+constexpr pair<typename decay<_T1>::type, typename decay<_T2>::type> make_pair(_T1&& __x, _T2&& __y) {
+  return pair<typename decay<_T1>::type, typename decay<_T2>::type>(forward<_T1>(__x), forward<_T2>(__y));
+}
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_UTILITY

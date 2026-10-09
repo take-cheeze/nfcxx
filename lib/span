@@ -1,0 +1,102 @@
+// nfcxx freestanding <span>: a view over contiguous elements. Stores a pointer and a size for
+// both static and dynamic extents. Out-of-range element access panics; there are no exceptions.
+// Subset: first/last/subspan return dynamic-extent spans (the standard's runtime overloads).
+#ifndef NFCXX_LIB_SPAN
+#define NFCXX_LIB_SPAN
+
+#include <array>
+#include <cstddef>
+#include <nfcxx_panic>
+#include <type_traits>
+
+namespace std {
+inline namespace __nfcxx {
+
+inline constexpr size_t dynamic_extent = static_cast<size_t>(-1);
+
+// span<From> converts to span<To> when the element types match up to cv and no const is dropped.
+template <class _From, class _To>
+struct __span_convertible
+    : bool_constant<is_same<remove_cv_t<_From>, remove_cv_t<_To>>::value &&
+                    (is_const<_To>::value || !is_const<_From>::value)> {};
+
+template <class _Tp, size_t _Extent = dynamic_extent>
+class span {
+public:
+  typedef _Tp element_type;
+  typedef typename remove_cv<_Tp>::type value_type;
+  typedef size_t size_type;
+  typedef ptrdiff_t difference_type;
+  typedef _Tp* pointer;
+  typedef const _Tp* const_pointer;
+  typedef _Tp& reference;
+  typedef const _Tp& const_reference;
+  typedef _Tp* iterator;
+  typedef const _Tp* const_iterator;
+
+  static constexpr size_t extent = _Extent;
+
+  constexpr span() noexcept : __p_(nullptr), __n_(0) {}
+  constexpr span(pointer __ptr, size_type __count) : __p_(__ptr), __n_(__count) {}
+
+  template <size_t _Np>
+  constexpr span(_Tp (&__arr)[_Np]) noexcept : __p_(__arr), __n_(_Np) {}
+
+  // From std::array (mutable for span<T>, const for span<const T>).
+  template <size_t _Np, class _Up = _Tp, enable_if_t<!is_const<_Up>::value, int> = 0>
+  constexpr span(array<value_type, _Np>& __a) noexcept : __p_(__a.data()), __n_(_Np) {}
+  template <size_t _Np, class _Up = _Tp, enable_if_t<is_const<_Up>::value, int> = 0>
+  constexpr span(const array<value_type, _Np>& __a) noexcept : __p_(__a.data()), __n_(_Np) {}
+
+  // span<T> -> span<const T> and other conversions between spans of the same extent.
+  template <class _Up, size_t _OtherExtent, enable_if_t<__span_convertible<_Up, _Tp>::value, int> = 0>
+  constexpr span(const span<_Up, _OtherExtent>& __s) noexcept : __p_(__s.data()), __n_(__s.size()) {}
+
+  constexpr size_type size() const noexcept { return __n_; }
+  constexpr size_type size_bytes() const noexcept { return __n_ * sizeof(_Tp); }
+  constexpr bool empty() const noexcept { return __n_ == 0; }
+  constexpr pointer data() const noexcept { return __p_; }
+
+  constexpr reference operator[](size_type __i) const {
+    if (__i >= __n_) __panic("span::operator[]: index out of range");
+    return __p_[__i];
+  }
+  constexpr reference front() const {
+    if (__n_ == 0) __panic("span::front: empty span");
+    return __p_[0];
+  }
+  constexpr reference back() const {
+    if (__n_ == 0) __panic("span::back: empty span");
+    return __p_[__n_ - 1];
+  }
+
+  constexpr iterator begin() const noexcept { return __p_; }
+  constexpr iterator end() const noexcept { return __p_ + __n_; }
+  constexpr const_iterator cbegin() const noexcept { return __p_; }
+  constexpr const_iterator cend() const noexcept { return __p_ + __n_; }
+
+  constexpr span<_Tp> first(size_type __count) const {
+    if (__count > __n_) __panic("span::first: count out of range");
+    return span<_Tp>(__p_, __count);
+  }
+  constexpr span<_Tp> last(size_type __count) const {
+    if (__count > __n_) __panic("span::last: count out of range");
+    return span<_Tp>(__p_ + (__n_ - __count), __count);
+  }
+  constexpr span<_Tp> subspan(size_type __offset, size_type __count = dynamic_extent) const {
+    if (__offset > __n_) __panic("span::subspan: offset out of range");
+    size_type __rest = __n_ - __offset;
+    if (__count == dynamic_extent) return span<_Tp>(__p_ + __offset, __rest);
+    if (__count > __rest) __panic("span::subspan: count out of range");
+    return span<_Tp>(__p_ + __offset, __count);
+  }
+
+private:
+  pointer __p_;
+  size_type __n_;
+};
+
+} // inline namespace __nfcxx
+} // namespace std
+
+#endif // NFCXX_LIB_SPAN
