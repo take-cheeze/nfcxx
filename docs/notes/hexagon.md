@@ -27,7 +27,7 @@ Everything below was run in this container (Ubuntu 24.04, GCC 13.3.0).
 
 Conclusion: the only Hexagon execution path available here is `clang --target=hexagon` for
 compilation, plus `qemu-hexagon` for Linux user-mode execution. Linking needs a small flattener
-(`tests/hexagon/flatlink.py`), because no Hexagon linker exists.
+(`tests/hexagon/flatlink.rb`), because no Hexagon linker exists.
 
 Get the emulator (no system-wide install):
 
@@ -132,7 +132,7 @@ Expected-exit values were computed in Python and checked against the host build
 ### Running on qemu-hexagon
 
 Hexagon Linux user-mode binaries need a linker, which this container lacks, so
-`tests/hexagon/flatlink.py` does the minimum: one `.text` section, `R_HEX_B22_PCREL` (call/jump)
+`tests/hexagon/flatlink.rb` does the minimum: one `.text` section, `R_HEX_B22_PCREL` (call/jump)
 relocations resolved within `.text`, and an ELF32 EXEC header around it. It refuses (with
 `SKIP-data` / `SKIP-undef`) anything it cannot handle. A small `tests/hexagon/stub.c` supplies `memcpy`,
 `memset` and `_start` (`trap0(#0)` syscalls, `exit_group(main())`).
@@ -209,7 +209,7 @@ multi-level pointer qualification conversions, throw specifications / `noexcept`
 (`__cleanup_vec_new_or_delete`), `std::exception`-style library types, and thrown `double`/`float` (soft-float helpers such as
 `__hexagon_adddf3` are not provided; unrelated to EH).
 
-`flatlink.py` gained the relocation forms this code needed: `R_HEX_6_X` on `combine(#s8,##u6)` and duplex `Rd=#u6`,
+`flatlink.rb` gained the relocation forms this code needed: `R_HEX_6_X` on `combine(#s8,##u6)` and duplex `Rd=#u6`,
 `R_HEX_16_X` on `add(Rs,##u32)`, `R_HEX_10_X` on `cmp.eq(Rs,##u32)` and `R_HEX_8_X` on `combine(##u32,#s8)`.
 
 ## 4. What blocks real Hexagon
@@ -281,7 +281,7 @@ scripts/gen-c-target.sh -t linux_riscv32 -o build/hexagon/k.c tests/cases/hvx_ad
 cat tests/hexagon/stub.c >> build/hexagon/k.c
 clang --target=hexagon-unknown-linux-musl -ffreestanding -fno-pic -O2 -fwrapv -fno-strict-aliasing \
       -w -c build/hexagon/k.c -o build/hexagon/k.o
-python3 tests/hexagon/flatlink.py build/hexagon/k.o build/hexagon/k.elf _start
+scripts/mrb tests/hexagon/flatlink.rb build/hexagon/k.o build/hexagon/k.elf _start
 chmod +x build/hexagon/k.elf && $QEMU_HEXAGON build/hexagon/k.elf; echo "exit $?"   # expect 67
 ```
 
@@ -292,7 +292,7 @@ Everything needed is open source and installs from Ubuntu's archive; the Qualcom
 - `clang-19` (upstream LLVM 19, has `--target=hexagon`; the Qualcomm 19.x toolchain dropped `hexagonv65`).
 - `qemu-user-static` (provides `qemu-hexagon-static`, Linux user mode).
 - No Hexagon linker: `lld-19` has no Hexagon emulation (`ld.lld -m elf32_hexagon` is rejected), so
-  `tests/hexagon/flatlink.py` still produces the flat image.
+  `tests/hexagon/flatlink.rb` still produces the flat image.
 
 Run it the way CI does:
 
@@ -303,7 +303,7 @@ Result: 13 passed (`constexpr_static`, `exceptions`, `float_neg_switch`, `qbe_bu
 kernels `hvx_add_i16`, `hvx_mul_i16`, `hvx_vaddh`), 3 skipped (`qbe_atomics`, `qbe_gnu_forms`, `qbe_int3_break`:
 they include hosted C++ headers that the `linux_riscv32` EDG configuration lacks).
 
-`flatlink.py` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
+`flatlink.rb` lays every `SHF_ALLOC` section out in one `PT_LOAD` (`.text` first, `.bss` last, memsz > filesz)
 and applies the absolute relocations clang emits for `-fno-pic -G0`: `R_HEX_32` (data words) and the
 constant-extender forms (`R_HEX_32_6_X` on `immext`, `R_HEX_6_X`/`R_HEX_16_X`/`R_HEX_8_X` on the consumer
 instruction). The field positions were checked against `llvm-mc` encodings of `##value`. Compiling with `-G0`

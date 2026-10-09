@@ -20,7 +20,7 @@ jobs:
           submodules: true
 
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 ruby rake clang
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -48,6 +48,9 @@ jobs:
 
       - name: nfcc drop-in cc mode (both backends)
         run: tests/c/cc-mode.sh
+
+      - name: mruby scripts (byte-identical to the Python originals)
+        run: tests/mruby/run.sh
 
       - name: sccache stats
         if: always()
