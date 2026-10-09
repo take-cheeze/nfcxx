@@ -1590,6 +1590,36 @@ static void ir_global_print(a_variable_ptr var, const char *name)
 
 static void ir_stmt(a_statement_ptr s, int d);
 
+/* `continue`. The lowered IL turns it into a goto to an unnamed label that ends the loop body. Each loop on the
+   way down pushes that label (NULL when its body has none); a goto to the innermost loop's label prints as
+   (continue), and the label itself is then dropped. A goto to the label of an outer loop (which source `continue`
+   never produces) stays a goto, and keeps its label. */
+#define IR_LOOP_MAX 256
+static void *ir_loop_cont[IR_LOOP_MAX];
+static int ir_loop_kept[IR_LOOP_MAX]; /* a plain goto reached this loop's label from an inner loop */
+static int ir_loop_n;
+
+/* The label that ends a loop body, or NULL: the last statement of the body (a block) is an unnamed label. */
+static void *ir_cont_label(a_statement_ptr body)
+{
+  a_statement_ptr last = NULL, t;
+  if (body == NULL || body->kind != stmk_block) return NULL;
+  for (t = body->variant.block.statements; t != NULL; t = t->next) last = t;
+  if (last == NULL || last->kind != stmk_label) return NULL;
+  if (last->variant.label.ptr->source_corresp.name != NULL && last->variant.label.ptr->source_corresp.name[0] != '\0') return NULL;
+  return last->variant.label.ptr;
+}
+
+static void ir_loop_push(a_statement_ptr body)
+{
+  if (ir_loop_n >= IR_LOOP_MAX) abort();
+  ir_loop_cont[ir_loop_n] = ir_cont_label(body);
+  ir_loop_kept[ir_loop_n] = 0;
+  ir_loop_n++;
+}
+
+static void ir_loop_pop(void) { ir_loop_n--; }
+
 static void ir_stmt_list(a_statement_ptr s, int d)
 {
   for (; s != NULL; s = s->next) ir_stmt(s, d);
@@ -1648,7 +1678,9 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_line(d, "(loop");
       ir_line(d + 1, "(body");
       ir_exit_unless(d + 2, s->expr);
+      ir_loop_push(s->variant.loop_statement);
       ir_stmt(s->variant.loop_statement, d + 2);
+      ir_loop_pop();
       ir_close(1);
       ir_line(d + 1, "(step)");
       ir_close(1);
@@ -1657,7 +1689,9 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_note(1, stmk_end_test_while, 1);
       ir_line(d, "(loop");
       ir_line(d + 1, "(body");
+      ir_loop_push(s->variant.loop_statement);
       ir_stmt(s->variant.loop_statement, d + 2);
+      ir_loop_pop();
       ir_close(1);
       ir_line(d + 1, "(step");
       ir_exit_unless(d + 2, s->expr);
@@ -1671,7 +1705,9 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_line(d, "(loop");
       ir_line(d + 1, "(body");
       if (s->expr != NULL) ir_exit_unless(d + 2, s->expr);
+      ir_loop_push(s->variant.for_loop.statement);
       ir_stmt(s->variant.for_loop.statement, d + 2);
+      ir_loop_pop();
       ir_close(1);
       ir_line(d + 1, "(step");
       if (extra != NULL && extra->increment != NULL) {
@@ -1706,12 +1742,23 @@ static void ir_stmt(a_statement_ptr s, int d)
     }
     case stmk_goto:
       ir_note(1, stmk_goto, 1);
+      if (ir_loop_n > 0 && ir_loop_cont[ir_loop_n - 1] == (void *)s->variant.label.ptr) {
+        ir_line(d, "(continue)");
+        return;
+      }
+      {
+        int i;
+        for (i = 0; i < ir_loop_n - 1; i++)
+          if (ir_loop_cont[i] == (void *)s->variant.label.ptr) ir_loop_kept[i] = 1;
+      }
       ir_line(d, ir_fmt("(goto %s)",
                         ir_tab_get(&ir_labels, s->variant.label.ptr,
                                    ir_name_or(s->variant.label.ptr->source_corresp.name, "label"), "")));
       return;
     case stmk_label:
       ir_note(1, stmk_label, 1);
+      if (ir_loop_n > 0 && ir_loop_cont[ir_loop_n - 1] == (void *)s->variant.label.ptr && !ir_loop_kept[ir_loop_n - 1])
+        return; /* the end of the loop body: fall-through reaches the step */
       ir_line(d, ir_fmt("(label %s)",
                         ir_tab_get(&ir_labels, s->variant.label.ptr,
                                    ir_name_or(s->variant.label.ptr->source_corresp.name, "label"), "")));
@@ -1823,6 +1870,7 @@ static void ir_function(a_routine_ptr rout)
   ir_in_main = rout->source_corresp.name != NULL && strcmp(rout->source_corresp.name, "main") == 0;
   ir_slots.n = 0;
   ir_labels.n = 0;
+  ir_loop_n = 0;
   ir_buf_open(&ir_slot_buf);
 
   /* Parameters: a hidden result pointer first, then one register per parameter. Aggregate parameters are
@@ -1939,7 +1987,11 @@ void nfcxx_ir_back_end(void)
   }
 
   nf_out = stdout;
-  fprintf(stdout, "(ir-module \"%s\")\n", slash != NULL ? slash + 1 : file_name);
+  /* The scalar sizes are EDG's for the target. A consumer that assumes a layout (the QBE emitter: LP64) checks them. */
+  fprintf(stdout, "(ir-module \"%s\" (layout (short %lu) (int %lu) (long %lu) (long_long %lu) (pointer %lu) (float %lu) (double %lu) (long_double %lu)))\n",
+          slash != NULL ? slash + 1 : file_name, (unsigned long)targ_sizeof_short, (unsigned long)targ_sizeof_int,
+          (unsigned long)targ_sizeof_long, (unsigned long)targ_sizeof_long_long, (unsigned long)targ_sizeof_pointer,
+          (unsigned long)targ_sizeof_float, (unsigned long)targ_sizeof_double, (unsigned long)targ_sizeof_long_double);
   ir_buf_write(&ir_out_globals, stdout);
   ir_buf_write(&ir_out_data, stdout);
   ir_buf_write(&ir_out_funcs, stdout);

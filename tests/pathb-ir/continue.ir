@@ -1,0 +1,130 @@
+(ir-module "continue.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (slot "j" int 4 4)
+  (slot "k" int 4 4)
+  (slot "n" int 4 4)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %0 int (load int $"i"))
+        (let %1 bool (lt.s int %0 (const int 10)))
+        (if %1 (then) (else (break)))
+        (block
+          (let %2 int (load int $"i"))
+          (let %3 int (crem int %2 (const int 2)))
+          (let %4 bool (ne int %3 (const int 0)))
+          (if %4
+            (then
+              (block
+                (continue))))
+          (let %5 int (load int $"i"))
+          (let %6 int (load int $"s"))
+          (let %7 int (wadd int %6 %5))
+          (store int $"s" %7)))
+      (step
+        (let %8 int (load int $"i"))
+        (let %9 int (wadd int %8 (const int 1)))
+        (store int $"i" %9))))
+  (store int $"j" (const int 0))
+  (loop
+    (body
+      (let %10 int (load int $"j"))
+      (let %11 bool (lt.s int %10 (const int 10)))
+      (if %11 (then) (else (break)))
+      (block
+        (let %12 int (load int $"j"))
+        (let %13 int (wadd int %12 (const int 1)))
+        (store int $"j" %13)
+        (let %14 int (load int $"j"))
+        (let %15 bool (eq int %14 (const int 3)))
+        (if %15
+          (then
+            (block
+              (continue))))
+        (let %16 int (load int $"j"))
+        (let %17 int (load int $"s"))
+        (let %18 int (wadd int %17 %16))
+        (store int $"s" %18)))
+    (step))
+  (store int $"k" (const int 0))
+  (loop
+    (body
+      (block
+        (let %19 int (load int $"k"))
+        (let %20 int (wadd int %19 (const int 1)))
+        (store int $"k" %20)
+        (let %21 int (load int $"k"))
+        (let %22 bool (eq int %21 (const int 2)))
+        (if %22
+          (then
+            (block
+              (continue))))
+        (let %23 int (load int $"k"))
+        (let %24 int (load int $"s"))
+        (let %25 int (wadd int %24 %23))
+        (store int $"s" %25)))
+    (step
+      (let %26 int (load int $"k"))
+      (let %27 bool (lt.s int %26 (const int 4)))
+      (if %27 (then) (else (break)))))
+  (store int $"n" (const int 0))
+  (block
+    (store int $"a" (const int 0))
+    (loop
+      (body
+        (let %28 int (load int $"a"))
+        (let %29 bool (lt.s int %28 (const int 4)))
+        (if %29 (then) (else (break)))
+        (block
+          (block
+            (block
+              (store int $"b" (const int 0))
+              (loop
+                (body
+                  (let %30 int (load int $"b"))
+                  (let %31 bool (lt.s int %30 (const int 4)))
+                  (if %31 (then) (else (break)))
+                  (block
+                    (let %32 int (load int $"b"))
+                    (let %33 int (load int $"a"))
+                    (let %34 bool (eq int %32 %33))
+                    (if %34
+                      (then
+                        (block
+                          (continue))))
+                    (let %35 int (load int $"n"))
+                    (let %36 int (wadd int %35 (const int 1)))
+                    (store int $"n" %36)))
+                (step
+                  (let %37 int (load int $"b"))
+                  (let %38 int (wadd int %37 (const int 1)))
+                  (store int $"b" %38))))
+            (let %39 int (load int $"a"))
+            (let %40 bool (eq int %39 (const int 1)))
+            (if %40
+              (then
+                (block
+                  (continue))))
+            (let %41 int (load int $"n"))
+            (let %42 int (wadd int %41 (const int 1)))
+            (store int $"n" %42))))
+      (step
+        (let %43 int (load int $"a"))
+        (let %44 int (wadd int %43 (const int 1)))
+        (store int $"a" %44))))
+  (let %45 int (load int $"n"))
+  (let %46 int (wadd int %45 (const int 5)))
+  (let %47 int (load int $"s"))
+  (let %48 int (wadd int %47 %46))
+  (store int $"s" %48)
+  (let %49 int (load int $"s"))
+  (return %49))

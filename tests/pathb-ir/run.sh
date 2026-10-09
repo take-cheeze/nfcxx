@@ -11,7 +11,10 @@ cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 [ -x "$cpfe" ] || { echo "run.sh: no harness at $cpfe; set PATHB_CPFE (see docs/notes/pathb-stage2.md)" >&2; exit 2; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
-for f in tests/cases/*.cpp; do
+# The probes of tests/pathb-qbe/cases that exercise the lowering itself (continue, bool loads, setjmp, unreachable
+# code) have goldens here too, so a change in the IR text shows up as a diff.
+probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp tests/pathb-qbe/cases/setjmp.cpp tests/pathb-qbe/cases/reachability.cpp"
+for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)
   if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then
