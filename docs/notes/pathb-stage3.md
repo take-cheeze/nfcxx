@@ -15,6 +15,8 @@ this note records what stage 3 covers, what it refuses, and the results.
 - **Template instances:** `pathb-dump` passes `-tused`, as `eccp` does for one file, so templates used by a
   file are defined (`templates_lambdas` links).
 - **The emitter** (`scripts/pathb-qbe-emit.py`) reads the IR text and writes QBE IL.
+- **Second round:** `(continue)`, a `(layout ...)` header, bool-load normalisation, reachability and `setjmp` (see
+  Closed gaps below).
 
 ## The emitter
 
@@ -55,6 +57,8 @@ Last run (on `main` at the time of writing):
 ```
 28 programs: 28 built, 28 ran, 17 match EXPECT, 11 trapped as required, 0 refused, 0 failed
 ```
+
+(That is the first round. The second round adds `continue`, `bool_load`, `reachability` and `setjmp`; 32 programs, see below.)
 
 | Program | Result |
 | --- | --- |
@@ -103,14 +107,47 @@ the runner checks.
 
 ## Known gaps
 
-- **`setjmp`.** QBE does not know that `setjmp` returns twice. Slots are promoted, so values changed after
-  `setjmp` may be stale after `longjmp`. `exceptions` passes, but that is not proof.
-- **Reachability.** Every routine EDG marks as needed is still printed.
-- **`continue`** is still a `goto`. There is no structurizer.
-- **Bool loads** are not normalised: a `bool` holding a value other than 0 or 1 is undefined here.
 - **Pointer subscripts** are not bounds-checked, and the IR has no `undef`, SSA or constant folding.
-- **Layout** assumes LP64 scalar sizes (int 4, long 8, pointers 8). The IR prints no scalar sizes.
 - **Hexadecimal unsigned constants** are fine for the emitter but not what a consumer might expect.
+- **`setjmp`:** the fix keeps every slot of a function that calls `setjmp` in memory, which is stronger than C
+  requires (and costs the promotion in that function). Other functions are unchanged. Functions are recognised by
+  the callee name, so an indirect call to `setjmp` is not.
+- **Reachability** is done by the emitter, not the IR: the IR still prints every routine EDG marks as needed.
+  Routines whose only job is a side effect without a reference (`__attribute__((constructor))` on a `static` function)
+  would be dropped; the IR carries no marker for them.
+- **Layout:** only the scalar sizes are checked; alignment of scalars is the one printed on slots and globals.
+
+## Closed gaps (stage 3, second round)
+
+Each has a probe in `tests/pathb-qbe/cases` (translation validation) and a golden in `tests/pathb-ir`.
+
+- **`continue`.** EDG's lowering turns `continue` into a `goto` to an unnamed label that ends the loop body. The IR now
+  prints `(continue)` for a goto to the innermost loop's own end-of-body label and drops that label; a goto to an outer
+  loop's label (never produced by source `continue`) stays a goto and keeps its label. The emitter jumps to the loop's
+  `step` block. Probe: `continue.cpp` (for, while, do-while, nested loops; exit 100 = EXPECT 100, gcc 100). The golden
+  `tests/pathb-ir/continue.ir` shows the nodes; `gaps.ir` changed for the same reason.
+- **Bool loads.** The emitter normalises every `bool` load to 0 or 1 (`cnew`), so `!`, `==`, conversions to `int` and
+  arguments see a canonical value. Probe: `bool_load.cpp` writes 2, 0x80 and 255 into bool objects through
+  `unsigned char` and a union. C++ leaves such an object undefined, so the runner skips the gcc comparison for a probe
+  with a `// GCC: undefined` line. Before: exit 6, EXPECT 0. After: exit 0.
+- **Reachability.** `pathb-qbe-emit.py` keeps the external definitions and what they refer to (`@"..."` and `&"..."`,
+  transitively) and drops unreachable `(static)` and `(weak)` definitions; `--no-prune` turns it off. Declarations
+  and string data stay. Probe: `reachability.cpp` has an unused static function, an unused inline function, an
+  unused template instance and an unused class with a virtual function, each using `long double` or `volatile`, which the
+  emitter refuses. Before: `refused: type long_double`. After: exit 42 = EXPECT 42, gcc 42.
+- **`setjmp`.** QBE promotes stack slots to temporaries and forwards stores to loads, and it does not know that
+  `setjmp` returns twice. A function that calls `setjmp`, `_setjmp`, `sigsetjmp`, `__sigsetjmp`, `savectx`, `vfork` or
+  `getcontext` now stores the address of each of its slots into a module-level sink, so the slots escape and their
+  values stay in memory. (A stack slot as the sink does not work: QBE promotes it first, and the stores vanish.) Probe:
+  `setjmp.cpp` assigns locals after `setjmp` and reads them after `longjmp`; before: exit 33, EXPECT 77; after: exit 77.
+  The gcc backend is not compared (the locals are indeterminate in C).
+- **LP64 layout.** The module header now prints `(layout (short N) (int N) (long N) (long_long N) (pointer N) (float N)
+  (double N) (long_double N))` from EDG's target sizes, and the emitter refuses a target that is not LP64
+  (`refused: layout: ...`). All goldens changed by that header line.
+
+Last run of the second round: `tests/pathb-ir/run.sh` ok (goldens, 45 kinds, 0 unsupported, 8 markers in the gap probe);
+`tests/pathb-qbe/run.sh`: 32 programs, 32 built, 32 ran, 21 match EXPECT, 11 trapped as required, 0 refused, 0 failed;
+`tests/run.sh` ok.
 
 ## Reproduce
 

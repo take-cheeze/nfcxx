@@ -1,4 +1,4 @@
-(ir-module "gaps.cpp")
+(ir-module "gaps.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 
 (function "_Z3vlai"
   (ret int)
@@ -104,12 +104,11 @@
           (if %16
             (then
               (block
-                (goto "label"))))
+                (continue))))
           (let %17 int (load int $"i"))
           (let %18 int (load int $"s"))
           (let %19 int (wadd int %18 %17))
-          (store int $"s" %19)
-          (label "label")))
+          (store int $"s" %19)))
       (step
         (let %20 int (load int $"i"))
         (let %21 int (wadd int %20 (const int 1)))

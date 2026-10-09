@@ -16,10 +16,12 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
   * `__builtin_{add,sub,mul}_overflow(a, b, &r)` in general (mruby's numeric.h and time gem), when `a`, `b`
     and `*r` all have the same type among int, unsigned, long, unsigned long, long long, unsigned long long
-    (an argument that is a plain integer literal takes the type of `*r`): nested `_Generic`s pick a small
-    helper function (`__nfcxx_addov_l`, ...) that computes the wrapped result and the overflow flag. Any
-    other combination of types selects `__nfcxx_overflow_unsupported_operand_types`, which is declared and
-    never defined, so it is a link error naming that symbol, never a silently converted operand.
+    (a literal is an int or long like any other operand): nested `_Generic`s pick a small
+    helper function (`__nfcxx_addov_l`, ...) that computes the wrapped result and the overflow flag. Any other
+    mix of integer types (and literals, and char/short operands or results) goes through `__nfcxx_ovx`, which
+    computes the exact result in sign and 128-bit magnitude as GCC does and reports whether `*r` can hold it.
+    A non-integer operand or result selects `__nfcxx_overflow_unsupported_operand_types`, declared and never
+    defined: a link error naming that symbol, never a silently converted operand.
   * `(double)1.5e308L` / `(float)...L` (hand-written C): glibc's <float.h> spells DBL_MIN, DBL_MAX and DBL_EPSILON
     this way (`((double)2.2250738585072014e-308L)`). cproc types the literal as long double and emits an invalid
     QBE `truncd` for the cast. The `L` is dropped when the literal is directly cast to double or float, which
@@ -382,19 +384,61 @@ def volatile_locals(toks):
     return edits
 
 
-def overflow_call(op, text, lit, prelude):
-    """C expression for __builtin_OP_overflow(a, b, r) given the argument texts and which operands are literals."""
-    cases = []
-    for ty, suf, u in OV_TYPES:
-        hname, hdef = ov_helper(op, ty, suf, u)
-        prelude[hname] = hdef
-        sel = hname
-        for k in (1, 0):  # operands must have the result's type, unless they are integer literals
-            if not lit[k]:
-                sel = f'_Generic(({text[k]}), {ty}: {sel}, default: {OV_BAD})'
-        cases.append(f'{ty} *: {sel}')
+# Result types of the general (mixed-operand) overflow lowering: (C type, bits, signed).
+OVX_TYPES = (('signed char', 8, 1), ('unsigned char', 8, 0), ('short', 16, 1), ('unsigned short', 16, 0),
+             ('int', 32, 1), ('unsigned int', 32, 0), ('long', 64, 1), ('unsigned long', 64, 0),
+             ('long long', 64, 1), ('unsigned long long', 64, 0))
+OVX_CORE = """static int __nfcxx_ovx(int op, unsigned long long a, int as, unsigned long long b, int bs, int w, int rs, unsigned long long *out) {
+  int an = as && (long long)a < 0, bn = bs && (long long)b < 0, neg;
+  unsigned long long am = an ? -a : a, bm = bn ? -b : b, hi = 0, lo;
+  if (op == 2) {
+    unsigned long long a0 = am & 0xffffffffULL, a1 = am >> 32, b0 = bm & 0xffffffffULL, b1 = bm >> 32;
+    unsigned long long p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    unsigned long long mid = (p00 >> 32) + (p01 & 0xffffffffULL) + (p10 & 0xffffffffULL);
+    lo = (p00 & 0xffffffffULL) | (mid << 32);
+    hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    neg = an != bn;
+  } else {
+    if (op == 1) bn = !bn;
+    if (an == bn) { lo = am + bm; hi = lo < am; neg = an; }
+    else if (am >= bm) { lo = am - bm; neg = an; }
+    else { lo = bm - am; neg = bn; }
+  }
+  if (hi == 0 && lo == 0) neg = 0;
+  *out = neg ? -lo : lo;
+  if (hi) return 1;
+  if (rs) return neg ? lo > (1ULL << (w - 1)) : lo > (1ULL << (w - 1)) - 1;
+  if (neg) return 1;
+  return w < 64 && (lo >> w) != 0;
+}"""
+OV_OPNUM = {'add': 0, 'sub': 1, 'mul': 2}
+
+
+def overflow_call(op, text, prelude):
+    """C expression for __builtin_OP_overflow(a, b, r) given the argument texts.
+
+    The result is the exact value a OP b converted (wrapping) to *r, the flag is whether that value differs, as in GCC.
+    Same-type int/long/long long operands use the small helpers; every other mix of integer operand
+    types (literals included) goes through __nfcxx_ovx, which computes in sign and 128-bit magnitude."""
+    a, b, r = text
+    prelude['__nfcxx_ovx'] = OVX_CORE
     prelude[OV_BAD] = f'int {OV_BAD}(long long, ...);'
-    return f'(_Generic(({text[2]}), ' + ', '.join(cases) + f', default: {OV_BAD}))({text[0]}, {text[1]}, {text[2]})'
+    sg = lambda x: (f'_Generic((({x})+0), int: 1, long: 1, long long: 1, unsigned: 0, unsigned long: 0,'
+                    f' unsigned long long: 0, default: {OV_BAD}(0))')
+    fast = {ty: (suf, u) for ty, suf, u in OV_TYPES}
+    cases = []
+    for ty, bits, signed in OVX_TYPES:
+        wname = '__nfcxx_ovx_' + ty.replace(' ', '_')
+        prelude[wname] = (f'static int {wname}(int op, unsigned long long a, int as, unsigned long long b, int bs, {ty} *r) {{'
+                          f' unsigned long long o; int f = __nfcxx_ovx(op, a, as, b, bs, {bits}, {signed}, &o); *r = ({ty})o; return f; }}')
+        mix = f'{wname}({OV_OPNUM[op]}, (unsigned long long)({a}), {sg(a)}, (unsigned long long)({b}), {sg(b)}, ({ty} *)({r}))'
+        sel = mix
+        if ty in fast:
+            hname, hdef = ov_helper(op, ty, *fast[ty])
+            prelude[hname] = hdef
+            sel = (f'_Generic(({a}), {ty}: _Generic(({b}), {ty}: {hname}({a}, {b}, ({ty} *)({r})), default: {mix}), default: {mix})')
+        cases.append(f'{ty} *: {sel}')
+    return f'_Generic(({r}), ' + ', '.join(cases) + f', default: {OV_BAD}(0, {a}, {b}, {r}))'
 
 
 MULOV_NAME = '__nfcxx_mulov_ul'
@@ -678,8 +722,7 @@ def main():
             if ranges is None or len(ranges) != 3:
                 sys.exit(f'qbe-prep: {t.text} expects three arguments')
             text = [src[toks[a].start:toks[b - 1].end] for a, b in ranges]
-            lit = [b - a == 1 and toks[a].kind == 'num' for a, b in ranges[:2]]
-            edits.append((t.start, toks[rp].end, overflow_call(OV_OPS[t.text], text, lit, prelude)))
+            edits.append((t.start, toks[rp].end, overflow_call(OV_OPS[t.text], text, prelude)))
             i = rp + 1
             continue
         elif t.kind == 'id' and ATOMIC_RE.fullmatch(t.text):

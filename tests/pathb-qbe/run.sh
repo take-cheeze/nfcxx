@@ -5,7 +5,9 @@
 # cc -c -> link with EDG's runtime the way eccp links (-L build/edg/lib -lstdc++ -lgcc_s -lpthread -lC) -> run.
 # The exit code must equal the // EXPECT: value. The gcc backend (NFCXX_BACKEND=gcc ./nfcxx) must agree with it.
 #
-#   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow.
+#   tests/pathb-qbe/cases/*.cpp   probes of the emitted subset: arithmetic, conversions, globals, control flow,
+#                                 `continue`, bool loads, unreachable code. A probe with a `// GCC: undefined` line
+#                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
 #   tests/cases/*.cpp             the regression programs (same EXPECT values as the production runner).
 #   tests/pathb-qbe/multi/*/      programs of several translation units (all *.cpp of a directory, linked together):
 #                                 COMDAT/weak linkage of inline and template code from a shared header.
@@ -76,6 +78,13 @@ run_one() {
   want=$(expect_of "$f")
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
   gcc_rc=n/a
+  if grep -q '^// GCC: undefined' "$f"; then
+    # The program relies on a case C++ leaves undefined (a bool holding 2): gcc is not compared.
+    if [ $((got & 255)) -ne $((want & 255)) ]; then
+      failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc not compared)"); return
+    fi
+    match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared: undefined in C++)"); return
+  fi
   if NFCXX_BACKEND=gcc ./nfcxx "$f" -o "$tmp/$n.gcc" > /dev/null 2> "$tmp/$n.gccerr"; then
     sh -c 'timeout 10 "$0" > /dev/null 2>&1; exit $?' "$tmp/$n.gcc"; gcc_rc=$?
   else

@@ -150,18 +150,26 @@ used for preprocessing, dependency files, assembling and linking (default `cc`).
   `-imacros` (the QBE path preprocesses with the host `cc -E`, so these go to it; `scripts/qbe-cc` learned the
   extra forms); dependency files `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`, `-MP` with `-c` come from the host
   preprocessor (`cc -M`/`-MM`), with gcc's default names (`foo.d` next to `-o foo.o`, target `foo.o`).
-- **Ignored on purpose:** `-O*`, `-g*`, `-W*` (including `-Werror`), `-w`, `-pipe`, `-v` with other arguments,
+- **Also honoured:** `-S` (assembly instead of an object, one `.s` per source, `-o -` for stdout; gcc backend:
+  the host compiler's output, QBE backend: QBE's own, so the two differ); `@file` response files, expanded first
+  with gcc's rules (whitespace-separated, single/double quotes, backslash escapes, nested `@file`; an unreadable
+  file is an error); `-Wa,*` (handed to the assembler, unused with `-S`); `-Wp,` followed by `-D<m>`, `-U<m>`,
+  `-I<d>`, `-isystem`/`-iquote`/`-idirafter`/`-include`/`-imacros,<arg>`, `-MD`/`-MMD,<file>`, `-MF`/`-MT`/`-MQ,<arg>`
+  and `-MP`, which become the options without the `-Wp,`; any other `-Wp,` item is rejected. On the gcc backend
+  `-O0 -O1 -O2 -O3 -Os -Og` (the last one wins; `-O2` when none is given, as before) and `-g*` (none unless asked)
+  are passed to gcc. `-Ofast` is rejected (it was silently dropped before).
+- **Ignored on purpose:** `-O*` and `-g*` on the QBE backend (no optimisation levels, no debug info), `-W*` (including `-Werror`), `-w`, `-pipe`, `-v` with other arguments,
   `-m64`, `-march=`, `-mtune=`, other `-m<feature>` x86 options, and an allow list of `-f` options that cannot
   change what the program means here (`-fPIC`, `-fvisibility=`, `-fno-strict-aliasing`, `-fwrapv`,
   `-fno-common`, `-fstack-protector*`, `-f(no-)omit-frame-pointer`, `-ffunction-sections`, `-flto`, ...; the full
-  list is `fok` in `nfcc`). The gcc backend always uses `-O2 -fwrapv -fno-strict-aliasing`, as `nfcxx` does.
-- **Rejected with `nfcc: error: ...`, nothing written:** `-S`, `-m32`/`-mx32`, `-fsanitize*`, `-fopenmp`,
+  list is `fok` in `nfcc`). The gcc backend always adds `-fwrapv -fno-strict-aliasing`, as `nfcxx` does.
+- **Rejected with `nfcc: error: ...`, nothing written:** `-m32`/`-mx32`, `-fsanitize*`, `-fopenmp`,
   `-fprofile*`, `--coverage`, `-ffast-math` and friends, `-funsigned-char`, `-fshort-enums`, `-ftrapv`, other
   `-f` options that change semantics or are not in the allow list, `-std=c++*`, `-x c++`, C++ and other non-C
-  sources, `-Wp,*`/`-Wa,*`, `@response` files, dependency options on a compile-and-link command, and any
+  sources, other `-Wp,*` options, unreadable `@files`, dependency options on a compile-and-link command, and any
   option it does not know.
 
-`tests/c/cc-mode.sh` (both backends, 105 checks) invokes it the way make does: flag soup, a Makefile with
+`tests/c/cc-mode.sh` (both backends, 145 checks) invokes it the way make does: flag soup, a Makefile with
 `CC=nfcc`, `-MMD -MP` and `-include *.d` (touching a header rebuilds the dependents), `ar`, `-L`/`-l`, a shared
 object, autoconf-style probes, and one check per rejected option.
 
@@ -202,7 +210,7 @@ fixes below. These were the first blockers, in the order the build hit them (the
 
 | first blocker on QBE | cause | fix |
 |---|---|---|
-| `<stdin>:2262:10: error: undeclared identifier: __builtin_add_overflow` (`src/backtrace.c`) | `include/mruby/numeric.h` tests `__has_builtin(__builtin_add_overflow)`, which the host preprocessor answers yes to even with `-undef` | `qbe-prep.py` lowers `__builtin_{add,sub,mul}_overflow` with nested `_Generic` to small helpers, for operands of one type (int, unsigned, long, unsigned long, long long, unsigned long long; integer literals take the result's type); any other mix links against an undefined `__nfcxx_overflow_unsupported_operand_types`. Also `__builtin_popcount*`, `ctz*`, `clz*`. Case `tests/c/builtins_overflow.c` |
+| `<stdin>:2262:10: error: undeclared identifier: __builtin_add_overflow` (`src/backtrace.c`) | `include/mruby/numeric.h` tests `__has_builtin(__builtin_add_overflow)`, which the host preprocessor answers yes to even with `-undef` | `qbe-prep.py` lowers `__builtin_{add,sub,mul}_overflow` with nested `_Generic` to small helpers, with `int`/`long`/`long long` (signed or unsigned) operands of one type; every other integer mix (literals, `char`/`short`, mixed signedness or width, narrower or wider result) goes through `__nfcxx_ovx`, which computes the exact result in sign and 128-bit magnitude and converts it to `*r` like GCC; a non-integer operand or result links against an undefined `__nfcxx_overflow_unsupported_operand_types`. Cases `tests/c/builtins_overflow_mixed.c` (expected values taken from gcc) and `tests/builtins/overflow.cpp`. Also `__builtin_popcount*`, `ctz*`, `clz*`. Case `tests/c/builtins_overflow.c` |
 | `<stdin>:...: error: va_arg with non-scalar type is not yet supported` (`src/error.c`: `va_arg(ap, mrb_value)`; also `src/vm.c`) | cproc/QBE `vaarg` is scalar-only (cproc issue 52); `mrb_value` is a 16-byte struct (or 8 bytes with word boxing) | `scripts/cproc-vaarg-aggregate.patch`, applied by `setup-qbe.sh` after the empty-struct patch: va_arg of a struct/union of at most 16 bytes made only of integers/pointers reads the SysV va_list directly (register save area if `gp_offset <= 48 - size`, else the overflow area). Floats in the aggregate, more than 16 bytes, over-alignment and non-x86_64 keep the error. Case `tests/c/va_struct.c`, which also covers the "one register left" corner and was cross-checked against gcc-compiled callers and callees |
 | `undefined reference to 'alloca'` (link of `mrbc`, bison's `y.tab.c`) | without `__GNUC__`, glibc's `<alloca.h>` declares a function; libc has none | `qbe-prep.py` (C inputs) rewrites `alloca(n)` calls to `__builtin_alloca`. Case `tests/c/alloca.c` |
 | `qbe:...: invalid instruction type in truncd` (`mruby-numeric-ext`) | `DBL_MIN` is `((double)2.2250738585072014e-308L)`; cproc types the literal as long double and emits an invalid cast | `qbe-prep.py` drops the `L` of a literal directly cast to `double`/`float`. Case `tests/c/float_limits.c`. (Finding it also fixed `qbe-prep.py`'s tokenizer, which split `1e-308` at the sign.) |
@@ -233,15 +241,16 @@ Other things the build exposed, not on cproc's side:
 - **`va_arg` of aggregates** is only done for integer-class aggregates up to 16 bytes on x86_64. A struct with a
   float/double member (SSE class), over 16 bytes (passed in memory) or over-aligned still stops with cproc's
   error. The cproc change is local to the build copy; it should go upstream (cproc issue 52).
-- **Overflow builtins** only for operands of one type; `unsigned char`/`short` and mixed signedness fail loudly at
-  link time (`tests/builtins/overflow.cpp` stays an xfail for that reason).
+- **Overflow builtins** accept any mix of integer operand and result types; a floating-point or pointer operand or
+  result still fails loudly at link time. A mixed call expands to a long `_Generic` expression (the operand text
+  is repeated per result type), which is fine for mruby-sized uses but would be slow to compile in a hot macro.
 - **`long double`** and `_Complex` are still unsupported by cproc (`mruby-cmath`, which is not in the default
   gembox, needs `_Complex`).
-- `nfcc` has no `-S`, no response files, no `-Wp,*`/`-Wa,*`, and does not generate dependency files for a
-  compile-and-link command; `-std=c89`/`-ansi` change only the preprocessing (cproc always parses C11 plus
+- `nfcc` rejects `-Wp,` items other than the preprocessor options listed above, and does not generate dependency
+  files for a compile-and-link command; `-std=c89`/`-ansi` change only the preprocessing (cproc always parses C11 plus
   its GNU subset).
-- The GCC backend of `nfcc` ignores `-O*`/`-g` (it always uses `-O2`); a build that needs `-g` for debugging
-  gets no debug info.
+- The QBE backend of `nfcc` ignores `-O*`/`-g`: no optimisation levels and no debug info (assembly from `-S`
+  has no `.loc` lines). The gcc backend honours them.
 
 ## Next candidates
 

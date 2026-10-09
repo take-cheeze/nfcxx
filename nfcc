@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
 # nfcc: drop-in `cc` for build systems (make, rake, autoconf probes), on top of nfcxx's C pipeline.
-#   NFCXX_BACKEND=qbe|gcc   (default qbe: cproc -> QBE; gcc: host gcc -O2 -fwrapv -fno-strict-aliasing)
+#   NFCXX_BACKEND=qbe|gcc   (default qbe: cproc -> QBE; gcc: host gcc -fwrapv -fno-strict-aliasing, -O2 unless -O/-g say otherwise)
 #   NFCC_HOST_CC            host compiler for preprocessing, dependency files, assembling and linking (default cc)
 #
 #   nfcc -c a.c -o a.o        compile (several .c files without -o give one .o each in the cwd)
 #   nfcc a.o b.o -lm -o prog  link; .c inputs are compiled to temporary objects first
 #   nfcc -E ... / -M ... / -fsyntax-only   preprocess / dependency query / syntax check: host compiler, unchanged
 #   nfcc --version, -v, -dumpmachine, -dumpversion, -print-*: answered like gcc (the host compiler answers)
+#   nfcc -S a.c [-o a.s]      emit assembly (qbe: QBE's output; gcc: the host compiler's), one .s per source
+#   @file                     response files are expanded first with gcc's rules (quotes, backslash, nested @file)
 #   -MD -MMD -MF f -MT t -MQ t -MP   dependency file from the host preprocessor (gcc -M/-MM), with -c
 #   honoured:  -std=* (C only), -ansi, -D -U -I -isystem -iquote -idirafter -include -imacros, -x c, -x none,
 #              -l -L -Wl,* -Xlinker -shared -static -rdynamic -pie -no-pie -s -nostdlib -pthread -o
-#   ignored:   -O* -g* -W* (except -Wp, -Wa) -w -pipe -v -m64 -march/-mtune/-m<feature>, and the -f options in
+#              -Wa,* (given to the assembler); -Wp,-D/-U/-I<arg>, -Wp,-isystem/-iquote/-idirafter/-include/-imacros,<arg>
+#              and -Wp,-MD/-MMD,<file>, -Wp,-MF/-MT/-MQ,<arg>, -Wp,-MP (as the options without the -Wp,)
+#              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
+#   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
+#              -W* (except -Wp, -Wa) -w -pipe -v -m64 -march/-mtune/-m<feature>, and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
-#   rejected with an error: -S, -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -funsigned-char,
-#              -fshort-enums, -ftrapv and other -f options that change semantics, C++ (-x c++, -std=c++*,
-#              .cpp: use nfcxx), -Wp/-Wa, @response files, dependency options on a compile-and-link command,
-#              and any option not listed here.
+#   rejected with an error: -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -Ofast,
+#              -funsigned-char, -fshort-enums, -ftrapv and other -f options that change semantics, C++ (-x c++,
+#              -std=c++*, .cpp: use nfcxx), other -Wp,* options, unreadable @files, dependency options on a
+#              compile-and-link command, and any option not listed here.
 # Nothing that changes meaning is dropped silently.
 set -euo pipefail
 shopt -s extglob
@@ -33,6 +39,37 @@ case $backend in
   gcc) ;;
   *) die "unknown NFCXX_BACKEND '$backend' (qbe or gcc)" ;;
 esac
+
+# Response files (@file), expanded in place with gcc's (libiberty buildargv) rules: arguments are separated by
+# whitespace; single or double quotes group (and are removed); a backslash makes the next character literal, even
+# inside quotes; @file inside a response file is expanded again. A file that cannot be read stays an "@file"
+# argument (gcc does the same) and is rejected below.
+expanded=()
+add_arg() {   # add_arg ARG DEPTH: ARG, or the arguments in the response file it names
+  local f=${1:1} text len j ch q="" have=0 cur="" parsed=() k
+  if [ "${1:0:1}" != @ ] || [ ! -f "$f" ] || [ ! -r "$f" ]; then expanded+=("$1"); return; fi
+  [ "$2" -lt 32 ] || die "response files nested too deeply (a loop?): $f"
+  text=$(cat -- "$f"; echo x); text=${text%x}; len=${#text}
+  for ((j = 0; j < len; j++)); do
+    ch=${text:j:1}
+    if [ "$ch" = "\\" ]; then
+      j=$((j + 1)); [ $j -lt $len ] || break
+      cur+=${text:j:1}; have=1
+    elif [ -n "$q" ]; then
+      if [ "$ch" = "$q" ]; then q=""; else cur+=$ch; fi
+    else
+      case $ch in
+        "'"|'"') q=$ch; have=1 ;;
+        ' '|$'\t'|$'\n'|$'\r'|$'\f'|$'\v') if [ $have = 1 ]; then parsed+=("$cur"); fi; cur=""; have=0 ;;
+        *) cur+=$ch; have=1 ;;
+      esac
+    fi
+  done
+  if [ $have = 1 ]; then parsed+=("$cur"); fi
+  for k in "${parsed[@]+"${parsed[@]}"}"; do add_arg "$k" $(($2 + 1)); done
+}
+for a in "$@"; do add_arg "$a" 0; done
+set -- "${expanded[@]+"${expanded[@]}"}"
 
 # Queries first: they take no input files.
 if [ $# -eq 0 ]; then die "no input files"; fi
@@ -66,6 +103,29 @@ inputs=()    # "kind:path": c, o (object/archive/other linker input), s (assembl
 picf=()
 dts=()       # -MT / -MQ pairs
 dp=0
+asm=0        # -S
+asf=()       # -Wa,* (assembler options)
+optlvl=-O2      # gcc backend: last -O option (-O2 when none)
+dbg=()       # gcc backend: -g options, in order
+# -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
+# would be dropped silently, so it is an error.
+wp_option() {
+  local w j x
+  IFS=, read -ra w <<<"${1#-Wp,}"
+  for ((j = 0; j < ${#w[@]}; j++)); do
+    x=${w[j]}
+    case $x in
+      -D?*|-U?*|-I?*) pp+=("$x") ;;
+      -isystem|-iquote|-idirafter|-include|-imacros)
+        [ $((j + 1)) -lt ${#w[@]} ] || die "$1: '$x' needs an argument"; pp+=("$x" "${w[++j]}") ;;
+      -MD|-MMD) [ $((j + 1)) -lt ${#w[@]} ] || die "$1: '$x' needs a file name"; depmode=$x; dfile=${w[++j]} ;;
+      -MF) [ $((j + 1)) -lt ${#w[@]} ] || die "$1: '-MF' needs a file name"; dfile=${w[++j]} ;;
+      -MT|-MQ) [ $((j + 1)) -lt ${#w[@]} ] || die "$1: '$x' needs a target"; dts+=("$x" "${w[++j]}") ;;
+      -MP) dp=1 ;;
+      *) die "$1: the preprocessor option '$x' is not supported (only -D -U -I -isystem -iquote -idirafter -include -imacros -MD -MMD -MF -MT -MQ -MP)" ;;
+    esac
+  done
+}
 args=("$@")
 n=${#args[@]}
 need() { [ $((i + 1)) -lt $n ] || die "option '${args[i]}' requires an argument"; }
@@ -73,7 +133,7 @@ for ((i = 0; i < n; i++)); do
   a=${args[i]}
   case $a in
     -c) mode=compile ;;
-    -S) die "-S (assembly output) is not supported" ;;
+    -S) asm=1 ;;
     -o) need; out=${args[++i]}; sawout=1 ;;
     -o?*) out=${a#-o}; sawout=1 ;;
     -x) need; lang=${args[++i]}
@@ -97,9 +157,14 @@ for ((i = 0; i < n; i++)); do
     -l?*|-L?*) ld+=("$a") ;;
     -Xlinker|-z|-u|-T) need; ld+=("$a" "${args[++i]}") ;;
     -Wl,*|-shared|-static|-rdynamic|-pie|-no-pie|-s|-nostdlib|-nostartfiles|-nodefaultlibs|-static-libgcc|-shared-libgcc|-pthread|-fuse-ld=*|-Bstatic|-Bdynamic|-symbolic|-r) ld+=("$a") ;;
-    -Wp,*|-Wa,*) die "$a is not supported (the preprocessor/assembler options would be dropped)" ;;
+    -Wp,*) wp_option "$a" ;;
+    -Wa,*) asf+=("$a") ;;
     -w|-W*) ;;
-    -O|-O?*|-g|-g?*|-pipe|-v|-time) ;;
+    -Ofast) die "$a is not supported (changes floating-point semantics)" ;;
+    -O|-O0|-O1|-O2|-O3|-Os|-Og) optlvl=$a; [ "$a" != -O ] || optlvl=-O1 ;;
+    -O?*) die "unknown optimisation option '$a'" ;;
+    -g|-g?*) dbg+=("$a") ;;   # gcc validates the rest; QBE writes no debug info
+    -pipe|-v|-time) ;;
     -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); picf+=("$a") ;;   # QBE output is already PIC (GOT-relative); gcc needs the flag
     -m32|-mx32|-m16|-miamcu) die "$a is not supported (x86-64 only)" ;;
     -m64|-march=*|-mtune=*|-mcpu=*|-msse*|-mavx*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*|-mrdrnd|-mrdseed) ;;
@@ -126,6 +191,7 @@ for ((i = 0; i < n; i++)); do
 done
 
 [ ${#inputs[@]} -gt 0 ] || die "no input files"
+[ $asm = 0 ] || mode=compile   # -S stops after code generation, with or without -c
 if [ "$mode" = compile ]; then
   [ "$sawout" = 0 ] || [ ${#inputs[@]} -le 1 ] || die "cannot specify -o with -c and multiple files"
 fi
@@ -142,7 +208,11 @@ compile_one() {
   local kind=$1 src=$2 obj=$3 base
   base=$(basename "$src"); base=${base%.*}
   if [ "$kind" = s ]; then
-    "$host" -c "${pp[@]+"${pp[@]}"}" "$src" -o "$obj"; return
+    if [ $asm = 1 ]; then   # -S on assembly: only .S (assembler-with-cpp) has anything to do, the preprocessing
+      [[ $src == *.S ]] || [ "$lang" = assembler-with-cpp ] || die "-S: $src is assembly already"
+      "$host" -S "${pp[@]+"${pp[@]}"}" "$src" -o "$obj"; return
+    fi
+    "$host" -c "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "$src" -o "$obj"; return
   fi
   local csrc=$src extra=()
   if [ "$src" = - ]; then
@@ -163,18 +233,21 @@ compile_one() {
         "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" ||
       die "dependency generation failed for $src"
   fi
+  local what=-c; [ $asm = 0 ] || what=-S
   if [ $backend = qbe ]; then
-    NFCXX_C_INPUT=1 "$qcc" -c "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
+    NFCXX_C_INPUT=1 "$qcc" $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
-    gcc -c -O2 -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${pp[@]+"${pp[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
+    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${pp[@]+"${pp[@]}"}" \
+        "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
   fi
 }
 
 if [ "$mode" = compile ]; then
+  suffix=.o; [ $asm = 0 ] || suffix=.s
   for e in "${inputs[@]}"; do
     src=${e#?:}
     if [ "$sawout" = 1 ]; then obj=$out
-    else obj=$(basename "$src"); obj=${obj%.*}.o; fi
+    else obj=$(basename "$src"); obj=${obj%.*}$suffix; fi
     compile_one "${e%%:*}" "$src" "$obj"
   done
   exit 0
