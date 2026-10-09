@@ -3,8 +3,8 @@
 (function "main"
   (ret int)
   (params)
-  (slot "p" (struct "P"))
-  (slot "f" (struct "_ZZ4mainEUliE_"))
+  (slot "p" (struct "P") 8 4)
+  (slot "f" (struct "_ZZ4mainEUliE_") 8 8)
   (store int $"p" (const int 0))
   (let %0 (ptr int) (offset $"p" 4))
   (store int %0 (const int 4))
@@ -15,12 +15,24 @@
   (let %3 int (call int &"_ZZ4mainENKUliE_clEi" %2 (const int 5)))
   (return %3))
 
+(function "_Z3addIiET_S0_S0_"
+  (ret int)
+  (params (param %0 "a" int) (param %1 "b" int))
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (store int $"a" %0)
+  (store int $"b" %1)
+  (let %2 int (load int $"a"))
+  (let %3 int (load int $"b"))
+  (let %4 int (wadd int %2 %3))
+  (return %4))
+
 (function "_ZZ4mainENKUliE_clEi"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "_ZZ4mainEUliE_"))))) (param %1 "k" int))
   (static)
-  (slot "tmp" (const (ptr (const (struct "_ZZ4mainEUliE_")))))
-  (slot "k" int)
+  (slot "tmp" (const (ptr (const (struct "_ZZ4mainEUliE_")))) 8 8)
+  (slot "k" int 4 4)
   (store (ptr (const (struct "_ZZ4mainEUliE_"))) $"tmp" %0)
   (store int $"k" %1)
   (let %2 (ptr (const (struct "_ZZ4mainEUliE_"))) (load (ptr (const (struct "_ZZ4mainEUliE_"))) $"tmp"))
@@ -35,7 +47,7 @@
 (function "_ZNK1P3sumEv"
   (ret int)
   (params (param %0 "tmp" (const (ptr (const (struct "P"))))))
-  (slot "tmp" (const (ptr (const (struct "P")))))
+  (slot "tmp" (const (ptr (const (struct "P")))) 8 8)
   (store (ptr (const (struct "P"))) $"tmp" %0)
   (let %1 (ptr (const (struct "P"))) (load (ptr (const (struct "P"))) $"tmp"))
   (nonnull %1)

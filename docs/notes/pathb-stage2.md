@@ -132,11 +132,18 @@ S-expressions, one statement per line, indented by nesting. Identifiers are doub
 
 ```
 module    ::= (ir-module "FILE") global* data* function*
-global    ::= (global "NAME" TYPE)                        static storage object (no initializer yet)
+global    ::= (global "NAME" TYPE BYTES ALIGN [(static)] INIT)  static storage object; (static) = internal linkage
+INIT      ::= (extern)                                    declared here, defined elsewhere: no storage
+            | (init ITEM*)                                 static initializer (see ITEM)
+            | (unsupported init KIND)                      not lowered (dynamic initialization)
+ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte offset OFF
+            | (addr OFF TYPE TARGET ADD)                   address TARGET (@"x" or &"f") plus byte addend ADD
+            | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
+            | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
 function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)] SLOT* STMT*)
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
-SLOT      ::= (slot "NAME" TYPE)
+SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
             | (eval RVALUE) | (bounds OPERAND N) | (nonnull OPERAND)
             | (if OPERAND (then STMT*) [(else STMT*)]) | (loop (body STMT*) (step STMT*))
@@ -214,8 +221,12 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
 
 1. **Reachability.** The routine set is stage 1's: every defined body that the front end marks needed, including the
    unreferenced inline and constructor bodies stage 1 noted. Stage 2 does not compute reachability yet.
-2. **Global initializers.** File-scope variables are printed as `(global "NAME" TYPE)` with no initializer. Vtables and
-   other static data therefore have no contents in the IR. This is a gap for any backend that links the program.
+2. **Global initializers** are done in stage 3. Each `(global ...)` carries its size and alignment and its
+   INIT (section 6). The items are the element-wise form that `ir_init_constant` produces for locals, at byte offsets,
+   in the same member and base order, with trailing array elements and class members the initializer does not name
+   given as `(zero ...)`. Bytes no item covers are padding (zero). Function-local statics take their initializer from
+   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization is still
+   `(unsupported init dynamic)`, not lowered.
 3. **Constructor initializers** (`dik_constructor`), VLAs, GNU statement expressions, inline asm and bit-field
    access print unsupported markers. None of these appears in `tests/cases` after lowering.
 4. **`continue`** is not a node. The lowered IL turns it into `(goto "L")` to a `(label "L")` at the end of the loop
@@ -240,7 +251,7 @@ Coverage on `tests/cases` (10 programs; NFCXX_PATHB_STATS counts every node the 
 | constants (`ck_*`) | 19 | 4 (`integer`, `float`, `address`, `string`) and aggregates inside initializers | 3 |
 | dynamic inits (`dik_*`) | 8 | 2 (`constant`, `expression`) | 2 |
 
-On the ten programs, `tests/pathb-ir/run.sh` reports 1926 node occurrences visited, all lowered, 0 `(unsupported ...)`.
+On the ten programs, `tests/pathb-ir/run.sh` reports 1991 node occurrences visited, all lowered, 0 `(unsupported ...)`.
 The 45 kinds seen are all lowered. "Referenced" is a count of the `case` labels in `be/nfcxx_ir.c`; it is not a test of
 behaviour. The kinds in the table's third column that are not in the fourth are implemented but not exercised by these
 programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: a variable-length array (2
