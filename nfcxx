@@ -49,11 +49,15 @@ host_sys_includes() {
 }
 extra=()
 sys_inc=()
+hosted_libs=()
 if [ $freestanding = 1 ]; then
   extra=(--no_standard_includes "-I$root/lib")
   [ -n "$gnu" ] || gnu=130000
 else
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
+  # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
+  # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
+  hosted_libs=(--c_to_obj_lib=m)
   if [ -z "$gnu" ]; then
     ver=$("${NFCXX_CXX:-g++}" -dumpfullversion 2>/dev/null) && gnu="${ver%%.*}0000"
   fi
@@ -83,5 +87,5 @@ esac
 
 # With the gcc backend the generated C relies on C's UB rules (e.g. plain signed '+'), so make the C
 # compiler give those operations defined behavior.
-exec "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
+exec "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing \
   "${files[@]}" -o "$out"
