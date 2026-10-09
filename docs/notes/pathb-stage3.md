@@ -14,7 +14,7 @@ this note records what stage 3 covers, what it refuses, and the results.
   a value-less `return` in a non-void, non-`main` function lowers to `(unreachable)`.
 - **Template instances:** `pathb-dump` passes `-tused`, as `eccp` does for one file, so templates used by a
   file are defined (`templates_lambdas` links).
-- **The emitter** (`scripts/pathb-qbe-emit.py`) reads the IR text and writes QBE IL.
+- **The emitter** (`scripts/pathb-qbe-emit.rb`, an mruby script; run it with `scripts/mrb`) reads the IR text and writes QBE IL.
 - **Second round:** `(continue)`, a `(layout ...)` header, bool-load normalisation, reachability and `setjmp` (see
   Closed gaps below).
 
@@ -97,7 +97,7 @@ the runner checks.
 
 - **Linkage of multi-translation-unit programs.** The IR carries `(weak)` on COMDAT definitions (stage 2, section 6),
   taken from EDG's `use_comdat` (routines) and `comdat_group` (variables). The emitter exports them and writes a
-  `# pathb-weak SYMBOL` comment line in the IL. QBE has no weak linkage, so `pathb-qbe-emit.py --append-weak IL ASM`
+  `# pathb-weak SYMBOL` comment line in the IL. QBE has no weak linkage, so `pathb-qbe-emit.rb --append-weak IL ASM`
   appends `.weak` directives to QBE's assembly (the runner does this after `qbe`). Probe:
   `tests/pathb-qbe/multi/comdat/` (`a.cpp` and `b.cpp` include `common.h` with an inline function, a template, an
   inline function with a static local, an inline variable and a class with inline virtuals). The runner links both
@@ -130,7 +130,7 @@ Each has a probe in `tests/pathb-qbe/cases` (translation validation) and a golde
   arguments see a canonical value. Probe: `bool_load.cpp` writes 2, 0x80 and 255 into bool objects through
   `unsigned char` and a union. C++ leaves such an object undefined, so the runner skips the gcc comparison for a probe
   with a `// GCC: undefined` line. Before: exit 6, EXPECT 0. After: exit 0.
-- **Reachability.** `pathb-qbe-emit.py` keeps the external definitions and what they refer to (`@"..."` and `&"..."`,
+- **Reachability.** `pathb-qbe-emit.rb` keeps the external definitions and what they refer to (`@"..."` and `&"..."`,
   transitively) and drops unreachable `(static)` and `(weak)` definitions; `--no-prune` turns it off. Declarations
   and string data stay. Probe: `reachability.cpp` has an unused static function, an unused inline function, an
   unused template instance and an unused class with a virtual function, each using `long double` or `volatile`, which the
@@ -159,5 +159,5 @@ tests/pathb-ir/run.sh          # IR goldens, coverage and the gap probe
 tests/pathb-qbe/run.sh         # translation validation
 ```
 
-`scripts/pathb-dump --ir FILE.cpp | python3 scripts/pathb-qbe-emit.py - > x.ssa` shows the emitter output for
+`scripts/pathb-dump --ir FILE.cpp | scripts/mrb scripts/pathb-qbe-emit.rb - > x.ssa` shows the emitter output for
 one file.

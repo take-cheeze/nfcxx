@@ -34,7 +34,7 @@ exit code 2. Hosted path (no `--freestanding`).
 - **QBE backend: xfail.** The build gets past the four gaps below, then stops at the next cproc limit.
   The chain, in the order cproc hits them in doctest's C output:
   1. **Fixed:** `GNU attribute 'aligned' is not supported here`. Two shapes from libstdc++'s
-     `__aligned_membuf` and `std::aligned_storage`. `scripts/qbe-prep.py` moves the attribute after the
+     `__aligned_membuf` and `std::aligned_storage`. `scripts/qbe-prep.rb` moves the attribute after the
      member name (cproc accepts it there), and turns a struct-body attribute into `_Alignas` on the first
      member when the size is a multiple of the alignment.
   2. **Fixed:** `typedef __bf16 ...` (cproc has no `__bf16`). The same pass maps `__bf16` and the
@@ -52,7 +52,7 @@ exit code 2. Hosted path (no `--freestanding`).
     (gap 3). Both fail on the previous `qbe-cc` and pass on both backends.
   - **Not fixed, next blockers** (found after gaps 1 to 4; each is a separate change):
     - **Fixed:** *inline asm* in doctest's `DOCTEST_BREAK_INTO_DEBUGGER`: `__asm__ volatile("int $3\n" : :)`,
-      20 uses. `scripts/qbe-prep.py` matches exactly that statement and calls `__nfcxx_int3()`; the assembly
+      20 uses. `scripts/qbe-prep.rb` matches exactly that statement and calls `__nfcxx_int3()`; the assembly
       tail defines it as a weak `int3; ret` stub. Any other inline asm still fails with cproc's
       `inline assembly is not yet supported`. Regression case: `tests/cases/qbe_int3_break.cpp`.
     - **Fixed:** *builtins* cproc does not know (its table is `3rd/cproc/scope.c`). `__builtin_memcpy`,
@@ -63,7 +63,7 @@ exit code 2. Hosted path (no `--freestanding`).
       `tests/builtins/mem_ops.cpp` now passes on QBE, so its `XFAIL-qbe` marker is stale (the runner reports
       an XPASS until the marker is removed).
     - **Fixed:** *sized atomics* `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}`
-      (libstdc++'s `atomic_base`). cproc has no atomics, so `scripts/qbe-prep.py` declares the libatomic
+      (libstdc++'s `atomic_base`). cproc has no atomics, so `scripts/qbe-prep.rb` declares the libatomic
       functions of the same name (GCC 13's libatomic exports them; the prototypes follow its ABI, and
       EDG passes GCC's six arguments to `compare_exchange`). The QBE link in `scripts/qbe-cc` adds
       `-latomic`; gcc is unchanged. The 16-byte forms are left out (they need `__int128`). Regression case:
@@ -94,7 +94,7 @@ diagnostic`). They do not affect the result.
 ## C inputs and Lua 5.4
 
 `nfcxx` now takes `.c` inputs (alone or mixed with `.cpp`). A `.c` file skips EDG: with the QBE backend it
-goes through `scripts/qbe-cc` (preprocess, `qbe-prep.py`, cproc, QBE, assemble), with the gcc backend through
+goes through `scripts/qbe-cc` (preprocess, `qbe-prep.rb`, cproc, QBE, assemble), with the gcc backend through
 `gcc -c -O2 -fwrapv -fno-strict-aliasing`. `-I`, `-D`, `-U` reach both the C compiler and (unchanged) eccp;
 `-l`/`-L`/`.o`/`.a` go to the link. With any `.cpp` the objects are linked by eccp (EDG's runtime); a C-only
 program needs no EDG build and is linked by the C compiler. `--trace` records a `C input: <file>` span per file.
@@ -113,7 +113,7 @@ Hand-written C includes real glibc headers, which needed three things in `script
   `lua_State.hookmask`, `CallInfo.u.l.trap`). qbe-prep drops `volatile` for C inputs. cproc already emits
   volatile loads as plain loads, and QBE does not touch memory accesses of address-taken objects, so this is
   sound for struct members and globals. A volatile local whose address is never taken would be promoted to a
-  register by QBE (stale across `setjmp`/`longjmp`), so `qbe-prep.py` adds `__nfcxx_keep(&x);` (a call to an
+  register by QBE (stale across `setjmp`/`longjmp`), so `qbe-prep.rb` adds `__nfcxx_keep(&x);` (a call to an
   empty prelude function) after each such declaration, making the address escape. Not covered: volatile
   function parameters, `for` declarations. Test: `tests/c/volatile_setjmp.c`.
 
@@ -210,10 +210,10 @@ fixes below. These were the first blockers, in the order the build hit them (the
 
 | first blocker on QBE | cause | fix |
 |---|---|---|
-| `<stdin>:2262:10: error: undeclared identifier: __builtin_add_overflow` (`src/backtrace.c`) | `include/mruby/numeric.h` tests `__has_builtin(__builtin_add_overflow)`, which the host preprocessor answers yes to even with `-undef` | `qbe-prep.py` lowers `__builtin_{add,sub,mul}_overflow` with nested `_Generic` to small helpers, with `int`/`long`/`long long` (signed or unsigned) operands of one type; every other integer mix (literals, `char`/`short`, mixed signedness or width, narrower or wider result) goes through `__nfcxx_ovx`, which computes the exact result in sign and 128-bit magnitude and converts it to `*r` like GCC; a non-integer operand or result links against an undefined `__nfcxx_overflow_unsupported_operand_types`. Cases `tests/c/builtins_overflow_mixed.c` (expected values taken from gcc) and `tests/builtins/overflow.cpp`. Also `__builtin_popcount*`, `ctz*`, `clz*`. Case `tests/c/builtins_overflow.c` |
+| `<stdin>:2262:10: error: undeclared identifier: __builtin_add_overflow` (`src/backtrace.c`) | `include/mruby/numeric.h` tests `__has_builtin(__builtin_add_overflow)`, which the host preprocessor answers yes to even with `-undef` | `qbe-prep.rb` lowers `__builtin_{add,sub,mul}_overflow` with nested `_Generic` to small helpers, with `int`/`long`/`long long` (signed or unsigned) operands of one type; every other integer mix (literals, `char`/`short`, mixed signedness or width, narrower or wider result) goes through `__nfcxx_ovx`, which computes the exact result in sign and 128-bit magnitude and converts it to `*r` like GCC; a non-integer operand or result links against an undefined `__nfcxx_overflow_unsupported_operand_types`. Cases `tests/c/builtins_overflow_mixed.c` (expected values taken from gcc) and `tests/builtins/overflow.cpp`. Also `__builtin_popcount*`, `ctz*`, `clz*`. Case `tests/c/builtins_overflow.c` |
 | `<stdin>:...: error: va_arg with non-scalar type is not yet supported` (`src/error.c`: `va_arg(ap, mrb_value)`; also `src/vm.c`) | cproc/QBE `vaarg` is scalar-only (cproc issue 52); `mrb_value` is a 16-byte struct (or 8 bytes with word boxing) | `scripts/cproc-vaarg-aggregate.patch`, applied by `setup-qbe.sh` after the empty-struct patch: va_arg of a struct/union of at most 16 bytes made only of integers/pointers reads the SysV va_list directly (register save area if `gp_offset <= 48 - size`, else the overflow area). Floats in the aggregate, more than 16 bytes, over-alignment and non-x86_64 keep the error. Case `tests/c/va_struct.c`, which also covers the "one register left" corner and was cross-checked against gcc-compiled callers and callees |
-| `undefined reference to 'alloca'` (link of `mrbc`, bison's `y.tab.c`) | without `__GNUC__`, glibc's `<alloca.h>` declares a function; libc has none | `qbe-prep.py` (C inputs) rewrites `alloca(n)` calls to `__builtin_alloca`. Case `tests/c/alloca.c` |
-| `qbe:...: invalid instruction type in truncd` (`mruby-numeric-ext`) | `DBL_MIN` is `((double)2.2250738585072014e-308L)`; cproc types the literal as long double and emits an invalid cast | `qbe-prep.py` drops the `L` of a literal directly cast to `double`/`float`. Case `tests/c/float_limits.c`. (Finding it also fixed `qbe-prep.py`'s tokenizer, which split `1e-308` at the sign.) |
+| `undefined reference to 'alloca'` (link of `mrbc`, bison's `y.tab.c`) | without `__GNUC__`, glibc's `<alloca.h>` declares a function; libc has none | `qbe-prep.rb` (C inputs) rewrites `alloca(n)` calls to `__builtin_alloca`. Case `tests/c/alloca.c` |
+| `qbe:...: invalid instruction type in truncd` (`mruby-numeric-ext`) | `DBL_MIN` is `((double)2.2250738585072014e-308L)`; cproc types the literal as long double and emits an invalid cast | `qbe-prep.rb` drops the `L` of a literal directly cast to `double`/`float`. Case `tests/c/float_limits.c`. (Finding it also fixed `qbe-prep.rb`'s tokenizer, which split `1e-308` at the sign.) |
 
 Not needed, although feared: computed goto / labels-as-values. `src/vm.c` uses them only under `#ifdef __GNUC__`
 (`MRB_USE_VM_GOTO`-style direct threading), and `qbe-cc` preprocesses C inputs without `__GNUC__`, so the VM is
@@ -226,7 +226,7 @@ Other things the build exposed, not on cproc's side:
   `lib/mruby/gem.rb`); this machine has `/x/`, so the default build picked `hal-win-io` and failed on
   `windows.h` with plain gcc already. The build config names the POSIX HAL gems explicitly.
 - `rake` with `-j` keeps going on stale objects after a compiler change; delete the build directory when
-  `nfcc` or `qbe-prep.py` changes (the script builds in a fresh temporary directory every time).
+  `nfcc` or `qbe-prep.rb` changes (the script builds in a fresh temporary directory every time).
 - `nfcc` rejected `-Wp,-v - -fsyntax-only`, which mruby's gcc toolchain uses to find the header search
   path; `-fsyntax-only` (and so `-Wp`) is now answered by the host compiler.
 

@@ -1,5 +1,5 @@
 // EXPECT: 0
-// QBE path (scripts/qbe-prep.py): GNU aligned on members and struct bodies, __bf16 and the _Float types of <numbers>,
+// QBE path (scripts/qbe-prep.rb): GNU aligned on members and struct bodies, __bf16 and the _Float types of <numbers>,
 // and thread_local with dynamic initialization. cproc rejects each of these forms in EDG's C output (docs/notes/realworld.md).
 #include <cstdint>
 #include <numbers>  // std::numbers variables use _Float16/_Float32/_Float64/_Float128

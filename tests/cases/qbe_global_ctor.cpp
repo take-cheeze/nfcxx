@@ -1,5 +1,5 @@
 // EXPECT: 0
-// QBE path (scripts/qbe-prep.py): global constructors. EDG marks each static initializer with the GNU
+// QBE path (scripts/qbe-prep.rb): global constructors. EDG marks each static initializer with the GNU
 // constructor attribute; cproc rejects it, so the QBE output lists the functions in .init_array instead
 // (docs/notes/realworld.md, gap 3).
 int initial_value() { return 42; }

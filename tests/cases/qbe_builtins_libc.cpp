@@ -1,5 +1,5 @@
 // EXPECT: 0
-// QBE path (scripts/qbe-prep.py): builtins that cproc lacks and doctest uses (docs/notes/realworld.md,
+// QBE path (scripts/qbe-prep.rb): builtins that cproc lacks and doctest uses (docs/notes/realworld.md,
 // blocker 2): __builtin_memcpy/memmove/memset/memcmp/strlen map to the libc functions, __builtin_isnan and
 // __builtin_clzl map to small helpers, and __builtin_mul_overflow(x, C, &x) with an unsigned long constant C
 // maps to a checked multiply. Each check counts a failure; main returns the count.
