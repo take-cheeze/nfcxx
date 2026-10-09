@@ -19,8 +19,11 @@ require_relative 'literal_element_proof'
 #   NIL   nil
 #   OTHER anything else, including false and an unassigned local's other uses
 #   RNG   exactly ::Range; EXC a pending exception object (what EXCEPT reads); and the bits from 1 << 9 up: exactly one closed-world class each
-#         (CodeGen#numeric_class_bit). They enter only through a proven `Klass.new` or a
-#         Range literal and reach other methods only through return values (ADR 0289).
+#         (CodeGen#numeric_class_bit). They enter through a proven `Klass.new`, a Range literal, or a true, false or
+#         Symbol literal (LOADTRUE, LOADFALSE, LOADSYM: TrueClass, FalseClass, Symbol) and reach other methods only
+#         through return values (ADR 0289) or the class pools. FalseClass is the one falsy class bit: a truthiness
+#         test leaves it on the falsy edge only. The oracle's false_class_bit names it; an oracle that names none
+#         keeps every class bit on both edges (falsy_class_bits).
 # Bits from OBJECT_KIND_BASE up are object kinds the oracle names (LcfRowFlow, ADR 0294): each is
 # "exactly an instance of that kind" and truthy, like ARR. Unlike the class bits they ride through
 # pooled arguments, ivars and constants; what a bit means, and what `[]` on it returns, is the
@@ -53,6 +56,7 @@ module NumericFlow
   CLASS_BIT_BASE = 9
   # LCF object kinds (LcfRowFlow) live above every class bit; CodeGen#numeric_class_bit refuses to grow into them.
   OBJECT_KIND_BASE = 320
+  CLASS_BITS = ((1 << OBJECT_KIND_BASE) - 1) & (-1 << CLASS_BIT_BASE)
   # Bits a fact outside one method (argument, ivar, constant) may not carry: OTHER, Range, EXC and
   # every class bit. Only return values ship them across methods. Object kinds are not among them.
   OPAQUE = OTHER | (((1 << OBJECT_KIND_BASE) - 1) & (-1 << 7))
@@ -405,7 +409,8 @@ module NumericFlow
     mask = state[reg]
     return state if mask.nil? || mask.zero?
 
-    narrowed = narrow_by_truth(op, taken, mask)
+    sure, maybe = falsy_class_bits(ctx)
+    narrowed = narrow_by_truth(op, taken, mask, sure, maybe)
     return nil if narrowed.zero?
 
     out = state
@@ -417,7 +422,7 @@ module NumericFlow
     slots = ctx[:slots].size
     if prov.positive? && prov <= slots
       slot = ctx[:nregs] + prov - 1
-      slot_narrowed = narrow_by_truth(op, taken, state[slot])
+      slot_narrowed = narrow_by_truth(op, taken, state[slot], sure, maybe)
       return nil if slot_narrowed.zero? && !state[slot].zero?
 
       if slot_narrowed != state[slot]
@@ -430,10 +435,28 @@ module NumericFlow
     out
   end
 
-  def narrow_by_truth(op, taken, mask)
+  # [definitely falsy, possibly falsy] class bits. FalseClass is the only class bit that is falsy, and it is falsy for
+  # sure. An oracle that does not name it leaves every class bit possibly falsy and none definitely falsy.
+  def falsy_class_bits(ctx)
+    oracle = ctx[:oracle]
+    return [0, CLASS_BITS] unless oracle.respond_to?(:false_class_bit)
+
+    bit = oracle.false_class_bit.to_i
+    [bit, bit]
+  end
+
+  # The class bit of a true, false or Symbol literal, or OTHER when the oracle names none.
+  def literal_class_mask(insn, ctx)
+    oracle = ctx[:oracle]
+    (oracle.respond_to?(:literal_class_mask) && oracle.literal_class_mask(insn)) || OTHER
+  end
+
+  # A truthy edge drops nil and the definitely falsy class bits; a falsy edge keeps nil, OTHER and the possibly falsy
+  # class bits. JMPNIL needs no class bits: only nil is nil.
+  def narrow_by_truth(op, taken, mask, sure, maybe)
     case op
-    when 'JMPIF' then taken ? mask & ~NIL : mask & FALSY
-    when 'JMPNOT' then taken ? mask & FALSY : mask & ~NIL
+    when 'JMPIF' then taken ? mask & ~(NIL | sure) : mask & (FALSY | maybe)
+    when 'JMPNOT' then taken ? mask & (FALSY | maybe) : mask & ~(NIL | sure)
     else taken ? (mask & FALSY).zero? ? 0 : NIL : mask & ~NIL # JMPNIL: nil exactly on the taken edge
     end
   end
@@ -528,6 +551,8 @@ module NumericFlow
       set.call(a, oracle.respond_to?(:loadself_mask) ? oracle.loadself_mask : OTHER)
     when 'LOADNIL'
       set.call(a, NIL)
+    when 'LOADTRUE', 'LOADFALSE', 'LOADSYM'
+      set.call(a, literal_class_mask(insn, ctx))
     when 'MOVE'
       src = insn.regs[1].to_i
       set.call(a, src < nregs ? state[src] : OTHER)

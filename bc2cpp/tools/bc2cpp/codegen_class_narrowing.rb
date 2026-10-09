@@ -242,7 +242,9 @@ class CodeGen
 
   def class_test_verdict(test, name)
     case test.kind
-    when :nil, :falsy then name == 'NilClass'
+    when :nil then name == 'NilClass'
+    # `!x` holds for nil and false, the falsy classes (FalseClass's bit is 0 when immediate class bits are off).
+    when :falsy then name == 'NilClass' || name == 'FalseClass'
     when :instance_of then name == test.klass
     when :responds then class_test_responds_verdict(name, test.klass)
     else class_test_chain(name)&.include?(test.klass)

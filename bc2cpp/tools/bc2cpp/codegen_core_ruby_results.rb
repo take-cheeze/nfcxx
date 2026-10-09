@@ -82,6 +82,7 @@ module CoreRubyResults
     def op_native?(_sym) = false
     def nil_raises?(_sym) = false
     def ivar_slots(_irep) = []
+    def false_class_bit = @cg.numeric_false_class_bit
 
     def send_mask(_irep, _index, insn, state)
       @cg.core_ruby_static_send_mask(insn, state)
