@@ -54,7 +54,8 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     `float`/`double` literal (`f32`, `f64`).
   * Hand-written C (env NFCXX_C_INPUT=1, set by nfcxx for .c inputs; glibc headers and user code):
     `volatile` is dropped (cproc errors on any store to a volatile object; it already emits volatile loads
-    as plain loads), and `typedef T _Float32;`-style typedefs of the floating types above are removed
+    as plain loads; a volatile block-scope local gets `__nfcxx_keep(&x);` after its declaration so QBE keeps
+    it in memory across setjmp/longjmp), and `typedef T _Float32;`-style typedefs of the floating types above are removed
     (the names are mapped instead), as glibc's <bits/floatn.h> declares them.
 
 Usage: qbe-prep.py PREPROCESSED_C REWRITTEN_C ASM_TAIL
@@ -285,6 +286,102 @@ def split_args(toks, lp):
     return ranges, rp
 
 
+VOLATILE_QUALS = ('volatile', '__volatile__', '__volatile')
+KEEP_NAME = '__nfcxx_keep'
+KEEP_DEF = f'static void {KEEP_NAME}(void *p) {{ }}'
+
+
+def volatile_locals(toks):
+    """Edits that keep volatile block-scope locals in memory (C inputs; the qualifier itself is dropped later).
+
+    QBE promotes a stack slot to a register unless its address escapes, so a volatile local that is written
+    after setjmp and read after longjmp would be stale. After each declaration of such a local this adds
+    `__nfcxx_keep(&x);` (a call to an empty function in the prelude), which makes the address escape.
+    Skipped: arrays, function pointers and function declarations, typedef/static/extern/register
+    declarations, `for` declarations and function parameters (none of which need it or can take it)."""
+    edits = []
+    stack = []  # 'func', 'block' or 'other' for each open brace
+    seen = set()
+    for i, t in enumerate(toks):
+        if t.kind == 'punct':
+            if t.text == '{':
+                prev = tok_at(toks, i - 1)
+                if not stack:
+                    stack.append('func' if is_punct(prev, ')') else 'other')
+                elif stack[-1] == 'other':
+                    stack.append('other')
+                elif prev is None or (prev.kind == 'punct' and prev.text in (';', '{', '}', ')', ':')) or (
+                        prev.kind == 'id' and prev.text in ('else', 'do')):
+                    stack.append('block')
+                else:
+                    stack.append('other')
+            elif t.text == '}' and stack:
+                stack.pop()
+            continue
+        if t.kind != 'id' or t.text not in VOLATILE_QUALS:
+            continue
+        if not stack or stack[-1] == 'other' or t.pdepth != 0:
+            continue
+        # A declaration: only identifiers and `*` between the statement start and the qualifier.
+        s = i
+        while s > 0 and not (toks[s - 1].kind == 'punct' and toks[s - 1].text in (';', '{', '}')):
+            s -= 1
+        if s in seen or not all(x.kind == 'id' or is_punct(x, '*') for x in toks[s:i]):
+            continue
+        seen.add(s)
+        e, level = i, 0  # e: the terminating `;`
+        while e < len(toks):
+            x = toks[e]
+            if x.kind == 'punct':
+                if x.text in '([{':
+                    level += 1
+                elif x.text in ')]}':
+                    level -= 1
+                    if level < 0:
+                        break
+                elif x.text == ';' and level == 0:
+                    break
+            e += 1
+        if e >= len(toks) or level < 0:
+            continue
+        if any(x.kind == 'id' and x.text in ('typedef', 'static', 'extern', 'register', '_Thread_local', '__thread')
+               for x in toks[s:e]):
+            continue
+        pieces, cur, level = [], [], 0
+        for x in toks[s:e]:
+            if x.kind == 'punct':
+                if x.text in '([{':
+                    level += 1
+                elif x.text in ')]}':
+                    level -= 1
+                elif x.text == ',' and level == 0:
+                    pieces.append(cur)
+                    cur = []
+                    continue
+            cur.append(x)
+        pieces.append(cur)
+        names, base_vol = [], False
+        for n, piece in enumerate(pieces):
+            decl = []
+            for x in piece:
+                if is_punct(x, '='):
+                    break
+                decl.append(x)
+            stars = [k for k, x in enumerate(decl) if is_punct(x, '*')]
+            vols = [k for k, x in enumerate(decl) if x.kind == 'id' and x.text in VOLATILE_QUALS]
+            if n == 0:
+                base_vol = any(not stars or k < stars[0] for k in vols)
+            if any(is_punct(x, '(') or is_punct(x, '[') for x in decl):
+                continue
+            ids = [x for x in decl if x.kind == 'id']
+            vol = any(k > stars[-1] for k in vols) if stars else base_vol
+            if vol and ids:
+                names.append(ids[-1].text)
+        if names:
+            edits.append((toks[e].end, toks[e].end, ''.join(f' {KEEP_NAME}(&{nm});' for nm in names)))
+    return edits
+
+
 def overflow_call(op, text, lit, prelude):
     """C expression for __builtin_OP_overflow(a, b, r) given the argument texts and which operands are literals."""
     cases = []
@@ -397,6 +494,11 @@ def main():
     need_float = set()
     need_int3 = False
     prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
+    if C_INPUT:
+        keep = volatile_locals(toks)
+        if keep:
+            edits.extend(keep)
+            prelude[KEEP_NAME] = KEEP_DEF
 
     def mark_weak_alias(name):
         # _ZTHx is the thread_local init alias for _ZTWx; if the wrapper is COMDAT (weak), so is the alias.
@@ -414,7 +516,7 @@ def main():
         # volatile object ("volatile store is not yet supported"), yet it already emits volatile loads as
         # plain loads and QBE does not reorder or remove memory accesses of an object whose address escapes
         # (struct members, globals). So the qualifier is dropped, except on inline asm. A volatile local
-        # whose address is never taken is promoted to a register by QBE; that gap exists with or without this.
+        # whose address is never taken is promoted to a register by QBE, so volatile_locals() makes its address escape.
         if C_INPUT and t.kind == 'id' and t.text in ('volatile', '__volatile__', '__volatile') and not (
                 prev is not None and prev.kind == 'id' and prev.text in ('__asm__', '__asm', 'asm')):
             edits.append((t.start, t.end, ''))

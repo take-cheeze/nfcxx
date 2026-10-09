@@ -113,7 +113,9 @@ Hand-written C includes real glibc headers, which needed three things in `script
   `lua_State.hookmask`, `CallInfo.u.l.trap`). qbe-prep drops `volatile` for C inputs. cproc already emits
   volatile loads as plain loads, and QBE does not touch memory accesses of address-taken objects, so this is
   sound for struct members and globals. A volatile local whose address is never taken would be promoted to a
-  register by QBE (matters for `setjmp`); that gap existed for loads before.
+  register by QBE (stale across `setjmp`/`longjmp`), so `qbe-prep.py` adds `__nfcxx_keep(&x);` (a call to an
+  empty prelude function) after each such declaration, making the address escape. Not covered: volatile
+  function parameters, `for` declarations. Test: `tests/c/volatile_setjmp.c`.
 
 ### Lua
 
@@ -228,11 +230,6 @@ Other things the build exposed, not on cproc's side:
 
 ## What remains
 
-- **`volatile` locals across `setjmp`:** for C inputs `qbe-prep.py` drops `volatile` (cproc rejects volatile
-  stores). QBE promotes a local whose address is never taken to a register, so a "volatile int err" written
-  after `setjmp` and read after `longjmp` may be stale. mruby has such a local (`mrb_core_init_protect`,
-  `src/error.c`) where the stale value happens to be the right one; the test script passes. A fix would keep
-  the object in memory (take its address) when it is `volatile` and the function calls `setjmp`.
 - **`va_arg` of aggregates** is only done for integer-class aggregates up to 16 bytes on x86_64. A struct with a
   float/double member (SSE class), over 16 bytes (passed in memory) or over-aligned still stops with cproc's
   error. The cproc change is local to the build copy; it should go upstream (cproc issue 52).
