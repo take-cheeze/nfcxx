@@ -115,10 +115,11 @@ emit the checks or refuse the program. Nothing is silently dropped.
 
 Pointer and aggregate addressing has no C-level expression:
 
-- `(offset ADDR N)`: field access. `N` is `a_field.offset` from EDG (bytes). Bit-fields are not lowered yet.
-- `(index BASE IDX SIZE)`: `BASE + sext(IDX) * SIZE`, wrapping. `SIZE` is `f_size_of_type` of the element. `padd`,
+- `(offset ADDR N)`: field access. `N` is `a_field.offset` from EDG (bytes). Bit-fields are different, see 5a.
+- `(index BASE IDX SIZE)`: `BASE + sext(IDX) * SIZE`, wrapping. `SIZE` is `f_size_of_type` of the element, a number, or
+  a register (of type `unsigned_long`) when the element type is a variable-length array type (5b). `padd`,
   `psubtract` and subscripts use it. Subtraction negates the index with `wneg` first.
-- `(pdiff A B SIZE)`: `(A - B) / SIZE` in the pointer difference type.
+- `(pdiff A B SIZE)`: `(A - B) / SIZE` in the pointer difference type. `SIZE` as for `index`.
 - `(bitcast PT OP)`: change of pointee type with the same address. Array decay and `&` produce one.
 - `(bounds IDX N)`: emitted before a subscript when the base is `array_to_pointer` of an array of known length. Pointers
   carry no length, so a subscript through a pointer is unchecked (see 9).
@@ -126,6 +127,80 @@ Pointer and aggregate addressing has no C-level expression:
   are not checked.
 
 All sizes and offsets come from EDG's layout (`a_field.offset`, `f_size_of_type`), not recomputed.
+
+### 5a. Bit-fields
+
+A bit-field is not an addressable object, so the IR has two operations on the *storage unit* that holds it:
+
+- `(bfload T UNIT ADDR BOFF WIDTH)` (an RVALUE): reads the `UNIT`-byte integer at `ADDR` (little-endian, `UNIT` is 1, 2,
+  4 or 8) and extracts bits `BOFF .. BOFF+WIDTH-1`. The result has the integer type `T`: sign-extended when `T` is signed,
+  zero-extended otherwise (`bool`: the bits, 0 or 1 for a 1-bit field).
+- `(bfstore T UNIT ADDR BOFF WIDTH VALUE)` (a STMT): a read-modify-write of the same unit. The low `WIDTH` bits of `VALUE`
+  (which has type `T`) replace those bits; every other bit of the unit is written back unchanged. The store does not
+  report the truncated value; the lowering reads the field again with `bfload` when the value of the assignment is
+  used (`result_is_not_used` is false).
+
+The `.v` forms (`bfload.v`, `bfstore.v`) are the volatile accesses. `ADDR` is the address of the storage unit (not of
+the struct), computed with `offset` like any member. `T` is the declared type of the field with the field's own
+signedness (EDG `bit_field_is_signed`): an unsigned enumeration bit-field prints as `unsigned_int`, not the signed
+`int` that the enumeration's type text gives. A load or store narrower or wider than `T` is allowed (`T` may be 8 bytes
+with a 4-byte unit); the value is converted.
+
+Layout comes from EDG: `a_field.offset` (bytes) and `offset_bit_remainder` (0..7) give the bit position of the field in
+its parent, `bit_size` the width. The lowering picks the unit as follows: the declared type's size `U`, at the
+`U`-aligned offset that contains the field, when the field fits there and the unit lies inside the parent object (the
+usual case; gcc does the same). Otherwise it tries 1, 2, 4 and 8 bytes at an aligned offset, then the window of that
+size that ends at the end of the parent (a packed struct, a field that straddles its declared type). A field wider
+than 64 bits, or that fits no window, is `(unsupported lvalue bit-field-layout)`.
+
+Compound assignment and `++`/`--` are `bfload`, the arithmetic in the declared type `T` (so it wraps in `T`, then the
+store truncates to `WIDTH`), `bfstore`. Initialization: aggregate initializers store each named bit-field with `bfstore`
+(unnamed bit-fields take no initializer); a static initializer lists one item per bit-field,
+`(bitfield OFF UNIT BOFF WIDTH T (const T V))` with `OFF` the byte offset of the unit, and the consumer ORs the bits of
+all items together (fields of different declared types have overlapping units, so merging is by bit position).
+Bit-fields in unions and in classes with virtual bases are not covered by the aggregate-initializer path (unions and
+virtual bases have no aggregate initializer in the IR at all); plain reads and writes work in all of them.
+The emitter documents its code shape in `scripts/pathb-qbe-emit.rb` (`r_bfload`): extraction is a shift pair, never an `and`
+with a low mask, because QBE's width analysis drops such a mask wrongly in some loops (see `docs/notes/pathb-stage3.md`).
+
+### 5b. Variable-length arrays
+
+EDG keeps VLAs in the lowered IL as three things, and the IR follows them:
+
+- `stmk_set_vla_size`: evaluates a dimension expression once into a compiler variable (`dimension_variable`). The IR
+  lowers the dimension expression (an assignment to that variable), so the dimension is an ordinary local slot.
+- an expression statement EDG adds that assigns the total element count (all dimensions multiplied, in `ptrdiff_t`)
+  to `vla_element_count_variable`;
+- `stmk_vla_decl`: the point where the storage appears. It prints `(vlaalloc $"v" BYTES)`:
+  `BYTES` (an `unsigned_long` operand) is the count times the size of the innermost element type.
+
+The VLA variable `v` has no slot of its own with the array's size. Its slot `(slot "v" (ptr (array ? T)) 8 8)` holds the
+*address* of its storage, and every use of the variable loads that pointer first, so `$"v"` is the slot of the pointer,
+not the array. `(array ? T)` is how a VLA type prints (the `?` is the unknown count).
+
+`(vlaalloc $"slot" BYTES)`: allocate `BYTES` bytes of dynamic stack storage, 16-byte aligned, uninitialized, and store the
+address in the slot. **Lifetime.** EDG gives no scope-exit marker for a VLA in this configuration (the lowered IL
+has no `enk_vla_dealloc` and no destruction-list entry). The IR therefore does not free at the end of the block. The
+semantics are: the storage lives until the function returns, *or* until the same `vlaalloc` executes again, when the
+old array's lifetime has ended anyway (C and GNU C end it when execution leaves the block, including a backward `goto`),
+and the backend may reuse the space. A backend with no dynamic stack must refuse the statement. The QBE emitter keeps a
+capacity per `vlaalloc` and allocates only when `BYTES` exceeds it (then for `max(BYTES, 2 * capacity)`), so a loop
+that declares a VLA of at most N bytes uses O(N) stack, not O(N * iterations); a recursion with a VLA uses one
+allocation per frame, released at return.
+
+`sizeof` of a VLA type or expression (`enk_sizeof` that EDG could not fold) is the product of the dimension variables
+and the element size, computed in registers, and so is the stride of a pointer to a VLA row (`index`/`pdiff` take a
+register `SIZE`). No `bounds` check is emitted for a VLA subscript (the length is a run-time value, and `bounds`
+takes a number). VLA typedefs (`stmk_vla_decl` with `is_typedef_decl`) allocate nothing; a function parameter of VLA
+type is a pointer as in C++ and needs nothing.
+
+### 5c. GNU statement expressions
+
+`({ S...; E; })` (`enk_statement`) is lowered inline: the statements run in place (no `(block)` wrapper, so the
+registers they define stay visible), and the value is the last statement when it is an expression statement
+(EDG marks it `stmk_stmt_expr_result`; its expression is lowered like any rvalue). A void result, or a statement
+expression whose last statement is not an expression, has no value. `break`, `continue`, `goto` and `return` inside work as in
+any statement. A result that EDG builds with a copy constructor (`dik_class_result_via_ctor`) is not lowered.
 
 ## 6. Decision (g): the text form
 
@@ -141,19 +216,25 @@ INIT      ::= (extern)                                    declared here, defined
             | (init ITEM*)                                 static initializer (see ITEM)
             | (unsupported init KIND)                      not lowered (dynamic initialization)
 ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte offset OFF
+            | (bitfield OFF UNIT BOFF WIDTH TYPE (const TYPE V))  bits BOFF.. of the UNIT-byte unit at byte OFF (5a);
+                                                           items that share bits of a byte are ORed together
             | (addr OFF TYPE TARGET ADD)                   address TARGET (@"x" or &"f") plus byte addend ADD
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
-function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)] SLOT* STMT*)
+function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)] [(constructor [PRIO])]
+              [(destructor [PRIO])] SLOT* STMT*)       PRIO = 1..65535; (constructor)/(destructor): see "Start-up and exit"
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
 SLOT      ::= (slot "NAME" TYPE BYTES ALIGN)
 STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VALUE) | (copy BYTES DST SRC)
+            | (bfstore[.v] TYPE UNIT ADDR BOFF WIDTH VALUE)                  bit-field store (5a)
+            | (vlaalloc $"SLOT" OPERAND)                                    VLA storage (5b)
             | (eval RVALUE) | (bounds OPERAND N) | (nonnull OPERAND)
             | (if OPERAND (then STMT*) [(else STMT*)]) | (loop (body STMT*) (step STMT*))
             | (switch OPERAND (body STMT*)) | (case CONST) | (default) | (break)
             | (goto "L") | (label "L") | (return [OPERAND]) | (unreachable) | (block STMT*)
 RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX SIZE) | (pdiff A B SIZE)
+            | (bfload[.v] TYPE UNIT ADDR BOFF WIDTH)                         bit-field load (5a)
             | (wadd|wsub|wmul T A B) | (wneg T A) | (cadd|csub|cmul|cdiv|crem|cshl|cshr T A B) | (cneg T A)
             | (fadd|fsub|fmul|fdiv T A B) | (fneg T A) | (and|or|xor T A B) | (not T A)
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
@@ -161,7 +242,8 @@ RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX
             | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
-            | (array N TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
+            | (array N TYPE) | (array ? TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
+SIZE      ::= N | %N        a byte count: a number, or a register of type unsigned_long (a VLA element type)
 ```
 
 `(variadic N)` appears in a call whose callee's function type ends in `...` (a direct call or one through a
@@ -197,6 +279,32 @@ accept `(volatile T)` wherever `(const T)` is accepted. A `(load.v ...)`/`(store
 in program order with respect to the other volatile accesses and calls; it must not be merged, removed or reordered
 across another volatile access. Aggregate copies `(copy N DST SRC)` of volatile objects are not marked (a copy is
 a call of a memory-copy routine in the QBE emitter, which a compiler cannot elide).
+
+Start-up and exit. `(constructor [PRIO])` on a function means it runs before `main`; `(destructor [PRIO])` means it
+runs at exit (a function may carry both). They come from two sources, and the IR does not say which:
+
+- `__attribute__((constructor [(PRIO)]))` and `__attribute__((destructor [(PRIO)]))` (EDG `is_initialization_routine`
+  with `ctor_priority`, `is_finalization_routine` with `dtor_priority`).
+- The initialization routine that IL lowering makes for a translation unit, named `__sti__...`
+  (`IL_LOWERING_INIT_ROUTINE_PREFIX`). It runs every dynamic initializer of the file scope in source order: the
+  constructor calls, `__cxa_atexit(dtor, &obj, &__dso_handle)` registrations (so static objects are destroyed in
+  reverse order of construction at exit, by the C library, and nothing else is needed for destructors of statics) and
+  the stores of values computed by calls. A GNU `init_priority(N)` object gets a second `__sti__...__prioN` routine,
+  which carries `(constructor N)`. This is the routine the C back end marks `__attribute__((constructor))` (path A),
+  or puts in a `.ctors.(65535-N)` section for a priority. Variables with dynamic initialization are printed as
+  zero-initialized `(global ... (init (zero 0 N)))`; the IR contains no other record of the dynamic initializer.
+
+A routine with a marker is a root: a consumer must not drop it because no code refers to it (the function may be
+`(static)`). Order: a routine with a PRIO runs before any routine without one, lower PRIO first; routines of equal
+priority run in the order they appear in the module. Destructors run in the reverse order (a destructor without a
+PRIO first). Function-local statics need no marker: the lowering writes the guard (`__cxa_guard_acquire` /
+`__cxa_guard_release`; the guard is the C++ runtime's, as in path A), the constructor call
+and the `__cxa_atexit` registration as ordinary statements of the function.
+
+Unnamed routines. The lowering makes routines without a name (the helper that destroys an array with static storage,
+registered with `__cxa_atexit`). They print as `__unnamed_fn`, `__unnamed_fn.1`, ... (the same name at the definition
+and at every reference), and the name of every named routine is reserved first so that no static object, string or
+unnamed routine takes it.
 
 Unsupported nodes print as `(unsupported KIND NAME)` in place of the statement or of the register's right-hand side.
 The runner counts them.
@@ -269,7 +377,19 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    given as `(zero ...)`. Bytes no item covers are padding (zero). Function-local statics take their initializer from
    the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization is still
    `(unsupported init dynamic)`, not lowered.
-3. **Constructor initializers** (`dik_constructor`), VLAs, GNU statement expressions, inline asm and bit-field
+3. **Constructor initializers** (`dik_constructor`) and inline asm print unsupported markers. None of these appears in
+   `tests/cases` after lowering. (Bit-fields, VLAs and GNU statement expressions were in this list; they are lowered
+   since stage 3 round 3, sections 5a-5c. Still open there: a VLA has no scope-exit free (5b); no `bounds` check on VLA subscripts; a statement expression that
+   returns a class by copy constructor; bit-fields wider than 64 bits.)
+
+   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization after
+   lowering is explicit statements of the `__sti__` routine (see "Start-up and exit"), so a global never reaches
+   `(unsupported init dynamic)` on the programs tested (that marker stays for an initializer kind the lowering left
+   in the IL).
+3. **Constructor initializers** (`dik_constructor`) in a `stmk_init` print as an ordinary constructor call
+   `(eval (call void &"ctor" OBJ ARG*))`; the lowering expands every constructor into such a call before the
+   back end sees it, so this path is never taken by the probes (array copies, implied copy sources and value
+   initialization of the unlowered form stay unsupported). VLAs, GNU statement expressions, inline asm and bit-field
    access print unsupported markers. None of these appears in `tests/cases` after lowering.
 4. **`continue`** is `(continue)` since stage 3 round 2. The lowered IL turns it into `(goto "L")` to an unnamed
    `(label "L")` at the end of the loop body; the lowering recognises that pair for the innermost loop, prints
@@ -284,6 +404,14 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
    (a call through a function pointer, including the lowered form of virtual calls and calls through a pointer member),
    unless the callee operand is an address constant. This closes the gap.
 10. **No SSA, no mem2reg, no constant folding.** The output is correct but verbose: every named variable is a slot.
+11. **C++ exceptions** need no IR construct. EDG lowers try/catch/throw/cleanups/exception specifications to its setjmp/longjmp
+    ABI before the back end runs, so the IR holds a call of `_setjmp` on a slot of the EH stack entry type, calls of
+    `__throw_setup`, `__throw`, `__rethrow`, `__exception_caught` and `__destroy_exception_object`, stores to the globals
+    `__curr_eh_stack_entry`, `__eh_curr_region`, `__catch_clause_number` and `__caught_object_address`, and static region/catch tables
+    and typeinfo globals. The lowering handles the two nodes that EH programs added: `enk_result_of_overriding_function` (the body of a
+    this-adjusting thunk, printed as a `(call ... &"underlying" PARAMS...)` with the thunk's own parameters) and a function designator
+    as an lvalue (`&"f"`). The runtime is EDG's `libC.a` (`lib_src/throw.c`); a consumer must keep every slot of a function that calls
+    `_setjmp` in memory (the QBE emitter does). Details, probes and limits: `docs/notes/pathb-stage3.md`, "C++ exceptions".
 
 Coverage on `tests/cases` (10 programs; NFCXX_PATHB_STATS counts every node the lowering visits):
 
@@ -298,9 +426,11 @@ Coverage on `tests/cases` (10 programs; NFCXX_PATHB_STATS counts every node the 
 On the ten programs, `tests/pathb-ir/run.sh` reports 1991 node occurrences visited, all lowered, 0 `(unsupported ...)`.
 The 45 kinds seen are all lowered. "Referenced" is a count of the `case` labels in `be/nfcxx_ir.c`; it is not a test of
 behaviour. The kinds in the table's third column that are not in the fourth are implemented but not exercised by these
-programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: a variable-length array (2
-statement kinds), a GNU statement expression, inline asm, and bit-field reads and writes give 8 `(unsupported ...)`
-markers, which the runner checks against the expected count.
+programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: it still contains a
+variable-length array, a GNU statement expression and bit-field reads and writes (lowered now, so they appear in its
+golden as `vlaalloc`, plain statements and `bfload`/`bfstore`) and inline asm, which is the one remaining
+`(unsupported ...)` marker; the runner checks the count (1). The bit-field, VLA and statement-expression probes
+`tests/pathb-qbe/cases/{bitfield,bitfield2,vla,stmtexpr}.cpp` have goldens of their own.
 
 Reproduce (from the worktree; the harness is built out of tree):
 

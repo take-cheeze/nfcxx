@@ -302,6 +302,31 @@ static const char *ir_name_or(const char *name, const char *fallback)
   return (name != NULL && name[0] != '\0') ? name : fallback;
 }
 
+/* Routine names. A routine's symbol is its name; the lowering also makes routines that have none (the helper that
+   destroys an array with static storage, registered with __cxa_atexit). Those get a unique module-level name on first
+   use, and every named routine's name is reserved up front (ir_reserve_routine_names), so that no static object or
+   unnamed routine takes it. */
+static void ir_reserve_name(const char *name)
+{
+  if (name == NULL || name[0] == '\0' || ir_raw_used(&ir_mod, name) || ir_mod.n >= IR_TAB_MAX) return;
+  ir_mod.e[ir_mod.n].key = NULL;
+  ir_mod.e[ir_mod.n].raw = ir_dup(name);
+  ir_mod.e[ir_mod.n].op = ir_fmt("&\"%s\"", name);
+  ir_mod.n++;
+}
+
+static const char *ir_rout_name(a_routine_ptr r)
+{
+  const char *n = r->source_corresp.name;
+  const char *op;
+  char *s;
+  if (n != NULL && n[0] != '\0') return n;
+  op = ir_tab_get(&ir_mod, r, "__unnamed_fn", "&");
+  s = ir_dup(op + 2);
+  s[strlen(s) - 1] = '\0';
+  return s;
+}
+
 /* ================================================================ statistics */
 
 /* Node occurrences that were lowered (ok) and that were not (gap), per node class:
@@ -357,6 +382,10 @@ struct ir_val {
   a_type_ptr t;
   char *ty;
   int vol;
+  /* A bit-field lvalue: s is the address of the storage unit (bf_unit bytes), the field occupies bf_width bits
+     from bit bf_boff of the unit, t is the declared type. bf_unit == 0: not a bit-field. */
+  unsigned bf_unit, bf_boff, bf_width;
+  char *bf_ty; /* IR type text of the field value: the declared type with the field's own signedness */
 };
 
 static ir_val ir_mk_value(char *s, a_type_ptr t)
@@ -366,6 +395,8 @@ static ir_val ir_mk_value(char *s, a_type_ptr t)
   v.t = t;
   v.ty = ir_valtext(t);
   v.vol = 0;
+  v.bf_unit = v.bf_boff = v.bf_width = 0;
+  v.bf_ty = NULL;
   return v;
 }
 
@@ -376,6 +407,8 @@ static ir_val ir_mk_addr(char *s, a_type_ptr t, int vol)
   v.t = t;
   v.ty = ir_ptext(t);
   v.vol = vol;
+  v.bf_unit = v.bf_boff = v.bf_width = 0;
+  v.bf_ty = NULL;
   return v;
 }
 
@@ -386,6 +419,8 @@ static ir_val ir_mk_bool(char *s)
   v.t = NULL;
   v.ty = (char *)"bool";
   v.vol = 0;
+  v.bf_unit = v.bf_boff = v.bf_width = 0;
+  v.bf_ty = NULL;
   return v;
 }
 
@@ -396,6 +431,8 @@ static ir_val ir_mk_void(void)
   v.t = NULL;
   v.ty = (char *)"void";
   v.vol = 0;
+  v.bf_unit = v.bf_boff = v.bf_width = 0;
+  v.bf_ty = NULL;
   return v;
 }
 
@@ -404,6 +441,7 @@ static int ir_nreg;
 static char *ir_sret;
 static a_type_ptr ir_ret_type;
 static int ir_in_main;   /* the routine being lowered is main */
+static a_routine_ptr ir_cur_rout;   /* the routine being lowered (thunks: enk_result_of_overriding_function) */
 
 /* Indentation of the next expression-level line. Statement lowering sets it before lowering. */
 static int ir_depth;
@@ -474,6 +512,11 @@ static void ir_copy(a_type_ptr t, const char *dst, const char *src)
 static ir_val ir_load(ir_val a)
 {
   char *r;
+  if (a.bf_unit != 0) { /* bit-field: read the storage unit and extract the field */
+    r = ir_let(a.bf_ty, ir_fmt("(bfload%s %s %u %s %u %u)", a.vol ? ".v" : "", a.bf_ty, a.bf_unit, a.s, a.bf_boff,
+                               a.bf_width));
+    return ir_mk_value(r, a.t);
+  }
   if (ir_is_aggregate(a.t)) return ir_mk_value(a.s, a.t);
   r = ir_let(ir_valtext(a.t), ir_fmt("(load%s %s %s)", a.vol ? ".v" : "", ir_valtext(a.t), a.s));
   return ir_mk_value(r, a.t);
@@ -494,16 +537,20 @@ static ir_val ir_subobject(const char *base, unsigned long off, a_type_ptr t, in
   return ir_mk_addr(ir_let(ir_ptext(t), ir_fmt("(offset %s %lu)", base, off)), t, vol);
 }
 
+static char *ir_size_text(a_type_ptr t);
+
 /* Address of element idx of an array whose element type is elem. */
 static ir_val ir_elem_addr(const char *base, const char *idx, a_type_ptr elem, int vol)
 {
-  return ir_mk_addr(ir_let(ir_ptext(elem), ir_fmt("(index %s %s %lu)", base, idx, ir_size_of(elem))), elem, vol);
+  char *sz = ir_size_text(elem);
+  return ir_mk_addr(ir_let(ir_ptext(elem), ir_fmt("(index %s %s %s)", base, idx, sz)), elem, vol);
 }
 
 /* Pointer value base + idx * sizeof(elem), of pointer type ptr_t. */
 static ir_val ir_ptr_add(const char *base, const char *idx, a_type_ptr ptr_t, a_type_ptr elem)
 {
-  char *r = ir_let(ir_valtext(ptr_t), ir_fmt("(index %s %s %lu)", base, idx, ir_size_of(elem)));
+  char *sz = ir_size_text(elem);
+  char *r = ir_let(ir_valtext(ptr_t), ir_fmt("(index %s %s %s)", base, idx, sz));
   return ir_mk_value(r, ptr_t);
 }
 
@@ -554,9 +601,13 @@ static ir_val ir_temp(a_type_ptr t)
 }
 
 /* Address of a variable: the operand bound to it (a parameter), else its slot or static object. */
+static ir_val ir_vla_addr(a_variable_ptr var, a_type_ptr t, int vol);
+
 static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
 {
-  const char *op = ir_tab_find(&ir_slots, var);
+  const char *op;
+  if (var->is_vla) return ir_vla_addr(var, t, vol);
+  op = ir_tab_find(&ir_slots, var);
   if (op != NULL) return ir_mk_addr((char *)op, t, vol);
   if (var_has_static_or_thread_storage_duration(var)) {
     return ir_mk_addr((char *)ir_global_op(var), t, vol);
@@ -573,6 +624,229 @@ static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
     return ir_mk_void();
   }
   return ir_mk_value(ir_let(ir_valtext(t), ir_fmt("(unsupported %s)", what)), t);
+}
+
+/* ================================================================ variable-length arrays and bit-fields */
+
+static void ir_stmt(a_statement_ptr s, int d);
+static ir_val ir_rval(an_expr_node_ptr e);
+
+/* The function scope being lowered (its vla_dimensions list finds the dimension variable of a VLA type). */
+static a_scope_ptr ir_cur_scope;
+
+/* 1 when the array type t, or an array it is made of, has a run-time bound. */
+static int ir_type_is_variable(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  while (s->kind == tk_array) {
+    if (s->variant.array.is_vla || s->variant.array.is_variable_size_array) return 1;
+    s = skip_typerefs(s->variant.array.element_type);
+  }
+  return 0;
+}
+
+/* The a_vla_dimension of a VLA array type (the original one for a compiler-generated copy), or NULL. */
+static a_vla_dimension_ptr ir_find_vla_dim(a_type_ptr s)
+{
+  a_vla_dimension_ptr d;
+  if (ir_cur_scope == NULL) return NULL;
+  for (d = ir_cur_scope->vla_dimensions; d != NULL; d = d->next) {
+    if (d->type == s) return d->original_dimension != NULL ? d->original_dimension : d;
+  }
+  return NULL;
+}
+
+/* Operand (a register or a constant) of type unsigned_long holding sizeof(t). A VLA type computes
+   count * sizeof(element) from the dimension variables that the stmk_set_vla_size statements set. */
+static char *ir_size_operand(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  char *esz, *cnt;
+  if (!ir_type_is_variable(t)) return ir_fmt("(const unsigned_long %lu)", ir_size_of(t));
+  esz = ir_size_operand(s->variant.array.element_type);
+  if (s->variant.array.is_vla) {
+    a_vla_dimension_ptr d = ir_find_vla_dim(s);
+    ir_val dv;
+    if (d == NULL || d->dimension_variable == NULL) {
+      ir_note(2, enk_sizeof, 0);
+      return ir_let("unsigned_long", "(unsupported vla-dimension)");
+    }
+    dv = ir_load(ir_var_addr(d->dimension_variable, d->dimension_variable->type, 0));
+    cnt = ir_let("unsigned_long", ir_fmt("(iconv unsigned_long %s)", dv.s));
+  } else if (!s->variant.array.is_variable_size_array) {
+    cnt = ir_fmt("(const unsigned_long %lu)", (unsigned long)s->variant.array.variant.number_of_elements);
+  } else {
+    ir_note(2, enk_sizeof, 0);
+    return ir_let("unsigned_long", "(unsupported vla-bound)");
+  }
+  return ir_let("unsigned_long", ir_fmt("(wmul unsigned_long %s %s)", cnt, esz));
+}
+
+/* The SIZE field of index and pdiff: a number, or a register when the element type is a VLA type. */
+static char *ir_size_text(a_type_ptr t)
+{
+  if (!ir_type_is_variable(t)) return ir_fmt("%lu", ir_size_of(t));
+  return ir_size_operand(t);
+}
+
+/* The slot that holds the address of a VLA variable's storage (see vlaalloc). Created on first use. */
+static const char *ir_vla_slot(a_variable_ptr var)
+{
+  const void *key = (const char *)var + 1; /* a key of its own: the variable itself may be bound elsewhere */
+  int fresh = ir_tab_find(&ir_slots, key) == NULL;
+  const char *op = ir_tab_get(&ir_slots, key, ir_name_or(var->source_corresp.name, "vla"), "$");
+  if (fresh) {
+    ir_buf_begin(&ir_slot_buf);
+    fprintf(nf_out, "\n  (slot %s (ptr ", op + 1);
+    nf_put_type(var->type);
+    fputs(") 8 8)", nf_out);
+    ir_buf_end(&ir_slot_buf);
+  }
+  return op;
+}
+
+/* The address of a VLA's storage: loaded from its slot. */
+static ir_val ir_vla_addr(a_variable_ptr var, a_type_ptr t, int vol)
+{
+  const char *slot = ir_vla_slot(var);
+  char *pt = ir_ptext(t);
+  return ir_mk_addr(ir_let(pt, ir_fmt("(load %s %s)", pt, slot)), t, vol);
+}
+
+/* stmk_vla_decl of a VLA variable: allocate count * sizeof(base element) bytes of dynamic stack storage.
+   The count is the variable that EDG's lowering assigned just before this statement. */
+static void ir_vla_alloc(a_variable_ptr var)
+{
+  a_variable_ptr cv = var->vla_element_count_variable;
+  a_type_ptr base = skip_typerefs(var->type);
+  const char *slot;
+  ir_val c;
+  char *n, *b;
+  if (cv == NULL) {
+    ir_note(1, stmk_vla_decl, 0);
+    ir_emit("(unsupported stmt vla_decl)");
+    return;
+  }
+  while (base->kind == tk_array) base = skip_typerefs(base->variant.array.element_type);
+  slot = ir_vla_slot(var);
+  c = ir_load(ir_var_addr(cv, cv->type, 0));
+  n = ir_let("unsigned_long", ir_fmt("(iconv unsigned_long %s)", c.s));
+  b = ir_let("unsigned_long", ir_fmt("(wmul unsigned_long %s (const unsigned_long %lu))", n, ir_size_of(base)));
+  ir_emit(ir_fmt("(vlaalloc %s %s)", slot, b));
+  ir_note(1, stmk_vla_decl, 1);
+}
+
+/* Storage unit of the bit-field f inside a parent object of parent_size bytes. The unit is the declared type's
+   size when the field fits in the aligned unit of that size inside the parent (the usual case), else the smallest
+   power of two (1, 2, 4, 8 bytes) at an aligned or end-of-parent position that holds the field. 0: no unit. */
+static int ir_bf_layout(a_field_ptr f, unsigned long parent_size, unsigned long *uoff, unsigned *unit, unsigned *boff)
+{
+  unsigned long start = (unsigned long)f->offset * 8UL + (unsigned long)f->offset_bit_remainder;
+  unsigned long w = (unsigned long)f->bit_size;
+  unsigned long cand[5], u, base;
+  int n = 0, i;
+  if (w == 0 || w > 64) return 0;
+  cand[n++] = ir_size_of(f->type);
+  cand[n++] = 1;
+  cand[n++] = 2;
+  cand[n++] = 4;
+  cand[n++] = 8;
+  for (i = 0; i < n; i++) {
+    u = cand[i];
+    if ((u != 1 && u != 2 && u != 4 && u != 8) || u * 8 < w) continue;
+    base = start / (8 * u) * u;
+    if (start + w > (base + u) * 8 || base + u > parent_size) {
+      if (parent_size < u) continue;
+      base = parent_size - u; /* slide the window to the end of the parent */
+      if (base * 8 > start || start + w > (base + u) * 8) continue;
+    }
+    *uoff = base;
+    *unit = (unsigned)u;
+    *boff = (unsigned)(start - base * 8);
+    return 1;
+  }
+  return 0;
+}
+
+/* The IR type text of a bit-field value: t's own text, or its counterpart of the other signedness when the field
+   differs (an enumeration whose bit-field is unsigned is printed as int). NULL when there is no such type. */
+static char *ir_bf_type(a_type_ptr t, int want_signed)
+{
+  char *txt = ir_valtext(t);
+  const char *base = txt;
+  if (!ir_is_integer(t) || ir_is_bool(t)) return want_signed ? NULL : txt;
+  if (ir_is_signed(t) == want_signed) return txt;
+  if (strncmp(base, "unsigned_", 9) == 0) base += 9;
+  else if (strncmp(base, "signed_", 7) == 0) base += 7;
+  if (!want_signed) return ir_fmt("unsigned_%s", base);
+  return strcmp(base, "char") == 0 ? ir_dup("signed_char") : ir_dup(base);
+}
+
+/* Lvalue of the bit-field f of the object at base (type parent), declared type t. */
+static ir_val ir_bf_lval(const char *base, a_field_ptr f, a_type_ptr parent, a_type_ptr t, int vol)
+{
+  unsigned long uoff = 0;
+  unsigned unit = 0, boff = 0;
+  ir_val a;
+  char *bty = ir_bf_type(t, f->bit_field_is_signed != 0);
+  if (bty == NULL || !ir_bf_layout(f, ir_size_of(parent), &uoff, &unit, &boff)) {
+    ir_val v = ir_gap(t, "bit-field-layout", 0, (int)eok_dot_field);
+    return ir_mk_addr(v.s, t, vol);
+  }
+  a = ir_subobject(base, uoff, t, vol);
+  a.bf_unit = unit;
+  a.bf_boff = boff;
+  a.bf_width = (unsigned)f->bit_size;
+  a.bf_ty = bty;
+  return a;
+}
+
+/* Store val into the lvalue lhs: a plain store, or a read-modify-write of the bit-field's storage unit. */
+static void ir_store_lv(ir_val lhs, const char *val)
+{
+  if (lhs.bf_unit != 0) {
+    ir_emit(ir_fmt("(bfstore%s %s %u %s %u %u %s)", lhs.vol ? ".v" : "", lhs.bf_ty, lhs.bf_unit, lhs.s,
+                   lhs.bf_boff, lhs.bf_width, val));
+    return;
+  }
+  ir_store(lhs.t, lhs.s, val, lhs.vol);
+}
+
+/* The value of an assignment-like expression on the lvalue lhs whose new value is nv: a bit-field stores only
+   its low bits (and sign-extends on reading), so a used result is read back. */
+static ir_val ir_assign_result(an_expr_node_ptr e, ir_val lhs, ir_val nv)
+{
+  if (lhs.bf_unit != 0 && !e->result_is_not_used) return ir_load(lhs);
+  return nv;
+}
+
+/* GNU statement expression ({ ... }): the statements run inline, and the value is that of the last one when
+   it is an expression statement (otherwise the expression is void). */
+static ir_val ir_stmt_expr(an_expr_node_ptr e)
+{
+  a_statement_ptr blk = e->variant.statement, s;
+  int d = ir_depth;
+  ir_val v = ir_mk_void();
+  ir_note(2, enk_statement, 1);
+  if (blk == NULL) return v;
+  if (blk->kind != stmk_block) {
+    ir_stmt(blk, d);
+    ir_depth = d;
+    return v;
+  }
+  for (s = blk->variant.block.statements; s != NULL; s = s->next) {
+    if (s->next == NULL && (s->kind == stmk_stmt_expr_result || s->kind == stmk_expr) && s->expr != NULL &&
+        !ir_is_void(s->expr->type)) {
+      ir_note(1, (int)s->kind, 1);
+      ir_depth = d;
+      v = ir_rval(s->expr);
+    } else {
+      ir_stmt(s, d);
+    }
+  }
+  ir_depth = d;
+  if (v.s == NULL && !ir_is_void(e->type)) return ir_gap(e->type, "statement-expression-value", 2, (int)enk_statement);
+  return v;
 }
 
 /* ================================================================ constants */
@@ -610,8 +884,7 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
     case abk_routine:
       if (off == 0) {
         ir_note(3, ck_address, 1);
-        return ir_mk_value(ir_fmt("&\"%s\"", ir_name_or(c->variant.address.variant.routine->source_corresp.name,
-                                                      "fn")),
+        return ir_mk_value(ir_fmt("&\"%s\"", ir_rout_name(c->variant.address.variant.routine)),
                            t);
       }
       break;
@@ -671,6 +944,7 @@ static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_lval_op(an_expr_node_ptr e);
+static ir_val ir_roof(an_expr_node_ptr e);
 
 /* Pointer that may be null: emit (nonnull P) unless the operand is known to be an address. */
 static void ir_nonnull(an_expr_node_ptr src, ir_val p)
@@ -691,15 +965,34 @@ static ir_val ir_rval(an_expr_node_ptr e)
       return ir_constant(e->variant.constant.ptr, e->type);
     case enk_routine:
       ir_note(2, enk_routine, 1);
-      return ir_mk_value(ir_fmt("&\"%s\"", ir_name_or(e->variant.routine.ptr->source_corresp.name, "fn")), e->type);
+      return ir_mk_value(ir_fmt("&\"%s\"", ir_rout_name(e->variant.routine.ptr)), e->type);
     case enk_variable:
       ir_note(2, enk_variable, 1);
       return ir_load(ir_lval(e));
     case enk_object_lifetime:
       ir_note(2, enk_object_lifetime, 1);
       return ir_rval(e->variant.object_lifetime.expr);
+    case enk_statement:
+      return ir_stmt_expr(e);
+    case enk_sizeof: {
+      /* sizeof is folded to a constant except for a variable-length array (a type or an expression of VLA type). */
+      a_type_ptr st = e->variant.sizeof_info.is_type ? e->variant.sizeof_info.variant.type
+                                                     : e->variant.sizeof_info.variant.expr->type;
+      char *sz;
+      if (st == NULL) return ir_gap(e->type, "sizeof", 2, (int)enk_sizeof);
+      if (!ir_type_is_variable(st)) {
+        ir_note(2, enk_sizeof, 1);
+        return ir_mk_value(ir_fmt("(const %s %lu)", ir_valtext(e->type), ir_size_of(st)), e->type);
+      }
+      sz = ir_size_operand(st);
+      ir_note(2, enk_sizeof, 1);
+      if (ir_is_integer(e->type) && ir_size_of(e->type) == 8 && !ir_is_signed(e->type)) return ir_mk_value(sz, e->type);
+      return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(iconv %s %s)", ir_valtext(e->type), sz)), e->type);
+    }
     case enk_operation:
       return ir_rval_op(e);
+    case enk_result_of_overriding_function:
+      return ir_roof(e);
     default:
       return ir_gap(e->type, ir_fmt("node %s", nfcxx_enk_name(e->kind) != NULL ? nfcxx_enk_name(e->kind) : "?"),
                     2, (int)e->kind);
@@ -717,6 +1010,11 @@ static ir_val ir_lval(an_expr_node_ptr e)
   }
   if (e->kind == enk_object_lifetime) return ir_lval(e->variant.object_lifetime.expr);
   if (e->kind == enk_operation) return ir_lval_op(e);
+  if (e->kind == enk_routine) {
+    /* A function designator (the operand of & outside a constant expression, for example `throw &f`): its address. */
+    ir_note(2, enk_routine, 1);
+    return ir_mk_addr(ir_fmt("&\"%s\"", ir_name_or(e->variant.routine.ptr->source_corresp.name, "fn")), e->type, 0);
+  }
   if (ir_is_aggregate(e->type)) return ir_rval(e);
   return ir_gap(e->type, "lvalue", 2, (int)e->kind);
 }
@@ -811,21 +1109,25 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
     case eok_dot_field: {
       ir_val base;
       an_expr_node_ptr fe = a1;
-      if (fe == NULL || fe->kind != enk_field || fe->variant.field.ptr->is_bit_field) break;
+      if (fe == NULL || fe->kind != enk_field) break;
       ir_note(0, k, 1);
       base = ir_lval(a0);
       /* a member of a volatile object is volatile, and so is a volatile member */
       vol = vol || base.vol || ir_is_volatile(fe->variant.field.ptr->type);
+      if (fe->variant.field.ptr->is_bit_field) return ir_bf_lval(base.s, fe->variant.field.ptr, a0->type, e->type, vol);
       return ir_subobject(base.s, (unsigned long)fe->variant.field.ptr->offset, e->type, vol);
     }
     case eok_points_to_field: {
       ir_val p;
       an_expr_node_ptr fe = a1;
-      if (fe == NULL || fe->kind != enk_field || fe->variant.field.ptr->is_bit_field) break;
+      if (fe == NULL || fe->kind != enk_field) break;
       ir_note(0, k, 1);
       p = ir_rval(a0);
       ir_nonnull(a0, p);
       vol = vol || ir_pointee_is_volatile(a0->type) || ir_is_volatile(fe->variant.field.ptr->type);
+      if (fe->variant.field.ptr->is_bit_field) {
+        return ir_bf_lval(p.s, fe->variant.field.ptr, skip_typerefs(a0->type)->variant.pointer.type, e->type, vol);
+      }
       return ir_subobject(p.s, (unsigned long)fe->variant.field.ptr->offset, e->type, vol);
     }
     case eok_subscript: {
@@ -878,11 +1180,14 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       return ir_lval(a1);
     }
     case eok_lvalue_adjust:
-      if (ir_is_aggregate(e->type)) {
-        ir_note(0, k, 1);
-        return ir_lval(a0);
+      /* Only the qualifiers of the lvalue change (a `const int c = f();` initializer writes through the adjusted
+         lvalue of c), so the address is the operand's. */
+      ir_note(0, k, 1);
+      if (ir_is_aggregate(e->type)) return ir_lval(a0);
+      {
+        ir_val base = ir_lval(a0);
+        return ir_mk_addr(base.s, e->type, vol);
       }
-      break;
     default:
       break;
   }
@@ -1013,8 +1318,10 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       ir_val b = ir_rval(a1);
       a_type_ptr elem = skip_typerefs(a0->type)->variant.pointer.type;
       ir_note(0, k, 1);
-      return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(pdiff %s %s %lu)", a.s, b.s, ir_size_of(elem))),
-                         e->type);
+      {
+        char *sz = ir_size_text(elem);
+        return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(pdiff %s %s %s)", a.s, b.s, sz)), e->type);
+      }
     }
     case eok_add:
     case eok_subtract:
@@ -1055,9 +1362,9 @@ static ir_val ir_assign(an_expr_node_ptr e, int want_addr)
       ir_note(0, eok_assign, 1);
       return want_addr ? lhs : ir_mk_value(lhs.s, lhs.t);
     }
-    ir_store(lhs.t, lhs.s, rhs.s, lhs.vol);
+    ir_store_lv(lhs, rhs.s);
     ir_note(0, eok_assign, 1);
-    return want_addr ? lhs : rhs;
+    return want_addr ? lhs : ir_assign_result(e, lhs, rhs);
   }
   {
     an_expr_operator_kind base = ir_compound_base(k, &ok);
@@ -1076,8 +1383,8 @@ static ir_val ir_assign(an_expr_node_ptr e, int want_addr)
       if (!ok) return ir_gap(e->type, "assign-op", 0, (int)k);
     }
     ir_note(0, k, 1);
-    ir_store(lhs.t, lhs.s, nv.s, lhs.vol);
-    return want_addr ? lhs : nv;
+    ir_store_lv(lhs, nv.s);
+    return want_addr ? lhs : ir_assign_result(e, lhs, nv);
   }
 }
 
@@ -1104,9 +1411,9 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
   } else {
     return ir_gap(e->type, "incr", 0, (int)e->variant.operation.kind);
   }
-  ir_store(lhs.t, lhs.s, nv.s, lhs.vol);
+  ir_store_lv(lhs, nv.s);
   ir_note(0, pre ? eok_pre_incr : eok_post_incr, 1);
-  return pre ? nv : cur;
+  return pre ? ir_assign_result(e, lhs, nv) : cur;
 }
 
 /* The function type a call goes through: the routine's own type, or the pointee of a function pointer. */
@@ -1131,7 +1438,7 @@ static ir_val ir_call(an_expr_node_ptr e)
   ir_val sret = ir_mk_void();
   if (f->kind == enk_routine) {
     ir_note(2, enk_routine, 1);
-    callee = ir_fmt("&\"%s\"", ir_name_or(f->variant.routine.ptr->source_corresp.name, "fn"));
+    callee = ir_fmt("&\"%s\"", ir_rout_name(f->variant.routine.ptr));
   } else {
     ir_val fv = ir_rval(f);
     ir_nonnull(f, fv); /* a call through a null function pointer traps (stage 2, gap 9) */
@@ -1160,6 +1467,50 @@ static ir_val ir_call(an_expr_node_ptr e)
       int named = agg_ret ? 1 : 0;
       for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) named++;
       callee = ir_fmt("%s (variadic %d)", callee, named);
+    }
+  }
+  ir_note(0, eok_call, 1);
+  if (ir_is_void(e->type) || agg_ret) {
+    ir_emit(ir_fmt("(eval (call void %s%s))", callee, args));
+    if (agg_ret) return ir_mk_addr(sret.s, e->type, 0);
+    return ir_mk_void();
+  }
+  return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(call %s %s%s)", ir_valtext(e->type), callee, args)), e->type);
+}
+
+/* enk_result_of_overriding_function: the body of an IA-64 this-adjusting thunk (for example the destructor of a
+   second base class) or of a covariant-return wrapper calls the underlying function with the thunk's own
+   parameters, as c_gen_be.c's dump_result_of_overriding_function writes it. The thunk has already adjusted its
+   `this` parameter in its slot. */
+static ir_val ir_roof(an_expr_node_ptr e)
+{
+  a_routine_ptr under = ir_cur_rout != NULL ? ir_cur_rout->overriding_function_for_wrapper : NULL;
+  a_scope_ptr scope = ir_cur_rout != NULL ? scope_for_routine(ir_cur_rout) : NULL;
+  a_variable_ptr param;
+  char *args = ir_dup("");
+  int agg_ret = ir_is_aggregate(e->type);
+  ir_val sret = ir_mk_void();
+  char *callee;
+  a_type_ptr ft;
+  if (under == NULL || scope == NULL) return ir_gap(e->type, "node result_of_overriding_function", 2, (int)e->kind);
+  ft = skip_typerefs(ir_cur_rout->type);
+  if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
+    return ir_gap(e->type, "node result_of_overriding_function (variadic)", 2, (int)e->kind);
+  }
+  ir_note(2, enk_result_of_overriding_function, 1);
+  callee = ir_fmt("&\"%s\"", ir_name_or(under->source_corresp.name, "fn"));
+  if (agg_ret) {
+    sret = ir_temp(e->type);
+    args = ir_fmt("%s %s", args, sret.s);
+  }
+  for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
+    ir_val a = ir_var_addr(param, param->type, 0);
+    if (ir_is_aggregate(param->type)) {
+      ir_val tmp = ir_temp(param->type);
+      ir_copy(param->type, tmp.s, a.s);
+      args = ir_fmt("%s %s", args, tmp.s);
+    } else {
+      args = ir_fmt("%s %s", args, ir_load(a).s);
     }
   }
   ir_note(0, eok_call, 1);
@@ -1324,10 +1675,11 @@ static ir_val ir_logic(an_expr_node_ptr e, int is_and)
 
 /* One element of an aggregate constant: a direct base class or a non-static data member, in the order
    EDG's aggregate constants use (direct bases first, then the members). Returns -1 when the class has a
-   virtual base or a bit-field, which are not lowered yet. */
+   virtual base. Named bit-fields are members (bf set); unnamed ones are skipped. */
 struct ir_member {
   unsigned long off;
   a_type_ptr t;
+  a_field_ptr bf; /* the field when it is a bit-field (off is then its byte offset component), else NULL */
 };
 
 static int ir_is_base_storage(a_class_type_supplement_ptr extra, a_field_ptr f)
@@ -1352,6 +1704,7 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
       if (b->is_virtual || n >= max) return -1;
       out[n].off = (unsigned long)b->offset;
       out[n].t = b->type;
+      out[n].bf = NULL;
       n++;
     }
   }
@@ -1359,9 +1712,12 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
     /* EDG adds a field __b_N for a base subobject that is already a direct base (same type, same offset).
        It is the same storage as that base, so it is not a second element. */
     if (ir_is_base_storage(extra, f)) continue;
-    if (f->is_bit_field || n >= max) return -1;
+    /* An unnamed bit-field (padding, or :0) takes no initializer. */
+    if (f->is_bit_field && (f->source_corresp.name == NULL || f->source_corresp.name[0] == '\0')) continue;
+    if (n >= max) return -1;
     out[n].off = (unsigned long)f->offset;
     out[n].t = f->type;
+    out[n].bf = f->is_bit_field ? f : NULL;
     n++;
   }
   return n;
@@ -1407,19 +1763,32 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
     a_constant_ptr ce;
     if (n < 0) {
       ir_note(4, dik_constant, 0);
-      ir_emit("(unsupported init virtual-base-or-bitfield)");
+      ir_emit("(unsupported init virtual-base)");
       return;
     }
     for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
-      ir_val sub = ir_subobject(dst.s, mem[i].off, mem[i].t, 0);
-      if (ce->kind == ck_aggregate || ir_is_aggregate(mem[i].t)) {
-        ir_init_constant(sub, ce, mem[i].t);
-      } else {
+      if (mem[i].bf != NULL) {
         ir_val v = ir_constant(ce, mem[i].t);
-        ir_store(mem[i].t, sub.s, v.s, 0);
+        ir_store_lv(ir_bf_lval(dst.s, mem[i].bf, t, mem[i].t, 0), v.s);
+        continue;
+      }
+      {
+        ir_val sub = ir_subobject(dst.s, mem[i].off, mem[i].t, 0);
+        if (ce->kind == ck_aggregate || ir_is_aggregate(mem[i].t)) {
+          ir_init_constant(sub, ce, mem[i].t);
+        } else {
+          ir_val v = ir_constant(ce, mem[i].t);
+          ir_store(mem[i].t, sub.s, v.s, 0);
+        }
       }
     }
-    for (; i < n; i++) ir_zero_object(ir_subobject(dst.s, mem[i].off, mem[i].t, 0), mem[i].t);
+    for (; i < n; i++) {
+      if (mem[i].bf != NULL) {
+        ir_store_lv(ir_bf_lval(dst.s, mem[i].bf, t, mem[i].t, 0), ir_zero(mem[i].t));
+        continue;
+      }
+      ir_zero_object(ir_subobject(dst.s, mem[i].off, mem[i].t, 0), mem[i].t);
+    }
     ir_note(4, dik_constant, 1);
     return;
   }
@@ -1487,7 +1856,7 @@ static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
     switch (c->variant.address.kind) {
       case abk_routine:
         if (add == 0) {
-          target = ir_fmt("&\"%s\"", ir_name_or(c->variant.address.variant.routine->source_corresp.name, "fn"));
+          target = ir_fmt("&\"%s\"", ir_rout_name(c->variant.address.variant.routine));
         }
         break;
       case abk_variable:
@@ -1547,13 +1916,27 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
     int i = 0;
     a_constant_ptr ce;
     if (n < 0) {
-      ir_gi_unsupported("virtual-base-or-bitfield");
+      ir_gi_unsupported("virtual-base");
       return;
     }
     for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      if (mem[i].bf != NULL) {
+        unsigned long uoff = 0;
+        unsigned unit = 0, boff = 0;
+        if (ce->kind != ck_integer || !ir_bf_layout(mem[i].bf, ir_size_of(t), &uoff, &unit, &boff)) {
+          ir_gi_unsupported("bitfield");
+          continue;
+        }
+        /* One item per bit-field; the consumer merges items that share a storage unit. */
+        fprintf(nf_out, "\n    (bitfield %lu %u %u %u %s %s)", off + uoff, unit, boff, (unsigned)mem[i].bf->bit_size,
+                ir_valtext(mem[i].t), ir_const_value(ce, mem[i].t).s);
+        continue;
+      }
       ir_gi_items(off + mem[i].off, ce, mem[i].t);
     }
-    for (; i < n; i++) fprintf(nf_out, "\n    (zero %lu %lu)", off + mem[i].off, ir_size_of(mem[i].t));
+    for (; i < n; i++) {
+      if (mem[i].bf == NULL) fprintf(nf_out, "\n    (zero %lu %lu)", off + mem[i].off, ir_size_of(mem[i].t));
+    }
     return;
   }
   if (c->kind == ck_aggregate || ir_is_aggregate(t)) {
@@ -1813,6 +2196,21 @@ static void ir_stmt(a_statement_ptr s, int d)
       /* The declaration point. Storage is per function, so nothing is printed. */
       ir_note(1, stmk_decl, 1);
       return;
+    case stmk_set_vla_size: {
+      /* The dimension of a VLA type is evaluated here, once, into its dimension variable. */
+      a_vla_dimension_ptr dim = s->variant.vla_dimension;
+      ir_note(1, stmk_set_vla_size, 1);
+      if (dim != NULL && dim->dimension_variable != NULL && dim->dimension_expr != NULL) (void)ir_rval(dim->dimension_expr);
+      return;
+    }
+    case stmk_vla_decl:
+      /* A variable-length array gets its storage here; a typedef of a variably modified type has none. */
+      if (!s->variant.vla.is_typedef_decl && s->variant.vla.variant.variable->is_vla) {
+        ir_vla_alloc(s->variant.vla.variant.variable);
+      } else {
+        ir_note(1, stmk_vla_decl, 1);
+      }
+      return;
     case stmk_init: {
       a_dynamic_init_ptr init = s->variant.dynamic_init;
       ir_note(1, stmk_init, 1);
@@ -1832,6 +2230,34 @@ static void ir_stmt(a_statement_ptr s, int d)
         else ir_store(dst.t, dst.s, v.s, dst.vol);
         ir_note(4, dik_expression, 1);
         return;
+      }
+      if (init->kind == dik_constructor && init->variant.constructor.ptr != NULL &&
+          !init->variant.constructor.is_copy_constructor_with_implied_source && !init->variant.constructor.is_array_copy &&
+          !init->variant.constructor.value_initialization) {
+        /* A constructor call on the object: (eval (call void &"ctor" OBJ ARG*)). DO_IL_LOWERING expands every
+           constructor into an explicit call before we see the IL, so this form is not reached on the programs in
+           tests (it is the shape the unlowered IL would need); array copies, implied copy sources and value
+           initialization stay unsupported. */
+        a_routine_ptr ctor = init->variant.constructor.ptr;
+        a_type_ptr ct = skip_typerefs(ctor->type);
+        if (ct->variant.routine.extra_info == NULL || !ct->variant.routine.extra_info->has_ellipsis) {
+          ir_val dst = ir_var_addr(init->variable, init->variable->type, 0);
+          char *args = ir_fmt(" %s", dst.s);
+          an_expr_node_ptr arg;
+          for (arg = init->variant.constructor.args; arg != NULL; arg = arg->next) {
+            ir_val a = ir_rval(arg);
+            if (ir_is_aggregate(a.t)) {
+              ir_val tmp = ir_temp(a.t);
+              ir_copy(a.t, tmp.s, a.s);
+              args = ir_fmt("%s %s", args, tmp.s);
+            } else {
+              args = ir_fmt("%s %s", args, a.s);
+            }
+          }
+          ir_note(4, dik_constructor, 1);
+          ir_line(d, ir_fmt("(eval (call void &\"%s\"%s))", ir_rout_name(ctor), args));
+          return;
+        }
       }
       ir_note(4, (int)init->kind, 0);
       ir_line(d, ir_fmt("(unsupported init %s)",
@@ -1866,6 +2292,39 @@ static void nf_put_quoted_name(const char *name)
   nf_put_quoted(n, strlen(n));
 }
 
+/* Startup and exit markers of a function: (constructor [PRIO]) and (destructor [PRIO]). A routine runs before main
+   when it has __attribute__((constructor [(PRIO)])), or when it is an initialization routine made by IL lowering
+   (the __sti__ routine that runs a translation unit's dynamic initializers; with GNU init_priority there is one
+   per priority, and rout->init_priority is that priority). The C back end marks the same routines with
+   __attribute__((constructor)) (or a .ctors.N section for a priority), which is what path A runs. A destructor
+   routine (__attribute__((destructor [(PRIO)]))) runs at exit. Without a PRIO the routine has the default
+   priority, which runs after every prioritized one. A consumer must keep these routines whatever refers to them. */
+static void ir_startup_markers(a_routine_ptr rout)
+{
+  const char *name = rout->source_corresp.name;
+  int ctor = 0, dtor = 0;
+  unsigned long cprio = 0, dprio = 0;
+  if (rout->is_initialization_routine) {
+    ctor = 1;
+    if (rout->has_ctor_priority && has_gnu_routine_supp(rout)) cprio = (unsigned long)gnu_routine_supp(rout)->ctor_priority;
+  } else if (name != NULL && strncmp(name, IL_LOWERING_INIT_ROUTINE_PREFIX, strlen(IL_LOWERING_INIT_ROUTINE_PREFIX)) == 0) {
+    ctor = 1;
+    cprio = (unsigned long)rout->init_priority;
+  }
+  if (rout->is_finalization_routine) {
+    dtor = 1;
+    if (rout->has_dtor_priority && has_gnu_routine_supp(rout)) dprio = (unsigned long)gnu_routine_supp(rout)->dtor_priority;
+  }
+  if (ctor) {
+    if (cprio != 0) fprintf(nf_out, "\n  (constructor %lu)", cprio);
+    else fputs("\n  (constructor)", nf_out);
+  }
+  if (dtor) {
+    if (dprio != 0) fprintf(nf_out, "\n  (destructor %lu)", dprio);
+    else fputs("\n  (destructor)", nf_out);
+  }
+}
+
 /* Lower one routine body into the function output. Same selection as the IL dump (stage 1). */
 static void ir_function(a_routine_ptr rout)
 {
@@ -1895,9 +2354,11 @@ static void ir_function(a_routine_ptr rout)
   ir_sret = NULL;
   ir_ret_type = ret;
   ir_in_main = rout->source_corresp.name != NULL && strcmp(rout->source_corresp.name, "main") == 0;
+  ir_cur_rout = rout;
   ir_slots.n = 0;
   ir_labels.n = 0;
   ir_loop_n = 0;
+  ir_cur_scope = scope;
   ir_buf_open(&ir_slot_buf);
 
   /* Parameters: a hidden result pointer first, then one register per parameter. Aggregate parameters are
@@ -1966,7 +2427,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_open(&hdr);
   ir_buf_begin(&hdr);
   fputs("\n(function ", nf_out);
-  nf_put_quoted_name(rout->source_corresp.name);
+  nf_put_quoted_name(ir_rout_name(rout));
   fputs("\n  (ret ", nf_out);
   if (ir_is_aggregate(ret)) fputs("void", nf_out); /* the result goes through (sret ...) */
   else nf_put_unqualified_type(skip_typerefs(ret));
@@ -1979,6 +2440,7 @@ static void ir_function(a_routine_ptr rout)
   fputs(")", nf_out);
   if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
   else if (rout->use_comdat) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
+  ir_startup_markers(rout);
   ir_buf_write(&ir_slot_buf, nf_out);
   ir_buf_write(&body, nf_out);
   fputs(")\n", nf_out);
@@ -2009,6 +2471,7 @@ void nfcxx_ir_back_end(void)
   for (var = scope->variables; var != NULL; var = var->next) {
     if (!ignore_variable_in_back_end(var)) (void)ir_global_op(var);
   }
+  for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(rout->source_corresp.name);
   for (rout = scope->routines; rout != NULL; rout = rout->next) {
     ir_function(rout);
   }

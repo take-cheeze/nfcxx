@@ -12,8 +12,11 @@ cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
 # The probes of tests/pathb-qbe/cases that exercise the lowering itself (continue, bool loads, setjmp, unreachable
-# code, volatile accesses, thread-local objects) have goldens here too, so a change in the IR text shows up as a diff.
-probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp tests/pathb-qbe/cases/setjmp.cpp tests/pathb-qbe/cases/reachability.cpp tests/pathb-qbe/cases/volatile.cpp tests/pathb-qbe/cases/tls.cpp"
+# code, EH thunks, volatile accesses, thread-local objects) have goldens here too, so a change in the IR text shows up as a diff.
+probes="tests/pathb-qbe/cases/continue.cpp tests/pathb-qbe/cases/bool_load.cpp tests/pathb-qbe/cases/setjmp.cpp tests/pathb-qbe/cases/reachability.cpp tests/pathb-qbe/cases/eh_thunk.cpp tests/pathb-qbe/cases/volatile.cpp tests/pathb-qbe/cases/tls.cpp tests/pathb-qbe/cases/bitfield_vol.cpp"
+# Dynamic initialization (global constructors, local statics, constructor/destructor attributes, new/delete).
+probes="$probes tests/pathb-qbe/cases/dyn_global.cpp tests/pathb-qbe/cases/dyn_local_static.cpp tests/pathb-qbe/cases/dyn_ctor_attr.cpp tests/pathb-qbe/cases/dyn_ctor_members.cpp tests/pathb-qbe/cases/dyn_new_delete.cpp tests/pathb-qbe/cases/dyn_global_forms.cpp tests/pathb-qbe/cases/dyn_init_forms.cpp"
+probes="$probes tests/pathb-qbe/cases/bitfield.cpp tests/pathb-qbe/cases/bitfield2.cpp tests/pathb-qbe/cases/vla.cpp tests/pathb-qbe/cases/stmtexpr.cpp"   # bit-fields, VLAs, statement expressions
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)
@@ -31,9 +34,9 @@ for f in tests/cases/*.cpp $probes; do
     echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1
   fi
 done
-# Gap probe: tests/pathb-ir/gaps.cpp uses constructs the lowering does not handle yet (VLA, statement
-# expressions, inline asm, bit-fields). Its golden shows the (unsupported ...) markers; the count must match.
-gap_expected=8
+# Gap probe: tests/pathb-ir/gaps.cpp uses constructs the lowering handled late (VLA, statement
+# expressions, bit-fields) next to one it still does not handle (inline asm). Its golden shows the (unsupported ...) marker; the count must match.
+gap_expected=1   # inline asm; VLAs, statement expressions and bit-fields are lowered
 if ! NFCXX_PATHB_STATS=1 scripts/pathb-dump --ir tests/pathb-ir/gaps.cpp > "$tmp/gaps.ir" 2> "$tmp/gaps.err"; then
   echo "FAIL (front end) tests/pathb-ir/gaps.cpp"; fail=1
 else

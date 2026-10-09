@@ -153,7 +153,7 @@ def parse_type(x):
         return parse_type(x[1])
     if head == "array":
         if x[1] == "?":
-            raise Refused("variable-length array type")
+            return ("array", None, parse_type(x[2]))   # variable-length: no count
         return ("array", int(x[1]), parse_type(x[2]))
     if head in ("struct", "class", "union"):
         return ("agg", head, str(x[1]))
@@ -295,6 +295,9 @@ class Module:
         self.thread = {}       # IR name -> "def" or "ext": thread-local globals ((thread) marker; ext = declaration only)
         self.vhelpers = {}     # volatile access helpers used so far: QBE function name -> its text lines
         self.weakrefs = {}     # undefined functions that are weak references (TLS init functions, see weak_refs)
+        self.startup = []      # (".init_array" or ".fini_array", priority (0: none), QBE symbol)
+        self.funcs = set()     # IR names of the functions defined in this module
+        self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -321,6 +324,8 @@ class Fn:
         self.ret_ty = ret_ty
         self.body = []
         self.allocs = []
+        self.inits = []      # instructions that run first in @start, after the allocs
+        self.nvla = 0        # vlaalloc statements so far (each has a capacity slot)
         self.returns_twice = False  # calls setjmp or another function that returns twice
         self.ntmp = 0
         self.nlab = 0
@@ -478,7 +483,17 @@ class Fn:
                 return Val("$" + qsym(name), "l", ("ptr", self.mod.globals.get(name)))
             if sig == "&":
                 # A weak reference goes through the GOT (`extern`), so that an absent definition reads as null in a PIE too.
-                return Val(("extern $" if name in self.mod.weakrefs else "$") + qsym(name), "l", ("ptr", ("fn",)))
+                if name in self.mod.weakrefs:
+                    return Val("extern $" + qsym(name), "l", ("ptr", ("fn",)))
+                if name in self.mod.funcs:
+                    return Val("$" + qsym(name), "l", ("ptr", ("fn",)))
+                # The address of a function defined elsewhere: loaded from a local pointer cell (see the
+                # mruby port; a PIE link rejects a PC-relative reference to a shared-library function).
+                cell = "pathb_got." + qsym(name)
+                self.mod.got[name] = cell
+                t = self.tmp()
+                self.emit("%s =l loadl $%s" % (t, cell))
+                return Val(t, "l", ("ptr", ("fn",)))
         if head_of(op) == "const":
             return self.const(op)
         if head_of(op) == "null":
@@ -907,10 +922,22 @@ def r_offset(fn, x):
     return Val(t, "l", ("ptr", None))
 
 
+def size_text(fn, s):
+    """The SIZE of index and pdiff: a number, or a register (a VLA element type) as an l-class QBE operand."""
+    if isinstance(s, str) and REG_RE.match(s):
+        v = fn.opnd(s)
+        if v.cls == "l":
+            return v.t
+        t = fn.tmp()
+        fn.emit("%s =l extuw %s" % (t, v.t))
+        return t
+    return str(as_int(s))
+
+
 def r_index(fn, x):
     base = fn.opnd(x[1], "l")
     idx = fn.opnd(x[2])
-    size = as_int(x[3])
+    size = size_text(fn, x[3])
     if idx.cls == "l":
         i64 = idx.t
     elif idx.ty is not None and idx.ty[0] == "int" and idx.ty[2] and not idx.ty[3]:
@@ -920,7 +947,7 @@ def r_index(fn, x):
         i64 = fn.tmp()
         fn.emit("%s =l extuw %s" % (i64, idx.t))
     m = fn.tmp()
-    fn.emit("%s =l mul %s, %d" % (m, i64, size))
+    fn.emit("%s =l mul %s, %s" % (m, i64, size))
     t = fn.tmp()
     fn.emit("%s =l add %s, %s" % (t, base.t, m))
     return Val(t, "l", ("ptr", None))
@@ -929,13 +956,13 @@ def r_index(fn, x):
 def r_pdiff(fn, x):
     a = fn.opnd(x[1], "l")
     b = fn.opnd(x[2], "l")
-    size = as_int(x[3])
-    if size == 0:
+    size = size_text(fn, x[3])
+    if size == "0":
         raise Refused("pdiff with element size 0")
     d = fn.tmp()
     fn.emit("%s =l sub %s, %s" % (d, a.t, b.t))
     t = fn.tmp()
-    fn.emit("%s =l div %s, %d" % (t, d, size))
+    fn.emit("%s =l div %s, %s" % (t, d, size))
     return Val(t, "l", ("int", 8, True, False))
 
 
@@ -999,7 +1026,10 @@ def r_call(fn, x):
     # (call TYPE CALLEE [(variadic N)] ARG*): with (variadic N) the first N arguments match named parameters
     # and the QBE call gets "..." after them, so the callee's register-save prologue is set up (%al).
     ret = parse_type(x[1])
-    callee = fn.opnd(x[2])
+    if isinstance(x[2], Sym) and x[2][0] == "&":
+        callee = Val("$" + qsym(x[2][1]), "l", ("ptr", ("fn",)))
+    else:
+        callee = fn.opnd(x[2])
     if isinstance(x[2], Sym) and x[2][1] in RETURNS_TWICE:
         fn.returns_twice = True
     rest = x[3:]
@@ -1029,6 +1059,69 @@ def r_call(fn, x):
     return Val(t, cls, ret)
 
 
+# ---- bit-fields. (bfload T UNIT ADDR BOFF WIDTH) reads the UNIT-byte storage unit at ADDR and extracts WIDTH bits from
+# bit BOFF (little-endian bit numbering); the result has type T (sign-extended when T is signed, else zero-extended).
+# (bfstore T UNIT ADDR BOFF WIDTH VALUE) replaces those bits of the unit with the low WIDTH bits of VALUE and leaves
+# the others alone. The unit is accessed whole (a read-modify-write for the store).
+BF_LOAD = {1: "loadub", 2: "loaduh", 4: "loadw", 8: "loadl"}
+BF_STORE = {1: "storeb", 2: "storeh", 4: "storew", 8: "storel"}
+
+
+def bf_args(x, nargs):
+    if len(x) != nargs:
+        raise BadIR("%s form" % x[0])
+    unit = as_int(x[2])
+    boff = as_int(x[4])
+    width = as_int(x[5])
+    if unit not in BF_LOAD:
+        raise BadIR("%s: unit %d" % (x[0], unit))
+    if width < 1 or boff < 0 or boff + width > unit * 8:
+        raise BadIR("%s: bits %d+%d outside a %d-byte unit" % (x[0], boff, width, unit))
+    return unit, boff, width
+
+
+def bf_mask(width, cls):
+    return wrap_int((1 << width) - 1, cls)
+
+
+def r_bfload(fn, x):
+    vol = x[0] == "bfload.v"
+    unit, boff, width = bf_args(x, 6)
+    ty = parse_type(x[1])
+    if ty[0] != "int":
+        raise Refused("bit-field of type %s" % (ty,))
+    addr = fn.opnd(x[3], "l")
+    ucls = "l" if unit == 8 else "w"
+    ubits = 64 if unit == 8 else 32
+    t = fn.tmp()
+    if vol:
+        # a volatile bit-field: the whole unit is read once, through the volatile helper (see vhelper)
+        fn.emit("%s =%s call $%s(l %s)" % (t, ucls, vhelper(fn.mod, BF_LOAD[unit], ucls), addr.t))
+    else:
+        fn.emit("%s =%s %s %s" % (t, ucls, BF_LOAD[unit], addr.t))
+    # Extraction is a shift pair (to the top of the register, then back down), never an `and` with a low mask: QBE's
+    # width analysis (copy.c, "redundant and mask") drops such an `and` wrongly when the value comes round a loop through
+    # memory (a phi it has visited and failed on is taken as narrow), which a do { } while (0) in a macro is enough
+    # to produce. Shifts are never removed that way.
+    if ubits - boff - width > 0:
+        t2 = fn.tmp()
+        fn.emit("%s =%s shl %s, %d" % (t2, ucls, t, ubits - boff - width))
+        t = t2
+    if ubits - width > 0:
+        t2 = fn.tmp()
+        fn.emit("%s =%s %s %s, %d" % (t2, ucls, "sar" if int_is_signed(ty) and not ty[3] else "shr", t, ubits - width))
+        t = t2
+    tcls = qcls(ty)
+    if tcls != ucls:
+        t2 = fn.tmp()
+        if tcls == "l":
+            fn.emit("%s =l %s %s" % (t2, "extsw" if int_is_signed(ty) and not ty[3] else "extuw", t))
+        else:
+            fn.emit("%s =w copy %s" % (t2, t))
+        t = t2
+    return Val(t, tcls, ty)
+
+
 RVAL = {
     "load": r_load,
     "load.v": r_load,
@@ -1048,6 +1141,7 @@ RVAL = {
     "iconv": r_iconv, "p2i": r_p2i, "i2p": r_i2p, "bitcast": r_bitcast,
     "i2f": r_i2f, "u2f": r_i2f, "fconv": r_fconv, "cf2i": r_cf2i,
     "offset": r_offset, "index": r_index, "pdiff": r_pdiff,
+    "bfload": r_bfload, "bfload.v": r_bfload,
     "call": r_call,
 }
 
@@ -1103,6 +1197,105 @@ def s_store(fn, x):
         fn.emit("call $%s(l %s, %s %s)" % (vhelper(fn.mod, op, cls), addr.t, cls, val.t))
     else:
         fn.emit("%s %s, %s" % (op, val.t, addr.t))
+
+
+def s_bfstore(fn, x):
+    vol = x[0] == "bfstore.v"
+    unit, boff, width = bf_args(x, 7)
+    ty = parse_type(x[1])
+    if ty[0] != "int":
+        raise Refused("bit-field of type %s" % (ty,))
+    addr = fn.opnd(x[3], "l")
+    val = fn.opnd(x[6])
+    ucls = "l" if unit == 8 else "w"
+    ubits = 64 if unit == 8 else 32
+    if val.cls != qcls(ty):
+        raise Refused("bit-field store of a value of class %s" % val.cls)
+    v = val.t
+    if val.cls != ucls:
+        t2 = fn.tmp()
+        fn.emit(("%s =l extuw %s" if ucls == "l" else "%s =w copy %s") % (t2, v))
+        v = t2
+    old = fn.tmp()
+    if vol:
+        fn.emit("%s =%s call $%s(l %s)" % (old, ucls, vhelper(fn.mod, BF_LOAD[unit], ucls), addr.t))
+    else:
+        fn.emit("%s =%s %s %s" % (old, ucls, BF_LOAD[unit], addr.t))
+    # The value's low WIDTH bits, moved to bit BOFF: a shift pair again (see r_bfload), no `and` with a low mask.
+    if width < ubits:
+        t2 = fn.tmp()
+        fn.emit("%s =%s shl %s, %d" % (t2, ucls, v, ubits - width))
+        v = t2
+        if ubits - width - boff > 0:
+            t2 = fn.tmp()
+            fn.emit("%s =%s shr %s, %d" % (t2, ucls, v, ubits - width - boff))
+            v = t2
+    clear = ((1 << ubits) - 1) ^ (((1 << width) - 1) << boff)
+    nw = v
+    if clear != 0:
+        keep = fn.tmp()
+        if boff + width == ubits:
+            # the field is the top of the unit, so the bits to keep are a low mask: shifts again
+            fn.emit("%s =%s shl %s, %d" % (keep, ucls, old, ubits - boff))
+            k2 = fn.tmp()
+            fn.emit("%s =%s shr %s, %d" % (k2, ucls, keep, ubits - boff))
+            keep = k2
+        else:
+            fn.emit("%s =%s and %s, %d" % (keep, ucls, old, wrap_int(clear, ucls)))
+        nw = fn.tmp()
+        fn.emit("%s =%s or %s, %s" % (nw, ucls, keep, v))
+    if vol:
+        fn.emit("call $%s(l %s, %s %s)" % (vhelper(fn.mod, BF_STORE[unit], ucls), addr.t, ucls, nw))
+    else:
+        fn.emit("%s %s, %s" % (BF_STORE[unit], nw, addr.t))
+
+
+def s_vlaalloc(fn, x):
+    """(vlaalloc $"slot" SIZE): the storage of a variable-length array. The slot receives the address of SIZE bytes of
+    dynamic stack (QBE: alloc16 outside @start, released when the function returns). QBE cannot give the space back
+    at the end of a block, so each statement keeps its capacity in a hidden slot (zero at function entry): the
+    storage is allocated again only when SIZE exceeds it, and then for max(SIZE, 2 * capacity) bytes. Executing the
+    statement again (a loop body, a backward goto) ends the previous array's lifetime, so its storage is reused, and
+    the stack a function uses stays within a constant factor of its largest array."""
+    if len(x) != 3:
+        raise BadIR("vlaalloc form")
+    slot = fn.opnd(x[1], "l")
+    sz = fn.opnd(x[2])
+    if sz.ty is None or sz.ty[0] != "int":
+        raise Refused("vlaalloc size of type %s" % (sz.ty,))
+    size = sz.t
+    if sz.cls != "l":
+        size = fn.tmp()
+        fn.emit("%s =l extuw %s" % (size, sz.t))
+    capq = "%%vc%d" % fn.nvla
+    fn.nvla += 1
+    fn.allocs.append("\t%s =l alloc8 8" % capq)
+    fn.inits.append("\tstorel 0, %s" % capq)
+    cap = fn.tmp()
+    fn.emit("%s =l loadl %s" % (cap, capq))
+    need = fn.tmp()
+    fn.emit("%s =w cultl %s, %s" % (need, cap, size))
+    grow = fn.newlab()
+    fix = fn.newlab()
+    alloc = fn.newlab()
+    done = fn.newlab()
+    fn.jnz(need, grow, done)
+    fn.label(grow)
+    dbl = fn.tmp()
+    fn.emit("%s =l add %s, %s" % (dbl, cap, cap))
+    fn.emit("storel %s, %s" % (dbl, capq))
+    lt = fn.tmp()
+    fn.emit("%s =w cultl %s, %s" % (lt, dbl, size))
+    fn.jnz(lt, fix, alloc)
+    fn.label(fix)
+    fn.emit("storel %s, %s" % (size, capq))
+    fn.label(alloc)
+    n = fn.tmp()
+    fn.emit("%s =l loadl %s" % (n, capq))
+    p = fn.tmp()
+    fn.emit("%s =l alloc16 %s" % (p, n))
+    fn.emit("storel %s, %s" % (p, slot.t))
+    fn.label(done)
 
 
 def s_copy(fn, x):
@@ -1303,6 +1496,7 @@ def s_unreachable(fn, x):
 STMT = {
     "block": s_block, "let": s_let, "set": s_set,
     "store": s_store, "store.v": s_store,
+    "bfstore": s_bfstore, "bfstore.v": s_bfstore, "vlaalloc": s_vlaalloc,
     "copy": s_copy, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
@@ -1346,9 +1540,30 @@ def item_scalar(val_text, ty):
 def global_items(mod, name, items_form):
     """Translate (init ITEM*) into (offset, bytes, text) triples."""
     out = []
+    bits = {}   # byte offset -> value: the bits that (bitfield OFF UNIT BOFF WIDTH TYPE (const TYPE V)) items put in that byte
     for it in items_form[1:]:
         h = head_of(it)
-        if h == "scalar":
+        if h == "bitfield":
+            if len(it) != 7:
+                raise BadIR("bitfield item form")
+            off = as_int(it[1])
+            unit = as_int(it[2])
+            boff = as_int(it[3])
+            width = as_int(it[4])
+            val = it[6]
+            if unit not in BF_LOAD:
+                raise BadIR("bitfield item: unit %d" % unit)
+            if width < 1 or boff < 0 or boff + width > unit * 8:
+                raise BadIR("bitfield item: bits %d+%d outside a %d-byte unit" % (boff, width, unit))
+            if head_of(val) != "const":
+                raise Refused("bitfield item operand %s" % form_text(val))
+            # Fields are placed by absolute bit position; storage units of different fields may overlap, so the bits are
+            # collected per byte (a bit-field never shares a byte with another kind of member).
+            v = as_int(val[2]) & ((1 << width) - 1)
+            for i in range(width):
+                pos = off * 8 + boff + i
+                bits[pos // 8] = bits.get(pos // 8, 0) | (((v >> i) & 1) << (pos % 8))
+        elif h == "scalar":
             off = as_int(it[1])
             ty = parse_type(it[2])
             val = it[3]
@@ -1396,6 +1611,8 @@ def global_items(mod, name, items_form):
             raise Refused(form_text(it))
         else:
             raise BadIR("unknown initializer item %s" % form_text(it))
+    for off in sorted(bits):
+        out.append((off, 1, "b %d" % bits[off]))
     return out
 
 
@@ -1489,6 +1706,7 @@ def emit_function(mod, f):
     fn = Fn(mod, name, ret)
     static = False
     weak = False
+    startup = []
     qparams = []
     param_stores = []
     body_forms = []
@@ -1498,12 +1716,22 @@ def emit_function(mod, f):
             static = True
         elif h == "weak":
             weak = True
+        elif h in ("constructor", "destructor"):
+            # (constructor [PRIO]) / (destructor [PRIO]): the function runs before main / at exit
+            if len(part) > 2:
+                raise BadIR("function %s: bad %s" % (name, form_text(part)))
+            prio = as_int(part[1]) if len(part) == 2 else 0
+            if prio < 0 or prio > 65535:
+                raise BadIR("function %s: bad priority in %s" % (name, form_text(part)))
+            startup.append((".init_array" if h == "constructor" else ".fini_array", prio, qsym(name)))
         elif h == "slot":
             # (slot "NAME" TYPE BYTES ALIGN)
             if len(part) != 5:
                 raise BadIR("slot form in %s is not (slot NAME TYPE BYTES ALIGN); rebuild the harness" % name)
             sname = str(part[1])
             sty = parse_type(part[2])
+            if sty[0] == "array" and sty[1] is None:
+                raise Refused("variable-length array type")
             ssize = as_int(part[3])
             salign = as_int(part[4])
             q = "%%s%d" % fn.nslot
@@ -1560,12 +1788,26 @@ def emit_function(mod, f):
     mod.out.append("%sfunction %s$%s(%s) {" % (linkage, rc, qsym(name), ", ".join(qparams)))
     mod.out.append("@start")
     mod.out.extend(fn.allocs)
+    mod.out.extend(fn.inits)
     if fn.returns_twice:
         mod.out.extend(escape_slots(fn.allocs))
         mod.need_sink = True
     mod.out.extend(fn.body)
     mod.out.append("}")
     mod.out.append("")
+    mod.startup.extend(startup)
+
+
+def emit_startup_tables(mod):
+    """A (constructor [PRIO]) function gets a pointer in .init_array, a (destructor [PRIO]) one in .fini_array
+    (the dynamic loader runs .fini_array backwards). A priority P goes to the section .init_array.PPPPP (five
+    decimal places, as GCC names it): the linker sorts those by name, before the plain section. Every entry is its
+    own object, in the order of the functions in the IR."""
+    for i, (sect, prio, sym) in enumerate(mod.startup):
+        if prio != 0:
+            sect += ".%05d" % prio
+        mod.out.append('section "%s" "aw"' % sect)
+        mod.out.append("data $pathb_startup%d = align 8 { l $%s }" % (i, sym))
 
 
 LP64 = {"short": 2, "int": 4, "long": 8, "long_long": 8, "pointer": 8, "float": 4, "double": 8}
@@ -1594,6 +1836,11 @@ def _symbols(x, out):
             _symbols(y, out)
 
 
+def _is_startup(f):
+    """A function that runs without being called: (constructor) or (destructor). It stays whatever refers to it."""
+    return head_of(f) == "function" and any(head_of(p) in ("constructor", "destructor") for p in f[2:])
+
+
 def _is_linked(f):
     """A function or global that other translation units can see: not (static), not (weak), and a definition."""
     h = head_of(f)
@@ -1619,7 +1866,7 @@ def prune(forms):
     for name, f in defs.items():
         if head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]):
             continue  # a declaration emits nothing
-        if _is_linked(f):
+        if _is_linked(f) or _is_startup(f):
             live.add(name)
             work.append(name)
     while work:
@@ -1660,6 +1907,8 @@ def emit_module(text, do_prune=True):
             mod.globals[str(f[1])] = parse_type(f[2])
             if any(head_of(p) == "thread" for p in f[5:]):
                 mod.thread[str(f[1])] = "ext" if any(head_of(p) == "extern" for p in f[5:]) else "def"
+        if head_of(f) == "function":
+            mod.funcs.add(str(f[1]))
     # Strings first: a string data item may be referenced from a global initializer.
     for f in forms[1:]:
         if head_of(f) == "data":
@@ -1672,6 +1921,9 @@ def emit_module(text, do_prune=True):
             emit_function(mod, f)
         elif head_of(f) not in ("global", "data"):
             raise Refused("top-level form (%s ...)" % head_of(f))
+    emit_startup_tables(mod)
+    for name, cell in mod.got.items():
+        mod.out.append("data $%s = align 8 { l $%s }" % (cell, qsym(name)))
     if mod.need_sink:
         mod.out.append('data $%s = align 8 { z 8 }' % SINK)
     for lines in mod.vhelpers.values():

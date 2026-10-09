@@ -119,6 +119,11 @@ Python original is the oracle `tests/mruby/oracle/pathb-qbe-emit.py`. What the p
   round-half-even, with Python's grammar (`inf`, `nan`, `1e999` is inf).
 - Integer constants up to `2**64 - 1`, `1 << 64` and `-(1 << 63)`: **`mruby-bigint` was added to the gem set**
   (`scripts/mruby-tool-config.rb`; `rational` was not needed). `wrap_int` uses `%` instead of `&` on a bigint.
+  Two more mruby bigint defects, both found by the bit-field work and both avoided in the emitter (the py-vs-rb
+  comparison caught them): `~x` of a bigint is wrong (`~((1 << 64) - 1)` gave a value that wraps to 2, not 0), so masks
+  are built with `^` on positive numbers; and comparing a fixnum with a bigint goes through a double, so
+  `9223372036854775807 >= 1 << 63` is true. `wrap_int` tests the sign bit with `v >> (bits - 1) != 0` for that reason.
+  Shifts, `%`, `&`, `|` and `^` on non-negative bigints behaved.
 - Python tuples in messages (`('int', 4, True, False)`, and the one-element `((...),)` form that
   `"%s" % (x[0], (ty,))` prints): `tyrepr`/`ty1`; `%r` of a name: `py_str_repr`.
 - The IR is read as latin-1 with universal newlines and stderr is UTF-8: bytes in, `u8()` on the way to stderr. A
@@ -155,6 +160,14 @@ Same method as stage 1, add to `tests/mruby/run.sh` before deleting anything:
 
 If mruby turns out too slow for the tokenizer on large inputs, the fallback is to write that one tool in
 C and build it with `scripts/setup-qbe.sh`-style `make`; the byte-identical test stays the same.
+
+### Emitter features added after the port
+
+Behaviour added to `pathb-qbe-emit.rb` is added to the oracle `tests/mruby/oracle/pathb-qbe-emit.py` in the same
+change, so the byte-for-byte comparison stays strict: the `(constructor [PRIO])` / `(destructor [PRIO])` function
+markers (`.init_array` / `.fini_array` tables, reachability roots) and the pointer cells for the address of a function
+defined elsewhere (`pathb_got.NAME`). Edge inputs: `tests/mruby/pathb-edge/startup.ir`, `fnaddr.ir`,
+`e_startup_*.ir`.
 
 ## Bootstrap caveat
 

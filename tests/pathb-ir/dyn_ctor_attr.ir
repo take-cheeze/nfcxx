@@ -1,0 +1,190 @@
+(ir-module "dyn_ctor_attr.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "logbuf" (array 128 char) 128 1 (static) (init (zero 0 128)))
+(global "logn" int 4 4 (static) (init (zero 0 4)))
+(global "g" (struct "G") 1 1 (init (zero 0 1)))
+(data "const" (const (array 8 (const char))) (string "log %s\n\000"))
+(data "const.1" (const (array 11 (const char))) (string "abDECmzxyf\000"))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc"
+  (ret void)
+  (params (param %0 "c" char))
+  (static)
+  (slot "c" char 1 1)
+  (store char $"c" %0)
+  (let %1 char (load char $"c"))
+  (let %2 (ptr char) (bitcast (ptr char) @"logbuf"))
+  (let %3 int (load int @"logn"))
+  (let %4 int (wadd int %3 (const int 1)))
+  (store int @"logn" %4)
+  (bounds %3 128)
+  (let %5 (ptr char) (index %2 %3 1))
+  (store char %5 %1)
+  (let %6 (ptr char) (bitcast (ptr char) @"logbuf"))
+  (let %7 int (load int @"logn"))
+  (bounds %7 128)
+  (let %8 (ptr char) (index %6 %7 1))
+  (store char %8 (const char 0))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g2isEPKc"
+  (ret bool)
+  (params (param %0 "want" (ptr (const char))))
+  (static)
+  (slot "want" (ptr (const char)) 8 8)
+  (slot "i" int 4 4)
+  (store (ptr (const char)) $"want" %0)
+  (store int $"i" (const int 0))
+  (loop
+    (body
+      (let %1 (ptr (const char)) (load (ptr (const char)) $"want"))
+      (let %2 int (load int $"i"))
+      (let %3 (ptr char) (index %1 %2 1))
+      (let %4 char (load char %3))
+      (let %5 int (iconv int %4))
+      (let %6 bool (ne int %5 (const int 0)))
+      (let %7 bool (const bool 0))
+      (if %6
+        (then
+          (let %8 (ptr char) (bitcast (ptr char) @"logbuf"))
+          (let %9 int (load int $"i"))
+          (bounds %9 128)
+          (let %10 (ptr char) (index %8 %9 1))
+          (let %11 char (load char %10))
+          (let %12 int (iconv int %11))
+          (let %13 (ptr (const char)) (load (ptr (const char)) $"want"))
+          (let %14 int (load int $"i"))
+          (let %15 (ptr char) (index %13 %14 1))
+          (let %16 char (load char %15))
+          (let %17 int (iconv int %16))
+          (let %18 bool (eq int %12 %17))
+          (set %7 %18)))
+      (if %7 (then) (else (break)))
+      (block
+        (let %19 int (load int $"i"))
+        (let %20 int (wadd int %19 (const int 1)))
+        (store int $"i" %20)))
+    (step))
+  (let %21 (ptr (const char)) (load (ptr (const char)) $"want"))
+  (let %22 int (load int $"i"))
+  (let %23 (ptr char) (index %21 %22 1))
+  (let %24 char (load char %23))
+  (let %25 int (iconv int %24))
+  (let %26 bool (eq int %25 (const int 0)))
+  (let %27 bool (const bool 0))
+  (if %26
+    (then
+      (let %28 (ptr char) (bitcast (ptr char) @"logbuf"))
+      (let %29 int (load int $"i"))
+      (bounds %29 128)
+      (let %30 (ptr char) (index %28 %29 1))
+      (let %31 char (load char %30))
+      (let %32 int (iconv int %31))
+      (let %33 bool (eq int %32 (const int 0)))
+      (set %27 %33)))
+  (return %27))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g6finishEv"
+  (ret void)
+  (params)
+  (static)
+  (destructor 101)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 102)))
+  (let %0 (ptr char) (bitcast (ptr char) @"logbuf"))
+  (let %1 int (call int &"printf" (variadic 1) @"const" %0))
+  (let %2 int (call int &"fflush" (null (ptr void))))
+  (let %3 bool (call bool &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g2isEPKc" @"const.1"))
+  (let %4 int (const int 0))
+  (if %3
+    (then
+      (set %4 (const int 42)))
+    (else
+      (set %4 (const int 43))))
+  (eval (call void &"_exit" %4))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g8ctor_102Ev"
+  (ret void)
+  (params)
+  (static)
+  (constructor 102)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 98)))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g8ctor_101Ev"
+  (ret void)
+  (params)
+  (static)
+  (constructor 101)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 97)))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g8dtor_103Ev"
+  (ret void)
+  (params)
+  (static)
+  (destructor 103)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 120)))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g8dtor_102Ev"
+  (ret void)
+  (params)
+  (static)
+  (destructor 102)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 121)))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g12dtor_defaultEv"
+  (ret void)
+  (params)
+  (static)
+  (destructor)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 122)))
+  (return))
+
+(function "ctor_default_2"
+  (ret void)
+  (params)
+  (constructor)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 68)))
+  (return))
+
+(function "_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g14ctor_default_3Ev"
+  (ret void)
+  (params)
+  (static)
+  (constructor)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 69)))
+  (return))
+
+(function "main"
+  (ret int)
+  (params)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 109)))
+  (return (const int 0)))
+
+(function "_ZN1GC1Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "G")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "G"))) 8 8)
+  (store (ptr (struct "G")) $"tmp" %0)
+  (eval (call void &"_ZN32_INTERNAL_17_dyn_ctor_attr_cpp_g3putEc" (const char 67)))
+  (return))
+
+(function "_ZN1GC2Ev"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "G")))))
+  (weak)
+  (slot "tmp" (const (ptr (struct "G"))) 8 8)
+  (store (ptr (struct "G")) $"tmp" %0)
+  (let %1 (ptr (struct "G")) (load (ptr (struct "G")) $"tmp"))
+  (eval (call void &"_ZN1GC1Ev" %1))
+  (return))
+
+(function "__sti___17_dyn_ctor_attr_cpp_g"
+  (ret void)
+  (params)
+  (constructor)
+  (eval (call void &"_ZN1GC1Ev" @"g"))
+  (return))

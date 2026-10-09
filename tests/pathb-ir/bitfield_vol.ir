@@ -1,0 +1,228 @@
+(ir-module "bitfield_vol.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "g_reg" (volatile (struct "Reg")) 8 8 (init (zero 0 8)))
+(global "g_mixed" (struct "Mixed") 4 4 (init (zero 0 4)))
+
+(function "bf_read_twice"
+  (ret unsigned_int)
+  (params (param %0 "r" (ptr (volatile (struct "Reg")))))
+  (slot "r" (ptr (volatile (struct "Reg"))) 8 8)
+  (store (ptr (volatile (struct "Reg"))) $"r" %0)
+  (let %1 (ptr (volatile (struct "Reg"))) (load (ptr (volatile (struct "Reg"))) $"r"))
+  (nonnull %1)
+  (let %2 unsigned_int (bfload.v unsigned_int 4 %1 0 3))
+  (let %3 int (iconv int %2))
+  (let %4 (ptr (volatile (struct "Reg"))) (load (ptr (volatile (struct "Reg"))) $"r"))
+  (nonnull %4)
+  (let %5 unsigned_int (bfload.v unsigned_int 4 %4 0 3))
+  (let %6 int (iconv int %5))
+  (let %7 int (wadd int %3 %6))
+  (let %8 unsigned_int (iconv unsigned_int %7))
+  (return %8))
+
+(function "bf_write"
+  (ret void)
+  (params (param %0 "r" (ptr (volatile (struct "Reg")))))
+  (slot "r" (ptr (volatile (struct "Reg"))) 8 8)
+  (store (ptr (volatile (struct "Reg"))) $"r" %0)
+  (let %1 (ptr (volatile (struct "Reg"))) (load (ptr (volatile (struct "Reg"))) $"r"))
+  (nonnull %1)
+  (bfstore.v unsigned_int 4 %1 3 5 (const unsigned_int 17))
+  (return))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "bad" int 4 4)
+  (slot "local" (volatile (struct "Reg")) 8 8)
+  (slot "i" int 4 4)
+  (store int $"bad" (const int 0))
+  (bfstore.v unsigned_int 4 @"g_reg" 0 3 (const unsigned_int 5))
+  (bfstore.v unsigned_int 4 @"g_reg" 3 5 (const unsigned_int 21))
+  (bfstore.v int 4 @"g_reg" 8 7 (const int -3))
+  (bfstore.v unsigned_long_long 8 @"g_reg" 15 40 (const unsigned_long_long 0x123456789a))
+  (let %0 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 0 3))
+  (let %1 int (iconv int %0))
+  (let %2 bool (ne int %1 (const int 5)))
+  (let %3 bool (const bool 1))
+  (if %2
+    (then)
+    (else
+      (let %4 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 3 5))
+      (let %5 int (iconv int %4))
+      (let %6 bool (ne int %5 (const int 21)))
+      (set %3 %6)))
+  (let %7 bool (const bool 1))
+  (if %3
+    (then)
+    (else
+      (let %8 int (bfload.v int 4 @"g_reg" 8 7))
+      (let %9 bool (ne int %8 (const int -3)))
+      (set %7 %9)))
+  (let %10 bool (const bool 1))
+  (if %7
+    (then)
+    (else
+      (let %11 unsigned_long_long (bfload.v unsigned_long_long 8 @"g_reg" 15 40))
+      (let %12 bool (ne unsigned_long_long %11 (const unsigned_long_long 0x123456789a)))
+      (set %10 %12)))
+  (if %10
+    (then
+      (block
+        (let %13 int (load int $"bad"))
+        (let %14 int (or int %13 (const int 1)))
+        (store int $"bad" %14))))
+  (let %15 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 0 3))
+  (let %16 unsigned_int (wadd unsigned_int %15 (const int 2)))
+  (bfstore.v unsigned_int 4 @"g_reg" 0 3 %16)
+  (let %17 int (bfload.v int 4 @"g_reg" 8 7))
+  (let %18 int (wsub int %17 (const int 1)))
+  (bfstore.v int 4 @"g_reg" 8 7 %18)
+  (let %19 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 0 3))
+  (let %20 int (iconv int %19))
+  (let %21 bool (ne int %20 (const int 7)))
+  (let %22 bool (const bool 1))
+  (if %21
+    (then)
+    (else
+      (let %23 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 3 5))
+      (let %24 int (iconv int %23))
+      (let %25 bool (ne int %24 (const int 21)))
+      (set %22 %25)))
+  (let %26 bool (const bool 1))
+  (if %22
+    (then)
+    (else
+      (let %27 int (bfload.v int 4 @"g_reg" 8 7))
+      (let %28 bool (ne int %27 (const int -4)))
+      (set %26 %28)))
+  (if %26
+    (then
+      (block
+        (let %29 int (load int $"bad"))
+        (let %30 int (or int %29 (const int 2)))
+        (store int $"bad" %30))))
+  (let %31 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 0 3))
+  (let %32 unsigned_int (wadd unsigned_int %31 (const unsigned_int 1)))
+  (bfstore.v unsigned_int 4 @"g_reg" 0 3 %32)
+  (let %33 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 0 3))
+  (let %34 int (iconv int %33))
+  (let %35 bool (ne int %34 (const int 0)))
+  (let %36 bool (const bool 1))
+  (if %35
+    (then)
+    (else
+      (let %37 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 3 5))
+      (let %38 int (iconv int %37))
+      (let %39 bool (ne int %38 (const int 21)))
+      (set %36 %39)))
+  (if %36
+    (then
+      (block
+        (let %40 int (load int $"bad"))
+        (let %41 int (or int %40 (const int 4)))
+        (store int $"bad" %41))))
+  (let %42 unsigned_int (call unsigned_int &"bf_read_twice" @"g_reg"))
+  (let %43 bool (ne unsigned_int %42 (const unsigned_int 0)))
+  (if %43
+    (then
+      (block
+        (let %44 int (load int $"bad"))
+        (let %45 int (or int %44 (const int 8)))
+        (store int $"bad" %45))))
+  (eval (call void &"bf_write" @"g_reg"))
+  (let %46 unsigned_int (bfload.v unsigned_int 4 @"g_reg" 3 5))
+  (let %47 int (iconv int %46))
+  (let %48 bool (ne int %47 (const int 17)))
+  (let %49 bool (const bool 1))
+  (if %48
+    (then)
+    (else
+      (let %50 int (bfload.v int 4 @"g_reg" 8 7))
+      (let %51 bool (ne int %50 (const int -4)))
+      (set %49 %51)))
+  (let %52 bool (const bool 1))
+  (if %49
+    (then)
+    (else
+      (let %53 unsigned_long_long (bfload.v unsigned_long_long 8 @"g_reg" 15 40))
+      (let %54 bool (ne unsigned_long_long %53 (const unsigned_long_long 0x123456789a)))
+      (set %52 %54)))
+  (if %52
+    (then
+      (block
+        (let %55 int (load int $"bad"))
+        (let %56 int (or int %55 (const int 16)))
+        (store int $"bad" %56))))
+  (bfstore.v unsigned_int 4 @"g_mixed" 0 4 (const unsigned_int 9))
+  (bfstore unsigned_int 4 @"g_mixed" 4 4 (const unsigned_int 6))
+  (let %57 unsigned_int (bfload.v unsigned_int 4 @"g_mixed" 0 4))
+  (let %58 int (iconv int %57))
+  (let %59 bool (ne int %58 (const int 9)))
+  (let %60 bool (const bool 1))
+  (if %59
+    (then)
+    (else
+      (let %61 unsigned_int (bfload unsigned_int 4 @"g_mixed" 4 4))
+      (let %62 int (iconv int %61))
+      (let %63 bool (ne int %62 (const int 6)))
+      (set %60 %63)))
+  (if %60
+    (then
+      (block
+        (let %64 int (load int $"bad"))
+        (let %65 int (or int %64 (const int 32)))
+        (store int $"bad" %65))))
+  (bfstore.v unsigned_int 4 $"local" 0 3 (const unsigned_int 3))
+  (bfstore.v unsigned_int 4 $"local" 3 5 (const unsigned_int 30))
+  (bfstore.v int 4 $"local" 8 7 (const int 63))
+  (bfstore.v unsigned_long_long 8 $"local" 15 40 (const unsigned_long_long 1))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %66 int (load int $"i"))
+        (let %67 bool (lt.s int %66 (const int 5)))
+        (if %67 (then) (else (break)))
+        (block
+          (let %68 unsigned_int (bfload.v unsigned_int 4 $"local" 0 3))
+          (let %69 int (iconv int %68))
+          (let %70 int (wadd int %69 (const int 1)))
+          (let %71 unsigned_int (iconv unsigned_int %70))
+          (bfstore.v unsigned_int 4 $"local" 0 3 %71)))
+      (step
+        (let %72 int (load int $"i"))
+        (let %73 int (wadd int %72 (const int 1)))
+        (store int $"i" %73))))
+  (let %74 unsigned_int (bfload.v unsigned_int 4 $"local" 0 3))
+  (let %75 int (iconv int %74))
+  (let %76 bool (ne int %75 (const int 0)))
+  (let %77 bool (const bool 1))
+  (if %76
+    (then)
+    (else
+      (let %78 unsigned_int (bfload.v unsigned_int 4 $"local" 3 5))
+      (let %79 int (iconv int %78))
+      (let %80 bool (ne int %79 (const int 30)))
+      (set %77 %80)))
+  (let %81 bool (const bool 1))
+  (if %77
+    (then)
+    (else
+      (let %82 int (bfload.v int 4 $"local" 8 7))
+      (let %83 bool (ne int %82 (const int 63)))
+      (set %81 %83)))
+  (let %84 bool (const bool 1))
+  (if %81
+    (then)
+    (else
+      (let %85 unsigned_long_long (bfload.v unsigned_long_long 8 $"local" 15 40))
+      (let %86 bool (ne unsigned_long_long %85 (const unsigned_long_long 1)))
+      (set %84 %86)))
+  (if %84
+    (then
+      (block
+        (let %87 int (load int $"bad"))
+        (let %88 int (or int %87 (const int 64)))
+        (store int $"bad" %88))))
+  (let %89 int (load int $"bad"))
+  (return %89))
