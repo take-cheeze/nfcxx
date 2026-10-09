@@ -8,8 +8,10 @@ and builds it with `tinyxml2_main.cpp`, expecting exit code 12.
 
 - **gcc backend: passes.** The whole library (`tinyxml2.cpp`, 3k lines) compiles and the driver runs
   correctly.
-- **QBE backend: expected failure.** EDG emits empty struct definitions that cproc rejects
-  ("no type in struct member declaration"); see `docs/notes/freestanding.md`.
+- **QBE backend: passes.** Two things had to work: empty struct definitions (the cproc patch, see
+  `docs/notes/freestanding.md`) and COMDAT functions. EDG marks inline and template instantiations
+  `__attribute__((__weak__))`; cproc drops that, so the per-object copies collided at link time.
+  `scripts/weak-symbols.py` emits `.weak` directives for them in the QBE wrapper.
 
 ## What it took
 
