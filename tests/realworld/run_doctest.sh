@@ -2,8 +2,9 @@
 # Real-world check: build doctest (MIT, single header) at a pinned upstream release with nfcxx on the
 # hosted path (not --freestanding) and run a small driver (tests/realworld/doctest_main.cpp, whose header
 # says EXPECT exit code 2). The source is cloned into build/realworld, not vendored.
-#   NFCXX_BACKEND=gcc|qbe   (default: both)
-# A backend failure is reported as a FAIL unless it matches a known, documented gap (xfail below).
+#   NFCXX_BACKEND=gcc|qbe   (default: gcc)
+# Decision: doctest is checked on the gcc backend only. Its toString(long double) needs a type QBE cannot
+# represent (docs/notes/realworld.md), so asking for qbe reports a SKIP with that reason.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=1da23a3e8119ec5cce4f9388e91b065e20bf06f5   # doctest/doctest tag v2.4.12, 2025-04-28
@@ -17,16 +18,15 @@ if [ "$(git -C "$src" rev-parse -q --verify "$pin^{commit}" 2>/dev/null)" != "$p
 fi
 git -C "$src" checkout -q "$pin" || { echo "FAIL doctest: checkout $pin failed"; exit 1; }
 
-backends=${NFCXX_BACKEND:-"gcc qbe"}
+backends=${NFCXX_BACKEND:-gcc}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for b in $backends; do
+  if [ "$b" = qbe ]; then
+    echo "skip qbe doctest: doctest is gcc-only (it needs long double, which QBE cannot represent; docs/notes/realworld.md)"
+    continue
+  fi
   if ! out=$(NFCXX_BACKEND=$b "$root/nfcxx" -I"$src" "$root/tests/realworld/doctest_main.cpp" \
              -o "$tmp/d-$b" 2>&1); then
-    # xfail: the next QBE blocker in doctest's C output, long double, which needs a decision (docs/notes/realworld.md).
-    if [ "$b" = qbe ] && grep -q "long double is not yet supported" <<<"$out"; then
-      echo "xfail qbe doctest: cproc has no long double (needs a decision; see docs/notes/realworld.md)"
-      continue
-    fi
     echo "FAIL $b doctest (build)"; grep -E "error|undefined reference" <<<"$out" | head -5; fail=1; continue
   fi
   "$tmp/d-$b" > "$tmp/run-$b" 2>&1; got=$?
