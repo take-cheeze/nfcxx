@@ -33,6 +33,13 @@ class CodeGen
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
              fixnum_nil: 'Bc2cppFixnumOrNil', value: 'mrb_value' }.freeze
 
+  # NATIVE_DATA_OWNERS: classes whose instances keep their native payload in DATA_PTR, set by a
+  # DataType<T> allocation in mruby-rgss/src/lib.cxx (alloc_obj asserts DATA_PTR is null first).
+  # A compiled #initialize must not embed an ivar struct in those objects: mrb_data_init would
+  # already occupy DATA_PTR before the first native load, so that assertion fails. Their ivars
+  # stay in iv_tbl, whatever BC2CPP_WIRED_EMBEDDINGS lists.
+  NATIVE_DATA_OWNERS = %w[RGSS::Bitmap].freeze
+
   # box/check/unbox/err per specialized type proof. Ordinary embedded ivars use
   # mrb_value directly so arbitrary Ruby assignments retain their normal behavior.
   # `:bool` has no single check macro (MRB_TT_TRUE/MRB_TT_FALSE are separate
@@ -406,6 +413,7 @@ class CodeGen
         other != owner && (strict_subclass?(owner, other) || strict_subclass?(other, owner))
       end
       next if inherited_layout
+      next if NATIVE_DATA_OWNERS.include?(owner)
 
       next if self.class.wired_embeddings && !self.class.wired_embeddings.include?(owner)
 
