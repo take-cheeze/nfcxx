@@ -1,6 +1,6 @@
 /* EXPECT: 0 */
 /* Type-generic __builtin_{add,sub,mul}_overflow and the popcount/ctz/clz builtins (cproc has none of them;
-   scripts/qbe-prep.py lowers them). */
+   scripts/qbe-prep.rb lowers them). */
 #include <stdio.h>
 #include <stdint.h>
 #include <limits.h>

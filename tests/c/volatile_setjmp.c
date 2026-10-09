@@ -1,5 +1,5 @@
 /* A volatile local written between setjmp and longjmp must keep the written value (C11 7.13.2.1).
-   QBE promotes a local whose address is never taken to a register, so qbe-prep.py keeps volatile locals
+   QBE promotes a local whose address is never taken to a register, so qbe-prep.rb keeps volatile locals
    in memory. Prints the values read after the longjmp. */
 /* EXPECT: 42 */
 #include <setjmp.h>

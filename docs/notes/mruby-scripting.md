@@ -9,9 +9,10 @@ nfcc (`tests/realworld/run_mruby.sh`), so the interpreter can be built by the co
 | Piece | What it is |
 | --- | --- |
 | `scripts/setup-mruby.sh` | Clones mruby 4.0.0 (`831da26b`, the pin `tests/realworld/run_mruby.sh` uses) into `build/mruby-tool/src`, builds with rake and installs `build/mruby-tool/bin/mruby`. Host `cc` by default. `MRUBY_CC=<repo>/nfcc` also builds `bin/mruby-nfcc` with nfcc (the host one is always built first, because `scripts/qbe-cc` runs mruby). |
-| `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bin-mruby`. Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
+| `scripts/mruby-tool-config.rb` | The build config: core, `mruby-io`, `mruby-pack`, `mruby-sprintf`, `mruby-string-ext`, `mruby-array-ext`, `mruby-hash-ext`, `mruby-set`, `mruby-enum-ext`, `mruby-numeric-ext`, `mruby-kernel-ext`, `mruby-object-ext`, `mruby-symbol-ext`, `mruby-range-ext`, `mruby-error`, `mruby-exit`, `mruby-bigint` (stage 3), `mruby-bin-mruby`; and the define `MRB_ARY_LENGTH_MAX=0`, because mruby caps an `Array` at 131072 entries by default (`array size too big`) and the token list of a big translation unit is longer (stage 3). Reuses the HAL workaround of `tests/realworld/mruby_build_config.rb`: naming the `hal-posix-*` gems stops mruby's `for_windows?` guess (any `/a/../z/` directory means "Windows") from picking the wrong HAL. |
 | `scripts/mrb` | `scripts/mrb script.rb args...`; builds the interpreter first when it is missing. `MRB=<exe>` picks another interpreter. |
 | `scripts/weak-symbols.rb` | Port of `weak-symbols.py`; used by `scripts/qbe-cc`. |
+| `scripts/qbe-prep.rb` | Port of `qbe-prep.py` (stage 3, below); used by `scripts/qbe-cc`. |
 | `tests/hexagon/flatlink.rb` | Port of `flatlink.py`; used by `tests/hexagon/run.sh`. |
 | `tests/mruby/run.sh` | Runs the Python original and the port on real inputs and compares the output byte for byte. The originals are kept as oracles in `tests/mruby/oracle/`; nothing else uses them. CI runs it. |
 
@@ -33,47 +34,66 @@ What the test compares:
 - Strings are byte strings (no UTF-8 gem): use `getbyte`/`byteslice` for binary data and pack/unpack with
   `File.open(path, "rb") { |f| f.read }`; there is no `File.binread`.
 - `Integer` is 64 bit. mruby 4 parses a literal above `2**31 - 1` as a bigint, which needs `mruby-bigint`
-  (not in the set): write `(1 << 32) - 1` instead of `0xffffffff`.
+  (in the set since stage 3, for the exact float-literal arithmetic of `qbe-prep.rb`): scripts still write
+  `(1 << 32) - 1` instead of `0xffffffff`, so they do not depend on it.
+- An `Array` holds at most 131072 entries in a stock mruby; the config lifts the cap (`MRB_ARY_LENGTH_MAX=0`).
+  An interpreter built from another config (for example the `bin/mruby` of `tests/realworld/run_mruby.sh`)
+  fails on `qbe-prep.rb` for large inputs.
+- No `ENV`: a script gets its settings as arguments (`qbe-prep.rb --c-input`). No `Time`, no `Enumerator`
+  (`each_with_index`, `each_byte` and the like need a block: use `bytes`, `each_with_index { }`), and
+  `sort_by` / `sort` are not stable (add an index to the sort key).
+- Strings are byte strings. Python's text-mode `open().read()` translates `\r\n` and `\r` to `\n`; a port that
+  must be byte-identical has to do that itself (`read_text` in `qbe-prep.rb`).
 - Operator precedence differs from Python: `a & b == 0` is `a & (b == 0)`; write the parentheses.
 - Exit codes: `exit 1` (from `mruby-exit`); messages to `$stderr`.
 
-## Stage plan for the other two scripts
+## Stage 3 (done): `qbe-prep.py` to `qbe-prep.rb`
 
-`scripts/qbe-prep.py` (614 lines) and `scripts/pathb-qbe-emit.py` (1540 lines) were not touched in stage 1,
-because other work was changing them. Port them when that work has landed.
+`scripts/qbe-prep.rb` (about 1200 lines with the comments, the Python was 760) replaces `scripts/qbe-prep.py`; `scripts/qbe-cc` runs
+`scripts/mrb scripts/qbe-prep.rb [--c-input] PP.c OUT.c TAIL.s`. The Python is the oracle
+`tests/mruby/oracle/qbe-prep.py` (it still reads `NFCXX_C_INPUT` from the environment; the port takes
+`--c-input`, which `qbe-cc` passes exactly when `NFCXX_C_INPUT` is non-empty, as before).
 
-### Stage 2: `qbe-prep.py` to `qbe-prep.rb`
-
-Python features it uses, and the mruby answer:
+How the Python features were answered:
 
 | Python | mruby |
 | --- | --- |
-| `re` tokenizer (`TOKEN_RE`, `finditer`) | hand-written scanner, below |
-| `re.fullmatch` on `.align N`, `.globl X`, `A = B` (asm lines) | small split/`index` checks on whitespace-split fields |
-| `re.search`/`re.fullmatch` for numeric literals (`UL_CONST`, `FLOAT_LIT`, `ATOMIC_RE`) | check the token text with character loops; `ATOMIC_RE` is `__atomic_` + one of eight operation names + an optional size suffix, so `start_with?` plus a table lookup |
-| `fractions.Fraction` in `ieee_bits` (exact decimal-to-IEEE for `_Float16/32/64/128` literals) | `mruby-rational` and `mruby-bigint` (both in mruby core, not in the stage 1 set) if the arithmetic is kept as written; or integer-only: parse the decimal literal into `digits * 10**exp` and do the rounding with bigint shifts. 113-bit mantissas (`_Float128`) exceed 64 bits, so `mruby-bigint` is required for stage 2. |
-| `class Tok` with `__slots__` | `Struct` (`mruby-struct`) or a plain class |
-| f-strings, `sys.exit(msg)` | interpolation, `$stderr.puts` + `exit 1` |
-| `os.environ.get('NFCXX_C_INPUT')` | no `ENV` in this gem set (there is no `mruby-env` in mruby 4.0.0 core): `scripts/qbe-cc` passes it as an extra argument (`--c-input`) |
+| `re` tokenizer (`TOKEN_RE`) | `tokenize`: one loop over bytes (`getbyte`), the alternatives of the regex in the same order: whitespace, `//` and `/* */` comments (an unterminated `/*` falls through to a `/` punct, as the regex does), string and char literals with the `u8`/`L`/`u`/`U` prefix (`scan_quoted`: a backslash takes any next byte, a raw newline means "not a literal", so the prefix becomes an identifier and the quote a punct), numbers (`[eEpP][+-]` pairs and word bytes), identifiers (`$` allowed first), any other single byte. Bytes >= 0x80 count as word characters, where Python's `\w` would also match non-ASCII letters; EDG's output and glibc's headers are ASCII outside literals. |
+| `re.fullmatch` for `.align N`, `.globl X`, `A = B`, `UL_CONST`, `FLOAT_LIT`, `ATOMIC_RE`, the `L` suffix of 4c | small hand-written matchers (`align_text?`, `globl_name`, `set_names`, `ul_const?`, `float_lit`, `atomic_parts`, `long_double_literal?`) |
+| `fractions.Fraction` in `ieee_bits` | integers only (`mruby-bigint`): the decimal literal is `digits * 10**exp`; the exponent is found with `bit_length` and two shift comparisons, the mantissa is `divmod` rounded half to even. No `mruby-rational` needed. |
+| `int(text, 0)` (alignment, array bound) | `py_int0`: decimal, `0x`, `0o`, `0b`, underscores; anything else exits 1 (Python raises `ValueError`) |
+| `unicode_escape` in `decode_str` | `decode_str`: the C escapes, octal, `\x`, `\u`, `\U` |
+| `sorted(edits, reverse=True)` then applying edit by edit | `apply_edits`: sorts on `[-start, -end, index]` (Python's reverse sort is stable), splices all non-overlapping edits in one pass, and replays one at a time only if two edits overlap |
+| `class Tok` with `__slots__`, f-strings, `sys.exit(msg)` | plain class, interpolation, `die` (`$stderr.puts` + `exit 1`) |
 
-Tokenizer design without Regexp. The Python regex is an ordered alternation tried at each position:
-whitespace, `//` comment, `/* */` comment, string (`u8`/`L`/`u`/`U` prefix), char literal, number,
-identifier, any single character. Port it as one loop over bytes with `getbyte`, dispatching on the first
-byte:
+Verification, `tests/mruby/qbe-prep.sh` (called by `tests/mruby/run.sh`): `tests/mruby/qbe-prep-tap.sh` is put in
+place of the interpreter (`MRB=`) while `nfcxx` compiles everything on the QBE back end, and copies each
+input `qbe-cc` really hands to `qbe-prep.rb` (and whether it was `--c-input`). Python and the port then run on
+every copy; the output C, the assembly tail, stderr and the exit status must be identical. Corpora: all
+`tests/cases`, `tests/builtins`, `tests/lib`, `tests/c` (the C inputs with the C-input mode), and from
+`build/realworld`, when cached, tinyxml2, doctest (4.6 MB of C) and Lua (33 C files). `QBE_PREP_CORPUS=<dir>`
+adds the captures of any other run, for example `tests/realworld/run_mruby.sh` (the rake build of mruby with
+nfcc, which exercises the overflow builtins and the setjmp code) with `MRB` set to the tap. Then about 60
+hand-written edge cases, each in the plain and the C-input mode, one or more per rewrite: aligned attributes
+on arrays and structs, `__bf16` and `_Float16/32/64/128` types and literals (rounding ties, the extreme
+normal values, subnormal and overflow refusals), constructors with and without priority, thread_local
+aliases (weak and not), every int3 asm form, unsupported top-level asm, the overflow builtins (the constant
+multiply shape, same-type helpers, mixed types, argument-count refusals), volatile locals in every declaration
+position, `alloca`, the sized atomics, `(double)...L` literals, floatn typedefs, and tokenizer corner cases
+(unterminated comment/string, escapes, prefixes, `$`, CRLF, non-ASCII, EOF in the middle of each construct).
+The test fails when a corpus yields no input, when fewer than 60 inputs or 8 refusals are compared, or when
+a kind of rewrite never occurs in the Python output.
 
-1. whitespace (`" \t\n\r\f\v"`): skip a run.
-2. `/` followed by `/` or `*`: find the end with `index("\n", i)` or `index("*/", i + 2)`; an unterminated
-   `/*` must fall through to the single-character case, as the regex does when `.*?` finds no end.
-3. `"` or `'`, or a prefix (`u8`, `L`, `u`, `U`) immediately followed by one: scan forward, skipping
-   `\` plus the next byte, stopping at the closing quote; a raw newline before the end means "not a
-   literal" (the regex class excludes `\n`), so the prefix is then an identifier and the quote a punct.
-4. digit, or `.` followed by a digit: take `[eEpP][+-]` pairs and word/`.` bytes (the `num` pattern).
-5. identifier start (letter, `_`, `$`): take word bytes.
-6. anything else: one byte.
+Speed (this machine, interpreter built with the host cc): the scanner is a byte loop in the VM, about 1.4 to
+1.6 times slower than the regex-based Python. tinyxml2.cpp (387 KB of generated C): 0.21 s Python, 0.34 s mruby,
+and a whole `qbe-cc -c` of it takes 0.55 s; doctest (4.6 MB): 2.8 s Python, 3.9 s mruby. Two things mattered:
+single-byte punct tokens share one string each (no allocation), and identifiers that no rewrite looks at are
+skipped before the rewrite tests (`SPECIAL_ID`); together they took doctest from 6.0 s to 3.9 s.
 
-Keep `start`/`end` offsets exactly (the rewriter edits the source by offset), and keep UTF-8 bytes >= 0x80
-as single-byte puncts or word bytes consistently with Python's `\w` (check what the generated C contains;
-EDG output is ASCII except inside string literals, which the scanner skips whole).
+Uncaught Python exceptions (a malformed number such as `1.2.3f16` or `__aligned__(16U)`) become an exit 1 with
+a different message (a traceback in Python); the test compares only the exit status for those.
+
+## Still to port
 
 ### Stage 3: `pathb-qbe-emit.py` to `pathb-qbe-emit.rb`
 

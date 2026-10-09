@@ -5,6 +5,7 @@
 #   1. scripts/weak-symbols.{py,rb}: the assembly QBE produces for generated C of several tests/cases.
 #   2. tests/hexagon/flatlink.{py,rb}: Hexagon objects (clang, if it has the hexagon target) built from
 #      the generated C of several tests/cases and the HVX kernel; output image, stderr and exit status.
+#   3. scripts/qbe-prep.{py,rb}: tests/mruby/qbe-prep.sh (its own header says what it compares).
 # Parts whose tools are missing (EDG, QBE, hexagon clang) are skipped with a message.
 #   CLANG (default clang)   MRB (an existing mruby executable; default build/mruby-tool/bin/mruby)
 cd "$(dirname "$0")/../.."
@@ -40,7 +41,7 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
     f=$root/tests/cases/$n.cpp
     if ! "$root/nfcxx" --emit-c "$f" >"$tmp/$n.c" 2>"$tmp/$n.err"; then report skip "weak-symbols $n: front end failed"; continue; fi
     cc -E -P -undef -D__CPROC__ "$tmp/$n.c" >"$tmp/$n.pp.c" 2>/dev/null
-    if ! python3 "$root/scripts/qbe-prep.py" "$tmp/$n.pp.c" "$tmp/$n.prep.c" "$tmp/$n.tail.s" 2>/dev/null ||
+    if ! "$mrb" "$root/scripts/qbe-prep.rb" "$tmp/$n.pp.c" "$tmp/$n.prep.c" "$tmp/$n.tail.s" 2>/dev/null ||
        ! "$root/build/cproc/cproc-qbe" <"$tmp/$n.prep.c" >"$tmp/$n.ssa" 2>/dev/null ||
        ! "$root/build/qbe/qbe" "$tmp/$n.ssa" >"$tmp/$n.s" 2>/dev/null; then
       report skip "weak-symbols $n: QBE pipeline failed"; continue
@@ -134,6 +135,8 @@ else
     else report fail "flatlink missing-entry handling differs (py=$rcp rb=$rcr)"; fi
   fi
 fi
+
+"$root/tests/mruby/qbe-prep.sh" || fail=1
 
 echo "tests/mruby: $pass passed, $skip skipped"
 [ $fail -eq 0 ]

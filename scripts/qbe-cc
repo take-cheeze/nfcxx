@@ -28,7 +28,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 
 if [ $compile = 0 ]; then
-  # The link. The sized __atomic_* calls qbe-prep.py leaves in the C (for libstdc++'s std::atomic) are
+  # The link. The sized __atomic_* calls qbe-prep.rb leaves in the C (for libstdc++'s std::atomic) are
   # libatomic functions; gcc inlines them, so only the QBE link adds the library.
   exec cc "$@" -latomic
 fi
@@ -50,11 +50,13 @@ else
   cc -E -P -undef -D__CPROC__ "${cppflags[@]}" "$src" > "$tmp/pp.c"
 fi
 trace_end "$t" "cc -E (preprocess)" qbe-backend
-# cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.py rewrites
+# cproc rejects some GNU forms EDG emits (top-level asm, aligned attributes, __bf16). qbe-prep.rb rewrites
 # just those and writes the assembly they need (aliases) to $tmp/tail.s, appended after weak-symbols.rb.
+# The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
-python3 "$(dirname "$0")/qbe-prep.py" "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
-trace_end "$t" "qbe-prep.py (rewrite for cproc)" qbe-backend
+prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
+"$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+"${prepflags[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
 "$cproc" < "$tmp/prep.c" > "$tmp/out.ssa"
 trace_end "$t" "cproc (C to QBE IL)" qbe-backend
