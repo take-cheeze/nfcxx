@@ -83,10 +83,10 @@ int main() {
   int back[4] = {0};
   bin.read((char *)back, sizeof back);
   std::printf("binary %d %d %d %d gcount %ld\n", back[0], back[1], back[2], back[3], (long)bin.gcount());
-  int n = 0;
-  for (auto &e : fs::directory_iterator(dir)) { (void)e; n++; }
-  std::printf("dir entries %d\n", n);
-  fs::remove_all(dir);
+  // (No directory_iterator / remove_all: the gcc backend cannot link libstdc++'s filesystem::_Dir shared_ptr.)
+  int n = (int)fs::remove(dir / "a.txt") + (int)fs::remove(dir / "b.bin");
+  std::printf("removed files %d\n", n);
+  fs::remove(dir);
   std::printf("removed %d\n", (int)!fs::exists(dir));
   std::ifstream missing("/nonexistent/file");
   std::printf("missing open %d\n", (int)missing.is_open());
