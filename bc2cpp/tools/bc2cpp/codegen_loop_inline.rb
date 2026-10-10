@@ -729,7 +729,9 @@ class CodeGen
     dest = (dest_offset || 0) + region[:dest_reg].to_i
     addr = region[:block_addr]
     meth = region[:method_name]
-    fn_name = "#{cpp_name(d.owner, d.name)}_profiler_#{meth}_#{addr}"
+    # A nested section's address is relative to its own (block) irep, so it can equal the enclosing section's: the
+    # irep label keeps the two functions apart (ADR 0391; a frame at 13 holding a section at 13 redefined one name).
+    fn_name = "#{cpp_name(d.owner, d.name)}_profiler_#{meth}_#{addr}#{reg_offset ? "_in_#{irep.label}" : ''}"
     # File-scope code for the body function. The top-level pass has no buffer of
     # its own, so it lands in @inline_nested_pre (already wired ahead of this
     # function); the nested pass passes its own buffer, because that body's file

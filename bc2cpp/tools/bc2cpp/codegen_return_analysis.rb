@@ -368,6 +368,14 @@ class CodeGen
     @symbol_installed_names = collect_installed_names(skip_class_object: false)
   end
 
+  # symbol_installed_names, counting only the name an `alias_method` installs, not the one it copies from
+  # (ARRAY_NEW_BLOCK, ADR 0391: Window's `alias_method :_rgss1_initialize, :initialize` does not touch Array).
+  def symbol_installed_destinations
+    return @symbol_installed_destinations if defined?(@symbol_installed_destinations)
+
+    @symbol_installed_destinations = collect_installed_names(skip_class_object: false, destinations_only: true)
+  end
+
   # NATIVE_CLASS_ARMS (ADR 0323): symbol_installed_names without the installs that land on a class or module
   # object (`class << Const; alias_method ...`), which no instance of a proven set can see. nil when
   # symbol_installed_names is.
@@ -377,7 +385,7 @@ class CodeGen
     @symbol_instance_installed_names = symbol_installed_names && collect_installed_names(skip_class_object: true)
   end
 
-  def collect_installed_names(skip_class_object:)
+  def collect_installed_names(skip_class_object:, destinations_only: false)
     names = Set.new
     children = @ireps.values.flat_map(&:reps).compact.to_set
     @ireps.each do |label, irep|
@@ -402,6 +410,8 @@ class CodeGen
           return nil unless syms && !syms.empty?
 
           # An implicit-receiver installer in a class-object body acts on that body's own cref.
+          # destinations_only (ADR 0391): `alias_method :new, :old` installs `new` and leaves `old` as it was.
+          syms = syms.first(1) if destinations_only && insn.sym == 'alias_method'
           names.merge(syms) unless scoped && insn.op.start_with?('SSEND')
         end
       end
