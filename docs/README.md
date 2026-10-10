@@ -58,9 +58,9 @@ Each entry names where it comes from and what, if anything, checks it.
   call of a helper in `be/nfcxx_ldrt.c` (gcc, x87), results in `st(0)` go through generated assembly thunks, so libc, libm
   and libstdc++.so are called directly. Checked by `tests/pathb-qbe/cases/longdouble_*.cpp`, `multi/abi_ld`, the traps
   `traps/longdouble_*.cpp` (all in `tests/pathb-qbe/run.sh`), the IR golden `tests/pathb-ir/longdouble_ir.ir` and the thunk
-  edge cases `tests/mruby/pathb-edge/x87_thunks.ir` (`tests/mruby/run.sh`, Python oracle identical). Named limits: function
-  pointers to `long double` functions use the internal convention, structs of at most 16 bytes holding one by value,
-  `_Float128`, `std::format` (blocked by `_Float128`); see the note, section 7. The option
+  edge cases `tests/mruby/pathb-edge/x87_thunks.ir` (`tests/mruby/run.sh`, Python oracle identical). Named limits: variadic
+  functions returning `long double` as pointer targets, unions of at most 16 bytes holding a `long double`; `std::format` builds
+  (`_Float128` is supported, `pathb-float128.md`); see the note, section 7. The option
   `--long-double=trap` remains for hand-written IR that still mentions the scalar type
   (`tests/mruby/pathb-edge/r_longdouble.ir`).
 - Hexagon: EDG's `long double` is 16 bytes, Hexagon's is 8; `tests/hexagon/layout.sh` leaves it out (`hexagon.md`).
@@ -109,9 +109,9 @@ refuses any other instruction, a register clobber or `goto` (`tests/mruby/pathb-
 **Path B other**: checked (`NFCXX_IR_OVERFLOW=trap`) unsigned or 64-bit signed multiplication is refused; pointer subscripts are not bounds-checked and there is no `undef` (by decision); thread-local
 objects are x86-64 ELF only and a thread-local address in a static initializer is refused; only LP64 layouts are emitted
 (`pathb-stage3.md`; refusal paths: `tests/mruby/pathb-edge/r_*.ir` via `tests/mruby/run.sh`). Hosted headers now work (`pathb-hosted.md`; `PATHB_HOSTED=0` or
-`--freestanding` gives the old EDG-only headers). Still failing there: `_Float128` in kept functions, asm outside the list in
+`--freestanding` gives the old EDG-only headers). Still failing there: asm outside the list in
 `pathb-hosted.md` ("Known limits"; no test asserts the failures). `__builtin_object_size` answers only for the address of a known
-object (else -1/0), TYPE 1 for a member of a global structure is -1 (`builtin_objsize.cpp`); `alias`/`weakref` need a target defined in
+object (else -1/0), TYPE 1 for a member of a global structure is answered when unambiguous and -1 otherwise (`builtin_objsize.cpp`, `builtin_objsize_global.cpp`); `alias`/`weakref` need a target defined in
 the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap` is SIGILL on Path B (`traps/builtin_trap.cpp`).
 
 **cproc / qbe backend, other**

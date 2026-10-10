@@ -92,14 +92,15 @@ also checks that the emitter accepts or refuses them as stated).
 | other `(unsupported ...)` found by the stress programs | `std::function` from a plain function (the reference-to-function argument `*__f` was *loaded* instead of decayed: segfault); a repeated array initializer (`ck_init_repeat`, `std::bitset`, `T a[N]{}`) and zero fills of more than 128 stores (now `(zero-fill N ADDR)`); `alignas`/`aligned` on a variable (slot and global alignment came from the type; QBE slots are 16-byte aligned at most, so a larger alignment over-allocates and rounds up, and a global's `align` takes any power of two up to 64, the most QBE data accepts: libstdc++'s `__waiter_pool_base` is 64-byte aligned); `__builtin_X` with no library function and no lowering (`frame_address`, `return_address`, `ia32_*`, ...) is now `(unsupported builtin X (no lowering))` instead of a link error. |
 | EDG front end assertion (`lower_il.c:10294`, "internal error ... in lower_routine") | Reached by `std::visit` with a functor and by `<chrono>`/`<thread>` in C++20 and later (`struct _Guard` of `basic_string.tcc`). The Path A build never gets there. The fork take-cheeze/edg-compiler (branch `nfcxx/ignored-routine`, tracked as `3rd/edg`) skips a routine the back end ignores (a prototype instantiation) instead of asserting, as `lower_routine_list` already does. |
 
-## Known limits (still failing)
+## Known limits
 
 - **Exceptions thrown by libstdc++.so** (`vector::at`, `std::__throw_*`) used the gcc unwinder and ended in `abort`. The EH shim (`lib/ehshim`,
   linked into every hosted program: Path B by `nfcxx`/`tests/pathb-qbe/run.sh`) throws them with EDG's runtime; `std::exception_ptr`,
   `current_exception`, `throw_with_nested` work with the patched `libC.a`. Remaining limits: `eh-shim.md`, "Limits". User-code throws,
   `std::runtime_error` constructed in user code, and EDG's `operator new` work as before.
-- `_Float128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `_Float128`).
-  `long double` is supported (below), and so is `__int128` (`docs/notes/pathb-int128.md`: 128-bit arithmetic, conversions,
+- `_Float128` is supported (`docs/notes/pathb-float128.md`: libgcc soft-float on 16-byte objects; `std::format` builds). Its limits:
+  `va_arg(ap, _Float128)`, variadic C calls with a `_Float128` argument, `_Complex _Float128`, `_Float128x`, and C routines
+  with a `_Float128` signature that have no wrapper in `be/nfcxx_ldrt.c`. `long double` is supported (below), and so is `__int128` (`docs/notes/pathb-int128.md`: 128-bit arithmetic, conversions,
   switch, bit-fields and the C ABI, as helper calls on 16-byte objects).
 - **`__builtin_object_size`** answers only for the address of a known object (below); any pointer that was loaded, passed or
   returned is unknown (-1, or 0 for types 2 and 3), as in gcc without optimization. `__builtin_dynamic_object_size` is the same
