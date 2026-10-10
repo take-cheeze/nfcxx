@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'record_hash'
+require_relative 'ivar_poison_causes'
 
 # Steps 6f-bis and 6g: proven fresh Arrays and ivar classes.
 
@@ -135,7 +136,8 @@ class ClassLayout
   # also what the driver's first probing pass passes; see that call site for
   # the stratification.
   def self.analyze(ireps, registry, class_annotations = {}, container_constants = {}, annotated_array_return = nil,
-                    poison_reason: nil, array_ret_proof: nil, ret_class_proof: nil, module_body_ivar_labels: {})
+                    poison_reason: nil, array_ret_proof: nil, ret_class_proof: nil, module_body_ivar_labels: {},
+                    store_log: nil)
     methods_of = Hash.new { |h, k| h[k] = [] }
     registry.each_value { |defs| defs.each { |d| methods_of[d.owner] << d.irep if d.irep } }
     module_body_ivar_labels.each do |owner, labels|
@@ -143,6 +145,8 @@ class ClassLayout
     end
 
     classes = Hash.new { |h, k| h[k] = {} } # owner -> {ivar_name => class_name or UNKNOWN}
+    label_name = {}
+    registry.each_value { |defs| defs.each { |d| label_name[d.irep] = d.name if d.irep } } if store_log
 
     10.times do
       changed = false
@@ -186,6 +190,10 @@ class ClassLayout
             # the class at runtime and falls back to mrb_funcall. IvarLayout (embedding) is
             # separate and still treats nilable ivars as unembeddable.
             next if found.nil? && nil_literal_write?(irep, idx, src_reg)
+
+            # IVAR_POISON_CAUSES: remember each store and what it resolved to on this pass (the last pass, which changed
+            # nothing, is the one that stays); IvarPoisonCauses classifies the unresolved ones after the fixed point.
+            store_log[[owner, label, idx]] = [ivar, found, irep, src_reg, mand, label_name[label]] if store_log
 
             found ||= UNKNOWN
 

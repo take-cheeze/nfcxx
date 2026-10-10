@@ -100,6 +100,16 @@ class CodeGen
     def loadself_mask = @receiver
   end
 
+  # POOL_SELF_CLASS: the generic oracle plus the class set of `self` for LOADSELF only.
+  class LoadSelfOracle < ExactOracle
+    def initialize(codegen, receiver)
+      super(codegen)
+      @receiver = receiver
+    end
+
+    def loadself_mask = @receiver
+  end
+
   class ContextOracle < ReceiverOracle
     attr_reader :context_enter_edges
 
@@ -253,7 +263,54 @@ class CodeGen
 
     writes = {}
     @rc_writes[irep.label] = writes
-    @rc_states[irep.label] = NumericFlow.states(irep, @rc_oracle, fixnum_proof_ctx(irep)[:upvars], writes)
+    @rc_states[irep.label] = NumericFlow.states(irep, return_class_table_oracle(irep), fixnum_proof_ctx(irep)[:upvars], writes)
+  end
+
+  # POOL_SELF_CLASS: the oracle of the table-building and pool-growth flow. A method body whose `self` is a fixed class
+  # set (return_class_self_receiver) reads LOADSELF as that set, so `Menu.new(self, state)` passes the class of the
+  # method's own receiver into the argument pool. Everything else about the flow is the generic oracle's: the register 0
+  # and every implicit-receiver call still answer OTHER, which keeps this a pure refinement of LOADSELF.
+  def return_class_table_oracle(irep)
+    receiver = pool_self_class_enabled? ? return_class_self_receiver(irep) : nil
+    return @rc_oracle unless receiver
+
+    @rc_load_self_oracles ||= {}
+    @rc_load_self_oracles[receiver] ||= LoadSelfOracle.new(self, receiver)
+  end
+
+  # Sends that run a method body with a receiver other than the one it was found on. A body reached through an
+  # UnboundMethod, or defined from a Method object, is not owned by one class any more.
+  POOL_SELF_REBINDING_SENDS = %w[instance_method public_instance_method bind bind_call unbind define_method].freeze
+
+  def pool_self_class_enabled?
+    pool_self_class_refusal.nil?
+  end
+
+  # Why LOADSELF stays unknown in the table-building flow, or nil. BC2CPP_POOL_SELF_CLASS=0 turns it off; a program that
+  # rebinds method bodies (POOL_SELF_REBINDING_SENDS, `define_method` with a block excepted: a block body is not a method
+  # irep and keeps the generic oracle) withdraws it, and so does Ruby outside the closed world that spells one of them.
+  def pool_self_class_refusal
+    return @pool_self_class_refusal if defined?(@pool_self_class_refusal)
+
+    @pool_self_class_refusal = compute_pool_self_class_refusal
+  end
+
+  def compute_pool_self_class_refusal
+    return 'BC2CPP_POOL_SELF_CLASS=0' if ENV.fetch('BC2CPP_POOL_SELF_CLASS', '1') == '0'
+    return 'no closed world' unless @closed_world
+
+    POOL_SELF_REBINDING_SENDS.each do |name|
+      return "outside Ruby spells #{name}" if @closed_world.outside_ruby_token?(name)
+    end
+    @ireps.each_value do |irep|
+      irep.instructions.each do |insn|
+        next unless insn.sym && insn.op.include?('SEND') && POOL_SELF_REBINDING_SENDS.include?(insn.sym)
+        next if insn.sym == 'define_method' && insn.op.end_with?('B')
+
+        return "#{insn.sym} at #{irep.label}"
+      end
+    end
+    nil
   end
 
   # On-demand counterpart to the table-building flow. It can use stable scoped
@@ -277,30 +334,37 @@ class CodeGen
   def return_class_method_oracle(irep)
     return @rc_oracle if ENV['BC2CPP_CALL_CONTEXT_RESULTS'] == '0'
 
+    receiver = return_class_self_receiver(irep)
+    receiver ? ReceiverOracle.new(self, receiver) : @rc_oracle
+  end
+
+  # The class set `self` holds in the instance method whose body is +irep+ (the declared class and its descendants, or
+  # the class alone when it has none), or nil when the body is shared, is not an instance method of a declared class,
+  # or the hierarchy is not fully visible.
+  def return_class_self_receiver(irep)
     definition = @owner_of[irep.label]
     owner = definition&.owner
-    return @rc_oracle unless definition && !definition.core && @closed_world.class_declared?(owner) &&
-                            @closed_world.instance_class?(owner)
+    return nil unless definition && !definition.core && @closed_world.class_declared?(owner) &&
+                      @closed_world.instance_class?(owner)
 
     @rc_body_owners ||= (@registry.values.flatten + Array(self.class.core_hidden_defs))
                        .flat_map { |d| [d.irep, d.copy_irep].compact.uniq.map { |label| [label, d.owner] } }
                        .group_by(&:first).transform_values { |entries| entries.to_set(&:last) }
-    return @rc_oracle unless @rc_body_owners[irep.label] == Set[owner]
+    return nil unless @rc_body_owners[irep.label] == Set[owner]
 
-    receiver = if @closed_world.exact_class?(owner)
-                 numeric_class_bit(owner)
-               else
-                 return @rc_oracle if ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
+    if @closed_world.exact_class?(owner)
+      numeric_class_bit(owner)
+    else
+      return nil if ENV['BC2CPP_USER_RECEIVER_UNIONS'] == '0'
 
-                 hierarchy = @closed_world.class_hierarchy(owner)
-                 return @rc_oracle unless hierarchy && hierarchy[:wild].empty?
+      hierarchy = @closed_world.class_hierarchy(owner)
+      return nil unless hierarchy && hierarchy[:wild].empty?
 
-                 classes = [owner] + hierarchy[:descendants].to_a
-                 return @rc_oracle unless classes.size <= 8 && classes.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.instance_class?(klass) }
+      classes = [owner] + hierarchy[:descendants].to_a
+      return nil unless classes.size <= 8 && classes.all? { |klass| @closed_world.class_declared?(klass) && @closed_world.instance_class?(klass) }
 
-                 classes.reduce(0) { |mask, klass| mask | numeric_class_bit(klass) }
-               end
-    ReceiverOracle.new(self, receiver)
+      classes.reduce(0) { |mask, klass| mask | numeric_class_bit(klass) }
+    end
   end
 
   # Class set one definition returns: its own return sites and the `return`s of blocks nested in it.

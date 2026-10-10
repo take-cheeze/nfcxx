@@ -43,11 +43,37 @@ class CodeGen
 
   # CORE_BODY_EXACT (ADR 0359): a compiled core body has no engine world, so its walk proof rests on
   # the program's. It is a checked proof: the site keeps a class test and a guard violation.
-  def core_body_exact_class(irep, idx, reg)
+  def core_body_exact_class(irep, idx, reg, owner_def: nil)
     return nil unless core_body_exact_enabled? && irep && idx&.positive? && reg
 
     klass = exact_walk_class(irep, idx, reg)
+    klass ||= core_self_walk_class(irep, idx, reg, owner_def)
     klass if CORE_BODY_EXACT_TESTS.key?(klass)
+  end
+
+  # CORE_SELF_EXACT (ADR 0381): inside a compiled body of Array, Hash, String or Range, `self` is exactly
+  # that class once the program has no subclass of it (core_class_subclass_free?) and no singleton maker
+  # (core_body_exact_enabled?). The proof is checked at the site like every core-body proof (ADR 0359).
+  # Only the method's own irep counts: a block can be run with a rebound self (instance_exec, define_method).
+  def core_self_exact_class(irep, owner_def)
+    return nil unless ENV['BC2CPP_CORE_SELF_EXACT'] != '0' && owner_def && irep && !@self_class_unknown
+    return nil unless owner_def.core && CORE_BODY_EXACT_TESTS.key?(owner_def.owner) && irep.equal?(@ireps[owner_def.irep])
+    return nil unless core_class_subclass_free?(owner_def.owner)
+
+    owner_def.owner
+  end
+
+  # The dominating-writer walk with `self` as a source: LOADSELF, or register 0 at the method's entry.
+  def core_self_walk_class(irep, idx, reg, owner_def)
+    klass = core_self_exact_class(irep, owner_def)
+    return nil unless klass
+
+    irep.walk_dominating_writers(idx - 1, reg.to_s, use: idx, exhausted: ->(entry_reg) { entry_reg.to_i.zero? ? klass : nil }) do |insn, _i, _cur|
+      case insn.op
+      when 'MOVE' then insn.regs[1] ? IrepScans.follow(insn.regs[1]) : nil
+      when 'LOADSELF' then klass
+      end
+    end
   end
 
   def core_body_exact_enabled?
@@ -82,15 +108,15 @@ class CodeGen
                end }
     end
 
-    checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest)
+    checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def)
   end
 
   # CORE_BODY_EXACT (ADR 0359): the receiver proof of a compiled core body. Only the receiver is
   # proven and with_exact_core_site tests it; no argument or Fixnum proof rides on it.
-  def checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest)
-    return nil unless recv.to_s.match?(/\Ar\d+\z/) && name && dest
+  def checked_core_body_site(irep, idx, receiver_reg, argv, recv, name, dest, owner_def = nil)
+    return nil unless recv.to_s.match?(/\A(?:r\d+|self)\z/) && name && dest
 
-    klass = core_body_exact_class(irep, idx, receiver_reg)
+    klass = core_body_exact_class(irep, idx, receiver_reg, owner_def: owner_def)
     return nil unless klass
 
     { klass: klass, recv: recv, name: name, int_site: nil, arg_class: ->(_position) {},

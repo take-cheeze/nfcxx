@@ -50,11 +50,29 @@ class CodeGen
         @closed_world.stable_constant_identity?('RGSS') && installed && !installed.include?(name) &&
         core_installed && !core_installed.include?(name) && opaque && opaque.none? { |_owner, method| method == name } &&
         !devirt_blocked_name?(name) && !numeric_aliased_names.include?(name) &&
-        (@registry[name] || []).all? { |definition| definition.owner == '<native>' && definition.irep.nil? } &&
+        profiler_name_unshadowed?(name) &&
         %w[RGSS::Profiler RGSS::Profiler.singleton].all? do |owner|
           Array(@prepended_modules[owner]).empty? && !@unknown_mixins.include?(owner)
         end
     end
+  end
+
+  # RGSS::Profiler's singleton answers `name` with the native in profiler.cxx unless a registry definition sits on the
+  # module or its singleton (a Ruby `def self.frame` there replaces it). Definitions elsewhere (`Game::EventGraphic.frame`)
+  # are on other receivers' chains: both callers prove the receiver is the constant RGSS::Profiler, whose lookup finds
+  # its own singleton method first (prepends and unresolved mixins on it are refused by the caller's clauses).
+  # The owner of a definition is spelled as the source nests it (`module RGSS::Profiler` gives `Profiler.singleton`), so
+  # any owner whose last segment is Profiler counts as the module.
+  # BC2CPP_PROFILER_NAME_SCOPED=0 restores "every definition of the name is native".
+  def profiler_owner?(owner)
+    owner.to_s.delete_suffix('.singleton').split('::').last == 'Profiler'
+  end
+
+  def profiler_name_unshadowed?(name)
+    definitions = @registry[name] || []
+    return definitions.all? { |definition| definition.owner == '<native>' && definition.irep.nil? } if ENV['BC2CPP_PROFILER_NAME_SCOPED'] == '0'
+
+    definitions.none? { |definition| profiler_owner?(definition.owner) }
   end
 
   # A nested callee's changing name result must invalidate every enclosing result.

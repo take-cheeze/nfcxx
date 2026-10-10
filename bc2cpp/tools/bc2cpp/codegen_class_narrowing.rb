@@ -340,7 +340,7 @@ class CodeGen
     return @core_class_subclass_free[klass] if @core_class_subclass_free.key?(klass)
 
     names = klass == 'Numeric' ? CLASS_TEST_NUMERIC_FAMILY : [klass]
-    @core_class_subclass_free[klass] = @closed_world.native_subclass_free?(names) && names.none? { |name| native_subclass_defined?(name) }
+    @core_class_subclass_free[klass] = block_core_world.native_subclass_free?(names) && names.none? { |name| native_subclass_defined?(name) }
   end
 
   CLASS_TEST_SUPER_FIELDS = { 'Integer' => 'integer_class', 'Float' => 'float_class', 'Array' => 'array_class',

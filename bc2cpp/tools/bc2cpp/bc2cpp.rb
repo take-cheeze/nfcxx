@@ -73,12 +73,14 @@ require_relative 'codegen_emit'
 require_relative 'codegen_method'
 require_relative 'codegen_rescue'
 require_relative 'codegen_loop_regions'
+require_relative 'codegen_array_new_inline'
 require_relative 'codegen_fixnum_proof'
 require_relative 'codegen_numeric_proof'
 require_relative 'codegen_numeric_args'
 require_relative 'codegen_numeric_ivars'
 require_relative 'codegen_numeric_returns'
 require_relative 'codegen_class_pools'
+require_relative 'codegen_entry_specialize'
 require_relative 'codegen_constructor_pools'
 require_relative 'codegen_return_classes'
 require_relative 'codegen_profiler_results'
@@ -130,7 +132,7 @@ require_relative 'escape_report' if ENV['BC2CPP_ESCAPE_REPORT']
 require_relative 'cha_self_report' if ENV['BC2CPP_CHA_REPORT']
 require_relative 'guard_hint_report' if ENV['BC2CPP_GUARD_HINT_REPORT']
 require_relative 'interface_table_report' if ENV['BC2CPP_ITAB_REPORT']
-require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT']
+require_relative 'send_root_report' if ENV['BC2CPP_SEND_ROOT_REPORT'] || ENV['BC2CPP_POOL_DROP_REPORT']
 require_relative 'site_origin_table' if ENV['BC2CPP_SITE_ORIGIN_TABLE']
 require_relative 'refine_report' if ENV['BC2CPP_REFINE_REPORT']
 require_relative 'native_arms_report' if ENV['BC2CPP_NATIVE_ARMS_REPORT']
@@ -589,9 +591,11 @@ if $PROGRAM_NAME == __FILE__
   # RETCLASS_SELF_CALL_SUPPORT: from the same Level-0 probe as
   # array_return_probe (see ClassLayout.analyze's `ret_class_proof`).
   class_poison_reason = {}
+  # IVAR_POISON_CAUSES: the stores ClassLayout read, kept to classify the unresolved ones after the fixed point.
+  ivar_store_log = {}
   class_layout_raw = profile_call.call('ClassLayout.analyze final') do
     ClassLayout.analyze(ireps, registry, class_annotations, container_constants,
-                        annotated_array_return, poison_reason: class_poison_reason,
+                        annotated_array_return, poison_reason: class_poison_reason, store_log: ivar_store_log,
                         array_ret_proof: ->(n) { array_return_probe.include?(n) },
                         ret_class_proof: ->(n, o) { return_names_probe.class_return_for_self_call(n, o) },
                         module_body_ivar_labels: module_body_ivar_labels)
@@ -660,6 +664,16 @@ if $PROGRAM_NAME == __FILE__
     warn '  (none)'
   else
     opaque.sort.each { |n| warn "  CLASS_CANDIDATE_OPAQUE  #{n}" }
+  end
+
+  # IVAR_POISON_CAUSES (ADR 0382): the same OPAQUE list bucketed by what the unresolved stores are.
+  warn ''
+  warn '== ivar-class OPAQUE causes (an ivar counts once, in its first bucket; atoms count it once each) =='
+  poison_lines, poison_buckets = IvarPoisonCauses.report(ivar_store_log, opaque, registry)
+  poison_lines.each { |l| warn l }
+  if ENV['BC2CPP_IVAR_POISON_REPORT']
+    File.write(ENV['BC2CPP_IVAR_POISON_REPORT'],
+               "#{poison_buckets.flat_map { |bucket, names| names.map { |n| "#{bucket}\t#{n}" } }.join("\n")}\n")
   end
 
   # ELEMENT_CLASS_SUPPORT: after ClassLayout (only proven-Array ivars are swept)
@@ -1007,6 +1021,12 @@ if $PROGRAM_NAME == __FILE__
   warn '== class pools (CLASS_POOLS) =='
   gen.class_pool_report.each { |l| warn l }
   warn ''
+  # POOL_DROP_REPORT (ADR 0382): why the ivar pools that are not there are not there.
+  if ENV['BC2CPP_POOL_DROP_REPORT']
+    warn '== class pools dropped: causes (POOL_DROP_REPORT) =='
+    gen.pool_drop_report.each { |l| warn l }
+    warn ''
+  end
   # CONSTRUCTOR_POOLS (ADR 0313): initialize arguments joined over every constructor site.
   warn '== constructor pools (CONSTRUCTOR_POOLS) =='
   gen.constructor_pool_report.each { |l| warn l }
@@ -1579,6 +1599,11 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn "== core-source compiled entry points (#{core_entries.size}) =="
   core_entries.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+
+  # ARRAY_NEW_BLOCK (ADR 0391): `Array.new(n) { }` sites the closed world inlined, and why the others kept the call.
+  warn ''
+  warn '== Array.new block inlining (ARRAY_NEW_BLOCK) =='
+  gen.array_new_report.sort.each { |reason, count| warn "  #{reason}: #{count}" }
 
   # YIELD_REACH (ADR 0283): what the yield-free proof gave this build.
   yf = gen.yield_free_report(compiled.filter_map { |m| m[:label] })

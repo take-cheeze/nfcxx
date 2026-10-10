@@ -49,17 +49,24 @@ class CodeGen
     chain
   end
 
+  # The instruction whose visibility the VM checks: the site's own, or (INLINED_UNLISTED_SITE, ADR 0386) the
+  # original SEND/SSEND an inlined block body was compiled from. Either is trusted only when its symbol is
+  # the name being compiled (both callers check), so a synthetic send never borrows a neighbour's opcode.
+  def unlisted_site_insn(site)
+    site && (site[:insn] || (CodeGen.inlined_unlisted_site? ? site[:trace_insn] : nil))
+  end
+
   # SSEND is the send of an implicit (or `self.`) receiver, which may call a
   # private method; every other send of the name is an explicit receiver.
   def unlisted_ssend?(site, name)
-    insn = site && site[:insn]
+    insn = unlisted_site_insn(site)
     !insn.nil? && insn.sym == name && insn.op.start_with?('SSEND')
   end
 
   # An explicit, non-self receiver: vm.c's OP_SEND raises vis_error before the
   # callee runs. `self_owner` keeps a send that may still be an implicit one out.
   def unlisted_private_call(target, klass, name, d, recv, argv, site)
-    insn = site && site[:insn]
+    insn = unlisted_site_insn(site)
     return nil unless insn && insn.sym == name && insn.op.match?(/\ASEND0?B?\z/) && site[:self_owner].nil?
     return nil if argv.size > FUNCALL_ARGC_MAX
 
