@@ -36,12 +36,19 @@ class CodeGen
   # The declared classes the receiver register of the SEND at +site+ must be an instance of because an
   # earlier call on the same value returned, or nil. Every fact is a name some call answered, and the
   # set is the classes that can answer all of them.
+  # LOOP_FLOW_POSITION (docs/adr/0398): the [irep, idx, insn] flow position of a site: its own, or for a send
+  # in an inlined loop body the unshifted position `closed_world_site` attached. Nil when there is none.
+  def site_flow_position(site)
+    return [site[:irep], site[:idx], site[:insn]] if site[:idx]
+
+    flow = site[:flow]
+    flow && [flow[:irep], flow[:idx], flow[:insn]]
+  end
+
   def refined_receiver_instances(site, name)
     return nil unless call_facts_enabled? && @native_results_ready
 
-    irep = site[:irep]
-    idx = site[:idx]
-    insn = site[:insn]
+    irep, idx, insn = site_flow_position(site)
     return nil unless irep && idx && insn&.sym == name && %w[SEND SEND0].include?(insn.op)
 
     reg = insn.reg.to_i
@@ -97,7 +104,8 @@ class CodeGen
   # The exact set leaves nil out (receiver_instances), but a nil the flow cannot exclude reaches the else arm
   # too: it must raise what dispatch raises, so a name NilClass may answer keeps the whole-name gates.
   def nil_may_answer?(site, name)
-    mask = exact_flow_mask(site[:irep], site[:idx], site[:insn].reg)
+    irep, idx, insn = site_flow_position(site)
+    mask = exact_flow_mask(irep, idx, insn.reg)
     (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::NIL)) && !nil_unanswerable_for_instances?(name)
   end
 

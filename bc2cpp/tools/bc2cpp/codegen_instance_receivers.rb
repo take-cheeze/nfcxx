@@ -13,11 +13,11 @@ class CodeGen
   # The exact classes (nil is an instance too, and adds none) the receiver of the SEND at +site+
   # holds, or nil when the flow proves less: an unmodelled value could be a class object.
   def receiver_instances(site, name)
-    insn = site[:insn]
-    return nil unless @native_results_ready && site[:irep] && site[:idx] && insn&.sym == name
+    irep, idx, insn = site_flow_position(site)
+    return nil unless @native_results_ready && irep && idx && insn&.sym == name
     return nil unless %w[SEND SEND0].include?(insn.op)
 
-    mask = exact_flow_mask(site[:irep], site[:idx], insn.reg)
+    mask = exact_flow_mask(irep, idx, insn.reg)
     return nil unless mask.is_a?(Integer) && mask.positive?
 
     classes = []

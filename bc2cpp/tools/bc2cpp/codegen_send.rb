@@ -1534,7 +1534,8 @@ class CodeGen
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         fallback = typed_fallback ||
                    guarded_fallback_line(d, recv, name, argv, [check_owner],
-                                         closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx))
+                                         closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                                           trace_insn: insn, trace_reg_offset: trace_reg_offset))
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
@@ -1560,7 +1561,8 @@ class CodeGen
         # Array1D crashed in Game::Actor's accessor). So every MONO call into an
         # embedding class gets the class guard, rather than proving per body that no
         # DATA_PTR is reached.
-        cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx)
+        cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                    trace_insn: insn, trace_reg_offset: trace_reg_offset)
         # CLOSED_WORLD_SELF: LEXICAL_SELF's reasoning for a MONO target. Self is
         # kind_of the owner and the closed world proves it has no subclass, so
         # the guard can only be true.
@@ -1651,7 +1653,8 @@ class CodeGen
       end
 
       fallback = guarded_fallback_line(d, recv, name, argv, [owner],
-                                       closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx))
+                                       closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                                         trace_insn: insn, trace_reg_offset: trace_reg_offset))
       "#{note}  if (#{check}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
         "  } else {\n" \
@@ -1724,7 +1727,8 @@ class CodeGen
       flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
       return flow_core if flow_core
 
-      cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx)
+      cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                  trace_insn: insn, trace_reg_offset: trace_reg_offset)
       poly = with_exact_core_site(exact_site) do
         compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
           compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
@@ -2207,7 +2211,7 @@ class CodeGen
   # `trace_idx` (INLINED_UNLISTED_SITE, docs/adr/0386): the unshifted site of a send inside an inlined block
   # body, whose own `idx` is nil. It only adds `trace_insn`, the original instruction of that site, which
   # unlisted_class_call reads; every other consumer of the site keeps seeing the nil `insn`/`idx`.
-  def closed_world_site(recv, irep, idx, owner_def, trace_idx: nil)
+  def closed_world_site(recv, irep, idx, owner_def, trace_idx: nil, trace_insn: nil, trace_reg_offset: 0)
     return nil unless @closed_world
 
     self_owner = owner_def && self_class(owner_def)
@@ -2222,7 +2226,101 @@ class CodeGen
     # the send of its own name before trusting SSEND vs SEND.
     site = { self_owner: self_owner, insn: irep && idx && irep.instructions[idx], irep: irep, idx: idx }
     site[:trace_insn] = irep.instructions[trace_idx] if CodeGen.inlined_unlisted_site? && idx.nil? && irep && trace_idx
+    # LOOP_FLOW_POSITION (ADR 0398): an inlined body's send has the flow position of its unshifted site.
+    if idx.nil? && irep && trace_idx && trace_insn
+      site[:flow] = loop_flow_position(irep, trace_idx, trace_insn, trace_reg_offset)
+    end
     site
+  end
+
+  # LOOP_FLOW_POSITION (docs/adr/0398): the flow position of a send compiled from an inlined loop body (compile_insn
+  # with the body's block irep, `irep`, its registers shifted by `reg_offset`). The proof's flow facts are indexed by
+  # the unshifted register of one irep, so the send is judged at a position of an irep:
+  #   - the receiver is a register the block itself defined: the block's flow at that send. A block activation starts
+  #     from unknown inputs (CallFacts::Flow.states), and the inlined frame is reset per iteration (inline_block_frame);
+  #   - a receiver read through GETUPVAR from the method (`:upvar`) is refused (ADR 0398, narrowed).
+  # Returns { irep:, idx:, insn: } or nil (refused; reason counted). A receiver the block reassigns from its loop element
+  # (R1), or with several definitions that are not one local, is refused.
+  def loop_flow_position(irep, trace_idx, trace_insn, reg_offset)
+    return nil unless CodeGen.loop_flow_position?
+
+    original = irep.instructions[trace_idx]
+    unless original && original.addr == trace_insn.addr && original.op == trace_insn.op &&
+           original.sym == trace_insn.sym && %w[SEND SEND0].include?(original.op) &&
+           original.reg && trace_insn.reg && original.reg.to_i + reg_offset.to_i == trace_insn.reg.to_i
+      # A synthetic send (addr 0: a typed index or splat helper) has no position of its own; an SSEND is a
+      # self call, whose receiver is self and needs no set.
+      reason = if trace_insn.addr.zero? then :synthetic_send
+               elsif trace_insn.op.start_with?('SSEND') then :self_send
+               else :position_mismatch
+               end
+      return loop_flow_refuse(irep, trace_idx, reason)
+    end
+
+    reg = original.reg.to_s
+    return loop_flow_refuse(irep, trace_idx, :opaque_reg) if fixnum_proof_ctx(irep)[:upvars].include?(reg)
+
+    defs = BytecodeIR.for(irep).reaching_definitions(trace_idx, reg, follow_moves: true,
+                                                                    opaque_regs: fixnum_proof_ctx(irep)[:upvars])
+    return loop_flow_refuse(irep, trace_idx, :unproven_definition) if defs.nil? || defs.empty?
+
+    writers = defs.map { |d| d.index.negative? ? nil : irep.instructions[d.index] }
+    # The receiver holds the loop element (the block's parameter R1, possibly copied: its definition is the entry
+    # value, index ENTRY, or the ENTER that binds it) and the body writes R1 again.
+    element = defs.any? do |d|
+      d.reg.to_s == LOOP_ELEMENT_REG && (d.index.negative? || irep.instructions[d.index].op == 'ENTER')
+    end
+    if element && loop_element_reassigned?(irep)
+      return loop_flow_refuse(irep, trace_idx, :element_reassigned)
+    end
+
+    upvars = writers.map { |w| w&.op == 'GETUPVAR' && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
+    return loop_flow_accept(irep, trace_idx, :local, { irep: irep, idx: trace_idx, insn: original }) if upvars.none?
+
+    # Narrowed (ADR 0398): a receiver that is a method local read through GETUPVAR is refused. Judging it at the
+    # method's flow at the loop's SENDB created new proven dead fallbacks in mruby-rpg2k's Scene::Map
+    # (reviewed-list failures), so only a receiver the block itself defines is given a position.
+    loop_flow_refuse(irep, trace_idx, :upvar_narrowed)
+  end
+
+  def loop_flow_accept(irep, trace_idx, path, position)
+    CodeGen::LOOP_FLOW_ACCEPTED[[irep.label, trace_idx, path, irep.instructions[trace_idx]&.sym]] = true
+    position
+  end
+
+  # LOOP_FLOW_POSITION: (body, position, reason, send name) of each refused inlined-loop position, and
+  # (body, position, path, send name) of each one given a flow position. BC2CPP_LOOP_FLOW_REPORT=1 prints the
+  # counts at exit; =2 also one line per send (for the census join by name).
+  LOOP_FLOW_REFUSALS = {}
+  LOOP_FLOW_ACCEPTED = {}
+  at_exit do
+    report = ENV['BC2CPP_LOOP_FLOW_REPORT']
+    if report == '1' || report == '2'
+      accepted = LOOP_FLOW_ACCEPTED.keys.group_by { |k| k[2] }.transform_values(&:size)
+      refused = LOOP_FLOW_REFUSALS.keys.group_by { |k| k[2] }.transform_values(&:size)
+      warn "bc2cpp loop_flow accepted: #{accepted.sort.map { |r, c| "#{r} #{c}" }.join(', ')}"
+      warn "bc2cpp loop_flow refused: #{refused.sort.map { |r, c| "#{r} #{c}" }.join(', ')}"
+      next unless report == '2'
+
+      LOOP_FLOW_ACCEPTED.each_key { |k| warn "bc2cpp loop_flow site: #{k[3]} #{k[2]} #{k[0]}:#{k[1]}" }
+      LOOP_FLOW_REFUSALS.each_key { |k| warn "bc2cpp loop_flow site: #{k[3]} #{k[2]} #{k[0]}:#{k[1]}" }
+    end
+  end
+
+  # The block's mandatory parameter (R1) is the loop element in the inlined each/map/select bodies.
+  LOOP_ELEMENT_REG = '1'
+
+  # Any instruction of the body writes R1 after the parameter binding (ENTER).
+  def loop_element_reassigned?(irep)
+    irep.instructions.any? do |i|
+      i.op != 'ENTER' && !NumericFlow::NO_WRITE_OPS.include?(i.op) && i.reg.to_s == LOOP_ELEMENT_REG
+    end
+  end
+
+  # Counted once per (body, position, reason): compile_send runs on a site more than once.
+  def loop_flow_refuse(irep, trace_idx, reason)
+    CodeGen::LOOP_FLOW_REFUSALS[[irep.label, trace_idx, reason, irep.instructions[trace_idx]&.sym]] = true
+    nil
   end
 
   def c_string_literal(s)

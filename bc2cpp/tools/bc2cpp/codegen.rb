@@ -33,6 +33,11 @@ class CodeGen
     def inlined_unlisted_site?
       ENV['BC2CPP_INLINED_UNLISTED'] != '0'
     end
+
+    # LOOP_FLOW_POSITION (docs/adr/0398): kill switch BC2CPP_LOOP_FLOW_POSITION=0 (byte-identical to master).
+    def loop_flow_position?
+      ENV['BC2CPP_LOOP_FLOW_POSITION'] != '0'
+    end
   end
 
   C_TYPE = { fixnum: 'mrb_int', symbol: 'mrb_sym', bool: 'mrb_bool',
