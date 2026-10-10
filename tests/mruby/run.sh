@@ -224,11 +224,12 @@ python3 "$oracle/pathb-qbe-emit.py" "$tmp/no-such-file.ir" >/dev/null 2>&1; r6=$
 "$mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/no-such-file.ir" >/dev/null 2>&1; r7=$?
 if [ "$r1 $r2 $r3 $r4 $r5" = "0 0 1 1 1" ] && [ "$r6" = 1 ] && [ "$r7" = 1 ]; then report ok "pathb-qbe-emit stdin, usage errors and a missing file behave the same"
 else report fail "pathb-qbe-emit stdin/usage statuses unexpected: $r1 $r2 $r3 $r4 $r5 $r6 $r7"; fi
-# --append-weak: the `# pathb-weak` marks of the IL become .weak lines at the end of the assembly.
+# --append-weak: the `# pathb-weak` marks of the IL become .weak lines at the end of the assembly; `# pathb-asm` and
+# `# pathb-alias` marks (fence/rdtsc helpers, GNU aliases) become the helper functions and .set lines.
 weak_n=0; weak_lines=0
 for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
   python3 "$oracle/pathb-qbe-emit.py" "$f" >"$tmp/w.ssa" 2>/dev/null || continue
-  grep -q '^# pathb-weak ' "$tmp/w.ssa" || continue
+  grep -q '^# pathb-\(weak\|asm\|alias\) ' "$tmp/w.ssa" || continue
   printf '\t.text\nfoo:\n\tret\n' >"$tmp/w.py.s"; cp "$tmp/w.py.s" "$tmp/w.rb.s"
   python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.ssa" "$tmp/w.py.s"; rcp=$?
   "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/w.ssa" "$tmp/w.rb.s"; rcr=$?

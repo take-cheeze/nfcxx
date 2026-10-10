@@ -636,7 +636,7 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi
+  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers
 
   def initialize
     @globals = {}       # IR name -> type
@@ -651,6 +651,7 @@ class Module_
     @funcs = {}         # IR name -> true for every function defined in this module
     @got = {}           # IR name of an external function whose address is taken -> its pointer cell (see opnd_)
     @abi = {}           # struct name -> AbiType: the C calling convention shape of aggregates by value
+    @asmhelpers = {}    # machine-level helpers ("fence", "rdtsc") that append_asm_helpers writes into the assembly
   end
 end
 
@@ -813,6 +814,13 @@ class Fn
   def ret(v = nil)
     ensure_live
     put(v.nil? ? (@sret_buf.nil? ? "ret" : "ret #{@sret_buf}") : "ret #{v}")
+    @dead = true
+  end
+
+  # Terminate the block with QBE's hlt (ud2 on x86-64: SIGILL).
+  def hlt
+    ensure_live
+    put("hlt")
     @dead = true
   end
 
@@ -1616,7 +1624,7 @@ RVAL = {
   "offset" => ->(fn, x) { r_offset(fn, x) }, "index" => ->(fn, x) { r_index(fn, x) },
   "pdiff" => ->(fn, x) { r_pdiff(fn, x) },
   "bfload" => ->(fn, x) { r_bfload(fn, x) }, "bfload.v" => ->(fn, x) { r_bfload(fn, x) },
-  "call" => ->(fn, x) { r_call(fn, x) },
+  "call" => ->(fn, x) { r_call(fn, x) }, "rdtsc" => ->(fn, x) { r_rdtsc(fn, x) },
 }
 
 # -------- statement handlers
@@ -1871,13 +1879,45 @@ def s_eval(fn, x)
 end
 
 def s_bounds(fn, x)
+  # (bounds IDX N): N is a number, or a register holding the run-time length of a variable-length array; a register
+  # bound and its index are both 64-bit (the lowering converts).
   idx = fn.opnd(x[1])
-  n = as_int(x[2])
+  n = reg?(x[2]) ? nil : as_int(x[2])
   raise Refused, "bounds on a non-integer index" if idx.ty.nil? || idx.ty[0] != "int"
   cls = idx.cls
   c = fn.tmp
-  fn.emit("#{c} =w cult#{cls} #{idx.t}, #{wrap_int(n, cls)}")
+  if n.nil?
+    nv = fn.opnd(x[2], "l")
+    raise BadIR, "bounds: a register bound needs a 64-bit index" if cls != "l"
+    fn.emit("#{c} =w cultl #{idx.t}, #{nv.t}")
+  else
+    fn.emit("#{c} =w cult#{cls} #{idx.t}, #{wrap_int(n, cls)}")
+  end
   fn.trap_unless(c)
+end
+
+# (trap): the instruction gcc's __builtin_trap and asm("ud2") are, QBE's hlt (ud2 on x86-64): SIGILL, not the SIGABRT of
+# the checked operations. It ends the block like (unreachable).
+def s_trap(fn, x)
+  raise BadIR, "trap form" if x.length != 1
+  fn.hlt
+end
+
+# (fence): a full memory fence for asm("mfence") and friends, a call of the helper __pathb_fence that
+# append_asm_helpers writes into the assembly (QBE has no fence). An opaque call, so also a compiler barrier.
+def s_fence(fn, x)
+  raise BadIR, "fence form" if x.length != 1
+  fn.mod.asmhelpers["fence"] = true
+  fn.emit("call $__pathb_fence()")
+end
+
+# (rdtsc): the 64-bit time stamp counter, edx:eax of the instruction, from the helper __pathb_rdtsc.
+def r_rdtsc(fn, x)
+  raise BadIR, "rdtsc form" if x.length != 1
+  fn.mod.asmhelpers["rdtsc"] = true
+  t = fn.tmp
+  fn.emit("#{t} =l call $__pathb_rdtsc()")
+  Val.new(t, "l", parse_type("unsigned_long"))
 end
 
 def s_nonnull(fn, x)
@@ -2070,7 +2110,7 @@ STMT = {
   "break" => ->(fn, x) { s_break(fn, x) }, "continue" => ->(fn, x) { s_continue(fn, x) },
   "goto" => ->(fn, x) { s_goto(fn, x) }, "label" => ->(fn, x) { s_label(fn, x) },
   "return" => ->(fn, x) { s_return(fn, x) }, "unreachable" => ->(fn, x) { s_unreachable(fn, x) },
-  "barrier" => ->(fn, x) { s_barrier(fn, x) },
+  "barrier" => ->(fn, x) { s_barrier(fn, x) }, "trap" => ->(fn, x) { s_trap(fn, x) }, "fence" => ->(fn, x) { s_fence(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions
@@ -2278,23 +2318,48 @@ def x87_entry_thunk(name, linkage, ints, stack, complex = false)
   out.join("\n") + "\n"
 end
 
+# Machine-level helpers for operations QBE cannot express. The emitter notes the use in the IL ("# pathb-asm NAME") and
+# this appends the helper, as a weak function, to the assembly: __pathb_fence executes mfence, __pathb_rdtsc rdtsc
+# (edx:eax combined into rax). x86-64 only, like the asm statements they come from.
+ASM_MARK = "# pathb-asm "
+ASM_HELPERS = {
+  "fence" => ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
+              "\t.size __pathb_fence, .-__pathb_fence"],
+  "rdtsc" => ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
+              "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+}
+
+# GNU alias attributes. QBE has no aliases: the IR form (alias NAME TARGET function|object [weak]) becomes a comment
+# line "# pathb-alias KIND NAME TARGET [weak]" in the IL and a .set (with .globl or .weak and the symbol type) here.
+ALIAS_MARK = "# pathb-alias "
+
 def append_weak(il_path, asm_path)
   names = []
-  thunks = []
+  extra = []
   read_text(il_path).split("\n").each do |line|
-    names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip if line.start_with?(WEAK_MARK)
-    if line.start_with?(X87_MARK)
+    if line.start_with?(WEAK_MARK)
+      names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip
+    elsif line.start_with?(ASM_MARK)
+      lines = ASM_HELPERS[line.byteslice(ASM_MARK.bytesize, line.bytesize - ASM_MARK.bytesize).strip]
+      extra << lines.join("\n") + "\n" unless lines.nil?
+    elsif line.start_with?(X87_MARK)
       w = line.byteslice(X87_MARK.bytesize, line.bytesize - X87_MARK.bytesize).split(" ")
       if w[0] == "call" || w[0] == "callc"
-        thunks << x87_call_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "callc")
+        extra << x87_call_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "callc")
       else
-        thunks << x87_entry_thunk(w[1], w[2], w[3].to_i, w[4].to_i, w[0] == "entryc")
+        extra << x87_entry_thunk(w[1], w[2], w[3].to_i, w[4].to_i, w[0] == "entryc")
       end
+    elsif line.start_with?(ALIAS_MARK)
+      p = line.byteslice(ALIAS_MARK.bytesize, line.bytesize - ALIAS_MARK.bytesize).split
+      next if p.length < 3
+      extra << ["\t#{p.length > 3 && p[3] == "weak" ? ".weak" : ".globl"} #{p[1]}",
+                "\t.type #{p[1]}, #{p[0] == "function" ? "@function" : "@object"}",
+                "\t.set #{p[1]}, #{p[2]}"].join("\n") + "\n"
     end
   end
-  unless names.empty? && thunks.empty?
+  unless names.empty? && extra.empty?
     File.open(asm_path, "a") do |f|
-      f.write("\n" + names.map { |n| ".weak #{n}\n" }.join + thunks.join)
+      f.write("\n" + names.map { |n| ".weak #{n}\n" }.join + extra.join)
     end
   end
   0
@@ -2566,6 +2631,17 @@ def global_extern?(f)
   head_of(f) == "global" && f.drop(2).any? { |p| head_of(p) == "extern" }
 end
 
+# (alias "NAME" "TARGET" function|object [weak]): from __attribute__((alias("TARGET"))) on a function or an object that
+# the translation unit defines. Returns [name, target, kind, weak].
+def alias_parts(f)
+  raise BadIR, "alias form: #{form_text(f)}" if f.length < 4 || f.length > 5
+  kind = f[3]
+  raise BadIR, "alias form: #{form_text(f)}" if kind != "function" && kind != "object"
+  weak = f.length == 5
+  raise BadIR, "alias form: #{form_text(f)}" if weak && f[4] != "weak"
+  [pstr(f[1]), pstr(f[2]), kind, weak]
+end
+
 # Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
 # nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
 # to, transitively. A (weak) or (static) definition that nothing reaches is dropped: another translation unit that
@@ -2584,6 +2660,14 @@ def prune(forms)
     if is_linked(f) || startup_function?(f)
       live[name] = true
       work << name
+    end
+  end
+  forms.drop(1).each do |f|   # the target of an alias is kept whatever its linkage
+    next if head_of(f) != "alias"
+    t = alias_parts(f)[1]
+    if defs.key?(t) && !live.key?(t)
+      live[t] = true
+      work << t
     end
   end
   until work.empty?
@@ -2707,6 +2791,9 @@ def emit_module(text, do_prune = true, ld_trap = false)
       rescue Refused => e
         raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
       end
+    elsif h == "alias"
+      name, target, kind, weak = alias_parts(f)
+      mod.out << "#{ALIAS_MARK}#{kind} #{qsym(name)} #{qsym(target)}#{weak ? " weak" : ""}"
     elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
@@ -2717,6 +2804,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
   mod.out << "data $#{SINK} = align 8 { z 8 }" if mod.need_sink
   mod.vhelpers.each_value { |lines| mod.out.concat(lines) }
   mod.weakrefs.each_key { |n| mod.out << (WEAK_MARK + qsym(n)) }
+  mod.asmhelpers.each_key { |n| mod.out << (ASM_MARK + n) }
   "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + mod.out.join("\n") + "\n"
 end
 

@@ -22,6 +22,9 @@
 #                                 `// TRAP-STDERR: text` line also requires that text on stderr (EH runtime messages).
 #                                 Built with NFCXX_IR_OVERFLOW=trap. The gcc backend is not compared: C leaves
 #                                 these cases undefined (gcc dies with SIGFPE or SIGSEGV instead).
+#                                 `// TRAP-EXIT: 132` expects another signal (128 + 4, SIGILL: __builtin_trap, asm ud2);
+#                                 `// TRAP-IR: default` builds without NFCXX_IR_OVERFLOW=trap (VLA lowering contains a
+#                                 checked 64-bit signed multiply, which trap mode refuses).
 #
 # A node, type or marker the emitter does not handle is REFUSED: reported with its reason, not counted as a
 # failure. Any other problem (front end, emitter error, QBE, assembler, linker, wrong exit code, gcc disagreeing
@@ -74,7 +77,9 @@ run_one() {
   total=$((total + 1))
   n=$(basename "$f" .cpp); name=${f#tests/}
   ir=$tmp/$n.ir; ssa=$tmp/$n.ssa; s=$tmp/$n.s; obj=$tmp/$n.o; exe=$tmp/$n.exe
-  if [ "$mode" = trap ]; then
+  if [ "$mode" = trap ] && ! grep -q '^// TRAP-IR: default' "$f"; then
+    # (`// TRAP-IR: default` keeps the wrapping arithmetic: a checked 64-bit signed multiply, which the lowering of a
+    # variable-length array contains, is refused in trap mode.)
     NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   else
@@ -108,10 +113,13 @@ run_one() {
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
     # another reason (a broken unwinder, say) is not taken for the trap it is testing.
     want=$(sed -n 's,^// TRAP-STDERR: *\(.*\),\1,p' "$f" | head -1)
-    if [ $got != 134 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap (134)")
+    # `// TRAP-EXIT: 132` names another fatal signal (128 + signal): __builtin_trap and ud2 are SIGILL, not SIGABRT.
+    wsig=$(sed -n 's,^// TRAP-EXIT: *\([0-9][0-9]*\).*,\1,p' "$f" | head -1); wsig=${wsig:-134}
+    case $wsig in 134) sname=SIGABRT ;; 132) sname=SIGILL ;; *) sname="signal $((wsig - 128))" ;; esac
+    if [ $got != $wsig ]; then failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap ($wsig)")
     elif [ -n "$want" ] && ! grep -qF "$want" "$tmp/$n.rt"; then
       failed=$((failed + 1)); lines+=("FAIL     $name: aborted, but stderr lacks '$want'")
-    else trapped=$((trapped + 1)); lines+=("trapped  $name (SIGABRT)"); fi
+    else trapped=$((trapped + 1)); lines+=("trapped  $name ($sname)"); fi
     return
   fi
   want=$(expect_of "$f")

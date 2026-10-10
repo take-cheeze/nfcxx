@@ -43,8 +43,7 @@ closed some of it; **current** state in the second list):
 - non-finite float constants;
 - global initializers that are dynamic or binding.
 
-Current (`scripts/pathb-qbe-emit.rb`, the `Refused` raises): `long double` (type and constants); inline asm with a
-template, operands or clobbers (`(unsupported stmt asm-...)`; the empty barrier is fine, `asm_barrier.cpp`); checked
+Current (`scripts/pathb-qbe-emit.rb`, the `Refused` raises): `long double` (type and constants); inline asm outside the accepted subset (`pathb-hosted.md`, "Inline asm"; `(unsupported stmt asm-...)`; the empty barrier is fine, `asm_barrier.cpp`); checked
 (`NFCXX_IR_OVERFLOW=trap`) unsigned operations and checked 64-bit signed multiplication; a non-integer `switch`;
 non-finite float constants; bit-fields of a non-integer type; the address of a thread-local object in a static
 initializer; layouts other than LP64 (`(layout ...)` header). Dynamic initialization, constructor initializers and
@@ -589,12 +588,39 @@ Still missing: any check of the order of initialization across translation units
 runtime does; the probes are single-threaded. The `dik_constructor` lowering is untested because the lowered IL never
 contains one.
 
+## Small gaps (stage 3, last round): asm idioms, `__builtin_trap`, `__builtin_object_size`, VLA bounds, aliases
+
+Each item names its probes. Emitter changes are in both `scripts/pathb-qbe-emit.rb` and the oracle
+`tests/mruby/oracle/pathb-qbe-emit.py` (identical output, checked by `tests/mruby/run.sh`).
+
+- **`(trap)`** (`traps/builtin_trap.cpp`, `traps/asm_ud2.cpp`): `__builtin_trap` and `asm("ud2")` end the block with
+  QBE's `hlt`, which the amd64 back end writes as `ud2`: the process dies of SIGILL (exit 132), as with gcc. They used to
+  be `(unreachable)`, a jump to the shared abort block (SIGABRT). `__builtin_unreachable` stays `(unreachable)`.
+  `tests/pathb-qbe/run.sh` takes `// TRAP-EXIT: 132` to expect another signal. On other targets `hlt` is whatever QBE
+  emits there (`brk` on arm64, SIGTRAP), which is also what gcc emits for `__builtin_trap` on arm64.
+- **Machine-level helpers.** `(fence)` and `(rdtsc)` need an instruction QBE cannot write. The emitter calls
+  `$__pathb_fence()` / `$__pathb_rdtsc()` and puts a comment line `# pathb-asm fence|rdtsc` in the IL;
+  `pathb-qbe-emit.rb --append-weak IL ASM`, which every consumer already runs for `.weak`, appends the two tiny weak
+  functions to the assembly (`mfence; ret` and `rdtsc; shlq $32,%rdx; orq %rdx,%rax; ret`). They are weak, so several
+  units can carry them. x86-64 only, like the asm text they stand for. A fence is an opaque call, so also a compiler barrier.
+- **Aliases** (`alias_attr.cpp`, `alias_static.cpp`; `pathb-edge/alias.ir`): `__attribute__((alias("t")))` on a
+  function or object, and `weak, alias`, print `(alias "NAME" "TARGET" function|object [weak])`; the declaration of an
+  alias object is `(extern)`. The emitter keeps the target through pruning (it may be static) and writes
+  `# pathb-alias KIND NAME TARGET [weak]`; `--append-weak` turns it into `.globl|.weak NAME`, `.type`, `.set NAME, TARGET`.
+  `weakref("t")` needs no output of its own: every reference to the weakref routine or object is a reference to `t`, which is
+  declared weak (`(declare "t" (weak))` / `(global "t" T B A (weak) (extern))`), so an undefined target reads as null.
+  The gcc backend cannot alias a static function (the generated C renames it), hence `alias_static.cpp` has `// GCC: undefined`.
+- **VLA bounds** (`vla_bounds.cpp`, `traps/vla_index.cpp`): see `pathb-stage2.md` 5b. `(bounds IDX %N)` takes a register.
+  The VLA lowering contains a checked 64-bit signed multiply, which trap mode refuses, so the trap probe says
+  `// TRAP-IR: default`.
+- **`__builtin_object_size`** (`builtin_objsize.cpp`): a constant at lowering time (see `pathb-hosted.md`).
+- **Inline asm**: `ir_asm_stmt` in `be/nfcxx_ir.c`, `asm_ext.cpp`; the accepted forms are in `pathb-hosted.md`.
+
 ## Round: long double
 
 `long double` no longer stops a module. The IR lowering keeps a 16-byte object per value and calls helpers
 (`be/nfcxx_ldrt.c`); results in `st(0)` are bridged by assembly thunks that the emitter leaves as `# pathb-x87` marks and
 `--append-weak` expands (new top-level forms `(x87-thunk ...)`, stage 2 grammar). The emitter changed only for those forms
 and for refusing a `(layout (long_double N))` other than 16; the Python oracle carries the same code
-(`tests/mruby/pathb-edge/x87_thunks.ir`, `e_x87_*.ir`, `r_layout_ld.ir`). `ck_init_repeat` array constants (a run of one
-constant) are lowered too (static items and local stores). The whole design, the calling convention and the limits are in
+(`tests/mruby/pathb-edge/x87_thunks.ir`, `e_x87_*.ir`, `r_layout_ld.ir`). The whole design, the calling convention and the limits are in
 `docs/notes/pathb-longdouble.md`.
