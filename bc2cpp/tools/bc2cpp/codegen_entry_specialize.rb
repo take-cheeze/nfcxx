@@ -3,7 +3,7 @@
 require 'set'
 require_relative 'numeric_flow'
 
-# CodeGen: ENTRY_GUARDED_SPECIALIZATION (docs/adr/0379).
+# CodeGen: ENTRY_GUARDED_SPECIALIZATION (docs/adr/0380).
 #
 # A hot method whose parameter is monomorphic at run time (BC2CPP_TRACE_PARAMS) but not provable from its
 # call sites gets a second body compiled under the ASSUMPTION that the listed parameters are exactly the

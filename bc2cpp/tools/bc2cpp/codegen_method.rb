@@ -201,7 +201,7 @@ class CodeGen
       end
     end
 
-    # ENTRY_GUARDED_SPECIALIZATION (ADR 0379): nil unless BC2CPP_SPECIALIZE names this method.
+    # ENTRY_GUARDED_SPECIALIZATION (ADR 0380): nil unless BC2CPP_SPECIALIZE names this method.
     entry_spec = entry_specialization(label, d, irep, arg_names, arg_native_types,
                                       entry_specialization_eligibility(mandatory_ok: mandatory_ok, opt: opt, has_rest: has_rest, has_blk: has_blk,
                                                                        needs_blk_param: needs_blk_param, kw_table: kw_table, resumable: resumable,
