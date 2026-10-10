@@ -31,7 +31,8 @@ this note records what stage 3 covers, what it refuses, and the results.
 
 ### Refusals (exit 3, `refused: <reason>`)
 
-Anything the emitter does not handle is refused, never dropped silently:
+Anything the emitter does not handle is refused, never dropped silently. The list as of the first round (later rounds
+closed some of it; **current** state in the second list):
 
 - `long double`;
 - a variable-length array *slot* (VLAs themselves are fine since round 3: the IR uses a pointer slot) and the other
@@ -41,6 +42,13 @@ Anything the emitter does not handle is refused, never dropped silently:
 - a non-integer `switch`;
 - non-finite float constants;
 - global initializers that are dynamic or binding.
+
+Current (`scripts/pathb-qbe-emit.rb`, the `Refused` raises): `long double` (type and constants); inline asm with a
+template, operands or clobbers (`(unsupported stmt asm-...)`; the empty barrier is fine, `asm_barrier.cpp`); checked
+(`NFCXX_IR_OVERFLOW=trap`) unsigned operations and checked 64-bit signed multiplication; a non-integer `switch`;
+non-finite float constants; bit-fields of a non-integer type; the address of a thread-local object in a static
+initializer; layouts other than LP64 (`(layout ...)` header). Dynamic initialization, constructor initializers and
+VLAs are lowered (`dyn_*.cpp`, `vla*.cpp`). The `tests/mruby/pathb-edge/r_*.ir` files exercise the refusal paths.
 
 A malformed or older IR format exits 1.
 

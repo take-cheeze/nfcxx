@@ -66,7 +66,7 @@ trace_end "$t" "qbe (IL to assembly)" qbe-backend
 # COMDAT functions (inline and template instantiations) are __weak__ in EDG's C; mark them weak in the
 # assembly too, so the link merges the per-object copies as gcc does.
 t=$(trace_start)
-"$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" "$tmp/prep.c" "$tmp/out.s"
+"$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" ${prepflags[@]+"${prepflags[@]}"} "$tmp/prep.c" "$tmp/out.s"
 cat "$tmp/tail.s" >> "$tmp/out.s"
 trace_end "$t" "weak-symbols.rb (mruby)" qbe-backend
 t=$(trace_start)

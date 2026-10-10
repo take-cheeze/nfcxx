@@ -5,7 +5,7 @@
 # submodule except the few things we change:
 #   src/CMakeLists.txt             c_gen_be.c -> nfcxx_be.c in CORE_FRONT_END_SOURCE_FILES
 #   src/nfcxx_be.{c,h}, nfcxx_names.h   copies of be/ (the new back end and its name tables)
-#   cmake/macro-conf/nfcxx-pathb/  macro config: BACK_END_IS_C_GEN_BE=0, DO_IL_LOWERING=1, everything else as
+##   cmake/macro-conf/nfcxx-pathb/  macro config: BACK_END_IS_C_GEN_BE=0, DO_IL_LOWERING=1, everything else as
 #                                  linux-gcc-release (so the IL is lowered exactly as the C generator sees it)
 # Result: build/pathb/cmake/bin/cpfe. scripts/pathb-dump runs it from build/pathb/edg-base like the driver does.
 # Reruns refresh the tree and rebuild only what changed (build/pathb/cmake is kept).

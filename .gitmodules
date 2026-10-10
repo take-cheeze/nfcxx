@@ -1,6 +1,6 @@
 [submodule "3rd/edg"]
 	path = 3rd/edg
-	url = https://github.com/edgcpp/compiler
+	url = https://github.com/take-cheeze/edg-compiler
 	shallow = true
 [submodule "3rd/qbe"]
 	path = 3rd/qbe

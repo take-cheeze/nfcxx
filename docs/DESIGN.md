@@ -6,12 +6,13 @@ UB-free by construction (with a path to Lean proofs), minimal API-compatible sta
 ## Pipeline
 
 ```
-C++ --EDG front end--+--> Path A: EDG C back end -> C -> host cc            (implemented, host)
-                     |                                 -> Hexagon SDK clang (planned)
-                     +--> Path B: EDG IL -> own mid-level IR -> QBE / C+HVX / SPIR-V,WGSL (planned)
+C++ --EDG front end--+--> Path A: EDG C back end -> C -> host cc / cproc+QBE   (implemented, host)
+                     |                                 -> clang-19 --target=hexagon + qemu-hexagon (checked, tests/hexagon)
+                     +--> Path B: EDG IL -> own IR -> QBE   (implemented through stage 3; scripts/pathb-*, be/)
+                                                    -> C+HVX / SPIR-V,WGSL   (planned)
 ```
 
-Path A is what `./nfcxx` does today: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default),
+Status per component, with the test that covers each claim: `docs/README.md`. Path A is what `./nfcxx` does today: the generated C goes through `cproc` -> QBE IL -> `qbe` -> asm (default),
 or through gcc with `--backend=gcc`. Path B is the long-term design: structured control flow,
 explicit address spaces, explicit safety checks inserted when lowering from EDG's IL.
 
@@ -49,11 +50,18 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
   wrapper strips it (alignment hint only).
 - **Exceptions work** on the QBE backend (`tests/cases/exceptions.cpp`): EDG lowers them to plain C plus its EH runtime
   in `libC.a`, so cproc/QBE never see anything special.
-- **Not supported by cproc** (so not by the QBE backend): `long double` ("long double is not yet supported"),
-  `volatile` stores ("volatile store is not yet supported"), inline asm. All three work with `--backend=gcc`.
-  `volatile` matters for MMIO on Hexagon/embedded targets; Path B must handle it itself.
+- **Not supported by cproc** (so not by the QBE backend of Path A): `long double` ("long double is not yet supported"),
+  `volatile` stores in EDG-generated C ("volatile store is not yet supported"; `qbe-prep.rb` drops `volatile` only for
+  hand-written `.c` inputs, see `tests/c/volatile_setjmp.c`), inline asm (only `__asm__ volatile("int $3")` is rewritten,
+  `tests/cases/qbe_int3_break.cpp`). All work with `--backend=gcc`. Path B handles volatile itself
+  (`tests/pathb-qbe/cases/volatile.cpp`, `docs/notes/pathb-stage3.md`) and still refuses `long double` and inline asm
+  with operands.
 
 ## Path B plan: own back end on EDG's lowered IL
+
+Stages 1 to 3 below are done (`docs/notes/pathb-stage1.md` to `pathb-stage3.md`, tests `tests/pathb/run.sh`,
+`tests/pathb-ir/run.sh`, `tests/pathb-qbe/run.sh`); stages 4 (Lean) and 5 (GPU, C+HVX) are not started. The text
+below is the original plan, kept for the reasoning.
 
 What EDG gives us (from `3rd/edg/doc/source/{lower_il,il,c_gen_be}.rst` and the sources):
 
@@ -94,7 +102,8 @@ Stages:
 ## Next steps
 
 1. Replace the gcc assembler/linker with QBE-only tooling where possible (QBE emits asm; `cc` still assembles and links).
-2. Hexagon: feed generated C to the SDK clang; test with `hexagon-sim`.
-3. Path B stage 1 (see above): harness build of `cpfe` with our own `back_end()`, IL dump.
-4. Path B subset -> QBE with translation validation.
-5. Freestanding core library + shared builtins; SPIR-V/WGSL back end; HVX vectorization.
+2. Hexagon: the open toolchain route (clang-19, qemu-hexagon) is wired in `tests/hexagon/run.sh`; the Hexagon SDK
+   and `hexagon-sim` are still not available (`docs/notes/hexagon.md`, section 4).
+3. Done: Path B stages 1 to 3 (harness, IR, QBE emitter with translation validation).
+4. Open: Path B on hosted C++ headers (the harness base ships only EDG's `include_c++`), `long double`, Lean model of the IR.
+5. Freestanding core library (`lib/`, done) + shared builtins; SPIR-V/WGSL back end; HVX vectorization (not started).

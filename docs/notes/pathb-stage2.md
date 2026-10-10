@@ -403,7 +403,7 @@ The runner counts them.
 
 The format is meant to be parsed by the Lean side without the C++ front end: every construct is an s-expression, every
 operand is typed by its declaration, and every trap condition is a statement or a named operator in section 4. The
-text form is not yet parsed by anything.
+text form is parsed by `scripts/pathb-qbe-emit.rb` since stage 3 (the Lean side does not exist yet).
 
 ## 7. Requirements for QBE
 
@@ -463,13 +463,15 @@ Implemented in `be/nfcxx_ir.c` (run `tests/pathb-ir/run.sh`):
 Not implemented (each prints an `(unsupported ...)` marker or is a stated decision):
 
 1. **Reachability.** The routine set is stage 1's: every defined body that the front end marks needed, including the
-   unreferenced inline and constructor bodies stage 1 noted. Stage 2 does not compute reachability yet.
+   unreferenced inline and constructor bodies stage 1 noted. The IR does not compute reachability; the QBE emitter does
+   (`scripts/pathb-qbe-emit.rb`, stage 3 second round, probe `tests/pathb-qbe/cases/reachability.cpp`).
 2. **Global initializers** are done in stage 3. Each `(global ...)` carries its size and alignment and its
    INIT (section 6). The items are the element-wise form that `ir_init_constant` produces for locals, at byte offsets,
    in the same member and base order, with trailing array elements and class members the initializer does not name
    given as `(zero ...)`. Bytes no item covers are padding (zero). Function-local statics take their initializer from
-   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization is still
-   `(unsupported init dynamic)`, not lowered.
+   the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization is
+   lowered to explicit statements since stage 3 round 3 (`tests/pathb-qbe/cases/dyn_*.cpp`; the repeat of this item
+   below is the current text).
 3. **Constructor initializers** (`dik_constructor`) and inline asm print unsupported markers. None of these appears in
    `tests/cases` after lowering. (Bit-fields, VLAs and GNU statement expressions were in this list; they are lowered
    since stage 3 round 3, sections 5a-5c; the later rounds closed the scope-exit free of a VLA, the class-result

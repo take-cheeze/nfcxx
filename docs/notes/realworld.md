@@ -11,7 +11,8 @@ and builds it with `tinyxml2_main.cpp`, expecting exit code 12.
 - **QBE backend: passes.** Two things had to work: empty struct definitions (the cproc patch, see
   `docs/notes/freestanding.md`) and COMDAT functions. EDG marks inline and template instantiations
   `__attribute__((__weak__))`; cproc drops that, so the per-object copies collided at link time.
-  `scripts/weak-symbols.rb` emits `.weak` directives for them in the QBE wrapper.
+  `scripts/weak-symbols.rb` emits `.weak` directives for them in the QBE wrapper (data and `extern inline` functions too since the
+  multi-TU work, see `docs/notes/multi-tu.md`).
 
 ## What it took
 
@@ -91,6 +92,80 @@ Also seen, not fixed: `nfcxx --emit-c` does not pass user `-I` options to `cpfe`
 also prints many `unrecognized GCC pragma` warnings from the EDG front end (doctest's `#pragma GCC
 diagnostic`). They do not affect the result.
 
+## nlohmann/json and {fmt}: third and fourth checks
+
+Both are cloned into `build/realworld` at a pinned commit and built with a single-translation-unit program, run on
+both backends, and the program's whole output is compared byte for byte with the host `g++` build of the same
+source (`NFCXX_CXX` picks the host compiler). Each script takes about two minutes or less.
+
+| library | pin | script | gcc | QBE |
+|---|---|---|---|---|
+| [nlohmann/json](https://github.com/nlohmann/json) (MIT) | tag `v3.12.0`, commit `55f93686` | `tests/realworld/run_json.sh`, program `json_main.cpp` | ok (82 output lines match host) | ok (after the fixes below) |
+| [{fmt}](https://github.com/fmtlib/fmt) (MIT) | tag `12.2.0`, commit `1be298e1` | `tests/realworld/run_fmt.sh`, program `fmt_main.cpp` | ok, header-only and compiled | skipped (see below) |
+
+`json_main.cpp` parses a document, mutates it, dumps with and without indentation, iterates (iterators, range-for,
+`items()`), round-trips through text, CBOR and MessagePack, converts a user struct with `to_json`/`from_json`,
+provokes `parse_error` (seven kinds of bad input), `out_of_range`, `type_error` and a failing `from_json`, and covers
+number formatting, JSON patch/diff and `flatten`. Exceptions need the EDG EH runtime, so this also exercises
+`throw`/`catch` through deeply instantiated templates.
+
+`fmt_main.cpp` covers width, precision, fill, alignment, integer bases, floating point (`e`, `g`, `a`, shortest
+round-trip), named and positional arguments, `format_to`, `format_to_n`, `memory_buffer`, `fmt::print` to stdout and a
+`FILE*`, user-defined formatters (a `Point`, an enum), ranges/tuples/maps, `FMT_STRING` and `FMT_COMPILE`
+compile-time checked formats (EDG accepts the C++20 `consteval` format strings), and eight `format_error` cases.
+There are two modes, both one translation unit: `FMT_HEADER_ONLY`, and "compiled" (`-DFMT_COMPILED_UNITY`), where the
+library sources `src/format.cc` and `src/os.cc` are `#include`d at the end of the program, so the non-header-only
+configuration (extern templates, explicit instantiations, `fmt::output_file` over POSIX `open`) is built without a
+second translation unit. (A real second TU would hit the driver bug where two nfcxx-compiled TUs that both use
+`std::string` fail to link.)
+
+### What nlohmann/json needed on QBE (the gcc backend needed nothing)
+
+In the order the build hit them. Each is covered by a case in `tests/cases` that fails without the fix:
+
+| first blocker | root cause | fix |
+|---|---|---|
+| `GNU attribute 'aligned' is not supported here` at `extern const char _ZZNSt19_Sp_make_shared_tag5_S_tiEvE5__tag __attribute__((__aligned__(8)))[16]` | cproc accepts the GNU `aligned` attribute only on struct members (`declaratortypes` passes `align` only there); the old rewrite moved it next to the name, which is wrong for an object | `qbe-prep.rb` (and its oracle) now writes `_Alignas(N)` before the declared name, which cproc takes on objects and members. Case `qbe_json_forms.cpp` |
+| `GNU attribute 'aligned' is not supported here` at `struct Over {char c[3]; char __dummy[29];} __attribute__((__aligned__(32)));` | only `std::aligned_storage`'s `{char b[L];}` shape was handled; `struct alignas(32) T` is the general case | the struct-level attribute becomes `_Alignas(N)` on the first member (not a bit-field). Size is rounded up to N, as with GCC |
+| `undeclared identifier: __builtin_strcmp` | cproc has few builtins | libc call (`__builtin_memchr` was missing from the oracle's table too; it is in the port, so the oracle is brought level) |
+| `undeclared identifier: __atomic_thread_fence` (libstdc++ `shared_ptr`) | cproc has no atomics or fences | `__atomic_thread_fence` and `__atomic_signal_fence` call a weak `mfence; ret` stub from the assembly tail (a full barrier on x86-64 for every memory order) |
+| `undeclared identifier: __builtin_huge_val` / `nan` / `isfinite` / `isinf` / `signbit` / `ldexp` / `bswap16` / `bswap32` / `bswap64` | same | small `static` helpers in the prelude (`double` only; `nan("")` ignores the payload argument; `isinf` returns `+1`/`-1` like GCC) and `ldexp` from libm |
+| **runtime**: `SIGSEGV` at `movq 0, %rsi` in `std::find_if_not` | QBE: a struct local that is never stored to, passed by value (libstdc++ passes a `_Iter_pred<lambda>` temporary that holds only a dummy `char`). `mem.c` `coalesce()` kills slots with an empty store mask and replaces the `Oargc` operand with a null address on purpose (`/* crash */`). Plain C triggers it: `struct P {char d;}; long f(long a) { struct P p; return g(a, p); }` | `scripts/qbe-uninit-slot.patch`, applied to the QBE copy by `setup-qbe.sh`: such a slot gets a full mask, so it stays allocated and is read as garbage, as with gcc. Case `qbe_uninit_struct_arg.cpp` |
+| **runtime**: `terminate()`/`abort` or a segfault right after `std::all_of(first, last, lambda)` returns | cproc: copying a zero-size struct (the closure, passed by value on) emitted one `loadub`/`storeb`, because `funccopy()` runs its loop at least once. The destination is a zero-byte slot, which QBE places at the frame pointer, so `mov %al,0x0(%rbp)` overwrote the low byte of the caller's saved `%rbp` | `scripts/cproc-empty-copy.patch` (after the empty-struct patch): a zero-size copy emits nothing. Case `qbe_empty_struct_copy.cpp` (segfaults without it) |
+
+Both patches only take effect after `scripts/setup-qbe.sh` is run again (CI does).
+
+### {fmt} on QBE: skipped, two cproc limits
+
+`run_fmt.sh` defaults to the gcc backend and prints a skip for `NFCXX_BACKEND=qbe` (set `FMT_QBE=1` to try it anyway).
+The first error is cproc's, from `fmt/format.h`'s `uint128_t`:
+
+```
+<stdin>:1030:9: error: declaration has no type specifier     (typedef __uint128_t ...native_uint128)
+```
+
+Minimal repros for the two limits (both build and run on the gcc backend):
+
+```cpp
+typedef unsigned __int128 u128;                                  // cproc has no __int128
+u128 mul(unsigned long a, unsigned long b) { return (u128)a * b; }
+int main() { return (int)(mul(3, 4) >> 64); }
+```
+
+```cpp
+long double twice(long double x) { return x * 2; }               // cproc-qbe: long double is not yet supported
+int main() { return (int)twice(2.0L); }
+```
+
+Neither can be worked around from the driver or the prep pass. {fmt}'s `format_float` is instantiated for `double`,
+`float` and `long double` (explicit instantiations in `format-inl.h`, so even an integer-only program contains them), and its
+`double` path multiplies through `uint128`. `-DFMT_USE_INT128=0` selects fmt's own `uint128_fallback`, but 12.2.0
+then fails in EDG already on the `long double` hexfloat path (`no operator "~"` for `fmt::detail::uint128`: the
+fallback lacks it; it also fails with g++), so that does not help. Removing `__SIZEOF_INT128__` for the QBE
+backend would have the same result. A faithful `long double` and a 128-bit integer in cproc/QBE are the missing pieces.
+
+Not seen with either library: anything in `scripts/weak-symbols.rb` or the driver.
+
 ## C inputs and Lua 5.4
 
 `nfcxx` now takes `.c` inputs (alone or mixed with `.cpp`). A `.c` file skips EDG: with the QBE backend it
@@ -123,7 +198,7 @@ Hand-written C includes real glibc headers, which needed three things in `script
 tag). `tests/realworld/run_lua.sh` fetches it into `build/realworld/lua` (not vendored), builds the interpreter
 from all `*.c` except `luac.c`, `ltests.c`, `onelua.c` (`-lm`), runs `lua -e "print(1+1)"` and
 `tests/realworld/lua_test.lua` (string, table, closures, coroutines, `pcall`/`error` over setjmp/longjmp,
-integer wraparound). Not in the GitHub workflow.
+integer wraparound). Run by the `Real-world` workflow (`.github/workflows/realworld.yml`), not by `ci.yml`.
 
 | backend | result |
 |---|---|
@@ -197,7 +272,7 @@ binary is not on `PATH`; the script finds it through `Gem.bindir`). The build is
 `mrbc` first and uses that binary to compile the Ruby parts of the core and the gems, so the QBE-compiled
 parser and VM run during the build. The resulting `mruby` runs `-e 'puts 1+1'` and
 `tests/realworld/mruby_test.rb` (strings, arrays, hashes, blocks, lambdas, `rescue`/`raise`/`ensure` and a
-50-deep re-raise (setjmp/longjmp in the VM), `catch`/`throw`, a memoizing `Hash`). Not in the GitHub workflow.
+50-deep re-raise (setjmp/longjmp in the VM), `catch`/`throw`, a memoizing `Hash`). Run by the `Real-world` workflow (`.github/workflows/realworld.yml`), not by `ci.yml`.
 
 | backend | result |
 |---|---|
@@ -254,7 +329,7 @@ Other things the build exposed, not on cproc's side:
 
 ## Next candidates
 
-Projects with no dependencies and their own tests, to find the next gaps: a JSON or XML parser or a
-small compression library in C++. Doctest stays on the gcc backend (see the decision above).
+Projects with no dependencies and their own tests, to find the next gaps: a small compression library in C++, or
+another header-only library. Doctest and {fmt} stay on the gcc backend (see the decisions above); nlohmann/json runs on both.
 mruby (C) now builds and runs on both backends through `nfcc`; see "What remains" above. Another C project that
 uses autoconf (`./configure CC=nfcc`) would be the next test of the `cc`-compatibility of `nfcc`.
