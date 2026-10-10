@@ -1,0 +1,128 @@
+name: Path B
+
+# Path B checks (docs/notes/pathb-stage1.md to pathb-stage3.md): the harness cpfe whose back end is be/nfcxx_*.c
+# (scripts/setup-pathb.sh), the IR goldens, and the IR -> QBE emitter run by the mruby interpreter. Building the
+# harness compiles the whole EDG front end a second time, so this is kept out of the main CI job and runs only when
+# a change can affect it. Runs on demand too (workflow_dispatch).
+#
+#   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
+#   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
+#   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
+#   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
+#   tests/mruby/run.sh       the mruby ports against their Python oracles, with the Path B parts enabled
+on:
+  push:
+    branches: [main]
+    paths:
+      - "be/**"
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "scripts/pathb-*"
+      - "scripts/setup-pathb.sh"
+      - "scripts/setup-edg.sh"
+      - "scripts/setup-qbe.sh"
+      - "scripts/host-sys.sh"
+      - "scripts/pathb-cc"
+      - "scripts/mrb"
+      - "scripts/setup-mruby.sh"
+      - "scripts/mruby-tool-config.rb"
+      - "tests/pathb/**"
+      - "tests/pathb-*/**"
+      - "tests/mruby/**"
+      - "tests/cases/**"
+      - "nfcxx"
+      - "tests/realworld/tinyxml2_main.cpp"
+      - ".github/workflows/pathb.yml"
+  pull_request:
+    paths:
+      - "be/**"
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "scripts/pathb-*"
+      - "scripts/setup-pathb.sh"
+      - "scripts/setup-edg.sh"
+      - "scripts/setup-qbe.sh"
+      - "scripts/host-sys.sh"
+      - "scripts/pathb-cc"
+      - "scripts/mrb"
+      - "scripts/setup-mruby.sh"
+      - "scripts/mruby-tool-config.rb"
+      - "tests/pathb/**"
+      - "tests/pathb-*/**"
+      - "tests/mruby/**"
+      - "tests/cases/**"
+      - "nfcxx"
+      - "tests/realworld/tinyxml2_main.cpp"
+      - ".github/workflows/pathb.yml"
+  workflow_dispatch:
+
+jobs:
+  pathb:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+      # ninja jobs for the Path B harness build (scripts/setup-pathb.sh); the runner has 4 cores and 16 GB, and
+      # the harness links with -flto, so do not oversubscribe it.
+      PATHB_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # python3 only for the oracles of tests/mruby/run.sh; ruby and rake only bootstrap the mruby build.
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 ruby rake
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # The harness (build/pathb) depends on be/, on the script that assembles it and on the EDG revision. An
+      # exact hit skips the build; on a miss sccache still serves the unchanged EDG compiles.
+      - name: Path B harness cache key
+        id: key
+        run: echo "edg=$(git rev-parse HEAD:3rd/edg)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Path B harness
+        id: harness
+        uses: actions/cache@v4
+        with:
+          path: build/pathb
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
+
+      - name: Build the Path B harness
+        if: steps.harness.outputs.cache-hit != 'true'
+        run: scripts/setup-pathb.sh
+
+      # The production pieces the Path B tests link against: EDG's runtime (build/edg/lib/libC.a) and QBE.
+      - name: Build EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: Build QBE and cproc
+        run: scripts/setup-qbe.sh
+
+      - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
+        run: scripts/setup-mruby.sh
+
+      - name: Path B stage 1 IL goldens
+        run: tests/pathb/run.sh
+
+      - name: Path B stage 2 IR goldens
+        run: tests/pathb-ir/run.sh
+
+      - name: Path B stage 3 IR to QBE translation validation
+        run: tests/pathb-qbe/run.sh
+
+      # Hosted Path B: the hosted probes, tests/cases through the driver (NFCXX_PATH=b) and tinyxml2
+      # (cloned at its pinned commit; skipped when the fetch fails).
+      - name: Hosted Path B (NFCXX_PATH=b)
+        run: tests/pathb-qbe/hosted.sh
+
+      - name: mruby scripts against their Python oracles (Path B parts enabled)
+        run: tests/mruby/run.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

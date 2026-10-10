@@ -11,7 +11,8 @@
 | `host C++ headers` | driver | querying the host g++ for its include directories |
 | `cpfe --emit-c (front end)` | frontend | `--emit-c` only: the EDG front end alone |
 | `eccp (front end, C compile, link)` | eccp | the whole compile, including EDG's C compile and the link |
-| `cc -E (preprocess)`, `cproc (C to QBE IL)`, `qbe (IL to assembly)`, `weak-symbols.rb`, `cc -c (assemble)` | qbe-backend | each step of `scripts/qbe-cc`, once per object file |
+| `cc -E (preprocess)`, `qbe-prep.rb (mruby, rewrite for cproc)`, `cproc (C to QBE IL)`, `qbe (IL to assembly)`, `weak-symbols.rb (mruby)`, `cc -c (assemble)` | qbe-backend | each step of `scripts/qbe-cc`, once per object file |
+| `C input: <file>` | driver | one per `.c` input (they skip EDG; `docs/notes/realworld.md`, "C inputs") |
 
 EDG's front end is not timed on its own when compiling. Its time is inside the `eccp` span together
 with the C compile and link, and the gcc backend's C compile is also inside that span. The QBE steps

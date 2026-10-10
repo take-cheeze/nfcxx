@@ -11,7 +11,8 @@ and builds it with `tinyxml2_main.cpp`, expecting exit code 12.
 - **QBE backend: passes.** Two things had to work: empty struct definitions (the cproc patch, see
   `docs/notes/freestanding.md`) and COMDAT functions. EDG marks inline and template instantiations
   `__attribute__((__weak__))`; cproc drops that, so the per-object copies collided at link time.
-  `scripts/weak-symbols.rb` emits `.weak` directives for them in the QBE wrapper.
+  `scripts/weak-symbols.rb` emits `.weak` directives for them in the QBE wrapper (data and `extern inline` functions too since the
+  multi-TU work, see `docs/notes/multi-tu.md`).
 
 ## What it took
 
@@ -123,7 +124,7 @@ Hand-written C includes real glibc headers, which needed three things in `script
 tag). `tests/realworld/run_lua.sh` fetches it into `build/realworld/lua` (not vendored), builds the interpreter
 from all `*.c` except `luac.c`, `ltests.c`, `onelua.c` (`-lm`), runs `lua -e "print(1+1)"` and
 `tests/realworld/lua_test.lua` (string, table, closures, coroutines, `pcall`/`error` over setjmp/longjmp,
-integer wraparound). Not in the GitHub workflow.
+integer wraparound). Run by the `Real-world` workflow (`.github/workflows/realworld.yml`), not by `ci.yml`.
 
 | backend | result |
 |---|---|
@@ -197,7 +198,7 @@ binary is not on `PATH`; the script finds it through `Gem.bindir`). The build is
 `mrbc` first and uses that binary to compile the Ruby parts of the core and the gems, so the QBE-compiled
 parser and VM run during the build. The resulting `mruby` runs `-e 'puts 1+1'` and
 `tests/realworld/mruby_test.rb` (strings, arrays, hashes, blocks, lambdas, `rescue`/`raise`/`ensure` and a
-50-deep re-raise (setjmp/longjmp in the VM), `catch`/`throw`, a memoizing `Hash`). Not in the GitHub workflow.
+50-deep re-raise (setjmp/longjmp in the VM), `catch`/`throw`, a memoizing `Hash`). Run by the `Real-world` workflow (`.github/workflows/realworld.yml`), not by `ci.yml`.
 
 | backend | result |
 |---|---|

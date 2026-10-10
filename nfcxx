@@ -13,6 +13,7 @@
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
+#   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
 #   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
 set -euo pipefail
@@ -21,7 +22,7 @@ source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
-cfiles=(); cflags=(); cflags_pic=(); ncpp=0
+cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 while [ $# -gt 0 ]; do
@@ -40,13 +41,14 @@ while [ $# -gt 0 ]; do
     # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
     *.c) cfiles+=("$1") ;;
     -I?*|-D?*|-U?*) cflags+=("$1"); files+=("$1") ;;
-    -*|*.o|*.a|*.so) files+=("$1") ;;
+    *.o) files+=("$1"); nobj=$((nobj + 1)) ;;
+    -*|*.a|*.so) files+=("$1") ;;
     *) files+=("$1"); ncpp=$((ncpp + 1)) ;;
   esac
   shift
 done
-[ $((ncpp + ${#cfiles[@]})) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
-if [ $ncpp -gt 0 ] || [ $emit_c = 1 ]; then
+[ $((ncpp + nobj + ${#cfiles[@]})) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
   [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
@@ -138,7 +140,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     trace_end "$t" "C input: $c" cinput
     cobjs+=("$o")
   done
-  if [ $ncpp = 0 ]; then
+  if [ $ncpp = 0 ] && { [ $nobj = 0 ] || [ ! -x "$edg/eccp" ]; }; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
     if [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
@@ -176,6 +178,6 @@ fi
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 t=$(trace_start)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions ${picopts[@]+"${picopts[@]}"} \
+"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
   ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
