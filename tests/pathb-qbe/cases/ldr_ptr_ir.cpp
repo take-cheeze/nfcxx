@@ -4,7 +4,8 @@
 // to the C-convention function (docs/notes/pathb-longdouble.md, "Calling convention"). The IR golden is tests/pathb-ir/ldr_ptr_ir.ir.
 // EXPECT: 0
 // The exit code is the number of wrong results.
-#include <cmath>
+// libm's sqrtl, declared here: <cmath> would also declare the _Float128 routines, which Path B refuses by name.
+extern "C" long double sqrtl(long double) noexcept;
 
 static int bad;
 #define CHECK(c) do { if (!(c)) ++bad; } while (0)

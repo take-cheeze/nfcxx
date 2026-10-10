@@ -122,8 +122,9 @@ void nf_put_unqualified_type(a_type_ptr type)
       nf_put_atom(is_bool_type(type) ? "bool" : int_type_name(type));
       break;
     case tk_float:
-      if (nf_ld_blob && type->variant.float_kind == fk_long_double) {
-        /* IR mode: a long double is a 16-byte object (docs/notes/pathb-longdouble.md) */
+      if (nf_ld_blob && (type->variant.float_kind == fk_long_double || type->variant.float_kind == fk_float128 ||
+                         type->variant.float_kind == fk_std_float128)) {
+        /* IR mode: a long double or a _Float128 is a 16-byte object (docs/notes/pathb-longdouble.md, pathb-float128.md) */
         fputs("(array 16 unsigned_char)", nf_out);
         break;
       }

@@ -25,6 +25,7 @@
 (abi-type "_ZSt17basic_string_viewIDiSt11char_traitsIDiEE" 16 8 (leaf 0 l) (leaf 8 l))
 (x87-thunk call "fabsl" 0 16)
 (x87-thunk entry "_ZSt3abse" weak 0 16)
+(abi-type "__nfcxx_f128" 16 16 (memory))
 (abi-type "ldiv_t" 16 8 (leaf 0 l) (leaf 8 l))
 (abi-type "_ZSt15error_condition" 16 8 (leaf 0 w) (leaf 8 l))
 (abi-type "_ZSt15__type_identityISaIcEE" 1 1 (empty))
@@ -667,32 +668,45 @@
     (scalar 0 std::float64_t (const std::float64_t 0.5772156649015329))))
 (global "_ZNSt7numbers5phi_vIDF64_EE" (const std::float64_t) 8 8 (weak) (init
     (scalar 0 std::float64_t (const std::float64_t 1.618033988749895))))
-(global "_ZNSt7numbers3e_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 2.7182818284590452353602874713526623))))
-(global "_ZNSt7numbers7log2e_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 1.442695040888963407359924681001892))))
-(global "_ZNSt7numbers8log10e_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 0.4342944819032518276511289189166051))))
-(global "_ZNSt7numbers4pi_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 3.1415926535897932384626433832795028))))
-(global "_ZNSt7numbers8inv_pi_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 0.31830988618379067153776752674502874))))
-(global "_ZNSt7numbers12inv_sqrtpi_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 0.5641895835477562869480794515607726))))
-(global "_ZNSt7numbers5ln2_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 0.6931471805599453094172321214581766))))
-(global "_ZNSt7numbers6ln10_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 2.302585092994045684017991454684364))))
-(global "_ZNSt7numbers7sqrt2_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 1.414213562373095048801688724209698))))
-(global "_ZNSt7numbers7sqrt3_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 1.7320508075688772935274463415058723))))
-(global "_ZNSt7numbers11inv_sqrt3_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 0.5773502691896257645091487805019574))))
-(global "_ZNSt7numbers8egamma_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 0.5772156649015328606065120900824025))))
-(global "_ZNSt7numbers5phi_vIDF128_EE" (const std::float128_t) 16 16 (weak) (init
-    (scalar 0 std::float128_t (const std::float128_t 1.6180339887498948482045868343656382))))
+(global "_ZNSt7numbers3e_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 10751604932185443962))
+    (scalar 8 unsigned_long (const unsigned_long 4611787107607856502))))
+(global "_ZNSt7numbers7log2e_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 16246591688395510330))
+    (scalar 8 unsigned_long (const unsigned_long 4611529151027001391))))
+(global "_ZNSt7numbers8log10e_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 16369013131275360872))
+    (scalar 8 unsigned_long (const unsigned_long 4611049090637262416))))
+(global "_ZNSt7numbers4pi_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 9541308523256152504))
+    (scalar 8 unsigned_long (const unsigned_long 4611846683310179025))))
+(global "_ZNSt7numbers8inv_pi_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 3050054389497850474))
+    (scalar 8 unsigned_long (const unsigned_long 4610918503591746696))))
+(global "_ZNSt7numbers12inv_sqrtpi_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 15067605818662639614))
+    (scalar 8 unsigned_long (const unsigned_long 4611159203997034934))))
+(global "_ZNSt7numbers5ln2_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 17534646158829291494))
+    (scalar 8 unsigned_long (const unsigned_long 4611231800670266270))))
+(global "_ZNSt7numbers6ln10_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 6353968491675452838))
+    (scalar 8 unsigned_long (const unsigned_long 4611728603493389649))))
+(global "_ZNSt7numbers7sqrt2_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 14486024992869247637))
+    (scalar 8 unsigned_long (const unsigned_long 4611521134203499452))))
+(global "_ZNSt7numbers7sqrt3_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 12050266408868673720))
+    (scalar 8 unsigned_long (const unsigned_long 4611610597434688714))))
+(global "_ZNSt7numbers11inv_sqrt3_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 14182425630482299685))
+    (scalar 8 unsigned_long (const unsigned_long 4611166612804404017))))
+(global "_ZNSt7numbers8egamma_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 10324963375825683110))
+    (scalar 8 unsigned_long (const unsigned_long 4611166537028926305))))
+(global "_ZNSt7numbers5phi_vIDF128_EE" (const (array 16 unsigned_char)) 16 16 (weak) (init
+    (scalar 0 unsigned_long (const unsigned_long 8941320489781976302))
+    (scalar 8 unsigned_long (const unsigned_long 4611578504553267018))))
 (global "_ZSt7nothrow" (const (struct "_ZSt9nothrow_t")) 1 1 (extern))
 (global "_ZSt38hardware_destructive_interference_size" (const unsigned_long) 8 8 (weak) (init
     (scalar 0 unsigned_long (const unsigned_long 64))))
@@ -35276,14 +35290,15 @@
   (return %4))
 
 (function "_ZSt3absDF128_"
-  (ret std::float128_t)
-  (params (param %0 "__x" std::float128_t))
+  (ret void)
+  (params (sret %0 (struct "__nfcxx_f128")) (param %1 "__x" (byval (struct "__nfcxx_f128"))))
   (weak)
-  (slot "__x" std::float128_t 16 16)
-  (store std::float128_t $"__x" %0)
-  (let %1 std::float128_t (load std::float128_t $"__x"))
-  (let %2 std::float128_t (call std::float128_t &"fabsf128" %1))
-  (return %2))
+  (slot "tmp" (array 16 unsigned_char) 16 16)
+  (slot "tmp.1" (array 16 unsigned_char) 16 16)
+  (copy 16 $"tmp.1" %1)
+  (eval (call void &"__nfcxx_f128w_fabsf128" (sret (struct "__nfcxx_f128") $"tmp") $"tmp.1"))
+  (copy 16 %0 $"tmp")
+  (return))
 
 (function "_ZSt3absDF16b"
   (ret std::bfloat16_t)
