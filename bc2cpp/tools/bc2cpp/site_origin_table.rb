@@ -18,8 +18,10 @@ require_relative 'bytecode_ir'
 # `status` is what BytecodeIR.reaching_definitions answers for `walk` at `index`: `exact` (one definition
 # reaches it, MOVE chains followed), `ambiguous` (several definitions reach it through a join or a loop),
 # `refused` (the dataflow cannot prove the set) or `none` (no definition). `category` is the origin of the
-# single definition for `exact`, and `-` otherwise; `definition` is that writer as `OP@index` (`entry` for
-# the method's incoming value).
+# single definition for `exact`; for `ambiguous` it is the may-set of the definitions' origins (sorted, distinct,
+# joined by `|`, ADR 0379: the receiver is one of them); for `refused` it is the first refusal cause; `-` for
+# `none`. `definition` is that writer as `OP@index` (`entry` for the method's incoming value), comma-separated
+# for an `ambiguous` row.
 #
 # A definition is classified by the instruction that writes it: ENTRY and LOADSELF by their
 # register, any other write by the right-hand side compile_insn emitted for it (the rules
@@ -108,11 +110,22 @@ module SiteOriginTable
       # A refused row's category is its first refusal cause; the census reads only the status of a refusal.
       return ['refused', refusal[:cause].to_s, '-'] unless defs
       return ['none', '-', '-'] if defs.empty?
-      return ['ambiguous', '-', '-'] if defs.size > 1
+      return ['ambiguous', may_set(irep, defs), defs.map { |d| definition_name(irep, d) }.join(',')] if defs.size > 1
 
       definition = defs.first
-      where = definition.entry? ? 'entry' : "#{irep.instructions[definition.index].op}@#{definition.index}"
-      ['exact', category(irep, definition), where]
+      ['exact', category(irep, definition), definition_name(irep, definition)]
+    end
+
+    # The writer as `OP@index` (`entry` for the method's incoming value).
+    def definition_name(irep, definition)
+      definition.entry? ? 'entry' : "#{irep.instructions[definition.index].op}@#{definition.index}"
+    end
+
+    # The origins a join can merge: each reaching definition's category, sorted and distinct, joined by `|`. The
+    # receiver is one of them (a may-set); a set of one is that origin on every path. `unknown` stays a member
+    # when a definition's category is not provable.
+    def may_set(irep, defs)
+      defs.map { |d| category(irep, d) }.uniq.sort.join('|')
     end
 
     def category(irep, definition)
@@ -121,8 +134,9 @@ module SiteOriginTable
       insn = irep.instructions[definition.index]
       return 'self' if insn.op == 'LOADSELF'
 
-      # ENTER's typed definitions (rest, keyword hash, block) are the method's own parameters.
-      return 'parameter' if insn.op == 'ENTER'
+      # ENTER's typed definitions (rest, keyword hash, block, R1, post arguments) are the method's own parameters;
+      # the one it stores that is not is a local, which starts as the nil every local starts as.
+      return(definition.built == :local ? 'literal_or_fresh' : 'parameter') if insn.op == 'ENTER'
 
       text = SiteOriginTable::INSN_TEXT[[irep.label, definition.index]]
       # The read's own opcode decides these: their emitted text can be a multi-line
@@ -134,9 +148,12 @@ module SiteOriginTable
 
       rhs = text ? assignment_rhs(text, definition.reg) : []
       if rhs.any?
-        # Producers inside one instruction (a fast path and its dispatch): agreeing ones give the origin, else it is open.
+        # Producers inside one instruction (a fast path and its dispatch): agreeing ones give the origin. When they
+        # differ, the writing instruction still says what kind of value it leaves, whichever arm ran (ADR 0379).
         producers = rhs.map { |value| SiteCensus.origin_of([], 0, value, nil, [], 0) }.uniq
-        return producers.size == 1 ? producers.first : 'unknown'
+        return producers.first if producers.size == 1
+
+        return result_category(insn.op) || 'unknown'
       end
 
       opcode_category(insn.op)
@@ -158,8 +175,20 @@ module SiteOriginTable
       end
     end
 
-    # Used only when no emitted text exists for the defining instruction: a send's result is not
-    # provable without its text, and other writes are 'other' as the text walk called them.
+    # What an instruction's own result is, whichever arm of its emitted code ran: a call op leaves a call result
+    # (`call_result`: direct or by name is the text's business), an operator op the operator's result
+    # (`operator_result`: the numeric fast path or its fallback send), an indexing op an indexed result. Nil for
+    # every other op.
+    def result_category(op)
+      case op
+      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLKCALL' then 'call_result'
+      when 'ADD', 'SUB', 'MUL', 'DIV', 'ADDI', 'SUBI', 'EQ', 'LT', 'LE', 'GT', 'GE' then 'operator_result'
+      when 'GETIDX', 'GETIDX0', 'AREF' then 'indexed_result'
+      end
+    end
+
+    # Used only when no emitted text exists for the defining instruction: a call's result is a `call_result`
+    # (direct or by name is not provable without its text), and other writes are 'other' as the text walk called them.
     def opcode_category(op)
       case op
       when 'GETIV' then 'ivar_read'
@@ -167,7 +196,7 @@ module SiteOriginTable
       when 'GETUPVAR' then 'captured_upvar'
       when 'LOADNIL', 'LOADTRUE', 'LOADFALSE', 'LOADL', 'ARRAY', 'ARRAY2', 'HASH', 'STRING', /\ALOADI/
         'literal_or_fresh'
-      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLKCALL' then 'unknown'
+      when 'SEND', 'SEND0', 'SENDB', 'SSEND', 'SSEND0', 'SSENDB', 'SUPER', 'BLKCALL' then 'call_result'
       else 'other'
       end
     end
