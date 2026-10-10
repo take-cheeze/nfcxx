@@ -49,6 +49,9 @@ jobs:
       - name: nfcc drop-in cc mode (both backends)
         run: tests/c/cc-mode.sh
 
+      - name: Several translation units sharing libstdc++ templates (both backends)
+        run: tests/multi-tu/run.sh
+
       - name: nfceval run-time eval library and nfcxx -shared (both backends)
         run: tests/eval/run.sh
 

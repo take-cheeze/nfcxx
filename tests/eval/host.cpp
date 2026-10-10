@@ -3,10 +3,9 @@
 #include <cstdio>
 #include <string>
 
-// The library is included as one translation unit: nfcxx currently fails to link two objects that both
-// use hosted libstdc++ templates such as std::string (duplicate std::allocator<char> members), see
-// docs/notes/eval.md.
-#include "nfceval.cpp"
+// The library is a separate translation unit (lib/eval/nfceval.cpp, linked by tests/eval/run.sh), or, in
+// tests/eval/host_single.cpp, is #included ahead of this file to build everything as one translation unit.
+#include "nfceval.hpp"
 #include "vec3.hpp"
 
 double Vec3::len2() const { return x * x + y * y + z * z; }
