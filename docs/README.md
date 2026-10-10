@@ -58,7 +58,7 @@ Each entry names where it comes from and what, if anything, checks it.
   `traps/longdouble_*.cpp` (all in `tests/pathb-qbe/run.sh`), the IR golden `tests/pathb-ir/longdouble_ir.ir` and the thunk
   edge cases `tests/mruby/pathb-edge/x87_thunks.ir` (`tests/mruby/run.sh`, Python oracle identical). Named limits: function
   pointers to `long double` functions use the internal convention, structs of at most 16 bytes holding one by value,
-  `std::atomic<long double>`, `_Float128`, `std::to_string` (needs `alloca`); see the note, section 7. The option
+  `_Float128`, `std::format` (blocked by `__int128`); see the note, section 7. The option
   `--long-double=trap` remains for hand-written IR that still mentions the scalar type
   (`tests/mruby/pathb-edge/r_longdouble.ir`).
 - Hexagon: EDG's `long double` is 16 bytes, Hexagon's is 8; `tests/hexagon/layout.sh` leaves it out (`hexagon.md`).

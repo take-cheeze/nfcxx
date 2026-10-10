@@ -1,6 +1,6 @@
 // long double in memory (docs/notes/pathb-longdouble.md): globals with static initializers, arrays, members of classes
 // (the layout is EDG's: 16 bytes, 16-aligned), classes passed and returned by value, unions, static locals,
-// references and pointers, new[], containers, default member initializers, lambdas, templates, constexpr values.
+// references and pointers, new[], containers, default member initializers, lambdas, templates, constexpr values,
 // EXPECT: 0
 // STDOUT: same
 #include <cstdio>

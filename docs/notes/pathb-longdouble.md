@@ -118,10 +118,11 @@ All of these run on Path B and print what the gcc backend prints (`// STDOUT: sa
 | globals with static initializers, arrays, members, classes by value (32 bytes, memory class) and results, unions, static locals, references, `new[]`, `std::vector`, `std::map`, lambdas, `unique_ptr`, templates | `longdouble_mem.cpp` |
 | 1 to 10 long double arguments, mixed with integers beyond the six registers and doubles beyond the eight, function pointers, virtual functions, `std::function`, `qsort` callbacks, varargs taking and returning long double, libm and libc through the thunks, `frexpl`/`modfl` with pointers | `longdouble_call.cpp` |
 | `<cmath>`: every overload, classification, `numeric_limits`, C++17 special functions, `complex` arithmetic | `longdouble_cmath.cpp` |
-| `operator<<`/`>>`, `stold`, `to_chars`, `from_chars`, `printf`/`snprintf`/`sscanf`/`swprintf` with `%Lf %Lg %La` | `longdouble_io.cpp` |
+| `operator<<`/`>>`, `stold`, `to_string`, `to_chars`, `from_chars`, `printf`/`snprintf`/`sscanf`/`swprintf` with `%Lf %Lg %La` | `longdouble_io.cpp` |
 | `uniform_real_distribution`, `normal_distribution`, `generate_canonical` and the other real distributions | `longdouble_random.cpp` |
 | `std::complex<long double>`: `abs arg polar exp log sqrt pow sin cosh` (libm `c*l` functions, `callc` thunks) | `longdouble_complex.cpp` (EXPECT only: Path A cannot build it) |
 | C compiled by gcc calls Path B and is called by it (both directions, `_Complex long double` too) | `tests/pathb-qbe/multi/abi_ld/` |
+| `std::atomic<long double>` (generic `__atomic_*` on 16 bytes, `__builtin_clear_padding`) | `longdouble_atomic.cpp` (EXPECT only: Path A cannot build it) |
 | NaN and out-of-range long double to an integer abort | `tests/pathb-qbe/traps/longdouble_to_int.cpp`, `longdouble_nan_to_int.cpp` |
 | the IR text of all of it | `tests/pathb-ir/longdouble_ir.ir` (golden), `tests/mruby/pathb-edge/x87_thunks.ir` and `e_x87_*.ir` (emitter, Python oracle identical) |
 
@@ -175,22 +176,17 @@ Each is a refusal at compile or link time or a documented difference; none gives
   double) are IR gaps.
 - **`volatile long double`** is read and written with ordinary 16-byte copies (not atomic, not a fence), like the rest of the
   type; the `.v` variants of load/store do not exist for it.
-- **`std::atomic<long double>`** (`__builtin_clear_padding`, the generic `__atomic_*` builtins) is not supported: link error
-  naming `clear_padding`. `std::to_string(long double)` needs `__builtin_alloca`, a pre-existing Path B gap.
 - **`_Float128`/`__float128`/`__int128`** stay refused; `__float80` is `long double` in EDG's layout and works.
 - **Exceptions thrown by libstdc++.so** (`std::stold("zzz")` throws `invalid_argument`) are still not catchable (a documented Path B
   limit independent of the type, `pathb-hosted.md`).
-- **`std::format`** is still blocked, but no longer by `long double`. Checked with a harness built from the EDG fork branch
-  `nfcxx/ignored-routine`, `std::format("{}", 1.5L)` goes through three more walls, in this order: (1) EDG's
-  `check_assertion(!ignore_routine_in_back_end(routine))` in `lower_routine` (`lower_il.c:10294`, reached through
-  `basic_string::_M_construct` of libstdc++ 13; fails for `std::format("{}", 42)` as well), which that branch turns into an
-  early return and which is not part of this change; (2) `ck_init_repeat` constants (libstdc++'s `from_chars` character
-  table), now lowered in `ir_init_constant` and `ir_gi_items` (one dimension; a multidimensional array keeps the marker);
-  (3) `refused: type __int128_t`: the formatter instantiates its visitor for `__int128` and `unsigned __int128` whatever the
-  arguments are, and Path B has no 128-bit integers. That last one needs its own design (the same memory-object plus helper
-  scheme would do: `abi-type` with two `l` leaves, libgcc's `__divti3`...). `std::to_chars(long double)` and the
+- **`std::format`** is still blocked, but no longer by `long double`: with the EDG fork's `ignored-routine` fix (the
+  `lower_il.c:10294` assertion on `basic_string::_M_construct`, in `main` since the `pathb-gaps2` merge) and the `ck_init_repeat`
+  lowering that also landed there, `std::format("{}", 1.5L)` stops at `refused: type __int128_t`: the formatter instantiates
+  its visitor for `__int128` and `unsigned __int128` whatever the arguments are, and Path B has no 128-bit integers. That
+  needs its own design (the same scheme would do: a 16-byte object, helper calls, `abi-type` with two `l` leaves so that C
+  code and libgcc's `__divti3` see the normal register convention, no thunks). `std::to_chars(long double)` and the
   `std::formatter<long double>` entry points in libstdc++.so take the argument in memory like `_M_insert<long double>`, so the
-  long double side needs nothing more once those three are gone.
+  long double side needs nothing more once that is done.
 - **Speed**: every operation is a call plus 16-byte copies; temporaries are never reused within a function (QBE's frame grows
   by 16 bytes per operation).
 - **Targets.** x86-64 only: the emitter checks that `(layout (long_double 16))` is the module's layout and refuses another

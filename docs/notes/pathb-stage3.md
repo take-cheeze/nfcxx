@@ -404,7 +404,8 @@ sections 5a-5c and 6.
 6. **Inline asm** (`asm_barrier.cpp`): the subset that is implementable on QBE, an empty template with no operands whose
    clobbers are `memory` and/or `cc` (and a basic `asm("")`), is `(barrier)`; the emitter calls an empty module-local
    function, an opaque call QBE keeps in order (`ASM-COUNT` lines check the call counts, including that `cc` alone emits
-   none). Everything else is refused with its reason: `(unsupported stmt asm-template | asm-operands | asm-clobbers | asm-goto)`;
+   none; `pause` / `rep nop` / `nop` are the same call, docs/notes/pathb-hosted.md). Everything else is refused with its reason:
+   `(unsupported stmt asm-template "TEXT" | asm-operands | asm-clobbers | asm-goto)`;
    the emitter prints `refused: (unsupported stmt asm-operands)`. Outputs, inputs, templates and register clobbers
    cannot be done: QBE has no inline assembly and the template would have to be spliced into its output.
 7. **General weak declarations** (`weak_decl.cpp`, `multi/weak_link`): `(declare "f" (weak))` for an undefined weak

@@ -39,6 +39,7 @@ int main() {
   std::istringstream bad("abc"); long double d = 7; bad >> d;
   CHECK(bad.fail());
 
+  CHECK(std::to_string(1.5L) == "1.500000" && std::to_string(-2.5e10L) == "-25000000000.000000" && std::to_string(0.1L) == "0.100000");
   CHECK(std::stold("2.718281828459045235360287") == 2.718281828459045235360287L);
   CHECK(std::stold("  -1e-4000") < 0 && std::stold("1e-4000") > 0 && std::stold("0x10") == 16.0L);
   size_t pos; long double sv = std::stold("1.5abc", &pos);

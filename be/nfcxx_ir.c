@@ -715,6 +715,8 @@ static ir_val ir_load(ir_val a)
     ir_copy(a.t, t.s, a.s);
     return ir_mk_value(t.s, a.t);
   }
+  /* A function lvalue (`*fp`, a reference to a function): its value is its address, nothing is read. */
+  if (a.t != NULL && skip_typerefs(a.t)->kind == tk_routine) return ir_mk_addr(a.s, a.t, 0);
   r = ir_let(ir_valtext(a.t), ir_fmt("(load%s %s %s)", a.vol ? ".v" : "", ir_valtext(a.t), a.s));
   return ir_mk_value(r, a.t);
 }
@@ -1201,6 +1203,7 @@ static an_expr_node_ptr ir_operand(an_expr_node_ptr e, int i)
 static ir_val ir_rval(an_expr_node_ptr e);
 static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
+static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap);
 static ir_val ir_lval_op(an_expr_node_ptr e);
 static ir_val ir_roof(an_expr_node_ptr e);
 
@@ -1514,7 +1517,16 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     case eok_points_to_field:
     case eok_subscript:
     case eok_indirect: {
-      ir_val a = ir_lval_op(e);
+      ir_val a;
+      /* `*__f` of a reference to a function (a pointer to the function in the lowered IL) whose result type is already
+         the decayed pointer type: the function-to-pointer conversion, the value is the operand's. Nothing is read. */
+      if (k == eok_indirect && a0 != NULL && a0->type != NULL && e->type != NULL && skip_typerefs(e->type)->kind == tk_pointer &&
+          skip_typerefs(a0->type)->kind == tk_pointer && skip_typerefs(skip_typerefs(a0->type)->variant.pointer.type)->kind == tk_routine) {
+        ir_val p = ir_rval(a0);
+        ir_note(0, k, 1);
+        return ir_mk_value(p.s, e->type);
+      }
+      a = ir_lval_op(e);
       if (a.s == NULL) return a;
       ir_note(0, k, 1);
       return ir_load(a);
@@ -1572,7 +1584,8 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
         ir_ld_call("vaarg", ir_fmt("%s %s", d.s, ir_valist_addr(a0)));
         return ir_mk_value(d.s, e->type);
       }
-      if (ir_is_aggregate(e->type) || ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (aggregate)", 0, (int)k);
+      if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate(e, ir_valist_addr(a0));
+      if (ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (bool)", 0, (int)k);
       {
         char *ap = ir_valist_addr(a0);
         ir_note(0, k, 1);
@@ -1883,98 +1896,449 @@ static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f)
 }
 
 /* GCC built-in functions (`__builtin_NAME`), which libstdc++'s headers call directly. Hint and query built-ins
-   become values or markers; a few bit operations are the libgcc routines of the same meaning; every other
-   built-in that has a C library function (`__builtin_memcpy`, `__builtin_strlen`, `__builtin_fabs`, ...) is a call
-   of that function. Built-ins that need an operation of their own (`__builtin_mul_overflow`, `__builtin_alloca`,
-   the `va_*` family) are not handled here. docs/notes/pathb-hosted.md lists them. */
-static const char *ir_builtin_libgcc(const char *n)
+   become values or markers; the bit operations (popcount, clz, ctz, ffs, parity, clrsb, bswap16/32/64) and the
+   overflow-checked arithmetic are expanded inline (straight-line IR, no libgcc call, so a freestanding link works);
+   every other built-in that has a C library function (`__builtin_memcpy`, `__builtin_strlen`, `__builtin_fabs`, ...)
+   is a call of that function. `__builtin_alloca` is the (alloca N) node. A built-in that has no library function and
+   no lowering here (`__builtin_frame_address`, `__builtin_ia32_*`, ...) is an (unsupported builtin NAME) marker, so
+   the emitter refuses with the name instead of the program failing to link. docs/notes/pathb-hosted.md lists them. */
+
+/* Small helpers for the expansions: typed constants and two-operand lets on IR type names. */
+static char *ir_k(const char *ty, unsigned long v)
 {
-  static const char *const tab[][2] = {
-    { "clz", "__clzsi2" },       { "clzl", "__clzdi2" },       { "clzll", "__clzdi2" },
-    { "ctz", "__ctzsi2" },       { "ctzl", "__ctzdi2" },       { "ctzll", "__ctzdi2" },
-    { "popcount", "__popcountsi2" }, { "popcountl", "__popcountdi2" }, { "popcountll", "__popcountdi2" },
-    { "bswap32", "__bswapsi2" }, { "bswap64", "__bswapdi2" },
-  };
-  size_t i;
-  for (i = 0; i < sizeof tab / sizeof tab[0]; i++) if (strcmp(n, tab[i][0]) == 0) return tab[i][1];
-  return NULL;
+  return ir_fmt("(const %s %lu)", ty, v);
 }
 
-/* __builtin_add_overflow / sub_overflow / mul_overflow (A, B, &R): R gets the wrapped result, the value is whether
-   the exact result did not fit. Lowered when A, B and R have one integer type: unsigned add, sub and mul, and
-   signed add and sub (signed mul and mixed types are an IR gap marker). The wrapped result uses the wrapping
-   operations (wadd, wsub, wmul) even in trap mode; the overflow test is the textbook one:
-   unsigned add r < a, sub a < b, mul a != 0 && r / a != b; signed add ((a ^ r) & (b ^ r)) < 0,
-   sub ((a ^ b) & (a ^ r)) < 0. */
-static ir_val ir_builtin_overflow(an_expr_node_ptr e, int op)
+static char *ir_o2(const char *op, const char *ty, const char *a, const char *b)
+{
+  return ir_let(ty, ir_fmt("(%s %s %s %s)", op, ty, a, b));
+}
+
+/* x shifted by the constant n (left or right; arithmetic when ty is signed). */
+static char *ir_sh(int left, const char *ty, const char *a, int n)
+{
+  return ir_o2(left ? "cshl" : "cshr", ty, a, ir_fmt("(const int %d)", n));
+}
+
+static char *ir_cv(const char *ty, const char *a)
+{
+  return ir_let(ty, ir_fmt("(iconv %s %s)", ty, a));
+}
+
+/* Population count of the unsigned value x (type ut, bits wide): the parallel bit-sum. */
+static char *ir_bi_popcount(const char *ut, int bits, const char *x)
+{
+  unsigned long m1 = bits == 64 ? 0x5555555555555555UL : 0x55555555UL;
+  unsigned long m2 = bits == 64 ? 0x3333333333333333UL : 0x33333333UL;
+  unsigned long m4 = bits == 64 ? 0x0f0f0f0f0f0f0f0fUL : 0x0f0f0f0fUL;
+  unsigned long h01 = bits == 64 ? 0x0101010101010101UL : 0x01010101UL;
+  char *t = ir_o2("and", ut, ir_sh(0, ut, x, 1), ir_k(ut, m1));
+  char *x1 = ir_o2("wsub", ut, x, t);
+  char *a = ir_o2("and", ut, x1, ir_k(ut, m2));
+  char *b = ir_o2("and", ut, ir_sh(0, ut, x1, 2), ir_k(ut, m2));
+  char *x2 = ir_o2("wadd", ut, a, b);
+  char *c = ir_o2("and", ut, ir_o2("wadd", ut, x2, ir_sh(0, ut, x2, 4)), ir_k(ut, m4));
+  return ir_sh(0, ut, ir_o2("wmul", ut, c, ir_k(ut, h01)), bits - 8);
+}
+
+/* Number of leading zero bits (bits for x == 0): smear the top bit down, count the zeros. */
+static char *ir_bi_clz(const char *ut, int bits, const char *x)
+{
+  int s;
+  char *v = (char *)x;
+  for (s = 1; s < bits; s *= 2) v = ir_o2("or", ut, v, ir_sh(0, ut, v, s));
+  return ir_o2("wsub", ut, ir_k(ut, (unsigned long)bits), ir_bi_popcount(ut, bits, v));
+}
+
+/* Number of trailing zero bits (bits for x == 0): the bits below the lowest set bit are ~x & (x - 1). */
+static char *ir_bi_ctz(const char *ut, int bits, const char *x)
+{
+  char *nx = ir_let(ut, ir_fmt("(not %s %s)", ut, x));
+  char *m = ir_o2("wsub", ut, x, ir_k(ut, 1));
+  return ir_bi_popcount(ut, bits, ir_o2("and", ut, nx, m));
+}
+
+/* Byte swap of the unsigned value x (type ut) of 2, 4 or 8 bytes: each byte moves to the mirrored position. */
+static char *ir_bi_bswap(const char *ut, int bytes, const char *x)
+{
+  char *r = NULL;
+  int i;
+  for (i = 0; i < bytes; i++) {
+    /* byte i of x (the top byte needs no mask: x has no bits above its width) moves to byte bytes - 1 - i */
+    char *b = i == 0 ? (char *)x : ir_sh(0, ut, x, 8 * i);
+    char *m;
+    if (i != bytes - 1) b = ir_o2("and", ut, b, ir_k(ut, 255));
+    m = i == bytes - 1 ? b : ir_sh(1, ut, b, 8 * (bytes - 1 - i));
+    r = r == NULL ? m : ir_o2("or", ut, r, m);
+  }
+  return r;
+}
+
+/* The integer built-in NAME (popcount, clz, ctz, ffs, parity, clrsb, with an l or ll suffix) as (kind, bits). kind:
+   1 popcount, 2 clz, 3 ctz, 4 ffs, 5 parity, 6 clrsb; 7 bswap16, 8 bswap32, 9 bswap64. 0: not one of them. */
+static int ir_bit_name(const char *n, int *bits)
+{
+  static const struct { const char *base; int kind; } tab[] = {
+    { "popcount", 1 }, { "clz", 2 }, { "ctz", 3 }, { "ffs", 4 }, { "parity", 5 }, { "clrsb", 6 },
+  };
+  size_t i;
+  if (strcmp(n, "bswap16") == 0) { *bits = 16; return 7; }
+  if (strcmp(n, "bswap32") == 0) { *bits = 32; return 8; }
+  if (strcmp(n, "bswap64") == 0) { *bits = 64; return 9; }
+  for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+    size_t l = strlen(tab[i].base);
+    if (strncmp(n, tab[i].base, l) != 0) continue;
+    if (n[l] == '\0') { *bits = 32; return tab[i].kind; }
+    if (strcmp(n + l, "l") == 0 || strcmp(n + l, "ll") == 0) { *bits = 64; return tab[i].kind; }
+  }
+  return 0;
+}
+
+static ir_val ir_bit_builtin(an_expr_node_ptr e, int kind, int bits)
+{
+  an_expr_node_ptr arg = ir_operand(e, 1);
+  const char *ut = bits == 64 ? "unsigned_long" : "unsigned_int";
+  const char *st = bits == 64 ? "long" : "int";
+  ir_val a;
+  char *x, *r = NULL;
+  if (arg == NULL || ir_operand(e, 2) != NULL || !ir_is_integer(arg->type)) return ir_gap(e->type, "builtin bit operation (arguments)", 0, (int)eok_call);
+  a = ir_rval(arg);
+  if (kind == 7) ut = "unsigned_int"; /* bswap16 works in 32 bits and narrows at the end */
+  x = ir_cv(ut, a.s);
+  switch (kind) {
+    case 1: r = ir_bi_popcount(ut, bits, x); break;
+    case 2: r = ir_bi_clz(ut, bits, x); break;
+    case 3: r = ir_bi_ctz(ut, bits, x); break;
+    case 4: {
+      /* ffs: the index (from 1) of the lowest set bit, 0 for 0. x ^ (x - 1) has the bits up to and including the lowest one. */
+      char *pc = ir_bi_popcount(ut, bits, ir_o2("xor", ut, x, ir_o2("wsub", ut, x, ir_k(ut, 1))));
+      char *nz = ir_cv(ut, ir_let("bool", ir_fmt("(ne %s %s %s)", ut, x, ir_k(ut, 0))));
+      r = ir_o2("wmul", ut, pc, nz);
+      break;
+    }
+    case 5: r = ir_o2("and", ut, ir_bi_popcount(ut, bits, x), ir_k(ut, 1)); break;
+    case 6: {
+      /* clrsb: the redundant sign bits are the leading zeros of ((x ^ (x >> (bits - 1))) << 1) | 1 (never zero). */
+      char *sg = ir_cv(ut, ir_sh(0, st, ir_cv(st, a.s), bits - 1));
+      char *y = ir_o2("xor", ut, x, sg);
+      r = ir_bi_clz(ut, bits, ir_o2("or", ut, ir_sh(1, ut, y, 1), ir_k(ut, 1)));
+      break;
+    }
+    case 7: r = ir_bi_bswap(ut, 2, ir_o2("and", ut, x, ir_k(ut, 65535))); break;
+    case 8: r = ir_bi_bswap(ut, 4, x); break;
+    default: r = ir_bi_bswap(ut, 8, x); break;
+  }
+  ir_note(0, eok_call, 1);
+  return ir_mk_value(ir_cv(ir_valtext(e->type), r), e->type);
+}
+
+/* The floating-point classification and comparison built-ins (<cmath>'s isnan, isinf, isfinite, isnormal, signbit, fpclassify,
+   isgreater ...): 1 when NAME is one and its lowering is in *out. x - x is 0 for a finite x and NaN for an infinity or a NaN,
+   which tells them apart without bit tricks; the comparisons are the ordered ones QBE has (false when unordered), which is
+   what isgreater and friends mean (no exception is raised, there is no floating-point environment here). The results are int. */
+static int ir_float_builtin(an_expr_node_ptr e, const char *name, ir_val *out)
+{
+  static const char *const cmp[] = { "isgreater", "isgreaterequal", "isless", "islessequal", "islessgreater", "isunordered" };
+  an_expr_node_ptr a1 = ir_operand(e, 1), a2 = ir_operand(e, 2);
+  const char *it = ir_valtext(e->type);
+  int k = -1, i;
+  for (i = 0; i < 6; i++) if (strcmp(name, cmp[i]) == 0) k = i;
+  if (k >= 0 && a1 != NULL && a2 != NULL && ir_is_float(a1->type) && ir_is_float(a2->type)) {
+    ir_val x = ir_rval(a1), y = ir_rval(a2);
+    const char *t = x.ty;
+    char *r;
+    if (k == 5) {
+      r = ir_o2("or", it, ir_cv(it, ir_let("bool", ir_fmt("(ne %s %s %s)", t, x.s, x.s))), ir_cv(it, ir_let("bool", ir_fmt("(ne %s %s %s)", t, y.s, y.s))));
+    } else if (k == 4) {
+      r = ir_o2("or", it, ir_cv(it, ir_let("bool", ir_fmt("(lt.f %s %s %s)", t, x.s, y.s))), ir_cv(it, ir_let("bool", ir_fmt("(lt.f %s %s %s)", t, y.s, x.s))));
+    } else {
+      /* isgreater(x, y) is y < x, isgreaterequal y <= x, isless x < y, islessequal x <= y */
+      static const char *const op[4] = { "lt.f", "le.f", "lt.f", "le.f" };
+      int swap = k < 2;
+      r = ir_cv(it, ir_let("bool", ir_fmt("(%s %s %s %s)", op[k], t, swap ? y.s : x.s, swap ? x.s : y.s)));
+    }
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(r, e->type);
+    return 1;
+  }
+  if (strcmp(name, "fpclassify") == 0) {
+    an_expr_node_ptr xa = ir_operand(e, 6);
+    if (xa != NULL && ir_is_float(xa->type) && ir_size_of(xa->type) <= 8) {
+      /* libm's classification returns the FP_* values of the same <math.h> that supplied the five constants */
+      ir_val x = ir_rval(xa);
+      ir_note(0, eok_call, 1);
+      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, ir_size_of(xa->type) == 4 ? "__fpclassifyf" : "__fpclassify", x.s)), e->type);
+      return 1;
+    }
+    return 0;
+  }
+  if ((strcmp(name, "isnan") == 0 || strcmp(name, "isinf") == 0 || strcmp(name, "isfinite") == 0 || strcmp(name, "isnormal") == 0 ||
+       strcmp(name, "isinf_sign") == 0 || strcmp(name, "signbit") == 0) && a1 != NULL && ir_operand(e, 2) == NULL && ir_is_float(a1->type) &&
+      ir_size_of(a1->type) <= 8) {
+    ir_val x = ir_rval(a1);
+    const char *t = x.ty;
+    int single = ir_size_of(a1->type) == 4;
+    char *r;
+    ir_note(0, eok_call, 1);
+    if (strcmp(name, "signbit") == 0) {
+      *out = ir_mk_value(ir_let(it, ir_fmt("(call %s &\"%s\" %s)", it, single ? "__signbitf" : "__signbit", x.s)), e->type);
+      return 1;
+    }
+    {
+      char *d = ir_let(t, ir_fmt("(fsub %s %s %s)", t, x.s, x.s));
+      char *isnum = ir_cv(it, ir_let("bool", ir_fmt("(eq %s %s %s)", t, x.s, x.s)));        /* not a NaN */
+      char *finite = ir_cv(it, ir_let("bool", ir_fmt("(eq %s %s %s)", t, d, d)));           /* neither NaN nor infinite */
+      if (strcmp(name, "isnan") == 0) {
+        r = ir_o2("xor", it, isnum, ir_k(it, 1));
+      } else if (strcmp(name, "isfinite") == 0) {
+        r = finite;
+      } else if (strcmp(name, "isnormal") == 0) {
+        /* finite and |x| >= the smallest normal number */
+        const char *mn = single ? "1.17549435082228750797e-38" : "2.2250738585072013831e-308";
+        char *big = ir_cv(it, ir_let("bool", ir_fmt("(le.f %s (const %s %s) %s)", t, t, mn, x.s)));
+        char *small = ir_cv(it, ir_let("bool", ir_fmt("(le.f %s %s (const %s -%s))", t, x.s, t, mn)));
+        r = ir_o2("and", it, ir_o2("or", it, big, small), finite);
+      } else {
+        char *isinf = ir_o2("and", it, isnum, ir_o2("xor", it, finite, ir_k(it, 1)));   /* a number that is not finite */
+        if (strcmp(name, "isinf") == 0) {
+          r = isinf;
+        } else {
+          char *neg = ir_cv(it, ir_let("bool", ir_fmt("(lt.f %s %s %s)", t, x.s, ir_zero(a1->type))));
+          char *sgn = ir_o2("wsub", it, ir_k(it, 1), ir_o2("wmul", it, neg, ir_k(it, 2)));   /* 1 or -1 */
+          r = ir_o2("wmul", it, isinf, sgn);
+        }
+      }
+    }
+    *out = ir_mk_value(r, e->type);
+    return 1;
+  }
+  return 0;
+}
+
+/* [su]?(add|sub|mul)(l|ll)?_overflow and the generic add/sub/mul_overflow[_p]: op 0 add, 1 sub, 2 mul; *pred is 1 for the
+   _p predicates (no result pointer, the third argument is only a value of the result type). 1 when NAME is one. */
+static int ir_ovf_op(const char *q)
+{
+  if (strncmp(q, "add", 3) == 0) return 0;
+  if (strncmp(q, "sub", 3) == 0) return 1;
+  if (strncmp(q, "mul", 3) == 0) return 2;
+  return -1;
+}
+
+static int ir_ovf_name(const char *n, int *op, int *pred)
+{
+  const char *q = n;
+  int sized = 0, o;
+  *pred = 0;
+  if ((q[0] == 's' || q[0] == 'u') && ir_ovf_op(q + 1) >= 0) { q++; sized = 1; }
+  o = ir_ovf_op(q);
+  if (o < 0) return 0;
+  q += 3;
+  if (sized && q[0] == 'l') { q++; if (q[0] == 'l') q++; } /* the C type of the sized forms: int, long, long long */
+  *op = o;
+  if (strcmp(q, "_overflow") == 0) return 1;
+  if (!sized && strcmp(q, "_overflow_p") == 0) { *pred = 1; return 1; }
+  return 0;
+}
+
+/* __builtin_add_overflow / sub_overflow / mul_overflow (A, B, &R) with GCC's meaning: R gets the exact result of the
+   arithmetic on the mathematical integers A and B converted to R's type (wrapped), the value is whether the exact
+   result did not fit R. A, B and R may be any integer types of any signedness and width up to 64 bits. The _p forms and
+   the __builtin_[su]{add,sub,mul}{,l,ll}_overflow forms are the same with a value instead of the result pointer / with
+   fixed types.
+   Two lowerings. The textbook one, when A, B and R are one integer type (not bool): the wrapped result uses the wrapping
+   operations (wadd, wsub, wmul) even in trap mode, unsigned add r < a, sub a < b, mul a != 0 && r / a != b, signed
+   add ((a ^ r) & (b ^ r)) < 0, sub ((a ^ b) & (a ^ r)) < 0.
+   The general one (signed multiply, mixed widths or signs): the operands are extended to 64 bits by their own signedness
+   and the exact result is formed as a pair (hi, lo) of 64-bit words (a 128-bit two's complement integer: for add and
+   sub the sum of the sign words and the carry or borrow; for multiply the product of the magnitudes, negated when the
+   signs differ, with the unsigned 64-bit overflow of the magnitude product caught by a division). R receives lo
+   truncated; the result fits R exactly when hi equals the sign extension of lo (all ones or zero for a signed R, zero
+   for an unsigned R) and, for R narrower than 64 bits, lo equals its own truncation extended again. */
+static ir_val ir_builtin_overflow(an_expr_node_ptr e, int op, int pred)
 {
   an_expr_node_ptr n0 = ir_operand(e, 1), n1 = ir_operand(e, 2), n2 = ir_operand(e, 3);
   a_type_ptr rt;
-  ir_val x, y, p, r;
+  ir_val x, y, p;
   char *ov;
   int sg;
-  if (n0 == NULL || n1 == NULL || n2 == NULL || !ir_is_pointer(n2->type)) return ir_gap(e->type, "builtin overflow", 0, (int)eok_call);
-  rt = skip_typerefs(skip_typerefs(n2->type)->variant.pointer.type);
+  const char *U = "unsigned_long";
+  if (n0 == NULL || n1 == NULL || n2 == NULL || ir_operand(e, 4) != NULL) return ir_gap(e->type, "builtin overflow (arguments)", 0, (int)eok_call);
+  if (pred) {
+    rt = skip_typerefs(n2->type);
+  } else {
+    if (!ir_is_pointer(n2->type)) return ir_gap(e->type, "builtin overflow (result is not a pointer)", 0, (int)eok_call);
+    rt = skip_typerefs(skip_typerefs(n2->type)->variant.pointer.type);
+  }
   sg = ir_is_signed(rt);
-  if (!ir_is_integer(rt) || ir_is_bool(rt) || !ir_is_integer(n0->type) || !ir_is_integer(n1->type) || ir_is_bool(n0->type) ||
-      ir_is_bool(n1->type) || ir_size_of(n0->type) != ir_size_of(rt) || ir_size_of(n1->type) != ir_size_of(rt) ||
-      ir_is_signed(n0->type) != sg || ir_is_signed(n1->type) != sg || (sg && op == 2)) {
-    return ir_gap(e->type, "builtin overflow (mixed types or signed multiply)", 0, (int)eok_call);
+  if (!ir_is_integer(rt) || ir_is_bool(rt) || !ir_is_integer(n0->type) || !ir_is_integer(n1->type) ||
+      ir_size_of(n0->type) > 8 || ir_size_of(n1->type) > 8 || ir_size_of(rt) > 8) {
+    return ir_gap(e->type, "builtin overflow (operand types)", 0, (int)eok_call);
   }
   x = ir_rval(n0);
   y = ir_rval(n1);
-  p = ir_rval(n2);
-  r = ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(%s %s %s %s)", op == 0 ? "wadd" : op == 1 ? "wsub" : "wmul",
-                                                  ir_valtext(rt), x.s, y.s)), rt);
-  ir_store(rt, p.s, r.s, 0);
-  if (!sg) {
-    if (op == 0) {
-      ov = ir_compare(eok_lt, r, x).s;
-    } else if (op == 1) {
-      ov = ir_compare(eok_lt, x, y).s;
+  p = pred ? ir_mk_void() : ir_rval(n2);
+  if (!ir_is_bool(n0->type) && !ir_is_bool(n1->type) && ir_size_of(n0->type) == ir_size_of(rt) &&
+      ir_size_of(n1->type) == ir_size_of(rt) && ir_is_signed(n0->type) == sg && ir_is_signed(n1->type) == sg &&
+      !(sg && op == 2) && getenv("NFCXX_IR_OVF_GENERAL") == NULL) {
+    ir_val r = ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(%s %s %s %s)", op == 0 ? "wadd" : op == 1 ? "wsub" : "wmul",
+                                                          ir_valtext(rt), x.s, y.s)), rt);
+    if (!pred) ir_store(rt, p.s, r.s, 0);
+    if (!sg) {
+      if (op == 0) {
+        ov = ir_compare(eok_lt, r, x).s;
+      } else if (op == 1) {
+        ov = ir_compare(eok_lt, x, y).s;
+      } else {
+        int d = ir_depth;
+        ov = ir_let("bool", "(const bool 0)");
+        ir_line(d, ir_fmt("(if %s", ir_compare(eok_ne, x, ir_mk_value(ir_zero(rt), rt)).s));
+        ir_line(d + 1, "(then");
+        ir_depth = d + 2;
+        {
+          ir_val q = ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(cdiv %s %s %s)", ir_valtext(rt), r.s, x.s)), rt);
+          ir_emit(ir_fmt("(set %s %s)", ov, ir_compare(eok_ne, q, y).s));
+        }
+        ir_close(1);
+        ir_close(1);
+        ir_depth = d;
+      }
     } else {
+      char *t1, *t2, *t3;
+      /* add: (x ^ r) & (y ^ r); sub: (x ^ y) & (x ^ r) */
+      if (op == 0) {
+        t1 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, r.s));
+        t2 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), y.s, r.s));
+      } else {
+        t1 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, y.s));
+        t2 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, r.s));
+      }
+      t3 = ir_let(ir_valtext(rt), ir_fmt("(and %s %s %s)", ir_valtext(rt), t1, t2));
+      ov = ir_compare(eok_lt, ir_mk_value(t3, rt), ir_mk_value(ir_zero(rt), rt)).s;
+    }
+    ir_note(0, eok_call, 1);
+    return ir_mk_bool(ov);
+  }
+  {
+    int sx = ir_is_signed(n0->type), sy = ir_is_signed(n1->type);
+    unsigned long wr = ir_size_of(rt) * 8UL;
+    char *zero = ir_k(U, 0);
+    char *X = ir_cv(U, x.s), *Y = ir_cv(U, y.s);
+    char *hx = sx ? ir_cv(U, ir_sh(0, "long", ir_cv("long", x.s), 63)) : zero;
+    char *hy = sy ? ir_cv(U, ir_sh(0, "long", ir_cv("long", y.s), 63)) : zero;
+    char *lo, *hi, *stored, *ext, *t, *ov64 = NULL;
+    if (op != 2) {
+      char *c;
+      if (op == 0) {
+        lo = ir_o2("wadd", U, X, Y);
+        c = ir_cv(U, ir_let("bool", ir_fmt("(lt.u %s %s %s)", U, lo, X)));
+        hi = ir_o2("wadd", U, ir_o2("wadd", U, hx, hy), c);
+      } else {
+        lo = ir_o2("wsub", U, X, Y);
+        c = ir_cv(U, ir_let("bool", ir_fmt("(lt.u %s %s %s)", U, X, Y)));
+        hi = ir_o2("wsub", U, ir_o2("wsub", U, hx, hy), c);
+      }
+    } else {
+      /* magnitudes, their 64-bit product, and the sign mask (all ones when the exact product is negative) */
+      char *mx = sx ? ir_o2("wsub", U, ir_o2("xor", U, X, hx), hx) : X;
+      char *my = sy ? ir_o2("wsub", U, ir_o2("xor", U, Y, hy), hy) : Y;
+      char *pr = ir_o2("wmul", U, mx, my);
+      char *hn, *nz, *mask;
       int d = ir_depth;
-      ov = ir_let("bool", "(const bool 0)");
-      ir_line(d, ir_fmt("(if %s", ir_compare(eok_ne, x, ir_mk_value(ir_zero(rt), rt)).s));
+      ov64 = ir_let("bool", "(const bool 0)");
+      ir_line(d, ir_fmt("(if %s", ir_let("bool", ir_fmt("(ne %s %s %s)", U, mx, zero))));
       ir_line(d + 1, "(then");
       ir_depth = d + 2;
       {
-        ir_val q = ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(cdiv %s %s %s)", ir_valtext(rt), r.s, x.s)), rt);
-        ir_emit(ir_fmt("(set %s %s)", ov, ir_compare(eok_ne, q, y).s));
+        char *q = ir_o2("cdiv", U, pr, mx);
+        ir_emit(ir_fmt("(set %s %s)", ov64, ir_let("bool", ir_fmt("(ne %s %s %s)", U, q, my))));
       }
       ir_close(1);
       ir_close(1);
       ir_depth = d;
+      hn = ir_o2("xor", U, hx, hy);
+      nz = ir_cv(U, ir_let("bool", ir_fmt("(ne %s %s %s)", U, pr, zero)));
+      mask = ir_o2("wsub", U, zero, nz);
+      hn = ir_o2("and", U, hn, mask);
+      lo = ir_o2("wsub", U, ir_o2("xor", U, pr, hn), hn);
+      hi = hn;
     }
-  } else {
-    char *t1, *t2, *t3;
-    /* add: (x ^ r) & (y ^ r); sub: (x ^ y) & (x ^ r) */
-    if (op == 0) {
-      t1 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, r.s));
-      t2 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), y.s, r.s));
-    } else {
-      t1 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, y.s));
-      t2 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, r.s));
-    }
-    t3 = ir_let(ir_valtext(rt), ir_fmt("(and %s %s %s)", ir_valtext(rt), t1, t2));
-    ov = ir_compare(eok_lt, ir_mk_value(t3, rt), ir_mk_value(ir_zero(rt), rt)).s;
+    stored = ir_cv(ir_valtext(rt), lo);
+    if (!pred) ir_store(rt, p.s, stored, 0);
+    ext = sg ? ir_cv(U, ir_sh(0, "long", ir_cv("long", lo), 63)) : zero;
+    t = ir_o2("xor", U, hi, ext);
+    if (wr < 64) t = ir_o2("or", U, t, ir_o2("xor", U, ir_cv(U, stored), lo));
+    if (ov64 != NULL) t = ir_o2("or", U, t, ir_cv(U, ov64));
+    ov = ir_let("bool", ir_fmt("(ne %s %s %s)", U, t, zero));
+    ir_note(0, eok_call, 1);
+    return ir_mk_bool(ov);
   }
-  ir_note(0, eok_call, 1);
-  return ir_mk_bool(ov);
+}
+
+/* The constant integer value of a built-in's argument, or -1 when it is not an integer constant. */
+static long ir_const_arg(an_expr_node_ptr n)
+{
+  while (n != NULL && n->kind == enk_operation && n->variant.operation.kind == eok_cast) n = ir_operand(n, 0);
+  if (n == NULL || n->kind != enk_constant || n->variant.constant.ptr->kind != ck_integer) return -1;
+  return atol(ir_capture_constant(n->variant.constant.ptr));
+}
+
+/* Built-ins that no code here lowers and that have no C library function of the same name either: calling
+   `__builtin_NAME` as a function would only fail at link time with a symbol nobody can explain. */
+static int ir_builtin_unlowerable(const char *n)
+{
+  static const char *const names[] = {
+    "frame_address", "return_address", "extract_return_addr", "frob_return_addr", "dwarf_cfa", "unwind_init",
+    "apply", "apply_args", "return", "setjmp", "longjmp", "nonlocal_goto", "cpu_init", "cpu_is", "cpu_supports",
+    "va_arg_pack", "va_arg_pack_len", "speculation_safe_value", "thread_pointer", "set_thread_pointer",
+  };
+  size_t i;
+  if (strncmp(n, "ia32_", 5) == 0 && strcmp(n, "ia32_pause") != 0) return 1;
+  for (i = 0; i < sizeof names / sizeof names[0]; i++) if (strcmp(n, names[i]) == 0) return 1;
+  return 0;
 }
 
 /* 1 when the call e of the built-in `name` (without the prefix) is lowered here; the value is in *out. */
 static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
 {
   an_expr_node_ptr arg = ir_operand(e, 1);
-  if (strcmp(name, "add_overflow") == 0 || strcmp(name, "sub_overflow") == 0 || strcmp(name, "mul_overflow") == 0) {
-    *out = ir_builtin_overflow(e, name[0] == 'a' ? 0 : name[0] == 's' ? 1 : 2);
+  int op, pred, bits, kind;
+  if (ir_ovf_name(name, &op, &pred)) {
+    *out = ir_builtin_overflow(e, op, pred);
     return 1;
   }
+  if ((kind = ir_bit_name(name, &bits)) != 0) {
+    *out = ir_bit_builtin(e, kind, bits);
+    return 1;
+  }
+  if (ir_float_builtin(e, name, out)) return 1;
   if (strcmp(name, "expect") == 0 || strcmp(name, "expect_with_probability") == 0) {
     ir_val a = ir_rval(arg);
     ir_note(0, eok_call, 1);
     *out = a;
+    return 1;
+  }
+  /* __builtin_clear_padding(&x), which libstdc++'s std::atomic<T> calls so that compare-exchange compares values: the six
+     padding bytes of a long double are zeroed; a type with no padding (an integer, float, double, pointer) needs nothing. */
+  if (strcmp(name, "clear_padding") == 0 && arg != NULL && ir_is_pointer(arg->type)) {
+    a_type_ptr pt = skip_typerefs(skip_typerefs(arg->type)->variant.pointer.type);
+    if (ir_is_x87(pt) || pt->kind == tk_integer || pt->kind == tk_float || pt->kind == tk_pointer) {
+      ir_val p = ir_rval(arg);
+      ir_note(0, eok_call, 1);
+      if (ir_is_x87(pt)) {
+        ir_val lo = ir_subobject(p.s, 10, integer_type(ik_unsigned_short), 0);
+        ir_val hi = ir_subobject(p.s, 12, integer_type(ik_unsigned_int), 0);
+        ir_emit(ir_fmt("(store unsigned_short %s (const unsigned_short 0))", lo.s));
+        ir_emit(ir_fmt("(store unsigned_int %s (const unsigned_int 0))", hi.s));
+      }
+      *out = ir_mk_void();
+      return 1;
+    }
+  }
+  /* __builtin_is_constant_evaluated(): true only while the compiler evaluates a constant expression; code that runs is not. */
+  if (strcmp(name, "is_constant_evaluated") == 0) {
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_fmt("(const %s 0)", ir_valtext(e->type)), e->type);
     return 1;
   }
   if (strcmp(name, "constant_p") == 0) {
@@ -2021,16 +2385,203 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = ir_is_void(e->type) ? ir_mk_void() : ir_mk_value(ir_zero(e->type), e->type);
     return 1;
   }
+  /* __builtin_object_size(P, TYPE) without optimization: (size_t)-1 for types 0 and 1, 0 for types 2 and 3 (what gcc
+     -O0 gives). P is not evaluated. */
+  if (strcmp(name, "object_size") == 0 || strcmp(name, "dynamic_object_size") == 0) {
+    long t = ir_const_arg(ir_operand(e, 2));
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_k(ir_valtext(e->type), (t == 2 || t == 3) ? 0UL : ~0UL), e->type);
+    return 1;
+  }
+  /* __builtin_assume_aligned(P, ALIGN [, OFFSET]) and __builtin_launder(P) are P. */
+  if (strcmp(name, "assume_aligned") == 0 || strcmp(name, "launder") == 0) {
+    an_expr_node_ptr rest;
+    ir_val a = ir_rval(arg);
+    for (rest = arg != NULL ? arg->next : NULL; rest != NULL; rest = rest->next) (void)ir_rval(rest);
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(a.s, e->type);
+    return 1;
+  }
+  /* __builtin_prefetch(ADDR [, RW [, LOCALITY]]) is a hint: the arguments are evaluated and nothing else happens. */
+  if (strcmp(name, "prefetch") == 0) {
+    an_expr_node_ptr a;
+    for (a = arg; a != NULL; a = a->next) (void)ir_rval(a);
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_void();
+    return 1;
+  }
+  /* The x86 `pause` hint does nothing observable; a call of an empty function keeps it where it is (see (barrier)). */
+  if (strcmp(name, "ia32_pause") == 0) {
+    ir_note(0, eok_call, 1);
+    ir_emit("(barrier)");
+    *out = ir_mk_void();
+    return 1;
+  }
+  /* __builtin_alloca(N) and the _with_align forms: dynamic stack storage that lives until the function returns. */
+  if (strcmp(name, "alloca") == 0 || strcmp(name, "alloca_with_align") == 0 || strcmp(name, "alloca_with_align_and_max") == 0) {
+    ir_val n;
+    long al = name[6] == '_' ? ir_const_arg(ir_operand(e, 2)) : 0;
+    if (arg == NULL || !ir_is_integer(arg->type) || al < 0 || al > 32768 || (al > 0 && (al & (al - 1)) != 0)) {
+      *out = ir_gap(e->type, "builtin alloca (alignment argument)", 0, (int)eok_call);
+      return 1;
+    }
+    n = ir_rval(arg);
+    ir_note(0, eok_call, 1);
+    if (al > 128) {
+      /* more than the 16 bytes alloca gives: take A - 1 bytes more and round the address up */
+      unsigned long a = (unsigned long)al / 8;
+      char *sz = ir_o2("wadd", "unsigned_long", ir_cv("unsigned_long", n.s), ir_k("unsigned_long", a));
+      char *raw = ir_let(ir_valtext(e->type), ir_fmt("(alloca %s)", sz));
+      char *ad = ir_o2("wadd", "unsigned_long", ir_let("unsigned_long", ir_fmt("(p2i unsigned_long %s)", raw)), ir_k("unsigned_long", a - 1));
+      char *rd = ir_o2("and", "unsigned_long", ad, ir_k("unsigned_long", ~(a - 1)));
+      *out = ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(i2p %s %s)", ir_valtext(e->type), rd)), e->type);
+      return 1;
+    }
+    *out = ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(alloca %s)", ir_cv("unsigned_long", n.s))), e->type);
+    return 1;
+  }
+  if (ir_builtin_unlowerable(name)) {
+    *out = ir_gap(e->type, ir_fmt("builtin %s (no lowering)", name), 0, (int)eok_call);
+    return 1;
+  }
   return 0;
 }
 
 /* The symbol a built-in's call goes to, or NULL when the name has no prefix. */
 static const char *ir_builtin_sym(const char *name)
 {
-  const char *g;
   if (name == NULL || strncmp(name, "__builtin_", 10) != 0) return NULL;
-  g = ir_builtin_libgcc(name + 10);
-  return g != NULL ? g : name + 10;
+  return name + 10;
+}
+
+/* The integer type text of an N-byte atomic operand. */
+static const char *ir_uty(int n)
+{
+  return n == 1 ? "unsigned_char" : n == 2 ? "unsigned_short" : n == 4 ? "unsigned_int" : "unsigned_long";
+}
+
+/* A full memory barrier (seq_cst fence): a locked read-modify-write of a private word through libatomic. On x86 any
+   locked instruction is a full barrier; the call is opaque, so the compiler cannot reorder around it either. */
+static void ir_full_fence(void)
+{
+  ir_val t = ir_temp(integer_type(ik_int));
+  ir_emit(ir_fmt("(eval (call void &\"__atomic_fetch_or_4\" %s (const int 0) (const int 5)))", t.s));
+}
+
+/* Atomic built-ins that EDG leaves as calls of functions nothing exports (the sized `__atomic_{load,store,...}_N` names
+   are libatomic's and need no help): __atomic_test_and_set, __atomic_clear, __atomic_thread_fence, __atomic_signal_fence,
+   and the legacy `__sync_*` family (EDG calls them `__sync_fetch_and_add_4` ...; GCC expands them inline). They are
+   lowered to calls of libatomic's `__atomic_*_N`, always sequentially consistent (stronger than any __sync_ order). */
+static int ir_atomic_call(an_expr_node_ptr e, const char *name, ir_val *out)
+{
+  static const char *const ops[] = { "add", "sub", "or", "and", "xor", "nand" };
+  an_expr_node_ptr a[4] = { NULL, NULL, NULL, NULL };
+  ir_val v[4];
+  int i, n = 0, mode = 0, op = -1, sz = 0;
+  /* 1 signal fence, 2 full fence, 3 test_and_set, 4 clear, 5 fetch_OP, 6 OP_fetch, 7 bool cas, 8 val cas, 9 lock_test_and_set, 10 lock_release */
+  if (strcmp(name, "__atomic_signal_fence") == 0) mode = 1;
+  else if (strcmp(name, "__atomic_thread_fence") == 0 || strcmp(name, "__sync_synchronize") == 0) mode = 2;
+  else if (strcmp(name, "__atomic_test_and_set") == 0) mode = 3;
+  else if (strcmp(name, "__atomic_clear") == 0) mode = 4;
+  else if (strncmp(name, "__sync_", 7) == 0) {
+    const char *tail = strrchr(name, '_');
+    char base[40];
+    size_t bl;
+    if (tail == NULL || tail <= name + 7) return 0;
+    sz = atoi(tail + 1);
+    bl = (size_t)(tail - (name + 7));
+    if ((sz != 1 && sz != 2 && sz != 4 && sz != 8) || bl >= sizeof base) return 0;
+    memcpy(base, name + 7, bl);
+    base[bl] = '\0';
+    for (i = 0; i < 6 && mode == 0; i++) {
+      char want[40];
+      snprintf(want, sizeof want, "fetch_and_%s", ops[i]);
+      if (strcmp(base, want) == 0) { mode = 5; op = i; }
+      snprintf(want, sizeof want, "%s_and_fetch", ops[i]);
+      if (strcmp(base, want) == 0) { mode = 6; op = i; }
+    }
+    if (strcmp(base, "bool_compare_and_swap") == 0) mode = 7;
+    else if (strcmp(base, "val_compare_and_swap") == 0) mode = 8;
+    else if (strcmp(base, "lock_test_and_set") == 0) mode = 9;
+    else if (strcmp(base, "lock_release") == 0) mode = 10;
+  }
+  if (mode == 0) return 0;
+  for (a[0] = ir_operand(e, 1); a[n] != NULL && n < 3; n++) a[n + 1] = a[n]->next;
+  for (i = 0; i < n; i++) v[i] = ir_rval(a[i]);
+  if ((mode == 3 || mode == 4 || mode == 10) && n < 1) return 0;
+  if ((mode == 5 || mode == 6 || mode == 9) && n < 2) return 0;
+  if ((mode == 7 || mode == 8) && n < 3) return 0;
+  ir_note(0, eok_call, 1);
+  {
+    const char *ty = ir_uty(sz), *rt = ir_valtext(e->type);
+    switch (mode) {
+      case 1:
+        ir_emit("(barrier)");
+        *out = ir_mk_void();
+        return 1;
+      case 2:
+        ir_full_fence();
+        *out = ir_mk_void();
+        return 1;
+      case 3: {
+        char *old = ir_let("unsigned_char", ir_fmt("(call unsigned_char &\"__atomic_exchange_1\" %s (const unsigned_char 1) (const int 5))", v[0].s));
+        *out = ir_mk_bool(ir_let("bool", ir_fmt("(ne unsigned_char %s (const unsigned_char 0))", old)));
+        return 1;
+      }
+      case 4:
+        ir_emit(ir_fmt("(eval (call void &\"__atomic_store_1\" %s (const unsigned_char 0) (const int 5)))", v[0].s));
+        *out = ir_mk_void();
+        return 1;
+      case 5:
+        *out = ir_mk_value(ir_let(rt, ir_fmt("(call %s &\"__atomic_fetch_%s_%d\" %s %s (const int 5))", rt, ops[op], sz, v[0].s, v[1].s)), e->type);
+        return 1;
+      case 6:
+        *out = ir_mk_value(ir_let(rt, ir_fmt("(call %s &\"__atomic_%s_fetch_%d\" %s %s (const int 5))", rt, ops[op], sz, v[0].s, v[1].s)), e->type);
+        return 1;
+      case 7:
+      case 8: {
+        /* the expected value lives in a temporary that the exchange updates with the value it found */
+        ir_val t = ir_temp(integer_type(sz == 1 ? ik_unsigned_char : sz == 2 ? ik_unsigned_short : sz == 4 ? ik_unsigned_int : ik_unsigned_long));
+        char *ok;
+        ir_emit(ir_fmt("(store %s %s %s)", ty, t.s, ir_cv(ty, v[1].s)));
+        ok = ir_let("bool", ir_fmt("(call bool &\"__atomic_compare_exchange_%d\" %s %s %s (const int 0) (const int 5) (const int 5))", sz, v[0].s, t.s, ir_cv(ty, v[2].s)));
+        if (mode == 7) *out = ir_mk_value(ir_cv(rt, ok), e->type);
+        else *out = ir_mk_value(ir_cv(rt, ir_let(ty, ir_fmt("(load %s %s)", ty, t.s))), e->type);
+        return 1;
+      }
+      case 9:
+        *out = ir_mk_value(ir_let(rt, ir_fmt("(call %s &\"__atomic_exchange_%d\" %s %s (const int 5))", rt, sz, v[0].s, v[1].s)), e->type);
+        return 1;
+      default:
+        ir_emit(ir_fmt("(eval (call void &\"__atomic_store_%d\" %s (const %s 0) (const int 5)))", sz, v[0].s, ty));
+        *out = ir_mk_void();
+        return 1;
+    }
+  }
+}
+
+/* 1 when the asm entry is a single `pause` / `rep nop` / `rep; nop` / `nop` with no operands, no labels and at most
+   "memory" and "cc" clobbers: an instruction with no effect the program can observe. 2 when it is such an instruction but
+   declares a register clobber (the call that replaces it would not clobber that register: refused as asm-clobbers). */
+static int ir_asm_is_nop(an_asm_entry_ptr ae)
+{
+  char norm[16];
+  size_t k, m = 0, len;
+  const char *t;
+  a_named_register_list_ptr cl;
+  if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string || ae->is_asm_goto || ae->operands != NULL) return 0;
+  t = ae->asm_string->variant.string.value;
+  len = (size_t)ae->asm_string->variant.string.length;
+  for (k = 0; k < len && t[k] != '\0'; k++) {
+    char c = t[k];
+    if (c == ' ' || c == '\t' || c == '\n' || c == ';') continue;
+    if (m >= sizeof norm - 1) return 0;
+    norm[m++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+  }
+  norm[m] = '\0';
+  if (strcmp(norm, "pause") != 0 && strcmp(norm, "repnop") != 0 && strcmp(norm, "nop") != 0) return 0;
+  for (cl = ae->clobbers; cl != NULL; cl = cl->next) if (cl->reg != anr_memory && cl->reg != anr_flags) return 2;
+  return 1;
 }
 
 static void ir_abi_note(a_type_ptr t);
@@ -2154,6 +2705,17 @@ static ir_val ir_call(an_expr_node_ptr e)
     if (bsym != NULL) {
       ir_val bv;
       if (ir_builtin_call(e, f->variant.routine.ptr->source_corresp.name + 10, &bv)) return bv;
+    } else if (f->variant.routine.ptr->source_corresp.name != NULL &&
+               strcmp(f->variant.routine.ptr->source_corresp.name, "alloca") == 0 &&
+               f->variant.routine.ptr->function_def_number == NULL_function_def_number) {
+      /* <alloca.h>'s `alloca` declared as a function (EDG does not apply the macro): the same dynamic stack storage */
+      ir_val bv;
+      if (ir_builtin_call(e, "alloca", &bv)) return bv;
+    } else if (f->variant.routine.ptr->source_corresp.name != NULL &&
+               (strncmp(f->variant.routine.ptr->source_corresp.name, "__sync_", 7) == 0 ||
+                strncmp(f->variant.routine.ptr->source_corresp.name, "__atomic_", 9) == 0)) {
+      ir_val bv;
+      if (ir_atomic_call(e, f->variant.routine.ptr->source_corresp.name, &bv)) return bv;
     }
     if (bsym != NULL && ir_operand(e, 1) != NULL && ir_operand(e, 1)->type != NULL && ir_is_x87(ir_operand(e, 1)->type)) {
       /* type-generic classification built-ins on a long double: glibc's __isnanl and friends take it in memory */
@@ -2493,6 +3055,12 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
 
 /* Store zero bytes over [off, off + n) of the object at base, in the widest naturally aligned integer stores.
    Returns 0 (and emits nothing) when that would take more than 128 stores. */
+/* 1 when the constant is the integer 0 (a repeated zero is a block of zero bytes). */
+static int ir_const_is_zero(a_constant_ptr c)
+{
+  return c != NULL && c->kind == ck_integer && strcmp(ir_capture_constant(c), "0") == 0;
+}
+
 static int ir_zero_bytes(const char *base, unsigned long off, unsigned long n)
 {
   unsigned long cnt = 0, o = off, left = n;
@@ -2500,7 +3068,11 @@ static int ir_zero_bytes(const char *base, unsigned long off, unsigned long n)
     unsigned long w = (o % 8 == 0 && left >= 8) ? 8 : (o % 4 == 0 && left >= 4) ? 4 : (o % 2 == 0 && left >= 2) ? 2 : 1;
     o += w;
     left -= w;
-    if (++cnt > 128) return 0;
+    if (++cnt > 128) {
+      /* too many stores: one fill of the whole range (a call of memset in the emitter) */
+      ir_emit(ir_fmt("(zero-fill %lu %s)", n, ir_subobject(base, off, integer_type(ik_unsigned_char), 0).s));
+      return 1;
+    }
   }
   o = off;
   left = n;
@@ -2668,6 +3240,103 @@ static int ir_abi_collect(a_type_ptr t, unsigned long base, ir_leaf *lv, int *n,
   }
 }
 
+/* va_arg of a struct, class or union by value, System V x86-64. The va_list is the 24-byte tag { unsigned gp_offset;
+   unsigned fp_offset; void *overflow_arg_area; void *reg_save_area; } that QBE's vastart fills (and glibc's v*printf read).
+   QBE's own vaarg takes scalars only, so the psABI's algorithm is spelled out in IR, with the classification the
+   by-value calls use (ir_abi_collect): an aggregate of up to 16 bytes whose eightbytes are INTEGER or SSE is fetched
+   from the register save area, one eightbyte from the next general register slot (8 bytes at gp_offset) or the next
+   vector slot (16 bytes at fp_offset), when enough of both kinds are left (gp_offset <= 48 - 8 * n_int and
+   fp_offset <= 176 - 16 * n_sse); otherwise, and for every larger or memory-class aggregate (more than 16 bytes, a long
+   double member), it is copied from overflow_arg_area, which then advances by the size rounded up to 8. An empty class
+   takes nothing from the list. An aggregate aligned to 16 bytes or more, or a shape the by-value convention cannot
+   describe, stays a gap marker. */
+static ir_val ir_vaarg_aggregate(an_expr_node_ptr e, const char *ap)
+{
+  a_type_ptr t = e->type;
+  unsigned long size = ir_size_of(t), align = ir_align_of(t);
+  ir_leaf lv[IR_LEAF_MAX];
+  int n = 0, i, ngp = 0, nfp = 0, cls[2] = { 0, 0 }, reg = 0, d = ir_depth;
+  const char *why = "";
+  ir_val tmp;
+  char *gp = NULL, *fp = NULL, *ok = NULL;
+  if (align > 8) return ir_gap(t, "op va_arg (aggregate aligned to 16 bytes)", 0, (int)eok_va_arg);
+  if (size <= 16) {
+    if (ir_abi_collect(t, 0, lv, &n, &why)) {
+      reg = n > 0;
+      for (i = 0; i < n; i++) {
+        int c = (lv[i].kind == 's' || lv[i].kind == 'd') ? 2 : 1, idx = (int)(lv[i].off / 8);
+        if (idx > 1) { reg = 0; break; }
+        if (cls[idx] == 0 || c == 1) cls[idx] = c;
+      }
+      if (n == 0) {
+        ir_note(0, eok_va_arg, 1);
+        tmp = ir_temp(t);
+        return ir_mk_addr(tmp.s, t, 0);
+      }
+      if (reg) {
+        for (i = 0; i < (int)((size + 7) / 8); i++) { if (cls[i] == 0) cls[i] = 1; if (cls[i] == 1) ngp++; else nfp++; }
+      }
+    } else if (strcmp(why, "long double") != 0) {
+      return ir_gap(t, ir_fmt("op va_arg (aggregate: %s)", why), 0, (int)eok_va_arg);
+    }
+  }
+  ir_note(0, eok_va_arg, 1);
+  tmp = ir_temp(t);
+  if (reg) {
+    char *pgp = ir_let("(ptr unsigned_int)", ir_fmt("(offset %s 0)", ap)), *pfp = ir_let("(ptr unsigned_int)", ir_fmt("(offset %s 4)", ap));
+    gp = ir_let("unsigned_int", ir_fmt("(load unsigned_int %s)", pgp));
+    fp = ir_let("unsigned_int", ir_fmt("(load unsigned_int %s)", pfp));
+    ok = ir_let("bool", "(const bool 1)");
+    if (ngp > 0) {
+      ir_line(d, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.u unsigned_int %s %s)", ir_k("unsigned_int", 48 - 8UL * (unsigned long)ngp), gp))));
+      ir_line(d + 1, "(then");
+      ir_line(d + 2, ir_fmt("(set %s (const bool 0))", ok));
+      ir_close(1);
+      ir_close(1);
+    }
+    if (nfp > 0) {
+      ir_line(d, ir_fmt("(if %s", ir_let("bool", ir_fmt("(lt.u unsigned_int %s %s)", ir_k("unsigned_int", 176 - 16UL * (unsigned long)nfp), fp))));
+      ir_line(d + 1, "(then");
+      ir_line(d + 2, ir_fmt("(set %s (const bool 0))", ok));
+      ir_close(1);
+      ir_close(1);
+    }
+    ir_line(d, ir_fmt("(if %s", ok));
+    ir_line(d + 1, "(then");
+    ir_depth = d + 2;
+    {
+      char *prs = ir_let("(ptr void)", ir_fmt("(offset %s 16)", ap));
+      char *rsa = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", prs));
+      char *gb = ir_let("(ptr void)", ir_fmt("(index %s %s 1)", rsa, ir_cv("long", gp)));
+      char *fb = ir_let("(ptr void)", ir_fmt("(index %s %s 1)", rsa, ir_cv("long", fp)));
+      int gi = 0, fi = 0;
+      for (i = 0; i < (int)((size + 7) / 8); i++) {
+        unsigned long nb = size - 8UL * (unsigned long)i < 8 ? size - 8UL * (unsigned long)i : 8;
+        char *src = cls[i] == 1 ? ir_let("(ptr void)", ir_fmt("(offset %s %d)", gb, 8 * gi++)) : ir_let("(ptr void)", ir_fmt("(offset %s %d)", fb, 16 * fi++));
+        char *dst = ir_let("(ptr void)", ir_fmt("(offset %s %d)", tmp.s, 8 * i));
+        ir_emit(ir_fmt("(copy %lu %s %s)", nb, dst, src));
+      }
+      if (ngp > 0) ir_emit(ir_fmt("(store unsigned_int %s %s)", pgp, ir_o2("wadd", "unsigned_int", gp, ir_k("unsigned_int", 8UL * (unsigned long)ngp))));
+      if (nfp > 0) ir_emit(ir_fmt("(store unsigned_int %s %s)", pfp, ir_o2("wadd", "unsigned_int", fp, ir_k("unsigned_int", 16UL * (unsigned long)nfp))));
+    }
+    ir_close(1);
+    ir_line(d + 1, "(else");
+    ir_depth = d + 2;
+  }
+  {
+    char *pov = ir_let("(ptr void)", ir_fmt("(offset %s 8)", ap));
+    char *ov = ir_let("(ptr void)", ir_fmt("(load (ptr void) %s)", pov));
+    ir_emit(ir_fmt("(copy %lu %s %s)", size, tmp.s, ov));
+    ir_emit(ir_fmt("(store (ptr void) %s %s)", pov, ir_let("(ptr void)", ir_fmt("(offset %s %lu)", ov, (size + 7) & ~7UL))));
+  }
+  if (reg) {
+    ir_close(1);
+    ir_close(1);
+  }
+  ir_depth = d;
+  return ir_mk_addr(tmp.s, t, 0);
+}
+
 static ir_tab ir_abi_tab;
 
 /* Print the (abi-type ...) form of aggregate type t once. */
@@ -2723,28 +3392,40 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
     unsigned long n = (unsigned long)s->variant.array.variant.number_of_elements;
     unsigned long i = 0, esz = ir_size_of(elem);
     a_constant_ptr ce;
-    for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next) {
-      /* ck_init_repeat: one constant repeated COUNT times (a run of equal elements, std::format's character table) */
-      unsigned long reps = 1;
-      a_constant_ptr one = ce;
-      unsigned long k;
+    for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      ir_val sub = ir_subobject(dst.s, i * esz, elem, 0);
       if (ce->kind == ck_init_repeat) {
-        one = ce->variant.init_repeat.constant;
-        reps = (unsigned long)ce->variant.init_repeat.count;
-        if (skip_typerefs(elem)->kind == tk_array) { /* multidimensional: the count is of leaf elements */
+        /* `T a[N] = {}` and friends: one constant repeated count times (a count that does not count whole elements is a
+           multidimensional leaf count, which is not lowered) */
+        a_constant_ptr rc = ce->variant.init_repeat.constant;
+        unsigned long cnt = (unsigned long)ce->variant.init_repeat.count, j;
+        if (cnt == 0 || rc == NULL || skip_typerefs(elem)->kind == tk_array) {
           ir_note(4, dik_constant, 0);
-          ir_emit("(unsupported init constant init_repeat)");
+          ir_emit("(unsupported init repeat)");
           return;
         }
-      }
-      for (k = 0; k < reps && i < n; k++, i++) {
-        ir_val sub = ir_subobject(dst.s, i * esz, elem, 0);
-        if (one->kind == ck_aggregate || ir_is_aggregate(elem)) {
-          ir_init_constant(sub, one, elem);
+        if (cnt > n - i) cnt = n - i;
+        if (ir_const_is_zero(rc) && !ir_is_aggregate(elem)) {
+          ir_zero_bytes(dst.s, i * esz, cnt * esz);
         } else {
-          ir_val v = ir_constant(one, elem);
-          ir_store(elem, sub.s, v.s, 0);
+          for (j = 0; j < cnt; j++) {
+            ir_val sj = ir_subobject(dst.s, (i + j) * esz, elem, 0);
+            if (rc->kind == ck_aggregate || ir_is_aggregate(elem)) {
+              ir_init_constant(sj, rc, elem);
+            } else {
+              ir_val v = ir_constant(rc, elem);
+              ir_store(elem, sj.s, v.s, 0);
+            }
+          }
         }
+        i += cnt - 1;
+        continue;
+      }
+      if (ce->kind == ck_aggregate || ir_is_aggregate(elem)) {
+        ir_init_constant(sub, ce, elem);
+      } else {
+        ir_val v = ir_constant(ce, elem);
+        ir_store(elem, sub.s, v.s, 0);
       }
     }
     for (; i < n; i++) ir_zero_object(ir_subobject(dst.s, i * esz, elem, 0), elem);
@@ -2947,19 +3628,21 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
     unsigned long n = (unsigned long)s->variant.array.variant.number_of_elements;
     unsigned long i = 0, esz = ir_size_of(elem);
     a_constant_ptr ce;
-    for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next) {
-      if (ce->kind == ck_init_repeat) { /* one constant repeated COUNT times */
-        unsigned long reps = (unsigned long)ce->variant.init_repeat.count, k;
-        if (skip_typerefs(elem)->kind == tk_array) { /* multidimensional: the count is of leaf elements */
-          ir_gi_unsupported("constant init_repeat");
-          i++;
-          continue;
+    for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      if (ce->kind == ck_init_repeat) {
+        a_constant_ptr rc = ce->variant.init_repeat.constant;
+        unsigned long cnt = (unsigned long)ce->variant.init_repeat.count, j;
+        if (cnt == 0 || rc == NULL || skip_typerefs(elem)->kind == tk_array) {
+          ir_gi_unsupported("repeat");
+          return;
         }
-        for (k = 0; k < reps && i < n; k++, i++) ir_gi_items(off + i * esz, ce->variant.init_repeat.constant, elem);
+        if (cnt > n - i) cnt = n - i;
+        if (ir_const_is_zero(rc) && !ir_is_aggregate(elem)) fprintf(nf_out, "\n    (zero %lu %lu)", off + i * esz, cnt * esz);
+        else for (j = 0; j < cnt; j++) ir_gi_items(off + (i + j) * esz, rc, elem);
+        i += cnt - 1;
         continue;
       }
       ir_gi_items(off + i * esz, ce, elem);
-      i++;
     }
     if (i < n) fprintf(nf_out, "\n    (zero %lu %lu)", off + i * esz, (n - i) * esz);
     return;
@@ -3369,8 +4052,32 @@ static void ir_stmt(a_statement_ptr s, int d)
           return;
         }
       }
+      /* `pause` (a.k.a. `rep nop`) and `nop`, with no operands and at most memory / cc clobbers: no observable effect
+         (pause is a spin-wait hint), so the opaque call of (barrier) is a correct lowering. Any other instruction (mfence,
+         lock-prefixed ops, cpuid, ...) has an effect a call cannot reproduce and is refused with its text. */
+      if (why != NULL && ir_asm_is_nop(ae) == 1) {
+        ir_note(1, stmk_asm, 1);
+        ir_line(d, "(barrier)");
+        return;
+      }
+      if (why != NULL && ir_asm_is_nop(ae) == 2) why = "asm-clobbers";
       ir_note(1, stmk_asm, why == NULL);
-      if (why != NULL) ir_line(d, ir_fmt("(unsupported stmt %s)", why));
+      if (why != NULL && strcmp(why, "asm-template") == 0 && ae != NULL && ae->asm_string != NULL &&
+          ae->asm_string->kind == ck_string) {
+        /* the template text makes the refusal readable: refused: (unsupported stmt asm-template "mfence") */
+        char shown[64];
+        const char *tx2 = ae->asm_string->variant.string.value;
+        size_t k, m = 0;
+        for (k = 0; k < (size_t)ae->asm_string->variant.string.length && tx2[k] != '\0' && m < sizeof shown - 1; k++) {
+          char c = tx2[k];
+          if (c == '\n' || c == '\t') c = ' ';
+          if (c == '"' || c == '\\' || (unsigned char)c < 32 || (unsigned char)c > 126) c = '?';
+          if (c == ' ' && m > 0 && shown[m - 1] == ' ') continue;
+          shown[m++] = c;
+        }
+        shown[m] = '\0';
+        ir_line(d, ir_fmt("(unsupported stmt asm-template \"%s\")", shown));
+      } else if (why != NULL) ir_line(d, ir_fmt("(unsupported stmt %s)", why));
       else if (mem) ir_line(d, "(barrier)");
       return;
     }
