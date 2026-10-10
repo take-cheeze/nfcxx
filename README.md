@@ -20,6 +20,8 @@ tests/builtins/run.sh     # compiler builtin probes (docs/notes/builtins.md)
 ./nfcxx -shared x.cpp -o x.so # shared object; lib/eval/ evaluates C++ snippets at run time (docs/notes/eval.md)
 tests/eval/run.sh         # nfceval library and -shared (both backends)
 scripts/setup-pathb.sh    # Path B harness (own back end on EDG's IL); then tests/pathb{,-ir,-qbe}/run.sh (docs/notes/pathb-stage3.md)
+./nfcxx -c a.cpp -o a.o; ./nfcxx a.o b.o -o x # separate compilation (docs/notes/multi-tu.md)
+tests/multi-tu/run.sh     # several translation units sharing libstdc++ templates (both backends)
 ```
 
 Which workflow runs which test script: `docs/README.md`, "Status matrix".
