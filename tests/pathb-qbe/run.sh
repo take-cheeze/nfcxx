@@ -30,7 +30,7 @@
 # the QBE binary is missing.
 cd "$(dirname "$0")/../.."
 root=$PWD
-cpfe=${PATHB_CPFE:-build/pathb/cmake/bin/cpfe}
+cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}   # absolute: scripts/pathb-dump runs it from another directory
 [ -x "$cpfe" ] || { echo "pathb-qbe: no harness at $cpfe; set PATHB_CPFE and PATHB_BASE (docs/notes/pathb-stage3.md)" >&2; exit 2; }
 qbe=${QBE:-build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }

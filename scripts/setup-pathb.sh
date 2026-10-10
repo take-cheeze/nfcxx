@@ -78,5 +78,5 @@ EDG_BASE=$base cmake -G Ninja -S "$tree" -B "$out/cmake" -DCMAKE_BUILD_TYPE=Rele
   -DEDG_MACRO_CONF=nfcxx-pathb -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ >"$out/configure.log" 2>&1 \
   || { tail -30 "$out/configure.log" >&2; exit 1; }
 cd "$out/cmake"
-ninja bin/cpfe >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
+ninja ${NINJA_JOBS:+-j"$NINJA_JOBS"} bin/cpfe >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
 echo "Path B cpfe built: $out/cmake/bin/cpfe (base dir: $base)"
