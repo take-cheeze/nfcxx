@@ -2238,10 +2238,7 @@ class CodeGen
   # the unshifted register of one irep, so the send is judged at a position of an irep:
   #   - the receiver is a register the block itself defined: the block's flow at that send. A block activation starts
   #     from unknown inputs (CallFacts::Flow.states), and the inlined frame is reset per iteration (inline_block_frame);
-  #   - the receiver is a method local read through GETUPVAR at level 0 (the defining frame, codegen_loop_regions):
-  #     the method's flow at the loop's own SENDB (`@inline_loop_parent`). The loop body runs right after that
-  #     instruction and nothing else runs in between, so the fact holds for every iteration unless the body or a nested
-  #     block writes that register (the method's opaque upvars, refused).
+  #   - a receiver read through GETUPVAR from the method (`:upvar`) is refused (ADR 0398, narrowed).
   # Returns { irep:, idx:, insn: } or nil (refused; reason counted). A receiver the block reassigns from its loop element
   # (R1), or with several definitions that are not one local, is refused.
   def loop_flow_position(irep, trace_idx, trace_insn, reg_offset)
@@ -2280,22 +2277,10 @@ class CodeGen
     upvars = writers.map { |w| w&.op == 'GETUPVAR' && w.upvar_ref&.last&.zero? ? w.upvar_ref.first : nil }
     return loop_flow_accept(irep, trace_idx, :local, { irep: irep, idx: trace_idx, insn: original }) if upvars.none?
 
-    loop_upvar_position(original, upvars, irep, trace_idx)
-  end
-
-  # The method's flow at the loop's SENDB for the method register every definition reads (one register, or refused).
-  def loop_upvar_position(original, upvars, irep, trace_idx)
-    parent = @inline_loop_parent
-    return loop_flow_refuse(irep, trace_idx, :upvar_no_position) unless parent && parent[:block_irep].equal?(irep) &&
-                                                                         parent[:idx]
-    return loop_flow_refuse(irep, trace_idx, :mixed_definitions) unless upvars.uniq.size == 1 && upvars.first
-
-    host = parent[:irep]
-    k = upvars.first
-    return loop_flow_refuse(irep, trace_idx, :upvar_written) if fixnum_proof_ctx(host)[:upvars].include?(k.to_s)
-
-    flow_insn = Insn.synthetic('SEND', "R#{k} :#{original.sym} n=#{original.args.to_s[/n=(\d+)/, 1] || 0}")
-    loop_flow_accept(irep, trace_idx, :upvar, { irep: host, idx: parent[:idx], insn: flow_insn })
+    # Narrowed (ADR 0398): a receiver that is a method local read through GETUPVAR is refused. Judging it at the
+    # method's flow at the loop's SENDB created new proven dead fallbacks in mruby-rpg2k's Scene::Map
+    # (reviewed-list failures), so only a receiver the block itself defines is given a position.
+    loop_flow_refuse(irep, trace_idx, :upvar_narrowed)
   end
 
   def loop_flow_accept(irep, trace_idx, path, position)
