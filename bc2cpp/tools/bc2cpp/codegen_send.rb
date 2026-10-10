@@ -1534,7 +1534,7 @@ class CodeGen
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         fallback = typed_fallback ||
                    guarded_fallback_line(d, recv, name, argv, [check_owner],
-                                         closed_world_site(recv, irep, idx, owner_def))
+                                         closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx))
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
@@ -1560,7 +1560,7 @@ class CodeGen
         # Array1D crashed in Game::Actor's accessor). So every MONO call into an
         # embedding class gets the class guard, rather than proving per body that no
         # DATA_PTR is reached.
-        cw_site = closed_world_site(recv, irep, idx, owner_def)
+        cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx)
         # CLOSED_WORLD_SELF: LEXICAL_SELF's reasoning for a MONO target. Self is
         # kind_of the owner and the closed world proves it has no subclass, so
         # the guard can only be true.
@@ -1650,7 +1650,8 @@ class CodeGen
                "#{ivar_accessor_call_code(owner, recv, name, d, argv)}\n"
       end
 
-      fallback = guarded_fallback_line(d, recv, name, argv, [owner], closed_world_site(recv, irep, idx, owner_def))
+      fallback = guarded_fallback_line(d, recv, name, argv, [owner],
+                                       closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx))
       "#{note}  if (#{check}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
         "  } else {\n" \
@@ -1718,7 +1719,7 @@ class CodeGen
       flow_core = exact_site && with_exact_core_site(exact_site) { flow_core_direct_line(d, recv, name, argv) }
       return flow_core if flow_core
 
-      cw_site = closed_world_site(recv, irep, idx, owner_def)
+      cw_site = closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx)
       poly = with_exact_core_site(exact_site) do
         compile_poly_small_n(name, d, recv, argv, n, closed_world_site: cw_site) ||
           compile_poly_table(name, d, recv, argv, n, closed_world_site: cw_site)
@@ -2198,7 +2199,10 @@ class CodeGen
 
   # CLOSED_WORLD: the facts guarded_fallback_line needs about a call site --
   # the enclosing owner when the receiver is provably that method's own self.
-  def closed_world_site(recv, irep, idx, owner_def)
+  # `trace_idx` (INLINED_UNLISTED_SITE, docs/adr/0386): the unshifted site of a send inside an inlined block
+  # body, whose own `idx` is nil. It only adds `trace_insn`, the original instruction of that site, which
+  # unlisted_class_call reads; every other consumer of the site keeps seeing the nil `insn`/`idx`.
+  def closed_world_site(recv, irep, idx, owner_def, trace_idx: nil)
     return nil unless @closed_world
 
     self_owner = owner_def && self_class(owner_def)
@@ -2211,7 +2215,9 @@ class CodeGen
     end
     # The instruction is kept for unlisted_class_call, which checks that it is
     # the send of its own name before trusting SSEND vs SEND.
-    { self_owner: self_owner, insn: irep && idx && irep.instructions[idx], irep: irep, idx: idx }
+    site = { self_owner: self_owner, insn: irep && idx && irep.instructions[idx], irep: irep, idx: idx }
+    site[:trace_insn] = irep.instructions[trace_idx] if CodeGen.inlined_unlisted_site? && idx.nil? && irep && trace_idx
+    site
   end
 
   def c_string_literal(s)
