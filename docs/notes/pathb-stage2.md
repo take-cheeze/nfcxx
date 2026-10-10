@@ -317,6 +317,8 @@ RVALUE    ::= OPERAND | (rdtsc) | (load[.v] TYPE ADDR) | (offset ADDR N) | (inde
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
             | (iconv|bitcast|i2p|p2i|cf2i|i2f|u2f|fconv TYPE A)               conversions
             | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
+            | (alloca SIZE)                                                  __builtin_alloca: SIZE bytes of dynamic stack, live until return (QBE alloc16)
+            | (vaarg TYPE ADDR)                                              scalar va_arg of the System V va_list at ADDR; aggregates are spelled in IR
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
             | (array N TYPE) | (array ? TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]

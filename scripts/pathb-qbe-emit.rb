@@ -516,19 +516,19 @@ def to_single(v)
   r
 end
 
+# Infinities and NaN are spelled d_inf / d_-inf / d_nan (QBE reads the text with strtod; the NaN is the positive quiet
+# NaN, whose sign and payload the IR does not carry).
 def float_lit(v, size)
-  raise Refused, "non-finite floating constant #{py_float_repr(v)}" unless v.finite?
   if size == 4
-    v = to_single(v)
+    v = to_single(v) if v.finite?
     return "s_" + py_float_repr(v)
   end
   "d_" + py_float_repr(v)
 end
 
 def data_float(v, size)
-  raise Refused, "non-finite floating constant #{py_float_repr(v)}" unless v.finite?
   if size == 4
-    v = to_single(v)
+    v = to_single(v) if v.finite?
     return ["s", "s_" + py_float_repr(v)]
   end
   ["d", "d_" + py_float_repr(v)]
@@ -1582,7 +1582,25 @@ def r_vaarg(fn, x)
   Val.new(t, cls, ty)
 end
 
+# (alloca SIZE): __builtin_alloca. SIZE bytes of dynamic stack, 16-byte aligned, that live until the function returns
+# (QBE alloc16 in the middle of a function: the stack pointer moves down and the epilogue restores it). Executed again
+# in a loop it allocates again, as alloca does; nothing is released earlier, there is no block scope.
+def r_alloca(fn, x)
+  raise BadIR, "alloca form" if x.length != 2
+  sz = fn.opnd(x[1])
+  raise Refused, "alloca size of type #{tyrepr(sz.ty)}" if sz.ty.nil? || sz.ty[0] != "int"
+  size = sz.t
+  if sz.cls != "l"
+    size = fn.tmp
+    fn.emit("#{size} =l extuw #{sz.t}")
+  end
+  t = fn.tmp
+  fn.emit("#{t} =l alloc16 #{size}")
+  Val.new(t, "l", ["ptr", nil])
+end
+
 RVAL = {
+  "alloca" => ->(fn, x) { r_alloca(fn, x) },
   "vaarg" => ->(fn, x) { r_vaarg(fn, x) },
   "load" => ->(fn, x) { r_load(fn, x) },
   "load.v" => ->(fn, x) { r_load(fn, x) },

@@ -1,0 +1,17 @@
+(ir-module "vaarg_ld.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_Z2ldiz"
+  (ret long_double)
+  (params (param %0 "n" int) (ellipsis))
+  (slot "n" int 4 4)
+  (slot "ap" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "v" long_double 16 16)
+  (store int $"n" %0)
+  (let %1 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (vastart %1)
+  (let %2 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %3 long_double (vaarg long_double %2))
+  (store long_double $"v" %3)
+  (let %4 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %5 long_double (load long_double $"v"))
+  (return %5))

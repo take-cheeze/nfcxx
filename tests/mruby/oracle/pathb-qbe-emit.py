@@ -217,19 +217,18 @@ def wrap_int(v, cls):
 
 
 def float_lit(v, size):
-    if not math.isfinite(v):
-        raise Refused("non-finite floating constant %r" % v)
+    # Infinities and NaN are spelled d_inf / d_-inf / d_nan (QBE reads the text with strtod).
     if size == 4:
-        v = struct.unpack("f", struct.pack("f", v))[0]
+        if math.isfinite(v):
+            v = struct.unpack("f", struct.pack("f", v))[0]
         return "s_" + repr(v)
     return "d_" + repr(v)
 
 
 def data_float(v, size):
-    if not math.isfinite(v):
-        raise Refused("non-finite floating constant %r" % v)
     if size == 4:
-        v = struct.unpack("f", struct.pack("f", v))[0]
+        if math.isfinite(v):
+            v = struct.unpack("f", struct.pack("f", v))[0]
         return "s", "s_" + repr(v)
     return "d", "d_" + repr(v)
 
@@ -1461,6 +1460,25 @@ def r_vaarg(fn, x):
     return Val(t, cls, ty)
 
 
+def r_alloca(fn, x):
+    # (alloca SIZE): __builtin_alloca. SIZE bytes of dynamic stack, 16-byte aligned, that live until the function returns
+    # (QBE alloc16 in the middle of a function: the stack pointer moves down and the epilogue restores it). Executed again
+    # in a loop it allocates again, as alloca does; nothing is released earlier, there is no block scope.
+    if len(x) != 2:
+        raise BadIR("alloca form")
+    sz = fn.opnd(x[1])
+    if sz.ty is None or sz.ty[0] != "int":
+        raise Refused("alloca size of type %s" % (sz.ty,))
+    size = sz.t
+    if sz.cls != "l":
+        size = fn.tmp()
+        fn.emit("%s =l extuw %s" % (size, sz.t))
+    t = fn.tmp()
+    fn.emit("%s =l alloc16 %s" % (t, size))
+    return Val(t, "l", ("ptr", None))
+
+
+RVAL["alloca"] = r_alloca
 RVAL["vaarg"] = r_vaarg
 
 
