@@ -2733,6 +2733,7 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#update -> update_pictures",
   "RPG2k::Scene::Map#update_closing_windows -> closing?",
   "RPG2k::Scene::Map#update_closing_windows -> dispose",
+  "RPG2k::Scene::Map#update_map_tone -> update",
   "RPG2k::Scene::Map#update_screen_overlay -> flash_color",
   "RPG2k::Scene::Map#update_screen_overlay -> screen",
   "RPG2k::Scene::Map#update_screen_overlay -> tint",
