@@ -204,6 +204,7 @@ class CodeGen
     end
     (@class_const_pools || {}).each { |name, mask| lines << "  CLASSCONST #{name} (#{class_mask_name(mask)})" }
     lines.concat(setter_pool_report)
+    lines << "  POOL_SELF_CLASS #{pool_self_class_refusal ? "off: #{pool_self_class_refusal}" : 'on'}"
     lines.sort
   end
 

@@ -67,6 +67,31 @@ class CodeGen
     constructor_naming_refusal
   end
 
+  # BC2CPP_CTOR_KEYWORDS=0 turns the keyword-call rule off (a keyword call, or a keyword parameter, refuses the initialize).
+  def constructor_keywords_enabled?
+    ENV.fetch('BC2CPP_CTOR_KEYWORDS', '1') != '0'
+  end
+
+  # CONSTRUCTOR_KEYWORDS: the positional count of a call that passes literal keywords (`new(a, b, k: v)`, n=2|nk=1), or
+  # nil for a splat, a packed kdict (`**opts`, nk=*) or a call without keywords. The keywords occupy the registers after
+  # the positionals; vm.c OP_ENTER hands them to a callee with keyword parameters as its kdict and appends them to the
+  # positionals of one without (an extra trailing Hash), so argument k <= n is the k-th positional either way.
+  def constructor_keyword_argc(insn)
+    return nil unless constructor_keywords_enabled?
+
+    n = insn.n_spec
+    nk = insn.nk_spec
+    return nil unless n && n != '*' && nk && nk != '*' && nk.to_i.positive?
+
+    n.to_i
+  end
+
+  # Does a keyword call with +positionals+ positional arguments leave all of D's mandatory positions (1..mand) as plain
+  # positionals? A call with fewer raises in ENTER or, without keyword parameters, would see the keyword Hash there.
+  def constructor_keyword_site_ok?(d, positionals)
+    positionals >= mandatory_arity(@ireps[d.irep])
+  end
+
   # Every Ruby initialize belongs to a declared class: a module's or singleton's one could sit between a
   # class and its superclass's initialize, or run with an argument list the sites do not show.
   def constructor_initializers_in_classes?
@@ -190,7 +215,10 @@ class CodeGen
     opt = fields[1].to_i
     # Positions 1..mand hold the first positional arguments of every call that gets as far as the body, whatever
     # follows them (optional, rest, block); a post-mandatory or keyword parameter is left out to stay clear of ENTER's hash handling.
-    return [:arity, nil] unless mand.positive? && fields[3..5].all? { |f| f.to_i.zero? }
+    # CONSTRUCTOR_KEYWORDS: keyword parameters (fields 4 and 5) leave positions 1..mand alone (vm.c OP_ENTER keeps the
+    # caller's keywords in a separate kdict register when the callee accepts any), so only a post-mandatory parameter
+    # is still refused. With the switch off the old rule refuses all three.
+    return [:arity, nil] unless mand.positive? && fields[3].to_i.zero? && (constructor_keywords_enabled? || fields[4..5].all? { |f| f.to_i.zero? })
     return [broken[d.irep], nil] if broken[d.irep]
 
     reach = constructor_reach(d)
@@ -278,11 +306,23 @@ class CodeGen
     return stats[:no_args] += 1 if argc&.zero?
 
     site = [irep, idx, insn.reg.to_i, argc, owner]
+    kw_argc = constructor_keyword_argc(insn) if argc.nil?
     classes = constructor_named_classes(irep, idx, insn) unless insn.op.start_with?('SS')
     if classes
       targets = constructor_targets(classes)
       stats[targets.empty? ? :named_no_ruby_init : :named] += 1
       targets.each do |d|
+        if kw_argc && constructor_keyword_site_ok?(d, kw_argc)
+          # CONSTRUCTOR_KEYWORDS: a keyword call is a site of its positionals.
+          stats[:keyword_named] += 1
+          found[:sites][d.irep] << [irep, idx, insn.reg.to_i, kw_argc, owner]
+          next
+        end
+        if kw_argc
+          stats[:keyword_refused_short] += 1
+          found[:broken][d.irep] ||= "keyword new with fewer positionals than mandatory parameters at #{irep.label}:#{idx}"
+          next
+        end
         found[:sites][d.irep] << site
         found[:broken][d.irep] ||= "new with a splat or keyword at #{irep.label}:#{idx}" if argc.nil?
       end
@@ -358,9 +398,13 @@ class CodeGen
 
     # A bare `super` forwards the method's own arguments through ARGARY, an op the flow does not model, so only
     # the explicit form can ever prove anything; the other withdraws the target.
+    kw_argc = constructor_keyword_argc(insn)
     if insn.plain_fixed_argc?
       found[:stats][:super_explicit] += 1
       found[:sites][target.irep] << [irep, idx, insn.reg.to_i, insn.argc, owner]
+    elsif kw_argc && constructor_keyword_site_ok?(target, kw_argc)
+      found[:stats][:super_keyword] += 1
+      found[:sites][target.irep] << [irep, idx, insn.reg.to_i, kw_argc, owner]
     else
       found[:stats][:super_unmodelled] += 1
       found[:broken][target.irep] = "super with unmodelled arguments at #{irep.label}:#{idx}"
@@ -379,10 +423,18 @@ class CodeGen
         lines << "  CTOR #{d.owner}#initialize pooled"
         @constructor_pool_candidates.each_key { |(label, k)| lines << "  CTORARG #{d.owner}#initialize arg#{k} #{constructor_arg_state(label, k)}" if label == d.irep }
       else
-        lines << "  CTOR #{d.owner}#initialize refused: #{status}"
+        lines << "  CTOR #{d.owner}#initialize refused: #{status}#{constructor_arity_note(d, status)}"
       end
     end
     lines.sort
+  end
+
+  # " (req=2 opt=0 rest=0 post=0 key=1 kdict=0)" for an arity refusal, so the report says which shape it was.
+  def constructor_arity_note(d, status)
+    return '' unless status == :arity
+
+    f = (@ireps[d.irep].enter ? @ireps[d.irep].enter.enter_fields : []).map(&:to_i)
+    " (req=#{f[0]} opt=#{f[1]} rest=#{f[2]} post=#{f[3]} key=#{f[4]} kdict=#{f[5]})"
   end
 
   # What the fixpoint made of one candidate argument: its pools, or the producers that dropped it.
