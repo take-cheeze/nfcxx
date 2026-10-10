@@ -73,6 +73,7 @@ require_relative 'codegen_emit'
 require_relative 'codegen_method'
 require_relative 'codegen_rescue'
 require_relative 'codegen_loop_regions'
+require_relative 'codegen_array_new_inline'
 require_relative 'codegen_fixnum_proof'
 require_relative 'codegen_numeric_proof'
 require_relative 'codegen_numeric_args'
@@ -1579,6 +1580,11 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn "== core-source compiled entry points (#{core_entries.size}) =="
   core_entries.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
+
+  # ARRAY_NEW_BLOCK (ADR 0391): `Array.new(n) { }` sites the closed world inlined, and why the others kept the call.
+  warn ''
+  warn '== Array.new block inlining (ARRAY_NEW_BLOCK) =='
+  gen.array_new_report.sort.each { |reason, count| warn "  #{reason}: #{count}" }
 
   # YIELD_REACH (ADR 0283): what the yield-free proof gave this build.
   yf = gen.yield_free_report(compiled.filter_map { |m| m[:label] })

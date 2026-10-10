@@ -35,12 +35,23 @@ class CodeGen
     # passes in a fixed order is what the emitters' shared nested-pre buffer
     # depends on.
     InlineLoopPass.new(:recognize_profiler_section_regions, :emit_profiler_section_inline, :block_addr, false),
-    InlineLoopPass.new(:recognize_sort_regions, :emit_sort_inline, :block_addr, true) # SORT_BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_sort_regions, :emit_sort_inline, :block_addr, true), # SORT_BLOCK_SUPPORT
+    InlineLoopPass.new(:recognize_array_new_regions, :emit_array_new_inline, :block_addr, true) # ARRAY_NEW_BLOCK (ADR 0391)
   ].freeze
 
-  # RESCUE_TRY_INLINE (ADR 0376): the passes a rescue try body runs. Not the profiler one: a raise
-  # would skip its end call, which the block-call fallback it replaces makes.
+  # RESCUE_TRY_INLINE (ADR 0376): the passes a rescue try body runs.
   RESCUE_TRY_INLINE_PASSES = (INLINE_LOOP_PASSES.map(&:recognize) - [:recognize_profiler_section_regions]).freeze
+
+  # RESCUE_PROFILER_INLINE (ADR 0391): the profiler pass joins them. ADR 0376 kept it out on the belief that the
+  # block call it replaces closes the section when the body raises. It does not: prof_section/prof_frame
+  # (mruby-rgss/src/profiler.cxx) call profiler_section_end/profiler_frame_end after mrb_yield_argv returns, with no
+  # unwinding guard, so a raise skips the end call there exactly as it skips the inlined one.
+  # BC2CPP_RESCUE_PROFILER_INLINE=0 keeps the call.
+  def rescue_try_pass?(recognize)
+    return true if RESCUE_TRY_INLINE_PASSES.include?(recognize)
+
+    recognize == :recognize_profiler_section_regions && ENV['BC2CPP_RESCUE_PROFILER_INLINE'] != '0'
+  end
 
   # INLINE_LOOP_PASSES over one scope: a region not in `claimed` is emitted, its addresses join
   # `suppressed` and its code `glue_at`. `try_range` (emit_rescue_try_body, ADR 0376) filters the
@@ -49,7 +60,7 @@ class CodeGen
     ctx_ivar = @class_layout[d.owner]
     ctx_args = @class_annotations[irep.label]&.args
     INLINE_LOOP_PASSES.each do |pass|
-      next if try_range && !RESCUE_TRY_INLINE_PASSES.include?(pass.recognize)
+      next if try_range && !rescue_try_pass?(pass.recognize)
 
       ctx = pass.context ? [d.owner, mand, ctx_ivar, ctx_args] : []
       send(pass.recognize, irep, *ctx).each do |region|
