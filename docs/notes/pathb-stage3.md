@@ -611,6 +611,10 @@ Each item names its probes. Emitter changes are in both `scripts/pathb-qbe-emit.
   `weakref("t")` needs no output of its own: every reference to the weakref routine or object is a reference to `t`, which is
   declared weak (`(declare "t" (weak))` / `(global "t" T B A (weak) (extern))`), so an undefined target reads as null.
   The gcc backend cannot alias a static function (the generated C renames it), hence `alias_static.cpp` has `// GCC: undefined`.
+  Later: a weakref without a target (`weakref, alias("t")`) is a weakref to `t` (EDG names the target); an `ifunc` routine
+  becomes the IFUNC symbol `(alias NAME RESOLVER ifunc)` (`.type NAME, @gnu_indirect_function`) instead of EDG's cached
+  wrapper, when the resolver is defined in the unit (`cases/alias_weakref_ifunc.cpp`, golden `pathb-ir/alias_weakref_ifunc.ir`,
+  `pathb-edge/alias_ifunc.ir`). `pathb-hosted.md` has the limits.
 - **VLA bounds** (`vla_bounds.cpp`, `traps/vla_index.cpp`): see `pathb-stage2.md` 5b. `(bounds IDX %N)` takes a register.
   The VLA lowering contains a checked 64-bit signed multiply, which trap mode refuses, so the trap probe says
   `// TRAP-IR: default`.

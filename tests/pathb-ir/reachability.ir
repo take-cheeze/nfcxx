@@ -1,5 +1,6 @@
 (ir-module "reachability.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
 (abi-type "__nfcxx_ld" 16 16 (memory))
+(x87-thunk entry "_ZN34_INTERNAL_16_reachability_cpp_main13unused_staticEe" local 0 16)
 (x87-thunk entry "_ZN6Unused1fEv" weak 1 0)
 (global "_ZTV6Unused" (const (array 3 (const long))) 24 8 (extern))
 (global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
