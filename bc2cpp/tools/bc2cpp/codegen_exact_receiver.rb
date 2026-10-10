@@ -51,7 +51,7 @@ class CodeGen
     klass if CORE_BODY_EXACT_TESTS.key?(klass)
   end
 
-  # CORE_SELF_EXACT (ADR 0380): inside a compiled body of Array, Hash, String or Range, `self` is exactly
+  # CORE_SELF_EXACT (ADR 0381): inside a compiled body of Array, Hash, String or Range, `self` is exactly
   # that class once the program has no subclass of it (core_class_subclass_free?) and no singleton maker
   # (core_body_exact_enabled?). The proof is checked at the site like every core-body proof (ADR 0359).
   # Only the method's own irep counts: a block can be run with a rebound self (instance_exec, define_method).
