@@ -1,10 +1,8 @@
 // Path B, hosted: <new>. std::nothrow, std::bad_alloc thrown by operator new and caught as bad_alloc and as
 // std::exception, placement new, new[] with initializer list, get_new_handler.
 // EXPECT: 8
-// GCC: undefined
-// (Only EXPECT is checked: on the gcc backend `new` of a huge size calls libstdc++'s operator new, which throws a
-// gcc-ABI std::bad_alloc that EDG's exception runtime cannot catch, so that program aborts. Path B links libC.a first
-// and gets EDG's operator new. docs/notes/pathb-hosted.md.)
+// (The gcc backend must agree: the driver links libC.a ahead of libstdc++, so `new` of a huge size reaches EDG's operator
+// new and throws an exception EDG's handlers catch; before, it was libstdc++'s, with a gcc-ABI std::bad_alloc, and aborted.)
 #include <new>
 #include <exception>
 #include <cstdio>

@@ -9,6 +9,7 @@ name: Path B
 #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
 #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
 #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
+#   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
 #   tests/mruby/run.sh       the mruby ports against their Python oracles, with the Path B parts enabled
 on:
   push:
@@ -30,6 +31,9 @@ on:
       - "tests/pathb-*/**"
       - "tests/mruby/**"
       - "tests/cases/**"
+      - "tests/ehshim/**"
+      - "lib/ehshim/**"
+      - "scripts/ehshim"
       - "nfcxx"
       - "tests/realworld/tinyxml2_main.cpp"
       - ".github/workflows/pathb.yml"
@@ -51,6 +55,9 @@ on:
       - "tests/pathb-*/**"
       - "tests/mruby/**"
       - "tests/cases/**"
+      - "tests/ehshim/**"
+      - "lib/ehshim/**"
+      - "scripts/ehshim"
       - "nfcxx"
       - "tests/realworld/tinyxml2_main.cpp"
       - ".github/workflows/pathb.yml"
@@ -119,6 +126,10 @@ jobs:
       # (cloned at its pinned commit; skipped when the fetch fails).
       - name: Hosted Path B (NFCXX_PATH=b)
         run: tests/pathb-qbe/hosted.sh
+
+      # The EH shim (lib/ehshim) on Path B too: exceptions thrown by libstdc++, std::exception_ptr; output compared with host g++.
+      - name: EH shim (gcc, qbe and Path B)
+        run: tests/ehshim/run.sh
 
       - name: mruby scripts against their Python oracles (Path B parts enabled)
         run: tests/mruby/run.sh

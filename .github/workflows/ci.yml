@@ -64,6 +64,9 @@ jobs:
       - name: Several translation units sharing libstdc++ templates (both backends)
         run: tests/multi-tu/run.sh
 
+      - name: EH shim, exceptions thrown by libstdc++ and std::exception_ptr (output compared with host g++)
+        run: tests/ehshim/run.sh
+
       - name: nfceval run-time eval library and nfcxx -shared (both backends)
         run: tests/eval/run.sh
 
