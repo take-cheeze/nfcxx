@@ -8,6 +8,7 @@ update=0; [ "${1:-}" = --update ] && update=1
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 fail=0; gaps=0
 for f in tests/cases/*.cpp; do
+  case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B stage 1
   n=$(basename "$f" .cpp)
   if ! scripts/pathb-dump "$f" > "$tmp/$n.il" 2> "$tmp/$n.err"; then
     echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue

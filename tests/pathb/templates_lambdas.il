@@ -13,6 +13,12 @@
     (expr (assign (ptr (struct "P")) (dot_field (ptr (struct "P")) (var (struct "_ZZ4mainEUliE_") "f") (field "p")) (address_of (ptr (struct "P")) (var (struct "P") "p"))))
     (return (call int (routine (ptr (fn int ((ptr (const (struct "_ZZ4mainEUliE_"))) int))) "_ZZ4mainENKUliE_clEi") (address_of (ptr (const (struct "_ZZ4mainEUliE_"))) (lvalue_adjust (const (struct "_ZZ4mainEUliE_")) (var (struct "_ZZ4mainEUliE_") "f"))) (const int 5)))))
 
+(function "_Z3addIiET_S0_S0_"
+  (returns int)
+  (params (param "a" int) (param "b" int))
+  (block
+    (return (add int (var int "a") (var int "b")))))
+
 (function "_ZZ4mainENKUliE_clEi"
   (returns int)
   (params (param "tmp1" (const (ptr (const (struct "_ZZ4mainEUliE_"))))) (param "k" int))
