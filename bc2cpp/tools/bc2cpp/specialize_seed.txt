@@ -1,0 +1,10 @@
+# BC2CPP_SPECIALIZE plan (docs/adr/0379): `Owner#name param=Class ...`, one method per line, `Owner.singleton#name`
+# for a class method. Derived from BC2CPP_TRACE_PARAMS=1 + scripts/bc2cpp_param_trace_report.rb (mtf-meido-action
+# boot + battle): parameters monomorphic at run time with no static fact. A wrong line costs speed, never
+# correctness; a method the compiler cannot specialize is skipped with a stderr line.
+RPG2k::Scene::Map#event_sliding? e=RPG2k::Scene::Map::MapEventState
+# Skipped today (nested blocks): the entries stay for when blocks are supported.
+RPG2k::Scene::Map#ids_touch? dirty=Hash
+RPG2k::Scene::Map#page_condition_ids id=Integer src=LCF::Array1D
+# Skipped today (the Integer assumption changes nothing in the body).
+Game::EventGraphic.singleton#continuous? anim_type=Integer
