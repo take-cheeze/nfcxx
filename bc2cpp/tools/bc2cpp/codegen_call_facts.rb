@@ -101,8 +101,19 @@ class CodeGen
     (!mask.is_a?(Integer) || mask.anybits?(NumericFlow::NIL)) && !nil_unanswerable_for_instances?(name)
   end
 
+  # NATIVE_ARM_COVER (ADR 0378): a class counts as native free when an exact-class native arm for it was emitted
+  # ahead of this fallback (`with_native_arms_emitted`, the zero-argument RGSS wrappers), so a receiver of exactly
+  # that class takes the arm and never reaches the else. BC2CPP_NATIVE_ARM_COVER=0 turns it off.
   def native_class_free?(name, classes)
     answers = call_facts_answers
-    classes.all? { |k| answers.resolves_in_ruby?(k, name) }
+    covered = native_arm_cover_classes(name)
+    classes.all? { |k| covered.include?(k) || answers.resolves_in_ruby?(k, name) }
+  end
+
+  # The owners of the exact-class native arms of +name+ that wrap the chain being emitted, or none.
+  def native_arm_cover_classes(name)
+    return [] if ENV['BC2CPP_NATIVE_ARM_COVER'] == '0'
+
+    Array(@native_arms_emitted && @native_arms_emitted[name])
   end
 end
