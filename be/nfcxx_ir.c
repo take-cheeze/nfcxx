@@ -199,10 +199,35 @@ static int ir_x87_kind(a_type_ptr t)
   return ir_x87_mem(t) ? 1 : ir_is_complex_x87(t) ? 2 : 0;
 }
 
-/* A value that is the address of its object: an aggregate, or a long double. */
+/* __int128 and unsigned __int128 (docs/notes/pathb-int128.md): like a long double, a 16-byte object in the IR, whose
+   operations are calls of the helpers in be/nfcxx_ldrt.c. Passed and returned in the integer registers like any
+   16-byte struct of two 8-byte integers (the System V class of the type), so its ABI shape is an (abi-type) with two
+   l leaves, and a bit-field of this type is extracted by a helper too. */
+static int ir_is_i128(a_type_ptr t)
+{
+  a_type_ptr s;
+  if (t == NULL) return 0;
+  s = skip_typerefs(t);
+  return s->kind == tk_integer && !is_bool_type(s) && f_size_of_type(s) == 16;
+}
+
+/* A 16-byte object of the IR that is not an aggregate (its value is the address of an object that is copied). */
+static int ir_is_obj16(a_type_ptr t)
+{
+  return ir_is_x87(t) || ir_is_i128(t);
+}
+
+/* A value that is the address of its object: an aggregate, a long double or a 128-bit integer. */
 static int ir_is_memval(a_type_ptr t)
 {
-  return ir_is_aggregate(t) || ir_is_x87(t);
+  return ir_is_aggregate(t) || ir_is_x87(t) || ir_is_i128(t);
+}
+
+/* A value that the C calling convention returns as a struct (in registers or through a hidden pointer): an
+   aggregate or a 128-bit integer. Not a long double (its result goes through the x87 thunks). */
+static int ir_is_cabi_agg(a_type_ptr t)
+{
+  return ir_is_aggregate(t) || ir_is_i128(t);
 }
 
 static int ir_is_integer(a_type_ptr t)
@@ -556,6 +581,7 @@ struct ir_val {
      from bit bf_boff of the unit, t is the declared type. bf_unit == 0: not a bit-field. */
   unsigned bf_unit, bf_boff, bf_width;
   char *bf_ty; /* IR type text of the field value: the declared type with the field's own signedness */
+  int bf_sign; /* a 128-bit bit-field (bf_unit 16): 1 when the field is signed (docs/notes/pathb-int128.md) */
 };
 
 static ir_val ir_mk_value(char *s, a_type_ptr t)
@@ -567,6 +593,7 @@ static ir_val ir_mk_value(char *s, a_type_ptr t)
   v.vol = 0;
   v.bf_unit = v.bf_boff = v.bf_width = 0;
   v.bf_ty = NULL;
+  v.bf_sign = 0;
   return v;
 }
 
@@ -579,6 +606,7 @@ static ir_val ir_mk_addr(char *s, a_type_ptr t, int vol)
   v.vol = vol;
   v.bf_unit = v.bf_boff = v.bf_width = 0;
   v.bf_ty = NULL;
+  v.bf_sign = 0;
   return v;
 }
 
@@ -591,6 +619,7 @@ static ir_val ir_mk_bool(char *s)
   v.vol = 0;
   v.bf_unit = v.bf_boff = v.bf_width = 0;
   v.bf_ty = NULL;
+  v.bf_sign = 0;
   return v;
 }
 
@@ -603,6 +632,7 @@ static ir_val ir_mk_void(void)
   v.vol = 0;
   v.bf_unit = v.bf_boff = v.bf_width = 0;
   v.bf_ty = NULL;
+  v.bf_sign = 0;
   return v;
 }
 
@@ -682,14 +712,18 @@ static char *ir_let(const char *ty, const char *rhs)
   return r;
 }
 
+/* The operand of "zero" for type t: a null pointer for an object value (the address of no object: a ternary's
+   register starts there, and every use of it that reads the value is a helper's or a store's, never this). */
 static char *ir_zero(a_type_ptr t)
 {
-  if (ir_is_pointer(t) || ir_is_x87(t)) return ir_fmt("(null %s)", ir_valtext(t));
+  if (ir_is_pointer(t) || ir_is_obj16(t)) return ir_fmt("(null %s)", ir_valtext(t));
   if (ir_is_float(t)) return ir_fmt("(const %s 0.0)", ir_valtext(t));
   return ir_fmt("(const %s 0)", ir_valtext(t));
 }
 
 static char *ir_ld_ret(const char *rty, const char *name, const char *args);
+static char *ir_i128_ret(const char *rty, const char *name, const char *args);
+static void ir_i128_call(const char *name, const char *args);
 
 /* A bool operand for any scalar value (a pointer or float compares with its zero). */
 static char *ir_to_bool(ir_val v)
@@ -697,6 +731,7 @@ static char *ir_to_bool(ir_val v)
   if (v.t == NULL) return v.s; /* already a bool */
   if (ir_is_bool(v.t)) return v.s;
   if (ir_is_x87(v.t)) return ir_let("bool", ir_fmt("(ne int %s (const int 0))", ir_ld_ret("int", "nz", v.s)));
+  if (ir_is_i128(v.t)) return ir_let("bool", ir_fmt("(ne int %s (const int 0))", ir_i128_ret("int", "nz", v.s)));
   return ir_let("bool", ir_fmt("(ne %s %s %s)", v.ty, v.s, ir_zero(v.t)));
 }
 
@@ -704,7 +739,7 @@ static void ir_copy(a_type_ptr t, const char *dst, const char *src);
 
 static void ir_store(a_type_ptr t, const char *addr, const char *val, int vol)
 {
-  if (ir_is_x87(t)) { /* a long double value is the address of an object: store = copy (a volatile one is not special) */
+  if (ir_is_obj16(t)) { /* a long double or 128-bit value is the address of an object: store = copy (a volatile one is not special) */
     ir_copy(t, addr, val);
     return;
   }
@@ -722,13 +757,19 @@ static ir_val ir_temp(a_type_ptr t);
 static ir_val ir_load(ir_val a)
 {
   char *r;
+  if (a.bf_unit != 0 && ir_is_i128(a.t)) { /* a 128-bit bit-field: a helper extracts it into a fresh object */
+    ir_val t = ir_temp(a.t);
+    ir_i128_call("bfget", ir_fmt("%s %s (const unsigned_long %u) (const int %u) (const int %d)", t.s, a.s, a.bf_boff,
+                                 a.bf_width, a.bf_sign));
+    return ir_mk_value(t.s, a.t);
+  }
   if (a.bf_unit != 0) { /* bit-field: read the storage unit and extract the field */
     r = ir_let(a.bf_ty, ir_fmt("(bfload%s %s %u %s %u %u)", a.vol ? ".v" : "", a.bf_ty, a.bf_unit, a.s, a.bf_boff,
                                a.bf_width));
     return ir_mk_value(r, a.t);
   }
   if (ir_is_aggregate(a.t)) return ir_mk_value(a.s, a.t);
-  if (ir_is_x87(a.t)) { /* reading a long double copies it: the object may change before the value is used */
+  if (ir_is_obj16(a.t)) { /* reading a long double or 128-bit value copies it: the object may change before the value is used */
     ir_val t = ir_temp(a.t);
     ir_copy(a.t, t.s, a.s);
     return ir_mk_value(t.s, a.t);
@@ -1033,7 +1074,18 @@ static ir_val ir_bf_lval(const char *base, a_field_ptr f, a_type_ptr parent, a_t
   unsigned long uoff = 0;
   unsigned unit = 0, boff = 0;
   ir_val a;
-  char *bty = ir_bf_type(t, f->bit_field_is_signed != 0);
+  char *bty;
+  if (ir_is_i128(t)) {
+    /* A 128-bit field (docs/notes/pathb-int128.md): the bits are read and written by helpers, from the object at base.
+       bf_unit 16 marks it; bf_boff is the bit offset from base. */
+    a = ir_mk_addr((char *)base, t, vol);
+    a.bf_unit = 16;
+    a.bf_boff = (unsigned)((unsigned long)f->offset * 8UL + (unsigned long)f->offset_bit_remainder);
+    a.bf_width = (unsigned)f->bit_size;
+    a.bf_sign = f->bit_field_is_signed != 0;
+    return a;
+  }
+  bty = ir_bf_type(t, f->bit_field_is_signed != 0);
   if (bty == NULL || !ir_bf_layout(f, ir_size_of(parent), &uoff, &unit, &boff)) {
     /* EDG truncates a width larger than the declared type (with a warning), so only a 128-bit declared type
        (unsigned __int128 f : 100) can be wider than 64 bits; the emitter has no 128-bit type either way. */
@@ -1051,6 +1103,10 @@ static ir_val ir_bf_lval(const char *base, a_field_ptr f, a_type_ptr parent, a_t
 /* Store val into the lvalue lhs: a plain store, or a read-modify-write of the bit-field's storage unit. */
 static void ir_store_lv(ir_val lhs, const char *val)
 {
+  if (lhs.bf_unit != 0 && ir_is_i128(lhs.t)) {
+    ir_i128_call("bfset", ir_fmt("%s (const unsigned_long %u) (const int %u) %s", lhs.s, lhs.bf_boff, lhs.bf_width, val));
+    return;
+  }
   if (lhs.bf_unit != 0) {
     ir_emit(ir_fmt("(bfstore%s %s %u %s %u %u %s)", lhs.vol ? ".v" : "", lhs.bf_ty, lhs.bf_unit, lhs.s,
                    lhs.bf_boff, lhs.bf_width, val));
@@ -1189,6 +1245,8 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
   return ir_mk_value(ir_let(ir_valtext(t), ir_fmt("(offset %s %lu)", base, off)), t);
 }
 
+static ir_val ir_i128_const(a_constant_ptr c, a_type_ptr t);
+
 /* A constant of type t (an expression constant or an initializer element). */
 static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
 {
@@ -1196,6 +1254,7 @@ static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
     case ck_integer:
       if (ir_is_x87(t)) return ir_gap(t, "integer constant of type long double", 3, ck_integer);
       ir_note(3, ck_integer, 1);
+      if (ir_is_i128(t)) return ir_i128_const(c, t);
       return ir_const_value(c, t);
     case ck_float:
       if (ir_is_x87(t)) {
@@ -1325,6 +1384,198 @@ static ir_val ir_lval(an_expr_node_ptr e)
   return ir_gap(e->type, "lvalue", 2, (int)e->kind);
 }
 
+/* ---- __int128 and unsigned __int128: operations are calls of the helpers in be/nfcxx_ldrt.c
+   (docs/notes/pathb-int128.md). A value is the address of a 16-byte object, as for a long double. ---- */
+
+/* (eval (call void &"__nfcxx_i128_NAME" ARGS)): a helper that writes its result through its first argument. */
+static void ir_i128_call(const char *name, const char *args)
+{
+  ir_emit(ir_fmt("(eval (call void &\"__nfcxx_i128_%s\" %s))", name, args));
+}
+
+/* (call RTY &"__nfcxx_i128_NAME" ARGS): a helper that returns a scalar. */
+static char *ir_i128_ret(const char *rty, const char *name, const char *args)
+{
+  return ir_let(rty, ir_fmt("(call %s &\"__nfcxx_i128_%s\" %s)", rty, name, args));
+}
+
+/* The 128-bit value lo + hi * 2^64 of type t in a fresh object: two 64-bit stores, as for a long double constant. */
+static ir_val ir_i128_lit(a_type_ptr t, unsigned long lo, unsigned long hi)
+{
+  ir_val tmp = ir_temp(t);
+  ir_val up = ir_subobject(tmp.s, 8, integer_type(ik_unsigned_long), 0);
+  ir_emit(ir_fmt("(store unsigned_long %s (const unsigned_long %lu))", tmp.s, lo));
+  ir_emit(ir_fmt("(store unsigned_long %s (const unsigned_long %lu))", up.s, hi));
+  return ir_mk_value(tmp.s, t);
+}
+
+/* The two 64-bit halves of an integer constant. EDG prints the value in decimal, or in hex ("0x..." for some values), with
+   a '-' for a negative one. The value is accumulated in four 32-bit limbs (least significant first), so no 128-bit host
+   type is needed. */
+static void ir_i128_parts(a_constant_ptr c, unsigned long *lo, unsigned long *hi)
+{
+  const char *s = ir_capture_constant(c);
+  unsigned long limb[4] = { 0, 0, 0, 0 };
+  int neg = 0, i, base = 10;
+  if (*s == '-') {
+    neg = 1;
+    s++;
+  }
+  if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+    base = 16;
+    s += 2;
+  }
+  for (;; s++) {
+    unsigned long carry;
+    if (*s >= '0' && *s <= '9') carry = (unsigned long)(*s - '0');
+    else if (base == 16 && *s >= 'a' && *s <= 'f') carry = (unsigned long)(*s - 'a' + 10);
+    else if (base == 16 && *s >= 'A' && *s <= 'F') carry = (unsigned long)(*s - 'A' + 10);
+    else break;
+    for (i = 0; i < 4; i++) {
+      unsigned long t = limb[i] * (unsigned long)base + carry;
+      limb[i] = t & 0xffffffffUL;
+      carry = t >> 32;
+    }
+  }
+  if (neg) { /* two's complement: invert and add one */
+    unsigned long carry = 1;
+    for (i = 0; i < 4; i++) {
+      unsigned long t = (~limb[i] & 0xffffffffUL) + carry;
+      limb[i] = t & 0xffffffffUL;
+      carry = t >> 32;
+    }
+  }
+  *lo = limb[0] | (limb[1] << 32);
+  *hi = limb[2] | (limb[3] << 32);
+}
+
+static ir_val ir_i128_const(a_constant_ptr c, a_type_ptr t)
+{
+  unsigned long lo, hi;
+  ir_i128_parts(c, &lo, &hi);
+  return ir_i128_lit(t, lo, hi);
+}
+
+/* An integer value as a long (a shift count, an index): a 128-bit one through the helper, which gives -1 when the value
+   does not fit a long (the shift or bounds check then aborts, as for any other value out of range). */
+static char *ir_i128_count(ir_val v)
+{
+  if (ir_is_i128(v.t)) return ir_i128_ret("long", "count", v.s);
+  if (strcmp(v.ty, "long") == 0) return v.s;
+  return ir_let("long", ir_fmt("(iconv long %s)", v.s));
+}
+
+/* Conversion of a value a (of type a.t; NULL for a bool) to dst, where one of the two is a 128-bit integer. */
+static ir_val ir_i128_conv(ir_val a, a_type_ptr dst)
+{
+  int sg;
+  if (ir_is_i128(dst)) {
+    ir_val d;
+    if (ir_is_i128(a.t)) return ir_mk_value(a.s, dst);
+    d = ir_temp(dst);
+    if (a.t == NULL || ir_is_integer(a.t)) {
+      char *w = a.s;
+      sg = a.t != NULL && ir_is_signed(a.t);
+      if (a.t == NULL || ir_size_of(a.t) < 8) w = ir_let(sg ? "long" : "unsigned_long", ir_fmt("(iconv %s %s)", sg ? "long" : "unsigned_long", a.s));
+      ir_i128_call(sg ? "from_s64" : "from_u64", ir_fmt("%s %s", d.s, w));
+    } else if (ir_is_float(a.t)) { /* the destination's signedness picks the range check */
+      int dsg = ir_is_signed(dst);
+      if (ir_size_of(a.t) == 4) ir_i128_call(dsg ? "from_f32_s" : "from_f32_u", ir_fmt("%s %s", d.s, a.s));
+      else ir_i128_call(dsg ? "from_f64_s" : "from_f64_u", ir_fmt("%s %s", d.s, a.s));
+    } else if (ir_is_x87(a.t)) {
+      ir_i128_call(ir_is_signed(dst) ? "from_ld_s" : "from_ld_u", ir_fmt("%s %s", d.s, a.s));
+    } else if (ir_is_pointer(a.t)) {
+      char *n = ir_let("unsigned_long", ir_fmt("(p2i unsigned_long %s)", a.s));
+      ir_i128_call("from_u64", ir_fmt("%s %s", d.s, n));
+    } else {
+      return ir_gap(dst, "conversion to 128-bit integer", 0, (int)eok_cast);
+    }
+    return ir_mk_value(d.s, dst);
+  }
+  /* from a 128-bit integer */
+  sg = ir_is_signed(a.t);
+  if (ir_is_bool(dst)) return ir_mk_bool(ir_to_bool(a));
+  if (ir_is_x87(dst)) {
+    ir_val d = ir_temp(dst);
+    ir_i128_call(sg ? "to_ld_s" : "to_ld_u", ir_fmt("%s %s", d.s, a.s));
+    return ir_mk_value(d.s, dst);
+  }
+  if (ir_is_integer(dst)) {
+    char *lo = ir_i128_ret("unsigned_long", "lo64", a.s);
+    if (strcmp(ir_valtext(dst), "unsigned_long") == 0) return ir_mk_value(lo, dst);
+    return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), lo)), dst);
+  }
+  if (ir_is_float(dst)) {
+    const char *nm = ir_size_of(dst) == 4 ? (sg ? "to_f32_s" : "to_f32_u") : (sg ? "to_f64_s" : "to_f64_u");
+    return ir_mk_value(ir_i128_ret(ir_valtext(dst), nm, a.s), dst);
+  }
+  if (ir_is_pointer(dst)) {
+    char *lo = ir_i128_ret("unsigned_long", "lo64", a.s);
+    return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(i2p %s %s)", ir_valtext(dst), lo)), dst);
+  }
+  return ir_gap(dst, "conversion from 128-bit integer", 0, (int)eok_cast);
+}
+
+/* The 128-bit form of v: v itself, or its conversion to t. */
+static ir_val ir_as_i128(ir_val v, a_type_ptr t)
+{
+  if (ir_is_i128(v.t)) return v;
+  return ir_i128_conv(v, t);
+}
+
+/* Arithmetic of kind k on 128-bit values; rt is the result type (the left operand's type for a shift). *ok is 0 for an
+   operator that is not lowered. Division truncates toward zero, and a zero divisor traps in libgcc's __divti3 exactly as
+   it does in a program built by gcc (the same helper is called there). */
+static ir_val ir_i128_arith(an_expr_operator_kind k, a_type_ptr rt, ir_val a, ir_val b, int *ok)
+{
+  int sg = ir_is_signed(rt);
+  const char *op = NULL;
+  ir_val d;
+  *ok = 1;
+  switch (k) {
+    case eok_add: op = "add"; break;
+    case eok_subtract: op = "sub"; break;
+    case eok_multiply: op = "mul"; break;
+    case eok_divide: op = sg ? "div_s" : "div_u"; break;
+    case eok_remainder: op = sg ? "rem_s" : "rem_u"; break;
+    case eok_and: op = "and"; break;
+    case eok_or: op = "or"; break;
+    case eok_xor: op = "xor"; break;
+    case eok_shiftl: op = "shl"; break;
+    case eok_shiftr: op = sg ? "shr_s" : "shr_u"; break;
+    default: *ok = 0; return ir_mk_void();
+  }
+  a = ir_as_i128(a, rt);
+  d = ir_temp(rt);
+  if (k == eok_shiftl || k == eok_shiftr) {
+    ir_i128_call(op, ir_fmt("%s %s %s", d.s, a.s, ir_i128_count(b)));
+  } else {
+    b = ir_as_i128(b, rt);
+    ir_i128_call(op, ir_fmt("%s %s %s", d.s, a.s, b.s));
+  }
+  return ir_mk_value(d.s, rt);
+}
+
+/* Comparison of 128-bit values (one of the operands is one). The helper returns 0 or 1. */
+static ir_val ir_i128_compare(an_expr_operator_kind k, ir_val a, ir_val b)
+{
+  a_type_ptr t = ir_is_i128(a.t) ? a.t : b.t;
+  int sg = ir_is_signed(t);
+  ir_val x, y;
+  const char *nm;
+  x = ir_as_i128(a, t);
+  y = ir_as_i128(b, t);
+  switch (k) {
+    case eok_eq: nm = "eq"; break;
+    case eok_ne: nm = "ne"; break;
+    case eok_lt: nm = sg ? "lt_s" : "lt_u"; break;
+    case eok_le: nm = sg ? "le_s" : "le_u"; break;
+    case eok_gt: nm = sg ? "lt_s" : "lt_u"; { ir_val s = x; x = y; y = s; } break;
+    default: nm = sg ? "le_s" : "le_u"; { ir_val s = x; x = y; y = s; } break; /* eok_ge */
+  }
+  return ir_mk_bool(ir_let("bool", ir_fmt("(ne int %s (const int 0))", ir_i128_ret("int", nm, ir_fmt("%s %s", x.s, y.s)))));
+}
+
 /* Arithmetic mnemonic for an operator on type t, or NULL when it is not lowered. */
 static const char *ir_arith_name(an_expr_operator_kind k, a_type_ptr t)
 {
@@ -1376,6 +1627,12 @@ static ir_val ir_arith(an_expr_operator_kind k, a_type_ptr rt, ir_val a, ir_val 
 {
   const char *mn;
   if (ir_is_x87(rt)) return ir_x87_arith(k, rt, a, b, ok);
+  if (ir_is_i128(rt)) return ir_i128_arith(k, rt, a, b, ok);
+  if ((k == eok_shiftl || k == eok_shiftr) && ir_is_i128(b.t)) { /* a 128-bit count for a narrower left operand */
+    char *cnt = ir_i128_count(b);
+    if (strcmp(ir_valtext(rt), "long") != 0) cnt = ir_let(ir_valtext(rt), ir_fmt("(iconv %s %s)", ir_valtext(rt), cnt));
+    b = ir_mk_value(cnt, rt);
+  }
   mn = ir_arith_name(k, rt);
   *ok = mn != NULL;
   if (mn == NULL) return ir_mk_void();
@@ -1393,6 +1650,7 @@ static ir_val ir_compare(an_expr_operator_kind k, ir_val a, ir_val b)
     char *r = ir_ld_ret("int", nm, ir_fmt("%s %s", a.s, b.s));
     return ir_mk_bool(ir_let("bool", ir_fmt("(ne int %s (const int 0))", r)));
   }
+  if (ir_is_i128(a.t) || ir_is_i128(b.t)) return ir_i128_compare(k, a, b);
   if (ir_is_float(a.t)) suffix = "f";
   else if (ir_is_signed(a.t)) suffix = "s";
   switch (k) {
@@ -1510,6 +1768,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       if (ir_is_aggregate(a0->type)) base = ir_lval(a0);
       else base = ir_rval(a0);
       idx = ir_rval(a1);
+      if (ir_is_i128(idx.t)) idx = ir_mk_value(ir_i128_count(idx), integer_type(ik_long));
       /* A subscript of array_to_pointer(array N) is checked against N. Pointers carry no length. */
       if (a0->kind == enk_operation && a0->variant.operation.kind == eok_array_to_pointer) {
         an_expr_node_ptr arr = ir_operand(a0, 0);
@@ -1648,6 +1907,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_void();
     }
     case eok_va_arg:
+      if (ir_is_i128(e->type)) return ir_gap(e->type, "op va_arg (__int128)", 0, (int)k);
       if (ir_is_x87(e->type)) { /* 16 bytes in the overflow area: a helper reads them with the C compiler's va_arg */
         ir_val d = ir_temp(e->type);
         ir_note(0, k, 1);
@@ -1714,6 +1974,11 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
         ir_ld_call("neg", ir_fmt("%s %s", d.s, a.s));
         return ir_mk_value(d.s, e->type);
       }
+      if (ir_is_i128(e->type)) {
+        ir_val d = ir_temp(e->type);
+        ir_i128_call(k == eok_complement ? "not" : "neg", ir_fmt("%s %s", d.s, a.s));
+        return ir_mk_value(d.s, e->type);
+      }
       if (k == eok_complement) {
         return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(not %s %s)", ir_valtext(e->type), a.s)), e->type);
       }
@@ -1729,6 +1994,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       /* A bool operand has no EDG type (a.t is NULL): compare it with false. */
       if (a.t == NULL) return ir_mk_bool(ir_let("bool", ir_fmt("(eq bool %s (const bool 0))", a.s)));
       if (ir_is_x87(a.t)) return ir_mk_bool(ir_let("bool", ir_fmt("(eq int %s (const int 0))", ir_ld_ret("int", "nz", a.s))));
+      if (ir_is_i128(a.t)) return ir_mk_bool(ir_let("bool", ir_fmt("(eq int %s (const int 0))", ir_i128_ret("int", "nz", a.s))));
       return ir_mk_bool(ir_let("bool", ir_fmt("(eq %s %s %s)", a.ty, a.s, ir_zero(a.t))));
     }
     case eok_eq:
@@ -1746,7 +2012,9 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
     case eok_psubtract: {
       ir_val p = ir_rval(a0);
       ir_val i = ir_rval(a1);
-      char *idx = i.s;
+      char *idx;
+      if (ir_is_i128(i.t)) i = ir_mk_value(ir_i128_count(i), integer_type(ik_long));
+      idx = i.s;
       a_type_ptr elem = skip_typerefs(e->type)->variant.pointer.type;
       ir_note(0, k, 1);
       if (k == eok_psubtract) idx = ir_let(i.ty, ir_fmt("(wneg %s %s)", i.ty, i.s));
@@ -1829,6 +2097,7 @@ static ir_val ir_x87_conv(ir_val a, a_type_ptr dst);
 static ir_val ir_conv_num(ir_val a, a_type_ptr dst)
 {
   if (strcmp(ir_valtext(dst), a.ty) == 0) return ir_mk_value(a.s, dst);
+  if (ir_is_i128(dst) || ir_is_i128(a.t)) return ir_i128_conv(a, dst);
   if (ir_is_x87(dst) || ir_is_x87(a.t)) return ir_x87_conv(a, dst);
   if (ir_is_integer(dst)) {
     if (ir_is_float(a.t)) return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(cf2i %s %s)", ir_valtext(dst), a.s)), dst);
@@ -1892,6 +2161,7 @@ static ir_val ir_assign(an_expr_node_ptr e, int want_addr)
     rhs = ir_rval(a1);
     lhs = ir_lval(a0);
     cur = ir_load(lhs);
+    if ((base == eok_padd || base == eok_psubtract) && ir_is_i128(rhs.t)) rhs = ir_mk_value(ir_i128_count(rhs), integer_type(ik_long));
     if (base == eok_padd || base == eok_psubtract) {
       char *idx = rhs.s;
       a_type_ptr elem = skip_typerefs(lhs.t)->variant.pointer.type;
@@ -1925,6 +2195,11 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
   if (ir_is_pointer(lhs.t)) {
     a_type_ptr elem = skip_typerefs(lhs.t)->variant.pointer.type;
     nv = ir_ptr_add(cur.s, inc ? "(const long 1)" : "(const long -1)", lhs.t, elem);
+  } else if (ir_is_i128(lhs.t)) {
+    int ok = 1;
+    ir_val one = ir_i128_lit(lhs.t, 1, 0);
+    nv = ir_arith(inc ? eok_add : eok_subtract, lhs.t, cur, one, &ok);
+    if (!ok) return ir_gap(e->type, "incr", 0, (int)e->variant.operation.kind);
   } else if (ir_is_integer(lhs.t) && !ir_is_bool(lhs.t)) {
     int ok = 1;
     char *one = ir_fmt("(const %s 1)", ir_valtext(lhs.t));
@@ -2071,7 +2346,7 @@ static ir_val ir_bit_builtin(an_expr_node_ptr e, int kind, int bits)
   const char *st = bits == 64 ? "long" : "int";
   ir_val a;
   char *x, *r = NULL;
-  if (arg == NULL || ir_operand(e, 2) != NULL || !ir_is_integer(arg->type)) return ir_gap(e->type, "builtin bit operation (arguments)", 0, (int)eok_call);
+  if (arg == NULL || ir_operand(e, 2) != NULL || !ir_is_integer(arg->type) || ir_is_i128(arg->type)) return ir_gap(e->type, "builtin bit operation (arguments)", 0, (int)eok_call);
   a = ir_rval(arg);
   if (kind == 7) ut = "unsigned_int"; /* bswap16 works in 32 bits and narrows at the end */
   x = ir_cv(ut, a.s);
@@ -2928,6 +3203,7 @@ static char *ir_abi_ty(a_type_ptr t)
 {
   ir_abi_note(t);
   if (ir_x87_mem(t)) return (char *)"(struct \"__nfcxx_ld\")";
+  if (ir_is_i128(t)) return (char *)"(struct \"__nfcxx_i128\")";
   return ir_capture_type(t, 1);
 }
 
@@ -2981,6 +3257,11 @@ static int ir_x87_param(a_type_ptr t, int *ints, int *sse, unsigned long *stack)
   al = ir_align_of(s);
   if (ir_x87_mem(s)) {
     *stack = (*stack + 15) / 16 * 16 + 16;
+    return 1;
+  }
+  if (ir_is_i128(s)) { /* two integer registers, or 16 bytes of stack aligned to 16 when fewer than two are left */
+    if (*ints + 2 <= 6) *ints += 2;
+    else *stack = (*stack + 15) / 16 * 16 + 16;
     return 1;
   }
   if (s->kind == tk_integer || s->kind == tk_pointer || s->kind == tk_nullptr) {
@@ -3110,7 +3391,7 @@ static ir_val ir_call(an_expr_node_ptr e)
   char *args = ir_dup("");
   int xk = ir_x87_kind(e->type);
   if (xk == 2 && f->kind == enk_routine && ir_x87_rout_kind(f->variant.routine.ptr) == 0) xk = 0; /* EDG runtime: sret */
-  int agg_ret = ir_is_aggregate(e->type) && xk == 0;
+  int agg_ret = ir_is_cabi_agg(e->type) && xk == 0;
   int x87_ret = xk != 0;
   int x87_first = 0; /* variadic callee: the result pointer is the first argument */
   const char *thunk_sym = NULL; /* x87 result of a routine defined elsewhere: the C symbol the call thunk calls */
@@ -3230,7 +3511,7 @@ static ir_val ir_roof(an_expr_node_ptr e)
   a_scope_ptr scope = ir_cur_rout != NULL ? scope_for_routine(ir_cur_rout) : NULL;
   a_variable_ptr param;
   char *args = ir_dup("");
-  int agg_ret = ir_is_aggregate(e->type);
+  int agg_ret = ir_is_cabi_agg(e->type);
   ir_val sret = ir_mk_void();
   char *callee;
   a_type_ptr ft;
@@ -3281,6 +3562,10 @@ static ir_val ir_cast(an_expr_node_ptr e)
   if (ir_is_aggregate(dst)) {
     ir_note(0, eok_cast, 1);
     return ir_mk_value(a.s, dst);
+  }
+  if (ir_is_i128(dst) || ir_is_i128(a.t)) {
+    ir_note(0, eok_cast, 1);
+    return ir_i128_conv(a, dst);
   }
   if (ir_is_x87(dst) || (ir_is_x87(a.t) && !ir_is_void(dst))) {
     ir_note(0, eok_cast, 1);
@@ -3592,6 +3877,12 @@ static int ir_abi_collect(a_type_ptr t, unsigned long base, ir_leaf *lv, int *n,
   switch (s->kind) {
     case tk_integer: {
       char k = sz == 1 ? 'b' : sz == 2 ? 'h' : sz == 4 ? 'w' : sz == 8 ? 'l' : 0;
+      if (sz == 16 && !is_bool_type(s)) { /* __int128: two INTEGER eightbytes (docs/notes/pathb-int128.md) */
+        if (*n + 2 > IR_LEAF_MAX) { *why = "too many members"; return 0; }
+        lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+        lv[*n].off = base + 8; lv[*n].kind = 'l'; (*n)++;
+        return 1;
+      }
       if (k == 0) { *why = "integer type of this size"; return 0; }
       if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
       lv[*n].off = base; lv[*n].kind = k; (*n)++;
@@ -3627,6 +3918,21 @@ static int ir_abi_collect(a_type_ptr t, unsigned long base, ir_leaf *lv, int *n,
       int cnt = ir_class_members(t, mem, 256), i, j;
       if (cnt < 0) { *why = "virtual base"; return 0; }
       for (i = 0; i < cnt; i++) {
+        if (mem[i].bf != NULL && ir_is_i128(mem[i].t)) {
+          /* A 128-bit bit-field makes every eightbyte its bits touch INTEGER: a byte leaf at the first byte of each
+             (docs/notes/pathb-int128.md). */
+          unsigned long sbit = (base + (unsigned long)mem[i].bf->offset) * 8UL + (unsigned long)mem[i].bf->offset_bit_remainder;
+          unsigned long b0 = sbit / 8, b1 = (sbit + (unsigned long)mem[i].bf->bit_size - 1) / 8, eb;
+          for (eb = b0 / 8; eb <= b1 / 8; eb++) {
+            unsigned long off = eb == b0 / 8 ? b0 : eb * 8, j2;
+            int dup = 0;
+            for (j2 = 0; j2 < (unsigned long)*n; j2++) if (lv[j2].off == off) dup = 1;
+            if (dup) continue;
+            if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+            lv[*n].off = off; lv[*n].kind = 'b'; (*n)++;
+          }
+          continue;
+        }
         if (mem[i].bf != NULL) {
           /* A bit-field only makes its eightbyte INTEGER: one byte leaf at its byte offset (the size of the type is
              declared separately). Several fields in one byte give one leaf. */
@@ -3800,6 +4106,16 @@ static void ir_abi_note(a_type_ptr t)
     }
     return;
   }
+  if (ir_is_i128(t)) { /* __int128: two INTEGER eightbytes (System V), passed and returned in rax:rdx like a pair */
+    static int done;
+    if (!done) {
+      done = 1;
+      ir_buf_begin(&ir_out_types);
+      fputs("(abi-type \"__nfcxx_i128\" 16 16 (leaf 0 l) (leaf 8 l))\n", nf_out);
+      ir_buf_end(&ir_out_types);
+    }
+    return;
+  }
   char *txt, *q1, *q2;
   ir_leaf lv[IR_LEAF_MAX];
   int n = 0, i;
@@ -3907,7 +4223,7 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
     }
     for (; i < n; i++) {
       if (mem[i].bf != NULL) {
-        ir_store_lv(ir_bf_lval(dst.s, mem[i].bf, t, mem[i].t, 0), ir_zero(mem[i].t));
+        ir_store_lv(ir_bf_lval(dst.s, mem[i].bf, t, mem[i].t, 0), ir_is_i128(mem[i].t) ? ir_i128_lit(mem[i].t, 0, 0).s : ir_zero(mem[i].t));
         continue;
       }
       ir_zero_object(ir_subobject(dst.s, mem[i].off, mem[i].t, 0), mem[i].t);
@@ -3997,6 +4313,28 @@ static void ir_gi_unsupported(const char *what)
   fprintf(nf_out, "\n    (unsupported init %s)", what);
 }
 
+/* A 128-bit bit-field of a static object at byte offset off, initialized to the integer constant c: one (bitfield ...)
+   item per byte the field touches (the emitter puts each bit at its absolute position). Returns the byte after the field. */
+static unsigned long ir_gi_i128_bits(unsigned long off, a_field_ptr f, a_constant_ptr c)
+{
+  unsigned long lo, hi, start, width, i = 0;
+  ir_i128_parts(c, &lo, &hi);
+  start = off * 8UL + (unsigned long)f->offset * 8UL + (unsigned long)f->offset_bit_remainder;
+  width = (unsigned long)f->bit_size;
+  while (i < width) {
+    unsigned long pos = start + i, bo = pos % 8, w = 8 - bo, v = 0, k;
+    if (w > width - i) w = width - i;
+    for (k = 0; k < w; k++) {
+      unsigned long bit = i + k;
+      unsigned long b = bit < 64 ? (lo >> bit) & 1UL : (hi >> (bit - 64)) & 1UL;
+      v |= b << k;
+    }
+    fprintf(nf_out, "\n    (bitfield %lu 1 %lu %lu unsigned_char (const unsigned_char %lu))", pos / 8, bo, w, v);
+    i += w;
+  }
+  return (start + width + 7) / 8 - off;
+}
+
 static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
 {
   const char *target = NULL;
@@ -4010,6 +4348,14 @@ static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
     unsigned long lo, hi;
     ir_x87_bytes(c, &lo, &hi);
     ir_note(3, ck_float, 1);
+    fprintf(nf_out, "\n    (scalar %lu unsigned_long (const unsigned_long %lu))", off, lo);
+    fprintf(nf_out, "\n    (scalar %lu unsigned_long (const unsigned_long %lu))", off + 8, hi);
+    return;
+  }
+  if (c->kind == ck_integer && ir_is_i128(t)) { /* two 64-bit items (docs/notes/pathb-int128.md) */
+    unsigned long lo, hi;
+    ir_i128_parts(c, &lo, &hi);
+    ir_note(3, ck_integer, 1);
     fprintf(nf_out, "\n    (scalar %lu unsigned_long (const unsigned_long %lu))", off, lo);
     fprintf(nf_out, "\n    (scalar %lu unsigned_long (const unsigned_long %lu))", off + 8, hi);
     return;
@@ -4106,6 +4452,11 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
       return;
     }
     for (ce = c->variant.aggregate.first_constant; ce != NULL && i < n; ce = ce->next, i++) {
+      if (mem[i].bf != NULL && ir_is_i128(mem[i].t)) {
+        if (ce->kind != ck_integer) ir_gi_unsupported("bitfield");
+        else ir_gi_i128_bits(off, mem[i].bf, ce);
+        continue;
+      }
       if (mem[i].bf != NULL) {
         unsigned long uoff = 0;
         unsigned unit = 0, boff = 0;
@@ -4138,7 +4489,13 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
     a_field_ptr f = ir_union_member(t, c, &val);
     unsigned long usz = ir_size_of(t), done = 0;
     if (f != NULL && val != NULL) {
-      if (f->is_bit_field) {
+      if (f->is_bit_field && ir_is_i128(f->type)) {
+        if (val->kind != ck_integer) {
+          ir_gi_unsupported("bitfield");
+          return;
+        }
+        done = ir_gi_i128_bits(off, f, val);
+      } else if (f->is_bit_field) {
         unsigned long uoff = 0;
         unsigned unit = 0, boff = 0;
         if (val->kind != ck_integer || !ir_bf_layout(f, usz, &uoff, &unit, &boff)) {
@@ -4222,6 +4579,82 @@ static void ir_global_print(a_variable_ptr var, const char *name)
 /* ================================================================ statements */
 
 static void ir_stmt(a_statement_ptr s, int d);
+
+/* switch on a 128-bit value (docs/notes/pathb-int128.md). The IR's switch selects on a scalar, so the selector is the low
+   64 bits when the value is the sign extension of them (a 64-bit value: the case labels are then longs), and a value no
+   case label has otherwise, which lands on default. The labels of the switch are collected while its body is lowered
+   (into a buffer, written after the selector is known). ir_sw holds one frame per open switch statement. */
+#define IR_SW_MAX 1024
+#define IR_SW_DEPTH 64
+struct ir_swframe {
+  int wide;
+  int n;
+  unsigned long vals[IR_SW_MAX];
+};
+static struct ir_swframe ir_sw[IR_SW_DEPTH];
+static int ir_sw_n;
+
+static void ir_sw_push(int wide)
+{
+  if (ir_sw_n >= IR_SW_DEPTH) abort();
+  ir_sw[ir_sw_n].wide = wide;
+  ir_sw[ir_sw_n].n = 0;
+  ir_sw_n++;
+}
+
+static void ir_sw_pop(void)
+{
+  ir_sw_n--;
+}
+
+static void ir_sw_record(unsigned long lo)
+{
+  struct ir_swframe *f = &ir_sw[ir_sw_n - 1];
+  if (f->n < IR_SW_MAX) f->vals[f->n++] = lo;
+}
+
+/* The switch statement s whose selector v (a 128-bit value, the address of its object) is already lowered at depth d. */
+static void ir_switch_wide(a_statement_ptr s, ir_val v, int d)
+{
+  ir_val t;
+  char *sl, *fits, *cb, *sel;
+  ir_buf body;
+  unsigned long cand = 0x8000000000000000UL;
+  int i, clash;
+  struct ir_swframe *f;
+  sl = ir_let("long", ir_fmt("(iconv long %s)", ir_i128_ret("unsigned_long", "lo64", v.s)));
+  t = ir_temp(v.t);
+  ir_i128_call("from_s64", ir_fmt("%s %s", t.s, sl));
+  fits = ir_i128_ret("int", "eq", ir_fmt("%s %s", v.s, t.s));
+  cb = ir_let("bool", ir_fmt("(ne int %s (const int 0))", fits));
+  ir_sw_push(1);
+  ir_buf_open(&body);
+  ir_buf_begin(&body);
+  ir_line(d + 1, "(body");
+  ir_stmt(s->variant.switch_stmt.body_statement, d + 2);
+  ir_close(1);
+  ir_buf_end(&body);
+  f = &ir_sw[ir_sw_n - 1];
+  do { /* a value no label has */
+    clash = 0;
+    for (i = 0; i < f->n; i++) if (f->vals[i] == cand) clash = 1;
+    if (clash) cand++;
+  } while (clash);
+  ir_sw_pop();
+  ir_depth = d;
+  sel = ir_let("long", ir_fmt("(const long %ld)", (long)cand));
+  ir_line(d, ir_fmt("(if %s", cb));
+  ir_line(d + 1, "(then");
+  ir_depth = d + 2;
+  ir_emit(ir_fmt("(set %s %s)", sel, sl));
+  ir_close(1);
+  ir_close(1);
+  ir_depth = d;
+  ir_line(d, ir_fmt("(switch %s", sel));
+  ir_buf_write(&body, nf_out);
+  ir_buf_close(&body);
+  ir_close(1);
+}
 
 /* `continue`. The lowered IL turns it into a goto to an unnamed label that ends the loop body. Each loop on the
    way down pushes that label (NULL when its body has none); a goto to the innermost loop's label prints as
@@ -4611,9 +5044,15 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_note(1, stmk_switch, 1);
       ir_depth = d;
       v = ir_rval(s->expr);
+      if (ir_is_i128(v.t)) { /* a 128-bit selector: see ir_switch_wide */
+        ir_switch_wide(s, v, d);
+        return;
+      }
       ir_line(d, ir_fmt("(switch %s", v.s));
       ir_line(d + 1, "(body");
+      ir_sw_push(0);
       ir_stmt(s->variant.switch_stmt.body_statement, d + 2);
+      ir_sw_pop();
       ir_close(1);
       ir_close(1);
       return;
@@ -4622,7 +5061,18 @@ static void ir_stmt(a_statement_ptr s, int d)
       a_switch_case_entry_ptr entry = s->variant.switch_case.extra_info;
       ir_note(1, stmk_switch_case, 1);
       if (entry != NULL && entry->case_value != NULL) {
-        ir_line(d, ir_fmt("(case %s)", ir_const_value(entry->case_value, entry->case_value->type).s));
+        if (ir_sw_n > 0 && ir_sw[ir_sw_n - 1].wide) { /* label of a 128-bit switch: a long, when it fits one */
+          unsigned long lo, hi;
+          ir_i128_parts(entry->case_value, &lo, &hi);
+          if (hi != ((long)lo < 0 ? ~0UL : 0UL) || ir_sw[ir_sw_n - 1].n >= IR_SW_MAX) {
+            ir_line(d, "(unsupported stmt switch-case-128)");
+          } else {
+            ir_sw_record(lo);
+            ir_line(d, ir_fmt("(case (const long %ld))", (long)lo));
+          }
+        } else {
+          ir_line(d, ir_fmt("(case %s)", ir_const_value(entry->case_value, entry->case_value->type).s));
+        }
       } else {
         ir_line(d, "(default)");
       }
@@ -4864,11 +5314,12 @@ static void ir_function(a_routine_ptr rout)
      byval: the register is the address of the callee's copy, and the variable is that copy. */
   ir_buf_open(&params);
   ir_buf_begin(&params);
-  if (ir_is_aggregate(ret) && !ir_x87_kind(ret)) {
+  if (ir_is_cabi_agg(ret) && !ir_x87_kind(ret)) {
     ir_sret = ir_newreg();
     ir_abi_note(ret);
     fprintf(nf_out, " (sret %s ", ir_sret);
-    nf_put_type(ret);
+    if (ir_is_i128(ret)) fputs(ir_abi_ty(ret), nf_out);
+    else nf_put_type(ret);
     fputc(')', nf_out);
   }
   if (ir_x87_kind(ret) && fn_type->variant.routine.extra_info != NULL && fn_type->variant.routine.extra_info->has_ellipsis) {
@@ -4884,7 +5335,7 @@ static void ir_function(a_routine_ptr rout)
     if (ir_is_memval(param->type)) {
       ir_abi_note(param->type);
       fputs(" (byval ", nf_out);
-      if (ir_x87_mem(param->type)) fputs(ir_abi_ty(param->type), nf_out);
+      if (ir_x87_mem(param->type) || ir_is_i128(param->type)) fputs(ir_abi_ty(param->type), nf_out);
       else nf_put_type(param->type);
       fputs("))", nf_out);
       ir_tab_put(&ir_slots, param, reg);
