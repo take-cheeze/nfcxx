@@ -96,10 +96,12 @@ delete it freely (not while another process is compiling).
   the dynamic linker against the host executable, so link it with `-rdynamic` (`nfcxx -rdynamic ...`). Inline
   members need nothing. `bind_method`/`bind_fn` avoid the requirement: they pass the member through a thunk.
 - With glibc older than 2.34 add `-ldl` (nfcxx's driver cannot currently find `libdl.so` for `-ldl`; use a newer glibc).
-- **Compile the library as part of the host's single translation unit** (`#include "nfceval.cpp"`, as
-  `tests/eval/host.cpp` does). Two nfcxx-compiled objects that both use hosted libstdc++ templates such as
-  `std::string` currently fail to link (duplicate `std::allocator<char>` members on gcc, duplicate `__cmp_cat_id`
-  on qbe); that is a driver problem outside this library (reproduce: `a1.cpp`/`a2.cpp` each including `<string>`).
+- The library is an ordinary second translation unit: compile `nfceval.cpp` together with the host
+  (`nfcxx -I lib/eval -rdynamic host.cpp lib/eval/nfceval.cpp -o host`) or as an object (`nfcxx -c`) linked later.
+  Several nfcxx-compiled objects that use libstdc++ templates such as `std::string` link, see `multi-tu.md`
+  (this used to fail with duplicate `std::allocator<char>` members on gcc and `__cmp_cat_id` on qbe, so the
+  library had to be `#include`d into the host's single translation unit; that still works and is tested by
+  `tests/eval/host_single.cpp`).
 - Host and snippet must be built by the same compiler and flags (same backend, same EDG, same libstdc++ headers):
   they exchange `std::string`, class objects and function pointers directly. Run the engine with the same
   `NFCXX_BACKEND` as the host was built with; an extra `--backend=` flag selects another but only works for types

@@ -68,8 +68,14 @@ extern void gamma_decl(void) __attribute__((__weak__));
 __attribute__((__weak__)) int *delta(void) { return 0; }
 struct S { int v; } __attribute__((__weak__)) obj;
 int not_weak(int y) { return y; }
+__attribute__((__weak__)) const unsigned cmp_id = sizeof(int);
+extern __attribute__((__weak__)) char lits[24];
+void (**retfn(int a))(void *) { return 0; }
+__attribute__((__weak__)) void (**retfn_weak(int a))(void *) { return 0; }
+extern __inline__ __attribute__((__always_inline__)) char *ext_inline(int n) { return 0; }
+static __inline__ int static_inline(int n) { return n; }
 EOF
-  printf 'alpha:\n\tret\nbeta:\n\tret\ngamma_decl:\nobj:\ndelta:\n\tret\n.Lx:\nnot_weak:\n  bad:\n' >"$tmp/edge.s"
+  printf 'cmp_id:\nlits:\nretfn:\nretfn_weak:\next_inline:\nstatic_inline:\nalpha:\n\tret\nbeta:\n\tret\ngamma_decl:\nobj:\ndelta:\n\tret\n.Lx:\nnot_weak:\n  bad:\n' >"$tmp/edge.s"
   cp "$tmp/edge.s" "$tmp/edge.py.s"; cp "$tmp/edge.s" "$tmp/edge.rb.s"
   python3 "$oracle/weak-symbols.py" "$tmp/edge.c" "$tmp/edge.py.s"
   "$mrb" "$root/scripts/weak-symbols.rb" "$tmp/edge.c" "$tmp/edge.rb.s"
