@@ -66,6 +66,12 @@ if [ -x "$tmp/sq" ]; then "$tmp/sq"; [ $? -eq 4 ] && ok "-lm program runs" || ba
 check "-fvisibility=hidden -fvisibility-inlines-hidden" \
   "$nfcxx" -fvisibility=hidden -fvisibility-inlines-hidden -c "$tmp/src/a.cpp" -o "$tmp/vis.o"
 
+# 8b. -include FILE (EGL/egl.h in Effekseer): the header is found through -isystem and its macros are visible
+printf '#define PRE_VALUE 42\n' > "$tmp/sys/pre.h"
+printf 'int main() { return PRE_VALUE; }\n' > "$tmp/src/pre_main.cpp"
+check "-include FILE" "$nfcxx" -isystem "$tmp/sys" -include pre.h "$tmp/src/pre_main.cpp" -o "$tmp/premain"
+if [ -x "$tmp/premain" ]; then "$tmp/premain"; [ $? -eq 42 ] && ok "-include header is used (exit 42)" || bad "-include header is used" "wrong exit"; fi
+
 # 9. CMake's compiler probe: a source on stdin preprocessed with -E -x c++ -
 check "-E -x c++ - (stdin)" sh -c "printf 'int probe_marker;\n' | '$nfcxx' -E -x c++ - | grep -q probe_marker"
 

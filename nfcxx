@@ -27,7 +27,7 @@ shared=0; pic=0; rdynamic=0; compile_only=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
-sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0
+sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=()
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
@@ -63,6 +63,7 @@ while [ $# -gt 0 ]; do
     -MP) depphony=-MP ;;
     -MF) dfile=$2; shift ;;
     -MT|-MQ) dtarget=$2; shift ;;
+    -include) preinc+=("$2"); shift ;;   # EDG's --preinclude (the front end only; same macros and declarations)
     -isystem) sysdirs+=("$2"); shift ;;
     -isystem?*) sysdirs+=("${1#-isystem}") ;;
     # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
@@ -81,8 +82,9 @@ if [ $preprocess = 1 ]; then
   pp_out=(); [ $outset = 0 ] || pp_out=(-o "$out")
   pp_x=(); [ -z "$xlang" ] || pp_x=(-x "$xlang")
   pp_in=(); [ $stdin_src = 0 ] || pp_in=(-)
+  pp_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pp_pre+=(-include "$f"); done
   exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+"${pp_x[@]}"} ${ppflags[@]+"${ppflags[@]}"} ${cflags[@]+"${cflags[@]}"} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+"${srcs[@]}"} ${pp_in[@]+"${pp_in[@]}"} "${pp_out[@]}"
+    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+"${pp_pre[@]}"} ${srcs[@]+"${srcs[@]}"} ${pp_in[@]+"${pp_in[@]}"} "${pp_out[@]}"
 fi
 if [ $stdin_src = 1 ]; then
   echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
@@ -129,6 +131,7 @@ else
 fi
 # -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
 for d in ${sysdirs[@]+"${sysdirs[@]}"}; do sys_inc+=("--sys_include=$d"); done
+pre_opts=(); for f in ${preinc[@]+"${preinc[@]}"}; do pre_opts+=(--preinclude "$f"); done
 gnu_opts=()
 [ -n "$gnu" ] && gnu_opts=(--gnu_version="$gnu")
 [ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
@@ -242,7 +245,7 @@ fi
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
+  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} "${files[@]}" ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
