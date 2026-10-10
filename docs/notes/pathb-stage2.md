@@ -251,11 +251,13 @@ NULL) stays `(unsupported stmt stmt_expr_result)`; this EDG build did not produc
 
 **Inline asm** (`stmk_asm`). QBE has no inline assembly, so only the subset that does nothing but constrain the compiler
 is lowered: an empty template (blank characters only), no operands, no labels, clobbers `"memory"` and/or `"cc"`, or a
-basic `asm("")` (gcc treats a basic asm as clobbering memory). With the `"memory"` clobber (or a basic asm) it prints
-`(barrier)`, a compiler barrier; without it, the statement prints nothing (it constrains no memory). Everything else
-prints `(unsupported stmt REASON)` with `REASON` one of `asm-template` (a non-empty template), `asm-operands`
-(inputs or outputs), `asm-clobbers` (a register clobber) or `asm-goto`, and the emitter refuses the module with that
-text (`refused: (unsupported stmt asm-operands)`; it used to say only `statement (unsupported ...)`). An asm with outputs
+basic `asm("")` (gcc treats a basic asm as clobbering memory), and the single no-effect instructions `pause`, `rep nop`,
+`rep; nop`, `nop` (no operands, at most memory / cc clobbers: a spin-wait hint is not observable). With the `"memory"` clobber (or a basic
+asm, or one of those instructions) it prints `(barrier)`, a compiler barrier; an empty template without it prints nothing (it
+constrains no memory). Everything else prints `(unsupported stmt REASON)` with `REASON` one of `asm-template` (a non-empty
+template, followed by its text: `asm-template "mfence"`), `asm-operands` (inputs or outputs), `asm-clobbers` (a register clobber)
+or `asm-goto`, and the emitter refuses the module with that text (`refused: (unsupported stmt asm-operands)`; it used to say only
+`statement (unsupported ...)`). An asm with outputs
 or a template cannot be implemented on QBE at all: it would need an assembler template inserted into QBE's output. The
 emitter's `(barrier)` is a call of an empty module-local function `$__pathb_barrier` (emitted once per module with the
 volatile helpers): QBE cannot look into a call or reorder it, and the call has no operands, so no stack slot escapes.
@@ -304,6 +306,8 @@ RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
             | (iconv|bitcast|i2p|p2i|cf2i|i2f|u2f|fconv TYPE A)               conversions
             | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
+            | (alloca SIZE)                                                  __builtin_alloca: SIZE bytes of dynamic stack, live until return (QBE alloc16)
+            | (vaarg TYPE ADDR)                                              scalar va_arg of the System V va_list at ADDR; aggregates are spelled in IR
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
             | (array N TYPE) | (array ? TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]

@@ -41,6 +41,15 @@ sed 's/attribute\.c c_gen_be\.c cfe\.c/attribute.c nfcxx_be.c nfcxx_ir.c cfe.c/'
 grep -q 'attribute.c nfcxx_be.c nfcxx_ir.c cfe.c' "$tree/src/CMakeLists.txt" || { echo "setup-pathb: CORE list patch failed" >&2; exit 1; }
 cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"/be/nfcxx_ir.c "$root"/be/nfcxx_names.h "$tree/src/"
 
+# 1b. lower_routine() asserts that it is never handed a routine the back end ignores (a prototype instantiation or a
+# consteval function). The chain of alternate entry points it walks ("the thunks follow on the next pointer") can run on into
+# the routine list and reach one: a generic lambda's closure members inside std::visit with a functor, <chrono> in C++20
+# and later (internal error at lower_il.c:10294, "struct _Guard" of basic_string.tcc or the variant's lambda). The C
+# generator never gets there; such a routine is skipped instead, as lower_routine_list() already does.
+rm -f "$tree/src/lower_il.c"
+sed 's|check_assertion(!ignore_routine_in_back_end(routine));|if (ignore_routine_in_back_end(routine)) return;|' "$src/src/lower_il.c" > "$tree/src/lower_il.c"
+grep -q 'if (ignore_routine_in_back_end(routine)) return;' "$tree/src/lower_il.c" || { echo "setup-pathb: lower_il.c patch failed" >&2; exit 1; }
+
 # 2. Macro config. Same lowering options as linux-gcc-release, but the C back end (and its C++ sibling) off.
 cat > "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'
 import <linux-gcc-release/base>

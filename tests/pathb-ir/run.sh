@@ -52,6 +52,26 @@ else
     echo "DIFF tests/pathb-ir/gaps.cpp"; head -40 "$tmp/gaps.diff"; fail=1
   fi
 fi
+# Built-ins and va_arg lowered without a library call, and the inline asm / long double cases the emitter must refuse by name.
+# Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb) must accept or refuse the IR as stated:
+#   builtins, vaarg_agg: accepted (exit 0)    vaarg_ld, asm_refuse: refused (exit 3) with the text shown
+mrb=scripts/mrb
+for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:3:long_double" "asm_refuse:3:asm-template \"mfence\""; do
+  n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
+  f=tests/pathb-ir/$n.cpp
+  if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
+  if [ $update = 1 ]; then cp "$tmp/$n.ir" "tests/pathb-ir/$n.ir"; echo "wrote tests/pathb-ir/$n.ir"; continue; fi
+  if diff -u "tests/pathb-ir/$n.ir" "$tmp/$n.ir" > "$tmp/$n.diff"; then echo "ok   $f"; else echo "DIFF $f"; head -40 "$tmp/$n.diff"; fail=1; continue; fi
+  "$mrb" scripts/pathb-qbe-emit.rb "$tmp/$n.ir" > /dev/null 2> "$tmp/$n.emit"; rc=$?
+  if [ "$rc" != "$want_rc" ]; then echo "FAIL $f: emitter exit $rc, expected $want_rc: $(head -1 "$tmp/$n.emit")"; fail=1
+  elif [ -n "$want_msg" ] && ! grep -qF -- "$want_msg" "$tmp/$n.emit"; then echo "FAIL $f: emitter message lacks '$want_msg': $(head -1 "$tmp/$n.emit")"; fail=1
+  else echo "ok   $f (emitter exit $rc${want_msg:+, refused with '$want_msg'})"; fi
+done
+# asm_refuse: four statements stay unsupported markers (mfence template, cpuid and lock operands, a register clobber); pause, rep nop are lowered
+if [ $update = 0 ]; then
+  g=$(grep -c '(unsupported stmt' "tests/pathb-ir/asm_refuse.ir" || true)
+  [ "$g" = 4 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm markers)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 4"; fail=1; }
+fi
 # Coverage: sum the per-kind counts of tests/cases (the gap probe is reported above, not here). A kind with a nonzero unsupported count is a gap.
 for f in tests/cases/*.cpp; do case $(basename "$f") in qbe_*) continue ;; esac; cat "$tmp/$(basename "$f" .cpp).err"; done 2>/dev/null | awk '
   $1 == "ir-stat" && $2 != "total" {

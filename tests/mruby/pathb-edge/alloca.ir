@@ -1,0 +1,22 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "f"
+  (ret int)
+  (params (param %0 "n" int) (param %1 "k" unsigned_char))
+  (slot "p" (ptr void) 8 8)
+  (let %2 unsigned_long (iconv unsigned_long %0))
+  (let %3 (ptr void) (alloca %2))
+  (store (ptr void) $"p" %3)
+  (let %4 unsigned_long (iconv unsigned_long %1))
+  (let %5 (ptr void) (alloca %4))
+  (let %6 (ptr void) (alloca (const unsigned_long 32)))
+  (let %7 (ptr int) (bitcast (ptr int) %6))
+  (store int %7 (const int 7))
+  (let %8 int (load int %7))
+  (return %8))
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (call int &"f" (const int 8) (const unsigned_char 3)))
+  (return %0))

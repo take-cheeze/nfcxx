@@ -516,19 +516,19 @@ def to_single(v)
   r
 end
 
+# Infinities and NaN are spelled d_inf / d_-inf / d_nan (QBE reads the text with strtod; the NaN is the positive quiet
+# NaN, whose sign and payload the IR does not carry).
 def float_lit(v, size)
-  raise Refused, "non-finite floating constant #{py_float_repr(v)}" unless v.finite?
   if size == 4
-    v = to_single(v)
+    v = to_single(v) if v.finite?
     return "s_" + py_float_repr(v)
   end
   "d_" + py_float_repr(v)
 end
 
 def data_float(v, size)
-  raise Refused, "non-finite floating constant #{py_float_repr(v)}" unless v.finite?
   if size == 4
-    v = to_single(v)
+    v = to_single(v) if v.finite?
     return ["s", "s_" + py_float_repr(v)]
   end
   ["d", "d_" + py_float_repr(v)]
@@ -1574,7 +1574,25 @@ def r_vaarg(fn, x)
   Val.new(t, cls, ty)
 end
 
+# (alloca SIZE): __builtin_alloca. SIZE bytes of dynamic stack, 16-byte aligned, that live until the function returns
+# (QBE alloc16 in the middle of a function: the stack pointer moves down and the epilogue restores it). Executed again
+# in a loop it allocates again, as alloca does; nothing is released earlier, there is no block scope.
+def r_alloca(fn, x)
+  raise BadIR, "alloca form" if x.length != 2
+  sz = fn.opnd(x[1])
+  raise Refused, "alloca size of type #{tyrepr(sz.ty)}" if sz.ty.nil? || sz.ty[0] != "int"
+  size = sz.t
+  if sz.cls != "l"
+    size = fn.tmp
+    fn.emit("#{size} =l extuw #{sz.t}")
+  end
+  t = fn.tmp
+  fn.emit("#{t} =l alloc16 #{size}")
+  Val.new(t, "l", ["ptr", nil])
+end
+
 RVAL = {
+  "alloca" => ->(fn, x) { r_alloca(fn, x) },
   "vaarg" => ->(fn, x) { r_vaarg(fn, x) },
   "load" => ->(fn, x) { r_load(fn, x) },
   "load.v" => ->(fn, x) { r_load(fn, x) },
@@ -2225,7 +2243,7 @@ def emit_global(mod, g)
   end
   raise Refused, "global #{name}: #{form_text(init)}" if h == "unsupported"
   raise BadIR, "global #{name}: unknown INIT #{form_text(init)}" if h != "init"
-  raise BadIR, "global #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align)
+  raise BadIR, "global #{name}: alignment #{align}" if align < 1 || (align & (align - 1)) != 0 || align > 4096
   items = global_items(mod, name, init)
   pieces = emit_data_items(mod, name, size, items)
   linkage = (thread ? "thread " : "") + (static ? "" : "export ")
@@ -2295,7 +2313,15 @@ def emit_function(mod, f)
       q = "%s#{fn.nslot}"
       fn.nslot += 1
       a = salign >= 16 ? 16 : salign >= 8 ? 8 : 4
-      fn.allocs << "\t#{q} =l alloc#{a} #{[ssize, 1].max}"
+      if salign > 16
+        # QBE slots are 16-byte aligned at most: over-allocate and round the address up (alignas(64) and the like)
+        raise BadIR, "slot #{sname}: alignment #{salign}" if (salign & (salign - 1)) != 0 || salign > 4096
+        fn.allocs << "\t#{q}raw =l alloc16 #{[ssize, 1].max + salign - 1}"
+        fn.inits << "\t#{q}up =l add #{q}raw, #{salign - 1}"
+        fn.inits << "\t#{q} =l and #{q}up, -#{salign}"
+      else
+        fn.allocs << "\t#{q} =l alloc#{a} #{[ssize, 1].max}"
+      end
       fn.slots[sname] = [q, sty]
     else
       body_forms << part
