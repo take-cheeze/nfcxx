@@ -2243,7 +2243,10 @@ def emit_global(mod, g)
   end
   raise Refused, "global #{name}: #{form_text(init)}" if h == "unsupported"
   raise BadIR, "global #{name}: unknown INIT #{form_text(init)}" if h != "init"
-  raise BadIR, "global #{name}: alignment #{align}" if align < 1 || (align & (align - 1)) != 0 || align > 4096
+  # QBE data accepts a power-of-two `align N` up to 64 (its parser rejects more than CHAR_MAX); above that the
+  # global is refused. A non-power-of-two alignment is a bad IR.
+  raise BadIR, "global #{name}: alignment #{align}" unless align >= 1 && (align & (align - 1)) == 0
+  raise Refused, "global #{name}: alignment #{align} (QBE data aligns to at most 64)" if align > 64
   items = global_items(mod, name, init)
   pieces = emit_data_items(mod, name, size, items)
   linkage = (thread ? "thread " : "") + (static ? "" : "export ")
@@ -2312,14 +2315,15 @@ def emit_function(mod, f)
       salign = as_int(part[4])
       q = "%s#{fn.nslot}"
       fn.nslot += 1
-      a = salign >= 16 ? 16 : salign >= 8 ? 8 : 4
       if salign > 16
-        # QBE slots are 16-byte aligned at most: over-allocate and round the address up (alignas(64) and the like)
-        raise BadIR, "slot #{sname}: alignment #{salign}" if (salign & (salign - 1)) != 0 || salign > 4096
-        fn.allocs << "\t#{q}raw =l alloc16 #{[ssize, 1].max + salign - 1}"
-        fn.inits << "\t#{q}up =l add #{q}raw, #{salign - 1}"
-        fn.inits << "\t#{q} =l and #{q}up, -#{salign}"
+        # QBE stack slots are at most 16-aligned: over-allocate and round the address up. The extra lines
+        # are address arithmetic on the start block's alloc, so the slot is a plain pointer for the rest.
+        raise Refused, "slot #{sname}: alignment #{salign}" if salign > 4096 || (salign & (salign - 1)) != 0
+        fn.allocs << "\t#{q}r =l alloc16 #{[ssize, 1].max + salign - 1}"
+        fn.allocs << "\t#{q}a =l add #{q}r, #{salign - 1}"
+        fn.allocs << "\t#{q} =l and #{q}a, #{-salign}"
       else
+        a = salign >= 16 ? 16 : salign >= 8 ? 8 : 4
         fn.allocs << "\t#{q} =l alloc#{a} #{[ssize, 1].max}"
       end
       fn.slots[sname] = [q, sty]

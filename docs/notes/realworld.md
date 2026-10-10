@@ -133,6 +133,16 @@ In the order the build hit them. Each is covered by a case in `tests/cases` that
 | **runtime**: `SIGSEGV` at `movq 0, %rsi` in `std::find_if_not` | QBE: a struct local that is never stored to, passed by value (libstdc++ passes a `_Iter_pred<lambda>` temporary that holds only a dummy `char`). `mem.c` `coalesce()` kills slots with an empty store mask and replaces the `Oargc` operand with a null address on purpose (`/* crash */`). Plain C triggers it: `struct P {char d;}; long f(long a) { struct P p; return g(a, p); }` | `scripts/qbe-uninit-slot.patch`, applied to the QBE copy by `setup-qbe.sh`: such a slot gets a full mask, so it stays allocated and is read as garbage, as with gcc. Case `qbe_uninit_struct_arg.cpp` |
 | **runtime**: `terminate()`/`abort` or a segfault right after `std::all_of(first, last, lambda)` returns | cproc: copying a zero-size struct (the closure, passed by value on) emitted one `loadub`/`storeb`, because `funccopy()` runs its loop at least once. The destination is a zero-byte slot, which QBE places at the frame pointer, so `mov %al,0x0(%rbp)` overwrote the low byte of the caller's saved `%rbp` | `scripts/cproc-empty-copy.patch` (after the empty-struct patch): a zero-size copy emits nothing. Case `qbe_empty_struct_copy.cpp` (segfaults without it) |
 
+Path B (`tests/pathb-qbe`) over-alignment: the IR writer (`be/nfcxx_ir.c`) now reports the object's own alignment
+(`alignment_of_variable`, so `alignas` and `aligned` count) for globals and stack slots; before, only the type's was
+reported and `alignas(64) char buf[10]` silently came out 1-aligned. `pathb-qbe-emit.rb` (and its oracle) emits
+`data ... align N` for globals up to 64 (QBE's parser rejects more than `CHAR_MAX`; a bigger one is refused, a
+non-power-of-two is a bad IR) and, for a local over 16, over-allocates an `alloc16` and rounds the address up
+(refused above 4096). Probe: `tests/pathb-qbe/cases/overalign.cpp`; edge IR `tests/mruby/pathb-edge/overalign.ir`,
+`e_overalign_*.ir`. The production path (cproc) also rejects `_Alignas` over 64 on data (`invalid alignment`).
+The builtins that Path B leaves as calls to libc names that do not exist (`isfinite`, `signbit`, `bswap16`,
+`__atomic_thread_fence`) are covered in `tests/builtins` rather than `tests/cases/qbe_json_forms.cpp`.
+
 Both patches only take effect after `scripts/setup-qbe.sh` is run again (CI does).
 
 ### {fmt} on QBE: skipped, two cproc limits
