@@ -9,6 +9,8 @@
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
 #   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
+#   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
+#                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
 #   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
 set -euo pipefail
@@ -17,7 +19,8 @@ source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
-cfiles=(); cflags=(); ncpp=0
+cfiles=(); cflags=(); cflags_pic=(); ncpp=0
+shared=0; pic=0; rdynamic=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 while [ $# -gt 0 ]; do
   case $1 in
@@ -27,6 +30,9 @@ while [ $# -gt 0 ]; do
     --gnu-version=*) gnu=${1#--gnu-version=} ;;
     --freestanding) freestanding=1 ;;
     --trace=*) trace=${1#--trace=} ;;
+    -shared) shared=1; pic=1 ;;
+    -fPIC|-fpic) pic=1 ;;
+    -rdynamic) rdynamic=1 ;;
     -o) out=$2; shift ;;
     -std=c++*) std=--c++${1#-std=c++} ;;
     # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
@@ -109,6 +115,13 @@ case $backend in
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
 
+# -fPIC / -rdynamic / -shared reach the C compiler and the link. EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces the
+# options eccp gives its link command (default: the C compile options), so only -shared goes there.
+picopts=(); ldopts=()
+[ $pic = 0 ] || { picopts=(--c_to_obj_option -fPIC); cflags_pic=(-fPIC); }
+[ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
+[ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
+
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
@@ -120,7 +133,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     if [ $backend = qbe ]; then
       NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
     else
-      gcc -c -O2 -fwrapv -fno-strict-aliasing ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
+      gcc -c -O2 -fwrapv -fno-strict-aliasing ${cflags_pic[@]+"${cflags_pic[@]}"} ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
     fi
     trace_end "$t" "C input: $c" cinput
     cobjs+=("$o")
@@ -128,8 +141,8 @@ if [ ${#cfiles[@]} -gt 0 ]; then
   if [ $ncpp = 0 ]; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
-    if [ $backend = qbe ]; then "$NFCXX_CC" "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
-    else gcc "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
+    if [ $backend = qbe ]; then "$NFCXX_CC" ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
+    else gcc ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
   fi
@@ -141,6 +154,6 @@ fi
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 t=$(trace_start)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions \
+"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions ${picopts[@]+"${picopts[@]}"} \
   ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
