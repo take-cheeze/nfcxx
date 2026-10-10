@@ -23,7 +23,7 @@ edg=${EDG_BUILD:-$root/build/edg}/bin
 
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
-shared=0; pic=0; rdynamic=0
+shared=0; pic=0; rdynamic=0; compile_only=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 while [ $# -gt 0 ]; do
   case $1 in
@@ -36,6 +36,7 @@ while [ $# -gt 0 ]; do
     -shared) shared=1; pic=1 ;;
     -fPIC|-fpic) pic=1 ;;
     -rdynamic) rdynamic=1 ;;
+    -c) compile_only=1; files+=(-c) ;;
     -o) out=$2; shift ;;
     -std=c++*) std=--c++${1#-std=c++} ;;
     # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
@@ -117,6 +118,20 @@ case $backend in
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
 
+# Hosted link (not -c, -shared or --freestanding): two additions to what eccp links.
+#  - the EH shim (lib/ehshim, docs/notes/eh-shim.md): exceptions thrown by libstdc++.so and std::exception_ptr on EDG's
+#    exception runtime; NFCXX_EHSHIM=0 leaves it out;
+#  - libC.a (EDG's runtime) ahead of libstdc++, as Path B links it: eccp puts -lC last, after -lstdc++, so `operator new`
+#    came from libstdc++.so and threw a gcc-ABI std::bad_alloc that EDG's handlers cannot catch.
+shim=(); rtlib=()
+if [ $freestanding = 0 ] && [ $compile_only = 0 ] && [ $shared = 0 ] && [ $((ncpp + nobj)) -gt 0 ]; then
+  t=$(trace_start)
+  s=$("$root/scripts/ehshim") || s=""
+  trace_end "$t" "EH shim" driver
+  [ -z "$s" ] || shim=("$s")
+  rtlib=(-lC)
+fi
+
 # -fPIC / -rdynamic / -shared reach the C compiler and the link. EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces the
 # options eccp gives its link command (default: the C compile options), so only -shared goes there.
 picopts=(); ldopts=()
@@ -167,7 +182,7 @@ if [ $backend = pathb ]; then
     esac
   done
   t=$(trace_start)
-  cc ${ldopts[@]+"${ldopts[@]}"} -o "$out" ${cobjs[@]+"${cobjs[@]}"} "${pobjs[@]}" ${plink[@]+"${plink[@]}"} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  cc ${ldopts[@]+"${ldopts[@]}"} -o "$out" ${cobjs[@]+"${cobjs[@]}"} "${pobjs[@]}" ${plink[@]+"${plink[@]}"} ${shim[@]+"${shim[@]}"} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   trace_end "$t" "link" pathb
   exit 0
 fi
@@ -179,5 +194,5 @@ fi
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" -o "$out"
+  ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp

@@ -35,6 +35,9 @@ cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 qbe=${QBE:-build/qbe/qbe}
 [ -x "$qbe" ] || { echo "pathb-qbe: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
 libdir=${EDG_LIB:-$root/build/edg/lib}
+# The EH shim (lib/ehshim; exceptions thrown by libstdc++.so, std::exception_ptr) is part of every hosted program the
+# driver links, so it is part of every program linked here. Empty when it cannot be built (NFCXX_EHSHIM=0 too).
+shim=$(scripts/ehshim) || shim=
 export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
@@ -97,7 +100,7 @@ run_one() {
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" $shim -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
@@ -185,7 +188,7 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: cc ($f): $(head -1 "$tmp/$b.cc")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" $rpath -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" $shim $rpath -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))

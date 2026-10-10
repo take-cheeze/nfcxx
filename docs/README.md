@@ -12,6 +12,7 @@ covers say so.
 | [build-self-hosting.md](notes/build-self-hosting.md) | What the build fetches, which host tools it needs for which step, and how to build offline from mirrored submodules. |
 | [builtins.md](notes/builtins.md) | Table of compiler builtins: what EDG accepts per dialect and what runs on the gcc and qbe backends. |
 | [eval.md](notes/eval.md) | `nfceval` (`lib/eval`): evaluating C++ snippets at run time with bound host objects, and `nfcxx -shared`. |
+| [eh-shim.md](notes/eh-shim.md) | Exceptions thrown by libstdc++.so (`std::__throw_*`) and `std::exception_ptr` on EDG's exception runtime: the shim library, the runtime hooks, link order, limits. |
 | [freestanding.md](notes/freestanding.md) | The `lib/` headers, `nfcxx --freestanding`, and the cproc limits met while writing them. |
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
@@ -32,6 +33,7 @@ covers say so.
 | Path A, qbe backend (the default: EDG's C -> `qbe-prep.rb` -> cproc -> QBE -> asm; `scripts/qbe-cc`) | Same `tests/cases`, `tests/lib`, `tests/builtins`, `tests/c`, tinyxml2 as above with `NFCXX_BACKEND=qbe` or the default; C++ exceptions (`tests/cases/exceptions.cpp`); signed overflow wraps (`tests/cases/signed_overflow_wraps.cpp`); Lua and mruby as C (`run_lua.sh`, `run_mruby.sh`) | ci.yml, realworld.yml |
 | Path B (EDG lowered IL -> own IR -> QBE, `scripts/setup-pathb.sh`, `be/`, `scripts/pathb-qbe-emit.rb`) | IL goldens (`tests/pathb/run.sh`); IR goldens and node coverage (`tests/pathb-ir/run.sh`); IR -> QBE -> run, equal to `// EXPECT:` and to the gcc backend (`tests/pathb-qbe/run.sh`): arithmetic and control flow, `continue`, bool loads, `setjmp`, bit-fields (`cases/bitfield*.cpp`), VLAs including scope exit (`cases/vla*.cpp`), GNU statement expressions (`cases/stmtexpr*.cpp`), volatile (`cases/volatile.cpp`), thread-local objects (`cases/tls*.cpp`, `multi/tls_*`), dynamic initialization (`cases/dyn_*.cpp`, `multi/dyn_init`), C++ exceptions (`cases/eh_*.cpp`), COMDAT/weak linkage (`multi/comdat`, `multi/weak_link`), checked operations that must abort with SIGABRT (`traps/`) | pathb.yml |
 | Path B, hosted (`NFCXX_PATH=b ./nfcxx`, `scripts/pathb-cc`, `scripts/host-sys.sh`; `docs/notes/pathb-hosted.md`) | Programs using the host C and C++ headers and libstdc++: hosted probes `tests/pathb-qbe/cases/{hosted_*,abi_struct,vararg_def,base_null}.cpp` and `multi/abi_c`, `tests/cases` through the driver (`NFCXX_PATH=b tests/run.sh`), tinyxml2 (exit 12); all in `tests/pathb-qbe/hosted.sh`. doctest builds with `NFCXX_LONG_DOUBLE=trap` and exits 2 as expected (documented in `pathb-hosted.md`; no CI script). Several translation units sharing libstdc++ templates: `tests/multi-tu/run.sh` (`docs/notes/multi-tu.md`, both backends) | pathb.yml (hosted.sh), ci.yml (multi-tu) |
+| EH shim (`lib/ehshim`, `scripts/ehshim`; `docs/notes/eh-shim.md`) | Exceptions thrown inside libstdc++ (`vector::at`, `std::stoi`, empty `std::function`, `string::_M_create`, `thread::join`, `promise`/`future`, `regex`) are caught by EDG-compiled handlers; `std::current_exception`, `exception_ptr`, `rethrow_exception`, `make_exception_ptr`, `throw_with_nested`; `new` failure on the gcc backend. Path A both backends, Path B: `tests/cases/eh_libstdcxx_throw.cpp`, `tests/cases/eh_exception_ptr.cpp` (all `tests/run.sh` modes and `tests/pathb-qbe/run.sh`), `tests/pathb-qbe/cases/hosted_eh_system.cpp`, and `tests/ehshim/run.sh` (output compared with host g++). `exception_ptr` needs the hooks of the patched `libC.a` (submodule `3rd/edg`); without them the test reports SKIP | ci.yml, pathb.yml |
 | Hexagon | Generated C for the `linux_riscv32` stand-in target compiles with clang-19 `--target=hexagon` and runs under qemu-hexagon, HVX kernels included; struct layout equals clang's Hexagon ABI (`tests/hexagon/run.sh`, `tests/hexagon/layout.sh`). Not the Hexagon SDK, QuRT or `hexagon-sim` (unavailable, `docs/notes/hexagon.md` section 4). | hexagon.yml |
 | `nfcc` (drop-in `cc`, C only) | `-c`, link, `-S`, `-E`/`-M*` answered by the host compiler, `-D -U -I`, dependency files, response files, `-shared`, rejected options, on both backends (`tests/c/cc-mode.sh`); Lua through its own makefile (`tests/realworld/run_lua_make.sh`); mruby's rake build (`tests/realworld/run_mruby.sh`) | ci.yml, realworld.yml |
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
@@ -66,15 +68,18 @@ one-line `.c` file (qbe fails, gcc backend runs it). Path B has no `_Complex` ha
 - EDG lowers C++ exceptions to its own setjmp/longjmp ABI and runtime (`libC.a`). Such a program runs on Path A
   (`tests/cases/exceptions.cpp`) and Path B (`tests/pathb-qbe/cases/eh_*.cpp`), with no zero-cost unwinding: every
   function with a handler keeps all its slots in memory (`pathb-stage3.md`, "C++ exceptions", Limits).
-- Exceptions thrown by libstdc++ itself (`std::string::at`, `new` failure) use the system unwinder, which the EDG
-  handlers do not see; they end in `terminate` (`eval.md`, "Errors"). No test asserts this.
+- Exceptions thrown by libstdc++ through its `std::__throw_*` functions (`std::string::at`, `vector::at`, `std::stoi`, empty
+  `std::function`, ...) and `std::exception_ptr` work: the driver links `lib/ehshim`, a shim that throws them with EDG's runtime
+  (`eh-shim.md`; `tests/cases/eh_libstdcxx_throw.cpp`, `tests/cases/eh_exception_ptr.cpp`, `tests/ehshim/run.sh`). What is left: libstdc++
+  code that throws without a `__throw_*` function (plain `__cxa_throw`) still aborts, EDG's `longjmp` skips the destructors of
+  libstdc++'s own frames, the EH runtime is not thread safe (`eh-shim.md`, "Limits").
 - An exception cannot unwind across a shared-object boundary (each object has its own EH stack): `nfceval` catches inside
   the snippet and rethrows a `RuntimeError` in the host (`tests/eval/run.sh`).
 - Hexagon EH runtime: multiple/virtual-base catch matching, `noexcept` violations, array `new` unwinding and thrown
   `double`/`float` are not supported (`hexagon.md`, section 3a). No test asserts the failures.
-- Path B and Path A alike cannot catch exceptions thrown inside libstdc++.so (`vector::at`, `std::__throw_*`): they use the
-  gcc unwinder, and the program aborts (`pathb-hosted.md`, "Known limits"). User-code throws and `std::runtime_error` constructed in
-  user code work (`tests/pathb-qbe/cases/hosted_stdexcept.cpp`, `eh_std.cpp`).
+- Path B and Path A alike catch exceptions thrown inside libstdc++.so through the shim above (`vector::at`, `std::__throw_*`). Before
+  it they aborted (the gcc unwinder); `new` of a huge size on the gcc backend too (libstdc++'s `operator new`; the driver now links `libC.a`
+  first). User-code throws and `std::runtime_error` constructed in user code work (`tests/pathb-qbe/cases/hosted_stdexcept.cpp`, `eh_std.cpp`).
 
 **Variable-length arrays (Path B)**: storage is EDG's `__vla_alloc`/`__vla_dealloc` pool in `libC.a`, a single global that
 is not thread safe, costing two calls and a `malloc` per VLA; no `bounds` check on VLA subscripts
