@@ -42,6 +42,7 @@ static int run_tests(int argc, char** argv) {
   nfceval::Engine eng;
   eng.add_flag("-I" + inc);
   eng.include("<vector>");
+  eng.include("<stdexcept>");
   eng.include("vec3.hpp");
 
   int counter = 0;
@@ -123,6 +124,7 @@ static int run_tests(int argc, char** argv) {
     nfceval::Engine eng2;
     eng2.add_flag("-I" + inc);
     eng2.include("<vector>");
+    eng2.include("<stdexcept>");
     eng2.include("vec3.hpp");
     int counter2 = 21;
     eng2.bind("counter", counter2);
@@ -181,6 +183,18 @@ static int run_tests(int argc, char** argv) {
   }
   CHECK(got);
   CHECK(eng.eval<int>("counter + 1") == 2 && counter == 1);
+
+  // libstdc++ throws inside the snippet (std::__throw_out_of_range_fmt): the EH shim of the host (docs/notes/eh-shim.md)
+  // makes it an EDG exception, which the snippet's own handler catches, or the entry function turns into a RuntimeError
+  std::printf("-- exception thrown by libstdc++ inside the snippet\n");
+  CHECK(eng.eval<int>("std::vector<int> v(3); try { (void)v.at(9); } catch (const std::out_of_range&) { return 1; } return 0;") == 1);
+  got = false;
+  try {
+    eng.eval<int>("std::vector<int> v(3); (void)v.at(9); return 0;");
+  } catch (const nfceval::RuntimeError& e) {
+    got = std::string(e.what()).find("vector::_M_range_check") != std::string::npos;
+  }
+  CHECK(got);
 
   std::printf("-- rebinding: same name, new object (same type: no recompile), then a different type\n");
   int other = 1000;

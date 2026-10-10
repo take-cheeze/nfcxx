@@ -33,9 +33,9 @@ The `gaps_*` programs ("Built-ins, atomics, asm" below) are stress probes: `gaps
 latch/barrier/semaphore/jthread, pmr, complex, locale), `gaps_containers` (deque ... bitset, <bit>, <random>), `gaps_regex`, `gaps_io`
 (fstream, filesystem, RTTI, user exceptions), `gaps_cxx20` (ranges, concepts, <=>), `gaps_complex` (`std::complex`: the gcc backend
 cannot link `__builtin_cabs`, so this one is checked by exit status only, `// GCC: undefined`). Each prints what it computes and must match the gcc backend byte for byte. All agree with the gcc
-backend except `hosted_new` (`// GCC: undefined`): on the gcc backend `new` of a huge size reaches libstdc++'s operator new, which
-throws a gcc-ABI `std::bad_alloc` that EDG's exception runtime cannot catch (abort). Path B links `libC.a` first and gets EDG's
-operator new, so it behaves. That is a path A bug, found by this probe.
+backend. (`hosted_new` did not until the driver linked `libC.a` ahead of libstdc++ on Path A: `new` of a huge size reached
+libstdc++'s operator new, which throws a gcc-ABI `std::bad_alloc` that EDG's exception runtime cannot catch; found by this probe,
+fixed with the EH shim, `eh-shim.md`.) `hosted_eh_system` adds `std::system_error` and `std::ios_base::failure` thrown by the library.
 
 ## Gaps found and closed (each has a probe or golden)
 
@@ -94,13 +94,12 @@ also checks that the emitter accepts or refuses them as stated).
 
 ## Known limits (still failing)
 
-- **Exceptions thrown by libstdc++.so** (`vector::at`, `std::function` called empty (`bad_function_call`, checked), `stoi("x")`
-  (checked), `std::__throw_*` in general, huge `new` on the gcc backend) use the gcc unwinder; EDG's
-  setjmp/longjmp exception ABI cannot catch them (abort, "terminate() called by the exception handling mechanism"). Throws that
-  the headers contain (`optional::value`, bad `variant` access, `throw` expressions in user code) work. The same holds
-  for `std::current_exception`, `exception_ptr`, `throw_with_nested`: libstdc++.so keeps that state in its own exception globals.
-  Path A has the same limit. User-code throws, `std::runtime_error` etc. constructed in user code, and EDG's `operator new` work
-  (`gaps_io.cpp` throws and catches a dozen kinds).
+- **Exceptions thrown by libstdc++.so** (`vector::at`, `std::__throw_*`) used the gcc unwinder and ended in `abort`. The EH shim (`lib/ehshim`,
+  linked into every hosted program: Path B by `nfcxx`/`tests/pathb-qbe/run.sh`) throws them with EDG's runtime; `std::exception_ptr`,
+  `current_exception`, `throw_with_nested` work with the patched `libC.a`. Remaining limits: `eh-shim.md`, "Limits". User-code throws,
+  `std::runtime_error` constructed in user code, and EDG's `operator new` work as before.
+- `_Float128`/`__int128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `__int128`).
+  `long double` is supported (below).
 - `_Float128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `_Float128` too).
   `long double` is supported (below), and so is `__int128` (`docs/notes/pathb-int128.md`: 128-bit arithmetic, conversions,
   switch, bit-fields and the C ABI, as helper calls on 16-byte objects).

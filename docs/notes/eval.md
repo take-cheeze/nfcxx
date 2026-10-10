@@ -71,9 +71,10 @@ snippet. `bind(name, obj, "spelling")` and `eval<R>(code, "spelling")` override 
   lost. Throwing from a *bound host function* works the other way round: it is thrown in the host runtime and
   is expected to unwind to the nearest host handler without running the snippet's destructors (untested);
   avoid it, or catch inside the bound function.
-- Exceptions raised by libstdc++ itself (`std::string::at`, `new` failure, ...) use the system unwinder, which the
-  snippet's EDG handlers do not see (a pre-existing nfcxx limitation, not specific to this library): they end in
-  `terminate`.
+- Exceptions raised by libstdc++ itself (`std::string::at`, `vector::at`, ...) inside a snippet are thrown by the EH shim linked into
+  the *host* executable (`eh-shim.md`; the host is built with `-rdynamic`, so the snippet binds to the host's runtime and shim): the
+  snippet's own `catch` sees them, or, uncaught in the snippet, the entry function turns them into a `RuntimeError` with the
+  library's message (`tests/eval/host.cpp`). Before the shim they ended in `terminate`. Build the host with `nfcxx` (it links the shim).
 
 ## Configuration
 
