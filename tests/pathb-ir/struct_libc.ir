@@ -1,4 +1,5 @@
 (ir-module "struct_libc.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "V" 12 4 (leaf 0 w) (leaf 4 w) (leaf 8 w))
 
 (function "_Z4makei"
   (ret void)
@@ -82,9 +83,9 @@
         (let %16 (ptr int) (load (ptr int) $"tmp.1"))
         (let %17 (ptr int) (index %16 (const long 1) 4))
         (store (ptr int) $"tmp.1" %17))))
-  (eval (call void &"_Z4makei" $"tmp.3" (const int 2)))
+  (eval (call void &"_Z4makei" (sret (struct "V") $"tmp.3") (const int 2)))
   (copy 12 $"tmp.4" $"tmp.3")
-  (let %18 int (call int &"_Z3sum1V" $"tmp.4"))
+  (let %18 int (call int &"_Z3sum1V" (byval (struct "V") $"tmp.4")))
   (let %19 bool (eq int %18 (const int 9)))
   (let %20 bool (const bool 0))
   (if %19

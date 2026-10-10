@@ -221,29 +221,94 @@ static int ir_trap_overflow;
 
 /* ================================================================ names and tables */
 
-#define IR_TAB_MAX 8192
-
 struct ir_ent {
   const void *key; /* entity pointer; NULL for entries made without one */
   char *raw;       /* name used for uniqueness; NULL for explicit mappings */
   char *op;        /* printed form: sigil"name", or an explicit operand */
 };
 
+/* The entries live in a growing array. Two open-addressing hash indexes (by entity, by raw name) make lookups
+   O(1): a hosted program has tens of thousands of module-level names. The indexes are built lazily from the
+   entries (ir_tab_sync), so code that resets a table with `t.n = 0` or appends an entry directly stays valid. */
 struct ir_tab {
-  ir_ent e[IR_TAB_MAX];
-  int n;
+  ir_ent *e;
+  int n, cap;
+  int *hkey, *hraw; /* entry index + 1; 0 is empty */
+  int hcap;         /* power of two, at least twice the entries */
+  int hn;           /* entries already in the indexes */
 };
+
+static unsigned long ir_hash_ptr(const void *p)
+{
+  unsigned long x = (unsigned long)(size_t)p;
+  x ^= x >> 33; x *= 0xff51afd7ed558ccdUL; x ^= x >> 33;
+  return x;
+}
+
+static unsigned long ir_hash_str(const char *s)
+{
+  unsigned long h = 1469598103934665603UL;
+  for (; *s != '\0'; s++) h = (h ^ (unsigned char)*s) * 1099511628211UL;
+  return h;
+}
+
+/* Bring the indexes up to date with the entries: clear them when the table was reset, grow them, add the new
+   entries. The first entry for a key or a name wins (as the linear scans it replaces). */
+static void ir_tab_sync(ir_tab *t)
+{
+  int i;
+  if (t->n < t->hn) {
+    if (t->hkey != NULL) memset(t->hkey, 0, (size_t)t->hcap * sizeof(int));
+    if (t->hraw != NULL) memset(t->hraw, 0, (size_t)t->hcap * sizeof(int));
+    t->hn = 0;
+  }
+  if (t->hcap < 2 * (t->n + 1)) {
+    int cap = t->hcap > 0 ? t->hcap : 1024;
+    while (cap < 2 * (t->n + 1)) cap *= 2;
+    free(t->hkey); free(t->hraw);
+    t->hkey = (int *)calloc((size_t)cap, sizeof(int));
+    t->hraw = (int *)calloc((size_t)cap, sizeof(int));
+    if (t->hkey == NULL || t->hraw == NULL) abort();
+    t->hcap = cap;
+    t->hn = 0;
+  }
+  for (i = t->hn; i < t->n; i++) {
+    unsigned long m = (unsigned long)t->hcap - 1, h;
+    if (t->e[i].key != NULL) {
+      for (h = ir_hash_ptr(t->e[i].key) & m; t->hkey[h] != 0 && t->e[t->hkey[h] - 1].key != t->e[i].key; h = (h + 1) & m) {}
+      if (t->hkey[h] == 0) t->hkey[h] = i + 1;
+    }
+    if (t->e[i].raw != NULL) {
+      for (h = ir_hash_str(t->e[i].raw) & m; t->hraw[h] != 0 && strcmp(t->e[t->hraw[h] - 1].raw, t->e[i].raw) != 0; h = (h + 1) & m) {}
+      if (t->hraw[h] == 0) t->hraw[h] = i + 1;
+    }
+  }
+  t->hn = t->n;
+}
+
+static ir_ent *ir_tab_push(ir_tab *t)
+{
+  ir_tab_sync(t); /* notices a reset (n = 0) before an entry is added over the old ones */
+  if (t->n >= t->cap) {
+    t->cap = t->cap > 0 ? 2 * t->cap : 1024;
+    t->e = (ir_ent *)realloc(t->e, (size_t)t->cap * sizeof(ir_ent));
+    if (t->e == NULL) abort();
+  }
+  return &t->e[t->n++];
+}
 
 /* Per function: stack slots and labels. Per module: globals, static objects and string data. */
 static ir_tab ir_slots;
 static ir_tab ir_labels;
 static ir_tab ir_mod;
 
-static int ir_raw_used(const ir_tab *t, const char *raw)
+static int ir_raw_used(ir_tab *t, const char *raw)
 {
-  int i;
-  for (i = 0; i < t->n; i++) {
-    if (t->e[i].raw != NULL && strcmp(t->e[i].raw, raw) == 0) return 1;
+  unsigned long m, h;
+  ir_tab_sync(t);
+  m = (unsigned long)t->hcap - 1;
+  for (h = ir_hash_str(raw) & m; t->hraw[h] != 0; h = (h + 1) & m) {
+    if (strcmp(t->e[t->hraw[h] - 1].raw, raw) == 0) return 1;
   }
   return 0;
 }
@@ -253,28 +318,32 @@ static const char *ir_tab_add(ir_tab *t, const void *key, const char *base, cons
 {
   char cand[300];
   int k = 0;
+  ir_ent *en;
   if (base == NULL || base[0] == '\0') base = "tmp";
   (void)snprintf(cand, sizeof cand, "%s", base);
   while (ir_raw_used(t, cand)) {
     k++;
     (void)snprintf(cand, sizeof cand, "%s.%d", base, k);
   }
-  if (t->n >= IR_TAB_MAX) {
-    fprintf(stderr, "nfcxx_ir: name table full\n");
-    abort();
-  }
-  t->e[t->n].key = key;
-  t->e[t->n].raw = ir_dup(cand);
-  t->e[t->n].op = ir_fmt("%s\"%s\"", sigil, cand);
-  t->n++;
-  return t->e[t->n - 1].op;
+  en = ir_tab_push(t);
+  en->key = key;
+  en->raw = ir_dup(cand);
+  en->op = ir_fmt("%s\"%s\"", sigil, cand);
+  return en->op;
 }
 
-static const char *ir_tab_find(const ir_tab *t, const void *key)
+static const char *ir_tab_find(ir_tab *t, const void *key)
 {
-  int i;
-  for (i = 0; i < t->n; i++) {
-    if (t->e[i].key == key) return t->e[i].op;
+  unsigned long m, h;
+  if (key == NULL) {
+    int i;
+    for (i = 0; i < t->n; i++) if (t->e[i].key == NULL) return t->e[i].op;
+    return NULL;
+  }
+  ir_tab_sync(t);
+  m = (unsigned long)t->hcap - 1;
+  for (h = ir_hash_ptr(key) & m; t->hkey[h] != 0; h = (h + 1) & m) {
+    if (t->e[t->hkey[h] - 1].key == key) return t->e[t->hkey[h] - 1].op;
   }
   return NULL;
 }
@@ -290,11 +359,10 @@ static const char *ir_tab_get(ir_tab *t, const void *key, const char *base, cons
 /* An explicit operand for an entity (a parameter used in place). */
 static void ir_tab_put(ir_tab *t, const void *key, const char *op)
 {
-  if (t->n >= IR_TAB_MAX) abort();
-  t->e[t->n].key = key;
-  t->e[t->n].raw = NULL;
-  t->e[t->n].op = ir_dup(op);
-  t->n++;
+  ir_ent *en = ir_tab_push(t);
+  en->key = key;
+  en->raw = NULL;
+  en->op = ir_dup(op);
 }
 
 static const char *ir_name_or(const char *name, const char *fallback)
@@ -308,18 +376,28 @@ static const char *ir_name_or(const char *name, const char *fallback)
    unnamed routine takes it. */
 static void ir_reserve_name(const char *name)
 {
-  if (name == NULL || name[0] == '\0' || ir_raw_used(&ir_mod, name) || ir_mod.n >= IR_TAB_MAX) return;
-  ir_mod.e[ir_mod.n].key = NULL;
-  ir_mod.e[ir_mod.n].raw = ir_dup(name);
-  ir_mod.e[ir_mod.n].op = ir_fmt("&\"%s\"", name);
-  ir_mod.n++;
+  ir_ent *en;
+  if (name == NULL || name[0] == '\0' || ir_raw_used(&ir_mod, name)) return;
+  en = ir_tab_push(&ir_mod);
+  en->key = NULL;
+  en->raw = ir_dup(name);
+  en->op = ir_fmt("&\"%s\"", name);
+}
+
+/* The symbol of a routine: its GNU asm label (`int f() __asm__("g")`, which glibc's string.h gives the C++ overloads
+   of strchr and friends so that they are the C functions) if it has one, else its name. */
+static const char *ir_rout_sym(a_routine_ptr r)
+{
+  if (has_gnu_routine_supp(r) && gnu_routine_supp(r)->asm_name != NULL && gnu_routine_supp(r)->asm_name[0] != '\0')
+    return gnu_routine_supp(r)->asm_name;
+  return r->source_corresp.name;
 }
 
 static void ir_weak_decl(a_routine_ptr r);
 
 static const char *ir_rout_name(a_routine_ptr r)
 {
-  const char *n = r->source_corresp.name;
+  const char *n = ir_rout_sym(r);
   const char *op;
   char *s;
   if (n != NULL && n[0] != '\0') {
@@ -453,6 +531,7 @@ static int ir_depth;
 
 /* Module output (globals, data, functions) and per-function output (slots). */
 static ir_buf ir_out_globals;
+static ir_buf ir_out_types;   /* (abi-type ...) forms: the C ABI shape of aggregates passed or returned by value */
 static ir_buf ir_out_data;
 static ir_buf ir_out_funcs;
 static ir_buf ir_slot_buf;
@@ -597,11 +676,19 @@ static int ir_var_is_thread(a_variable_ptr var)
          var_has_static_or_thread_storage_duration(var);
 }
 
+/* The symbol of a static object: its GNU asm label (`extern int x __asm__("y")`) if it has one, else its name. */
+static const char *ir_var_sym(a_variable_ptr var)
+{
+  if (var->asm_name_is_valid && var->asm_name_or_reg.name != NULL && var->asm_name_or_reg.name[0] != '\0')
+    return var->asm_name_or_reg.name;
+  return var->source_corresp.name;
+}
+
 /* Static object (global, static local, or string data) operand; the module entry is printed on first use. */
 static const char *ir_global_op(a_variable_ptr var)
 {
   int fresh = ir_tab_find(&ir_mod, var) == NULL;
-  const char *op = ir_tab_get(&ir_mod, var, ir_name_or(var->source_corresp.name, "tmp"), "@");
+  const char *op = ir_tab_get(&ir_mod, var, ir_name_or(ir_var_sym(var), "tmp"), "@");
   if (fresh) ir_global_print(var, op + 1);
   return op;
 }
@@ -973,6 +1060,9 @@ static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
     case ck_string:
       ir_note(3, ck_string, 1);
       return ir_mk_addr((char *)ir_string_data(c), t, 0);
+    case ck_void: /* `(void)0` as a constant expression: no value */
+      ir_note(3, ck_void, 1);
+      return ir_mk_void();
     default:
       return ir_gap(t, ir_fmt("const %s", nfcxx_ck_name(c->kind) != NULL ? nfcxx_ck_name(c->kind) : "?"), 3,
                     (int)c->kind);
@@ -996,6 +1086,15 @@ static ir_val ir_lval(an_expr_node_ptr e);
 static ir_val ir_rval_op(an_expr_node_ptr e);
 static ir_val ir_lval_op(an_expr_node_ptr e);
 static ir_val ir_roof(an_expr_node_ptr e);
+
+/* Set by the address-of operator while it lowers its operand when that is `p->field` or `*p`: the address of a
+   member or of an object through a pointer reads no memory, so a null p is not a trap. EDG lowers the conversion of
+   a pointer to a derived class to a pointer to its base as `&p->__b_N`, and that has to give a null base pointer
+   for a null p (std::map's node pointers are null all the time). ir_lval_op reads and clears it on entry, so the
+   operands of the operand are checked as usual. */
+static int ir_addr_only;
+
+static char *ir_valist_addr(an_expr_node_ptr n);
 
 /* Pointer that may be null: emit (nonnull P) unless the operand is known to be an address. */
 static void ir_nonnull(an_expr_node_ptr src, ir_val p)
@@ -1064,7 +1163,7 @@ static ir_val ir_lval(an_expr_node_ptr e)
   if (e->kind == enk_routine) {
     /* A function designator (the operand of & outside a constant expression, for example `throw &f`): its address. */
     ir_note(2, enk_routine, 1);
-    return ir_mk_addr(ir_fmt("&\"%s\"", ir_name_or(e->variant.routine.ptr->source_corresp.name, "fn")), e->type, 0);
+    return ir_mk_addr(ir_fmt("&\"%s\"", ir_name_or(ir_rout_sym(e->variant.routine.ptr), "fn")), e->type, 0);
   }
   if (ir_is_aggregate(e->type)) return ir_rval(e);
   return ir_gap(e->type, "lvalue", 2, (int)e->kind);
@@ -1152,7 +1251,9 @@ static an_expr_operator_kind ir_compound_base(an_expr_operator_kind k, int *ok)
 /* Lvalue-valued operators, as addresses. */
 static ir_val ir_lval_op(an_expr_node_ptr e)
 {
+  int addr_only = ir_addr_only;
   an_expr_operator_kind k = e->variant.operation.kind;
+  ir_addr_only = 0;
   an_expr_node_ptr a0 = ir_operand(e, 0);
   an_expr_node_ptr a1 = ir_operand(e, 1);
   int vol = ir_is_volatile(e->type);
@@ -1174,7 +1275,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       if (fe == NULL || fe->kind != enk_field) break;
       ir_note(0, k, 1);
       p = ir_rval(a0);
-      ir_nonnull(a0, p);
+      if (!addr_only) ir_nonnull(a0, p);
       vol = vol || ir_pointee_is_volatile(a0->type) || ir_is_volatile(fe->variant.field.ptr->type);
       if (fe->variant.field.ptr->is_bit_field) {
         return ir_bf_lval(p.s, fe->variant.field.ptr, skip_typerefs(a0->type)->variant.pointer.type, e->type, vol);
@@ -1205,7 +1306,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
       if (a0 == NULL) break;
       ir_note(0, k, 1);
       p = ir_rval(a0);
-      ir_nonnull(a0, p);
+      if (!addr_only) ir_nonnull(a0, p);
       return ir_mk_addr(p.s, e->type, vol || ir_pointee_is_volatile(a0->type));
     }
     case eok_assign:
@@ -1285,12 +1386,42 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_value(ir_retype_addr(a, skip_typerefs(e->type)->variant.pointer.type, 0).s, e->type);
     }
     case eok_address_of: {
-      ir_val a = ir_lval(a0);
+      ir_val a;
+      if (a0->kind == enk_operation &&
+          (a0->variant.operation.kind == eok_points_to_field || a0->variant.operation.kind == eok_indirect)) {
+        ir_addr_only = 1;
+      }
+      a = ir_lval(a0);
+      ir_addr_only = 0;
       ir_note(0, k, 1);
       return ir_mk_value(ir_retype_addr(a, skip_typerefs(e->type)->variant.pointer.type, 0).s, e->type);
     }
     case eok_call:
       return ir_call(e);
+    /* <stdarg.h>: the System V va_list is the 24-byte __va_list_tag, which QBE's vastart/vaarg fill and read in the
+       same layout glibc's v*printf functions use. va_end has nothing to do. An aggregate va_arg is a gap marker. */
+    case eok_va_start:
+    case eok_va_start_single_operand:
+      ir_emit(ir_fmt("(vastart %s)", ir_valist_addr(a0)));
+      ir_note(0, k, 1);
+      return ir_mk_void();
+    case eok_va_end:
+      (void)ir_valist_addr(a0);
+      ir_note(0, k, 1);
+      return ir_mk_void();
+    case eok_va_copy: {
+      char *dst = ir_valist_addr(a0), *src = ir_valist_addr(a1);
+      ir_emit(ir_fmt("(copy 24 %s %s)", dst, src));
+      ir_note(0, k, 1);
+      return ir_mk_void();
+    }
+    case eok_va_arg:
+      if (ir_is_aggregate(e->type) || ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (aggregate)", 0, (int)k);
+      {
+        char *ap = ir_valist_addr(a0);
+        ir_note(0, k, 1);
+        return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(vaarg %s %s)", ir_valtext(e->type), ap)), e->type);
+      }
     case eok_cast:
       return ir_cast(e);
     case eok_question:
@@ -1409,6 +1540,45 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
 }
 
 /* Assignment (scalar or aggregate, plain or compound). want_addr returns the address of the lhs. */
+/* Value a converted to the arithmetic type dst (an integer or floating type). */
+static ir_val ir_conv_num(ir_val a, a_type_ptr dst)
+{
+  if (strcmp(ir_valtext(dst), a.ty) == 0) return ir_mk_value(a.s, dst);
+  if (ir_is_integer(dst)) {
+    if (ir_is_float(a.t)) return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(cf2i %s %s)", ir_valtext(dst), a.s)), dst);
+    return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), a.s)), dst);
+  }
+  if (ir_is_float(a.t)) return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(fconv %s %s)", ir_valtext(dst), a.s)), dst);
+  return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(%s %s %s)", ir_is_signed(a.t) ? "i2f" : "u2f", ir_valtext(dst), a.s)), dst);
+}
+
+/* The type a compound assignment computes in (C's usual arithmetic conversions of the object and the right-hand
+   side), as one of the two operand types, or NULL when that is neither (both narrower than int): the caller then
+   computes in the object's type. EDG leaves the operands of `unsigned n; n /= 10UL;` in their own types. */
+static a_type_ptr ir_common_type(a_type_ptr a, a_type_ptr b)
+{
+  if (a == NULL || b == NULL) return NULL;
+  if (ir_is_float(a) || ir_is_float(b)) {
+    if (ir_is_float(a) && ir_is_float(b)) return ir_size_of(a) >= ir_size_of(b) ? a : b;
+    return ir_is_float(a) ? a : b;
+  }
+  if (ir_is_integer(a) && ir_is_integer(b) && !ir_is_bool(a) && !ir_is_bool(b)) {
+    unsigned long sa = ir_size_of(a), sb = ir_size_of(b);
+    int ua = !ir_is_signed(a) && sa >= 4, ub = !ir_is_signed(b) && sb >= 4;
+    if (sa < 4) sa = 4;
+    if (sb < 4) sb = 4;
+    if (sa > sb) return ir_size_of(a) == sa ? a : NULL;
+    if (sb > sa) return ir_size_of(b) == sb ? b : NULL;
+    if (ua || ub) {
+      if (ua && ir_size_of(a) == sa) return a;
+      if (ub && ir_size_of(b) == sb) return b;
+      return NULL;
+    }
+    return ir_size_of(a) == sa ? a : (ir_size_of(b) == sb ? b : NULL);
+  }
+  return NULL;
+}
+
 static ir_val ir_assign(an_expr_node_ptr e, int want_addr)
 {
   an_expr_operator_kind k = e->variant.operation.kind;
@@ -1441,7 +1611,15 @@ static ir_val ir_assign(an_expr_node_ptr e, int want_addr)
       if (base == eok_psubtract) idx = ir_let(rhs.ty, ir_fmt("(wneg %s %s)", rhs.ty, rhs.s));
       nv = ir_ptr_add(cur.s, idx, lhs.t, elem);
     } else {
-      nv = ir_arith(base, lhs.t, cur, rhs, &ok);
+      a_type_ptr ct = NULL;
+      if (base != eok_shiftl && base != eok_shiftr && rhs.t != NULL) ct = ir_common_type(lhs.t, rhs.t);
+      if (ct != NULL && strcmp(ir_valtext(ct), ir_valtext(lhs.t)) != 0) {
+        /* compute in the common type, then convert back for the store */
+        nv = ir_arith(base, ct, ir_conv_num(cur, ct), ir_conv_num(rhs, ct), &ok);
+        if (ok) nv = ir_conv_num(nv, lhs.t);
+      } else {
+        nv = ir_arith(base, lhs.t, cur, rhs, &ok);
+      }
       if (!ok) return ir_gap(e->type, "assign-op", 0, (int)k);
     }
     ir_note(0, k, 1);
@@ -1478,6 +1656,14 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
   return pre ? ir_assign_result(e, lhs, nv) : cur;
 }
 
+/* The address of the va_list object an operand of a va_* operation names: an lvalue of the va_list array type (its
+   address), or a pointer (a va_list parameter, which decays to a pointer to the tag). */
+static char *ir_valist_addr(an_expr_node_ptr n)
+{
+  if (n != NULL && n->type != NULL && skip_typerefs(n->type)->kind == tk_array) return ir_lval(n).s;
+  return ir_rval(n).s;
+}
+
 /* The function type a call goes through: the routine's own type, or the pointee of a function pointer. */
 static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f)
 {
@@ -1488,8 +1674,135 @@ static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f)
   return t->kind == tk_routine ? t : NULL;
 }
 
-/* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and
-   passed by address; an aggregate result is written to a temporary passed as the first argument. */
+/* GCC built-in functions (`__builtin_NAME`), which libstdc++'s headers call directly. Hint and query built-ins
+   become values or markers; a few bit operations are the libgcc routines of the same meaning; every other
+   built-in that has a C library function (`__builtin_memcpy`, `__builtin_strlen`, `__builtin_fabs`, ...) is a call
+   of that function. Built-ins that need an operation of their own (`__builtin_mul_overflow`, `__builtin_alloca`,
+   the `va_*` family) are not handled here. docs/notes/pathb-hosted.md lists them. */
+static const char *ir_builtin_libgcc(const char *n)
+{
+  static const char *const tab[][2] = {
+    { "clz", "__clzsi2" },       { "clzl", "__clzdi2" },       { "clzll", "__clzdi2" },
+    { "ctz", "__ctzsi2" },       { "ctzl", "__ctzdi2" },       { "ctzll", "__ctzdi2" },
+    { "popcount", "__popcountsi2" }, { "popcountl", "__popcountdi2" }, { "popcountll", "__popcountdi2" },
+    { "bswap32", "__bswapsi2" }, { "bswap64", "__bswapdi2" },
+  };
+  size_t i;
+  for (i = 0; i < sizeof tab / sizeof tab[0]; i++) if (strcmp(n, tab[i][0]) == 0) return tab[i][1];
+  return NULL;
+}
+
+/* __builtin_add_overflow / sub_overflow / mul_overflow (A, B, &R): R gets the wrapped result, the value is whether
+   the exact result did not fit. Lowered when A, B and R have one integer type: unsigned add, sub and mul, and
+   signed add and sub (signed mul and mixed types are an IR gap marker). The wrapped result uses the wrapping
+   operations (wadd, wsub, wmul) even in trap mode; the overflow test is the textbook one:
+   unsigned add r < a, sub a < b, mul a != 0 && r / a != b; signed add ((a ^ r) & (b ^ r)) < 0,
+   sub ((a ^ b) & (a ^ r)) < 0. */
+static ir_val ir_builtin_overflow(an_expr_node_ptr e, int op)
+{
+  an_expr_node_ptr n0 = ir_operand(e, 1), n1 = ir_operand(e, 2), n2 = ir_operand(e, 3);
+  a_type_ptr rt;
+  ir_val x, y, p, r;
+  char *ov;
+  int sg;
+  if (n0 == NULL || n1 == NULL || n2 == NULL || !ir_is_pointer(n2->type)) return ir_gap(e->type, "builtin overflow", 0, (int)eok_call);
+  rt = skip_typerefs(skip_typerefs(n2->type)->variant.pointer.type);
+  sg = ir_is_signed(rt);
+  if (!ir_is_integer(rt) || ir_is_bool(rt) || !ir_is_integer(n0->type) || !ir_is_integer(n1->type) || ir_is_bool(n0->type) ||
+      ir_is_bool(n1->type) || ir_size_of(n0->type) != ir_size_of(rt) || ir_size_of(n1->type) != ir_size_of(rt) ||
+      ir_is_signed(n0->type) != sg || ir_is_signed(n1->type) != sg || (sg && op == 2)) {
+    return ir_gap(e->type, "builtin overflow (mixed types or signed multiply)", 0, (int)eok_call);
+  }
+  x = ir_rval(n0);
+  y = ir_rval(n1);
+  p = ir_rval(n2);
+  r = ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(%s %s %s %s)", op == 0 ? "wadd" : op == 1 ? "wsub" : "wmul",
+                                                  ir_valtext(rt), x.s, y.s)), rt);
+  ir_store(rt, p.s, r.s, 0);
+  if (!sg) {
+    if (op == 0) {
+      ov = ir_compare(eok_lt, r, x).s;
+    } else if (op == 1) {
+      ov = ir_compare(eok_lt, x, y).s;
+    } else {
+      int d = ir_depth;
+      ov = ir_let("bool", "(const bool 0)");
+      ir_line(d, ir_fmt("(if %s", ir_compare(eok_ne, x, ir_mk_value(ir_zero(rt), rt)).s));
+      ir_line(d + 1, "(then");
+      ir_depth = d + 2;
+      {
+        ir_val q = ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(cdiv %s %s %s)", ir_valtext(rt), r.s, x.s)), rt);
+        ir_emit(ir_fmt("(set %s %s)", ov, ir_compare(eok_ne, q, y).s));
+      }
+      ir_close(1);
+      ir_close(1);
+      ir_depth = d;
+    }
+  } else {
+    char *t1, *t2, *t3;
+    /* add: (x ^ r) & (y ^ r); sub: (x ^ y) & (x ^ r) */
+    if (op == 0) {
+      t1 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, r.s));
+      t2 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), y.s, r.s));
+    } else {
+      t1 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, y.s));
+      t2 = ir_let(ir_valtext(rt), ir_fmt("(xor %s %s %s)", ir_valtext(rt), x.s, r.s));
+    }
+    t3 = ir_let(ir_valtext(rt), ir_fmt("(and %s %s %s)", ir_valtext(rt), t1, t2));
+    ov = ir_compare(eok_lt, ir_mk_value(t3, rt), ir_mk_value(ir_zero(rt), rt)).s;
+  }
+  ir_note(0, eok_call, 1);
+  return ir_mk_bool(ov);
+}
+
+/* 1 when the call e of the built-in `name` (without the prefix) is lowered here; the value is in *out. */
+static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
+{
+  an_expr_node_ptr arg = ir_operand(e, 1);
+  if (strcmp(name, "add_overflow") == 0 || strcmp(name, "sub_overflow") == 0 || strcmp(name, "mul_overflow") == 0) {
+    *out = ir_builtin_overflow(e, name[0] == 'a' ? 0 : name[0] == 's' ? 1 : 2);
+    return 1;
+  }
+  if (strcmp(name, "expect") == 0 || strcmp(name, "expect_with_probability") == 0) {
+    ir_val a = ir_rval(arg);
+    ir_note(0, eok_call, 1);
+    *out = a;
+    return 1;
+  }
+  if (strcmp(name, "constant_p") == 0) {
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_fmt("(const %s 0)", ir_valtext(e->type)), e->type);
+    return 1;
+  }
+  if (strcmp(name, "unreachable") == 0 || strcmp(name, "trap") == 0) {
+    ir_note(0, eok_call, 1);
+    ir_emit("(unreachable)");
+    *out = ir_is_void(e->type) ? ir_mk_void() : ir_mk_value(ir_zero(e->type), e->type);
+    return 1;
+  }
+  return 0;
+}
+
+/* The symbol a built-in's call goes to, or NULL when the name has no prefix. */
+static const char *ir_builtin_sym(const char *name)
+{
+  const char *g;
+  if (name == NULL || strncmp(name, "__builtin_", 10) != 0) return NULL;
+  g = ir_builtin_libgcc(name + 10);
+  return g != NULL ? g : name + 10;
+}
+
+static void ir_abi_note(a_type_ptr t);
+/* The type text of an aggregate in a call: `(struct "N")`, unqualified. */
+static char *ir_abi_ty(a_type_ptr t)
+{
+  ir_abi_note(t);
+  return ir_capture_type(t, 1);
+}
+
+/* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and passed as
+   (byval TYPE ADDR); an aggregate result is written to a temporary passed as the first argument, (sret TYPE ADDR). The
+   emitter turns both into the C calling convention of the target (docs/notes/pathb-hosted.md, "Aggregates by value"). */
 static ir_val ir_call(an_expr_node_ptr e)
 {
   an_expr_node_ptr f = ir_operand(e, 0);
@@ -1499,8 +1812,13 @@ static ir_val ir_call(an_expr_node_ptr e)
   int agg_ret = ir_is_aggregate(e->type);
   ir_val sret = ir_mk_void();
   if (f->kind == enk_routine) {
+    const char *bsym = ir_builtin_sym(f->variant.routine.ptr->source_corresp.name);
     ir_note(2, enk_routine, 1);
-    callee = ir_fmt("&\"%s\"", ir_rout_name(f->variant.routine.ptr));
+    if (bsym != NULL) {
+      ir_val bv;
+      if (ir_builtin_call(e, f->variant.routine.ptr->source_corresp.name + 10, &bv)) return bv;
+    }
+    callee = ir_fmt("&\"%s\"", bsym != NULL ? bsym : ir_rout_name(f->variant.routine.ptr));
   } else {
     ir_val fv = ir_rval(f);
     ir_nonnull(f, fv); /* a call through a null function pointer traps (stage 2, gap 9) */
@@ -1508,14 +1826,14 @@ static ir_val ir_call(an_expr_node_ptr e)
   }
   if (agg_ret) {
     sret = ir_temp(e->type);
-    args = ir_fmt("%s %s", args, sret.s);
+    args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) {
     ir_val a = ir_rval(arg);
     if (ir_is_aggregate(a.t)) {
       ir_val tmp = ir_temp(a.t);
       ir_copy(a.t, tmp.s, a.s);
-      args = ir_fmt("%s %s", args, tmp.s);
+      args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(a.t), tmp.s);
     } else {
       args = ir_fmt("%s %s", args, a.s);
     }
@@ -1560,17 +1878,17 @@ static ir_val ir_roof(an_expr_node_ptr e)
     return ir_gap(e->type, "node result_of_overriding_function (variadic)", 2, (int)e->kind);
   }
   ir_note(2, enk_result_of_overriding_function, 1);
-  callee = ir_fmt("&\"%s\"", ir_name_or(under->source_corresp.name, "fn"));
+  callee = ir_fmt("&\"%s\"", ir_name_or(ir_rout_sym(under), "fn"));
   if (agg_ret) {
     sret = ir_temp(e->type);
-    args = ir_fmt("%s %s", args, sret.s);
+    args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
   for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
     ir_val a = ir_var_addr(param, param->type, 0);
     if (ir_is_aggregate(param->type)) {
       ir_val tmp = ir_temp(param->type);
       ir_copy(param->type, tmp.s, a.s);
-      args = ir_fmt("%s %s", args, tmp.s);
+      args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(param->type), tmp.s);
     } else {
       args = ir_fmt("%s %s", args, ir_load(a).s);
     }
@@ -1749,7 +2067,14 @@ static int ir_is_base_storage(a_class_type_supplement_ptr extra, a_field_ptr f)
   a_base_class_ptr b;
   if (extra == NULL) return 0;
   for (b = extra->direct_base_classes; b != NULL; b = b->next_direct) {
-    if (!b->is_virtual && skip_typerefs(b->type) == skip_typerefs(f->type) && b->offset == f->offset) return 1;
+    if (b->is_virtual || b->offset != f->offset) continue;
+    if (skip_typerefs(b->type) == skip_typerefs(f->type)) return 1;
+    /* A base whose tail padding is reused (a non-POD base) gets a field of the EDG-made type "base without the
+       padding", also named __b_N, and smaller than the base. It is the same storage as the base. */
+    if (f->source_corresp.name != NULL && strncmp(f->source_corresp.name, "__b_", 4) == 0 &&
+        f->type != NULL && ir_is_aggregate(f->type) && ir_size_of(f->type) <= ir_size_of(b->type)) {
+      return 1;
+    }
   }
   return 0;
 }
@@ -1763,6 +2088,8 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
   a_field_ptr f;
   if (extra != NULL) {
     for (b = extra->direct_base_classes; b != NULL; b = b->next_direct) {
+      /* A direct empty base takes no part in the lowered struct, and a constant list has no entry for it. */
+      if (b->is_optimized_empty_base) continue;
       if (b->is_virtual || n >= max) return -1;
       out[n].off = (unsigned long)b->offset;
       out[n].t = b->type;
@@ -1774,6 +2101,7 @@ static int ir_class_members(a_type_ptr t, ir_member *out, int max)
     /* EDG adds a field __b_N for a base subobject that is already a direct base (same type, same offset).
        It is the same storage as that base, so it is not a second element. */
     if (ir_is_base_storage(extra, f)) continue;
+    if (f->is_optimized_empty_class) continue; /* [[no_unique_address]] empty member: not in the lowered struct */
     /* An unnamed bit-field (padding, or :0) takes no initializer. */
     if (f->is_bit_field && (f->source_corresp.name == NULL || f->source_corresp.name[0] == '\0')) continue;
     if (n >= max) return -1;
@@ -1837,6 +2165,164 @@ static a_field_ptr ir_union_member(a_type_ptr u, a_constant_ptr c, a_constant_pt
   }
   *val = ce;
   return f;
+}
+
+/* ---------------------------------------------------------------- C ABI shape of aggregates by value
+
+   A struct or class passed or returned by value follows the platform's C calling convention (System V x86-64 here), so
+   that calls to and from code the C++ library, C and other compilers built agree: std::pair<bool, size_t> comes back from
+   libstdc++'s hashtable policy in rax:rdx, a div_t from div(). The IR cannot say how, so every aggregate used in a
+   (sret ...) or (byval ...) gets a module-level form
+     (abi-type "NAME" SIZE ALIGN (leaf OFF K)...)   its scalars, K one of b h w l s d (QBE's names), at their offsets
+     (abi-type "NAME" SIZE ALIGN (memory))          more than 16 bytes: passed in memory
+     (abi-type "NAME" SIZE ALIGN (empty))           no data: not passed at all
+     (abi-type "NAME" SIZE ALIGN (unsupported "WHY"))  a shape the emitter cannot describe (union, bit-field, long double)
+   The emitter classifies the eightbytes from the leaves (QBE does it for its aggregate types). EDG's lowering has
+   already turned classes with a non-trivial copy constructor or destructor into pointer arguments and results, so
+   what reaches here is trivial aggregates, for which the Itanium C++ ABI follows the C rules. */
+struct ir_leaf {
+  unsigned long off;
+  char kind;
+};
+
+#define IR_LEAF_MAX 32
+
+/* The scalars of t at offset base: 1 on success, else 0 with the reason in *why. */
+static int ir_abi_collect(a_type_ptr t, unsigned long base, ir_leaf *lv, int *n, const char **why)
+{
+  a_type_ptr s = skip_typerefs(t);
+  unsigned long sz = ir_size_of(s);
+  switch (s->kind) {
+    case tk_integer: {
+      char k = sz == 1 ? 'b' : sz == 2 ? 'h' : sz == 4 ? 'w' : sz == 8 ? 'l' : 0;
+      if (k == 0) { *why = "integer type of this size"; return 0; }
+      if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = k; (*n)++;
+      return 1;
+    }
+    case tk_pointer:
+      if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+      return 1;
+    case tk_float:
+      if (sz != 4 && sz != 8) { *why = "long double"; return 0; }
+      if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = sz == 4 ? 's' : 'd'; (*n)++;
+      return 1;
+    case tk_ptr_to_member:
+      if (sz != 8 && sz != 16) { *why = "pointer to member of this size"; return 0; }
+      if (*n + 2 > IR_LEAF_MAX) { *why = "too many members"; return 0; }
+      lv[*n].off = base; lv[*n].kind = 'l'; (*n)++;
+      if (sz == 16) { lv[*n].off = base + 8; lv[*n].kind = 'l'; (*n)++; }
+      return 1;
+    case tk_array: {
+      a_type_ptr el = s->variant.array.element_type;
+      unsigned long cnt = (unsigned long)s->variant.array.variant.number_of_elements, esz = ir_size_of(el), i;
+      if (s->variant.array.is_variable_size_array) { *why = "variable-length array"; return 0; }
+      for (i = 0; i < cnt; i++) {
+        if (!ir_abi_collect(el, base + i * esz, lv, n, why)) return 0;
+      }
+      return 1;
+    }
+    case tk_class:
+    case tk_struct: {
+      ir_member mem[256];
+      int cnt = ir_class_members(t, mem, 256), i, j;
+      if (cnt < 0) { *why = "virtual base"; return 0; }
+      for (i = 0; i < cnt; i++) {
+        if (mem[i].bf != NULL) {
+          /* A bit-field only makes its eightbyte INTEGER: one byte leaf at its byte offset (the size of the type is
+             declared separately). Several fields in one byte give one leaf. */
+          int dup = 0;
+          for (j = 0; j < *n; j++) if (lv[j].off == base + mem[i].off && lv[j].kind == 'b') dup = 1;
+          if (!dup) {
+            if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+            lv[*n].off = base + mem[i].off; lv[*n].kind = 'b'; (*n)++;
+          }
+          continue;
+        }
+        if (!ir_abi_collect(mem[i].t, base + mem[i].off, lv, n, why)) return 0;
+      }
+      return 1;
+    }
+    case tk_union: {
+      /* The members overlap, so each eightbyte of the union is INTEGER when any member puts an integer or pointer in
+         it, else SSE (the psABI merge). The union becomes leaves that are not its members': l (or w, h, b for a tail)
+         for INTEGER, d or s for SSE. */
+      ir_leaf sub[IR_LEAF_MAX];
+      int sn = 0, k, i;
+      a_field_ptr f;
+      unsigned long nb = (sz + 7) / 8;
+      for (f = s->variant.class_struct_union.field_list; f != NULL; f = f->next) {
+        if (f->is_bit_field) {
+          if (sn >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+          sub[sn].off = 0; sub[sn].kind = 'b'; sn++;
+          continue;
+        }
+        if (!ir_abi_collect(f->type, 0, sub, &sn, why)) return 0;
+      }
+      for (k = 0; (unsigned long)k < nb; k++) {
+        int is_int = 0, is_sse = 0;
+        unsigned long left = sz - (unsigned long)k * 8 < 8 ? sz - (unsigned long)k * 8 : 8, off = (unsigned long)k * 8;
+        for (i = 0; i < sn; i++) {
+          if (sub[i].off >= off + 8 || sub[i].off + (sub[i].kind == 'b' ? 1 : sub[i].kind == 'h' ? 2 : (sub[i].kind == 'w' || sub[i].kind == 's') ? 4 : 8) <= off) continue;
+          if (sub[i].kind == 's' || sub[i].kind == 'd') is_sse = 1; else is_int = 1;
+        }
+        if (!is_int && !is_sse) continue;
+        if (!is_int) {
+          if (left != 8 && left != 4) { *why = "union with a float in an odd-sized eightbyte"; return 0; }
+          if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+          lv[*n].off = base + off; lv[*n].kind = left == 8 ? 'd' : 's'; (*n)++;
+          continue;
+        }
+        while (left > 0) {
+          unsigned long chunk = left >= 8 ? 8 : left >= 4 ? 4 : left >= 2 ? 2 : 1;
+          if (*n >= IR_LEAF_MAX) { *why = "too many members"; return 0; }
+          lv[*n].off = base + off; lv[*n].kind = chunk == 8 ? 'l' : chunk == 4 ? 'w' : chunk == 2 ? 'h' : 'b'; (*n)++;
+          off += chunk; left -= chunk;
+        }
+      }
+      return 1;
+    }
+    default:
+      *why = "type kind";
+      return 0;
+  }
+}
+
+static ir_tab ir_abi_tab;
+
+/* Print the (abi-type ...) form of aggregate type t once. */
+static void ir_abi_note(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  char *txt, *q1, *q2;
+  ir_leaf lv[IR_LEAF_MAX];
+  int n = 0, i;
+  const char *why = "";
+  unsigned long size = ir_size_of(s), align = ir_align_of(s);
+  int fresh = ir_tab_find(&ir_abi_tab, s) == NULL;
+  if (!fresh) return;
+  ir_tab_put(&ir_abi_tab, s, "x");
+  txt = ir_capture_type(s, 1);
+  q1 = strchr(txt, '"');
+  q2 = strrchr(txt, '"');
+  if (q1 == NULL || q2 == q1) return; /* not a named struct type */
+  *q2 = '\0';
+  ir_buf_begin(&ir_out_types);
+  fprintf(nf_out, "(abi-type \"%s\" %lu %lu", q1 + 1, size, align);
+  if (size > 16) {
+    fputs(" (memory))\n", nf_out);
+  } else if (!ir_abi_collect(s, 0, lv, &n, &why)) {
+    fprintf(nf_out, " (unsupported \"%s\"))\n", why);
+  } else if (n == 0) {
+    fputs(" (empty))\n", nf_out);
+  } else {
+    for (i = 0; i < n; i++) fprintf(nf_out, " (leaf %lu %c)", lv[i].off, lv[i].kind);
+    fputs(")\n", nf_out);
+  }
+  ir_buf_end(&ir_out_types);
+
 }
 
 /* Store constant c (of type t) into the object at address dst. Arrays are element-wise, classes are
@@ -1941,6 +2427,12 @@ static void ir_init_constant(ir_val dst, a_constant_ptr c, a_type_ptr t)
       return;
     }
     ir_copy(t, dst.s, src.s);
+    ir_note(4, dik_constant, 1);
+    return;
+  }
+  if (c->kind == ck_integer && ir_is_aggregate(t)) {
+    /* An empty class (an allocator, a comparison object) initialized by `{}` has the constant 0 */
+    ir_zero_object(dst, t);
     ir_note(4, dik_constant, 1);
     return;
   }
@@ -2072,6 +2564,13 @@ static void ir_gi_items(unsigned long off, a_constant_ptr c, a_type_ptr t)
     for (; i < n; i++) {
       if (mem[i].bf == NULL) fprintf(nf_out, "\n    (zero %lu %lu)", off + mem[i].off, ir_size_of(mem[i].t));
     }
+    return;
+  }
+  if (c->kind == ck_integer && ir_is_aggregate(t)) {
+    /* An empty class (an allocator, a comparison object) initialized by `{}` has the constant 0. Its one byte may
+       share an offset with the first member (empty base optimization), so a size-1 object gets no item (uncovered
+       bytes are zero anyway). */
+    if (ir_size_of(t) != 1) fprintf(nf_out, "\n    (zero %lu %lu)", off, ir_size_of(t));
     return;
   }
   if (c->kind == ck_aggregate && s->kind == tk_union) {
@@ -2244,6 +2743,23 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_close(1);
       return;
     }
+    /* `if constexpr`, `if consteval`: the run-time code has only the branch that is taken (as c_gen_be.c puts it out).
+       An instantiated template has its untaken branch replaced by an empty statement already. */
+    case stmk_constexpr_if: {
+      a_constexpr_if_ptr cip = s->variant.constexpr_if;
+      ir_note(1, stmk_constexpr_if, 1);
+      if (cip->value) ir_stmt(cip->then_statement, d);
+      else if (cip->else_statement != NULL) ir_stmt(cip->else_statement, d);
+      return;
+    }
+    case stmk_if_consteval:
+      ir_note(1, stmk_if_consteval, 1);
+      if (s->variant.if_stmt.else_statement != NULL) ir_stmt(s->variant.if_stmt.else_statement, d);
+      return;
+    case stmk_if_not_consteval:
+      ir_note(1, stmk_if_not_consteval, 1);
+      ir_stmt(s->variant.if_stmt.then_statement, d);
+      return;
     case stmk_while:
       ir_note(1, stmk_while, 1);
       ir_line(d, "(loop");
@@ -2409,6 +2925,23 @@ static void ir_stmt(a_statement_ptr s, int d)
           else if (cl->reg != anr_flags) why = "asm-clobbers";
         }
       }
+      /* doctest's debugger break, `__asm__ volatile("int $3\n" : :)`: raise SIGTRAP, which is what the instruction does
+         when no debugger is attached (path A's qbe-prep.rb calls a stub for it). */
+      if (why != NULL && ae != NULL && ae->asm_string != NULL && ae->asm_string->kind == ck_string &&
+          !ae->is_asm_goto && ae->operands == NULL && ae->clobbers == NULL) {
+        const char *t3 = ae->asm_string->variant.string.value;
+        char norm[16];
+        size_t k, m = 0;
+        for (k = 0; t3[k] != '\0' && m < sizeof norm - 1; k++) {
+          if (t3[k] != ' ' && t3[k] != '\t' && t3[k] != '\n') norm[m++] = t3[k];
+        }
+        norm[m] = '\0';
+        if (t3[k] == '\0' && strcmp(norm, "int$3") == 0) {
+          ir_note(1, stmk_asm, 1);
+          ir_line(d, "(eval (call void &\"raise\" (const int 5)))");
+          return;
+        }
+      }
       ir_note(1, stmk_asm, why == NULL);
       if (why != NULL) ir_line(d, ir_fmt("(unsupported stmt %s)", why));
       else if (mem) ir_line(d, "(barrier)");
@@ -2546,7 +3079,12 @@ static void ir_function(a_routine_ptr rout)
 #if MAINTAIN_NEEDED_FLAGS
   if (!rout->definition_needed) return;
 #endif /* MAINTAIN_NEEDED_FLAGS */
-  if (rout->suppress_inline_body) return;
+  /* A body kept only for inlining is not a stand-alone definition: a gnu_inline function (definition_for_inlining_only;
+     the C library has the real one) is skipped. suppress_inline_body without that flag is an inline member of an
+     `extern template` class such as std::allocator<char>::allocate, whose copy gcc inlines in the C back end's
+     output. Path B has no inliner, so that body is emitted (weak), and the emitter keeps it only when something
+     refers to it. */
+  if (rout->suppress_inline_body && rout->definition_for_inlining_only) return;
   scope = scope_for_routine(rout);
   if (scope == NULL || scope->assoc_block == NULL) return;
 
@@ -2570,6 +3108,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_begin(&params);
   if (ir_is_aggregate(ret)) {
     ir_sret = ir_newreg();
+    ir_abi_note(ret);
     fprintf(nf_out, " (sret %s ", ir_sret);
     nf_put_type(ret);
     fputc(')', nf_out);
@@ -2579,6 +3118,7 @@ static void ir_function(a_routine_ptr rout)
     fprintf(nf_out, " (param %s ", reg);
     nf_put_quoted_name(param->source_corresp.name);
     if (ir_is_aggregate(param->type)) {
+      ir_abi_note(param->type);
       fputs(" (byval ", nf_out);
       nf_put_type(param->type);
       fputs("))", nf_out);
@@ -2642,7 +3182,7 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_write(&params, nf_out);
   fputs(")", nf_out);
   if (rout->storage_class == sc_static) fputs("\n  (static)", nf_out);
-  else if (rout->use_comdat) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
+  else if (rout->use_comdat || rout->suppress_inline_body) fputs("\n  (weak)", nf_out); /* EDG: COMDAT (inline, template), written as __weak__ by c_gen_be.c */
   else if (rout->is_weak && rout->source_corresp.name != NULL && strncmp(rout->source_corresp.name, "_ZT", 3) == 0)
     fputs("\n  (weak)", nf_out); /* the _ZTW wrapper / _ZTH function of a thread_local: every unit that uses the variable defines it */
   else if (rout->is_weak) fputs("\n  (weak attr)", nf_out); /* __attribute__((weak)) definition: an interface symbol, kept by pruning */
@@ -2696,14 +3236,16 @@ void nfcxx_ir_back_end(void)
 
   ir_trap_overflow = ov != NULL && strcmp(ov, "trap") == 0;
   ir_buf_open(&ir_out_globals);
+  ir_buf_open(&ir_out_types);
   ir_buf_open(&ir_out_data);
   ir_buf_open(&ir_out_funcs);
   ir_mod.n = 0;
 
   for (var = scope->variables; var != NULL; var = var->next) {
-    if (!ignore_variable_in_back_end(var)) (void)ir_global_op(var);
+    /* Variables of a dependent type (the function parameter packs of libstdc++'s templates) have no object. */
+    if (!ignore_variable_in_back_end(var) && !is_template_dependent_type(var->type)) (void)ir_global_op(var);
   }
-  for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(rout->source_corresp.name);
+  for (rout = scope->routines; rout != NULL; rout = rout->next) ir_reserve_name(ir_rout_sym(rout));
   for (rout = scope->routines; rout != NULL; rout = rout->next) {
     if (rout->is_tls_init_alias && rout->function_def_number == NULL_function_def_number) ir_tls_init_alias(rout, scope);
     else ir_function(rout);
@@ -2715,6 +3257,7 @@ void nfcxx_ir_back_end(void)
           slash != NULL ? slash + 1 : file_name, (unsigned long)targ_sizeof_short, (unsigned long)targ_sizeof_int,
           (unsigned long)targ_sizeof_long, (unsigned long)targ_sizeof_long_long, (unsigned long)targ_sizeof_pointer,
           (unsigned long)targ_sizeof_float, (unsigned long)targ_sizeof_double, (unsigned long)targ_sizeof_long_double);
+  ir_buf_write(&ir_out_types, stdout);
   ir_buf_write(&ir_out_globals, stdout);
   ir_buf_write(&ir_out_data, stdout);
   ir_buf_write(&ir_out_funcs, stdout);
