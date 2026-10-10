@@ -176,17 +176,16 @@ Each is a refusal at compile or link time or a documented difference; none gives
   double) are IR gaps.
 - **`volatile long double`** is read and written with ordinary 16-byte copies (not atomic, not a fence), like the rest of the
   type; the `.v` variants of load/store do not exist for it.
-- **`_Float128`/`__float128`** stay refused; `__float80` is `long double` in EDG's layout and works. `__int128` is supported
-  with the same scheme (`docs/notes/pathb-int128.md`).
+- **`_Float128`/`__float128`** are supported with the same scheme, with gcc's soft-float in libgcc underneath
+  (`docs/notes/pathb-float128.md`); `__float80` is `long double` in EDG's layout and works. `__int128` is supported with the
+  same scheme (`docs/notes/pathb-int128.md`).
 - **Exceptions thrown by libstdc++.so** (`std::stold("zzz")` throws `invalid_argument`) are still not catchable (a documented Path B
   limit independent of the type, `pathb-hosted.md`).
-- **`std::format`** is still blocked, but no longer by `long double` or `__int128` (`docs/notes/pathb-int128.md`). With the
-  EDG fork's `ignored-routine` fix (the `lower_il.c:10294` assertion on `basic_string::_M_construct`; it is not in the pinned
-  `3rd/edg` commit) the front end gets through, and `std::format("{}", 1.5L)` stops at `refused: type std::float128_t`: the
-  formatter instantiates its visitor for `_Float128` whatever the arguments are. `_Float128` is the remaining piece (a
-  software binary128 in libgcc, and an SSE class in the C ABI that the 16-byte scheme does not give). `std::to_chars(long
-  double)` and the `std::formatter<long double>` entry points in libstdc++.so take the argument in memory like
-  `_M_insert<long double>`, so the long double side needs nothing more once that is done.
+- **`std::format`** builds and runs, with `long double`, `__int128` and `_Float128` arguments
+  (`tests/pathb-qbe/cases/float128_format.cpp`; `docs/notes/pathb-float128.md`). It needed the EDG fork's `ignored-routine`
+  fix (the `lower_il.c:10294` assertion on `basic_string::_M_construct`), which the pinned `3rd/edg` commit has. The
+  `_Float128` formatter calls libstdc++'s `to_chars(char*, char*, _Float128)` in the C ABI (an SSE register), which the
+  wrappers of `be/nfcxx_ldrt.c` provide.
 - **Speed**: every operation is a call plus 16-byte copies; temporaries are never reused within a function (QBE's frame grows
   by 16 bytes per operation).
 - **Targets.** x86-64 only: the emitter checks that `(layout (long_double 16))` is the module's layout and refuses another

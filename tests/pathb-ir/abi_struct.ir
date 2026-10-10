@@ -13,6 +13,7 @@
 (abi-type "__nfcxx_ld" 16 16 (memory))
 (x87-thunk call "fabsl" 0 16)
 (x87-thunk entry "_ZSt3abse" weak 0 16)
+(abi-type "__nfcxx_f128" 16 16 (memory))
 (global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
 (global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
@@ -742,14 +743,15 @@
   (return %4))
 
 (function "_ZSt3absDF128_"
-  (ret std::float128_t)
-  (params (param %0 "__x" std::float128_t))
+  (ret void)
+  (params (sret %0 (struct "__nfcxx_f128")) (param %1 "__x" (byval (struct "__nfcxx_f128"))))
   (weak)
-  (slot "__x" std::float128_t 16 16)
-  (store std::float128_t $"__x" %0)
-  (let %1 std::float128_t (load std::float128_t $"__x"))
-  (let %2 std::float128_t (call std::float128_t &"fabsf128" %1))
-  (return %2))
+  (slot "tmp" (array 16 unsigned_char) 16 16)
+  (slot "tmp.1" (array 16 unsigned_char) 16 16)
+  (copy 16 $"tmp.1" %1)
+  (eval (call void &"__nfcxx_f128w_fabsf128" (sret (struct "__nfcxx_f128") $"tmp") $"tmp.1"))
+  (copy 16 %0 $"tmp")
+  (return))
 
 (function "_ZSt3absDF16b"
   (ret std::bfloat16_t)
