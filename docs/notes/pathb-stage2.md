@@ -122,7 +122,14 @@ Pointer and aggregate addressing has no C-level expression:
 - `(pdiff A B SIZE)`: `(A - B) / SIZE` in the pointer difference type. `SIZE` as for `index`.
 - `(bitcast PT OP)`: change of pointee type with the same address. Array decay and `&` produce one.
 - `(bounds IDX N)`: emitted before a subscript when the base is `array_to_pointer` of an array of known length. Pointers
-  carry no length, so a subscript through a pointer is unchecked (see 9).
+  carry no length, so a subscript through a pointer is unchecked (see 9). `N` is a number, or a register of type
+  `unsigned_long` (then `IDX` is `unsigned_long` too) for a variable-length array (5b).
+- `(trap)`: ends the block with an illegal instruction (`__builtin_trap`, `asm("ud2")`): SIGILL, unlike the SIGABRT of
+  `(unreachable)` and the checked operations. `(fence)`: a full memory fence (`asm("mfence")` and friends), also a
+  compiler barrier. `(rdtsc)`: an `unsigned_long` value, the time stamp counter (`asm("rdtsc" : "=a"(lo), "=d"(hi))`).
+  The emitter implements the last two as calls of helpers it appends to the assembly (stage 3, "Machine-level helpers").
+- `(alias "NAME" "TARGET" function|object [weak])`, a top-level form: `__attribute__((alias("TARGET")))`; the symbol NAME is
+  another name of TARGET, which this module defines (stage 3, "Aliases").
 - `(nonnull P)`: emitted before every dereference of a pointer value (`indirect`, `points_to_field`). Addresses of objects
   are not checked.
 
@@ -229,8 +236,12 @@ why the lowered form, heap based, is the way to free at scope exit.
 
 `sizeof` of a VLA type or expression (`enk_sizeof` that EDG could not fold) is the product of the dimension variables
 and the element size, computed in registers, and so is the stride of a pointer to a VLA row (`index`/`pdiff` take a
-register `SIZE`). No `bounds` check is emitted for a VLA subscript (the length is a run-time value, and `bounds`
-takes a number). VLA typedefs (`stmk_vla_decl` with `is_typedef_decl`) allocate nothing; a function parameter of VLA
+register `SIZE`). A VLA subscript is bounds-checked like a fixed array's, with `(bounds IDX %N)`: `%N` is a register of
+type `unsigned_long` with the run-time element count, read from EDG's compiler variable `vla_element_count_variable` of
+the VLA (the lowered VLA is a `T *` variable plus that count), divided by the constant number of innermost elements one
+index step covers (`m[n][3]` checks the outer index against `count / 3`), and the index is converted to `unsigned_long`
+first (a negative one is huge). It is emitted when the subscript base is the VLA variable itself (through pointer casts),
+and not for a run-time inner dimension (`m[n][k]`: the step is not a constant) or a pointer parameter. VLA typedefs (`stmk_vla_decl` with `is_typedef_decl`) allocate nothing; a function parameter of VLA
 type is a pointer as in C++ and needs nothing.
 
 ### 5c. GNU statement expressions
@@ -249,8 +260,9 @@ computed. The value is the address of the destination object. `tests/pathb-qbe/c
 copy and destructor counts with the gcc backend. A `stmk_stmt_expr_result` that still carries a `dynamic_init` (expr
 NULL) stays `(unsupported stmt stmt_expr_result)`; this EDG build did not produce one in any probe.
 
-**Inline asm** (`stmk_asm`). QBE has no inline assembly, so only the subset that does nothing but constrain the compiler
-is lowered: an empty template (blank characters only), no operands, no labels, clobbers `"memory"` and/or `"cc"`, or a
+**Inline asm** (`stmk_asm`, `ir_asm_stmt`). QBE has no inline assembly, so only templates whose effect QBE can express are
+lowered (the list of what is accepted is in `pathb-hosted.md`, "Inline asm"): fences `(fence)`, `ud2` as `(trap)`,
+`rdtsc` as `(rdtsc)`, and an empty template with operands as a value passthrough, in addition to the barrier subset: an empty template (blank characters only), no operands, no labels, clobbers `"memory"` and/or `"cc"`, or a
 basic `asm("")` (gcc treats a basic asm as clobbering memory). With the `"memory"` clobber (or a basic asm) it prints
 `(barrier)`, a compiler barrier; without it, the statement prints nothing (it constrains no memory). Everything else
 prints `(unsupported stmt REASON)` with `REASON` one of `asm-template` (a non-empty template), `asm-operands`
@@ -265,7 +277,7 @@ volatile helpers): QBE cannot look into a call or reorder it, and the call has n
 S-expressions, one statement per line, indented by nesting. Identifiers are double-quoted strings. The grammar as printed:
 
 ```
-module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* (global|data|declare|function)*
+module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* (global|data|declare|abi-type|x87-thunk|function)*
 declare   ::= (declare "NAME" (weak))                          a function declared __attribute__((weak)) that this module
                                                                refers to and does not define: a weak reference (see Linkage)
 global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)|(weak attr)] [(thread)] INIT)
@@ -284,6 +296,9 @@ ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte o
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
+x87-thunk ::= (x87-thunk call|callc "F" INTS STACK)           long double results (docs/notes/pathb-longdouble.md): the emitter writes
+            | (x87-thunk entry|entryc "F" global|weak INTS STACK)   assembly thunks between the IR's convention (result through a
+                                                           trailing pointer) and the C one (result in st(0)[, st(1)])
 function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)|(weak attr)] [(constructor [PRIO])]
               [(destructor [PRIO])] SLOT* STMT*)       PRIO = 1..65535; (constructor)/(destructor): see "Start-up and exit"
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)
@@ -297,13 +312,16 @@ STMT      ::= (let %N TYPE RVALUE) | (set %N OPERAND) | (store[.v] TYPE ADDR VAL
             | (switch OPERAND (body STMT*)) | (case CONST) | (default) | (break)
             | (goto "L") | (label "L") | (return [OPERAND]) | (unreachable) | (block STMT*)
             | (barrier)                                                    compiler barrier (asm volatile("" ::: "memory"))
-RVALUE    ::= OPERAND | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX SIZE) | (pdiff A B SIZE)
+            | (fence) | (trap)                                            hardware fence (mfence); illegal instruction (ud2)
+RVALUE    ::= OPERAND | (rdtsc) | (load[.v] TYPE ADDR) | (offset ADDR N) | (index BASE IDX SIZE) | (pdiff A B SIZE)
             | (bfload[.v] TYPE UNIT ADDR BOFF WIDTH)                         bit-field load (5a)
             | (wadd|wsub|wmul T A B) | (wneg T A) | (cadd|csub|cmul|cdiv|crem|cshl|cshr T A B) | (cneg T A)
             | (fadd|fsub|fmul|fdiv T A B) | (fneg T A) | (and|or|xor T A B) | (not T A)
             | (eq|ne T A B) | (lt.s|lt.u|lt.f|le.s|le.u|le.f T A B)           result type bool
             | (iconv|bitcast|i2p|p2i|cf2i|i2f|u2f|fconv TYPE A)               conversions
             | (call TYPE CALLEE [(variadic N)] ARG*) | (eval (call void CALLEE [(variadic N)] ARG*))
+            | (alloca SIZE)                                                  __builtin_alloca: SIZE bytes of dynamic stack, live until return (QBE alloc16)
+            | (vaarg TYPE ADDR)                                              scalar va_arg of the System V va_list at ADDR; aggregates are spelled in IR
 OPERAND   ::= %N | $"name" | @"name" | &"name" | (const TYPE VALUE) | (null PTR)
 TYPE      ::= int | unsigned_int | bool | double | ... | void | (ptr TYPE) | (struct "N") | (class "N") | (union "N")
             | (array N TYPE) | (array ? TYPE) | (fn RET (PARAMS))   [type text as in stage 1; qualifiers are kept inside pointee and object types]
@@ -471,9 +489,10 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
 3. **Constructor initializers** (`dik_constructor`) and inline asm print unsupported markers. None of these appears in
    `tests/cases` after lowering. (Bit-fields, VLAs and GNU statement expressions were in this list; they are lowered
    since stage 3 round 3, sections 5a-5c; the later rounds closed the scope-exit free of a VLA, the class-result
-   statement expression, union aggregate constants and the empty-asm barrier. Still open: no `bounds` check on VLA
-   subscripts; bit-fields wider than 64 bits (128-bit declared type, not implementable); inline asm with a template,
-   operands or register clobbers.)
+   statement expression, union aggregate constants and the empty-asm barrier; later still the `bounds` check on VLA
+   subscripts and the asm subset of `pathb-hosted.md`. Still open: bit-fields wider than 64 bits (128-bit declared type,
+   not implementable); inline asm with a template other than fences, `ud2`, `rdtsc`, `int $3` and nops, with operands on
+   anything but an empty template, or with register clobbers.)
 
    the function's local-static-variable-init entry (EDG `get_variable_initializer`). Dynamic initialization after
    lowering is explicit statements of the `__sti__` routine (see "Start-up and exit"), so a global never reaches
@@ -482,7 +501,7 @@ Not implemented (each prints an `(unsupported ...)` marker or is a stated decisi
 3. **Constructor initializers** (`dik_constructor`) in a `stmk_init` print as an ordinary constructor call
    `(eval (call void &"ctor" OBJ ARG*))`; the lowering expands every constructor into such a call before the
    back end sees it, so this path is never taken by the probes (array copies, implied copy sources and value
-   initialization of the unlowered form stay unsupported). Inline asm beyond the barrier subset (5c) prints an
+   initialization of the unlowered form stay unsupported). Inline asm beyond the subset of 5c prints an
    unsupported marker. It does not appear in `tests/cases` after lowering.
 4. **`continue`** is `(continue)` since stage 3 round 2. The lowered IL turns it into `(goto "L")` to an unnamed
    `(label "L")` at the end of the loop body; the lowering recognises that pair for the innermost loop, prints
@@ -521,10 +540,11 @@ The 45 kinds seen are all lowered. "Referenced" is a count of the `case` labels 
 behaviour. The kinds in the table's third column that are not in the fourth are implemented but not exercised by these
 programs. The probe in `tests/pathb-ir/gaps.cpp` exercises the marker path on purpose: it still contains a
 variable-length array, a GNU statement expression and bit-field reads and writes (lowered now, so they appear in its
-golden as `__vla_alloc` calls, plain statements and `bfload`/`bfstore`) and an inline asm with an input operand, which
-is the one remaining `(unsupported stmt asm-operands)` marker; the runner checks the count (1). The probes
+golden as `__vla_alloc` calls, plain statements and `bfload`/`bfstore`) and an inline asm of a `cpuid` template with a
+register clobber, which is the one remaining `(unsupported stmt asm-template)` marker; the runner checks the count (1). The probes
 `tests/pathb-qbe/cases/{bitfield,bitfield2,bitfield_union,vla,vla_scope,stmtexpr,stmtexpr_class,agg_union,asm_barrier,weak_decl}.cpp`
-have goldens of their own.
+have goldens of their own, and so do `asm_ext`, `builtin_objsize`, `alias_attr`, `alias_static`, `vla_bounds` and the
+`traps/` probes `builtin_trap`, `asm_ud2` and `vla_index`.
 
 Reproduce (from the worktree; the harness is built out of tree):
 

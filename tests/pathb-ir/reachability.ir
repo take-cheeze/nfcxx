@@ -1,4 +1,6 @@
 (ir-module "reachability.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "__nfcxx_ld" 16 16 (memory))
+(x87-thunk entry "_ZN6Unused1fEv" weak 1 0)
 (global "_ZTV6Unused" (const (array 3 (const long))) 24 8 (extern))
 (global "_ZTVN10__cxxabiv117__class_type_infoE" (const (array 0 (const long))) 0 8 (extern))
 (global "_ZTS4Used" (const (array 6 (const char))) 6 1 (weak) (init
@@ -13,15 +15,20 @@
 (global "__curr_eh_stack_entry" (ptr (struct "anon1")) 8 8 (extern))
 (data "const" (const (array 6 (const char))) (string "4Used\000"))
 
-(function "_ZN34_INTERNAL_16_reachability_cpp_main13unused_staticEe"
-  (ret long_double)
-  (params (param %0 "x" long_double))
+(function "__nfcxx_ldr__ZN34_INTERNAL_16_reachability_cpp_main13unused_staticEe"
+  (ret void)
+  (params (param %0 "x" (byval (struct "__nfcxx_ld"))) (param %1 "__ldret" (ptr (array 16 unsigned_char))))
   (static)
-  (slot "x" long_double 16 16)
-  (store long_double $"x" %0)
-  (let %1 long_double (load long_double $"x"))
-  (let %2 long_double (fmul long_double %1 (const long_double 2.0)))
-  (return %2))
+  (slot "tmp" (array 16 unsigned_char) 16 16)
+  (slot "tmp.1" (array 16 unsigned_char) 16 16)
+  (slot "tmp.2" (array 16 unsigned_char) 16 16)
+  (copy 16 $"tmp" %0)
+  (let %2 (ptr unsigned_long) (offset $"tmp.1" 8))
+  (store unsigned_long $"tmp.1" (const unsigned_long 9223372036854775808))
+  (store unsigned_long %2 (const unsigned_long 16384))
+  (eval (call void &"__nfcxx_ld_mul" $"tmp.2" $"tmp" $"tmp.1"))
+  (copy 16 %1 $"tmp.2")
+  (return))
 
 (function "_Z13unused_inlinePVi"
   (ret int)
@@ -89,13 +96,18 @@
   (let %9 int (wadd int %1 %8))
   (return %9))
 
-(function "_ZN6Unused1fEv"
-  (ret long_double)
-  (params (param %0 "tmp" (const (ptr (struct "Unused")))))
+(function "__nfcxx_ldr__ZN6Unused1fEv"
+  (ret void)
+  (params (param %0 "tmp" (const (ptr (struct "Unused")))) (param %1 "__ldret" (ptr (array 16 unsigned_char))))
   (weak)
   (slot "tmp" (const (ptr (struct "Unused"))) 8 8)
+  (slot "tmp.1" (array 16 unsigned_char) 16 16)
   (store (ptr (struct "Unused")) $"tmp" %0)
-  (return (const long_double 1.0)))
+  (let %2 (ptr unsigned_long) (offset $"tmp.1" 8))
+  (store unsigned_long $"tmp.1" (const unsigned_long 9223372036854775808))
+  (store unsigned_long %2 (const unsigned_long 16383))
+  (copy 16 %1 $"tmp.1")
+  (return))
 
 (function "_ZN4Used1gEv"
   (ret int)

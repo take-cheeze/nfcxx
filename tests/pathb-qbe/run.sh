@@ -22,6 +22,9 @@
 #                                 `// TRAP-STDERR: text` line also requires that text on stderr (EH runtime messages).
 #                                 Built with NFCXX_IR_OVERFLOW=trap. The gcc backend is not compared: C leaves
 #                                 these cases undefined (gcc dies with SIGFPE or SIGSEGV instead).
+#                                 `// TRAP-EXIT: 132` expects another signal (128 + 4, SIGILL: __builtin_trap, asm ud2);
+#                                 `// TRAP-IR: default` builds without NFCXX_IR_OVERFLOW=trap (VLA lowering contains a
+#                                 checked 64-bit signed multiply, which trap mode refuses).
 #
 # A node, type or marker the emitter does not handle is REFUSED: reported with its reason, not counted as a
 # failure. Any other problem (front end, emitter error, QBE, assembler, linker, wrong exit code, gcc disagreeing
@@ -42,6 +45,7 @@ export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
 mrb=$root/scripts/mrb
+ldrt=$(scripts/pathb-ldrt) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0
@@ -76,7 +80,9 @@ run_one() {
   total=$((total + 1))
   n=$(basename "$f" .cpp); name=${f#tests/}
   ir=$tmp/$n.ir; ssa=$tmp/$n.ssa; s=$tmp/$n.s; obj=$tmp/$n.o; exe=$tmp/$n.exe
-  if [ "$mode" = trap ]; then
+  if [ "$mode" = trap ] && ! grep -q '^// TRAP-IR: default' "$f"; then
+    # (`// TRAP-IR: default` keeps the wrapping arithmetic: a checked 64-bit signed multiply, which the lowering of a
+    # variable-length array contains, is refused in trap mode.)
     NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
       failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
   else
@@ -100,7 +106,7 @@ run_one() {
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" $shim -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" "$ldrt" $shim -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
@@ -110,10 +116,13 @@ run_one() {
     # A `// TRAP-STDERR: text` line names a message the abort must have printed, so that a program which aborts for
     # another reason (a broken unwinder, say) is not taken for the trap it is testing.
     want=$(sed -n 's,^// TRAP-STDERR: *\(.*\),\1,p' "$f" | head -1)
-    if [ $got != 134 ]; then failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap (134)")
+    # `// TRAP-EXIT: 132` names another fatal signal (128 + signal): __builtin_trap and ud2 are SIGILL, not SIGABRT.
+    wsig=$(sed -n 's,^// TRAP-EXIT: *\([0-9][0-9]*\).*,\1,p' "$f" | head -1); wsig=${wsig:-134}
+    case $wsig in 134) sname=SIGABRT ;; 132) sname=SIGILL ;; *) sname="signal $((wsig - 128))" ;; esac
+    if [ $got != $wsig ]; then failed=$((failed + 1)); lines+=("FAIL     $name: exit $got, expected a trap ($wsig)")
     elif [ -n "$want" ] && ! grep -qF "$want" "$tmp/$n.rt"; then
       failed=$((failed + 1)); lines+=("FAIL     $name: aborted, but stderr lacks '$want'")
-    else trapped=$((trapped + 1)); lines+=("trapped  $name (SIGABRT)"); fi
+    else trapped=$((trapped + 1)); lines+=("trapped  $name ($sname)"); fi
     return
   fi
   want=$(expect_of "$f")
@@ -188,7 +197,7 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: cc ($f): $(head -1 "$tmp/$b.cc")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" $shim $rpath -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" $shim $rpath "$ldrt" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))
@@ -196,6 +205,14 @@ run_multi() {
   ran=$((ran + 1))
   want=$(for f in "$d"/*.cpp; do expect_of "$f"; done | head -1)
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
+  if grep -q '^// GCC: undefined' "$d"/*.cpp; then
+    # as for a single program: the gcc backend is not compared (it cannot run this one, e.g. _Complex long double across
+    # a C ABI boundary: EDG's C output passes it as a struct), only EXPECT is checked
+    if [ $((got & 255)) -ne $((want & 255)) ]; then
+      failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc not compared)"); return
+    fi
+    match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared), ${#objs[@]} translation units"); return
+  fi
   gcc_rc=compile-error
   if NFCXX_BACKEND=gcc ./nfcxx "${srcs[@]}" -o "$tmp/multi_$n.gcc" > /dev/null 2> "$tmp/multi_$n.gccerr"; then
     sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/multi_$n.gcc" "$tmp/multi_$n.gcc.stdout"; gcc_rc=$?

@@ -1,0 +1,50 @@
+(ir-module "builtin_trap.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "stderr" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(data "const" (const (array 12 (const char))) (string "not reached\000"))
+
+(function "_ZN34_INTERNAL_16_builtin_trap_cpp_main7reachedEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 bool (lt.s int (const int 2) %1))
+  (if %2
+    (then
+      (block
+        (trap))))
+  (let %3 int (load int $"x"))
+  (return %3))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (slot "tmp" int 4 4)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %0 int (load int $"i"))
+        (let %1 bool (lt.s int %0 (const int 10)))
+        (if %1 (then) (else (break)))
+        (block
+          (let %2 int (load int $"i"))
+          (let %3 int (call int &"_ZN34_INTERNAL_16_builtin_trap_cpp_main7reachedEi" %2))
+          (store int $"tmp" %3)
+          (let %4 int (load int $"tmp"))
+          (let %5 int (load int $"s"))
+          (let %6 int (wadd int %5 %4))
+          (store int $"s" %6)))
+      (step
+        (let %7 int (load int $"i"))
+        (let %8 int (wadd int %7 (const int 1)))
+        (store int $"i" %8))))
+  (let %9 int (call int &"puts" @"const"))
+  (let %10 int (load int $"s"))
+  (return %10))

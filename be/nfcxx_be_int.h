@@ -13,6 +13,7 @@ mid-level IR (nfcxx_ir.c). Include only after the EDG headers and USING_NAMESPAC
 extern FILE *nf_out;
 
 /* Printers from nfcxx_be.c. They write to nf_out. */
+extern int nf_ld_blob;   /* IR mode: print long double as (array 16 unsigned_char) */
 void nf_put_atom(const char *s);
 void nf_put_quoted(const char *s, size_t len);
 void nf_put_unqualified_type(a_type_ptr type);

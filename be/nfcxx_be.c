@@ -103,6 +103,9 @@ static void nf_put_stmt(a_statement_ptr stmt, int depth);
 
 /* ---------------------------------------------------------------- types */
 
+/* Set by the IR back end: a long double is printed as a 16-byte array, not as the type name. */
+int nf_ld_blob;
+
 void nf_put_unqualified_type(a_type_ptr type)
 {
   switch (type->kind) {
@@ -114,6 +117,11 @@ void nf_put_unqualified_type(a_type_ptr type)
       nf_put_atom(is_bool_type(type) ? "bool" : int_type_name(type));
       break;
     case tk_float:
+      if (nf_ld_blob && type->variant.float_kind == fk_long_double) {
+        /* IR mode: a long double is a 16-byte object (docs/notes/pathb-longdouble.md) */
+        fputs("(array 16 unsigned_char)", nf_out);
+        break;
+      }
       nf_put_atom(float_kind_name(type->variant.float_kind, /*use_C_form=*/FALSE));
       break;
     case tk_pointer:

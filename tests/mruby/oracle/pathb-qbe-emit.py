@@ -217,19 +217,18 @@ def wrap_int(v, cls):
 
 
 def float_lit(v, size):
-    if not math.isfinite(v):
-        raise Refused("non-finite floating constant %r" % v)
+    # Infinities and NaN are spelled d_inf / d_-inf / d_nan (QBE reads the text with strtod).
     if size == 4:
-        v = struct.unpack("f", struct.pack("f", v))[0]
+        if math.isfinite(v):
+            v = struct.unpack("f", struct.pack("f", v))[0]
         return "s_" + repr(v)
     return "d_" + repr(v)
 
 
 def data_float(v, size):
-    if not math.isfinite(v):
-        raise Refused("non-finite floating constant %r" % v)
     if size == 4:
-        v = struct.unpack("f", struct.pack("f", v))[0]
+        if math.isfinite(v):
+            v = struct.unpack("f", struct.pack("f", v))[0]
         return "s", "s_" + repr(v)
     return "d", "d_" + repr(v)
 
@@ -300,6 +299,7 @@ class Module:
         self.funcs = set()     # IR names of the functions defined in this module
         self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
         self.abi = {}          # struct name -> AbiType: the C calling convention shape of aggregates by value
+        self.asmhelpers = {}   # machine-level helpers ("fence", "rdtsc") that append_weak writes into the assembly
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -457,6 +457,12 @@ class Fn:
     def ret(self, v=None):
         self.ensure_live()
         self._put(("ret" if self.sret_buf is None else "ret %s" % self.sret_buf) if v is None else "ret %s" % v)
+        self.dead = True
+
+    def hlt(self):
+        """Terminate the block with QBE's hlt (ud2 on x86-64: SIGILL)."""
+        self.ensure_live()
+        self._put("hlt")
         self.dead = True
 
     def label(self, lab):
@@ -1267,7 +1273,7 @@ RVAL = {
     "i2f": r_i2f, "u2f": r_i2f, "fconv": r_fconv, "cf2i": r_cf2i,
     "offset": r_offset, "index": r_index, "pdiff": r_pdiff,
     "bfload": r_bfload, "bfload.v": r_bfload,
-    "call": r_call,
+    "call": r_call, "rdtsc": lambda fn, x: r_rdtsc(fn, x),
 }
 
 
@@ -1454,6 +1460,25 @@ def r_vaarg(fn, x):
     return Val(t, cls, ty)
 
 
+def r_alloca(fn, x):
+    # (alloca SIZE): __builtin_alloca. SIZE bytes of dynamic stack, 16-byte aligned, that live until the function returns
+    # (QBE alloc16 in the middle of a function: the stack pointer moves down and the epilogue restores it). Executed again
+    # in a loop it allocates again, as alloca does; nothing is released earlier, there is no block scope.
+    if len(x) != 2:
+        raise BadIR("alloca form")
+    sz = fn.opnd(x[1])
+    if sz.ty is None or sz.ty[0] != "int":
+        raise Refused("alloca size of type %s" % (sz.ty,))
+    size = sz.t
+    if sz.cls != "l":
+        size = fn.tmp()
+        fn.emit("%s =l extuw %s" % (size, sz.t))
+    t = fn.tmp()
+    fn.emit("%s =l alloc16 %s" % (t, size))
+    return Val(t, "l", ("ptr", None))
+
+
+RVAL["alloca"] = r_alloca
 RVAL["vaarg"] = r_vaarg
 
 
@@ -1475,14 +1500,49 @@ def s_eval(fn, x):
 
 
 def s_bounds(fn, x):
+    # (bounds IDX N): N is a number, or a register holding the run-time length of a variable-length array; a register
+    # bound and its index are both 64-bit (the lowering converts).
     idx = fn.opnd(x[1])
-    n = as_int(x[2])
+    n = None if (isinstance(x[2], str) and REG_RE.match(x[2])) else as_int(x[2])
     if idx.ty is None or idx.ty[0] != "int":
         raise Refused("bounds on a non-integer index")
     cls = idx.cls
     c = fn.tmp()
-    fn.emit("%s =w cult%s %s, %d" % (c, cls, idx.t, wrap_int(n, cls)))
+    if n is None:
+        nv = fn.opnd(x[2], "l")
+        if cls != "l":
+            raise BadIR("bounds: a register bound needs a 64-bit index")
+        fn.emit("%s =w cultl %s, %s" % (c, idx.t, nv.t))
+    else:
+        fn.emit("%s =w cult%s %s, %d" % (c, cls, idx.t, wrap_int(n, cls)))
     fn.trap_unless(c)
+
+
+def s_trap(fn, x):
+    # (trap): the instruction gcc's __builtin_trap and asm("ud2") are, QBE's hlt (ud2 on x86-64): SIGILL, not the SIGABRT of
+    # the checked operations. It ends the block like (unreachable).
+    if len(x) != 1:
+        raise BadIR("trap form")
+    fn.hlt()
+
+
+def s_fence(fn, x):
+    # (fence): a full memory fence for asm("mfence") and friends, a call of the helper __pathb_fence that
+    # append_weak writes into the assembly (QBE has no fence). An opaque call, so also a compiler barrier.
+    if len(x) != 1:
+        raise BadIR("fence form")
+    fn.mod.asmhelpers["fence"] = True
+    fn.emit("call $__pathb_fence()")
+
+
+def r_rdtsc(fn, x):
+    # (rdtsc): the 64-bit time stamp counter, edx:eax of the instruction, from the helper __pathb_rdtsc.
+    if len(x) != 1:
+        raise BadIR("rdtsc form")
+    fn.mod.asmhelpers["rdtsc"] = True
+    t = fn.tmp()
+    fn.emit("%s =l call $__pathb_rdtsc()" % t)
+    return Val(t, "l", parse_type("unsigned_long"))
 
 
 def s_nonnull(fn, x):
@@ -1667,7 +1727,7 @@ STMT = {
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
-    "barrier": s_barrier,
+    "barrier": s_barrier, "trap": s_trap, "fence": s_fence,
 }
 
 
@@ -1788,15 +1848,123 @@ def global_items(mod, name, items_form):
 # that QBE produced (the same trick as scripts/weak-symbols.py, but driven by the IR instead of EDG's __weak__ text).
 WEAK_MARK = "# pathb-weak "
 
+# Machine-level helpers for operations QBE cannot express. The emitter notes the use in the IL ("# pathb-asm NAME") and
+# append_weak appends the helper, as a weak function, to the assembly: __pathb_fence executes mfence, __pathb_rdtsc rdtsc
+# (edx:eax combined into rax). x86-64 only, like the asm statements they come from.
+ASM_MARK = "# pathb-asm "
+ASM_HELPERS = {
+    "fence": ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
+              "\t.size __pathb_fence, .-__pathb_fence"],
+    "rdtsc": ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
+              "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+}
+
+# GNU alias attributes. QBE has no aliases: the IR form (alias NAME TARGET function|object [weak]) becomes a comment
+# line "# pathb-alias KIND NAME TARGET [weak]" in the IL and a .set (with .globl or .weak and the symbol type) here.
+ALIAS_MARK = "# pathb-alias "
+
+
+# ---- long double: the x87 thunks (docs/notes/pathb-longdouble.md)
+#
+# A function returning long double returns it in st(0), which QBE cannot touch. Path B defines such a function F as
+# __nfcxx_ldr_F with a trailing pointer parameter for the result (an ordinary void function). Two thunks in assembly
+# connect that to the C convention. They are described by the IR forms
+#   (x87-thunk entry "F" LINKAGE INTS STACK)   F itself: calls __nfcxx_ldr_F with a stack buffer, loads st(0)
+#   (x87-thunk call "F" INTS STACK)            __nfcxx_x87c_F(args..., dst): calls F, stores st(0) at dst
+# and entryc / callc for a _Complex long double result (COMPLEX_X87: real part in st(0), imaginary part in st(1); the
+# 32-byte object holds the real part at offset 0 and the imaginary part at 16).
+# where INTS is the number of integer registers the parameters of F use and STACK the bytes of its stack arguments.
+# The emitter leaves one marker comment per live thunk in the QBE IL; append_weak turns them into assembly (QBE has no
+# way to write it). The extra pointer is the next integer register after the parameters, or the stack word after the
+# stack arguments when all six are used; the thunk copies the stack arguments to its own frame, which keeps the
+# 16-byte alignment of long doubles passed in memory, and uses only r11 and the register of the extra pointer.
+X87_MARK = "# pathb-x87 "
+X87_REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+
+
+def x87_copy_args(stack, frame):
+    out = []
+    for i in range(0, stack, 8):
+        out.append("\tmovq %d(%%rsp), %%r11" % (frame + 8 + i))
+        out.append("\tmovq %%r11, %d(%%rsp)" % i)
+    return out
+
+
+def x87_call_thunk(name, ints, stack, cplx=False):
+    r = (stack + 15) // 16 * 16
+    frame = r + 24
+    sym = "__nfcxx_x87c_" + name
+    out = [".text", ".weak %s" % sym, ".hidden %s" % sym, ".type %s, @function" % sym, sym + ":",
+           "\tsubq $%d, %%rsp" % frame]
+    if ints < 6:
+        out.append("\tmovq %%%s, %d(%%rsp)" % (X87_REGS[ints], r))
+    else:
+        out.append("\tmovq %d(%%rsp), %%r11" % (frame + 8 + stack))
+        out.append("\tmovq %%r11, %d(%%rsp)" % r)
+    out.extend(x87_copy_args(stack, frame))
+    out.append("\tcall %s@PLT" % name)
+    out.append("\tmovq %d(%%rsp), %%rdi" % r)
+    out.append("\tfstpt (%rdi)")
+    out.append("\tmovw $0, 10(%rdi)")
+    out.append("\tmovl $0, 12(%rdi)")
+    if cplx:
+        out.append("\tfstpt 16(%rdi)")
+        out.append("\tmovw $0, 26(%rdi)")
+        out.append("\tmovl $0, 28(%rdi)")
+    out.append("\taddq $%d, %%rsp" % frame)
+    out.append("\tret")
+    out.append(".size %s, .-%s" % (sym, sym))
+    return "\n".join(out) + "\n"
+
+
+def x87_entry_thunk(name, linkage, ints, stack, cplx=False):
+    m = stack + (8 if ints == 6 else 0)
+    mr = (m + 15) // 16 * 16
+    frame = mr + (40 if cplx else 24)
+    out = [".text", (".weak %s" % name) if linkage == "weak" else (".globl %s" % name), ".type %s, @function" % name,
+           name + ":", "\tsubq $%d, %%rsp" % frame]
+    out.extend(x87_copy_args(stack, frame))
+    if ints < 6:
+        out.append("\tleaq %d(%%rsp), %%%s" % (mr, X87_REGS[ints]))
+    else:
+        out.append("\tleaq %d(%%rsp), %%r11" % mr)
+        out.append("\tmovq %%r11, %d(%%rsp)" % stack)
+    out.append("\tcall __nfcxx_ldr_%s@PLT" % name)
+    if cplx:
+        out.append("\tfldt %d(%%rsp)" % (mr + 16))
+    out.append("\tfldt %d(%%rsp)" % mr)
+    out.append("\taddq $%d, %%rsp" % frame)
+    out.append("\tret")
+    out.append(".size %s, .-%s" % (name, name))
+    return "\n".join(out) + "\n"
+
 
 def append_weak(il_path, asm_path):
     names = []
+    extra = []
     for line in open(il_path, encoding="latin-1"):
         if line.startswith(WEAK_MARK):
             names.append(line[len(WEAK_MARK):].strip())
-    if names:
+        elif line.startswith(ASM_MARK):
+            lines = ASM_HELPERS.get(line[len(ASM_MARK):].strip())
+            if lines is not None:
+                extra.append("\n".join(lines) + "\n")
+        elif line.startswith(X87_MARK):
+            w = line[len(X87_MARK):].rstrip("\n").split(" ")
+            if w[0] in ("call", "callc"):
+                extra.append(x87_call_thunk(w[1], int(w[2]), int(w[3]), w[0] == "callc"))
+            else:
+                extra.append(x87_entry_thunk(w[1], w[2], int(w[3]), int(w[4]), w[0] == "entryc"))
+        elif line.startswith(ALIAS_MARK):
+            p = line[len(ALIAS_MARK):].split()
+            if len(p) < 3:
+                continue
+            extra.append("\n".join(["\t%s %s" % (".weak" if len(p) > 3 and p[3] == "weak" else ".globl", p[1]),
+                                    "\t.type %s, %s" % (p[1], "@function" if p[0] == "function" else "@object"),
+                                    "\t.set %s, %s" % (p[1], p[2])]) + "\n")
+    if names or extra:
         with open(asm_path, "a") as f:
-            f.write("\n" + "".join(".weak %s\n" % n for n in names))
+            f.write("\n" + "".join(".weak %s\n" % n for n in names) + "".join(extra))
     return 0
 
 
@@ -2019,7 +2187,7 @@ def emit_startup_tables(mod):
         mod.out.append("data $pathb_startup%d = align 8 { l $%s }" % (i, sym))
 
 
-LP64 = {"short": 2, "int": 4, "long": 8, "long_long": 8, "pointer": 8, "float": 4, "double": 8}
+LP64 = {"short": 2, "int": 4, "long": 8, "long_long": 8, "pointer": 8, "float": 4, "double": 8, "long_double": 16}
 
 
 def check_layout(header):
@@ -2062,6 +2230,20 @@ def _is_linked(f):
     return True
 
 
+def alias_parts(f):
+    """(alias "NAME" "TARGET" function|object [weak]): from __attribute__((alias("TARGET"))) on a function or an object
+    that the translation unit defines. Returns (name, target, kind, weak)."""
+    if len(f) < 4 or len(f) > 5:
+        raise BadIR("alias form: %s" % form_text(f))
+    kind = f[3]
+    if kind != "function" and kind != "object":
+        raise BadIR("alias form: %s" % form_text(f))
+    weak = len(f) == 5
+    if weak and f[4] != "weak":
+        raise BadIR("alias form: %s" % form_text(f))
+    return (str(f[1]), str(f[2]), kind, weak)
+
+
 def prune(forms):
     """Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
     nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
@@ -2080,6 +2262,13 @@ def prune(forms):
         if _is_linked(f) or _is_startup(f):
             live.add(name)
             work.append(name)
+    for f in forms[1:]:   # the target of an alias is kept whatever its linkage
+        if head_of(f) != "alias":
+            continue
+        tg = alias_parts(f)[1]
+        if tg in defs and tg not in live:
+            live.add(tg)
+            work.append(tg)
     while work:
         refs = set()
         _symbols(defs[work.pop()], refs)
@@ -2132,6 +2321,39 @@ def stub_long_double(forms):
     return out
 
 
+def emit_x87_thunks(mod, forms):
+    """Marker comments for the x87 thunks (append_weak writes the assembly) that live code needs: a call thunk when some
+    kept function or global refers to __nfcxx_x87c_F, an entry thunk when __nfcxx_ldr_F was kept."""
+    refs = set()
+    kept = set()
+    for f in forms[1:]:
+        h = head_of(f)
+        if h not in ("function", "global"):
+            continue
+        _symbols(f, refs)
+        if h == "function":
+            kept.add(str(f[1]))
+    for f in forms[1:]:
+        if head_of(f) != "x87-thunk":
+            continue
+        if len(f) < 5:
+            raise BadIR("x87-thunk form: %s" % form_text(f))
+        kind = f[1]
+        name = str(f[2])
+        if kind in ("call", "callc"):
+            if len(f) != 5:
+                raise BadIR("x87-thunk %s form: %s" % (kind, form_text(f)))
+            if "__nfcxx_x87c_" + name in refs:
+                mod.out.append("%s%s %s %d %d" % (X87_MARK, kind, qsym(name), as_int(f[3]), as_int(f[4])))
+        elif kind in ("entry", "entryc"):
+            if len(f) != 6 or f[3] not in ("weak", "global"):
+                raise BadIR("x87-thunk %s form: %s" % (kind, form_text(f)))
+            if "__nfcxx_ldr_" + name in kept:
+                mod.out.append("%s%s %s %s %d %d" % (X87_MARK, kind, qsym(name), f[3], as_int(f[4]), as_int(f[5])))
+        else:
+            raise BadIR("x87-thunk kind %s" % form_text(f))
+
+
 def emit_module(text, do_prune=True, ld_trap=False):
     forms = parse_forms(tokenize(text))
     if not forms or head_of(forms[0]) != "ir-module":
@@ -2171,8 +2393,12 @@ def emit_module(text, do_prune=True, ld_trap=False):
                 emit_function(mod, f)
             except Refused as e:
                 raise Refused("%s [in %s]" % (e, str(f[1])))   # which function holds the unsupported node
-        elif head_of(f) not in ("global", "data", "abi-type", "declare"):
+        elif head_of(f) == "alias":
+            name, target, kind, weak = alias_parts(f)
+            mod.out.append("%s%s %s %s%s" % (ALIAS_MARK, kind, qsym(name), qsym(target), " weak" if weak else ""))
+        elif head_of(f) not in ("global", "data", "abi-type", "declare", "x87-thunk"):
             raise Refused("top-level form (%s ...)" % head_of(f))
+    emit_x87_thunks(mod, forms)
     emit_startup_tables(mod)
     for name, cell in mod.got.items():
         mod.out.append("data $%s = align 8 { l $%s }" % (cell, qsym(name)))
@@ -2182,6 +2408,8 @@ def emit_module(text, do_prune=True, ld_trap=False):
         mod.out.extend(lines)
     for n in mod.weakrefs:
         mod.out.append(WEAK_MARK + qsym(n))
+    for n in mod.asmhelpers:
+        mod.out.append(ASM_MARK + n)
     return "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + "\n".join(mod.out) + "\n"
 
 

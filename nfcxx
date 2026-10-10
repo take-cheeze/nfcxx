@@ -182,7 +182,9 @@ if [ $backend = pathb ]; then
     esac
   done
   t=$(trace_start)
-  cc ${ldopts[@]+"${ldopts[@]}"} -o "$out" ${cobjs[@]+"${cobjs[@]}"} "${pobjs[@]}" ${plink[@]+"${plink[@]}"} ${shim[@]+"${shim[@]}"} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
+  # libnfcxxld.a: the long double helpers and nothing else (scripts/pathb-ldrt, docs/notes/pathb-longdouble.md)
+  ldrt=$("$root/scripts/pathb-ldrt")
+  cc ${ldopts[@]+"${ldopts[@]}"} -o "$out" ${cobjs[@]+"${cobjs[@]}"} "${pobjs[@]}" ${plink[@]+"${plink[@]}"} "$ldrt" ${shim[@]+"${shim[@]}"} -L"${EDG_BUILD:-$root/build/edg}/lib" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic
   trace_end "$t" "link" pathb
   exit 0
 fi

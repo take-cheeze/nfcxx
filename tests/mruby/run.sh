@@ -224,11 +224,12 @@ python3 "$oracle/pathb-qbe-emit.py" "$tmp/no-such-file.ir" >/dev/null 2>&1; r6=$
 "$mrb" "$root/scripts/pathb-qbe-emit.rb" "$tmp/no-such-file.ir" >/dev/null 2>&1; r7=$?
 if [ "$r1 $r2 $r3 $r4 $r5" = "0 0 1 1 1" ] && [ "$r6" = 1 ] && [ "$r7" = 1 ]; then report ok "pathb-qbe-emit stdin, usage errors and a missing file behave the same"
 else report fail "pathb-qbe-emit stdin/usage statuses unexpected: $r1 $r2 $r3 $r4 $r5 $r6 $r7"; fi
-# --append-weak: the `# pathb-weak` marks of the IL become .weak lines at the end of the assembly.
+# --append-weak: the `# pathb-weak` marks of the IL become .weak lines at the end of the assembly; `# pathb-asm` and
+# `# pathb-alias` marks (fence/rdtsc helpers, GNU aliases) become the helper functions and .set lines.
 weak_n=0; weak_lines=0
 for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
   python3 "$oracle/pathb-qbe-emit.py" "$f" >"$tmp/w.ssa" 2>/dev/null || continue
-  grep -q '^# pathb-weak ' "$tmp/w.ssa" || continue
+  grep -q '^# pathb-\(weak\|asm\|alias\) ' "$tmp/w.ssa" || continue
   printf '\t.text\nfoo:\n\tret\n' >"$tmp/w.py.s"; cp "$tmp/w.py.s" "$tmp/w.rb.s"
   python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.ssa" "$tmp/w.py.s"; rcp=$?
   "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/w.ssa" "$tmp/w.rb.s"; rcr=$?
@@ -238,6 +239,22 @@ for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
 done
 if [ $weak_lines -gt 0 ]; then report ok "pathb-qbe-emit --append-weak ($weak_n modules, $weak_lines .weak lines identical)"
 else report fail "pathb-qbe-emit --append-weak: no module had a weak definition"; fi
+# The `# pathb-x87` marks (long double thunks, docs/notes/pathb-longdouble.md) become assembly: identical output, and, when QBE
+# and an assembler are there, a file the assembler accepts.
+x87_n=0; x87_marks=0
+for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do
+  python3 "$oracle/pathb-qbe-emit.py" "$f" >"$tmp/x.ssa" 2>/dev/null || continue
+  grep -q '^# pathb-x87 ' "$tmp/x.ssa" || continue
+  printf '\t.text\nfoo:\n\tret\n' >"$tmp/x.py.s"; cp "$tmp/x.py.s" "$tmp/x.rb.s"
+  python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/x.ssa" "$tmp/x.py.s"; rcp=$?
+  "$mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/x.ssa" "$tmp/x.rb.s"; rcr=$?
+  if [ $rcp -eq $rcr ] && cmp -s "$tmp/x.py.s" "$tmp/x.rb.s"; then
+    x87_n=$((x87_n + 1)); x87_marks=$((x87_marks + $(grep -c '^# pathb-x87 ' "$tmp/x.ssa")))
+    if ! cc -c -o "$tmp/x.o" "$tmp/x.py.s" 2>"$tmp/x.as"; then report fail "pathb-qbe-emit x87 thunks of ${f#$root/tests/} do not assemble: $(head -1 "$tmp/x.as")"; fi
+  else report fail "pathb-qbe-emit --append-weak (x87) ${f#$root/tests/}: differs"; fi
+done
+if [ $x87_marks -gt 0 ]; then report ok "pathb-qbe-emit x87 thunks ($x87_n modules, $x87_marks thunks identical and assembled)"
+else report fail "pathb-qbe-emit x87 thunks: no module had a thunk"; fi
 printf 'x\n' >"$tmp/w.none.s"; cp "$tmp/w.none.s" "$tmp/w.none2.s"
 echo '# no marks' >"$tmp/w.none.ssa"
 python3 "$oracle/pathb-qbe-emit.py" --append-weak "$tmp/w.none.ssa" "$tmp/w.none.s"

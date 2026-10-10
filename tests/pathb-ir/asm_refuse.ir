@@ -1,0 +1,41 @@
+(ir-module "asm_refuse.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_Z5fencev"
+  (ret void)
+  (params)
+  (fence)
+  (return))
+
+(function "_Z9cpuid_eaxv"
+  (ret unsigned_int)
+  (params)
+  (slot "a" unsigned_int 4 4)
+  (unsupported stmt asm-template "cpuid")
+  (let %0 unsigned_int (load unsigned_int $"a"))
+  (return %0))
+
+(function "_Z8lock_incPi"
+  (ret void)
+  (params (param %0 "p" (ptr int)))
+  (slot "p" (ptr int) 8 8)
+  (store (ptr int) $"p" %0)
+  (unsupported stmt asm-template "lock; incl %0")
+  (return))
+
+(function "_Z8pause_okv"
+  (ret void)
+  (params)
+  (barrier)
+  (return))
+
+(function "_Z10rep_nop_okv"
+  (ret void)
+  (params)
+  (barrier)
+  (return))
+
+(function "_Z7clobberv"
+  (ret void)
+  (params)
+  (unsupported stmt asm-clobbers)
+  (return))

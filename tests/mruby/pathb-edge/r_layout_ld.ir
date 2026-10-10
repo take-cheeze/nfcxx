@@ -1,0 +1,6 @@
+(ir-module "e.cpp" (layout (short 2) (int 4) (long 8) (pointer 8) (long_double 8)))
+
+(function "main"
+  (ret int)
+  (params)
+  (return (const int 0)))
