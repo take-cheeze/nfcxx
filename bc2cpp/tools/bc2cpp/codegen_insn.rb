@@ -631,11 +631,14 @@ class CodeGen
         if exact && proven_index_operand?(irep, idx, unshift_proof_reg(s, reg_offset), owner_def)
           "#{INDEX_EXACT_NOTE}#{PROVEN_INDEX_NOTE}r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));\n"
         else
+          # INTEGER_TAG_ELSE (ADR 0394): an exact Array receiver's non-fixnum key runs the Array body directly.
+          direct = integer_tag_else_array_call('[]', exact, "r#{d}", ["r#{s}"])
+          by_name = direct ? "r#{d} = #{direct};" : "r#{d} = mrb_funcall(M, r#{d}, \"[]\", 1, r#{s});"
           <<~CPP
             #{exact ? INDEX_EXACT_NOTE : ''}if (#{array_test}mrb_integer_p(r#{s})) {
               r#{d} = bc2cpp_ary_entry(M, r#{d}, mrb_integer(r#{s}));
             } else {
-              r#{d} = mrb_funcall(M, r#{d}, "[]", 1, r#{s});
+              #{by_name}
             }
           CPP
         end
@@ -739,7 +742,7 @@ class CodeGen
               mrb_ary_set(M, r#{d}, mrb_integer(r#{idx_reg}), r#{val});
               r#{d} = r#{val};
             } else {
-              r#{d} = mrb_funcall(M, r#{d}, "[]=", 2, r#{idx_reg}, r#{val});
+              #{integer_tag_else_by_name_set(exact, d, idx_reg, val)}
             }
           CPP
         end

@@ -100,6 +100,7 @@ require_relative 'codegen_numeric_slow'
 require_relative 'codegen_numeric_slow_misc'
 require_relative 'codegen_numeric_slow_zero'
 require_relative 'codegen_index_closed'
+require_relative 'codegen_integer_tag_else'
 require_relative 'codegen_collection_ops'
 require_relative 'codegen_numeric_roots'
 require_relative 'codegen_native_int_args'
@@ -1552,6 +1553,7 @@ if $PROGRAM_NAME == __FILE__
   warn ''
   warn "== outlined index ops: #{gen.index_helper_site_counts(compiled).map { |k, n| "#{k} #{n}" }.join(', ')} sites =="
   warn "== index helpers closed (INDEX_CLOSED, ADR 0365): #{gen.index_closed_summary(compiled)} =="
+  warn "== integer-tag else (INTEGER_TAG_ELSE, ADR 0394): #{gen.integer_tag_else_summary} ==" if gen.integer_tag_else_enabled?
   warn ''
   eqq_helper_code = SymbolCache.rewrite(gen.emit_eqq_helper(compiled), symbol_table)
   warn "== shared === helper (EQQ_DIRECT): #{gen.eqq_helper_site_count(compiled)} sites =="

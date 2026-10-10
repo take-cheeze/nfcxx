@@ -813,7 +813,7 @@ class CodeGen
   def emit_index_helpers(codes)
     prepare_index_helpers(codes)
     helpers = index_helpers_used(codes).map { |kind| @index_helper_code.fetch(kind) }.join
-    "#{index_closed_prelude(helpers)}#{helpers}"
+    "#{integer_tag_else_prelude}#{index_closed_prelude(helpers)}#{helpers}"
   end
 
   # How many sites call each helper, for the stderr summary.
