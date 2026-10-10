@@ -169,6 +169,9 @@ class CodeGen
     saved_nested = @inline_nested
     saved_blk_param_name = @blk_param_name
     saved_blk_param_level = @blk_param_level
+    # LOOP_FLOW_POSITION (docs/adr/0398): the method's SENDB of this body, where a GETUPVAR-read receiver is judged.
+    saved_loop_parent = @inline_loop_parent
+    @inline_loop_parent = { block_irep: block_irep, irep: irep, idx: irep.index_of_addr(region[:sendb_addr]) }
     @blk_param_name = 'bc2cpp_blk' if forwarded_blk
     @blk_param_level = 1 if forwarded_blk
     @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
@@ -194,6 +197,7 @@ class CodeGen
     end
     nested_pre = @inline_nested.pre
     @inline_nested = saved_nested
+    @inline_loop_parent = saved_loop_parent
     @blk_param_name = saved_blk_param_name
     @blk_param_level = saved_blk_param_level
     return nil if body.include?('#error')
