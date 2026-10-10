@@ -17,7 +17,7 @@ lowered to the IR of `pathb-stage2.md`, and the IR is emitted as QBE and execute
 | `scripts/pathb-gen-names.sh` | Regenerates `be/nfcxx_names.h` from `3rd/edg/src/il_def.h`. |
 | `scripts/pathb-dump` | Runs the harness front end on `file.cpp` from the EDG base dir (same flags as `nfcxx --emit-c`) and prints the IL. |
 | `tests/pathb/<name>.il` | Golden dumps for each `tests/cases/<name>.cpp`. |
-| `tests/pathb/run.sh` | Regenerates the dumps and diffs them against the goldens. `--update` rewrites the goldens. |
+| `tests/pathb/run.sh` | Regenerates the dumps of the frozen set (one per existing golden `tests/pathb/<name>.il`, from `tests/cases/<name>.cpp`) and diffs them against the goldens. `--update` rewrites only the existing goldens. New cases are covered by `tests/pathb-ir` (stage 2), not here: the stage 1 printer cannot print the constexpr_if / if_consteval nodes of hosted-header code. The C++17 evaluation-order patch (`docs/notes/eval-order.md`) changed some goldens: new sequencing temporaries. |
 
 Commits on `wt/pathb`: back end and build (`580024a`), driver and goldens (`e43092a`), body-emission gate (`0c9c36a`).
 

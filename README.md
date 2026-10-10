@@ -13,7 +13,7 @@ scripts/setup-mruby.sh    # the mruby interpreter that runs the helper scripts (
 ./nfcxx --emit-c hello.cpp   # print the generated C
 ./nfcxx --trace=t.json x.cpp # Chrome/Perfetto trace of the driver steps (docs/notes/tracing.md)
 ./nfcc -c x.c -o x.o         # drop-in cc for C, for make/rake/autoconf (docs/notes/realworld.md)
-tests/run.sh              # regression cases in tests/cases (// EXPECT: <exit code>)
+tests/run.sh              # regression cases in tests/cases (// EXPECT: <exit code>); C++17 evaluation order: docs/notes/eval-order.md
 ./nfcxx --freestanding x.cpp # headers from lib/ only, no hosted libc++/libstdc++ (docs/notes/freestanding.md)
 tests/lib/run.sh          # freestanding library tests (both backends)
 tests/builtins/run.sh     # compiler builtin probes (docs/notes/builtins.md)

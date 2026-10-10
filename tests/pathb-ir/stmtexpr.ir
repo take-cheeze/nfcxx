@@ -69,6 +69,7 @@
   (slot "s" int 4 4)
   (slot "i" int 4 4)
   (slot "sq" int 4 4)
+  (slot "tmp" int 4 4)
   (store int $"n" %0)
   (store int $"s" (const int 0))
   (block
@@ -94,15 +95,17 @@
               (set %10 %11))
             (else
               (set %10 (const int -1))))
-          (let %12 int (load int $"s"))
-          (let %13 int (wadd int %12 %10))
-          (store int $"s" %13)))
+          (store int $"tmp" %10)
+          (let %12 int (load int $"tmp"))
+          (let %13 int (load int $"s"))
+          (let %14 int (wadd int %13 %12))
+          (store int $"s" %14)))
       (step
-        (let %14 int (load int $"i"))
-        (let %15 int (wadd int %14 (const int 1)))
-        (store int $"i" %15))))
-  (let %16 int (load int $"s"))
-  (return %16))
+        (let %15 int (load int $"i"))
+        (let %16 int (wadd int %15 (const int 1)))
+        (store int $"i" %16))))
+  (let %17 int (load int $"s"))
+  (return %17))
 
 (function "_ZN30_INTERNAL_12_stmtexpr_cpp_main9cond_loopEi"
   (ret int)
@@ -147,6 +150,7 @@
   (slot "i" int 4 4)
   (slot "r" int 4 4)
   (slot "tmp" int 4 4)
+  (slot "tmp.1" int 4 4)
   (store int $"n" %0)
   (store int $"s" (const int 0))
   (block
@@ -174,19 +178,21 @@
                 (block
                   (goto "label"))))
             (let %9 int (load int $"r"))
-            (let %10 int (load int $"s"))
-            (let %11 int (wadd int %10 %9))
-            (store int $"s" %11))))
+            (store int $"tmp" %9)
+            (let %10 int (load int $"tmp"))
+            (let %11 int (load int $"s"))
+            (let %12 int (wadd int %11 %10))
+            (store int $"s" %12))))
       (step
-        (let %12 int (load int $"i"))
-        (let %13 int (wadd int %12 (const int 1)))
-        (store int $"i" %13)))
+        (let %13 int (load int $"i"))
+        (let %14 int (wadd int %13 (const int 1)))
+        (store int $"i" %14)))
     (label "label"))
   (block
-    (let %14 int (load int $"s"))
-    (store int $"tmp" %14)
-    (let %15 int (load int $"tmp"))
-    (return %15)))
+    (let %15 int (load int $"s"))
+    (store int $"tmp.1" %15)
+    (let %16 int (load int $"tmp.1"))
+    (return %16)))
 
 (function "_ZN30_INTERNAL_12_stmtexpr_cpp_main10ret_insideEi"
   (ret int)
