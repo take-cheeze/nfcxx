@@ -52,7 +52,21 @@ printf '#include <thread>\nint main() { int x = 0; std::thread t([&] { x = 1; })
 check "-pthread link" "$nfcxx" -pthread "$tmp/src/thr.cpp" -o "$tmp/thr"
 if [ -x "$tmp/thr" ]; then "$tmp/thr"; [ $? -eq 1 ] && ok "-pthread program runs" || bad "-pthread program runs" "wrong exit"; fi
 
-# 6. Options that would change the meaning of the code are still refused, loudly
+# 6. -fPIE -pie (CMake's POSITION_INDEPENDENT_CODE on an executable): links and runs
+printf 'int main() { return 3; }\n' > "$tmp/src/hi.cpp"
+check "-fPIE -pie link" "$nfcxx" -fPIE -pie "$tmp/src/hi.cpp" -o "$tmp/pie"
+if [ -x "$tmp/pie" ]; then "$tmp/pie"; [ $? -eq 3 ] && ok "-fPIE -pie program runs" || bad "-fPIE -pie program runs" "wrong exit"; fi
+
+# 7. -lm after the sources: libm is found by the host linker (eccp's own -l search does not look in /usr/lib/<multiarch>)
+printf '#include <cmath>\nint main() { return (int)std::sqrt(16.0); }\n' > "$tmp/src/sq.cpp"
+check "-lm link" "$nfcxx" "$tmp/src/sq.cpp" -o "$tmp/sq" -lm
+if [ -x "$tmp/sq" ]; then "$tmp/sq"; [ $? -eq 4 ] && ok "-lm program runs" || bad "-lm program runs" "wrong exit"; fi
+
+# 8. -fvisibility (ng-log, lvgl and effekseer use it): accepted and ignored, as nfcc does
+check "-fvisibility=hidden -fvisibility-inlines-hidden" \
+  "$nfcxx" -fvisibility=hidden -fvisibility-inlines-hidden -c "$tmp/src/a.cpp" -o "$tmp/vis.o"
+
+# 9. Options that would change the meaning of the code are still refused, loudly
 if "$nfcxx" -fno-rtti -c "$tmp/src/a.cpp" -o "$tmp/r.o" 2>/dev/null; then
   bad "-fno-rtti refused" "compiled"
 else

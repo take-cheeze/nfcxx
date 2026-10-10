@@ -27,7 +27,7 @@ shared=0; pic=0; rdynamic=0; compile_only=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
-sysdirs=(); srcs=(); ppflags=()
+sysdirs=(); srcs=(); ppflags=(); pie_opts=()
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
@@ -47,7 +47,15 @@ while [ $# -gt 0 ]; do
     -P) ppflags+=(-P) ;;
     -pthread) pthread=1 ;;
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
+    # Symbol visibility is not implemented; nfcc ignores it too (docs/notes/realworld.md), so nfcxx does the same
+    # for consistency. It changes the exports of a -shared object, which is the one place it could matter.
+    -fvisibility=*|-fvisibility-inlines-hidden) ;;
+    -fPIE|-fpie) pie_opts+=(--c_to_obj_option -fPIE) ;;   # CMake's POSITION_INDEPENDENT_CODE on an executable
+    -pie) pie_opts+=(--c_to_obj_option -pie) ;;
     -Wl,*) files+=("$1") ;;
+    # -lNAME goes to the host linker as --c_to_obj_lib: eccp's own -l search (the EDG prelinker) only looks in -L
+    # directories and /lib, /usr/lib, so it cannot find a multiarch libm (hosted mode already does this for libm).
+    -l?*) files+=("--c_to_obj_lib=${1#-l}") ;;
     -W*|-w) ;;                                      # warnings do not change the object code
     -MD|-MMD) depmode=$1 ;;
     -MP) depphony=-MP ;;
@@ -166,6 +174,7 @@ picopts=(); ldopts=()
 [ $pic = 0 ] || { picopts=(--c_to_obj_option -fPIC); cflags_pic=(-fPIC); }
 [ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
 [ $pthread = 0 ] || picopts+=(--c_to_obj_option -pthread)
+picopts+=(${pie_opts[@]+"${pie_opts[@]}"})
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
 
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
