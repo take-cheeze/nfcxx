@@ -13,8 +13,9 @@ module BytecodeIR
   # the value the method was entered with) and +reg+ the register it wrote
   # (the MOVE source when the chain was followed). +built+ is set when the
   # writer is an ENTER that stores the slot itself (Program#enter_built_kind,
-  # origin walk only): :rest (an Array), :hash (a Hash) or :block (a Proc or
-  # nil). nil for every other definition.
+  # origin walk only): :rest (an Array), :hash (a Hash), :block (a Proc or nil),
+  # :arg (R1, a parameter's value), :post (a post parameter's value or nil) or
+  # :local (nil). nil for every other definition.
   Definition = Struct.new(:index, :reg, :built) do
     def entry?
       index == ENTRY
@@ -158,6 +159,8 @@ module BytecodeIR
           effect = origin_transfers ? origin_effect(insn, r) : dataflow_effect(insn, r)
           case effect
           when :refuse then return refused(refusal, "unmodelled:#{insn.op}")
+          when :refuse_enter_shape, :refuse_enter_temp
+            return refused(refusal, "unmodelled:ENTER:#{effect.to_s.delete_prefix('refuse_enter_')}")
           when :callee_clobber then return refused(refusal, :callee_frame_clobber)
           when :pass then work << [p, r]
           when :define
@@ -266,52 +269,86 @@ module BytecodeIR
     # Origin-only transfers (SiteOriginTable's walk; codegen never passes origin_transfers:, so its answers
     # do not change). Each one follows vm.c for the op. JMPUW writes no register: its ensure unwinding needs
     # a protected range, and a protected predecessor is refused before this runs. RESCUE a b (vm.c OP_RESCUE)
-    # reads R[a] and writes only R[b] (the match result). EXCEPT a (vm.c OP_EXCEPT) stores the exception or
-    # nil into R[a] on every entry; the walk reaches it only for R[a] (see reaching_definitions).
+    # reads R[a] and writes only R[b] (the match result). EXCEPT a (vm.c OP_EXCEPT, :2161-2192) stores the exception
+    # or nil into R[a] on every entry and writes no other register, so any other register passes through it to the
+    # handler edges into it. Those edges exist only under through_handlers: the normal walk refuses at the handler
+    # target (a guarded instruction) before this runs, except for R[a] itself (see reaching_definitions).
     # ORIGIN_FRAME_OPS clobber or write above R(a) on a path the leading-register model misses. ENTER is answered
-    # by its register layout: a rest, keyword-hash or block slot is a :define (enter_built_kind, the value ENTER
-    # stores); self, a required or optional argument passes to the entry; every other slot (a post argument,
-    # a local, the packed R(1)) refuses. With typed_enter: false (write_dominates?, shared with codegen) the
-    # typed slots refuse as they did before the origin walk typed them.
+    # by its register layout (enter_origin_effect). With typed_enter: false (write_dominates?, shared with
+    # codegen) ENTER answers as it did before the origin walk typed its slots: self and a required or optional
+    # argument pass to the entry value, every other slot (and the packed R(1)) refuses.
     def origin_effect(insn, reg, typed_enter: true)
       case insn.op
       when 'JMPUW' then :pass
       when 'RESCUE'
         second = insn.typed[1]
         second&.kind == :reg && second.value.to_s == reg ? :define : :pass
-      when 'EXCEPT' then insn.reg == reg ? :define : :refuse
+      when 'EXCEPT' then insn.reg == reg ? :define : :pass
       when 'ENTER'
-        if typed_enter && enter_built_kind(insn, reg) then :define
+        if typed_enter then enter_origin_effect(insn, reg)
         else enter_passes?(insn, reg) ? :pass : :refuse
         end
       else dataflow_effect(insn, reg)
       end
     end
 
-    # The slot of ENTER's own register layout that vm.c OP_ENTER stores on every normal exit, as the kind of
-    # value it stores: :rest, :hash or :block. nil for every other register (self, a required or optional
-    # argument, a local, and a post argument, which is the entered value or nil when none was passed).
-    # With the vm.c register numbers (3rd/mruby/src/vm.c OP_ENTER): len = req + opt + rest + post, kd = 1 when the
-    # method takes keywords or **rest (key > 0 or kdict), and
-    #   rest  R[req+opt+1]     an Array built from the extra arguments (vm.c:2710, :2725)
-    #   hash  R[len+1]         the keyword Hash, passed or new (kd only; vm.c:2741)
-    #   block R[len+kd+1]      the block the caller passed, a Proc or nil (vm.c:2736). In the fast path
-    #                          (no rest, optional, post or keywords; vm.c:2603-2612) ENTER stores nothing here,
-    #                          and the caller has already put the same block in that slot.
+    # The slot of ENTER's register layout +reg+ names (origin walk only), from the vm.c register numbers
+    # (3rd/mruby/src/vm.c OP_ENTER). With len = req + opt + rest + post and kd = 1 when the method takes
+    # keywords or **rest (key > 0 or kdict):
+    #   self   R0                  never written
+    #   entry  R[2..req+opt]       a required or optional argument, or with keywords R[1]: its entry value
+    #   arg    R[1], no keywords   the first positional parameter. ENTER can rebind it (vm.c:2647 packs the
+    #                              arguments and a keyword hash into R1, and the moves at :2695 and :2720
+    #                              overwrite it), so it is not the entry value, but every exit leaves the
+    #                              parameter's value there (an argument, or nil when a proc got none)
+    #   rest   R[req+opt+1]        an Array built from the extra arguments (vm.c:2710, :2725)
+    #   post   R[req+opt+rest+1..len]  a post parameter: the argument moved there, or nil when none was passed
+    #                              (vm.c:2700-2705, :2728; a post parameter implies a rest or optional one,
+    #                              so the moves are not skipped by the argc-m2 > m1 test)
+    #   hash   R[len+1]            the keyword Hash, passed or new (kd only; vm.c:2741)
+    #   block  R[len+kd+1]         the block the caller passed, a Proc or nil (vm.c:2736). In the fast path
+    #                              (no rest, optional, post or keywords; vm.c:2603-2612) ENTER stores nothing
+    #                              here, and the caller has already put the same block in that slot
+    #   local  R[len+kd+2..nlocals-1]  nil: stack_clear on both exits (vm.c:2612, :2750)
+    #   temp   R[nlocals..]        not touched by ENTER: whatever the caller's frame left there
     # Field order is ENTER's operand (req:opt:rest:post:key:kdict:block:_), checked against mrbc output.
-    def enter_built_kind(insn, reg)
+    # Nil when the operand does not have those eight fields, and :temp when the irep's nlocals is unknown.
+    def enter_slot(insn, reg)
       fields = insn.enter_fields
       return nil unless fields.size == 8
 
-      req, opt, rest, post, key, kdict = fields
+      req, opt, rest, post, key, kdict = fields.first(6).map(&:to_i)
       n = reg.to_i
-      kd = key.to_i.positive? || kdict.to_i.positive? ? 1 : 0
-      len = req.to_i + opt.to_i + rest.to_i + post.to_i
-      return nil unless n.positive?
-      return :rest if rest.to_i.positive? && n == req.to_i + opt.to_i + 1
+      kd = key.positive? || kdict.positive? ? 1 : 0
+      len = req + opt + rest + post
+      return :self if n.zero?
+      return(n == 1 && kd.zero? ? :arg : :entry) if n <= req + opt
+      return :rest if rest.positive? && n == req + opt + 1
+      return :post if n <= len
       return :hash if kd == 1 && n == len + 1
+      return :block if n == len + kd + 1
 
-      n == len + kd + 1 ? :block : nil
+      nlocals && n < nlocals ? :local : :temp
+    end
+
+    # ENTER as a writer for the origin walk: :define for every slot ENTER stores (enter_built_kind says what),
+    # :pass for self and the argument slots that keep their entry value, and a counted refusal for a register
+    # ENTER does not account for (:refuse_enter_temp: a temporary above nlocals, or an irep without nlocals;
+    # :refuse_enter_shape: an operand without the eight ASPEC fields).
+    def enter_origin_effect(insn, reg)
+      case enter_slot(insn, reg)
+      when nil then :refuse_enter_shape
+      when :self, :entry then :pass
+      when :temp then :refuse_enter_temp
+      else :define
+      end
+    end
+
+    # The kind of value vm.c OP_ENTER stores into +reg+ (see enter_slot): :arg, :rest, :post, :hash, :block or
+    # :local. nil for a register ENTER leaves alone (self and the entry-valued arguments) or does not account for.
+    def enter_built_kind(insn, reg)
+      kind = enter_slot(insn, reg)
+      %i[arg rest post hash block local].include?(kind) ? kind : nil
     end
 
     # Instruction indices reachable from the method entry over normal and handler edges (origin only), or nil

@@ -69,7 +69,7 @@ class ClassArgTypes
       conflicts = Array.new(mand, false)
       # A packed caller (`f(*a)`, count nil) may pass any number of arguments: it is no fact for any position.
       packed = false
-      call_sites.fetch(name, []).each do |caller_irep, idx, d, n|
+      CallSiteIndex.sites(call_sites, name).each do |caller_irep, idx, d, n|
         packed ||= n.nil?
         next unless n == mand # a real call site to a MONO name matches its arity.
 
