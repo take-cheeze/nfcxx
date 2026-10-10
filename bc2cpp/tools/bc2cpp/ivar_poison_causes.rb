@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# IVAR_POISON_CAUSES (ADR 0380): diagnostic only. ClassLayout.analyze joins every SETIV of an ivar; one store whose
+# IVAR_POISON_CAUSES (ADR 0382): diagnostic only. ClassLayout.analyze joins every SETIV of an ivar; one store whose
 # value trace_new_target cannot name poisons the ivar to UNKNOWN (the `== ivar-class candidates split: OPAQUE ==` list).
 # This classifies each unresolved store by what produced its value and buckets every OPAQUE ivar by those causes, so the
 # poisoned ivars can be counted and the next rule chosen by yield. It never feeds a fact back: ClassLayout hands it the

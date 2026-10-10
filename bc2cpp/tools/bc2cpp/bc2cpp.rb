@@ -664,7 +664,7 @@ if $PROGRAM_NAME == __FILE__
     opaque.sort.each { |n| warn "  CLASS_CANDIDATE_OPAQUE  #{n}" }
   end
 
-  # IVAR_POISON_CAUSES (ADR 0380): the same OPAQUE list bucketed by what the unresolved stores are.
+  # IVAR_POISON_CAUSES (ADR 0382): the same OPAQUE list bucketed by what the unresolved stores are.
   warn ''
   warn '== ivar-class OPAQUE causes (an ivar counts once, in its first bucket; atoms count it once each) =='
   poison_lines, poison_buckets = IvarPoisonCauses.report(ivar_store_log, opaque, registry)
@@ -1019,7 +1019,7 @@ if $PROGRAM_NAME == __FILE__
   warn '== class pools (CLASS_POOLS) =='
   gen.class_pool_report.each { |l| warn l }
   warn ''
-  # POOL_DROP_REPORT (ADR 0380): why the ivar pools that are not there are not there.
+  # POOL_DROP_REPORT (ADR 0382): why the ivar pools that are not there are not there.
   if ENV['BC2CPP_POOL_DROP_REPORT']
     warn '== class pools dropped: causes (POOL_DROP_REPORT) =='
     gen.pool_drop_report.each { |l| warn l }

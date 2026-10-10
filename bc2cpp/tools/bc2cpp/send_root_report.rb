@@ -163,7 +163,7 @@ module SendRootReport
             elsif @numeric_wild_families.include?(family) then ':wild'
             else ':poisoned'
             end
-    # IVAR_POISON_CAUSES (ADR 0380): every blocking store, as `mask|kind|name|status|method`, where mask is `unmodelled`
+    # IVAR_POISON_CAUSES (ADR 0382): every blocking store, as `mask|kind|name|status|method`, where mask is `unmodelled`
     # (the irep has no flow) or `other` (the flow cannot name the value) and status is the producing name's state.
     # Unlike `blockers`, this follows the reaching definitions, so a joined register names the definition at fault.
     detail = group.sites.flat_map do |irep, idx, reg|
@@ -255,7 +255,7 @@ module SendRootReport
     'method:pool_dropped'
   end
 
-  # POOL_DROP_REPORT (ADR 0380): the dropped ivar pools counted by state and by the stores that dropped them. A pool counts
+  # POOL_DROP_REPORT (ADR 0382): the dropped ivar pools counted by state and by the stores that dropped them. A pool counts
   # once per distinct blocker, so the blocker lines overlap; the state lines partition the dropped pools.
   def pool_drop_report
     return ['  (class pools are off)'] unless @class_ivar_pools
