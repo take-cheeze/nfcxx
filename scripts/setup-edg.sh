@@ -7,9 +7,8 @@
 # Overrides: EDG_SRC (source tree, default 3rd/edg), EDG_BUILD (output, default build/edg),
 # EDG_BASE (base dir, default build/edg-base).
 #
-# scripts/edg-patches/*.patch (paths a/src/..., -p1) are applied to a private overlay of the source tree
-# (<EDG_BUILD>-src: symlinks to the submodule, real copies of only the patched files), so the submodule
-# stays clean. See docs/notes/eval-order.md.
+# 3rd/edg is take-cheeze/edg-compiler, a fork of edgcpp/compiler that carries nfcxx's front end patches
+# (branch nfcxx/cpp17-eval-order: C++17 evaluation order). See docs/notes/eval-order.md.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 src=${EDG_SRC:-$root/3rd/edg}
@@ -34,18 +33,6 @@ fi
 
 # Let nfcxx pick the C compiler eccp hands the generated C to (NFCXX_CC).
 sed -i 's|^EDG_C_TO_OBJ_COMPILER=gcc|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-gcc}|' "$base/edg_eccp_config"
-
-# Patched source overlay.
-shopt -s nullglob
-patches=("$root"/scripts/edg-patches/*.patch)
-if [ ${#patches[@]} -gt 0 ]; then
-  ov=$out-src
-  rm -rf "$ov"; mkdir -p "$ov/src"
-  for e in $(ls -A "$src"); do [ "$e" = src ] || ln -s "$src/$e" "$ov/$e"; done
-  for e in $(ls -A "$src/src"); do ln -s "$src/src/$e" "$ov/src/$e"; done
-  "$root/scripts/edg-patch.sh" "$ov"
-  src=$ov
-fi
 
 cd "$src"
 EDG_BASE=$base cmake --preset linux-gcc-release -B "$out" >/dev/null

@@ -5,8 +5,7 @@
 # submodule except the few things we change:
 #   src/CMakeLists.txt             c_gen_be.c -> nfcxx_be.c in CORE_FRONT_END_SOURCE_FILES
 #   src/nfcxx_be.{c,h}, nfcxx_names.h   copies of be/ (the new back end and its name tables)
-#   src/lower_il.c                 patched by scripts/edg-patches (via scripts/edg-patch.sh)
-#   cmake/macro-conf/nfcxx-pathb/  macro config: BACK_END_IS_C_GEN_BE=0, DO_IL_LOWERING=1, everything else as
+##   cmake/macro-conf/nfcxx-pathb/  macro config: BACK_END_IS_C_GEN_BE=0, DO_IL_LOWERING=1, everything else as
 #                                  linux-gcc-release (so the IL is lowered exactly as the C generator sees it)
 # Result: build/pathb/cmake/bin/cpfe. scripts/pathb-dump runs it from build/pathb/edg-base like the driver does.
 # Reruns refresh the tree and rebuild only what changed (build/pathb/cmake is kept).
@@ -41,8 +40,6 @@ link_all "$src/cmake/macro-conf" "$tree/cmake/macro-conf" nfcxx-pathb
 sed 's/attribute\.c c_gen_be\.c cfe\.c/attribute.c nfcxx_be.c nfcxx_ir.c cfe.c/' "$src/src/CMakeLists.txt" > "$tree/src/CMakeLists.txt"
 grep -q 'attribute.c nfcxx_be.c nfcxx_ir.c cfe.c' "$tree/src/CMakeLists.txt" || { echo "setup-pathb: CORE list patch failed" >&2; exit 1; }
 cp "$root"/be/nfcxx_be.c "$root"/be/nfcxx_be.h "$root"/be/nfcxx_be_int.h "$root"/be/nfcxx_ir.c "$root"/be/nfcxx_names.h "$tree/src/"
-# The same source patches the driver's EDG gets (scripts/edg-patches: C++17 evaluation order in lower_il.c).
-"$root/scripts/edg-patch.sh" "$tree"
 
 # 2. Macro config. Same lowering options as linux-gcc-release, but the C back end (and its C++ sibling) off.
 cat > "$tree/cmake/macro-conf/nfcxx-pathb/base.cmakedef" <<'CFG'

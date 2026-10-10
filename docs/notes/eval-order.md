@@ -38,10 +38,10 @@ same lowered IL, which is why Path B (`be/nfcxx_ir.c`) needed no change of its o
 what it is given left to right (and `op=` right before left, `docs/notes/pathb-stage2.md`), the lost order was in the
 IL it was given (the arguments were already temporaries, the object was not).
 
-The submodule stays clean. `scripts/edg-patches/0001-cpp17-eval-order.patch` is applied to a private overlay of the
-source (`build/edg-src`, symlinks into `3rd/edg` plus a copy of `lower_il.c`) by `scripts/setup-edg.sh`, and to the
-Path B harness tree by `scripts/setup-pathb.sh`; both go through `scripts/edg-patch.sh`. `NFCXX_EDG_PATCHES=0` skips
-the patches (an unpatched build to compare against). Rebuild after pulling: `scripts/setup-edg.sh`,
+The change is tracked in the fork https://github.com/take-cheeze/edg-compiler (a fork of edgcpp/compiler), branch
+`nfcxx/cpp17-eval-order`, and `3rd/edg` points at it, so there is nothing to apply at build time: `scripts/setup-edg.sh`
+and `scripts/setup-pathb.sh` build the submodule as is. Further front end patches go on that fork the same way (a branch
+on top of the fork's `main`, then bump the `3rd/edg` gitlink). Rebuild after pulling: `scripts/setup-edg.sh`,
 `scripts/setup-pathb.sh`. `setup-edg.sh` also takes `EDG_SRC`, `EDG_BUILD` and `EDG_BASE` to build somewhere else.
 
 The patch adds, only when `strict_cpp17_eval_order` is on:

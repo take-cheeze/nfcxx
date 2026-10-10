@@ -19,8 +19,6 @@ on:
       - "3rd/qbe"
       - "scripts/pathb-*"
       - "scripts/setup-pathb.sh"
-      - "scripts/edg-patch.sh"
-      - "scripts/edg-patches/**"
       - "scripts/setup-edg.sh"
       - "scripts/setup-qbe.sh"
       - "scripts/host-sys.sh"
@@ -42,8 +40,6 @@ on:
       - "3rd/qbe"
       - "scripts/pathb-*"
       - "scripts/setup-pathb.sh"
-      - "scripts/edg-patch.sh"
-      - "scripts/edg-patches/**"
       - "scripts/setup-edg.sh"
       - "scripts/setup-qbe.sh"
       - "scripts/host-sys.sh"
@@ -94,7 +90,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/pathb
-          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh', 'scripts/edg-patch.sh', 'scripts/edg-patches/**') }}
+          key: pathb-${{ runner.os }}-${{ steps.key.outputs.edg }}-${{ hashFiles('be/**', 'scripts/setup-pathb.sh') }}
 
       - name: Build the Path B harness
         if: steps.harness.outputs.cache-hit != 'true'
