@@ -45,6 +45,9 @@ class CodeGen
     :@super_no_caller_block => nil, :@block_carrying_callers => nil, :@superclass_closure => nil,
     :@block_ret_slot => nil, :@block_brk_slot => nil,
     :@inline_nested => nil, :@inline_nested_pre => nil, :@suppress_native_expression_send => nil,
+    # LOOP_FLOW_POSITION (ADR 0398): the enclosing inlined loop's SENDB. Saved and restored around each inlined
+    # body, so a nested compile of a callee must start without the caller's loop parent.
+    :@inline_loop_parent => nil,
     :@runtime_installed_names => nil, :@ensure_except_remaps => nil, :@self_class_unknown => nil,
     :@compiling_core => false, :@resumable => nil,
     :@exact_core_site => nil, :@nonnil_receiver => nil,
