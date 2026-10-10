@@ -1,7 +1,7 @@
 struct BF { unsigned a : 3; unsigned b : 5; };
 int vla(int n) { int buf[n]; buf[0] = n; return buf[0]; }
 int stmtexpr(int x) { return ({ int y = x + 1; y * 2; }); }
-int asmish(int x) { asm volatile("" : : "r"(x)); return x; }
+int asmish(int x) { asm volatile("cpuid" : : "a"(x) : "ebx", "ecx", "edx"); return x; }
 int bits(BF *p) { p->b = 7; return p->b + p->a; }
 int walk(int n) {
   int s = 0;

@@ -1,0 +1,71 @@
+(ir-module "alias_static.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "hidden_data" int 4 4 (static) (init
+    (scalar 0 int (const int 21))))
+(global "alias_data" int 4 4 (extern))
+
+(function "_ZN34_INTERNAL_16_alias_static_cpp_main6hiddenEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wmul int %1 (const int 3)))
+  (return %2))
+
+(function "main"
+  (ret int)
+  (params)
+  (loop
+    (body
+      (block
+        (let %0 int (call int &"alias_hidden" (const int 2)))
+        (let %1 bool (eq int %0 (const int 6)))
+        (let %2 bool (eq bool %1 (const bool 0)))
+        (if %2
+          (then
+            (block
+              (let %3 int (load int @"bad"))
+              (let %4 int (wadd int %3 (const int 1)))
+              (store int @"bad" %4))))))
+    (step
+      (let %5 bool (ne int (const int 0) (const int 0)))
+      (if %5 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %6 int (load int @"alias_data"))
+        (let %7 bool (eq int %6 (const int 21)))
+        (let %8 bool (eq bool %7 (const bool 0)))
+        (if %8
+          (then
+            (block
+              (let %9 int (load int @"bad"))
+              (let %10 int (wadd int %9 (const int 1)))
+              (store int @"bad" %10))))))
+    (step
+      (let %11 bool (ne int (const int 0) (const int 0)))
+      (if %11 (then) (else (break)))))
+  (store int @"alias_data" (const int 4))
+  (loop
+    (body
+      (block
+        (let %12 int (load int @"hidden_data"))
+        (let %13 bool (eq int %12 (const int 4)))
+        (let %14 bool (eq bool %13 (const bool 0)))
+        (if %14
+          (then
+            (block
+              (let %15 int (load int @"bad"))
+              (let %16 int (wadd int %15 (const int 1)))
+              (store int @"bad" %16))))))
+    (step
+      (let %17 bool (ne int (const int 0) (const int 0)))
+      (if %17 (then) (else (break)))))
+  (let %18 int (load int @"bad"))
+  (return %18))
+
+(alias "alias_hidden" "_ZN34_INTERNAL_16_alias_static_cpp_main6hiddenEi" function)
+
+(alias "alias_data" "hidden_data" object)

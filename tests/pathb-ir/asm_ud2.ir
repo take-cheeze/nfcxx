@@ -1,0 +1,45 @@
+(ir-module "asm_ud2.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "_ZN29_INTERNAL_11_asm_ud2_cpp_main7reachedEi"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 bool (eq int %1 (const int 4)))
+  (if %2
+    (then
+      (block
+        (trap))))
+  (let %3 int (load int $"x"))
+  (return %3))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "s" int 4 4)
+  (slot "i" int 4 4)
+  (slot "tmp" int 4 4)
+  (store int $"s" (const int 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %0 int (load int $"i"))
+        (let %1 bool (lt.s int %0 (const int 10)))
+        (if %1 (then) (else (break)))
+        (block
+          (let %2 int (load int $"i"))
+          (let %3 int (call int &"_ZN29_INTERNAL_11_asm_ud2_cpp_main7reachedEi" %2))
+          (store int $"tmp" %3)
+          (let %4 int (load int $"tmp"))
+          (let %5 int (load int $"s"))
+          (let %6 int (wadd int %5 %4))
+          (store int $"s" %6)))
+      (step
+        (let %7 int (load int $"i"))
+        (let %8 int (wadd int %7 (const int 1)))
+        (store int $"i" %8))))
+  (let %9 int (load int $"s"))
+  (return %9))

@@ -19,6 +19,8 @@ probes="$probes tests/pathb-qbe/cases/dyn_global.cpp tests/pathb-qbe/cases/dyn_l
 probes="$probes tests/pathb-qbe/cases/tls_dyn.cpp tests/pathb-qbe/cases/tls_dyn_forms.cpp"   # thread_local with dynamic initialization (_ZTW wrappers, _ZTH, __tls_init)
 probes="$probes tests/pathb-qbe/cases/bitfield.cpp tests/pathb-qbe/cases/bitfield2.cpp tests/pathb-qbe/cases/vla.cpp tests/pathb-qbe/cases/stmtexpr.cpp tests/pathb-qbe/cases/base_null.cpp tests/pathb-qbe/cases/vararg_def.cpp tests/pathb-qbe/cases/abi_struct.cpp"   # bit-fields, VLAs, statement expressions
 # Union aggregate constants, bit-fields in unions, class statement-expression results, VLA scope exit, asm barriers, weak declarations.
+# Extended asm idioms (fences, rdtsc, operand passthrough), __builtin_object_size, alias/weakref attributes, VLA bounds.
+probes="$probes tests/pathb-qbe/cases/asm_ext.cpp tests/pathb-qbe/cases/builtin_objsize.cpp tests/pathb-qbe/cases/alias_attr.cpp tests/pathb-qbe/cases/alias_static.cpp tests/pathb-qbe/cases/vla_bounds.cpp tests/pathb-qbe/traps/builtin_trap.cpp tests/pathb-qbe/traps/asm_ud2.cpp tests/pathb-qbe/traps/vla_index.cpp"
 probes="$probes tests/pathb-qbe/cases/agg_union.cpp tests/pathb-qbe/cases/bitfield_union.cpp tests/pathb-qbe/cases/stmtexpr_class.cpp tests/pathb-qbe/cases/vla_scope.cpp tests/pathb-qbe/cases/asm_barrier.cpp tests/pathb-qbe/cases/weak_decl.cpp"
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B

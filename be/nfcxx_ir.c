@@ -400,6 +400,13 @@ static const char *ir_rout_name(a_routine_ptr r)
   const char *n = ir_rout_sym(r);
   const char *op;
   char *s;
+  /* __attribute__((weakref("target"))): the routine is a local name for a weak reference to target (an undefined
+     target reads as a null address); every reference goes to the target's symbol, declared weak. */
+  if (r->is_weakref && has_gnu_routine_supp(r) && gnu_routine_supp(r)->aliased_routine != NULL) {
+    a_routine_ptr t = gnu_routine_supp(r)->aliased_routine;
+    ir_weak_decl(t);
+    return ir_rout_sym(t);
+  }
   if (n != NULL && n[0] != '\0') {
     if (r->is_weak) ir_weak_decl(r);
     return n;
@@ -539,8 +546,8 @@ static ir_buf ir_slot_buf;
 /* A routine declared __attribute__((weak)) and not defined in this translation unit is a weak reference: the symbol
    may be absent at link time and then reads as a null address. It is carried through as a top-level
    (declare "NAME" (weak)), printed once, when the module first refers to the routine. A defined weak routine
-   instead has the marker (weak attr) on its (function ...). A weakref alias is not handled (it names another
-   symbol). */
+   instead has the marker (weak attr) on its (function ...). A weakref names another symbol: ir_rout_name sends
+   every reference to the target, which is then declared here. */
 #define IR_WEAK_DECL_MAX 1024
 static a_routine_ptr ir_weak_decls[IR_WEAK_DECL_MAX];
 static int ir_weak_decl_n;
@@ -685,10 +692,21 @@ static const char *ir_var_sym(a_variable_ptr var)
 }
 
 /* Static object (global, static local, or string data) operand; the module entry is printed on first use. */
+static int ir_force_weak; /* ir_global_print: the declaration being printed is the target of a weakref */
 static const char *ir_global_op(a_variable_ptr var)
 {
-  int fresh = ir_tab_find(&ir_mod, var) == NULL;
-  const char *op = ir_tab_get(&ir_mod, var, ir_name_or(ir_var_sym(var), "tmp"), "@");
+  int fresh;
+  const char *op;
+  /* __attribute__((weakref("target"))) on an object: a local name for a weak reference to the target. */
+  if (var->is_weakref && var->aliased_variable != NULL) {
+    a_variable_ptr t = var->aliased_variable;
+    if (ir_tab_find(&ir_mod, t) == NULL && t->storage_class == sc_extern) ir_force_weak = 1;
+    op = ir_global_op(t);
+    ir_force_weak = 0;
+    return op;
+  }
+  fresh = ir_tab_find(&ir_mod, var) == NULL;
+  op = ir_tab_get(&ir_mod, var, ir_name_or(ir_var_sym(var), "tmp"), "@");
   if (fresh) ir_global_print(var, op + 1);
   return op;
 }
@@ -1249,6 +1267,38 @@ static an_expr_operator_kind ir_compound_base(an_expr_operator_kind k, int *ok)
   }
 }
 
+/* A subscript of a variable-length array. The front end lowers the array to a pointer `T *a` plus a compiler variable
+   that holds the element count, so the subscript is checked like the subscript of a fixed array, (bounds IDX COUNT),
+   with the count read at run time. The count is of innermost elements and one index step covers
+   sizeof(result)/sizeof(innermost) of them, so the bound is count / step. This needs that step to be a compile-time
+   constant (the inner dimensions of a multi-dimensional VLA are fixed); `int m[n][k]` with a run-time k is not
+   checked, and neither is a pointer to a VLA row (a parameter). */
+static void ir_vla_bounds(an_expr_node_ptr base, a_type_ptr elem, ir_val idx)
+{
+  an_expr_node_ptr b = base;
+  a_variable_ptr v;
+  a_type_ptr bt;
+  unsigned long bs, step;
+  ir_val cnt;
+  char *ix, *n;
+  while (b != NULL && b->kind == enk_operation && b->variant.operation.kind == eok_cast) b = ir_operand(b, 0);
+  if (b == NULL || b->kind != enk_variable) return;
+  v = b->variant.variable.ptr;
+  if (!v->is_vla || v->vla_element_count_variable == NULL || !ir_is_pointer(v->type)) return;
+  if (idx.t == NULL || ir_type_is_variable(elem)) return;
+  bt = skip_typerefs(skip_typerefs(v->type)->variant.pointer.type);
+  while (bt->kind == tk_array) bt = skip_typerefs(bt->variant.array.element_type);
+  bs = ir_size_of(bt);
+  step = ir_size_of(elem);
+  if (bs == 0 || step == 0 || step % bs != 0) return;
+  cnt = ir_load(ir_var_addr(v->vla_element_count_variable, v->vla_element_count_variable->type, 0));
+  n = strcmp(cnt.ty, "unsigned_long") == 0 ? cnt.s : ir_let("unsigned_long", ir_fmt("(iconv unsigned_long %s)", cnt.s));
+  if (step / bs != 1) n = ir_let("unsigned_long", ir_fmt("(cdiv unsigned_long %s (const unsigned_long %lu))", n, step / bs));
+  ix = strcmp(idx.ty, "unsigned_long") == 0 ? idx.s : ir_let("unsigned_long", ir_fmt("(iconv unsigned_long %s)", idx.s));
+  ir_emit(ir_fmt("(bounds %s %s)", ix, n));
+}
+
+
 /* Lvalue-valued operators, as addresses. */
 static ir_val ir_lval_op(an_expr_node_ptr e)
 {
@@ -1298,6 +1348,8 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
           unsigned long n = (unsigned long)skip_typerefs(arr->type)->variant.array.variant.number_of_elements;
           ir_emit(ir_fmt("(bounds %s %lu)", idx.s, n));
         }
+      } else if (ir_is_integer(a1->type)) {
+        ir_vla_bounds(a0, e->type, idx);
       }
       vol = vol || (ir_is_aggregate(a0->type) ? base.vol : 0) || ir_pointee_is_volatile(a0->type);
       return ir_elem_addr(base.s, idx.s, e->type, vol);
@@ -1756,6 +1808,156 @@ static ir_val ir_builtin_overflow(an_expr_node_ptr e, int op)
   return ir_mk_bool(ov);
 }
 
+/* __builtin_object_size(P, TYPE): the bytes from P to the end of the object P points into, when P is the address
+   of a known object (a local or global variable, a member, an element at a constant index, a constant offset from
+   one of those), otherwise "unknown": (size_t)-1 for TYPE 0 and 1, 0 for 2 and 3. Bit 0 of TYPE selects the closest
+   surrounding sub-object (a member) instead of the whole object. As in gcc the pointer is not evaluated. Pointers
+   read from variables, parameters, calls and allocations are unknown (gcc's -O0 answer; an optimizing gcc may know
+   more, which the specification allows). A past-the-end or negative offset gives 0. */
+typedef struct {
+  unsigned long total; /* size of the whole object */
+  long off;            /* offset of the pointer from the start of the object */
+  long lo, hi;         /* the surrounding sub-object, [lo, hi), for TYPE 1 */
+  int vague;           /* TYPE 1 cannot be answered: a folded address into a structure (the member is not recorded) */
+} ir_osz;
+
+static int ir_osz_class(a_type_ptr t)
+{
+  a_type_ptr s = skip_typerefs(t);
+  return s->kind == tk_struct || s->kind == tk_class || s->kind == tk_union;
+}
+
+static int ir_osz_const(an_expr_node_ptr e, long *v)
+{
+  a_boolean ovf = FALSE;
+  if (e == NULL || e->kind != enk_constant || e->variant.constant.ptr->kind != ck_integer) return 0;
+  *v = (long)value_of_integer_constant(e->variant.constant.ptr, &ovf);
+  return !ovf;
+}
+
+static int ir_osz_lval(an_expr_node_ptr e, ir_osz *o);
+
+/* The address of a known object is the value of the pointer expression e. */
+static int ir_osz_ptr(an_expr_node_ptr e, ir_osz *o)
+{
+  an_expr_operator_kind k;
+  an_expr_node_ptr a0, a1;
+  /* The front end folds the address of a global (`g`, `&g[2]`, `&gs.b`) into an address constant: the variable and
+     a byte offset. The member that the offset names is not recorded, so TYPE 1 is answered only when the
+     variable has no structure inside it, or the pointer is the whole object. */
+  if (e != NULL && e->kind == enk_constant && e->variant.constant.ptr->kind == ck_address &&
+      e->variant.constant.ptr->variant.address.kind == abk_variable) {
+    a_variable_ptr var = e->variant.constant.ptr->variant.address.variant.variable;
+    a_type_ptr s = skip_typerefs(var->type);
+    if (ir_type_is_variable(var->type) || is_incomplete_type(var->type)) return 0;
+    o->total = ir_size_of(var->type);
+    o->off = (long)e->variant.constant.ptr->variant.address.offset;
+    o->lo = 0;
+    o->hi = (long)o->total;
+    while (s->kind == tk_array) s = skip_typerefs(s->variant.array.element_type);
+    if (ir_osz_class(s) && !(o->off == 0 && e->type != NULL && ir_is_pointer(e->type) &&
+                             ir_size_of(skip_typerefs(e->type)->variant.pointer.type) == o->total)) {
+      o->vague = 1;
+    }
+    return 1;
+  }
+  if (e == NULL || e->kind != enk_operation) return 0;
+  k = e->variant.operation.kind;
+  a0 = ir_operand(e, 0);
+  a1 = ir_operand(e, 1);
+  switch (k) {
+    case eok_cast: {
+      a_type_ptr to, from;
+      if (a0 == NULL || a0->type == NULL || e->type == NULL) return 0;
+      to = skip_typerefs(e->type);
+      from = skip_typerefs(a0->type);
+      if (to->kind != tk_pointer || from->kind != tk_pointer) return 0;
+      /* a pointer conversion that adds no offset: to void or any non-class type (a conversion to a class type may be
+         a derived-to-base conversion, which can add one) */
+      if (ir_osz_class(to->variant.pointer.type)) return 0;
+      return ir_osz_ptr(a0, o);
+    }
+    case eok_array_to_pointer:
+    case eok_address_of:
+      return a0 != NULL && ir_osz_lval(a0, o);
+    case eok_padd:
+    case eok_psubtract: {
+      long n;
+      if (a0 == NULL || !ir_is_pointer(e->type) || !ir_osz_ptr(a0, o) || !ir_osz_const(a1, &n)) return 0;
+      n *= (long)ir_size_of(skip_typerefs(e->type)->variant.pointer.type);
+      o->off += k == eok_padd ? n : -n;
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+/* The lvalue e is (part of) a known object. */
+static int ir_osz_lval(an_expr_node_ptr e, ir_osz *o)
+{
+  if (e == NULL) return 0;
+  if (e->kind == enk_variable) {
+    a_variable_ptr var = e->variant.variable.ptr;
+    a_type_ptr t = var->type;
+    if (e->type == NULL || ir_type_is_variable(t) || is_incomplete_type(t) || ir_size_of(t) != ir_size_of(e->type)) return 0;
+    if (ir_is_pointer(t) != ir_is_pointer(e->type)) return 0; /* a reference variable */
+    o->total = ir_size_of(t);
+    o->off = 0;
+    o->lo = 0;
+    o->hi = (long)o->total;
+    return 1;
+  }
+  if (e->kind != enk_operation) return 0;
+  switch (e->variant.operation.kind) {
+    case eok_dot_field:
+    case eok_points_to_field: {
+      an_expr_node_ptr a0 = ir_operand(e, 0), fe = ir_operand(e, 1);
+      a_field_ptr f;
+      long fsz;
+      if (a0 == NULL || fe == NULL || fe->kind != enk_field) return 0;
+      f = fe->variant.field.ptr;
+      if (f->is_bit_field || is_incomplete_type(f->type)) return 0;
+      if (e->variant.operation.kind == eok_dot_field ? !ir_osz_lval(a0, o) : !ir_osz_ptr(a0, o)) return 0;
+      fsz = (long)ir_size_of(f->type);
+      o->off += (long)f->offset;
+      o->lo = o->off;
+      o->hi = o->off + fsz;
+      return 1;
+    }
+    case eok_subscript: {
+      an_expr_node_ptr a0 = ir_operand(e, 0), a1 = ir_operand(e, 1);
+      long n;
+      if (a0 == NULL || e->type == NULL || !ir_osz_ptr(a0, o) || !ir_osz_const(a1, &n)) return 0;
+      o->off += n * (long)ir_size_of(e->type); /* an element is not a sub-object: lo and hi stay those of the array */
+      return 1;
+    }
+    case eok_indirect:
+      return ir_osz_ptr(ir_operand(e, 0), o);
+    default:
+      return 0;
+  }
+}
+
+static unsigned long ir_object_size(an_expr_node_ptr e)
+{
+  long ty = 0;
+  ir_osz o;
+  unsigned long unknown;
+  if (!ir_osz_const(ir_operand(e, 2), &ty) || ty < 0 || ty > 3) ty = 0;
+  unknown = (ty & 2) ? 0UL : ~0UL;
+  memset(&o, 0, sizeof o);
+  if (!ir_osz_ptr(ir_operand(e, 1), &o)) return unknown;
+  if ((ty & 1) && o.vague) return unknown;
+  if (!(ty & 1)) {
+    o.lo = 0;
+    o.hi = (long)o.total;
+  }
+  if (o.off < o.lo || o.off > o.hi) return 0;
+  return (unsigned long)(o.hi - o.off);
+}
+
+
 /* 1 when the call e of the built-in `name` (without the prefix) is lowered here; the value is in *out. */
 static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
 {
@@ -1775,9 +1977,16 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = ir_mk_value(ir_fmt("(const %s 0)", ir_valtext(e->type)), e->type);
     return 1;
   }
+  if (strcmp(name, "object_size") == 0 || strcmp(name, "dynamic_object_size") == 0) {
+    ir_note(0, eok_call, 1);
+    *out = ir_mk_value(ir_fmt("(const %s %lu)", ir_valtext(e->type), ir_object_size(e)), e->type);
+    return 1;
+  }
+  /* __builtin_trap is the instruction gcc uses (ud2 on x86-64): SIGILL. __builtin_unreachable is undefined
+     behaviour when reached, and aborts like the other checked operations (SIGABRT). */
   if (strcmp(name, "unreachable") == 0 || strcmp(name, "trap") == 0) {
     ir_note(0, eok_call, 1);
-    ir_emit("(unreachable)");
+    ir_emit(name[0] == 't' ? "(trap)" : "(unreachable)");
     *out = ir_is_void(e->type) ? ir_mk_void() : ir_mk_value(ir_zero(e->type), e->type);
     return 1;
   }
@@ -2613,6 +2822,10 @@ static void ir_global_init(a_variable_ptr var)
   unsigned long size = ir_size_of(var->type);
   an_init_kind kind;
   an_initializer_ptr ini;
+  if (var->is_gnu_alias && var->aliased_variable != NULL) {
+    fputs(" (extern)", nf_out); /* __attribute__((alias)): the (alias ...) form defines the symbol */
+    return;
+  }
   get_variable_initializer(var, NULL, &kind, &ini);
   switch (kind) {
     case initk_static:
@@ -2648,7 +2861,7 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   fprintf(nf_out, " %lu %lu", ir_size_of(var->type), (unsigned long)alignment_of_variable(var));
   if (var->storage_class == sc_static) fputs(" (static)", nf_out);
   else if (var->comdat_group != NULL) fputs(" (weak)", nf_out); /* EDG: COMDAT, which c_gen_be.c writes as __weak__ */
-  else if (var->is_weak) fputs(var->storage_class == sc_extern ? " (weak)" : " (weak attr)", nf_out); /* __attribute__((weak)): declaration / definition */
+  else if (var->is_weak || ir_force_weak) fputs(var->storage_class == sc_extern ? " (weak)" : " (weak attr)", nf_out); /* __attribute__((weak)): declaration / definition */
   if (ir_var_is_thread(var)) fputs(" (thread)", nf_out); /* __thread / thread_local: one copy per thread */
   ir_global_init(var);
   fputs(")\n", nf_out);
@@ -2705,6 +2918,228 @@ static void ir_exit_unless(int d, an_expr_node_ptr cond)
     ir_line(d, ir_fmt("(if %s (then) (else (break)))", cb));
   }
 }
+
+/* ---- inline assembly. QBE has no inline asm, so only templates whose effect QBE can express are lowered:
+     empty / nop / pause     nothing at the machine level. A memory clobber (and a basic asm, which gcc treats as
+                             clobbering memory) is a compiler barrier, (barrier). Operands are allowed (below).
+     mfence lfence sfence    (fence): a full hardware fence (stronger than the one asked for, so sound) and a barrier.
+     lock; addl $0,(%rsp)    the same fence, written the old way
+     ud2                     (trap): SIGILL, as the instruction does
+     int $3                  raise(SIGTRAP), what the instruction does with no debugger attached
+     rdtsc, lfence; rdtsc    (rdtsc): the 64-bit counter from a helper that executes the instruction; outputs "=a", "=d"
+   Operands of an empty template: an input is evaluated and dropped, "+X" and unconstrained "=X" outputs keep their
+   value (the instruction does not write them; the value of an "=X" register output is unspecified in gcc as well),
+   and an output tied to an input ("=r"(x) : "0"(y)) receives the input value. A memory-capable output adds a barrier.
+   Everything else (other instructions, register clobbers, asm goto, flag outputs, x87 constraints) stays an
+   unsupported marker with the reason, and the emitter refuses the module with that text. */
+enum { IR_ASM_NONE = 0, IR_ASM_EMPTY, IR_ASM_FENCE, IR_ASM_TRAP, IR_ASM_INT3, IR_ASM_RDTSC, IR_ASM_RDTSC_FENCE };
+
+static int ir_asm_class(a_constant_ptr sc, int gnu_form)
+{
+  char key[96];
+  size_t m = 0;
+  unsigned long i, n = (unsigned long)sc->variant.string.length;
+  const char *tx = sc->variant.string.value;
+  static const char *const fences[] = {
+    "mfence", "lfence", "sfence", "lock;addl$0,(%rsp)", "lock;addl$0,0(%rsp)", "lock;orl$0,(%rsp)", "lock;orl$0,0(%rsp)",
+    "lock;addq$0,(%rsp)", "lock;addq$0,0(%rsp)", "lock;orq$0,(%rsp)", "lock;orq$0,0(%rsp)", NULL
+  };
+  static const char *const empties[] = { "", "nop", "pause", "rep;nop", "repnop", NULL };
+  int k;
+  /* Normal form: no blanks, lower case, instructions separated by single semicolons, "%%" read as "%". */
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)tx[i];
+    if (c == '\0' || c == ' ' || c == '\t' || c == '\r') continue;
+    if (c == '\n') c = ';';
+    if (c == '%' && gnu_form && i + 1 < n && tx[i + 1] == '%') i++;
+    if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+    if (c == ';' && (m == 0 || key[m - 1] == ';')) continue;
+    if (m + 1 >= sizeof key) return IR_ASM_NONE;
+    key[m++] = (char)c;
+  }
+  while (m > 0 && key[m - 1] == ';') m--;
+  key[m] = '\0';
+  for (k = 0; empties[k] != NULL; k++) if (strcmp(key, empties[k]) == 0) return IR_ASM_EMPTY;
+  for (k = 0; fences[k] != NULL; k++) if (strcmp(key, fences[k]) == 0) return IR_ASM_FENCE;
+  if (strcmp(key, "ud2") == 0) return IR_ASM_TRAP;
+  if (strcmp(key, "int$3") == 0 || strcmp(key, "int3") == 0) return IR_ASM_INT3;
+  if (strcmp(key, "rdtsc") == 0) return IR_ASM_RDTSC;
+  if (strcmp(key, "lfence;rdtsc") == 0 || strcmp(key, "mfence;rdtsc") == 0) return IR_ASM_RDTSC_FENCE;
+  return IR_ASM_NONE;
+}
+
+/* Properties of an operand's constraint list: *mem_only (every alternative is a memory constraint), *mem_ok (some
+   alternative may be memory), *tie (the digit of a tie to an output, else -1), *reg (the x86 register letter a or d
+   when there is one, else 0), *bad (a flag output, an x87 register, or a tie among alternatives). */
+static void ir_asm_constraints(an_asm_operand_ptr op, int *mem_only, int *mem_ok, int *tie, int *reg, int *bad)
+{
+  an_asm_operand_constraint_ptr c;
+  int alts = 1, nonmem = 0, any = 0;
+  *mem_only = 0; *mem_ok = 0; *tie = -1; *reg = 0; *bad = 0;
+  for (c = op->constraints; c != NULL; c = c->next) {
+    switch (c->kind) {
+      case aoc_end_of_constraint: alts++; break;
+      case aoc_mem_any: case aoc_mem_load: case aoc_mem_offset: case aoc_mem_nonoffset: case aoc_mem_autoinc:
+      case aoc_mem_autodec: *mem_ok = 1; any = 1; break;
+      case aoc_general: case aoc_any: *mem_ok = 1; nonmem = 1; any = 1; break;
+      case aoc_cc: case aoc_reg_float_tos: case aoc_reg_float_second: *bad = 1; break;
+      case aoc_reg_a: *reg = 'a'; nonmem = 1; any = 1; break;
+      case aoc_reg_d: *reg = 'd'; nonmem = 1; any = 1; break;
+      case aoc_match_0: case aoc_match_1: case aoc_match_2: case aoc_match_3: case aoc_match_4:
+      case aoc_match_5: case aoc_match_6: case aoc_match_7: case aoc_match_8: case aoc_match_9:
+        *tie = (int)c->kind - (int)aoc_match_0; nonmem = 1; any = 1; break;
+      case aoc_mod_earlyclobber: case aoc_mod_commutative_ops: case aoc_mod_ignore: case aoc_mod_ignore_char:
+      case aoc_mod_disparage_slightly: case aoc_mod_disparage_severely: break;
+      default: nonmem = 1; any = 1; break;
+    }
+  }
+  if (alts > 1 && *tie >= 0) *bad = 1;
+  *mem_only = any && !nonmem;
+}
+
+/* An operand type this lowering moves as one scalar value. */
+static int ir_asm_scalar(a_type_ptr t)
+{
+  return t != NULL && !ir_is_aggregate(t) && !ir_is_void(t);
+}
+
+#define IR_ASM_OPS_MAX 10
+
+static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
+{
+  const char *why = NULL;
+  int cls = IR_ASM_NONE, mem = 0, nout = 0, nin = 0, idx = 0, got_a = 0, got_d = 0;
+  a_named_register_list_ptr cl;
+  an_asm_operand_ptr op;
+  if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string) why = "asm-template";
+  else {
+    cls = ir_asm_class(ae->asm_string, ae->gnu_asm_form);
+    if (cls == IR_ASM_NONE) why = "asm-template";
+  }
+  if (why == NULL && !ae->gnu_asm_form) mem = 1; /* basic asm: gcc treats it as clobbering memory */
+  if (why == NULL && ae->is_asm_goto) why = "asm-goto";
+  if (why == NULL) {
+    for (cl = ae->clobbers; cl != NULL; cl = cl->next) {
+      if (cl->reg == anr_memory) mem = 1;
+      else if (cl->reg != anr_flags) why = "asm-clobbers";
+    }
+  }
+  /* Operands are validated before anything is printed. */
+  if (why == NULL && ae->operands != NULL && cls != IR_ASM_EMPTY && cls != IR_ASM_RDTSC && cls != IR_ASM_RDTSC_FENCE) {
+    why = "asm-operands";
+  }
+  for (op = (why == NULL ? ae->operands : NULL); op != NULL && why == NULL; op = op->next, idx++) {
+    int mem_only, mem_ok, tie, reg, bad;
+    int is_out = (op->modifiers & aom_output) != 0;
+    a_type_ptr ot = op->expression != NULL ? op->expression->type : NULL;
+    ir_asm_constraints(op, &mem_only, &mem_ok, &tie, &reg, &bad);
+    if (idx >= IR_ASM_OPS_MAX || ot == NULL || bad) { why = "asm-operands"; break; }
+    if (is_out) {
+      nout++;
+      if (nin > 0 || !op->expression->is_lvalue) { why = "asm-operands"; break; } /* outputs come first and are lvalues */
+      if (mem_ok) mem = 1;
+      if (cls == IR_ASM_EMPTY) {
+        if (!mem_ok && !ir_asm_scalar(ot)) why = "asm-operands";
+      } else if (op->modifiers != aom_output || (reg != 'a' && reg != 'd') || !ir_is_integer(ot) || ir_is_bool(ot) ||
+                 (ir_size_of(ot) != 4 && ir_size_of(ot) != 8)) {
+        why = "asm-operands"; /* rdtsc: exactly "=a" and "=d", integers of 4 or 8 bytes */
+      } else if (reg == 'a') {
+        got_a++;
+      } else {
+        got_d++;
+      }
+    } else {
+      nin++;
+      if (cls != IR_ASM_EMPTY) { why = "asm-operands"; break; }
+      if (tie >= 0) {
+        /* tied to a plain output of the same IR type */
+        an_asm_operand_ptr o2 = ae->operands;
+        int j;
+        for (j = 0; j < tie && o2 != NULL; j++) o2 = o2->next;
+        if (o2 == NULL || o2->modifiers != aom_output || o2->expression == NULL || !ir_asm_scalar(o2->expression->type) ||
+            !ir_asm_scalar(ot) || strcmp(ir_valtext(o2->expression->type), ir_valtext(ot)) != 0) {
+          why = "asm-operands";
+        }
+      } else if (!mem_ok && !ir_asm_scalar(ot)) {
+        why = "asm-operands"; /* an aggregate needs a memory alternative */
+      }
+    }
+  }
+  if (why == NULL && ae->operands != NULL && cls != IR_ASM_EMPTY && (nout != 2 || got_a != 1 || got_d != 1)) why = "asm-operands";
+  ir_note(1, stmk_asm, why == NULL);
+  if (why != NULL) {
+    ir_line(d, ir_fmt("(unsupported stmt %s)", why));
+    return;
+  }
+  ir_depth = d;
+  switch (cls) {
+    case IR_ASM_FENCE:
+      ir_line(d, "(fence)");
+      return;
+    case IR_ASM_TRAP:
+      ir_line(d, "(trap)");
+      return;
+    case IR_ASM_INT3:
+      ir_line(d, "(eval (call void &\"raise\" (const int 5)))");
+      if (mem) ir_line(d, "(barrier)");
+      return;
+    case IR_ASM_RDTSC:
+    case IR_ASM_RDTSC_FENCE:
+      if (cls == IR_ASM_RDTSC_FENCE) ir_line(d, "(fence)");
+      if (ae->operands == NULL) {
+        ir_line(d, "(eval (rdtsc))");
+      } else {
+        char *r = ir_let("unsigned_long", "(rdtsc)");
+        ir_val lv[2];
+        char *vs[2];
+        int i = 0;
+        for (op = ae->operands; op != NULL; op = op->next, i++) {
+          int mo, mk, ti, rg, bd;
+          ir_asm_constraints(op, &mo, &mk, &ti, &rg, &bd);
+          lv[i] = ir_lval(op->expression);
+          if (rg == 'd') vs[i] = ir_let("unsigned_long", ir_fmt("(cshr unsigned_long %s (const unsigned_long 32))", r));
+          else vs[i] = ir_let("unsigned_long", ir_fmt("(and unsigned_long %s (const unsigned_long 4294967295))", r));
+        }
+        for (i = 0; i < 2; i++) {
+          char *conv = vs[i];
+          if (strcmp(ir_valtext(lv[i].t), "unsigned_long") != 0) {
+            conv = ir_let(ir_valtext(lv[i].t), ir_fmt("(iconv %s %s)", ir_valtext(lv[i].t), vs[i]));
+          }
+          ir_store_lv(lv[i], conv);
+        }
+      }
+      if (mem) ir_line(d, "(barrier)");
+      return;
+    default:
+      break;
+  }
+  /* An empty template with operands. */
+  if (ae->operands != NULL) {
+    ir_val lv[IR_ASM_OPS_MAX], tv[IR_ASM_OPS_MAX];
+    int tied[IR_ASM_OPS_MAX];
+    int n = 0, i;
+    for (op = ae->operands; op != NULL; op = op->next, n++) {
+      int mo, mk, ti, rg, bd;
+      ir_asm_constraints(op, &mo, &mk, &ti, &rg, &bd);
+      tied[n] = -1;
+      if ((op->modifiers & aom_output) != 0) {
+        lv[n] = ir_lval(op->expression);
+      } else if (ti >= 0) {
+        tv[n] = ir_rval(op->expression);
+        tied[n] = ti;
+      } else if ((mo || (mk && !ir_asm_scalar(op->expression->type))) && op->expression->is_lvalue) {
+        (void)ir_lval(op->expression);
+      } else {
+        (void)ir_rval(op->expression);
+      }
+    }
+    for (i = 0; i < n; i++) {
+      if (tied[i] >= 0) ir_store_lv(lv[tied[i]], tv[i].s);
+    }
+  }
+  if (mem) ir_line(d, "(barrier)");
+}
+
 
 static void ir_stmt(a_statement_ptr s, int d)
 {
@@ -2896,58 +3331,10 @@ static void ir_stmt(a_statement_ptr s, int d)
         ir_note(1, stmk_vla_decl, 1);
       }
       return;
-    case stmk_asm: {
-      /* Inline assembly. QBE has no inline asm, so the only subset that can be lowered is the one that does nothing
-         but constrain the compiler: an empty template with no operands and no labels, whose clobbers are "memory"
-         and/or "cc" (a basic asm("") counts as having the memory clobber, as in gcc). With "memory" it is a
-         compiler barrier, (barrier); without it, it emits nothing at all.
-         Everything else (a template, operands, a register clobber, asm goto) stays an unsupported marker with the
-         reason, and the emitter refuses the module with that text. */
-      an_asm_entry_ptr ae = s->variant.asm_entry;
-      const char *why = NULL;
-      int mem = 0;
-      a_named_register_list_ptr cl;
-      const char *tx;
-      if (ae == NULL || ae->asm_string == NULL || ae->asm_string->kind != ck_string) why = "asm-template";
-      else {
-        a_constant_ptr sc = ae->asm_string;
-        unsigned long i;
-        tx = sc->variant.string.value;
-        for (i = 0; i < (unsigned long)sc->variant.string.length; i++) {
-          if (tx[i] != '\0' && tx[i] != ' ' && tx[i] != '\t' && tx[i] != '\n') why = "asm-template";
-        }
-      }
-      if (why == NULL && !ae->gnu_asm_form) mem = 1; /* basic asm(""): gcc treats it as clobbering memory */
-      if (why == NULL && ae->is_asm_goto) why = "asm-goto";
-      if (why == NULL && ae->operands != NULL) why = "asm-operands";
-      if (why == NULL) {
-        for (cl = ae->clobbers; cl != NULL; cl = cl->next) {
-          if (cl->reg == anr_memory) mem = 1;
-          else if (cl->reg != anr_flags) why = "asm-clobbers";
-        }
-      }
-      /* doctest's debugger break, `__asm__ volatile("int $3\n" : :)`: raise SIGTRAP, which is what the instruction does
-         when no debugger is attached (path A's qbe-prep.rb calls a stub for it). */
-      if (why != NULL && ae != NULL && ae->asm_string != NULL && ae->asm_string->kind == ck_string &&
-          !ae->is_asm_goto && ae->operands == NULL && ae->clobbers == NULL) {
-        const char *t3 = ae->asm_string->variant.string.value;
-        char norm[16];
-        size_t k, m = 0;
-        for (k = 0; t3[k] != '\0' && m < sizeof norm - 1; k++) {
-          if (t3[k] != ' ' && t3[k] != '\t' && t3[k] != '\n') norm[m++] = t3[k];
-        }
-        norm[m] = '\0';
-        if (t3[k] == '\0' && strcmp(norm, "int$3") == 0) {
-          ir_note(1, stmk_asm, 1);
-          ir_line(d, "(eval (call void &\"raise\" (const int 5)))");
-          return;
-        }
-      }
-      ir_note(1, stmk_asm, why == NULL);
-      if (why != NULL) ir_line(d, ir_fmt("(unsupported stmt %s)", why));
-      else if (mem) ir_line(d, "(barrier)");
+    case stmk_asm:
+      /* Inline assembly: ir_asm_stmt lowers the subset QBE can express and marks the rest unsupported. */
+      ir_asm_stmt(s->variant.asm_entry, d);
       return;
-    }
     case stmk_init: {
       a_dynamic_init_ptr init = s->variant.dynamic_init;
       ir_note(1, stmk_init, 1);
@@ -3225,6 +3612,18 @@ static void ir_tls_init_alias(a_routine_ptr rout, a_scope_ptr scope)
   ir_buf_end(&ir_out_funcs);
 }
 
+static void ir_alias(const char *name, const char *target, const char *kind, int weak)
+{
+  if (name == NULL || target == NULL) return;
+  ir_buf_begin(&ir_out_funcs);
+  fputs("\n(alias ", nf_out);
+  nf_put_quoted_name(name);
+  fputc(' ', nf_out);
+  nf_put_quoted_name(target);
+  fprintf(nf_out, " %s%s)\n", kind, weak ? " weak" : "");
+  ir_buf_end(&ir_out_funcs);
+}
+
 /* Entry point. Called by back_end() when NFCXX_PATHB_MODE=ir. */
 void nfcxx_ir_back_end(void)
 {
@@ -3242,6 +3641,10 @@ void nfcxx_ir_back_end(void)
   ir_buf_open(&ir_out_funcs);
   ir_mod.n = 0;
 
+  /* A weakref variable first: its target is then printed as the weak declaration the weakref makes it. */
+  for (var = scope->variables; var != NULL; var = var->next) {
+    if (var->is_weakref && var->aliased_variable != NULL && !ignore_variable_in_back_end(var)) (void)ir_global_op(var);
+  }
   for (var = scope->variables; var != NULL; var = var->next) {
     /* Variables of a dependent type (the function parameter packs of libstdc++'s templates) have no object. */
     if (!ignore_variable_in_back_end(var) && !is_template_dependent_type(var->type)) (void)ir_global_op(var);
@@ -3250,6 +3653,22 @@ void nfcxx_ir_back_end(void)
   for (rout = scope->routines; rout != NULL; rout = rout->next) {
     if (rout->is_tls_init_alias && rout->function_def_number == NULL_function_def_number) ir_tls_init_alias(rout, scope);
     else ir_function(rout);
+  }
+  /* GNU alias attributes: (alias NAME TARGET function|object [weak]), when the target is defined in this unit. */
+  for (rout = scope->routines; rout != NULL; rout = rout->next) {
+    a_routine_ptr t;
+    if (!has_gnu_routine_supp(rout) || rout->implicit_alias || rout->is_ifunc || rout->is_weakref ||
+        rout->function_def_number != NULL_function_def_number) {
+      continue;
+    }
+    t = gnu_routine_supp(rout)->aliased_routine;
+    if (t == NULL || t->function_def_number == NULL_function_def_number) continue;
+    ir_alias(ir_rout_sym(rout), ir_rout_sym(t), "function", rout->is_weak);
+  }
+  for (var = scope->variables; var != NULL; var = var->next) {
+    if (var->is_gnu_alias && !var->is_weakref && var->aliased_variable != NULL && !ignore_variable_in_back_end(var)) {
+      ir_alias(ir_var_sym(var), ir_var_sym(var->aliased_variable), "object", var->is_weak);
+    }
   }
 
   nf_out = stdout;
