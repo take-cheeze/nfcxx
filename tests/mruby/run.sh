@@ -178,6 +178,12 @@ emit_file() {
 }
 before=$fail
 for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do emit_file "${f#$root/tests/}" "$f"; done
+# --long-double=trap: a function that mentions long double becomes an aborting stub (refused without the option).
+for f in "$root"/tests/mruby/pathb-edge/ld_trap.ir "$root"/tests/mruby/pathb-edge/e_long_double*.ir; do
+  [ -e "$f" ] || continue
+  emit_n=$((emit_n + 1))
+  emit_cmp "${f#$root/tests/} --long-double=trap" --long-double=trap "$f"
+done
 # The IR of the C++ programs, when the Path B harness is built.
 cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 if [ -x "$cpfe" ]; then
