@@ -88,12 +88,10 @@ it touches (the emitter places each bit at its absolute position; `ir_gi_i128_bi
 - **`va_arg` of a 128-bit type** is `(unsupported op va_arg (__int128))`: the emitter refuses it. Passing one through `...`
   works (the callee does not read it); reading it would need the register save area logic of `va_arg`.
 - **Case labels** outside the signed 64-bit range (section 4), and their collisions, are refused by name.
-- **`_Float128`** (`std::float128_t`) is a separate type and still refused. `std::format` instantiates a visitor for it
-  as well as for `__int128`, so **`std::format` still does not build**, with the same refusal and no new cause on the
-  128-bit side: with the EDG fork's `ignored-routine` change (the `lower_il.c` assertion on `basic_string::_M_construct`),
-  the refusal moves from `type __int128_t` to `type std::float128_t`. The pinned `3rd/edg` commit does not have that
-  change, so `std::format` stops in the front end before that. `std::to_chars(char*, char*, __int128)` is not an overload
-  in strict `-std=c++NN` mode; `to_chars` of `long double` works (`longdouble_io.cpp`).
+- **`_Float128`** (`std::float128_t`) is a separate type, supported as of `docs/notes/pathb-float128.md`. `std::format`
+  instantiates a visitor for it as well as for `__int128`, and builds now that both are supported
+  (`tests/pathb-qbe/cases/float128_format.cpp`). `std::to_chars(char*, char*, __int128)` is not an overload in strict
+  `-std=c++NN` mode; `to_chars` of `long double` works (`longdouble_io.cpp`).
 - **`std::atomic<__int128>`** works (`tests/pathb-qbe/cases/int128_atomic.cpp`), but the 16-byte `__atomic_*` calls need
   libatomic at link time, which the Path B link has (`-latomic`) and the gcc backend's link line does not; that probe is
   therefore not compared with gcc.
