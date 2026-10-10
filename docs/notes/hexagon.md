@@ -252,13 +252,11 @@ Hexagon plan:
 
 ## 6. Findings outside the Hexagon work
 
-- **Header include bug in `setup-edg.sh`.** Its `cp -r` copies `bases/.../gcc/include`, a *relative*
-  symlink (`../../../../include_c++/`), so `build/edg-base/include` dangles. Any `--sys_include` based
-  on `build/edg-base/include` finds nothing, so `#include <exception>` fails
-  (`cannot open source file "exception"`, rc 4) for both `./nfcxx --emit-c` and `./nfcxx file.cpp`
-  (both checked). Passing the real
-  directory (`3rd/edg/include_c++`) works. This is not changed here (outside this task); a one-line fix
-  is `ln -sfn "$src/include_c++" "$base/include"` after the copy. `scripts/gen-c-target.sh` works around it.
+- **Header include bug in `setup-edg.sh` (fixed).** Its `cp -r` copied `bases/.../gcc/include`, a *relative*
+  symlink (`../../../../include_c++/`), so `build/edg-base/include` dangled and `#include <exception>` failed
+  (`cannot open source file "exception"`, rc 4). `setup-edg.sh` now runs
+  `ln -sfn "$src/include_c++" "$base/include"` after the copy (and `setup-pathb.sh` does the same). The fallback in
+  `scripts/gen-c-target.sh` (use `3rd/edg/include_c++` when `exception.h` is not found) is kept for old `build/edg-base` trees.
 - EDG ships only about 15 C++ headers in `include_c++/` (`exception`, `new`, `typeinfo`, `cxxabi.h`, ...; no `<cstdio>`, `<cstddef>`, `<stdlib.h>`).
   Programs that need them need a freestanding shim or the real libc headers.
 
