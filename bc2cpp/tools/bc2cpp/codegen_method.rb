@@ -161,7 +161,7 @@ class CodeGen
     # positions are never retyped; the padding is explicit.
     arg_native_types = native_arg_types(d, mand) + Array.new(total_args - mand)
 
-    impl_name = "#{cpp_name(d.owner, d.name)}_impl"
+    impl_name = "#{cpp_name(d.owner, d.name)}#{@entry_spec_suffix}_impl"
     entry_name = cpp_name(d.owner, d.name)
     embedded_ivars = @ivar_layout[d.owner]
 
@@ -201,6 +201,12 @@ class CodeGen
       end
     end
 
+    # ENTRY_GUARDED_SPECIALIZATION (ADR 0380): nil unless BC2CPP_SPECIALIZE names this method.
+    entry_spec = entry_specialization(label, d, irep, arg_names, arg_native_types,
+                                      entry_specialization_eligibility(mandatory_ok: mandatory_ok, opt: opt, has_rest: has_rest, has_blk: has_blk,
+                                                                       needs_blk_param: needs_blk_param, kw_table: kw_table, resumable: resumable,
+                                                                       fiber_guarded: fiber_guarded, needs_return_catch: needs_return_catch,
+                                                                       block_fallback_regions: block_fallback_regions))
     out = String.new
     out << "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n"
     # Not `static`: another gem's generated code may call it (OTHER_DECLS_HEADER;
@@ -238,6 +244,8 @@ class CodeGen
     else
       out << "mrb_value #{impl_name}(mrb_state* M, #{(['mrb_value self'] + arg_params).join(', ')}) {\n"
       out << errinfo_scope_line(irep)
+      # ENTRY_GUARDED_SPECIALIZATION: the entry check; a miss falls through to the generic body below.
+      out << "  if (#{entry_spec[:guard]}) return #{entry_spec[:call]}(M, #{(['self'] + arg_names).join(', ')});\n" if entry_spec&.fetch(:guard)
       # EXCEPTION_RETURN_SUPPORT: wrap the body in one try/catch only when a
       # BLOCK_FALLBACK region can throw bc2cpp_method_return. Cheap under zero-cost
       # exceptions but not free, hence the gate. Statements inside the `try` behave
@@ -498,6 +506,12 @@ class CodeGen
     out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
+    if entry_spec
+      # The specialized function goes ahead of `_impl`, after this method's header line.
+      header = "// #{d.owner}##{d.name} (compiled from irep #{label}, #{irep.instructions.size} insns)\n"
+      at = out.index(header) + header.length
+      out = out[0...at] + entry_spec[:code] + out[at..]
+    end
     @runtime_installed_names = nil
     if @resumable
       out << resumable_entry_function(impl_name, step_name, "#{d.owner}##{d.name}")
