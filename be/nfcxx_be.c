@@ -114,6 +114,11 @@ void nf_put_unqualified_type(a_type_ptr type)
       break;
     case tk_integer:
       /* bool is an integer type in EDG (no kind of its own); is_bool_type tells it apart from char. */
+      if (nf_ld_blob && !is_bool_type(type) && f_size_of_type(type) == 16) {
+        /* IR mode: __int128 and unsigned __int128 are 16-byte objects (docs/notes/pathb-int128.md) */
+        fputs("(array 16 unsigned_char)", nf_out);
+        break;
+      }
       nf_put_atom(is_bool_type(type) ? "bool" : int_type_name(type));
       break;
     case tk_float:

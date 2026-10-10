@@ -101,12 +101,9 @@ also checks that the emitter accepts or refuses them as stated).
   for `std::current_exception`, `exception_ptr`, `throw_with_nested`: libstdc++.so keeps that state in its own exception globals.
   Path A has the same limit. User-code throws, `std::runtime_error` etc. constructed in user code, and EDG's `operator new` work
   (`gaps_io.cpp` throws and catches a dozen kinds).
-- `_Float128`/`__int128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `__int128`).
-  `long double` is supported (below).
-- **128-bit bit-fields** (`unsigned __int128 f : 100`, or `: 20`): the layout of a structure that has one is right and its
-  other members work, but any access to the field is refused (`refused: type __uint128_t`; a width over 64 also has the marker
-  `bit-field-wider-than-64-bits`). It needs `__int128` values, which neither the IR nor QBE has (no 128-bit arithmetic, conversion
-  or calling convention); `tests/mruby/pathb-edge/r_bitfield128.ir`. Not done: that is `__int128` support as a whole.
+- `_Float128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `_Float128` too).
+  `long double` is supported (below), and so is `__int128` (`docs/notes/pathb-int128.md`: 128-bit arithmetic, conversions,
+  switch, bit-fields and the C ABI, as helper calls on 16-byte objects).
 - **`__builtin_object_size`** answers only for the address of a known object (below); any pointer that was loaded, passed or
   returned is unknown (-1, or 0 for types 2 and 3), as in gcc without optimization. `__builtin_dynamic_object_size` is the same
   (it does not see the size of a VLA or an allocation). TYPE 1 of the address of a member of a *global* structure is -1: the front
