@@ -7,7 +7,7 @@ require_relative 'source_text'
 # A result fact joins successful returns; it never bypasses the original call.
 module NativeClassResults
   FILES = {
-    '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e],
+    '3rd/mruby/mrbgems/mruby-io/src/file.c' => %w[cc1202e26515fcf1af8b6014359b05b198bc81214ce20348c07778f037271102 dec83df295fbae0157686e55882e73acebdfa0825edf2ab542cfe51d7f03c53e 2bf54ced4214251c7706ca7bcef3e9ee35293313f10d06cea2ba1d7ab43754fb],
     '3rd/mruby/mrbgems/mruby-array-ext/src/array.c' => '8065d3073a5bb5290cafe20df0785ccdfecc0563ef14ac211f203915c1a2fc29',
     '3rd/mruby/src/hash.c' => '42d9e2c6d836f08e73fff828fc2cf7988d18cd24c6ae3a29ee71a7d6ee019a16',
     '3rd/mruby/src/string.c' => %w[1ea0c045842b4feeefcad548ef79951a5fb3408d31908063fd9fec106de71f00 d4cbdaef5a4e33016077ee8f3855df407edb065a749f0c7ecffc9bf53d6d78bb],
