@@ -13,4 +13,6 @@ tests/run.sh              # regression cases in tests/cases (// EXPECT: <exit co
 ./nfcxx --freestanding x.cpp # headers from lib/ only, no hosted libc++/libstdc++ (docs/notes/freestanding.md)
 tests/lib/run.sh          # freestanding library tests (both backends)
 tests/builtins/run.sh     # compiler builtin probes (docs/notes/builtins.md)
+./nfcxx -shared x.cpp -o x.so # shared object; lib/eval/ evaluates C++ snippets at run time (docs/notes/eval.md)
+tests/eval/run.sh         # nfceval library and -shared (both backends)
 ```

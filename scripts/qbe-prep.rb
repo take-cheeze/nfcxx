@@ -505,6 +505,7 @@ LIBC_BUILTINS = {
   '__builtin_memmove' => ['memmove', 'void *memmove(void *, const void *, unsigned long);'],
   '__builtin_memset' => ['memset', 'void *memset(void *, int, unsigned long);'],
   '__builtin_memcmp' => ['memcmp', 'int memcmp(const void *, const void *, unsigned long);'],
+  '__builtin_memchr' => ['memchr', 'void *memchr(const void *, int, unsigned long);'],  # std::string::find
   '__builtin_strlen' => ['strlen', 'unsigned long strlen(const char *);'],
 }
 # builtin -> [helper name, definition in the prelude]
