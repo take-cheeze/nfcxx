@@ -615,3 +615,12 @@ Each item names its probes. Emitter changes are in both `scripts/pathb-qbe-emit.
   `// TRAP-IR: default`.
 - **`__builtin_object_size`** (`builtin_objsize.cpp`): a constant at lowering time (see `pathb-hosted.md`).
 - **Inline asm**: `ir_asm_stmt` in `be/nfcxx_ir.c`, `asm_ext.cpp`; the accepted forms are in `pathb-hosted.md`.
+
+## Round: long double
+
+`long double` no longer stops a module. The IR lowering keeps a 16-byte object per value and calls helpers
+(`be/nfcxx_ldrt.c`); results in `st(0)` are bridged by assembly thunks that the emitter leaves as `# pathb-x87` marks and
+`--append-weak` expands (new top-level forms `(x87-thunk ...)`, stage 2 grammar). The emitter changed only for those forms
+and for refusing a `(layout (long_double N))` other than 16; the Python oracle carries the same code
+(`tests/mruby/pathb-edge/x87_thunks.ir`, `e_x87_*.ir`, `r_layout_ld.ir`). The whole design, the calling convention and the limits are in
+`docs/notes/pathb-longdouble.md`.

@@ -1,4 +1,4 @@
-// va_arg of long double: the IR carries it and the emitter refuses it by name (QBE has no 80-bit type; the check is in run.sh).
+// va_arg of long double: a call of the helper __nfcxx_ld_vaarg (docs/notes/pathb-longdouble.md); the emitter accepts it (the check is in run.sh).
 long double ld(int n, ...) {
   __builtin_va_list ap;
   __builtin_va_start(ap, n);

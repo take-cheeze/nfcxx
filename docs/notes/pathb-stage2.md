@@ -277,7 +277,7 @@ volatile helpers): QBE cannot look into a call or reorder it, and the call has n
 S-expressions, one statement per line, indented by nesting. Identifiers are double-quoted strings. The grammar as printed:
 
 ```
-module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* (global|data|declare|function)*
+module    ::= (ir-module "FILE" (layout (short N) (int N) (long N) (long_long N) (pointer N) (float N) (double N) (long_double N))) global* data* (global|data|declare|abi-type|x87-thunk|function)*
 declare   ::= (declare "NAME" (weak))                          a function declared __attribute__((weak)) that this module
                                                                refers to and does not define: a weak reference (see Linkage)
 global    ::= (global "NAME" TYPE BYTES ALIGN [(static)|(weak)|(weak attr)] [(thread)] INIT)
@@ -296,6 +296,9 @@ ITEM      ::= (scalar OFF TYPE (const TYPE V)|(null PTR))  one number, at byte o
             | (bytes OFF BYTES @"const")                   the bytes of a string literal copied into an array
             | (zero OFF BYTES)                             elements the initializer does not name
 data      ::= (data "NAME" TYPE CONST)                    string literal: CONST = (string "...")
+x87-thunk ::= (x87-thunk call|callc "F" INTS STACK)           long double results (docs/notes/pathb-longdouble.md): the emitter writes
+            | (x87-thunk entry|entryc "F" global|weak INTS STACK)   assembly thunks between the IR's convention (result through a
+                                                           trailing pointer) and the C one (result in st(0)[, st(1)])
 function  ::= (function "LINKAGE" (ret TYPE|void) (params PARAM*) [(static)|(weak)|(weak attr)] [(constructor [PRIO])]
               [(destructor [PRIO])] SLOT* STMT*)       PRIO = 1..65535; (constructor)/(destructor): see "Start-up and exit"
 PARAM     ::= (sret %N TYPE) | (param %N "NAME" TYPE) | (param %N "NAME" (byval TYPE)) | (ellipsis)

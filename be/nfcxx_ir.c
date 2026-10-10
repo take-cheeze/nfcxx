@@ -154,9 +154,45 @@ static int ir_is_pointer(a_type_ptr t)
   return t != NULL && skip_typerefs(t)->kind == tk_pointer;
 }
 
+/* long double (docs/notes/pathb-longdouble.md): QBE has no 80-bit type, so the IR holds one in a 16-byte object and the
+   value of an expression of that type is the address of such an object, like an aggregate's. Every operation is a call
+   of a helper in be/nfcxx_ldrt.c. ir_is_float is false for it, so no code path meant for float and double takes it. */
+static int ir_is_x87(a_type_ptr t)
+{
+  a_type_ptr s;
+  if (t == NULL) return 0;
+  s = skip_typerefs(t);
+  return s->kind == tk_float && s->variant.float_kind == fk_long_double;
+}
+
 static int ir_is_float(a_type_ptr t)
 {
-  return t != NULL && skip_typerefs(t)->kind == tk_float;
+  return t != NULL && skip_typerefs(t)->kind == tk_float && !ir_is_x87(t);
+}
+
+/* EDG lowers `_Complex long double` to a struct of this name. It is class COMPLEX_X87 of the System V ABI: passed in
+   memory (like any 32-byte struct), but returned in st(0) and st(1), so a function returning one has the x87 result
+   kind 2 (see ir_x87_kind and the thunks below). */
+static int ir_is_complex_x87(a_type_ptr t)
+{
+  a_type_ptr s;
+  if (t == NULL) return 0;
+  s = skip_typerefs(t);
+  return (s->kind == tk_struct || s->kind == tk_class) && s->source_corresp.name != NULL &&
+         strcmp(s->source_corresp.name, "_Complex_long_double") == 0;
+}
+
+/* The kind of x87 result of a function returning t: 1 for a long double (st(0)), 2 for a _Complex long double (st(0) and
+   st(1)), 0 for any other type. */
+static int ir_x87_kind(a_type_ptr t)
+{
+  return ir_is_x87(t) ? 1 : ir_is_complex_x87(t) ? 2 : 0;
+}
+
+/* A value that is the address of its object: an aggregate, or a long double. */
+static int ir_is_memval(a_type_ptr t)
+{
+  return ir_is_aggregate(t) || ir_is_x87(t);
 }
 
 static int ir_is_integer(a_type_ptr t)
@@ -205,7 +241,7 @@ static unsigned long ir_align_of(a_type_ptr t)
 /* IR text of an object type as a value: unqualified scalar, or the address for aggregates. */
 static char *ir_valtext(a_type_ptr t)
 {
-  if (ir_is_aggregate(t)) return ir_fmt("(ptr %s)", ir_capture_type(t, 0));
+  if (ir_is_memval(t)) return ir_fmt("(ptr %s)", ir_capture_type(t, 0));
   return ir_capture_type(t, 1);
 }
 
@@ -395,6 +431,34 @@ static const char *ir_rout_sym(a_routine_ptr r)
 
 static void ir_weak_decl(a_routine_ptr r);
 
+/* Does the routine return a long double? Such a routine is defined and called with the result written through a
+   trailing pointer parameter, under the name __nfcxx_ldr_<symbol> (the real symbol is a thunk that returns the value in
+   st(0); docs/notes/pathb-longdouble.md, "Calling convention"). */
+/* The x87 result kind of routine r (ir_x87_kind of its return type). EDG's own runtime (libC.a, the __c99_complex_*
+   routines it lowers complex arithmetic to) returns a _Complex long double through a hidden pointer like any struct, so
+   for those the kind is 0 and the call is an ordinary (sret ...) call. */
+static int ir_x87_rout_kind(a_routine_ptr r)
+{
+  a_type_ptr ft = skip_typerefs(r->type);
+  int k;
+  if (ft->kind != tk_routine || ft->variant.routine.return_type == NULL) return 0;
+  k = ir_x87_kind(ft->variant.routine.return_type);
+  if (k == 2 && r->source_corresp.name != NULL && strncmp(r->source_corresp.name, "__c99_", 6) == 0 &&
+      r->function_def_number == NULL_function_def_number)
+    return 0;
+  return k;
+}
+
+static int ir_x87_ret_rout(a_routine_ptr r)
+{
+  return ir_x87_rout_kind(r) != 0;
+}
+
+static void ir_x87_note_extern(a_routine_ptr r, const char *n);
+
+/* The name a routine is defined, called and addressed under. A routine returning long double that is defined here is
+   __nfcxx_ldr_<symbol>; one defined elsewhere is reached through the call thunk __nfcxx_x87c_<symbol>, which has the
+   same trailing-pointer signature and calls the C-convention symbol. */
 static const char *ir_rout_name(a_routine_ptr r)
 {
   const char *n = ir_rout_sym(r);
@@ -409,6 +473,11 @@ static const char *ir_rout_name(a_routine_ptr r)
   }
   if (n != NULL && n[0] != '\0') {
     if (r->is_weak) ir_weak_decl(r);
+    if (ir_x87_ret_rout(r)) {
+      if (r->function_def_number != NULL_function_def_number) return ir_fmt("__nfcxx_ldr_%s", n);
+      ir_x87_note_extern(r, n);
+      return ir_fmt("__nfcxx_x87c_%s", n);
+    }
     return n;
   }
   op = ir_tab_get(&ir_mod, r, "__unnamed_fn", "&");
@@ -604,21 +673,30 @@ static char *ir_let(const char *ty, const char *rhs)
 
 static char *ir_zero(a_type_ptr t)
 {
-  if (ir_is_pointer(t)) return ir_fmt("(null %s)", ir_valtext(t));
+  if (ir_is_pointer(t) || ir_is_x87(t)) return ir_fmt("(null %s)", ir_valtext(t));
   if (ir_is_float(t)) return ir_fmt("(const %s 0.0)", ir_valtext(t));
   return ir_fmt("(const %s 0)", ir_valtext(t));
 }
+
+static char *ir_ld_ret(const char *rty, const char *name, const char *args);
 
 /* A bool operand for any scalar value (a pointer or float compares with its zero). */
 static char *ir_to_bool(ir_val v)
 {
   if (v.t == NULL) return v.s; /* already a bool */
   if (ir_is_bool(v.t)) return v.s;
+  if (ir_is_x87(v.t)) return ir_let("bool", ir_fmt("(ne int %s (const int 0))", ir_ld_ret("int", "nz", v.s)));
   return ir_let("bool", ir_fmt("(ne %s %s %s)", v.ty, v.s, ir_zero(v.t)));
 }
 
+static void ir_copy(a_type_ptr t, const char *dst, const char *src);
+
 static void ir_store(a_type_ptr t, const char *addr, const char *val, int vol)
 {
+  if (ir_is_x87(t)) { /* a long double value is the address of an object: store = copy (a volatile one is not special) */
+    ir_copy(t, addr, val);
+    return;
+  }
   ir_emit(ir_fmt("(store%s %s %s %s)", vol ? ".v" : "", ir_valtext(t), addr, val));
 }
 
@@ -628,6 +706,8 @@ static void ir_copy(a_type_ptr t, const char *dst, const char *src)
 }
 
 /* A scalar loaded from an address. An aggregate is already its address. */
+static ir_val ir_temp(a_type_ptr t);
+
 static ir_val ir_load(ir_val a)
 {
   char *r;
@@ -637,6 +717,11 @@ static ir_val ir_load(ir_val a)
     return ir_mk_value(r, a.t);
   }
   if (ir_is_aggregate(a.t)) return ir_mk_value(a.s, a.t);
+  if (ir_is_x87(a.t)) { /* reading a long double copies it: the object may change before the value is used */
+    ir_val t = ir_temp(a.t);
+    ir_copy(a.t, t.s, a.s);
+    return ir_mk_value(t.s, a.t);
+  }
   /* A function lvalue (`*fp`, a reference to a function): its value is its address, nothing is read. */
   if (a.t != NULL && skip_typerefs(a.t)->kind == tk_routine) return ir_mk_addr(a.s, a.t, 0);
   r = ir_let(ir_valtext(a.t), ir_fmt("(load%s %s %s)", a.vol ? ".v" : "", ir_valtext(a.t), a.s));
@@ -1010,6 +1095,31 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
 
 /* ================================================================ constants */
 
+/* The 16 bytes of a long double constant: EDG keeps the value in the host's format (the x87 extended format, little
+   endian, in the low 10 bytes); the rest is zero. */
+static void ir_x87_bytes(a_constant_ptr c, unsigned long *lo, unsigned long *hi)
+{
+  unsigned char b[16];
+  unsigned long w[2];
+  memset(b, 0, sizeof b);
+  memcpy(b, c->variant.float_value.bytes, 10);
+  memcpy(w, b, sizeof w);
+  *lo = w[0];
+  *hi = w[1];
+}
+
+/* A long double constant: a temporary object that two 64-bit stores fill. */
+static ir_val ir_x87_const(a_constant_ptr c, a_type_ptr t)
+{
+  unsigned long lo, hi;
+  ir_val tmp = ir_temp(t);
+  ir_val up = ir_subobject(tmp.s, 8, integer_type(ik_unsigned_long), 0);
+  ir_x87_bytes(c, &lo, &hi);
+  ir_emit(ir_fmt("(store unsigned_long %s (const unsigned_long %lu))", tmp.s, lo));
+  ir_emit(ir_fmt("(store unsigned_long %s (const unsigned_long %lu))", up.s, hi));
+  return ir_mk_value(tmp.s, t);
+}
+
 /* A scalar constant operand of type t. */
 static ir_val ir_const_value(a_constant_ptr c, a_type_ptr t)
 {
@@ -1071,9 +1181,15 @@ static ir_val ir_constant(a_constant_ptr c, a_type_ptr t)
 {
   switch (c->kind) {
     case ck_integer:
+      if (ir_is_x87(t)) return ir_gap(t, "integer constant of type long double", 3, ck_integer);
       ir_note(3, ck_integer, 1);
       return ir_const_value(c, t);
     case ck_float:
+      if (ir_is_x87(t)) {
+        if (!ir_is_x87(c->type)) return ir_gap(t, "long double constant of another floating type", 3, ck_float);
+        ir_note(3, ck_float, 1);
+        return ir_x87_const(c, t);
+      }
       ir_note(3, ck_float, 1);
       return ir_const_value(c, t);
     case ck_address:
@@ -1187,7 +1303,7 @@ static ir_val ir_lval(an_expr_node_ptr e)
     ir_note(2, enk_routine, 1);
     return ir_mk_addr(ir_fmt("&\"%s\"", ir_name_or(ir_rout_sym(e->variant.routine.ptr), "fn")), e->type, 0);
   }
-  if (ir_is_aggregate(e->type)) return ir_rval(e);
+  if (ir_is_memval(e->type)) return ir_rval(e);
   return ir_gap(e->type, "lvalue", 2, (int)e->kind);
 }
 
@@ -1211,10 +1327,38 @@ static const char *ir_arith_name(an_expr_operator_kind k, a_type_ptr t)
   }
 }
 
+/* ---- long double: operations are calls of the helpers in be/nfcxx_ldrt.c ---- */
+
+/* (eval (call void &"__nfcxx_ld_NAME" ARGS)): a helper that writes its result through its first argument. */
+static void ir_ld_call(const char *name, const char *args)
+{
+  ir_emit(ir_fmt("(eval (call void &\"__nfcxx_ld_%s\" %s))", name, args));
+}
+
+/* (call TYPE &"__nfcxx_ld_NAME" ARGS): a helper that returns a scalar. */
+static char *ir_ld_ret(const char *rty, const char *name, const char *args)
+{
+  return ir_let(rty, ir_fmt("(call %s &\"__nfcxx_ld_%s\" %s)", rty, name, args));
+}
+
+/* Result of a binary operation on long doubles: a fresh object. NULL when the operator is not lowered. */
+static ir_val ir_x87_arith(an_expr_operator_kind k, a_type_ptr rt, ir_val a, ir_val b, int *ok)
+{
+  const char *op = k == eok_add ? "add" : k == eok_subtract ? "sub" : k == eok_multiply ? "mul" : k == eok_divide ? "div" : NULL;
+  ir_val d;
+  *ok = op != NULL;
+  if (op == NULL) return ir_mk_void();
+  d = ir_temp(rt);
+  ir_ld_call(op, ir_fmt("%s %s %s", d.s, a.s, b.s));
+  return ir_mk_value(d.s, rt);
+}
+
 /* Arithmetic of kind k on values a and b; the result has type rt. NULL when not lowered. */
 static ir_val ir_arith(an_expr_operator_kind k, a_type_ptr rt, ir_val a, ir_val b, int *ok)
 {
-  const char *mn = ir_arith_name(k, rt);
+  const char *mn;
+  if (ir_is_x87(rt)) return ir_x87_arith(k, rt, a, b, ok);
+  mn = ir_arith_name(k, rt);
   *ok = mn != NULL;
   if (mn == NULL) return ir_mk_void();
   return ir_mk_value(ir_let(ir_valtext(rt), ir_fmt("(%s %s %s %s)", mn, ir_valtext(rt), a.s, b.s)), rt);
@@ -1226,6 +1370,11 @@ static ir_val ir_compare(an_expr_operator_kind k, ir_val a, ir_val b)
   const char *suffix = "u";
   const char *op;
   ir_val x = a, y = b;
+  if (ir_is_x87(a.t)) { /* long double: the helper returns 0 or 1 (false for an unordered pair, except !=) */
+    const char *nm = k == eok_eq ? "eq" : k == eok_ne ? "ne" : k == eok_lt ? "lt" : k == eok_le ? "le" : k == eok_gt ? "gt" : "ge";
+    char *r = ir_ld_ret("int", nm, ir_fmt("%s %s", a.s, b.s));
+    return ir_mk_bool(ir_let("bool", ir_fmt("(ne int %s (const int 0))", r)));
+  }
   if (ir_is_float(a.t)) suffix = "f";
   else if (ir_is_signed(a.t)) suffix = "s";
   switch (k) {
@@ -1399,7 +1548,7 @@ static ir_val ir_lval_op(an_expr_node_ptr e)
     default:
       break;
   }
-  if (ir_is_aggregate(e->type)) return ir_rval(e);
+  if (ir_is_memval(e->type)) return ir_rval(e);
   {
     ir_val v = ir_gap(e->type, ir_fmt("lvalue %s", nfcxx_eok_name(k) != NULL ? nfcxx_eok_name(k) : "?"), 0, (int)k);
     return ir_mk_addr(v.s, e->type, vol);
@@ -1481,6 +1630,12 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       return ir_mk_void();
     }
     case eok_va_arg:
+      if (ir_is_x87(e->type)) { /* 16 bytes in the overflow area: a helper reads them with the C compiler's va_arg */
+        ir_val d = ir_temp(e->type);
+        ir_note(0, k, 1);
+        ir_ld_call("vaarg", ir_fmt("%s %s", d.s, ir_valist_addr(a0)));
+        return ir_mk_value(d.s, e->type);
+      }
       if (ir_is_aggregate(e->type)) return ir_vaarg_aggregate(e, ir_valist_addr(a0));
       if (ir_is_bool(e->type)) return ir_gap(e->type, "op va_arg (bool)", 0, (int)k);
       {
@@ -1535,6 +1690,12 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       ir_val a = ir_rval(a0);
       ir_note(0, k, 1);
       if (k == eok_unary_plus) return a;
+      if (ir_is_x87(e->type)) {
+        ir_val d = ir_temp(e->type);
+        if (k == eok_complement) return ir_gap(e->type, "op complement (long double)", 0, (int)k);
+        ir_ld_call("neg", ir_fmt("%s %s", d.s, a.s));
+        return ir_mk_value(d.s, e->type);
+      }
       if (k == eok_complement) {
         return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(not %s %s)", ir_valtext(e->type), a.s)), e->type);
       }
@@ -1549,6 +1710,7 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
       ir_note(0, k, 1);
       /* A bool operand has no EDG type (a.t is NULL): compare it with false. */
       if (a.t == NULL) return ir_mk_bool(ir_let("bool", ir_fmt("(eq bool %s (const bool 0))", a.s)));
+      if (ir_is_x87(a.t)) return ir_mk_bool(ir_let("bool", ir_fmt("(eq int %s (const int 0))", ir_ld_ret("int", "nz", a.s))));
       return ir_mk_bool(ir_let("bool", ir_fmt("(eq %s %s %s)", a.ty, a.s, ir_zero(a.t))));
     }
     case eok_eq:
@@ -1605,11 +1767,51 @@ static ir_val ir_rval_op(an_expr_node_ptr e)
   return ir_gap(e->type, ir_fmt("op %s", nfcxx_eok_name(k) != NULL ? nfcxx_eok_name(k) : "?"), 0, (int)k);
 }
 
+/* Conversion between long double and another arithmetic type (either side), or from a bool/int/float value. The value a
+   has the type a.t (NULL: a bool). Integers of any width go through a 64-bit one first. */
+static ir_val ir_x87_conv(ir_val a, a_type_ptr dst)
+{
+  if (ir_is_x87(dst)) {
+    ir_val d;
+    if (ir_is_x87(a.t)) return ir_mk_value(a.s, dst);
+    d = ir_temp(dst);
+    if (a.t == NULL || ir_is_integer(a.t)) {
+      int sg = a.t != NULL && ir_is_signed(a.t);
+      char *w = a.s;
+      if (a.t == NULL || ir_size_of(a.t) < 8) {
+        w = ir_let(sg ? "long" : "unsigned_long", ir_fmt("(iconv %s %s)", sg ? "long" : "unsigned_long", a.s));
+      }
+      ir_ld_call(sg ? "from_s64" : "from_u64", ir_fmt("%s %s", d.s, w));
+    } else if (ir_is_float(a.t)) {
+      ir_ld_call(ir_size_of(a.t) == 4 ? "from_f32" : "from_f64", ir_fmt("%s %s", d.s, a.s));
+    } else {
+      return ir_gap(dst, "conversion to long double", 0, (int)eok_cast);
+    }
+    return ir_mk_value(d.s, dst);
+  }
+  /* from long double */
+  if (ir_is_bool(dst)) return ir_mk_bool(ir_to_bool(a));
+  if (ir_is_integer(dst)) {
+    int sg = ir_is_signed(dst);
+    unsigned long bits = ir_size_of(dst) * 8;
+    char *r = ir_ld_ret(sg ? "long" : "unsigned_long", sg ? "to_s" : "to_u", ir_fmt("%s (const int %lu)", a.s, bits));
+    if (ir_size_of(dst) == 8) return ir_mk_value(r, dst);
+    return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), r)), dst);
+  }
+  if (ir_is_float(dst)) {
+    return ir_mk_value(ir_ld_ret(ir_valtext(dst), ir_size_of(dst) == 4 ? "to_f32" : "to_f64", a.s), dst);
+  }
+  return ir_gap(dst, "conversion from long double", 0, (int)eok_cast);
+}
+
 /* Assignment (scalar or aggregate, plain or compound). want_addr returns the address of the lhs. */
 /* Value a converted to the arithmetic type dst (an integer or floating type). */
+static ir_val ir_x87_conv(ir_val a, a_type_ptr dst);
+
 static ir_val ir_conv_num(ir_val a, a_type_ptr dst)
 {
   if (strcmp(ir_valtext(dst), a.ty) == 0) return ir_mk_value(a.s, dst);
+  if (ir_is_x87(dst) || ir_is_x87(a.t)) return ir_x87_conv(a, dst);
   if (ir_is_integer(dst)) {
     if (ir_is_float(a.t)) return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(cf2i %s %s)", ir_valtext(dst), a.s)), dst);
     return ir_mk_value(ir_let(ir_valtext(dst), ir_fmt("(iconv %s %s)", ir_valtext(dst), a.s)), dst);
@@ -1624,6 +1826,7 @@ static ir_val ir_conv_num(ir_val a, a_type_ptr dst)
 static a_type_ptr ir_common_type(a_type_ptr a, a_type_ptr b)
 {
   if (a == NULL || b == NULL) return NULL;
+  if (ir_is_x87(a) || ir_is_x87(b)) return ir_is_x87(a) ? a : b;
   if (ir_is_float(a) || ir_is_float(b)) {
     if (ir_is_float(a) && ir_is_float(b)) return ir_size_of(a) >= ir_size_of(b) ? a : b;
     return ir_is_float(a) ? a : b;
@@ -1709,6 +1912,10 @@ static ir_val ir_incr(an_expr_node_ptr e, int pre, int inc)
     char *one = ir_fmt("(const %s 1)", ir_valtext(lhs.t));
     nv = ir_arith(inc ? eok_add : eok_subtract, lhs.t, cur, ir_mk_value(one, lhs.t), &ok);
     if (!ok) return ir_gap(e->type, "incr", 0, (int)e->variant.operation.kind);
+  } else if (ir_is_x87(lhs.t)) {
+    int ok = 1;
+    ir_val one = ir_x87_conv(ir_mk_value("(const int 1)", integer_type(ik_int)), lhs.t);
+    nv = ir_x87_arith(inc ? eok_add : eok_subtract, lhs.t, cur, one, &ok);
   } else if (ir_is_float(lhs.t)) {
     char *one = ir_fmt("(const %s 1.0)", ir_valtext(lhs.t));
     nv = ir_mk_value(ir_let(ir_valtext(lhs.t),
@@ -2313,6 +2520,23 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     *out = a;
     return 1;
   }
+  /* __builtin_clear_padding(&x), which libstdc++'s std::atomic<T> calls so that compare-exchange compares values: the six
+     padding bytes of a long double are zeroed; a type with no padding (an integer, float, double, pointer) needs nothing. */
+  if (strcmp(name, "clear_padding") == 0 && arg != NULL && ir_is_pointer(arg->type)) {
+    a_type_ptr pt = skip_typerefs(skip_typerefs(arg->type)->variant.pointer.type);
+    if (ir_is_x87(pt) || pt->kind == tk_integer || pt->kind == tk_float || pt->kind == tk_pointer) {
+      ir_val p = ir_rval(arg);
+      ir_note(0, eok_call, 1);
+      if (ir_is_x87(pt)) {
+        ir_val lo = ir_subobject(p.s, 10, integer_type(ik_unsigned_short), 0);
+        ir_val hi = ir_subobject(p.s, 12, integer_type(ik_unsigned_int), 0);
+        ir_emit(ir_fmt("(store unsigned_short %s (const unsigned_short 0))", lo.s));
+        ir_emit(ir_fmt("(store unsigned_int %s (const unsigned_int 0))", hi.s));
+      }
+      *out = ir_mk_void();
+      return 1;
+    }
+  }
   /* __builtin_is_constant_evaluated(): true only while the compiler evaluates a constant expression; code that runs is not. */
   if (strcmp(name, "is_constant_evaluated") == 0) {
     ir_note(0, eok_call, 1);
@@ -2323,6 +2547,39 @@ static int ir_builtin_call(an_expr_node_ptr e, const char *name, ir_val *out)
     ir_note(0, eok_call, 1);
     *out = ir_mk_value(ir_fmt("(const %s 0)", ir_valtext(e->type)), e->type);
     return 1;
+  }
+  /* the classification and comparison built-ins on a long double argument (the last argument for fpclassify) */
+  {
+    an_expr_node_ptr last = arg;
+    while (last != NULL && last->next != NULL) last = last->next;
+    if (last != NULL && last->type != NULL && ir_is_x87(last->type) &&
+        (strcmp(name, "fpclassify") == 0 || strcmp(name, "isnormal") == 0)) {
+      ir_val x = ir_rval(last);
+      ir_note(0, eok_call, 1);
+      *out = ir_mk_value(ir_ld_ret("int", name[0] == 'f' ? "fpclassify" : "isnormal", x.s), e->type);
+      return 1;
+    }
+    if (arg != NULL && arg->next != NULL && arg->type != NULL && ir_is_x87(arg->type) && arg->next->type != NULL &&
+        ir_is_x87(arg->next->type)) {
+      const char *h = strcmp(name, "isgreater") == 0 ? "gt" : strcmp(name, "isgreaterequal") == 0 ? "ge" :
+                      strcmp(name, "isless") == 0 ? "lt" : strcmp(name, "islessequal") == 0 ? "le" :
+                      strcmp(name, "isunordered") == 0 ? "isunordered" : strcmp(name, "islessgreater") == 0 ? "lg" : NULL;
+      if (h != NULL) {
+        ir_val x = ir_rval(arg);
+        ir_val y = ir_rval(arg->next);
+        char *r;
+        ir_note(0, eok_call, 1);
+        if (strcmp(h, "lg") == 0) {
+          /* a < b || a > b (false for an unordered pair) */
+          r = ir_let("int", ir_fmt("(or int %s %s)", ir_ld_ret("int", "lt", ir_fmt("%s %s", x.s, y.s)),
+                                   ir_ld_ret("int", "gt", ir_fmt("%s %s", x.s, y.s))));
+        } else {
+          r = ir_ld_ret("int", h, ir_fmt("%s %s", x.s, y.s));
+        }
+        *out = ir_mk_value(r, e->type);
+        return 1;
+      }
+    }
   }
   if (strcmp(name, "object_size") == 0 || strcmp(name, "dynamic_object_size") == 0) {
     ir_note(0, eok_call, 1);
@@ -2541,20 +2798,116 @@ static void ir_abi_note(a_type_ptr t);
 static char *ir_abi_ty(a_type_ptr t)
 {
   ir_abi_note(t);
+  if (ir_is_x87(t)) return (char *)"(struct \"__nfcxx_ld\")";
   return ir_capture_type(t, 1);
+}
+
+/* ---- long double results: the x87 thunks ----
+
+   A function that returns a long double returns it in st(0), which QBE cannot read or write. Path B therefore defines
+   such a function F under the name __nfcxx_ldr_F with one more, trailing, pointer parameter that receives the result
+   (an ordinary function returning void), and calls through that name when F is defined in the translation unit or the
+   call goes through a pointer. Two thunks, assembly generated by the emitter from the forms below, bridge to the C
+   convention:
+     (x87-thunk entry "F" LINKAGE INTS STACK)  defines F itself: calls __nfcxx_ldr_F with a stack buffer and loads st(0)
+     (x87-thunk call "F" INTS STACK)           defines __nfcxx_x87c_F(args..., dst): calls F and stores st(0) at dst
+   INTS is the number of integer registers the parameters use and STACK the bytes of stack arguments of F; the thunk
+   shifts nothing, it copies the stack arguments (long doubles are passed in memory) and takes the extra pointer from
+   the next integer register, or the stack word after the arguments when the six are used. */
+#define IR_X87T_MAX 4096
+static struct ir_x87t {
+  char *sym;
+  int entry;
+} ir_x87t_tab[IR_X87T_MAX];
+static int ir_x87t_n;
+
+static void ir_x87_thunk(const char *sym, int entry, int kind, const char *linkage, int ints, unsigned long stack)
+{
+  int i;
+  for (i = 0; i < ir_x87t_n; i++)
+    if (ir_x87t_tab[i].entry == entry && strcmp(ir_x87t_tab[i].sym, sym) == 0) return;
+  if (ir_x87t_n >= IR_X87T_MAX) return;
+  ir_x87t_tab[ir_x87t_n].sym = ir_dup(sym);
+  ir_x87t_tab[ir_x87t_n].entry = entry;
+  ir_x87t_n++;
+  ir_buf_begin(&ir_out_types);
+  if (entry) fprintf(nf_out, "(x87-thunk %s \"%s\" %s %d %lu)\n", kind == 2 ? "entryc" : "entry", sym, linkage, ints, stack);
+  else fprintf(nf_out, "(x87-thunk %s \"%s\" %d %lu)\n", kind == 2 ? "callc" : "call", sym, ints, stack);
+  ir_buf_end(&ir_out_types);
+}
+
+/* System V classification of one parameter of type t: *ints integer registers used so far, *sse vector registers,
+   *stack bytes of stack arguments. 0 for a shape the thunks do not know (an aggregate of at most 16 bytes). */
+static int ir_x87_param(a_type_ptr t, int *ints, int *sse, unsigned long *stack)
+{
+  unsigned long sz, al;
+  a_type_ptr s;
+  if (t == NULL) { /* a bool value */
+    if (*ints < 6) (*ints)++; else *stack += 8;
+    return 1;
+  }
+  s = skip_typerefs(t);
+  sz = ir_size_of(s);
+  al = ir_align_of(s);
+  if (ir_is_x87(s)) {
+    *stack = (*stack + 15) / 16 * 16 + 16;
+    return 1;
+  }
+  if (s->kind == tk_integer || s->kind == tk_pointer || s->kind == tk_nullptr) {
+    if (*ints < 6) (*ints)++; else *stack += 8;
+    return 1;
+  }
+  if (s->kind == tk_float) {
+    if (*sse < 8) (*sse)++; else *stack += 8;
+    return 1;
+  }
+  if (s->kind == tk_class || s->kind == tk_struct || s->kind == tk_union) {
+    if (sz <= 16) return 0;
+    if (al < 8) al = 8;
+    *stack = (*stack + al - 1) / al * al + (sz + 7) / 8 * 8;
+    return 1;
+  }
+  return 0;
+}
+
+/* The address (or a call) of a routine returning long double that is defined elsewhere: the call thunk, classified
+   from the routine's declared parameters. A shape the thunk cannot copy leaves the name without a thunk (link error). */
+static void ir_x87_note_extern(a_routine_ptr r, const char *n)
+{
+  a_type_ptr ft = skip_typerefs(r->type);
+  a_param_type_ptr p;
+  int ints = 0, sse = 0;
+  unsigned long stack = 0;
+  int kind = ir_x87_rout_kind(r);
+  if (ft->variant.routine.extra_info == NULL) {
+    ir_x87_thunk(n, 0, kind, NULL, 0, 0);
+    return;
+  }
+  if (ft->variant.routine.extra_info->has_ellipsis) return;
+  for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next)
+    if (!ir_x87_param(p->type, &ints, &sse, &stack)) return;
+  ir_x87_thunk(n, 0, kind, NULL, ints, stack);
 }
 
 /* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and passed as
    (byval TYPE ADDR); an aggregate result is written to a temporary passed as the first argument, (sret TYPE ADDR). The
-   emitter turns both into the C calling convention of the target (docs/notes/pathb-hosted.md, "Aggregates by value"). */
+   emitter turns both into the C calling convention of the target (docs/notes/pathb-hosted.md, "Aggregates by value").
+   A long double argument is a (byval (struct "__nfcxx_ld") ADDR) of 16 bytes in memory; a long double result is
+   written through a trailing pointer (see the x87 thunks above). */
 static ir_val ir_call(an_expr_node_ptr e)
 {
   an_expr_node_ptr f = ir_operand(e, 0);
   an_expr_node_ptr arg;
   char *callee;
   char *args = ir_dup("");
-  int agg_ret = ir_is_aggregate(e->type);
+  int xk = ir_x87_kind(e->type);
+  if (xk == 2 && f->kind == enk_routine && ir_x87_rout_kind(f->variant.routine.ptr) == 0) xk = 0; /* EDG runtime: sret */
+  int agg_ret = ir_is_aggregate(e->type) && xk == 0;
+  int x87_ret = xk != 0;
+  int x87_first = 0; /* variadic callee: the result pointer is the first argument */
+  const char *thunk_sym = NULL; /* x87 result of a routine defined elsewhere: the C symbol the call thunk calls */
   ir_val sret = ir_mk_void();
+  ir_val ldres = ir_mk_void();
   if (f->kind == enk_routine) {
     const char *bsym = ir_builtin_sym(f->variant.routine.ptr->source_corresp.name);
     ir_note(2, enk_routine, 1);
@@ -2573,41 +2926,75 @@ static ir_val ir_call(an_expr_node_ptr e)
       ir_val bv;
       if (ir_atomic_call(e, f->variant.routine.ptr->source_corresp.name, &bv)) return bv;
     }
-    callee = ir_fmt("&\"%s\"", bsym != NULL ? bsym : ir_rout_name(f->variant.routine.ptr));
+    if (bsym != NULL && ir_operand(e, 1) != NULL && ir_operand(e, 1)->type != NULL && ir_is_x87(ir_operand(e, 1)->type)) {
+      /* type-generic classification built-ins on a long double: glibc's __isnanl and friends take it in memory */
+      static const char *const tab[][2] = { { "isnan", "__isnanl" }, { "isinf", "__isinfl" }, { "isfinite", "__finitel" },
+                                            { "signbit", "__signbitl" } };
+      size_t i;
+      for (i = 0; i < sizeof tab / sizeof tab[0]; i++) if (strcmp(bsym, tab[i][0]) == 0) bsym = tab[i][1];
+    }
+    if (x87_ret && (bsym != NULL || f->variant.routine.ptr->function_def_number == NULL_function_def_number)) {
+      thunk_sym = bsym != NULL ? bsym : ir_name_or(ir_rout_sym(f->variant.routine.ptr), "fn");
+      callee = ir_fmt("&\"__nfcxx_x87c_%s\"", thunk_sym);
+    } else {
+      callee = ir_fmt("&\"%s\"", bsym != NULL ? bsym : ir_rout_name(f->variant.routine.ptr));
+    }
   } else {
     ir_val fv = ir_rval(f);
     ir_nonnull(f, fv); /* a call through a null function pointer traps (stage 2, gap 9) */
     callee = fv.s;
   }
+  if (x87_ret) {
+    a_type_ptr ft = ir_callee_fn_type(f);
+    if (ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
+      /* variadic: the result pointer goes first, like (sret ...), since nothing can follow the "..." arguments; there is
+         no C-convention entry for such a function, so one defined elsewhere cannot be called */
+      if (thunk_sym != NULL) return ir_gap(e->type, "call of a variadic function returning long double defined elsewhere", 0, (int)eok_call);
+      x87_first = 1;
+    }
+    ldres = ir_temp(e->type);
+    if (x87_first) args = ir_fmt("%s %s", args, ldres.s);
+  }
   if (agg_ret) {
     sret = ir_temp(e->type);
     args = ir_fmt("%s (sret %s %s)", args, ir_abi_ty(e->type), sret.s);
   }
-  for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) {
-    ir_val a = ir_rval(arg);
-    if (ir_is_aggregate(a.t)) {
-      ir_val tmp = ir_temp(a.t);
-      ir_copy(a.t, tmp.s, a.s);
-      args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(a.t), tmp.s);
-    } else {
-      args = ir_fmt("%s %s", args, a.s);
+  {
+    int ints = 0, sse = 0, shape_ok = 1;
+    unsigned long stack = 0;
+    for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) {
+      ir_val a = ir_rval(arg);
+      if (thunk_sym != NULL && !ir_x87_param(a.t, &ints, &sse, &stack)) shape_ok = 0;
+      if (ir_is_memval(a.t)) {
+        ir_val tmp = ir_temp(a.t);
+        ir_copy(a.t, tmp.s, a.s);
+        args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(a.t), tmp.s);
+      } else {
+        args = ir_fmt("%s %s", args, a.s);
+      }
+    }
+    if (thunk_sym != NULL) {
+      if (!shape_ok) return ir_gap(e->type, "call of a function returning long double with a small aggregate argument", 0, (int)eok_call);
+      ir_x87_thunk(thunk_sym, 0, xk, NULL, ints, stack);
     }
   }
+  if (x87_ret && !x87_first) args = ir_fmt("%s %s", args, ldres.s);
   /* A variadic callee: (variadic N) gives the number of leading ARGs (the hidden result pointer included)
      that match named parameters; the rest are the "..." arguments. */
   {
     a_type_ptr ft = ir_callee_fn_type(f);
     if (ft != NULL && ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
       a_param_type_ptr p;
-      int named = agg_ret ? 1 : 0;
+      int named = (agg_ret || x87_first) ? 1 : 0;
       for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) named++;
       callee = ir_fmt("%s (variadic %d)", callee, named);
     }
   }
   ir_note(0, eok_call, 1);
-  if (ir_is_void(e->type) || agg_ret) {
+  if (ir_is_void(e->type) || agg_ret || x87_ret) {
     ir_emit(ir_fmt("(eval (call void %s%s))", callee, args));
     if (agg_ret) return ir_mk_addr(sret.s, e->type, 0);
+    if (x87_ret) return ir_mk_value(ldres.s, e->type);
     return ir_mk_void();
   }
   return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(call %s %s%s)", ir_valtext(e->type), callee, args)), e->type);
@@ -2628,6 +3015,8 @@ static ir_val ir_roof(an_expr_node_ptr e)
   char *callee;
   a_type_ptr ft;
   if (under == NULL || scope == NULL) return ir_gap(e->type, "node result_of_overriding_function", 2, (int)e->kind);
+  if (ir_x87_kind(e->type) != 0)
+    return ir_gap(e->type, "node result_of_overriding_function (long double)", 2, (int)e->kind);
   ft = skip_typerefs(ir_cur_rout->type);
   if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) {
     return ir_gap(e->type, "node result_of_overriding_function (variadic)", 2, (int)e->kind);
@@ -2640,7 +3029,7 @@ static ir_val ir_roof(an_expr_node_ptr e)
   }
   for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
     ir_val a = ir_var_addr(param, param->type, 0);
-    if (ir_is_aggregate(param->type)) {
+    if (ir_is_memval(param->type)) {
       ir_val tmp = ir_temp(param->type);
       ir_copy(param->type, tmp.s, a.s);
       args = ir_fmt("%s (byval %s %s)", args, ir_abi_ty(param->type), tmp.s);
@@ -2672,6 +3061,11 @@ static ir_val ir_cast(an_expr_node_ptr e)
   if (ir_is_aggregate(dst)) {
     ir_note(0, eok_cast, 1);
     return ir_mk_value(a.s, dst);
+  }
+  if (ir_is_x87(dst) || (ir_is_x87(a.t) && !ir_is_void(dst))) {
+    ir_note(0, eok_cast, 1);
+    if (ir_is_pointer(dst) || ir_is_pointer(a.t)) return ir_gap(dst, "cast (long double and pointer)", 0, (int)eok_cast);
+    return ir_x87_conv(a, dst);
   }
   if (ir_is_bool(dst)) {
     ir_note(0, eok_cast, 1);
@@ -2906,7 +3300,7 @@ static int ir_zero_bytes(const char *base, unsigned long off, unsigned long n)
    on every target Path B emits). */
 static void ir_zero_object(ir_val dst, a_type_ptr t)
 {
-  if (ir_is_aggregate(t)) {
+  if (ir_is_memval(t)) {
     if (!ir_zero_bytes(dst.s, 0, ir_size_of(t))) ir_emit("(unsupported init zero-aggregate)");
     return;
   }
@@ -3158,6 +3552,16 @@ static ir_tab ir_abi_tab;
 static void ir_abi_note(a_type_ptr t)
 {
   a_type_ptr s = skip_typerefs(t);
+  if (ir_is_x87(t)) { /* a long double argument is 16 bytes in memory (class X87), like a large struct */
+    static int done;
+    if (!done) {
+      done = 1;
+      ir_buf_begin(&ir_out_types);
+      fputs("(abi-type \"__nfcxx_ld\" 16 16 (memory))\n", nf_out);
+      ir_buf_end(&ir_out_types);
+    }
+    return;
+  }
   char *txt, *q1, *q2;
   ir_leaf lv[IR_LEAF_MAX];
   int n = 0, i;
@@ -3359,6 +3763,19 @@ static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
 {
   const char *target = NULL;
   long add = 0;
+  if (ir_is_x87(t) && (c->kind != ck_float || !ir_is_x87(c->type))) {
+    ir_note(3, (int)c->kind, 0);
+    ir_gi_unsupported("long double constant");
+    return;
+  }
+  if (c->kind == ck_float && ir_is_x87(t)) { /* two 64-bit items */
+    unsigned long lo, hi;
+    ir_x87_bytes(c, &lo, &hi);
+    ir_note(3, ck_float, 1);
+    fprintf(nf_out, "\n    (scalar %lu unsigned_long (const unsigned_long %lu))", off, lo);
+    fprintf(nf_out, "\n    (scalar %lu unsigned_long (const unsigned_long %lu))", off + 8, hi);
+    return;
+  }
   if (c->kind == ck_integer || c->kind == ck_float) {
     ir_val v = ir_const_value(c, t);
     ir_note(3, (int)c->kind, 1);
@@ -3998,13 +4415,13 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_note(1, stmk_return, 1);
       if (s->expr == NULL) {
         /* Falling off the end of a non-void function is undefined; main returns 0 (see ir_function). */
-        if (ir_is_void(ir_ret_type) || ir_is_aggregate(ir_ret_type)) ir_line(d, "(return)");
+        if (ir_is_void(ir_ret_type) || ir_is_memval(ir_ret_type)) ir_line(d, "(return)");
         else if (ir_in_main) ir_line(d, ir_fmt("(return %s)", ir_zero(ir_ret_type)));
         else ir_line(d, "(unreachable)");
       } else if (ir_is_void(s->expr->type)) {
         (void)ir_rval(s->expr);
         ir_line(d, "(return)");
-      } else if (ir_is_aggregate(ir_ret_type)) {
+      } else if (ir_is_memval(ir_ret_type)) {
         ir_val v = ir_rval(s->expr);
         ir_copy(ir_ret_type, ir_sret, v.s);
         ir_line(d, "(return)");
@@ -4169,6 +4586,9 @@ static void ir_function(a_routine_ptr rout)
     char *reg;
   } pending[256];
   int npending = 0;
+  const char *x87_unsupported = NULL; /* a long double function whose C-convention entry thunk cannot be made */
+  int x87_ints = 0;
+  unsigned long x87_stack = 0;
 
   if (ignore_routine_in_back_end(rout)) return;
   if (rout->function_def_number == NULL_function_def_number) return;
@@ -4202,21 +4622,28 @@ static void ir_function(a_routine_ptr rout)
      byval: the register is the address of the callee's copy, and the variable is that copy. */
   ir_buf_open(&params);
   ir_buf_begin(&params);
-  if (ir_is_aggregate(ret)) {
+  if (ir_is_aggregate(ret) && !ir_x87_kind(ret)) {
     ir_sret = ir_newreg();
     ir_abi_note(ret);
     fprintf(nf_out, " (sret %s ", ir_sret);
     nf_put_type(ret);
     fputc(')', nf_out);
   }
+  if (ir_x87_kind(ret) && fn_type->variant.routine.extra_info != NULL && fn_type->variant.routine.extra_info->has_ellipsis) {
+    /* variadic: the result pointer is the first parameter (see ir_call) */
+    ir_sret = ir_newreg();
+    fprintf(nf_out, " (param %s \"__ldret\" (ptr %s))", ir_sret, ir_capture_type(ret, 0));
+    x87_unsupported = "variadic function returning long double";
+  }
   for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
     char *reg = ir_newreg();
     fprintf(nf_out, " (param %s ", reg);
     nf_put_quoted_name(param->source_corresp.name);
-    if (ir_is_aggregate(param->type)) {
+    if (ir_is_memval(param->type)) {
       ir_abi_note(param->type);
       fputs(" (byval ", nf_out);
-      nf_put_type(param->type);
+      if (ir_is_x87(param->type)) fputs(ir_abi_ty(param->type), nf_out);
+      else nf_put_type(param->type);
       fputs("))", nf_out);
       ir_tab_put(&ir_slots, param, reg);
     } else {
@@ -4228,6 +4655,19 @@ static void ir_function(a_routine_ptr rout)
         pending[npending].reg = reg;
         npending++;
       }
+    }
+  }
+  if (ir_x87_kind(ret) && x87_unsupported == NULL) {
+    /* the result of a long double function is written through a trailing pointer (x87 thunks) */
+    ir_sret = ir_newreg();
+    fprintf(nf_out, " (param %s \"__ldret\" (ptr %s))", ir_sret, ir_capture_type(ret, 0));
+    {
+      int ints = 0, sse = 0;
+      unsigned long stack = 0;
+      for (param = scope->variant.routine.parameters; param != NULL; param = param->next)
+        if (!ir_x87_param(param->type, &ints, &sse, &stack)) x87_unsupported = "long double function with a small aggregate parameter";
+      x87_ints = ints;
+      x87_stack = stack;
     }
   }
   if (fn_type->variant.routine.extra_info != NULL && fn_type->variant.routine.extra_info->has_ellipsis) {
@@ -4268,7 +4708,7 @@ static void ir_function(a_routine_ptr rout)
   fputs("\n(function ", nf_out);
   nf_put_quoted_name(ir_rout_name(rout));
   fputs("\n  (ret ", nf_out);
-  if (ir_is_aggregate(ret)) fputs("void", nf_out); /* the result goes through (sret ...) */
+  if (ir_is_memval(ret)) fputs("void", nf_out); /* the result goes through (sret ...) or the trailing pointer */
   else nf_put_unqualified_type(skip_typerefs(ret));
   fputs(")\n  (params", nf_out);
   ir_buf_end(&hdr);
@@ -4292,6 +4732,14 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_close(&params);
   ir_buf_close(&body);
   ir_buf_close(&ir_slot_buf);
+
+  /* A long double function is also defined under its own symbol, the C-convention entry (returns in st(0)). A static
+     one is only reached through __nfcxx_ldr_F. */
+  if (ir_x87_kind(ret) && x87_unsupported == NULL && rout->storage_class != sc_static && ir_rout_sym(rout) != NULL &&
+      ir_rout_sym(rout)[0] != '\0') {
+    int weak = rout->use_comdat || rout->suppress_inline_body || rout->is_weak;
+    ir_x87_thunk(ir_rout_sym(rout), 1, ir_x87_kind(ret), weak ? "weak" : "global", x87_ints, x87_stack);
+  }
 }
 
 /* The `_ZTH<name>` initialization routine of a thread_local variable (EDG routine->is_tls_init_alias). IL lowering
@@ -4343,6 +4791,7 @@ void nfcxx_ir_back_end(void)
   const char *ov = getenv("NFCXX_IR_OVERFLOW");
 
   ir_trap_overflow = ov != NULL && strcmp(ov, "trap") == 0;
+  nf_ld_blob = 1; /* long double types print as a 16-byte array in the IR */
   ir_buf_open(&ir_out_globals);
   ir_buf_open(&ir_out_types);
   ir_buf_open(&ir_out_data);

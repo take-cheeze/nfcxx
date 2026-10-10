@@ -87,7 +87,7 @@ also checks that the emitter accepts or refuses them as stated).
 | `isnan`, `isinf`, `isfinite`, `isnormal`, `isinf_sign`, `signbit` (libm `__signbit[f]`), `fpclassify` (libm `__fpclassify[f]`), `isgreater`, `isgreaterequal`, `isless`, `islessequal`, `islessgreater`, `isunordered` | `x - x` separates finite from NaN/infinite; the comparisons are QBE's ordered ones. Before, `<cmath>` classification of a `float` called the double routine (wrong ABI) or an undefined symbol. |
 | Non-finite float constants (`NAN`, `INFINITY`, `numeric_limits<>::infinity()`, `HUGE_VAL`) in code and data | `d_inf`, `d_-inf`, `d_nan` (QBE reads them with `strtod`); the NaN is the positive quiet NaN, sign and payload are not in the IR. Before: `refused: non-finite floating constant`. |
 | `__atomic_test_and_set`, `__atomic_clear`, `__atomic_thread_fence`, `__atomic_signal_fence`, `__sync_*` (all sized forms) | EDG leaves them as calls nothing exports (libatomic has only the sized `__atomic_*_N`). Lowered to those: test_and_set is `__atomic_exchange_1`, clear a store, a thread fence a locked `__atomic_fetch_or_4` on a private word (a full barrier on x86 and opaque to the compiler), a signal fence `(barrier)`, `__sync_fetch_and_OP_N`/`__sync_OP_and_fetch_N` the `__atomic` forms, the compare-and-swaps use a temporary for the expected value. All seq_cst. `std::atomic_flag`, `atomic_thread_fence`, `std::atomic<T>` of every size, `std::latch/barrier/semaphore` need them (`gaps_atomic.cpp`, `gaps_sync.cpp`). |
-| `va_arg` of a struct/class/union by value | Spelled in IR with the System V algorithm and the by-value classification (`ir_abi_collect`): up to 16 bytes with INTEGER/SSE eightbytes come from the register save area when `gp_offset <= 48 - 8 n_int` and `fp_offset <= 176 - 16 n_sse`, otherwise (and for every larger or memory-class aggregate, a `long double` member) from `overflow_arg_area`, which advances by the size rounded to 8. An empty class takes nothing. An aggregate aligned to 16 or more, or a shape the by-value convention cannot describe, stays an `(unsupported ...)` marker. `va_arg` of `long double` is carried in the IR and the emitter refuses it by name (QBE has no 80-bit type). `gaps_vaarg.cpp` crosses `int`/`double`/mixed/`float` pairs/memory structs with registers running out mid-list. |
+| `va_arg` of a struct/class/union by value | Spelled in IR with the System V algorithm and the by-value classification (`ir_abi_collect`): up to 16 bytes with INTEGER/SSE eightbytes come from the register save area when `gp_offset <= 48 - 8 n_int` and `fp_offset <= 176 - 16 n_sse`, otherwise (and for every larger or memory-class aggregate, a `long double` member) from `overflow_arg_area`, which advances by the size rounded to 8. An empty class takes nothing. An aggregate aligned to 16 or more, or a shape the by-value convention cannot describe, stays an `(unsupported ...)` marker. `va_arg` of `long double` is a call of a helper (`docs/notes/pathb-longdouble.md`). `gaps_vaarg.cpp` crosses `int`/`double`/mixed/`float` pairs/memory structs with registers running out mid-list. |
 | inline asm | `pause`, `rep nop`, `rep; nop`, `nop` (with no operands and at most `"memory"`/`"cc"` clobbers) and `__builtin_ia32_pause` are `(barrier)`, an opaque call of an empty module-local function: the instruction has no observable effect, the call keeps its place in the instruction stream. Any other instruction is refused with its text (`refused: (unsupported stmt asm-template "mfence")`; `asm-operands`, `asm-clobbers`, `asm-goto` as before). A fence is not a no-op, so `mfence` and friends are refused rather than lowered to an empty call. |
 | other `(unsupported ...)` found by the stress programs | `std::function` from a plain function (the reference-to-function argument `*__f` was *loaded* instead of decayed: segfault); a repeated array initializer (`ck_init_repeat`, `std::bitset`, `T a[N]{}`) and zero fills of more than 128 stores (now `(zero-fill N ADDR)`); `alignas`/`aligned` on a variable (slot and global alignment came from the type; QBE slots are 16-byte aligned at most, so a larger alignment over-allocates and rounds up, and a global's `align` takes any power of two up to 64, the most QBE data accepts: libstdc++'s `__waiter_pool_base` is 64-byte aligned); `__builtin_X` with no library function and no lowering (`frame_address`, `return_address`, `ia32_*`, ...) is now `(unsupported builtin X (no lowering))` instead of a link error. |
 | EDG front end assertion (`lower_il.c:10294`, "internal error ... in lower_routine") | Reached by `std::visit` with a functor and by `<chrono>`/`<thread>` in C++20 and later (`struct _Guard` of `basic_string.tcc`). The Path A build never gets there. The fork take-cheeze/edg-compiler (branch `nfcxx/ignored-routine`, tracked as `3rd/edg`) skips a routine the back end ignores (a prototype instantiation) instead of asserting, as `lower_routine_list` already does. |
@@ -101,9 +101,8 @@ also checks that the emitter accepts or refuses them as stated).
   for `std::current_exception`, `exception_ptr`, `throw_with_nested`: libstdc++.so keeps that state in its own exception globals.
   Path A has the same limit. User-code throws, `std::runtime_error` etc. constructed in user code, and EDG's `operator new` work
   (`gaps_io.cpp` throws and catches a dozen kinds).
-- `long double`, see below. It reaches programs through `std::uniform_real_distribution` / `normal_distribution` /
-  `generate_canonical` (`std::log(long double)`), `std::format` (the long double formatter) and `<cmath>` overloads: those functions
-  are refused (or abort with `--long-double=trap`). `_Float128`/`__int128` types are refused when a kept function uses them.
+- `_Float128`/`__int128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `__int128`).
+  `long double` is supported (below).
 - **128-bit bit-fields** (`unsigned __int128 f : 100`, or `: 20`): the layout of a structure that has one is right and its
   other members work, but any access to the field is refused (`refused: type __uint128_t`; a width over 64 also has the marker
   `bit-field-wider-than-64-bits`). It needs `__int128` values, which neither the IR nor QBE has (no 128-bit arithmetic, conversion
@@ -159,22 +158,24 @@ really calls), `traps/asm_ud2.cpp`; the refusal is in `tests/pathb-ir/gaps.cpp` 
 
 ## long double
 
-QBE has no 80-bit type and the emitter refuses any IR that mentions `long_double`. For hosted programs the header paths that reach
-it are few. doctest: `std::ostream::operator<<(long double)` (inline in `<ostream>`), `doctest::toString(long double)`,
-`toStreamLit<long double>` and `IsNaN<long double>`: four functions, none run by the test driver. tinyxml2 never mentions it.
+Supported since `docs/notes/pathb-longdouble.md`: a `long double` is a 16-byte object in the x86-64 System V layout, every operation
+is a call of a helper that gcc compiled (`be/nfcxx_ldrt.c`, linked from `libnfcxxld.a`, `scripts/pathb-ldrt`), and the places
+where the C calling convention differs (results in `st(0)`) go through assembly thunks the emitter writes. libc, libm and
+libstdc++.so are called directly with the right ABI: `printf("%Lf")`, `strtold`, `powl`, `ostream::_M_insert<long double>`,
+`std::to_chars`. What used to be blocked now compiles and matches the gcc backend: `<random>` distributions over
+`long double`, `generate_canonical`, `<cmath>` overloads, `std::complex<long double>`, `std::stold`, iostream.
 
-**Decision: no silent `long double` = `double`.** A double fallback changes the value, the size and the calling convention (x87
-class in memory, `printf("%Lf")`, `strtold`, `ostream::_M_insert<long double>` in libstdc++.so), so a program that really uses
-it would be wrong without notice. Instead the opt-in `--long-double=trap` of the emitter (`PATHB_LONG_DOUBLE=trap` for `pathb-cc`,
-`NFCXX_LONG_DOUBLE=trap` for the driver) turns every function that mentions `long_double` into a stub that aborts when it runs, and
-drops globals of that type. Results stay correct for programs whose long double code does not run (doctest below), and
-the failure is loud (SIGABRT) when it does. Without the option the module is refused as before.
+The earlier decision stays: **no silent `long double` = `double`**; whatever is not supported is a named refusal or a link error
+(note, section 7). The opt-in `--long-double=trap` (`PATHB_LONG_DOUBLE=trap`, `NFCXX_LONG_DOUBLE=trap`) still turns functions of a
+hand-written IR that mention the scalar type `long_double` into aborting stubs, but no program lowered by `nfcxx_ir.c`
+mentions it any more, so the option is unused by the build.
 
 ## Real-world programs
 
 - **tinyxml2** (pinned, `tests/realworld/run.sh` sources): `NFCXX_PATH=b ./nfcxx -I<src> tests/realworld/tinyxml2_main.cpp <src>/tinyxml2.cpp`
   gives exit 12, same as the gcc and QBE backends; no long double on its header paths. `tests/pathb-qbe/hosted.sh` checks it.
-- **doctest** (pinned, `tests/realworld/run_doctest.sh` source): builds with `NFCXX_LONG_DOUBLE=trap` and gives the expected exit 2
-  (23 assertions pass, 2 deliberate failures reported) now that thread_local dynamic initialization is lowered. Without the
-  option it is refused at the first long double function.
+- **doctest** (pinned, `tests/realworld/run_doctest.sh` source): builds with the driver as it is and gives the expected exit 2
+  (23 assertions pass, 2 deliberate failures reported). Its `toString(long double)` and `ostream << long double` now compile
+  and work; before `long double` support it needed `NFCXX_LONG_DOUBLE=trap` (those functions aborted when run) and without the
+  option it was refused at the first one.
 - Lua, mruby are C programs: not Path B.

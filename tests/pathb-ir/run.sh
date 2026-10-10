@@ -21,7 +21,7 @@ probes="$probes tests/pathb-qbe/cases/bitfield.cpp tests/pathb-qbe/cases/bitfiel
 # Union aggregate constants, bit-fields in unions, class statement-expression results, VLA scope exit, asm barriers, weak declarations.
 # Extended asm idioms (fences, rdtsc, operand passthrough), __builtin_object_size, alias/weakref attributes, VLA bounds.
 probes="$probes tests/pathb-qbe/cases/asm_ext.cpp tests/pathb-qbe/cases/builtin_objsize.cpp tests/pathb-qbe/cases/alias_attr.cpp tests/pathb-qbe/cases/alias_static.cpp tests/pathb-qbe/cases/vla_bounds.cpp tests/pathb-qbe/traps/builtin_trap.cpp tests/pathb-qbe/traps/asm_ud2.cpp tests/pathb-qbe/traps/vla_index.cpp"
-probes="$probes tests/pathb-qbe/cases/agg_union.cpp tests/pathb-qbe/cases/bitfield_union.cpp tests/pathb-qbe/cases/stmtexpr_class.cpp tests/pathb-qbe/cases/vla_scope.cpp tests/pathb-qbe/cases/asm_barrier.cpp tests/pathb-qbe/cases/weak_decl.cpp"
+probes="$probes tests/pathb-qbe/cases/longdouble_ir.cpp tests/pathb-qbe/cases/agg_union.cpp tests/pathb-qbe/cases/bitfield_union.cpp tests/pathb-qbe/cases/stmtexpr_class.cpp tests/pathb-qbe/cases/vla_scope.cpp tests/pathb-qbe/cases/asm_barrier.cpp tests/pathb-qbe/cases/weak_decl.cpp"
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)
@@ -54,11 +54,11 @@ else
     echo "DIFF tests/pathb-ir/gaps.cpp"; head -40 "$tmp/gaps.diff"; fail=1
   fi
 fi
-# Built-ins and va_arg lowered without a library call, and the inline asm / long double cases the emitter must refuse by name.
+# Built-ins and va_arg lowered without a library call (va_arg of long double is a helper call), and the inline asm cases the emitter must refuse by name.
 # Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb) must accept or refuse the IR as stated:
-#   builtins, vaarg_agg: accepted (exit 0)    vaarg_ld, asm_refuse: refused (exit 3) with the text shown
+#   builtins, vaarg_agg, vaarg_ld: accepted (exit 0)    asm_refuse: refused (exit 3) with the text shown
 mrb=scripts/mrb
-for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:3:long_double" "asm_refuse:3:asm-template \"cpuid\""; do
+for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:0:" "asm_refuse:3:asm-template \"cpuid\""; do
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
   if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi

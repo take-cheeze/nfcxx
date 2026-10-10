@@ -42,6 +42,7 @@ export PATHB_CPFE=$cpfe
 export PATHB_BASE=${PATHB_BASE:-$root/build/pathb/edg-base}
 emit=scripts/pathb-qbe-emit.rb
 mrb=$root/scripts/mrb
+ldrt=$(scripts/pathb-ldrt) || exit 2   # the long double helpers (be/nfcxx_ldrt.c, docs/notes/pathb-longdouble.md)
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 total=0; built=0; ran=0; match=0; refused=0; failed=0; trapped=0
@@ -102,7 +103,7 @@ run_one() {
   if ! cc -c -o "$obj" "$s" 2> "$tmp/$n.as"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: assembler: $(head -1 "$tmp/$n.as")"); return
   fi
-  if ! cc -o "$exe" "$obj" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
+  if ! cc -o "$exe" "$obj" "$ldrt" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "undefined reference to .*" "$tmp/$n.ld" || head -1 "$tmp/$n.ld")"); return
   fi
   built=$((built + 1))
@@ -193,7 +194,7 @@ run_multi() {
       failed=$((failed + 1)); lines+=("FAIL     $name: cc ($f): $(head -1 "$tmp/$b.cc")"); return; }
     objs+=("$obj")
   done
-  if ! cc -o "$exe" "${objs[@]}" $rpath -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
+  if ! cc -o "$exe" "${objs[@]}" $rpath "$ldrt" -L"$libdir" -lC -lstdc++ -lgcc_s -lpthread -lm -latomic 2> "$tmp/multi_$n.ld"; then
     failed=$((failed + 1)); lines+=("FAIL     $name: link: $(grep -m1 -o "multiple definition of .*\|undefined reference to .*" "$tmp/multi_$n.ld" || head -1 "$tmp/multi_$n.ld")"); return
   fi
   built=$((built + 1))
@@ -201,6 +202,14 @@ run_multi() {
   ran=$((ran + 1))
   want=$(for f in "$d"/*.cpp; do expect_of "$f"; done | head -1)
   if [ -z "$want" ]; then failed=$((failed + 1)); lines+=("FAIL     $name: no // EXPECT: line"); return; fi
+  if grep -q '^// GCC: undefined' "$d"/*.cpp; then
+    # as for a single program: the gcc backend is not compared (it cannot run this one, e.g. _Complex long double across
+    # a C ABI boundary: EDG's C output passes it as a struct), only EXPECT is checked
+    if [ $((got & 255)) -ne $((want & 255)) ]; then
+      failed=$((failed + 1)); lines+=("MISMATCH $name: exit $got, EXPECT $want (gcc not compared)"); return
+    fi
+    match=$((match + 1)); lines+=("ok       $name: exit $got = EXPECT $want (gcc not compared), ${#objs[@]} translation units"); return
+  fi
   gcc_rc=compile-error
   if NFCXX_BACKEND=gcc ./nfcxx "${srcs[@]}" -o "$tmp/multi_$n.gcc" > /dev/null 2> "$tmp/multi_$n.gccerr"; then
     sh -c 'timeout 10 "$0" > "$1" 2>/dev/null; exit $?' "$tmp/multi_$n.gcc" "$tmp/multi_$n.gcc.stdout"; gcc_rc=$?
