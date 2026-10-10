@@ -1,0 +1,24 @@
+Local patch for 3rd/qbe (c9x.me/git/qbe.git mirror), applied to the build copy by scripts/setup-qbe.sh.
+
+Passing (or copying) a never-initialized struct local is legal C; gcc passes garbage. QBE kills a stack slot
+whose store mask is empty ("kill slots with an empty live range" in mem.c coalesce()) and replaces the
+Oargc operand with a null address on purpose ("crash"), so the call loads from address 0 and segfaults.
+EDG emits this for empty-ish temporaries, e.g. libstdc++ __gnu_cxx::__ops::_Iter_pred<lambda> passed to
+__find_if_not (nlohmann::json initializer-list constructor). The patch gives such slots a full mask, so
+they stay allocated and are read as garbage. Test: tests/cases/qbe_uninit_struct_arg.cpp.
+--- a/mem.c
++++ b/mem.c
+@@ -235,6 +235,13 @@
+ 			s->t = n;
+ 			s->sz = t->alias.u.loc.sz;
+ 			s->m = t->alias.u.loc.m;
++			/* nfcxx: a slot that is never stored to must still be
++			 * readable. C allows passing an uninitialized struct by
++			 * value; with an empty mask the slot is killed and the
++			 * argument becomes a null address (see "crash" below).
++			 * Keep the slot; the callee sees garbage, as with gcc. */
++			if (!s->m)
++				s->m = s->sz >= NBit ? (bits)-1 : BIT(s->sz) - 1;
+ 			s->s = 0;
+ 			s->st = vnew(0, sizeof s->st[0], PHeap);
+ 			s->nst = 0;

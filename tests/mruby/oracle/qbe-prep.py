@@ -44,9 +44,9 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     is removed from the C, and the function is listed in `.init_array` in the assembly tail, so the
     C runtime runs it before main. Only the plain form is handled; a priority argument is left alone.
   * `__attribute__((__aligned__(N)))` after an array declarator (`T x[40] __attribute__(...)`)
-    moves to just after the declared name, where cproc accepts it. Same alignment.
-  * `struct T {char b[L];} __attribute__((__aligned__(N)))` (std::aligned_storage) becomes
-    `struct T {_Alignas(N) char b[L];}`. Only when L is a multiple of N, so the size does not change.
+    becomes `_Alignas(N)` just before the declared name (cproc takes the GNU attribute there only on struct members, not on objects). Same alignment.
+  * `struct T {...;} __attribute__((__aligned__(N)))` (std::aligned_storage, `struct alignas(N) T`) becomes
+    `struct T {_Alignas(N) ...;}` on the first member (not a bit-field): same alignment, same rounded-up size.
   * Floating types cproc lacks: `__bf16` and `_Float16` (2 bytes) and `_Float128` (16 bytes) become
     structs with the same size and alignment and no arithmetic, so a real use of the value is a
     compile error rather than a silent mis-typed float. `_Float32` and `_Float64` are IEEE binary32
@@ -181,6 +181,26 @@ def match_fwd(toks, i, open_s, close_s):
     return -1
 
 
+def first_member_plain(toks, o, close):
+    """True if the struct body toks[o+1:close] starts with a member that is not a bit-field (a first member
+    can carry _Alignas; a bit-field cannot)."""
+    if o + 1 >= close:
+        return False
+    depth = 0
+    for k in range(o + 1, close):
+        x = toks[k]
+        if x.kind == 'punct':
+            if x.text in ('(', '[', '{'):
+                depth += 1
+            elif x.text in (')', ']', '}'):
+                depth -= 1
+            elif x.text == ':' and depth == 0:
+                return False
+            elif x.text == ';' and depth == 0:
+                return True
+    return False
+
+
 def aligned_group(toks, i):
     """If toks[i] starts __attribute__((__aligned__(N))), return (end_index_exclusive, N)."""
     if i + 8 >= len(toks) or toks[i].kind != 'id' or toks[i].text != '__attribute__':
@@ -209,16 +229,47 @@ __nfcxx_int3:
 \t.popsection"""
 
 
+# __atomic_thread_fence / __atomic_signal_fence (libstdc++ shared_ptr, nlohmann::json): cproc has no fences, so the
+# call goes to a weak stub with mfence, a full barrier on x86-64 whatever the memory order.
+FENCE_STUB = """\t.pushsection .text.__nfcxx_fence,"ax",@progbits
+\t.weak __nfcxx_fence
+\t.type __nfcxx_fence,@function
+__nfcxx_fence:
+\tmfence
+\tret
+\t.popsection"""
+
+
 LIBC_BUILTINS = {  # builtin -> (libc function, prototype); cproc has the builtin names but not the functions
     '__builtin_memcpy': ('memcpy', 'void *memcpy(void *, const void *, unsigned long);'),
     '__builtin_memmove': ('memmove', 'void *memmove(void *, const void *, unsigned long);'),
     '__builtin_memset': ('memset', 'void *memset(void *, int, unsigned long);'),
     '__builtin_memcmp': ('memcmp', 'int memcmp(const void *, const void *, unsigned long);'),
+    '__builtin_memchr': ('memchr', 'void *memchr(const void *, int, unsigned long);'),  # std::string::find
     '__builtin_strlen': ('strlen', 'unsigned long strlen(const char *);'),
+    '__builtin_ldexp': ('ldexp', 'double ldexp(double, int);'),
+    '__builtin_strcmp': ('strcmp', 'int strcmp(const char *, const char *);'),  # JSON_HEDLEY / char_traits
 }
 HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
     '__builtin_isnan': ('__nfcxx_isnan',
                         'static int __nfcxx_isnan(double x) { return x != x; }'),
+    '__builtin_huge_val': ('__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'),
+    '__builtin_nan': ('__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'),
+    '__builtin_isfinite': ('__nfcxx_isfinite', 'static int __nfcxx_isfinite(double x) { return x - x == 0; }'),
+    '__builtin_isinf': ('__nfcxx_isinf',
+                        'static int __nfcxx_isinf(double x) {'
+                        ' return x == __builtin_inff() ? 1 : x == -__builtin_inff() ? -1 : 0; }'),
+    '__builtin_bswap16': ('__nfcxx_bswap16',
+                          'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'),
+    '__builtin_bswap32': ('__nfcxx_bswap32',
+                          'static unsigned int __nfcxx_bswap32(unsigned int x) {'
+                          ' return (x << 24) | ((x & 0xff00u) << 8) | ((x >> 8) & 0xff00u) | (x >> 24); }'),
+    '__builtin_bswap64': ('__nfcxx_bswap64',
+                          'static unsigned long __nfcxx_bswap64(unsigned long x) {'
+                          ' unsigned long r = 0; int i; for (i = 0; i < 8; i++) { r = (r << 8) | (x & 0xff); x >>= 8; } return r; }'),
+    '__builtin_signbit': ('__nfcxx_signbit',
+                          'static int __nfcxx_signbit(double x) {'
+                          ' union { double d; unsigned long u; } v; v.d = x; return (int)(v.u >> 63); }'),
     '__builtin_clzl': ('__nfcxx_clzl',
                        'static int __nfcxx_clzl(unsigned long x) {'
                        ' if (x == 0) return 64; int n = 0; while (!(x >> 63)) { x <<= 1; ++n; } return n; }'),
@@ -537,6 +588,7 @@ def main():
     ctors = []  # constructor functions, in source order
     need_float = set()
     need_int3 = False
+    need_fence = False
     prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
     if C_INPUT:
         keep = volatile_locals(toks)
@@ -635,7 +687,7 @@ def main():
                     i = j + 2
                     continue
 
-        # 2. __attribute__((__aligned__(N))) after an array declarator: move it after the name.
+        # 2. __attribute__((__aligned__(N))) after an array declarator: becomes _Alignas(N) before the name (valid for members and objects; cproc takes the GNU form only on members).
         if t.kind == 'id' and t.text != '__attribute__' and is_punct(tok_at(toks, i + 1), '['):
             j = i + 1
             while j < len(toks) and is_punct(toks[j], '['):
@@ -647,20 +699,18 @@ def main():
             if g is not None:
                 end, n = g
                 edits.append((toks[j].start, toks[end - 1].end, ''))
-                edits.append((t.end, t.end, f' __attribute__((__aligned__({n})))'))
+                edits.append((t.start, t.start, f'_Alignas({n}) '))
                 i = end
                 continue
 
-        # 3. struct T { char b[L]; } __attribute__((__aligned__(N)));
+        # 3. struct T { ...; } __attribute__((__aligned__(N)));  (alignas on a class, std::aligned_storage):
+        # _Alignas(N) on the first member gives the struct the same alignment and the same rounded-up size.
         if is_punct(t, '}'):
             g = aligned_group(toks, i + 1)
             if g is not None and is_punct(tok_at(toks, g[0]), ';'):
                 end, n = g
                 o = match_back(toks, i, '{', '}')
-                body = [x.text for x in toks[o + 1:i]]
-                if (len(body) == 6 and body[0] == 'char' and toks[o + 2].kind == 'id' and body[2] == '['
-                        and toks[o + 4].kind == 'num' and body[4] == ']' and body[5] == ';'
-                        and int(toks[o + 4].text, 0) % n == 0):
+                if first_member_plain(toks, o, i):
                     edits.append((toks[o].end, toks[o].end, f' _Alignas({n})'))
                     edits.append((toks[i + 1].start, toks[end - 1].end, ''))
                     i = end
@@ -725,6 +775,10 @@ def main():
             edits.append((t.start, toks[rp].end, overflow_call(OV_OPS[t.text], text, prelude)))
             i = rp + 1
             continue
+        elif t.kind == 'id' and t.text in ('__atomic_thread_fence', '__atomic_signal_fence'):
+            edits.append((t.start, t.end, '__nfcxx_fence'))
+            prelude['__nfcxx_fence'] = 'void __nfcxx_fence(int);'
+            need_fence = True
         elif t.kind == 'id' and ATOMIC_RE.fullmatch(t.text):
             prelude[t.text] = atomic_prototype(t.text)
 
@@ -738,6 +792,8 @@ def main():
     if need_int3:
         prelude['__nfcxx_int3'] = 'void __nfcxx_int3(void);'
         tail.append(INT3_STUB)
+    if need_fence:
+        tail.append(FENCE_STUB)
     decls += prelude.values()
     if decls:
         edits.append((0, 0, '\n'.join(decls) + '\n'))

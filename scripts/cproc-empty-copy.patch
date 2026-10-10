@@ -1,0 +1,21 @@
+Local patch for 3rd/cproc, applied to the build copy by scripts/setup-qbe.sh after cproc-empty-struct.patch.
+
+Copying a zero-size struct (EDG's empty C++ classes: lambda closures, comparators, allocators passed by value)
+emitted one `loadub`/`storeb` pair, because funccopy() copies at least one unit. The store went to a zero-byte
+slot, which QBE places at the frame pointer, so it overwrote the low byte of the saved %rbp: the caller then
+ran with a corrupted frame pointer after the callee returned (found with nlohmann::json: std::all_of(first,
+last, lambda) took the closure by value; `mov %al,0x0(%rbp)` in the generated all_of). A zero-size copy now
+emits nothing. Test: tests/cases/qbe_empty_struct_copy.cpp.
+--- a/qbe.c
++++ b/qbe.c
+@@ -429,6 +429,10 @@
+ 	unsigned long long off;
+
+ 	assert((align & align - 1) == 0);
++	/* an empty struct or union (size 0, see cproc-empty-struct.patch) has nothing to copy; the loop
++	 * below always runs once and would write one byte past the zero-size destination */
++	if (size == 0)
++		return;
+ 	class = 'w';
+ 	switch (align) {
+ 	case 1: load = ILOADUB, store = ISTOREB; break;

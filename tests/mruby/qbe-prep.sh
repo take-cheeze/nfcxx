@@ -4,7 +4,7 @@
 # (tests/mruby/oracle/qbe-prep.py, the NFCXX_C_INPUT environment variable of which is the --c-input
 # argument of the port) on
 #   1. every input scripts/qbe-cc really feeds it: the compiles of tests/cases, tests/c, tests/builtins and
-#      tests/lib (and tinyxml2, doctest, lua when build/realworld has them) run with the interpreter wrapped
+#      tests/lib (and tinyxml2, doctest, json, lua when build/realworld has them) run with the interpreter wrapped
 #      by tests/mruby/qbe-prep-tap.sh, which saves each preprocessed C file and the C-input flag;
 #   2. hand-written edge cases for each rewrite (aligned attributes, __bf16/_Float*, constructors,
 #      thread_local aliases, overflow builtins, volatile locals, alloca, atomics, float literals, tokenizer).
@@ -86,15 +86,19 @@ struct S2 { char b[30]; } __attribute__((__aligned__(16)));
 struct S3 { int b[8]; } __attribute__((__aligned__(16)));
 struct S4 { char b[0x20]; } __attribute__((__aligned__(0x10)));
 struct S5 { char b[32]; } __attribute__((__aligned__(8))) s5v;
+struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));
 int plain[4];
 char *ptrs[3] , other[2] __attribute__((__aligned__(4)));
 int tricky(int a[4] __attribute__((__aligned__(8))));
 EOF
 both aligned
-expect aligned out 'buf __attribute__((__aligned__(16)))[40]'
+expect aligned out 'static char _Alignas(16) buf[40]'
 expect aligned out '_Alignas(16) char b[32];'
 expect aligned out '_Alignas(16) char b[0x20];'
-expect aligned out 'm __attribute__((__aligned__(32)))[2][3]'
+expect aligned out 'double _Alignas(32) m[2][3]'
+expect aligned out 'struct S2 { _Alignas(16) char b[30]; }'
+expect aligned out 'struct S3 { _Alignas(16) int b[8]; }'
+expect aligned out 'struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));'
 cat >"$tmp/edge/floats.c" <<'EOF'
 __bf16 b1; _Float16 h1; _Float32 f1; _Float64 d1; _Float128 q1; _Float32x f2; unsigned _Float64x u;
 _Float16 h2 = (1.5f16), h3 = (.5f16), h4 = (65504.0f16), h5 = (6.103515625e-5f16), h6 = (2049f16), h7 = (0f16),
@@ -484,6 +488,11 @@ if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$r
     build "$root/nfcxx" -I"$rw/doctest" "$root/tests/realworld/doctest_main.cpp" -o "$tmp/bin/dt"
     corpus doctest 1
   else echo "skip qbe-prep doctest: build/realworld/doctest not cached (tests/realworld/run_doctest.sh)"; fi
+  if [ -f "$rw/json/single_include/nlohmann/json.hpp" ]; then
+    tap_dir json
+    build "$root/nfcxx" -I"$rw/json/single_include" "$root/tests/realworld/json_main.cpp" -o "$tmp/bin/js"
+    corpus json 1
+  else echo "skip qbe-prep json: build/realworld/json not cached (tests/realworld/run_json.sh)"; fi
   if [ -f "$rw/lua/lapi.c" ]; then
     tap_dir lua; srcs=()
     for f in "$rw"/lua/*.c; do
