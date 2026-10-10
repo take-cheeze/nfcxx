@@ -1,0 +1,27 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "gv" int 4 4 (static) (init (scalar 0 int (const int 5))))
+(global "gv_alias" int 4 4 (extern))
+
+(function "hidden"
+  (ret int)
+  (params (param %0 "x" int))
+  (static)
+  (return %0))
+
+(function "target"
+  (ret int)
+  (params (param %0 "x" int))
+  (return %0))
+
+(alias "alias_hidden" "hidden" function)
+(alias "alias_target" "target" function weak)
+(alias "gv_alias" "gv" object)
+
+(function "main"
+  (ret int)
+  (params)
+  (let %0 int (call int &"alias_hidden" (const int 1)))
+  (let %1 int (load int @"gv_alias"))
+  (let %2 int (wadd int %0 %1))
+  (return %2))

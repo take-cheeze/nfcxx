@@ -47,7 +47,7 @@ operator new, so it behaves. That is a path A bug, found by this probe.
 | `std::string` literals `L"..."` (wide string data) failed `string data longer than its array` | string data length is in bytes: count x element size |
 | `if constexpr`, `if consteval` statements | lowered to the taken branch (as `c_gen_be.c` does) |
 | GCC asm labels (`strchr(char*, int) __asm("strchr")` of `<cstring>`) | the symbol is the asm label (functions and variables) |
-| `__builtin_*` | `expect`, `constant_p`, `unreachable`, `trap` are values/markers; every other `__builtin_X` with a libc function is a call of `X`; the rest of the family is in "Built-ins, atomics, asm" below |
+| `__builtin_*` | `expect`, `constant_p`, `unreachable` are values/markers, `trap` is SIGILL (`(trap)`, below), `object_size` is a constant (below); every other `__builtin_X` with a libc function is a call of `X`; the rest of the family is in "Built-ins, atomics, asm" below |
 | inline members of `extern template` classes (`std::allocator<char>::allocate`) had no body (gcc inlines them) | `suppress_inline_body` routines without `definition_for_inlining_only` are emitted `(weak)` |
 | derived-to-base pointer conversion of a null pointer trapped (`&p->__b` was checked like a dereference); `std::map` node pointers are null all the time | address-of `p->f` / `*p` does not check `p` |
 | compound assignment with operands of different types (`unsigned n; n /= 10UL;`) mixed `unsigned` and `unsigned long` in one operation | computed in the usual-arithmetic-conversions type, converted back |
@@ -57,7 +57,7 @@ operator new, so it behaves. That is a path A bug, found by this probe.
 | `(void)0` constant | a void value |
 | `va_start`, `va_arg`, `va_end`, `va_copy` | `(vastart A)`, `(vaarg T A)`, `(copy 24 ...)`: QBE's `vastart`/`vaarg` use the System V `va_list` that glibc's `vsnprintf` reads |
 | structs passed or returned by value used the Path B convention (pointer), not the C one: `div()`, libstdc++'s `_M_need_rehash` returning `std::pair<bool, size_t>` (every `unordered_*` insert) broke | **Aggregates by value** below |
-| `__asm__ volatile("int $3")` (doctest) | `raise(SIGTRAP)`; the other asm forms are main's lowering (empty-template barriers) |
+| `__asm__ volatile("int $3")` (doctest) | `raise(SIGTRAP)`; the other asm forms are in "Inline asm" below |
 
 ### Aggregates by value (C calling convention)
 
@@ -104,10 +104,58 @@ also checks that the emitter accepts or refuses them as stated).
 - `long double`, see below. It reaches programs through `std::uniform_real_distribution` / `normal_distribution` /
   `generate_canonical` (`std::log(long double)`), `std::format` (the long double formatter) and `<cmath>` overloads: those functions
   are refused (or abort with `--long-double=trap`). `_Float128`/`__int128` types are refused when a kept function uses them.
-- `__builtin_object_size` always reports "unknown" (gcc -O0 knows the size of a visible local); `__builtin_trap` aborts (SIGABRT)
-  where gcc raises SIGILL; the NaN constant is always the positive quiet NaN; `va_arg` of an aggregate aligned to 16 bytes and the
-  frame/return-address built-ins stay markers.
+- **128-bit bit-fields** (`unsigned __int128 f : 100`, or `: 20`): the layout of a structure that has one is right and its
+  other members work, but any access to the field is refused (`refused: type __uint128_t`; a width over 64 also has the marker
+  `bit-field-wider-than-64-bits`). It needs `__int128` values, which neither the IR nor QBE has (no 128-bit arithmetic, conversion
+  or calling convention); `tests/mruby/pathb-edge/r_bitfield128.ir`. Not done: that is `__int128` support as a whole.
+- **`__builtin_object_size`** answers only for the address of a known object (below); any pointer that was loaded, passed or
+  returned is unknown (-1, or 0 for types 2 and 3), as in gcc without optimization. `__builtin_dynamic_object_size` is the same
+  (it does not see the size of a VLA or an allocation). TYPE 1 of the address of a member of a *global* structure is -1: the front
+  end folds `&g.m` to the address of `g` plus an offset and the member is lost (a local structure, `ls.a[1]` and `&ls.m`, is exact).
+- **VLA subscripts** are checked only when the subscript base is the VLA variable itself and the number of elements one index
+  step covers is a constant: not `m[n][k]` with a run-time `k`, and not a pointer parameter or a pointer derived from the array
+  (pointers carry no length, as for fixed arrays). Checked traps abort (SIGABRT) like the other checks.
+- **`alias`/`weakref`**: the alias target has to be defined in the same unit (as in gcc), on x86-64 ELF only (the aliases are
+  `.set` lines in the assembly). `weakref` without a target name (`__attribute__((weakref))` with `alias`) and `ifunc` are not
+  handled. The gcc backend cannot alias a static function (`tests/pathb-qbe/cases/alias_static.cpp`).
 - VLAs use one global malloc pool, which is not thread safe (see stage 3); `alloca` does not.
+
+## Inline asm
+
+QBE has no inline assembly, so Path B accepts the asm statements whose effect it can write itself and refuses every other with its
+reason (`refused: (unsupported stmt asm-template | asm-operands | asm-clobbers | asm-goto)`). `ir_asm_stmt` in `be/nfcxx_ir.c`
+normalizes the template (blanks and case ignored, `;` and newline alike, `%%` read as `%`), then:
+
+| Template | Lowering |
+| --- | --- |
+| empty, `nop`, `pause`, `rep; nop` | nothing; a memory clobber (and any basic `asm`) is `(barrier)`, a call of an empty module-local function |
+| `mfence`, `lfence`, `sfence`, `lock; addl $0,(%rsp)` (and `or`, `addq`, `orq`, `0(%rsp)`) | `(fence)`: a call of `__pathb_fence`, a weak function with `mfence` that `--append-weak` puts into the assembly; a full fence is stronger than `lfence`/`sfence`, so sound, and an opaque call is a compiler barrier too |
+| `ud2` | `(trap)`: SIGILL |
+| `int $3`, `int3` | `raise(SIGTRAP)` |
+| `rdtsc`, `lfence; rdtsc`, `mfence; rdtsc` | `(rdtsc)`: a call of `__pathb_rdtsc` (`rdtsc; shlq $32,%rdx; orq %rdx,%rax`); the outputs must be exactly `"=a"` and `"=d"`, integers of 4 or 8 bytes, the value is the low or high 32 bits; with no operands the counter is read and dropped |
+
+Operands are accepted only on an empty template (the compiler-barrier idioms of benchmark libraries: `asm volatile("" : : "r,m"(v) : "memory")`,
+`asm volatile("" : "+r,m"(v) : : "memory")`, `asm volatile("" : "+x"(d))`) and on `rdtsc`. An input is evaluated once and dropped
+(a memory-only constraint takes the address, an aggregate needs a memory alternative); a `+X` or untied `=X` output keeps its value
+(the empty template writes nothing, so the old value is a valid unspecified value); an output tied to an input (`"=r"(x) : "0"(y)`,
+both scalars of one type) receives the input, all inputs being read before any output is stored; an output that may be memory
+adds a barrier. Refused (`asm-operands`): flag outputs (`=@cc..`), x87 constraints (`t`, `u`), an output that is not an lvalue,
+more than 10 operands, operands on a fence, `ud2` or `int $3`, a tie among alternatives, a tie to a `+` output or to a different type.
+Refused (`asm-template`): any other instruction (`cpuid`, `rdtscp`, `xchg`, `lock; xadd`, `pause` followed by anything, ...).
+Refused (`asm-clobbers`): a register clobber on an otherwise acceptable asm, even an empty one. Refused (`asm-goto`).
+The helpers are x86-64 code. Probes: `asm_barrier.cpp`, `asm_ext.cpp` (with `// ASM-COUNT:` checks that the fences and barriers are
+really calls), `traps/asm_ud2.cpp`; the refusal is in `tests/pathb-ir/gaps.cpp` (`cpuid`), `pathb-edge/r_unsupported_asm*.ir`.
+
+## `__builtin_trap`, `__builtin_object_size`, aliases
+
+- `__builtin_trap` is `(trap)`: QBE's `hlt`, which its amd64 back end writes as `ud2`. The process dies of SIGILL (exit 132) like
+  gcc's, not SIGABRT (`traps/builtin_trap.cpp`, `// TRAP-EXIT: 132`). `__builtin_unreachable` reached still aborts (SIGABRT).
+- `__builtin_object_size(P, TYPE)` is folded when the lowering runs: P is the address of a local or global variable, a member,
+  an element at a constant index, a constant offset, through pointer casts that add no offset; the result is the bytes from P to the
+  end of the object (TYPE 0, 2) or of the member (TYPE 1, 3); a past-the-end or negative offset gives 0. The pointer is not
+  evaluated, as in gcc. Unknown is -1 for TYPE 0 and 1, 0 for 2 and 3 (`builtin_objsize.cpp`; it compares with the gcc backend).
+  Before, the call went to a nonexistent function `object_size` and failed at link time.
+- `__attribute__((alias("t")))` and `weak, alias`, and `weakref("t")`, on functions and objects: see `pathb-stage3.md`, last section.
 
 ## long double
 

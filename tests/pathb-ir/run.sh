@@ -19,6 +19,8 @@ probes="$probes tests/pathb-qbe/cases/dyn_global.cpp tests/pathb-qbe/cases/dyn_l
 probes="$probes tests/pathb-qbe/cases/tls_dyn.cpp tests/pathb-qbe/cases/tls_dyn_forms.cpp"   # thread_local with dynamic initialization (_ZTW wrappers, _ZTH, __tls_init)
 probes="$probes tests/pathb-qbe/cases/bitfield.cpp tests/pathb-qbe/cases/bitfield2.cpp tests/pathb-qbe/cases/vla.cpp tests/pathb-qbe/cases/stmtexpr.cpp tests/pathb-qbe/cases/base_null.cpp tests/pathb-qbe/cases/vararg_def.cpp tests/pathb-qbe/cases/abi_struct.cpp"   # bit-fields, VLAs, statement expressions
 # Union aggregate constants, bit-fields in unions, class statement-expression results, VLA scope exit, asm barriers, weak declarations.
+# Extended asm idioms (fences, rdtsc, operand passthrough), __builtin_object_size, alias/weakref attributes, VLA bounds.
+probes="$probes tests/pathb-qbe/cases/asm_ext.cpp tests/pathb-qbe/cases/builtin_objsize.cpp tests/pathb-qbe/cases/alias_attr.cpp tests/pathb-qbe/cases/alias_static.cpp tests/pathb-qbe/cases/vla_bounds.cpp tests/pathb-qbe/traps/builtin_trap.cpp tests/pathb-qbe/traps/asm_ud2.cpp tests/pathb-qbe/traps/vla_index.cpp"
 probes="$probes tests/pathb-qbe/cases/agg_union.cpp tests/pathb-qbe/cases/bitfield_union.cpp tests/pathb-qbe/cases/stmtexpr_class.cpp tests/pathb-qbe/cases/vla_scope.cpp tests/pathb-qbe/cases/asm_barrier.cpp tests/pathb-qbe/cases/weak_decl.cpp"
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
@@ -56,7 +58,7 @@ fi
 # Each has a golden; the emitter (scripts/pathb-qbe-emit.rb through scripts/mrb) must accept or refuse the IR as stated:
 #   builtins, vaarg_agg: accepted (exit 0)    vaarg_ld, asm_refuse: refused (exit 3) with the text shown
 mrb=scripts/mrb
-for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:3:long_double" "asm_refuse:3:asm-template \"mfence\""; do
+for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:3:long_double" "asm_refuse:3:asm-template \"cpuid\""; do
   n=${spec%%:*}; rest=${spec#*:}; want_rc=${rest%%:*}; want_msg=${rest#*:}
   f=tests/pathb-ir/$n.cpp
   if ! scripts/pathb-dump --ir "$f" > "$tmp/$n.ir" 2> "$tmp/$n.err"; then echo "FAIL (front end) $f"; head -5 "$tmp/$n.err"; fail=1; continue; fi
@@ -67,10 +69,10 @@ for spec in "builtins:0:" "vaarg_agg:0:" "vaarg_ld:3:long_double" "asm_refuse:3:
   elif [ -n "$want_msg" ] && ! grep -qF -- "$want_msg" "$tmp/$n.emit"; then echo "FAIL $f: emitter message lacks '$want_msg': $(head -1 "$tmp/$n.emit")"; fail=1
   else echo "ok   $f (emitter exit $rc${want_msg:+, refused with '$want_msg'})"; fi
 done
-# asm_refuse: four statements stay unsupported markers (mfence template, cpuid and lock operands, a register clobber); pause, rep nop are lowered
+# asm_refuse: three statements stay unsupported markers (cpuid, lock; incl, a register clobber); mfence is a (fence); pause, rep nop are lowered
 if [ $update = 0 ]; then
   g=$(grep -c '(unsupported stmt' "tests/pathb-ir/asm_refuse.ir" || true)
-  [ "$g" = 4 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm markers)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 4"; fail=1; }
+  [ "$g" = 3 ] && echo "ok   tests/pathb-ir/asm_refuse.cpp ($g unsupported asm markers)" || { echo "FAIL tests/pathb-ir/asm_refuse.cpp: $g unsupported markers, expected 3"; fail=1; }
 fi
 # Coverage: sum the per-kind counts of tests/cases (the gap probe is reported above, not here). A kind with a nonzero unsupported count is a gap.
 for f in tests/cases/*.cpp; do case $(basename "$f") in qbe_*) continue ;; esac; cat "$tmp/$(basename "$f" .cpp).err"; done 2>/dev/null | awk '

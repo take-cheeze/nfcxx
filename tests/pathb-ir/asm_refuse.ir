@@ -3,7 +3,7 @@
 (function "_Z5fencev"
   (ret void)
   (params)
-  (unsupported stmt asm-template "mfence")
+  (fence)
   (return))
 
 (function "_Z9cpuid_eaxv"

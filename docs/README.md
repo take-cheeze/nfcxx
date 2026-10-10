@@ -77,13 +77,16 @@ one-line `.c` file (qbe fails, gcc backend runs it). Path B has no `_Complex` ha
   user code work (`tests/pathb-qbe/cases/hosted_stdexcept.cpp`, `eh_std.cpp`).
 
 **Variable-length arrays (Path B)**: storage is EDG's `__vla_alloc`/`__vla_dealloc` pool in `libC.a`, a single global that
-is not thread safe, costing two calls and a `malloc` per VLA; no `bounds` check on VLA subscripts
-(`pathb-stage2.md` 5b, `pathb-stage3.md`). Scope exit is checked single-threaded by `tests/pathb-qbe/cases/vla_scope.cpp`.
+is not thread safe, costing two calls and a `malloc` per VLA; subscripts of the VLA variable are bounds-checked (abort)
+against the run-time count, except through a run-time inner dimension or a pointer (`pathb-stage2.md` 5b, `pathb-hosted.md`;
+`tests/pathb-qbe/cases/vla_bounds.cpp`, `traps/vla_index.cpp`). Scope exit is checked single-threaded by `tests/pathb-qbe/cases/vla_scope.cpp`.
 
 
-**Inline asm**: Path A qbe handles only `__asm__ volatile("int $3")` (`tests/cases/qbe_int3_break.cpp`); Path B accepts only
-an empty barrier (`tests/pathb-qbe/cases/asm_barrier.cpp`) and refuses a template, operands, clobbers or `goto`
-(`tests/mruby/pathb-edge/r_unsupported_asm.ir`, `tests/pathb-ir/gaps.cpp`). The gcc backend passes asm through.
+**Inline asm**: Path A qbe handles only `__asm__ volatile("int $3")` (`tests/cases/qbe_int3_break.cpp`); Path B accepts empty
+barriers, nops/`pause`, fences (`mfence`, `lfence`, `sfence`, `lock; addl`), `ud2`, `int $3`, `rdtsc` with `"=a"`/`"=d"` outputs and an
+empty template with operands as a value passthrough (`tests/pathb-qbe/cases/asm_barrier.cpp`, `asm_ext.cpp`, `traps/asm_ud2.cpp`), and
+refuses any other instruction, a register clobber or `goto` (`tests/mruby/pathb-edge/r_unsupported_asm*.ir`,
+`tests/pathb-ir/gaps.cpp`); list in `pathb-hosted.md`, "Inline asm". The gcc backend passes asm through.
 
 **`volatile`**
 - Path A qbe: for EDG-generated C, cproc rejects stores to `volatile` objects ("volatile store is not yet supported").
@@ -93,13 +96,15 @@ an empty barrier (`tests/pathb-qbe/cases/asm_barrier.cpp`) and refuses a templat
 - Path B: every volatile access is a call of a module-local helper, so volatile code is slow; not atomic, not a fence
   (`tests/pathb-qbe/cases/volatile.cpp`, with assembly checks `// ASM-COUNT:`).
 
-**Path B other**: bit-fields wider than 64 bits and checked (`NFCXX_IR_OVERFLOW=trap`) unsigned or 64-bit signed
+**Path B other**: bit-fields of a 128-bit declared type (any access to the field; the layout is right) and checked (`NFCXX_IR_OVERFLOW=trap`) unsigned or 64-bit signed
 multiplication are refused; pointer subscripts are not bounds-checked and there is no `undef` (by decision); thread-local
 objects are x86-64 ELF only and a thread-local address in a static initializer is refused; only LP64 layouts are emitted
 (`pathb-stage3.md`; refusal paths: `tests/mruby/pathb-edge/r_*.ir` via `tests/mruby/run.sh`). Hosted headers now work (`pathb-hosted.md`; `PATHB_HOSTED=0` or
 `--freestanding` gives the old EDG-only headers). Still failing there: `__builtin_alloca`, signed multiply-overflow and
-mixed-type overflow builtins, `bswap16`, aggregate `va_arg`, `__int128`/`_Float128` in kept functions, asm other than the
-barriers and `int $3` (`pathb-hosted.md`, "Known limits"; no test asserts the failures).
+mixed-type overflow builtins, `bswap16`, aggregate `va_arg`, `__int128`/`_Float128` in kept functions, asm outside the list in
+`pathb-hosted.md` ("Known limits"; no test asserts the failures). `__builtin_object_size` answers only for the address of a known
+object (else -1/0), TYPE 1 for a member of a global structure is -1 (`builtin_objsize.cpp`); `alias`/`weakref` need a target defined in
+the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap` is SIGILL on Path B (`traps/builtin_trap.cpp`).
 
 **cproc / qbe backend, other**
 - `alignas(16) int x;` on a block-scope local becomes `__attribute__((aligned))`, which cproc rejects ("GNU attribute

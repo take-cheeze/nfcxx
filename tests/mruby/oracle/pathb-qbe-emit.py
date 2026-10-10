@@ -299,6 +299,7 @@ class Module:
         self.funcs = set()     # IR names of the functions defined in this module
         self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
         self.abi = {}          # struct name -> AbiType: the C calling convention shape of aggregates by value
+        self.asmhelpers = {}   # machine-level helpers ("fence", "rdtsc") that append_weak writes into the assembly
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -456,6 +457,12 @@ class Fn:
     def ret(self, v=None):
         self.ensure_live()
         self._put(("ret" if self.sret_buf is None else "ret %s" % self.sret_buf) if v is None else "ret %s" % v)
+        self.dead = True
+
+    def hlt(self):
+        """Terminate the block with QBE's hlt (ud2 on x86-64: SIGILL)."""
+        self.ensure_live()
+        self._put("hlt")
         self.dead = True
 
     def label(self, lab):
@@ -1266,7 +1273,7 @@ RVAL = {
     "i2f": r_i2f, "u2f": r_i2f, "fconv": r_fconv, "cf2i": r_cf2i,
     "offset": r_offset, "index": r_index, "pdiff": r_pdiff,
     "bfload": r_bfload, "bfload.v": r_bfload,
-    "call": r_call,
+    "call": r_call, "rdtsc": lambda fn, x: r_rdtsc(fn, x),
 }
 
 
@@ -1493,14 +1500,49 @@ def s_eval(fn, x):
 
 
 def s_bounds(fn, x):
+    # (bounds IDX N): N is a number, or a register holding the run-time length of a variable-length array; a register
+    # bound and its index are both 64-bit (the lowering converts).
     idx = fn.opnd(x[1])
-    n = as_int(x[2])
+    n = None if (isinstance(x[2], str) and REG_RE.match(x[2])) else as_int(x[2])
     if idx.ty is None or idx.ty[0] != "int":
         raise Refused("bounds on a non-integer index")
     cls = idx.cls
     c = fn.tmp()
-    fn.emit("%s =w cult%s %s, %d" % (c, cls, idx.t, wrap_int(n, cls)))
+    if n is None:
+        nv = fn.opnd(x[2], "l")
+        if cls != "l":
+            raise BadIR("bounds: a register bound needs a 64-bit index")
+        fn.emit("%s =w cultl %s, %s" % (c, idx.t, nv.t))
+    else:
+        fn.emit("%s =w cult%s %s, %d" % (c, cls, idx.t, wrap_int(n, cls)))
     fn.trap_unless(c)
+
+
+def s_trap(fn, x):
+    # (trap): the instruction gcc's __builtin_trap and asm("ud2") are, QBE's hlt (ud2 on x86-64): SIGILL, not the SIGABRT of
+    # the checked operations. It ends the block like (unreachable).
+    if len(x) != 1:
+        raise BadIR("trap form")
+    fn.hlt()
+
+
+def s_fence(fn, x):
+    # (fence): a full memory fence for asm("mfence") and friends, a call of the helper __pathb_fence that
+    # append_weak writes into the assembly (QBE has no fence). An opaque call, so also a compiler barrier.
+    if len(x) != 1:
+        raise BadIR("fence form")
+    fn.mod.asmhelpers["fence"] = True
+    fn.emit("call $__pathb_fence()")
+
+
+def r_rdtsc(fn, x):
+    # (rdtsc): the 64-bit time stamp counter, edx:eax of the instruction, from the helper __pathb_rdtsc.
+    if len(x) != 1:
+        raise BadIR("rdtsc form")
+    fn.mod.asmhelpers["rdtsc"] = True
+    t = fn.tmp()
+    fn.emit("%s =l call $__pathb_rdtsc()" % t)
+    return Val(t, "l", parse_type("unsigned_long"))
 
 
 def s_nonnull(fn, x):
@@ -1685,7 +1727,7 @@ STMT = {
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
-    "barrier": s_barrier,
+    "barrier": s_barrier, "trap": s_trap, "fence": s_fence,
 }
 
 
@@ -1806,15 +1848,42 @@ def global_items(mod, name, items_form):
 # that QBE produced (the same trick as scripts/weak-symbols.py, but driven by the IR instead of EDG's __weak__ text).
 WEAK_MARK = "# pathb-weak "
 
+# Machine-level helpers for operations QBE cannot express. The emitter notes the use in the IL ("# pathb-asm NAME") and
+# append_weak appends the helper, as a weak function, to the assembly: __pathb_fence executes mfence, __pathb_rdtsc rdtsc
+# (edx:eax combined into rax). x86-64 only, like the asm statements they come from.
+ASM_MARK = "# pathb-asm "
+ASM_HELPERS = {
+    "fence": ["\t.text", "\t.weak __pathb_fence", "\t.type __pathb_fence, @function", "__pathb_fence:", "\tmfence", "\tret",
+              "\t.size __pathb_fence, .-__pathb_fence"],
+    "rdtsc": ["\t.text", "\t.weak __pathb_rdtsc", "\t.type __pathb_rdtsc, @function", "__pathb_rdtsc:", "\trdtsc", "\tshlq $32, %rdx",
+              "\torq %rdx, %rax", "\tret", "\t.size __pathb_rdtsc, .-__pathb_rdtsc"],
+}
+
+# GNU alias attributes. QBE has no aliases: the IR form (alias NAME TARGET function|object [weak]) becomes a comment
+# line "# pathb-alias KIND NAME TARGET [weak]" in the IL and a .set (with .globl or .weak and the symbol type) here.
+ALIAS_MARK = "# pathb-alias "
+
 
 def append_weak(il_path, asm_path):
     names = []
+    extra = []
     for line in open(il_path, encoding="latin-1"):
         if line.startswith(WEAK_MARK):
             names.append(line[len(WEAK_MARK):].strip())
-    if names:
+        elif line.startswith(ASM_MARK):
+            lines = ASM_HELPERS.get(line[len(ASM_MARK):].strip())
+            if lines is not None:
+                extra.append("\n".join(lines) + "\n")
+        elif line.startswith(ALIAS_MARK):
+            p = line[len(ALIAS_MARK):].split()
+            if len(p) < 3:
+                continue
+            extra.append("\n".join(["\t%s %s" % (".weak" if len(p) > 3 and p[3] == "weak" else ".globl", p[1]),
+                                    "\t.type %s, %s" % (p[1], "@function" if p[0] == "function" else "@object"),
+                                    "\t.set %s, %s" % (p[1], p[2])]) + "\n")
+    if names or extra:
         with open(asm_path, "a") as f:
-            f.write("\n" + "".join(".weak %s\n" % n for n in names))
+            f.write("\n" + "".join(".weak %s\n" % n for n in names) + "".join(extra))
     return 0
 
 
@@ -2080,6 +2149,20 @@ def _is_linked(f):
     return True
 
 
+def alias_parts(f):
+    """(alias "NAME" "TARGET" function|object [weak]): from __attribute__((alias("TARGET"))) on a function or an object
+    that the translation unit defines. Returns (name, target, kind, weak)."""
+    if len(f) < 4 or len(f) > 5:
+        raise BadIR("alias form: %s" % form_text(f))
+    kind = f[3]
+    if kind != "function" and kind != "object":
+        raise BadIR("alias form: %s" % form_text(f))
+    weak = len(f) == 5
+    if weak and f[4] != "weak":
+        raise BadIR("alias form: %s" % form_text(f))
+    return (str(f[1]), str(f[2]), kind, weak)
+
+
 def prune(forms):
     """Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
     nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
@@ -2098,6 +2181,13 @@ def prune(forms):
         if _is_linked(f) or _is_startup(f):
             live.add(name)
             work.append(name)
+    for f in forms[1:]:   # the target of an alias is kept whatever its linkage
+        if head_of(f) != "alias":
+            continue
+        tg = alias_parts(f)[1]
+        if tg in defs and tg not in live:
+            live.add(tg)
+            work.append(tg)
     while work:
         refs = set()
         _symbols(defs[work.pop()], refs)
@@ -2189,6 +2279,9 @@ def emit_module(text, do_prune=True, ld_trap=False):
                 emit_function(mod, f)
             except Refused as e:
                 raise Refused("%s [in %s]" % (e, str(f[1])))   # which function holds the unsupported node
+        elif head_of(f) == "alias":
+            name, target, kind, weak = alias_parts(f)
+            mod.out.append("%s%s %s %s%s" % (ALIAS_MARK, kind, qsym(name), qsym(target), " weak" if weak else ""))
         elif head_of(f) not in ("global", "data", "abi-type", "declare"):
             raise Refused("top-level form (%s ...)" % head_of(f))
     emit_startup_tables(mod)
@@ -2200,6 +2293,8 @@ def emit_module(text, do_prune=True, ld_trap=False):
         mod.out.extend(lines)
     for n in mod.weakrefs:
         mod.out.append(WEAK_MARK + qsym(n))
+    for n in mod.asmhelpers:
+        mod.out.append(ASM_MARK + n)
     return "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + "\n".join(mod.out) + "\n"
 
 

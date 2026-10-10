@@ -1,5 +1,5 @@
 // Inline asm that cannot be lowered: each statement prints an (unsupported stmt ...) marker and the emitter refuses the
-// module with it. pause / rep nop / nop and the empty barrier are lowered (tests/pathb-qbe/cases/gaps_asm.cpp, asm_barrier.cpp).
+// module with it. pause / rep nop / nop and the empty barrier are lowered (tests/pathb-qbe/cases/gaps_asm.cpp, asm_barrier.cpp). mfence is lowered ((fence)); cpuid, lock-prefixed operands and register clobbers are not.
 void fence() { __asm__ __volatile__("mfence" ::: "memory"); }
 unsigned cpuid_eax() {
   unsigned a, b, c, d;

@@ -1,0 +1,207 @@
+(ir-module "alias_attr.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "missing_data" int 4 4 (weak) (extern))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "gv" int 4 4 (init
+    (scalar 0 int (const int 5))))
+(global "gv_alias" int 4 4 (extern))
+(global "gv_alias2" int 4 4 (extern))
+(declare "weak_alias" (weak))
+(declare "ext_missing" (weak))
+
+(function "target"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (return %2))
+
+(function "pathb_present"
+  (ret int)
+  (params (param %0 "x" int))
+  (weak attr)
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wsub int %1 (const int 100)))
+  (return %2))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "f" (ptr (fn int (int))) 8 8)
+  (loop
+    (body
+      (block
+        (let %0 int (call int &"alias_fn" (const int 1)))
+        (let %1 bool (eq int %0 (const int 2)))
+        (let %2 bool (eq bool %1 (const bool 0)))
+        (if %2
+          (then
+            (block
+              (let %3 int (load int @"bad"))
+              (let %4 int (wadd int %3 (const int 1)))
+              (store int @"bad" %4))))))
+    (step
+      (let %5 bool (ne int (const int 0) (const int 0)))
+      (if %5 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %6 int (call int &"target" (const int 9)))
+        (let %7 bool (eq int %6 (const int 10)))
+        (let %8 bool (eq bool %7 (const bool 0)))
+        (if %8
+          (then
+            (block
+              (let %9 int (load int @"bad"))
+              (let %10 int (wadd int %9 (const int 1)))
+              (store int @"bad" %10))))))
+    (step
+      (let %11 bool (ne int (const int 0) (const int 0)))
+      (if %11 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %12 int (load int @"gv_alias"))
+        (let %13 bool (eq int %12 (const int 5)))
+        (let %14 bool (eq bool %13 (const bool 0)))
+        (if %14
+          (then
+            (block
+              (let %15 int (load int @"bad"))
+              (let %16 int (wadd int %15 (const int 1)))
+              (store int @"bad" %16))))))
+    (step
+      (let %17 bool (ne int (const int 0) (const int 0)))
+      (if %17 (then) (else (break)))))
+  (store int @"gv" (const int 8))
+  (loop
+    (body
+      (block
+        (let %18 int (load int @"gv_alias"))
+        (let %19 bool (eq int %18 (const int 8)))
+        (let %20 bool (const bool 0))
+        (if %19
+          (then
+            (let %21 int (load int @"gv_alias2"))
+            (let %22 bool (eq int %21 (const int 8)))
+            (set %20 %22)))
+        (let %23 bool (eq bool %20 (const bool 0)))
+        (if %23
+          (then
+            (block
+              (let %24 int (load int @"bad"))
+              (let %25 int (wadd int %24 (const int 1)))
+              (store int @"bad" %25))))))
+    (step
+      (let %26 bool (ne int (const int 0) (const int 0)))
+      (if %26 (then) (else (break)))))
+  (store int @"gv_alias" (const int 11))
+  (loop
+    (body
+      (block
+        (let %27 int (load int @"gv"))
+        (let %28 bool (eq int %27 (const int 11)))
+        (let %29 bool (eq bool %28 (const bool 0)))
+        (if %29
+          (then
+            (block
+              (let %30 int (load int @"bad"))
+              (let %31 int (wadd int %30 (const int 1)))
+              (store int @"bad" %31))))))
+    (step
+      (let %32 bool (ne int (const int 0) (const int 0)))
+      (if %32 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %33 int (call int &"weak_alias" (const int 3)))
+        (let %34 bool (eq int %33 (const int 4)))
+        (let %35 bool (eq bool %34 (const bool 0)))
+        (if %35
+          (then
+            (block
+              (let %36 int (load int @"bad"))
+              (let %37 int (wadd int %36 (const int 1)))
+              (store int @"bad" %37))))))
+    (step
+      (let %38 bool (ne int (const int 0) (const int 0)))
+      (if %38 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %39 bool (eq (ptr (fn int (int))) &"ext_missing" (null (ptr (fn int (int))))))
+        (let %40 bool (eq bool %39 (const bool 0)))
+        (if %40
+          (then
+            (block
+              (let %41 int (load int @"bad"))
+              (let %42 int (wadd int %41 (const int 1)))
+              (store int @"bad" %42))))))
+    (step
+      (let %43 bool (ne int (const int 0) (const int 0)))
+      (if %43 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %44 bool (ne (ptr (fn int (int))) &"pathb_present" (null (ptr (fn int (int))))))
+        (let %45 bool (const bool 0))
+        (if %44
+          (then
+            (let %46 int (call int &"pathb_present" (const int 101)))
+            (let %47 bool (eq int %46 (const int 1)))
+            (set %45 %47)))
+        (let %48 bool (eq bool %45 (const bool 0)))
+        (if %48
+          (then
+            (block
+              (let %49 int (load int @"bad"))
+              (let %50 int (wadd int %49 (const int 1)))
+              (store int @"bad" %50))))))
+    (step
+      (let %51 bool (ne int (const int 0) (const int 0)))
+      (if %51 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %52 bool (eq (ptr int) @"missing_data" (null (ptr int))))
+        (let %53 bool (eq bool %52 (const bool 0)))
+        (if %53
+          (then
+            (block
+              (let %54 int (load int @"bad"))
+              (let %55 int (wadd int %54 (const int 1)))
+              (store int @"bad" %55))))))
+    (step
+      (let %56 bool (ne int (const int 0) (const int 0)))
+      (if %56 (then) (else (break)))))
+  (store (ptr (fn int (int))) $"f" &"alias_fn")
+  (loop
+    (body
+      (block
+        (let %57 (ptr (fn int (int))) (load (ptr (fn int (int))) $"f"))
+        (nonnull %57)
+        (let %58 int (call int %57 (const int 4)))
+        (let %59 bool (eq int %58 (const int 5)))
+        (let %60 bool (eq bool %59 (const bool 0)))
+        (if %60
+          (then
+            (block
+              (let %61 int (load int @"bad"))
+              (let %62 int (wadd int %61 (const int 1)))
+              (store int @"bad" %62))))))
+    (step
+      (let %63 bool (ne int (const int 0) (const int 0)))
+      (if %63 (then) (else (break)))))
+  (let %64 int (load int @"bad"))
+  (return %64))
+
+(alias "alias_fn" "target" function)
+
+(alias "weak_alias" "target" function weak)
+
+(alias "gv_alias" "gv" object)
+
+(alias "gv_alias2" "gv" object)
