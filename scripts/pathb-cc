@@ -5,8 +5,9 @@
 # validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
 # Usage: scripts/pathb-cc [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
 #   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
-#   PATHB_LONG_DOUBLE=trap (or NFCXX_LONG_DOUBLE=trap)  a function that mentions long double becomes a stub that aborts
-#                    when run, instead of refusing the file (QBE has no 80-bit float; docs/notes/pathb-hosted.md)
+#   PATHB_LONG_DOUBLE=trap (or NFCXX_LONG_DOUBLE=trap)  a function of a hand-written IR that mentions the scalar type long_double
+#                    becomes a stub that aborts when run. long double itself is supported (docs/notes/pathb-longdouble.md): link the
+#                    object with $(scripts/pathb-ldrt) (the helpers in be/nfcxx_ldrt.c; the driver and the test scripts do)
 # Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
 # Needs the Path B harness (scripts/setup-pathb.sh; PATHB_CPFE, PATHB_BASE) and build/qbe/qbe (QBE).
 set -euo pipefail

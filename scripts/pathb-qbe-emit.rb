@@ -2182,14 +2182,101 @@ def universal_newlines(text)
   text.split("\r\n", -1).join("\n").split("\r", -1).join("\n")
 end
 
+# ---- long double: the x87 thunks (docs/notes/pathb-longdouble.md)
+#
+# A function returning long double returns it in st(0), which QBE cannot touch. Path B defines such a function F as
+# __nfcxx_ldr_F with a trailing pointer parameter for the result (an ordinary void function). Two thunks in assembly
+# connect that to the C convention. They are described by the IR forms
+#   (x87-thunk entry "F" LINKAGE INTS STACK)   F itself: calls __nfcxx_ldr_F with a stack buffer, loads st(0)
+#   (x87-thunk call "F" INTS STACK)            __nfcxx_x87c_F(args..., dst): calls F, stores st(0) at dst
+# and entryc / callc for a _Complex long double result (COMPLEX_X87: real part in st(0), imaginary part in st(1); the
+# 32-byte object holds the real part at offset 0 and the imaginary part at 16).
+# where INTS is the number of integer registers the parameters of F use and STACK the bytes of its stack arguments.
+# The emitter leaves one marker comment per live thunk in the QBE IL; append_weak turns them into assembly (QBE has no
+# way to write it). The extra pointer is the next integer register after the parameters, or the stack word after the
+# stack arguments when all six are used; the thunk copies the stack arguments to its own frame, which keeps the
+# 16-byte alignment of long doubles passed in memory, and uses only r11 and the register of the extra pointer.
+X87_MARK = "# pathb-x87 "
+X87_REGS = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+
+def x87_copy_args(stack, frame)
+  out = []
+  i = 0
+  while i < stack
+    out << "\tmovq #{frame + 8 + i}(%rsp), %r11"
+    out << "\tmovq %r11, #{i}(%rsp)"
+    i += 8
+  end
+  out
+end
+
+def x87_call_thunk(name, ints, stack, complex = false)
+  r = (stack + 15) / 16 * 16
+  frame = r + 24
+  sym = "__nfcxx_x87c_" + name
+  out = [".text", ".weak #{sym}", ".hidden #{sym}", ".type #{sym}, @function", sym + ":", "\tsubq $#{frame}, %rsp"]
+  if ints < 6
+    out << "\tmovq %#{X87_REGS[ints]}, #{r}(%rsp)"
+  else
+    out << "\tmovq #{frame + 8 + stack}(%rsp), %r11"
+    out << "\tmovq %r11, #{r}(%rsp)"
+  end
+  out.concat(x87_copy_args(stack, frame))
+  out << "\tcall #{name}@PLT"
+  out << "\tmovq #{r}(%rsp), %rdi"
+  out << "\tfstpt (%rdi)"
+  out << "\tmovw $0, 10(%rdi)"
+  out << "\tmovl $0, 12(%rdi)"
+  if complex
+    out << "\tfstpt 16(%rdi)"
+    out << "\tmovw $0, 26(%rdi)"
+    out << "\tmovl $0, 28(%rdi)"
+  end
+  out << "\taddq $#{frame}, %rsp"
+  out << "\tret"
+  out << ".size #{sym}, .-#{sym}"
+  out.join("\n") + "\n"
+end
+
+def x87_entry_thunk(name, linkage, ints, stack, complex = false)
+  m = stack + (ints == 6 ? 8 : 0)
+  mr = (m + 15) / 16 * 16
+  frame = mr + (complex ? 40 : 24)
+  out = [".text", (linkage == "weak" ? ".weak #{name}" : ".globl #{name}"), ".type #{name}, @function", name + ":",
+         "\tsubq $#{frame}, %rsp"]
+  out.concat(x87_copy_args(stack, frame))
+  if ints < 6
+    out << "\tleaq #{mr}(%rsp), %#{X87_REGS[ints]}"
+  else
+    out << "\tleaq #{mr}(%rsp), %r11"
+    out << "\tmovq %r11, #{stack}(%rsp)"
+  end
+  out << "\tcall __nfcxx_ldr_#{name}@PLT"
+  out << "\tfldt #{mr + 16}(%rsp)" if complex
+  out << "\tfldt #{mr}(%rsp)"
+  out << "\taddq $#{frame}, %rsp"
+  out << "\tret"
+  out << ".size #{name}, .-#{name}"
+  out.join("\n") + "\n"
+end
+
 def append_weak(il_path, asm_path)
   names = []
+  thunks = []
   read_text(il_path).split("\n").each do |line|
     names << line.byteslice(WEAK_MARK.bytesize, line.bytesize - WEAK_MARK.bytesize).strip if line.start_with?(WEAK_MARK)
+    if line.start_with?(X87_MARK)
+      w = line.byteslice(X87_MARK.bytesize, line.bytesize - X87_MARK.bytesize).split(" ")
+      if w[0] == "call" || w[0] == "callc"
+        thunks << x87_call_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "callc")
+      else
+        thunks << x87_entry_thunk(w[1], w[2], w[3].to_i, w[4].to_i, w[0] == "entryc")
+      end
+    end
   end
-  unless names.empty?
+  unless names.empty? && thunks.empty?
     File.open(asm_path, "a") do |f|
-      f.write("\n" + names.map { |n| ".weak #{n}\n" }.join)
+      f.write("\n" + names.map { |n| ".weak #{n}\n" }.join + thunks.join)
     end
   end
   0
@@ -2415,7 +2502,7 @@ def emit_startup_tables(mod)
   end
 end
 
-LP64 = { "short" => 2, "int" => 4, "long" => 8, "long_long" => 8, "pointer" => 8, "float" => 4, "double" => 8 }
+LP64 = { "short" => 2, "int" => 4, "long" => 8, "long_long" => 8, "pointer" => 8, "float" => 4, "double" => 8, "long_double" => 16 }
 
 # The emitter's scalar sizes are LP64's. The module header carries the target's: (layout (int 4) ...).
 # A target with other sizes is refused, not emitted with wrong sizes. An IR without (layout ...) is older
@@ -2541,6 +2628,34 @@ def stub_long_double(forms)
   out
 end
 
+# Marker comments for the x87 thunks (append_weak writes the assembly) that live code needs: a call thunk when some kept
+# function or global refers to __nfcxx_x87c_F, an entry thunk when __nfcxx_ldr_F was kept.
+def emit_x87_thunks(mod, forms)
+  refs = {}
+  kept = {}
+  forms.drop(1).each do |f|
+    h = head_of(f)
+    next if h != "function" && h != "global"
+    symbols(f, refs)
+    kept[pstr(f[1])] = true if h == "function"
+  end
+  forms.drop(1).each do |f|
+    next if head_of(f) != "x87-thunk"
+    raise BadIR, "x87-thunk form: #{form_text(f)}" if f.length < 5
+    kind = f[1]
+    name = pstr(f[2])
+    if kind == "call" || kind == "callc"
+      raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?("__nfcxx_x87c_" + name)
+    elsif kind == "entry" || kind == "entryc"
+      raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 6 || !(f[3] == "weak" || f[3] == "global")
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{f[3]} #{as_int(f[4])} #{as_int(f[5])}" if kept.key?("__nfcxx_ldr_" + name)
+    else
+      raise BadIR, "x87-thunk kind #{form_text(f)}"
+    end
+  end
+end
+
 def emit_module(text, do_prune = true, ld_trap = false)
   forms = parse_forms(tokenize(text))
   raise BadIR, "the input is not an (ir-module ...) IR text" if forms.empty? || head_of(forms[0]) != "ir-module"
@@ -2574,10 +2689,11 @@ def emit_module(text, do_prune = true, ld_trap = false)
       rescue Refused => e
         raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
       end
-    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare"
+    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare" && h != "x87-thunk"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end
+  emit_x87_thunks(mod, forms)
   emit_startup_tables(mod)
   mod.got.each { |name, cell| mod.out << "data $#{cell} = align 8 { l $#{qsym(name)} }" }
   mod.out << "data $#{SINK} = align 8 { z 8 }" if mod.need_sink

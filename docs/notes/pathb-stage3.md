@@ -587,3 +587,13 @@ Thread-local objects with a dynamic initializer are done (above, "Dynamic initia
 Still missing: any check of the order of initialization across translation units beyond "all run before main". The local-static guard is whatever `__cxa_guard_acquire` / `__cxa_guard_release` of the linked C++
 runtime does; the probes are single-threaded. The `dik_constructor` lowering is untested because the lowered IL never
 contains one.
+
+## Round: long double
+
+`long double` no longer stops a module. The IR lowering keeps a 16-byte object per value and calls helpers
+(`be/nfcxx_ldrt.c`); results in `st(0)` are bridged by assembly thunks that the emitter leaves as `# pathb-x87` marks and
+`--append-weak` expands (new top-level forms `(x87-thunk ...)`, stage 2 grammar). The emitter changed only for those forms
+and for refusing a `(layout (long_double N))` other than 16; the Python oracle carries the same code
+(`tests/mruby/pathb-edge/x87_thunks.ir`, `e_x87_*.ir`, `r_layout_ld.ir`). `ck_init_repeat` array constants (a run of one
+constant) are lowered too (static items and local stores). The whole design, the calling convention and the limits are in
+`docs/notes/pathb-longdouble.md`.

@@ -72,26 +72,28 @@ Probes: `abi_struct.cpp` (libc `div`/`ldiv`/`lldiv`, every shape class, function
   constructed in user code, and EDG's `operator new` work.
 - `__builtin_alloca`, signed multiply-overflow and mixed-type overflow builtins, `bswap16`, aggregate `va_arg`: an IR gap
   marker / link error when reachable. Other asm statements than the barriers and `int $3`.
-- `long double`, see below. `_Float128`/`__int128` types are refused when a kept function uses them.
+- `_Float128`/`__int128` types are refused when a kept function uses them. `long double` is supported (below).
 
 ## long double
 
-QBE has no 80-bit type and the emitter refuses any IR that mentions `long_double`. For hosted programs the header paths that reach
-it are few. doctest: `std::ostream::operator<<(long double)` (inline in `<ostream>`), `doctest::toString(long double)`,
-`toStreamLit<long double>` and `IsNaN<long double>`: four functions, none run by the test driver. tinyxml2 never mentions it.
+Supported since `docs/notes/pathb-longdouble.md`: a `long double` is a 16-byte object in the x86-64 System V layout, every operation
+is a call of a helper that gcc compiled (`be/nfcxx_ldrt.c`, linked from `libnfcxxld.a`, `scripts/pathb-ldrt`), and the places
+where the C calling convention differs (results in `st(0)`) go through assembly thunks the emitter writes. libc, libm and
+libstdc++.so are called directly with the right ABI: `printf("%Lf")`, `strtold`, `powl`, `ostream::_M_insert<long double>`,
+`std::to_chars`. What used to be blocked now compiles and matches the gcc backend: `<random>` distributions over
+`long double`, `generate_canonical`, `<cmath>` overloads, `std::complex<long double>`, `std::stold`, iostream.
 
-**Decision: no silent `long double` = `double`.** A double fallback changes the value, the size and the calling convention (x87
-class in memory, `printf("%Lf")`, `strtold`, `ostream::_M_insert<long double>` in libstdc++.so), so a program that really uses
-it would be wrong without notice. Instead the opt-in `--long-double=trap` of the emitter (`PATHB_LONG_DOUBLE=trap` for `pathb-cc`,
-`NFCXX_LONG_DOUBLE=trap` for the driver) turns every function that mentions `long_double` into a stub that aborts when it runs, and
-drops globals of that type. Results stay correct for programs whose long double code does not run (doctest below), and
-the failure is loud (SIGABRT) when it does. Without the option the module is refused as before.
+The earlier decision stays: **no silent `long double` = `double`**; whatever is not supported is a named refusal or a link error
+(note, section 7). The opt-in `--long-double=trap` (`PATHB_LONG_DOUBLE=trap`, `NFCXX_LONG_DOUBLE=trap`) still turns functions of a
+hand-written IR that mention the scalar type `long_double` into aborting stubs, but no program lowered by `nfcxx_ir.c`
+mentions it any more, so the option is unused by the build.
 
 ## Real-world programs
 
 - **tinyxml2** (pinned, `tests/realworld/run.sh` sources): `NFCXX_PATH=b ./nfcxx -I<src> tests/realworld/tinyxml2_main.cpp <src>/tinyxml2.cpp`
   gives exit 12, same as the gcc and QBE backends; no long double on its header paths. `tests/pathb-qbe/hosted.sh` checks it.
-- **doctest** (pinned, `tests/realworld/run_doctest.sh` source): builds with `NFCXX_LONG_DOUBLE=trap` and gives the expected exit 2
-  (23 assertions pass, 2 deliberate failures reported) now that thread_local dynamic initialization is lowered. Without the
-  option it is refused at the first long double function.
+- **doctest** (pinned, `tests/realworld/run_doctest.sh` source): builds with the driver as it is and gives the expected exit 2
+  (23 assertions pass, 2 deliberate failures reported). Its `toString(long double)` and `ostream << long double` now compile
+  and work; before `long double` support it needed `NFCXX_LONG_DOUBLE=trap` (those functions aborted when run) and without the
+  option it was refused at the first one.
 - Lua, mruby are C programs: not Path B.

@@ -10,6 +10,9 @@
 (abi-type "div_t" 8 4 (leaf 0 w) (leaf 4 w))
 (abi-type "ldiv_t" 16 8 (leaf 0 l) (leaf 8 l))
 (abi-type "lldiv_t" 16 8 (leaf 0 l) (leaf 8 l))
+(abi-type "__nfcxx_ld" 16 16 (memory))
+(x87-thunk call "fabsl" 0 16)
+(x87-thunk entry "_ZSt3abse" weak 0 16)
 (global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
 (global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
 (global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
@@ -641,15 +644,18 @@
   (let %2 float (call float &"fabsf" %1))
   (return %2))
 
-(function "_ZSt3abse"
-  (ret long_double)
-  (params (param %0 "__x" long_double))
+(function "__nfcxx_ldr__ZSt3abse"
+  (ret void)
+  (params (param %0 "__x" (byval (struct "__nfcxx_ld"))) (param %1 "__ldret" (ptr (array 16 unsigned_char))))
   (weak)
-  (slot "__x" long_double 16 16)
-  (store long_double $"__x" %0)
-  (let %1 long_double (load long_double $"__x"))
-  (let %2 long_double (call long_double &"fabsl" %1))
-  (return %2))
+  (slot "tmp" (array 16 unsigned_char) 16 16)
+  (slot "tmp.1" (array 16 unsigned_char) 16 16)
+  (slot "tmp.2" (array 16 unsigned_char) 16 16)
+  (copy 16 $"tmp.1" %0)
+  (copy 16 $"tmp.2" $"tmp.1")
+  (eval (call void &"__nfcxx_x87c_fabsl" (byval (struct "__nfcxx_ld") $"tmp.2") $"tmp"))
+  (copy 16 %1 $"tmp")
+  (return))
 
 (function "_ZSt3absDF16_"
   (ret std::float16_t)
