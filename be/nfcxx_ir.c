@@ -694,7 +694,8 @@ static const char *ir_global_op(a_variable_ptr var)
 }
 
 /* Stack slot operand for an object of the current function, created on first use. */
-static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t)
+/* al: the object's own alignment (alignas / aligned attribute included), or 0 for the type's. */
+static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t, unsigned long al)
 {
   int fresh = ir_tab_find(&ir_slots, key) == NULL;
   const char *op = ir_tab_get(&ir_slots, key, base, "$");
@@ -702,7 +703,7 @@ static const char *ir_slot_op(const void *key, const char *base, a_type_ptr t)
     ir_buf_begin(&ir_slot_buf);
     fprintf(nf_out, "\n  (slot %s ", op + 1);
     nf_put_type(t);
-    fprintf(nf_out, " %lu %lu)", ir_size_of(t), ir_align_of(t));
+    fprintf(nf_out, " %lu %lu)", ir_size_of(t), al != 0 ? al : ir_align_of(t));
     ir_buf_end(&ir_slot_buf);
   }
   return op;
@@ -734,7 +735,7 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
   if (var_has_static_or_thread_storage_duration(var)) {
     return ir_mk_addr((char *)ir_global_op(var), t, vol);
   }
-  return ir_mk_addr((char *)ir_slot_op(var, ir_name_or(var->source_corresp.name, "tmp"), var->type), t, vol);
+  return ir_mk_addr((char *)ir_slot_op(var, ir_name_or(var->source_corresp.name, "tmp"), var->type, (unsigned long)alignment_of_variable(var)), t, vol);
 }
 
 /* Marker for a node that is not lowered. The value of the marker has the type t (void: a statement). */
@@ -2644,7 +2645,7 @@ static void ir_global_print(a_variable_ptr var, const char *name)
   ir_buf_begin(&g);
   fprintf(nf_out, "(global %s ", name);
   nf_put_type(var->type);
-  fprintf(nf_out, " %lu %lu", ir_size_of(var->type), ir_align_of(var->type));
+  fprintf(nf_out, " %lu %lu", ir_size_of(var->type), (unsigned long)alignment_of_variable(var));
   if (var->storage_class == sc_static) fputs(" (static)", nf_out);
   else if (var->comdat_group != NULL) fputs(" (weak)", nf_out); /* EDG: COMDAT, which c_gen_be.c writes as __weak__ */
   else if (var->is_weak) fputs(var->storage_class == sc_extern ? " (weak)" : " (weak attr)", nf_out); /* __attribute__((weak)): declaration / definition */

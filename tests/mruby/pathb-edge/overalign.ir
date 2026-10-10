@@ -1,0 +1,14 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "g32" int 4 32 (init (scalar 0 int (const int 7))))
+(global "g64" int 4 64 (init (scalar 0 int (const int 9))))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "a" int 4 32)
+  (slot "b" int 4 64)
+  (slot "c" int 4 16)
+  (store int $"a" (const int 3))
+  (let %0 int (load int $"a"))
+  (return %0))

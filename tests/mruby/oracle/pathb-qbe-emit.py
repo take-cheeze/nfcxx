@@ -1832,8 +1832,12 @@ def emit_global(mod, g):
         raise Refused("global %s: %s" % (name, form_text(init)))
     if h != "init":
         raise BadIR("global %s: unknown INIT %s" % (name, form_text(init)))
-    if align not in (1, 2, 4, 8, 16):
+    # QBE data accepts a power-of-two `align N` up to 64 (its parser rejects more than CHAR_MAX); above that the
+    # global is refused. A non-power-of-two alignment is a bad IR.
+    if not (align >= 1 and (align & (align - 1)) == 0):
         raise BadIR("global %s: alignment %d" % (name, align))
+    if align > 64:
+        raise Refused("global %s: alignment %d (QBE data aligns to at most 64)" % (name, align))
     items = global_items(mod, name, init)
     pieces = emit_data_items(mod, name, size, items)
     linkage = ("thread " if thread else "") + ("" if static else "export ")
@@ -1907,8 +1911,17 @@ def emit_function(mod, f):
             salign = as_int(part[4])
             q = "%%s%d" % fn.nslot
             fn.nslot += 1
-            a = 16 if salign >= 16 else 8 if salign >= 8 else 4
-            fn.allocs.append("\t%s =l alloc%d %d" % (q, a, max(ssize, 1)))
+            if salign > 16:
+                # QBE stack slots are at most 16-aligned: over-allocate and round the address up. The extra lines
+                # are address arithmetic on the start block's alloc, so the slot is a plain pointer for the rest.
+                if salign > 4096 or (salign & (salign - 1)) != 0:
+                    raise Refused("slot %s: alignment %d" % (sname, salign))
+                fn.allocs.append("\t%sr =l alloc16 %d" % (q, max(ssize, 1) + salign - 1))
+                fn.allocs.append("\t%sa =l add %sr, %d" % (q, q, salign - 1))
+                fn.allocs.append("\t%s =l and %sa, %d" % (q, q, -salign))
+            else:
+                a = 16 if salign >= 16 else 8 if salign >= 8 else 4
+                fn.allocs.append("\t%s =l alloc%d %d" % (q, a, max(ssize, 1)))
             fn.slots[sname] = (q, sty)
         else:
             body_forms.append(part)

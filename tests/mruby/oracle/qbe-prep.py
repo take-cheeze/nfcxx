@@ -201,6 +201,32 @@ def first_member_plain(toks, o, close):
     return False
 
 
+def plain_aligned_object(toks, i):
+    """`T x __attribute__((__aligned__(N)))` on a plain (non-array) object: toks[i] is the name, the attribute
+    follows it and the declarator ends with `;`, `,` or `=`. Not a typedef, and not `struct T __attribute__...`."""
+    nxt = tok_at(toks, i + 1)
+    if nxt is None or nxt.kind != 'id' or nxt.text != '__attribute__':
+        return False
+    g = aligned_group(toks, i + 1)
+    if g is None:
+        return False
+    f = tok_at(toks, g[0])
+    if not (is_punct(f, ';') or is_punct(f, ',') or is_punct(f, '=')):
+        return False
+    prv = tok_at(toks, i - 1)
+    if i == 0 or prv is None or (prv.kind == 'id' and prv.text in ('struct', 'union', 'enum')):
+        return False
+    k = i - 1
+    while k >= 0:
+        x = toks[k]
+        if x.kind == 'punct' and x.text in (';', '{', '}'):
+            break
+        if x.kind == 'id' and x.text == 'typedef':
+            return False
+        k -= 1
+    return True
+
+
 def aligned_group(toks, i):
     """If toks[i] starts __attribute__((__aligned__(N))), return (end_index_exclusive, N)."""
     if i + 8 >= len(toks) or toks[i].kind != 'id' or toks[i].text != '__attribute__':
@@ -687,8 +713,8 @@ def main():
                     i = j + 2
                     continue
 
-        # 2. __attribute__((__aligned__(N))) after an array declarator: becomes _Alignas(N) before the name (valid for members and objects; cproc takes the GNU form only on members).
-        if t.kind == 'id' and t.text != '__attribute__' and is_punct(tok_at(toks, i + 1), '['):
+        # 2. __attribute__((__aligned__(N))) after a declarator name (array or not): becomes _Alignas(N) before the name (valid for members and objects; cproc takes the GNU form only on members).
+        if t.kind == 'id' and t.text != '__attribute__' and (is_punct(tok_at(toks, i + 1), '[') or plain_aligned_object(toks, i)):
             j = i + 1
             while j < len(toks) and is_punct(toks[j], '['):
                 j = match_fwd(toks, j, '[', ']')

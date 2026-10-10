@@ -87,6 +87,10 @@ struct S3 { int b[8]; } __attribute__((__aligned__(16)));
 struct S4 { char b[0x20]; } __attribute__((__aligned__(0x10)));
 struct S5 { char b[32]; } __attribute__((__aligned__(8))) s5v;
 struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));
+extern int pg __attribute__((__aligned__(32)));
+typedef int tdi __attribute__((__aligned__(8)));
+struct tag_only __attribute__((__aligned__(8)));
+int pi1 __attribute__((aligned(64))) = 3, pi2 __attribute__((aligned(16)));
 int plain[4];
 char *ptrs[3] , other[2] __attribute__((__aligned__(4)));
 int tricky(int a[4] __attribute__((__aligned__(8))));
@@ -99,6 +103,9 @@ expect aligned out 'double _Alignas(32) m[2][3]'
 expect aligned out 'struct S2 { _Alignas(16) char b[30]; }'
 expect aligned out 'struct S3 { _Alignas(16) int b[8]; }'
 expect aligned out 'struct S6 { unsigned f : 3; int g; } __attribute__((__aligned__(16)));'
+expect aligned out 'extern int _Alignas(32) pg '
+expect aligned out 'typedef int tdi __attribute__((__aligned__(8)));'
+expect aligned out 'int _Alignas(64) pi1  = 3, _Alignas(16) pi2 '
 cat >"$tmp/edge/floats.c" <<'EOF'
 __bf16 b1; _Float16 h1; _Float32 f1; _Float64 d1; _Float128 q1; _Float32x f2; unsigned _Float64x u;
 _Float16 h2 = (1.5f16), h3 = (.5f16), h4 = (65504.0f16), h5 = (6.103515625e-5f16), h6 = (2049f16), h7 = (0f16),
