@@ -636,7 +636,7 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :startup, :funcs, :got, :abi
+  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi
 
   def initialize
     @globals = {}       # IR name -> type
@@ -645,7 +645,8 @@ class Module_
     @need_sink = false  # a function that returns twice stores slot addresses into SINK
     @thread = {}        # IR name -> "def" or "ext": thread-local globals ((thread) marker; ext = declaration only)
     @vhelpers = {}      # volatile access helpers used so far: QBE function name -> its text lines
-    @weakrefs = {}      # undefined functions that are weak references (TLS init functions, see weak_refs)
+    @weakrefs = {}      # undefined functions that are weak references ((declare NAME (weak)), see weak_refs)
+    @weakdata = {}      # extern globals declared (weak): their address is loaded from the GOT, a missing one is null
     @startup = []       # [".init_array" or ".fini_array", priority (0: none), QBE symbol] of (constructor)/(destructor)
     @funcs = {}         # IR name -> true for every function defined in this module
     @got = {}           # IR name of an external function whose address is taken -> its pointer cell (see opnd_)
@@ -912,12 +913,19 @@ class Fn
       return slot_val(name) if sig == "$"
       if sig == "@"
         if @mod.thread.key?(name)
-          # Thread-local object: its address is the thread pointer plus the object's TLS offset. A definition in this
-          # module uses the local-exec model (`thread $x`); a declaration uses initial-exec through the GOT
-          # (`extern thread $x`), so the object may live in another object file or in a shared library.
+          # Thread-local object: its address is the thread pointer plus the object's TLS offset. Every access uses the
+          # initial-exec model (`extern thread $x`, the offset comes from the GOT), also for an object defined in this
+          # module: that is valid in an executable (the linker relaxes it to local-exec for a symbol it defines) and in
+          # a shared library (QBE has no general-dynamic form), and the object may live in another object file.
           # The address goes through a temporary so that it is a plain `l` value wherever it is used.
           t = tmp
-          emit("#{t} =l copy #{@mod.thread[name] == "ext" ? "extern thread" : "thread"} $#{qsym(name)}")
+          emit("#{t} =l copy extern thread $#{qsym(name)}")
+          return Val.new(t, "l", ["ptr", @mod.globals[name]])
+        end
+        if @mod.weakdata.key?(name)
+          # A weak undefined object: the address comes from the GOT, so an absent definition reads as null in a PIE too.
+          t = tmp
+          emit("#{t} =l copy extern $#{qsym(name)}")
           return Val.new(t, "l", ["ptr", @mod.globals[name]])
         end
         return Val.new("$" + qsym(name), "l", ["ptr", @mod.globals[name]])
@@ -1032,10 +1040,8 @@ class Fn
     raise BadIR, "statement expected, got #{form_text(x)}" unless x.is_a?(Array)
     h = head_of(x)
     fn = STMT[h]
-    if fn.nil?
-      raise Refused, "statement #{form_text(x)}" if h == "unsupported"   # an IR gap marker: say which
-      raise Refused, "statement (#{h || "None"} ...)"
-    end
+    raise Refused, form_text(x) if h == "unsupported" # the lowering says why: (unsupported stmt asm-operands)
+    raise Refused, "statement (#{h || "None"} ...)" if fn.nil?
     fn.call(self, x)
   end
 
@@ -2023,6 +2029,15 @@ def s_unreachable(fn, x)
   fn.jmp(fn.abort_label)
 end
 
+# (barrier): a compiler barrier, from an empty asm statement with a "memory" clobber. A call of an empty function
+# defined in the module (QBE cannot look into a call, and keeps calls in order, see vhelper): accesses of escaped
+# memory do not move across it. It has no operands, so it does not make any stack slot escape.
+def s_barrier(fn, x)
+  raise BadIR, "barrier form" if x.length != 1
+  fn.mod.vhelpers["__pathb_barrier"] ||= ["function $__pathb_barrier() {", "@start", "\tret", "}", ""]
+  fn.emit("call $__pathb_barrier()")
+end
+
 STMT = {
   "block" => ->(fn, x) { s_block(fn, x) }, "let" => ->(fn, x) { s_let(fn, x) },
   "set" => ->(fn, x) { s_set(fn, x) },
@@ -2037,6 +2052,7 @@ STMT = {
   "break" => ->(fn, x) { s_break(fn, x) }, "continue" => ->(fn, x) { s_continue(fn, x) },
   "goto" => ->(fn, x) { s_goto(fn, x) }, "label" => ->(fn, x) { s_label(fn, x) },
   "return" => ->(fn, x) { s_return(fn, x) }, "unreachable" => ->(fn, x) { s_unreachable(fn, x) },
+  "barrier" => ->(fn, x) { s_barrier(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions
@@ -2203,7 +2219,10 @@ def emit_global(mod, g)
   raise BadIR, "global #{name}: expected one INIT" if rest.length != 1
   init = rest[0]
   h = head_of(init)
-  return if h == "extern"
+  if h == "extern"
+    mod.out << (WEAK_MARK + qsym(name)) if weak # a weak undefined object: .weak, see append_weak
+    return
+  end
   raise Refused, "global #{name}: #{form_text(init)}" if h == "unsupported"
   raise BadIR, "global #{name}: unknown INIT #{form_text(init)}" if h != "init"
   raise BadIR, "global #{name}: alignment #{align}" unless [1, 2, 4, 8, 16].include?(align)
@@ -2289,7 +2308,7 @@ def emit_function(mod, f)
     h = head_of(p)
     if h == "sret"
       n = p[1].byteslice(1, p[1].bytesize - 1).to_i
-      info = abi_of(mod, p[2])
+      info = p.length > 2 ? abi_of(mod, p[2]) : nil
       fn.declare_reg(n, ["ptr", nil])
       if info.nil?
         qparams << "l %p#{pi}"
@@ -2412,10 +2431,11 @@ def symbols(x, out)
 end
 
 # A function or global that other translation units can see: not (static), not (weak), and a definition.
+# (weak attr) is a definition the source declared __attribute__((weak)): an interface symbol, unlike a COMDAT (weak).
 def is_linked(f)
   f.drop(2).each do |part|
     h = head_of(part)
-    return false if h == "static" || h == "weak" || h == "extern"
+    return false if h == "static" || (h == "weak" && part.length == 1) || h == "extern"
   end
   true
 end
@@ -2465,16 +2485,20 @@ def prune(forms)
   end
 end
 
-# The Itanium C++ ABI declares the thread_local initialization function `_ZTH<name>` of an `extern thread_local`
-# variable as a weak reference: the wrapper `_ZTW<name>` calls it only when it exists (`if (&_ZTH<name>) _ZTH<name>()`).
-# The IR has no weak declarations, so an undefined function with this prefix that the module refers to is taken as one.
+# Weak references. (declare "NAME" (weak)) is a function declared __attribute__((weak)) that the module refers to
+# and does not define: the symbol may be absent at link time. The address of such a function goes through the GOT and
+# the symbol is marked .weak (WEAK_MARK). The thread_local initialization function `_ZTH<name>` of an
+# `extern thread_local` variable (Itanium C++ ABI: the wrapper `_ZTW<name>` calls it only when it exists) is such a
+# declaration: EDG marks it weak and the lowering prints it. There is no special case for the name any more.
 def weak_refs(forms)
   defined = {}
   forms.drop(1).each { |f| defined[pstr(f[1])] = true if head_of(f) == "function" }
-  refs = {}
-  forms.drop(1).each { |f| symbols(f, refs) if head_of(f) == "function" }
   out = {}
-  refs.keys.sort.each { |n| out[n] = true if n.start_with?("_ZTH") && !defined.key?(n) }
+  forms.drop(1).each do |f|
+    next if head_of(f) != "declare"
+    raise BadIR, "declare form: #{form_text(f)}" if f.length != 3 || head_of(f[2]) != "weak" || f[2].length != 1
+    out[pstr(f[1])] = true unless defined.key?(pstr(f[1]))
+  end
   out
 end
 
@@ -2519,6 +2543,10 @@ def emit_module(text, do_prune = true, ld_trap = false)
   forms.drop(1).each do |f|   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
     next if head_of(f) != "global"
     mod.globals[pstr(f[1])] = parse_type(f[2])
+    if f.drop(5).any? { |p| head_of(p) == "weak" } && f.drop(5).any? { |p| head_of(p) == "extern" } &&
+       !f.drop(5).any? { |p| head_of(p) == "thread" }
+      mod.weakdata[pstr(f[1])] = true
+    end
     if f.drop(5).any? { |p| head_of(p) == "thread" }
       mod.thread[pstr(f[1])] = f.drop(5).any? { |p| head_of(p) == "extern" } ? "ext" : "def"
     end
@@ -2534,7 +2562,7 @@ def emit_module(text, do_prune = true, ld_trap = false)
       rescue Refused => e
         raise Refused, "#{e.message} [in #{pstr(f[1])}]"   # which function holds the unsupported node
       end
-    elsif h != "global" && h != "data" && h != "abi-type"
+    elsif h != "global" && h != "data" && h != "abi-type" && h != "declare"
       raise Refused, "top-level form (#{h || "None"} ...)"
     end
   end

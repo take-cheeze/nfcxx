@@ -1,0 +1,279 @@
+(ir-module "weak_decl.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "absent_data" int 4 4 (weak) (extern))
+(global "absent_array" (array 4 int) 16 4 (weak) (extern))
+(global "weak_def_data" int 4 4 (weak attr) (init
+    (scalar 0 int (const int 41))))
+(declare "absent_fn" (weak))
+(global "table" (array 2 (ptr (fn int (int)))) 16 8 (static) (init
+    (addr 0 (ptr (fn int (int))) &"absent_fn" 0)
+    (addr 8 (ptr (fn int (int))) &"weak_def_fn" 0)))
+(declare "absent_void" (weak))
+(declare "abort" (weak))
+
+(function "weak_def_fn"
+  (ret int)
+  (params (param %0 "x" int))
+  (weak attr)
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (return %2))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "r" int 4 4)
+  (slot "f" (ptr (fn int (int))) 8 8)
+  (loop
+    (body
+      (block
+        (let %0 bool (eq (ptr (fn int (int))) &"absent_fn" (null (ptr (fn int (int))))))
+        (let %1 bool (eq bool %0 (const bool 0)))
+        (if %1
+          (then
+            (block
+              (let %2 int (load int @"bad"))
+              (let %3 int (wadd int %2 (const int 1)))
+              (store int @"bad" %3))))))
+    (step
+      (let %4 bool (ne int (const int 0) (const int 0)))
+      (if %4 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %5 bool (eq (ptr int) @"absent_data" (null (ptr int))))
+        (let %6 bool (eq bool %5 (const bool 0)))
+        (if %6
+          (then
+            (block
+              (let %7 int (load int @"bad"))
+              (let %8 int (wadd int %7 (const int 1)))
+              (store int @"bad" %8))))))
+    (step
+      (let %9 bool (ne int (const int 0) (const int 0)))
+      (if %9 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %10 bool (eq (ptr int) @"absent_array" (null (ptr int))))
+        (let %11 bool (eq bool %10 (const bool 0)))
+        (if %11
+          (then
+            (block
+              (let %12 int (load int @"bad"))
+              (let %13 int (wadd int %12 (const int 1)))
+              (store int @"bad" %13))))))
+    (step
+      (let %14 bool (ne int (const int 0) (const int 0)))
+      (if %14 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %15 bool (eq (ptr (fn void ())) &"absent_void" (null (ptr (fn void ())))))
+        (let %16 bool (eq bool %15 (const bool 0)))
+        (if %16
+          (then
+            (block
+              (let %17 int (load int @"bad"))
+              (let %18 int (wadd int %17 (const int 1)))
+              (store int @"bad" %18))))))
+    (step
+      (let %19 bool (ne int (const int 0) (const int 0)))
+      (if %19 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %20 bool (eq (ptr (fn int (int))) &"absent_fn" (null (ptr (fn int (int))))))
+        (let %21 bool (eq bool %20 (const bool 0)))
+        (if %21
+          (then
+            (block
+              (let %22 int (load int @"bad"))
+              (let %23 int (wadd int %22 (const int 1)))
+              (store int @"bad" %23))))))
+    (step
+      (let %24 bool (ne int (const int 0) (const int 0)))
+      (if %24 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %25 bool (ne (ptr (fn int (int))) &"weak_def_fn" (null (ptr (fn int (int))))))
+        (let %26 bool (eq bool %25 (const bool 0)))
+        (if %26
+          (then
+            (block
+              (let %27 int (load int @"bad"))
+              (let %28 int (wadd int %27 (const int 1)))
+              (store int @"bad" %28))))))
+    (step
+      (let %29 bool (ne int (const int 0) (const int 0)))
+      (if %29 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %30 int (call int &"weak_def_fn" (const int 1)))
+        (let %31 bool (eq int %30 (const int 2)))
+        (let %32 bool (eq bool %31 (const bool 0)))
+        (if %32
+          (then
+            (block
+              (let %33 int (load int @"bad"))
+              (let %34 int (wadd int %33 (const int 1)))
+              (store int @"bad" %34))))))
+    (step
+      (let %35 bool (ne int (const int 0) (const int 0)))
+      (if %35 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %36 int (load int @"weak_def_data"))
+        (let %37 bool (eq int %36 (const int 41)))
+        (let %38 bool (eq bool %37 (const bool 0)))
+        (if %38
+          (then
+            (block
+              (let %39 int (load int @"bad"))
+              (let %40 int (wadd int %39 (const int 1)))
+              (store int @"bad" %40))))))
+    (step
+      (let %41 bool (ne int (const int 0) (const int 0)))
+      (if %41 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %42 bool (ne (ptr (fn void ())) &"abort" (null (ptr (fn void ())))))
+        (let %43 bool (eq bool %42 (const bool 0)))
+        (if %43
+          (then
+            (block
+              (let %44 int (load int @"bad"))
+              (let %45 int (wadd int %44 (const int 1)))
+              (store int @"bad" %45))))))
+    (step
+      (let %46 bool (ne int (const int 0) (const int 0)))
+      (if %46 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %47 (ptr (ptr (fn int (int)))) (bitcast (ptr (ptr (fn int (int)))) @"table"))
+        (bounds (const int 0) 2)
+        (let %48 (ptr (ptr (fn int (int)))) (index %47 (const int 0) 8))
+        (let %49 (ptr (fn int (int))) (load (ptr (fn int (int))) %48))
+        (let %50 bool (eq (ptr (fn int (int))) %49 (null (ptr (fn int (int))))))
+        (let %51 bool (const bool 0))
+        (if %50
+          (then
+            (let %52 (ptr (ptr (fn int (int)))) (bitcast (ptr (ptr (fn int (int)))) @"table"))
+            (bounds (const int 1) 2)
+            (let %53 (ptr (ptr (fn int (int)))) (index %52 (const int 1) 8))
+            (let %54 (ptr (fn int (int))) (load (ptr (fn int (int))) %53))
+            (let %55 bool (ne (ptr (fn int (int))) %54 (null (ptr (fn int (int))))))
+            (set %51 %55)))
+        (let %56 bool (const bool 0))
+        (if %51
+          (then
+            (let %57 (ptr (ptr (fn int (int)))) (bitcast (ptr (ptr (fn int (int)))) @"table"))
+            (bounds (const int 1) 2)
+            (let %58 (ptr (ptr (fn int (int)))) (index %57 (const int 1) 8))
+            (let %59 (ptr (fn int (int))) (load (ptr (fn int (int))) %58))
+            (nonnull %59)
+            (let %60 int (call int %59 (const int 5)))
+            (let %61 bool (eq int %60 (const int 6)))
+            (set %56 %61)))
+        (let %62 bool (eq bool %56 (const bool 0)))
+        (if %62
+          (then
+            (block
+              (let %63 int (load int @"bad"))
+              (let %64 int (wadd int %63 (const int 1)))
+              (store int @"bad" %64))))))
+    (step
+      (let %65 bool (ne int (const int 0) (const int 0)))
+      (if %65 (then) (else (break)))))
+  (store int $"r" (const int 0))
+  (let %66 bool (ne (ptr (fn int (int))) &"absent_fn" (null (ptr (fn int (int))))))
+  (if %66
+    (then
+      (block
+        (let %67 int (call int &"absent_fn" (const int 3)))
+        (store int $"r" %67))))
+  (loop
+    (body
+      (block
+        (let %68 int (load int $"r"))
+        (let %69 bool (eq int %68 (const int 0)))
+        (let %70 bool (eq bool %69 (const bool 0)))
+        (if %70
+          (then
+            (block
+              (let %71 int (load int @"bad"))
+              (let %72 int (wadd int %71 (const int 1)))
+              (store int @"bad" %72))))))
+    (step
+      (let %73 bool (ne int (const int 0) (const int 0)))
+      (if %73 (then) (else (break)))))
+  (let %74 bool (ne (ptr int) @"absent_data" (null (ptr int))))
+  (if %74
+    (then
+      (block
+        (let %75 int (load int @"absent_data"))
+        (store int $"r" %75))))
+  (loop
+    (body
+      (block
+        (let %76 int (load int $"r"))
+        (let %77 bool (eq int %76 (const int 0)))
+        (let %78 bool (eq bool %77 (const bool 0)))
+        (if %78
+          (then
+            (block
+              (let %79 int (load int @"bad"))
+              (let %80 int (wadd int %79 (const int 1)))
+              (store int @"bad" %80))))))
+    (step
+      (let %81 bool (ne int (const int 0) (const int 0)))
+      (if %81 (then) (else (break)))))
+  (store (ptr (fn int (int))) $"f" &"absent_fn")
+  (loop
+    (body
+      (block
+        (let %82 (ptr (fn int (int))) (load (ptr (fn int (int))) $"f"))
+        (let %83 bool (eq (ptr (fn int (int))) %82 (null (ptr (fn int (int))))))
+        (let %84 bool (eq bool %83 (const bool 0)))
+        (if %84
+          (then
+            (block
+              (let %85 int (load int @"bad"))
+              (let %86 int (wadd int %85 (const int 1)))
+              (store int @"bad" %86))))))
+    (step
+      (let %87 bool (ne int (const int 0) (const int 0)))
+      (if %87 (then) (else (break)))))
+  (store (ptr (fn int (int))) $"f" &"weak_def_fn")
+  (loop
+    (body
+      (block
+        (let %88 (ptr (fn int (int))) (load (ptr (fn int (int))) $"f"))
+        (let %89 bool (ne (ptr (fn int (int))) %88 (null (ptr (fn int (int))))))
+        (let %90 bool (const bool 0))
+        (if %89
+          (then
+            (let %91 (ptr (fn int (int))) (load (ptr (fn int (int))) $"f"))
+            (nonnull %91)
+            (let %92 int (call int %91 (const int 9)))
+            (let %93 bool (eq int %92 (const int 10)))
+            (set %90 %93)))
+        (let %94 bool (eq bool %90 (const bool 0)))
+        (if %94
+          (then
+            (block
+              (let %95 int (load int @"bad"))
+              (let %96 int (wadd int %95 (const int 1)))
+              (store int @"bad" %96))))))
+    (step
+      (let %97 bool (ne int (const int 0) (const int 0)))
+      (if %97 (then) (else (break)))))
+  (let %98 int (load int @"bad"))
+  (return %98))

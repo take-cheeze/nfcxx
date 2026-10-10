@@ -216,18 +216,77 @@ for definitions and `extern` declarations alike, and for function-local `static 
 initial image of the thread's copy.
 
 QBE (checked against `3rd/qbe/amd64`): `thread export data $x = align 4 { w 5 }` goes to `.tdata` (`.tbss` when it is
-all `z`); a reference is an operand with the `thread` prefix. A definition in the module is referenced as `thread $x`
-(local-exec: `movl %fs:x@tpoff, %eax`, `leaq x@tpoff(%rax)`), a declaration as `extern thread $x` (initial-exec through
-`x@gottpoff(%rip)`), so the object can be defined in another object file. The emitter writes the address of a
-thread-local object to a temporary, `%t =l copy thread $x`, wherever the IR uses `@"x"`, so the address is a plain
-`l` value (compares, calls, `memmove`) and the access forms are unchanged. Local-exec needs the object file to end up
-in an executable; a shared library would have to use `extern thread` for definitions as well (one line in `opnd_`).
+all `z`); a reference is an operand with the `extern thread` prefix, which QBE writes as initial-exec
+(`movq %fs:0, %r; addq x@gottpoff(%rip), %r`). The emitter writes the address of a thread-local object to a
+temporary, `%t =l copy extern thread $x`, wherever the IR uses `@"x"`, so the address is a plain `l` value (compares,
+calls, `memmove`) and the access forms are unchanged. **Definitions use the same form as declarations.** Before the
+dynamic-initialization round a definition in the module used `thread $x` (local-exec, `leaq x@tpoff(%rax)`), which
+cannot be linked into a shared library. QBE's amd64 back end has only these two models (no general-dynamic /
+`__tls_get_addr`; `thread` without `extern` is local-exec), so initial-exec is the form that is valid in a shared
+object: the linker keeps an `R_X86_64_TPOFF64` entry in the library's GOT and the dynamic loader fills it. In an
+executable the linker relaxes the access to local-exec when it defines the symbol itself, so nothing is lost there.
+Limit of initial-exec: a library with a TLS block needs static TLS space, which glibc grants at startup and, within a
+small surplus, to `dlopen`ed libraries; a library that is `dlopen`ed late with a large TLS block can fail to load
+(`cannot allocate memory in static TLS block`). The rest of the emitter's code is not position independent yet (for
+example the references to weak data such as the string constants of COMDAT functions use `pc32` relocations), so a
+shared library is only possible for units that avoid those; `tests/pathb-qbe/multi/tls_shlib` links the thread-local
+definitions of `tls_extern` as a real shared library (`// SHARED: yes` marks the unit that run.sh builds with
+`cc -shared`).
 
 The C++11 wrapper functions for `extern thread_local` variables (`_ZTW<name>` calls `_ZTH<name>` if it is not null)
-refer to a weak undefined function. The IR has no weak declarations, so the emitter treats an undefined function whose
-name starts with `_ZTH` as a weak reference: it is referenced through the GOT (`extern $_ZTH...`) and marked
-`# pathb-weak` (`.weak` through `--append-weak`). Dynamic initialization of thread-locals (`thread_local std::string`)
-is not lowered (stage 3 `(unsupported init dynamic)`), so no `_ZTH` function is ever defined by this Path B yet.
+refer to a weak undefined function. `_ZTH<name>` is a weak routine in EDG's IL, so the IR carries it as
+`(declare "_ZTH<name>" (weak))` (stage 2, section 6, "Linkage": general weak declarations) and the emitter references
+it through the GOT (`extern $_ZTH...`) and marks it `# pathb-weak` (`.weak` through `--append-weak`); the earlier `_ZTH`
+name rule in the emitter is gone. A `_ZTH` function that the unit defines is an ordinary function
+(next subsection).
+
+#### Dynamic initialization of thread-local objects
+
+`thread_local std::string s;`, a class with a constructor or destructor, `thread_local int x = f();`. What EDG's
+lowering gives (checked on the IL and on the path A C output of `tests/pathb-qbe/cases/tls_dyn.cpp`):
+
+- One routine per translation unit, `__tls_init` (static, `is_tls_init_routine`), holds the dynamic initialization of
+  every thread_local object defined in the unit, in declaration order: the constructor calls, the stores of values
+  computed by calls, and the registration of each destructor with `__cxa_thread_atexit(dtor, &obj, &__dso_handle)`
+  (an array gets one registration of an unnamed array destroyer, `__unnamed_fn`, that calls `__cxa_vec_dtor`). The body
+  sits in a per-thread guard: an unnamed `static thread_local char` is tested and set first, so it runs once per
+  thread. The destructors run at thread exit (glibc runs the `__cxa_thread_atexit_impl` list; for the main thread at
+  `exit`, before the `__cxa_atexit` handlers of static objects).
+- Every use of such a variable is a call of its wrapper `_ZTW<mangled name>`: `{ _ZTH<name>(); return &x; }`. The
+  wrapper is `static` when the variable is, otherwise `is_weak` (every unit that uses the variable defines it), and
+  the IR prints `(weak)` for it (the IR printed only COMDAT routines as weak, so two units that used the same
+  variable failed to link with a multiple definition). A use in the defining unit goes through the wrapper too, so a
+  thread's objects are constructed on its first use of any of them (all of the unit's objects at once, in declaration
+  order).
+- `_ZTH<name>` is the "TLS init function for X": a routine without a body (`is_tls_init_alias`) that the C back end
+  turns into the assembler alias `_ZTH<name> = __tls_init` (or into a routine that calls `__tls_init`, without alias
+  support). The IR dropped it, so the wrapper's call had no target and the link failed with an undefined reference.
+  It has the storage class of the variable: extern (declared here, defined elsewhere) means no definition here, and
+  the wrapper tests it (`if (_ZTH<name>) _ZTH<name>();`, the weak undefined reference above); otherwise it is defined
+  here.
+- Function-local `static thread_local` objects need no wrapper: the lowering writes a per-thread guard (a `static
+  thread_local` char) and the `__cxa_thread_atexit` call inside the function, like `__cxa_guard_*` for an ordinary local
+  static. An object with constant initialization has no wrapper either, unless it is declared `extern` in a unit that
+  does not define it (the wrapper then tests `_ZTH`).
+
+The IR change (`be/nfcxx_ir.c`, `ir_tls_init_alias`): the `_ZTH` routine is printed as a function of its own,
+`(function "_ZTH.." (ret void) (params) [(static)|(weak)] (eval (call void &"__tls_init")) (return))`; `(static)`
+for a static variable, `(weak)` otherwise (EDG `is_weak`: inline variables and template static members are defined by
+several units), and nothing for an extern one. The emitter needed no change for this: `__tls_init` and the unnamed
+destroyer are ordinary functions, `__cxa_thread_atexit` an ordinary call (libstdc++ provides it; the probes link
+`-lstdc++`), and `__dso_handle` is the same extern data as for `__cxa_atexit`. Aliases stay out of the IR: the extra
+call costs one more function call per use of the wrapper, as in the C back end's fallback.
+
+Probes (all with `// STDOUT: same`: the standard output, that is the constructor and destructor order of each thread,
+must equal the gcc backend's): `cases/tls_dyn.cpp` (class with constructor and destructor, a scalar with a computed
+initializer, an array of objects, a function-local one, a static data member; the main thread and a pthread),
+`cases/tls_dyn_forms.cpp` (internal linkage and anonymous namespace, a constant-initialized neighbour, a reference, an
+`inline` variable, a template static member, a function-local one in a template and in a loop, a thread that never
+touches the objects), `multi/tls_dyn_extern` (one unit defines, the other only declares `extern thread_local T`: its
+wrapper calls the weak `_ZTH` of the defining unit), `multi/tls_dyn_inline` (a header with an `inline thread_local`, a
+template static member and an inline function with a thread_local local, included by two units: the weak wrappers and
+`_ZTH` routines merge). Goldens `tests/pathb-ir/tls_dyn.ir` and `tls_dyn_forms.ir`. `run.sh` takes
+`PATHB_QBE_ONLY=<regex>` to run just some programs, and compares the standard output of multi-unit programs too.
 
 Checked: `tls.cpp` has `__thread`, `thread_local`, zero, initialized, array, struct, a `static` (internal) and a
 function-local one; the main thread writes its copies, a pthread must see the initializers, change its copies, and main
@@ -293,17 +352,67 @@ insertion use shift pairs, and the "keep the other bits" mask is applied with `a
 2^k-1 (the field at the top of the unit uses a shift pair instead). `bitfield2.cpp` uses that macro on purpose. The
 same QBE bug can in principle bite any `and x, 2^k-1` that the emitter produces for other reasons; none is known.
 
-**Still missing**
+**Still missing** (what remains after the fourth round, below)
 
-- VLA storage is not freed at block exit (the IL has no scope marker); it is reused when the same declaration executes
-  again, so loops and recursion are bounded, but a function that declares different VLAs in sequence in one scope
-  keeps all of them until it returns. A VLA subscript has no bounds check.
+- A VLA subscript has no bounds check.
 - Volatile bit-fields (`bfload.v`, `bfstore.v`) are emitted: the whole storage unit is read once and written once through
   the volatile helpers (see "Volatile, thread-local objects", `cases/bitfield_vol.cpp`).
-- Bit-fields in a union or in a class with a virtual base have no aggregate initializer path (the IR has none for those
-  classes); plain access works.
-- A statement expression that returns a class by copy constructor stays `(unsupported stmt stmt_expr_result)`;
-  inline asm is still unsupported (the one marker left in `gaps.cpp`).
+
+## Closed gaps (stage 3, fourth round): aggregates, class results, scope-exit VLAs, asm barriers, weak declarations
+
+Probes in `tests/pathb-qbe/cases` (compared with the gcc backend; exit code = number of wrong results), goldens in
+`tests/pathb-ir`, emitter edge inputs in `tests/mruby/pathb-edge`. Details of each IR form: `docs/notes/pathb-stage2.md`,
+sections 5a-5c and 6.
+
+1. **Union aggregate constants and default member initializers on a class with a base and a vptr** (`agg_union.cpp`,
+   `bitfield_union.cpp`). Two causes behind `(unsupported init aggregate-constant)`: a `ck_aggregate` of a union (the
+   initialized member is a `ck_designator` plus value, or the first non-empty initializable field), and, for the
+   default member initializers, `eok_bassign` (the block copy that initializes an array member from a static array),
+   which printed `(unsupported op bassign)`. Both lowered. Zeroing an aggregate (the unnamed rest of a union, trailing
+   aggregate elements) is real stores now, not `(unsupported init zero-aggregate)`.
+2. **Statement expression that returns a class by copy constructor** (`stmtexpr_class.cpp`): the value statement is a
+   nested statement expression followed by the destructors of the block's locals, not the last statement
+   (stage 2, 5c). `C a = ({ C t(5); t; })`, a by-value argument, a reference binding and a copy of an outer object, with
+   copy and destructor counts equal to the gcc backend.
+3. **Bit-fields in a union or in a class with a virtual base** (`bitfield_union.cpp`): unions (aggregate initializers,
+   anonymous unions, `constexpr` union constructors, static data) are covered by 1. A class with a virtual base has no
+   aggregate constant at all, EDG rejects a `constexpr` constructor in such a class, so it is zeroed and constructed at
+   start-up and its bit-fields go through `bfstore` as before (probe: `D`, `D2`, with default member initializers on
+   bit-fields). Nothing was missing there beyond what the probe now checks.
+4. **Bit-fields wider than 64 bits**: only `unsigned __int128 f : 100` can be (EDG truncates `long long f : 70` to 64
+   bits with a warning). Not implementable here (no 128-bit type in the emitter, units of at most 8 bytes). The marker
+   is now `(unsupported lvalue bit-field-wider-than-64-bits)` instead of the generic layout one.
+5. **VLA storage freed at scope exit** (`vla_scope.cpp`; changed `vla.cpp`, `stmtexpr.cpp` goldens): the default
+   lowered IL has no marker (no `enk_vla_dealloc` in C++, no destruction-list entry, and QBE could not release stack
+   in any case: no save/restore, `alloc16` is a bare `sub rsp`). EDG can lower VLAs itself, though:
+   `LOWER_VARIABLE_LENGTH_ARRAYS=1` (the C generator's configuration) turns a VLA into a pointer, a `__vla_alloc` call at
+   the declaration and `__vla_dealloc` on every exit from the scope plus an EH cleanup-list entry
+   (`__vla_dealloc_eh`). `scripts/setup-pathb.sh` now sets it; the runtime is in `libC.a`. The probe counts live
+   allocations (`__vla_number_of_active_allocations`) after every kind of scope exit. The `vlaalloc` IR op and the
+   emitter's capacity scheme stay for a harness built without the macro (`be/nfcxx_ir.c` compiles both under
+   `#if LOWER_VARIABLE_LENGTH_ARRAYS`) and are not reached by the current harness. Cost and limits: two runtime calls and a
+   `malloc` per VLA, and the runtime pool is one global (not thread safe).
+   **A harness built before this change must be rebuilt** (`scripts/setup-pathb.sh`): the VLA goldens are for the lowered form.
+6. **Inline asm** (`asm_barrier.cpp`): the subset that is implementable on QBE, an empty template with no operands whose
+   clobbers are `memory` and/or `cc` (and a basic `asm("")`), is `(barrier)`; the emitter calls an empty module-local
+   function, an opaque call QBE keeps in order (`ASM-COUNT` lines check the call counts, including that `cc` alone emits
+   none). Everything else is refused with its reason: `(unsupported stmt asm-template | asm-operands | asm-clobbers | asm-goto)`;
+   the emitter prints `refused: (unsupported stmt asm-operands)`. Outputs, inputs, templates and register clobbers
+   cannot be done: QBE has no inline assembly and the template would have to be spliced into its output.
+7. **General weak declarations** (`weak_decl.cpp`, `multi/weak_link`): `(declare "f" (weak))` for an undefined weak
+   function, `(global ... (weak) (extern))` for an undefined weak object, `(weak attr)` on a weak definition. The
+   emitter loads their addresses from the GOT (`extern $f`, `copy extern $x`: a PIE links and an absent symbol is null)
+   and marks them `.weak`; a `(weak attr)` definition is kept by pruning and overridden by a strong definition in
+   another unit (`weak_link`). The `_ZTH` prefix rule is removed: `_ZTH<name>` arrives as an ordinary `declare`
+   (checked with `multi/tls_extern`).
+
+Emitter changes are in both `scripts/pathb-qbe-emit.rb` and the oracle `tests/mruby/oracle/pathb-qbe-emit.py`:
+`(barrier)`, `(declare ...)`, `(weak) (extern)` and `(weak attr)`, and a refusal that prints an `(unsupported ...)` statement
+as it is. Edge inputs: `barrier.ir`, `e_barrier_form.ir`, `r_unsupported_asm.ir`, `weak_decl.ir`, `e_declare_form.ir`,
+`weakref_tls_init.ir` (now with `declare`s).
+
+**Still missing after this round**: bit-fields over 64 bits (128-bit types), inline asm with operands/templates/register
+clobbers (not implementable), a bounds check on VLA subscripts, `weakref` aliases, a thread-safe VLA pool.
 
 ## C++ exceptions (stage 3, third round)
 
@@ -410,9 +519,8 @@ as required, 0 refused, 0 failed; `tests/pathb-ir/run.sh` ok (goldens, 45 kinds,
   so the probes report through the exit code.
 - **`long double`** is refused by the emitter as before: a handler or a throw of `long double` refuses the module. A
   `volatile`-qualified handler type refuses it until the volatile work lands (the probe uses `const int *`).
-- **Union aggregate constants** (a local `{{1,2,3,4}, {7}}` with a union member) and **default member initializers on a class with a
-  base and a vptr** give `(unsupported init aggregate-constant)` (`ir_init_constant`). They showed up while writing EH probes but are
-  not related to exceptions; the probes avoid them.
+- **Union aggregate constants** and **default member initializers on a class with a base and a vptr** gave
+  `(unsupported init aggregate-constant)`; they are lowered in the fourth round (above).
 - **Exceptions in dynamic initialization** (a throwing initializer of a namespace-scope object) depend on the dynamic initialization
   work.
 - **Cost.** Every function with an EH stack entry has a 240-byte slot and, since it calls `_setjmp`, all its slots in memory. A try
@@ -467,9 +575,7 @@ Order (matches path A on the probes): priorities ascending, then the routines wi
 `__cxa_atexit` run before `.fini_array` entries, as in path A. Across translation units the order is the link order
 of the objects, as for gcc.
 
-Still missing: thread-local objects (`thread_local` with a dynamic initializer: the lowering makes `TLS init
-function for X` routines; the IR prints them, nothing calls them and the link fails with an undefined reference; that
-belongs with the TLS work), and any check of the order of initialization across translation units beyond "all
-run before main". The local-static guard is whatever `__cxa_guard_acquire` / `__cxa_guard_release` of the linked C++
+Thread-local objects with a dynamic initializer are done (above, "Dynamic initialization of thread-local objects").
+Still missing: any check of the order of initialization across translation units beyond "all run before main". The local-static guard is whatever `__cxa_guard_acquire` / `__cxa_guard_release` of the linked C++
 runtime does; the probes are single-threaded. The `dik_constructor` lowering is untested because the lowered IL never
 contains one.

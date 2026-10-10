@@ -1,0 +1,12 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(function "sum"
+  (ret int)
+  (params (param %0 "n" int) (ellipsis))
+  (slot "ap" (array 1 (struct "tag")) 24 8)
+  (slot "n" int 4 4)
+  (store int $"n" %0)
+  (vastart $"ap")
+  (let %1 int (vaarg int $"ap"))
+  (let %2 double (vaarg double $"ap"))
+  (let %3 (ptr char) (vaarg (ptr char) $"ap"))
+  (return %1))

@@ -1,0 +1,340 @@
+(ir-module "vararg_def.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "__curr_eh_stack_entry" (ptr (struct "__C8")) 8 8 (extern))
+(global "stdin" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "stdout" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(global "stderr" (ptr (struct "_IO_FILE")) 8 8 (extern))
+(data "const" (const (array 5 (const char))) (string "idls\000"))
+(data "const.1" (const (array 2 (const char))) (string "A\000"))
+(data "const.2" (const (array 11 (const char))) (string "dddddddddd\000"))
+(data "const.3" (const (array 11 (const char))) (string "%d-%s-%.1f\000"))
+(data "const.4" (const (array 3 (const char))) (string "xy\000"))
+(data "const.5" (const (array 9 (const char))) (string "%d [%s]\n\000"))
+
+(function "_ZN32_INTERNAL_14_vararg_def_cpp_main8sum_intsEiz"
+  (ret long)
+  (params (param %0 "n" int) (ellipsis))
+  (static)
+  (slot "n" int 4 4)
+  (slot "ap" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "s" long 8 8)
+  (slot "i" int 4 4)
+  (store int $"n" %0)
+  (let %1 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (vastart %1)
+  (store long $"s" (const long 0))
+  (block
+    (store int $"i" (const int 0))
+    (loop
+      (body
+        (let %2 int (load int $"i"))
+        (let %3 int (load int $"n"))
+        (let %4 bool (lt.s int %2 %3))
+        (if %4 (then) (else (break)))
+        (block
+          (let %5 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+          (let %6 int (vaarg int %5))
+          (let %7 long (iconv long %6))
+          (let %8 long (load long $"s"))
+          (let %9 long (wadd long %8 %7))
+          (store long $"s" %9)))
+      (step
+        (let %10 int (load int $"i"))
+        (let %11 int (wadd int %10 (const int 1)))
+        (store int $"i" %11))))
+  (let %12 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %13 long (load long $"s"))
+  (return %13))
+
+(function "_ZN32_INTERNAL_14_vararg_def_cpp_main5mixedEPKcz"
+  (ret double)
+  (params (param %0 "fmt" (ptr (const char))) (ellipsis))
+  (static)
+  (slot "fmt" (ptr (const char)) 8 8)
+  (slot "ap" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "t" double 8 8)
+  (slot "p" (ptr (const char)) 8 8)
+  (store (ptr (const char)) $"fmt" %0)
+  (let %1 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (vastart %1)
+  (store double $"t" (const double 0.0))
+  (block
+    (let %2 (ptr (const char)) (load (ptr (const char)) $"fmt"))
+    (store (ptr (const char)) $"p" %2)
+    (loop
+      (body
+        (let %3 (ptr (const char)) (load (ptr (const char)) $"p"))
+        (nonnull %3)
+        (let %4 char (load char %3))
+        (let %5 bool (ne char %4 (const char 0)))
+        (if %5 (then) (else (break)))
+        (block
+          (let %6 (ptr (const char)) (load (ptr (const char)) $"p"))
+          (nonnull %6)
+          (let %7 char (load char %6))
+          (let %8 int (iconv int %7))
+          (let %9 bool (eq int %8 (const int 105)))
+          (if %9
+            (then
+              (block
+                (let %10 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+                (let %11 int (vaarg int %10))
+                (let %12 double (i2f double %11))
+                (let %13 double (load double $"t"))
+                (let %14 double (fadd double %13 %12))
+                (store double $"t" %14)))
+            (else
+              (block
+                (let %15 (ptr (const char)) (load (ptr (const char)) $"p"))
+                (nonnull %15)
+                (let %16 char (load char %15))
+                (let %17 int (iconv int %16))
+                (let %18 bool (eq int %17 (const int 108)))
+                (if %18
+                  (then
+                    (block
+                      (let %19 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+                      (let %20 long (vaarg long %19))
+                      (let %21 double (i2f double %20))
+                      (let %22 double (load double $"t"))
+                      (let %23 double (fadd double %22 %21))
+                      (store double $"t" %23)))
+                  (else
+                    (block
+                      (let %24 (ptr (const char)) (load (ptr (const char)) $"p"))
+                      (nonnull %24)
+                      (let %25 char (load char %24))
+                      (let %26 int (iconv int %25))
+                      (let %27 bool (eq int %26 (const int 100)))
+                      (if %27
+                        (then
+                          (block
+                            (let %28 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+                            (let %29 double (vaarg double %28))
+                            (let %30 double (load double $"t"))
+                            (let %31 double (fadd double %30 %29))
+                            (store double $"t" %31)))
+                        (else
+                          (block
+                            (let %32 (ptr (const char)) (load (ptr (const char)) $"p"))
+                            (nonnull %32)
+                            (let %33 char (load char %32))
+                            (let %34 int (iconv int %33))
+                            (let %35 bool (eq int %34 (const int 115)))
+                            (if %35
+                              (then
+                                (block
+                                  (let %36 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+                                  (let %37 (ptr (const char)) (vaarg (ptr (const char)) %36))
+                                  (let %38 (ptr char) (index %37 (const int 0) 1))
+                                  (let %39 char (load char %38))
+                                  (let %40 double (i2f double %39))
+                                  (let %41 double (load double $"t"))
+                                  (let %42 double (fadd double %41 %40))
+                                  (store double $"t" %42)))))))))))))))
+      (step
+        (let %43 (ptr (const char)) (load (ptr (const char)) $"p"))
+        (let %44 (ptr (const char)) (index %43 (const long 1) 1))
+        (store (ptr (const char)) $"p" %44))))
+  (let %45 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %46 double (load double $"t"))
+  (return %46))
+
+(function "_ZN32_INTERNAL_14_vararg_def_cpp_main11format_intoEPcmPKcz"
+  (ret int)
+  (params (param %0 "buf" (ptr char)) (param %1 "n" unsigned_long) (param %2 "fmt" (ptr (const char))) (ellipsis))
+  (static)
+  (slot "buf" (ptr char) 8 8)
+  (slot "n" unsigned_long 8 8)
+  (slot "fmt" (ptr (const char)) 8 8)
+  (slot "ap" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "tmp" (ptr char) 8 8)
+  (slot "tmp.1" unsigned_long 8 8)
+  (slot "tmp.2" (ptr (const char)) 8 8)
+  (slot "r" int 4 4)
+  (store (ptr char) $"buf" %0)
+  (store unsigned_long $"n" %1)
+  (store (ptr (const char)) $"fmt" %2)
+  (let %3 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (vastart %3)
+  (let %4 (ptr char) (load (ptr char) $"buf"))
+  (store (ptr char) $"tmp" %4)
+  (let %5 unsigned_long (load unsigned_long $"n"))
+  (store unsigned_long $"tmp.1" %5)
+  (let %6 (ptr (const char)) (load (ptr (const char)) $"fmt"))
+  (store (ptr (const char)) $"tmp.2" %6)
+  (let %7 (ptr char) (load (ptr char) $"tmp"))
+  (let %8 unsigned_long (load unsigned_long $"tmp.1"))
+  (let %9 (ptr (const char)) (load (ptr (const char)) $"tmp.2"))
+  (let %10 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %11 int (call int &"vsnprintf" %7 %8 %9 %10))
+  (store int $"r" %11)
+  (let %12 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %13 int (load int $"r"))
+  (return %13))
+
+(function "_ZN32_INTERNAL_14_vararg_def_cpp_main9take_listEP13__va_list_tag"
+  (ret int)
+  (params (param %0 "ap" (ptr (struct "__va_list_tag"))))
+  (static)
+  (slot "ap" (ptr (struct "__va_list_tag")) 8 8)
+  (slot "a" int 4 4)
+  (slot "b" int 4 4)
+  (store (ptr (struct "__va_list_tag")) $"ap" %0)
+  (let %1 (ptr (struct "__va_list_tag")) (load (ptr (struct "__va_list_tag")) $"ap"))
+  (let %2 int (vaarg int %1))
+  (store int $"a" %2)
+  (let %3 (ptr (struct "__va_list_tag")) (load (ptr (struct "__va_list_tag")) $"ap"))
+  (let %4 int (vaarg int %3))
+  (store int $"b" %4)
+  (let %5 int (load int $"a"))
+  (let %6 int (wmul int %5 (const int 10)))
+  (let %7 int (load int $"b"))
+  (let %8 int (wadd int %6 %7))
+  (return %8))
+
+(function "_ZN32_INTERNAL_14_vararg_def_cpp_main5twiceEiz"
+  (ret int)
+  (params (param %0 "n" int) (ellipsis))
+  (static)
+  (slot "n" int 4 4)
+  (slot "ap" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "ap2" (array 1 (struct "__va_list_tag")) 24 8)
+  (slot "x" int 4 4)
+  (slot "y" int 4 4)
+  (store int $"n" %0)
+  (let %1 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (vastart %1)
+  (let %2 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap2"))
+  (let %3 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (copy 24 %2 %3)
+  (let %4 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %5 int (call int &"_ZN32_INTERNAL_14_vararg_def_cpp_main9take_listEP13__va_list_tag" %4))
+  (store int $"x" %5)
+  (let %6 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap2"))
+  (let %7 int (call int &"_ZN32_INTERNAL_14_vararg_def_cpp_main9take_listEP13__va_list_tag" %6))
+  (store int $"y" %7)
+  (let %8 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap2"))
+  (let %9 (ptr (struct "__va_list_tag")) (bitcast (ptr (struct "__va_list_tag")) $"ap"))
+  (let %10 int (load int $"x"))
+  (let %11 int (load int $"y"))
+  (let %12 bool (eq int %10 %11))
+  (let %13 int (const int 0))
+  (if %12
+    (then
+      (let %14 int (load int $"x"))
+      (set %13 %14))
+    (else
+      (set %13 (const int -1))))
+  (return %13))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "ok" int 4 4)
+  (slot "buf" (array 64 char) 64 1)
+  (slot "r" int 4 4)
+  (store int $"ok" (const int 0))
+  (let %0 long (call long &"_ZN32_INTERNAL_14_vararg_def_cpp_main8sum_intsEiz" (variadic 1) (const int 12) (const int 1) (const int 2) (const int 3) (const int 4) (const int 5) (const int 6) (const int 7) (const int 8) (const int 9) (const int 10) (const int 11) (const int 12)))
+  (let %1 bool (eq long %0 (const long 78)))
+  (if %1
+    (then
+      (block
+        (let %2 int (load int $"ok"))
+        (let %3 int (wadd int %2 (const int 4)))
+        (store int $"ok" %3))))
+  (let %4 (ptr (const char)) (bitcast (ptr (const char)) @"const.1"))
+  (let %5 double (call double &"_ZN32_INTERNAL_14_vararg_def_cpp_main5mixedEPKcz" (variadic 1) @"const" (const int 3) (const double 2.5) (const long 100) %4))
+  (let %6 bool (eq double %5 (const double 170.5)))
+  (if %6
+    (then
+      (block
+        (let %7 int (load int $"ok"))
+        (let %8 int (wadd int %7 (const int 4)))
+        (store int $"ok" %8))))
+  (let %9 double (call double &"_ZN32_INTERNAL_14_vararg_def_cpp_main5mixedEPKcz" (variadic 1) @"const.2" (const double 1.0) (const double 2.0) (const double 3.0) (const double 4.0) (const double 5.0) (const double 6.0) (const double 7.0) (const double 8.0) (const double 9.0) (const double 10.0)))
+  (let %10 bool (eq double %9 (const double 55.0)))
+  (if %10
+    (then
+      (block
+        (let %11 int (load int $"ok"))
+        (let %12 int (wadd int %11 (const int 4)))
+        (store int $"ok" %12))))
+  (let %13 (ptr char) (bitcast (ptr char) $"buf"))
+  (let %14 (ptr (const char)) (bitcast (ptr (const char)) @"const.4"))
+  (let %15 int (call int &"_ZN32_INTERNAL_14_vararg_def_cpp_main11format_intoEPcmPKcz" (variadic 3) %13 (const unsigned_long 64) @"const.3" (const int 42) %14 (const double 1.5)))
+  (store int $"r" %15)
+  (let %16 int (load int $"r"))
+  (let %17 (ptr char) (bitcast (ptr char) $"buf"))
+  (let %18 int (call int &"printf" (variadic 1) @"const.5" %16 %17))
+  (let %19 int (load int $"r"))
+  (let %20 bool (eq int %19 (const int 9)))
+  (let %21 bool (const bool 0))
+  (if %20
+    (then
+      (let %22 (ptr char) (bitcast (ptr char) $"buf"))
+      (bounds (const int 0) 64)
+      (let %23 (ptr char) (index %22 (const int 0) 1))
+      (let %24 char (load char %23))
+      (let %25 int (iconv int %24))
+      (let %26 bool (eq int %25 (const int 52)))
+      (set %21 %26)))
+  (let %27 bool (const bool 0))
+  (if %21
+    (then
+      (let %28 (ptr char) (bitcast (ptr char) $"buf"))
+      (bounds (const int 3) 64)
+      (let %29 (ptr char) (index %28 (const int 3) 1))
+      (let %30 char (load char %29))
+      (let %31 int (iconv int %30))
+      (let %32 bool (eq int %31 (const int 120)))
+      (set %27 %32)))
+  (if %27
+    (then
+      (block
+        (let %33 int (load int $"ok"))
+        (let %34 int (wadd int %33 (const int 4)))
+        (store int $"ok" %34))))
+  (let %35 int (call int &"_ZN32_INTERNAL_14_vararg_def_cpp_main5twiceEiz" (variadic 1) (const int 2) (const int 3) (const int 4)))
+  (let %36 bool (eq int %35 (const int 34)))
+  (if %36
+    (then
+      (block
+        (let %37 int (load int $"ok"))
+        (let %38 int (wadd int %37 (const int 4)))
+        (store int $"ok" %38))))
+  (let %39 int (load int $"ok"))
+  (let %40 int (wadd int %39 (const int 10)))
+  (return %40))
+
+(function "_ZSt11__terminatev"
+  (ret void)
+  (params)
+  (weak)
+  (slot "tmp" (struct "__C8") 240 8)
+  (let %0 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %0)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %1 (ptr unsigned_char) (offset $"tmp" 8))
+  (store unsigned_char %1 (const unsigned_char 6))
+  (eval (call void &"_ZSt9terminatev"))
+  (block
+    (let %2 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+    (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %2)
+    (return)))
+
+(function "_ZSt23__is_constant_evaluatedv"
+  (ret bool)
+  (params)
+  (weak)
+  (slot "tmp" (struct "__C8") 240 8)
+  (let %0 (ptr (struct "__C8")) (load (ptr (struct "__C8")) @"__curr_eh_stack_entry"))
+  (store (ptr (struct "__C8")) $"tmp" %0)
+  (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" $"tmp")
+  (let %1 (ptr unsigned_char) (offset $"tmp" 8))
+  (store unsigned_char %1 (const unsigned_char 6))
+  (block
+    (block
+      (let %2 (ptr (struct "__C8")) (load (ptr (struct "__C8")) $"tmp"))
+      (store (ptr (struct "__C8")) @"__curr_eh_stack_entry" %2)
+      (return (const bool 0x0))))
+  (unreachable))

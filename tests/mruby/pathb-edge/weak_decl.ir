@@ -1,0 +1,39 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(global "absent_data" int 4 4 (weak) (extern))
+(global "absent_array" (array 4 int) 16 4 (weak) (extern))
+(global "plain_ext" int 4 4 (extern))
+(global "weak_def_data" int 4 4 (weak attr) (init (scalar 0 int (const int 41))))
+(global "comdat_data" int 4 4 (weak) (init (scalar 0 int (const int 1))))
+(global "fn_table" (array 2 (ptr (fn int (int)))) 16 8 (init
+    (addr 0 (ptr (fn int (int))) &"absent_fn" 0)
+    (addr 8 (ptr (fn int (int))) &"weak_def_fn" 0)))
+(declare "absent_fn" (weak))
+(declare "absent_void" (weak))
+(declare "weak_def_fn" (weak))
+(function "weak_def_fn"
+  (ret int)
+  (params (param %0 "x" int))
+  (weak attr)
+  (let %1 int (wadd int %0 (const int 1)))
+  (return %1))
+(function "comdat_fn"
+  (ret int)
+  (params)
+  (weak)
+  (return (const int 3)))
+(function "main"
+  (ret int)
+  (params)
+  (let %0 bool (ne (ptr (fn int (int))) &"absent_fn" (null (ptr (fn int (int))))))
+  (if %0
+    (then
+      (let %1 int (call int &"absent_fn" (const int 3)))))
+  (let %2 bool (ne (ptr (fn void ())) &"absent_void" (null (ptr (fn void ())))))
+  (let %3 bool (ne (ptr int) @"absent_data" (null (ptr int))))
+  (let %4 int (load int @"absent_data"))
+  (let %5 (ptr int) (index @"absent_array" (const long 2) 4))
+  (let %6 int (load int @"plain_ext"))
+  (let %7 int (load int @"weak_def_data"))
+  (let %8 int (call int &"weak_def_fn" (const int 1)))
+  (return %8))
