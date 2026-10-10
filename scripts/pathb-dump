@@ -3,7 +3,10 @@
 # with --ir the mid-level IR (stage 2, see docs/notes/pathb-stage2.md). Runs the harness front end
 # (build/pathb, from scripts/setup-pathb.sh) from the EDG base dir, with the same flags as the nfcxx --emit-c
 # branch. Front-end errors go to stderr and give a non-zero exit status.
-# Usage: scripts/pathb-dump [--ir] [-std=c++NN] file.cpp...
+# Usage: scripts/pathb-dump [--ir] [-std=c++NN] [-Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp...
+# Hosted by default, like the driver: the host g++'s C++ library include directories and GNU version
+# (scripts/host-sys.sh; NFCXX_CXX, NFCXX_SYS_INCLUDES). --freestanding or PATHB_HOSTED=0 gives the old harness
+# (only EDG's include_c++, no C library headers).
 # NFCXX_PATHB_STATS=1 prints per-node-kind lowered/unsupported counts to stderr (--ir only).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -11,15 +14,25 @@ cpfe=${PATHB_CPFE:-$root/build/pathb/cmake/bin/cpfe}
 base=${PATHB_BASE:-$root/build/pathb/edg-base}
 [ -x "$cpfe" ] || { echo "pathb-dump: harness not built; run scripts/setup-pathb.sh" >&2; exit 2; }
 
-std=--c++23; files=(); mode=il
+source "$root/scripts/host-sys.sh"
+std=--c++23; files=(); user_opts=(); mode=il; hosted=${PATHB_HOSTED:-1}
 for arg in "$@"; do
   case $arg in
     --ir) mode=ir ;;
+    --freestanding) hosted=0 ;;
     -std=c++*) std=--c++${arg#-std=c++} ;;
+    -I?*) user_opts+=("-I$(realpath -m "${arg#-I}")") ;;   # the front end runs in another directory
+    -D?*|-U?*) user_opts+=("$arg") ;;                        # preprocessor options reach the front end
     *) files+=("$arg") ;;
   esac
 done
 [ ${#files[@]} -gt 0 ] || { echo "pathb-dump: no input files" >&2; exit 2; }
+
+sys_inc=(); gnu_opts=()
+if [ "$hosted" != 0 ]; then
+  while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
+  gnu=$(host_gnu_version); [ -z "$gnu" ] || gnu_opts=(--gnu_version="$gnu")
+fi
 
 export NFCXX_PATHB_MODE=$mode   # read by back_end() in be/nfcxx_be.c: "ir" selects be/nfcxx_ir.c
 status=0
@@ -31,7 +44,7 @@ for file in "${files[@]}"; do
   ti=$base/$stem.ti; had_ti=0; [ -e "$ti" ] && had_ti=1
   # -tused: instantiate the templates this file uses, as eccp does for a single file that is compiled and linked
   # (eccp.sh, "instantiate used"). Without it a call to a template has no definition in the IR.
-  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ -tused --sys_include="$base/include" "$f") || status=$?
+  (cd "$base" && "$cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --g++ ${gnu_opts[@]+"${gnu_opts[@]}"} -tused ${user_opts[@]+"${user_opts[@]}"} ${sys_inc[@]+"${sys_inc[@]}"} --sys_include="$base/include" "$f") || status=$?
   [ $had_ti = 1 ] || rm -f "$ti"
 done
 exit $status

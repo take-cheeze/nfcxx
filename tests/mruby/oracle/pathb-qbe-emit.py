@@ -299,6 +299,7 @@ class Module:
         self.startup = []      # (".init_array" or ".fini_array", priority (0: none), QBE symbol)
         self.funcs = set()     # IR names of the functions defined in this module
         self.got = {}          # IR name of an external function whose address is taken -> its pointer cell
+        self.abi = {}          # struct name -> AbiType: the C calling convention shape of aggregates by value
 
 
 # Functions that return twice. QBE does not know that, and it promotes a stack slot to an SSA temporary when only
@@ -314,6 +315,81 @@ def escape_slots(allocs):
     memory, where longjmp finds the last assignment. (The sink has to be a global: a stack slot used for this would
     itself be promoted, and the stores would vanish before QBE looks at escapes.)"""
     return ["\tstorel %s, $%s" % (line.split()[0], SINK) for line in allocs]
+
+
+class AbiType:
+    """(abi-type "NAME" SIZE ALIGN SHAPE): how a struct or class is passed and returned by value. shape is "leaves"
+    (the scalars to classify), "memory" (more than 16 bytes), "empty" (no data: not passed) or "unsupported"."""
+
+    def __init__(self, tn, size, align, shape, why):
+        self.tn = tn
+        self.size = size
+        self.align = align
+        self.shape = shape
+        self.why = why
+
+
+LEAF_SIZE = {"b": 1, "h": 2, "w": 4, "l": 8, "s": 4, "d": 8}
+
+
+def declare_abi_type(mod, f):
+    """Read an (abi-type ...) form, add it to the module and write the QBE type declaration."""
+    if len(f) < 5:
+        raise BadIR("abi-type form")
+    name = str(f[1])
+    size = as_int(f[2])
+    align = as_int(f[3])
+    if align not in (1, 2, 4, 8, 16):
+        raise BadIR("abi-type %s: alignment %d" % (name, align))
+    spec = f[4]
+    tn = ":ty%d" % len(mod.abi)
+    shape = head_of(spec)
+    why = None
+    fields = None
+    if shape == "memory":
+        fields = "%d" % size
+    elif shape == "empty":
+        fields = ""
+    elif shape == "unsupported":
+        why = str(spec[1])
+    elif shape == "leaf":
+        parts = []
+        cur = 0
+        for lf in f[4:]:
+            if head_of(lf) != "leaf" or len(lf) != 3:
+                raise BadIR("abi-type %s: bad leaf %s" % (name, form_text(lf)))
+            off = as_int(lf[1])
+            k = lf[2]
+            if not isinstance(k, str) or k not in LEAF_SIZE:
+                raise BadIR("abi-type %s: leaf kind %s" % (name, form_text(lf)))
+            ks = LEAF_SIZE[k]
+            if off < cur:
+                raise BadIR("abi-type %s: leaf at %d out of order or overlapping" % (name, off))
+            if off % ks != 0:
+                raise Refused("abi-type %s: member at offset %d is not naturally aligned" % (name, off))
+            if off > cur:
+                parts.append("b %d" % (off - cur))
+            parts.append(k)
+            cur = off + ks
+        if cur > size:
+            raise BadIR("abi-type %s: leaves exceed the size" % name)
+        if size > cur:
+            parts.append("b %d" % (size - cur))
+        fields = ", ".join(parts)
+        shape = "leaves"
+    else:
+        raise BadIR("abi-type %s: unknown shape %s" % (name, form_text(spec)))
+    mod.abi[name] = AbiType(tn, size, align, shape, why)
+    if fields is not None:
+        mod.out.append("type %s = align %d { %s }" % (tn, align, fields))
+
+
+def abi_of(mod, tyform):
+    """The AbiType of an aggregate type form, or None (an IR without (abi-type ...) keeps the pointer convention)."""
+    ty = parse_type(tyform)
+    if ty[0] != "agg":
+        return None
+    return mod.abi.get(ty[2])
 
 
 class Fn:
@@ -339,6 +415,7 @@ class Fn:
         self.conts = []      # step labels of enclosing loops, for (continue)
         self.case_labels = {}  # id(marker) -> @label, for the switch being emitted
         self.abort_used = False
+        self.sret_buf = None   # a function returning an aggregate in the C convention: the buffer whose address it returns
 
     # ---- output
     def _put(self, s):
@@ -379,7 +456,7 @@ class Fn:
 
     def ret(self, v=None):
         self.ensure_live()
-        self._put("ret" if v is None else "ret %s" % v)
+        self._put(("ret" if self.sret_buf is None else "ret %s" % self.sret_buf) if v is None else "ret %s" % v)
         self.dead = True
 
     def label(self, lab):
@@ -1048,17 +1125,56 @@ def r_call(fn, x):
         rest = rest[1:]
         if nfixed > len(rest):
             raise BadIR("call: (variadic %d) with only %d arguments" % (nfixed, len(rest)))
-    args = [fn.opnd(a) for a in rest]
+    # An aggregate argument is (byval TYPE ADDR), an aggregate result (sret TYPE ADDR) first. With an (abi-type ...) for
+    # the type they are passed the way the C calling convention says (QBE classifies its aggregate types); without one
+    # (older IR) they are plain addresses.
+    sret = None
+    args = []
+    for i, a in enumerate(rest):
+        h = head_of(a)
+        if h == "sret" or h == "byval":
+            if len(a) != 3:
+                raise BadIR("call: bad %s" % form_text(a))
+            info = abi_of(fn.mod, a[1])
+            if info is None:
+                args.append((fn.opnd(a[2], "l"), None))
+            else:
+                if info.shape == "unsupported":
+                    raise Refused("aggregate %s by value: %s" % (str(parse_type(a[1])[2]), info.why))
+                if h == "sret":
+                    if i != 0:
+                        raise BadIR("call: sret is not the first argument")
+                    sret = (info, fn.opnd(a[2], "l"))
+                    args.append(None)
+                else:
+                    args.append((fn.opnd(a[2], "l"), info))
+        else:
+            args.append((fn.opnd(a), None))
     parts = []
     for i, a in enumerate(args):
-        if a.cls is None:
-            raise Refused("call argument without a class")
         if i == nfixed:
             parts.append("...")
-        parts.append("%s %s" % (a.cls, a.t))
+        if a is None:
+            continue
+        v, info = a
+        if v.cls is None:
+            raise Refused("call argument without a class")
+        if info is None:
+            parts.append("%s %s" % (v.cls, v.t))
+        elif info.shape != "empty":
+            parts.append("%s %s" % (info.tn, v.t))
     if nfixed is not None and nfixed == len(args):
         parts.append("...")
     target = callee.t
+    if sret is not None:
+        info, dest = sret
+        if info.shape == "empty":
+            fn.emit("call %s(%s)" % (target, ", ".join(parts)))
+        else:
+            t = fn.tmp()
+            fn.emit("%s =%s call %s(%s)" % (t, info.tn, target, ", ".join(parts)))
+            fn.emit("call $memmove(l %s, l %s, l %d)" % (dest.t, t, info.size))
+        return None
     if ret == VOID:
         fn.emit("call %s(%s)" % (target, ", ".join(parts)))
         return None
@@ -1307,6 +1423,40 @@ def s_vlaalloc(fn, x):
     fn.label(done)
 
 
+def s_zero_fill(fn, x):
+    # (zero-fill BYTES DST): clear an aggregate object (the part of a constant initializer that names no element).
+    n = as_int(x[1])
+    dst = fn.opnd(x[2], "l")
+    if n == 0:
+        return
+    fn.emit("call $memset(l %s, w 0, l %d)" % (dst.t, n))
+
+
+def s_vastart(fn, x):
+    # (vastart ADDR): start the va_list at ADDR (the enclosing function must have an (ellipsis) parameter).
+    if len(x) != 2:
+        raise BadIR("vastart form")
+    ap = fn.opnd(x[1], "l")
+    fn.emit("vastart %s" % ap.t)
+
+
+def r_vaarg(fn, x):
+    # (vaarg TYPE ADDR): the next variadic argument of the va_list at ADDR. QBE's vaarg takes w, l, s and d.
+    if len(x) != 3:
+        raise BadIR("vaarg form")
+    ty = parse_type(x[1])
+    if is_agg(ty) or ty[0] == "fn":
+        raise Refused("vaarg of type %s" % (ty,))
+    cls = qcls(ty)
+    ap = fn.opnd(x[2], "l")
+    t = fn.tmp()
+    fn.emit("%s =%s vaarg %s" % (t, cls, ap.t))
+    return Val(t, cls, ty)
+
+
+RVAL["vaarg"] = r_vaarg
+
+
 def s_copy(fn, x):
     n = as_int(x[1])
     dst = fn.opnd(x[2], "l")
@@ -1513,7 +1663,7 @@ STMT = {
     "block": s_block, "let": s_let, "set": s_set,
     "store": s_store, "store.v": s_store,
     "bfstore": s_bfstore, "bfstore.v": s_bfstore, "vlaalloc": s_vlaalloc,
-    "copy": s_copy, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
+    "copy": s_copy, "zero-fill": s_zero_fill, "vastart": s_vastart, "eval": s_eval, "bounds": s_bounds, "nonnull": s_nonnull,
     "if": s_if, "loop": s_loop, "switch": s_switch,
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
@@ -1702,9 +1852,11 @@ def emit_string(mod, d):
     if head_of(text) != "string":
         raise Refused("data %s: %s" % (name, form_text(text)))
     raw = str(text[1])
-    if len(raw) > ty[1]:
+    # The string is bytes; a wide string (wchar_t, char16_t, char32_t) is an array of 2 or 4 byte integers.
+    total = ty[1] * (ty[2][1] if ty[2][0] == "int" else 1)
+    if len(raw) > total:
         raise BadIR("string data %s longer than its array" % name)
-    raw = raw + "\0" * (ty[1] - len(raw))
+    raw = raw + "\0" * (total - len(raw))
     mod.strings[name] = raw
     parts = ["b %d" % ord(c) for c in raw]
     mod.out.append("data $%s = { %s }" % (qsym(name), ", ".join(parts)) if parts else "data $%s = { z 0 }" % qsym(name))
@@ -1762,20 +1914,43 @@ def emit_function(mod, f):
             body_forms.append(part)
     # Parameters: each arrives in a QBE temporary %pI and is copied into its register slot.
     pi = 0
+    sret_tn = None
     for p in params_form[1:]:
         h = head_of(p)
         if h == "sret":
             n = int(p[1][1:])
+            info = abi_of(mod, p[2]) if len(p) > 2 else None
             fn.declare_reg(n, ("ptr", None))
-            qparams.append("l %%p%d" % pi)
-            param_stores.append(("l", pi, n))
+            if info is None:
+                qparams.append("l %%p%d" % pi)
+                param_stores.append(("l", pi, n))
+            else:
+                if info.shape == "unsupported":
+                    raise Refused("aggregate %s returned by value: %s" % (str(parse_type(p[2])[2]), info.why))
+                # The C convention: no hidden parameter; the function fills a buffer of its own and returns its address.
+                fn.allocs.append("\t%%sretbuf =l alloc%d %d" % (16 if info.align >= 16 else 8, max(info.size, 1)))
+                fn.inits.append("\tstorel %%sretbuf, %%r%d" % n)
+                if info.shape != "empty":
+                    fn.sret_buf = "%sretbuf"
+                    sret_tn = info.tn
         elif h == "param":
             n = int(p[1][1:])
             pty = p[3]
             if head_of(pty) == "byval":
+                info = abi_of(mod, pty[1])
                 fn.declare_reg(n, ("ptr", None))
-                qparams.append("l %%p%d" % pi)
-                param_stores.append(("l", pi, n))
+                if info is None:
+                    qparams.append("l %%p%d" % pi)
+                    param_stores.append(("l", pi, n))
+                else:
+                    if info.shape == "unsupported":
+                        raise Refused("aggregate %s passed by value: %s" % (str(parse_type(pty[1])[2]), info.why))
+                    if info.shape == "empty":
+                        fn.allocs.append("\t%%ebuf%d =l alloc8 8" % pi)
+                        fn.inits.append("\tstorel %%ebuf%d, %%r%d" % (pi, n))
+                    else:
+                        qparams.append("%s %%p%d" % (info.tn, pi))
+                        param_stores.append(("l", pi, n))
             else:
                 ty = parse_type(pty)
                 cls = qcls(ty)
@@ -1801,6 +1976,8 @@ def emit_function(mod, f):
         fn._put("call $abort()")
         fn._put("hlt")
     rc = "" if ret == VOID else qcls(ret) + " "
+    if sret_tn is not None:
+        rc = sret_tn + " "
     linkage = "" if static else "export "
     if weak:
         mod.out.append(WEAK_MARK + qsym(name))
@@ -1876,7 +2053,8 @@ def prune(forms):
     """Reachability. The IR carries every routine EDG marks as needed, including inline and template code that
     nothing reaches. Keep the external definitions (they are the translation unit's interface) and what they refer
     to, transitively. A (weak) or (static) definition that nothing reaches is dropped: another translation unit that
-    needs a weak definition has its own copy. Declarations ((extern) globals) and string data always stay."""
+    needs a weak definition has its own copy. A declaration ((extern) global) that nothing reaches is dropped too (a
+    hosted program's headers declare many objects of types this emitter refuses). String data always stays."""
     defs = {}
     for f in forms[1:]:
         if head_of(f) in ("function", "global"):
@@ -1896,8 +2074,7 @@ def prune(forms):
             if r in defs and r not in live:
                 live.add(r)
                 work.append(r)
-    return [f for f in forms[1:] if head_of(f) not in ("function", "global")
-            or str(f[1]) in live or (head_of(f) == "global" and any(head_of(p) == "extern" for p in f[2:]))]
+    return [f for f in forms[1:] if head_of(f) not in ("function", "global") or str(f[1]) in live]
 
 
 # Weak references. (declare "NAME" (weak)) is a function declared __attribute__((weak)) that the module refers to
@@ -1918,17 +2095,49 @@ def weak_refs(forms):
     return out
 
 
-def emit_module(text, do_prune=True):
+def _mentions_long_double(x):
+    """Does the form mention the type long_double (a bare atom, not a string constant)?"""
+    if isinstance(x, list):
+        return any(_mentions_long_double(y) for y in x)
+    return type(x) is str and x == "long_double"
+
+
+def stub_long_double(forms):
+    """--long-double=trap: QBE has no 80-bit type, so a function that mentions long double cannot be emitted. Instead
+    of refusing the module, such a function becomes a stub that aborts when it runs (its linkage and start-up markers
+    stay), and a global of that type is dropped."""
+    out = [forms[0]]
+    for f in forms[1:]:
+        h = head_of(f)
+        if h == "function" and _mentions_long_double(f):
+            keep = [p for p in f[2:] if head_of(p) in ("static", "weak", "constructor", "destructor")]
+            out.append(["function", f[1], ["ret", "void"], ["params"]] + keep + [["unreachable"]])
+        elif h == "global" and _mentions_long_double(f):
+            continue
+        else:
+            out.append(f)
+    return out
+
+
+def emit_module(text, do_prune=True, ld_trap=False):
     forms = parse_forms(tokenize(text))
     if not forms or head_of(forms[0]) != "ir-module":
         raise BadIR("the input is not an (ir-module ...) IR text")
     check_layout(forms[0])
+    if ld_trap:
+        forms = stub_long_double(forms)
     mod = Module()
     all_forms = forms
     if do_prune:
         forms = [forms[0]] + prune(forms)
     mod.weakrefs = weak_refs(forms)
+    for f in forms[1:]:
+        if head_of(f) == "abi-type":
+            declare_abi_type(mod, f)
     for f in all_forms[1:]:
+        if head_of(f) == "function":
+            mod.funcs.add(str(f[1]))
+    for f in forms[1:]:   # the globals that stay: a dropped one (unreferenced) may have a type this emitter refuses
         if head_of(f) == "global":
             mod.globals[str(f[1])] = parse_type(f[2])
             if (any(head_of(p) == "weak" for p in f[5:]) and any(head_of(p) == "extern" for p in f[5:])
@@ -1936,8 +2145,6 @@ def emit_module(text, do_prune=True):
                 mod.weakdata[str(f[1])] = True
             if any(head_of(p) == "thread" for p in f[5:]):
                 mod.thread[str(f[1])] = "ext" if any(head_of(p) == "extern" for p in f[5:]) else "def"
-        if head_of(f) == "function":
-            mod.funcs.add(str(f[1]))
     # Strings first: a string data item may be referenced from a global initializer.
     for f in forms[1:]:
         if head_of(f) == "data":
@@ -1947,8 +2154,11 @@ def emit_module(text, do_prune=True):
             emit_global(mod, f)
     for f in forms[1:]:
         if head_of(f) == "function":
-            emit_function(mod, f)
-        elif head_of(f) not in ("global", "data", "declare"):
+            try:
+                emit_function(mod, f)
+            except Refused as e:
+                raise Refused("%s [in %s]" % (e, str(f[1])))   # which function holds the unsupported node
+        elif head_of(f) not in ("global", "data", "abi-type", "declare"):
             raise Refused("top-level form (%s ...)" % head_of(f))
     emit_startup_tables(mod)
     for name, cell in mod.got.items():
@@ -1970,15 +2180,19 @@ def main(argv):
             return 1
         return append_weak(args[1], args[2])
     do_prune = True
+    ld_trap = False
     if args and args[0] == "--no-prune":
         do_prune = False
         args = args[1:]
+    if args and args[0] == "--long-double=trap":
+        ld_trap = True
+        args = args[1:]
     if len(args) > 1:
-        sys.stderr.write("usage: pathb-qbe-emit.py [--no-prune] [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n")
+        sys.stderr.write("usage: pathb-qbe-emit.py [--no-prune] [--long-double=trap] [FILE.ir | -]  |  --append-weak IL.ssa ASM.s\n")
         return 1
     src = sys.stdin.read() if not args or args[0] == "-" else open(args[0], encoding="latin-1").read()
     try:
-        sys.stdout.write(emit_module(src, do_prune))
+        sys.stdout.write(emit_module(src, do_prune, ld_trap))
     except Refused as e:
         sys.stderr.write("refused: %s\n" % e)
         return 3

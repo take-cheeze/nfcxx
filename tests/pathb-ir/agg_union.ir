@@ -1009,10 +1009,8 @@
   (store unsigned_short %10 %8)
   (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
   (let %11 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
-  (nonnull %11)
   (eval (call void &"_ZN7DerivedC2Ev" %11))
   (let %12 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
-  (nonnull %12)
   (let %13 (ptr void) (bitcast (ptr void) %12))
   (let %14 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.2"))
   (bounds (const unsigned_long 0) 1)
@@ -1086,7 +1084,6 @@
   (nonnull %14)
   (store (ptr (const long)) %14 %13)
   (let %15 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
-  (nonnull %15)
   (let %16 (ptr void) (bitcast (ptr void) %15))
   (let %17 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
   (bounds (const unsigned_long 0) 1)
@@ -1096,7 +1093,6 @@
   (block
     (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
     (let %19 (ptr (struct "Derived2")) (load (ptr (struct "Derived2")) $"tmp"))
-    (nonnull %19)
     (eval (call void &"_ZN7DerivedD2Ev" %19)))
   (block
     (let %20 (ptr (union "__C7")) (offset $"tmp.2" 16))

@@ -274,10 +274,8 @@
   (store unsigned_short %12 %10)
   (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
   (let %13 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
-  (nonnull %13)
   (eval (call void &"_ZN1VC2Ev" %13))
   (let %14 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
-  (nonnull %14)
   (let %15 (ptr void) (bitcast (ptr void) %14))
   (let %16 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
   (bounds (const unsigned_long 0) 1)
@@ -345,7 +343,6 @@
   (nonnull %14)
   (store (ptr (const long)) %14 %13)
   (let %15 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
-  (nonnull %15)
   (let %16 (ptr void) (bitcast (ptr void) %15))
   (let %17 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
   (bounds (const unsigned_long 0) 1)
@@ -355,7 +352,6 @@
   (block
     (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
     (let %19 (ptr (struct "W")) (load (ptr (struct "W")) $"tmp"))
-    (nonnull %19)
     (eval (call void &"_ZN1VD2Ev" %19)))
   (block
     (let %20 (ptr (union "__C7")) (offset $"tmp.2" 16))
@@ -431,10 +427,8 @@
   (store unsigned_short %12 %10)
   (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
   (let %13 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
-  (nonnull %13)
   (eval (call void &"_ZN1WC2Ev" %13))
   (let %14 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
-  (nonnull %14)
   (let %15 (ptr void) (bitcast (ptr void) %14))
   (let %16 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
   (bounds (const unsigned_long 0) 1)
@@ -502,7 +496,6 @@
   (nonnull %14)
   (store (ptr (const long)) %14 %13)
   (let %15 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
-  (nonnull %15)
   (let %16 (ptr void) (bitcast (ptr void) %15))
   (let %17 (ptr (ptr void)) (bitcast (ptr (ptr void)) $"tmp.3"))
   (bounds (const unsigned_long 0) 1)
@@ -512,7 +505,6 @@
   (block
     (store unsigned_short @"__eh_curr_region" (const unsigned_short 65535))
     (let %19 (ptr (struct "X")) (load (ptr (struct "X")) $"tmp"))
-    (nonnull %19)
     (eval (call void &"_ZN1WD2Ev" %19)))
   (block
     (let %20 (ptr (union "__C7")) (offset $"tmp.2" 16))

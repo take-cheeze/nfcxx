@@ -11,7 +11,7 @@
 # Reruns refresh the tree and rebuild only what changed (build/pathb/cmake is kept).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-src=$root/3rd/edg
+src=${PATHB_EDG_SRC:-$root/3rd/edg}   # PATHB_EDG_SRC: an EDG checkout elsewhere (worktrees with an empty 3rd/)
 out=${PATHB_OUT:-$root/build/pathb}   # PATHB_OUT: build somewhere else (scratch builds, other checkouts)
 tree=$out/tree
 
@@ -78,5 +78,5 @@ EDG_BASE=$base cmake -G Ninja -S "$tree" -B "$out/cmake" -DCMAKE_BUILD_TYPE=Rele
   -DEDG_MACRO_CONF=nfcxx-pathb -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ >"$out/configure.log" 2>&1 \
   || { tail -30 "$out/configure.log" >&2; exit 1; }
 cd "$out/cmake"
-ninja ${NINJA_JOBS:+-j"$NINJA_JOBS"} bin/cpfe >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
+ninja ${PATHB_JOBS:+-j$PATHB_JOBS} bin/cpfe >"$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log" >&2; exit 1; }
 echo "Path B cpfe built: $out/cmake/bin/cpfe (base dir: $base)"
