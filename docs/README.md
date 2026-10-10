@@ -31,7 +31,7 @@ covers say so.
 | Path A, gcc backend (`nfcxx --backend=gcc`: EDG's C through `gcc -O2 -fwrapv -fno-strict-aliasing`) | The 15 programs of `tests/cases` (`NFCXX_BACKEND=gcc tests/run.sh`); freestanding library (`tests/lib/run.sh`); builtin probes (`tests/builtins/run.sh`); C inputs (`tests/c/run.sh`); tinyxml2 (`tests/realworld/run.sh`); doctest on the hosted headers (`tests/realworld/run_doctest.sh`, gcc only) | ci.yml, realworld.yml |
 | Path A, qbe backend (the default: EDG's C -> `qbe-prep.rb` -> cproc -> QBE -> asm; `scripts/qbe-cc`) | Same `tests/cases`, `tests/lib`, `tests/builtins`, `tests/c`, tinyxml2 as above with `NFCXX_BACKEND=qbe` or the default; C++ exceptions (`tests/cases/exceptions.cpp`); signed overflow wraps (`tests/cases/signed_overflow_wraps.cpp`); Lua and mruby as C (`run_lua.sh`, `run_mruby.sh`) | ci.yml, realworld.yml |
 | Path B (EDG lowered IL -> own IR -> QBE, `scripts/setup-pathb.sh`, `be/`, `scripts/pathb-qbe-emit.rb`) | IL goldens (`tests/pathb/run.sh`); IR goldens and node coverage (`tests/pathb-ir/run.sh`); IR -> QBE -> run, equal to `// EXPECT:` and to the gcc backend (`tests/pathb-qbe/run.sh`): arithmetic and control flow, `continue`, bool loads, `setjmp`, bit-fields (`cases/bitfield*.cpp`), VLAs including scope exit (`cases/vla*.cpp`), GNU statement expressions (`cases/stmtexpr*.cpp`), volatile (`cases/volatile.cpp`), thread-local objects (`cases/tls*.cpp`, `multi/tls_*`), dynamic initialization (`cases/dyn_*.cpp`, `multi/dyn_init`), C++ exceptions (`cases/eh_*.cpp`), COMDAT/weak linkage (`multi/comdat`, `multi/weak_link`), checked operations that must abort with SIGABRT (`traps/`) | pathb.yml |
-| Path B, hosted (`NFCXX_PATH=b`, `tests/pathb-qbe/hosted.sh`) | Not on this revision: neither the switch in `nfcxx` nor the script exists here. `pathb.yml` runs the script when it is present. | pathb.yml (conditional) |
+| Path B, hosted (`NFCXX_PATH=b ./nfcxx`, `scripts/pathb-cc`, `scripts/host-sys.sh`; `docs/notes/pathb-hosted.md`) | Programs using the host C and C++ headers and libstdc++: hosted probes `tests/pathb-qbe/cases/{hosted_*,abi_struct,vararg_def,base_null}.cpp` and `multi/abi_c`, `tests/cases` through the driver (`NFCXX_PATH=b tests/run.sh`), tinyxml2 (exit 12); all in `tests/pathb-qbe/hosted.sh`. doctest builds with `NFCXX_LONG_DOUBLE=trap` and exits 2 as expected (documented in `pathb-hosted.md`; no CI script). Several translation units sharing libstdc++ templates: `tests/multi-tu/run.sh` (`docs/notes/multi-tu.md`, both backends) | pathb.yml (hosted.sh), ci.yml (multi-tu) |
 | Hexagon | Generated C for the `linux_riscv32` stand-in target compiles with clang-19 `--target=hexagon` and runs under qemu-hexagon, HVX kernels included; struct layout equals clang's Hexagon ABI (`tests/hexagon/run.sh`, `tests/hexagon/layout.sh`). Not the Hexagon SDK, QuRT or `hexagon-sim` (unavailable, `docs/notes/hexagon.md` section 4). | hexagon.yml |
 | `nfcc` (drop-in `cc`, C only) | `-c`, link, `-S`, `-E`/`-M*` answered by the host compiler, `-D -U -I`, dependency files, response files, `-shared`, rejected options, on both backends (`tests/c/cc-mode.sh`); Lua through its own makefile (`tests/realworld/run_lua_make.sh`); mruby's rake build (`tests/realworld/run_mruby.sh`) | ci.yml, realworld.yml |
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
@@ -51,7 +51,9 @@ Each entry names where it comes from and what, if anything, checks it.
 **`long double`**
 - Path A qbe: cproc rejects it ("long double is not yet supported"). `tests/realworld/run_doctest.sh` therefore
   runs doctest on gcc only and reports a SKIP for qbe (`docs/notes/realworld.md`).
-- Path B: the emitter refuses a module that uses it (`refused: type long_double`). Checked by
+- Path B: the emitter refuses a module that uses it (`refused: type long_double`), unless run with `--long-double=trap`
+  (`PATHB_LONG_DOUBLE=trap`, driver `NFCXX_LONG_DOUBLE=trap`): functions that mention it become stubs that abort when run, and
+  globals of that type are dropped; there is no silent `long double` = `double` (`pathb-hosted.md`, "long double"). Refusal checked by
   `tests/mruby/pathb-edge/r_longdouble.ir` (via `tests/mruby/run.sh`) and the unused-code probe
   `tests/pathb-qbe/cases/reachability.cpp`.
 - Hexagon: EDG's `long double` is 16 bytes, Hexagon's is 8; `tests/hexagon/layout.sh` leaves it out (`hexagon.md`).
@@ -70,8 +72,9 @@ one-line `.c` file (qbe fails, gcc backend runs it). Path B has no `_Complex` ha
   the snippet and rethrows a `RuntimeError` in the host (`tests/eval/run.sh`).
 - Hexagon EH runtime: multiple/virtual-base catch matching, `noexcept` violations, array `new` unwinding and thrown
   `double`/`float` are not supported (`hexagon.md`, section 3a). No test asserts the failures.
-- Path B in the harness: `<new>` does not open (`stddef.h`), so `std::bad_alloc` is untestable there
-  (`pathb-stage3.md`, Limits); `<exception>` and `<typeinfo>` work (`tests/pathb-qbe/cases/eh_std.cpp`).
+- Path B and Path A alike cannot catch exceptions thrown inside libstdc++.so (`vector::at`, `std::__throw_*`): they use the
+  gcc unwinder, and the program aborts (`pathb-hosted.md`, "Known limits"). User-code throws and `std::runtime_error` constructed in
+  user code work (`tests/pathb-qbe/cases/hosted_stdexcept.cpp`, `eh_std.cpp`).
 
 **Variable-length arrays (Path B)**: storage is EDG's `__vla_alloc`/`__vla_dealloc` pool in `libC.a`, a single global that
 is not thread safe, costing two calls and a `malloc` per VLA; no `bounds` check on VLA subscripts
@@ -93,9 +96,10 @@ an empty barrier (`tests/pathb-qbe/cases/asm_barrier.cpp`) and refuses a templat
 **Path B other**: bit-fields wider than 64 bits and checked (`NFCXX_IR_OVERFLOW=trap`) unsigned or 64-bit signed
 multiplication are refused; pointer subscripts are not bounds-checked and there is no `undef` (by decision); thread-local
 objects are x86-64 ELF only and a thread-local address in a static initializer is refused; only LP64 layouts are emitted
-(`pathb-stage3.md`; refusal paths: `tests/mruby/pathb-edge/r_*.ir` via `tests/mruby/run.sh`). The harness base ships only
-EDG's `include_c++`, so programs that need C library headers cannot be built by `tests/pathb-qbe/run.sh`
-(`pathb-stage3.md`, Limits); `tests/cases/qbe_*.cpp` are skipped for that reason.
+(`pathb-stage3.md`; refusal paths: `tests/mruby/pathb-edge/r_*.ir` via `tests/mruby/run.sh`). Hosted headers now work (`pathb-hosted.md`; `PATHB_HOSTED=0` or
+`--freestanding` gives the old EDG-only headers). Still failing there: `__builtin_alloca`, signed multiply-overflow and
+mixed-type overflow builtins, `bswap16`, aggregate `va_arg`, `__int128`/`_Float128` in kept functions, asm other than the
+barriers and `int $3` (`pathb-hosted.md`, "Known limits"; no test asserts the failures).
 
 **cproc / qbe backend, other**
 - `alignas(16) int x;` on a block-scope local becomes `__attribute__((aligned))`, which cproc rejects ("GNU attribute
@@ -116,8 +120,7 @@ spans that exist).
 
 **`nfceval`** (`eval.md`, "Limitations"; `tests/eval/run.sh` covers the supported forms, not the limits): no sandbox
 and no run-time timeout; one eval at a time per engine, not thread safe; no overloaded bindings, no generic lambdas or
-C varargs as bound functions; the library must be part of the host's single translation unit because two nfcxx objects that
-both use `std::string` fail to link (duplicate template members); host and snippet must use the same backend.
+C varargs as bound functions; host and snippet must use the same backend.
 
 **Hexagon**: no Hexagon SDK, `hexagon-sim` or QuRT; EDG has no Hexagon target, so a 32-bit little-endian stand-in
 (`linux_riscv32`) is used; cases that include hosted C++ headers, need GP-relative relocations or template instantiation

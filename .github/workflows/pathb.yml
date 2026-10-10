@@ -8,7 +8,7 @@ name: Path B
 #   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
 #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
 #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
-#   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b), run when the script exists
+#   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
 #   tests/mruby/run.sh       the mruby ports against their Python oracles, with the Path B parts enabled
 on:
   push:
@@ -22,6 +22,7 @@ on:
       - "scripts/setup-edg.sh"
       - "scripts/setup-qbe.sh"
       - "scripts/host-sys.sh"
+      - "scripts/pathb-cc"
       - "scripts/mrb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -30,6 +31,7 @@ on:
       - "tests/mruby/**"
       - "tests/cases/**"
       - "nfcxx"
+      - "tests/realworld/tinyxml2_main.cpp"
       - ".github/workflows/pathb.yml"
   pull_request:
     paths:
@@ -41,6 +43,7 @@ on:
       - "scripts/setup-edg.sh"
       - "scripts/setup-qbe.sh"
       - "scripts/host-sys.sh"
+      - "scripts/pathb-cc"
       - "scripts/mrb"
       - "scripts/setup-mruby.sh"
       - "scripts/mruby-tool-config.rb"
@@ -49,6 +52,7 @@ on:
       - "tests/mruby/**"
       - "tests/cases/**"
       - "nfcxx"
+      - "tests/realworld/tinyxml2_main.cpp"
       - ".github/workflows/pathb.yml"
   workflow_dispatch:
 
@@ -62,7 +66,7 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: sccache
       # ninja jobs for the Path B harness build (scripts/setup-pathb.sh); the runner has 4 cores and 16 GB, and
       # the harness links with -flto, so do not oversubscribe it.
-      NINJA_JOBS: "4"
+      PATHB_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,14 +115,10 @@ jobs:
       - name: Path B stage 3 IR to QBE translation validation
         run: tests/pathb-qbe/run.sh
 
-      # hosted.sh belongs to the hosted Path B work (NFCXX_PATH=b); the step is a no-op until the script lands.
+      # Hosted Path B: the hosted probes, tests/cases through the driver (NFCXX_PATH=b) and tinyxml2
+      # (cloned at its pinned commit; skipped when the fetch fails).
       - name: Hosted Path B (NFCXX_PATH=b)
-        run: |
-          if [ -f tests/pathb-qbe/hosted.sh ]; then
-            bash tests/pathb-qbe/hosted.sh
-          else
-            echo "tests/pathb-qbe/hosted.sh not present on this revision; skipped"
-          fi
+        run: tests/pathb-qbe/hosted.sh
 
       - name: mruby scripts against their Python oracles (Path B parts enabled)
         run: tests/mruby/run.sh

@@ -113,7 +113,7 @@ by stubs that exit 127. Results:
 | `scripts/setup-edg.sh` | built (about 4 minutes on a shared 4-core machine) |
 | `scripts/setup-qbe.sh` | built |
 | `scripts/setup-mruby.sh` | built (about 1 minute); the pinned commit came from the mruby mirror |
-| `NINJA_JOBS=4 scripts/setup-pathb.sh` | built (about 4 minutes, cold, no sccache) |
+| `PATHB_JOBS=4 scripts/setup-pathb.sh` | built (about 4 minutes, cold, no sccache) |
 | `tests/run.sh` (qbe, gcc), `tests/lib/run.sh`, `tests/builtins/run.sh`, `tests/c/run.sh` (22 passed), `tests/c/cc-mode.sh` (145 passed), `tests/eval/run.sh` | pass without python3, ruby and rake |
 | `tests/pathb/run.sh`, `tests/pathb-ir/run.sh` (1997 node occurrences, 0 unsupported) | pass without python3, ruby and rake |
 | `tests/pathb-qbe/run.sh` | 74 programs, 74 built, 74 ran, 58 match EXPECT, 16 trapped as required, 0 refused, 0 failed, without python3, ruby and rake. The first run failed all 74 on a relative `PATHB_CPFE` that `scripts/pathb-dump` could not use from its working directory; fixed in the script on this branch. |
