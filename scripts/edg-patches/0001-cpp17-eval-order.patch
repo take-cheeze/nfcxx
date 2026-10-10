@@ -1,0 +1,206 @@
+--- a/src/lower_il.c	2026-10-10 01:30:16.499761800 +0000
++++ b/src/lower_il.c	2026-10-10 01:30:16.502596690 +0000
+@@ -13334,6 +13334,119 @@
+ 
+ #endif /* BUILTIN_FUNCTIONS_ENABLED */
+ 
++
++/* nfcxx: C++17 sequencing for the C back end.  C leaves the order of
++   evaluation of function designator, "this" object and arguments, and of the
++   operands of most operators, unspecified, so the C compiler picks its own.
++   C++17 [expr.call], [expr.shift], [expr.ass], [expr.sub] and [over.match.oper]
++   fix the order (postfix-expression/object before the arguments, left before
++   right for << >> [], right before left for = and op=).  The routines below
++   evaluate the operand that must come first into a temporary ahead of the
++   operation, which makes the order explicit in the generated C. */
++
++static void sequence_operand_before_args(an_expr_node_ptr      node,
++                                         an_insert_location_ptr insert_location)
++/*
++Evaluate the (lowered, rvalue) expression node into a temporary at
++*insert_location and replace node by a use of the temporary.
++*/
++{
++  a_variable_ptr   temp;
++  an_expr_node_ptr temp_node;
++
++  check_assertion(!node->is_lvalue);
++  temp = make_lowered_temporary(node->type);
++  temp_node = make_var_assignment_expr(temp, copy_node(node));
++  (void)insert_expr_statement(temp_node, insert_location);
++  overwrite_node(node, var_rvalue_expr(temp));
++}  /* sequence_operand_before_args */
++
++
++static an_expr_node_ptr sequence_operands_of_operation(an_expr_node_ptr expr)
++/*
++expr is a lowered-operands, non-call, two operand built-in operation.  If
++C++17 mandates an evaluation order for its operands and C would not
++guarantee it, evaluate the operand that must go first into a temporary and
++return the assignment expression that does so (the caller makes it the left
++operand of a comma in front of expr); otherwise return NULL.
++*/
++{
++  an_expr_node_ptr      op1 = expr->variant.operation.operands, op2, assigns = NULL;
++  an_expr_operator_kind op = expr->variant.operation.kind;
++  a_boolean             first_is_op2 = FALSE, first_is_op1 = FALSE;
++
++  if (!strict_cpp17_eval_order || op1 == NULL) return NULL;
++  op2 = op1->next;
++  if (op2 == NULL || op2->next != NULL) return NULL;
++  switch (op) {
++    case eok_assign:
++      /* The right operand is sequenced before the left one.  What matters
++         for the left operand is the address it designates. */
++      if (expr->variant.operation.eval_right_to_left &&
++          !op2->is_lvalue &&
++          ((node_has_side_effects(op2, (a_boolean *)NULL) &&
++            !is_invariant_expr(op1, /*vars_can_change=*/TRUE,
++                               /*treat_as_potential_prvalue=*/FALSE)) ||
++           (node_has_side_effects(op1, (a_boolean *)NULL) &&
++            !is_invariant_expr(op2, /*vars_can_change=*/TRUE,
++                               /*treat_as_potential_prvalue=*/FALSE)))) {
++        first_is_op2 = TRUE;
++      }  /* if */
++      break;
++    case eok_add_assign:
++    case eok_subtract_assign:
++    case eok_multiply_assign:
++    case eok_divide_assign:
++    case eok_remainder_assign:
++    case eok_shiftl_assign:
++    case eok_shiftr_assign:
++    case eok_and_assign:
++    case eok_or_assign:
++    case eok_xor_assign:
++    case eok_padd_assign:
++    case eok_psubtract_assign:
++      /* The left operand's value is read too, so any side effect of the
++         right operand matters. */
++      if (expr->variant.operation.eval_right_to_left &&
++          !op2->is_lvalue &&
++          (node_has_side_effects(op2, (a_boolean *)NULL) ||
++           (node_has_side_effects(op1, (a_boolean *)NULL) &&
++            !is_invariant_expr(op2, /*vars_can_change=*/TRUE,
++                               /*treat_as_potential_prvalue=*/FALSE)))) {
++        first_is_op2 = TRUE;
++      }  /* if */
++      break;
++    case eok_shiftl:
++    case eok_shiftr:
++    case eok_subscript:
++      /* Left operand before the right one. */
++      if (expr->variant.operation.eval_left_to_right &&
++          !op1->is_lvalue &&
++          node_has_side_effects(op1, (a_boolean *)NULL) &&
++          !is_invariant_expr(op2, /*vars_can_change=*/TRUE,
++                             /*treat_as_potential_prvalue=*/FALSE)) {
++        first_is_op1 = TRUE;
++      }  /* if */
++      break;
++    default:
++      break;
++  }  /* switch */
++  if (first_is_op2) {
++    (void)pre_execute_expression(op2, &op1->next, &assigns);
++  } else if (first_is_op1) {
++    /* op1 is the first operand, so *prev is the expression pointer of the
++       operation itself; build the temporary by hand. */
++    a_variable_ptr   temp = make_lowered_temporary(op1->type);
++    an_expr_node_ptr copy = copy_node(op1);
++    copy->next = NULL;
++    assigns = make_var_assignment_expr(temp, copy);
++    set_expr_result_not_used(assigns);
++    overwrite_node(op1, var_rvalue_expr(temp));
++  }  /* if */
++  return assigns;
++}  /* sequence_operands_of_operation */
++
++
+ void lower_call(an_expr_node_ptr           expr,
+                 an_init_pos_descr_ptr      ipdp,
+                 ARG_UNUSED a_statement_ptr statement,
+@@ -13354,6 +13467,7 @@
+   an_expr_operator_kind         op = expr->variant.operation.kind;
+   a_routine_ptr                 routine = NULL;
+   an_expr_node_ptr              call_expr = expr, this_node = NULL;
++  an_expr_node_ptr              object_arg_node = NULL;
+   an_insert_location            insert_location;
+ 
+   if (expr_has_been_detached != NULL) *expr_has_been_detached = FALSE;
+@@ -13417,6 +13531,7 @@
+          whether or not the NULL-preservation test is added, so generate
+          slightly optimized code. */
+       lower_expr_full(arg_node, /*assume_expr_is_non_null=*/TRUE);
++      object_arg_node = arg_node;
+     }  /* if */
+     if (rtsp->return_value_parameter_follows_this) {
+       /* If a return value address argument will be added below, make sure
+@@ -13463,6 +13578,35 @@
+   /* In preparation for lowering the arguments, create an insert location
+      in case any temporaries are needed. */
+   set_expr_creation_insert_location(&insert_location);
++  if (strict_cpp17_eval_order) {
++    /* C++17: the object expression (or the function pointer, or the
++       pointer to member function) is sequenced before the arguments.  The
++       arguments may be moved into temporaries ahead of the call, and C does
++       not order the designator against the arguments, so evaluate the
++       designator first when an argument could depend on it. */
++    a_boolean        args_mutable = FALSE;
++    an_expr_node_ptr a;
++    for (a = arg_node; a != NULL; a = a->next) {
++      if (!is_invariant_expr(a, /*vars_can_change=*/TRUE,
++                             /*treat_as_potential_prvalue=*/FALSE)) {
++        args_mutable = TRUE;
++        break;
++      }  /* if */
++    }  /* for */
++    if (args_mutable) {
++      /* The object comes before the function (pm calls: (2), (1), (3..n)). */
++      if (object_arg_node != NULL && !object_arg_node->is_lvalue &&
++          !is_invariant_expr(object_arg_node, /*vars_can_change=*/TRUE,
++                             /*treat_as_potential_prvalue=*/FALSE)) {
++        sequence_operand_before_args(object_arg_node, &insert_location);
++      }  /* if */
++      if (!first_arg->is_lvalue &&
++          !is_invariant_expr(first_arg, /*vars_can_change=*/TRUE,
++                             /*treat_as_potential_prvalue=*/FALSE)) {
++        sequence_operand_before_args(first_arg, &insert_location);
++      }  /* if */
++    }  /* if */
++  }  /* if */
+   /* Lower the rest of the arguments. */
+   lower_arg_expr_list(arg_node, rout_type, routine, (a_param_type_ptr)NULL,
+                       /*maintain_sequencing=*/strict_cpp17_eval_order,
+@@ -16786,7 +16930,8 @@
+         lower_class_rvalue_adjust(expr);
+ #endif /* LOWER_CLASS_RVALUE_ADJUST */
+       } else {
+-        a_type_ptr  type;
++        a_type_ptr       type;
++        an_expr_node_ptr sequence_assigns = NULL;
+         if (bool_is_keyword && op == (an_expr_operator_kind)eok_cast &&
+             is_bool_type(operand_node->type)) {
+           /* A cast can eliminate the need for an extra cast on a
+@@ -16808,6 +16953,8 @@
+                         assume_operand_non_null_mask(expr,
+                                                      assume_expr_is_non_null),
+                         expr->variant.operation.eval_right_to_left);
++        /* C++17 operand sequencing that C does not guarantee. */
++        sequence_assigns = sequence_operands_of_operation(expr);
+         /* Do any special lowering required for this operator after the
+            operands have been lowered. */
+         switch (op) {
+@@ -17138,6 +17285,12 @@
+         /* Change the type of operators that return "bool" in C++ to
+            the "int" required in C. */
+         change_result_type_of_operator_returning_bool(expr);
++        if (sequence_assigns != NULL) {
++          /* Execute the operand that C++17 sequences first before the
++             operation. */
++          overwrite_node(expr, make_comma_node(sequence_assigns,
++                                               copy_node(expr)));
++        }  /* if */
+       }  /* if */
+       break;
+     case enk_constant:
