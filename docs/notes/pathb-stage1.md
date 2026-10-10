@@ -1,7 +1,10 @@
 # Path B stage 1: harness and IL dump
 
-Status: working for the eight `tests/cases/*.cpp` programs and for a wider probe program. It is a dump only:
-nothing executes or links the IL yet.
+Status: this note describes stage 1 as it was when written (a dump only). It is **historical**: the IL is now
+lowered to the IR of `pathb-stage2.md`, and the IR is emitted as QBE and executed by `tests/pathb-qbe/run.sh`
+(`pathb-stage3.md`). The "Not covered" list and "Surprises" below were true for the dump; the current state is in
+`docs/README.md` (status matrix) and in the later notes. `tests/pathb/run.sh` still checks the stage 1 goldens, and
+`scripts/setup-pathb.sh` / `scripts/pathb-dump` are still the harness entry points.
 
 ## What was built
 
@@ -61,7 +64,10 @@ member-function-pointer values:
 - Types: integers (`bool` via `is_bool_type`), `void`, float kinds, pointers, arrays, function types, classes,
   structs, unions, `const`/`volatile`, `nullptr_t`.
 
-Not covered (print `(unsupported ...)`):
+Not covered at stage 1 (printed `(unsupported ...)`; **since lowered** except inline asm with operands, templates or
+clobbers: VLAs by EDG itself, `LOWER_VARIABLE_LENGTH_ARRAYS=1`, probes `tests/pathb-qbe/cases/vla*.cpp`; statement
+expressions, `stmtexpr*.cpp`; bit-fields, `bitfield*.cpp`; global initializers and dynamic initialization, `dyn_*.cpp`;
+see `pathb-stage3.md`, "Closed gaps"):
 
 - `stmk_asm` (inline asm), `stmk_set_vla_size` and `stmk_vla_decl` (VLAs), and the `enk_statement` expression (GNU
   statement expression `({ ... })`). All three appear in the probe, none in `tests/cases`.
@@ -92,8 +98,8 @@ not check `typeid` or range-for.
   ...). `<cstdio>`, `<cstdarg>` and `<typeinfo>` fail to open, for the harness and for `nfcxx --emit-c` alike. The probe
   used `extern "C"` declarations and `__builtin_va_*`.
 - **Relative `include` symlink dangles on copy.** The base's `include` is a relative link into the submodule. `cp -r`
-  copies the link text, so from `build/pathb` it dangles. `setup-pathb.sh` replaces it with an absolute link. The stock
-  `setup-edg.sh` copies the same way. I did not check the main checkout's `build/edg-base`, and I did not touch it.
+  copies the link text, so from `build/pathb` it dangles. `setup-pathb.sh` replaces it with an absolute link. (`setup-edg.sh` copied the same
+  way when this was written; it now makes the same absolute link, `ln -sfn "$src/include_c++" "$base/include"`.)
 - **cpfe writes `<stem>.ti` into its working directory**, which is the base dir. `pathb-dump` removes it after each run.
 - **`-N` (`no_il_lowering`) does not give the unlowered C++ IL.** In this EDG `optk_write_unlowered_il` sets
   `suppress_back_end`, so `back_end()` is never called. The unlowered IL is not available without patching EDG's

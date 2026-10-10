@@ -1,0 +1,84 @@
+name: Real-world
+
+# The larger real-world builds of docs/notes/realworld.md: doctest (hosted C++, gcc backend), Lua 5.4 (C input mode
+# and its own makefile through nfcc) and mruby (its rake build with nfcc as the compiler, bootstrapped: the QBE-compiled
+# parser and VM run during the build). Each one clones its pinned upstream commit into build/realworld. tinyxml2 stays
+# in the main CI job. Run only when a change can affect the compilers they exercise. Runs on demand too.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "nfcxx"
+      - "nfcc"
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "3rd/cproc"
+      - "scripts/qbe-cc"
+      - "scripts/qbe-prep.rb"
+      - "scripts/weak-symbols.rb"
+      - "scripts/mrb"
+      - "scripts/setup-*.sh"
+      - "scripts/cproc-*.patch"
+      - "scripts/mruby-tool-config.rb"
+      - "tests/realworld/**"
+      - ".github/workflows/realworld.yml"
+  pull_request:
+    paths:
+      - "nfcxx"
+      - "nfcc"
+      - "3rd/edg"
+      - "3rd/qbe"
+      - "3rd/cproc"
+      - "scripts/qbe-cc"
+      - "scripts/qbe-prep.rb"
+      - "scripts/weak-symbols.rb"
+      - "scripts/mrb"
+      - "scripts/setup-*.sh"
+      - "scripts/cproc-*.patch"
+      - "scripts/mruby-tool-config.rb"
+      - "tests/realworld/**"
+      - ".github/workflows/realworld.yml"
+  workflow_dispatch:
+
+jobs:
+  realworld:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # ruby and rake: the mruby interpreter bootstrap (scripts/setup-mruby.sh) and run_mruby.sh's own rake build.
+      # make: Lua's makefile (run_lua_make.sh).
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ make ruby rake
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Build EDG front end
+        run: scripts/setup-edg.sh
+
+      - name: Build QBE and cproc
+        run: scripts/setup-qbe.sh
+
+      - name: doctest (hosted C++, gcc backend; the qbe request is reported as a documented SKIP)
+        run: tests/realworld/run_doctest.sh
+
+      - name: Lua 5.4 as C inputs (both backends)
+        run: tests/realworld/run_lua.sh
+
+      - name: Lua 5.4 through its own makefile with nfcc (both backends)
+        run: tests/realworld/run_lua_make.sh
+
+      - name: mruby rake build with nfcc (both backends)
+        run: tests/realworld/run_mruby.sh
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

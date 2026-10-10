@@ -37,6 +37,12 @@ jobs:
       - name: Test (gcc backend)
         run: NFCXX_BACKEND=gcc tests/run.sh
 
+      - name: Freestanding library (both backends)
+        run: tests/lib/run.sh
+
+      - name: Compiler builtin probes (both backends)
+        run: tests/builtins/run.sh
+
       - name: Real-world check (tinyxml2)
         run: tests/realworld/run.sh
 
