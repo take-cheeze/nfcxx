@@ -205,6 +205,23 @@ module SiteCensus
     [category, status, nil]
   end
 
+  # An inlined `&:sym` / `each` loop binds its element once per iteration: `mrb_value bc2cpp_sym_e_<n> = <read>;`
+  # opens the loop body and nothing else assigns the name (it is a block-scoped C++ variable with a unique number).
+  # Its receiver is that read, `indexed_result` for an array or hash element. Nil for any other non-register receiver.
+  LOOP_ELEMENT_RE = /\Abc2cpp_sym_e_\d+\z/
+
+  def loop_element_origin(lines, i, recv)
+    return nil unless recv.match?(LOOP_ELEMENT_RE)
+
+    decl = /^\s*mrb_value #{recv} = (.*);\s*$/
+    j = i - 1
+    j -= 1 while j >= 0 && i - j < 12 && lines[j] !~ decl
+    return nil if j.negative? || i - j >= 12 || lines[(j + 1)...i].any? { |l| l =~ /\b#{recv} = / }
+
+    origin = origin_of([], 0, lines[j][decl, 1], nil, [], 0)
+    origin == 'indexed_result' ? origin : nil
+  end
+
   # The origin of an `ambiguous` row from its may-set (the `|`-joined categories of its definitions).
   def join_origin(category)
     set = category.split('|')
@@ -311,6 +328,10 @@ module SiteCensus
     kept = l[/CLOSED_WORLD kept: (\w+)/, 1]
     recv = l[/bc2cpp_send\(M, (\w+)/, 1]
     origin, origin_status, origin_set = origins ? exact_origin(l, recv, origins) : [receiver_origin(lines, i + 1, recv), 'text_walk', nil]
+    if origin_status == 'not_a_register' && (element = loop_element_origin(lines, i, recv))
+      origin = element
+      origin_status = 'loop_element'
+    end
     category = if kept then "closed_world_kept:#{kept}"
                elsif class_arm then 'known_class_arm_still_by_name'
                elsif shape == 'rgss_native_class_guard' then 'rgss_native_exact_class_else'
