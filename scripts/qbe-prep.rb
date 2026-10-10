@@ -445,6 +445,28 @@ def first_member_plain?(toks, o, close)
   false
 end
 
+# `T x __attribute__((__aligned__(N)))` on a plain (non-array) object: toks[i] is the name, the attribute follows
+# it and the declarator ends with `;`, `,` or `=`. Not a typedef, and not `struct T __attribute__...` (a tag).
+# Python: plain_aligned_object.
+def plain_aligned_object?(toks, i)
+  nxt = tok_at(toks, i + 1)
+  return false if nxt.nil? || nxt.kind != :id || nxt.text != '__attribute__'
+  g = aligned_group(toks, i + 1)
+  return false if g.nil?
+  f = tok_at(toks, g[0])
+  return false unless is_punct(f, ';') || is_punct(f, ',') || is_punct(f, '=')
+  prv = tok_at(toks, i - 1)
+  return false if i == 0 || prv.nil? || (prv.kind == :id && ['struct', 'union', 'enum'].include?(prv.text))
+  k = i - 1
+  while k >= 0
+    x = toks[k]
+    break if x.kind == :punct && (x.text == ';' || x.text == '{' || x.text == '}')
+    return false if x.kind == :id && x.text == 'typedef'
+    k -= 1
+  end
+  true
+end
+
 # If toks[i] starts __attribute__((__aligned__(N))), return [end_index_exclusive, N].
 def aligned_group(toks, i)
   return nil if i + 8 >= toks.size || toks[i].kind != :id || toks[i].text != '__attribute__'
@@ -1041,7 +1063,8 @@ def main(argv)
     kind = t.kind
     if kind == :id
       x = t.text
-      unless SPECIAL_ID.key?(x) || (x.getbyte(0) == 95 && x.start_with?('__atomic_')) || is_punct(toks[i + 1], '[')
+      unless SPECIAL_ID.key?(x) || (x.getbyte(0) == 95 && x.start_with?('__atomic_')) || is_punct(toks[i + 1], '[') ||
+           (toks[i + 1] && toks[i + 1].kind == :id && toks[i + 1].text == '__attribute__')
         i += 1
         next
       end
@@ -1142,8 +1165,8 @@ def main(argv)
       end
     end
 
-    # 2. __attribute__((__aligned__(N))) after an array declarator: becomes _Alignas(N) before the name (valid for members and objects; cproc takes the GNU form only on members).
-    if t.kind == :id && t.text != '__attribute__' && is_punct(tok_at(toks, i + 1), '[')
+    # 2. __attribute__((__aligned__(N))) after a declarator name (array or not): becomes _Alignas(N) before the name (valid for members and objects; cproc takes the GNU form only on members).
+    if t.kind == :id && t.text != '__attribute__' && (is_punct(tok_at(toks, i + 1), '[') || plain_aligned_object?(toks, i))
       j = i + 1
       while j < toks.size && is_punct(toks[j], '[')
         j = match_fwd(toks, j, '[', ']')
