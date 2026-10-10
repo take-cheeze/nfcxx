@@ -43,7 +43,7 @@ closed some of it; **current** state in the second list):
 - non-finite float constants;
 - global initializers that are dynamic or binding.
 
-Current (`scripts/pathb-qbe-emit.rb`, the `Refused` raises): `long double` (type and constants); inline asm outside the accepted subset (`pathb-hosted.md`, "Inline asm"; `(unsupported stmt asm-...)`; the empty barrier is fine, `asm_barrier.cpp`); checked
+Current at this stage (`scripts/pathb-qbe-emit.rb`, the `Refused` raises; `long double` and `__int128` were lifted later, see `pathb-longdouble.md` and `pathb-int128.md`): inline asm outside the accepted subset (`pathb-hosted.md`, "Inline asm"; `(unsupported stmt asm-...)`; the empty barrier is fine, `asm_barrier.cpp`); checked
 (`NFCXX_IR_OVERFLOW=trap`) unsigned operations and checked 64-bit signed multiplication; a non-integer `switch`;
 non-finite float constants; bit-fields of a non-integer type; the address of a thread-local object in a static
 initializer; layouts other than LP64 (`(layout ...)` header). Dynamic initialization, constructor initializers and
@@ -212,7 +212,7 @@ Limits:
 - A copy of a whole volatile aggregate (`(copy N DST SRC)`) is not marked; it is a `memmove` call, which is not
   elided, but not a per-member volatile access either (C++ leaves this unspecified).
 - Volatile bit-fields work as the other accesses (read-modify-write of the unit through the helpers, one call each); the
-  bit-field branch's shift-pair extraction (no low-mask `and`, QBE copy.c miscompile) is kept. `long double` is still refused.
+  bit-field branch's shift-pair extraction (no low-mask `and`, QBE copy.c miscompile) is kept. `long double` was refused at this stage; it is supported now (`pathb-longdouble.md`).
 - The helpers are emitted per translation unit, only when used, and are not exported, so linking several units is fine.
 
 ### Thread-local objects
@@ -387,8 +387,9 @@ sections 5a-5c and 6.
    start-up and its bit-fields go through `bfstore` as before (probe: `D`, `D2`, with default member initializers on
    bit-fields). Nothing was missing there beyond what the probe now checks.
 4. **Bit-fields wider than 64 bits**: only `unsigned __int128 f : 100` can be (EDG truncates `long long f : 70` to 64
-   bits with a warning). Not implementable here (no 128-bit type in the emitter, units of at most 8 bytes). The marker
-   is now `(unsupported lvalue bit-field-wider-than-64-bits)` instead of the generic layout one.
+   bits with a warning). Not implementable here at this stage (no 128-bit type in the emitter, units of at most 8 bytes). The marker
+   is now `(unsupported lvalue bit-field-wider-than-64-bits)` instead of the generic layout one. Later, `__int128` was added and
+   128-bit bit-fields work (`pathb-int128.md`).
 5. **VLA storage freed at scope exit** (`vla_scope.cpp`; changed `vla.cpp`, `stmtexpr.cpp` goldens): the default
    lowered IL has no marker (no `enk_vla_dealloc` in C++, no destruction-list entry, and QBE could not release stack
    in any case: no save/restore, `alloc16` is a bare `sub rsp`). EDG can lower VLAs itself, though:
@@ -419,7 +420,7 @@ Emitter changes are in both `scripts/pathb-qbe-emit.rb` and the oracle `tests/mr
 as it is. Edge inputs: `barrier.ir`, `e_barrier_form.ir`, `r_unsupported_asm.ir`, `weak_decl.ir`, `e_declare_form.ir`,
 `weakref_tls_init.ir` (now with `declare`s).
 
-**Still missing after this round**: bit-fields over 64 bits (128-bit types), inline asm with operands/templates/register
+**Still missing after this round** (bit-fields over 64 bits were closed later, `pathb-int128.md`): inline asm with operands/templates/register
 clobbers (not implementable), a bounds check on VLA subscripts, `weakref` aliases, a thread-safe VLA pool.
 
 ## C++ exceptions (stage 3, third round)
