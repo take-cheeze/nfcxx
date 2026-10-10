@@ -66,7 +66,10 @@ if [ -x "$tmp/sq" ]; then "$tmp/sq"; [ $? -eq 4 ] && ok "-lm program runs" || ba
 check "-fvisibility=hidden -fvisibility-inlines-hidden" \
   "$nfcxx" -fvisibility=hidden -fvisibility-inlines-hidden -c "$tmp/src/a.cpp" -o "$tmp/vis.o"
 
-# 9. Options that would change the meaning of the code are still refused, loudly
+# 9. CMake's compiler probe: a source on stdin preprocessed with -E -x c++ -
+check "-E -x c++ - (stdin)" sh -c "printf 'int probe_marker;\n' | '$nfcxx' -E -x c++ - | grep -q probe_marker"
+
+# 10. Options that would change the meaning of the code are still refused, loudly
 if "$nfcxx" -fno-rtti -c "$tmp/src/a.cpp" -o "$tmp/r.o" 2>/dev/null; then
   bad "-fno-rtti refused" "compiled"
 else

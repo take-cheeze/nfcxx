@@ -27,7 +27,7 @@ shared=0; pic=0; rdynamic=0; compile_only=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
-sysdirs=(); srcs=(); ppflags=(); pie_opts=()
+sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
@@ -45,6 +45,8 @@ while [ $# -gt 0 ]; do
     -std=gnu++*) std=--c++${1#-std=gnu++} ;;   # GNU and strict modes differ in the dialect, which --dialect selects
     -E) preprocess=1 ;;
     -P) ppflags+=(-P) ;;
+    -x) xlang=$2; shift ;;      # -x c++ (CMake's compiler probes pipe a source to -E -x c++ -)
+    -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
     # Symbol visibility is not implemented; nfcc ignores it too (docs/notes/realworld.md), so nfcxx does the same
@@ -72,14 +74,20 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ $((ncpp + nobj + ${#cfiles[@]})) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+[ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
 if [ $preprocess = 1 ]; then
   # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way).
   hostcxx=${NFCXX_CXX:-g++}
   pp_out=(); [ $outset = 0 ] || pp_out=(-o "$out")
-  exec "$hostcxx" -E "-std=${std#--}" ${ppflags[@]+"${ppflags[@]}"} ${cflags[@]+"${cflags[@]}"} \
-    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+"${srcs[@]}"} "${pp_out[@]}"
+  pp_x=(); [ -z "$xlang" ] || pp_x=(-x "$xlang")
+  pp_in=(); [ $stdin_src = 0 ] || pp_in=(-)
+  exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+"${pp_x[@]}"} ${ppflags[@]+"${ppflags[@]}"} ${cflags[@]+"${cflags[@]}"} \
+    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+"${srcs[@]}"} ${pp_in[@]+"${pp_in[@]}"} "${pp_out[@]}"
 fi
+if [ $stdin_src = 1 ]; then
+  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
+fi
+case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
 if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
   echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
 fi
