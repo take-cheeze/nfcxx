@@ -35,8 +35,11 @@ module BytecodeIR
 
   class Program
     attr_reader :instructions, :blocks, :address_to_index
+    # The irep's local-register count (R0 and the locals; vm.c irep->nlocals), nil when the irep does not carry it.
+    attr_reader :nlocals
 
     def initialize(irep)
+      @nlocals = irep.nlocals&.to_i
       @catch_handlers = Array(irep.catch_handlers).freeze
       @instructions = Array(irep.instructions).each_with_index.map do |source, index|
         Instruction.new(index: index, source: source, successors: [])

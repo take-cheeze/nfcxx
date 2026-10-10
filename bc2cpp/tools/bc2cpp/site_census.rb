@@ -183,23 +183,51 @@ module SiteCensus
     end
   end
 
-  # The receiver origin from the exact walk (SiteOriginTable): [origin, status]. A site the table
-  # cannot prove, or cannot find, is `unknown` with the reason as its status.
+  # The receiver origin from the exact walk (SiteOriginTable): [origin, status, may_set]. A site the table
+  # cannot prove, or cannot find, is `unknown` with the reason as its status. A join (`ambiguous`) carries the set of
+  # origins its definitions have: when they all agree the site has that origin, when they differ it is `join` (the
+  # receiver is one of the set, which is the third element), and when any of them is `unknown` it stays `unknown`.
   def exact_origin(line, recv, origins)
-    return ['self', 'exact'] if recv == 'self'
-    return ['unknown', 'not_a_register'] unless recv =~ /\Ar\d+\z/
+    return ['self', 'exact', nil] if recv == 'self'
+    return ['unknown', 'not_a_register', nil] unless recv =~ /\Ar\d+\z/
 
     m = line.match(ORIGIN_TAG_RE)
-    return ['unknown', 'untagged'] unless m
+    return ['unknown', 'untagged', nil] unless m
 
     row = origins[[m[1], m[2].to_i, m[3], m[4]]]
-    return ['unknown', 'no_table_row'] unless row
+    return ['unknown', 'no_table_row', nil] unless row
 
     status, category, _definition = row
-    return ['unknown', status] unless status == 'exact'
-    return ['unknown', 'reg_mismatch'] unless recv == "r#{m[3]}"
+    return(recv == "r#{m[3]}" ? join_origin(category) : ['unknown', 'reg_mismatch', nil]) if status == 'ambiguous' && category != '-'
+    return ['unknown', status, nil] unless status == 'exact'
+    return ['unknown', 'reg_mismatch', nil] unless recv == "r#{m[3]}"
 
-    [category, status]
+    [category, status, nil]
+  end
+
+  # An inlined `&:sym` / `each` loop binds its element once per iteration: `mrb_value bc2cpp_sym_e_<n> = <read>;`
+  # opens the loop body and nothing else assigns the name (it is a block-scoped C++ variable with a unique number).
+  # Its receiver is that read, `indexed_result` for an array or hash element. Nil for any other non-register receiver.
+  LOOP_ELEMENT_RE = /\Abc2cpp_sym_e_\d+\z/
+
+  def loop_element_origin(lines, i, recv)
+    return nil unless recv.match?(LOOP_ELEMENT_RE)
+
+    decl = /^\s*mrb_value #{recv} = (.*);\s*$/
+    j = i - 1
+    j -= 1 while j >= 0 && i - j < 12 && lines[j] !~ decl
+    return nil if j.negative? || i - j >= 12 || lines[(j + 1)...i].any? { |l| l =~ /\b#{recv} = / }
+
+    origin = origin_of([], 0, lines[j][decl, 1], nil, [], 0)
+    origin == 'indexed_result' ? origin : nil
+  end
+
+  # The origin of an `ambiguous` row from its may-set (the `|`-joined categories of its definitions).
+  def join_origin(category)
+    set = category.split('|')
+    return ['unknown', 'ambiguous', set] if set.include?('unknown')
+
+    [set.size == 1 ? set.first : 'join', 'ambiguous', set]
   end
 
   # `at` is the index of the assignment whose right-hand side is `rhs`; `fn` and `params` describe its method.
@@ -299,7 +327,11 @@ module SiteCensus
           end
     kept = l[/CLOSED_WORLD kept: (\w+)/, 1]
     recv = l[/bc2cpp_send\(M, (\w+)/, 1]
-    origin, origin_status = origins ? exact_origin(l, recv, origins) : [receiver_origin(lines, i + 1, recv), 'text_walk']
+    origin, origin_status, origin_set = origins ? exact_origin(l, recv, origins) : [receiver_origin(lines, i + 1, recv), 'text_walk', nil]
+    if origin_status == 'not_a_register' && (element = loop_element_origin(lines, i, recv))
+      origin = element
+      origin_status = 'loop_element'
+    end
     category = if kept then "closed_world_kept:#{kept}"
                elsif class_arm then 'known_class_arm_still_by_name'
                elsif shape == 'rgss_native_class_guard' then 'rgss_native_exact_class_else'
@@ -309,7 +341,7 @@ module SiteCensus
                elsif shape == 'owner_class_chain' then 'owner_chain_default_else'
                else "other:#{shape}"
                end
-    { line: i + 1, origin: origin, origin_status: origin_status, category: category, kept: kept, fn: cur, name: name, argc: argc, else_arm: else_arm, class_arm: class_arm, marker: marker, shape: shape, why: why,
+    { line: i + 1, origin: origin, origin_status: origin_status, origin_set: origin_set, category: category, kept: kept, fn: cur, name: name, argc: argc, else_arm: else_arm, class_arm: class_arm, marker: marker, shape: shape, why: why,
       excluded: diag && diag[/excluded=(\S+)/, 1] }
   end
 
