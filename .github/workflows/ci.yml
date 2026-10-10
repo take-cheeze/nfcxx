@@ -49,6 +49,9 @@ jobs:
       - name: nfcc drop-in cc mode (both backends)
         run: tests/c/cc-mode.sh
 
+      - name: nfceval run-time eval library and nfcxx -shared (both backends)
+        run: tests/eval/run.sh
+
       - name: mruby scripts (byte-identical to the Python originals)
         run: tests/mruby/run.sh
 
