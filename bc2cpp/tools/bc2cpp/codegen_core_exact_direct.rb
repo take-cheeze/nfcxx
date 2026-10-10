@@ -35,7 +35,7 @@ module CoreExactDirect
     spec = site && BlockCoreDirectFallback::RECEIVERS[site[:klass]]
     return nil unless spec && tail == dynamic_dispatch_line(d, recv, name, argv)
 
-    target = core_exact_target(site[:klass], spec[:chain], name, argv.size)
+    target = core_exact_target(site[:klass], spec[:chain], name, argv.size, private_ok: site[:implicit_self])
     return nil unless target
 
     impl = "#{cpp_name(target.owner, target.name)}_impl"
@@ -71,19 +71,20 @@ module CoreExactDirect
   # The compiled core definition a call to `name` with `arity` arguments and no block reaches on
   # an exact `klass`, or nil when anything else could answer or the body cannot run outside the
   # entry's guard.
-  def core_exact_target(klass, chain, name, arity)
+  def core_exact_target(klass, chain, name, arity, private_ok: false)
     @core_exact_targets ||= {}
-    @core_exact_targets.fetch([klass, name, arity]) do
-      @core_exact_targets[[klass, name, arity]] = core_exact_target_uncached(klass, chain, name, arity)
+    key = [klass, name, arity, private_ok]
+    @core_exact_targets.fetch(key) do
+      @core_exact_targets[key] = core_exact_target_uncached(klass, chain, name, arity, private_ok)
     end
   end
 
-  def core_exact_target_uncached(klass, chain, name, arity)
+  def core_exact_target_uncached(klass, chain, name, arity, private_ok = false)
     return nil if devirt_blocked_name?(name)
 
     target = block_core_target(klass, chain, name, arity, blockless: true)
     # An explicit-receiver call of a private method is a NoMethodError, not a call.
-    return nil unless target && target.visibility == :public
+    return nil unless target && (target.visibility == :public || private_ok)
     return nil if core_guarded_def?(target) && !core_body_relaxable?(target.irep)
     return nil if target.owner == 'Enumerable' && !core_each_builtin?(klass, chain)
 
