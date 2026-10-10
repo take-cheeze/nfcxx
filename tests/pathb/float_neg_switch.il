@@ -44,7 +44,8 @@
         (cond (lt int (var int "i") (const int 4)))
         (step (pre_incr int (var int "i")))
         (block
-          (expr (add_assign int (var int "s") (call int (routine (ptr (fn int (int))) "_Z8classifyi") (question int (eq int (var int "i") (const int 3)) (const int 5) (var int "i"))))))))
+          (local "tmp1" int)
+          (expr (comma int (assign int (var int "tmp1") (call int (routine (ptr (fn int (int))) "_Z8classifyi") (question int (eq int (var int "i") (const int 3)) (const int 5) (var int "i")))) (add_assign int (var int "s") (var int "tmp1")))))))
     (decl "d" double)
     (init "d" expression (add double (call double (routine (ptr (fn double (double))) "_Z3negd") (const double 2.5)) (const double 2.5)))
     (decl "signbit_ok" bool)
