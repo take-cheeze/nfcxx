@@ -155,8 +155,17 @@ class CodeGen
     return call if self_implicit && site&.dig(:self_owner) == target.owner && @closed_world&.exact_class?(target.owner)
 
     check = "#{owner_class_ptr_expr(target.owner)} == mrb_obj_class(M, #{recv})"
+    # KEYWORDLESS_FALLBACK (ADR 0386): the keywordless call is an ordinary send of `name` with `argv`, so the
+    # else arm is MONO_EMBED_GUARD's: the closed world's proven fallback (nomethod / unlisted-class arms) or,
+    # when it cannot prove the chain, the same by-name dispatch as before.
+    fallback = keywordless_fallback? ? guarded_fallback_line(d, recv, name, argv, [target.owner], site) : dynamic_dispatch_line(d, recv, name, argv)
     "#{call.lines.first}  if (#{check}) {\n  #{call.lines.drop(1).join}  } else {\n    " \
-      "#{dynamic_dispatch_line(d, recv, name, argv)}  }\n"
+      "#{fallback}  }\n"
+  end
+
+  # BC2CPP_KEYWORDLESS_FALLBACK=0 restores the by-name else arm of the embedding-owner guard.
+  def keywordless_fallback?
+    ENV['BC2CPP_KEYWORDLESS_FALLBACK'] != '0'
   end
 
   def compile_keyword_send(self_implicit:, irep:, idx:, owner_def:, name:, d:, n:, nk:)
