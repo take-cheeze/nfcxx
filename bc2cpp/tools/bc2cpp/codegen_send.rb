@@ -1665,6 +1665,11 @@ class CodeGen
       exact_reg = unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset)
       exact_site = !self_implicit && irep && exact_core_site(irep, constant_site_idx, exact_reg, argv, trace_reg_offset,
                                                              exact_class, recv: recv, name: name, owner_def: owner_def, dest: d)
+      # CORE_SELF_EXACT (ADR 0381): a bare send on `self` in a compiled core body, receiver register 0.
+      if self_implicit && irep && idx && trace_reg_offset.zero? && call_receiver.nil? && @closed_world.nil?
+        exact_site = exact_core_site(irep, idx, 0, argv, 0, nil, recv: recv, name: name, owner_def: owner_def, dest: d)
+        exact_site[:implicit_self] = true if exact_site
+      end
       if builtin_native_expression_send
         exact_entry = if exact_class && known_class
                         native_expression_entries.find do |entry|
