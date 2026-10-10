@@ -11,7 +11,8 @@ and builds it with `tinyxml2_main.cpp`, expecting exit code 12.
 - **QBE backend: passes.** Two things had to work: empty struct definitions (the cproc patch, see
   `docs/notes/freestanding.md`) and COMDAT functions. EDG marks inline and template instantiations
   `__attribute__((__weak__))`; cproc drops that, so the per-object copies collided at link time.
-  `scripts/weak-symbols.rb` emits `.weak` directives for them in the QBE wrapper.
+  `scripts/weak-symbols.rb` emits `.weak` directives for them in the QBE wrapper (data and `extern inline` functions too since the
+  multi-TU work, see `docs/notes/multi-tu.md`).
 
 ## What it took
 

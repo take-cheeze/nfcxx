@@ -1,0 +1,2 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "BAD" 8 4 (leaf 0 w) (leaf 2 w))

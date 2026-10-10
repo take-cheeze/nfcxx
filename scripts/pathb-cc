@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Path B compiler: one C++ file to an object file.
+#   EDG front end (lowered IL) -> typed IR (be/nfcxx_ir.c) -> QBE IL (scripts/pathb-qbe-emit.rb) -> QBE -> assembler
+# i.e. scripts/pathb-dump --ir | scripts/mrb scripts/pathb-qbe-emit.rb | qbe | cc -c, the pipeline tests/pathb-qbe/run.sh
+# validates. Hosted by default (the host g++'s C++ library headers, see scripts/host-sys.sh).
+# Usage: scripts/pathb-cc [-std=c++NN] [-I dir | -Idir] [-Dmacro] [-Umacro] [--freestanding] file.cpp -o out.o
+#   PATHB_KEEP=dir   keep file.ir, file.ssa and file.s there
+#   PATHB_LONG_DOUBLE=trap (or NFCXX_LONG_DOUBLE=trap)  a function that mentions long double becomes a stub that aborts
+#                    when run, instead of refusing the file (QBE has no 80-bit float; docs/notes/pathb-hosted.md)
+# Exit status: 0 done; 3 the IR has a node, type or marker the emitter refuses (reason on stderr); anything else failed.
+# Needs the Path B harness (scripts/setup-pathb.sh; PATHB_CPFE, PATHB_BASE) and build/qbe/qbe (QBE).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+qbe=${QBE:-$root/build/qbe/qbe}
+[ -x "$qbe" ] || { echo "pathb-cc: no QBE at $qbe; run scripts/setup-qbe.sh" >&2; exit 2; }
+
+opts=(); src=""; out=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) out=$2; shift ;;
+    -I|-D|-U) opts+=("$1$2"); shift ;;
+    -I?*|-D?*|-U?*|-std=c++*|--freestanding) opts+=("$1") ;;
+    -*) ;;   # other compiler flags (-O2, -Wall, ...) do not apply
+    *) src=$1 ;;
+  esac
+  shift
+done
+[ -n "$src" ] || { echo "pathb-cc: no input file" >&2; exit 2; }
+[ -n "$out" ] || out=$(basename "${src%.*}").o
+
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+n=$(basename "${src%.*}")
+"$root/scripts/pathb-dump" --ir ${opts[@]+"${opts[@]}"} "$src" > "$tmp/$n.ir"
+rc=0
+ldopt=(); [ "${PATHB_LONG_DOUBLE:-${NFCXX_LONG_DOUBLE:-}}" != trap ] || ldopt=(--long-double=trap)
+"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" ${ldopt[@]+"${ldopt[@]}"} "$tmp/$n.ir" > "$tmp/$n.ssa" 2> "$tmp/$n.emit" || rc=$?
+if [ $rc != 0 ]; then
+  echo "pathb-cc: $src: $(head -1 "$tmp/$n.emit")" >&2
+  [ -z "${PATHB_KEEP:-}" ] || { mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$PATHB_KEEP/"; }
+  exit $rc
+fi
+"$qbe" "$tmp/$n.ssa" > "$tmp/$n.s"
+# QBE has no weak linkage: .weak for the IR's (weak) definitions (COMDAT inline and template code)
+"$root/scripts/mrb" "$root/scripts/pathb-qbe-emit.rb" --append-weak "$tmp/$n.ssa" "$tmp/$n.s"
+if [ -n "${PATHB_KEEP:-}" ]; then mkdir -p "$PATHB_KEEP"; cp "$tmp/$n.ir" "$tmp/$n.ssa" "$tmp/$n.s" "$PATHB_KEEP/"; fi
+cc -c -o "$out" "$tmp/$n.s"
