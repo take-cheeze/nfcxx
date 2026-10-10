@@ -170,6 +170,16 @@ static int ir_is_float(a_type_ptr t)
   return t != NULL && skip_typerefs(t)->kind == tk_float && !ir_is_x87(t);
 }
 
+/* A struct of 16 bytes whose only member is a long double (or such a struct): class X87 of the System V ABI, which
+   is passed in memory and returned in st(0), exactly as a long double is. Defined with the class members below. */
+static int ir_is_x87_agg(a_type_ptr t);
+
+/* A value of x87 class in the calling convention: a long double or an X87-class struct (see ir_is_x87_agg). */
+static int ir_x87_mem(a_type_ptr t)
+{
+  return ir_is_x87(t) || ir_is_x87_agg(t);
+}
+
 /* EDG lowers `_Complex long double` to a struct of this name. It is class COMPLEX_X87 of the System V ABI: passed in
    memory (like any 32-byte struct), but returned in st(0) and st(1), so a function returning one has the x87 result
    kind 2 (see ir_x87_kind and the thunks below). */
@@ -186,7 +196,7 @@ static int ir_is_complex_x87(a_type_ptr t)
    st(1)), 0 for any other type. */
 static int ir_x87_kind(a_type_ptr t)
 {
-  return ir_is_x87(t) ? 1 : ir_is_complex_x87(t) ? 2 : 0;
+  return ir_x87_mem(t) ? 1 : ir_is_complex_x87(t) ? 2 : 0;
 }
 
 /* A value that is the address of its object: an aggregate, or a long double. */
@@ -455,6 +465,7 @@ static int ir_x87_ret_rout(a_routine_ptr r)
 }
 
 static void ir_x87_note_extern(a_routine_ptr r, const char *n);
+static const char *ir_rout_addr(a_routine_ptr r, const char **why);
 
 /* The name a routine is defined, called and addressed under. A routine returning long double that is defined here is
    __nfcxx_ldr_<symbol>; one defined elsewhere is reached through the call thunk __nfcxx_x87c_<symbol>, which has the
@@ -1152,9 +1163,11 @@ static ir_val ir_address_const(a_constant_ptr c, a_type_ptr t)
   switch (c->variant.address.kind) {
     case abk_routine:
       if (off == 0) {
+        const char *why = NULL;
+        const char *sym = ir_rout_addr(c->variant.address.variant.routine, &why);
+        if (sym == NULL) return ir_gap(t, why, 3, ck_address);
         ir_note(3, ck_address, 1);
-        return ir_mk_value(ir_fmt("&\"%s\"", ir_rout_name(c->variant.address.variant.routine)),
-                           t);
+        return ir_mk_value(ir_fmt("&\"%s\"", sym), t);
       }
       break;
     case abk_variable:
@@ -1252,8 +1265,13 @@ static ir_val ir_rval(an_expr_node_ptr e)
       ir_note(2, enk_constant, 1);
       return ir_constant(e->variant.constant.ptr, e->type);
     case enk_routine:
-      ir_note(2, enk_routine, 1);
-      return ir_mk_value(ir_fmt("&\"%s\"", ir_rout_name(e->variant.routine.ptr)), e->type);
+      {
+        const char *why = NULL;
+        const char *sym = ir_rout_addr(e->variant.routine.ptr, &why);
+        if (sym == NULL) return ir_gap(e->type, why, 2, (int)enk_routine);
+        ir_note(2, enk_routine, 1);
+        return ir_mk_value(ir_fmt("&\"%s\"", sym), e->type);
+      }
     case enk_variable:
       ir_note(2, enk_variable, 1);
       return ir_load(ir_lval(e));
@@ -2360,7 +2378,9 @@ typedef struct {
   unsigned long total; /* size of the whole object */
   long off;            /* offset of the pointer from the start of the object */
   long lo, hi;         /* the surrounding sub-object, [lo, hi), for TYPE 1 */
-  int vague;           /* TYPE 1 cannot be answered: a folded address into a structure (the member is not recorded) */
+  int vague;           /* TYPE 1 needs the member the front end folded away: see ir_osz_member */
+  int folded;          /* the address was folded into a constant (EDG's address constant: the variable and an offset) */
+  a_type_ptr var;      /* the folded variable's type */
 } ir_osz;
 
 static int ir_osz_class(a_type_ptr t)
@@ -2397,6 +2417,8 @@ static int ir_osz_ptr(an_expr_node_ptr e, ir_osz *o)
     o->lo = 0;
     o->hi = (long)o->total;
     while (s->kind == tk_array) s = skip_typerefs(s->variant.array.element_type);
+    o->folded = 1;
+    o->var = var->type;
     if (ir_osz_class(s) && !(o->off == 0 && e->type != NULL && ir_is_pointer(e->type) &&
                              ir_size_of(skip_typerefs(e->type)->variant.pointer.type) == o->total)) {
       o->vague = 1;
@@ -2481,6 +2503,108 @@ static int ir_osz_lval(an_expr_node_ptr e, ir_osz *o)
   }
 }
 
+/* TYPE 1 of a folded address (EDG folds `&g.m` into the address of g plus an offset, and the builtin's `const void *`
+   parameter erases the pointer's type, so the member the address names is not in the IR). What the offset allows is the
+   set of sub-objects that could be the pointed-at object, and the answer is the candidate that all of them agree on:
+     - every sub-object that starts at the offset (a member at any depth, an array element of a structure array, the
+       whole object at offset 0, an array as a whole): its size;
+     - when none starts there, the innermost scalar or array member that contains the offset: its end minus the offset
+       (an array of scalars is one sub-object, its elements are not).
+   A union, a class with a base class, or a variable-length array is not decided. The answer is sound: an address that is
+   the start of two sub-objects of different sizes (`&g` and `&g.a` of a structure whose first member is an int) is unknown.
+   Returns 1 with the answer in *out, else 0. */
+static int ir_is_base_storage(a_class_type_supplement_ptr extra, a_field_ptr f);
+
+#define IR_OSZ_STARTS 16
+typedef struct {
+  unsigned long starts[IR_OSZ_STARTS];
+  int nstarts;
+  unsigned long inner; /* the innermost containing scalar or array member, from the offset to its end */
+  int has_inner;
+  int bad;             /* a shape that is not decided */
+} ir_osz_cand;
+
+static void ir_osz_collect(a_type_ptr t, long base, long off, ir_osz_cand *c)
+{
+  a_type_ptr s = skip_typerefs(t);
+  unsigned long sz = ir_size_of(s);
+  long end = base + (long)sz;
+  if (c->bad || off < base || off >= end) return;
+  if (base == off) {
+    if (c->nstarts >= IR_OSZ_STARTS) {
+      c->bad = 1;
+      return;
+    }
+    c->starts[c->nstarts++] = sz;
+  }
+  switch (s->kind) {
+    case tk_struct:
+    case tk_class: {
+      a_class_type_supplement_ptr extra = s->variant.class_struct_union.extra_info;
+      a_field_ptr f;
+      if (extra != NULL && extra->direct_base_classes != NULL) {
+        c->bad = 1;
+        return;
+      }
+      for (f = s->variant.class_struct_union.field_list; f != NULL; f = f->next) {
+        long fs;
+        if (f->is_bit_field || f->is_optimized_empty_class || ir_is_base_storage(extra, f)) continue;
+        fs = base + (long)f->offset;
+        if (ir_size_of(f->type) > 0 && off >= fs && off < fs + (long)ir_size_of(f->type)) ir_osz_collect(f->type, fs, off, c);
+      }
+      return;
+    }
+    case tk_array: {
+      a_type_ptr el = skip_typerefs(s->variant.array.element_type);
+      unsigned long esz = ir_size_of(el);
+      if (s->variant.array.is_variable_size_array || el->kind == tk_union || el->kind == tk_array) {
+        c->bad = 1;
+        return;
+      }
+      if (el->kind == tk_struct || el->kind == tk_class) {
+        long i;
+        if (esz == 0) {
+          c->bad = 1;
+          return;
+        }
+        i = (off - base) / (long)esz;
+        if (i < (long)s->variant.array.variant.number_of_elements) ir_osz_collect(el, base + i * (long)esz, off, c);
+        return;
+      }
+      c->inner = (unsigned long)(end - off);
+      c->has_inner = 1;
+      return;
+    }
+    case tk_union:
+      c->bad = 1;
+      return;
+    default: /* a scalar: the innermost object containing the offset, if it is the deepest so far */
+      c->inner = (unsigned long)(end - off);
+      c->has_inner = 1;
+      return;
+  }
+}
+
+static int ir_osz_member(a_type_ptr var, long off, unsigned long *out)
+{
+  ir_osz_cand c;
+  int i;
+  memset(&c, 0, sizeof c);
+  if (off < 0) return 0;
+  ir_osz_collect(var, 0, off, &c);
+  if (c.bad) return 0;
+  if (c.nstarts > 0) {
+    for (i = 1; i < c.nstarts; i++) if (c.starts[i] != c.starts[0]) return 0;
+    *out = c.starts[0];
+    return 1;
+  }
+  if (c.has_inner) {
+    *out = c.inner;
+    return 1;
+  }
+  return 0;
+}
+
 static unsigned long ir_object_size(an_expr_node_ptr e)
 {
   long ty = 0;
@@ -2490,7 +2614,12 @@ static unsigned long ir_object_size(an_expr_node_ptr e)
   unknown = (ty & 2) ? 0UL : ~0UL;
   memset(&o, 0, sizeof o);
   if (!ir_osz_ptr(ir_operand(e, 1), &o)) return unknown;
-  if ((ty & 1) && o.vague) return unknown;
+  if ((ty & 1) && o.vague) {
+    /* a folded address into a structure: the member the offset names (see ir_osz_member) */
+    unsigned long r;
+    if (!o.folded || !ir_osz_member(o.var, o.off, &r)) return unknown;
+    return r;
+  }
   if (!(ty & 1)) {
     o.lo = 0;
     o.hi = (long)o.total;
@@ -2798,7 +2927,7 @@ static void ir_abi_note(a_type_ptr t);
 static char *ir_abi_ty(a_type_ptr t)
 {
   ir_abi_note(t);
-  if (ir_is_x87(t)) return (char *)"(struct \"__nfcxx_ld\")";
+  if (ir_x87_mem(t)) return (char *)"(struct \"__nfcxx_ld\")";
   return ir_capture_type(t, 1);
 }
 
@@ -2831,7 +2960,8 @@ static void ir_x87_thunk(const char *sym, int entry, int kind, const char *linka
   ir_x87t_tab[ir_x87t_n].entry = entry;
   ir_x87t_n++;
   ir_buf_begin(&ir_out_types);
-  if (entry) fprintf(nf_out, "(x87-thunk %s \"%s\" %s %d %lu)\n", kind == 2 ? "entryc" : "entry", sym, linkage, ints, stack);
+  if (entry == 2 || entry == 3) fprintf(nf_out, "(x87-thunk %s \"%s\" %d %lu)\n", entry == 3 ? "icallc" : "icall", sym, ints, stack);
+  else if (entry) fprintf(nf_out, "(x87-thunk %s \"%s\" %s %d %lu)\n", kind == 2 ? "entryc" : "entry", sym, linkage, ints, stack);
   else fprintf(nf_out, "(x87-thunk %s \"%s\" %d %lu)\n", kind == 2 ? "callc" : "call", sym, ints, stack);
   ir_buf_end(&ir_out_types);
 }
@@ -2849,7 +2979,7 @@ static int ir_x87_param(a_type_ptr t, int *ints, int *sse, unsigned long *stack)
   s = skip_typerefs(t);
   sz = ir_size_of(s);
   al = ir_align_of(s);
-  if (ir_is_x87(s)) {
+  if (ir_x87_mem(s)) {
     *stack = (*stack + 15) / 16 * 16 + 16;
     return 1;
   }
@@ -2889,6 +3019,84 @@ static void ir_x87_note_extern(a_routine_ptr r, const char *n)
   ir_x87_thunk(n, 0, kind, NULL, ints, stack);
 }
 
+/* Why the C-convention entry of routine r, defined here, cannot be made: a variadic routine (nothing can follow its
+   "...") or a parameter the thunk cannot copy. NULL when the entry exists (ir_function defines it under the routine's own
+   symbol with the same two conditions). */
+static const char *ir_x87_entry_why(a_routine_ptr r)
+{
+  a_type_ptr ft = skip_typerefs(r->type);
+  a_scope_ptr scope = scope_for_routine(r);
+  a_variable_ptr param;
+  int ints = 0, sse = 0;
+  unsigned long stack = 0;
+  if (ft->variant.routine.extra_info != NULL && ft->variant.routine.extra_info->has_ellipsis) return "variadic function returning long double";
+  if (scope == NULL) return "long double function without a body";
+  for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
+    if (!ir_x87_param(param->type, &ints, &sse, &stack)) return "long double function with a small aggregate parameter";
+  }
+  return NULL;
+}
+
+/* The value of the address of routine r (a function designator, a vtable slot, a static initializer). A routine that
+   does not return long double, and a weakref, keep their symbol. A long double routine's address is its C-convention
+   symbol: the entry that ir_function defines for it (a static one under its own name, local), or the C function it
+   names when it is defined elsewhere. That is what non-Path-B code (C, libstdc++) calls through a pointer. Its trailing
+   pointer form __nfcxx_ldr_NAME is for direct calls only. NULL, with the reason in *why, when no C-convention symbol
+   exists (a variadic routine defined here). */
+static const char *ir_rout_addr(a_routine_ptr r, const char **why)
+{
+  const char *n;
+  *why = NULL;
+  if (!ir_x87_ret_rout(r) || (r->is_weakref && has_gnu_routine_supp(r) && gnu_routine_supp(r)->aliased_routine != NULL))
+    return ir_rout_name(r);
+  n = ir_rout_sym(r);
+  if (n == NULL || n[0] == '\0') {
+    *why = "address of an unnamed long double function";
+    return NULL;
+  }
+  if (r->is_weak) ir_weak_decl(r);
+  if (r->function_def_number != NULL_function_def_number) {
+    *why = ir_x87_entry_why(r);
+    if (*why != NULL) return NULL;
+  }
+  return n;
+}
+
+/* The indirect call thunk for a call through a pointer to a function of type ft returning long double (complex: _Complex
+   long double). Pointers hold the C-convention function (`&F` is F, see ir_rout_addr), so the call goes through
+   __nfcxx_x87i_KEY (__nfcxx_x87ic_KEY): it takes the arguments of F, then the result pointer, then the callee, and calls
+   the callee with the C convention. KEY names the integer registers and the stack bytes of the parameters (ir_x87_param),
+   which the thunk needs to find the result pointer and the callee. Returns the symbol, or NULL with the reason in *why
+   for a function type the thunk cannot describe. */
+static char *ir_x87_icall(a_type_ptr ft, int complex, const char **why)
+{
+  int ints = 0, sse = 0;
+  unsigned long stack = 0;
+  a_param_type_ptr p;
+  char *key;
+  if (ft == NULL || ft->kind != tk_routine) {
+    *why = "call through a pointer of unknown function type";
+    return NULL;
+  }
+  if (ft->variant.routine.extra_info == NULL) {
+    *why = "call through an unprototyped pointer to a long double function";
+    return NULL;
+  }
+  if (ft->variant.routine.extra_info->has_ellipsis) {
+    *why = "call through a pointer to a variadic function returning long double";
+    return NULL;
+  }
+  for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) {
+    if (!ir_x87_param(p->type, &ints, &sse, &stack)) {
+      *why = "call through a pointer to a long double function with a small aggregate parameter";
+      return NULL;
+    }
+  }
+  key = ir_fmt("I%dS%lu", ints, stack);
+  ir_x87_thunk(key, complex ? 3 : 2, 0, NULL, ints, stack);
+  return ir_fmt("__nfcxx_x87i%s_%s", complex ? "c" : "", key);
+}
+
 /* Call of a routine or through a function pointer. Aggregate arguments are copied into temporaries and passed as
    (byval TYPE ADDR); an aggregate result is written to a temporary passed as the first argument, (sret TYPE ADDR). The
    emitter turns both into the C calling convention of the target (docs/notes/pathb-hosted.md, "Aggregates by value").
@@ -2906,6 +3114,7 @@ static ir_val ir_call(an_expr_node_ptr e)
   int x87_ret = xk != 0;
   int x87_first = 0; /* variadic callee: the result pointer is the first argument */
   const char *thunk_sym = NULL; /* x87 result of a routine defined elsewhere: the C symbol the call thunk calls */
+  char *indirect_fp = NULL;     /* a call through a function pointer: its value (the callee of the indirect call thunk) */
   ir_val sret = ir_mk_void();
   ir_val ldres = ir_mk_void();
   if (f->kind == enk_routine) {
@@ -2943,6 +3152,7 @@ static ir_val ir_call(an_expr_node_ptr e)
     ir_val fv = ir_rval(f);
     ir_nonnull(f, fv); /* a call through a null function pointer traps (stage 2, gap 9) */
     callee = fv.s;
+    indirect_fp = fv.s;
   }
   if (x87_ret) {
     a_type_ptr ft = ir_callee_fn_type(f);
@@ -2950,6 +3160,7 @@ static ir_val ir_call(an_expr_node_ptr e)
       /* variadic: the result pointer goes first, like (sret ...), since nothing can follow the "..." arguments; there is
          no C-convention entry for such a function, so one defined elsewhere cannot be called */
       if (thunk_sym != NULL) return ir_gap(e->type, "call of a variadic function returning long double defined elsewhere", 0, (int)eok_call);
+      if (indirect_fp != NULL) return ir_gap(e->type, "call through a pointer to a variadic function returning long double", 0, (int)eok_call);
       x87_first = 1;
     }
     ldres = ir_temp(e->type);
@@ -2979,6 +3190,15 @@ static ir_val ir_call(an_expr_node_ptr e)
     }
   }
   if (x87_ret && !x87_first) args = ir_fmt("%s %s", args, ldres.s);
+  if (x87_ret && indirect_fp != NULL) {
+    /* A pointer's function is the C-convention function: the indirect call thunk takes the pointer after the result
+       pointer and calls it (docs/notes/pathb-longdouble.md, "Calling convention"). */
+    const char *why = NULL;
+    char *th = ir_x87_icall(ir_callee_fn_type(f), xk == 2, &why);
+    if (th == NULL) return ir_gap(e->type, why, 0, (int)eok_call);
+    callee = ir_fmt("&\"%s\"", th);
+    args = ir_fmt("%s %s", args, indirect_fp);
+  }
   /* A variadic callee: (variadic N) gives the number of leading ARGs (the hidden result pointer included)
      that match named parameters; the rest are the "..." arguments. */
   {
@@ -2994,7 +3214,7 @@ static ir_val ir_call(an_expr_node_ptr e)
   if (ir_is_void(e->type) || agg_ret || x87_ret) {
     ir_emit(ir_fmt("(eval (call void %s%s))", callee, args));
     if (agg_ret) return ir_mk_addr(sret.s, e->type, 0);
-    if (x87_ret) return ir_mk_value(ldres.s, e->type);
+    if (x87_ret) return ir_is_aggregate(e->type) ? ir_mk_addr(ldres.s, e->type, 0) : ir_mk_value(ldres.s, e->type);
     return ir_mk_void();
   }
   return ir_mk_value(ir_let(ir_valtext(e->type), ir_fmt("(call %s %s%s)", ir_valtext(e->type), callee, args)), e->type);
@@ -3226,6 +3446,24 @@ static int ir_is_base_storage(a_class_type_supplement_ptr extra, a_field_ptr f)
     }
   }
   return 0;
+}
+
+/* A struct of exactly 16 bytes whose one member, at offset 0, is a long double or another such struct. A union is not
+   one: a union with a long double is memory class or INTEGER class (the psABI merge), and a struct with a second member
+   needs 32 bytes or shares the eightbyte. The unit tests cover the classes gcc gives. */
+static int ir_class_members(a_type_ptr t, ir_member *out, int max);
+
+static int ir_is_x87_agg(a_type_ptr t)
+{
+  a_type_ptr s;
+  ir_member mem[2];
+  int n;
+  if (t == NULL) return 0;
+  s = skip_typerefs(t);
+  if ((s->kind != tk_struct && s->kind != tk_class) || ir_size_of(s) != 16) return 0;
+  n = ir_class_members(s, mem, 2);
+  if (n != 1 || mem[0].bf != NULL || mem[0].off != 0) return 0;
+  return ir_is_x87(mem[0].t) || ir_is_x87_agg(mem[0].t);
 }
 
 static int ir_class_members(a_type_ptr t, ir_member *out, int max)
@@ -3552,7 +3790,7 @@ static ir_tab ir_abi_tab;
 static void ir_abi_note(a_type_ptr t)
 {
   a_type_ptr s = skip_typerefs(t);
-  if (ir_is_x87(t)) { /* a long double argument is 16 bytes in memory (class X87), like a large struct */
+  if (ir_x87_mem(t)) { /* a long double (or X87-class struct) argument is 16 bytes in memory (class X87), like a large struct */
     static int done;
     if (!done) {
       done = 1;
@@ -3785,11 +4023,13 @@ static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
   if (c->kind == ck_string) {
     target = ir_string_data(c);
   } else if (c->kind == ck_address) {
+    const char *addr_why = NULL; /* why the address has no symbol (ir_rout_addr), for the unsupported marker */
     add = (long)c->variant.address.offset;
     switch (c->variant.address.kind) {
       case abk_routine:
         if (add == 0) {
-          target = ir_fmt("&\"%s\"", ir_rout_name(c->variant.address.variant.routine));
+          const char *sym = ir_rout_addr(c->variant.address.variant.routine, &addr_why);
+          target = sym != NULL ? ir_fmt("&\"%s\"", sym) : NULL; /* NULL: the initializer is an unsupported marker */
         }
         break;
       case abk_variable:
@@ -3805,7 +4045,7 @@ static void ir_gi_scalar(unsigned long off, a_constant_ptr c, a_type_ptr t)
     }
     if (target == NULL) {
       ir_note(3, ck_address, 0);
-      ir_gi_unsupported("address-constant");
+      ir_gi_unsupported(addr_why != NULL ? addr_why : "address-constant");
       return;
     }
     ir_note(3, ck_address, 1);
@@ -4581,6 +4821,8 @@ static void ir_function(a_routine_ptr rout)
   a_variable_ptr param;
   a_type_ptr fn_type, ret;
   ir_buf params, body, hdr;
+  /* An ifunc routine with its resolver is the IFUNC symbol (ir_alias), not the wrapper EDG lowered it to */
+  if (rout->is_ifunc && has_gnu_routine_supp(rout) && gnu_routine_supp(rout)->aliased_routine != NULL) return;
   struct ir_pending {
     a_variable_ptr var;
     char *reg;
@@ -4642,7 +4884,7 @@ static void ir_function(a_routine_ptr rout)
     if (ir_is_memval(param->type)) {
       ir_abi_note(param->type);
       fputs(" (byval ", nf_out);
-      if (ir_is_x87(param->type)) fputs(ir_abi_ty(param->type), nf_out);
+      if (ir_x87_mem(param->type)) fputs(ir_abi_ty(param->type), nf_out);
       else nf_put_type(param->type);
       fputs("))", nf_out);
       ir_tab_put(&ir_slots, param, reg);
@@ -4733,12 +4975,12 @@ static void ir_function(a_routine_ptr rout)
   ir_buf_close(&body);
   ir_buf_close(&ir_slot_buf);
 
-  /* A long double function is also defined under its own symbol, the C-convention entry (returns in st(0)). A static
-     one is only reached through __nfcxx_ldr_F. */
-  if (ir_x87_kind(ret) && x87_unsupported == NULL && rout->storage_class != sc_static && ir_rout_sym(rout) != NULL &&
-      ir_rout_sym(rout)[0] != '\0') {
+  /* A long double function is also defined under its own symbol, the C-convention entry (returns in st(0)): what its
+     address is (ir_rout_addr). A static one gets a local entry, which the emitter keeps when the function is kept. */
+  if (ir_x87_kind(ret) && x87_unsupported == NULL && ir_rout_sym(rout) != NULL && ir_rout_sym(rout)[0] != '\0') {
     int weak = rout->use_comdat || rout->suppress_inline_body || rout->is_weak;
-    ir_x87_thunk(ir_rout_sym(rout), 1, ir_x87_kind(ret), weak ? "weak" : "global", x87_ints, x87_stack);
+    ir_x87_thunk(ir_rout_sym(rout), 1, ir_x87_kind(ret),
+                 rout->storage_class == sc_static ? "local" : weak ? "weak" : "global", x87_ints, x87_stack);
   }
 }
 
@@ -4810,6 +5052,25 @@ void nfcxx_ir_back_end(void)
   for (rout = scope->routines; rout != NULL; rout = rout->next) {
     if (rout->is_tls_init_alias && rout->function_def_number == NULL_function_def_number) ir_tls_init_alias(rout, scope);
     else ir_function(rout);
+  }
+  /* GNU ifunc (__attribute__((ifunc("resolver")))): an IFUNC symbol whose value is what its resolver returns, as gcc
+     emits it (.type NAME, @gnu_indirect_function). The routine has no body here (ir_function skips it). A resolver that
+     this unit does not define is refused by name (an unsupported top-level form). */
+  for (rout = scope->routines; rout != NULL; rout = rout->next) {
+    a_routine_ptr t;
+    if (!rout->is_ifunc || !has_gnu_routine_supp(rout)) continue;
+    t = gnu_routine_supp(rout)->aliased_routine;
+    if (t != NULL && t->function_def_number != NULL_function_def_number) {
+      ir_alias(ir_rout_sym(rout), ir_rout_sym(t), "ifunc", 0);
+    } else if (t == NULL) {
+      ir_buf_begin(&ir_out_funcs);
+      fprintf(nf_out, "\n(unsupported ifunc %s: no resolver)", ir_rout_sym(rout));
+      ir_buf_end(&ir_out_funcs);
+    } else {
+      ir_buf_begin(&ir_out_funcs);
+      fprintf(nf_out, "\n(unsupported ifunc %s: resolver %s is not defined in this unit)", ir_rout_sym(rout), ir_rout_sym(t));
+      ir_buf_end(&ir_out_funcs);
+    }
   }
   /* GNU alias attributes: (alias NAME TARGET function|object [weak]), when the target is defined in this unit. */
   for (rout = scope->routines; rout != NULL; rout = rout->next) {

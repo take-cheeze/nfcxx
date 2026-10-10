@@ -1917,12 +1917,46 @@ def x87_call_thunk(name, ints, stack, cplx=False):
     return "\n".join(out) + "\n"
 
 
+def x87_icall_thunk(key, ints, stack, cplx=False):
+    r = (stack + 15) // 16 * 16
+    frame = r + 24
+    sym = ("__nfcxx_x87ic_" if cplx else "__nfcxx_x87i_") + key
+    out = [".text", ".weak %s" % sym, ".hidden %s" % sym, ".type %s, @function" % sym, sym + ":",
+           "\tsubq $%d, %%rsp" % frame]
+    if ints < 6:
+        out.append("\tmovq %%%s, %d(%%rsp)" % (X87_REGS[ints], r))
+    else:
+        out.append("\tmovq %d(%%rsp), %%r11" % (frame + 8 + stack))
+        out.append("\tmovq %%r11, %d(%%rsp)" % r)
+    if ints < 5:
+        out.append("\tmovq %%%s, %d(%%rsp)" % (X87_REGS[ints + 1], r + 8))
+    else:
+        word = stack if ints == 5 else stack + 8
+        out.append("\tmovq %d(%%rsp), %%r11" % (frame + 8 + word))
+        out.append("\tmovq %%r11, %d(%%rsp)" % (r + 8))
+    out.extend(x87_copy_args(stack, frame))
+    out.append("\tmovq %d(%%rsp), %%r11" % (r + 8))
+    out.append("\tcall *%r11")
+    out.append("\tmovq %d(%%rsp), %%rdi" % r)
+    out.append("\tfstpt (%rdi)")
+    out.append("\tmovw $0, 10(%rdi)")
+    out.append("\tmovl $0, 12(%rdi)")
+    if cplx:
+        out.append("\tfstpt 16(%rdi)")
+        out.append("\tmovw $0, 26(%rdi)")
+        out.append("\tmovl $0, 28(%rdi)")
+    out.append("\taddq $%d, %%rsp" % frame)
+    out.append("\tret")
+    out.append(".size %s, .-%s" % (sym, sym))
+    return "\n".join(out) + "\n"
+
+
 def x87_entry_thunk(name, linkage, ints, stack, cplx=False):
     m = stack + (8 if ints == 6 else 0)
     mr = (m + 15) // 16 * 16
     frame = mr + (40 if cplx else 24)
-    out = [".text", (".weak %s" % name) if linkage == "weak" else (".globl %s" % name), ".type %s, @function" % name,
-           name + ":", "\tsubq $%d, %%rsp" % frame]
+    glob = [] if linkage == "local" else [(".weak %s" % name) if linkage == "weak" else (".globl %s" % name)]
+    out = [".text"] + glob + [".type %s, @function" % name, name + ":", "\tsubq $%d, %%rsp" % frame]
     out.extend(x87_copy_args(stack, frame))
     if ints < 6:
         out.append("\tleaq %d(%%rsp), %%%s" % (mr, X87_REGS[ints]))
@@ -1953,6 +1987,8 @@ def append_weak(il_path, asm_path):
             w = line[len(X87_MARK):].rstrip("\n").split(" ")
             if w[0] in ("call", "callc"):
                 extra.append(x87_call_thunk(w[1], int(w[2]), int(w[3]), w[0] == "callc"))
+            elif w[0] in ("icall", "icallc"):
+                extra.append(x87_icall_thunk(w[1], int(w[2]), int(w[3]), w[0] == "icallc"))
             else:
                 extra.append(x87_entry_thunk(w[1], w[2], int(w[3]), int(w[4]), w[0] == "entryc"))
         elif line.startswith(ALIAS_MARK):
@@ -1960,7 +1996,8 @@ def append_weak(il_path, asm_path):
             if len(p) < 3:
                 continue
             extra.append("\n".join(["\t%s %s" % (".weak" if len(p) > 3 and p[3] == "weak" else ".globl", p[1]),
-                                    "\t.type %s, %s" % (p[1], "@function" if p[0] == "function" else "@object"),
+                                    "\t.type %s, %s" % (p[1], "@function" if p[0] == "function" else
+                                                        "@gnu_indirect_function" if p[0] == "ifunc" else "@object"),
                                     "\t.set %s, %s" % (p[1], p[2])]) + "\n")
     if names or extra:
         with open(asm_path, "a") as f:
@@ -2236,7 +2273,7 @@ def alias_parts(f):
     if len(f) < 4 or len(f) > 5:
         raise BadIR("alias form: %s" % form_text(f))
     kind = f[3]
-    if kind != "function" and kind != "object":
+    if kind not in ("function", "object", "ifunc"):
         raise BadIR("alias form: %s" % form_text(f))
     weak = len(f) == 5
     if weak and f[4] != "weak":
@@ -2273,6 +2310,10 @@ def prune(forms):
         refs = set()
         _symbols(defs[work.pop()], refs)
         for r in refs:
+            # The C-convention entry of a long double function (its own name, an x87 thunk) is what its address is: a
+            # reference to that name keeps the __nfcxx_ldr_ function the entry calls (a static one is otherwise dropped).
+            if r not in defs and "__nfcxx_ldr_" + r in defs:
+                r = "__nfcxx_ldr_" + r
             if r in defs and r not in live:
                 live.add(r)
                 work.append(r)
@@ -2345,8 +2386,13 @@ def emit_x87_thunks(mod, forms):
                 raise BadIR("x87-thunk %s form: %s" % (kind, form_text(f)))
             if "__nfcxx_x87c_" + name in refs:
                 mod.out.append("%s%s %s %d %d" % (X87_MARK, kind, qsym(name), as_int(f[3]), as_int(f[4])))
+        elif kind in ("icall", "icallc"):
+            if len(f) != 5:
+                raise BadIR("x87-thunk %s form: %s" % (kind, form_text(f)))
+            if ("__nfcxx_x87ic_" if kind == "icallc" else "__nfcxx_x87i_") + name in refs:
+                mod.out.append("%s%s %s %d %d" % (X87_MARK, kind, qsym(name), as_int(f[3]), as_int(f[4])))
         elif kind in ("entry", "entryc"):
-            if len(f) != 6 or f[3] not in ("weak", "global"):
+            if len(f) != 6 or f[3] not in ("weak", "global", "local"):
                 raise BadIR("x87-thunk %s form: %s" % (kind, form_text(f)))
             if "__nfcxx_ldr_" + name in kept:
                 mod.out.append("%s%s %s %s %d %d" % (X87_MARK, kind, qsym(name), f[3], as_int(f[4]), as_int(f[5])))

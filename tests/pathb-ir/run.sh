@@ -22,6 +22,9 @@ probes="$probes tests/pathb-qbe/cases/bitfield.cpp tests/pathb-qbe/cases/bitfiel
 # Extended asm idioms (fences, rdtsc, operand passthrough), __builtin_object_size, alias/weakref attributes, VLA bounds.
 probes="$probes tests/pathb-qbe/cases/asm_ext.cpp tests/pathb-qbe/cases/builtin_objsize.cpp tests/pathb-qbe/cases/alias_attr.cpp tests/pathb-qbe/cases/alias_static.cpp tests/pathb-qbe/cases/vla_bounds.cpp tests/pathb-qbe/traps/builtin_trap.cpp tests/pathb-qbe/traps/asm_ud2.cpp tests/pathb-qbe/traps/vla_index.cpp"
 probes="$probes tests/pathb-qbe/cases/longdouble_ir.cpp tests/pathb-qbe/cases/agg_union.cpp tests/pathb-qbe/cases/bitfield_union.cpp tests/pathb-qbe/cases/stmtexpr_class.cpp tests/pathb-qbe/cases/vla_scope.cpp tests/pathb-qbe/cases/asm_barrier.cpp tests/pathb-qbe/cases/weak_decl.cpp"
+# Member sizes of a global structure (TYPE 1), a weakref without a target and an ifunc, pointers to long double functions (the
+# C-convention address and the indirect call thunk), structs of one long double (class X87).
+probes="$probes tests/pathb-qbe/cases/builtin_objsize_global.cpp tests/pathb-qbe/cases/alias_weakref_ifunc.cpp tests/pathb-qbe/cases/ldr_ptr_ir.cpp tests/pathb-qbe/cases/x87_struct.cpp"
 for f in tests/cases/*.cpp $probes; do
   case $(basename "$f") in qbe_*) continue ;; esac   # production-path only (system headers, GNU forms): outside Path B
   n=$(basename "$f" .cpp)

@@ -1,0 +1,30 @@
+(ir-module "edge.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(abi-type "__nfcxx_ld" 16 16 (memory))
+
+(x87-thunk icall "I1S16" 1 16)
+(x87-thunk icallc "I5S0" 5 0)
+(x87-thunk icall "I6S8" 6 8)
+(x87-thunk icall "I0S0" 0 0)
+(x87-thunk entry "st" local 1 16)
+
+(function "__nfcxx_ldr_st"
+  (ret void)
+  (params (param %0 "k" int) (param %1 "x" (byval (struct "__nfcxx_ld"))) (param %2 "__ldret" (ptr (array 16 unsigned_char))))
+  (static)
+  (copy 16 %2 %1)
+  (return))
+
+(global "fpv" (ptr void) 8 8 (init (addr 0 (ptr void) &"st" 0)))
+(global "unused_icall_user" int 4 4 (static) (init (scalar 0 int (const int 0))))
+
+(function "main"
+  (ret int)
+  (params)
+  (slot "a" (array 16 unsigned_char) 16 16)
+  (slot "c" (array 32 unsigned_char) 32 16)
+  (store unsigned_long $"a" (const unsigned_long 9223372036854775808))
+  (eval (call void &"__nfcxx_x87i_I1S16" (const int 2) (byval (struct "__nfcxx_ld") $"a") $"a" (null (ptr void))))
+  (eval (call void &"__nfcxx_x87ic_I5S0" (const int 1) (const int 2) (const int 3) (const int 4) (const int 5) $"c" (null (ptr void))))
+  (eval (call void &"__nfcxx_x87i_I6S8" (const int 1) (const int 2) (const int 3) (const int 4) (const int 5) (const int 6) (const long 7) $"c" (null (ptr void))))
+  (eval (call void &"__nfcxx_x87i_I0S0" $"c" (null (ptr void))))
+  (return (const int 0)))

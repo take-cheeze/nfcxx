@@ -1,0 +1,93 @@
+(ir-module "alias_weakref_ifunc.cpp" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+(global "bad" int 4 4 (static) (init (zero 0 4)))
+(global "__IFV__ifn" (ptr (fn int (int))) 8 8 (weak) (init
+    (addr 0 (ptr (fn int (int))) &"ifn" 0)))
+
+(function "target_fn"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wadd int %1 (const int 1)))
+  (return %2))
+
+(function "impl_fast"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wmul int %1 (const int 2)))
+  (return %2))
+
+(function "impl_slow"
+  (ret int)
+  (params (param %0 "x" int))
+  (slot "x" int 4 4)
+  (store int $"x" %0)
+  (let %1 int (load int $"x"))
+  (let %2 int (wmul int %1 (const int 3)))
+  (return %2))
+
+(function "_ZN45_INTERNAL_23_alias_weakref_ifunc_cpp_72c3feb710resolve_itEv"
+  (ret (ptr (fn int (int))))
+  (params)
+  (static)
+  (return &"impl_fast"))
+
+(function "main"
+  (ret int)
+  (params)
+  (loop
+    (body
+      (block
+        (let %0 int (call int &"target_fn" (const int 4)))
+        (let %1 bool (eq int %0 (const int 5)))
+        (let %2 bool (eq bool %1 (const bool 0)))
+        (if %2
+          (then
+            (block
+              (let %3 int (load int @"bad"))
+              (let %4 int (wadd int %3 (const int 1)))
+              (store int @"bad" %4))))))
+    (step
+      (let %5 bool (ne int (const int 0) (const int 0)))
+      (if %5 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %6 (ptr void) (bitcast (ptr void) &"target_fn"))
+        (let %7 (ptr void) (bitcast (ptr void) &"target_fn"))
+        (let %8 bool (eq (ptr void) %6 %7))
+        (let %9 bool (eq bool %8 (const bool 0)))
+        (if %9
+          (then
+            (block
+              (let %10 int (load int @"bad"))
+              (let %11 int (wadd int %10 (const int 1)))
+              (store int @"bad" %11))))))
+    (step
+      (let %12 bool (ne int (const int 0) (const int 0)))
+      (if %12 (then) (else (break)))))
+  (loop
+    (body
+      (block
+        (let %13 (ptr (fn int (int))) (load (ptr (fn int (int))) @"__IFV__ifn"))
+        (nonnull %13)
+        (let %14 int (call int %13 (const int 7)))
+        (let %15 bool (eq int %14 (const int 14)))
+        (let %16 bool (eq bool %15 (const bool 0)))
+        (if %16
+          (then
+            (block
+              (let %17 int (load int @"bad"))
+              (let %18 int (wadd int %17 (const int 1)))
+              (store int @"bad" %18))))))
+    (step
+      (let %19 bool (ne int (const int 0) (const int 0)))
+      (if %19 (then) (else (break)))))
+  (let %20 int (load int @"bad"))
+  (return %20))
+
+(alias "ifn" "_ZN45_INTERNAL_23_alias_weakref_ifunc_cpp_72c3feb710resolve_itEv" ifunc)

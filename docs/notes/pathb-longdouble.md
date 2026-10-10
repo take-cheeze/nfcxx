@@ -108,6 +108,17 @@ Examples, from `tests/pathb-ir/longdouble_ir.ir`:
 (eval (call void &"__nfcxx_x87c_strtold" ... $"tmp"))
 ```
 
+### Pointers
+
+The address of a routine that returns a long double (`ir_rout_addr`) is its C-convention symbol, not the trailing-pointer
+form: `&F` is `F`, the entry thunk ir_function defines (a static F has a local one, kept with F's body), or the C symbol of
+a routine defined elsewhere. Only direct calls use `__nfcxx_ldr_F` and `__nfcxx_x87c_F`. A call through a pointer passes the
+arguments, the result pointer and the pointer itself to `__nfcxx_x87i_KEY` (`icall` in the IR), which copies the stack
+arguments, takes the callee from the register after the result pointer (or the stack word after the arguments), calls it
+with the C convention and stores `st(0)` at the result pointer (`icallc` for `_Complex long double`, `st(0)` and `st(1)`).
+KEY is `I<integer registers>S<stack bytes>` of the function type's parameters. A virtual call is an indirect call: the
+vtable slot holds the entry. Prune keeps a static F's body when a kept function refers to its entry name.
+
 ## 4. What works (tests)
 
 All of these run on Path B and print what the gcc backend prints (`// STDOUT: same`) unless noted.
@@ -157,10 +168,15 @@ type (hand-written IR); the doctest build no longer needs them.
 
 Each is a refusal at compile or link time or a documented difference; none gives a wrong result silently.
 
-- **Function pointers to long double functions use the internal convention.** `&F` is `__nfcxx_ldr_F` (or the call thunk for
-  a function defined elsewhere), so a pointer that escapes to code Path B did not compile and is called there with the C
-  convention gets the wrong result. Callbacks that return `int` or take a `long double` argument are fine (`qsort`'s
-  comparator, tested). Path B code can call a pointer obtained from a Path B function only.
+- **Function pointers** hold the C-convention address (see "Pointers" below): `&F` is the entry `F` for a Path B function (a
+  static one has a local entry, `(x87-thunk entry "F" local ...)`), and `F` itself for a function defined elsewhere. A call
+  through a pointer goes through the indirect thunk `__nfcxx_x87i_KEY` (`__nfcxx_x87ic_KEY` for `_Complex`), so C code and
+  libstdc++ can call what Path B made, and Path B can call what they made. Two refusals remain, named in the IR:
+  `(unsupported variadic function returning long double)` for the address of a variadic routine defined here (it has no
+  C-convention entry), and `(unsupported call through a pointer to a variadic function returning long double)` (nothing can
+  follow `...` in the indirect call). A variadic routine defined elsewhere keeps its refusal at a direct call
+  (`call of a variadic function returning long double defined elsewhere`); its address is its C symbol.
+  `tests/pathb-qbe/multi/ldr_ptr` (C calls Path B's pointers and the reverse) and `cases/ldr_ptr_ir.cpp`.
 - **Signatures the thunks cannot describe.** The thunks know integers, pointers, float, double, long double and structs
   larger than 16 bytes as parameters (`ir_x87_param`). A parameter that is a struct of at most 16 bytes (classified into
   registers by its members) makes a call of a long double function defined elsewhere an IR gap ("call of a function
@@ -169,9 +185,14 @@ Each is a refusal at compile or link time or a documented difference; none gives
 - **Variadic functions** returning long double: Path B can define and call them (result pointer first); one defined elsewhere
   cannot be called (`call of a variadic function returning long double defined elsewhere`) and a Path B one has no
   C-convention entry. Taking and passing long doubles through `...` is fully supported.
-- **Structs of at most 16 bytes that contain a long double** (`struct { long double x; }`) as a parameter or result: the ABI
-  class is X87 (result in `st(0)`), which the emitter does not describe; `abi-type ... (unsupported "long double")` refuses.
-  Larger structs (memory class, `std::complex`, `std::pair<long double, long double>`) work.
+- **Structs of at most 16 bytes that contain a long double.** A struct (or class, nested) of 16 bytes whose only member is a
+  long double is class X87: passed in memory, returned in `st(0)`. It is treated exactly as a long double (`ir_is_x87_agg`,
+  `ir_x87_mem`): the `(byval (struct "__nfcxx_ld") ...)` argument, the trailing result pointer, the same thunks. gcc agrees on
+  the classes (`struct { long double x; }` returned in `st(0)`, its argument at `16(%rbp)`). Refused by name: a union of 16 bytes
+  with a long double (its eightbytes merge to MEMORY or INTEGER, which the emitter does not describe:
+  `abi-type ... (unsupported "long double")`), and a struct of 16 bytes with a long double plus another member (cannot
+  exist: 16 bytes are the long double). `tests/pathb-qbe/cases/x87_struct.cpp`, `multi/abi_x87s` (C and Path B exchange them).
+  Larger structs (memory class, `std::complex`, `std::pair<long double, long double>`) work as before.
 - **`result_of_overriding_function` thunks** (a covariant or this-adjusting thunk for a virtual function returning long
   double) are IR gaps.
 - **`volatile long double`** is read and written with ordinary 16-byte copies (not atomic, not a fence), like the rest of the

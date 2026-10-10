@@ -2296,11 +2296,50 @@ def x87_call_thunk(name, ints, stack, complex = false)
   out.join("\n") + "\n"
 end
 
+def x87_icall_thunk(key, ints, stack, complex = false)
+  r = (stack + 15) / 16 * 16
+  frame = r + 24
+  sym = (complex ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + key
+  out = [".text", ".weak #{sym}", ".hidden #{sym}", ".type #{sym}, @function", sym + ":", "\tsubq $#{frame}, %rsp"]
+  # the result pointer: the integer register after the parameters, or the stack word after the stack arguments
+  if ints < 6
+    out << "\tmovq %#{X87_REGS[ints]}, #{r}(%rsp)"
+  else
+    out << "\tmovq #{frame + 8 + stack}(%rsp), %r11"
+    out << "\tmovq %r11, #{r}(%rsp)"
+  end
+  # the callee: the register after the result pointer, or the stack word after the result pointer
+  if ints < 5
+    out << "\tmovq %#{X87_REGS[ints + 1]}, #{r + 8}(%rsp)"
+  else
+    word = ints == 5 ? stack : stack + 8
+    out << "\tmovq #{frame + 8 + word}(%rsp), %r11"
+    out << "\tmovq %r11, #{r + 8}(%rsp)"
+  end
+  out.concat(x87_copy_args(stack, frame))
+  out << "\tmovq #{r + 8}(%rsp), %r11"
+  out << "\tcall *%r11"
+  out << "\tmovq #{r}(%rsp), %rdi"
+  out << "\tfstpt (%rdi)"
+  out << "\tmovw $0, 10(%rdi)"
+  out << "\tmovl $0, 12(%rdi)"
+  if complex
+    out << "\tfstpt 16(%rdi)"
+    out << "\tmovw $0, 26(%rdi)"
+    out << "\tmovl $0, 28(%rdi)"
+  end
+  out << "\taddq $#{frame}, %rsp"
+  out << "\tret"
+  out << ".size #{sym}, .-#{sym}"
+  out.join("\n") + "\n"
+end
+
 def x87_entry_thunk(name, linkage, ints, stack, complex = false)
   m = stack + (ints == 6 ? 8 : 0)
   mr = (m + 15) / 16 * 16
   frame = mr + (complex ? 40 : 24)
-  out = [".text", (linkage == "weak" ? ".weak #{name}" : ".globl #{name}"), ".type #{name}, @function", name + ":",
+  global = linkage == "local" ? [] : [(linkage == "weak" ? ".weak #{name}" : ".globl #{name}")]
+  out = [".text", *global, ".type #{name}, @function", name + ":",
          "\tsubq $#{frame}, %rsp"]
   out.concat(x87_copy_args(stack, frame))
   if ints < 6
@@ -2346,6 +2385,8 @@ def append_weak(il_path, asm_path)
       w = line.byteslice(X87_MARK.bytesize, line.bytesize - X87_MARK.bytesize).split(" ")
       if w[0] == "call" || w[0] == "callc"
         extra << x87_call_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "callc")
+      elsif w[0] == "icall" || w[0] == "icallc"
+        extra << x87_icall_thunk(w[1], w[2].to_i, w[3].to_i, w[0] == "icallc")
       else
         extra << x87_entry_thunk(w[1], w[2], w[3].to_i, w[4].to_i, w[0] == "entryc")
       end
@@ -2353,7 +2394,7 @@ def append_weak(il_path, asm_path)
       p = line.byteslice(ALIAS_MARK.bytesize, line.bytesize - ALIAS_MARK.bytesize).split
       next if p.length < 3
       extra << ["\t#{p.length > 3 && p[3] == "weak" ? ".weak" : ".globl"} #{p[1]}",
-                "\t.type #{p[1]}, #{p[0] == "function" ? "@function" : "@object"}",
+                "\t.type #{p[1]}, #{p[0] == "function" ? "@function" : p[0] == "ifunc" ? "@gnu_indirect_function" : "@object"}",
                 "\t.set #{p[1]}, #{p[2]}"].join("\n") + "\n"
     end
   end
@@ -2636,7 +2677,7 @@ end
 def alias_parts(f)
   raise BadIR, "alias form: #{form_text(f)}" if f.length < 4 || f.length > 5
   kind = f[3]
-  raise BadIR, "alias form: #{form_text(f)}" if kind != "function" && kind != "object"
+  raise BadIR, "alias form: #{form_text(f)}" unless kind == "function" || kind == "object" || kind == "ifunc"
   weak = f.length == 5
   raise BadIR, "alias form: #{form_text(f)}" if weak && f[4] != "weak"
   [pstr(f[1]), pstr(f[2]), kind, weak]
@@ -2674,6 +2715,9 @@ def prune(forms)
     refs = {}
     symbols(defs[work.pop], refs)
     refs.each_key do |r|
+      # The C-convention entry of a long double function (its own name, an x87 thunk) is what its address is: a reference
+      # to that name keeps the __nfcxx_ldr_ function the entry calls (a static one is otherwise dropped).
+      r = "__nfcxx_ldr_" + r if !defs.key?(r) && defs.key?("__nfcxx_ldr_" + r)
       if defs.key?(r) && !live.key?(r)
         live[r] = true
         work << r
@@ -2749,8 +2793,12 @@ def emit_x87_thunks(mod, forms)
     if kind == "call" || kind == "callc"
       raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
       mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?("__nfcxx_x87c_" + name)
+    elsif kind == "icall" || kind == "icallc"
+      raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 5
+      sym = (kind == "icallc" ? "__nfcxx_x87ic_" : "__nfcxx_x87i_") + name
+      mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{as_int(f[3])} #{as_int(f[4])}" if refs.key?(sym)
     elsif kind == "entry" || kind == "entryc"
-      raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 6 || !(f[3] == "weak" || f[3] == "global")
+      raise BadIR, "x87-thunk #{kind} form: #{form_text(f)}" if f.length != 6 || !(f[3] == "weak" || f[3] == "global" || f[3] == "local")
       mod.out << "#{X87_MARK}#{kind} #{qsym(name)} #{f[3]} #{as_int(f[4])} #{as_int(f[5])}" if kept.key?("__nfcxx_ldr_" + name)
     else
       raise BadIR, "x87-thunk kind #{form_text(f)}"

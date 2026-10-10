@@ -106,14 +106,21 @@ also checks that the emitter accepts or refuses them as stated).
   or calling convention); `tests/mruby/pathb-edge/r_bitfield128.ir`. Not done: that is `__int128` support as a whole.
 - **`__builtin_object_size`** answers only for the address of a known object (below); any pointer that was loaded, passed or
   returned is unknown (-1, or 0 for types 2 and 3), as in gcc without optimization. `__builtin_dynamic_object_size` is the same
-  (it does not see the size of a VLA or an allocation). TYPE 1 of the address of a member of a *global* structure is -1: the front
-  end folds `&g.m` to the address of `g` plus an offset and the member is lost (a local structure, `ls.a[1]` and `&ls.m`, is exact).
+  (it does not see the size of a VLA or an allocation). TYPE 1 of the address of a member of a *global* structure: EDG folds
+  `&g.m` into the address of `g` plus an offset, and the builtin's `const void *` parameter erases the pointer's type, so the
+  member's type is not in the IR. The lowering answers from the offset alone when every sub-object that could sit there agrees
+  (the members starting at the offset, or the innermost scalar or array containing it: `&g.m`, `&g.c`, `&g.in.x[1]`,
+  `&gg[1].m` are answered as gcc does); where they disagree it is -1 (`&g.a`, `&g`, `&gg[1]`, `&gg[1].a`: one address, several
+  answers). A union, a class with a base class and a variable-length array are -1 too. Locals are exact (`ls.a[1]`, `&ls.m`).
 - **VLA subscripts** are checked only when the subscript base is the VLA variable itself and the number of elements one index
   step covers is a constant: not `m[n][k]` with a run-time `k`, and not a pointer parameter or a pointer derived from the array
   (pointers carry no length, as for fixed arrays). Checked traps abort (SIGABRT) like the other checks.
-- **`alias`/`weakref`**: the alias target has to be defined in the same unit (as in gcc), on x86-64 ELF only (the aliases are
-  `.set` lines in the assembly). `weakref` without a target name (`__attribute__((weakref))` with `alias`) and `ifunc` are not
-  handled. The gcc backend cannot alias a static function (`tests/pathb-qbe/cases/alias_static.cpp`).
+- **`alias`/`weakref`/`ifunc`**: the alias target has to be defined in the same unit (as in gcc), on x86-64 ELF only (the aliases
+  are `.set` lines in the assembly). A `weakref` without a target name (`__attribute__((weakref, alias("t")))`) is a weakref to
+  `t`, as with the target named. `ifunc` is an IFUNC symbol (`.type NAME, @gnu_indirect_function`, `.set NAME, RESOLVER`) when the
+  resolver is defined in the unit; an ifunc whose resolver another unit defines is refused by name
+  (`(unsupported ifunc NAME: resolver R is not defined in this unit)`). The gcc backend cannot alias a static function
+  (`tests/pathb-qbe/cases/alias_static.cpp`).
 - VLAs use one global malloc pool, which is not thread safe (see stage 3); `alloca` does not.
 
 ## Inline asm
