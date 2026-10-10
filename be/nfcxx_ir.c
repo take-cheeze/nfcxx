@@ -3759,7 +3759,23 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
   }
   if (why == NULL && ae->operands != NULL && cls != IR_ASM_EMPTY && (nout != 2 || got_a != 1 || got_d != 1)) why = "asm-operands";
   ir_note(1, stmk_asm, why == NULL);
-  if (why != NULL) {
+  if (why != NULL && strcmp(why, "asm-template") == 0 && ae != NULL && ae->asm_string != NULL &&
+      ae->asm_string->kind == ck_string) {
+    /* the template text makes the refusal readable: refused: (unsupported stmt asm-template "mfence") */
+    char shown[64];
+    const char *tx2 = ae->asm_string->variant.string.value;
+    size_t k, m = 0;
+    for (k = 0; k < (size_t)ae->asm_string->variant.string.length && tx2[k] != '\0' && m < sizeof shown - 1; k++) {
+      char c = tx2[k];
+      if (c == '\n' || c == '\t') c = ' ';
+      if (c == '"' || c == '\\' || (unsigned char)c < 32 || (unsigned char)c > 126) c = '?';
+      if (c == ' ' && m > 0 && shown[m - 1] == ' ') continue;
+      shown[m++] = c;
+    }
+    shown[m] = '\0';
+    ir_line(d, ir_fmt("(unsupported stmt asm-template \"%s\")", shown));
+    return;
+  } else if (why != NULL) {
     ir_line(d, ir_fmt("(unsupported stmt %s)", why));
     return;
   }

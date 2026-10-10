@@ -96,7 +96,7 @@
   (params (param %0 "x" int))
   (slot "x" int 4 4)
   (store int $"x" %0)
-  (unsupported stmt asm-template)
+  (unsupported stmt asm-template "cpuid")
   (let %1 int (load int $"x"))
   (return %1))
 
