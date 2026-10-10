@@ -336,6 +336,22 @@ class ClosedWorld
     !ForeignDefiners.defines?(@ruby_paths, owner, name)
   end
 
+  # NATIVE_OWNER_MAP (ADR 0397): why the closed world does not allow an exact-class arm of `name` (nil when it
+  # does), beyond the native definers the owner map checks. An arm calls a class's own definition for an object
+  # of exactly that class, so a dynamic installer, an unknown or outside Ruby definer, a global refusal, or a
+  # singleton maker (an object with a singleton class is not of its class's exact lookup) keeps the by-name
+  # send. A `.singleton` definer answers only for class objects, whose class is never the arm's class, so it
+  # does not refuse. `installed` is CodeGen#symbol_installed_names.
+  def exact_arm_refusal(name, installed)
+    return :global_refusal if @global_refusal
+    return :dynamic_install if installed.nil? || installed.include?(name)
+    return :unknown_definer if @unknown_defs.include?(name)
+    return :outside_ruby if @outside_ruby_names.include?(name)
+    return :singleton_maker unless exact_instances_singleton_free?
+
+    nil
+  end
+
   # NATIVE_EXACT_DIRECT (ADR 0281): nothing outside the registry can replace or
   # hide the RGSS native `name` on the class it is registered for: it is spelled
   # only by the RGSS sources (so no outside Ruby, no other native), no dynamic

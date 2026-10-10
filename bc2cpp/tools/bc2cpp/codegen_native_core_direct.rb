@@ -141,7 +141,11 @@ module NativeCoreDirectFallback
     entries = native_core_entries(name, argv.size)
     # An exact-literal receiver (ADR 0280) is never another builtin, so their arms are dead code.
     entries = entries.select { |entry| entry.owner == site[:klass] } if site && CodeGen::EXACT_LITERAL_CLASS.value?(site[:klass])
-    return tail if entries.empty? || tail.include?('bc2cpp_nomethod')
+    if entries.empty? || tail.include?('bc2cpp_nomethod')
+      # NATIVE_OWNER_MAP (ADR 0397): a chain with no audited native entry still gets the proven candidates' arms.
+      arms = site || tail.include?('bc2cpp_nomethod') ? '' : native_owner_map_arms(d, recv, name, argv)
+      return arms.empty? ? tail : "#{arms}{\n      #{tail.chomp}\n    }\n"
+    end
 
     exact = native_core_exact_entry(entries, recv, name, argv)
     return exact_code_line(d, recv, argv, exact) if exact
@@ -153,9 +157,12 @@ module NativeCoreDirectFallback
     end.join
     proven = site && entries.any? { |entry| entry.owner == site[:klass] }
     what = proven ? "proven #{site[:klass]} receiver, argument guarded," : "exact #{entries.map(&:owner).uniq.join('/')} receiver"
+    # NATIVE_OWNER_MAP (ADR 0397): proven Ruby candidates' exact-class arms come ahead of the by-name else.
+    arms = site ? '' : native_owner_map_arms(d, recv, name, argv)
+    else_body = arms.empty? ? tail.chomp : "#{arms}{\n      #{tail.chomp}\n    }"
     "// NATIVE_CORE_DIRECT :#{name} -- #{what} calls the verified core body\n" \
       "  #{branches}{\n" \
-      "    #{tail.chomp}\n" \
+      "    #{else_body}\n" \
       "  }\n"
   end
 

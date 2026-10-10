@@ -62,6 +62,7 @@ require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
 require_relative 'codegen_exact_native_wrappers'
 require_relative 'codegen_native_core_direct'
+require_relative 'codegen_native_owner_map'
 require_relative 'codegen_numeric_native_direct'
 require_relative 'codegen_core_methods'
 require_relative 'core_compare'
@@ -250,6 +251,8 @@ if $PROGRAM_NAME == __FILE__
   native_registered_expressions = {}
   if ENV['NATIVE_SRCS']
     native_paths = Shellwords.split(ENV['NATIVE_SRCS'])
+    # NATIVE_OWNER_MAP (ADR 0397): every native source, not only those with a literal name registration.
+    CodeGen.native_source_paths = native_paths
     native_expression_devirt = NativeExpressionDevirt.analyze(native_paths)
     native_registered_expressions = NativeExpressionDevirt.analyze_exact_class_expressions(native_paths)
     warn "== generated native C-expression devirtualizations (#{native_expression_devirt.size}) =="
