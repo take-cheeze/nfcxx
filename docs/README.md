@@ -60,7 +60,7 @@ Each entry names where it comes from and what, if anything, checks it.
   `traps/longdouble_*.cpp` (all in `tests/pathb-qbe/run.sh`), the IR golden `tests/pathb-ir/longdouble_ir.ir` and the thunk
   edge cases `tests/mruby/pathb-edge/x87_thunks.ir` (`tests/mruby/run.sh`, Python oracle identical). Named limits: function
   pointers to `long double` functions use the internal convention, structs of at most 16 bytes holding one by value,
-  `_Float128`, `std::format` (blocked by `__int128`); see the note, section 7. The option
+  `_Float128`, `std::format` (blocked by `_Float128`); see the note, section 7. The option
   `--long-double=trap` remains for hand-written IR that still mentions the scalar type
   (`tests/mruby/pathb-edge/r_longdouble.ir`).
 - Hexagon: EDG's `long double` is 16 bytes, Hexagon's is 8; `tests/hexagon/layout.sh` leaves it out (`hexagon.md`).
@@ -106,12 +106,10 @@ refuses any other instruction, a register clobber or `goto` (`tests/mruby/pathb-
 - Path B: every volatile access is a call of a module-local helper, so volatile code is slow; not atomic, not a fence
   (`tests/pathb-qbe/cases/volatile.cpp`, with assembly checks `// ASM-COUNT:`).
 
-**Path B other**: bit-fields of a 128-bit declared type (any access to the field; the layout is right) and checked (`NFCXX_IR_OVERFLOW=trap`) unsigned or 64-bit signed
-multiplication are refused; pointer subscripts are not bounds-checked and there is no `undef` (by decision); thread-local
+**Path B other**: checked (`NFCXX_IR_OVERFLOW=trap`) unsigned or 64-bit signed multiplication is refused; pointer subscripts are not bounds-checked and there is no `undef` (by decision); thread-local
 objects are x86-64 ELF only and a thread-local address in a static initializer is refused; only LP64 layouts are emitted
 (`pathb-stage3.md`; refusal paths: `tests/mruby/pathb-edge/r_*.ir` via `tests/mruby/run.sh`). Hosted headers now work (`pathb-hosted.md`; `PATHB_HOSTED=0` or
-`--freestanding` gives the old EDG-only headers). Still failing there: `__builtin_alloca`, signed multiply-overflow and
-mixed-type overflow builtins, `bswap16`, aggregate `va_arg`, `__int128`/`_Float128` in kept functions, asm outside the list in
+`--freestanding` gives the old EDG-only headers). Still failing there: `_Float128` in kept functions, asm outside the list in
 `pathb-hosted.md` ("Known limits"; no test asserts the failures). `__builtin_object_size` answers only for the address of a known
 object (else -1/0), TYPE 1 for a member of a global structure is -1 (`builtin_objsize.cpp`); `alias`/`weakref` need a target defined in
 the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap` is SIGILL on Path B (`traps/builtin_trap.cpp`).

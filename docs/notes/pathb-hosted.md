@@ -98,9 +98,7 @@ also checks that the emitter accepts or refuses them as stated).
   linked into every hosted program: Path B by `nfcxx`/`tests/pathb-qbe/run.sh`) throws them with EDG's runtime; `std::exception_ptr`,
   `current_exception`, `throw_with_nested` work with the patched `libC.a`. Remaining limits: `eh-shim.md`, "Limits". User-code throws,
   `std::runtime_error` constructed in user code, and EDG's `operator new` work as before.
-- `_Float128`/`__int128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `__int128`).
-  `long double` is supported (below).
-- `_Float128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `_Float128` too).
+- `_Float128` types are refused when a kept function uses them (`std::format` instantiates its visitor for `_Float128`).
   `long double` is supported (below), and so is `__int128` (`docs/notes/pathb-int128.md`: 128-bit arithmetic, conversions,
   switch, bit-fields and the C ABI, as helper calls on 16-byte objects).
 - **`__builtin_object_size`** answers only for the address of a known object (below); any pointer that was loaded, passed or
