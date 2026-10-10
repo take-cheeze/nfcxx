@@ -46,6 +46,12 @@ jobs:
       - name: Real-world check (tinyxml2)
         run: tests/realworld/run.sh
 
+      - name: Real-world check (nlohmann/json, both backends, output compared with host g++)
+        run: tests/realworld/run_json.sh
+
+      - name: Real-world check ({fmt}, gcc backend, header-only and compiled; output compared with host g++)
+        run: tests/realworld/run_fmt.sh
+
       - name: Trace output (Perfetto JSON, both backends)
         run: tests/trace/run.sh
 
