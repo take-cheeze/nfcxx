@@ -691,12 +691,28 @@ omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
-`OPTCARROT_STATIC_DISPATCH=1` expands the finite CPU opcode table and nested
-addressing, instruction and store calls into named calls in both compiler input
-and runtime bundles. It remains opt-in: compiled median wall FPS improved from
-34.64 to 63.90, while the interpreter's linear case is slower. See
-[CPU dispatch](../../docs/optcarrot-cpu-dispatch.md) for the equivalence checks
-and benchmark measurements.
+Two additional opt-in experiments can run together:
+
+```sh
+OPTCARROT_CLOSED_WORLD=1 OPTCARROT_STATIC_DISPATCH=1 \
+  ruby tools/optcarrot_probe/compiled_run.rb 180
+```
+
+Static dispatch expands the finite CPU opcode table and nested addressing,
+instruction and store calls into named calls in both compiler input and runtime
+bundles (see [CPU dispatch](../../docs/optcarrot-cpu-dispatch.md)). Strict mode
+compiles the entire benchmark bundle, including shims and interpreted methods,
+and embeds it as gem bytecode. Its dedicated executable accepts only ROM and
+frame-count data. The build excludes source loaders, compiler and eval gems,
+validates its actual gem manifest, and scans the fixed host's native source
+(see [ADR 0403](../../docs/adr/0403-optcarrot-sealed-world.md)). These modes have
+separate compiled target directories; neither is required for the default run.
+
+Use static dispatch alone for the measured FPS gain (median 34.64 to 63.90 wall
+FPS; [measurements](../../docs/optcarrot-cpu-dispatch.md)). Strict mode currently
+triggers conservative Fiber fallback for CPU hot methods: the first combined
+180-frame run passed checksum `59662` but took 24.20 s with 17 methods installed.
+It is a correctness and analysis experiment, not a faster benchmark preset.
 
 `compiled_run.rb` now defaults to optimized toolchain settings (`-O3` with
 GCC) for both mruby binaries and generated C++. Use `OPTCARROT_DEBUG=1` for
