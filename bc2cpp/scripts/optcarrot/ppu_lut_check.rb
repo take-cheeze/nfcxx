@@ -5,7 +5,7 @@ require 'tmpdir'
 require 'rbconfig'
 require_relative '../../tools/optcarrot_probe/ppu_lut'
 
-path = File.expand_path('../3rd/optcarrot/lib/optcarrot/ppu.rb', __dir__)
+path = File.expand_path('../../3rd/optcarrot/lib/optcarrot/ppu.rb', __dir__)
 source = File.read(path)
 transformed = OptcarrotPPULUT.transform(source)
 original_table = Module.new.module_eval(OptcarrotPPULUT::ORIGINAL)
