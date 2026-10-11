@@ -104,5 +104,23 @@ else
   ok "-fno-rtti refused"
 fi
 
+# 11. A quoted include resolves -I DIR before the host system directories, as GCC does. The source is outside
+# DIR and includes "error.h", which /usr/include also provides (glibc). The -I copy must win: EXPECT 42, the
+# same as host g++ (ifc_modules_templ.c in EDG's probe failed here when the -I came after --sys_include).
+mkdir -p "$tmp/quote/inc" "$tmp/quote/src"
+printf '#ifndef QUOTE_ERROR_H\n#define QUOTE_ERROR_H\ninline int quote_value(void) { return 42; }\n#endif\n' > "$tmp/quote/inc/error.h"
+printf '#include "error.h"\nint main() { return quote_value(); }\n' > "$tmp/quote/src/quote_main.cpp"
+g++ -I "$tmp/quote/inc" "$tmp/quote/src/quote_main.cpp" -o "$tmp/quote_gxx" && "$tmp/quote_gxx"; want=$?
+[ "$want" -eq 42 ] || bad "quoted include: host g++ EXPECT 42" "got $want"
+check "-I DIR wins over the host header for a quoted include" \
+  "$nfcxx" -I "$tmp/quote/inc" -c "$tmp/quote/src/quote_main.cpp" -o "$tmp/quote.o"
+if [ -x "$tmp/quote_gxx" ] && "$nfcxx" -I "$tmp/quote/inc" "$tmp/quote/src/quote_main.cpp" -o "$tmp/quote_nfcxx" 2>/dev/null; then
+  "$tmp/quote_nfcxx"; got=$?
+  [ "$got" -eq "$want" ] && ok "quoted include: nfcxx exit $got matches host g++" \
+    || bad "quoted include: nfcxx matches host g++" "nfcxx $got, g++ $want"
+else
+  bad "quoted include: nfcxx links and runs" "compile or link failed"
+fi
+
 echo "pass $pass fail $fail"
 [ $fail -eq 0 ]
