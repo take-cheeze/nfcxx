@@ -80,7 +80,7 @@ module SymbolCache
   def rewrite_funcalls(code, table)
     out = +''
     pos = 0
-    while (start = code.index(/\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/, pos))
+    while (start = code.index(/\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
@@ -90,11 +90,12 @@ module SymbolCache
         # names take their slots before this call's own.
         receiver = rewrite_funcalls(code[head_end...recv_end], table)
         index = table.index_for(name[1], CHECKED_FUNCALLS.fetch(kind, 0))
-        table.nomethod_used = true if kind == 'bc2cpp_nomethod_named'
+        table.nomethod_used = true if kind == 'bc2cpp_nomethod_named' || kind == 'bc2cpp_nomethod_raise_named'
         table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
+                      when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
                       when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
@@ -115,7 +116,7 @@ module SymbolCache
   def send_indices(code)
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|guard_violation|nil_receiver)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|nil_receiver)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*[,)]/, 1]
@@ -262,6 +263,30 @@ module SymbolCache
       for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
       va_end(ap);
       bc2cpp_nomethod_argv(M, recv, i, argc, argv);
+    }
+    // DIRECT_RAISE (ADR 0226): a reviewed dead site, which the closed world proves answers the name
+    // neither by a method nor by method_missing. Dispatch would find nothing and reach mruby's basic
+    // method_missing (mrb_method_missing), which raises this NoMethodError; the format is that function's.
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_nomethod_raise_argv(mrb_state* M, mrb_value recv, int i, mrb_int argc, const mrb_value* argv) {
+      mrb_sym mid = bc2cpp_sym(M, i);
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: dead site reached: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s (%d arg(s))\\n", mrb_sym_name(M, mid), (int)argc);
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_no_method_error(M, mid, mrb_ary_new_from_values(M, argc, argv), "undefined method '%n' for %T", mid, recv);
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i) {
+      bc2cpp_nomethod_raise_argv(M, recv, i, 0, nullptr);
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_nomethod_raise(mrb_state* M, mrb_value recv, int i, mrb_int argc, ...) {
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      bc2cpp_nomethod_raise_argv(M, recv, i, argc, argv);
     }
   CPP
   private_constant :NOMETHOD

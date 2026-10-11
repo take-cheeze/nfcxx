@@ -78,6 +78,7 @@ else
     File.write(source, <<~CPP)
       #include <mruby.h>
       #include <mruby/class.h>
+      #include <mruby/array.h>
       #include <mruby/error.h>
       #include <mruby/string.h>
       #include <cstdarg>
@@ -115,7 +116,10 @@ else
       int main() {
         mrb_state* M = mrb_open_core();
         // The core alone has no NoMethodError (mrblib/error.rb defines it).
-        if (!mrb_class_defined(M, "NameError")) mrb_define_class(M, "NameError", M->eStandardError_class);
+        // Build the chain NoMethodError < NameError < StandardError < Exception: mrb_exc_get_id
+        // refuses a class whose chain never reaches Exception (M->eStandardError_class is NULL here).
+        if (!mrb_class_defined(M, "StandardError")) mrb_define_class(M, "StandardError", M->eException_class);
+        if (!mrb_class_defined(M, "NameError")) mrb_define_class(M, "NameError", mrb_class_get(M, "StandardError"));
         if (!mrb_class_defined(M, "NoMethodError")) mrb_define_class(M, "NoMethodError", mrb_class_get(M, "NameError"));
         struct RClass* foo = mrb_define_class(M, "Foo", M->object_class);
         mrb_define_method(M, foo, "bar", bar, MRB_ARGS_NONE());

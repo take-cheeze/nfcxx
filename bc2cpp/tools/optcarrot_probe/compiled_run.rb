@@ -113,6 +113,7 @@ abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.e
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
 require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
+require_relative 'sealed_build'
 
 # The bundle prepends this shim, so bc2cpp must see it: it is the only `[]` definer on the numbers optcarrot
 # indexes, and the GETIDX helper's exact-class arm needs it (ADR 0305). shims.rb stays out: its classes embed.
@@ -149,7 +150,7 @@ end
 def run_bc2cpp(sources, env)
   command = [RbConfig.ruby, File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb'), *sources]
   stdout, stderr, status = Open3.capture3(env, *command)
-  raise "bc2cpp failed (#{status.exitstatus}):\n#{stderr[-4000..]}" unless status.success?
+  raise "bc2cpp failed (#{status.exitstatus}):\n#{stderr[-4000..] || stderr}" unless status.success?
 
   [stdout, stderr]
 end
@@ -189,10 +190,10 @@ end
 def owner_class_expr(owner)
   singleton = owner.end_with?('.singleton')
   parts = owner.sub(/\.singleton\z/, '').split('::')
-  raise "unexpected optcarrot owner: #{owner}" unless parts.first == 'Optcarrot' && parts.length > 1
+  raise "unexpected optcarrot owner: #{owner}" unless parts.all? { |part| part.match?(/\A[A-Z]\w*\z/) }
 
-  parent = 'root'
-  parts[1..].each do |part|
+  parent = 'M->object_class'
+  parts.each do |part|
     parent = "mrb_class_ptr(mrb_const_get(M, mrb_obj_value(#{parent}), " \
              "mrb_intern_cstr(M, #{part.dump})))"
   end
@@ -263,7 +264,6 @@ def emit_register(diagnostics, out_dir)
     file.puts '#include "optcarrot_probe_decls.h"'
     file.puts '#include "optcarrot_probe_gen.cpp"'
     file.puts 'static mrb_value optcarrot_install(mrb_state* M, mrb_value) {'
-    file.puts '  struct RClass* root = mrb_module_get(M, "Optcarrot");'
     embeds.each do |owner|
       klass, = owner_class_expr(owner)
       file.puts "  MRB_SET_INSTANCE_TT(#{klass}, MRB_TT_DATA);"
@@ -297,6 +297,18 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   output_dir = File.join(temp, 'gem', 'src')
   FileUtils.mkdir_p(scan_dir)
   FileUtils.mkdir_p(output_dir)
+  sealed = ENV['OPTCARROT_CLOSED_WORLD'] == '1'
+  if sealed
+    benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
+    sources = [benchmark_source]
+    native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
+  elsif ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+    require_relative 'cpu_dispatch'
+    cpu_source = sources.find { |path| path.end_with?('/optcarrot/cpu.rb') }
+    transformed_cpu = File.join(temp, 'cpu.rb')
+    File.write(transformed_cpu, OptcarrotCPUDispatch.transform(File.read(cpu_source)))
+    sources = sources.map { |path| path == cpu_source ? transformed_cpu : path }
+  end
   base_env = {
     'MRBC' => MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
@@ -339,6 +351,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     # unconditionally, since this file was first written.
     'BC2CPP_SELF_REGISTERING' => '1'
   }
+  base_env.merge!(OptcarrotSealedBuild.environment(sealed_gems)) if sealed
   # NILABLE_EMBED_EXPERIMENT: OPTIN set only for the A/B run, so the default
   # three-mode benchmark and the CI job below are untouched. It adds a SECOND
   # compiled target from the same sources, differing only in one thing: bc2cpp is
@@ -354,6 +367,12 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   nullable_ivars = ENV['OPTCARROT_FIXNUM_NIL_IVARS'].to_s
   scan_env = nullable ? base_env.merge('FIXNUM_NIL_IVARS' => nullable_ivars) : base_env
   _scan_cpp, scan_diagnostics = run_bc2cpp(sources, scan_env.merge('OUT_DIR' => scan_dir))
+  if sealed
+    lines = scan_diagnostics.lines
+    world_header = lines.index { |line| line.start_with?('== closed world (') }
+    puts lines[world_header, 2] if world_header
+    puts lines.grep(/\A== closed world (fallbacks|guard violations|nil receivers|nomethod sites|proven-class miss sites)/)
+  end
   # Optcarrot::PPU used to be excluded here entirely -- a devirtualized call
   # (a direct C++ call from one compiled method's body into another's)
   # reaches a compiled `_impl` function regardless of whether that method is
@@ -402,15 +421,29 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     end
   RUBY
   profiling = ENV['GPROF'] == '1'
-  interpreted_target = profiling ? 'optcarrotinterpretedprofile' : 'optcarrotinterpreted'
-  compiled_target = profiling ? 'optcarrotcompiledprofile' : 'optcarrotcompiled'
+  debug = ENV['OPTCARROT_DEBUG'] == '1'
+  build_mode = debug ? 'debug (-O0)' : 'release (-O3)'
+  target_suffix = "#{debug ? '' : 'release'}#{profiling ? 'profile' : ''}"
+  interpreted_target = "optcarrotinterpreted#{target_suffix}"
+  target_suffix += 'sealed' if sealed
+  target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+  compiled_target = "optcarrotcompiled#{target_suffix}"
+  puts "Optcarrot build mode: #{build_mode}"
+  puts "Optcarrot CPU dispatch: #{ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : 'dynamic'}; sealed world: #{sealed}"
   config = File.join(temp, 'mruby_build_config.rb')
+  compiled_base = if sealed
+                    ["toolchain", "self.mrbcfile = #{File.expand_path(MRBC).dump}",
+                     (debug ? 'enable_debug' : nil),
+                     *sealed_gems.reject { |name, _| name.start_with?('optcarrot-') }.values.map { |dir| "gem #{dir.dump}" }].compact.join("\n      ")
+                  else
+                    'instance_eval(&base)'
+                  end
   File.write(config, <<~RUBY)
     base = proc do
       toolchain
       gembox 'full-core'
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
-      enable_debug
+      #{debug ? 'enable_debug' : '# Keep the toolchain optimization defaults for FPS measurements.'}
     end
     unless #{site_profile ? true : false}
       MRuby::Build.new(#{interpreted_target.dump}) do
@@ -422,7 +455,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       end
     end
     MRuby::Build.new(#{compiled_target.dump}) do
-      instance_eval(&base)
+      #{compiled_base}
       # The compiled gem's only source is C++ (register.cxx), and its generated
       # code raises real C++ exceptions (its own bc2cpp_ensure_guard /
       # bc2cpp_block_break), so the build needs MRB_USE_CXX_EXCEPTION and the
@@ -436,12 +469,26 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       # .../optcarrot-compiled/src/register.o".
       enable_cxx_exception
       gem #{gem_dir.dump}
+      #{sealed ? "gem #{sealed_gems.fetch('optcarrot-benchmark').dump}" : ''}
       if #{profiling}
         cc.flags << '-pg'
         cxx.flags << %w(-pg -fno-inline)
         linker.flags << '-pg'
       end
     end
+    #{sealed ? <<~VERIFY : ''}
+      task :verify_optcarrot_world do
+        actual = MRuby.targets.fetch(#{compiled_target.dump}).gems.to_h { |g| [g.name, File.expand_path(g.dir)] }
+        expected = #{sealed_gems.inspect}
+        unless actual == expected
+          raise "sealed gem manifest differs from actual build: extra=\#{actual.to_a - expected.to_a}; missing=\#{expected.to_a - actual.to_a}"
+        end
+      end
+      task :link_optcarrot => :all do
+        build = MRuby.targets.fetch(#{compiled_target.dump})
+        build.linker.run File.join(build.build_dir, 'bin/optcarrot'), build.libraries, *build.gems.linker_attrs
+      end
+    VERIFY
   RUBY
   # The generated C++ depends on this repo's own mruby patches, not just on
   # upstream mruby: bc2cpp's VM_UNWIND_RESTORE helper reads
@@ -478,13 +525,24 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # still -- that sets the EMPTY STRING, leaving mruby's link command blank,
   # "sh: 1: -o: not found".) The linker has to go through the compiler driver,
   # which is what adds libc: LD=CC, the same `cc` the compile half already uses.
-  # A kept build dir does not rebuild the gem when only its (temp-dir) sources change, and
-  # counters from an old binary would be ranked against this run's site table.
-  FileUtils.rm_rf(File.join(MRUBY, "build/#{compiled_target}/mrbgems/optcarrot-compiled")) if site_profile
+  # Temporary gem paths can leave stale objects in a kept build directory.
+  # Always rebuild generated code so timings and counters describe this run.
+  FileUtils.rm_rf(File.join(MRUBY, "build/#{compiled_target}/mrbgems/optcarrot-compiled"))
+  if sealed
+    gems_dir = File.join(MRUBY, "build/#{compiled_target}/mrbgems")
+    FileUtils.rm_rf(File.join(gems_dir, 'optcarrot-benchmark'))
+    FileUtils.rm_rf(File.join(gems_dir, 'mruby-onig-regexp/src'))
+    FileUtils.rm_f(Dir[File.join(gems_dir, 'mruby-onig-regexp/gem_init.{c,pi,o}')])
+  end
   rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
   rake_env['LD'] = rake_env['CC'] || 'cc'
-  output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
-  raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..]}" unless status.success?
+  tasks = sealed ? %w[verify_optcarrot_world link_optcarrot] : []
+  output, status = Open3.capture2e(rake_env, 'rake', *tasks, "-j#{Etc.nprocessors}", chdir: MRUBY)
+  raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..] || output}" unless status.success?
+
+  if sealed
+    compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/optcarrot")
+  end
 
   bundle = File.join(temp, 'optcarrot.rb')
   cruby_bundle = File.join(temp, 'optcarrot_cruby.rb')
@@ -497,9 +555,12 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   File.write(compiled_bundle, source)
 
   interpreted_binary = File.join(MRUBY, "build/#{interpreted_target}/bin/mruby")
-  compiled_binary = File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
-  puts "bc2cpp installed #{count} compiled methods, including CPU/NES/Video/APU's own and " \
-       "PPU's (main_loop as a resumable step function, ADR 0273; run and the wait_* helpers stay interpreted)"
+  compiled_binary ||= File.join(MRUBY, "build/#{compiled_target}/bin/mruby")
+  compiled_entries = section_lines(diagnostics, 'compiled entry points').join("\n")
+  cpu_run_mode = compiled_entries.include?('(Optcarrot::CPU#run,') ? 'compiled' : 'interpreted'
+  ppu_loop_mode = compiled_entries.include?('(Optcarrot::PPU#main_loop,') ? 'compiled' : 'interpreted'
+  puts "bc2cpp installed #{count} compiled methods; " \
+       "CPU#run=#{cpu_run_mode}; PPU#main_loop=#{ppu_loop_mode}"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -511,7 +572,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
-  compiled_result = run_benchmark(core_label, [compiled_binary, compiled_bundle, ROM, FRAMES.to_s],
+  modes = [sealed && 'sealed', ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && 'static dispatch'].select { |mode| mode }
+  core_label += " (#{modes.join(', ')})" unless modes.empty?
+  compiled_command = sealed ? [compiled_binary, ROM, FRAMES.to_s] : [compiled_binary, compiled_bundle, ROM, FRAMES.to_s]
+  compiled_result = run_benchmark(core_label, compiled_command,
                                   chdir: (compiled_profile_dir if profiling))
   benchmarks << compiled_result
   # The A/B size figure, when the experiment ran: this binary's own .text, so
@@ -528,7 +592,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   if !site_profile && (summary_path = ENV['GITHUB_STEP_SUMMARY']) && !summary_path.empty?
     File.open(summary_path, 'a') do |summary|
-      summary.puts "## Optcarrot benchmark (#{FRAMES} frames)", '',
+      summary.puts "## Optcarrot benchmark (#{FRAMES} frames, #{build_mode})", '',
                    '| Runtime | Wall time | Wall fps | Optcarrot fps | Checksum |',
                    '| --- | ---: | ---: | ---: | ---: |'
       benchmarks.each do |result|
@@ -536,10 +600,11 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                             FRAMES / result[:seconds], result[:reported_fps] || 'n/a', result[:checksum])
       end
       summary.puts '', 'All three runtimes produced the same checksum.'
-      summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
+      summary.puts format('Wall-time ratios: mruby/CRuby %.2fx; bc2cpp/mruby %.2fx (lower is faster).',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Config, Opt, CPU, NES, ROM.load, ROM#initialize, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are all compiled; PPU is compiled too, with main_loop a resumable step function driven by the interpreted Fiber block (ADR 0273) and #run, which builds the Fiber, interpreted; Video/APU besides those two hooks remain interpreted.'
+      summary.puts "Installed #{count} compiled methods; CPU#run is #{cpu_run_mode}; PPU#main_loop is #{ppu_loop_mode}. " \
+                   'Unsupported and Fiber-unsafe methods stay interpreted. A compiled PPU#main_loop uses a resumable step function (ADR 0273).'
     end
   end
 

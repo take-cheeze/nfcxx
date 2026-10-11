@@ -1214,7 +1214,9 @@ class ClosedWorld
   end
 
   def build_hierarchy
-    global!(:qualified_class_definition) if @class_decls.values.flatten.any? { |d| !d[:outer_nil] }
+    # ADR 0402: a compact definition whose outer constant registry.rb resolved
+    # (outer_qualified) is named correctly and needs no refusal.
+    global!(:qualified_class_definition) if @class_decls.values.flatten.any? { |d| !d[:outer_nil] && !d[:outer_qualified] }
     by_simple = Hash.new { |h, k| h[k] = [] }
     @class_decls.each_key { |c| by_simple[simple(c)] << c }
     @by_simple = by_simple

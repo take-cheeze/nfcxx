@@ -691,6 +691,57 @@ omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
+Two additional opt-in experiments can run together:
+
+```sh
+OPTCARROT_CLOSED_WORLD=1 OPTCARROT_STATIC_DISPATCH=1 \
+  ruby tools/optcarrot_probe/compiled_run.rb 180
+```
+
+Static dispatch expands the finite CPU opcode table and nested addressing,
+instruction and store calls into named calls in both compiler input and runtime
+bundles (see [CPU dispatch](../../docs/optcarrot-cpu-dispatch.md)). Strict mode
+compiles the entire benchmark bundle, including shims and interpreted methods,
+and embeds it as gem bytecode. Its dedicated executable accepts only ROM and
+frame-count data. The build excludes source loaders, compiler and eval gems,
+validates its actual gem manifest, and scans the fixed host's native source
+(see [ADR 0403](../../docs/adr/0403-optcarrot-sealed-world.md)). These modes have
+separate compiled target directories; neither is required for the default run.
+
+Use static dispatch alone for the measured FPS gain (median 34.64 to 63.90 wall
+FPS; [measurements](../../docs/optcarrot-cpu-dispatch.md)). Strict mode currently
+triggers conservative Fiber fallback for CPU hot methods: the first combined
+180-frame run passed checksum `59662` but took 24.20 s with 17 methods installed.
+It is a correctness and analysis experiment, not a faster benchmark preset.
+
+`compiled_run.rb` now defaults to optimized toolchain settings (`-O3` with
+GCC) for both mruby binaries and generated C++. Use `OPTCARROT_DEBUG=1` for
+the previous `enable_debug` mode (`-O0 -g3`, `MRB_DEBUG`). The console and CI
+summary report the selected mode. Release/debug targets and their `GPROF=1`
+variants have separate build directories; every invocation rebuilds the
+generated gem so an earlier temporary source path cannot leave stale code
+in the benchmark. The standalone `mruby_build_config.rb` remains a debug
+configuration for building the probe's host tools.
+
+The measurements below are historical and used the debug configuration
+unless explicitly described as optimized. Compare timings only within the
+same mode; this default change enables C/C++ optimization without changing
+the emulator or bc2cpp lowering.
+
+Local validation (GCC 15, 180 frames of `Lan_Master.nes`, three alternating
+runs of the same generated bundle using the two compiled binaries):
+
+| Compiled build | Median wall time | Median wall FPS |
+| --- | ---: | ---: |
+| Debug (`OPTCARROT_DEBUG=1`) | 12.629 s | 14.25 |
+| Release (default) | 5.230 s | 34.41 |
+
+All six runs returned checksum `59662`. This is a 2.41x speedup from enabling
+C/C++ optimization, not a change to emulation or generated-code algorithms.
+The full runner also verified checksum agreement with CRuby and interpreted
+mruby in both modes. Wall FPS uses monotonic elapsed time for the whole
+process; the compatibility-shim FPS counter is a separate measurement.
+
 `perf` sampling is unavailable in the current environment (`perf_event_paranoid`
 is 4), so I profiled both mruby modes with GCC `gprof` instead:
 
@@ -1240,7 +1291,7 @@ as `cmake/build-mruby.cmake`, `enable_debug` removed so mruby builds at -O3;
 `gprof` showed ~100M `rdata_ivar_slot` calls per 60 frames. Hashing the
 descriptor (`ivar_hash`) brought it to 12 s, and a per-(state, type, symbol)
 cache measured as a floor reached 8.3 s (faster than the interpreter), so the
-remaining gap is the name fetch and hash per access. The CI job builds with
+remaining gap is the name fetch and hash per access. The CI job at the time built with
 `enable_debug` (-O0 for both binaries), so its ratio is not comparable to
 these.
 
@@ -1373,8 +1424,7 @@ after -- there the compiled build is only level with the interpreter, as before 
 it was slower than it. Most of the gain comes from compiling the callees that used to be
 refused; the step function itself is worth another 10-30 percent in these builds.
 
-Two pitfalls when repeating this locally after changing bc2cpp: mruby's rake keeps the
-object files of an earlier run's temporary gem directory and can relink them (the
-preprocessed `.pi` changes, the `.o` does not), so `rm -rf 3rd/mruby/build` first or the
-benchmark measures the previous generator's output; and a run under load (other builds on
-the machine) moved the same binary by 10 percent or more between repeats.
+The runner now removes the generated gem's object directory before each build:
+mruby's rake can otherwise relink objects from an earlier temporary gem directory
+even when its preprocessed `.pi` changes. A run under load (other builds on the
+machine) moved the same binary by 10 percent or more between repeats.

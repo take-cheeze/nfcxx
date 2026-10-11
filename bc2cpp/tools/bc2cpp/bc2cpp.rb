@@ -212,7 +212,7 @@ if $PROGRAM_NAME == __FILE__
     build_name = ENV['BC2CPP_BUILD_NAME'].to_s
     build_gems = Shellwords.split(ENV['BC2CPP_BUILD_GEMS'].to_s).to_h { |kv| kv.split('=', 2) }
     CodeGen.build_gem_names = build_gems.keys.to_set
-    errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root)
+    errors = bc2cpp_closed_world_violations(build_name, build_gems, repo_root, compiled_srcs: srcs)
     abort "bc2cpp: BC2CPP_CLOSED_WORLD refused for build '#{build_name}':\n  #{errors.join("\n  ")}" unless errors.empty?
 
     outside_native, outside_ruby = bc2cpp_closed_world_outside_srcs(build_name, build_gems, repo_root)
@@ -1492,6 +1492,8 @@ if $PROGRAM_NAME == __FILE__
   compiled.each do |m|
     m[:code] = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
   end
+  # DIRECT_RAISE (ADR 0226): a reviewed dead fallback raises without dispatching (before the rewrite renames its callee).
+  compiled.each { |m| m[:code] = NomethodReviewed.direct_raise(m[:code], m[:owner], m[:name]) }
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
   if closed_world
     kept = Hash.new(0)

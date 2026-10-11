@@ -173,9 +173,12 @@ if ENV['MRBC']
         fn = site.gsub('::', '__').tr('.', '_') # the emitted function name
         body = body_of.call(code, fn)
         # It dispatches or, for a Ruby definition the closed world sees, calls that definition; never the native.
+        # A reopened `class << self` in a compact class is one such definition: it is named by its real owner
+        # (ADR 0402), so the site calls its own `*_impl` directly instead of dispatching.
         check.call("#{what} keeps `#{name}` in #{fn} off the native entry point",
                    !body.empty? && !body.include?("NATIVE_EXACT_DIRECT :#{name}") &&
-                     (body.include?('bc2cpp_send(') || body.include?("CLOSED_WORLD_CONSTANT_OBJECT :#{name}")))
+                     (body.include?('bc2cpp_send(') || body.include?("CLOSED_WORLD_CONSTANT_OBJECT :#{name}") ||
+                      body.match?(/_#{Regexp.escape(name)}_impl\(M, self\)/)))
       end
     end
   end

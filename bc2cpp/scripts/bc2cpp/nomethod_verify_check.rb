@@ -71,6 +71,7 @@ else
     source = File.join(dir, 'verify_probe.cpp')
     File.write(source, <<~CPP)
       #include <mruby.h>
+      #include <mruby/array.h>
       #include <mruby/class.h>
       #include <mruby/error.h>
       #include <cstdarg>

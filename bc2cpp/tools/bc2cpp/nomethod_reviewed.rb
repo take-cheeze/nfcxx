@@ -69,6 +69,22 @@ module NomethodReviewed
     end
   end
 
+  # DIRECT_RAISE (ADR 0226): the reviewed site's by-name fallback calls bc2cpp_nomethod_raise_named, which raises the
+  # NoMethodError without dispatching, instead of bc2cpp_nomethod_named. Only the callee name changes, and the marker
+  # stays, so the gate still counts the site. A site whose key is not listed keeps the dispatching fallback.
+  def direct_raise(code, owner, method)
+    return code unless code.include?('CLOSED_WORLD nomethod:')
+
+    code.gsub(/bc2cpp_nomethod_named\((M, [^\n]*?)\); (\/\* CLOSED_WORLD nomethod: (?:self|recv)\.(\S+) \*\/)/) do
+      args, marker, called = Regexp.last_match(1), Regexp.last_match(2), Regexp.last_match(3)
+      if NOMETHOD_REVIEWED.include?(key(owner, method, called))
+        "bc2cpp_nomethod_raise_named(#{args}); #{marker}"
+      else
+        Regexp.last_match(0)
+      end
+    end
+  end
+
   # The GUARD_VIOLATION keys of `compiled`, for the stderr listing.
   def violation_sites(compiled)
     compiled.flat_map do |m|
