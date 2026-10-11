@@ -123,7 +123,7 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
   (`realworld.md`). No test asserts the rejection; `tests/lib/new_launder.cpp` uses a union to avoid it
   (`freestanding.md`). Checked by hand with a one-line program on both backends.
 - `__builtin_trap` is unknown to cproc (`tests/builtins/trap_compile_only.cpp`, `XFAIL-qbe`); `freestanding.md`'s `panic` uses `abort`.
-- `va_arg` of an aggregate works only for integer-class aggregates of at most 16 bytes (`scripts/cproc-vaarg-aggregate.patch`,
+- `va_arg` of an aggregate works only for integer-class aggregates of at most 16 bytes (`cproc-vaarg-aggregate` (a commit on take-cheeze/cproc branch nfcxx-patches),
   `tests/c/va_struct.c`); floats in the aggregate, larger or over-aligned ones still stop with cproc's error (`realworld.md`).
 - Empty classes have size 0 in the C that cproc sees, while EDG folds `sizeof` as 1 (`freestanding.md`; no test asserts it).
 - `nfcc` on qbe ignores `-O*` and `-g*` (no optimisation levels, no debug info); `-Wp,` items outside the listed

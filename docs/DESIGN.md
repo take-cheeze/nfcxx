@@ -44,7 +44,7 @@ into the copied `edg_eccp_config`): `cc -E | cproc-qbe | qbe | cc -c`; the link 
 - **Sources**: `3rd/qbe` is [take-cheeze/qbe](https://github.com/take-cheeze/qbe), a daily mirror of upstream
   `https://c9x.me/git/qbe.git` (its `master` and tags; sync workflow + `scripts/sync-c9x.sh` live on that repo's `main`).
   Plain `git clone` of c9x.me fails (dumb-HTTP server resets connections), hence the curl-based sync script.
-  `3rd/cproc` is michaelforney/cproc (needs a QBE new enough to parse `call extern`, i.e. current upstream).
+  `3rd/cproc` is the take-cheeze/cproc fork of michaelforney/cproc, branch nfcxx-patches (needs a QBE new enough to parse `call extern`, i.e. current upstream).
   Move both forward together.
 - **EDG output quirk**: EDG emits a top-level `__asm__(".align 2");` after functions; cproc has no top-level asm, so the
   wrapper strips it (alignment hint only).

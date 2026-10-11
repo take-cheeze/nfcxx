@@ -60,7 +60,7 @@ anyway, so default mode has no hosted library headers either.
 - **Empty class definitions (fixed by a local cproc patch).** EDG emits every instantiated empty class as
   `struct X {};`, and cproc rejected that ("no type in struct member declaration"). This covers trait metafunctions
   (`remove_reference<int&>`), `char_traits<char>`, `nullopt_t` and `integer_sequence<>`. The patch is
-  `scripts/cproc-empty-struct.patch`; `scripts/setup-qbe.sh` applies it to the build copy of cproc (`3rd/cproc`
+  `cproc-empty-struct` (a commit on take-cheeze/cproc branch nfcxx-patches); `scripts/setup-qbe.sh` applies it to the build copy of cproc (`3rd/cproc`
   itself is unchanged). It makes three changes in cproc: an empty struct or union body is accepted (size 0,
   alignment 1, the GNU C rule that gcc follows); a zero-size object, or an array of them, gets a zero-byte
   allocation (cproc assumed only arrays are zero-size); and a constant-length array of zero-size elements is a
@@ -92,7 +92,7 @@ The `panic` test expects exit status 134 (SIGABRT): the abort path is tested as 
 
 ## Reproduce
 
-The qbe path needs the patched cproc: run `scripts/setup-qbe.sh` (it applies `scripts/cproc-empty-struct.patch`)
+The qbe path needs the patched cproc: run `scripts/setup-qbe.sh` (it applies `cproc-empty-struct` (a commit on take-cheeze/cproc branch nfcxx-patches))
 before testing, and rerun it after pulling a change to the patch.
 
 ```
