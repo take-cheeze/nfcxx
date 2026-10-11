@@ -49,6 +49,7 @@ while [ $# -gt 0 ]; do
     -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
+    -pipe) ;;                                       # pass data between the compiler stages through pipes: no effect on the output
     # Symbol visibility is not implemented; nfcc ignores it too (docs/notes/realworld.md), so nfcxx does the same
     # for consistency. It changes the exports of a -shared object, which is the one place it could matter.
     -fvisibility=*|-fvisibility-inlines-hidden) ;;

@@ -11,6 +11,7 @@ below, on the gcc backend.
 | --- | --- |
 | `-std=gnu++NN` | as `-std=c++NN`; GNU and strict modes differ in the dialect, which `--dialect` selects |
 | `-W*`, `-w` | dropped: warnings do not change the object code (no `-Werror`) |
+| `-pipe` | dropped: the stages talk through pipes instead of temporary files; the output is the same (ninja's `configure.py` passes it) |
 | `-Wl,*` | passed to the host link as an EDG `--c_to_obj_option` (order-independent options such as `-Wl,-rpath,DIR`, `-Wl,-E`, `-Wl,--gc-sections`). The order-dependent ones (`--whole-archive`/`--no-whole-archive`, `--start-group`/`--end-group`, `--as-needed`/`--no-as-needed`, `-Bstatic`/`-Bdynamic`) are refused with exit 2 for C++ inputs: eccp puts its `--c_to_obj_option` items before every object and archive, so they would act on the wrong ones. Before this change every `-Wl,*` was rejected by eccp ("unknown option"). Test: `tests/cxx-driver/run.sh` |
 | `-fexceptions`, `-fwrapv`, `-fno-strict-aliasing` | accepted: EDG always lowers exceptions; the C side already gets the other two |
 | `-fvisibility=*`, `-fvisibility-inlines-hidden` | ignored, as `nfcc` ignores them (`docs/notes/realworld.md`). They change the exports of a `-shared` object; that is the one place this could matter |

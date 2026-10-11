@@ -85,6 +85,9 @@ if [ -x "$tmp/sq" ]; then "$tmp/sq"; [ $? -eq 4 ] && ok "-lm program runs" || ba
 check "-fvisibility=hidden -fvisibility-inlines-hidden" \
   "$nfcxx" -fvisibility=hidden -fvisibility-inlines-hidden -c "$tmp/src/a.cpp" -o "$tmp/vis.o"
 
+# 8a. -pipe (ninja's configure.py passes it): accepted and ignored
+check "-pipe" "$nfcxx" -pipe -c "$tmp/src/a.cpp" -o "$tmp/pipe.o"
+
 # 8b. -include FILE (EGL/egl.h in Effekseer): the header is found through -isystem and its macros are visible
 printf '#define PRE_VALUE 42\n' > "$tmp/sys/pre.h"
 printf 'int main() { return PRE_VALUE; }\n' > "$tmp/src/pre_main.cpp"
