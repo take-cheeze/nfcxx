@@ -248,9 +248,13 @@ fi
 # (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
-eflist=()
+eflist=(); userinc=()
 for f in ${files[@]+"${files[@]}"}; do
   case $f in
+    # User -I dirs go before the host's --sys_include dirs: eccp searches them in command-line order, and GCC
+    # searches -I before the system directories, so "error.h" from a file outside EDG's src/ must not pick
+    # glibc's <error.h> (ifc_modules_templ.c, docs/notes/cxx-driver.md).
+    -I?*) userinc+=("$f") ;;
     -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
     # eccp puts its --c_to_obj_option items before every object and archive, so a link option that acts on the
     # arguments after it would act on the wrong ones. Refused rather than moved (docs/notes/cxx-driver.md).
@@ -264,7 +268,7 @@ for f in ${files[@]+"${files[@]}"}; do
   esac
 done
 t=$(trace_start)
-"$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
+"$edg/eccp" "$std" --"$dialect" "${extra[@]}" ${userinc[@]+"${userinc[@]}"} "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
   ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
