@@ -22,7 +22,11 @@ int main() {
   __nfcxx_cuda_launch(noargs, 1, 1, 0, 0);
   cudaError_t err = cudaGetLastError();
   printf("launch: %s\n", cudaGetErrorString(err));
+  cudaMemcpy(o, b, sizeof o, cudaMemcpyDeviceToHost);
+  int bad = 0;
+  for (int i = 0; i < n; i++) bad += o[i] != 2 * h[i];
+  printf("mul2: %d elements, %d mismatches\n", n, bad);
   cudaFree(a);
   cudaFree(b);
-  return 0;
+  return bad != 0;
 }
