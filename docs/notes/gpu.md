@@ -48,8 +48,10 @@ This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda
   `cudaLibraryLoadData` and `cudaLibraryGetKernel` before `main`.
 
 Layout: one object per `.cu` file holds the host code and its device image (the cubin is a data array in it). The
-host copy of a `-c` compile stays beside the object, in `<dir>/.nfcxx/<name>.cpp`, because the EDG prelinker
-re-reads the source recorded in an object at link time; a link without `-c` uses a temp directory. A file with no
+host copy of a `-c` compile goes to a per-user cache, `${NFCXX_CU_CACHE:-$XDG_CACHE_HOME/nfcxx or ~/.cache/nfcxx}/cu/<key>/<name>.cpp`,
+keyed by the absolute object path, and the `.ti` file records that absolute path. The EDG prelinker re-reads the
+copy when it needs a template instance at link time, and a failed link deletes its input objects (so a missing copy
+also costs the object). A link without `-c` uses a temp directory. Nothing is left under the source tree. A file with no
 `__global__` gets no device image. The device compile needs the Path B harness (`scripts/setup-pathb.sh`) and ptxas;
 `NFCXX_PTXAS` and `NFCXX_SM` override the tool and the architecture.
 
