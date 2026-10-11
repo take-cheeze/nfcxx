@@ -7,4 +7,4 @@
 	url = https://github.com/take-cheeze/qbe
 [submodule "3rd/cproc"]
 	path = 3rd/cproc
-	url = https://github.com/michaelforney/cproc
+	url = https://github.com/take-cheeze/cproc
