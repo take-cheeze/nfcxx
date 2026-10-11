@@ -211,6 +211,21 @@ EOC
     elif grep -q overflow_unsupported_operand_types <<<"$out"; then ok "floating operand to __builtin_add_overflow fails at link, naming the symbol"
     else bad "floating operand to __builtin_add_overflow" "$(head -2 <<<"$out" | tr '\n' ' ')"; fi
   fi
+  if [ "$b" = gcc ]; then
+    # -mavx2 reaches the C compile, so the intrinsics inline (without it gcc: "target specific option mismatch").
+    # gcc backend only: QBE ignores the ISA options and cannot compile these intrinsics.
+    cat > avx2.c <<'EOF'
+#include <immintrin.h>
+#include <stdio.h>
+__attribute__((noinline)) int f(int a, int b) {
+  __m256i x = _mm256_set1_epi32(a), y = _mm256_set1_epi32(b);
+  return _mm256_extract_epi32(_mm256_xor_si256(x, y), 0);
+}
+int main(void) { printf("%d\n", f(12, 10)); return 0; }
+EOF
+    if out=$("$nfcc" -mavx2 avx2.c -o avx2 2>&1) && [ "$(./avx2)" = 6 ]; then ok "-mavx2 intrinsics inline"
+    else bad "-mavx2 intrinsics inline" "$(head -3 <<<"$out" | tr '\n' ' ')"; fi
+  fi
   cd "$root" || exit 1
 done
 echo "tests/c/cc-mode: $pass passed, $fail failed"

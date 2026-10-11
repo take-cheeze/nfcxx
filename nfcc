@@ -15,8 +15,10 @@
 #              -Wa,* (given to the assembler); -Wp,-D/-U/-I<arg>, -Wp,-isystem/-iquote/-idirafter/-include/-imacros,<arg>
 #              and -Wp,-MD/-MMD,<file>, -Wp,-MF/-MT/-MQ,<arg>, -Wp,-MP (as the options without the -Wp,)
 #              gcc backend: -O0 -O1 -O2 -O3 -Os -Og (-O2 when none is given) and -g, -g0..-g3, -ggdb, -gdwarf-N
+#              gcc backend: -march=* and the ISA options -msse*, -mavx*, -mfma, -mbmi*, -mpopcnt, -mlzcnt, -mf16c,
+#              -mcx16, -mmmx, -mrdrnd, -mrdseed, given to the C compile (qbe: ignored)
 #   ignored:   -O* and -g* on the qbe backend (cproc/QBE has no optimisation levels and writes no debug info);
-#              -W* (except -Wp, -Wa) -w -pipe -v -m64 -march/-mtune/-m<feature>, and the -f options in
+#              -W* (except -Wp, -Wa) -w -pipe -v -m64 -mtune/-m<feature> (but see below), and the -f options in
 #              the allow list below (-fPIC ... -fwrapv -fno-strict-aliasing, which this pipeline implies)
 #   rejected with an error: -m32, -fsanitize*, -fopenmp, -fprofile*, --coverage, -ffast-math, -Ofast,
 #              -funsigned-char, -fshort-enums, -ftrapv and other -f options that change semantics, C++ (-x c++,
@@ -107,6 +109,7 @@ asm=0        # -S
 asf=()       # -Wa,* (assembler options)
 optlvl=-O2      # gcc backend: last -O option (-O2 when none)
 dbg=()       # gcc backend: -g options, in order
+isa=()       # gcc backend: -march and the ISA -m options (-msse*, -mavx*, ...), given to the C compile
 # -Wp,a,b,c: preprocessor options. The ones with a plain meaning are mapped to the option itself; anything else
 # would be dropped silently, so it is an error.
 wp_option() {
@@ -167,7 +170,10 @@ for ((i = 0; i < n; i++)); do
     -pipe|-v|-time) ;;
     -fPIC|-fpic|-fPIE|-fpie) ld+=("$a"); picf+=("$a") ;;   # QBE output is already PIC (GOT-relative); gcc needs the flag
     -m32|-mx32|-m16|-miamcu) die "$a is not supported (x86-64 only)" ;;
-    -m64|-march=*|-mtune=*|-mcpu=*|-msse*|-mavx*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*|-mrdrnd|-mrdseed) ;;
+    # ISA options enable instructions, and intrinsics headers need them on the compile of the code that calls them
+    # (gcc: "target specific option mismatch"): the gcc backend gets them; QBE cannot use them, so it ignores them.
+    -march=*|-msse*|-mavx*|-mfma|-mbmi*|-mpopcnt|-mlzcnt|-mf16c|-mcx16|-mmmx|-mrdrnd|-mrdseed) isa+=("$a") ;;
+    -m64|-mtune=*|-mcpu=*|-mfpmath=*|-mcmodel=*|-mstackrealign|-mpreferred-stack-boundary=*|-mtls-dialect=*|-mrelax*|-masm=*|-mno-red-zone|-mred-zone|-mindirect-branch=*|-mfunction-return=*|-mharden-sls=*|-mbranch-protection=*) ;;
     -m*) die "$a is not supported" ;;
     -fno-strict-aliasing|-fwrapv|-fno-strict-overflow) ;;
     -fopenmp*|-fsanitize*|-fprofile*|-fcoverage*|--coverage|-ftest-coverage|-fstack-check|-fmudflap) die "$a is not supported (instrumentation would be dropped)" ;;
@@ -237,7 +243,7 @@ compile_one() {
   if [ $backend = qbe ]; then
     NFCXX_C_INPUT=1 "$qcc" $what "${pp[@]+"${pp[@]}"}" "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" "$csrc" -o "$obj"
   else
-    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${pp[@]+"${pp[@]}"}" \
+    gcc $what "$optlvl" "${dbg[@]+"${dbg[@]}"}" -fwrapv -fno-strict-aliasing "${picf[@]+"${picf[@]}"}" "${isa[@]+"${isa[@]}"}" "${pp[@]+"${pp[@]}"}" \
         "${asf[@]+"${asf[@]}"}" "${extra[@]+"${extra[@]}"}" -x c "$csrc" -o "$obj"
   fi
 }
