@@ -1911,6 +1911,21 @@ def s_fence(fn, x)
   fn.emit("call $__pathb_fence()")
 end
 
+# Borrow facts (NFCXX_PATHB_BORROW=1, docs/notes/borrowck-plan.md 1.3): where a local is declared (decl OP ref|val|param),
+# where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
+# the code and do not change it, so they are accepted as no-ops; only the shape is checked.
+def s_decl(fn, x)
+  raise BadIR, "decl form" if x.length != 3
+end
+
+def s_scope_end(fn, x)
+  raise BadIR, "scope-end form" if x.length != 2
+end
+
+def s_rref_arg(fn, x)
+  raise BadIR, "rref-arg form" if x.length != 2
+end
+
 # (rdtsc): the 64-bit time stamp counter, edx:eax of the instruction, from the helper __pathb_rdtsc.
 def r_rdtsc(fn, x)
   raise BadIR, "rdtsc form" if x.length != 1
@@ -2111,6 +2126,8 @@ STMT = {
   "goto" => ->(fn, x) { s_goto(fn, x) }, "label" => ->(fn, x) { s_label(fn, x) },
   "return" => ->(fn, x) { s_return(fn, x) }, "unreachable" => ->(fn, x) { s_unreachable(fn, x) },
   "barrier" => ->(fn, x) { s_barrier(fn, x) }, "trap" => ->(fn, x) { s_trap(fn, x) }, "fence" => ->(fn, x) { s_fence(fn, x) },
+  "decl" => ->(fn, x) { s_decl(fn, x) }, "scope-end" => ->(fn, x) { s_scope_end(fn, x) },
+  "rref-arg" => ->(fn, x) { s_rref_arg(fn, x) },
 }
 
 # ------------------------------------------------------------------ module and functions

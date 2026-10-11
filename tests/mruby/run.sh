@@ -177,7 +177,7 @@ emit_file() {
   done
 }
 before=$fail
-for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do emit_file "${f#$root/tests/}" "$f"; done
+for f in "$root"/tests/pathb-ir/*.ir "$root"/tests/pathb-ir/borrow/*.ir "$root"/tests/mruby/pathb-edge/*.ir; do emit_file "${f#$root/tests/}" "$f"; done
 # --long-double=trap: a function that mentions long double becomes an aborting stub (refused without the option).
 for f in "$root"/tests/mruby/pathb-edge/ld_trap.ir "$root"/tests/mruby/pathb-edge/e_long_double*.ir; do
   [ -e "$f" ] || continue
