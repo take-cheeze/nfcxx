@@ -1,16 +1,21 @@
 // Runtime side of the CUDA launch rewrite (scripts/cuda-rewrite.rb). The nfcxx driver includes this header before
 // every .cu input. A launch `k<<<grid, block, shmem, stream>>>(args)` is a call of __nfcxx_cuda_launch, which packs
-// the arguments into the kernel's parameter types and calls cudaLaunchKernel. Link with -lcudart.
+// the arguments into the kernel's parameter types and launches the kernel's device code. Link with -lcudart.
 //
-// The qualifiers are empty: a kernel is an ordinary function on the host side, and its device code is not compiled
-// here (see docs/notes/gpu.md). Kernels must be declared with `void` return.
+// The device code of a .cu file is built by the driver (scripts/cuda-rewrite.rb --device, scripts/pathb-ptx-emit.rb,
+// ptxas) and appended to the host copy as a registration tail (scripts/cuda-embed.rb): a static object whose
+// constructor loads the image with cudaLibraryLoadData and maps each kernel's host address to its cudaKernel_t.
+// The qualifiers are empty: a kernel is an ordinary function on the host side. Kernels must return void.
 #ifndef NFCXX_CUDA_H
 #define NFCXX_CUDA_H
 
 #include <cuda_runtime.h>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #undef __global__
 #undef __device__
@@ -32,22 +37,72 @@ inline const uint3 blockIdx{0, 0, 0};
 inline const dim3 blockDim{1, 1, 1};
 inline const dim3 gridDim{1, 1, 1};
 
+// One entry per kernel of a translation unit: the host function and the entry name of its device code.
+struct __nfcxx_kernel_entry {
+  const void *host;
+  const char *entry;
+};
+
+// Host address -> cudaKernel_t, filled when a module is registered (static initialization, before main).
+inline std::vector<std::pair<const void *, cudaKernel_t>> &__nfcxx_registry() {
+  static std::vector<std::pair<const void *, cudaKernel_t>> registry;
+  return registry;
+}
+
+inline void __nfcxx_cuda_register_module(const unsigned char *image, const __nfcxx_kernel_entry *table,
+                                         std::size_t count) {
+  cudaLibrary_t lib;
+  if (cudaLibraryLoadData(&lib, image, nullptr, nullptr, 0, nullptr, nullptr, 0) != cudaSuccess) {
+    std::fprintf(stderr, "nfcxx: cannot load the device image of this file\n");
+    std::abort();
+  }
+  for (std::size_t i = 0; i < count; i++) {
+    cudaKernel_t kernel;
+    if (cudaLibraryGetKernel(&kernel, lib, table[i].entry) != cudaSuccess) {
+      std::fprintf(stderr, "nfcxx: no device kernel %s in the device image\n", table[i].entry);
+      std::abort();
+    }
+    __nfcxx_registry().push_back({table[i].host, kernel});
+  }
+}
+
+struct __nfcxx_module_init {
+  __nfcxx_module_init(const unsigned char *image, std::size_t size, const __nfcxx_kernel_entry *table,
+                      std::size_t count) {
+    (void)size;  // cudaLibraryLoadData takes the image as a whole
+    __nfcxx_cuda_register_module(image, table, count);
+  }
+};
+
+inline cudaKernel_t __nfcxx_find_kernel(const void *host) {
+  for (const auto &e : __nfcxx_registry()) {
+    if (e.first == host) return e.second;
+  }
+  return nullptr;
+}
+
 template <typename... P, std::size_t... I>
-inline cudaError_t __nfcxx_cuda_launch_impl(void (*kernel)(P...), dim3 grid, dim3 block, std::size_t shmem,
+inline cudaError_t __nfcxx_cuda_launch_impl(cudaKernel_t kernel, dim3 grid, dim3 block, std::size_t shmem,
                                             cudaStream_t stream, std::tuple<P...> &packed,
                                             std::index_sequence<I...>) {
-  // One pointer per parameter, then a null terminator: cudaLaunchKernel reads only the parameters the kernel has.
+  // One pointer per parameter, then a null terminator: the launch reads only the parameters the kernel has.
   void *argv[sizeof...(P) + 1] = {static_cast<void *>(&std::get<I>(packed))..., nullptr};
-  return cudaLaunchKernel(reinterpret_cast<const void *>(kernel), grid, block, argv, shmem, stream);
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = block;
+  cfg.dynamicSmemBytes = shmem;
+  cfg.stream = stream;
+  return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), argv);
 }
 
 template <typename... P, typename... A>
 inline cudaError_t __nfcxx_cuda_launch(void (*kernel)(P...), dim3 grid, dim3 block, std::size_t shmem,
                                        cudaStream_t stream, A... args) {
   static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
+  cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
+  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
   std::tuple<P...> packed(static_cast<P>(args)...);
-  return __nfcxx_cuda_launch_impl(kernel, grid, block, shmem, stream, packed,
-                                  std::index_sequence_for<P...>());
+  return __nfcxx_cuda_launch_impl(device, grid, block, shmem, stream, packed, std::index_sequence_for<P...>());
 }
 
 #endif  // NFCXX_CUDA_H
