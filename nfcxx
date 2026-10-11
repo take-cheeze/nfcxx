@@ -28,6 +28,16 @@ dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
 sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=()
+# A .cu input is rewritten to C++ before the front end (scripts/cuda-rewrite.rb: launches become calls of
+# __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
+# directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
+cudatmp=""
+cu_rewrite() {  # cu_rewrite FILE.cu: sets cu_out to the rewritten copy
+  if [ -z "$cudatmp" ]; then cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT; fi
+  cu_out=$cudatmp/$(basename "$1" .cu).cpp
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1" > "$cu_out" || exit $?
+  case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
+}
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
@@ -76,6 +86,7 @@ while [ $# -gt 0 ]; do
               cflags+=("$1$2"); files+=("$1$2"); shift ;;
     *.o) files+=("$1"); nobj=$((nobj + 1)) ;;
     -*|*.a|*.so) files+=("$1") ;;
+    *.cu) cu_rewrite "$1"; files+=("$cu_out"); ncpp=$((ncpp + 1)); srcs+=("$cu_out") ;;
     *) files+=("$1"); ncpp=$((ncpp + 1)); srcs+=("$1") ;;
   esac
   shift
@@ -147,7 +158,7 @@ fi
 if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
-  tmp=$(mktemp -d); trap 'rm -rf "$tmp"; trace_finish' EXIT
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$cudatmp"; trace_finish' EXIT
   f=$(realpath "${files[0]}")
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+"${sys_inc[@]}"} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
@@ -196,7 +207,7 @@ picopts+=(${pie_opts[@]+"${pie_opts[@]}"})
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
 cobjs=()
 if [ ${#cfiles[@]} -gt 0 ]; then
-  ctmp=$(mktemp -d); trap 'rm -rf "$ctmp"; trace_finish' EXIT
+  ctmp=$(mktemp -d); trap 'rm -rf "$ctmp" "$cudatmp"; trace_finish' EXIT
   n=0
   for c in "${cfiles[@]}"; do
     o=$ctmp/$n.o; n=$((n + 1))
@@ -222,7 +233,7 @@ fi
 # Path B: no C is generated. Each C++ file goes EDG -> typed IR -> QBE -> object (scripts/pathb-cc), and the objects are
 # linked with EDG's runtime (libC.a: exceptions, operator new) before libstdc++, as tests/pathb-qbe/run.sh links them.
 if [ $backend = pathb ]; then
-  ptmp=$(mktemp -d); trap 'rm -rf "$ptmp"; trace_finish' EXIT
+  ptmp=$(mktemp -d); trap 'rm -rf "$ptmp" "$cudatmp"; trace_finish' EXIT
   pobjs=(); plink=(); n=0
   for f in "${files[@]}"; do
     case $f in

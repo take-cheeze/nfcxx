@@ -18,5 +18,22 @@ Status: **first step verified** on an NVIDIA GeForce RTX 2060 (sm_75, driver 595
 Checked by mutation (on the earlier hand-written PTX; the launcher is unchanged since): a wrong multiplier (`*3`) gives 999 mismatches, and a dropped bounds check (`setp` against 2000)
 gives 24 guard writes. Both fail `launch`.
 
-Not done: the emitter beyond this kernel (it refuses other nodes with exit 3), the front
+## CUDA source (`.cu`)
+
+`nfcxx` takes `.cu` inputs. Before the front end, `scripts/cuda-rewrite.rb` rewrites each launch
+`k<<<g, b[, shmem[, stream]]>>>(args)` into `__nfcxx_cuda_launch(k, g, b, shmem, stream, args)`. The helper
+(`lib/cuda/nfcxx_cuda.h`, included before every `.cu`) packs the arguments into the kernel's parameter types and calls
+`cudaLaunchKernel`. The qualifiers (`__global__`, `__device__`, ...) are empty macros, and the device built-ins
+(`threadIdx`, `blockIdx`, ...) are zero placeholders for the host copy of a kernel. No EDG change.
+
+`tests/cuda/run.sh` checks the rewrite against golden files, refuses unsupported launch forms with exit 3, and builds
+and runs `mul2.cu` through the driver. The launch reaches the runtime, but the kernel is not registered, so it returns
+an error.
+
+NVIDIA `cuda-samples` `0_Introduction/vectorAdd` builds and links through the driver with `--backend=gcc` (it needs
+`-I/usr/local/cuda/include/cccl` for `<cuda/cmath>`). It runs, but its result check fails, because the kernel never
+runs. The qbe backend (cproc) rejects `__builtin_fabsf`, which libcu++ uses.
+
+Not done: device code (the kernel has to be built and registered with the runtime, so the launch can run), the qbe
+path for libcu++, the emitter beyond this kernel (it refuses other nodes with exit 3), the front
 end's CUDA input (EDG here has no CUDA mode, so `__global__` and `<<<>>>` do not parse), and an nvcc-compatible driver.
