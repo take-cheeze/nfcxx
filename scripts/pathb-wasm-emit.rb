@@ -24,10 +24,12 @@
 # An import's signature is the one of its first call.
 #
 # This milestone handles scalars, pointers, arithmetic, comparisons, conversions, loads and stores, slots, direct calls,
-# if, loop with break and continue, return, copy, trap and unreachable. Everything else is refused with the reason on
-# stderr: switch, goto, static data and globals, bit-fields, aggregate parameters, results and arguments, variadic calls,
-# function pointers, indirect calls, inline assembly, VLAs, exceptions and the 16-byte types. Those refusals are the next
-# steps, not silent drops.
+# if, loop with break and continue, switch (arms that end in a jump, no fallthrough), return, copy, trap and unreachable,
+# and static data: the defined globals and string data, at fixed addresses in the memory, with their initializers.
+# Everything else is refused with the reason on stderr: general goto and labels, extern and dynamically initialized
+# globals (when used), bit-field access, aggregate parameters, results and arguments, variadic calls, function pointers,
+# indirect calls, inline assembly, VLAs, exceptions and the 16-byte types. Those refusals are the next steps, not silent
+# drops.
 
 class Refused < StandardError; end   # a node this emitter does not handle (exit status 3)
 class BadIR < StandardError; end     # malformed IR text (exit status 1)
@@ -319,9 +321,11 @@ VT = { :i32 => 0x7f, :i64 => 0x7e, :f32 => 0x7d, :f64 => 0x7c }
 
 class Module_
   attr_reader :types, :imports, :import_index, :defined_index
+  attr_accessor :data_end, :segments   # the end of the static objects; [address, bytes] of each data segment
 
   def initialize(defs)
     @defs = defs                 # name => the (function ...) form
+    @statics = {}                # name => StaticObj
     @types = []                  # [params, result] pairs of wasm value types
     @type_index = {}
     @imports = []                # [name, type index]
@@ -350,6 +354,229 @@ class Module_
   def defines?(name)
     @defs.key?(name)
   end
+
+  # The static objects of the module (defined globals and string data), by name. Each has its address (see
+  # layout_statics); an object the module does not define is refused where it is used.
+  def add_statics(objs)
+    @statics = {}
+    objs.each do |o|
+      raise BadIR, "static object #{o.name} defined twice" if @statics.key?(o.name)
+      @statics[o.name] = o
+    end
+  end
+
+  def static_addr(name)
+    static_obj(name).addr
+  end
+
+  # The object of a name. A use of one that has no storage here (an extern or dynamically initialized global) is refused.
+  def static_obj(name)
+    o = @statics.fetch(name) { raise Refused, "static object @\"#{name}\" is not defined in this module" }
+    raise Refused, o.refusal unless o.refusal.nil?
+    o
+  end
+end
+
+# ------------------------------------------------------------------ static data
+
+# A static object: a defined global (init is its (init ITEM*) form) or string data (data is true, and bytes holds it).
+# addr is its address in the linear memory; bytes is its contents, size bytes long.
+class StaticObj
+  # refusal: the reason a use of the object is refused (no storage here: an extern or dynamic global), or nil
+  attr_accessor :name, :size, :align, :init, :data, :bytes, :addr, :refusal
+
+  def initialize(name, size, align, init, data)
+    @name = name
+    @size = size
+    @align = align
+    @init = init
+    @data = data
+    @bytes = nil
+    @addr = nil
+    @refusal = nil
+  end
+end
+
+# Address 0 is no object, so a null pointer never points at one.
+STATIC_BASE = 16
+
+# (global "NAME" TYPE BYTES ALIGN [(static)|(weak)] INIT): a defined global with its initializer. The TYPE is not needed:
+# the size and alignment come from BYTES and ALIGN. An extern declaration, a thread-local and a dynamic initializer are
+# refused.
+def parse_global(f)
+  raise BadIR, "global form too short: #{form_text(f)}" if f.length < 6
+  raise BadIR, "global name is not a string" unless f[1].is_a?(IRStr)
+  name = f[1].to_s
+  size = as_int(f[3].to_s)
+  align = as_int(f[4].to_s)
+  raise BadIR, "global #{name}: alignment #{align} is not a power of two" unless align >= 1 && (align & (align - 1)) == 0
+  rest = f.drop(5)
+  rest = rest.reject { |p| head_of(p) == "static" || head_of(p) == "weak" }
+  thread = rest.any? { |p| head_of(p) == "thread" }
+  rest = rest.reject { |p| head_of(p) == "thread" }
+  raise BadIR, "global #{name}: expected one INIT" if rest.length != 1
+  init = rest[0]
+  h = head_of(init)
+  raise BadIR, "global #{name}: unknown INIT #{form_text(init)}" if h != "init" && h != "extern" && h != "unsupported"
+  o = StaticObj.new(name, size, align, h == "init" ? init : nil, false)
+  # no storage here: a use of the object is refused, and a declaration that nothing uses is not
+  if thread
+    o.refusal = "thread-local global #{name} (not lowered)"
+  elsif h == "extern"
+    o.refusal = "extern global #{name} (declared here, defined elsewhere: no storage in this module)"
+  elsif h == "unsupported"
+    o.refusal = "global #{name}: #{form_text(init)}"
+  end
+  o
+end
+
+# (data "NAME" TYPE (string "...")): string data, an array of bytes padded with zeros to its type's size.
+def parse_data(d)
+  raise BadIR, "data form too short: #{form_text(d)}" if d.length != 4 || !d[1].is_a?(IRStr)
+  name = d[1].to_s
+  ty = parse_type(d[2])
+  raise BadIR, "data #{name} is not an array" if ty[0] != "array" || ty[1].nil?
+  text = d[3]
+  raise Refused, "data #{name}: #{form_text(text)}" if head_of(text) != "string"
+  elem = ty[2]
+  raise Refused, "wide string data #{name} (not lowered)" unless elem[0] == "int" && elem[1] == 1
+  raise BadIR, "string data #{name}: no string" unless text[1].is_a?(IRStr)
+  raw = text[1].bytes.dup
+  raise BadIR, "string data #{name} longer than its array" if raw.length > ty[1]
+  bytes = raw + [0] * (ty[1] - raw.length)
+  o = StaticObj.new(name, ty[1], 1, nil, true)
+  o.bytes = bytes
+  o
+end
+
+# Gives each object an address, in order, after address 0. Returns the end of the data: the stack starts above it.
+def layout_statics(objs)
+  pos = STATIC_BASE
+  objs.each do |o|
+    next unless o.refusal.nil?             # no storage for those
+    pos = (pos + o.align - 1) / o.align * o.align
+    o.addr = pos
+    pos += o.size
+  end
+  pos
+end
+
+# The little-endian bytes of an integer of n bytes.
+def le_bytes(v, n)
+  (0...n).map { |i| (v >> (8 * i)) & 255 }
+end
+
+# The contents of a defined global from its (init ITEM*) form. The items are (scalar OFF TYPE VALUE), (addr OFF TYPE
+# TARGET ADD), (bytes OFF N @"string"), (zero OFF N) and (bitfield OFF UNIT BOFF WIDTH TYPE VALUE). The bytes of the
+# other items are written first; a bit-field's bits are ORed in after them, since the bit-fields share bytes.
+def static_contents(mod, o)
+  items = []                               # [offset, length, bit-field?, bytes (nil: zero) or [[byte, bits]...]]
+  o.init.drop(1).each do |it|
+    h = head_of(it)
+    if h == "scalar"
+      off = as_int(it[1].to_s)
+      ty = parse_type(it[2])
+      val = it[3]
+      size = type_size(ty)
+      if head_of(val) == "null"
+        items << [off, size, false, nil]
+      elsif head_of(val) == "const" && ty[0] == "float"
+        v = float_value(val[2].to_s)
+        items << [off, size, false, (size == 4 ? [v].pack("e") : [v].pack("E")).bytes]
+      elsif head_of(val) == "const" && (ty[0] == "int" || ty[0] == "ptr")
+        items << [off, size, false, le_bytes(as_int(val[2].to_s), size)]
+      else
+        raise Refused, "scalar item operand #{form_text(val)}"
+      end
+    elsif h == "addr"
+      off = as_int(it[1].to_s)
+      ty = parse_type(it[2])
+      target = it[3]
+      add = as_int(it[4].to_s)
+      raise Refused, "address item of type #{form_text(it[2])} (not a pointer)" if ty[0] != "ptr"
+      raise Refused, "address item target #{form_text(target)}" unless target.is_a?(IRSym)
+      raise Refused, "address of the function #{target.name} in a static initializer (a function table is not lowered)" if target.sig == "&"
+      items << [off, 8, false, le_bytes(mod.static_addr(target.name) + add, 8)]
+    elsif h == "bytes"
+      off = as_int(it[1].to_s)
+      n = as_int(it[2].to_s)
+      src = it[3]
+      raise Refused, "bytes item from #{form_text(src)}" unless src.is_a?(IRSym) && src.sig == "@"
+      so = mod.static_obj(src.name)
+      raise Refused, "bytes item from the global #{src.name} (only string data)" unless so.data
+      raise BadIR, "bytes item of #{n} bytes from a #{so.bytes.length}-byte string" if so.bytes.length != n
+      items << [off, n, false, so.bytes]
+    elsif h == "zero"
+      off = as_int(it[1].to_s)
+      n = as_int(it[2].to_s)
+      items << [off, n, false, nil] if n != 0
+    elsif h == "bitfield"
+      raise BadIR, "bitfield item form" if it.length != 7
+      off = as_int(it[1].to_s)
+      unit = as_int(it[2].to_s)
+      boff = as_int(it[3].to_s)
+      width = as_int(it[4].to_s)
+      raise BadIR, "bitfield item: unit #{unit}" unless [1, 2, 4, 8].include?(unit)
+      raise BadIR, "bitfield item: bits #{boff}+#{width} outside a #{unit}-byte unit" if width < 1 || boff < 0 || boff + width > unit * 8
+      raise Refused, "bitfield item operand #{form_text(it[6])}" if head_of(it[6]) != "const"
+      v = as_int(it[6][2].to_s) & ((1 << width) - 1)
+      bits = {}
+      width.times do |i|
+        pos = off * 8 + boff + i
+        bits[pos / 8] = (bits[pos / 8] || 0) | (((v >> i) & 1) << (pos % 8))
+      end
+      keys = bits.keys.sort
+      items << [keys[0], keys[-1] - keys[0] + 1, true, keys.map { |b| [b, bits[b]] }]
+    elsif h == "unsupported"
+      raise Refused, form_text(it)
+    else
+      raise BadIR, "unknown initializer item #{form_text(it)}"
+    end
+  end
+  # no two items overlap, except bit-fields among themselves
+  items.sort! { |a, b| a[0] <=> b[0] }
+  max_end = 0
+  max_bf = false
+  items.each do |it|
+    off = it[0]
+    len = it[1]
+    raise BadIR, "initializer runs past the size of #{o.name}" if off < 0 || off + len > o.size
+    if off < max_end && !(it[2] && max_bf)
+      raise BadIR, "initializer items overlap at offset #{off} in #{o.name}"
+    end
+    if off + len > max_end
+      max_end = off + len
+      max_bf = it[2]
+    end
+  end
+  buf = Array.new(o.size, 0)
+  items.each do |it|
+    next if it[2] || it[3].nil?
+    it[3].each_with_index { |b, i| buf[it[0] + i] = b }
+  end
+  items.each do |it|
+    next unless it[2]
+    it[3].each { |b, bits| buf[b] |= bits }
+  end
+  buf
+end
+
+# The static objects of the module, with their addresses and contents, in the order of the forms.
+def build_statics(mod, objs)
+  mod.add_statics(objs)
+  end_addr = layout_statics(objs)
+  objs.each do |o|
+    o.bytes = static_contents(mod, o) unless o.data || !o.refusal.nil?
+  end
+  end_addr
+end
+
+# The value of a float constant's text (the IR prints the infinities and NaN by name).
+def float_value(text)
+  return Float::INFINITY if text == "+Infinity" || text == "Infinity"
+  return -Float::INFINITY if text == "-Infinity"
+  return Float::NAN if text == "NaN" || text == "nan" || text == "+NaN" || text == "-NaN"
+  text.to_f
 end
 
 # ------------------------------------------------------------------ function bodies
@@ -490,8 +717,8 @@ class Fn
       return reg_info(op)[2]
     end
     if op.is_a?(IRSym)
-      raise Refused, "static object @\"#{op.name}\"" if op.sig == "@"
       raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
+      @mod.static_addr(op.name) if op.sig == "@"    # checks that the object is defined here
       return ["ptr", nil]
     end
     return parse_type(op[1]) if head_of(op) == "const"
@@ -508,6 +735,8 @@ class Fn
     end
     if op.is_a?(String) && op[0] == "%"
       e(0x20); leb_u(reg_info(op)[0])
+    elsif op.is_a?(IRSym) && op.sig == "@"
+      e(0x42); leb_s(@mod.static_addr(op.name))   # the address of the static object
     elsif op.is_a?(IRSym)
       e(0x20); leb_u(@fp_local)
       e(0x41); leb_s(slot_offset(op.name))
@@ -524,8 +753,8 @@ class Fn
   # The wasm type of an operand, without pushing it.
   def op_wtype(op)
     if op.is_a?(IRSym)
-      raise Refused, "static object @\"#{op.name}\"" if op.sig == "@"
       raise Refused, "function address &\"#{op.name}\"" if op.sig == "&"
+      @mod.static_addr(op.name) if op.sig == "@"
       return :i64
     end
     return reg_info(op)[1] if op.is_a?(String) && op[0] == "%"
@@ -576,13 +805,6 @@ class Fn
       n -= 0x10000000000000000 if n >= 0x8000000000000000
       e(0x42); leb_s(n)
     end
-  end
-
-  def float_value(text)
-    return Float::INFINITY if text == "+Infinity" || text == "Infinity"
-    return -Float::INFINITY if text == "-Infinity"
-    return Float::NAN if text == "NaN" || text == "nan" || text == "+NaN" || text == "-NaN"
-    text.to_f
   end
 
   # Canonical form of an i32 value of integer type ty: sign or zero extended from its width, bool as 0 or 1.
@@ -914,7 +1136,8 @@ class Fn
   def stmt_list(list)
     list.each_with_index do |s, i|
       nxt = list[i + 1]
-      @pending_brk = (head_of(s) == "loop" && head_of(nxt) == "label") ? nxt[1].to_s : nil
+      # a loop or a switch followed by a label: the label is the break target (the IR's goto "label" leaves it)
+      @pending_brk = ((head_of(s) == "loop" || head_of(s) == "switch") && head_of(nxt) == "label") ? nxt[1].to_s : nil
       stmt(s)
     end
   end
@@ -976,6 +1199,8 @@ class Fn
       end
       e(0x0b)
       @labels.pop
+    when "switch"
+      switch_stmt(s)
     when "loop"
       body = s[1]
       step = s[2]
@@ -1051,6 +1276,125 @@ class Fn
     end
   end
 
+  # ---- switch. The body's case and default markers (also inside blocks of the body) split it into arms, in order. The
+  # selector picks the arm of its marker, control falls through the arms that follow, and break leaves the switch.
+  # The lowering: a block E for the exit (the break target), one block per arm, nested so that arm k starts right after
+  # the end of its block L_k; a compare chain that branches to an arm (br_if L_k), or to the default arm, or to E.
+  # An arm that is not empty must end in a jump (break, continue, return, unreachable, trap, goto), or be the last one:
+  # falling into the next arm is refused, as docs/notes/pathb-stage2.md section 2 asks.
+  def switch_stmt(s)
+    brk_label = @pending_brk
+    @pending_brk = nil
+    raise BadIR, "switch form" if s.length != 3 || head_of(s[2]) != "body"
+    sel = s[1]
+    sel_w = op_wtype(sel)
+    raise Refused, "switch on a value of wasm type #{sel_w.inspect}" unless sel_w == :i32 || sel_w == :i64
+    # the arms: a marker starts a new arm when the arm before it has statements; consecutive markers share one arm
+    arms = []                              # [markers, statements]
+    cur = nil
+    flatten_blocks(s[2].drop(1), []).each do |st|
+      h = head_of(st)
+      if h == "case" || h == "default"
+        if cur.nil? || !cur[1].empty?
+          cur = [[], []]
+          arms << cur
+        end
+        cur[0] << st
+      else
+        raise Refused, "statement before the first case label of a switch (not lowered)" if cur.nil?
+        cur[1] << st
+      end
+    end
+    arms.each_with_index do |arm, k|
+      next if k == arms.length - 1
+      unless ends_list?(arm[1])
+        raise Refused, "switch fallthrough: the case arm with #{form_text(arm[1].last)} falls into the next arm (not lowered)"
+      end
+    end
+    default_arm = nil
+    seen = {}
+    cases = []                             # [arm index, selector constant]
+    mask = sel_w == :i32 ? 0xffffffff : 0xffffffffffffffff
+    arms.each_with_index do |arm, k|
+      arm[0].each do |m|
+        if head_of(m) == "default"
+          raise BadIR, "two default labels" unless default_arm.nil?
+          default_arm = k
+        else
+          raise BadIR, "case label without a constant: #{form_text(m)}" unless head_of(m[1]) == "const"
+          n = as_int(m[1][2].to_s) & mask
+          raise BadIR, "duplicate case value #{n}" if seen.key?(n)
+          seen[n] = true
+          n -= mask + 1 if n > mask >> 1          # the bit pattern of the selector's width, signed
+          cases << [k, n]
+        end
+      end
+    end
+    push_op(sel)
+    sel_local = @next_local
+    @next_local += 1
+    @local_types << sel_w
+    e(0x21); leb_u(sel_local)
+    id = @loop_n                           # a switch takes an id from the loop counter: its break label names it
+    @loop_n += 1
+    @brk[brk_label] = id if brk_label
+    n = arms.length
+    @labels << [:brk, id]
+    e(0x02, 0x40)                          # block E: the exit
+    (n - 1).downto(0) do |k|
+      @labels << [:arm, k]
+      e(0x02, 0x40)                        # block L_k
+    end
+    cases.each do |k, v|
+      e(0x20); leb_u(sel_local)
+      if sel_w == :i32
+        e(0x41); leb_s(v)
+        e(0x46)                            # i32.eq
+      else
+        e(0x42); leb_s(v)
+        e(0x51)                            # i64.eq
+      end
+      e(0x0d); leb_u(k)                    # br_if L_k
+    end
+    e(0x0c); leb_u(default_arm.nil? ? n : default_arm)   # br to the default arm, or out of the switch
+    n.times do |k|
+      e(0x0b)                              # end of L_k: arm k starts here
+      raise BadIR, "switch labels out of order" unless @labels.pop == [:arm, k]
+      stmt_list(arms[k][1])
+    end
+    e(0x0b)                                # end of E
+    raise BadIR, "switch labels out of order" unless @labels.pop == [:brk, id]
+  end
+
+  # The statements of a list with the blocks in it expanded (a block is a sequence; the case markers may sit in one).
+  def flatten_blocks(list, out)
+    list.each do |s|
+      if head_of(s) == "block"
+        flatten_blocks(s.drop(1), out)
+      else
+        out << s
+      end
+    end
+    out
+  end
+
+  # Whether a list of statements ends in a jump, so that control does not reach the statement after it.
+  def ends_list?(list)
+    !list.empty? && ends_jump?(list.last)
+  end
+
+  def ends_jump?(st)
+    case head_of(st)
+    when "break", "continue", "return", "unreachable", "trap", "goto" then true
+    when "block" then ends_list?(st.drop(1))
+    when "if"
+      then_part = st[2]
+      else_part = st[3]
+      !else_part.nil? && ends_list?(then_part.drop(1)) && ends_list?(else_part.drop(1))
+    else false
+    end
+  end
+
   # The IR's own marker for a node the front end did not lower, e.g. (unsupported cast): the refusal names it.
   def unsupported_text(x)
     "(" + x.map { |y| form_text(y) }.join(" ") + ")"
@@ -1112,6 +1456,7 @@ def emit_module(src)
   forms = parse_forms(tokenize(src))
   defs = {}
   order = []
+  objs = []
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
@@ -1124,12 +1469,17 @@ def emit_module(src)
       defs[nm] = f
       order << nm
     elsif h == "global"
-      raise Refused, "global #{form_text(f[1])} (static data is not lowered yet)"
+      objs << parse_global(f)
+    elsif h == "data"
+      objs << parse_data(f)
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
   end
   mod = Module_.new(defs)
+  mod.data_end = build_statics(mod, objs)
+  # the memory starts zeroed, so only the objects with a nonzero byte need a data segment
+  mod.segments = objs.select { |o| o.refusal.nil? && o.bytes.any? { |b| b != 0 } }.map { |o| [o.addr, o.bytes] }
   # The import list comes from the calls, so the first pass only collects it: the index of a defined function is not
   # known until the imports are, and the calls of the first pass are discarded.
   order.each_with_index { |nm, i| mod.defined_index[nm] = i }
@@ -1177,18 +1527,20 @@ def encode_module(mod, bodies)
   uleb(bodies.length, fsec)
   bodies.each { |nm, fn| uleb(fn.type_index, fsec) }
   section(3, fsec, out)
-  # memory: one memory of two pages; the stack grows down from its top
+  # memory: two pages (128 KB), or more when the static objects leave less than 64 KB for the stack; the stack grows down
+  # from its top, above the static objects
+  pages = [2, (mod.data_end + 65536 + 65535) / 65536].max
   mem = []
   uleb(1, mem)
   mem << 0x00
-  uleb(2, mem)
+  uleb(pages, mem)
   section(5, mem, out)
   # global 0: the stack pointer, mutable i32, starts at the top of the memory
   gl = []
   uleb(1, gl)
   gl << VT[:i32] << 0x01
   gl << 0x41
-  sleb(2 * 65536, gl)
+  sleb(pages * 65536, gl)
   gl << 0x0b
   section(6, gl, out)
   # exports: the memory, then each function under its IR name
@@ -1213,6 +1565,19 @@ def encode_module(mod, bodies)
     b.each { |x| code << x }
   end
   section(10, code, out)
+  # data: the segments of the static objects, each at its address (an active segment in memory 0)
+  unless mod.segments.empty?
+    dsec = []
+    uleb(mod.segments.length, dsec)
+    mod.segments.each do |addr, bytes|
+      dsec << 0x00 << 0x41                 # active, memory 0: the offset is an i32.const
+      sleb(addr, dsec)
+      dsec << 0x0b
+      uleb(bytes.length, dsec)
+      bytes.each { |b| dsec << b }
+    end
+    section(11, dsec, out)
+  end
   out
 end
 

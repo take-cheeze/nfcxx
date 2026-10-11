@@ -1,3 +1,3 @@
-// REFUSE: global
-int g = 3;
+// REFUSE: extern
+extern int g;
 int main() { return g; }

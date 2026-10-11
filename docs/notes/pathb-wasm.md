@@ -27,9 +27,16 @@ pointer widths of the IR are the ones the C++ program has.
 | `float`, `double` | `f32`, `f64` |
 
 - A register is a wasm local. The IR is not SSA, so a register may be set more than once, which a wasm local allows.
-- A slot is a frame in the linear memory. The memory is two pages (128 KB). A shadow stack grows down from its top
-  (global 0). A function's frame starts at the stack pointer it found on entry, minus its frame size, aligned to 16,
-  and the stack pointer is restored before each return and at the end of a void function.
+- A slot is a frame in the linear memory. The memory is two pages (128 KB), or more when the static data needs it (below).
+  A shadow stack grows down from its top (global 0). A function's frame starts at the stack pointer it found on entry,
+  minus its frame size, aligned to 16, and the stack pointer is restored before each return and at the end of a void
+  function.
+- A static object (a defined global with an initializer, or string data) is at a fixed address: the objects are laid
+  out in the order of the IR forms, from address 16 (address 0 is no object), each at its alignment. `@"x"` is the i64
+  address of the object. Its contents are a data segment, written from the IR's `(init ITEM*)` (`scalar`, `addr`,
+  `bytes`, `zero` and `bitfield` items; the bit-fields of a byte are ORed together). The memory starts zeroed, so only
+  the objects with a nonzero byte get a segment. The stack keeps at least 64 KB above the static data: the memory is
+  two pages, and grows to `ceil((end of the static data + 64 KB) / 64 KB)` pages when the data is larger.
 - A function the module defines is exported under its IR name. A function it calls without defining is an import from
   module `env`, with the signature of its first call. The host supplies the imports.
 
@@ -46,14 +53,26 @@ conversions (`iconv`, `i2f`, `u2f`, `fconv`, `cf2i`, `p2i`, `i2p`, `bitcast`), `
 slots, direct calls, `if`, `loop` with `break` and `continue`, `return`, and the checks above.
 
 Two forms of `goto` are handled because the front end produces them for `break` and `continue`: a jump to the label at
-the end of a loop body, and a jump to the label just after a loop. Any other `goto`, and any other label, is refused.
+the end of a loop body, and a jump to the label just after a loop or a switch. Any other `goto`, and any other label, is
+refused.
+
+`switch` (`docs/notes/pathb-stage2.md`, section 2). The markers `(case (const T V))` and `(default)` may sit in blocks of
+the body; the body's statements are split into arms at them. The selector is compared with each case value in order by
+a compare chain: `br_if` to the arm, else `br` to the default arm, or out of the switch when there is none. The arms are
+blocks nested so that arm k starts right after the end of its block, and an arm falls into the next one. An arm that is
+not empty must end in a jump (`break`, `continue`, `return`, `unreachable`, `trap` or `goto`, also inside a block or in
+both branches of an `if`), or be the last arm; otherwise the emitter refuses the fallthrough. `break` inside a switch
+leaves it (its label stack entry is the switch's), and `continue` goes to the enclosing loop's step.
 
 ## What is refused (the next steps)
 
 Each refusal names the node on stderr and exits with status 3. None is dropped silently.
 
-- `switch`, and general `goto` and labels. The structurizer that `pathb-stage2.md` section 2 asks for is needed.
-- Static data and globals: a `global` form, and an `@"x"` operand. The data segments are the next piece.
+- General `goto` and labels: the jumps other than the ones above, and a switch whose arm falls into the next non-empty one.
+  The structurizer that `pathb-stage2.md` section 2 asks for is needed for these.
+- A use of an extern global (`(extern)`, declared here and defined elsewhere), of a dynamically initialized one
+  (`(unsupported init ...)`), of a thread-local one, or of a function's address in a static initializer (`addr` to `&"f"`).
+  A declaration that nothing uses is not refused: it has no storage, and the QBE path drops it the same way.
 - Aggregate parameters, results and arguments (`byval`, `sret`), and aggregate values in registers.
 - Variadic calls, indirect calls and function addresses (a table would be needed).
 - Bit-fields (`bfload`, `bfstore`), inline assembly, VLAs and exceptions, and the 16-byte types.
@@ -68,13 +87,19 @@ too. The tests write such expressions as `? 1 : 0`.
 ## Checks
 
 `tests/wasm/run.sh` compiles each test with the harness (`scripts/setup-pathb.sh`), emits it, validates and runs it under
-node, and compares the result with the expectation. Node instantiates a module only after validating it, so a malformed
+node, and compares the result with the expectation. The tests for the statics (`globals_*.cpp`) cover an array with an
+initializer, a struct with a pointer to another global, a string read through a pointer, an address with an addend, a
+float and a negative value, bit-field items, and an 80 KB object that grows the memory. The switch tests
+(`switch_*.cpp`) cover several cases with a default, an empty case, a switch in a loop with `break` and `continue`, nested
+switches on a long selector, and a return in each arm. `refuse_switch_fallthrough.cpp` and `refuse_global.cpp` check the
+two refusals. Node instantiates a module only after validating it, so a malformed
 module fails the test. `tests/wasm/frames.cpp` makes 1000 calls with 256 bytes of locals each: the frames must be released
 for it to pass in 128 KB.
 
-Sweep over the 262 IR files in the repo (`tests/pathb-ir`, its borrow goldens, `tests/mruby/pathb-edge`): 34 emit, and
-every module validates; 197 are refused for the gaps above; 31 are malformed IR (the edge cases that test the parser,
-which exit with status 1 as the QBE emitter does).
+Sweep over the 262 IR files in the repo (`tests/pathb-ir`, its borrow goldens, `tests/mruby/pathb-edge`): 46 emit, and
+every module validates; 168 are refused for the gaps above; 48 are malformed IR (the edge cases that test the parser,
+which exit with status 1 as the QBE emitter does). Before the statics and the switch were lowered, the sweep had 34 emit,
+197 refused and 31 malformed: 17 of the malformed files are `e_*` edge cases that the refusal of `global` hid until now.
 
 Not done: a C library for the modules (a program that prints goes through an import), and an oracle in Python. The
 emitter is not checked byte for byte against another implementation; the node run is the check.
