@@ -18,6 +18,19 @@ Status: **first step verified** on an NVIDIA GeForce RTX 2060 (sm_75, driver 595
 Checked by mutation (on the earlier hand-written PTX; the launcher is unchanged since): a wrong multiplier (`*3`) gives 999 mismatches, and a dropped bounds check (`setp` against 2000)
 gives 24 guard writes. Both fail `launch`.
 
+## Device code from C++ (`tests/gpu/device/`)
+
+The first kernel from C++ source: `vecadd.cpp`, the `vecAdd` kernel of NVIDIA cuda-samples
+`0_Introduction/vectorAdd`, with the thread indices as `extern "C"` intrinsic calls. The Path B front end
+(`scripts/pathb-dump --ir`) lowers it to IR (`vecadd.ir`, the golden); `scripts/pathb-ptx-emit.rb` lowers the IR to
+PTX, with the intrinsics mapped to special registers (`DEVICE_INTRINSICS`); `ptxas` assembles it; `launch.c` runs it
+on 50000 elements through the runtime. `tests/gpu/device/run.sh` runs this, a mutant (add -> sub, must fail), and a
+call the emitter does not lower (exit 3). Calls of other functions are refused, and every IR function becomes a
+`.visible .entry`, so a device helper would need `.func` support first.
+
+This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda-rewrite.rb` leaves
+`threadIdx`/`blockIdx`/`blockDim` as host placeholders, and the kernel is not registered with the runtime.
+
 ## CUDA source (`.cu`)
 
 `nfcxx` takes `.cu` inputs. Before the front end, `scripts/cuda-rewrite.rb` rewrites each launch
