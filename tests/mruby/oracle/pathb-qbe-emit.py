@@ -1526,6 +1526,24 @@ def s_trap(fn, x):
     fn.hlt()
 
 
+# Borrow facts (NFCXX_PATHB_BORROW=1, docs/notes/borrowck-plan.md 1.3): where a local is declared (decl OP ref|val|param),
+# where it ends (scope-end OP), and the rvalue-reference argument of the call that follows (rref-arg OP). They describe
+# the code and do not change it, so they are accepted as no-ops; only the shape is checked.
+def s_decl(fn, x):
+    if len(x) != 3:
+        raise BadIR("decl form")
+
+
+def s_scope_end(fn, x):
+    if len(x) != 2:
+        raise BadIR("scope-end form")
+
+
+def s_rref_arg(fn, x):
+    if len(x) != 2:
+        raise BadIR("rref-arg form")
+
+
 def s_fence(fn, x):
     # (fence): a full memory fence for asm("mfence") and friends, a call of the helper __pathb_fence that
     # append_weak writes into the assembly (QBE has no fence). An opaque call, so also a compiler barrier.
@@ -1728,6 +1746,7 @@ STMT = {
     "case": s_case, "default": s_default, "break": s_break, "continue": s_continue,
     "goto": s_goto, "label": s_label, "return": s_return, "unreachable": s_unreachable,
     "barrier": s_barrier, "trap": s_trap, "fence": s_fence,
+    "decl": s_decl, "scope-end": s_scope_end, "rref-arg": s_rref_arg,
 }
 
 

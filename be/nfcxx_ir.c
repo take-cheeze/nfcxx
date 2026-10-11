@@ -918,6 +918,106 @@ static ir_val ir_var_addr(a_variable_ptr var, a_type_ptr t, int vol)
   return ir_mk_addr((char *)ir_slot_op(var, ir_name_or(var->source_corresp.name, "tmp"), var->type, (unsigned long)alignment_of_variable(var)), t, vol);
 }
 
+/* ================================================================ borrow facts (NFCXX_PATHB_BORROW=1)
+   Tier 0 of docs/notes/borrowck-plan.md (section 1.3). With the flag unset nothing here prints, and no slot or
+   other state is created, so the default output is unchanged. */
+
+static int ir_borrow = 0;               /* NFCXX_PATHB_BORROW=1: print the (decl), (scope-end) and (rref-arg) facts */
+
+/* The locals declared so far and still open, most recent first. A block end closes the ones declared inside it; a return
+   closes all of them. Only declared variables are closed, so a local declared after a return is not named before its decl. */
+typedef struct ir_decl_rec {
+  a_variable_ptr var;
+  struct ir_decl_rec *prev;
+} ir_decl_rec;
+static ir_decl_rec *ir_decl_top = NULL;
+
+/* A C++ reference (lvalue or rvalue, the (ptr T) type with is_reference set), and an rvalue reference (also is_reference). */
+static int ir_is_ref_type(a_type_ptr t)
+{
+  a_type_ptr s = t == NULL ? NULL : skip_typerefs(t);
+  return s != NULL && s->kind == tk_pointer && s->variant.pointer.is_reference;
+}
+static int ir_is_rref_type(a_type_ptr t)
+{
+  a_type_ptr s = t == NULL ? NULL : skip_typerefs(t);
+  return s != NULL && s->kind == tk_pointer && s->variant.pointer.is_rvalue_reference;
+}
+
+static a_type_ptr ir_callee_fn_type(an_expr_node_ptr f);
+
+/* The declared type of the parameter that argument idx of a call with nargs arguments binds to (flag only), or NULL when
+   the callee's parameter list does not say: no prototype, a variadic callee, or a count that is not the parameter count,
+   with or without a `this` argument (the one extra argument of a member call). */
+static a_type_ptr ir_arg_param_type(an_expr_node_ptr f, int idx, int nargs)
+{
+  a_type_ptr ft = ir_callee_fn_type(f);
+  a_param_type_ptr p;
+  int np = 0, off, i;
+  if (ft == NULL || ft->variant.routine.extra_info == NULL) return NULL;
+  if (!ft->variant.routine.extra_info->prototyped || ft->variant.routine.extra_info->has_ellipsis) return NULL;
+  for (p = ft->variant.routine.extra_info->param_type_list; p != NULL; p = p->next) np++;
+  off = nargs - np;
+  if ((off != 0 && off != 1) || idx < off) return NULL;
+  p = ft->variant.routine.extra_info->param_type_list;
+  for (i = 0; i < idx - off && p != NULL; i++) p = p->next;
+  return p != NULL ? p->type : NULL;
+}
+
+/* A nonstatic object of the function that has an ordinary slot (no VLA, no template-dependent or ignored object). */
+static int ir_fact_var(a_variable_ptr var)
+{
+  if (var->is_vla || ignore_variable_in_back_end(var) || is_template_dependent_type(var->type)) return 0;
+  return !var_has_static_or_thread_storage_duration(var);
+}
+
+/* The variable is now declared and open. */
+static void ir_fact_open(a_variable_ptr var)
+{
+  ir_decl_rec *r;
+  if (!ir_borrow || !ir_fact_var(var)) return;
+  r = (ir_decl_rec *)malloc(sizeof *r);
+  if (r == NULL) abort();
+  r->var = var;
+  r->prev = ir_decl_top;
+  ir_decl_top = r;
+}
+
+/* (decl OP KIND) at a declaration point: KIND is ref for a reference, val for an object. */
+static void ir_fact_decl(a_statement_ptr s, int d)
+{
+  an_il_entity_list_entry_ptr entry;
+  if (!ir_borrow) return;
+  for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next) {
+    a_variable_ptr var;
+    if (entry->entity.kind != iek_variable) continue;
+    var = (a_variable_ptr)entry->entity.ptr;
+    if (!ir_fact_var(var)) continue;
+    ir_line(d, ir_fmt("(decl %s %s)", ir_var_addr(var, var->type, 0).s, ir_is_ref_type(var->type) ? "ref" : "val"));
+    ir_fact_open(var);
+  }
+}
+
+/* (scope-end OP) for the locals opened after mark, most recent first, and forget them. A block end passes its mark;
+   emit is 0 when the block ends in a return, after which the locals were closed already. */
+static void ir_fact_close_to(ir_decl_rec *mark, int d, int emit)
+{
+  while (ir_decl_top != mark && ir_decl_top != NULL) {
+    ir_decl_rec *r = ir_decl_top;
+    if (emit && ir_borrow) ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+    ir_decl_top = r->prev;
+  }
+}
+
+/* A return leaves every open scope of the function: close all, but keep the list (the code after it is still lowered). */
+static void ir_fact_close_all(int d)
+{
+  ir_decl_rec *r;
+  if (!ir_borrow) return;
+  for (r = ir_decl_top; r != NULL; r = r->prev)
+    ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+}
+
 /* Marker for a node that is not lowered. The value of the marker has the type t (void: a statement). */
 static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
 {
@@ -932,6 +1032,7 @@ static ir_val ir_gap(a_type_ptr t, const char *what, int cls, int kind)
 /* ================================================================ variable-length arrays and bit-fields */
 
 static void ir_stmt(a_statement_ptr s, int d);
+static int ir_ends_in_return(a_statement_ptr body);
 static ir_val ir_rval(an_expr_node_ptr e);
 
 /* The function scope being lowered (its vla_dimensions list finds the dimension variable of a VLA type). */
@@ -1153,6 +1254,7 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
   a_statement_ptr blk = e->variant.statement, s, res = NULL;
   int d = ir_depth;
   ir_val v = ir_mk_void();
+  ir_decl_rec *mark = ir_decl_top;
   ir_note(2, enk_statement, 1);
   if (blk == NULL) return v;
   if (blk->kind != stmk_block) {
@@ -1178,6 +1280,7 @@ static ir_val ir_stmt_expr(an_expr_node_ptr e)
       ir_stmt(s, d);
     }
   }
+  ir_fact_close_to(mark, d, !ir_ends_in_return(blk));
   ir_depth = d;
   if (v.s == NULL && !ir_is_void(e->type)) return ir_gap(e->type, "statement-expression-value", 2, (int)enk_statement);
   return v;
@@ -3547,8 +3650,12 @@ static ir_val ir_call(an_expr_node_ptr e)
   {
     int ints = 0, sse = 0, shape_ok = 1;
     unsigned long stack = 0;
-    for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) {
+    const char *rref[32]; /* the operands of the rvalue-reference arguments (flag only) */
+    int nrref = 0, k, idx, nargs = 0;
+    if (ir_borrow) for (arg = ir_operand(e, 1); arg != NULL; arg = arg->next) nargs++;
+    for (arg = ir_operand(e, 1), idx = 0; arg != NULL; arg = arg->next, idx++) {
       ir_val a = ir_rval(arg);
+      if (ir_borrow && nrref < 32 && ir_is_rref_type(ir_arg_param_type(f, idx, nargs))) rref[nrref++] = a.s;
       if (thunk_sym != NULL && !ir_x87_param(a.t, &ints, &sse, &stack)) shape_ok = 0;
       if (f128w && ir_is_f128(a.t)) { /* a wrapper takes the _Float128 by address */
         args = ir_fmt("%s %s", args, a.s);
@@ -3560,6 +3667,8 @@ static ir_val ir_call(an_expr_node_ptr e)
         args = ir_fmt("%s %s", args, a.s);
       }
     }
+    /* The moves of this call: a (rref-arg OP) right before the call (flag only). */
+    for (k = 0; k < nrref; k++) ir_emit(ir_fmt("(rref-arg %s)", rref[k]));
     if (thunk_sym != NULL) {
       if (!shape_ok) return ir_gap(e->type, "call of a function returning long double with a small aggregate argument", 0, (int)eok_call);
       ir_x87_thunk(thunk_sym, 0, xk, NULL, ints, stack);
@@ -5079,12 +5188,15 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_note(1, stmk_expr, 1);
       (void)ir_rval(s->expr);
       return;
-    case stmk_block:
+    case stmk_block: {
+      ir_decl_rec *mark = ir_decl_top;
       ir_note(1, stmk_block, 1);
       ir_line(d, "(block");
       ir_stmt_list(s->variant.block.statements, d + 1);
+      ir_fact_close_to(mark, d + 1, !ir_ends_in_return(s));
       ir_close(1);
       return;
+    }
     case stmk_if: {
       char *cb;
       ir_note(1, stmk_if, 1);
@@ -5228,26 +5340,32 @@ static void ir_stmt(a_statement_ptr s, int d)
       return;
     case stmk_return:
       ir_note(1, stmk_return, 1);
+      /* The borrow facts close the open locals after the value is computed and before the return (flag only). */
       if (s->expr == NULL) {
         /* Falling off the end of a non-void function is undefined; main returns 0 (see ir_function). */
+        ir_fact_close_all(d);
         if (ir_is_void(ir_ret_type) || ir_is_memval(ir_ret_type)) ir_line(d, "(return)");
         else if (ir_in_main) ir_line(d, ir_fmt("(return %s)", ir_zero(ir_ret_type)));
         else ir_line(d, "(unreachable)");
       } else if (ir_is_void(s->expr->type)) {
         (void)ir_rval(s->expr);
+        ir_fact_close_all(d);
         ir_line(d, "(return)");
       } else if (ir_is_memval(ir_ret_type)) {
         ir_val v = ir_rval(s->expr);
         ir_copy(ir_ret_type, ir_sret, v.s);
+        ir_fact_close_all(d);
         ir_line(d, "(return)");
       } else {
         ir_val v = ir_rval(s->expr);
+        ir_fact_close_all(d);
         ir_line(d, ir_fmt("(return %s)", v.s));
       }
       return;
     case stmk_decl:
-      /* The declaration point. Storage is per function, so nothing is printed. */
+      /* The declaration point. Storage is per function, so nothing is printed, except the borrow facts (flag only). */
       ir_note(1, stmk_decl, 1);
+      ir_fact_decl(s, d);
       return;
     case stmk_set_vla_size: {
       /* The dimension of a VLA type is evaluated here, once, into its dimension variable. */
@@ -5432,6 +5550,7 @@ static void ir_function(a_routine_ptr rout)
   ir_slots.n = 0;
   ir_labels.n = 0;
   ir_loop_n = 0;
+  ir_decl_top = NULL;
   ir_cur_scope = scope;
   ir_buf_open(&ir_slot_buf);
 
@@ -5496,6 +5615,20 @@ static void ir_function(a_routine_ptr rout)
   /* Body. Scalar parameters are copied into slots first, so that every named variable has an address. */
   ir_buf_open(&body);
   ir_buf_begin(&body);
+  if (ir_borrow) {
+    /* (decl REG KIND) for each parameter: ref for a reference, param for an object. The parameters are open locals. */
+    int i;
+    for (i = 0; i < npending; i++) {
+      ir_line(1, ir_fmt("(decl %s %s)", pending[i].reg, ir_is_ref_type(pending[i].var->type) ? "ref" : "param"));
+    }
+    for (param = scope->variant.routine.parameters; param != NULL; param = param->next) {
+      if (ir_is_memval(param->type)) {
+        const char *reg = ir_tab_find(&ir_slots, param);
+        if (reg != NULL) ir_line(1, ir_fmt("(decl %s param)", reg));
+      }
+    }
+    for (param = scope->variant.routine.parameters; param != NULL; param = param->next) ir_fact_open(param);
+  }
   {
     int i;
     for (i = 0; i < npending; i++) {
@@ -5510,6 +5643,8 @@ static void ir_function(a_routine_ptr rout)
   } else {
     ir_stmt(scope->assoc_block, 1);
   }
+  /* The function's locals and parameters end here, unless the body ends in a return (which closed them). */
+  ir_fact_close_to(NULL, 1, !ir_ends_in_return(scope->assoc_block));
   /* Falling off the end of a non-void routine is UB in C++; main returns 0. Both forms are explicit. */
   if (!ir_is_void(ret) && !ir_ends_in_return(scope->assoc_block)) {
     if (strcmp(rout->source_corresp.name != NULL ? rout->source_corresp.name : "", "main") == 0) {
@@ -5609,6 +5744,10 @@ void nfcxx_ir_back_end(void)
   const char *ov = getenv("NFCXX_IR_OVERFLOW");
 
   ir_trap_overflow = ov != NULL && strcmp(ov, "trap") == 0;
+  {
+    const char *bf = getenv("NFCXX_PATHB_BORROW");
+    ir_borrow = bf != NULL && strcmp(bf, "1") == 0;
+  }
   nf_ld_blob = 1; /* long double types print as a 16-byte array in the IR */
   ir_buf_open(&ir_out_globals);
   ir_buf_open(&ir_out_types);
