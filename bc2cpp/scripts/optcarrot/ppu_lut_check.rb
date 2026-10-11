@@ -29,7 +29,7 @@ raise 'row mutation affected another pattern' unless optimized_table[0][1] == or
   end
 end
 Dir.mktmpdir('optcarrot-lut-check') do |temp|
-  builder = File.expand_path('../tools/optcarrot_probe/build_bundle.rb', __dir__)
+  builder = File.expand_path('../../tools/optcarrot_probe/build_bundle.rb', __dir__)
   env = { 'OPTCARROT_NO_SHIMS' => nil, 'OPTCARROT_ORIGINAL_LUT' => nil,
           'OPTCARROT_STATIC_DISPATCH' => nil }
   bundles = [{}, { 'OPTCARROT_ORIGINAL_LUT' => '1' }, { 'OPTCARROT_NO_SHIMS' => '1' }].map.with_index do |options, index|
