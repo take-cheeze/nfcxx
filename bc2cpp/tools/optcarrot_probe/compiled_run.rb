@@ -402,15 +402,19 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     end
   RUBY
   profiling = ENV['GPROF'] == '1'
-  interpreted_target = profiling ? 'optcarrotinterpretedprofile' : 'optcarrotinterpreted'
-  compiled_target = profiling ? 'optcarrotcompiledprofile' : 'optcarrotcompiled'
+  debug = ENV['OPTCARROT_DEBUG'] == '1'
+  build_mode = debug ? 'debug (-O0)' : 'release (-O3)'
+  target_suffix = "#{debug ? '' : 'release'}#{profiling ? 'profile' : ''}"
+  interpreted_target = "optcarrotinterpreted#{target_suffix}"
+  compiled_target = "optcarrotcompiled#{target_suffix}"
+  puts "Optcarrot build mode: #{build_mode}"
   config = File.join(temp, 'mruby_build_config.rb')
   File.write(config, <<~RUBY)
     base = proc do
       toolchain
       gembox 'full-core'
       gem #{File.join(ROOT, '3rd/mruby-onig-regexp').dump}
-      enable_debug
+      #{debug ? 'enable_debug' : '# Keep the toolchain optimization defaults for FPS measurements.'}
     end
     unless #{site_profile ? true : false}
       MRuby::Build.new(#{interpreted_target.dump}) do
@@ -478,13 +482,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # still -- that sets the EMPTY STRING, leaving mruby's link command blank,
   # "sh: 1: -o: not found".) The linker has to go through the compiler driver,
   # which is what adds libc: LD=CC, the same `cc` the compile half already uses.
-  # A kept build dir does not rebuild the gem when only its (temp-dir) sources change, and
-  # counters from an old binary would be ranked against this run's site table.
-  FileUtils.rm_rf(File.join(MRUBY, "build/#{compiled_target}/mrbgems/optcarrot-compiled")) if site_profile
+  # Temporary gem paths can leave stale objects in a kept build directory.
+  # Always rebuild generated code so timings and counters describe this run.
+  FileUtils.rm_rf(File.join(MRUBY, "build/#{compiled_target}/mrbgems/optcarrot-compiled"))
   rake_env = ENV.to_h.merge('MRUBY_CONFIG' => config)
   rake_env['LD'] = rake_env['CC'] || 'cc'
   output, status = Open3.capture2e(rake_env, 'rake', "-j#{Etc.nprocessors}", chdir: MRUBY)
-  raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..]}" unless status.success?
+  raise "mruby build failed (#{status.exitstatus}):\n#{output[-6000..] || output}" unless status.success?
 
   bundle = File.join(temp, 'optcarrot.rb')
   cruby_bundle = File.join(temp, 'optcarrot_cruby.rb')
@@ -528,7 +532,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
 
   if !site_profile && (summary_path = ENV['GITHUB_STEP_SUMMARY']) && !summary_path.empty?
     File.open(summary_path, 'a') do |summary|
-      summary.puts "## Optcarrot benchmark (#{FRAMES} frames)", '',
+      summary.puts "## Optcarrot benchmark (#{FRAMES} frames, #{build_mode})", '',
                    '| Runtime | Wall time | Wall fps | Optcarrot fps | Checksum |',
                    '| --- | ---: | ---: | ---: | ---: |'
       benchmarks.each do |result|
@@ -536,7 +540,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                             FRAMES / result[:seconds], result[:reported_fps] || 'n/a', result[:checksum])
       end
       summary.puts '', 'All three runtimes produced the same checksum.'
-      summary.puts format('mruby is %.2fx slower than CRuby; bc2cpp is %.2fx slower than mruby.',
+      summary.puts format('Wall-time ratios: mruby/CRuby %.2fx; bc2cpp/mruby %.2fx (lower is faster).',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
       summary.puts 'The generated optcarrot bundle calls CPU opcode handlers with fixed positional arguments to avoid per-opcode splat arrays. Config, Opt, CPU, NES, ROM.load, ROM#initialize, and the post-Fiber Video#tick and APU#flush_sound/APU#vsync hooks are all compiled; PPU is compiled too, with main_loop a resumable step function driven by the interpreted Fiber block (ADR 0273) and #run, which builds the Fiber, interpreted; Video/APU besides those two hooks remain interpreted.'
