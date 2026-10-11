@@ -1492,6 +1492,8 @@ if $PROGRAM_NAME == __FILE__
   compiled.each do |m|
     m[:code] = m[:code].gsub('@@SITE@@') { "#{m[:owner]}##{m[:name]}".gsub(/["\\]/) { |c| "\\#{c}" } }
   end
+  # DIRECT_RAISE (ADR 0226): a reviewed dead fallback raises without dispatching (before the rewrite renames its callee).
+  compiled.each { |m| m[:code] = NomethodReviewed.direct_raise(m[:code], m[:owner], m[:name]) }
   compiled.each { |m| m[:code] = SymbolCache.rewrite(m[:code], symbol_table) }
   if closed_world
     kept = Hash.new(0)
