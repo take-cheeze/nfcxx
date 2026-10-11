@@ -16,6 +16,10 @@ MRUBY = File.join(ROOT, '3rd/mruby')
 MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
+GRAY_STACK_SIZE = Integer(ENV.fetch('OPTCARROT_GRAY_STACK_SIZE', '16384'), 10)
+unless (1024..262_144).cover?(GRAY_STACK_SIZE)
+  abort 'OPTCARROT_GRAY_STACK_SIZE must be between 1024 and 262144 pointers'
+end
 # Optcarrot::PPU used to be entirely excluded here (a real, 100%-
 # reproducible FiberError -- `PPU#run`'s `@fiber ||= Fiber.new { ... }`
 # compiled its block through the same BLOCK_FALLBACK path every other block
@@ -424,6 +428,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   debug = ENV['OPTCARROT_DEBUG'] == '1'
   build_mode = debug ? 'debug (-O0)' : 'release (-O3)'
   target_suffix = "#{debug ? '' : 'release'}#{profiling ? 'profile' : ''}"
+  # The stack is embedded in mrb_gc; every translation unit must share its layout.
+  target_suffix += "gray#{GRAY_STACK_SIZE}"
+  build_mode += ", gray stack=#{GRAY_STACK_SIZE}"
+  gray_stack_config = "cc.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'\ncxx.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
   target_suffix += 'sealed' if sealed
   target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
@@ -448,6 +456,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     unless #{site_profile ? true : false}
       MRuby::Build.new(#{interpreted_target.dump}) do
         instance_eval(&base)
+        #{gray_stack_config}
         if #{profiling}
           cc.flags << '-pg'
           linker.flags << '-pg'
@@ -456,6 +465,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     end
     MRuby::Build.new(#{compiled_target.dump}) do
       #{compiled_base}
+      #{gray_stack_config}
       # The compiled gem's only source is C++ (register.cxx), and its generated
       # code raises real C++ exceptions (its own bc2cpp_ensure_guard /
       # bc2cpp_block_break), so the build needs MRB_USE_CXX_EXCEPTION and the
