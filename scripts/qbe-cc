@@ -30,7 +30,9 @@ done
 if [ $compile = 0 ]; then
   # The link. The sized __atomic_* calls qbe-prep.rb leaves in the C (for libstdc++'s std::atomic) are
   # libatomic functions; gcc inlines them, so only the QBE link adds the library.
-  exec cc "$@" -latomic
+  # libnfcxxld.a (be/nfcxx_ldrt.c) is the runtime of the helper calls cproc emits for long double and __float128.
+  # Its __float128 to_chars wrappers need libstdc++; the archive member is only pulled in when a program calls a helper.
+  exec cc "$@" "$("$(dirname "$0")/pathb-ldrt")" -latomic -lstdc++
 fi
 if [ -z "$src" ]; then
   exec cc "$@"

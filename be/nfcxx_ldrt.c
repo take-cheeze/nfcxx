@@ -19,7 +19,9 @@
 
 typedef long double ld;
 
-#define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); *(d) = pv_; } while (0)
+/* the 10 x87 bytes are copied, not stored as an ld: gcc treats `*(d) = pv_` as a 16-byte store, drops the memset of the
+   6 padding bytes and leaves them unwritten */
+#define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); memcpy((d), &pv_, 10); } while (0)
 
 void __nfcxx_ld_add(ld *d, const ld *a, const ld *b) { PUT(d, *a + *b); }
 void __nfcxx_ld_sub(ld *d, const ld *a, const ld *b) { PUT(d, *a - *b); }
@@ -245,6 +247,13 @@ void __nfcxx_f128_from_ld(void *d, const void *a)
   f128_wr(d, (f128)x);
 }
 void __nfcxx_f128_to_ld(void *d, const void *a)
+{
+  ld v = (ld)f128_rd(a);
+  memset(d, 0, 16);
+  memcpy(d, &v, 10);
+}
+/* from a _Float128 to a long double object (libgcc's __trunctfxf2): the conversion cproc emits between the two soft types */
+void __nfcxx_ld_from_f128(void *d, const void *a)
 {
   ld v = (ld)f128_rd(a);
   memset(d, 0, 16);
