@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# CPU-only GPU check: scripts/pathb-ptx-emit.rb lowers tests/gpu/mul2.ir to PTX, and the ptx-interp
+# interpreter runs it with the launch tests/gpu/launch.c uses (8 blocks of 128 threads, N=1000,
+# 64 guard ints past b, a[i] = i - 299). No GPU and no CUDA are needed.
+# The mutants must be caught, which shows the check notices a wrong multiplier and a missing bounds check.
+set -euo pipefail
+cd "$(dirname "$0")"
+root=$(cd ../.. && pwd)
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+
+gcc -std=c11 -O2 -Wall -Wextra -Werror -pedantic -o "$out/ptxi" ptx-interp/ptxi.c
+"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" mul2.ir > "$out/mul2.ptx"
+
+launch=(mul2 --grid 8 --block 128 ptr:1064:iota=-299 ptr:1064 s32:1000 --dump 1)
+
+# check FILE: one value per line (buffer b). b[i] == 2*a[i] for i < 1000; the guard ints are zero.
+check() {
+  awk 'BEGIN { bad = 0; guard = 0 }
+       { i = NR - 1
+         if (i < 1000) { if ($1 + 0 != 2 * (i - 299)) bad++ }
+         else if ($1 + 0 != 0) guard++ }
+       END { if (NR != 1064) { printf "  wrong line count %d\n", NR; exit 1 }
+             printf "  %d elements, %d mismatches, %d guard writes\n", 1000, bad, guard
+             exit (bad != 0 || guard != 0) }' "$1"
+}
+
+"$out/ptxi" "$out/mul2.ptx" "${launch[@]}" > "$out/out.txt"
+check "$out/out.txt"
+echo "mul2 on the PTX interpreter: ok"
+
+# Mutant 1: a wrong multiplier. Mutant 2: the bounds check against 2000, so threads 1000..1023 write
+# into the guard ints. Each must fail the interpreter or the check.
+sed 's/mul.lo.s32 \(%r[0-9]*\), \(%r[0-9]*\), 2;/mul.lo.s32 \1, \2, 3;/' "$out/mul2.ptx" > "$out/mul3.ptx"
+sed 's/setp.lt.s32 %p0, %r5, %r6;/setp.lt.s32 %p0, %r5, 2000;/' "$out/mul2.ptx" > "$out/nobounds.ptx"
+for m in mul3 nobounds; do
+  status=0
+  "$out/ptxi" "$out/$m.ptx" "${launch[@]}" > "$out/$m.out" || status=$?
+  if [ "$status" -eq 0 ] && check "$out/$m.out"; then
+    echo "mutant $m was not caught" >&2
+    exit 1
+  fi
+  echo "mutant $m caught (interpreter exit $status)"
+done
+
+# An instruction the interpreter does not model is refused before it runs (exit 3).
+sed 's/ld.s32 %r6, \[%rd6\];/ld.s32 %r6, [%rd6];\n  bar.sync 0;/' "$out/mul2.ptx" > "$out/barrier.ptx"
+status=0
+"$out/ptxi" "$out/barrier.ptx" "${launch[@]}" > /dev/null 2>&1 || status=$?
+[ "$status" -eq 3 ] || { echo "barrier: expected exit 3, got $status" >&2; exit 1; }
+echo "unsupported instruction refused (exit 3)"
+
+# A launch that runs past b (2000 elements against a 1064-element buffer) must fault (exit 4).
+status=0
+"$out/ptxi" "$out/mul2.ptx" mul2 --grid 9 --block 128 ptr:1064:iota=-299 ptr:1064 s32:2000 > /dev/null 2>&1 || status=$?
+[ "$status" -eq 4 ] || { echo "out-of-bounds launch: expected exit 4, got $status" >&2; exit 1; }
+echo "out-of-bounds access faults (exit 4)"

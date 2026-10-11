@@ -76,6 +76,9 @@ jobs:
       - name: mruby scripts (byte-identical to the Python originals)
         run: tests/mruby/run.sh
 
+      - name: GPU kernel lowered to PTX, run on the CPU PTX interpreter (no GPU needed)
+        run: tests/gpu/run_interp.sh
+
       - name: sccache stats
         if: always()
         run: sccache --show-stats
