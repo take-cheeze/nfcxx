@@ -1,0 +1,67 @@
+; Hand-written Path B IR (flattened, docs/notes/pathb-stage2.md form) for the C++:
+;   __global__ void loop_sum(const int *a, int *out, int n, int k) {
+;     int i = blockIdx.x * blockDim.x + threadIdx.x;
+;     if (i < n) {
+;       int s = 0;
+;       for (int j = 0; j < k; ++j) {
+;         if (j == 3) continue;
+;         if (a[i] < j) break;
+;         s += j;
+;       }
+;       out[i] = s;
+;     }
+;   }
+(ir-module "loop_sum.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "loop_sum"
+  (ret void)
+  (params (param %0 "a" (ptr int)) (param %1 "out" (ptr int)) (param %2 "n" int) (param %3 "k" int))
+  (slot "a" (ptr int) 8 8)
+  (slot "out" (ptr int) 8 8)
+  (slot "n" int 4 4)
+  (slot "k" int 4 4)
+  (slot "s" int 4 4)
+  (slot "j" int 4 4)
+  (store (ptr int) $"a" %0)
+  (store (ptr int) $"out" %1)
+  (store int $"n" %2)
+  (store int $"k" %3)
+  (let %4 int (gpu int "ctaid.x"))
+  (let %5 int (gpu int "ntid.x"))
+  (let %6 int (gpu int "tid.x"))
+  (let %7 int (wmul int %4 %5))
+  (let %8 int (wadd int %7 %6))
+  (let %9 int (load int $"n"))
+  (let %10 bool (lt int %8 %9))
+  (if %10
+    (then
+      (store int $"s" (const int 0))
+      (store int $"j" (const int 0))
+      (loop
+        (body
+          (let %11 int (load int $"j"))
+          (let %12 int (load int $"k"))
+          (let %13 bool (lt int %11 %12))
+          (if %13 (then) (else (break)))
+          (let %14 int (load int $"j"))
+          (let %15 bool (eq int %14 (const int 3)))
+          (if %15 (then (continue)) (else))
+          (let %16 (ptr int) (load (ptr int) $"a"))
+          (let %17 (ptr int) (index %16 %8 4))
+          (let %18 int (load int %17))
+          (let %19 int (load int $"j"))
+          (let %20 bool (lt int %18 %19))
+          (if %20 (then (break)) (else))
+          (let %21 int (load int $"s"))
+          (let %22 int (load int $"j"))
+          (let %23 int (wadd int %21 %22))
+          (store int $"s" %23))
+        (step
+          (let %24 int (load int $"j"))
+          (let %25 int (wadd int %24 (const int 1)))
+          (store int $"j" %25)))
+      (let %26 int (load int $"s"))
+      (let %27 (ptr int) (load (ptr int) $"out"))
+      (let %28 (ptr int) (index %27 %8 4))
+      (store int %28 %26)))
+  (return))

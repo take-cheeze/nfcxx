@@ -15,10 +15,17 @@
 # Registers are numbered per class in the order they are first set. Labels are $L<N>; `if` is a predicated branch
 # over the then part, and the else part follows.
 #
-# Handled: block, set, let, store, if, return; the expressions load, index, wadd, wsub, wmul, the comparisons lt, le,
-# gt, ge, eq, ne, const, and gpu (the special registers tid, ctaid, ntid, nctaid, .x .y .z, a Path B form for the
-# GPU). Operands: registers, constants, slot addresses, null. Everything else is refused: the next steps are the
-# remaining operators, 1- and 2-byte integers, bool in memory, floats, aggregates, switch, goto, static data, calls.
+# Handled: block, set, let, store, if (with else), loop (with break and continue), trap, return; the expressions load,
+# index, wadd, wsub, wmul, wneg, cdiv, crem (checked: trap on a zero divisor and on INT_MIN / -1), cshl, cshr (checked:
+# trap on a count not below the width), and, or, xor, not (bool and integer), the comparisons lt, le, gt, ge, eq, ne (also
+# spelled lt.s, lt.u, lt.f, ...), fadd, fsub, fmul, fdiv, fneg (IEEE, with explicit .rn so ptxas does not fuse them),
+# iconv, fconv, i2f, u2f, cf2i (checked: trap on NaN or out of range), const (floats too, including +Infinity and
+# -Infinity), and gpu (the special registers tid, ctaid, ntid, nctaid, .x .y .z, a Path B form for the GPU). Operands:
+# registers, constants, slot addresses, null. Everything else is refused: the next steps are 1- and 2-byte integers,
+# bool in memory, aggregates, switch, goto, static data, calls, and float constants that are not exact decimals.
+#
+# Checked operations emit `trap;`, which aborts the kernel (the launch reports an error). PTX has no abort block, so
+# each check is a predicated trap at the operation.
 #
 # The emitted code is checked by running it (tests/gpu/run.sh); it is not compared byte for byte with a hand translation.
 
@@ -222,7 +229,7 @@ end
 
 def type_size(t)
   return 8 if t[0] == "ptr"
-  return t[1] if t[0] == "int"
+  return t[1] if t[0] == "int" || t[0] == "float"
   raise Refused, "size of #{t[0]}"
 end
 
@@ -232,18 +239,51 @@ def reg_class(t)
   return "p" if t[0] == "int" && t[3]
   return "rd" if t[0] == "ptr" || (t[0] == "int" && t[1] == 8)
   return "r" if t[0] == "int" && t[1] == 4
+  return "f" if t[0] == "float" && t[1] == 4
+  return "fd" if t[0] == "float" && t[1] == 8
   raise Refused, "value of type #{t[0]} #{t[1]} bytes"
 end
 
-# The PTX type suffix for a value or a memory access of an IR type: s32, u32, s64, u64 (a pointer is u64).
+# The PTX type suffix for a value or a memory access of an IR type: s32, u32, s64, u64 (a pointer is u64), f32, f64.
 def ptx_type(t)
   return "u64" if t[0] == "ptr"
+  return "f#{t[1] * 8}" if t[0] == "float" && (t[1] == 4 || t[1] == 8)
   raise Refused, "bool in arithmetic or memory" if t[0] == "int" && t[3]
   raise Refused, "integer of #{t[1]} bytes" unless t[0] == "int" && (t[1] == 4 || t[1] == 8)
   (t[2] ? "s" : "u") + (t[1] * 8).to_s
 end
 
-# A constant as a PTX immediate of an IR integer or pointer type (the bits of v, read with the signedness of t).
+# The untyped bit suffix (b32, b64) for and, or, xor, not and shl, where the signedness does not matter.
+def bits_type(t)
+  raise Refused, "bitwise operation on #{t[0]}" unless (t[0] == "int" && !t[3] && (t[1] == 4 || t[1] == 8)) || t[0] == "ptr"
+  "b" + (type_size(t) * 8).to_s
+end
+
+# A decimal float literal, exact in the type: a finite number as printed by the IR (shortest form that reads back), or
+# an infinity. Other spellings (NaN, hexadecimal) are refused, because the decimal form would round.
+def float_lit(text, t)
+  if text == "+Infinity" || text == "Infinity"
+    return t[1] == 4 ? "0f7F800000" : "0d7FF0000000000000"
+  elsif text == "-Infinity"
+    return t[1] == 4 ? "0fFF800000" : "0dFFF0000000000000"
+  end
+  # a decimal with a point and an optional exponent (what the IR prints): no regex, as special_register? has none
+  ok = text.count(".") == 1 && text.count("0123456789") > 0
+  text.each_char { |c| ok = false unless "0123456789.eE+-".include?(c) }
+  raise Refused, "float constant #{text}" unless ok
+  text
+end
+
+# The instruction that sets predicate t to the bool constant v (IR text 0 or 1): setp of equal or unequal immediates.
+def bool_const_setp(t, v)
+  case v.to_s
+  when "1" then "setp.eq.u32 #{t}, 0, 0;"
+  when "0" then "setp.ne.u32 #{t}, 0, 0;"
+  else raise Refused, "bool constant #{v}"
+  end
+end
+
+# A constant as a PTX immediate of an IR integer, float or pointer type (the bits of v, read with the signedness of t).
 def imm(t, v)
   return "0" if t[0] == "ptr"
   raise Refused, "bool constant" if t[3]
@@ -268,7 +308,8 @@ class Fn
     @index = index
     @name = form[1].to_s
     @regs = {}              # IR register "%N" => [PTX register, IR type]
-    @count = { "p" => 0, "r" => 0, "rd" => 0 }
+    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0 }
+    @loops = []             # [continue label, break label] of the enclosing loops, innermost last
     @slots = {}             # slot name => byte offset in the frame
     @frame = 0
     @params = []            # IR types of the parameters, in order
@@ -315,7 +356,7 @@ class Fn
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param" && p.length == 4
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
           ty = parse_type(p[3])
-          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8))
+          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
       elsif h == "static"
@@ -354,6 +395,13 @@ class Fn
     h = head_of(x)
     if h == "const"
       ty = parse_type(x[1])
+      return [float_lit(x[2].to_s, ty), ty] if ty[0] == "float"
+      if ty[0] == "int" && ty[3]
+        # a bool constant is a predicate: setp of two equal (true) or unequal (false) immediates
+        t = fresh("p")
+        emit(bool_const_setp(t, x[2]))
+        return [t, ty]
+      end
       return [imm(ty, as_int(x[2])), ty]
     end
     if h == "null"
@@ -388,7 +436,7 @@ class Fn
   end
 
   def expect(dty, ty)
-    raise BadIR, "value of type #{ty[0]} stored in a #{dty[0]}" unless reg_class(dty) == reg_class(ty)
+    raise BadIR, "value of type #{ty[0]} (#{type_size(ty)} bytes) stored in a #{dty[0]} (#{type_size(dty)} bytes)" unless reg_class(dty) == reg_class(ty)
   end
 
   # ---- expressions: store the value of x in register dest, of IR type dty
@@ -422,12 +470,89 @@ class Fn
       b, _ = operand(x[3])
       op = { "wadd" => "add", "wsub" => "sub", "wmul" => "mul.lo" }[h]
       emit("#{op}.#{ptx_type(ty)} #{dest}, #{reg_of(a, ty)}, #{b};")
-    when "lt", "le", "gt", "ge", "eq", "ne"
+    when "wneg"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      raise Refused, "negation of bool" if ty[0] == "int" && ty[3]
+      a, _ = operand(x[2])
+      emit("neg.s#{type_size(ty) * 8} #{dest}, #{reg_of(a, ty)};")
+    when "cdiv", "crem"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      checked_div(h, dest, ty, x[2], x[3])
+    when "cshl", "cshr"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      checked_shift(h, dest, ty, x[2], x[3])
+    when "and", "or", "xor"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      a, _ = operand(x[2])
+      b, _ = operand(x[3])
+      if ty[0] == "int" && ty[3]
+        emit("#{h}.pred #{dest}, #{reg_of(a, ty)}, #{b};")
+      else
+        emit("#{h}.#{bits_type(ty)} #{dest}, #{reg_of(a, ty)}, #{b};")
+      end
+    when "not"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      a, _ = operand(x[2])
+      if ty[0] == "int" && ty[3]
+        emit("not.pred #{dest}, #{reg_of(a, ty)};")
+      else
+        emit("not.#{bits_type(ty)} #{dest}, #{reg_of(a, ty)};")
+      end
+    when "fadd", "fsub", "fmul", "fdiv"
+      ty = parse_type(x[1])
+      raise Refused, "#{h} on #{ty[0]}" unless ty[0] == "float"
+      expect(dty, ty)
+      a, _ = operand(x[2])
+      b, _ = operand(x[3])
+      op = { "fadd" => "add", "fsub" => "sub", "fmul" => "mul", "fdiv" => "div" }[h]
+      # .rn: an explicit rounding mode, so ptxas does not contract a multiply and an add into a fused multiply-add
+      emit("#{op}.rn.#{ptx_type(ty)} #{dest}, #{reg_of(a, ty)}, #{b};")
+    when "fneg"
+      ty = parse_type(x[1])
+      raise Refused, "fneg on #{ty[0]}" unless ty[0] == "float"
+      expect(dty, ty)
+      a, _ = operand(x[2])
+      emit("neg.#{ptx_type(ty)} #{dest}, #{reg_of(a, ty)};")
+    when "iconv"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      a, aty = operand(x[2])
+      int_convert(dest, ty, a, aty)
+    when "fconv"
+      ty = parse_type(x[1])
+      raise Refused, "fconv to #{ty[0]}" unless ty[0] == "float"
+      expect(dty, ty)
+      a, aty = operand(x[2])
+      raise BadIR, "fconv of a #{aty[0]}" unless aty[0] == "float"
+      if type_size(ty) == type_size(aty)
+        emit("mov.#{ptx_type(ty)} #{dest}, #{a};")
+      else
+        # widening is exact; narrowing rounds to nearest even
+        rnd = type_size(ty) < type_size(aty) ? ".rn" : ""
+        emit("cvt#{rnd}.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+      end
+    when "i2f", "u2f"
+      ty = parse_type(x[1])
+      raise Refused, "#{h} to #{ty[0]}" unless ty[0] == "float"
+      expect(dty, ty)
+      a, aty = operand(x[2])
+      raise Refused, "#{h} of bool" if aty[0] == "int" && aty[3]
+      emit("cvt.rn.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+    when "cf2i"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      a, aty = operand(x[2])
+      float_to_int(dest, ty, a, aty)
+    when "lt", "le", "gt", "ge", "eq", "ne", "lt.s", "le.s", "gt.s", "ge.s", "eq.s", "ne.s",
+         "lt.u", "le.u", "gt.u", "ge.u", "eq.u", "ne.u", "lt.f", "le.f", "gt.f", "ge.f", "eq.f", "ne.f"
       ty = parse_type(x[1])
       raise BadIR, "comparison result is not bool" unless reg_class(dty) == "p"
-      a, aty = operand(x[2])
-      b, _ = operand(x[3])
-      emit("setp.#{h}.#{ptx_type(ty)} #{dest}, #{reg_of(a, aty)}, #{b};")
+      compare(h.split(".")[0], dest, ty, x[2], x[3])
     when "gpu"
       ty = parse_type(x[1])
       expect(dty, ty)
@@ -437,11 +562,141 @@ class Fn
     when "const"
       ty = parse_type(x[1])
       expect(dty, ty)
-      text, _ = operand(x)
-      emit("mov.#{ptx_type(ty)} #{dest}, #{text};")
+      if ty[0] == "int" && ty[3]
+        emit(bool_const_setp(dest, x[2]))
+      else
+        text, _ = operand(x)
+        emit("mov.#{ptx_type(ty)} #{dest}, #{text};")
+      end
     else
       raise Refused, "expression #{h || form_text(x)}"
     end
+  end
+
+  # ---- operators with checks and conversions (called from rval)
+
+  # The comparison op (lt, le, gt, ge, eq, ne) of the IR operands xa and xb, of type ty, into predicate dest.
+  # A bool comparison is an xor, negated for eq. A float ne is unordered (neu): C's != holds when an operand is NaN.
+  def compare(op, dest, ty, xa, xb)
+    a, aty = operand(xa)
+    b, _ = operand(xb)
+    if ty[0] == "int" && ty[3]
+      raise Refused, "bool comparison #{op}" unless op == "eq" || op == "ne"
+      if op == "ne"
+        emit("xor.pred #{dest}, #{a}, #{b};")
+      else
+        t = fresh("p")
+        emit("xor.pred #{t}, #{a}, #{b};")
+        emit("not.pred #{dest}, #{t};")
+      end
+      return
+    end
+    cmp = op
+    cmp = "neu" if ty[0] == "float" && op == "ne"
+    emit("setp.#{cmp}.#{ptx_type(ty)} #{dest}, #{reg_of(a, aty)}, #{b};")
+  end
+
+  # cdiv (signed or unsigned) and crem: trap on a zero divisor, and for signed types on INT_MIN / -1.
+  # The checks are predicated traps; a constant divisor needs only the checks that can fail.
+  def checked_div(op, dest, ty, xa, xb)
+    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    t = ptx_type(ty)
+    a, _ = operand(xa)
+    b, _ = operand(xb)
+    a = reg_of(a, ty)
+    min = imm(ty, -(1 << (ty[1] * 8 - 1)))
+    if b == "0"
+      emit("trap;")
+    elsif b.start_with?("%")
+      p = fresh("p")
+      emit("setp.eq.#{t} #{p}, #{b}, 0;")
+      emit("@#{p} trap;")
+      if ty[2]
+        m = fresh("p")
+        q = fresh("p")
+        emit("setp.eq.#{t} #{m}, #{b}, -1;")
+        emit("setp.eq.#{t} #{q}, #{a}, #{min};")
+        emit("and.pred #{m}, #{m}, #{q};")
+        emit("@#{m} trap;")
+      end
+    elsif ty[2] && b == "-1"
+      q = fresh("p")
+      emit("setp.eq.#{t} #{q}, #{a}, #{min};")
+      emit("@#{q} trap;")
+    end
+    emit("#{op == "cdiv" ? "div" : "rem"}.#{t} #{dest}, #{a}, #{b};")
+  end
+
+  # cshl and cshr (count in ty's width, as the IR gives it): trap unless 0 <= count < width. The count is compared
+  # unsigned, so a negative count fails the test too. A 64-bit count is narrowed to 32 bits after the test.
+  def checked_shift(op, dest, ty, xa, xb)
+    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    bits = ty[1] * 8
+    a, _ = operand(xa)
+    a = reg_of(a, ty)
+    c, cty = operand(xb)
+    raise Refused, "shift count of type #{cty[0]}" unless cty[0] == "int" && !cty[3] && (cty[1] == 4 || cty[1] == 8)
+    cnt = c
+    if c.start_with?("%")
+      p = fresh("p")
+      if reg_class(cty) == "rd"
+        emit("setp.hs.u64 #{p}, #{c}, #{bits};")
+        emit("@#{p} trap;")
+        cnt = fresh("r")
+        emit("cvt.u32.u64 #{cnt}, #{c};")
+      else
+        emit("setp.hs.u32 #{p}, #{c}, #{bits};")
+        emit("@#{p} trap;")
+      end
+    else
+      emit("trap;") if c.to_i < 0 || c.to_i >= bits
+    end
+    if op == "cshl"
+      emit("shl.#{bits_type(ty)} #{dest}, #{a}, #{cnt};")
+    else
+      emit("shr.#{ptx_type(ty)} #{dest}, #{a}, #{cnt};")
+    end
+  end
+
+  # iconv: integer to integer, sign-extending from a signed source and zero-extending from an unsigned one, and
+  # truncating to a narrower target (cvt does all three).
+  def int_convert(dest, ty, a, aty)
+    raise Refused, "iconv to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    raise BadIR, "iconv of a #{aty[0]}" unless aty[0] == "int"
+    raise Refused, "iconv of bool" if aty[3]
+    if type_size(ty) == type_size(aty)
+      emit("mov.#{ptx_type(ty)} #{dest}, #{a};")
+    else
+      emit("cvt.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
+    end
+  end
+
+  # cf2i: a float to an integer, with C's truncation. The IR says it traps on NaN and on values whose truncation does
+  # not fit the target. The test is ordered (NaN makes both comparisons false), so NaN traps too. Each bound is exact
+  # in the source type: the lower one is strict (lo - 1) when that is a float of the source type, else lo itself.
+  def float_to_int(dest, ty, a, aty)
+    raise Refused, "cf2i to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
+    raise BadIR, "cf2i of a #{aty[0]}" unless aty[0] == "float"
+    bits = ty[1] * 8
+    fsz = aty[1]
+    ft = ptx_type(aty)
+    a = reg_of(a, aty)
+    if ty[2]
+      lo = -(1 << (bits - 1))
+      hi = 1 << (bits - 1)
+      exact_below = (fsz == 8 && bits <= 53) || (fsz == 4 && bits <= 24)
+      lo_op, lo_v = exact_below ? ["gt", (lo - 1).to_f] : ["ge", lo.to_f]
+    else
+      lo_op, lo_v = "gt", -1.0
+      hi = 1 << bits
+    end
+    p1 = fresh("p")
+    p2 = fresh("p")
+    emit("setp.#{lo_op}.#{ft} #{p1}, #{a}, #{lo_v.to_s};")
+    emit("setp.lt.#{ft} #{p2}, #{a}, #{hi.to_f.to_s};")
+    emit("and.pred #{p1}, #{p1}, #{p2};")
+    emit("@!#{p1} trap;")
+    emit("cvt.rzi.#{ptx_type(ty)}.#{ft} #{dest}, #{a};")
   end
 
   # ---- statements
@@ -481,6 +736,30 @@ class Fn
       label(lab_else)
       (else_f ? else_f.drop(1) : []).each { |t| stmt(t) }
       label(lab_end)
+    when "loop"
+      # repeat { body; L_cont: step }: break leaves to L_end, continue goes to L_cont (the step), as pathb-stage2 says
+      body_f = s.drop(1).find { |f| head_of(f) == "body" }
+      step_f = s.drop(1).find { |f| head_of(f) == "step" }
+      raise BadIR, "loop without body and step" if body_f.nil? || step_f.nil?
+      top = new_label
+      lab_cont = new_label
+      lab_end = new_label
+      label(top)
+      @loops.push([lab_cont, lab_end])
+      body_f.drop(1).each { |t| stmt(t) }
+      label(lab_cont)
+      step_f.drop(1).each { |t| stmt(t) }
+      @loops.pop
+      emit("bra #{top};")
+      label(lab_end)
+    when "break"
+      raise Refused, "break outside a loop (switch is not lowered yet)" if @loops.empty?
+      emit("bra #{@loops[-1][1]};")
+    when "continue"
+      raise BadIR, "continue outside a loop" if @loops.empty?
+      emit("bra #{@loops[-1][0]};")
+    when "trap"
+      emit("trap;")
     when "return"
       raise Refused, "return with a value" if s.length > 1
       emit("ret;")
@@ -519,6 +798,8 @@ class Fn
     out << "  .reg .pred %p<#{@count['p']}>;" if @count["p"] > 0
     out << "  .reg .b32 %r<#{@count['r']}>;" if @count["r"] > 0
     out << "  .reg .b64 %rd<#{@count['rd']}>;" if @count["rd"] > 0
+    out << "  .reg .f32 %f<#{@count['f']}>;" if @count["f"] > 0
+    out << "  .reg .f64 %fd<#{@count['fd']}>;" if @count["fd"] > 0
     out << "  .local .align 8 .b8 __local_depot#{@index}[#{@frame}];" if @frame > 0
     @prologue.each { |s| out << "  #{s}" }
     out.concat(@lines)

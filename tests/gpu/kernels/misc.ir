@@ -1,0 +1,48 @@
+; Hand-written Path B IR (flattened) for the C++:
+;   __global__ void misc(const float *x, float *out, int n) {
+;     int i = blockIdx.x * blockDim.x + threadIdx.x;
+;     if (i < n) {
+;       float v = x[i];
+;       int t = (int)v;                   // cf2i: v is in range here (the trap path is not exercised)
+;       int l = t << (i & 7);             // cshl
+;       int m = -l;                       // wneg
+;       float f = (float)(unsigned)m;     // u2f
+;       out[i] = f + -v;                  // fneg, fadd
+;     }
+;   }
+(ir-module "misc.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "misc"
+  (ret void)
+  (params (param %0 "x" (ptr float)) (param %1 "out" (ptr float)) (param %2 "n" int))
+  (slot "x" (ptr float) 8 8)
+  (slot "out" (ptr float) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr float) $"x" %0)
+  (store (ptr float) $"out" %1)
+  (store int $"n" %2)
+  (let %3 int (gpu int "ctaid.x"))
+  (let %4 int (gpu int "ntid.x"))
+  (let %5 int (gpu int "tid.x"))
+  (let %15 int (wmul int %3 %4))
+  (let %6 int (wadd int %15 %5))
+  (let %7 int (load int $"n"))
+  (let %8 bool (lt int %6 %7))
+  (if %8
+    (then
+      (let %9 (ptr float) (load (ptr float) $"x"))
+      (let %10 (ptr float) (index %9 %6 4))
+      (let %11 float (load float %10))
+      (let %12 int (cf2i int %11))
+      (let %13 int (and int %6 (const int 7)))
+      (let %14 int (cshl int %12 %13))
+      (let %16 int (wneg int %14))
+      (let %17 float (fneg float %11))
+      (let %18 unsigned_int (iconv unsigned_int %16))
+      (let %19 float (u2f float %18))
+      (let %20 float (fadd float %19 %17))
+      (let %21 (ptr float) (load (ptr float) $"out"))
+      (let %22 (ptr float) (index %21 %6 4))
+      (store float %22 %20))
+    (else))
+  (return))

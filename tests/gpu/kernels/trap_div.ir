@@ -1,0 +1,39 @@
+; Hand-written Path B IR (flattened) for the C++:
+;   __global__ void trap_div(const int *a, const int *b, int *out, int n) {
+;     int i = blockIdx.x * blockDim.x + threadIdx.x;
+;     if (i < n) out[i] = a[i] / b[i];   // cdiv: traps when b[i] == 0
+;   }
+(ir-module "trap_div.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "trap_div"
+  (ret void)
+  (params (param %0 "a" (ptr int)) (param %1 "b" (ptr int)) (param %2 "out" (ptr int)) (param %3 "n" int))
+  (slot "a" (ptr int) 8 8)
+  (slot "b" (ptr int) 8 8)
+  (slot "out" (ptr int) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr int) $"a" %0)
+  (store (ptr int) $"b" %1)
+  (store (ptr int) $"out" %2)
+  (store int $"n" %3)
+  (let %4 int (gpu int "ctaid.x"))
+  (let %5 int (gpu int "ntid.x"))
+  (let %6 int (gpu int "tid.x"))
+  (let %15 int (wmul int %4 %5))
+  (let %7 int (wadd int %15 %6))
+  (let %8 int (load int $"n"))
+  (let %9 bool (lt int %7 %8))
+  (if %9
+    (then
+      (let %10 (ptr int) (load (ptr int) $"a"))
+      (let %11 (ptr int) (index %10 %7 4))
+      (let %12 int (load int %11))
+      (let %13 (ptr int) (load (ptr int) $"b"))
+      (let %14 (ptr int) (index %13 %7 4))
+      (let %16 int (load int %14))
+      (let %17 int (cdiv int %12 %16))
+      (let %18 (ptr int) (load (ptr int) $"out"))
+      (let %19 (ptr int) (index %18 %7 4))
+      (store int %19 %17))
+    (else))
+  (return))

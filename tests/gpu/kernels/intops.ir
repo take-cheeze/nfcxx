@@ -1,0 +1,63 @@
+; Hand-written Path B IR (flattened) for the C++:
+;   __global__ void intops(const int *a, long *out, int n) {
+;     int i = blockIdx.x * blockDim.x + threadIdx.x;
+;     if (i < n) {
+;       int x = a[i];
+;       int d = (i & 7) + 1;
+;       int q = x / d, r = x % d;          // cdiv, crem: divisor is never 0 or -1 here
+;       int sh = i & 15;
+;       int ar = x >> sh;                  // cshr, arithmetic for int
+;       unsigned lg = (unsigned)x >> sh;   // cshr, logical for unsigned
+;       int t = (q * 2 + r) ^ ~ar;
+;       long v = t;
+;       if (lg < 1000u) v += 1;
+;       out[i] = v;
+;     }
+;   }
+(ir-module "intops.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "intops"
+  (ret void)
+  (params (param %0 "a" (ptr int)) (param %1 "out" (ptr long)) (param %2 "n" int))
+  (slot "a" (ptr int) 8 8)
+  (slot "out" (ptr long) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr int) $"a" %0)
+  (store (ptr long) $"out" %1)
+  (store int $"n" %2)
+  (let %3 int (gpu int "ctaid.x"))
+  (let %4 int (gpu int "ntid.x"))
+  (let %5 int (gpu int "tid.x"))
+  (let %40 int (wmul int %3 %4))
+  (let %6 int (wadd int %40 %5))
+  (let %7 int (load int $"n"))
+  (let %8 bool (lt int %6 %7))
+  (if %8
+    (then
+      (let %9 (ptr int) (load (ptr int) $"a"))
+      (let %10 (ptr int) (index %9 %6 4))
+      (let %11 int (load int %10))
+      (let %12 int (and int %6 (const int 7)))
+      (let %13 int (wadd int %12 (const int 1)))
+      (let %14 int (cdiv int %11 %13))
+      (let %16 int (crem int %11 %13))
+      (let %17 int (and int %6 (const int 15)))
+      (let %18 int (cshr int %11 %17))
+      (let %19 unsigned_int (iconv unsigned_int %11))
+      (let %20 unsigned_int (cshr unsigned_int %19 %17))
+      (let %21 int (wmul int %14 (const int 2)))
+      (let %22 int (wadd int %21 %16))
+      (let %23 int (not int %18))
+      (let %24 int (xor int %22 %23))
+      (let %25 long (iconv long %24))
+      (let %26 bool (lt unsigned_int %20 (const unsigned_int 1000)))
+      (if %26
+        (then
+          (let %27 long (wadd long %25 (const long 1)))
+          (set %25 %27))
+        (else))
+      (let %28 (ptr long) (load (ptr long) $"out"))
+      (let %29 (ptr long) (index %28 %6 8))
+      (store long %29 %25))
+    (else))
+  (return))
