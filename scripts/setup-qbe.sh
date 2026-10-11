@@ -8,6 +8,7 @@
 # scripts/cproc-empty-struct.patch (see docs/notes/freestanding.md) and scripts/cproc-vaarg-aggregate.patch
 # (va_arg of small integer-class structs, needed by mruby) and scripts/cproc-empty-copy.patch (no copy of a
 # zero-size struct) are applied, in that order, to the cproc copy;
+# scripts/cproc-array-qual.patch (a qualifier on an array type is on its elements, C11 6.7.3p9) is applied last;
 # they must be refreshed if 3rd/cproc moves. scripts/qbe-uninit-slot.patch is applied to the QBE copy. Re-run this script after pulling a new patch.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,7 +19,7 @@ for p in qbe cproc; do
   cp -r "$root/3rd/$p" "$root/build/$p"
   rm -rf "$root/build/$p/.git"
 done
-for p in cproc-empty-struct cproc-vaarg-aggregate cproc-empty-copy; do
+for p in cproc-empty-struct cproc-vaarg-aggregate cproc-empty-copy cproc-array-qual; do
   patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/$p.patch"
 done
 # QBE: scripts/qbe-uninit-slot.patch (a never-stored struct slot passed by value must not become a null load)

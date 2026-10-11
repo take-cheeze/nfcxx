@@ -48,7 +48,7 @@ cproc) is ours to vendor.
 | Step | External tools beyond gcc/g++ and coreutils | Network |
 | --- | --- | --- |
 | `scripts/setup-edg.sh` (EDG `cpfe`, `eccp`, `edg_prelink`, `libC.a`) | cmake, ninja, git (submodule `3rd/edg`) | submodule fetch only |
-| `scripts/setup-qbe.sh` (QBE, cproc and the two cproc patches) | make, patch, git (submodules `3rd/qbe`, `3rd/cproc`) | submodule fetch only |
+| `scripts/setup-qbe.sh` (QBE, cproc and its cproc patches) | make, patch, git (submodules `3rd/qbe`, `3rd/cproc`) | submodule fetch only |
 | `scripts/setup-mruby.sh` (the interpreter that runs the helper scripts) | ruby, rake, git, flock | one shallow fetch of `mruby/mruby` at the pinned commit |
 | `scripts/setup-pathb.sh` (Path B harness `cpfe`, `build/pathb`) | cmake, ninja, git (the `3rd/edg` submodule) | submodule fetch only |
 | `./nfcxx`, `./nfcc` with the gcc backend | EDG built; gcc | none |
@@ -82,7 +82,7 @@ Everything else is bash, C or C++. `scripts/mruby-tool-config.rb` is the mruby b
    the submodule URLs at it: either change `.gitmodules`, or set `submodule.<name>.url` in the local
    git config. Each pinned commit must exist on the mirror. The pins are the only versions the build
    uses.
-2. **Keep the patches valid.** `scripts/cproc-empty-struct.patch` applies to the pinned cproc commit
+2. **Keep the patches valid.** `scripts/cproc-empty-struct.patch` and the other `scripts/cproc-*.patch` files apply to the pinned cproc commit
    (`d1c53dd`). It must be regenerated if cproc moves. `setup-edg.sh` edits the EDG base config
    with `sed`, so a new EDG pin needs that edit checked.
 3. **Pin the host toolchain.** A container image or an apt list with gcc-13, cmake, ninja, make,
