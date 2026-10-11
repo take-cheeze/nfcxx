@@ -931,6 +931,16 @@ typedef struct ir_decl_rec {
   struct ir_decl_rec *prev;
 } ir_decl_rec;
 static ir_decl_rec *ir_decl_top = NULL;
+static int ir_decl_n;                   /* the length of ir_decl_top */
+
+/* The open-local count at each label of the function, filled by ir_scan_labels before the body is lowered (flag only). A
+   jump (goto, continue, and a break, which is a goto to the label after the loop) leaves the locals above its target's count. */
+typedef struct ir_lbl_depth {
+  void *lbl;
+  int depth;
+  struct ir_lbl_depth *next;
+} ir_lbl_depth;
+static ir_lbl_depth *ir_lbl_list = NULL;
 
 /* A C++ reference (lvalue or rvalue, the (ptr T) type with is_reference set), and an rvalue reference (also is_reference). */
 static int ir_is_ref_type(a_type_ptr t)
@@ -981,6 +991,7 @@ static void ir_fact_open(a_variable_ptr var)
   r->var = var;
   r->prev = ir_decl_top;
   ir_decl_top = r;
+  ir_decl_n++;
 }
 
 /* (decl OP KIND) at a declaration point: KIND is ref for a reference, val for an object. */
@@ -1006,6 +1017,7 @@ static void ir_fact_close_to(ir_decl_rec *mark, int d, int emit)
     ir_decl_rec *r = ir_decl_top;
     if (emit && ir_borrow) ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
     ir_decl_top = r->prev;
+    ir_decl_n--;
   }
 }
 
@@ -1015,6 +1027,81 @@ static void ir_fact_close_all(int d)
   ir_decl_rec *r;
   if (!ir_borrow) return;
   for (r = ir_decl_top; r != NULL; r = r->prev)
+    ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
+}
+
+/* The labels of a function, with the open-local count at each (flag only). A block restores the count at its end, as
+   ir_fact_close_to does when lowering it. A label inside an expression (a statement expression) is not seen: its jumps
+   close nothing, as before. */
+static void ir_lbl_add(void *lbl, int depth)
+{
+  ir_lbl_depth *r = (ir_lbl_depth *)malloc(sizeof *r);
+  if (r == NULL) abort();
+  r->lbl = lbl;
+  r->depth = depth;
+  r->next = ir_lbl_list;
+  ir_lbl_list = r;
+}
+static void ir_lbl_free(void)
+{
+  while (ir_lbl_list != NULL) {
+    ir_lbl_depth *r = ir_lbl_list;
+    ir_lbl_list = r->next;
+    free(r);
+  }
+}
+static void ir_scan_labels(a_statement_ptr s, int *n)
+{
+  a_statement_ptr t;
+  an_il_entity_list_entry_ptr entry;
+  if (s == NULL) return;
+  switch (s->kind) {
+    case stmk_block: {
+      int saved = *n;
+      for (t = s->variant.block.statements; t != NULL; t = t->next) ir_scan_labels(t, n);
+      *n = saved;
+      return;
+    }
+    case stmk_decl:
+      for (entry = s->variant.decl.entities; entry != NULL; entry = entry->next)
+        if (entry->entity.kind == iek_variable && ir_fact_var((a_variable_ptr)entry->entity.ptr)) (*n)++;
+      return;
+    case stmk_label:
+      ir_lbl_add((void *)s->variant.label.ptr, *n);
+      return;
+    case stmk_if:
+    case stmk_if_consteval:
+    case stmk_if_not_consteval:
+      ir_scan_labels(s->variant.if_stmt.then_statement, n);
+      ir_scan_labels(s->variant.if_stmt.else_statement, n);
+      return;
+    case stmk_while:
+    case stmk_end_test_while:
+      ir_scan_labels(s->variant.loop_statement, n);
+      return;
+    case stmk_for:
+      if (s->variant.for_loop.extra_info != NULL) ir_scan_labels(s->variant.for_loop.extra_info->initialization, n);
+      ir_scan_labels(s->variant.for_loop.statement, n);
+      return;
+    case stmk_switch:
+      ir_scan_labels(s->variant.switch_stmt.body_statement, n);
+      return;
+    default:
+      return;
+  }
+}
+
+/* A jump to label lbl leaves the open locals above the label's count: (scope-end) for each, most recent first. As for a
+   return, the list is kept, since the code after the jump is still lowered. */
+static void ir_fact_jump(void *lbl, int d)
+{
+  ir_lbl_depth *l;
+  ir_decl_rec *r;
+  int n;
+  if (!ir_borrow) return;
+  for (l = ir_lbl_list; l != NULL && l->lbl != lbl; l = l->next) ;
+  if (l == NULL) return;
+  for (r = ir_decl_top, n = ir_decl_n; r != NULL && n > l->depth; r = r->prev, n--)
     ir_line(d, ir_fmt("(scope-end %s)", ir_var_addr(r->var, r->var->type, 0).s));
 }
 
@@ -5318,6 +5405,7 @@ static void ir_stmt(a_statement_ptr s, int d)
     case stmk_goto:
       ir_note(1, stmk_goto, 1);
       if (ir_loop_n > 0 && ir_loop_cont[ir_loop_n - 1] == (void *)s->variant.label.ptr) {
+        ir_fact_jump((void *)s->variant.label.ptr, d);
         ir_line(d, "(continue)");
         return;
       }
@@ -5326,6 +5414,7 @@ static void ir_stmt(a_statement_ptr s, int d)
         for (i = 0; i < ir_loop_n - 1; i++)
           if (ir_loop_cont[i] == (void *)s->variant.label.ptr) ir_loop_kept[i] = 1;
       }
+      ir_fact_jump((void *)s->variant.label.ptr, d);
       ir_line(d, ir_fmt("(goto %s)",
                         ir_tab_get(&ir_labels, s->variant.label.ptr,
                                    ir_name_or(s->variant.label.ptr->source_corresp.name, "label"), "")));
@@ -5637,6 +5726,12 @@ static void ir_function(a_routine_ptr rout)
       slot = ir_var_addr(pending[i].var, pending[i].var->type, 0);
       ir_store(pending[i].var->type, slot.s, pending[i].reg, 0);
     }
+  }
+  if (ir_borrow) {
+    /* The open-local count at each label, before any jump is lowered (a forward goto needs its target's count). */
+    int n = ir_decl_n;
+    ir_lbl_free();
+    ir_scan_labels(scope->assoc_block, &n);
   }
   if (scope->assoc_block->kind == stmk_block) {
     ir_stmt_list(scope->assoc_block->variant.block.statements, 1);
