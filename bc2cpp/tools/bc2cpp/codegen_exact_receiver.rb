@@ -145,7 +145,7 @@ class CodeGen
   end
 
   # What an arm that dropped its class test on this proof says about itself: a new arm kind must say it too, or
-  # its code is left unchecked (scripts/bc2cpp_core_body_exact_check.rb scans for the "unguarded proof" ones).
+  # its code is left unchecked (scripts/bc2cpp/core_body_exact_check.rb scans for the "unguarded proof" ones).
   CORE_BODY_EXACT_ARM = /unguarded proof|-- proven \w+ receiver/
 
   # The code is only valid for the proven class, so it sits behind the class test and the else is a

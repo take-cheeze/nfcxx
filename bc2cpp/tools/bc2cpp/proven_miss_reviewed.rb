@@ -11,8 +11,8 @@
 #
 # Key: "<compiled owner>#<compiled method> -> <name> (<proof kind> <class>)".
 # bc2cpp.rb enforces it on every closed-world run;
-# scripts/bc2cpp_proven_miss_check.rb re-proves it over a full wio run.
-# Regenerate with `MRBC=... ruby scripts/bc2cpp_proven_miss_update.rb`.
+# scripts/bc2cpp/proven_miss_check.rb re-proves it over a full wio run.
+# Regenerate with `MRBC=... ruby scripts/bc2cpp/proven_miss_update.rb`.
 require 'set'
 
 module ProvenMiss

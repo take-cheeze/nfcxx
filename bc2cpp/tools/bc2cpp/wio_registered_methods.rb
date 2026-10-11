@@ -19,7 +19,7 @@
 #
 # NEVER_CALLED_EXCLUSION: an entry never_called_registrations.rb marks
 # never-called and safe to unregister is left out: once
-# scripts/bc2cpp_prune_never_called_registrations.rb removes its register.cxx
+# scripts/bc2cpp/prune_never_called_registrations.rb removes its register.cxx
 # line, nothing installs the override any more, and stripping its bytecode
 # `def` would delete the method's only implementation.
 

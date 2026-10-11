@@ -6,7 +6,7 @@ require_relative 'core_mixins'
 # CORE_COMPARE (ADR 0362): mruby's Comparable#<, #<=, #> and #>= as a known body. bc2cpp_slow_lt & co. mirror it
 # for String and Symbol receivers, so a build whose core sources differ from the model keeps the by-name helper.
 # Same verification as CoreMixins (owner, file, normalized body, every other definer, the native registrations);
-# scripts/bc2cpp_numeric_slow_check.rb fails when the real 3rd/mruby stops matching.
+# scripts/bc2cpp/numeric_slow_check.rb fails when the real 3rd/mruby stops matching.
 module CoreCompare
   OPS = %w[< <= > >=].freeze
   FILE = 'mrblib/compar.rb'

@@ -10,7 +10,7 @@
 # EVERY ClosedWorld#refusal gate the name fails, not only the first one, so a site blocked by exactly one
 # gate is visible. `set` is the receiver's proven instance classes (CodeGen#receiver_instances) or
 # `unproven:<mask>`. `cells` says, per class of a proven set, what an interface-table cell would be.
-# scripts/bc2cpp_interface_table_report.rb aggregates it.
+# scripts/bc2cpp/interface_table_report.rb aggregates it.
 module InterfaceTableReport
   ROWS = {}
   @names_source = nil

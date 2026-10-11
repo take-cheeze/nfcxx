@@ -21,7 +21,7 @@
 # compile clean -- so the equivalence holds by construction rather than by a
 # hand-written register.cxx kept in sync (which drifted before: see ADR 0139).
 # register.cxx calls it once, right after bc2cpp_set_instance_tts.
-# scripts/bc2cpp_wired_embedding_check.rb verifies it against the generated
+# scripts/bc2cpp/wired_embedding_check.rb verifies it against the generated
 # output (a hand mrb_define_method for the same name/aspec counts too).
 BC2CPP_WIRED_EMBEDDINGS = %w[
   Game::Screen Game::ChipSet Game::Switches RPG2k::Scene::VehicleWorld
@@ -68,7 +68,7 @@ BC2CPP_CORE_MRBLIB_GEMS = %w[
 # Core mrblib files that stay outside the world (foreign sources):
 # - mruby-io's kernel.rb defines Kernel#puts/print/printf/gets with `(...)`
 #   forwarding, whose call sites bc2cpp models separately
-#   (scripts/bc2cpp_io_puts_model_check.rb); and mrbc's multi-file parse leaves the
+#   (scripts/bc2cpp/io_puts_model_check.rb); and mrbc's multi-file parse leaves the
 #   `(...)` state set, so a file after it fails to parse.
 # - 10error.rb only gives NameError/NoMethodError their accessors; visible, they
 #   would add two exact-class arms to every `.name` call chain for nothing.

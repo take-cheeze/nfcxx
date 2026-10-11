@@ -6,7 +6,7 @@ require 'set'
 # mixins, and the core Ruby methods bc2cpp inlines (Numeric#positive?/#negative?,
 # Enumerable#min/#max). Each inlined method is named by owner, file, normalized
 # body and every other core definer, and stays active only while the build's
-# core sources still say exactly that; scripts/bc2cpp_core_mixins_check.rb
+# core sources still say exactly that; scripts/bc2cpp/core_mixins_check.rb
 # fails when they stop, so the model gets reviewed instead of going stale.
 module CoreMixins
   # Kernel is Object's own ancestor and is never re-included.

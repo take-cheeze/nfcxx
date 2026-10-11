@@ -8,7 +8,7 @@ require_relative 'operand_schema'
 # `args`/`raw` text is synthesized in src/codedump.c's exact print format
 # because diagnostics and generated-code comments still show it.
 module InsnDecoder
-  # mruby/ops.h, in opcode order (OP_NOP == 0); scripts/bc2cpp_binary_loader_check.rb
+  # mruby/ops.h, in opcode order (OP_NOP == 0); scripts/bc2cpp/binary_loader_check.rb
   # compares this table with the header.
   FORMATS = %w[
     NOP:Z MOVE:BB LOADL:BB LOADI8:BB LOADINEG:BB LOADI__1:B LOADI_0:B LOADI_1:B LOADI_2:B LOADI_3:B

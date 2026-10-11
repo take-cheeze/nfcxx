@@ -5,7 +5,7 @@
 # optcarrot's own real source (3rd/optcarrot/lib) as its OWN closed world --
 # entirely separate from the real project's mruby-lcf/rgss/rpg2k registry --
 # and reports the same method-level attempted/compiled-clean/#error-reason
-# breakdown scripts/bc2cpp_coverage_report.rb produces for the real gems
+# breakdown scripts/bc2cpp/coverage_report.rb produces for the real gems
 # (same parsing logic, reused directly from that script). See
 # tools/optcarrot_probe/README.md for what this is and isn't.
 #
@@ -87,7 +87,7 @@ Dir.mktmpdir do |dir|
   raise "bc2cpp.rb failed (exit #{status.exitstatus}):\n#{@stderr[-6000..]}" unless status.success?
 end
 
-# Same section_lines/count helpers scripts/bc2cpp_coverage_report.rb uses.
+# Same section_lines/count helpers scripts/bc2cpp/coverage_report.rb uses.
 def section_lines(text, header)
   start = text.index("== #{header} ==")
   raise "section #{header.inspect} not found in bc2cpp.rb's own diagnostic" unless start

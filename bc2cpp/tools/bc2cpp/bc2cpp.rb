@@ -20,7 +20,7 @@
 require 'shellwords'
 require 'set'
 
-# Parts split out by scripts/bc2cpp_split.rb, loaded in original definition order.
+# Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
 require_relative 'bytecode_ir'
 require_relative 'registry'
@@ -1525,7 +1525,7 @@ if $PROGRAM_NAME == __FILE__
       msg = "bc2cpp: #{violations.size} closed-world NOMETHOD_REVIEWED violation(s) (docs/adr/0226):\n  " \
             "#{violations.join("\n  ")}\n" \
             'Read each site: fix a real missing method, or list a reviewed dead branch in ' \
-            'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp_nomethod_reviewed_update.rb).'
+            'tools/bc2cpp/nomethod_reviewed.rb (scripts/bc2cpp/nomethod_reviewed_update.rb).'
       abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
 
       warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
@@ -1540,7 +1540,7 @@ if $PROGRAM_NAME == __FILE__
       msg = "bc2cpp: #{miss_violations.size} closed-world PROVEN_MISS_REVIEWED violation(s) (docs/adr/0275):\n  " \
             "#{miss_violations.join("\n  ")}\n" \
             'Read each site: fix the missing method, or list defensive code in ' \
-            'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp_proven_miss_update.rb).'
+            'tools/bc2cpp/proven_miss_reviewed.rb (scripts/bc2cpp/proven_miss_update.rb).'
       abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
 
       warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")

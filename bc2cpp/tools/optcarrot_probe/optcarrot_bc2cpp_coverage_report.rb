@@ -2,7 +2,7 @@
 # encoding: UTF-8
 #
 # optcarrot bc2cpp coverage report: the same measurement
-# scripts/bc2cpp_coverage_report.rb makes for the real project's own 3
+# scripts/bc2cpp/coverage_report.rb makes for the real project's own 3
 # compiled gems (mruby-lcf-compiled/mruby-rgss-compiled/mruby-rpg2k-compiled),
 # run instead against optcarrot's own real source (3rd/optcarrot/lib) as its
 # own standalone closed world -- see tools/optcarrot_probe/README.md for what
@@ -73,7 +73,7 @@ Dir.mktmpdir do |dir|
   raise "bc2cpp.rb failed (exit #{status.exitstatus}):\n#{@stderr[-4000..]}" unless status.success?
 end
 
-# See scripts/bc2cpp_coverage_report.rb's own DYNAMIC_DISPATCH_STATS_SUPPORT
+# See scripts/bc2cpp/coverage_report.rb's own DYNAMIC_DISPATCH_STATS_SUPPORT
 # comment for why this needs a second, SKIP_UNSUPPORTED=1 run.
 Dir.mktmpdir do |dir|
   shipped_env = env.merge('OUT_SYMBOL' => 'optcarrot_coverage_report_shipped', 'SKIP_UNSUPPORTED' => '1', 'OUT_DIR' => dir)

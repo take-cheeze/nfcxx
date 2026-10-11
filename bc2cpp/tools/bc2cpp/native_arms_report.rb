@@ -14,7 +14,7 @@ require_relative 'call_facts'
 # table or arm cell would be: ruby_direct, native_direct, native_core_direct, native_noentry (a native with no
 # frame-independent entry: the cell would be a send), error (the class does not answer), and so on. `gates`
 # are the whole-name ClosedWorld gates that fail today; `levers` are the same gates re-judged against S (the
-# per-class proofs ADR 0315 asks for). scripts/bc2cpp_native_arms_report.rb aggregates the rows.
+# per-class proofs ADR 0315 asks for). scripts/bc2cpp/native_arms_report.rb aggregates the rows.
 module NativeArmsReport
   ROWS = {}
   BY_NAME = /\bbc2cpp_send\(|\bmrb_funcall\w*\(|\bbc2cpp_funcall_(?:argv|noarg|explicit)\(/

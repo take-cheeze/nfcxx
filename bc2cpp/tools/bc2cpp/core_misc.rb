@@ -6,7 +6,7 @@ require_relative 'core_mixins'
 # CORE_MISC (docs/adr/0367): the core definitions of `%` and `-@` that bc2cpp_slow_mod and bc2cpp_slow_neg call
 # directly (patches/mruby-expose-misc-bodies.patch) or mirror. Each is named by owner, file and body, and an arm is
 # emitted only while the build's own sources still say exactly that; a tree without the patch fails the wrapper
-# pins below, so the helper keeps its by-name body. scripts/bc2cpp_numeric_slow_check.rb runs the model against
+# pins below, so the helper keeps its by-name body. scripts/bc2cpp/numeric_slow_check.rb runs the model against
 # the real 3rd/mruby and against trees that stop matching it.
 module CoreMisc
   Ruby = Struct.new(:owner, :file, :body, keyword_init: true)

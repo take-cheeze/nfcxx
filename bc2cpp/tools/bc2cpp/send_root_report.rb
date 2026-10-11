@@ -3,7 +3,7 @@
 # Debug report (ADR 0309): with BC2CPP_SEND_ROOT_REPORT=<path>, every explicit-receiver send whose
 # generated code still holds a by-name dispatch is written as one TSV row naming the nearest
 # producer of its receiver and why that producer's class is not proven, and each by-name line of
-# the generated C++ carries a `/*SR:<id>*/` tag so scripts/bc2cpp_send_root_report.rb can join a
+# the generated C++ carries a `/*SR:<id>*/` tag so scripts/bc2cpp/send_root_report.rb can join a
 # shipped site to its row:
 #
 #   id  owner  irep  site  name  receiver_class_set  producer_kind  producer_name  producer_status

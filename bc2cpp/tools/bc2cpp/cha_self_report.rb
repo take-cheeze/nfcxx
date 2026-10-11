@@ -8,7 +8,7 @@
 #
 # `construct` is the marker compile_send chose; `plan` is what cha_self_plan
 # says about the site (`direct`, `arms`, or the refusal reason).
-# scripts/bc2cpp_cha_self_report.rb aggregates it.
+# scripts/bc2cpp/cha_self_report.rb aggregates it.
 module ChaSelfReport
   CONSTRUCTS = %w[INHERITED_GUARD MONO_EMBED_GUARD POLY_SMALL_N POLY_TABLE CLOSED_WORLD_SELF LEXICAL_SELF_IVAR_ACCESSOR
                   LEXICAL_SELF MODULE_FUNCTION_SELF MONO TYPED IVAR_ACCESSOR POLY].freeze
