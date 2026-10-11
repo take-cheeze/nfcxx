@@ -494,10 +494,34 @@ class YieldReach
       node.unknown_call = true unless lit_block
     elsif PROC_CALLS.include?(name)
       recv = explicit ? classify_reg(node, program, idx, dest) : [:unknown]
-      recv.first == :forward ? node.invokes = true : node.proc_call = true
+      if recv.first == :forward
+        node.invokes = true
+      elsif recv.first != :lit || !literal_proc_receiver?(node, program, idx, dest)
+        # A literal Proc's body is already a node.lit edge; it cannot run an unrelated escaped Proc.
+        node.proc_call = true
+      end
     end
     note_callable(node, program, idx, dest, name)
     note_enumerator(node, program, idx, dest, name, recv_const)
+  end
+
+  # The literal must dominate this read: a parameter can retain its incoming Proc when a later
+  # or conditional assignment is the register's only writer.
+  def literal_proc_receiver?(node, program, idx, reg)
+    return false unless reg
+
+    from = idx
+    loop do
+      writer = writers_of(node.irep)[reg.to_i].select { |i| i < from }.max
+      return false unless writer && straight?(program, node.irep, writer, from)
+
+      insn = node.irep.instructions[writer]
+      return true if %w[BLOCK LAMBDA].include?(insn.op)
+      return false unless insn.op == 'MOVE'
+
+      reg = insn.regs[1]
+      from = writer
+    end
   end
 
   def note_callable(node, program, idx, dest, name)
