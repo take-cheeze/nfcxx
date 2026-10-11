@@ -331,7 +331,8 @@ end
 # CLOSED_WORLD (docs/adr/0210): the builds that ship RPG2000/2003 only
 # (build_config.rb's single_format_only). Their games carry no Ruby, so the
 # only Ruby that can run is the closed world plus the build's own gems.
-BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix].freeze
+# The standalone Optcarrot benchmark seals its host separately (ADR 0400).
+BC2CPP_CLOSED_WORLD_BUILDS = %w[psp wio maix optcarrot-probe].freeze
 # Gems that load or define Ruby at runtime; any of them opens the world.
 BC2CPP_OPEN_WORLD_GEMS = %w[
   mruby-rpgxp mruby-rpgvx mruby-wolf mruby-mvjs mruby-eval mruby-binding mruby-proc-binding
@@ -378,14 +379,33 @@ end
 
 # Why `gems` ({name => dir}, the build's real gem list) cannot be treated as a
 # closed world; empty when it can.
-def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cpp_host_native_srcs(build_name, repo_root))
+def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cpp_host_native_srcs(build_name, repo_root), compiled_srcs: [])
   errors = []
   unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name)
     errors << "build '#{build_name}' is not one of #{BC2CPP_CLOSED_WORLD_BUILDS.join('/')}"
   end
-  missing = BC2CPP_CLOSED_WORLD_GEMS - gems.keys
+  required = build_name == 'optcarrot-probe' ? %w[optcarrot-benchmark optcarrot-compiled] : BC2CPP_CLOSED_WORLD_GEMS
+  missing = required - gems.keys
   errors << "gem list lacks #{missing.join(', ')}" unless missing.empty?
   (gems.keys & BC2CPP_OPEN_WORLD_GEMS).each { |name| errors << "#{name} loads or defines Ruby at runtime" }
+  if build_name == 'optcarrot-probe'
+    errors << 'optcarrot-probe cannot include mruby-compiler' if gems.key?('mruby-compiler')
+    benchmark = gems['optcarrot-benchmark']
+    if benchmark
+      ruby = Dir["#{benchmark}/mrblib/**/*.rb"].map { |p| File.expand_path(p) }
+      inputs = compiled_srcs.map { |p| File.expand_path(p) }
+      if ruby.empty? || !(ruby - inputs).empty?
+        errors << 'optcarrot benchmark Ruby must be complete compiled input'
+      end
+      host = Dir["#{benchmark}/src/**/#{BC2CPP_NATIVE_GLOB}"]
+      errors << 'optcarrot benchmark lacks a fixed native host' if host.empty?
+      host.each do |path|
+        if File.read(path).match?(/\bmrb_(?:load|parse)_\w*\s*\(/)
+          errors << "#{path} loads Ruby at runtime; the benchmark must initialize fixed gem bytecode"
+        end
+      end
+    end
+  end
   # Without mruby-compiler no source string can be compiled at all; with it,
   # every host call must compile a fixed literal that defines nothing.
   if gems.key?('mruby-compiler')
@@ -418,7 +438,8 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
     next if BC2CPP_COMPILED_GEMS.key?(name)
 
     native += Dir["#{dir}/{src,core}/**/#{BC2CPP_NATIVE_GLOB}"]
-    ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name)
+    ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name) ||
+                                               (build_name == 'optcarrot-probe' && name == 'optcarrot-benchmark')
   end
   [native.map { |p| File.expand_path(p) }.uniq.sort, ruby.map { |p| File.expand_path(p) }.uniq.sort]
 end
