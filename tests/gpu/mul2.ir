@@ -1,0 +1,35 @@
+; Hand-written Path B IR (docs/notes/pathb-stage2.md form) for one GPU kernel:
+;   void mul2(int *a, int *b, int n) {
+;     int i = blockIdx.x * blockDim.x + threadIdx.x;
+;     if (i < n) b[i] = a[i] * 2;
+;   }
+; `gpu` reads a special register (tid.x, ctaid.x, ntid.x). It is a new form, not in stage 2 yet.
+(ir-module "mul2.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "mul2"
+  (ret void)
+  (params (param %0 "a" (ptr int)) (param %1 "b" (ptr int)) (param %2 "n" int))
+  (slot "a" (ptr int) 8 8)
+  (slot "b" (ptr int) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr int) $"a" %0)
+  (store (ptr int) $"b" %1)
+  (store int $"n" %2)
+  (let %3 int (gpu int "ctaid.x"))
+  (let %4 int (gpu int "ntid.x"))
+  (let %5 int (gpu int "tid.x"))
+  (let %15 int (wmul int %3 %4))
+  (let %6 int (wadd int %15 %5))
+  (let %7 int (load int $"n"))
+  (let %8 bool (lt int %6 %7))
+  (if %8
+    (then
+      (let %9 (ptr int) (load (ptr int) $"a"))
+      (let %10 (ptr int) (index %9 %6 4))
+      (let %11 int (load int %10))
+      (let %12 int (wmul int %11 (const int 2)))
+      (let %13 (ptr int) (load (ptr int) $"b"))
+      (let %14 (ptr int) (index %13 %6 4))
+      (store int %14 %12))
+    (else))
+  (return))

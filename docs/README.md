@@ -15,6 +15,7 @@ covers say so.
 | [eval.md](notes/eval.md) | `nfceval` (`lib/eval`): evaluating C++ snippets at run time with bound host objects, and `nfcxx -shared`. |
 | [eh-shim.md](notes/eh-shim.md) | Exceptions thrown by libstdc++.so (`std::__throw_*`) and `std::exception_ptr` on EDG's exception runtime: the shim library, the runtime hooks, link order, limits. |
 | [freestanding.md](notes/freestanding.md) | The `lib/` headers, `nfcxx --freestanding`, and the cproc limits met while writing them. |
+| [gpu.md](notes/gpu.md) | GPU first step: a hand-written IR kernel, lowered to PTX by `scripts/pathb-ptx-emit.rb`, run with ptxas and the CUDA runtime on an RTX 2060 (`tests/gpu/run.sh`). |
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
