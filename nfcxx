@@ -55,9 +55,9 @@ while [ $# -gt 0 ]; do
     -fPIE|-fpie) pie_opts+=(--c_to_obj_option -fPIE) ;;   # CMake's POSITION_INDEPENDENT_CODE on an executable
     -pie) pie_opts+=(--c_to_obj_option -pie) ;;
     -Wl,*) files+=("$1") ;;
-    # -lNAME goes to the host linker as --c_to_obj_lib: eccp's own -l search (the EDG prelinker) only looks in -L
-    # directories and /lib, /usr/lib, so it cannot find a multiarch libm (hosted mode already does this for libm).
-    -l?*) files+=("--c_to_obj_lib=${1#-l}") ;;
+    # -lNAME stays -lNAME for the host link steps; the EDG call below spells it --c_to_obj_lib=NAME (eccp's own -l
+    # search only looks in -L directories and /lib, /usr/lib, so it cannot find a multiarch libm).
+    -l?*) files+=("$1") ;;
     -W*|-w) ;;                                      # warnings do not change the object code
     -MD|-MMD) depmode=$1 ;;
     -MP) depphony=-MP ;;
@@ -243,9 +243,13 @@ fi
 # (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
+eflist=()
+for f in ${files[@]+"${files[@]}"}; do
+  case $f in -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;; *) eflist+=("$f") ;; esac
+done
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} "${files[@]}" ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
+  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
 if [ -n "$depmode" ]; then
   # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
