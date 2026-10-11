@@ -340,3 +340,163 @@ f128_tcres __nfcxx_f128w__ZSt8to_charsPcS_DF128_St12chars_formati(char *f, char 
 {
   return f128_tc4(f, l, f128_rd(v), fmt, prec);
 }
+
+/* ---- _Float16 (cproc qbe.c, f16binary and convertf16) ----
+
+   A _Float16 is its IEEE binary16 pattern in an unsigned int (the low 16 bits; the upper bits are zero, and the helpers
+   only read the low 16). Every operation on one is a call of a function here, on patterns. The arithmetic is done in
+   float: a binary16 value is exact in float, and the float result of + - * / is correctly rounded (24 >= 2 * 11 + 2), so
+   one rounding to binary16 gives the correctly rounded binary16 result, as gcc's _Float16 arithmetic does. The integer
+   and double conversions round the exact value once, to nearest with ties to even. Each helper is checked against gcc
+   by tests/c/float16_ops.c. */
+
+/* binary16 to float: exact (a subnormal is man * 2^-24) */
+static float f16_to_float(unsigned h)
+{
+  unsigned exp = h >> 10 & 31, man = h & 1023;
+  unsigned u;
+  float f;
+  if (exp == 0) {
+    f = (float)man / 16777216.0f;
+    return h >> 15 ? -f : f;
+  }
+  u = (h >> 15) << 31 | (exp == 31 ? 255u << 23 : (exp + 112) << 23) | man << 13;
+  memcpy(&f, &u, sizeof f);
+  return f;
+}
+
+/* the binary16 pattern of m * 2^e2 (m > 0, sign given in bit 15), rounded to nearest, ties to even */
+static unsigned f16_round(unsigned sign, unsigned long long m, int e2)
+{
+  unsigned long long q, rem, half;
+  unsigned code;
+  int p, E, Q, s;
+
+  /* a sticky shift keeps the rounding of m when it has more than 62 bits (a larger shift then gives 0 below) */
+  while (m >> 62) {
+    e2 += 1;
+    m = m >> 1 | (m & 1);
+  }
+  for (p = 0; m >> p > 1; ++p)
+    ;
+  E = p + e2;  /* the value is in [2^E, 2^(E+1)) */
+  if (E > 15)
+    return sign | 0x7c00;
+  Q = E >= -14 ? E - 10 : -24;  /* exponent of the last bit kept */
+  s = Q - e2;  /* bits of m dropped */
+  if (s <= 0) {
+    q = m << -s;
+  } else if (s > 62) {
+    q = 0;
+  } else {
+    q = m >> s;
+    rem = m & (1ull << s) - 1;
+    half = 1ull << s - 1;
+    if (rem > half || (rem == half && (q & 1)))
+      ++q;
+  }
+  if (E >= -14)
+    code = (unsigned)(((E + 15) << 10) + (q - 1024));
+  else
+    code = (unsigned)q;
+  return sign | (code >= 0x7c00 ? 0x7c00 : code);
+}
+
+/* float to binary16 (a NaN gives a quiet NaN; its payload is not kept) */
+static unsigned f16_from_float(float f)
+{
+  unsigned u, exp, man;
+  memcpy(&u, &f, sizeof u);
+  exp = u >> 23 & 255;
+  man = u & 0x7fffff;
+  if (exp == 255)
+    return (u >> 16 & 0x8000) | (man ? 0x7e00 : 0x7c00);
+  if (exp == 0)
+    return f16_round(u >> 16 & 0x8000, man, -149) & 0xffff;
+  return f16_round(u >> 16 & 0x8000, man | 0x800000, (int)exp - 150) & 0xffff;
+}
+
+unsigned __nfcxx_f16_from_f64(double x)
+{
+  unsigned long long u, man;
+  unsigned exp;
+  memcpy(&u, &x, sizeof u);
+  exp = u >> 52 & 0x7ff;
+  man = u & (1ull << 52) - 1;
+  if (exp == 0x7ff)
+    return (unsigned)(u >> 48 & 0x8000) | (man ? 0x7e00 : 0x7c00);
+  if (exp == 0)
+    return f16_round((unsigned)(u >> 48 & 0x8000), man, -1074);
+  return f16_round((unsigned)(u >> 48 & 0x8000), man | 1ull << 52, (int)exp - 1075);
+}
+
+unsigned __nfcxx_f16_from_s64(long v)
+{
+  unsigned long long mag = v < 0 ? 0 - (unsigned long long)v : (unsigned long long)v;
+  if (mag == 0)
+    return 0;
+  return f16_round(v < 0 ? 0x8000u : 0u, mag, 0);
+}
+
+unsigned __nfcxx_f16_from_u64(unsigned long v)
+{
+  if (v == 0)
+    return 0;
+  return f16_round(0, v, 0);
+}
+
+double __nfcxx_f16_to_f64(unsigned h) { return (double)f16_to_float(h); }
+
+unsigned __nfcxx_f16_add(unsigned a, unsigned b) { return f16_from_float(f16_to_float(a) + f16_to_float(b)); }
+unsigned __nfcxx_f16_sub(unsigned a, unsigned b) { return f16_from_float(f16_to_float(a) - f16_to_float(b)); }
+unsigned __nfcxx_f16_mul(unsigned a, unsigned b) { return f16_from_float(f16_to_float(a) * f16_to_float(b)); }
+unsigned __nfcxx_f16_div(unsigned a, unsigned b) { return f16_from_float(f16_to_float(a) / f16_to_float(b)); }
+
+int __nfcxx_f16_eq(unsigned a, unsigned b) { return f16_to_float(a) == f16_to_float(b); }
+int __nfcxx_f16_ne(unsigned a, unsigned b) { return f16_to_float(a) != f16_to_float(b); }
+int __nfcxx_f16_lt(unsigned a, unsigned b) { return f16_to_float(a) < f16_to_float(b); }
+int __nfcxx_f16_le(unsigned a, unsigned b) { return f16_to_float(a) <= f16_to_float(b); }
+int __nfcxx_f16_gt(unsigned a, unsigned b) { return f16_to_float(a) > f16_to_float(b); }
+int __nfcxx_f16_ge(unsigned a, unsigned b) { return f16_to_float(a) >= f16_to_float(b); }
+
+/* long double and __float128 to binary16, rounded once from the exact value (the object is read as in the other helpers
+   of this file: 10 x87 bytes, or the 16 bytes of binary128) */
+unsigned __nfcxx_f16_from_ld(const void *a)
+{
+  unsigned long long m;
+  unsigned short se;
+  unsigned sign, e;
+  memcpy(&m, a, 8);
+  memcpy(&se, (const char *)a + 8, 2);
+  sign = (unsigned)(se & 0x8000);
+  e = se & 0x7fff;
+  if (e == 0x7fff)
+    return sign | ((m << 1) ? 0x7e00 : 0x7c00);
+  if (m == 0)
+    return sign;
+  /* the x87 significand has an explicit integer bit: value = m * 2^(e - 16383 - 63), e = 0 is the subnormal scale */
+  return f16_round(sign, m, (e ? (int)e : 1) - 16383 - 63);
+}
+
+unsigned __nfcxx_f16_from_f128(const void *a)
+{
+  unsigned long long lo, hi, frac, m;
+  unsigned sign, e;
+  int e2;
+  memcpy(&lo, a, 8);
+  memcpy(&hi, (const char *)a + 8, 8);
+  sign = (unsigned)(hi >> 63) << 15;
+  e = (unsigned)(hi >> 48 & 0x7fff);
+  frac = hi & ((1ull << 48) - 1);
+  if (e == 0x7fff)
+    return sign | ((frac || lo) ? 0x7e00 : 0x7c00);
+  if (e == 0 && frac == 0 && lo == 0)
+    return sign;
+  /* the significand is (implicit bit, frac, lo): 113 bits. Its top 62 bits, and a sticky bit for the rest. */
+  m = (e ? 1ull << 48 : 0) | frac;
+  m = m << 13 | lo >> 51;
+  if (lo & ((1ull << 51) - 1))
+    m |= 1;
+  e2 = (int)(e ? e : 1) - 16383 - 112 + 51;
+  return f16_round(sign, m, e2);
+}

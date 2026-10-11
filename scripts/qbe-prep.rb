@@ -46,13 +46,13 @@
 #     becomes `_Alignas(N)` just before the declared name (cproc takes the GNU attribute there only on struct members, not on objects). Same alignment.
 #   * `struct T {...;} __attribute__((__aligned__(N)))` (std::aligned_storage, `struct alignas(N) T`) becomes
 #     `struct T {_Alignas(N) ...;}` on the first member (not a bit-field): same alignment, same rounded-up size.
-#   * Floating types cproc lacks: `__bf16` and `_Float16` (2 bytes) and `_Float128` (16 bytes) become
-#     structs with the same size and alignment and no arithmetic, so a real use of the value is a
-#     compile error rather than a silent mis-typed float. `_Float32` and `_Float64` are IEEE binary32
-#     and binary64, the same formats as `float` and `double` on x86-64, so they map to those.
-#     libstdc++'s std::numbers variables (pulled in by <map>) use all of them. Their literals
-#     (`2.71875f16`) are rewritten to the exact bit pattern (`f16`, `f128`), or to a plain
-#     `float`/`double` literal (`f32`, `f64`).
+#   * Floating types cproc lacks: `__bf16` and `_Float128` (16 bytes) become structs with the same size
+#     and alignment and no arithmetic, so a real use of the value is a compile error rather than a silent
+#     mis-typed float. `_Float16` is passed through: cproc has it (qbe.c, f16binary). `_Float32` and
+#     `_Float64` are IEEE binary32 and binary64, the same formats as `float` and `double` on x86-64, so they
+#     map to those. libstdc++'s std::numbers variables (pulled in by <map>) use all of them. Their literals
+#     (`2.71875f16`) are rewritten to the binary16 value, as a cast of an exact hex float, or to a plain
+#     `float`/`double` literal (`f32`, `f64`); `f128` to the bit pattern.
 #   * Hand-written C (--c-input, passed by scripts/qbe-cc when nfcxx sets NFCXX_C_INPUT=1 for .c inputs;
 #     glibc headers and user code): `volatile` is dropped (cproc errors on any store to a volatile object; it
 #     already emits volatile loads as plain loads; a volatile block-scope local gets `__nfcxx_keep(&x);` after
@@ -125,7 +125,6 @@ FLOAT_TYPE = {
   '_Float32' => 'float',
   '_Float64' => 'double',
   '__bf16' => 'struct __nfcxx_half16',
-  '_Float16' => 'struct __nfcxx_half16',
   '_Float128' => 'struct __nfcxx_float128',
 }
 DROP_TYPEDEF = FLOAT_TYPE.keys + ['_Float32x', '_Float64x', '_Float128x']
@@ -228,6 +227,20 @@ def ieee_bits(lit, mant, ebits)
     die "qbe-prep: literal #{lit} is out of range for this format (subnormal or overflow)"
   end
   ((e + bias) << mant) | (m - 2**mant)
+end
+
+# The value of a binary16 bit pattern as a C hexadecimal floating constant (exact): 1.f * 2^(e-15), or 0.f * 2^-14
+# for a subnormal, with f the 10 fraction bits as three hex digits (the value of m << 2 over 16^3).
+def half_literal(bits)
+  e = (bits >> 10) & 31
+  m = bits & 1023
+  x = m << 2
+  digits = '0123456789abcdef'
+  frac = digits[x >> 8] + digits[(x >> 4) & 15] + digits[x & 15]
+  frac = frac.chop while frac.end_with?('0')
+  ex = e == 0 ? -14 : e - 15
+  (bits >> 15 == 1 ? '-' : '') + '0x' + (e == 0 ? '0' : '1') + (frac.empty? ? '' : '.' + frac) +
+    'p' + (ex < 0 ? '-' : '+') + ex.abs.to_s
 end
 
 # ---- tokens ---------------------------------------------------------------------------------------
@@ -1209,7 +1222,8 @@ def main(argv)
       elsif suffix == 'f64'
         edits << [t.start, t.end, body]
       elsif suffix == 'f16' && paren
-        edits << [prev.start, toks[i + 1].end, '{ 0x' + hex_pad(ieee_bits(body, 10, 5), 4) + ' }']
+        # the binary16 value, rounded from the decimal literal, as a cast of its exact double
+        edits << [prev.start, toks[i + 1].end, '((_Float16)' + half_literal(ieee_bits(body, 10, 5)) + ')']
         i += 2
         next
       elsif suffix == 'f128' && paren
