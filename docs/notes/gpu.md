@@ -33,20 +33,34 @@ This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda
 
 ## CUDA source (`.cu`)
 
-`nfcxx` takes `.cu` inputs. Before the front end, `scripts/cuda-rewrite.rb` rewrites each launch
-`k<<<g, b[, shmem[, stream]]>>>(args)` into `__nfcxx_cuda_launch(k, g, b, shmem, stream, args)`. The helper
-(`lib/cuda/nfcxx_cuda.h`, included before every `.cu`) packs the arguments into the kernel's parameter types and calls
-`cudaLaunchKernel`. The qualifiers (`__global__`, `__device__`, ...) are empty macros, and the device built-ins
-(`threadIdx`, `blockIdx`, ...) are zero placeholders for the host copy of a kernel. No EDG change.
+`nfcxx` takes `.cu` inputs. The driver makes two things from each file:
 
-`tests/cuda/run.sh` checks the rewrite against golden files, refuses unsupported launch forms with exit 3, and builds
-and runs `mul2.cu` through the driver. The launch reaches the runtime, but the kernel is not registered, so it returns
-an error.
+- **Host copy.** `scripts/cuda-rewrite.rb` rewrites each launch `k<<<g, b[, shmem[, stream]]>>>(args)` into
+  `__nfcxx_cuda_launch(k, g, b, shmem, stream, args)`. The helper (`lib/cuda/nfcxx_cuda.h`, included before every
+  `.cu`) finds the kernel's device code in a registry and calls `cudaLaunchKernelExC`. The qualifiers are empty macros,
+  and the device built-ins (`threadIdx`, ...) are zero placeholders for the host compile of a kernel body.
+- **Device image.** `cuda-rewrite.rb --device` extracts the file's `__global__` and `__device__` functions into a
+  device-only translation unit, with `threadIdx.x`, `blockIdx.x`, `blockDim.x`, `gridDim.x` (and y, z) rewritten to the
+  intrinsic calls `__nfcxx_tid_x()` and the rest. `scripts/pathb-dump --ir` lowers it, `scripts/pathb-ptx-emit.rb`
+  lowers the IR to PTX, and `ptxas -arch=sm_$NFCXX_SM` (default 75) assembles it. `scripts/cuda-embed.rb` then appends
+  a registration tail to the host copy: the cubin as a byte array, the table of host function to entry name (the
+  kernel's IR function, the name itself or `_Z<len><name>`), and a static object whose constructor calls
+  `cudaLibraryLoadData` and `cudaLibraryGetKernel` before `main`.
 
-NVIDIA `cuda-samples` `0_Introduction/vectorAdd` builds and links through the driver with `--backend=gcc` (it needs
-`-I/usr/local/cuda/include/cccl` for `<cuda/cmath>`). It runs, but its result check fails, because the kernel never
-runs. The qbe backend (cproc) rejects `__builtin_fabsf`, which libcu++ uses.
+Layout: one object per `.cu` file holds the host code and its device image (the cubin is a data array in it). The
+host copy of a `-c` compile stays beside the object, in `<dir>/.nfcxx/<name>.cpp`, because the EDG prelinker
+re-reads the source recorded in an object at link time; a link without `-c` uses a temp directory. A file with no
+`__global__` gets no device image. The device compile needs the Path B harness (`scripts/setup-pathb.sh`) and ptxas;
+`NFCXX_PTXAS` and `NFCXX_SM` override the tool and the architecture.
 
-Not done: device code (the kernel has to be built and registered with the runtime, so the launch can run), the qbe
-path for libcu++, the emitter beyond this kernel (it refuses other nodes with exit 3), the front
+`tests/cuda/run.sh` checks the host rewrite against golden files, refuses unsupported launch forms (exit 3), and
+builds, links and runs `mul2.cu`: the kernels run on the GPU and the program checks 1000 results.
+
+NVIDIA `cuda-samples` `0_Introduction/vectorAdd`, unmodified, builds with `--backend=gcc` and
+`-I/usr/local/cuda/include/cccl` (for `<cuda/cmath>`), links with `-lcudart`, and prints "CPU and GPU answers match".
+Note that the sample exits 0 even when its check fails: the check is its output line. The qbe backend (cproc) rejects
+`__builtin_fabsf`, which libcu++ uses.
+
+Not done: device helper functions (the emitter makes every IR function a `.visible .entry`), the qbe path for libcu++,
+the emitter beyond the kernels in `tests/gpu/kernels` (it refuses other nodes with exit 3), the front
 end's CUDA input (EDG here has no CUDA mode, so `__global__` and `<<<>>>` do not parse), and an nvcc-compatible driver.
