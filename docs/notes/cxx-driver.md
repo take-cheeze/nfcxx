@@ -12,12 +12,13 @@ below, on the gcc backend.
 | `-std=gnu++NN` | as `-std=c++NN`; GNU and strict modes differ in the dialect, which `--dialect` selects |
 | `-W*`, `-w` | dropped: warnings do not change the object code (no `-Werror`) |
 | `-pipe` | dropped: the stages talk through pipes instead of temporary files; the output is the same (ninja's `configure.py` passes it) |
-| `-Wl,*` | passed to the link |
+| `-Wl,*` | passed to the host link as an EDG `--c_to_obj_option` (order-independent options such as `-Wl,-rpath,DIR`, `-Wl,-E`, `-Wl,--gc-sections`). The order-dependent ones (`--whole-archive`/`--no-whole-archive`, `--start-group`/`--end-group`, `--as-needed`/`--no-as-needed`, `-Bstatic`/`-Bdynamic`) are refused with exit 2 for C++ inputs: eccp puts its `--c_to_obj_option` items before every object and archive, so they would act on the wrong ones. Before this change every `-Wl,*` was rejected by eccp ("unknown option"). Test: `tests/cxx-driver/run.sh` |
 | `-fexceptions`, `-fwrapv`, `-fno-strict-aliasing` | accepted: EDG always lowers exceptions; the C side already gets the other two |
 | `-fvisibility=*`, `-fvisibility-inlines-hidden` | ignored, as `nfcc` ignores them (`docs/notes/realworld.md`). They change the exports of a `-shared` object; that is the one place this could matter |
 | `-fPIC`, `-fPIE`, `-pie`, `-rdynamic` | passed to the C compile and the link |
 | `-pthread` | passed to the C compile and the link |
 | `-isystem DIR`, `-isystemDIR` | a system include directory, after the host's own |
+| `-I DIR`, `-D NAME`, `-U NAME` (separate argument, as mrustc's Makefile writes them) | joined to `-IDIR` etc. The joined form was the only one the host dependency pass (`-MMD`) saw, so with the separate form it ran without the include path and failed ("No such file"). Test: `tests/cxx-driver/run.sh` |
 | `-lNAME` | `--c_to_obj_lib=NAME`: the host linker resolves it. eccp's own search (`-l` in its prelinker) looks only in `-L` directories and `/lib`, `/usr/lib`, which misses a multiarch `libm` |
 | `-E` (with `-P`, `-o`, `-x c++`, and `-` for a source on stdin) | the host C++ compiler preprocesses, as `nfcc` does for C; mruby's presym step and CMake's GLES3 header probe run the compiler this way |
 | `-include FILE` | EDG's `--preinclude`: the header is found through the include paths and its macros are visible (Effekseer's `-include EGL/egl.h`) |
