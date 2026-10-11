@@ -29,6 +29,25 @@ check "compile with build-system flags" \
 # 2. -isystem DIR as two arguments: the header in DIR is found
 check "-isystem DIR (separate argument)" \
   "$nfcxx" -isystem "$tmp/sys" "$tmp/src/main.cpp" -o "$tmp/main"
+# -I DIR, -D NAME as separate arguments (mrustc's Makefile), with -MMD: the dependency pass must see the -I too
+mkdir -p "$tmp/inc" && printf '#define SEP_N 3\n' > "$tmp/inc/sepdef.h"
+printf '#include "sepdef.h"\nint sep_val(void) { return SEP_N; }\n' > "$tmp/src/sep.cpp"
+check "-I DIR -MMD -MF (separate argument, dependency pass)" \
+  "$nfcxx" -I "$tmp/inc" -c "$tmp/src/sep.cpp" -o "$tmp/sep.o" -MMD -MF "$tmp/sep.d"
+grep -q "inc/sepdef.h" "$tmp/sep.d" 2>/dev/null && ok "-I DIR: dependency file lists the header" \
+  || bad "-I DIR: dependency file lists the header" "$(cat "$tmp/sep.d" 2>/dev/null)"
+check "-D NAME (separate argument)" \
+  "$nfcxx" -D SEP_OVERRIDE=1 -U NOTDEFINED -c "$tmp/src/a.cpp" -o "$tmp/sep2.o"
+# -Wl,* reaches the host link (order-independent options); the order-dependent ones are refused (eccp puts
+# its link options before every object, so --whole-archive would apply to the wrong archive)
+printf 'int add(int, int);\nint main() { return add(1, 2) == 3 ? 0 : 1; }\n' > "$tmp/src/wl.cpp"
+check "-Wl,--gc-sections -Wl,-z,now (C++ link)" \
+  "$nfcxx" -Wl,--gc-sections -Wl,-z,now "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -o "$tmp/wl_ok"
+if "$nfcxx" "$tmp/src/wl.cpp" "$tmp/src/a.cpp" -Wl,--whole-archive -o "$tmp/wl_refused" >/dev/null 2>&1; then
+  bad "-Wl,--whole-archive is refused" "the link succeeded"
+else
+  ok "-Wl,--whole-archive is refused"
+fi
 if [ -x "$tmp/main" ]; then
   "$tmp/main"; got=$?
   [ "$got" -eq 42 ] && ok "-isystem header is used (exit 42)" || bad "-isystem header is used" "exit $got, want 42"
