@@ -69,6 +69,10 @@ while [ $# -gt 0 ]; do
     # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
     *.c) cfiles+=("$1") ;;
     -I?*|-D?*|-U?*) cflags+=("$1"); files+=("$1") ;;
+    # The separate form (`-I DIR`, as mrustc's Makefile writes it) is joined here: the host dependency pass
+    # (-MMD) sees only cflags, so without this it ran without the include path.
+    -I|-D|-U) [ $# -ge 2 ] || { echo "nfcxx: $1 needs an argument" >&2; exit 2; }
+              cflags+=("$1$2"); files+=("$1$2"); shift ;;
     *.o) files+=("$1"); nobj=$((nobj + 1)) ;;
     -*|*.a|*.so) files+=("$1") ;;
     *) files+=("$1"); ncpp=$((ncpp + 1)); srcs+=("$1") ;;
@@ -245,7 +249,18 @@ fi
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
 eflist=()
 for f in ${files[@]+"${files[@]}"}; do
-  case $f in -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;; *) eflist+=("$f") ;; esac
+  case $f in
+    -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;;
+    # eccp puts its --c_to_obj_option items before every object and archive, so a link option that acts on the
+    # arguments after it would act on the wrong ones. Refused rather than moved (docs/notes/cxx-driver.md).
+    -Wl,--whole-archive|-Wl,--whole-archive,*|-Wl,--no-whole-archive|-Wl,--no-whole-archive,*|\
+-Wl,--start-group|-Wl,--start-group,*|-Wl,--end-group|-Wl,--end-group,*|-Wl,--as-needed|-Wl,--as-needed,*|\
+-Wl,--no-as-needed|-Wl,--no-as-needed,*|-Wl,-Bstatic|-Wl,-Bstatic,*|-Wl,-Bdynamic|-Wl,-Bdynamic,*)
+      echo "nfcxx: $f: an order-dependent link option cannot be kept with C++ inputs (docs/notes/cxx-driver.md)" >&2
+      exit 2 ;;
+    -Wl,*) eflist+=(--c_to_obj_option "$f") ;;   # -Wl,-rpath,DIR, -Wl,-E, ...: the host link (eccp's C compile options)
+    *) eflist+=("$f") ;;
+  esac
 done
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
