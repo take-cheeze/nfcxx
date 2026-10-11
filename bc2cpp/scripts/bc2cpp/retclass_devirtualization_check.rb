@@ -443,8 +443,8 @@ Dir.mktmpdir do |dir|
   (empty_registry['empty?'] ||= []) << MethodDef.new(name: 'empty?', owner: '<native>', irep: nil,
                                                       visibility: :public)
   native_sources = Dir[
-    File.expand_path('../3rd/mruby/src/**/*.{c,cxx}', __dir__),
-    File.expand_path('../3rd/mruby/mrbgems/**/src/**/*.{c,cxx}', __dir__)
+    File.expand_path('../../3rd/mruby/src/**/*.{c,cxx}', __dir__),
+    File.expand_path('../../3rd/mruby/mrbgems/**/src/**/*.{c,cxx}', __dir__)
   ]
   native_exact_class_expressions = NativeExpressionDevirt.analyze_exact_class_expressions(native_sources)
   empty_gen = CodeGen.new(ireps, empty_registry, {}, class_layout, class_annotations, {}, {}, element_layout,

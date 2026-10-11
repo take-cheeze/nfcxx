@@ -4,7 +4,7 @@
 # ADR 0333: pinned native results join Ruby returns, never replace them.
 require 'fileutils'
 require_relative 'fixture_runtime'
-require ENV.fetch('NCR_AUDIT_TOOL') { File.expand_path('../tools/bc2cpp/native_class_results', __dir__) }
+require ENV.fetch('NCR_AUDIT_TOOL') { File.expand_path('../../tools/bc2cpp/native_class_results', __dir__) }
 
 # Keep the native-summary withdrawal checks independent of local receiver proofs.
 ENV['BC2CPP_CALL_CONTEXT_RESULTS'] = '0'

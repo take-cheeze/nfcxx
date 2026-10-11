@@ -4,7 +4,7 @@
 # ADR 0334: audited native String returns must join every compiled Ruby result.
 require 'fileutils'
 require_relative 'fixture_runtime'
-require ENV.fetch('NSR_AUDIT_TOOL') { File.expand_path('../tools/bc2cpp/native_class_results', __dir__) }
+require ENV.fetch('NSR_AUDIT_TOOL') { File.expand_path('../../tools/bc2cpp/native_class_results', __dir__) }
 
 ROOT = File.expand_path('../..', __dir__)
 failures = []

@@ -8,8 +8,8 @@ require_relative 'native_names'
 module NativeIvarScopes
   FILES = {
     'mruby-rgss/src/lib.cxx' => '24834066d96a347cbd2671459e67b544f684d78bb27ae7419750c7e77a083b2c',
-    'include/rgss_construct.hxx' => 'f1c476607ff9bba32f33d77a088466150e717e329dff1fa8792027fa05d45e28',
-    'include/rgss_native_direct.hxx' => '4e43a533ce6371f47b9ccb3dafb342405c4e63ad942347236fb0c4de71b11386'
+    'include/rgss_construct.hxx' => '24a6783a902be749f6c1f7502a2bd2cad073629cecb9ca1b9d586d63f6a8ef83',
+    'include/rgss_native_direct.hxx' => 'b01b64f91131f0ff0e8548c76ee9e55a8417c74284b3bb7d60f8039093f6a1b8'
   }.freeze
   SCOPES = {
     'contents' => ['RGSS::Window'],

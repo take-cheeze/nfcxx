@@ -22,7 +22,7 @@ check = lambda do |what, condition|
 end
 
 %w[mruby-lcf-compiled mruby-rgss-compiled mruby-rpg2k-compiled mruby-core-compiled].each do |gem|
-  path = File.expand_path("../#{gem}/mrbgem.rake", __dir__)
+  path = File.expand_path("../../#{gem}/mrbgem.rake", __dir__)
   source = File.read(path)
   check.call("#{gem}/mrbgem.rake globs every tools/bc2cpp/*.rb file as a dependency",
              source.match?(/Dir\[\s*"#\{dir\}\/\.\.\/tools\/bc2cpp\/\*\.rb"\s*\]/))

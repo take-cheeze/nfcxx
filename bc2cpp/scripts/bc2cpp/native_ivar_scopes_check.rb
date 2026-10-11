@@ -5,7 +5,7 @@
 # withdrawal. Runtime cases include native writes to a Window subclass.
 require 'fileutils'
 require_relative 'fixture_runtime'
-require ENV.fetch('NIS_AUDIT_TOOL') { File.expand_path('../tools/bc2cpp/native_ivar_scopes', __dir__) }
+require ENV.fetch('NIS_AUDIT_TOOL') { File.expand_path('../../tools/bc2cpp/native_ivar_scopes', __dir__) }
 
 ROOT = File.expand_path('../..', __dir__)
 failures = []
