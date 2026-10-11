@@ -412,7 +412,7 @@ class CodeGen
   #     (KEYWORD_HASH_POSITIONAL_OPTIONAL_ARG_SUPPORT);
   #   - `total.between?(mand, mand + opt)`: only argc ranges OP_ENTER accepts;
   #   - every def, because mrb_funcall resolves at runtime, so all possible
-  #     targets must agree (`:load_h`, five `(h)` defs, compiles;
+  #     targets must agree (`:load_h`, when every `(h)` def agrees, compiles;
   #     `:close_message`, whose defs disagree, does not);
   #   - a `<native>` def fails (its argument spec is invisible), which keeps
   #     `:new` sites out;
