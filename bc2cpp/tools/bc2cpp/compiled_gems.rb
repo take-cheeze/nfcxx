@@ -162,7 +162,7 @@ BC2CPP_COMPILED_GEMS = {
                Game.singleton Game::States.singleton Game::States::BattleText.singleton
                Game::ChipsetLayout.singleton Game::EventGraphic.singleton
                Game::Battle.singleton Game::Transition.singleton
-               Game::State.singleton Game::Party.singleton
+               Game::State.singleton Game::LegacyLsd.singleton Game::Party.singleton
                Game::Picture.singleton Game::Character.singleton
                Game::ChipSet.singleton RPG2k::Scene::Map.singleton
                Game::Battle::Combatant RPG2k
