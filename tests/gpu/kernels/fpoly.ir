@@ -1,0 +1,46 @@
+; Hand-written Path B IR (flattened) for the C++:
+;   __global__ void fpoly(const float *x, double *y, int n) {
+;     int i = blockIdx.x * blockDim.x + threadIdx.x;
+;     if (i < n) {
+;       float v = x[i];
+;       float w = v * v * 0.5f - 1.25f / (v + 2.0f);
+;       y[i] = (double)w + (double)i;
+;     }
+;   }
+; Built with -ffp-contract=off: the GPU side uses .rn float ops, so each operation rounds once.
+(ir-module "fpoly.cu" (layout (short 2) (int 4) (long 8) (long_long 8) (pointer 8) (float 4) (double 8) (long_double 16)))
+
+(function "fpoly"
+  (ret void)
+  (params (param %0 "x" (ptr float)) (param %1 "y" (ptr double)) (param %2 "n" int))
+  (slot "x" (ptr float) 8 8)
+  (slot "y" (ptr double) 8 8)
+  (slot "n" int 4 4)
+  (store (ptr float) $"x" %0)
+  (store (ptr double) $"y" %1)
+  (store int $"n" %2)
+  (let %3 int (gpu int "ctaid.x"))
+  (let %4 int (gpu int "ntid.x"))
+  (let %5 int (gpu int "tid.x"))
+  (let %15 int (wmul int %3 %4))
+  (let %6 int (wadd int %15 %5))
+  (let %7 int (load int $"n"))
+  (let %8 bool (lt int %6 %7))
+  (if %8
+    (then
+      (let %9 (ptr float) (load (ptr float) $"x"))
+      (let %10 (ptr float) (index %9 %6 4))
+      (let %11 float (load float %10))
+      (let %12 float (fmul float %11 %11))
+      (let %13 float (fmul float %12 (const float 0.5)))
+      (let %14 float (fadd float %11 (const float 2.0)))
+      (let %16 float (fdiv float (const float 1.25) %14))
+      (let %17 float (fsub float %13 %16))
+      (let %18 double (fconv double %17))
+      (let %19 double (i2f double %6))
+      (let %20 double (fadd double %18 %19))
+      (let %21 (ptr double) (load (ptr double) $"y"))
+      (let %22 (ptr double) (index %21 %6 8))
+      (store double %22 %20))
+    (else))
+  (return))
