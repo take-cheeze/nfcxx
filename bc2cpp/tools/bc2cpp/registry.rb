@@ -173,7 +173,14 @@ def build_registry(ireps, root_label)
         pending_idx = idx
         pending_ivar_owner = nil
         # Qualified name (Game::CharSet) so same-named nested classes stay distinct.
-        pending_name = namespace ? "#{namespace}::#{name}" : name
+        # ADR 0402: `class Outer::Name` / `module Outer::Name` (a compact definition)
+        # is named by its resolved outer constant, not by the lexical namespace.
+        outer_qualified = compact_outer_name(irep, idx, reg[/\d+/], namespace, module_names)
+        pending_name = if outer_qualified
+                         "#{outer_qualified}::#{name}"
+                       else
+                         namespace ? "#{namespace}::#{name}" : name
+                       end
         module_names << pending_name if insn.op == 'MODULE'
         if insn.op == 'MODULE'
           pending_ivar_owner = "#{pending_name}.singleton"
@@ -186,7 +193,8 @@ def build_registry(ireps, root_label)
           resolved = resolve_superclass_ref(irep, idx, superclass_reg, namespace)
           superclass_of[pending_name] = resolved if resolved
           outer_nil = resolve_superclass_ref(irep, idx, reg[/\d+/], nil) == :none
-          class_decls[pending_name] << { super: resolved, outer_nil: outer_nil }
+          class_decls[pending_name] << { super: resolved, outer_nil: outer_nil,
+                                         outer_qualified: !outer_qualified.nil? }
         end
       when 'SCLASS'
         # "SCLASS R1": R[a] = R[a].singleton_class. A `class << self` / `class <<
@@ -541,6 +549,29 @@ def resolve_superclass_ref(irep, before_idx, reg, namespace)
 
     [ref.name, *ref.segments].join('::')
   end
+end
+
+# ADR 0402: the qualified name of a compact definition's outer constant, or nil.
+# `class Outer::Name` names its outer through a GETCONST (plus GETMCNST segments)
+# that is not the lexical self. A first segment at top level is taken as written.
+# Inside a namespace it resolves only to a module already walked in this file
+# (`Namespace::First` in +known_modules+); anything else -- a constant from another
+# file, a later module, an unrecognised register write -- is nil, so the caller
+# keeps the closed-world refusal rather than guessing a name.
+def compact_outer_name(irep, before_idx, reg, namespace, known_modules)
+  ref = irep.constant_path(before_idx - 1, reg)
+  return nil unless ref&.root == :const && ref.name && !ref.name.start_with?('::')
+
+  first =
+    if namespace.nil?
+      ref.name
+    else
+      candidate = "#{namespace}::#{ref.name}"
+      return nil unless known_modules.include?(candidate)
+
+      candidate
+    end
+  [first, *ref.segments].join('::')
 end
 
 # Resolve the constant operand of a statically shaped class-body include. Keep
