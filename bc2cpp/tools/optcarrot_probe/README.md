@@ -691,6 +691,13 @@ omits only the mruby-specific compatibility shims.
 
 ## Profiling notes
 
+`OPTCARROT_STATIC_DISPATCH=1` expands the finite CPU opcode table and nested
+addressing, instruction and store calls into named calls in both compiler input
+and runtime bundles. It remains opt-in: compiled median wall FPS improved from
+34.64 to 63.90, while the interpreter's linear case is slower. See
+[CPU dispatch](../../docs/optcarrot-cpu-dispatch.md) for the equivalence checks
+and benchmark measurements.
+
 `compiled_run.rb` now defaults to optimized toolchain settings (`-O3` with
 GCC) for both mruby binaries and generated C++. Use `OPTCARROT_DEBUG=1` for
 the previous `enable_debug` mode (`-O0 -g3`, `MRB_DEBUG`). The console and CI

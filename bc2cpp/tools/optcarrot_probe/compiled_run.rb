@@ -297,6 +297,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   output_dir = File.join(temp, 'gem', 'src')
   FileUtils.mkdir_p(scan_dir)
   FileUtils.mkdir_p(output_dir)
+  if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+    require_relative 'cpu_dispatch'
+    cpu_source = sources.find { |path| path.end_with?('/optcarrot/cpu.rb') }
+    transformed_cpu = File.join(temp, 'cpu.rb')
+    File.write(transformed_cpu, OptcarrotCPUDispatch.transform(File.read(cpu_source)))
+    sources = sources.map { |path| path == cpu_source ? transformed_cpu : path }
+  end
   base_env = {
     'MRBC' => MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
@@ -406,7 +413,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   build_mode = debug ? 'debug (-O0)' : 'release (-O3)'
   target_suffix = "#{debug ? '' : 'release'}#{profiling ? 'profile' : ''}"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
-  compiled_target = "optcarrotcompiled#{target_suffix}"
+  static_suffix = ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : ''
+  compiled_target = "optcarrotcompiled#{target_suffix}#{static_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
   config = File.join(temp, 'mruby_build_config.rb')
   File.write(config, <<~RUBY)
@@ -515,6 +523,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
+  core_label += ' (static dispatch)' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
   compiled_result = run_benchmark(core_label, [compiled_binary, compiled_bundle, ROM, FRAMES.to_s],
                                   chdir: (compiled_profile_dir if profiling))
   benchmarks << compiled_result
