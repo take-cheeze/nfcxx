@@ -27,6 +27,7 @@
 
 require 'fileutils'
 require 'open3'
+require_relative 'cpu_dispatch'
 
 ROOT = File.expand_path('../..', __dir__)
 PROBE_DIR = __dir__
@@ -90,7 +91,12 @@ File.open(out_file, 'w') do |out|
   end
   cpu_dispatch_rewritten = false
   FILES.each do |f|
-    File.foreach(f) do |line|
+    source = File.read(f)
+    if f.end_with?('/optcarrot/cpu.rb') && ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+      source = OptcarrotCPUDispatch.transform(source)
+      cpu_dispatch_rewritten = true
+    end
+    source.each_line do |line|
       next if line =~ /^\s*require_relative\b/
 
       if f.end_with?('/optcarrot/cpu.rb') && line.include?(CPU_DISPATCH_SPLAT)
