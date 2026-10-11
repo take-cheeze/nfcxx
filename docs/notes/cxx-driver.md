@@ -11,6 +11,7 @@ below, on the gcc backend.
 | --- | --- |
 | `-std=gnu++NN` | as `-std=c++NN`; GNU and strict modes differ in the dialect, which `--dialect` selects |
 | `-W*`, `-w` | dropped: warnings do not change the object code (no `-Werror`) |
+| `-pipe` | dropped: the stages talk through pipes instead of temporary files; the output is the same (ninja's `configure.py` passes it) |
 | `-Wl,*` | passed to the link |
 | `-fexceptions`, `-fwrapv`, `-fno-strict-aliasing` | accepted: EDG always lowers exceptions; the C side already gets the other two |
 | `-fvisibility=*`, `-fvisibility-inlines-hidden` | ignored, as `nfcc` ignores them (`docs/notes/realworld.md`). They change the exports of a `-shared` object; that is the one place this could matter |
