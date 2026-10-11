@@ -25,6 +25,9 @@ std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
+# Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
+pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
+sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=()
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
@@ -37,18 +40,59 @@ while [ $# -gt 0 ]; do
     -fPIC|-fpic) pic=1 ;;
     -rdynamic) rdynamic=1 ;;
     -c) compile_only=1; files+=(-c) ;;
-    -o) out=$2; shift ;;
+    -o) out=$2; outset=1; shift ;;
     -std=c++*) std=--c++${1#-std=c++} ;;
+    -std=gnu++*) std=--c++${1#-std=gnu++} ;;   # GNU and strict modes differ in the dialect, which --dialect selects
+    -E) preprocess=1 ;;
+    -P) ppflags+=(-P) ;;
+    -x) xlang=$2; shift ;;      # -x c++ (CMake's compiler probes pipe a source to -E -x c++ -)
+    -) stdin_src=1 ;;           # the source on stdin: only -E reads it
+    -pthread) pthread=1 ;;
+    -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
+    # Symbol visibility is not implemented; nfcc ignores it too (docs/notes/realworld.md), so nfcxx does the same
+    # for consistency. It changes the exports of a -shared object, which is the one place it could matter.
+    -fvisibility=*|-fvisibility-inlines-hidden) ;;
+    -fPIE|-fpie) pie_opts+=(--c_to_obj_option -fPIE) ;;   # CMake's POSITION_INDEPENDENT_CODE on an executable
+    -pie) pie_opts+=(--c_to_obj_option -pie) ;;
+    -Wl,*) files+=("$1") ;;
+    # -lNAME stays -lNAME for the host link steps; the EDG call below spells it --c_to_obj_lib=NAME (eccp's own -l
+    # search only looks in -L directories and /lib, /usr/lib, so it cannot find a multiarch libm).
+    -l?*) files+=("$1") ;;
+    -W*|-w) ;;                                      # warnings do not change the object code
+    -MD|-MMD) depmode=$1 ;;
+    -MP) depphony=-MP ;;
+    -MF) dfile=$2; shift ;;
+    -MT|-MQ) dtarget=$2; shift ;;
+    -include) preinc+=("$2"); shift ;;   # EDG's --preinclude (the front end only; same macros and declarations)
+    -isystem) sysdirs+=("$2"); shift ;;
+    -isystem?*) sysdirs+=("${1#-isystem}") ;;
     # C inputs skip EDG (see "C inputs" below). Their -I/-D/-U go to the C compiler as well as to eccp.
     *.c) cfiles+=("$1") ;;
     -I?*|-D?*|-U?*) cflags+=("$1"); files+=("$1") ;;
     *.o) files+=("$1"); nobj=$((nobj + 1)) ;;
     -*|*.a|*.so) files+=("$1") ;;
-    *) files+=("$1"); ncpp=$((ncpp + 1)) ;;
+    *) files+=("$1"); ncpp=$((ncpp + 1)); srcs+=("$1") ;;
   esac
   shift
 done
-[ $((ncpp + nobj + ${#cfiles[@]})) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+[ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+if [ $preprocess = 1 ]; then
+  # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way).
+  hostcxx=${NFCXX_CXX:-g++}
+  pp_out=(); [ $outset = 0 ] || pp_out=(-o "$out")
+  pp_x=(); [ -z "$xlang" ] || pp_x=(-x "$xlang")
+  pp_in=(); [ $stdin_src = 0 ] || pp_in=(-)
+  pp_pre=(); for f in ${preinc[@]+"${preinc[@]}"}; do pp_pre+=(-include "$f"); done
+  exec "$hostcxx" -E "-std=${std#--}" ${pp_x[@]+"${pp_x[@]}"} ${ppflags[@]+"${ppflags[@]}"} ${cflags[@]+"${cflags[@]}"} \
+    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${pp_pre[@]+"${pp_pre[@]}"} ${srcs[@]+"${srcs[@]}"} ${pp_in[@]+"${pp_in[@]}"} "${pp_out[@]}"
+fi
+if [ $stdin_src = 1 ]; then
+  echo "nfcxx: a source on stdin is supported only with -E" >&2; exit 2
+fi
+case $xlang in ""|c++|none) ;; *) echo "nfcxx: -x $xlang: only C++ sources (use nfcc for C)" >&2; exit 2 ;; esac
+if [ -n "$depmode" ] && [ $compile_only = 0 ]; then
+  echo "nfcxx: $depmode needs -c (dependency files are written for a compile only)" >&2; exit 2
+fi
 if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 0 ]; }; then
   [ -x "$edg/eccp" ] || { echo "nfcxx: EDG not built; run scripts/setup-edg.sh" >&2; exit 2; }
 fi
@@ -85,6 +129,9 @@ else
     gnu=$(host_gnu_version)
   fi
 fi
+# -isystem DIR from the command line: searched after the host's own directories, as the host compiler does.
+for d in ${sysdirs[@]+"${sysdirs[@]}"}; do sys_inc+=("--sys_include=$d"); done
+pre_opts=(); for f in ${preinc[@]+"${preinc[@]}"}; do pre_opts+=(--preinclude "$f"); done
 gnu_opts=()
 [ -n "$gnu" ] && gnu_opts=(--gnu_version="$gnu")
 [ ${#gnu_opts[@]} -gt 0 ] && export EDG_CPFE_DEFAULT_OPTIONS="${gnu_opts[*]} ${EDG_CPFE_DEFAULT_OPTIONS:-}"
@@ -137,6 +184,8 @@ fi
 picopts=(); ldopts=()
 [ $pic = 0 ] || { picopts=(--c_to_obj_option -fPIC); cflags_pic=(-fPIC); }
 [ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
+[ $pthread = 0 ] || picopts+=(--c_to_obj_option -pthread)
+picopts+=(${pie_opts[@]+"${pie_opts[@]}"})
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
 
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
@@ -194,7 +243,18 @@ fi
 # (thread_local dynamic initialization): it is referenced only through a top-level asm alias, which gcc
 # -O2 does not count as a use, so it was dropped and the wrapper's call went unresolved.
 # With --trace, eccp's own C compiler steps are child processes that record their spans too (qbe-cc).
+eflist=()
+for f in ${files[@]+"${files[@]}"}; do
+  case $f in -l?*) eflist+=("--c_to_obj_lib=${f#-l}") ;; *) eflist+=("$f") ;; esac
+done
 t=$(trace_start)
 "$edg/eccp" "$std" --"$dialect" "${extra[@]}" "${sys_inc[@]}" "${hosted_libs[@]}" --c_to_obj_option -O2 --c_to_obj_option -fwrapv --c_to_obj_option -fno-strict-aliasing --c_to_obj_option -fkeep-static-functions --c_to_obj_option -fgnu89-inline ${picopts[@]+"${picopts[@]}"} \
-  ${cobjs[@]+"${cobjs[@]}"} "${files[@]}" ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
+  ${cobjs[@]+"${cobjs[@]}"} ${pre_opts[@]+"${pre_opts[@]}"} ${eflist[@]+"${eflist[@]}"} ${shim[@]+"${shim[@]}"} ${rtlib[@]+"${rtlib[@]}"} -o "$out"
 trace_end "$t" "eccp (front end, C compile, link)" eccp
+if [ -n "$depmode" ]; then
+  # -MD/-MMD (with -MF/-MT/-MQ/-MP): the host preprocessor writes the dependency file, as nfcc does for C.
+  df=${dfile:-${out%.*}.d}; tgt=${dtarget:-$out}
+  mflag=-M; [ "$depmode" = -MMD ] && mflag=-MM
+  "${NFCXX_CXX:-g++}" $mflag $depphony -MT "$tgt" -MF "$df" "-std=${std#--}" ${cflags[@]+"${cflags[@]}"} \
+    ${sysdirs[@]+"${sysdirs[@]/#/-isystem}"} ${srcs[@]+"${srcs[@]}"}
+fi
