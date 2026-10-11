@@ -8,6 +8,7 @@ name: Path B
 #   tests/pathb/run.sh       stage 1 IL goldens (tests/pathb/*.il)
 #   tests/pathb-ir/run.sh    stage 2 IR goldens (tests/pathb-ir/*.ir) and node coverage
 #   tests/pathb-qbe/run.sh   stage 3 translation validation: IR -> QBE -> run, against EXPECT and the gcc backend
+#   tests/wasm/run.sh        the wasm emitter (scripts/pathb-wasm-emit.rb): IR -> wasm, run under node, against EXPECT
 #   tests/pathb-qbe/hosted.sh  hosted Path B (NFCXX_PATH=b driver, hosted probes, tinyxml2)
 #   tests/ehshim/run.sh      the EH shim (lib/ehshim): libstdc++ exceptions and exception_ptr on gcc, qbe and Path B
 #   tests/mruby/run.sh       the mruby ports against their Python oracles, with the Path B parts enabled
@@ -29,6 +30,7 @@ on:
       - "scripts/mruby-tool-config.rb"
       - "tests/pathb/**"
       - "tests/pathb-*/**"
+      - "tests/wasm/**"
       - "tests/mruby/**"
       - "tests/cases/**"
       - "tests/ehshim/**"
@@ -53,6 +55,7 @@ on:
       - "scripts/mruby-tool-config.rb"
       - "tests/pathb/**"
       - "tests/pathb-*/**"
+      - "tests/wasm/**"
       - "tests/mruby/**"
       - "tests/cases/**"
       - "tests/ehshim/**"
@@ -121,6 +124,10 @@ jobs:
 
       - name: Path B stage 3 IR to QBE translation validation
         run: tests/pathb-qbe/run.sh
+
+      # The wasm emitter: the IR of each test is emitted as a module and run under node (skipped without node).
+      - name: Path B wasm emitter
+        run: tests/wasm/run.sh
 
       # Hosted Path B: the hosted probes, tests/cases through the driver (NFCXX_PATH=b) and tinyxml2
       # (cloned at its pinned commit; skipped when the fetch fails).
