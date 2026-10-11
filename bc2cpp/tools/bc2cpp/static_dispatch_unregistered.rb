@@ -200,7 +200,6 @@ STATIC_DISPATCH_UNREGISTERED = Set[
   "RPG2k#fire_preview_animation",
   "RPG2k#open_chipset_editor",
   "RPG2k#open_map_editor",
-  "RPG2k#save_path",
   "RPG2k3::Scene::Battle#active_atb?",
   "RPG2k3::Scene::Battle#atb_accumulating?",
   "RPG2k3::Scene::Battle#enter_atb_phase",
