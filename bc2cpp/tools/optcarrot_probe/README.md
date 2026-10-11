@@ -715,8 +715,12 @@ triggers conservative Fiber fallback for CPU hot methods: the first combined
 It is a correctness and analysis experiment, not a faster benchmark preset.
 
 `compiled_run.rb` now defaults to optimized toolchain settings (`-O3` with
-GCC) for both mruby binaries and generated C++. Use `OPTCARROT_DEBUG=1` for
-the previous `enable_debug` mode (`-O0 -g3`, `MRB_DEBUG`). The console and CI
+GCC) for both mruby binaries and generated C++. The mruby bundles factor
+PPU tile-table construction into fixed pixel rows, avoiding repeated computation
+and nested block calls during startup.
+`OPTCARROT_ORIGINAL_LUT=1` restores upstream table construction; CRuby always
+uses the upstream expression. See [tile-table startup](../../docs/optcarrot-ppu-lut.md).
+Use `OPTCARROT_DEBUG=1` for the previous `enable_debug` mode (`-O0 -g3`, `MRB_DEBUG`). The console and CI
 summary report the selected mode. Release/debug targets and their `GPROF=1`
 variants have separate build directories; every invocation rebuilds the
 generated gem so an earlier temporary source path cannot leave stale code

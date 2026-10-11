@@ -28,6 +28,7 @@
 require 'fileutils'
 require 'open3'
 require_relative 'cpu_dispatch'
+require_relative 'ppu_lut'
 
 ROOT = File.expand_path('../..', __dir__)
 PROBE_DIR = __dir__
@@ -95,6 +96,9 @@ File.open(out_file, 'w') do |out|
     if f.end_with?('/optcarrot/cpu.rb') && ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
       source = OptcarrotCPUDispatch.transform(source)
       cpu_dispatch_rewritten = true
+    end
+    if f.end_with?('/optcarrot/ppu.rb') && ENV['OPTCARROT_NO_SHIMS'] != '1' && ENV['OPTCARROT_ORIGINAL_LUT'] != '1'
+      source = OptcarrotPPULUT.transform(source)
     end
     source.each_line do |line|
       next if line =~ /^\s*require_relative\b/

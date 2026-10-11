@@ -228,6 +228,28 @@ else
              blocks_in(leaky, method_label(leaky, 'Leaky', 'push')).none? { |b| leaky.yield_free?(b) })
 end
 
+literal_procs = analyse(<<~RUBY)
+  class LiteralProcs
+    def stash; -> { Fiber.yield 1 }; end
+    def quiet; p = -> { 42 }; p.call; end
+    def yielding; p = -> { Fiber.yield 2 }; p.call; end
+    def unknown(p); p.call; end
+    def later(p); p.call; p = -> { 42 }; end
+    def conditional(p, flag); p = -> { 42 } if flag; p.call; end
+    def start; Fiber.new { quiet }; end
+  end
+RUBY
+check.call('a known literal Proc call excludes unrelated escaped yielding blocks',
+           literal_procs.yield_free?(method_label(literal_procs, 'LiteralProcs', 'quiet')))
+check.call('a known literal Proc still reaches its own yielding body',
+           !literal_procs.yield_free?(method_label(literal_procs, 'LiteralProcs', 'yielding')))
+check.call('an unknown Proc still reaches escaped yielding blocks',
+           !literal_procs.yield_free?(method_label(literal_procs, 'LiteralProcs', 'unknown')))
+%w[later conditional].each do |name|
+  check.call("a #{name} literal assignment does not hide the incoming Proc",
+             !literal_procs.yield_free?(method_label(literal_procs, 'LiteralProcs', name)))
+end
+
 if failures.empty?
   puts 'bc2cpp yield reach check: PASS'
 else
