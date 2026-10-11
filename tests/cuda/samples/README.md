@@ -33,7 +33,7 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 ## What the failures have in common
 
 - **The device-only unit drops the host context.** The device code is extracted into its own translation unit
-  (`cuda-rewrite.rb --device`), without the `#define`s, typedefs, and includes of the host source. Eight of the
+  (`cuda-rewrite.rb --device`), without the `#define`s, typedefs, and includes of the host source. Nine of the
   failures are unknown names from that context (`NUM_THREADS`, `NULL`, `uint`, `uchar`, `thread_group`, the
   cooperative-groups namespace, the struct `Node`, `printf`).
 - **The device compile has no CUDA qualifiers or intrinsics.** `__shared__`, `__syncthreads`, `__any_sync` and device
