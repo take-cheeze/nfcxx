@@ -2305,6 +2305,40 @@ def host_storage(out, kw)
   already ? "" : kw
 end
 
+# True when the output so far is inside a class, struct or union body (the innermost unmatched {). A member keeps its
+# own linkage: `static` on a member function (or a constructor, or a const member) is an error.
+def in_class_body?(out)
+  depth = 0
+  j = out.length - 1
+  while j >= 0
+    c = out[j]
+    if c == "}"
+      depth += 1
+    elsif c == "{"
+      if depth == 0
+        # The head is the text since the last ; { or }: `struct Name` (or `class Name : Base`) names a class body.
+        start = [out.rindex(";", j - 1), out.rindex("}", j - 1), out.rindex("{", j - 1)].compact.max
+        head = start ? out[(start + 1)...j] : out[0...j]
+        word = ""
+        (head + " ").each_char do |ch|
+          if ident_char?(ch)
+            word << ch
+          else
+            return true if KEYWORDS_OF_CLASS.include?(word)
+            word = ""
+          end
+        end
+        return false
+      end
+      depth -= 1
+    end
+    j -= 1
+  end
+  false
+end
+
+KEYWORDS_OF_CLASS = %w[class struct union]
+
 def host_linkage(text)
   out = ""
   i = 0
@@ -2331,8 +2365,9 @@ def host_linkage(text)
       k += 1 while k < text.length && !"(=;{".include?(text[k])
       if k < text.length && text[k] == "("
         # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
+        # A class member keeps its linkage (static is not allowed on a member function, const member or constructor).
         after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
-        out << (after_static ? "" : host_storage(out, "static"))
+        out << (after_static || in_class_body?(out) ? "" : host_storage(out, "static"))
         i += 10
         next
       end
