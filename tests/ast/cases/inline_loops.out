@@ -1,0 +1,248 @@
+-- loops
+1	1	0	0	1	1	1.5	0
+1	nil	10	0	3	0
+1	3	1	30	0	6	3	0	7	1	1
+2	3	0	0	5	3	5.0	0
+1	nil	11	0	6	0
+3	3	7	30	0	6	3	0	7	2	4
+3	6	0	0	12	6	10.5	0
+1	nil	12	0	9	0
+6	3	16	30	0	6	3	0	7	3	9
+4	10	0	0	22	10	18.0	0
+1	nil	12	0	12	0
+10	3	28	30	0	6	3	0	7	4	16
+5	15	0	0	35	15	27.5	0
+3	nil	13	0	15	0
+15	3	43	30	0	6	3	0	7	5	25
+6	21	0	0	51	21	39.0	0
+3	nil	13	0	18	0
+15	3	61	30	0	6	3	0	7	6	36
+7	28	0	0	70	28	52.5	0
+3	nil	13	0	21	0
+15	3	82	30	0	6	3	0	14	7	49
+8	36	0	0	92	36	68.0	0
+3	nil	13	0	24	0
+15	3	106	30	0	6	3	0	14	8	64
+-- errors inside loops
+false inline_loops.lua:33: 'for' step is zero
+false inline_loops.lua:33: bad 'for' limit (number expected, got string)
+false inline_loops.lua:33: bad 'for' initial value (number expected, got string)
+true 7.5
+false inline_loops.lua:34: bad 'for' limit (number expected, got nil)
+false inline_loops.lua:34: bad 'for' limit (number expected, got table)
+true 15
+true 6
+false inline_loops.lua:35: attempt to perform arithmetic on a nil value (local 'v')
+false inline_loops.lua:35: attempt to add a 'number' with a 'string'
+false inline_loops.lua:35: attempt to index a nil value (local 't')
+true 6
+false inline_loops.lua:42: three
+false obj3
+false inline_loops.lua:36: attempt to call a nil value (local 'f')
+true 7
+false inline_loops.lua:37: attempt to perform arithmetic on a nil value (local 'x')
+true 7
+false inline_loops.lua:33: 'for' step is zero
+false inline_loops.lua:33: bad 'for' limit (number expected, got string)
+false inline_loops.lua:33: bad 'for' initial value (number expected, got string)
+true 7.5
+false inline_loops.lua:34: bad 'for' limit (number expected, got nil)
+false inline_loops.lua:34: bad 'for' limit (number expected, got table)
+true 15
+true 6
+false inline_loops.lua:35: attempt to perform arithmetic on a nil value (local 'v')
+false inline_loops.lua:35: attempt to add a 'number' with a 'string'
+false inline_loops.lua:35: attempt to index a nil value (local 't')
+true 6
+false inline_loops.lua:42: three
+false obj3
+false inline_loops.lua:36: attempt to call a nil value (local 'f')
+true 7
+false inline_loops.lua:37: attempt to perform arithmetic on a nil value (local 'x')
+true 7
+false inline_loops.lua:33: 'for' step is zero
+false inline_loops.lua:33: bad 'for' limit (number expected, got string)
+false inline_loops.lua:33: bad 'for' initial value (number expected, got string)
+true 7.5
+false inline_loops.lua:34: bad 'for' limit (number expected, got nil)
+false inline_loops.lua:34: bad 'for' limit (number expected, got table)
+true 15
+true 6
+false inline_loops.lua:35: attempt to perform arithmetic on a nil value (local 'v')
+false inline_loops.lua:35: attempt to add a 'number' with a 'string'
+false inline_loops.lua:35: attempt to index a nil value (local 't')
+true 6
+false inline_loops.lua:42: three
+false obj3
+false inline_loops.lua:36: attempt to call a nil value (local 'f')
+true 7
+false inline_loops.lua:37: attempt to perform arithmetic on a nil value (local 'x')
+true 7
+false inline_loops.lua:33: 'for' step is zero
+false inline_loops.lua:33: bad 'for' limit (number expected, got string)
+false inline_loops.lua:33: bad 'for' initial value (number expected, got string)
+true 7.5
+false inline_loops.lua:34: bad 'for' limit (number expected, got nil)
+false inline_loops.lua:34: bad 'for' limit (number expected, got table)
+true 15
+true 6
+false inline_loops.lua:35: attempt to perform arithmetic on a nil value (local 'v')
+false inline_loops.lua:35: attempt to add a 'number' with a 'string'
+false inline_loops.lua:35: attempt to index a nil value (local 't')
+true 6
+false inline_loops.lua:42: three
+false obj3
+false inline_loops.lua:36: attempt to call a nil value (local 'f')
+true 7
+false inline_loops.lua:37: attempt to perform arithmetic on a nil value (local 'x')
+true 7
+false inline_loops.lua:33: 'for' step is zero
+false inline_loops.lua:33: bad 'for' limit (number expected, got string)
+false inline_loops.lua:33: bad 'for' initial value (number expected, got string)
+true 7.5
+false inline_loops.lua:34: bad 'for' limit (number expected, got nil)
+false inline_loops.lua:34: bad 'for' limit (number expected, got table)
+true 15
+true 6
+false inline_loops.lua:35: attempt to perform arithmetic on a nil value (local 'v')
+false inline_loops.lua:35: attempt to add a 'number' with a 'string'
+false inline_loops.lua:35: attempt to index a nil value (local 't')
+true 6
+false inline_loops.lua:42: three
+false obj3
+false inline_loops.lua:36: attempt to call a nil value (local 'f')
+true 7
+false inline_loops.lua:37: attempt to perform arithmetic on a nil value (local 'x')
+true 7
+false inline_loops.lua:33: 'for' step is zero
+false inline_loops.lua:33: bad 'for' limit (number expected, got string)
+false inline_loops.lua:33: bad 'for' initial value (number expected, got string)
+true 7.5
+false inline_loops.lua:34: bad 'for' limit (number expected, got nil)
+false inline_loops.lua:34: bad 'for' limit (number expected, got table)
+true 15
+true 6
+false inline_loops.lua:35: attempt to perform arithmetic on a nil value (local 'v')
+false inline_loops.lua:35: attempt to add a 'number' with a 'string'
+false inline_loops.lua:35: attempt to index a nil value (local 't')
+true 6
+false inline_loops.lua:42: three
+false obj3
+false inline_loops.lua:36: attempt to call a nil value (local 'f')
+true 7
+false inline_loops.lua:37: attempt to perform arithmetic on a nil value (local 'x')
+true 7
+-- errors raised with a level, from loops
+false inline_loops.lua:48: lv2
+false lv2
+false lv2
+true
+false inline_loops.lua:48: lv2
+false lv2
+false lv2
+true
+false inline_loops.lua:48: lv2
+false lv2
+false lv2
+true
+false inline_loops.lua:48: lv2
+false lv2
+false lv2
+true
+false inline_loops.lua:48: lv2
+false lv2
+false lv2
+true
+false inline_loops.lua:48: lv2
+false lv2
+false lv2
+true
+-- multiple assignment
+2	2	1	0
+3,2,1	1	1	1	1
+2	3	3	1	2
+2	2	1	0
+3,2,1	2	2	2	1
+2	6	4	2	4
+2	2	2	0
+3,2,1	3	3	3	1
+2	9	5	3	6
+2	2	3	0
+3,2,1	4	4	4	1
+2	12	6	4	8
+2	2	5	0
+3,2,1	5	5	5	1
+2	15	7	5	10
+2	2	8	0
+3,2,1	6	6	6	1
+2	18	8	6	12
+2	2	13	0
+3,2,1	7	7	7	1
+2	21	9	7	14
+2	2	21	0
+3,2,1	8	8	8	1
+2	24	10	8	16
+false inline_loops.lua:55: attempt to index a nil value (local 't')
+false inline_loops.lua:55: table index is nil
+false inline_loops.lua:56: attempt to index a nil value (local 't')
+false inline_loops.lua:56: attempt to index a number value (local 't')
+false inline_loops.lua:57: attempt to index a nil value (local 't')
+false inline_loops.lua:69: ni2
+false inline_loops.lua:55: attempt to index a nil value (local 't')
+false inline_loops.lua:55: table index is nil
+false inline_loops.lua:56: attempt to index a nil value (local 't')
+false inline_loops.lua:56: attempt to index a number value (local 't')
+false inline_loops.lua:57: attempt to index a nil value (local 't')
+false inline_loops.lua:69: ni2
+false inline_loops.lua:55: attempt to index a nil value (local 't')
+false inline_loops.lua:55: table index is nil
+false inline_loops.lua:56: attempt to index a nil value (local 't')
+false inline_loops.lua:56: attempt to index a number value (local 't')
+false inline_loops.lua:57: attempt to index a nil value (local 't')
+false inline_loops.lua:69: ni2
+false inline_loops.lua:55: attempt to index a nil value (local 't')
+false inline_loops.lua:55: table index is nil
+false inline_loops.lua:56: attempt to index a nil value (local 't')
+false inline_loops.lua:56: attempt to index a number value (local 't')
+false inline_loops.lua:57: attempt to index a nil value (local 't')
+false inline_loops.lua:69: ni2
+false inline_loops.lua:55: attempt to index a nil value (local 't')
+false inline_loops.lua:55: table index is nil
+false inline_loops.lua:56: attempt to index a nil value (local 't')
+false inline_loops.lua:56: attempt to index a number value (local 't')
+false inline_loops.lua:57: attempt to index a nil value (local 't')
+false inline_loops.lua:69: ni2
+false inline_loops.lua:55: attempt to index a nil value (local 't')
+false inline_loops.lua:55: table index is nil
+false inline_loops.lua:56: attempt to index a nil value (local 't')
+false inline_loops.lua:56: attempt to index a number value (local 't')
+false inline_loops.lua:57: attempt to index a nil value (local 't')
+false inline_loops.lua:69: ni2
+-- loops that allocate (the collector runs at every safe point under stress)
+1	1x	
+2	1x2x	
+3	1x2x3x	
+4	1x2x3x4x	
+5	1x2x3x4x5x	
+6	1x2x3x4x5x6x	
+7	1x2x3x4x5x6x7x	
+8	1x2x3x4x5x6x7x8x	
+-- recursion with loops
+11	1
+21	1
+36	1
+57	1
+85	1
+121	1
+false	stack overflow
+-- methods with loops and multiple assignment
+6	2	4	4
+7	1	6	6
+10	2	6	6
+10	1	7	7
+11	2	9	9
+14	1	9	9
+14	2	10	10
+15	1	12	12
+false attempt to index a nil value
+false attempt to index a number value

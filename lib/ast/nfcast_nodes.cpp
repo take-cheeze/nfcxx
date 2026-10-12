@@ -977,14 +977,15 @@ struct CallGen : CallBase {
 // ---- inlining (nfcast_inline.inc, included at the end of this file) ----
 // The number of executions of a call or method site left before it is looked at for inlining; 0 when it is switched off.
 inline unsigned inline_hot(Frame& f) { return f.S->inlining ? f.S->inline_warm : 0; }
-void inline_call_site(Frame& f, CallBase* site, Closure* callee);
+void inline_call_site(Frame& f, CallBase* site, Closure* callee, unsigned retry);
 
 struct CallClosure : CallBase {
-  unsigned hot_ = 0;  // executions left before inline_call_site looks at this site
+  unsigned hot_ = 0;    // executions left before inline_call_site looks at this site
+  unsigned retry_ = 0;  // how many inlined versions of this site were given up on after a guard failure
   using CallBase::CallBase;
   void dispatch(Frame& f, const Value& fnv, Value* args, int n, Rets& out) override {
     if (fnv.t == T_FUN && fnv.o->gctype == G_CLOSURE) {
-      if (hot_ && --hot_ == 0) inline_call_site(f, this, fnv.closure());
+      if (hot_ && --hot_ == 0) inline_call_site(f, this, fnv.closure(), retry_);
       call_closure(*f.S, fnv.closure(), args, n, out, false);
       return;
     }
@@ -1105,11 +1106,12 @@ struct MethodGen : MethodBase {
 };
 
 struct MethodTab;
-void inline_method_site(Frame& f, MethodTab* site, Closure* callee);
+void inline_method_site(Frame& f, MethodTab* site, Closure* callee, unsigned retry);
 
 struct MethodTab : MethodBase {  // the receiver is a table: its field (or an inherited one) is the method
   long cache = -1;
-  unsigned hot_ = 0;  // executions left before inline_method_site looks at this site
+  unsigned hot_ = 0;    // executions left before inline_method_site looks at this site
+  unsigned retry_ = 0;  // how many inlined versions of this site were given up on after a guard failure
   using MethodBase::MethodBase;
   void run_with(Frame& f, Rets& out, const Value& o) override {
     if (o.t == T_TAB) {
@@ -1122,7 +1124,7 @@ struct MethodTab : MethodBase {  // the receiver is a table: its field (or an in
       }
       if (i >= 0 && !t->nodes[i].val.is_nil()) ab[0] = t->nodes[i].val;
       else ab[0] = lookup_generic(f, o);
-      if (hot_ && !tail && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure());
+      if (hot_ && !tail && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure(), retry_);
       finish(f, ab, out);
       return;
     }
@@ -1483,12 +1485,19 @@ struct WhileNode : Node {
     exec(f);
     return Value();
   }
+  TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   int exec(Frame& f) override {
+    TierLoopState ts;
+    ts.kind = TierLoopState::WHILE;
+    if (f.S->tier)
+      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
     while (cond_->eval(f).truthy()) {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
       loop_edge(f);
+      if (f.S->tier)
+        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
     }
     return C_NORMAL;
   }
@@ -1504,13 +1513,20 @@ struct RepeatNode : Node {
     exec(f);
     return Value();
   }
+  TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   int exec(Frame& f) override {
+    TierLoopState ts;
+    ts.kind = TierLoopState::REPEAT;
+    if (f.S->tier)
+      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;
     for (;;) {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
       if (cond_->eval(f).truthy()) break;
       loop_edge(f);
+      if (f.S->tier)
+        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
     }
     return C_NORMAL;
   }
@@ -1544,6 +1560,7 @@ struct IfNode : Node {
 struct NumForNode : Node {
   LocalSlot var_;
   Node *start_, *limit_, *step_, *body_;
+  TierLoop* tl_ = nullptr;  // what the tier knows about this loop (nfcast_tier.cpp)
   NumForNode(Proto& P, VarInfo* v, Node* a, Node* b, Node* c, Node* body) : start_(a), limit_(b), step_(c), body_(body) {
     var_.slot = v->slot;
     var_.vi = v;
@@ -1585,6 +1602,14 @@ struct NumForNode : Node {
       if (step > 0 ? i0 > limit : i0 < limit) return C_NORMAL;
       std::uint64_t count = nfcr_forcount(i0, limit, step);  // the loop arithmetic is shared with the tier (nfcast_tier_rt.h)
       std::int64_t i = i0;
+      TierLoopState ts;
+      ts.kind = TierLoopState::FOR_INT;
+      ts.step = step;
+      if (S.tier) {
+        ts.i = i;
+        ts.count = count;
+        if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+      }
       for (;;) {
         declare(f, var_, Value::integer(i));
         int c = body_->exec(f);
@@ -1593,6 +1618,11 @@ struct NumForNode : Node {
         if (count-- == 0) break;
         i = static_cast<std::int64_t>(static_cast<std::uint64_t>(i) + static_cast<std::uint64_t>(step));
         loop_edge(f);
+        if (S.tier) {
+          ts.i = i;
+          ts.count = count;
+          if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+        }
       }
       return C_NORMAL;
     }
@@ -1605,6 +1635,16 @@ struct NumForNode : Node {
       f.line = line;
       S.rt_error("'for' step is zero");
     }
+    TierLoopState ts;
+    ts.kind = TierLoopState::FOR_FLT;
+    ts.limit = limit;
+    ts.dstep = step;
+    // A NaN start or limit still runs the body once here (below); compiled code tests the plain condition, so it takes over only
+    // for numbers, or after an iteration (where the condition is the plain one in both).
+    if (S.tier && idx == idx && limit == limit) {
+      ts.d = idx;
+      if (int r = tier_loop(f, this, tl_, ts, false)) return r == 2 ? C_RETURN : C_NORMAL;  // compiled code takes the loop over
+    }
     // Lua's forprep skips the loop only when the start is beyond the limit; a NaN is beyond nothing, so the body runs once
     for (bool first = true; first ? !(0 < step ? limit < idx : idx < limit) : (0 < step ? idx <= limit : limit <= idx); idx += step, first = false) {
       declare(f, var_, Value::number(idx));
@@ -1612,6 +1652,10 @@ struct NumForNode : Node {
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
       loop_edge(f);
+      if (S.tier) {
+        ts.d = idx + step;  // where the loop goes on after this iteration
+        if (int r = tier_loop(f, this, tl_, ts, true)) return r == 2 ? C_RETURN : C_NORMAL;
+      }
     }
     return C_NORMAL;
   }

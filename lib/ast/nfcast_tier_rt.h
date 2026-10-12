@@ -220,7 +220,8 @@ typedef struct nfcr_Ctx {
   void* jb;            // the jmp_buf of the entry trampoline: an abandoned run longjmps there
   nfcr_i64 depth;      // nested calls, counted like State::depth (it starts at the engine's value)
   nfcr_i64 maxd;       // State::max_depth
-  const nfcr_W* fv;    // the values of the free variables (upvalues and globals) the unit reads, gathered at entry
+  nfcr_W* fv;          // the free variables (upvalues and globals) the unit reads, gathered at entry: two words each, the value and (an N) its kind;
+                       // the ones the code assigns are copied back by the engine when the run has ended
   nfcr_i64 rtag;       // the kind of a result that is an nfcr_N: 1 a float (the result is in W.d), 0 an integer
 } nfcr_Ctx;
 

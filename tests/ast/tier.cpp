@@ -49,6 +49,8 @@ static std::string eval(State& S, const std::string& code) {
   return r;
 }
 
+// The checks of whole functions run with the on-stack replacement of loops off, so that what they count is the functions; the section
+// of its own turns it on.
 static void tier_on(State& S, TierOptions::Mode mode, unsigned threshold, const std::string& cache, const std::string& driver = "") {
   TierOptions o;
   o.mode = mode;
@@ -56,7 +58,26 @@ static void tier_on(State& S, TierOptions::Mode mode, unsigned threshold, const 
   o.loop_threshold = threshold;
   o.cache_dir = cache;
   o.driver = driver;
+  o.osr = false;
   S.enable_tier(o);
+}
+
+// A loop is compiled when it has run LOOPS iterations; a function when it has been called CALLS times (default: as often).
+static void tier_osr_on(State& S, TierOptions::Mode mode, unsigned loops, const std::string& cache, unsigned calls = 0) {
+  TierOptions o;
+  o.mode = mode;
+  o.threshold = calls ? calls : loops;
+  o.loop_threshold = loops;
+  o.cache_dir = cache;
+  o.osr = true;
+  S.enable_tier(o);
+}
+
+// The result of CODE in a State without a tier.
+static std::string eval_plain(const std::string& code) {
+  State P;
+  P.open_libs();
+  return eval(P, code);
 }
 
 static std::vector<std::string> g_dirs;  // the temporary directories, removed at the end
@@ -593,6 +614,242 @@ int main() {
     T.tier_wait();
     CHECK(T.stats.tier_compiled == 1 && T.stats.tier_failed == 0);
     signal(SIGCHLD, old);
+  }
+
+  std::printf("-- on-stack replacement: a loop is taken over in the middle of a call\n");
+  {
+    std::string oc = temp_dir("cacheosr");
+    // The loops of a main chunk or of a function that is called once: compiled when the loop has run 100 iterations, and run to the end
+    // as native code. The calls threshold is high so that no whole function is compiled.
+    {
+      State S;
+      S.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 100, oc, 1000000);
+      CHECK(eval(S, "local s = 0 for i = 1, 10000 do s = s + i % 7 end return s") == "29998");
+      CHECK(S.stats.tier_osr_runs == 1 && S.stats.tier_osr_bailouts == 0 && S.stats.tier_calls == 0);
+      CHECK(S.stats.tier_compiled == 1);
+      CHECK(eval(S, "local x = 1.5 local n = 0 while n < 5000 do x = x * 1.0001 + 0.5 n = n + 1 end return x, n") == eval_plain("local x = 1.5 local n = 0 while n < 5000 do x = x * 1.0001 + 0.5 n = n + 1 end return x, n"));
+      CHECK(S.stats.tier_osr_runs == 2);
+      CHECK(eval(S, "local k, a = 0, 0 repeat k = k + 1 a = a + k * k until a > 1000000 return k, a") == eval_plain("local k, a = 0, 0 repeat k = k + 1 a = a + k * k until a > 1000000 return k, a"));
+      CHECK(S.stats.tier_osr_runs == 3);
+      // a main chunk with many locals: the frame of the function the loop is in does not count against the stack the compiled code may use
+      {
+        std::string many;
+        for (int i = 0; i < 150; ++i) many += "local v" + std::to_string(i) + " = " + std::to_string(i) + " ";
+        std::uint64_t r0 = S.stats.tier_osr_runs;
+        CHECK(eval(S, many + "local s = 0 for i = 1, 1000 do s = s + i % v100 end return s") == eval_plain(many + "local s = 0 for i = 1, 1000 do s = s + i % v100 end return s"));
+        CHECK(S.stats.tier_osr_runs == r0 + 1 && S.stats.tier_osr_bailouts == 0);
+      }
+      // a float loop, a loop that counts down, a return from inside the loop
+      CHECK(eval(S, "local t = 0.0 for x = 0.0, 1000.0, 0.5 do t = t + x end return t") == eval_plain("local t = 0.0 for x = 0.0, 1000.0, 0.5 do t = t + x end return t"));
+      CHECK(eval(S, "local t = 0 for i = 5000, 1, -3 do t = t + i end return t") == eval_plain("local t = 0 for i = 5000, 1, -3 do t = t + i end return t"));
+      CHECK(eval(S, "local function f(m) for d = 2, m do if m % d == 0 then return d end end return m end return f(1000003), f(91)") == "1000003,7");
+      CHECK(S.stats.tier_osr_runs == 7);   // f(91) finds its divisor before the loop is hot; f as a whole was compiled by then, for its next call
+      CHECK(consistent(S));
+    }
+    // the locals after the loop, the locals the loop leaves alone, the kind of a number that has both
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 10, oc, 1000000);
+      same(P, S, "local keep, name = {1, 2, 3}, 'x' local p, q = 1, 2 for i = 1, 90 do p, q = q, p + q end return p, q, #keep, name", "swap");
+      same(P, S, "local e = 0 for i = 1, 100 do e = e + 0.25 end return e, math.type(e)", "either kind");
+      same(P, S, "local e = 5 for i = 1, 100 do if i > 200 then e = e + 0.5 end end return e, math.type(e)", "either kind, never a float");
+      same(P, S, "local b, c = true, 0 for i = 1, 100 do b = not b if b then c = c + 1 end end return b, c", "a boolean local");
+      same(P, S, "local w = 1 for i = 1, 100 do w = w * 3 end return w", "wraparound");
+      same(P, S, "local a, b = 1, 2.5 for i = 1, 100 do a, b = b, a end return a, b, math.type(a), math.type(b)", "swapping kinds");
+      same(P, S, "local x = 0 for i = math.maxinteger - 40, math.maxinteger do x = x + 1 end return x", "the end of the integers");
+      same(P, S, "local x = 0 for i = math.mininteger, math.mininteger + 40 do x = x + 1 end return x", "the start of the integers");
+      same(P, S, "local x = 0 for i = 1, 3.7 do x = x + i end for i = 100, 1, -7 do x = x + i end return x", "float limits, negative steps");
+      same(P, S, "local x = 0 for i = 1, 100 do for j = i, 100 do x = x + (i ~ j) end end return x", "nested loops");
+      same(P, S, "local x = 0.0 for i = 1, 30 do for y = 0.5, 20, 0.25 do x = x + y / i end end return x", "nested float loops");
+      same(P, S, "local x, i = 0, 0 while true do i = i + 1 if i > 100 then break end if i % 3 == 0 then gnext = nil end x = x + i end return x, i", "a global write: not a kernel");
+      same(P, S, "local t = {} local s = 0 for i = 1, 100 do t[i] = i end for i = 1, #t do s = s + t[i] end return s", "tables");
+      same(P, S, "local s = 0 for i = 1, 100 do s = s + math.floor(i / 3) end return s", "a native function");
+      same(P, S, "local s = 0 for i = 1, 100 do local f = function() return i end s = s + f() end return s", "a closure");
+      same(P, S, "local function sq(x) return x * x end local s = 0 for i = 1, 100 do s = s + sq(i) end return s", "a kernel called from the loop");
+      same(P, S, "local s = 0 for i = 1, 100 do s = s + undefinedfn(i) end return s", "an error: calling nil");
+      same(P, S, "local s = 'a' for i = 1, 100 do s = s + 1 end return s", "an error: arithmetic on a string");
+      CHECK(S.stats.tier_osr_runs >= 10);
+      CHECK(consistent(S) && consistent(P));
+    }
+    // a loop that fails half way: the interpreter goes on from where compiled code took over, and finds the error
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 10, oc, 1000000);
+      const char* prog = "local function f(d) local acc = 0 for i = 1, 1000 do acc = acc + 1000 // (d - i) end return acc end return pcall(f, 500)";
+      same(P, S, prog, "an integer division by zero half way");
+      CHECK(S.stats.tier_osr_runs == 0 && S.stats.tier_osr_bailouts == 1);
+      same(P, S, "local function f(d) local acc = 0 for i = 1, 1000 do acc = acc + 1000 // (d - i) end return acc end return f(2000)", "the same loop without the error");
+      CHECK(S.stats.tier_osr_runs == 1);
+      same(P, S, "local x, i = 0, 0 while i < 100 do i = i + 1 x = x + (i & 1.5) end return x", "a bitwise operation on a float");
+      same(P, S, "local x, i = 0, 0 while i < 100 do i = i + 1 x = x | (i * 0.5) end return x", "a bitwise operation on a float (either kind)");
+      same(P, S, "local x, y = 0, 3 for i = 1, 100 do x = x + i % (y - i) end return x", "a modulo by zero");
+      same(P, S, "local x = 0 local function g(n) return g(n + 1) + 1 end for i = 1, 100 do x = x + i if i == 50 then x = x + g(1) end end return x", "a runaway recursion");
+      same(P, S, "local function g(n) if n == 0 then return 0 end return g(n - 1) + 1 end local x = 0 for i = 1, 100 do x = x + g(i * 100) end return x", "a deep recursion");
+      CHECK(consistent(S) && consistent(P));
+    }
+    // a loop that is abandoned is not tried at every iteration; one that keeps being abandoned is given up
+    {
+      State S;
+      S.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 10, oc, 1000000);
+      CHECK(eval(S, "local function f(d) local acc = 0 for i = 1, 100000 do acc = acc + 1000 // (d - i) end return acc end return pcall(f, 99990)") ==
+            "false,test:1: attempt to divide by zero");
+      CHECK(S.stats.tier_osr_bailouts == 1);
+      CHECK(eval(S, "local function f(d) local acc = 0 for i = 1, 100 do acc = acc + 1000 // (d - i) end return acc end "
+                    "local n = 0 for k = 1, 40 do if not pcall(f, 50) then n = n + 1 end end return n") == "40");
+      CHECK(S.stats.tier_osr_bailouts <= 12);   // 8 abandoned runs, then the loop is left to the interpreter
+      // a guard that keeps failing (one cell assigned and reached in two ways) is given up in the same way
+      std::uint64_t b0 = S.stats.tier_osr_bailouts;
+      const char* alias = "local c = 0 local function inc() c = c + 1 end local function f() for i = 1, 50 do c = c + 2 inc() end return c end "
+                          "local t = 0 for k = 1, 40 do t = t + f() end return t, c";
+      CHECK(eval(S, alias) == eval_plain(alias));
+      CHECK(S.stats.tier_osr_bailouts - b0 <= 12 && S.stats.tier_osr_bailouts > b0);
+      CHECK(consistent(S));
+    }
+    // other types of the locals: another version; a binding that changed; the option that turns it off
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 5, oc, 1000000);
+      const char* prog = "local function total(a, b) local r = a for i = 1, 50 do r = r + b end return r end return total(0, 1), total(0, 1.5), total(0.5, 1), total(1, 1), total(1, 2)";
+      same(P, S, prog, "four kinds of arguments");
+      CHECK(S.stats.tier_osr_runs >= 3);   // the other calls ran in the version of the whole function that the loop's iterations made
+      same(P, S, "scale = 2 local function ld(n) local s = 0 for i = 1, n do s = s + i * scale end return s end local a = ld(100) scale = 2.5 local b = ld(100) scale = 'x' return a, b, pcall(ld, 100)", "a global that changes type");
+      same(P, S, "local function k(x) return x + 1 end function kg(x) return k(x) end local s = 0 for i = 1, 100 do s = s + kg(i) end kg = function(x) return x * 2 end for i = 1, 100 do s = s + kg(i) end return s", "a callee that is rebound");
+      CHECK(S.tier_loops(Value()) == "not a script function");
+      CHECK(consistent(S));
+    }
+    {
+      State S;
+      S.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 10, oc, 1000000);
+      TierOptions o;
+      o.mode = TierOptions::Sync;
+      o.threshold = o.loop_threshold = 10;
+      o.cache_dir = oc;
+      o.osr = false;
+      S.enable_tier(o);
+      CHECK(eval(S, "local s = 0 for i = 1, 1000 do s = s + i end return s") == "500500");
+      CHECK(S.stats.tier_osr_runs == 0 && S.stats.tier_compiled == 0);
+    }
+    // a loop entered again after its compile (a function called twice): taken over at the entry, not in the middle. The function is not a
+    // kernel as a whole (a table), so only its loop is compiled.
+    {
+      State S;
+      S.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 50, oc, 100000);
+      eval(S, "function two(n) local t = {} local s = 0 for i = 1, n do s = s + i end t[1] = s return t[1] end");
+      CHECK(eval(S, "return two(1000)") == "500500");
+      CHECK(S.stats.tier_osr_runs == 1 && S.stats.tier_osr_bailouts == 0);
+      CHECK(eval(S, "return two(10)") == "55");                  // 10 iterations: never reaches the threshold again, but the loop is compiled
+      CHECK(S.stats.tier_osr_runs == 2 && S.stats.tier_calls == 0);
+      CHECK(eval(S, "return two(0), two(1)") == "0,1");          // a loop that does not run, a loop with one iteration
+      CHECK(S.stats.tier_osr_runs == 3);
+      nfcast::Closure* cl = S.load("return two", "test", nullptr);
+      Rets o2;
+      S.call(Value::function(cl), nullptr, 0, o2);
+      CHECK(S.tier_loops(o2.p[0]).find("compiled i") != std::string::npos);
+      CHECK(S.tier_state(o2.p[0]).find("compiled") == std::string::npos);   // the function as a whole was not compiled
+      CHECK(S.tier_loops(o2.p[0]).find("line 1") == 0);
+    }
+    // the collector at every safe point
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      S.gc_stress = true;
+      tier_osr_on(S, TierOptions::Sync, 3, oc);
+      same(P, S, "local t = {} local s = 0 for i = 1, 200 do s = s + i % 5 end for i = 1, 50 do t[i] = {i} end local u = 0 for i = 1, 50 do u = u + t[i][1] end return s, u", "collector stress");
+      CHECK(S.stats.tier_osr_runs >= 1);
+      CHECK(consistent(S));
+    }
+    // compiling in the background: the loop is taken over once the code is there
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_osr_on(S, TierOptions::Async, 10, temp_dir("cacheosr2"));
+      for (int k = 0; k < 3; ++k) same(P, S, "local s = 0 for i = 1, 3000 do s = s + i % 7 end return s", "async");
+      S.tier_wait();
+      same(P, S, "local s = 0 for i = 1, 3000 do s = s + i % 7 end return s", "async, after the compile");
+      CHECK(S.stats.tier_compiled >= 1 && S.stats.tier_failed == 0);   // three chunks with the same loop were being built at once
+    }
+    // a parse-level corner: a vararg main chunk with a loop that reads `...`: not a kernel
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 3, oc);
+      same(P, S, "local s = 0 for i = 1, 100 do s = s + select('#', ...) end return s", "varargs in the loop");
+    }
+  }
+
+  std::printf("-- kernels that assign upvalues; loops over locals that closures capture and over callees that are locals\n");
+  {
+    std::string oc = temp_dir("cacheup");
+    // A function that assigns an upvalue is a kernel now: the assignment is made when the call has ended.
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_on(S, TierOptions::Sync, 1, oc);
+      same(P, S, "local n = 0 local function inc(x) n = n + x return n end local r = 0 for i = 1, 20 do r = r + inc(i) end return r, n", "an upvalue assigned");
+      CHECK(S.stats.tier_calls > 0);
+      same(P, S, "local n = 0 local function inc(x) n = n + x end for i = 1, 10 do inc(0.5) end return n, math.type(n)", "an upvalue that takes both kinds");
+      same(P, S, "local a, b = 1, 2 local function sw() a, b = b, a + b end for i = 1, 20 do sw() end return a, b", "multiple assignment to upvalues");
+      same(P, S, "local n = 0 local function f(x) n = n + 1 return 10 // (3 - x) end local ok, e = pcall(function() for i = 1, 6 do f(i) end end) return ok, e, n", "an error after assignments");
+      same(P, S, "local n = 0 local function f(x) n = n + 1 if x == 0 then return 0 end return f(x - 1) + 1 end return f(30), n", "a recursion that assigns");
+      same(P, S, "local n = 0 local function f(x) n = n + 1 return f(x + 1) + 1 end local ok, e = pcall(f, 1) return ok, e, n > 100", "a runaway recursion that assigns");
+      same(P, S, "local t = true local function f(x) t = not t return x end for i = 1, 5 do f(i) end return t", "a boolean upvalue");
+      same(P, S, "local t = 1 local function f(x) t = x > 2 return x end for i = 1, 5 do f(i) end return t", "an upvalue that is an integer, then a boolean");
+      same(P, S, "local c = 0 local function w() c = c + 1 end local function r() return c end local x = 0 for i = 1, 20 do w() x = x + r() end return x, c", "an assigned cell reached by two functions");
+      same(P, S, "local function mk() local c = 0 return function() c = c + 1 end, function() return c end end local i1, g1 = mk() local i2, g2 = mk() "
+                 "for i = 1, 20 do i1() i2() i2() end return g1(), g2()", "two counters");
+      same(P, S, "g = 0 local function f() g = g + 1 end for i = 1, 5 do f() end return g", "a global is not assigned by a kernel");
+      CHECK(S.stats.tier_aborts >= 1);
+      CHECK(consistent(S) && consistent(P));
+    }
+    // loops: a local captured by a closure is handed over as a cell, and a callee may be a local of the running function
+    {
+      State S, P;
+      S.open_libs();
+      P.open_libs();
+      tier_osr_on(S, TierOptions::Sync, 3, oc, 1000000);
+      std::uint64_t r0, b0;
+      same(P, S, "local c = 0 local function get() return c end for i = 1, 100 do c = c + i end return c, get()", "a captured local");
+      CHECK(S.stats.tier_osr_runs == 1);
+      CHECK(S.stats.tier_osr_runs == 1 && S.stats.tier_osr_bailouts == 0);   // through the cell
+      same(P, S, "local c = 0.5 local function get() return c end for i = 1, 10 do c = c * 2 end return c, get(), math.type(c)", "a captured float");
+      same(P, S, "local c = 1 local function get() return c end for i = 1, 10 do c = c + 0.5 end return c, get(), math.type(get())", "a captured number of both kinds");
+      r0 = S.stats.tier_osr_runs;
+      same(P, S, "local c = 0 local function inc() c = c + 1 end for i = 1, 100 do c = c + 10 inc() end return c", "a captured local and a function that assigns it");
+      CHECK(S.stats.tier_osr_runs == r0);   // one cell reached in two ways while it is assigned: the guard fails, the interpreter runs the loop
+      same(P, S, "local c = 0 local function get() return c end local s = 0 for i = 1, 100 do c = c + 1 s = s + get() end return s, c", "a captured local and a function that reads it");
+      same(P, S, "local function sq(x) return x * x end local s = 0 for i = 1, 100 do s = s + sq(i) end return s", "a local function called by the loop");
+      CHECK(S.stats.tier_osr_runs >= 4);
+      r0 = S.stats.tier_osr_runs;
+      b0 = S.stats.tier_osr_bailouts;
+      same(P, S, "local function sq(x) return x * x end local s = 0 for i = 1, 100 do s = s + sq(i) end return s", "a local function called by the loop, again");
+      CHECK(S.stats.tier_osr_runs == r0 + 1 && S.stats.tier_osr_bailouts == b0);   // the callee is found in the frame, and the loop runs as native code
+      r0 = S.stats.tier_osr_runs;
+      same(P, S, "local function fact(n) if n < 2 then return 1 end return n * fact(n - 1) end local s = 0 for i = 1, 25 do s = s + fact(i) % 1000 end return s", "a recursive local function (a cell)");
+      CHECK(S.stats.tier_osr_runs == r0 + 1);   // a callee in a Cell is found too
+      same(P, S, "local f = function(x) return x + 1 end local s = 0 for i = 1, 20 do s = s + f(i) end f = function(x) return x * 2 end for i = 1, 20 do s = s + f(i) end return s", "the local is another function the next time");
+      same(P, S, "local f = function(x) return x + 1 end local s = 0 for i = 1, 20 do if i == 10 then f = function(x) return x * 2 end end s = s + f(i) end return s", "the local is assigned in the loop");
+      r0 = S.stats.tier_osr_runs;
+      same(P, S, "local G local function mk() local c = 0 G = function() return c end for i = 1, 100 do c = c + i if c > 1000 then return c end end return -1 end "
+                 "local r = mk() return r, G()", "a return from a loop: the cell a closure holds is written first");
+      CHECK(S.stats.tier_osr_runs == r0 + 1);
+      same(P, S, "local f = 5 local s = 0 for i = 1, 20 do s = s + f(i) end return s", "a local that is not a function");
+      same(P, S, "local f = math.abs local s = 0 for i = 1, 30 do s = s + f(-i) end return s", "a native function in a local");
+      CHECK(consistent(S) && consistent(P));
+    }
   }
 
   std::printf("-- environment\n");
