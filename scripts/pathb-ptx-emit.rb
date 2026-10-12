@@ -26,7 +26,13 @@
 # iconv, fconv, i2f, u2f, cf2i (checked: trap on NaN or out of range), const (floats too, including +Infinity and
 # -Infinity), and gpu (the special registers tid, ctaid, ntid, nctaid, .x .y .z, a Path B form for the GPU). Operands:
 # registers, constants, slot addresses, null. Everything else is refused: the next steps are 1- and 2-byte integers,
-# bool in memory, aggregates, switch, goto, static data, calls of anything but the device intrinsics and the module's own functions (see the model above), and float constants that are not exact decimals.
+# bool in memory, aggregates, switch, goto, global data other than zero-initialized static arrays, calls of anything but
+# the device intrinsics and the module's own functions (see the model above), and float constants that are not exact decimals.
+#
+# Checks: bounds IDX N (one unsigned compare, 0 <= IDX < N), nonnull P (a null pointer traps), cf2i and the division
+# and shift checks. A file-scope zero-initialized static array of the device unit is block-shared memory (CUDA's
+# __shared__): a `.shared` declaration, its address through cvta.shared (`@"name"`), and __nfcxx_syncthreads() is
+# bar.sync 0.
 #
 # Checked operations emit `trap;`, which aborts the kernel (the launch reports an error). PTX has no abort block, so
 # each check is a predicated trap at the operation.
@@ -335,13 +341,14 @@ end
 
 class Fn
   attr_reader :name, :params, :ret, :form
-  attr_accessor :kernel, :module_fns
+  attr_accessor :kernel, :module_fns, :shared
 
   def initialize(form, index)
     @form = form
     @index = index
     @kernel = true
     @module_fns = {}
+    @shared = {}
     @ret = nil
     @setup_done = false
     @ncall = 0
@@ -456,6 +463,12 @@ class Fn
     if h == "null"
       return ["0", parse_type(x[1])]
     end
+    if x.is_a?(IRSym) && x.sig == "@"
+      raise Refused, "static object @\"#{x.name}\" (only the block-shared arrays are lowered)" unless @shared.key?(x.name)
+      t = fresh("rd")
+      emit("cvta.shared.u64 #{t}, #{x.name};")
+      return [t, ["ptr", nil]]
+    end
     if x.is_a?(IRSym) && x.sig == "$"
       off = @slots[x.name]
       raise BadIR, "slot #{x.name} is not declared" if off.nil?
@@ -498,6 +511,13 @@ class Fn
       expect(dty, ty)
       addr, aty = operand(x[2])
       emit("ld.#{ptx_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
+    when "bitcast"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      raise Refused, "bitcast to a non-pointer" unless ty[0] == "ptr" && dty[0] == "ptr"
+      v, vty = operand(x[2])
+      raise Refused, "bitcast of a non-pointer" unless vty[0] == "ptr"
+      emit("mov.u64 #{dest}, #{reg_of(v, vty)};")
     when "index"
       expect(dty, ["ptr", nil])
       base, bty = operand(x[1])
@@ -824,6 +844,27 @@ class Fn
       emit("bra #{@loops[-1][0]};")
     when "trap"
       emit("trap;")
+    when "bounds"
+      # (bounds IDX N): traps unless 0 <= IDX < N. One unsigned compare does both ends of a signed index.
+      v, vty = operand(s[1])
+      raise Refused, "bounds of a non-integer" unless vty[0] == "int"
+      n = as_int(s[2])
+      bits = vty[1] * 8
+      uty = bits == 64 ? "u64" : "u32"
+      q = fresh("p")
+      emit("setp.ge.#{uty} #{q}, #{reg_of(v, vty)}, #{n};")
+      emit("@#{q} trap;")
+    when "nonnull"
+      # (nonnull P): a null pointer traps (pathb-stage2 section 4). A null constant always traps.
+      p, pty = operand(s[1])
+      raise Refused, "nonnull of #{form_text(s[1])}" unless pty[0] == "ptr"
+      if p == "0"
+        emit("trap;")
+      else
+        q = fresh("p")
+        emit("setp.eq.u64 #{q}, #{reg_of(p, pty)}, 0;")
+        emit("@#{q} trap;")
+      end
     when "return"
       if @ret.nil?
         raise Refused, "return with a value in a void function" if s.length > 1
@@ -855,6 +896,13 @@ class Fn
     callee_sym = x[2]
     raise Refused, "indirect call" unless callee_sym.is_a?(IRSym) && callee_sym.sig == "&"
     cname = callee_sym.name
+    if cname == "__nfcxx_syncthreads"
+      # the block barrier: every thread of the block waits here, and shared memory is visible after it
+      raise Refused, "__nfcxx_syncthreads takes no arguments" unless x.length == 3
+      raise Refused, "__nfcxx_syncthreads has no value" unless dest.nil?
+      emit("bar.sync 0;")
+      return
+    end
     raise Refused, "call of intrinsic #{cname} as a statement" if DEVICE_INTRINSICS.key?(cname)
     callee = @module_fns[cname]
     raise Refused, "call of #{cname} (not a function of this module)" if callee.nil?
@@ -947,6 +995,7 @@ end
 def emit_module(src, sm, kernels = [])
   forms = parse_forms(tokenize(strip_comments(src)))
   fns = []
+  shared = {}
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
@@ -954,7 +1003,18 @@ def emit_module(src, sm, kernels = [])
     elsif h == "function"
       fns << Fn.new(f, fns.length)
     elsif h == "global"
-      raise Refused, "global #{form_text(f[1])} (static data is not lowered yet)"
+      # A file-scope static array of the device unit is block-shared memory (CUDA's __shared__): its name and
+      # size come from the IR, and it must be zero-initialized. Any other global is refused.
+      name = f[1].to_s
+      ty = f[2]
+      raise Refused, "global #{name} (only static zero-initialized arrays are block-shared memory)" unless head_of(ty) == "array"
+      size = as_int(f[3])
+      align = as_int(f[4])
+      raise Refused, "global #{name} is not static" unless f.length >= 6 && head_of(f[5]) == "static"
+      init = f[6]
+      raise Refused, "global #{name} has an initializer (only zero is lowered)" unless f.length == 7 && head_of(init) == "init" && init.length == 2 && head_of(init[1]) == "zero"
+      raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
+      shared[name] = [size, align]
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
@@ -975,10 +1035,12 @@ def emit_module(src, sm, kernels = [])
   end
   state = {}
   fns.each { |fn| check_recursion(fn.name, callees, state) }
-  fns.each { |fn| fn.module_fns = by_name }
+  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
+  shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{name}[#{size}];\n" }
+  out << "\n" unless shared.empty?
   fns.each { |fn| out << fn.text << "\n" }
   out
 end

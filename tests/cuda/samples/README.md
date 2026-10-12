@@ -27,7 +27,7 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | Rodinia pathfinder | `__shared__` arrays | fails to compile | `identifier "__shared__" is undefined` (device unit) |
 | Rodinia hotspot | `__shared__` 2-D arrays | fails to compile | `identifier "__shared__" is undefined` (device unit) |
 | Rodinia nw | `__syncthreads` (barrier) | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |
-| Rodinia gaussian | multi-kernel host loop, null-pointer checks | fails to compile | `refused: statement nonnull` (emitter) |
+| Rodinia gaussian | multi-kernel host loop, null-pointer checks | fails to compile | `class "cudaDeviceProp" has no member "clockRate"` (host side: CUDA 13 removed the field; the emitter now lowers `nonnull`) |
 | Rodinia bfs | struct `Node` from a header, multi-file kernels | fails to compile | `incomplete type "void" is not allowed` (device unit) |
 
 ## What the failures have in common
