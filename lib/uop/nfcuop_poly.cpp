@@ -621,7 +621,9 @@ void bind_numpy(nfcpoly::Context& ctx, np::Session& session, const std::string& 
   def_numpy(ctx.def_class<NumPy>("NumPy"));
   NumPy facade;
   facade.s = &session;
-  facade.st = std::make_shared<State>();
+  // not std::make_shared: on the qbe back end its function-local static (_Sp_make_shared_tag::_S_ti) is emitted as a strong symbol
+  // in every translation unit that uses it, and nfcpoly_go.cpp uses it too (docs/notes/multi-tu.md)
+  facade.st = std::shared_ptr<State>(new State());
   ctx.set(name, facade);
 }
 
