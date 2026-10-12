@@ -181,9 +181,24 @@ end
 # The template header of the first __global__ template named `name` in the source: its parameter names, and its
 # parameter list text.
 def kernel_template(name)
-  top_pieces($expanded).each do |st, en, kind, body|
+  # the host pass searches the host-resolved unit (its pieces are balanced); the device pass has resolved already
+  src = $kernel_text || $expanded
+  # memoized per unit: many launches name the same kernel
+  $kernel_memo = {} unless $kernel_memo_for.equal?(src)
+  $kernel_memo_for = src
+  return $kernel_memo[name] if $kernel_memo.key?(name)
+  $kernel_memo[name] = kernel_template_uncached(name, src)
+end
+
+def kernel_template_uncached(name, src)
+  $kernel_pieces = nil unless $kernel_pieces_for.equal?(src)
+  unless $kernel_pieces
+    $kernel_pieces = top_pieces(src)
+    $kernel_pieces_for = src
+  end
+  $kernel_pieces.each do |st, en, kind, body|
     next unless kind == :code && body
-    t = $expanded[st...en]
+    t = src[st...en]
     toks = tokens_of(t)
     next unless toks.first == "template" && toks.include?("__global__")
     q = remove_words(t, DEVICE_QUALIFIERS)
@@ -258,26 +273,12 @@ end
 # arguments of a launch name one of its parameters, that parameter's name; else nil. A launch like that needs an
 # instance that only the instantiation fixes, and the wrapper is a concrete function (see template_site).
 def dependent_on_template(text, i, targs)
-  j = i - 1
-  while j >= 0
-    if word_at?(text, j, "template")
-      k = j + 8
-      k += 1 while k < text.length && white?(text[k])
-      if text[k] == "<"
-        close = matching_angle(text, k)
-        if close && close < i
-          params = split_top(text[(k + 1)...close])
-          names = params.map { |pr| pr.split("=")[0] }.map { |pr| tokens_of(pr).last }.compact
-          used = tokens_of(targs)
-          hit = names.find { |nm| used.include?(nm) }
-          return hit unless hit.nil?
-          return nil
-        end
-      end
-    end
-    j -= 1
-  end
-  nil
+  cand = template_bodies(text).select { |tb| tb[:open] < i && i < tb[:close] }
+  return nil if cand.empty?
+  t = cand.max_by { |x| x[:open] }[:tmpl]
+  names = split_top(text[(t[:lt] + 1)...t[:close]]).map { |pr| tokens_of(pr.split("=")[0]).last }.compact
+  used = tokens_of(targs)
+  names.find { |nm| used.include?(nm) }
 end
 
 # Index of the `>` closing the `<` at s[open] (nesting counted), or nil.
@@ -300,17 +301,32 @@ def matching_angle(s, open)
   nil
 end
 
+# The directives of a text: start index => end index (a launch in a #define is not a launch in code).
+def directive_ends(text)
+  out = {}
+  top_pieces(text).each { |st, en, kind, _b| out[st] = en if kind == :pp }
+  out
+end
+
 def template_launches(text)
   found = []
   i = 0
+  dirs = directive_ends(text)
   while i < text.length
+    if dirs.key?(i)
+      i = dirs[i]
+      next
+    end
     e = skip_literal(text, i)
     if e
       i = e
       next
     end
     if text[i, 3] == "<<<" && text_before(text, i) == ">"
-      j = i - 1
+      # the `>` closing the template arguments: the nearest one before `<<<` (a line break may come between)
+      gt = i - 1
+      gt -= 1 while gt >= 0 && white?(text[gt])
+      j = gt
       depth = 0
       while j >= 0
         depth += 1 if text[j] == ">"
@@ -323,18 +339,337 @@ def template_launches(text)
       e2 = k + 1
       k -= 1 while k >= 0 && ident_char?(text[k])
       name = text[(k + 1)...e2]
-      found << [name, text[(j + 1)...(i - 1)].strip] unless name.empty?
+      found << [name, text[(j + 1)...gt].strip, i] unless name.empty?
     end
     i += 1
   end
   found
 end
 
+# Index of the `}` closing the `{` at s[open], skipping literals; nil if unbalanced.
+def matching_brace(s, open)
+  depth = 0
+  i = open
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    depth += 1 if s[i] == "{"
+    if s[i] == "}"
+      depth -= 1
+      return i if depth == 0
+    end
+    i += 1
+  end
+  nil
+end
+
+# The bodies of the function templates of the text, in one pass: each `{` whose header (the text since the last `;`
+# or brace of its level) starts with `template <...>`, with the body's open and close braces, the header's
+# `template` position and its angle brackets. Braces of the text are balanced once the conditionals are resolved.
+def template_bodies(text)
+  return $template_bodies if $template_bodies_for.equal?(text)
+  out = []
+  stack = [{ hs: 0 }]
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    c = text[i]
+    if c == "{"
+      # the header's last `template <`: a comment, a preprocessor line or a declaration may come before it
+      tmpl = nil
+      k = stack.last[:hs]
+      while k < i
+        e2 = skip_literal(text, k)
+        if e2
+          k = e2
+          next
+        end
+        if word_at?(text, k, "template")
+          lt = index_code(text, "<", k + 8)
+          if lt && lt < i && text[k + 8...lt].strip.empty?
+            close = matching_angle(text, lt)
+            tmpl = { st: k, lt: lt, close: close } if close && close < i
+          end
+        end
+        k += 1
+      end
+      stack << { hs: i + 1, open: i, tmpl: tmpl }
+    elsif c == "}"
+      frame = stack.size > 1 ? stack.pop : stack.last
+      out << { open: frame[:open], close: i, tmpl: frame[:tmpl] } if frame[:tmpl]
+      stack.last[:hs] = i + 1
+    elsif c == ";"
+      stack.last[:hs] = i + 1
+    end
+    i += 1
+  end
+  $template_bodies_for = text
+  $template_bodies = out
+  out
+end
+
+# The function template that holds position pos: the innermost template body containing pos, as its parameter
+# names, declaration texts, the header's position and the function's name. nil when no template encloses pos.
+def enclosing_template(text, pos)
+  cand = template_bodies(text).select { |tb| tb[:open] < pos && pos < tb[:close] }
+  return nil if cand.empty?
+  tb = cand.max_by { |x| x[:open] }
+  t = tb[:tmpl]
+  params = split_top(text[(t[:lt] + 1)...t[:close]])
+  refuse("template header with a parameter pack (at line #{text[0...pos].count("\n") + 1})") if params.any? { |pr| pr.include?("...") }
+  decls = params.map { |pr| pr.split("=")[0].strip }
+  names = decls.map { |pr| tokens_of(pr).last }
+  header = text[(t[:close] + 1)...tb[:open]]
+  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header) }
+end
+
+# `Q<args>::member` in a header of a member defined out of its class template: { name: Q, args: [...] }, else nil.
+def member_qualifier(header)
+  cc = header.index("::")
+  return nil if cc.nil?
+  before = header[0...cc].rstrip
+  return nil unless before.end_with?(">")
+  open = before.length - 1
+  depth = 0
+  while open >= 0
+    depth += 1 if before[open] == ">"
+    depth -= 1 if before[open] == "<"
+    break if depth == 0
+    open -= 1
+  end
+  return nil if open < 0
+  name_start = open
+  name_start -= 1 while name_start > 0 && ident_char?(before[name_start - 1])
+  name = before[name_start...open]
+  return nil if name.empty?
+  { name: name, args: split_top(before[(open + 1)...(before.length - 1)]) }
+end
+
+# The explicit instantiations `template class|struct Q<args>;` of a class template in the text, as their argument
+# lists, mapped onto the member template's names: one instance (a list in the member's own parameter order) each.
+def member_instances(outer, text)
+  q = outer[:qual]
+  out = []
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(text, i, "template")
+      k = i + 8
+      k += 1 while k < text.length && white?(text[k])
+      if word_at?(text, k, "class") || word_at?(text, k, "struct")
+        k += (text[k, 5] == "class" ? 5 : 6)
+        k += 1 while k < text.length && white?(text[k])
+        if word_at?(text, k, q[:name])
+          k += q[:name].length
+          k += 1 while k < text.length && white?(text[k])
+          if text[k] == "<"
+            close = matching_angle(text, k)
+            out << split_top(text[(k + 1)...close]) if close
+          end
+        end
+      end
+    end
+    i += 1
+  end
+  out.map do |args|
+    refuse("member template #{outer[:fname]}: the class instance #{q[:name]}<#{args.join(', ')}> does not give all its arguments") unless args.length == q[:args].length
+    outer[:names].map do |nm|
+      k = q[:args].index(nm)
+      refuse("member template #{outer[:fname]}: its parameter #{nm} is not a parameter of #{q[:name]}") if k.nil?
+      args[k]
+    end
+  end.uniq
+end
+
+# The explicit template-argument lists of the calls of template function `name` in the text: [targs, position].
+# The text is indexed once (every `name<...>(` in it), so the lookups of many launches do not rescan it.
+def call_sites(text, name)
+  unless $call_index_for.equal?(text)
+    index = Hash.new { |h, k| h[k] = [] }
+    i = 0
+    while i < text.length
+      e = skip_literal(text, i)
+      if e
+        i = e
+        next
+      end
+      if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && !(text[i] >= "0" && text[i] <= "9")
+        j = i
+        j += 1 while j < text.length && ident_char?(text[j])
+        id = text[i...j]
+        k = j
+        k += 1 while k < text.length && white?(text[k])
+        if text[k] == "<"
+          close = matching_angle(text, k)
+          if close
+            m = close + 1
+            m += 1 while m < text.length && white?(text[m])
+            index[id] << [text[(k + 1)...close].strip, i] if text[m] == "("
+          end
+        end
+        i = j
+        next
+      end
+      i += 1
+    end
+    $call_index_for = text
+    $call_index = index
+  end
+  $call_index.key?(name) ? $call_index[name] : []
+end
+
+# The concrete argument lists that instantiate template function `name`: each explicit call of it, with the
+# arguments that name an enclosing template's parameters replaced by that template's own instances (transitively).
+# A call through a cycle of templates is refused with the chain.
+def template_instances(name, text, stack)
+  refuse("dependent launch: #{(stack + [name]).join(' -> ')} instantiates itself through its template arguments") if stack.include?(name)
+  out = []
+  call_sites(text, name).each do |targs, pos|
+    args = split_top(targs)
+    outer = enclosing_template(text, pos)
+    if outer && args.any? { |a| tokens_of(a).any? { |tk| outer[:names].include?(tk) } }
+      template_instances(outer[:fname], text, stack + [name]).each do |inst|
+        out << args.map { |a| substitute(a, outer[:names], inst) }
+      end
+    else
+      out << args
+    end
+  end
+  out.uniq
+end
+
+# Line (1-based) and column (0-based) of position pos in s. The newline positions of s are indexed once.
+def line_col(s, pos)
+  unless $newlines_for.equal?(s)
+    nl = []
+    i = 0
+    while (k = s.index("\n", i))
+      nl << k
+      i = k + 1
+    end
+    $newlines = nl
+    $newlines_for = s
+  end
+  lo = 0
+  hi = $newlines.length
+  while lo < hi
+    mid = (lo + hi) / 2
+    if $newlines[mid] < pos
+      lo = mid + 1
+    else
+      hi = mid
+    end
+  end
+  line_start = lo == 0 ? 0 : $newlines[lo - 1] + 1
+  [lo + 1, pos - line_start]
+end
+
+def line_start(s, line)
+  i = 0
+  (line - 1).times { i = s.index("\n", i) + 1 }
+  i
+end
+
+# The launches whose template arguments depend on an enclosing template parameter, keyed by [line, column] of their
+# `<<<` (in the text they are given; the rewrite maps them, see rewrite). The text is the host-resolved unit, where the
+# conditionals of the host pass are resolved and each function is one top-level piece.
+# `<<<`: the enclosing template, its concrete instances, and the dispatch struct that carries each instance's wrapper
+# address (see dependent_decls). The instances come from the explicit calls of the enclosing template in the unit.
+def dependent_launches(text)
+  out = {}
+  template_launches(text).each_with_index do |(nm, ta, pos), idx|
+    next if ta.empty?
+    dep = dependent_on_template(text, pos, ta)
+    next if dep.nil?
+    outer = enclosing_template(text, pos)
+    refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep}, which is not a parameter of a top-level " \
+           "template function (at line #{text[0...pos].count("\n") + 1})") if outer.nil?
+    insts = outer[:qual] ? member_instances(outer, text) : template_instances(outer[:fname], text, [])
+    refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep} of #{outer[:fname]}: the unit has no " \
+           "explicit call of it with all its template arguments, so its instances are not known") if insts.empty?
+    insts.each do |inst|
+      refuse("template launch of #{nm}<#{ta}>: a call of #{outer[:fname]} does not give all its template arguments " \
+             "explicitly") if inst.length != outer[:names].length
+    end
+    outer[:line] = line_col(text, outer[:st])[0]
+    out[line_col(text, pos)] = { name: nm, targs: ta, outer: outer, insts: insts, dname: "__nfcxx_disp_#{sanitize(nm)}_#{idx}" }
+  end
+  out
+end
+
+# The declarations of the dependent launches' dispatch, at the top-level piece of their enclosing template: each
+# instance's wrapper (see template_site), the primary dispatch template, and one specialization per instance.
+def dependent_decls(dl, orig)
+  lines = []
+  dl.each_value do |d|
+    d[:insts].each do |inst|
+      concrete = split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", ")
+      d[:wrapper] ||= {}
+      d[:wrapper][inst] = template_site(d[:name], concrete)
+    end
+  end
+  dl.each_value do |d|
+    at = line_start(orig, d[:outer][:line])
+    d[:wrapper].values.uniq.each { |w| lines << [at, "static void #{w}(#{$sites[w][:decl]});\n"] }
+    lines << [at, "template <#{d[:outer][:decls].join(', ')}> struct #{d[:dname]};\n"]
+    d[:insts].each do |inst|
+      lines << [at, "template <> struct #{d[:dname]}<#{inst.join(', ')}> { static constexpr auto fn = &#{d[:wrapper][inst]}; };\n"]
+    end
+  end
+  lines
+end
+
 def rewrite(text, orig)
   out = "#line 1 \"#{orig}\"\n"
   n = text.length
   i = 0
+  # The wrapper declarations of the template launches, at file scope just before the top-level piece that holds
+  # each launch: EDG rejects a linkage specification in block scope. Keyed by the piece's start index.
+  pieces = top_pieces(text)
+  decls_at = Hash.new { |h, k| h[k] = [] }
+  # The dependent launches are found in the host-resolved unit: its top-level pieces are balanced (the untaken branches
+  # of the conditionals are blank lines, the lines of the taken ones are unchanged).
+  $cond_strict = true
+  resolved = resolve_conditionals(text, {})
+  $cond_strict = false
+  $kernel_text = resolved
+  dl = dependent_launches(resolved)
+  template_launches(text).each do |nm, ta, pos|
+    next unless dependent_on_template(text, pos, ta).nil?
+    w = template_site(nm, ta)
+    piece = pieces.find { |st, en, _kind, _body| st <= pos && pos < en }
+    line = "static void #{w}(#{$sites[w][:decl]});\n"
+    decls_at[piece ? piece[0] : 0] << line unless decls_at[piece ? piece[0] : 0].include?(line)
+  end
+  dependent_decls(dl, text).each { |at, line| decls_at[at] << line unless decls_at[at].include?(line) }
+  dirs = directive_ends(text)
   while i < n
+    if decls_at.key?(i)
+      decls_at.delete(i).each { |line| out << line }
+    end
+    if dirs.key?(i)
+      # a directive ends before its newline: the newline (and the declarations of the piece after it) follow it
+      k = dirs[i]
+      out << text[i...k]
+      i = k
+      if k < n && text[k] == "\n"
+        out << "\n"
+        i = k + 1
+        decls_at.delete(k).each { |line| out << line } if decls_at.key?(k)
+      end
+      next
+    end
     e = skip_literal(text, i)
     if e
       out << text[i...e]
@@ -342,11 +677,12 @@ def rewrite(text, orig)
       next
     end
     if text[i, 3] == "<<<" && !(i + 3 < n && text[i + 3] == "<")
-      line = text[0...i].count("\n") + 1
+      line = line_col(text, i)[0]
       # The kernel name is the identifier before `<<<`, or before its template argument list.
       j = i - 1
       j -= 1 while j >= 0 && white?(text[j])
       targs = nil
+      gt_at = j
       if text[j] == ">"
         depth = 0
         while j >= 0
@@ -355,7 +691,7 @@ def rewrite(text, orig)
           break if depth == 0
           j -= 1
         end
-        targs = text[(j + 1)...(i - 1)].strip
+        targs = text[(j + 1)...gt_at].strip
         j -= 1
         j -= 1 while j >= 0 && white?(text[j])
       end
@@ -405,19 +741,18 @@ def rewrite(text, orig)
       lines = text[i..close_args].count("\n")
       kernel = name
       if targs
-        dep = dependent_on_template(text, i, targs)
-        refuse("template launch of #{name}<#{targs}> depends on the template parameter #{dep} of the enclosing template: " \
-               "the device image would need that instance, which is not built yet (at line #{line})") unless dep.nil?
-        kernel = template_site(name, targs)
-      end
-      if targs
-        # a block, so the wrapper's declaration is in scope at the call
-        out << "{ extern \"C\" void #{kernel}(#{$sites[kernel][:decl]}); "
+        d = dl[line_col(text, i)]
+        if d
+          kernel = "#{d[:dname]}<#{d[:outer][:names].join(', ')}>::fn"
+        else
+          refuse("template launch of #{name}<#{targs}> depends on a template parameter, and its enclosing template is not " \
+                 "resolved in this unit (at line #{line})") unless dependent_on_template(text, i, targs).nil?
+          kernel = template_site(name, targs)
+        end
       end
       out << "__nfcxx_cuda_launch(#{kernel}, #{cfg[0]}, #{cfg[1]}, #{cfg[2]}, #{cfg[3]}"
       out << ", #{args}" unless args.empty?
       out << ")"
-      out << "; }" if targs
       out << ("\n" * lines)
       i = close_args + 1
       next
@@ -429,10 +764,279 @@ def rewrite(text, orig)
   unless $sites.empty?
     out << "\n"
     $sites.each do |w, site|
-      out << "extern \"C\" void #{w}(#{site[:decl]}) {}\n"
+      out << "static void #{w}(#{site[:decl]}) {}\n"
     end
   end
   out
+end
+
+# ---- launch forms the scan does not see: a launch inside a function-like macro, and template arguments that the
+# launch leaves to deduction. Both are rewritten before the launch scan, so the scan and the dependent-launch analysis
+# see ordinary explicit launches. An expansion keeps the line count: its newlines go after it.
+
+QUAL_WORDS = ["const", "volatile", "__restrict__", "__restrict", "restrict"]
+
+# The function-like macros whose body holds a launch: name => { params:, body: } (continuation lines joined).
+def launch_macros(text)
+  out = {}
+  top_pieces(text).each do |st, en, kind, _body|
+    next unless kind == :pp
+    t = text[st...en].sub("#", "").gsub("\\\n", " ").strip
+    next unless t.start_with?("define")
+    rest = t[6..-1].lstrip
+    k = 0
+    k += 1 while k < rest.length && ident_char?(rest[k])
+    name = rest[0...k]
+    after = rest[k..-1]
+    next if name.empty? || !after.start_with?("(")
+    close = after.index(")")
+    next if close.nil?
+    body = after[(close + 1)..-1].strip
+    next unless body.include?("<<<")
+    out[name] = { params: split_top(after[1...close]), body: body }
+  end
+  out
+end
+
+# Expands the calls of those macros in code (not in directives, comments or literals), nested calls included.
+def expand_launch_macros(text, depth = 0)
+  macros = launch_macros(text)
+  return text if macros.empty?
+  refuse("launch macros nest more than 4 deep") if depth > 4
+  code = top_pieces(text).select { |pc| pc[2] == :code }.map { |pc| [pc[0], pc[1]] }
+  n = text.length
+  out = ""
+  changed = false
+  i = 0
+  while i < n
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && code.any? { |a, b| a <= i && i < b }
+      j = i
+      j += 1 while j < n && ident_char?(text[j])
+      name = text[i...j]
+      m = macros[name]
+      k = j
+      k += 1 while k < n && white?(text[k])
+      if m && k < n && text[k] == "("
+        close = matching_paren(text, k)
+        refuse("unterminated call of launch macro #{name}") if close.nil?
+        args = split_top(text[(k + 1)...close])
+        refuse("launch macro #{name} takes #{m[:params].length} arguments, its call gives #{args.length}") unless args.length == m[:params].length
+        body = substitute(m[:body], m[:params], args).gsub("\n", " ")
+        out << body << ("\n" * text[i..close].count("\n"))
+        i = close + 1
+        changed = true
+        next
+      end
+      out << name
+      i = j
+      next
+    end
+    out << text[i]
+    i += 1
+  end
+  changed ? expand_launch_macros(out, depth + 1) : out
+end
+
+# The argument expressions of the launch whose `<<<` is at i, split at the top-level commas; nil if not readable.
+def launch_arguments(text, i)
+  k = i + 3
+  depth = 0
+  while k < text.length
+    e = skip_literal(text, k)
+    if e
+      k = e
+      next
+    end
+    c = text[k]
+    if c == "(" || c == "[" || c == "{"
+      depth += 1
+    elsif c == ")" || c == "]" || c == "}"
+      depth -= 1
+    elsif depth == 0 && text[k, 3] == ">>>"
+      break
+    end
+    k += 1
+  end
+  return nil if k >= text.length
+  p = k + 3
+  p += 1 while p < text.length && white?(text[p])
+  return nil if text[p] != "("
+  close = matching_paren(text, p)
+  return nil if close.nil?
+  split_top(text[(p + 1)...close])
+end
+
+# The span of the template arguments of the launch whose `<<<` is at i (the text between `<` and `>`).
+def targs_span(text, i)
+  gt = i - 1
+  gt -= 1 while gt >= 0 && white?(text[gt])
+  j = gt
+  depth = 0
+  while j >= 0
+    depth += 1 if text[j] == ">"
+    depth -= 1 if text[j] == "<"
+    break if depth == 0
+    j -= 1
+  end
+  [j + 1, gt]
+end
+
+# The type of a parameter, as its identifiers, `*` and `&` in order (the parameter's name is left out).
+def type_tokens(s)
+  out = []
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    c = s[i]
+    if c == "*" || c == "&"
+      out << c
+      i += 1
+    elsif ident_char?(c) && !(c >= "0" && c <= "9")
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      out << s[i...j]
+      i = j
+    else
+      i += 1
+    end
+  end
+  out
+end
+
+# The declared type written before the identifier at i, as its tokens: `const float *` for `const float *x`. Empty when
+# the identifier is not a declaration (a call argument, an assignment, a return).
+def type_before(text, i)
+  toks = []
+  j = i - 1
+  loop do
+    j -= 1 while j >= 0 && white?(text[j])
+    break if j < 0
+    c = text[j]
+    if c == "*" || c == "&"
+      toks.unshift(c)
+      j -= 1
+    elsif ident_char?(c)
+      k = j
+      k -= 1 while k >= 0 && ident_char?(text[k])
+      toks.unshift(text[(k + 1)..j])
+      j = k
+    else
+      break
+    end
+  end
+  return [] if toks.empty? || %w[return else case new delete throw do].include?(toks.first)
+  # a declaration has a type name; `&p` (an address taken in a call) has only punctuation before it
+  return [] unless toks.any? { |t| ident_char?(t[0]) && !(t[0] >= "0" && t[0] <= "9") }
+  toks
+end
+
+# The type of a launch argument: a literal's, or the declared type of an identifier in the same top-level piece.
+def argument_type(text, pos, arg, nm)
+  if arg.length > 0 && arg.chars.all? { |c| (c >= "0" && c <= "9") || c == "u" || c == "U" || c == "l" || c == "L" }
+    return ["int"]
+  end
+  if arg.length > 1 && arg[0] >= "0" && arg[0] <= "9" && (arg.end_with?("f") || arg.end_with?("F"))
+    return ["float"]
+  end
+  if arg.length > 0 && arg[0] >= "0" && arg[0] <= "9" && (arg.include?(".") || arg.include?("e") || arg.include?("E"))
+    return ["double"]
+  end
+  unless arg.chars.all? { |c| ident_char?(c) } && !(arg[0] >= "0" && arg[0] <= "9")
+    refuse("template launch of #{nm}: cannot deduce a template argument from the argument #{arg} (only identifiers and literals)")
+  end
+  piece = top_pieces(text).find { |st, en, kind, _b| kind == :code && st <= pos && pos < en }
+  found = nil
+  i = piece ? piece[0] : 0
+  while i < pos
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if text[i, arg.length] == arg && !(i > 0 && ident_char?(text[i - 1])) && i + arg.length < pos &&
+       !ident_char?(text[i + arg.length])
+      after = i + arg.length
+      after += 1 while after < pos && white?(text[after])
+      if "=;,)".include?(text[after].to_s)
+        t = type_before(text, i)
+        found = t unless t.empty?
+      end
+    end
+    i += 1
+  end
+  refuse("template launch of #{nm}: no declaration of #{arg} before the launch, so its type is not known") if found.nil?
+  found
+end
+
+# The type a kernel parameter of type ptoks gives to the template parameter p, from an argument of type atoks; nil when
+# the shapes do not match.
+def match_type(ptoks, atoks, p)
+  pt = ptoks.reject { |x| QUAL_WORDS.include?(x) }
+  at = atoks.reject { |x| QUAL_WORDS.include?(x) }
+  return at.join(" ") if pt == [p]
+  return nil unless pt.length == at.length
+  k = pt.index(p)
+  return nil if k.nil?
+  at[k]
+end
+
+# The explicit arguments for the template parameters the launch leaves out (the trailing ones).
+def deduce_types(nm, ta, kt, missing, args, text, pos)
+  parts = split_top(kt[:params])
+  refuse("launch of #{nm}: #{args.length} arguments for #{parts.length} kernel parameters") unless args.length == parts.length
+  found = {}
+  parts.each_with_index do |part, idx|
+    ptoks = type_tokens(part)
+    ptoks.pop if ptoks.last && !ptoks.last.start_with?("*") && !ptoks.last.start_with?("&") && ptoks.length > 1
+    missing.each do |p|
+      next unless ptoks.include?(p)
+      at = argument_type(text, pos, args[idx], nm)
+      t = match_type(ptoks, at, p)
+      refuse("template launch of #{nm}<#{ta}>: cannot deduce #{p} from the argument #{args[idx]} of type #{at.join(' ')}") if t.nil?
+      refuse("template launch of #{nm}<#{ta}>: #{p} is deduced as #{found[p]} and as #{t} (ambiguous)") if found[p] && found[p] != t
+      found[p] = t
+    end
+  end
+  missing.map do |p|
+    found[p] || refuse("template launch of #{nm}<#{ta}>: no argument gives #{p}, so it cannot be deduced")
+  end
+end
+
+# Every launch with fewer template arguments than the kernel's parameters gets the deduced ones written after its own.
+def deduce_launch_targs(text)
+  edits = []
+  template_launches(text).each do |nm, ta, pos|
+    kt = kernel_template(nm)
+    next if kt.nil?
+    given = split_top(ta)
+    next if given.length >= kt[:names].length
+    args = launch_arguments(text, pos)
+    refuse("template launch of #{nm}<#{ta}>: its arguments are not readable (at line #{text[0...pos].count("\n") + 1})") if args.nil?
+    deduced = deduce_types(nm, ta, kt, kt[:names][given.length..-1], args, text, pos)
+    a, b = targs_span(text, pos)
+    edits << [a, b, (given + deduced).join(", ")]
+  end
+  edits.sort_by { |a, _b, _n| -a }.each do |a, b, new|
+    text = text[0...a] + new + text[b..-1]
+  end
+  text
+end
+
+# The launch forms before the scan: the macro calls that hold a launch, then the deduced template arguments.
+def launch_prepare(text)
+  t = expand_launch_macros(text)
+  $expanded = t
+  deduce_launch_targs(t)
 end
 
 # ---- device side (--device): the __global__ and __device__ functions as a device-only translation unit
@@ -472,6 +1076,15 @@ def rewrite_builtins(t)
       i += 13
       next
     end
+    # __syncwarp(mask) is the warp barrier of the mask; __syncwarp() is the full warp (CUDA's default mask)
+    if word_at?(t, i, "__syncwarp") && t[i + 10] == "("
+      out << "__nfcxx_syncwarp("
+      j = i + 11
+      j += 1 while j < t.length && white?(t[j])
+      out << "0xffffffffu" if t[j] == ")"
+      i += 11
+      next
+    end
     hit = false
     DEVICE_BUILTINS.each do |name, prefix|
       next if hit || !word_at?(t, i, name)
@@ -503,12 +1116,24 @@ DEVICE_PRELUDE = <<'PRELUDE'
 typedef unsigned int uint;
 typedef unsigned short ushort;
 typedef unsigned long ulong;
+typedef unsigned long size_t;
 #ifndef NULL
 #define NULL 0
 #endif
 #define __shared__ static
+// The device pass architecture, for plain uses of __CUDA_ARCH__ (the conditionals are resolved with it too).
+#define __CUDA_ARCH__ 750
+// The qualifiers as macros too: a macro body of a carried header can name them (ggml-common.h: GGML_TABLE_BEGIN).
+#define __device__
+#define __global__
+#define __host__
+#define __forceinline__
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
+// Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
+extern "C" int printf(const char *, ...);
+extern "C" int vprintf(const char *, const void *);
 PRELUDE
 
 # CUDA's vector types (uchar4, uint2, float3, ...) come from the CUDA headers, which the device unit does not
@@ -540,8 +1165,115 @@ VECTOR_DEFS = vector_defs
 # Device builtins that the CUDA headers define as functions, provided in the unit when device code names them
 # (the same rule as the vector types). __mul24 takes the low 24 bits of each operand, sign-extended, and returns the
 # low 32 bits of the product.
+# The shuffle wrappers: name => the PTX mode the emitter uses (WARP_SHUFFLES: __nfcxx_shfl_<mode>_sync_i / _f).
+SHFL_DEFS = {}
+{ "bfly" => "xor", "down" => "down", "up" => "up", "idx" => "" }.each do |mode, cuda|
+  base = cuda.empty? ? "__shfl_sync" : "__shfl_#{cuda}_sync"
+  ext = cuda.empty? ? "__nfcxx_shfl_sync" : "__nfcxx_shfl_#{cuda}_sync"
+  SHFL_DEFS[mode] = <<-SHFL
+extern "C" int #{ext}_i(unsigned, int, int);
+extern "C" float #{ext}_f(unsigned, float, int);
+static inline int #{base}(unsigned m, int v, int l) { (void)m; return #{ext}_i(0xffffffffu, v, l); }
+static inline int #{base}(unsigned m, int v, int l, int w) { (void)m; (void)w; return #{ext}_i(0xffffffffu, v, l); }
+static inline float #{base}(unsigned m, float v, int l) { (void)m; return #{ext}_f(0xffffffffu, v, l); }
+static inline float #{base}(unsigned m, float v, int l, int w) { (void)m; (void)w; return #{ext}_f(0xffffffffu, v, l); }
+  SHFL
+end
+
+# The half type and its conversions, shared by the entries below (include-guarded: each entry carries them, the
+# device unit gets them once). __float2half rounds to nearest, even, as CUDA does; __half2float is exact.
+HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
+  "typedef unsigned short __half;\n" \
+  "static inline unsigned short __float2half(float f) { unsigned x = *(const unsigned *)&f; unsigned sign = x & 0x80000000u; x ^= sign; unsigned o; if (x >= 0x47800000u) { o = x > 0x7f800000u ? 0x7e00u : 0x7c00u; } else if (x < 0x38800000u) { float t = *(const float *)&x * 16777216.0f; float r = (t + 8388608.0f) - 8388608.0f; o = (unsigned)r; } else { unsigned odd = (x >> 13) & 1u; x += (0u - 112u) * 0x800000u + 0xfffu; x += odd; o = x >> 13; } return (unsigned short)((sign >> 16) | o); }\n" \
+  "static inline float __half2float(unsigned short h) { unsigned u = (unsigned)h; unsigned sign = (u & 0x8000u) << 16; unsigned e = (u >> 10) & 0x1fu; unsigned m = u & 0x3ffu; unsigned r; if (e == 0) { if (m == 0) { r = sign; } else { float f = (float)m * (1.0f / 16777216.0f); r = *(const unsigned *)&f | sign; } } else if (e == 31) { r = sign | 0x7f800000u | (m << 13); } else { r = sign | ((e + 112u) << 23) | (m << 13); } return *(const float *)&r; }\n" \
+  "#endif\n"
+
+# The integer intrinsics of llama.cpp's ggml-cuda. __umulhi, __popc and __byte_perm wrap the scalar intrinsics of the
+# emitter (SCALAR_U32 in pathb-ptx-emit.rb, one PTX instruction each); the others are plain integer code. The half type
+# is an unsigned short here (16-bit integers are lowered by the emitter), and the conversions do the IEEE work in 32-bit
+# integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub, __hmul and __hfma compute
+# in float and round once more to half: for these operands the float result is exact or rounds the same way, except for
+# rare double-rounding cases of __hfma (the sum of an exact product with c).
+# __half2: two halves packed in an unsigned int, the low half in bits 0..15 (x) and the high half in bits 16..31 (y).
+# The pair functions are plain integer code on that packing; the lanes use the half operations above, through one
+# guarded helper so that several pair functions in a unit define it once.
+HALF2_TYPE = "#ifndef __NFCXX_HALF2_TYPE\n#define __NFCXX_HALF2_TYPE\ntypedef unsigned int __half2;\n#endif\n"
+HALF_LANE = HALF_CORE + "#ifndef __NFCXX_HALF_LANE\n#define __NFCXX_HALF_LANE\n" \
+  "static inline unsigned short __nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __hadd(a, b) : __hmul(a, b); }\n" \
+  "#endif\n"
+HALF_LANE = HALF_LANE.sub("__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __hadd(a, b) : __hmul(a, b); }",
+  "__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __float2half(__half2float(a) + __half2float(b)) : __float2half(__half2float(a) * __half2float(b)); }")
+HALF2_PAIR = HALF2_TYPE + HALF_LANE
+
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
+  "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
+  "__popc" => "extern \"C\" unsigned __nfcxx_popc(unsigned);\nstatic inline int __popc(unsigned x) { return (int)__nfcxx_popc(x); }\n",
+  "__popcll" => "extern \"C\" unsigned __nfcxx_popc(unsigned);\nstatic inline int __popcll(unsigned long long x) { return (int)__nfcxx_popc((unsigned)x) + (int)__nfcxx_popc((unsigned)(x >> 32)); }\n",
+  "__byte_perm" => "extern \"C\" unsigned __nfcxx_byte_perm(unsigned, unsigned, unsigned);\nstatic inline unsigned __byte_perm(unsigned x, unsigned y, unsigned s) { return __nfcxx_byte_perm(x, y, s); }\n",
+  "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
+  "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
+  "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  # The float math functions and __dp4a: wrappers over the emitter's FLOAT_BUILTINS / SCALAR_U32 intrinsics. The
+  # accuracy of the approximate ones (rsqrt, div, exp, log) is in docs/notes/gpu.md.
+  "fmaxf" => "extern \"C\" float __nfcxx_fmaxf(float, float);\nstatic inline float fmaxf(float a, float b) { return __nfcxx_fmaxf(a, b); }\n",
+  "fminf" => "extern \"C\" float __nfcxx_fminf(float, float);\nstatic inline float fminf(float a, float b) { return __nfcxx_fminf(a, b); }\n",
+  "fabsf" => "extern \"C\" float __nfcxx_fabsf(float);\nstatic inline float fabsf(float a) { return __nfcxx_fabsf(a); }\n",
+  "sqrtf" => "extern \"C\" float __nfcxx_sqrtf(float);\nstatic inline float sqrtf(float a) { return __nfcxx_sqrtf(a); }\n",
+  "rsqrtf" => "extern \"C\" float __nfcxx_rsqrtf(float);\nstatic inline float rsqrtf(float a) { return __nfcxx_rsqrtf(a); }\n",
+  "expf" => "extern \"C\" float __nfcxx_expf(float);\nstatic inline float expf(float a) { return __nfcxx_expf(a); }\n",
+  "__expf" => "extern \"C\" float __nfcxx_expf(float);\nstatic inline float __expf(float a) { return __nfcxx_expf(a); }\n",
+  "logf" => "extern \"C\" float __nfcxx_logf(float);\nstatic inline float logf(float a) { return __nfcxx_logf(a); }\n",
+  "__logf" => "extern \"C\" float __nfcxx_logf(float);\nstatic inline float __logf(float a) { return __nfcxx_logf(a); }\n",
+  "__fdividef" => "extern \"C\" float __nfcxx_fdividef(float, float);\nstatic inline float __fdividef(float a, float b) { return __nfcxx_fdividef(a, b); }\n",
+  "__saturatef" => "extern \"C\" float __nfcxx_saturatef(float);\nstatic inline float __saturatef(float a) { return __nfcxx_saturatef(a); }\n",
+  "__dp4a" => "extern \"C\" int __nfcxx_dp4a(int, int, int);\nstatic inline int __dp4a(int a, int b, int c) { return __nfcxx_dp4a(a, b, c); }\n",
+  # Block and system intrinsics (the emitter lowers the extern ones: bar.red.or.pred, the butterfly reduction, membar.sys, nanosleep).
+  # __reduce_add_sync ignores its mask, as the shuffles do: the full warp is lowered; a partial mask is not honoured.
+  "__syncthreads_or" => "extern \"C\" int __nfcxx_syncthreads_or(int);\nstatic inline int __syncthreads_or(int p) { return __nfcxx_syncthreads_or(p); }\n",
+  "__reduce_add_sync" => "extern \"C\" unsigned __nfcxx_reduce_add_sync(unsigned, unsigned);\nstatic inline unsigned __reduce_add_sync(unsigned m, unsigned v) { (void)m; return __nfcxx_reduce_add_sync(0xffffffffu, v); }\n",
+  "__threadfence_system" => "extern \"C\" void __nfcxx_threadfence_system(void);\nstatic inline void __threadfence_system(void) { __nfcxx_threadfence_system(); }\n",
+  "__nanosleep" => "extern \"C\" void __nfcxx_nanosleep(unsigned);\nstatic inline void __nanosleep(unsigned ns) { __nfcxx_nanosleep(ns); }\n",
+  "__isnanf" => "static inline int __isnanf(float x) { return x != x; }\n",
+  "__hmax" => HALF_CORE + "static inline unsigned short __hmax(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n",
+  # __ldg: a plain load of the pointee (the read-only cache is a performance hint, not a semantic change).
+  "__ldg" => "static inline float __ldg(const float *p) { return *p; }\nstatic inline int __ldg(const int *p) { return *p; }\nstatic inline unsigned __ldg(const unsigned *p) { return *p; }\n",
+  # The warp shuffles (the emitter's WARP_SHUFFLES): int and float overloads, with and without the width. The mask and the
+  # width are ignored: the wrapper is the full warp (width 32, mask 0xffffffff), because the emitter needs the constant
+  # mask at the call and a wrapper's parameter is not one. Llama.cpp uses the full warp; a partial mask is not honoured.
+  "__half" => HALF_CORE,
+  "__float2half" => HALF_CORE,
+  "__half2float" => HALF_CORE,
+  "half" => HALF_CORE + "typedef __half half;\n",
+  "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
+  "int8_t" => "typedef signed char int8_t;\n",
+  "uint8_t" => "typedef unsigned char uint8_t;\n",
+  "int16_t" => "typedef short int16_t;\n",
+  "uint16_t" => "typedef unsigned short uint16_t;\n",
+  "int32_t" => "typedef int int32_t;\n",
+  "uint32_t" => "typedef unsigned int uint32_t;\n",
+  "int64_t" => "typedef long long int64_t;\n",
+  "uint64_t" => "typedef unsigned long long uint64_t;\n",
+  "ldexpf" => "static inline float ldexpf(float x, int e) { return x * (float)(1 << (e > 30 ? 30 : (e < -30 ? -30 : e))); }\n",
+  "fmaxf" => "static inline float fmaxf(float a, float b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }\n",
+  "__half2" => HALF2_TYPE,
+  "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { return (unsigned)a | ((unsigned)b << 16); }\n",
+  "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return (unsigned short)(h & 0xffffu); }\n",
+  "__high2half" => HALF2_TYPE + "static inline unsigned short __high2half(__half2 h) { return (unsigned short)(h >> 16); }\n",
+  "__half2half2" => HALF2_TYPE + "static inline __half2 __half2half2(unsigned short h) { return (unsigned)h | ((unsigned)h << 16); }\n",
+  "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { return (a & 0xffffu) | ((b & 0xffffu) << 16); }\n",
+  "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { return (a >> 16) | ((b >> 16) << 16); }\n",
+  "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float((unsigned short)(h >> 16)); }\n",
+  "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 1) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 1) << 16); }\n",
+  "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 0) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 0) << 16); }\n",
+  "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
+  "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
+  "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
+  "__hfma" => HALF_CORE + "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __float2half(__half2float(a) * __half2float(b) + __half2float(c)); }\n",
+  "__shfl_xor_sync" => SHFL_DEFS["bfly"],
+  "__shfl_down_sync" => SHFL_DEFS["down"],
+  "__shfl_up_sync" => SHFL_DEFS["up"],
+  "__shfl_sync" => SHFL_DEFS["idx"],
 }
 
 # The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
@@ -565,6 +1297,17 @@ def tokens_of(s)
     e = skip_literal(s, i)
     if e
       i = e
+      next
+    end
+    # comments are not code: a word in one (a `__device__` mentioned above a host function) is no token
+    if s[i] == "/" && s[i + 1] == "/"
+      e = s.index("\n", i)
+      i = e.nil? ? s.length : e
+      next
+    end
+    if s[i] == "/" && s[i + 1] == "*"
+      e = s.index("*/", i + 2)
+      i = e.nil? ? s.length : e + 2
       next
     end
     c = s[i]
@@ -716,7 +1459,28 @@ end
 
 # Device mode: a quoted #include of a file that exists is replaced by that file's text (recursively, relative to the
 # including file), so kernels kept in a .cu or .cuh of the same program are in the unit. System includes stay.
-def expand_includes(text, dir, depth)
+# Each file is expanded once per unit (`seen`, by absolute path): the headers of a CUDA backend include each other
+# heavily, and without this the expansion repeats them at every branch (llama.cpp's mmq.cu grew to 24 MB, from 20 KB).
+# Its include guards would drop the repeats anyway; a file meant to be included twice is not expanded twice.
+# The -I directories of the driver (project headers). A quoted include is looked up beside the including file first,
+# then in these, as the compiler does; an angle-bracket include is looked up in these only. System headers (CUDA's,
+# the C library's) are never inlined: the device unit has no use for them.
+$incdirs = []
+
+# mruby has no ENV, so the toolkit is the default prefix /usr/local/cuda (where the driver's CUDA_HOME points).
+def system_path?(path)
+  p = File.expand_path(path)
+  p.start_with?("/usr/", "/opt/", "/usr/local/cuda/")
+end
+
+def find_include(dir, name, quoted)
+  cands = []
+  cands << dir + "/" + name if quoted
+  $incdirs.each { |d| cands << d + "/" + name }
+  cands.find { |c| File.file?(c) && !system_path?(c) }
+end
+
+def expand_includes(text, dir, depth, seen = {})
   return text if depth > 8
   out = ""
   last = 0
@@ -725,12 +1489,22 @@ def expand_includes(text, dir, depth)
     rest = text[st...en].sub("#", "").strip
     next unless rest.start_with?("include")
     q = rest[7..-1].to_s.strip
-    next unless q.start_with?("\"")
-    name = q[1..-1].split("\"")[0].to_s
-    path = dir + "/" + name
-    next unless File.exist?(path)
-    inc = File.open(path, "rb") { |f| f.read }
-    out << text[last...st] << "\n" << expand_includes(inc, File.dirname(path), depth + 1) << "\n"
+    quoted = q.start_with?("\"")
+    next unless quoted || q.start_with?("<")
+    name = q[1..-1].split(quoted ? "\"" : ">")[0].to_s
+    path = find_include(dir, name, quoted)
+    next if path.nil?
+    key = File.expand_path(path)
+    out << text[last...st]
+    if seen[key]
+      out << "\n"
+    else
+      seen[key] = true
+      # The same two rewrites as the main file: a header of the backend has __launch_bounds__ in front of its
+      # template kernels, which kernel_template would not match.
+      inc = dynamic_shared_rewrite(strip_launch_bounds(File.open(path, "rb") { |f| f.read }))
+      out << "\n" << expand_includes(inc, File.dirname(path), depth + 1, seen) << "\n"
+    end
     last = en
   end
   out << text[last..-1].to_s
@@ -745,6 +1519,368 @@ end
 # contents are not in the unit; a name they supply is a missing declaration, reported by the front end). The
 # conditional directives (#if, #ifdef, ...) are kept as written. A __device__ variable is refused: device data is
 # not lowered yet.
+# ---- conditionals of the device pass
+
+# An expression the evaluator does not handle (a float literal, a string, a call with odd arguments): the conditional
+# is kept as it was, with its lines and both branches, as before the evaluator existed.
+class CondUnsupported < StandardError
+end
+
+def cond_fail(msg)
+  raise CondUnsupported, msg
+end
+#
+# The device unit is cut into top-level pieces by brace counting, and a preprocessor conditional opens or closes
+# braces in the text of both of its branches, so a kernel inside #if/#else never returns the count to zero. The
+# device pass therefore evaluates the conditionals first: the branches not taken are blanked (the line count is
+# kept), the #if/#ifdef/#else/#endif lines are removed, and #define and #undef of the taken branches stay.
+# The device pass defines CUDA's device-compile macros; the host pass is not affected.
+DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750" }
+
+def cond_tokens(s, line)
+  toks = []
+  i = 0
+  n = s.length
+  while i < n
+    c = s[i]
+    if white?(c)
+      i += 1
+    elsif ident_char?(c)
+      j = i
+      j += 1 while j < n && ident_char?(s[j])
+      w = s[i...j]
+      if c.ord >= 48 && c.ord <= 57
+        w = w[0...-1] while w.length > 0 && "uUlL".include?(w[-1])
+        v = (w.length > 2 && w[0] == "0" && (w[1] == "x" || w[1] == "X")) ? w[2..-1].to_i(16) : w.to_i
+        toks << [:num, v]
+      else
+        toks << [:id, w]
+      end
+      i = j
+    else
+      two = i + 1 < n ? s[i, 2] : ""
+      if %w[&& || == != <= >= << >>].include?(two)
+        toks << [:op, two]
+        i += 2
+      elsif "!~+-*/%<>&|^()?:,".include?(c)
+        toks << [:op, c]
+        i += 1
+      else
+        cond_fail("unsupported character #{c.inspect} in #if at line #{line}")
+      end
+    end
+  end
+  toks
+end
+
+# Evaluates a #if expression: integers, identifiers (their object-like macro value, else 0), defined(X), the usual C
+# operators. An unknown function-like call, such as __has_include(...), counts as 0.
+def cond_eval(s, defs, line, depth = 0)
+  cond_fail("#if nesting too deep at line #{line}") if depth > 16
+  st = { toks: cond_tokens(s, line), pos: 0 }
+  v = cond_expr(st, defs, line, depth)
+  cond_fail("unsupported #if expression at line #{line}") if st[:pos] != st[:toks].length
+  v
+end
+
+def cond_peek(st, x = nil)
+  t = st[:toks][st[:pos]]
+  return false if t.nil?
+  return false if x && !(t[0] == :op && t[1] == x)
+  true
+end
+
+def cond_expr(st, defs, line, depth)
+  c = cond_binary(st, defs, line, depth, 0)
+  return c unless cond_peek(st, "?")
+  st[:pos] += 1
+  a = cond_expr(st, defs, line, depth)
+  cond_fail("expected ':' in #if at line #{line}") unless cond_peek(st, ":")
+  st[:pos] += 1
+  b = cond_expr(st, defs, line, depth)
+  c != 0 ? a : b
+end
+
+# Binary operators by precedence level, lowest first.
+COND_LEVELS = [["||"], ["&&"], ["|"], ["^"], ["&"], ["==", "!="], ["<", ">", "<=", ">="], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]]
+
+def cond_binary(st, defs, line, depth, level)
+  return cond_unary(st, defs, line, depth) if level >= COND_LEVELS.length
+  l = cond_binary(st, defs, line, depth, level + 1)
+  loop do
+    t = st[:toks][st[:pos]]
+    break unless t && t[0] == :op && COND_LEVELS[level].include?(t[1])
+    op = t[1]
+    st[:pos] += 1
+    if op == "||"
+      r = cond_binary(st, defs, line, depth, level + 1)
+      l = (l != 0 || r != 0) ? 1 : 0
+    elsif op == "&&"
+      r = cond_binary(st, defs, line, depth, level + 1)
+      l = (l != 0 && r != 0) ? 1 : 0
+    else
+      r = cond_binary(st, defs, line, depth, level + 1)
+      l = case op
+          when "|" then l | r
+          when "^" then l ^ r
+          when "&" then l & r
+          when "==" then l == r ? 1 : 0
+          when "!=" then l != r ? 1 : 0
+          when "<" then l < r ? 1 : 0
+          when ">" then l > r ? 1 : 0
+          when "<=" then l <= r ? 1 : 0
+          when ">=" then l >= r ? 1 : 0
+          when "<<" then l << r
+          when ">>" then l >> r
+          when "+" then l + r
+          when "-" then l - r
+          when "*" then l * r
+          when "/" then (r == 0 ? cond_fail("division by zero in #if at line #{line}") : l / r)
+          when "%" then (r == 0 ? cond_fail("division by zero in #if at line #{line}") : l % r)
+          end
+    end
+  end
+  l
+end
+
+def cond_unary(st, defs, line, depth)
+  t = st[:toks][st[:pos]]
+  cond_fail("unexpected end of #if expression at line #{line}") if t.nil?
+  if t[0] == :op && t[1] == "!"
+    st[:pos] += 1
+    return cond_unary(st, defs, line, depth) == 0 ? 1 : 0
+  elsif t[0] == :op && t[1] == "-"
+    st[:pos] += 1
+    return -cond_unary(st, defs, line, depth)
+  elsif t[0] == :op && t[1] == "+"
+    st[:pos] += 1
+    return cond_unary(st, defs, line, depth)
+  elsif t[0] == :op && t[1] == "~"
+    st[:pos] += 1
+    return ~cond_unary(st, defs, line, depth)
+  elsif t[0] == :op && t[1] == "("
+    st[:pos] += 1
+    v = cond_expr(st, defs, line, depth)
+    cond_fail("expected ')' in #if at line #{line}") unless cond_peek(st, ")")
+    st[:pos] += 1
+    return v
+  elsif t[0] == :num
+    st[:pos] += 1
+    return t[1]
+  elsif t[0] == :id && t[1] == "defined"
+    st[:pos] += 1
+    paren = cond_peek(st, "(")
+    st[:pos] += 1 if paren
+    name = st[:toks][st[:pos]]
+    cond_fail("defined without a name at line #{line}") unless name && name[0] == :id
+    st[:pos] += 1
+    if paren
+      cond_fail("expected ')' after defined at line #{line}") unless cond_peek(st, ")")
+      st[:pos] += 1
+    end
+    return defs.key?(name[1]) ? 1 : 0
+  elsif t[0] == :id
+    st[:pos] += 1
+    if cond_peek(st, "(")
+      # a call of a function-like macro or an unknown function: 0, with its arguments skipped
+      st[:pos] += 1
+      nest = 1
+      while nest > 0
+        u = st[:toks][st[:pos]]
+        cond_fail("unbalanced parentheses in #if at line #{line}") if u.nil?
+        nest += 1 if u[0] == :op && u[1] == "("
+        nest -= 1 if u[0] == :op && u[1] == ")"
+        st[:pos] += 1
+      end
+      return 0
+    end
+    val = defs[t[1]]
+    # The host analysis (see rewrite) keeps both branches of a condition on a name the unit does not define: the name
+    # may come from a system header (CUDART_VERSION), so its value is not known here.
+    cond_fail("#if names #{t[1]}, which the unit does not define (line #{line})") if val.nil? && $cond_strict
+    return 0 if val.nil? || val == :function
+    return cond_eval(val, defs, line, depth + 1)
+  end
+  cond_fail("unsupported #if expression at line #{line}")
+end
+
+# Resolves the conditionals of a translation unit. defs maps a name to its object-like replacement text, a function-like
+# macro to :function, and a macro with no value to "". A conditional that cannot be evaluated (CondUnsupported) is
+# kept with its branches; the lines of the other conditionals are blanked, so the line count does not change.
+# A line without its // comment (and without /* */ comments on it): for the values of #define in the conditionals.
+def strip_comments_line(v)
+  out = ""
+  i = 0
+  while i < v.length
+    if v[i] == "/" && v[i + 1] == "/"
+      break
+    elsif v[i] == "/" && v[i + 1] == "*"
+      e = v.index("*/", i + 2)
+      break if e.nil?
+      out << " "
+      i = e + 2
+    else
+      out << v[i]
+      i += 1
+    end
+  end
+  out
+end
+
+def resolve_conditionals(text, defs)
+  out = []
+  stack = []
+  active = true
+  pending = nil
+  lineno = 0
+  text.split("\n", -1).each do |raw|
+    lineno += 1
+    line = raw
+    if pending
+      # the joined line is one output line: a newline here would shift every later line (launches are keyed by line)
+      line = pending + " " + raw
+      pending = nil
+    end
+    if line.end_with?("\\")
+      pending = line[0...-1]
+      out << ""
+      next
+    end
+    s = line.lstrip
+    unless s.start_with?("#")
+      out << (active ? line : "")
+      next
+    end
+    d = s[1..-1].lstrip
+    name = ""
+    k = 0
+    while k < d.length && ident_char?(d[k])
+      name += d[k]
+      k += 1
+    end
+    rest = d[k..-1].to_s.strip
+    case name
+    when "if", "ifdef", "ifndef"
+      parent = active
+      begin
+        if name == "if"
+          cond = parent ? cond_eval(rest, defs, lineno) != 0 : false
+        else
+          nm = rest.split(" ")[0].to_s
+          cond = parent ? (defs.key?(nm) == (name == "ifdef")) : false
+        end
+        stack << { parent: parent, taken: cond, kept: false }
+        active = parent && cond
+        out << ""
+      rescue CondUnsupported
+        stack << { parent: parent, taken: true, kept: true }
+        active = parent
+        out << (parent ? line : "")
+      end
+    when "elif"
+      refuse("#elif without #if at line #{lineno}") if stack.empty?
+      fr = stack.last
+      if fr[:kept]
+        out << (fr[:parent] ? line : "")
+      elsif fr[:taken]
+        active = false
+        out << ""
+      else
+        begin
+          cond = fr[:parent] ? cond_eval(rest, defs, lineno) != 0 : false
+          fr[:taken] = cond
+          active = fr[:parent] && cond
+          out << ""
+        rescue CondUnsupported
+          fr[:kept] = true
+          fr[:taken] = true
+          active = fr[:parent]
+          out << (fr[:parent] ? line : "")
+        end
+      end
+    when "else"
+      refuse("#else without #if at line #{lineno}") if stack.empty?
+      fr = stack.last
+      if fr[:kept]
+        out << (fr[:parent] ? line : "")
+      else
+        active = fr[:parent] && !fr[:taken]
+        fr[:taken] = true
+        out << ""
+      end
+    when "endif"
+      refuse("#endif without #if at line #{lineno}") if stack.empty?
+      fr = stack.pop
+      active = fr[:parent]
+      out << (fr[:kept] && fr[:parent] ? line : "")
+    when "define"
+      if active
+        mname = ""
+        j = 0
+        while j < rest.length && ident_char?(rest[j])
+          mname += rest[j]
+          j += 1
+        end
+        if rest[j] == "("
+          defs[mname] = :function
+        else
+          # the value without its comment: `#define CUDART_HMAX 11070 // CUDA 11.7` is 11070
+          defs[mname] = strip_comments_line(rest[j..-1].to_s).strip
+        end
+      end
+      out << (active ? line : "")
+    when "undef"
+      defs.delete(rest.split(" ")[0].to_s) if active
+      out << (active ? line : "")
+    else
+      out << (active ? line : "")
+    end
+  end
+  refuse("#if without #endif") unless stack.empty?
+  out.join("\n")
+end
+
+# The identifier written right after the first whole-word occurrence of kw in t, or nil (anonymous, or not found).
+def tag_after(t, kw)
+  i = 0
+  while (j = t.index(kw, i))
+    k = j + kw.length
+    whole = (j == 0 || !ident_char?(t[j - 1])) && (k >= t.length || !ident_char?(t[k]))
+    if whole
+      k += 1 while k < t.length && white?(t[k])
+      return nil unless k < t.length && (ident_char?(t[k]) && !(t[k].ord >= 48 && t[k].ord <= 57))
+      e = k
+      e += 1 while e < t.length && ident_char?(t[e])
+      return t[k...e]
+    end
+    i = k
+  end
+  nil
+end
+
+# The names an enum defines: its enumerators (the identifier at the start of each comma-separated item of its body).
+# Only these: every other identifier of the enum (a type it mentions) is not defined by it.
+def enum_enumerators(t)
+  open = t.index("{")
+  return [] if open.nil?
+  close = matching_brace(t, open)
+  body = t[(open + 1)...(close || t.length)]
+  names = []
+  body.split(",").each do |item|
+    first = tokens_of(item.split("=")[0].to_s)[0]
+    names << first if first
+  end
+  names
+end
+
+# A function definition or declaration whose head names a type keyword (`static enum ggml_status f(...) {`): the
+# keyword is not a type definition. The head is the text before the first brace; a `(` in it marks a function.
+def function_head?(t)
+  b = t.index("{")
+  h = b.nil? ? t : t[0...b]
+  h.index("(") && !(h.index("=") && h.index("=") < h.index("("))
+end
+
 def device_tu(text)
   pieces = top_pieces(text).map do |pc|
     st, en, kind, body = pc
@@ -773,7 +1909,16 @@ def device_tu(text)
   kernels = []
   seeds = []
   # The template launches of the source: each instance is a wrapper kernel (see template_site).
-  template_launches(text).each { |nm, ta| template_site(nm, ta) }
+  # A launch whose template arguments depend on an enclosing template parameter is not a wrapper: its instance is
+  # fixed only by the instantiation, and the host pass refuses it (see rewrite). Registering it here would give a
+  # wrapper that still names the parameter.
+  template_launches(text).each { |nm, ta, pos| template_site(nm, ta) if dependent_on_template(text, pos, ta).nil? }
+  # the dependent launches: the wrapper of each instance of their enclosing template (see dependent_launches)
+  dependent_launches(text).each_value do |d|
+    d[:insts].each do |inst|
+      template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", "))
+    end
+  end
   pieces.each do |pc|
     next if pc[:kind] == :pp
     if pc[:device]
@@ -808,15 +1953,18 @@ def device_tu(text)
     end
     next if toks.empty?
     next if pc[:body] && t.index("(") && !toks.include?("struct") && !toks.include?("class") && !toks.include?("union") && !toks.include?("enum")
-    next if !pc[:body] && t.index("(") && !t.index("=") # host prototype
+    next if !pc[:body] && t.index("(") && !t.index("=") && toks.first != "typedef" # host prototype (a typedef is not one)
     if toks.first == "typedef"
-      pc[:defined] = [toks.last]
+      # `typedef R (*name)(args)` names `name`, which follows the `(*`; otherwise the name is the last identifier.
+      fp = t.index("(*")
+      pc[:defined] = [fp ? tokens_of(t[(fp + 2)..-1].to_s)[0] : toks.last].compact
     elsif toks.first == "using"
       pc[:defined] = [toks[1]].compact
-    elsif (kw = (toks & %w[struct class union enum]).first)
-      k = toks.index(kw)
-      pc[:defined] = [toks[k + 1]].compact
-      pc[:defined] += toks if kw == "enum"   # the enumerators: over-approximated by every identifier
+    elsif (kw = (toks & %w[struct class union enum]).first) && !function_head?(t)
+      # The tag is the identifier written right after the keyword; an anonymous one (`union { ... }` inside a function)
+      # names nothing. (The next token in tokens_of skips the brace, so it must not be taken from there.)
+      pc[:defined] = [tag_after(t, kw)].compact
+      pc[:defined] += enum_enumerators(t) if kw == "enum"
     elsif pc[:body]
       next
     elsif toks.include?("const") || toks.include?("constexpr")
@@ -995,8 +2143,70 @@ end
 device = false
 kernels_path = nil
 path = nil
+# The host copy of a unit gives each kernel internal linkage (static), as nvcc does: two translation units that
+# include the same header with a kernel must not define the same host symbol. The embedded registration of each
+# unit refers to its own host copy. Literals and comments are skipped; only the whole identifier is replaced.
+# The storage keyword a host copy gets: `static`, unless the declaration already has one (then the qualifier goes).
+# The check is on the declaration so far (from the last ; { or }), so `static constexpr __device__ int f()` keeps
+# its one storage class.
+def host_storage(out, kw)
+  start = [out.rindex(";"), out.rindex("{"), out.rindex("}")].compact.max
+  decl = start ? out[(start + 1)..-1] : out
+  already = false
+  word = ""
+  (decl + " ").each_char do |c|
+    if ident_char?(c)
+      word << c
+    else
+      already = true if word == "static"
+      word = ""
+    end
+  end
+  already ? "" : kw
+end
+
+def host_linkage(text)
+  out = ""
+  i = 0
+  word = "__global__"
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    if text[i, word.length] == word && !(i > 0 && ident_char?(text[i - 1])) && !ident_char?(text[i + word.length])
+      out << host_storage(out, "static")
+      i += word.length
+      next
+    end
+    # A __device__ function (not a variable) is device-only code, but its host copy would still be an external symbol:
+    # the same header in two units would define it twice. Its host copy is static too.
+    if text[i, 8] == "__device" && !(i > 0 && ident_char?(text[i - 1])) && text[i, 10] == "__device__" &&
+       !ident_char?(text[i + 10])
+      j = i + 10
+      j += 1 while j < text.length && (text[j] == " " || text[j] == "\n" || text[j] == "\t")
+      k = j
+      k += 1 while k < text.length && !"(=;{".include?(text[k])
+      if k < text.length && text[k] == "("
+        # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
+        after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
+        out << (after_static ? "" : host_storage(out, "static"))
+        i += 10
+        next
+      end
+    end
+    out << text[i]
+    i += 1
+  end
+  out
+end
+
 ARGV.each do |a|
-  if a == "--device"
+  if a.start_with?("-I")
+    $incdirs << a[2..-1]
+  elsif a == "--device"
     device = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
@@ -1010,10 +2220,19 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
 $expanded = expand_includes(text, File.dirname(path), 0)
+$expanded = launch_prepare($expanded)
 if device
+  # The device unit is built from the conditionals of the device pass (see resolve_conditionals).
+  defs = {}
+  DEVICE_PASS_MACROS.each { |k, v| defs[k] = v }
+  $expanded = resolve_conditionals($expanded, defs)
+  # #include lines of system headers (and of headers not inlined) are not in the device unit: a top-level piece may
+  # carry one in front of a declaration, so they are removed here, not by the piece's keep decision.
+  $expanded = $expanded.split("\n").reject { |l| l.lstrip.start_with?("#include") || (l.lstrip.start_with?("#") && l.lstrip[1..-1].to_s.lstrip.start_with?("include")) }.join("\n")
   dev, kernels = device_tu($expanded)
   File.open(kernels_path, "wb") { |f| f.write(kernels.map { |k| k + "\n" }.join) } unless kernels_path.nil?
   print dev
 else
-  print rewrite(text, path)
+  # The host copy has the local headers expanded too: their launches are in the host unit as well.
+  print host_linkage(rewrite($expanded, path))
 end

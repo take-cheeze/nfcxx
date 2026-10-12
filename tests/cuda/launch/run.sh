@@ -2,6 +2,7 @@
 # Launch-path features of llama.cpp's CUDA backend, through the nfcxx driver (see docs/notes/gpu.md, "Launch path").
 #   pass:    builds, links, runs on the GPU, and prints the expected line.
 #   refuse:  the driver refuses with exit 3 and the message names the gap (the work is not done yet).
+#   (Dependent launches: the enclosing template's concrete instances come from its explicit calls in the unit.)
 # Needs the CUDA toolkit (CUDA_HOME, default /usr/local/cuda) and an NVIDIA GPU; skips (exit 0) when missing.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -40,6 +41,17 @@ refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
 
 pass bounds.cu "launch_bounds: no error, 0 mismatches"
 pass async.cu "async: no error, 0 mismatches"
-refuse dynshared.cu "call of __nfcxx_dynshared_addr"
-refuse tmpl_dep.cu "depends on the template parameter T"
+pass dynshared.cu "dynamic shared: no error, 0 mismatches"
+pass macro_launch.cu "macro launch: no error, value 3"
+pass deduced_launch.cu "deduced launch: no error, value 3.0"
+pass member_launch.cu "member launch: no error, value 7.0"
+refuse refuse_deduce_expr.cu "cannot deduce a template argument from the argument"
+refuse refuse_member_nocall.cu "depends on the template parameter Real of run"
+pass tmpl_explicit.cu "templates: no error, 0 mismatches"
+pass tmpl_dep.cu "template dependent: no error, 0 mismatches"
+pass dep_type.cu "dep type: no error, 0 mismatches"
+pass dep_value.cu "dep value: no error, 0 mismatches"
+refuse refuse_dep_nocall.cu "instances are not known"
+refuse refuse_dep_cycle.cu "instantiates itself through its template arguments"
+refuse refuse_dep_deduced.cu "instances are not known"
 exit $fail
