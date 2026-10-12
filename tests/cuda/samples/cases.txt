@@ -1,6 +1,7 @@
 # Test beds: real CUDA programs through the nfcxx driver (tests/cuda/samples/run.sh).
 # Fields: name | source tree (cpp = cuda-samples cpp/, rodinia = Rodinia cuda/) | dir in that tree | sources | expect | marker | known error
 # expect:
+#   build-only   compiles and links; the program needs input files (Rodinia), so it is not run here.
 #   pass         builds, runs, exits 0, and prints marker (the sample's own check). Mutants must lose the marker.
 #   unverified   builds, runs, exits 0; the sample has no printed check (marker empty).
 #   fail-compile currently fails to compile; the run checks that the recorded error text still appears, and
@@ -11,7 +12,7 @@ simpleZeroCopy | cpp | 0_Introduction/simpleZeroCopy | simpleZeroCopy.cu | unver
 simpleAtomicIntrinsics | cpp | 0_Introduction/simpleAtomicIntrinsics | simpleAtomicIntrinsics.cu | fail-compile |  | identifier "atomicAdd" is undefined
 simpleVoteIntrinsics | cpp | 0_Introduction/simpleVoteIntrinsics | simpleVoteIntrinsics.cu | fail-compile | | identifier "__any_sync" is undefined
 simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | fail-compile | | identifier "printf" is undefined
-matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile |  | linkage specification is not allowed
+matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | unverified | | 
 asyncAPI | cpp | 0_Introduction/asyncAPI | asyncAPI.cu | unverified | | 
 reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | refused: template launch of reduce0<T> depends on the template parameter T of the enclosing template
 shfl_scan | cpp | 2_Concepts_and_Techniques/shfl_scan | shfl_scan.cu | fail-compile |  | namespace "cooperative_groups" has no member "tiled_partition"
@@ -21,8 +22,8 @@ scalarProd | cpp | 2_Concepts_and_Techniques/scalarProd | scalarProd.cu scalarPr
 threadFenceReduction | cpp | 2_Concepts_and_Techniques/threadFenceReduction | threadFenceReduction.cu | fail-compile |  | name must be a namespace name
 simpleCooperativeGroups | cpp | 0_Introduction/simpleCooperativeGroups | simpleCooperativeGroups.cu | fail-compile | | identifier "thread_group" is undefined
 MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | refused: template launch of computeValue<Real> depends on the template parameter Real of the enclosing template
-pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile |  | identifier "__syncthreads" is undefined
-hotspot | rodinia | hotspot | hotspot.cu | fail-compile |  | identifier "__syncthreads" is undefined
-nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile |  | identifier "__syncthreads" is undefined
+pathfinder | rodinia | pathfinder | pathfinder.cu | build-only |  | 
+hotspot | rodinia | hotspot | hotspot.cu | build-only |  | 
+nw | rodinia | nw | needle.cu | build-only |  | 
 gaussian | rodinia | gaussian | gaussian.cu | fail-compile | | class "cudaDeviceProp" has no member "clockRate"
 bfs | rodinia | bfs | bfs.cu kernel.cu kernel2.cu | fail-compile |  | incomplete type "void" is not allowed
