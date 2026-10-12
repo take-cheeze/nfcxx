@@ -250,6 +250,26 @@ def check_formats
   puts "bc2cpp binary loader check: #{want.length} opcode formats match ops.h"
 end
 
+def check_debug_file_lookup
+  files = [RiteBinary::DebugFile.new(3, 'first.rb'),
+           RiteBinary::DebugFile.new(7, 'second.rb'),
+           RiteBinary::DebugFile.new(7, 'last.rb')]
+  [nil, [], files.first(1), files].each do |records|
+    rite = RiteBinary::RiteIrep.new(iseq: "\0" * 12, debug_files: records)
+    decoder = InsnDecoder::Decoder.new(rite)
+    [0, 3, 6, 7, 11, 12, 13, 7, 0].each do |pc|
+      expected = if records && !records.empty? && pc < rite.iseq.bytesize
+                   records.reverse_each.find { |file| file.start_pos <= pc } || records.first
+                 end
+      2.times do
+        actual = decoder.__send__(:debug_file_at, pc)
+        abort "bc2cpp binary loader check: FAIL debug file at #{pc}" unless actual.equal?(expected)
+      end
+    end
+  end
+end
+
+check_debug_file_lookup
 check_formats
 results = Dir.mktmpdir do |dir|
   synthetic = File.join(dir, 'synthetic.rb')
