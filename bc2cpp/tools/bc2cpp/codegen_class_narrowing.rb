@@ -221,9 +221,16 @@ class CodeGen
     owner if owner && @closed_world.class_declared?(owner) && @closed_world.instance_class?(owner)
   end
 
+  # Symbol's chain (ADR 0429): the closed world has no class_parent for it, so without this a Symbol bit is unknown and
+  # passes both edges of every kind_of test. Only a name class_test_constant admits reaches it, and none of those is
+  # a superclass or a module of Symbol, so the verdict is exact. It is not in CLASS_TEST_CORE_CHAIN, which also
+  # decides respond_to? (Symbol's native methods are not modelled there).
+  SYMBOL_CLASS_CHAIN = %w[Symbol].freeze
+
   # Superclass chain (full names) of exactly class +name+, or nil when the world does not pin it down.
   def class_test_chain(name)
     return CLASS_TEST_CORE_CHAIN[name] if CLASS_TEST_CORE_CHAIN.key?(name)
+    return SYMBOL_CLASS_CHAIN if name == 'Symbol' && loadsym_class_enabled?
 
     chain = []
     cur = name
