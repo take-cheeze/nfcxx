@@ -230,6 +230,23 @@ int main() {
         // comparisons between integers and floats
         "local function lt(a, b) return a < b end local function le(a, b) return a <= b end return lt(1, 1.5), lt(2^53, 2^53 + 1), lt(9007199254740993, 9007199254740992.0), le(math.maxinteger, 2^63), lt(math.mininteger, -2^63), lt(0/0, 1), le(1, 0/0)",
         "local function e(a, b) return a == b end return e(1, 1.0), e(2^53, 2^53 + 1), e(math.maxinteger, math.maxinteger + 0.0), e(0/0, 0/0), e(true, true)",
+        // no parameters; a function without a result called as a statement; a boolean global
+        "local function k() return 42 end local function k2() local s = 0 for i = 1, 10 do s = s + i end return s end return k(), k2(), k() + k2()",
+        "local function v(n) local s = 0 for i = 1, n do s = s + i end end local function w(n) v(n) v(n + 1) return n end return w(3), w(4.5), w(0)",
+        "ok = true local function f(x) if ok then return x end return -x end local a, b = f(1), f(2) ok = false local c = f(3) ok = 0 return a, b, c, pcall(f, 4)",
+        // the same variable twice on the left: the interpreter stores right to left, so the first value wins
+        "local function f(a, b) local x = 0 x, x = a, b return x end local function g(a, b, c) local x, y = 0, 0 x, y, x = a, b, c return x * 100 + y end "
+        "return f(1, 2), f(1.5, 2.5), g(1, 2, 3), g(1.5, 2.5, 3.5)",
+        // every comparison of integers around 2^53 and 2^63 with floats, in both orders
+        "local function lt(a, b) return a < b end local function le(a, b) return a <= b end local function gt(a, b) return a > b end "
+        "local function ge(a, b) return a >= b end local function eq(a, b) return a == b end local function ne(a, b) return a ~= b end "
+        "local ints = {0, 1, -1, 9007199254740991, 9007199254740992, 9007199254740993, 9007199254740995, 4611686018427387904, 9223372036854775807, "
+        "-9223372036854775807 - 1, -9007199254740993, -9007199254740992} "
+        "local flts = {0.0, 0.5, -0.5, 1.0, 9007199254740992.0, 9007199254740994.0, 9223372036854775808.0, -9223372036854775808.0, 1e300, -1e300, 1/0, -1/0} "
+        "local out = {} local function t(b) out[#out + 1] = b and 'T' or 'F' end "
+        "for i = 1, #ints do for j = 1, #flts do local a, b = ints[i], flts[j] "
+        "t(lt(a, b)) t(le(a, b)) t(gt(a, b)) t(ge(a, b)) t(eq(a, b)) t(ne(a, b)) t(lt(b, a)) t(le(b, a)) t(gt(b, a)) t(ge(b, a)) t(eq(b, a)) t(ne(b, a)) end end "
+        "return table.concat(out)",
         // shifts and bits
         "local function s(x, n) return x << n, x >> n end local function l(x, n) return x << n end local function r(x, n) return x >> n end return l(1, 63), l(1, 64), l(1, -1), r(-1, 1), r(-1, 64), l(1.0, 2), pcall(l, 1.5, 1)",
         // booleans, and/or/not
@@ -245,6 +262,9 @@ int main() {
         "local function d(n) if n == 0 then return 0 end return 1 + d(n - 1) end local r = {} for n = 1490, 1505 do r[#r + 1] = tostring(select(2, pcall(d, n))) end return table.concat(r, ' ')",
         "local function d(n) if n == 0 then return 0 end return 1 + d(n - 1) end return d(1400)",
         "local function a(n) if n == 0 then return 0 end return 1 + b(n - 1) end function b(n) if n == 0 then return 0 end return 1 + a(n - 1) end return a(100), pcall(a, 5000)",
+        // a NaN made from constants prints the same (its sign is the processor's, not the C compiler's)
+        "local function n0() return 0.0 / 0.0 end local function n1(a) local z = 0.0 return a / z - a / z end local function n2() local z = 0.0 return z / z end "
+        "local function n3() return 1e308 * 10 - 1e308 * 10 end return n0(), n1(1.0), n2(), n3(), n0() ~= n0()",
         // floats: the mandelbrot iteration and integration
         "local function m(cx, cy, k) local x, y, i = 0.0, 0.0, 0 while i < k and x * x + y * y <= 4.0 do x, y = x * x - y * y + cx, 2.0 * x * y + cy i = i + 1 end return i end return m(0, 0, 20), m(1, 1, 20), m(-0.75, 0.1, 100), m(0.3, 0.5, 100)",
         "local s = 0.5 local function f(x) return s * x * x end local function g(n) local t = 0.0 for i = 1, n do t = t + f(i) end return t end return g(10), g(100)",
@@ -321,6 +341,31 @@ int main() {
     S.call(Value::function(cl), nullptr, 0, o);
     CHECK(S.tier_state(o.first()).find("abandoned") != std::string::npos);
     CHECK(eval(S, "return z(7, 2)") == "3");                        // still correct
+    CHECK(consistent(S));
+  }
+
+  std::printf("-- at most four versions of a function; operands that can fail keep their order\n");
+  {
+    State S;
+    S.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    eval(S, "function two(a, b) return a + b end");
+    CHECK(eval(S, "return two(1, 2), two(1, 2.5), two(1.5, 2), two(1.5, 2.5)") == "3,3.5,3.5,4.0");
+    CHECK(S.stats.tier_compiled == 4 && S.stats.tier_calls == 4);
+    CHECK(eval(S, "return two(true, 1)") == "ERR:test:1: attempt to perform arithmetic on a boolean value (local 'a')");
+    CHECK(S.stats.tier_compiled == 4 && S.stats.tier_calls == 4 && S.stats.tier_bailouts == 1);   // a fifth combination: no version for it
+    CHECK(eval(S, "return two(5, 6)") == "11");
+    CHECK(S.stats.tier_calls == 5);
+    // `(1 // a) + spin(0)`: the interpreter divides first and raises; the C compiler may evaluate the operands of + in either order,
+    // and spin never returns. The generated code must raise (this check would hang otherwise: the alarm ends the test)
+    alarm(120);
+    eval(S, "local function spin(n) while true do n = n + 1 end return n end function g(a) return (1 // a) + spin(0) end");
+    CHECK(eval(S, "return pcall(g, 0)") == "false,test:1: attempt to divide by zero");
+    // the same with the arguments of a call, which C compilers often evaluate from the right
+    eval(S, "local function spin2(n) while true do n = n + 1 end return n end local function add(x, y) return x + y end "
+            "function g2(a) return add(1 // a, spin2(0)) end");
+    CHECK(eval(S, "return pcall(g2, 0)") == "false,test:1: attempt to divide by zero");
+    alarm(0);
     CHECK(consistent(S));
   }
 

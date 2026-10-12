@@ -248,7 +248,7 @@ struct Stats {
   std::uint64_t tier_bailouts = 0;    // calls of a compiled function that ran in the interpreter instead: an argument or a binding
                                       // the code did not assume (tier_guard_misses), or a run abandoned half way (tier_aborts)
   std::uint64_t tier_guard_misses = 0;
-  std::uint64_t tier_aborts = 0;      // runs abandoned after starting: a division by zero, too deep a recursion, a float with no integer value
+  std::uint64_t tier_aborts = 0;      // runs abandoned after starting: an integer // or % by zero, a for step of zero, a recursion too deep
 };
 
 // Tiering is off unless a State is given options (or NFCAST_TIER is set in the environment, for the test drivers). A function

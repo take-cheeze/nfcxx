@@ -991,7 +991,11 @@ const char* kPostRt =
     "static void nfct_bail(nfcr_Ctx* cx) { longjmp(*(jmp_buf*)cx->jb, 1); }\n"
     "static nfcr_i64 nfct_idiv(nfcr_Ctx* cx, nfcr_i64 a, nfcr_i64 b) { if (b == 0) nfct_bail(cx); return nfcr_idiv(a, b); }\n"
     "static nfcr_i64 nfct_imod(nfcr_Ctx* cx, nfcr_i64 a, nfcr_i64 b) { if (b == 0) nfct_bail(cx); return nfcr_imod(a, b); }\n"
-    "static double nfct_dbl(nfcr_u64 bits) { union { nfcr_u64 u; double d; } x; x.u = bits; return x.d; }\n";
+    "static double nfct_dbl(nfcr_u64 bits) { union { nfcr_u64 u; double d; } x; x.u = bits; return x.d; }\n"
+    // The C compiler folds 0.0 / 0.0 to a positive NaN where the interpreter divides at run time and gets the processor's (negative on
+    // x86); an operation on two constants, which the parser leaves alone exactly when its result is a NaN, goes through this.
+    "static double nfct_id(double x) { return x; }\n"
+    "static double (*volatile nfct_opq_p)(double) = nfct_id;\n";
 
 struct Gen {
   Unit& U;
@@ -1104,8 +1108,13 @@ struct Gen {
       case IExpr::Arith: {
         Ty ta = ty(e->kids[0]), tb = ty(e->kids[1]);
         std::vector<std::string> o = operands(e->kids);
-        const std::string &a = o[0], &b = o[1];
         bool ii = ta == Y_I && tb == Y_I;
+        if (e->kids[0]->k == IExpr::Const && e->kids[1]->k == IExpr::Const && (!ii || e->op == AR_DIV || e->op == AR_POW) &&
+            e->op != AR_BAND && e->op != AR_BOR && e->op != AR_BXOR && e->op != AR_SHL && e->op != AR_SHR) {
+          o[0] = "nfct_opq_p(" + D(o[0], ta) + ")";  // not for the C compiler to evaluate
+          ta = Y_F;
+        }
+        const std::string &a = o[0], &b = o[1];
         switch (e->op) {
           case AR_ADD: return ii ? "nfcr_add(" + a + ", " + b + ")" : "(" + D(a, ta) + " + " + D(b, tb) + ")";
           case AR_SUB: return ii ? "nfcr_sub(" + a + ", " + b + ")" : "(" + D(a, ta) + " - " + D(b, tb) + ")";
