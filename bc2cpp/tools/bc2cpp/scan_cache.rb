@@ -18,6 +18,12 @@ module ScanCache
   VERSION = 1
   ENV_NAME = 'BC2CPP_SCAN_CACHE_DIR'
 
+  # An in-process memo with the same keys (ADR 0416). WarmGenerator's server fills it before it forks, so every
+  # forked generation finds the scans in memory. nil (the default) leaves it off.
+  class << self
+    attr_accessor :memory
+  end
+
   module_function
 
   def directory
@@ -29,11 +35,20 @@ module ScanCache
   # key is known, else the block's, which is stored for the next process.
   def fetch(name, inputs, cache_absent: true)
     dir = directory
-    return yield unless dir
+    memo = memory
+    return yield unless dir || memo
 
     key = key_for(name, inputs, cache_absent)
     return yield unless key
 
+    return memo.fetch(key) if memo&.key?(key)
+
+    value = dir ? fetch_entry(dir, name, key) { yield } : yield
+    memo[key] = value if memo
+    value
+  end
+
+  def fetch_entry(dir, name, key)
     path = File.join(dir, "#{name}-#{key}.bin")
     stored = load_entry(path)
     return stored.first if stored
