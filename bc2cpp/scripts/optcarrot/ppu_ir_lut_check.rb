@@ -40,6 +40,8 @@ Dir.mktmpdir('ppu-ir-lut') do |temp|
 
   build = ENV['MRUBY_BUILD']
   if build
+    raise "MRUBY_BUILD has no compatible library: #{build}" unless File.file?(File.join(build, 'lib/libmruby.a'))
+
     script = <<~RUBY_SCRIPT
       #{File.read(File.join(root, 'tools/optcarrot_probe/shim_integer_aref.rb'))}
       module Optcarrot
@@ -145,6 +147,8 @@ Dir.mktmpdir('ppu-ir-lut') do |temp|
     rom = File.join(root, '3rd/optcarrot/examples/Lan_Master.nes')
     File.write(bundle, "ARGV = [#{rom.dump}, '1']\n" + bundled)
     system(binary, bundle, exception: true)
+  else
+    puts 'Optcarrot PPU IR LUT native check: SKIP (set MRUBY_BUILD to a compatible Optcarrot probe host)'
   end
 end
 puts 'Optcarrot PPU bytecode IR LUT check: PASS (exact tree, decoded drift and child-reference refusal)'
