@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'scan_cache'
+
 # Extracts a deliberately small set of direct-call expressions from mruby's
 # C method implementations. This is not a C-to-C++ translator: it accepts
 # supported zero-argument or single-required-argument registrations with a
@@ -73,7 +75,13 @@ module NativeExpressionDevirt
     source.scan(pattern, &block)
   end
 
+  # The scans that read only `paths` (and, for the exact-class scan, the public API headers) are memoized across
+  # processes (ScanCache, ADR 0415); the bodies are scan_analyze and scan_exact_class_expressions.
   def analyze(paths)
+    ScanCache.fetch('native_expression_devirt.analyze', Array(paths)) { scan_analyze(paths) }
+  end
+
+  def scan_analyze(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     implementations = {}
 
@@ -164,6 +172,11 @@ module NativeExpressionDevirt
   # MRB_MT_INIT_ROM, and the class's instance tag comes from
   # MRB_SET_INSTANCE_TT. Both are needed to emit a guarded call-site path.
   def analyze_exact_class_expressions(paths)
+    inputs = Array(paths) + public_api_header_paths(mruby_core_root(paths))
+    ScanCache.fetch('native_expression_devirt.exact_class', inputs) { scan_exact_class_expressions(paths) }
+  end
+
+  def scan_exact_class_expressions(paths)
     registrations, opaque_owners = class_registrations(paths)
     implementations = Hash.new { |hash, function| hash[function] = [] }
     target_classes = BUILTIN_CLASS_TAGS.keys.to_set
@@ -676,12 +689,18 @@ module NativeExpressionDevirt
     end.first
   end
 
+  # Every header public_mrb_value_functions may read, whether or not it exists.
+  def public_api_header_paths(root)
+    return [] unless root
+
+    PUBLIC_API_HEADERS.map { |relative| File.join(root, '3rd/mruby/include', relative) }.uniq
+  end
+
   def public_mrb_value_functions(root)
     return Set.new unless root
 
-    include_dir = File.join(root, '3rd/mruby/include')
-    headers = PUBLIC_API_HEADERS.map { |relative| File.join(include_dir, relative) }.select { |path| File.file?(path) }
-    headers.uniq.flat_map do |header|
+    headers = public_api_header_paths(root).select { |path| File.file?(path) }
+    headers.flat_map do |header|
       File.read(header, encoding: 'UTF-8').scan(/\bMRB_API\s+mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*mrb_value\s+\w+\s*\)\s*;/)
     end.flatten.to_set
   end
