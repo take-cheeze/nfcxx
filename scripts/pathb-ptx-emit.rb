@@ -342,11 +342,23 @@ WARP_SHUFFLES = {
   "__nfcxx_shfl_up_sync_i" => "up", "__nfcxx_shfl_up_sync_f" => "up",
 }
 WARP_VOTES = { "__nfcxx_ballot_sync" => "ballot", "__nfcxx_any_sync" => "any", "__nfcxx_all_sync" => "all" }
+# Scalar 32-bit integer intrinsics that map to one PTX instruction: name => [PTX instruction, number of operands].
+# The CUDA names (__umulhi, __popc, __byte_perm) are wrappers in the device prelude (cuda-rewrite.rb, BUILTIN_DEFS).
+SCALAR_U32 = {
+  "__nfcxx_umulhi" => ["mul.hi.u32", 2],
+  "__nfcxx_popc" => ["popc.b32", 1],
+  "__nfcxx_byte_perm" => ["prmt.b32", 3],
+}
 # name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
 ATOMICS = {
   "__nfcxx_atomic_add_i" => ["add", "s32"], "__nfcxx_atomic_add_f" => ["add", "f32"],
   "__nfcxx_atomic_max_i" => ["max", "s32"], "__nfcxx_atomic_cas_i" => ["cas", "b32"],
 }
+
+# A function the IR marks static (internal linkage: `(static)` after the signature, as the IR spec gives it).
+def static_fn?(fn)
+  fn.form.any? { |x| x.is_a?(Array) && head_of(x) == "static" }
+end
 
 def special_register?(name)
   parts = name.split(".")
@@ -703,6 +715,8 @@ class Fn
         emit("mov.u32 #{dest}, %#{reg};")
       elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name)
         device_builtin(name, x, dest, ty)
+      elsif SCALAR_U32.key?(name)
+        scalar_u32(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -1042,6 +1056,21 @@ class Fn
     raise Refused, "#{name}: only the full-warp mask 0xffffffff is lowered (mask operand #{text})" unless ["4294967295", "-1"].include?(text)
   end
 
+  # A scalar 32-bit intrinsic of SCALAR_U32: one instruction, operands and result all 32-bit integers.
+  def scalar_u32(name, x, dest, ty)
+    op, arity = SCALAR_U32[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}" unless ty[0] == "int" && type_size(ty) == 4
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 4
+      reg_of(v, vty)
+    end
+    emit("#{op} #{dest}, #{regs.join(', ')};")
+  end
+
   def device_builtin(name, x, dest, ty)
     args = x[3..-1] || []
     raise Refused, "#{name} has no value" if dest.nil?
@@ -1246,6 +1275,25 @@ def emit_module(src, sm, kernels = [])
     end
   end
   raise BadIR, "no function in the IR" if fns.empty?
+  # Keep the functions reachable from the kernels: the listed kernels, or else the functions that are not static and
+  # not called. A static function that nothing reaches is dead code (a C++ header's unused inline helper): it is not
+  # emitted, rather than taken for a kernel (which could not return its value).
+  pre_by = {}
+  fns.each { |fn| pre_by[fn.name] = fn }
+  pre_callees = {}
+  fns.each { |fn| pre_callees[fn.name] = collect_calls(fn.form, []).select { |c| pre_by.key?(c) }.uniq }
+  pre_called = {}
+  pre_callees.each { |caller, cs| cs.each { |c| pre_called[c] = caller } }
+  roots = kernels.empty? ? fns.reject { |fn| static_fn?(fn) || pre_called.key?(fn.name) }.map(&:name) : kernels
+  live = {}
+  stack = roots.dup
+  until stack.empty?
+    n = stack.pop
+    next if live[n] || !pre_by.key?(n)
+    live[n] = true
+    stack.concat(pre_callees[n])
+  end
+  fns = fns.select { |fn| live[fn.name] }
   by_name = {}
   fns.each { |fn| by_name[fn.name] = fn }
   callees = {}

@@ -54,8 +54,18 @@ while IFS='|' read -r name tree dir srcs expect marker known; do
   fi
   if [ "$expect" = fail-compile ]; then echo "NOW BUILDS $name: update cases.txt (it was recorded as $known)"; fi
   if ! TMPDIR=$w "$nfcxx" $objs -L"$cuda/lib64" -lcudart -o "$w/$name" > "$w/link.log" 2>&1; then
-    echo "FAIL $name: link: $(grep -m1 -i 'undefined\|error' "$w/link.log" | cut -c1-160)"; fail=1; continue
+    lerr=$(grep -m1 -i 'undefined\|error\|multiple definition' "$w/link.log" | cut -c1-160)
+    if [ "$expect" = fail-link ]; then
+      if grep -qF "$known" "$w/link.log"; then echo "known-fail $name (link): $known"
+      else echo "FAIL $name: link error changed: $lerr"; fail=1; fi
+    else
+      echo "FAIL $name: link: $lerr"; fail=1
+    fi
+    continue
   fi
+  if [ "$expect" = fail-link ]; then echo "NOW LINKS $name: update cases.txt (it was recorded as $known)"; fi
+  # builds: compiles and links, but the program needs input arguments to run, so it is not run here.
+  if [ "$expect" = builds ]; then echo "builds $name: links; not run ($known)"; continue; fi
   out=$(cd "$w" && LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" timeout 300 "./$name" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then echo "FAIL $name: run exit $rc"; fail=1; continue; fi
   if [ "$expect" = pass ]; then

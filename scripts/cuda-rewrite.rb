@@ -550,8 +550,43 @@ VECTOR_DEFS = vector_defs
 # Device builtins that the CUDA headers define as functions, provided in the unit when device code names them
 # (the same rule as the vector types). __mul24 takes the low 24 bits of each operand, sign-extended, and returns the
 # low 32 bits of the product.
+# The shuffle wrappers: name => the PTX mode the emitter uses (WARP_SHUFFLES: __nfcxx_shfl_<mode>_sync_i / _f).
+SHFL_DEFS = {}
+{ "bfly" => "xor", "down" => "down", "idx" => "" }.each do |mode, cuda|
+  base = cuda.empty? ? "__shfl_sync" : "__shfl_#{cuda}_sync"
+  ext = cuda.empty? ? "__nfcxx_shfl_sync" : "__nfcxx_shfl_#{cuda}_sync"
+  SHFL_DEFS[mode] = <<-SHFL
+extern "C" int #{ext}_i(unsigned, int, int);
+extern "C" float #{ext}_f(unsigned, float, int);
+static inline int #{base}(unsigned m, int v, int l) { (void)m; return #{ext}_i(0xffffffffu, v, l); }
+static inline int #{base}(unsigned m, int v, int l, int w) { (void)m; (void)w; return #{ext}_i(0xffffffffu, v, l); }
+static inline float #{base}(unsigned m, float v, int l) { (void)m; return #{ext}_f(0xffffffffu, v, l); }
+static inline float #{base}(unsigned m, float v, int l, int w) { (void)m; (void)w; return #{ext}_f(0xffffffffu, v, l); }
+  SHFL
+end
+
+# The integer intrinsics of llama.cpp's ggml-cuda. __umulhi, __popc and __byte_perm wrap the scalar intrinsics of the
+# emitter (SCALAR_U32 in pathb-ptx-emit.rb, one PTX instruction each); the others are plain integer code. The half type
+# is an unsigned short here (the emitter refuses 16-bit values), and the conversions do the IEEE work in 32-bit integers
+# and float additions: round to nearest, even, as CUDA's __float2half.
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
+  "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
+  "__popc" => "extern \"C\" unsigned __nfcxx_popc(unsigned);\nstatic inline int __popc(unsigned x) { return (int)__nfcxx_popc(x); }\n",
+  "__popcll" => "extern \"C\" unsigned __nfcxx_popc(unsigned);\nstatic inline int __popcll(unsigned long long x) { return (int)__nfcxx_popc((unsigned)x) + (int)__nfcxx_popc((unsigned)(x >> 32)); }\n",
+  "__byte_perm" => "extern \"C\" unsigned __nfcxx_byte_perm(unsigned, unsigned, unsigned);\nstatic inline unsigned __byte_perm(unsigned x, unsigned y, unsigned s) { return __nfcxx_byte_perm(x, y, s); }\n",
+  "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
+  "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
+  "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  "__half" => "typedef unsigned short __half;\n",
+  "__float2half" => "typedef unsigned short __half;\nstatic inline unsigned short __float2half(float f) { unsigned x = *(const unsigned *)&f; unsigned sign = x & 0x80000000u; x ^= sign; unsigned o; if (x >= 0x47800000u) { o = x > 0x7f800000u ? 0x7e00u : 0x7c00u; } else if (x < 0x38800000u) { unsigned mg = 254u << 23; float t = *(const float *)&x + *(const float *)&mg; o = *(const unsigned *)&t - mg; } else { unsigned odd = (x >> 13) & 1u; x += (0u - 112u) * 0x800000u + 0xfffu; x += odd; o = x >> 13; } return (unsigned short)((sign >> 16) | o); }\n",
+  # The warp shuffles (the emitter's WARP_SHUFFLES): int and float overloads, with and without the width. The mask and the
+  # width are ignored: the wrapper is the full warp (width 32, mask 0xffffffff), because the emitter needs the constant
+  # mask at the call and a wrapper's parameter is not one. Llama.cpp uses the full warp; a partial mask is not honoured.
+  "__shfl_xor_sync" => SHFL_DEFS["bfly"],
+  "__shfl_down_sync" => SHFL_DEFS["down"],
+  "__shfl_sync" => SHFL_DEFS["idx"],
+  "__half2float" => "typedef unsigned short __half;\nstatic inline float __half2float(unsigned short h) { unsigned u = (unsigned)h; unsigned sign = (u & 0x8000u) << 16; unsigned e = (u >> 10) & 0x1fu; unsigned m = u & 0x3ffu; unsigned r; if (e == 0) { if (m == 0) { r = sign; } else { float f = (float)m * (1.0f / 16777216.0f); r = *(const unsigned *)&f | sign; } } else if (e == 31) { r = sign | 0x7f800000u | (m << 13); } else { r = sign | ((e + 112u) << 23) | (m << 13); } return *(const float *)&r; }\n",
 }
 
 # The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block

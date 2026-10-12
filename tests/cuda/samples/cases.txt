@@ -5,6 +5,8 @@
 #   unverified   builds, runs, exits 0; the sample has no printed check (marker empty).
 #   fail-compile currently fails to compile; the run checks that the recorded error text still appears, and
 #                reports NOW BUILDS when it no longer fails (update the table then).
+#   builds       compiles and links; the program needs input arguments, so it is not run by the runner.
+#   fail-link    compiles, fails to link; the recorded text must appear in the link output (NOW LINKS when it does not).
 # Lines starting with # are comments.
 simpleStreams | cpp | 0_Introduction/simpleStreams | simpleStreams.cu | unverified | | 
 simpleZeroCopy | cpp | 0_Introduction/simpleZeroCopy | simpleZeroCopy.cu | unverified | | 
@@ -21,8 +23,8 @@ scalarProd | cpp | 2_Concepts_and_Techniques/scalarProd | scalarProd.cu scalarPr
 threadFenceReduction | cpp | 2_Concepts_and_Techniques/threadFenceReduction | threadFenceReduction.cu | fail-compile |  | name must be a namespace name
 simpleCooperativeGroups | cpp | 0_Introduction/simpleCooperativeGroups | simpleCooperativeGroups.cu | fail-compile | | identifier "thread_group" is undefined
 MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | refused: template launch of computeValue<Real> depends on the template parameter Real of the enclosing template
-pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile |  | identifier "__syncthreads" is undefined
-hotspot | rodinia | hotspot | hotspot.cu | fail-compile |  | identifier "__syncthreads" is undefined
-nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile |  | identifier "__syncthreads" is undefined
+pathfinder | rodinia | pathfinder | pathfinder.cu | builds |  | needs input arguments to run (not run by the runner)
+hotspot | rodinia | hotspot | hotspot.cu | builds |  | needs input arguments to run (not run by the runner)
+nw | rodinia | nw | needle.cu needle_kernel.cu | fail-link |  | multiple definition of `_Z20needle_cuda_shared_1PiS_iiii'
 gaussian | rodinia | gaussian | gaussian.cu | fail-compile | | class "cudaDeviceProp" has no member "clockRate"
 bfs | rodinia | bfs | bfs.cu kernel.cu kernel2.cu | fail-compile |  | incomplete type "void" is not allowed
