@@ -5,8 +5,15 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-test:
+  # Builds the EDG front end and QBE/cproc once; the test jobs below download build/ instead of rebuilding it.
+  # Test jobs run at the same checkout path, so absolute paths inside build/ (cmake caches, symlinks) stay valid.
+  build:
     runs-on: ubuntu-24.04
     env:
       # sccache stores compiler outputs in the GitHub Actions cache.
@@ -31,56 +38,81 @@ jobs:
       - name: Build QBE and cproc
         run: scripts/setup-qbe.sh
 
-      - name: Test (QBE backend)
-        run: NFCXX_BACKEND=qbe tests/run.sh
+      - name: Pack build/
+        run: tar -cf build.tar build
 
-      - name: Test (gcc backend)
-        run: NFCXX_BACKEND=gcc tests/run.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: build.tar
+          retention-days: 1
+          compression-level: 1
 
-      - name: Freestanding library (both backends)
-        run: tests/lib/run.sh
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
-      - name: Compiler builtin probes (both backends)
-        run: tests/builtins/run.sh
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cases (QBE backend)
+            run: NFCXX_BACKEND=qbe tests/run.sh
+          - name: cases (gcc backend)
+            run: NFCXX_BACKEND=gcc tests/run.sh
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
+            run: |
+              tests/lib/run.sh
+              tests/builtins/run.sh
+              tests/trace/run.sh
+              tests/c/run.sh
+              tests/c/cc-mode.sh
+              tests/cxx-driver/run.sh
+          - name: real-world tinyxml2 and nlohmann/json
+            run: |
+              tests/realworld/run.sh
+              tests/realworld/run_json.sh
+          - name: real-world {fmt}
+            run: tests/realworld/run_fmt.sh
+          - name: multi-TU, EH shim, nfceval
+            run: |
+              tests/multi-tu/run.sh
+              tests/ehshim/run.sh
+              tests/eval/run.sh
+          - name: nfcpoly, mruby scripts
+            run: |
+              tests/poly/run.sh
+              tests/mruby/run.sh
+          - name: GPU kernel on the PTX interpreter
+            run: tests/gpu/run_interp.sh
+    name: ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: Real-world check (tinyxml2)
-        run: tests/realworld/run.sh
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 python3-dev ruby rake clang
 
-      - name: Real-world check (nlohmann/json, both backends, output compared with host g++)
-        run: tests/realworld/run_json.sh
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
-      - name: Real-world check ({fmt}, gcc backend, header-only and compiled; output compared with host g++)
-        run: tests/realworld/run_fmt.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
 
-      - name: Trace output (Perfetto JSON, both backends)
-        run: tests/trace/run.sh
+      - name: Unpack build/
+        run: tar -xf build.tar && rm build.tar
 
-      - name: C inputs (both backends)
-        run: tests/c/run.sh
-
-      - name: nfcc drop-in cc mode (both backends)
-        run: tests/c/cc-mode.sh
-
-      - name: nfcxx accepts the compiler-driver options of CMake and mruby (gcc backend)
-        run: tests/cxx-driver/run.sh
-
-      - name: Several translation units sharing libstdc++ templates (both backends)
-        run: tests/multi-tu/run.sh
-
-      - name: EH shim, exceptions thrown by libstdc++ and std::exception_ptr (output compared with host g++)
-        run: tests/ehshim/run.sh
-
-      - name: nfceval run-time eval library and nfcxx -shared (both backends)
-        run: tests/eval/run.sh
-
-      - name: nfcpoly embedded Ruby, Lua and Python, scripts calling C++ and back, C++ exceptions through mruby and Lua (both backends)
-        run: tests/poly/run.sh
-
-      - name: mruby scripts (byte-identical to the Python originals)
-        run: tests/mruby/run.sh
-
-      - name: GPU kernel lowered to PTX, run on the CPU PTX interpreter (no GPU needed)
-        run: tests/gpu/run_interp.sh
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
 
       - name: sccache stats
         if: always()
