@@ -11,10 +11,10 @@ abort 'SKIP: set MRBC' unless ENV['MRBC']
 AUDIT = 'codegen_core_ruby_results.rb'
 MUTANTS = [
   ['control', nil, nil, nil, nil],
-  ['Hash filter result treated as Array', "called == 'map' || trace_new_target(irep, pin_idx, pin.reg, registry: registry) == 'Array'", 'true', 'kill switch', /map preserves both receiver paths/, 'class_layout.rb'],
+  ['Hash filter result treated as Array', "next 'Array' if called == 'map' || traced == 'Array'", "next 'Array' if true", 'kill switch', /map preserves both receiver paths/, 'class_layout.rb'],
   ['receiver union switch ignored', "classes.size > 1 && ENV['BC2CPP_CORE_RUBY_RECEIVER_UNIONS'] == '0'", 'false', 'receiver union kill switch', /every union member returns Array/],
   ['receiver union member omitted', 'classes.reduce(0) do |joined, (bit, klass)|', 'classes.first(1).reduce(0) do |joined, (bit, klass)|', 'Hash map override', /every union member returns Array/],
-  ['union receiver treated as Array', 'return RETURN_CORE_CLASS[mask] == klass', 'return true', 'core bodies', /union map preserves both receiver paths/, 'codegen_loop_regions.rb'],
+  ['union receiver treated as Array', 'return proven == klass if proven || !guarded_inline_sites?', 'return true', 'core bodies', /union map preserves both receiver paths/, 'codegen_loop_regions.rb'],
   ['positional switch ignored', "argc.positive? && ENV['BC2CPP_CORE_RUBY_POSITIONAL_RESULTS'] == '0'", 'false', 'positional kill switch', /positional Array memo/],
   ['positional argument masks ignored', '@arguments.fetch(reg - 1, NumericFlow::OTHER)', 'NumericFlow::ARR', 'core bodies', /positional Hash memo|memo_unknown stays unproved|memo_nil stays unproved/],
   ['positional argument cache omitted', 'key = [insn.sym, block_given, arguments]', 'key = [insn.sym, block_given]', 'core bodies', /unresolved receiver memo|unresolved receiver Hash memo|unresolved unknown memo stays unproved/],

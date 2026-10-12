@@ -17,7 +17,7 @@
 #    <Owner#method (FAMILY)>` and raises BC2cppHintViolation (a NoMethodError); -DBC2CPP_NOMETHOD_VERIFY
 #    aborts naming class, name and site; -DBC2CPP_HINT_VIOLATION_DISPATCH dispatches again.
 #
-# Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_FULL=dir] ruby scripts/bc2cpp/strict_hints_check.rb
+# Usage: [MRBC=path/to/mrbc BC2CPP_MRUBY_FULL=dir | BC2CPP_FULL_BUILD_DIR=dir] ruby scripts/bc2cpp/strict_hints_check.rb
 
 require 'tmpdir'
 require_relative 'fixture_runtime'
@@ -328,7 +328,9 @@ end
 
 # -- 3. behaviour ----------------------------------------------------------------------
 
-build = runtime.full || runtime.core
+# The fixture's total() iterates with Array#each, which a core-only libmruby (no mrblib) does not have: the
+# interpreted side needs the full-core build (BC2CPP_MRUBY_FULL, else one built once into BC2CPP_FULL_BUILD_DIR).
+build = runtime.full_or_build
 if ENV['MRBC'] && build && runtime.compiler? && !ENV['SH_GENERATED_ONLY']
   puts '== fixture on real mruby, interpreted and compiled'
   body = <<~'CPP'
@@ -478,7 +480,7 @@ if ENV['MRBC'] && build && runtime.compiler? && !ENV['SH_GENERATED_ONLY']
     end
   end
 else
-  puts '-- SKIP run: set MRBC, BC2CPP_MRUBY_FULL (or BC2CPP_MRUBY_CORE) and have g++'
+  puts '-- SKIP run: set MRBC, BC2CPP_MRUBY_FULL (or BC2CPP_FULL_BUILD_DIR) and have g++'
 end
 
 if failures.empty?

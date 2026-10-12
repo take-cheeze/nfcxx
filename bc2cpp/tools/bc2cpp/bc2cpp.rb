@@ -131,6 +131,7 @@ require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_computed_send'
+require_relative 'bytecode_ir_cpu_dispatch'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_guarded_block_inline'
 require_relative 'codegen_core_exact_direct'
@@ -184,6 +185,11 @@ if $PROGRAM_NAME == __FILE__
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = build_registry(ireps, root_label)
+  if ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' && BytecodeIR::CPUDispatch.apply(ireps, registry, fixed_core: ENV['BC2CPP_OPTCARROT_FIXED_CORE'] == '1')
+    registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
+      struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
+      declared_modules, alias_sites = build_registry(ireps, root_label)
+  end
   # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
@@ -1117,6 +1123,7 @@ if $PROGRAM_NAME == __FILE__
   # stay interpreted. CLI exploration keeps the markers visible; real builds
   # (mrbgem.rake) set this, since a `#error` stops the C++ build.
   unsupported_core_codes = compiled.select { |m| m[:code].include?('#error') && m[:label] && CoreDefs.core_source?(ireps[m[:label]]&.file) }
+  skipped_entries = []
   if ENV['SKIP_UNSUPPORTED'] == '1'
     skipped, compiled = compiled.partition { |m| m[:code].include?('#error') }
     unless skipped.empty?
@@ -1124,6 +1131,7 @@ if $PROGRAM_NAME == __FILE__
       warn '== skipped (unsupported, left on the interpreter) =='
       skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
     end
+    skipped_entries = skipped.map { |m| m[:entry] }.compact
   end
 
   # CORE_INTERPRETED_REPORT (ADR 0371): every core-source bytecode method this run leaves
@@ -1554,6 +1562,10 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
   print gen.emit_hot_only_registration_stubs(compiled, only_owners: only_owners)
+  # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
+  # that compiles only when the closed world proves a fact a desktop build lacks (ADR 0422). It guards such a
+  # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
+  print gen.emit_skipped_entry_macros(skipped_entries)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
