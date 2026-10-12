@@ -398,8 +398,7 @@ class CodeGen
                           end
           if owner_emitted
             if listed_target
-              @direct_construct_used << known
-              accessor = "#{direct_construct_class_fn(known)}()"
+              accessor = direct_construct_class_expr(known)
             else
               accessor = owner_class_ptr_expr(known)
             end
@@ -2265,9 +2264,12 @@ class CodeGen
   # native and singleton arms in front of it keep answering their receivers, and a chain whose else is
   # already `bc2cpp_nomethod` (a proven-dead arm, NOMETHOD_REVIEWED) is left alone: it has no send to force.
   # `hinted: false` keeps the base (MONO_EMBED_GUARD without a hint naming the owner).
-  def strict_hint_wrap(family, d, recv, name, argv, owner, hinted: true)
+  # `listed:` (the candidate-set families) is the classes the chain or table names; see
+  # ClosedWorld#answered_outside? for why a known class outside it keeps the dispatch (ADR 0428).
+  def strict_hint_wrap(family, d, recv, name, argv, owner, hinted: true, listed: nil)
     base = yield
     return base unless hinted && strict_hint_fallback(family, d, recv, name, argv, owner)
+    return base if listed && @closed_world.answered_outside?(name, listed)
 
     dispatch = dynamic_dispatch_line(d, recv, name, argv).chomp
     pattern = %r{#{Regexp.escape(dispatch)}(?: /\* CLOSED_WORLD kept: \w+ \*/)?}

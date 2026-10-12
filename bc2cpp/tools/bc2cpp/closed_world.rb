@@ -378,6 +378,18 @@ class ClosedWorld
     @outside_names
   end
 
+  # STRICT_HINTS (ADR 0428): does a KNOWN receiver outside `listed` answer `name`? A definer the registry has
+  # but the chain does not list (uncompiled, excluded by a hot-only build, an embedded accessor, a subclass), a
+  # core or native definer, or a module's singleton definition (a class or module object is the receiver)
+  # reaches the else arm of a candidate-set chain in a correct program, so the set is incomplete by design and
+  # the arm is not a wrong hint.
+  def answered_outside?(name, listed)
+    reason, required = required_classes(name, false, nil)
+    return true if reason || @outside_names.include?(name)
+
+    !required.subset?(listed.to_set)
+  end
+
   # KERNEL_DIRECT (ADR 0274): an implicit-self send of `name` reaches the audited
   # Kernel/BasicObject native for every receiver. That needs the same name-level proof as
   # ownerless_native_dispatch_safe? plus a receiver that includes Kernel, which only a
