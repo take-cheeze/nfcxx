@@ -1454,3 +1454,8 @@ Combine it with `OPTCARROT_STATIC_DISPATCH=1` for the compiled experiment. It
 uses no target-side eval; the original Fiber entry remains the default.
 Interpreted mruby is slower, and strict sealed mode is not yet admitted.
 See [PPU core](../../docs/optcarrot-ppu-core.md) for measurements and proof limits.
+
+`BC2CPP_IR_INLINE=1` adds bounded bytecode IR method inlining to the compiled
+probe, with a separate `irinline` build suffix. It keeps the Ruby helpers
+small enough for mrbc and expands eligible direct-call bodies afterward.
+See [method inlining](../../docs/bc2cpp-method-inlining.md) for scope and checks.

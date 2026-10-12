@@ -1483,6 +1483,7 @@ class CodeGen
     if target
       impl = cpp_name(target.owner, target.name) + '_impl'
       call_argv, native_note = direct_call_args(target, argv, impl)
+      ir_inline = bytecode_ir_inline_code(target, d, argv, owner_def, self_implicit, irep) unless typed || module_function_self
       if typed
         if user_receiver_union
           note = "  // USER_RECEIVER_UNION :#{name} -> #{target.owner}##{target.name}, every exact receiver selects this body, " \
@@ -1550,7 +1551,7 @@ class CodeGen
         note = "  // LEXICAL_SELF :#{name} -> #{target.owner}##{target.name} (self, statically " \
                "#{target.owner} -- no subclass exists program-wide), direct C++ call (no mrb_funcall, " \
                "no runtime check)#{native_note}\n"
-        "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        note + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
       elsif @ivar_layout.key?(target.owner)
         # MONO_EMBED_GUARD: MONO says nothing about method_missing: a class answering a
         # name via method_missing (LCF::Array1D/Array2D) adds no registry entry, so
@@ -1569,7 +1570,7 @@ class CodeGen
         if cw_site && cw_site[:self_owner] == target.owner && @closed_world.exact_class?(target.owner)
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self, exactly " \
                  "#{target.owner}: no subclass in the closed world), direct C++ call#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return note + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
         end
 
         # CHA_SELF: the same for a class with subclasses, when none of them can
@@ -1581,7 +1582,7 @@ class CodeGen
           note = "  // CLOSED_WORLD_SELF :#{name} -> #{target.owner}##{target.name} (self in " \
                  "#{cw_site[:self_owner]}; class hierarchy analysis: no descendant defines or mixes in " \
                  "the name), direct C++ call#{native_note}\n"
-          return "#{note}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+          return note + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
         end
 
         # RECORD_HASH_PROOF (ADR 0285): the receiver is a record key that only holds fresh instances of
@@ -1598,8 +1599,9 @@ class CodeGen
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
                "direct C++ call, mrb_funcall fallback#{native_note}\n"
         fallback = guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
+        body = ir_inline ? ir_inline.lines.map { |line| "  #{line}" }.join : "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         "#{note}  if (#{check}) {\n" \
-          "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
+          "#{body}" \
           "  } else {\n" \
           "    #{fallback}" \
           "  }\n"
@@ -1613,7 +1615,7 @@ class CodeGen
         # would run this owner's body instead of raising.
         miss = proven_miss_marker(name, d, recv, irep, idx, trace_idx, owner_def, self_implicit, trace_receiver_reg,
                                   trace_reg_offset)
-        "#{note}#{miss}  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
+        note + miss + (ir_inline || "  r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n")
       end
     elsif lexical_self_ivar_accessor
       # LEXICAL_SELF_IVAR_ACCESSOR codegen: no guard, no fallback; IVAR_ACCESS picks

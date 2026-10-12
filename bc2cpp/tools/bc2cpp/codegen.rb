@@ -164,6 +164,7 @@ class CodeGen
     @block_fallback_depth = 0
     # ADR 0264: true while compiling a method of mruby's own Ruby (see core_targets).
     @compiling_core = false
+    @ir_inline_remaining = 512
     @registry = registry
     @known_owners = Set.new(registry.values.flatten.map(&:owner))
     # FIBER_REACHABILITY_UNSAFE_SUPPORT: must exist before drop_unsafe_embeddings,
