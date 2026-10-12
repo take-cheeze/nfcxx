@@ -26,7 +26,13 @@
 # iconv, fconv, i2f, u2f, cf2i (checked: trap on NaN or out of range), const (floats too, including +Infinity and
 # -Infinity), and gpu (the special registers tid, ctaid, ntid, nctaid, .x .y .z, a Path B form for the GPU). Operands:
 # registers, constants, slot addresses, null. Everything else is refused: the next steps are 1- and 2-byte integers,
-# bool in memory, aggregates, switch, goto, static data, calls of anything but the device intrinsics and the module's own functions (see the model above), and float constants that are not exact decimals.
+# bool in memory, aggregates, switch, goto, global data other than zero-initialized static arrays, calls of anything but
+# the device intrinsics and the module's own functions (see the model above), and float constants that are not exact decimals.
+#
+# Checks: bounds IDX N (one unsigned compare, 0 <= IDX < N), nonnull P (a null pointer traps), cf2i and the division
+# and shift checks. A file-scope zero-initialized static array of the device unit is block-shared memory (CUDA's
+# __shared__): a `.shared` declaration, its address through cvta.shared (`@"name"`), and __nfcxx_syncthreads() is
+# bar.sync 0.
 #
 # Checked operations emit `trap;`, which aborts the kernel (the launch reports an error). PTX has no abort block, so
 # each check is a predicated trap at the operation.
@@ -265,6 +271,21 @@ end
 
 # A decimal float literal, exact in the type: a finite number as printed by the IR (shortest form that reads back), or
 # an infinity. Other spellings (NaN, hexadecimal) are refused, because the decimal form would round.
+# A name as a PTX identifier: the IR names of template instances and of file-scope statics can carry characters PTX
+# does not accept (`temp.1`). Each other character becomes _xHH, so distinct IR names stay distinct.
+def ptx_sym(name)
+  out = ""
+  name.each_char do |c|
+    o = c.ord
+    if (o >= 48 && o <= 57) || (o >= 65 && o <= 90) || (o >= 97 && o <= 122) || o == 95
+      out << c
+    else
+      out << "_x" << ("0" + o.to_s(16))[-2, 2]
+    end
+  end
+  out
+end
+
 def float_lit(text, t)
   if text == "+Infinity" || text == "Infinity"
     return t[1] == 4 ? "0f7F800000" : "0d7FF0000000000000"
@@ -281,8 +302,8 @@ end
 # The instruction that sets predicate t to the bool constant v (IR text 0 or 1): setp of equal or unequal immediates.
 def bool_const_setp(t, v)
   case v.to_s
-  when "1" then "setp.eq.u32 #{t}, 0, 0;"
-  when "0" then "setp.ne.u32 #{t}, 0, 0;"
+  when "1", "0x1" then "setp.eq.u32 #{t}, 0, 0;"
+  when "0", "0x0" then "setp.ne.u32 #{t}, 0, 0;"
   else raise Refused, "bool constant #{v}"
   end
 end
@@ -335,13 +356,15 @@ end
 
 class Fn
   attr_reader :name, :params, :ret, :form
-  attr_accessor :kernel, :module_fns
+  attr_accessor :kernel, :module_fns, :shared, :globals
 
   def initialize(form, index)
     @form = form
     @index = index
     @kernel = true
     @module_fns = {}
+    @shared = {}
+    @globals = {}
     @ret = nil
     @setup_done = false
     @ncall = 0
@@ -408,8 +431,8 @@ class Fn
           raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
-      elsif h == "static"
-        nil
+      elsif h == "static" || h == "weak"
+        nil   # linkage of the function: no effect on the PTX (the entry or helper is emitted the same way)
       elsif h == "slot"
         # (slot "x" TYPE) or (slot "x" TYPE SIZE ALIGN): the explicit size and alignment are the ones of the IR's layout
         raise Refused, "slot form #{form_text(f)}" unless f.length == 3 || f.length == 5
@@ -456,6 +479,17 @@ class Fn
     if h == "null"
       return ["0", parse_type(x[1])]
     end
+    if x.is_a?(IRSym) && x.sig == "@"
+      t = fresh("rd")
+      if @shared.key?(x.name)
+        emit("cvta.shared.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @globals.key?(x.name)
+        emit("cvta.global.u64 #{t}, #{ptx_sym(x.name)};")
+      else
+        raise Refused, "static object @\"#{x.name}\" (only block-shared and device globals are lowered)"
+      end
+      return [t, ["ptr", nil]]
+    end
     if x.is_a?(IRSym) && x.sig == "$"
       off = @slots[x.name]
       raise BadIR, "slot #{x.name} is not declared" if off.nil?
@@ -497,7 +531,27 @@ class Fn
       ty = parse_type(x[1])
       expect(dty, ty)
       addr, aty = operand(x[2])
-      emit("ld.#{ptx_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
+      if ty[0] == "int" && ty[3]
+        b = fresh("r")
+        emit("ld.u8 #{b}, [#{reg_of(addr, aty)}];")
+        emit("setp.ne.u32 #{dest}, #{b}, 0;")
+      else
+        emit("ld.#{ptx_type(ty)} #{dest}, [#{reg_of(addr, aty)}];")
+      end
+    when "bitcast"
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      raise Refused, "bitcast to a non-pointer" unless ty[0] == "ptr" && dty[0] == "ptr"
+      v, vty = operand(x[2])
+      raise Refused, "bitcast of a non-pointer" unless vty[0] == "ptr"
+      emit("mov.u64 #{dest}, #{reg_of(v, vty)};")
+    when "offset"
+      # (offset ADDR N): the address of a field, N bytes past ADDR (pathb-stage2 section 5)
+      expect(dty, ["ptr", nil])
+      base, bty = operand(x[1])
+      n = as_int(x[2])
+      raise Refused, "offset of a non-pointer" unless bty[0] == "ptr"
+      emit("add.s64 #{dest}, #{reg_of(base, bty)}, #{n};")
     when "index"
       expect(dty, ["ptr", nil])
       base, bty = operand(x[1])
@@ -727,7 +781,16 @@ class Fn
   def int_convert(dest, ty, a, aty)
     raise Refused, "iconv to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 4 || ty[1] == 8)
     raise BadIR, "iconv of a #{aty[0]}" unless aty[0] == "int"
-    raise Refused, "iconv of bool" if aty[3]
+    if aty[3]
+      b = fresh("r")
+      emit("selp.u32 #{b}, 1, 0, #{a};")
+      if type_size(ty) == 4
+        emit("mov.b32 #{dest}, #{b};")
+      else
+        emit("cvt.#{ptx_type(ty)}.u32 #{dest}, #{b};")
+      end
+      return
+    end
     if type_size(ty) == type_size(aty)
       emit("mov.#{ptx_type(ty)} #{dest}, #{a};")
     else
@@ -777,15 +840,23 @@ class Fn
     when "set"
       r = @regs[s[1]]
       raise BadIR, "set of #{s[1]} before its let" if r.nil?
-      raise Refused, "set of a bool register" if reg_class(r[1]) == "p"
       text, ty = operand(s[2])
       expect(r[1], ty)
-      emit("mov.#{ptx_type(r[1])} #{r[0]}, #{text};")
+      # a bool register is a predicate: its value is copied as a predicate (operand gives one for a bool)
+      emit(reg_class(r[1]) == "p" ? "mov.pred #{r[0]}, #{text};" : "mov.#{ptx_type(r[1])} #{r[0]}, #{text};")
     when "store"
       ty = parse_type(s[1])
       addr, aty = operand(s[2])
-      val, _ = operand(s[3])
-      emit("st.#{ptx_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
+      val, vty = operand(s[3])
+      if ty[0] == "int" && ty[3]
+        # a bool is one byte in memory, 0 or 1 (the IR's bool layout); the value is a predicate here
+        expect(ty, vty)
+        b = fresh("r")
+        emit("selp.u32 #{b}, 1, 0, #{val};")
+        emit("st.u8 [#{reg_of(addr, aty)}], #{b};")
+      else
+        emit("st.#{ptx_type(ty)} [#{reg_of(addr, aty)}], #{reg_of(val, ty)};")
+      end
     when "if"
       cond, cty = operand(s[1])
       raise BadIR, "if condition is not a bool register" unless reg_class(cty) == "p" && cond.start_with?("%")
@@ -822,8 +893,30 @@ class Fn
     when "continue"
       raise BadIR, "continue outside a loop" if @loops.empty?
       emit("bra #{@loops[-1][0]};")
-    when "trap"
+    when "trap", "unreachable"
+      # (trap) and (unreachable): an illegal instruction on the GPU; the IR spec says unreachable traps
       emit("trap;")
+    when "bounds"
+      # (bounds IDX N): traps unless 0 <= IDX < N. One unsigned compare does both ends of a signed index.
+      v, vty = operand(s[1])
+      raise Refused, "bounds of a non-integer" unless vty[0] == "int"
+      n = as_int(s[2])
+      bits = vty[1] * 8
+      uty = bits == 64 ? "u64" : "u32"
+      q = fresh("p")
+      emit("setp.ge.#{uty} #{q}, #{reg_of(v, vty)}, #{n};")
+      emit("@#{q} trap;")
+    when "nonnull"
+      # (nonnull P): a null pointer traps (pathb-stage2 section 4). A null constant always traps.
+      p, pty = operand(s[1])
+      raise Refused, "nonnull of #{form_text(s[1])}" unless pty[0] == "ptr"
+      if p == "0"
+        emit("trap;")
+      else
+        q = fresh("p")
+        emit("setp.eq.u64 #{q}, #{reg_of(p, pty)}, 0;")
+        emit("@#{q} trap;")
+      end
     when "return"
       if @ret.nil?
         raise Refused, "return with a value in a void function" if s.length > 1
@@ -855,6 +948,13 @@ class Fn
     callee_sym = x[2]
     raise Refused, "indirect call" unless callee_sym.is_a?(IRSym) && callee_sym.sig == "&"
     cname = callee_sym.name
+    if cname == "__nfcxx_syncthreads"
+      # the block barrier: every thread of the block waits here, and shared memory is visible after it
+      raise Refused, "__nfcxx_syncthreads takes no arguments" unless x.length == 3
+      raise Refused, "__nfcxx_syncthreads has no value" unless dest.nil?
+      emit("bar.sync 0;")
+      return
+    end
     raise Refused, "call of intrinsic #{cname} as a statement" if DEVICE_INTRINSICS.key?(cname)
     callee = @module_fns[cname]
     raise Refused, "call of #{cname} (not a function of this module)" if callee.nil?
@@ -947,6 +1047,8 @@ end
 def emit_module(src, sm, kernels = [])
   forms = parse_forms(tokenize(strip_comments(src)))
   fns = []
+  shared = {}
+  globals = {}
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
@@ -954,7 +1056,25 @@ def emit_module(src, sm, kernels = [])
     elsif h == "function"
       fns << Fn.new(f, fns.length)
     elsif h == "global"
-      raise Refused, "global #{form_text(f[1])} (static data is not lowered yet)"
+      # A file-scope static array of the device unit is block-shared memory (CUDA's __shared__): its name and
+      # size come from the IR, and it must be zero-initialized. Any other global is refused.
+      # Function-local __shared__ (a template instance's, mangled _ZZ..., linkage weak) and file-scope static
+      # objects are block-shared memory; any other zero-initialized global is device memory (__device__), .global.
+      name = f[1].to_s
+      ty = f[2]
+      size = as_int(f[3])
+      align = as_int(f[4])
+      # the optional linkage (static, weak, extern) and the initializer come after the size and alignment, in any case
+      linkage = f.drop(5).map { |x| head_of(x) }.find { |h| h == "static" || h == "weak" || h == "extern" }
+      raise Refused, "global #{name} is extern (no definition in this unit)" if linkage == "extern"
+      init = f.drop(5).find { |x| head_of(x) == "init" }
+      raise Refused, "global #{name}: only zero initializers are lowered" unless init && init.length == 2 && head_of(init[1]) == "zero"
+      raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
+      if linkage == "static" || (linkage == "weak" && name.start_with?("_ZZ"))
+        shared[name] = [size, align]
+      else
+        globals[name] = [size, align]
+      end
     elsif h == "abi-type"
       raise Refused, "aggregate type #{form_text(f[1])}: struct and union values by value are not lowered yet"
     else
@@ -977,11 +1097,24 @@ def emit_module(src, sm, kernels = [])
   end
   state = {}
   fns.each { |fn| check_recursion(fn.name, callees, state) }
-  fns.each { |fn| fn.module_fns = by_name }
+  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
-  fns.each { |fn| out << fn.text << "\n" }
+  shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
+  globals.each { |name, (size, align)| out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
+  out << "\n" unless shared.empty? && globals.empty?
+  # PTX needs a callee declared before its first call: emit the functions callee first (depth-first post-order).
+  ordered = []
+  seen = {}
+  visit = lambda do |name|
+    next if seen[name]
+    seen[name] = true
+    (callees[name] || []).each { |c| visit.call(c) }
+    ordered << by_name[name]
+  end
+  fns.each { |fn| visit.call(fn.name) }
+  ordered.each { |fn| out << fn.text << "\n" }
   out
 end
 

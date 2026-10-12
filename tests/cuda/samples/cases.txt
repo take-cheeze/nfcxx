@@ -11,7 +11,7 @@ simpleZeroCopy | cpp | 0_Introduction/simpleZeroCopy | simpleZeroCopy.cu | unver
 simpleAtomicIntrinsics | cpp | 0_Introduction/simpleAtomicIntrinsics | simpleAtomicIntrinsics.cu | fail-compile |  | identifier "atomicAdd" is undefined
 simpleVoteIntrinsics | cpp | 0_Introduction/simpleVoteIntrinsics | simpleVoteIntrinsics.cu | fail-compile | | identifier "__any_sync" is undefined
 simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | fail-compile | | identifier "printf" is undefined
-matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile |  | static data is not lowered yet
+matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile |  | refused: global _ZZ13MatrixMulCUDAILi16EEvPfS0_S0_iiE2As is not static
 asyncAPI | cpp | 0_Introduction/asyncAPI | asyncAPI.cu | fail-compile | | cannot open source file "cuda_profiler_api.h"
 reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | incomplete type "double []" is not allowed
 shfl_scan | cpp | 2_Concepts_and_Techniques/shfl_scan | shfl_scan.cu | fail-compile |  | identifier "uchar4" is undefined
@@ -21,8 +21,8 @@ scalarProd | cpp | 2_Concepts_and_Techniques/scalarProd | scalarProd.cu scalarPr
 threadFenceReduction | cpp | 2_Concepts_and_Techniques/threadFenceReduction | threadFenceReduction.cu | fail-compile |  | device variable
 simpleCooperativeGroups | cpp | 0_Introduction/simpleCooperativeGroups | simpleCooperativeGroups.cu | fail-compile | | identifier "thread_group" is undefined
 MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | identifier "cg" is undefined
-pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile |  | static data is not lowered yet
-hotspot | rodinia | hotspot | hotspot.cu | fail-compile |  | static data is not lowered yet
-nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile |  | static data is not lowered yet
-gaussian | rodinia | gaussian | gaussian.cu | fail-compile | | refused: statement nonnull
+pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile |  | refused: set of a bool register
+hotspot | rodinia | hotspot | hotspot.cu | fail-compile |  | refused: set of a bool register
+nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile |  | refused: statement unreachable
+gaussian | rodinia | gaussian | gaussian.cu | fail-compile | | class "cudaDeviceProp" has no member "clockRate"
 bfs | rodinia | bfs | bfs.cu kernel.cu kernel2.cu | fail-compile |  | bool in arithmetic or memory
