@@ -799,7 +799,7 @@ VECTOR_DEFS = vector_defs
 # low 32 bits of the product.
 # The shuffle wrappers: name => the PTX mode the emitter uses (WARP_SHUFFLES: __nfcxx_shfl_<mode>_sync_i / _f).
 SHFL_DEFS = {}
-{ "bfly" => "xor", "down" => "down", "idx" => "" }.each do |mode, cuda|
+{ "bfly" => "xor", "down" => "down", "up" => "up", "idx" => "" }.each do |mode, cuda|
   base = cuda.empty? ? "__shfl_sync" : "__shfl_#{cuda}_sync"
   ext = cuda.empty? ? "__nfcxx_shfl_sync" : "__nfcxx_shfl_#{cuda}_sync"
   SHFL_DEFS[mode] = <<-SHFL
@@ -835,6 +835,22 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  # The float math functions and __dp4a: wrappers over the emitter's FLOAT_BUILTINS / SCALAR_U32 intrinsics. The
+  # accuracy of the approximate ones (rsqrt, div, exp, log) is in docs/notes/gpu.md.
+  "fmaxf" => "extern \"C\" float __nfcxx_fmaxf(float, float);\nstatic inline float fmaxf(float a, float b) { return __nfcxx_fmaxf(a, b); }\n",
+  "fminf" => "extern \"C\" float __nfcxx_fminf(float, float);\nstatic inline float fminf(float a, float b) { return __nfcxx_fminf(a, b); }\n",
+  "fabsf" => "extern \"C\" float __nfcxx_fabsf(float);\nstatic inline float fabsf(float a) { return __nfcxx_fabsf(a); }\n",
+  "sqrtf" => "extern \"C\" float __nfcxx_sqrtf(float);\nstatic inline float sqrtf(float a) { return __nfcxx_sqrtf(a); }\n",
+  "rsqrtf" => "extern \"C\" float __nfcxx_rsqrtf(float);\nstatic inline float rsqrtf(float a) { return __nfcxx_rsqrtf(a); }\n",
+  "expf" => "extern \"C\" float __nfcxx_expf(float);\nstatic inline float expf(float a) { return __nfcxx_expf(a); }\n",
+  "__expf" => "extern \"C\" float __nfcxx_expf(float);\nstatic inline float __expf(float a) { return __nfcxx_expf(a); }\n",
+  "logf" => "extern \"C\" float __nfcxx_logf(float);\nstatic inline float logf(float a) { return __nfcxx_logf(a); }\n",
+  "__logf" => "extern \"C\" float __nfcxx_logf(float);\nstatic inline float __logf(float a) { return __nfcxx_logf(a); }\n",
+  "__fdividef" => "extern \"C\" float __nfcxx_fdividef(float, float);\nstatic inline float __fdividef(float a, float b) { return __nfcxx_fdividef(a, b); }\n",
+  "__saturatef" => "extern \"C\" float __nfcxx_saturatef(float);\nstatic inline float __saturatef(float a) { return __nfcxx_saturatef(a); }\n",
+  "__dp4a" => "extern \"C\" int __nfcxx_dp4a(int, int, int);\nstatic inline int __dp4a(int a, int b, int c) { return __nfcxx_dp4a(a, b, c); }\n",
+  # __ldg: a plain load of the pointee (the read-only cache is a performance hint, not a semantic change).
+  "__ldg" => "static inline float __ldg(const float *p) { return *p; }\nstatic inline int __ldg(const int *p) { return *p; }\nstatic inline unsigned __ldg(const unsigned *p) { return *p; }\n",
   # The warp shuffles (the emitter's WARP_SHUFFLES): int and float overloads, with and without the width. The mask and the
   # width are ignored: the wrapper is the full warp (width 32, mask 0xffffffff), because the emitter needs the constant
   # mask at the call and a wrapper's parameter is not one. Llama.cpp uses the full warp; a partial mask is not honoured.
@@ -847,6 +863,7 @@ BUILTIN_DEFS = {
   "__hfma" => HALF_CORE + "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __float2half(__half2float(a) * __half2float(b) + __half2float(c)); }\n",
   "__shfl_xor_sync" => SHFL_DEFS["bfly"],
   "__shfl_down_sync" => SHFL_DEFS["down"],
+  "__shfl_up_sync" => SHFL_DEFS["up"],
   "__shfl_sync" => SHFL_DEFS["idx"],
 }
 
