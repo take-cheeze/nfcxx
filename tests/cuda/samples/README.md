@@ -24,9 +24,9 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | threadFenceReduction | memory fences, cooperative groups | fails to compile | `name must be a namespace name` (the conditionals of the source are now evaluated; the device-variable refusal is no longer reached) |
 | simpleCooperativeGroups | cooperative groups (`thread_block`, `thread_group`) | fails to compile | `identifier "thread_group" is undefined` (device unit) |
 | MC_EstimatePiP | template kernel launch (curand is not reached) | fails to compile | `refused: template launch of computeValue<Real>`: the launch depends on the enclosing template's `Real` |
-| Rodinia pathfinder | `__shared__` arrays | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |
-| Rodinia hotspot | `__shared__` 2-D arrays | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |
-| Rodinia nw | `__syncthreads` (barrier) | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |
+| Rodinia pathfinder | `__shared__` arrays | builds and links (needs input arguments to run; not run here) | — |
+| Rodinia hotspot | `__shared__` 2-D arrays | builds and links (needs input arguments to run; not run here) | — |
+| Rodinia nw | `__syncthreads` (barrier) | fails to link | `multiple definition of _Z20needle_cuda_shared_1PiS_iiii` (needle.cu and needle_kernel.cu each define the kernel host copies) |
 | Rodinia gaussian | multi-kernel host loop, null-pointer checks | fails to compile | `class "cudaDeviceProp" has no member "clockRate"` (host side: CUDA 13 removed the field; the emitter now lowers `nonnull`) |
 | Rodinia bfs | struct `Node` from a header, multi-file kernels | fails to compile | `incomplete type "void" is not allowed` (device unit) |
 
