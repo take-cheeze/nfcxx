@@ -200,6 +200,9 @@ if [ $emit_c = 1 ]; then
   f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+"${sys_inc[@]}"} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
+  # The user's -I directories (kept in files, with the other options) go in front, as eccp puts them.
+  # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
+  for x in ${files[@]+"${files[@]}"}; do case $x in -I?*) inc=("-I$(realpath -m "${x#-I}")" ${inc[@]+"${inc[@]}"}) ;; esac; done
   t=$(trace_start)
   (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
       "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")
