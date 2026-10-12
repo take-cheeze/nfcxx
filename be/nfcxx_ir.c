@@ -313,6 +313,14 @@ static char *ir_ptext(a_type_ptr t)
    NFCXX_IR_OVERFLOW=trap selects the checked forms. */
 static int ir_trap_overflow;
 
+/* 1 when the checks report themselves (-fsanitize=undefined, docs/notes/ubsan.md): NFCXX_IR_SANITIZE is a comma list
+   of check names. The lowering then prints a (loc "FILE" LINE) statement whenever the source line changes, so that the
+   emitter can name the place of a failing check, and (unreachable missing-return) for a function that is left without a
+   value. Without it the output is as before. ir_loc_file/ir_loc_line: the last location printed in this function. */
+static int ir_ubsan;
+static char *ir_loc_file;
+static unsigned long ir_loc_line;
+
 /* ================================================================ names and tables */
 
 struct ir_ent {
@@ -5260,6 +5268,50 @@ static void ir_asm_stmt(an_asm_entry_ptr ae, int d)
 }
 
 
+/* [[likely]] and [[unlikely]] on the statement of an if arm: a (likely) or (unlikely) statement at the start of the arm. A
+   consumer that does not use branch weights ignores it; the QBE emitter puts the unlikely arm out of line. */
+static void ir_branch_hint(a_statement_ptr s, int d)
+{
+  /* The front end wraps the statement of an arm in a block, and puts the attribute on the statement inside it. The
+     standard counts a path as including a statement it contains, so the first statement of the arm speaks for the arm. */
+  while (s != NULL && !s->is_likely && !s->is_unlikely && s->kind == stmk_block && s->variant.block.statements != NULL)
+    s = s->variant.block.statements;
+  if (s == NULL || s->is_likely == s->is_unlikely) return; /* neither, or both (the front end rejects that) */
+  ir_line(d, s->is_likely ? "(likely)" : "(unlikely)");
+}
+
+/* (loc "FILE" LINE) for the statement about to be lowered, when it differs from the last one printed in this function. */
+static void ir_loc_stmt(a_statement_ptr s, int d)
+{
+  a_const_char *fname = NULL, *full = NULL;
+  a_line_number line = 0;
+  a_boolean at_end = FALSE;
+  char *q, *o;
+  const char *c;
+  if (!ir_ubsan || s == NULL || s->position.seq == 0) return;
+  if (conv_seq_to_file_and_line(s->position.seq, &fname, &full, &line, &at_end) == NULL || fname == NULL) return;
+  if (ir_loc_file != NULL && strcmp(ir_loc_file, fname) == 0 && ir_loc_line == (unsigned long)line) return;
+  free(ir_loc_file);
+  ir_loc_file = strdup(fname);
+  ir_loc_line = (unsigned long)line;
+  q = o = (char *)malloc(2 * strlen(fname) + 1);
+  for (c = fname; *c != 0; c++) {
+    if (*c == '"' || *c == '\\') *o++ = '\\';
+    *o++ = *c;
+  }
+  *o = 0;
+  ir_line(d, ir_fmt("(loc \"%s\" %lu)", q, ir_loc_line));
+  free(q);
+}
+
+/* The statement is lowered again in a new place (the step of a loop): print its location even if it is the last one. */
+static void ir_loc_again(a_statement_ptr s, int d)
+{
+  free(ir_loc_file);
+  ir_loc_file = NULL;
+  ir_loc_stmt(s, d);
+}
+
 static void ir_stmt(a_statement_ptr s, int d)
 {
   ir_depth = d;
@@ -5267,6 +5319,7 @@ static void ir_stmt(a_statement_ptr s, int d)
     ir_line(d, "(nil-stmt)");
     return;
   }
+  if (s->kind != stmk_block && s->kind != stmk_empty && s->kind != stmk_label) ir_loc_stmt(s, d);
   switch (s->kind) {
     case stmk_empty:
       ir_note(1, stmk_empty, 1);
@@ -5291,10 +5344,12 @@ static void ir_stmt(a_statement_ptr s, int d)
       cb = ir_to_bool(ir_rval(s->expr));
       ir_line(d, ir_fmt("(if %s", cb));
       ir_line(d + 1, "(then");
+      ir_branch_hint(s->variant.if_stmt.then_statement, d + 2);
       ir_stmt(s->variant.if_stmt.then_statement, d + 2);
       ir_close(1);
       if (s->variant.if_stmt.else_statement != NULL) {
         ir_line(d + 1, "(else");
+        ir_branch_hint(s->variant.if_stmt.else_statement, d + 2);
         ir_stmt(s->variant.if_stmt.else_statement, d + 2);
         ir_close(1);
       }
@@ -5339,6 +5394,7 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_loop_pop();
       ir_close(1);
       ir_line(d + 1, "(step");
+      ir_loc_again(s, d + 2);
       ir_exit_unless(d + 2, s->expr);
       ir_close(1);
       ir_close(1);
@@ -5356,6 +5412,7 @@ static void ir_stmt(a_statement_ptr s, int d)
       ir_close(1);
       ir_line(d + 1, "(step");
       if (extra != NULL && extra->increment != NULL) {
+        ir_loc_again(s, d + 2);
         ir_depth = d + 2;
         (void)ir_rval(extra->increment);
       }
@@ -5435,7 +5492,7 @@ static void ir_stmt(a_statement_ptr s, int d)
         ir_fact_close_all(d);
         if (ir_is_void(ir_ret_type) || ir_is_memval(ir_ret_type)) ir_line(d, "(return)");
         else if (ir_in_main) ir_line(d, ir_fmt("(return %s)", ir_zero(ir_ret_type)));
-        else ir_line(d, "(unreachable)");
+        else ir_line(d, ir_ubsan ? "(unreachable missing-return)" : "(unreachable)");
       } else if (ir_is_void(s->expr->type)) {
         (void)ir_rval(s->expr);
         ir_fact_close_all(d);
@@ -5704,6 +5761,8 @@ static void ir_function(a_routine_ptr rout)
   /* Body. Scalar parameters are copied into slots first, so that every named variable has an address. */
   ir_buf_open(&body);
   ir_buf_begin(&body);
+  free(ir_loc_file);
+  ir_loc_file = NULL;
   if (ir_borrow) {
     /* (decl REG KIND) for each parameter: ref for a reference, param for an object. The parameters are open locals. */
     int i;
@@ -5745,7 +5804,7 @@ static void ir_function(a_routine_ptr rout)
     if (strcmp(rout->source_corresp.name != NULL ? rout->source_corresp.name : "", "main") == 0) {
       ir_line(1, ir_fmt("(return %s)", ir_zero(ret)));
     } else {
-      ir_line(1, "(unreachable)");
+      ir_line(1, ir_ubsan ? "(unreachable missing-return)" : "(unreachable)");
     }
   }
   ir_buf_end(&body);
@@ -5839,6 +5898,14 @@ void nfcxx_ir_back_end(void)
   const char *ov = getenv("NFCXX_IR_OVERFLOW");
 
   ir_trap_overflow = ov != NULL && strcmp(ov, "trap") == 0;
+  {
+    /* NFCXX_IR_SANITIZE=undefined | CHECK[,CHECK...]: the driver's -fsanitize= (docs/notes/ubsan.md). Signed overflow is
+       the one check that is off by default; the others (divide, shift, bounds, null, unreachable, float cast) are always on
+       and only gain a report. */
+    const char *sz = getenv("NFCXX_IR_SANITIZE");
+    ir_ubsan = sz != NULL && sz[0] != 0;
+    if (ir_ubsan && (strstr(sz, "undefined") != NULL || strstr(sz, "signed-integer-overflow") != NULL)) ir_trap_overflow = 1;
+  }
   {
     const char *bf = getenv("NFCXX_PATHB_BORROW");
     ir_borrow = bf != NULL && strcmp(bf, "1") == 0;

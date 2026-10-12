@@ -133,6 +133,12 @@ Pointer and aggregate addressing has no C-level expression:
 - `(nonnull P)`: emitted before every dereference of a pointer value (`indirect`, `points_to_field`). Addresses of objects
   are not checked.
 
+- `(loc "FILE" LINE)`, `(likely)`, `(unlikely)`: statements that generate no code. `loc` is printed only under
+  `NFCXX_IR_SANITIZE` (`-fsanitize=`): the source position of the statements that follow, which a failing check reports.
+  `(likely)`/`(unlikely)` is the first statement of an `if` arm that has `[[likely]]`/`[[unlikely]]`; a consumer may use it for
+  block layout and must otherwise ignore it. `(unreachable missing-return)` is `(unreachable)` for a function left without a
+  value, printed under the same variable. See `ubsan.md`.
+
 All sizes and offsets come from EDG's layout (`a_field.offset`, `f_size_of_type`), not recomputed.
 
 ### 5a. Bit-fields

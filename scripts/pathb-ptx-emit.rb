@@ -1052,6 +1052,8 @@ class Fn
       enclosing = @loops.reverse.find { |e| e[0] }
       raise BadIR, "continue outside a loop" if enclosing.nil?
       emit("bra #{enclosing[0]};")
+    when "loc", "likely", "unlikely"
+      # source position and branch hints (docs/notes/ubsan.md): no code
     when "trap", "unreachable"
       # (trap) and (unreachable): an illegal instruction on the GPU; the IR spec says unreachable traps
       emit("trap;")

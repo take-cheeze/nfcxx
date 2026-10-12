@@ -1,15 +1,6 @@
-// nfceval implementation. See nfceval.hpp and docs/notes/eval.md.
+// nfceval implementation. See nfceval.hpp and docs/notes/eval.md. Finding the driver, hashing, the cache directory, running the
+// driver and dlopen are in nfceval_build.hpp (shared with the tier of lib/ast).
 #include "nfceval.hpp"
-
-#include <dlfcn.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 #include <cctype>
 #include <cstdio>
@@ -17,23 +8,16 @@
 #include <cstring>
 #include <map>
 
+#include "nfceval_build.hpp"
+
 namespace nfceval {
 
 namespace {
 
-// ---- hashing: two FNV-1a 64 passes with different offsets, 32 hex digits ----------------------
-std::string hash_hex(const std::string& s) {
-  unsigned long long a = 1469598103934665603ULL, b = 0x9e3779b97f4a7c15ULL;
-  for (std::size_t i = 0; i < s.size(); ++i) {
-    unsigned char c = (unsigned char)s[i];
-    a = (a ^ c) * 1099511628211ULL;
-    b = (b ^ (c + 31u)) * 1099511628211ULL;
-    b ^= b >> 29;
-  }
-  char buf[40];
-  std::snprintf(buf, sizeof buf, "%016llx%016llx", a, b);
-  return buf;
-}
+using build::file_exists;
+using build::hash_hex;
+using build::read_file;
+using build::write_file;
 
 bool is_ident(const std::string& s) {
   if (s.empty() || !(std::isalpha((unsigned char)s[0]) || s[0] == '_')) return false;
@@ -111,47 +95,6 @@ bool unspellable(const std::string& t) {
          t.find("<unknown") != std::string::npos;
 }
 
-std::string read_file(const std::string& path) {
-  std::string out;
-  if (FILE* f = std::fopen(path.c_str(), "rb")) {
-    char buf[4096];
-    std::size_t n;
-    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
-    std::fclose(f);
-  }
-  return out;
-}
-
-bool write_file(const std::string& path, const std::string& data) {
-  FILE* f = std::fopen(path.c_str(), "wb");
-  if (!f) return false;
-  bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
-  return std::fclose(f) == 0 && ok;
-}
-
-bool file_exists(const std::string& p, int mode = F_OK) { return ::access(p.c_str(), mode) == 0; }
-
-std::string default_driver() {
-  if (const char* e = std::getenv("NFCXX")) {
-    if (*e) return e;
-  }
-#ifdef NFCEVAL_DEFAULT_DRIVER
-  if (file_exists(NFCEVAL_DEFAULT_DRIVER, X_OK)) return NFCEVAL_DEFAULT_DRIVER;
-#endif
-  // <repo>/lib/eval/nfceval.cpp -> <repo>/nfcxx
-  std::string f = __FILE__;
-  for (int i = 0; i < 3; ++i) {
-    std::size_t s = f.rfind('/');
-    if (s == std::string::npos) {
-      f = i == 2 ? "." : "";  // a relative __FILE__ ("lib/eval/nfceval.cpp"): the repository is the cwd
-      break;
-    }
-    f.resize(s);
-  }
-  if (!f.empty() && file_exists(f + "/nfcxx", X_OK)) return f + "/nfcxx";
-  return "nfcxx";
-}
-
 struct Loaded {
   void* handle;
   int (*entry)(void* const*, void*, char*, unsigned long);
@@ -160,7 +103,11 @@ struct Loaded {
 }  // namespace
 
 struct Engine::Impl {
-  std::string driver = default_driver();
+#ifdef NFCEVAL_DEFAULT_DRIVER
+  std::string driver = build::default_driver(__FILE__, NFCEVAL_DEFAULT_DRIVER);
+#else
+  std::string driver = build::default_driver(__FILE__);
+#endif
   std::string cache;
   std::vector<std::string> flags;
   unsigned timeout = 300;
@@ -170,78 +117,13 @@ struct Engine::Impl {
   unsigned compiles = 0, loads = 0;
 
   std::string cache_dir() {
-    if (cache.empty()) {
-      if (const char* e = std::getenv("NFCEVAL_CACHE")) cache = e;
-      if (cache.empty()) {
-        const char* t = std::getenv("TMPDIR");
-        cache = std::string(t && *t ? t : "/tmp") + "/nfceval-cache-" + std::to_string((unsigned long)::getuid());
-      }
-    }
+    if (cache.empty()) cache = build::default_cache_dir("NFCEVAL_CACHE", "nfceval-cache");
     return cache;
   }
 
   void ensure_cache() {
-    std::string d = cache_dir();
-    // mkdir -p
-    for (std::size_t i = 1; i <= d.size(); ++i) {
-      if (i == d.size() || d[i] == '/') {
-        std::string part = d.substr(0, i);
-        if (::mkdir(part.c_str(), 0700) != 0 && errno != EEXIST)
-          throw Error("nfceval: cannot create cache directory " + part + ": " + std::strerror(errno));
-      }
-    }
-    struct stat st;
-    if (::stat(d.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
-      throw Error("nfceval: cache path is not a directory: " + d);
-    // Shared objects from this directory are executed: refuse one another user could write to.
-    if (st.st_uid != ::getuid() || (st.st_mode & (S_IWGRP | S_IWOTH)))
-      throw Error("nfceval: cache directory " + d + " must be owned by the current user and not group/world writable");
-  }
-
-  // Runs the driver; returns its output, sets status (exit code, -1: killed by the timeout, -2: spawn failed).
-  std::string run_driver(const std::vector<std::string>& args, const std::string& logfile, int& status) {
-    std::vector<char*> argv;
-    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
-    argv.push_back(nullptr);
-    pid_t pid = ::fork();
-    if (pid < 0) {
-      status = -2;
-      return std::string("fork failed: ") + std::strerror(errno);
-    }
-    if (pid == 0) {
-      ::setpgid(0, 0);
-      int fd = ::open(logfile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-      int in = ::open("/dev/null", O_RDONLY);
-      if (fd >= 0) {
-        ::dup2(fd, 1);
-        ::dup2(fd, 2);
-      }
-      if (in >= 0) ::dup2(in, 0);
-      ::execvp(argv[0], argv.data());
-      std::fprintf(stderr, "nfceval: cannot run %s: %s\n", argv[0], std::strerror(errno));
-      ::_exit(127);
-    }
-    ::setpgid(pid, pid);
-    long waited_ms = 0;
-    bool killed = false;
-    int ws = 0;
-    for (;;) {
-      pid_t r = ::waitpid(pid, &ws, WNOHANG);
-      if (r == pid) break;
-      if (r < 0 && errno != EINTR) {
-        ws = 0;
-        break;
-      }
-      struct timespec ts = {0, 5 * 1000 * 1000};
-      ::nanosleep(&ts, nullptr);
-      waited_ms += 5;
-      if (timeout && !killed && waited_ms > (long)timeout * 1000) {
-        ::kill(-pid, SIGKILL);
-        killed = true;
-      }
-    }
-    status = killed ? -1 : WIFEXITED(ws) ? WEXITSTATUS(ws) : 128 + (WIFSIGNALED(ws) ? WTERMSIG(ws) : 0);
-    return read_file(logfile);
+    std::string err = build::ensure_cache_dir(cache_dir());
+    if (!err.empty()) throw Error("nfceval: " + err);
   }
 
   Loaded load(const std::string& key, const std::string& src) {
@@ -263,13 +145,11 @@ struct Engine::Impl {
       args.push_back(tmp);
       int status = 0;
       ++compiles;
-      std::string out = run_driver(args, log, status);
+      std::string out = build::run_driver(args, log, timeout, status);
       ::unlink(log.c_str());
       if (status != 0 || !file_exists(tmp)) {
         ::unlink(tmp.c_str());
-        std::string why = status == -1 ? "compiler timed out after " + std::to_string(timeout) + " s"
-                          : status == 127 ? "cannot run the nfcxx driver '" + driver + "' (set NFCXX or Engine::set_driver)"
-                                          : "compile failed (driver exit " + std::to_string(status) + ")";
+        std::string why = build::failure_reason(status, driver, timeout);
         if (status == 127 || status == -2) throw Error("nfceval: " + why + "\n" + out);
         throw CompileError("nfceval: " + why + "\n" + out);
       }
@@ -278,16 +158,10 @@ struct Engine::Impl {
         throw Error("nfceval: cannot install " + so + ": " + std::strerror(errno));
       }
     }
-    void* h = ::dlopen(so.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!h) {
-      const char* e = ::dlerror();
-      throw Error(std::string("nfceval: dlopen failed: ") + (e ? e : "?"));
-    }
-    void* sym = ::dlsym(h, "nfceval_entry");
-    if (!sym) {
-      ::dlclose(h);
-      throw Error("nfceval: " + so + " has no nfceval_entry");
-    }
+    void* sym = nullptr;
+    std::string err;
+    void* h = build::open_so(so, "nfceval_entry", &sym, &err);
+    if (!h) throw Error("nfceval: " + err);
     ++loads;
     Loaded l;
     l.handle = h;
