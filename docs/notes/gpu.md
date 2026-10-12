@@ -48,18 +48,20 @@ This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda
   `cudaLibraryLoadData` and `cudaLibraryGetKernel` before `main`.
 
 Layout: one object per `.cu` file holds the host code and its device image (the cubin is a data array in it). The
-host copy of a `-c` compile stays beside the object, in `<dir>/.nfcxx/<name>.cpp`, because the EDG prelinker
-re-reads the source recorded in an object at link time; a link without `-c` uses a temp directory. A file with no
+host copy of a `-c` compile goes to a per-user cache, `${NFCXX_CU_CACHE:-$XDG_CACHE_HOME/nfcxx or ~/.cache/nfcxx}/cu/<key>/<name>.cpp`,
+keyed by the absolute object path, and the `.ti` file records that absolute path. The EDG prelinker re-reads the
+copy when it needs a template instance at link time, and a failed link deletes its input objects (so a missing copy
+also costs the object). A link without `-c` uses a temp directory. Nothing is left under the source tree. A file with no
 `__global__` gets no device image. The device compile needs the Path B harness (`scripts/setup-pathb.sh`) and ptxas;
 `NFCXX_PTXAS` and `NFCXX_SM` override the tool and the architecture.
 
 `tests/cuda/run.sh` checks the host rewrite against golden files, refuses unsupported launch forms (exit 3), and
 builds, links and runs `mul2.cu`: the kernels run on the GPU and the program checks 1000 results.
 
-NVIDIA `cuda-samples` `0_Introduction/vectorAdd`, unmodified, builds with `--backend=gcc` and
-`-I/usr/local/cuda/include/cccl` (for `<cuda/cmath>`), links with `-lcudart`, and prints "CPU and GPU answers match".
-Note that the sample exits 0 even when its check fails: the check is its output line. The qbe backend (cproc) rejects
-`__builtin_fabsf`, which libcu++ uses.
+NVIDIA `cuda-samples` `0_Introduction/vectorAdd`, unmodified, builds with `-I/usr/local/cuda/include/cccl` (for
+`<cuda/cmath>`) on the default qbe backend and on `--backend=gcc`, links with `-lcudart`, and prints "CPU and GPU answers
+match". On qbe, `scripts/qbe-prep.rb` maps `__builtin_fabsf` and `__builtin_fabs` (used by libcu++) to libm. Note that the
+sample exits 0 even when its check fails: the check is its output line.
 
 Device unit (`scripts/cuda-rewrite.rb --device`): the top-level pieces of the source (preprocessor lines, declarations,
 definitions) are classified. The unit has every `__global__`/`__device__` function, and the host declarations those
@@ -75,6 +77,9 @@ defines a stub at the end of the file, so the embedded table finds it by name. T
 with the explicit arguments substituted. Launches whose arguments depend on an enclosing template parameter fail to
 compile (the stub refers to the parameter).
 
-Not done: device helper functions (the emitter makes every IR function a `.visible .entry`), the qbe path for libcu++,
-the emitter beyond the kernels in `tests/gpu/kernels` (it refuses other nodes with exit 3), the front
+The CPU interpreter (`tests/gpu/ptx-interp`) runs `.func` and `call` (no recursion), so `helper_kernel` runs in
+`tests/gpu/run_interp.sh` with the same check as the GPU run. A struct passed by value is refused with a message that
+names the type.
+
+Not done: the emitter beyond the kernels in `tests/gpu/kernels` (it refuses other nodes with exit 3), the front
 end's CUDA input (EDG here has no CUDA mode, so `__global__` and `<<<>>>` do not parse), and an nvcc-compatible driver.

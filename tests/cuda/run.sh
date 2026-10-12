@@ -59,4 +59,24 @@ else
   cat "$out/build.log"; echo "mul2.cu build: FAIL"; fail=1
 fi
 
+# 4. The copy stays out of the source tree, and the object links from another directory. Built from a directory
+#    other than the output's, with a relative -o, and linked from a third directory. No .nfcxx directory may be left
+#    under the source tree or the build directory, and the copies go to a per-test cache (NFCXX_CU_CACHE).
+export NFCXX_CU_CACHE="$out/cache"
+mkdir -p "$out/elsewhere/sub" "$out/linkdir"
+src=$PWD/mul2.cu
+if ( cd "$out/elsewhere" && "$root/nfcxx" -c -I"$cuda/include" "$src" -o sub/rel.o > "$out/rel.log" 2>&1 ) \
+   && ( cd "$out/linkdir" && "$root/nfcxx" "$out/elsewhere/sub/rel.o" -L"$cuda/lib64" -lcudart -o "$out/rel" >> "$out/rel.log" 2>&1 ); then
+  run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/rel") && rc=0 || rc=$?
+  if [ "$rc" = 0 ] && [ "$run" = "$(printf 'launch: no error\nmul2: 1000 elements, 0 mismatches')" ]; then
+    echo "relative -o from another directory, linked from a third: ok"
+  else
+    echo "relative -o run: FAIL (exit $rc): $run"; fail=1
+  fi
+else
+  cat "$out/rel.log"; echo "relative -o build: FAIL"; fail=1
+fi
+left=$(find "$root/tests/cuda" "$out" -name .nfcxx 2>/dev/null || true)
+if [ -z "$left" ]; then echo "no .nfcxx left in the tree: ok"; else echo "no .nfcxx left in the tree: FAIL: $left"; fail=1; fi
+
 exit $fail
