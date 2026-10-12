@@ -22,7 +22,7 @@ require_relative 'literal_element_proof'
 #         (CodeGen#numeric_class_bit). They enter through a proven `Klass.new`, a Range literal, or a true, false or
 #         Symbol literal (LOADTRUE, LOADFALSE, LOADSYM: TrueClass, FalseClass, Symbol) and reach other methods only
 #         through return values (ADR 0289) or the class pools. The Symbol bit also comes from a Symbol element of a
-#         frozen literal (FROZEN_TABLES, ADR 0421). FalseClass is the one falsy class bit: a truthiness
+#         frozen literal (FROZEN_TABLES, ADR 0424). FalseClass is the one falsy class bit: a truthiness
 #         test leaves it on the falsy edge only. The oracle's false_class_bit names it; an oracle that names none
 #         keeps every class bit on both edges (falsy_class_bits).
 # Bits from OBJECT_KIND_BASE up are object kinds the oracle names (LcfRowFlow, ADR 0294): each is

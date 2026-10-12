@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# SYMBOL_CLASS (docs/adr/0421): a frozen literal table whose elements are Symbols carries the 'Symbol' class bit
+# SYMBOL_CLASS (docs/adr/0424): a frozen literal table whose elements are Symbols carries the 'Symbol' class bit
 # (the bit LOADSYM literals carry in the exact-class run) in its slot classes, so `TABLE[i]` is SYM where the index
 # is an Integer. Every other class bit stays out of numeric arithmetic, truthiness and cross-method facts.
 #
