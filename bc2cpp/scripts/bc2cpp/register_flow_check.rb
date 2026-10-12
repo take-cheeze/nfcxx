@@ -14,6 +14,7 @@ require 'rbconfig'
 require 'set'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/irep'
+require_relative '../../tools/bc2cpp/irep_arity'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/register_flow'
 require_relative 'cxx'
@@ -107,6 +108,27 @@ skipped = flow([insn(0, 'MOVE', "R3\tR1"), insn(2, 'JMP', '6'), insn(4, 'RETURN'
                ["  r3 = r1;\n", '', "  return r3;\n", "  r3 = mrb_nil_value();\n", "  return r3;\n"])
 check.call('a suppressed JMP does not hide the fall-through into the next text',
            skipped[0] == "  r3 = r1;\n" || skipped[2] == "  return r1;\n")
+
+# def f(a, b = 1) style table: ENTER, the first table JMP is the switch over the
+# default-value targets (addrs 3 and 4), the second table JMP is suppressed.
+dispatch_list = [insn(0, 'ENTER', "0:1:0:0:0:0:0:0\t(0x0)"), insn(1, 'JMP', '3'), insn(2, 'JMP', '4'),
+                 insn(3, 'MOVE', "R3\tR1"), insn(4, 'MOVE', "R3\tR2"), insn(5, 'RETURN', 'R3')]
+switch_text = RegisterFlow.dispatch_text([3, 4])
+dispatch_texts = ["  // ENTER\n", switch_text, '', "  r3 = r1;\n", "  r3 = r2;\n", "  return r3;\n"]
+check.call('the switch text is the one codegen emits',
+           switch_text == "  switch (bc2cpp_given_opt) {\n    case 0: goto L3;\n    default: goto L4;\n  }\n")
+check.call('an optional-argument switch reaches its default targets: the overwritten write and the copy go',
+           flow(dispatch_list, dispatch_texts) == ["  // ENTER\n", switch_text, '', '', '', "  return r2;\n"])
+wrong_switch = ["  // ENTER\n", RegisterFlow.dispatch_text([3, 9]), '', "  r3 = r1;\n", "  r3 = r2;\n", "  return r3;\n"]
+check.call('a switch naming a target the table does not have refuses the method',
+           flow(dispatch_list, wrong_switch) == wrong_switch)
+emitting_entry = ["  // ENTER\n", switch_text, "  r5 = r1;\n", "  r3 = r1;\n", "  r3 = r2;\n", "  return r3;\n"]
+check.call('a table entry that emitted code refuses the method',
+           flow(dispatch_list, emitting_entry) == emitting_entry)
+ENV['BC2CPP_REGISTER_FLOW_GOTO'] = '0'
+check.call('BC2CPP_REGISTER_FLOW_GOTO=0 refuses the switch method again',
+           flow(dispatch_list, dispatch_texts) == dispatch_texts)
+ENV.delete('BC2CPP_REGISTER_FLOW_GOTO')
 ENV['BC2CPP_REGISTER_FLOW'] = '0'
 check.call('the kill switch returns the texts untouched', flow(list, texts).equal?(texts))
 ENV.delete('BC2CPP_REGISTER_FLOW')

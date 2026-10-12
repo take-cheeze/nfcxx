@@ -827,14 +827,9 @@ class CodeGen
 
   # OPTIONAL_ARG_SUPPORT: the switch replacing ENTER's jump table (see
   # optional_arg_table); `targets` are the table's target addresses in order.
+  # RegisterFlow.dispatch_text builds the text; the pass matches it, so both come from there.
   def emit_optional_dispatch(targets)
-    out = String.new
-    out << "  switch (bc2cpp_given_opt) {\n"
-    targets.each_with_index do |addr, i|
-      out << (i == targets.size - 1 ? "    default: goto L#{addr};\n" : "    case #{i}: goto L#{addr};\n")
-    end
-    out << "  }\n"
-    out
+    RegisterFlow.dispatch_text(targets)
   end
 
   # Every address a JMP/JMPNOT/JMPIF/JMPUW can land on needs a C label. JMPUW
