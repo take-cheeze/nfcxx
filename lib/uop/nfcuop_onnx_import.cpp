@@ -1,7 +1,6 @@
 // nfcuop::hir::Graph::merge_onnx / from_onnx: the ONNX ModelProto reader, a hand-written protobuf parser for the few messages
 // the writer (nfcuop_hir.cpp) writes and the tools that produce models (onnx, onnxruntime, onnxsim) emit. See nfcuop_hir.hpp.
 #include <cstring>
-#include <set>
 
 #include "nfcuop_hir.hpp"
 
@@ -318,11 +317,11 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
   };
 
   // initializers first: an input of the same name is the initializer
-  std::set<std::string> init_names;
+  std::map<std::string, int> init_names;
   for (const Bytes& b : inits) {
     TensorMsg t = read_tensor(b);
     if (t.name.empty()) throw Error("onnx import: an initializer has no name");
-    init_names.insert(t.name);
+    init_names[t.name] = 1;
     int id = find_value(t.name);
     if (id >= 0) {
       const Array* have = initializer(id);
@@ -404,8 +403,7 @@ std::vector<int> Graph::merge_onnx(const std::string& bytes) {
         attrs.push_back(a);
       }
     }
-    int out = add_node(n.op, ins, attrs, n.out[0]);
-    if (!n.name.empty()) nodes_.back().name = n.name;
+    int out = add_node_named(n.op, ins, attrs, n.out[0], n.name);
     local[n.out[0]] = out;
   }
 

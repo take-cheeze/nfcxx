@@ -104,12 +104,14 @@ class Graph {
 
  private:
   int new_value(const std::string& name, DType d, const Shape& shape);
+  int add_node_named(const std::string& op, std::vector<int> inputs, std::vector<Attribute> attrs, const std::string& out_name, const std::string& node_name);
   std::deque<Value> values_;  // stable addresses: Tensor::shape() hands out references
   std::vector<Node> nodes_;
   std::vector<int> inputs_;
   std::vector<int> producer_;
   std::map<int, Array> inits_;
   std::map<std::string, int> names_;
+  std::map<std::string, int> node_names_;  // node names are unique too (ONNX tools want that)
 };
 
 // Lowers values of a hir::Graph to tensors of a ut::Session (memoized), so they can be evaluated with the UOp

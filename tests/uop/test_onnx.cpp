@@ -8,7 +8,6 @@
 #include <fstream>
 #include <map>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -301,14 +300,15 @@ static void merging() {
     hir::Graph b;
     std::vector<int> o = b.merge_onnx(m);
     int p = b.add_node("Neg", {o[0]}), q = b.add_node("Neg", {p}), r = b.add_node("Neg", {q});
-    std::set<std::string> names;
-    for (int id : {0, 1, o[0], p, q, r}) names.insert(b.value(id).name);
+    std::map<std::string, int> names;
+    for (int id : {0, 1, o[0], p, q, r}) names[b.value(id).name] = 1;
     CHECK(names.size() == 5 || names.size() == 6);
     for (size_t k = 0; k < b.num_values(); k++) CHECK(b.find_value(b.value(static_cast<int>(k)).name) == static_cast<int>(k));
   }
 }
 
 // ---- (d) a tiny hand-made ModelProto, for the errors ----
+// (the models are built before the call that throws: nfcxx's unwinder destroyed the temporaries of a nested braced-list full-expression twice)
 
 namespace {
 struct W {
@@ -353,27 +353,27 @@ static void errors() {
   CHECK_ERR(hir::Graph::from_onnx(good.substr(0, good.size() - 5)), "onnx import");           // truncated
   CHECK_ERR(hir::Graph::from_onnx(std::string("\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 11)), "onnx import");
   CHECK_ERR(hir::Graph::from_onnx(""), "no graph");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Foo", {"x"}, {"y"})}, {ok_in}, {ok_out})), "Foo");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {ok_in}, {ok_out}, 12)), "opset");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {value_info("x", 1, {2}, true)}, {ok_out})), "dynamic");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {value_info("x", 10, {2})}, {ok_out})), "FLOAT16");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"nope"}, {"y"})}, {ok_in}, {ok_out})), "nope");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {ok_in}, {value_info("z", 1, {2})})), "z");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {ok_in}, {value_info("y", 1, {3})})), "name collision");   // declared shape differs from the inferred one
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y", "y2"})}, {ok_in}, {ok_out})), "several outputs");
-  CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x", "x"}, {"y"})}, {ok_in}, {ok_out})), "Neg");                             // shape inference's own message
+  { std::string m_ = model({node("Foo", {"x"}, {"y"})}, {ok_in}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "Foo"); }
+  { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {ok_in}, {ok_out}, 12); CHECK_ERR(hir::Graph::from_onnx(m_), "opset"); }
+  { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {value_info("x", 1, {2}, true)}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "dynamic"); }
+  { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {value_info("x", 10, {2})}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "FLOAT16"); }
+  { std::string m_ = model({node("Neg", {"nope"}, {"y"})}, {ok_in}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "nope"); }
+  { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {ok_in}, {value_info("z", 1, {2})}); CHECK_ERR(hir::Graph::from_onnx(m_), "z"); }
+  { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {ok_in}, {value_info("y", 1, {3})}); CHECK_ERR(hir::Graph::from_onnx(m_), "name collision"); }   // declared shape differs from the inferred one
+  { std::string m_ = model({node("Neg", {"x"}, {"y", "y2"})}, {ok_in}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "several outputs"); }
+  { std::string m_ = model({node("Neg", {"x", "x"}, {"y"})}, {ok_in}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "Neg"); }                             // shape inference's own message
   {  // an initializer of an unsupported type
     W t; t.i(1, 2); t.i(2, 5); t.s(8, "c"); t.s(9, std::string(4, '\0'));   // INT16
-    CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {ok_in}, {ok_out}, 18, {t})), "INT16");
+    { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {ok_in}, {ok_out}, 18, {t}); CHECK_ERR(hir::Graph::from_onnx(m_), "INT16"); }
   }
   {  // raw_data of the wrong size
     W t; t.i(1, 2); t.i(2, 1); t.s(8, "c"); t.s(9, std::string(7, '\0'));
-    CHECK_ERR(hir::Graph::from_onnx(model({node("Neg", {"x"}, {"y"})}, {ok_in}, {ok_out}, 18, {t})), "raw_data");
+    { std::string m_ = model({node("Neg", {"x"}, {"y"})}, {ok_in}, {ok_out}, 18, {t}); CHECK_ERR(hir::Graph::from_onnx(m_), "raw_data"); }
   }
   {  // a node in a domain of its own
     W n = node("Neg", {"x"}, {"y"});
     n.s(7, "com.example");
-    CHECK_ERR(hir::Graph::from_onnx(model({n}, {ok_in}, {ok_out})), "domain");
+    { std::string m_ = model({n}, {ok_in}, {ok_out}); CHECK_ERR(hir::Graph::from_onnx(m_), "domain"); }
   }
 }
 

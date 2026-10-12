@@ -34,7 +34,9 @@ run_all() {
   mkdir -p "$tmp/$label/onnx" "$tmp/$label/import"
   command -v python3 >/dev/null && python3 tests/uop/onnx_import_gen.py "$tmp/$label/import" | sed "s/^/     $label /"
   for t in "${tests[@]}"; do
-    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl 2>&1); then
+    ldx=()   # nfcxx programs export type_info vtables that break the exceptions inside libnfconnxsim.so: export nothing (scripts/onnxsim/exe.map)
+    [ -n "$CC_IS_NFCXX" ] && [ "$t" = test_grad ] && ldx=(-Wl,--version-script=scripts/onnxsim/exe.map)
+    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl "${ldx[@]}" 2>&1); then
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     fi
     case $t in

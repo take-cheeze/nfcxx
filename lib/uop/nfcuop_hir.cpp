@@ -358,6 +358,10 @@ Value infer(const Graph& g, const Node& n) {
 }  // namespace
 
 int Graph::add_node(const std::string& op, std::vector<int> inputs, std::vector<Attribute> attrs, const std::string& out_name) {
+  return add_node_named(op, std::move(inputs), std::move(attrs), out_name, "");
+}
+
+int Graph::add_node_named(const std::string& op, std::vector<int> inputs, std::vector<Attribute> attrs, const std::string& out_name, const std::string& node_name) {
   Node n;
   n.op = op;
   n.inputs = std::move(inputs);
@@ -366,7 +370,9 @@ int Graph::add_node(const std::string& op, std::vector<int> inputs, std::vector<
   while (!n.inputs.empty() && n.inputs.back() < 0) n.inputs.pop_back();  // trailing omitted optionals
   Value v = infer(*this, n);
   n.output = new_value(out_name, v.dtype, v.shape);
-  n.name = "node_" + std::to_string(nodes_.size());
+  n.name = node_name.empty() || node_names_.count(node_name) ? "node_" + std::to_string(nodes_.size()) : node_name;   // an imported node keeps its name
+  while (node_names_.count(n.name)) n.name += "_";
+  node_names_[n.name] = 1;
   producer_[n.output] = static_cast<int>(nodes_.size());
   nodes_.push_back(std::move(n));
   return nodes_.back().output;

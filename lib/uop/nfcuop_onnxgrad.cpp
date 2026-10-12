@@ -69,6 +69,17 @@ Library& library() {
     std::string tried;
     for (const std::string& p : paths) {
       if (!file_exists(p)) { tried += (tried.empty() ? "" : ", ") + p; continue; }
+      // The library throws and catches C++ exceptions inside (every operator without a rule is one). A program built by nfcxx
+      // exports weak definitions of the C++ ABI's type_info vtables, without their virtual functions, and libstdc++ binds its
+      // exception machinery to them: the first exception thrown in the library crashes in the unwinder. Such a program must be
+      // linked with -Wl,--version-script=scripts/onnxsim/exe.map (nothing exported); otherwise the library is not used.
+      if (void* vt = dlsym(RTLD_DEFAULT, "_ZTVN10__cxxabiv117__class_type_infoE")) {
+        Dl_info di;
+        if (dladdr(vt, &di) && di.dli_fname && std::string(di.dli_fname).find("libstdc++") == std::string::npos) {
+          l.why = "this program defines the C++ ABI type_info itself (built by nfcxx?), which breaks exceptions inside " + p + "; link it with -Wl,--version-script=scripts/onnxsim/exe.map";
+          return l;
+        }
+      }
       void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_LOCAL);
       if (!h) {
         const char* e = dlerror();
