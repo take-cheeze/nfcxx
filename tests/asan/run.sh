@@ -2,7 +2,7 @@
 # AddressSanitizer (nfcxx -fsanitize=address; docs/notes/asan.md, asan-plan.md). The backend is $ASAN_BACKEND (gcc, the
 # default, or qbe: cproc's checks of every load and store). Path B and other sanitizers are refused.
 #
-#   tests/asan/cases/*.cpp  with a `// ASAN: text` line: the program must be killed by asan (exit 1 from the runtime's
+#   tests/asan/cases/*.cpp  with a `// ASAN: text` line (`// ASAN-QBE: text` replaces it on qbe): the program must be killed by asan (exit 1 from the runtime's
 #                           default abort_on_error=0) and the report on stderr must contain `text`;
 #                           with `// CLEAN`: the program must exit 0 with no report.
 #                           `// ASAN-OPTIONS: opts` sets ASAN_OPTIONS for that program (LeakSanitizer is off by default
@@ -20,6 +20,8 @@ bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 for f in tests/asan/cases/*.cpp; do
   n=$(basename "$f" .cpp)
   want=$(sed -n 's,^// ASAN: *\(.*\),\1,p' "$f" | head -1)
+  # qbe may word the same error differently (its redzones are poisoned by __asan_poison_memory_region)
+  [ "$B" = qbe ] && alt=$(sed -n 's,^// ASAN-QBE: *\([^ ]*\).*,\1,p' "$f" | head -1) && [ -n "$alt" ] && want=$alt
   opts=$(sed -n 's,^// ASAN-OPTIONS: *\(.*\),\1,p' "$f" | head -1)
   only=$(sed -n 's,^// ASAN-ONLY: *\([a-z]*\).*,\1,p' "$f" | head -1)
   if [ -n "$only" ] && [ "$only" != "$B" ]; then echo "SKIP $n (needs the $only backend)"; skip=$((skip + 1)); continue; fi

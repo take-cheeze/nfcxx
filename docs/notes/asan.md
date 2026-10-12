@@ -12,8 +12,12 @@ EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`de
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
-Not yet: redzones for stack and globals (`ASAN-ONLY: gcc` cases skip there), the report's source line, and volatile
-(qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+Stack objects get redzones (`asanalloc` in cproc's `funcalloc`): 32 bytes on each side, allocated in the entry block,
+poisoned on entry and unpoisoned in `funcret`. Redzones use `__asan_poison_memory_region`, so the report says
+`use-after-poison` where gcc says `stack-buffer-overflow` (the test accepts both spellings on qbe, `ASAN-QBE:`). Limits:
+the object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; objects over
+16-byte alignment, variable-length arrays and `alloca` get no redzones. Not yet: global redzones (`ASAN-ONLY: gcc`
+cases skip on qbe), the report's source line, and volatile (qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
 
 ## How it works
 
@@ -29,7 +33,7 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store (`scripts/cproc-asan.patch`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack objects get redzones (`scripts/cproc-asan.patch`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
