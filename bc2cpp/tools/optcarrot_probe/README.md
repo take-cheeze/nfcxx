@@ -1445,3 +1445,12 @@ The stack is embedded in `mrb_gc`, so the setting reaches both C and C++ and
 each capacity has separate build targets. This prevents mixing incompatible
 VM and generated-gem layouts. The RPG engine and constrained-target builds
 retain their existing defaults. See [GC measurements](../../docs/optcarrot-gc.md).
+
+## Generated synchronous PPU
+
+`OPTCARROT_STATIC_PPU=1` uses upstream's host-side code generator and a scoped
+Prism rewrite to provide an ordinary `PPU#run` before bc2cpp compilation.
+Combine it with `OPTCARROT_STATIC_DISPATCH=1` for the compiled experiment. It
+uses no target-side eval; the original Fiber entry remains the default.
+Interpreted mruby is slower, and strict sealed mode is not yet admitted.
+See [PPU core](../../docs/optcarrot-ppu-core.md) for measurements and proof limits.
