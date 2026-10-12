@@ -10,6 +10,11 @@
 #     registered-expression arms (`size`, `empty?`, `first` ...) and the tail of a POLY chain, so the
 #     arm loses its class test and its by-name dispatch.
 #
+#   * EXACT_FLOW_RESULT_CLASS: where the receiver trace names no class (a call result such as `h.keys`, or a
+#     core `select` whose block the flow specializes), the flow's exact core class is the receiver class, so a
+#     name several classes define (`er_total` on Array, Hash and ErFlowBox) reaches its Array or Hash body with
+#     no class test and no by-name dispatch.
+#
 # 1. Generated code (needs MRBC): positives lose their guard and dispatch; each withdrawal (a second
 #    class under the same constant name, a user `freeze`, a const_missing, an outside definition of
 #    the name, a computed const_set, the kill switch, the open world) keeps the guard.
@@ -96,6 +101,42 @@ HOLDER = <<~RUBY
 RUBY
 
 OWNERS = %w[ErBox ErHolder ErOther ErDrv].freeze
+
+# EXACT_FLOW_RESULT_CLASS fixture: compiled with the core (the flow specializes the core `select` and `reject`
+# bodies), run against the interpreter on the full-core build.
+FLOW_SOURCE = <<~RUBY
+  # One name, three definitions: a call is a POLY chain unless the receiver's class is proven.
+  class Array
+    def er_total; size + 100; end
+  end
+  class Hash
+    def er_total; size + 200; end
+  end
+  class ErFlowBox
+    def er_total; 7; end
+  end
+  class ErFlow
+    # The class comes from the flow; the trace names none for a call result.
+    def keys_total; { a: 1, b: 2 }.keys.er_total; end
+    def values_total; { a: 1 }.values.er_total; end
+    def select_total; { a: 1, b: 2 }.select { |_k, v| v > 1 }.er_total; end
+    def sym_reject_total; [1, nil, 3].reject(&:nil?).er_total; end
+    def copy_total; k = { a: 1 }.keys; j = k; j.er_total; end
+    # NEG: the flow proves one class on no path, or a class that may be nil (go passes both flags).
+    def unknown_total(x); x.er_total; end
+    def mixed_total(flag); (flag ? [1] : { a: 1 }).er_total; end
+    def nilable_total(flag); (flag ? nil : { a: 1 }.keys).er_total; end
+    def box_total; ErFlowBox.new.er_total; end
+    def go
+      [keys_total, values_total, select_total, sym_reject_total, copy_total,
+       unknown_total([1]), unknown_total({ a: 1 }), unknown_total(ErFlowBox.new),
+       mixed_total(true), mixed_total(false), nilable_total(false), (nilable_total(true) rescue :nomethod), box_total]
+    end
+  end
+RUBY
+FLOW_OWNERS = %w[ErFlowBox ErFlow].freeze
+FLOW_POSITIVE = { 'keys_total' => 'Array', 'values_total' => 'Array', 'select_total' => 'Hash',
+                  'sym_reject_total' => 'Array', 'copy_total' => 'Array' }.freeze
 
 body_of = lambda do |code, owner, fn|
   code[/^mrb_value #{owner}_#{fn}_impl\(mrb_state\* M.*?(?=^(?:static )?mrb_value \w+\(mrb_state\* M|\z)/m].to_s
@@ -195,6 +236,51 @@ if ENV['MRBC']
       open_code, = generate.call(CLASSES + HOLDER, open_dir, closed: false)
       check.call('the open world proves nothing about a constant', guarded.call(open_code, 'ErHolder', 'const_list'))
     end
+
+    # EXACT_FLOW_RESULT_CLASS: the typed call carries no class test and no fallback when the flow names the class.
+    flow_generate = lambda do |source, d, env: {}, **options|
+      saved = env.to_h { |k, _| [k, ENV.fetch(k, nil)] }
+      env.each { |k, v| ENV[k] = v }
+      begin
+        runtime.generate(source, d, core: true, only_owners: FLOW_OWNERS, **options)
+      ensure
+        saved.each { |k, v| v ? ENV[k] = v : ENV.delete(k) }
+      end
+    end
+    typed_at = ->(code, fn, klass) { body_of.call(code, 'ErFlow', fn).include?("EXACT_TYPED :er_total -> #{klass}#er_total (receiver proven exactly #{klass})") }
+    Dir.mktmpdir do |flow_dir|
+      fcode, = flow_generate.call(FLOW_SOURCE, flow_dir)
+      FLOW_POSITIVE.each do |fn, klass|
+        check.call("ErFlow##{fn}: the flow's #{klass} is the receiver class, the typed call has no guard and no fallback",
+                   typed_at.call(fcode, fn, klass))
+      end
+      %w[unknown_total mixed_total].each do |fn|
+        check.call("NEG ErFlow##{fn}: no single exact class, the call keeps its guards",
+                   !body_of.call(fcode, 'ErFlow', fn).include?('EXACT_TYPED :er_total'))
+      end
+      # A nil-or-Array receiver is not exact: only the non-nil arm of NILABLE_RECEIVER (behind its nil test) is typed.
+      nilable = body_of.call(fcode, 'ErFlow', 'nilable_total')
+      check.call('NEG ErFlow#nilable_total: the typed call sits behind the nil test',
+                 nilable.include?('NILABLE_RECEIVER :er_total') && nilable.index('mrb_nil_p(') < nilable.index('EXACT_TYPED :er_total'))
+      check.call('NEG ErFlow#box_total: a user class is not a core class (its own proof is untouched)',
+                 !body_of.call(fcode, 'ErFlow', 'box_total').include?('EXACT_TYPED :er_total -> Array') &&
+                 !body_of.call(fcode, 'ErFlow', 'box_total').include?('EXACT_TYPED :er_total -> Hash'))
+    end
+    Dir.mktmpdir do |flow_off|
+      ocode, = flow_generate.call(FLOW_SOURCE, flow_off, env: { 'BC2CPP_EXACT_FLOW_RESULT_CLASS' => '0' })
+      check.call('the kill switch (BC2CPP_EXACT_FLOW_RESULT_CLASS=0): the flow no longer names the receiver class',
+                 FLOW_POSITIVE.keys.none? { |fn| body_of.call(ocode, 'ErFlow', fn).include?('EXACT_TYPED :er_total') })
+    end
+    Dir.mktmpdir do |flow_arms|
+      acode, = flow_generate.call(FLOW_SOURCE, flow_arms, env: { 'BC2CPP_EXACT_CORE_ARMS' => '0' })
+      check.call('the exact-core-arms switch (BC2CPP_EXACT_CORE_ARMS=0) also withdraws it',
+                 FLOW_POSITIVE.keys.none? { |fn| body_of.call(acode, 'ErFlow', fn).include?('EXACT_TYPED :er_total') })
+    end
+    Dir.mktmpdir do |flow_open|
+      pcode, = flow_generate.call(FLOW_SOURCE, flow_open, closed: false)
+      check.call('the open world proves no flow class',
+                 FLOW_POSITIVE.keys.none? { |fn| body_of.call(pcode, 'ErFlow', fn).include?('EXACT_TYPED :er_total') })
+    end
   end
 else
   puts '-- SKIP generated code: set MRBC'
@@ -264,6 +350,35 @@ if ENV['MRBC'] && !builds.empty? && runtime.compiler? && !ENV['ERF_GENERATED_ONL
           check.call("#{label}: #{m}: the compiled call makes no dynamic dispatch", n == 0)
         end
       end
+    end
+  end
+
+  # EXACT_FLOW_RESULT_CLASS on real mruby: the typed calls answer what the interpreter answers, for every class
+  # that reaches the shared name, and the unproven sites still dispatch.
+  builds.each do |build_name, build|
+    next unless File.exist?("#{build}/lib/libmruby.a")
+
+    Dir.mktmpdir do |dir|
+      _code, err = runtime.generate(FLOW_SOURCE, dir, core: true, only_owners: FLOW_OWNERS)
+      flow_body_cpp = <<~CPP
+        static int scenario(mrb_state* M) {
+          mrb_value flow = mrb_obj_new(M, mrb_class_get(M, "ErFlow"), 0, nullptr);
+          call(M, "go", flow, "go");
+          return 0;
+        }
+      CPP
+      built, output = runtime.run(dir, err, FLOW_OWNERS, flow_body_cpp, build: build, full: true)
+      check.call("#{build_name}, flow classes: the fixture compiles and runs against real mruby", built)
+      puts output unless built
+      next unless built
+
+      sections = runtime.sections(output)
+      values = ->(name) { sections.fetch(name, []).reject { |l| l.start_with?('  ') } }
+      puts output if values.call('interpreted') != values.call('compiled')
+      check.call("#{build_name}, flow classes: compiled answers equal interpreted ones",
+                 !values.call('interpreted').empty? && values.call('interpreted') == values.call('compiled'))
+      check.call("#{build_name}, flow classes: every class reaches its own er_total",
+                 values.call('compiled').include?('go => [102, 101, 201, 102, 101, 101, 201, 7, 101, 201, 101, :nomethod, 7]'))
     end
   end
 else

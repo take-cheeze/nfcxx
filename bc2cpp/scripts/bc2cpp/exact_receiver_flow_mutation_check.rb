@@ -31,7 +31,18 @@ MUTANTS = [
    'exact = entries.find { |entry| entry[:owner][:class_name] == site[:klass] }', 'exact = entries.first',
    /every method answers what the interpreter answers/, true],
   ['the exact proof no longer reaches the POLY chain tail', 'codegen_send.rb',
-   'poly = with_exact_core_site(exact_site) do', 'poly = with_exact_core_site(nil) do', /ErHolder#lit_join|ErHolder#const_join/, false]
+   'poly = with_exact_core_site(exact_site) do', 'poly = with_exact_core_site(nil) do', /ErHolder#lit_join|ErHolder#const_join/, false],
+  # EXACT_FLOW_RESULT_CLASS: the flow's class names the receiver where the trace names none.
+  ['the receiver class is not the flow\'s', 'codegen_send.rb',
+   'known_class = exact_core_arm_class(irep, proof_idx, proof_reg, self_implicit)', "known_class = 'Array'",
+   /ErFlow#select_total/, false],
+  ['the flow result class ignores its switch', 'codegen_exact_core_arms.rb',
+   "exact_core_arms_enabled? && ENV.fetch('BC2CPP_EXACT_FLOW_RESULT_CLASS', '1') != '0'", 'exact_core_arms_enabled?',
+   /kill switch \(BC2CPP_EXACT_FLOW_RESULT_CLASS=0\)/, false],
+  ['a nil-or-class flow set names the class', 'codegen_return_classes.rb',
+   'RETURN_CORE_CLASS[mask] || return_class_name_of_bit(mask)',
+   'RETURN_CORE_CLASS[mask & ~NumericFlow::NIL] || return_class_name_of_bit(mask & ~NumericFlow::NIL)',
+   /ErFlow#nilable_total/, false]
 ].freeze
 
 # Concurrent mutants must not race to build the shared BC2CPP_FULL_BUILD_DIR: build it once first.

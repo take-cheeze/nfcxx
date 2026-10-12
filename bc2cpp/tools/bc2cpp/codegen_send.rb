@@ -1397,6 +1397,12 @@ class CodeGen
         exact_via_flow = true
       end
       # EXACT_CORE_ARMS (ADR 0309): a core class the flow proves exact; only the TYPED guard below uses it.
+      # EXACT_FLOW_RESULT_CLASS: when the receiver trace names no class at all (a call result such as
+      # `h.keys`, `x.to_s`, `r.to_a`), the flow's proof supplies the class; the TYPED lookup below still decides
+      # whether any direct target exists, so a class without one changes nothing.
+      if known_class.nil? && exact_class.nil? && exact_flow_result_class_enabled?
+        known_class = exact_core_arm_class(irep, proof_idx, proof_reg, self_implicit)
+      end
       exact_core_typed = exact_class.nil? && !known_class.nil? &&
                          exact_core_arm_class(irep, proof_idx, proof_reg, self_implicit) == known_class
       if exact_class
