@@ -29,6 +29,12 @@
 #define __shared__
 #define __constant__
 #define __managed__
+// The host copy of a kernel: __launch_bounds__ is a hint for the device compile. cuda_runtime.h defines it only when
+// __CUDACC__ is set, which the host compile is not, so a header kernel (one the rewrite does not touch) would keep the
+// call and break the parse. An empty default covers headers too.
+#ifndef __launch_bounds__
+#define __launch_bounds__(...)
+#endif
 
 // The device built-ins, for the host compile of a kernel body. The host copy of a kernel is never run (a launch
 // goes to the runtime), so these placeholders only have to exist and link.
