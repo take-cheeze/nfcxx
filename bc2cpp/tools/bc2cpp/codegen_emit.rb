@@ -692,6 +692,20 @@ class CodeGen
     "#{sanitize(owner)}_compiled_class"
   end
 
+  # The class expression of a DIRECT_CONSTRUCT_TARGETS owner at a direct-construct site. A full build
+  # reads the gem's hand-wired accessor; a HOT_ONLY build reads the owner-class cache instead, because
+  # register.cxx captures the g_direct_construct_* globals under `#ifndef BC2CPP_HOT_ONLY_STUBS`, so in
+  # a hot-only build every such accessor would return nullptr (found by the BC2CPP_STRICT_HINTS verify
+  # run on the sealed desktop host, ADR 0428: Game::Party#initialize crashed in bc2cpp_direct_alloc).
+  # The sealed desktop host (RPGMAKER_BC2CPP_CLOSED_WORLD_HOST, BC2CPP_BUILD_NAME=host) always reads the
+  # cache: a full build of it must link without a hand-written accessor per listed owner (most are unwired).
+  def direct_construct_class_expr(owner)
+    return owner_class_ptr_expr(owner) if hot_only_active? || ENV['BC2CPP_BUILD_NAME'] == 'host'
+
+    @direct_construct_used << owner
+    "#{direct_construct_class_fn(owner)}()"
+  end
+
   # Declarations for direct compiled construction actually used:
   # 1. bc2cpp_direct_alloc: mirrors mrb_instance_alloc's checks and allocation.
   # 2. Accessors only for listed targets, defined in the same gem's register.cxx.
@@ -815,6 +829,14 @@ class CodeGen
   def hot_only_active?
     excluded = self.class.hot_only_excluded
     excluded ? !excluded.empty? : false
+  end
+
+  # SKIPPED_ENTRY_MACROS: one `#define BC2CPP_SKIPPED_<entry> 1` per entry SKIP_UNSUPPORTED dropped from this output.
+  def emit_skipped_entry_macros(entries)
+    return '' if entries.empty?
+
+    "// SKIPPED_ENTRY_MACROS: entries refused by this run (left on the interpreter).\n" +
+      entries.sort.map { |e| "#define BC2CPP_SKIPPED_#{e} 1\n" }.join + "\n"
   end
 
   # HOT_ONLY: register.cxx still names uncompiled entries. Each becomes a constant

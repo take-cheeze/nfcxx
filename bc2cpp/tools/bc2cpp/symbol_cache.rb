@@ -429,8 +429,11 @@ module SymbolCache
   # dispatches, never undefined behavior. -DBC2CPP_NOMETHOD_VERIFY aborts, naming class, name and site,
   # so CI can run real workloads and prove zero violations; -DBC2CPP_HINT_VIOLATION_DISPATCH restores
   # the by-name send (silently) to bisect a suspected wrong hint without regenerating.
+  # -DBC2CPP_HINT_VIOLATION_LOG (ADR 0428) is the survey mode of the verify build: every distinct
+  # (site, class, name) is printed once on stderr as `bc2cpp: HINT_VIOLATION_LOG: Class#name at site`
+  # and the by-name send runs, so one workload run lists every wrong hint instead of stopping at the first.
   HINT_VIOLATION = <<~CPP
-    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #if defined(BC2CPP_NOMETHOD_VERIFY) || defined(BC2CPP_HINT_VIOLATION_LOG)
     #include <stdio.h>
     #include <stdlib.h>
     #endif
@@ -449,7 +452,22 @@ module SymbolCache
       mrb_exc_raise(M, mrb_exc_new_str(M, klass, mrb_str_plus(M, mrb_str_new_lit(M, "hint violation: "), msg)));
     }
     [[gnu::noipa]] static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
-    #ifdef BC2CPP_HINT_VIOLATION_DISPATCH
+    #ifdef BC2CPP_HINT_VIOLATION_LOG
+      {
+        static struct { const char* site; struct RClass* klass; mrb_sym mid; } seen[1024];
+        static int nseen;
+        struct RClass* klass = mrb_obj_class(M, recv);
+        mrb_sym mid = bc2cpp_sym(M, i);
+        bool known = false;
+        for (int k = 0; k < nseen && !known; k++) known = seen[k].site == site && seen[k].klass == klass && seen[k].mid == mid;
+        if (!known) {
+          if (nseen < 1024) { seen[nseen].site = site; seen[nseen].klass = klass; seen[nseen].mid = mid; nseen++; }
+          fprintf(stderr, "bc2cpp: HINT_VIOLATION_LOG: %s#%s at %s\\n", mrb_class_name(M, klass), mrb_sym_name(M, mid), site);
+          fflush(stderr);
+        }
+      }
+    #endif
+    #if defined(BC2CPP_HINT_VIOLATION_DISPATCH) || defined(BC2CPP_HINT_VIOLATION_LOG)
       mrb_value argv[16];
       va_list ap;
       va_start(ap, argc);

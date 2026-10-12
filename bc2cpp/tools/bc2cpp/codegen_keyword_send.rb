@@ -240,10 +240,20 @@ class CodeGen
   # nil (a safe miss) otherwise.
   def compile_keyword_direct_construct(irep:, idx:, owner_def:, self_implicit:,
                                        name:, d:, n:, recv:, argv:, kw_names:, kw_val_exprs:)
-    return nil unless name == 'new' && !self_implicit && irep && idx
+    return nil unless name == 'new' && irep && idx
 
-    known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
-                             canonical: false)
+    # KEYWORD_IMPLICIT_NEW (ADR 0426): a bare `new(a, k: v)` in a class method has the class object for its receiver,
+    # exactly as the positional path knows it (implicit_singleton_self_class). Unlike a `Const.new` site, a subclass
+    # reaches this one by inheriting the class method, and the guard-miss arm below cannot build its object (the
+    # keywords travel as a trailing positional Hash, which a keyword #initialize does not take from a funcall). So
+    # the class must have no descendants: the miss is then only a constant reassigned after the gem's init.
+    known = if self_implicit
+              implicit = implicit_singleton_self_class(owner_def)
+              implicit if implicit && @closed_world&.exact_class?(implicit)
+            else
+              trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
+                               canonical: false)
+            end
     return nil unless known && DIRECT_CONSTRUCT_TARGETS.include?(known)
 
     # 1/2: no custom `self.new`/`self.allocate` on this class ("X.singleton"), and
@@ -289,8 +299,7 @@ class CodeGen
     owner_emitted = !@only_owners || @only_owners.include?(known) || @other_owners&.include?(known)
     return nil unless owner_emitted
 
-    @direct_construct_used << known
-    accessor = direct_construct_class_fn(known)
+    accessor = direct_construct_class_expr(known)
     init_impl = cpp_name(known, 'initialize') + '_impl'
     # (value, given) arguments as in compile_keyword_call (see
     # KEYWORD_CALLSITE_ARITY_FIX).
@@ -330,7 +339,7 @@ class CodeGen
            "a trailing positional Hash, which is only correct for a callee declaring no keywords " \
            "at all (vm.c OP_ENTER's own kd == 0 arm; see compile_keyword_hash_positional_send).\n" \
            "  // Runtime-guarded exactly the way the non-keyword direct-construct path is: " \
-           "#{known} could have been reassigned at the constant level since #{accessor}'s own " \
+           "#{known} could have been reassigned at the constant level since #{direct_construct_class_fn(known)}'s own " \
            "class was captured at gem-init, so #{recv} (this call site's own already-resolved " \
            "receiver) is compared against it rather than trusted outright, falling back to " \
            "ordinary mrb_funcall if they differ.\n"
@@ -355,7 +364,7 @@ class CodeGen
                  dynamic_dispatch_line(d, recv, name, argv + ['bc2cpp_kwh'])
                end
     "#{note}" \
-      "  if (mrb_class_ptr(#{recv}) == #{accessor}()) {\n" \
+      "  if (mrb_class_ptr(#{recv}) == #{accessor}) {\n" \
       "    r#{d} = bc2cpp_direct_alloc(M, mrb_class_ptr(#{recv}));\n" \
       "    #{init_impl}(M, #{(["r#{d}"] + argv + opt_args + kw_args).join(', ')});\n" \
       "  } else {\n" \

@@ -5,7 +5,7 @@
 #
 #   - the real hot-only codegen of each compiled gem (what a build runs) passes the gate: every forced
 #     site is listed in tools/bc2cpp/strict_hints_reviewed.rb;
-#   - with every method compiled (the superset) the forced sites are exactly the listed ones, no more
+#   - with every method compiled plus the hot-only run the forced sites are exactly the listed ones, no more
 #     and no fewer, so a new forced site is noticed and a vanished one is dropped from the list.
 #
 #   MRBC=path/to/host/mrbc ruby scripts/bc2cpp/strict_hints_reviewed_check.rb
@@ -40,7 +40,10 @@ results.select { |_, kind| kind == :hot }.sort.each do |gem_name, _, err, status
 end
 full = results.select { |_, kind| kind == :full }
 full.each { |gem_name, _, err, status| check.call("#{gem_name}: the full codegen runs", status.success? || (puts(err[-1500..]) && false)) }
-keys = full.flat_map { |_, _, err, _| StrictHints.parse_listing(err) }.to_set
+# A hot-only build forces sites the full build turns into another form (more callees compile there), so the
+# list is the union of both runs (ADR 0428).
+hot_keys = results.select { |_, kind| kind == :hot }.flat_map { |_, _, err, _| StrictHints.parse_listing(err) }
+keys = (full.flat_map { |_, _, err, _| StrictHints.parse_listing(err) } + hot_keys).to_set
 unreviewed = (keys - STRICT_HINTS_REVIEWED).sort
 stale = (STRICT_HINTS_REVIEWED - keys).sort
 unreviewed.each { |k| puts "    unreviewed: #{k}" }

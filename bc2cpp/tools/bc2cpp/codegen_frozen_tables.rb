@@ -29,10 +29,13 @@ class CodeGen
     @frozen_tables = nil
     @frozen_table_sites = {}
     @frozen_table_name_safe = {}
+    @frozen_symbol_bit = nil
     @frozen_tables_refusal = frozen_tables_refusal_reason
     return if @frozen_tables_refusal
 
-    registry = FrozenTables::Registry.new
+    # Allocated here, before any flow, so every flow numbers the Symbol bit the same way (see frozen_symbol_bit).
+    @frozen_symbol_bit = symbol_class_enabled? ? numeric_class_bit('Symbol') : nil
+    registry = FrozenTables::Registry.new(symbol_bit: @frozen_symbol_bit)
     @ireps.each do |label, irep|
       irep.instructions.each_with_index do |insn, idx|
         next unless insn.op == 'SEND0' && insn.sym == 'freeze'
@@ -46,6 +49,17 @@ class CodeGen
 
   def frozen_tables_model
     @frozen_tables
+  end
+
+  # The class bit of a Symbol element of a frozen literal (BC2CPP_SYMBOL_CLASS=0 or BC2CPP_IMMEDIATE_CLASS_BITS=0
+  # turn it off, and nil then). It is the 'Symbol' bit the exact-class run gives LOADSYM literals, so one class
+  # bit names one class in every flow. A Symbol is an immediate mrb_sym (LOADSYM emits mrb_symbol_value).
+  def frozen_symbol_bit
+    @frozen_symbol_bit
+  end
+
+  def symbol_class_enabled?
+    ENV.fetch('BC2CPP_SYMBOL_CLASS', '1') != '0' && immediate_class_bits_enabled?
   end
 
   # The kind `LITERAL.freeze` at SEND0 +index+ evaluates to, 0 when the site is not a tracked one.
@@ -153,6 +167,24 @@ end
   # The shape of the literal a `freeze` at SEND0 +idx+ receives, or nil. Only a literal built by a
   # single ARRAY / HASH op qualifies (a literal grown by ARYPUSH/HASHADD/ARYCAT is another writer).
   def frozen_table_literal_shape(irep, idx, insn, registry)
+    literal = frozen_table_freeze_literal(irep, idx, insn)
+    return nil unless literal
+
+    lit, at, container = literal
+    n = lit.uint_operand
+    return nil unless n
+
+    base = lit.reg.to_i
+    stride = container == :array ? 1 : 2
+    slot_regs = (0...n).map { |k| (base + stride * k + (container == :array ? 0 : 1)).to_s }
+    slots = slot_regs.map { |r| frozen_table_slot_mask(irep, at, r) }
+    keys = container == :hash ? frozen_table_hash_keys(irep, at, base, n) : nil
+    registry.intern(container, slots, keys)
+  end
+
+  # [literal op, its index, container] when the `freeze` at SEND0 +idx+ is applied to a single ARRAY/HASH
+  # op right before it (same register), else nil. The shape and a frozen-literal slot both need it.
+  def frozen_table_freeze_literal(irep, idx, insn)
     defs = BytecodeIR.reaching_definitions(irep, idx, insn.reg.to_s)
     return nil unless defs && defs.size == 1 && !defs.first.entry?
 
@@ -163,18 +195,22 @@ end
     # still-mutable array to code that changes its slots.
     return nil unless at + 1 == idx && lit.reg == insn.reg
 
-    n = lit.uint_operand
-    return nil unless n
-
     container = lit.op == 'ARRAY' ? :array : :hash
     return nil unless frozen_table_name_safe?('freeze', container == :array ? 'Array' : 'Hash')
 
-    base = lit.reg.to_i
-    stride = container == :array ? 1 : 2
-    slot_regs = (0...n).map { |k| (base + stride * k + (container == :array ? 0 : 1)).to_s }
-    slots = slot_regs.map { |r| frozen_table_slot_mask(irep, at, r) }
-    keys = container == :hash ? frozen_table_hash_keys(irep, at, base, n) : nil
-    registry.intern(container, slots, keys)
+    [lit, at, container]
+  end
+
+  # A slot whose value is `LITERAL.freeze` (BC2CPP_FREEZE_SLOT, ADR 0425). Kernel#freeze answers its receiver
+  # (frozen_table_name_safe? refuses an override), so the slot holds the container class of that literal.
+  # Only the class is claimed: the inner table's own slots are not followed (ADR 0425).
+  def frozen_table_freeze_slot(irep, index, insn)
+    return NumericFlow::OTHER if ENV['BC2CPP_FREEZE_SLOT'] == '0' || insn.sym != 'freeze'
+
+    literal = frozen_table_freeze_literal(irep, index, insn)
+    return NumericFlow::OTHER unless literal
+
+    literal[2] == :array ? NumericFlow::ARR : NumericFlow::HSH
   end
 
   def frozen_table_hash_keys(irep, at, base, n)
@@ -215,10 +251,13 @@ end
     when 'LOADNIL' then NumericFlow::NIL
     when 'ARRAY' then NumericFlow::ARR
     when 'HASH' then NumericFlow::HSH
+    when 'SEND0' then frozen_table_freeze_slot(irep, defs.first.index, writer)
     when 'RANGE_INC', 'RANGE_EXC' then NumericFlow::RNG
     when 'GETCONST', 'GETMCNST'
       name = writer.const_name
       name && @integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER
+    # Only the literal LOADSYM is a Symbol here; SYMBOL interns a string at run time and stays OTHER.
+    when 'LOADSYM' then frozen_symbol_bit || NumericFlow::OTHER
     else NumericFlow::OTHER
     end
   end

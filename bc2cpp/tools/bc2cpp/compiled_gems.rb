@@ -174,6 +174,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::WindowCursor.singleton Game::Message.singleton
                Game::EventPage.singleton Game::CharSet.singleton
                Game::Backdrop.singleton RPG2k::Scene.singleton
+               Game::CommonEvent.singleton Game::MoveRoute.singleton
                RPG2k::Scene::Map::LRUBitmapCache
                # docs/adr/0215: the record classes that replaced Structs.
                RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState
@@ -400,8 +401,19 @@ def bc2cpp_c_call_args(text)
   args
 end
 
+# RPGMAKER_BC2CPP_CLOSED_WORLD_HOST=1 (test-only, ADR 0428): build the desktop `host` engine as the
+# RPG2000/2003-only world the wio/maix/psp builds ship (build_config.rb's single_format_only: no XP/VX/
+# Wolf/MV gems), with src/ as its native host, so the closed-world tiers (NOMETHOD_REVIEWED, guard
+# violations, BC2CPP_STRICT_HINTS) can be verified against the real engine on a machine with a display.
+# The binary can only play RPG2k games; the host's mruby-compiler stays linked, so the host-source check
+# for runtime-compiled Ruby is skipped. Never set for a shipped build.
+def bc2cpp_closed_world_host?(build_name, env: ENV)
+  build_name == 'host' && env['RPGMAKER_BC2CPP_CLOSED_WORLD_HOST'] == '1'
+end
+
 def bc2cpp_host_native_srcs(build_name, repo_root)
   host = BC2CPP_CLOSED_WORLD_HOST_SRCS[build_name]
+  host = 'src' if bc2cpp_closed_world_host?(build_name)
   host ? Dir["#{repo_root}/#{host}/**/#{BC2CPP_NATIVE_GLOB}"].sort : []
 end
 
@@ -409,7 +421,7 @@ end
 # closed world; empty when it can.
 def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cpp_host_native_srcs(build_name, repo_root), compiled_srcs: [])
   errors = []
-  unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name)
+  unless BC2CPP_CLOSED_WORLD_BUILDS.include?(build_name) || bc2cpp_closed_world_host?(build_name)
     errors << "build '#{build_name}' is not one of #{BC2CPP_CLOSED_WORLD_BUILDS.join('/')}"
   end
   required = build_name == 'optcarrot-probe' ? %w[optcarrot-benchmark optcarrot-compiled] : BC2CPP_CLOSED_WORLD_GEMS
@@ -436,7 +448,7 @@ def bc2cpp_closed_world_violations(build_name, gems, repo_root, host_srcs: bc2cp
   end
   # Without mruby-compiler no source string can be compiled at all; with it,
   # every host call must compile a fixed literal that defines nothing.
-  if gems.key?('mruby-compiler')
+  if gems.key?('mruby-compiler') && !bc2cpp_closed_world_host?(build_name)
     host_srcs.each do |path|
       text = File.read(path, encoding: 'BINARY')
       text.scan(BC2CPP_SOURCE_LOADER_CALL) do |(args)|

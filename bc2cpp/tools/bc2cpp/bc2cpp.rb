@@ -103,6 +103,7 @@ require_relative 'codegen_call_facts'
 require_relative 'codegen_nilable_receiver'
 require_relative 'codegen_setter_pools'
 require_relative 'codegen_checked_send'
+require_relative 'lexical_consts'
 require_relative 'codegen_numeric_consts'
 require_relative 'codegen_numeric_slow'
 require_relative 'codegen_numeric_slow_misc'
@@ -1123,6 +1124,7 @@ if $PROGRAM_NAME == __FILE__
   # stay interpreted. CLI exploration keeps the markers visible; real builds
   # (mrbgem.rake) set this, since a `#error` stops the C++ build.
   unsupported_core_codes = compiled.select { |m| m[:code].include?('#error') && m[:label] && CoreDefs.core_source?(ireps[m[:label]]&.file) }
+  skipped_entries = []
   if ENV['SKIP_UNSUPPORTED'] == '1'
     skipped, compiled = compiled.partition { |m| m[:code].include?('#error') }
     unless skipped.empty?
@@ -1130,6 +1132,7 @@ if $PROGRAM_NAME == __FILE__
       warn '== skipped (unsupported, left on the interpreter) =='
       skipped.each { |m| warn "  #{m[:owner]}##{m[:name]}" }
     end
+    skipped_entries = skipped.map { |m| m[:entry] }.compact
   end
 
   # CORE_INTERPRETED_REPORT (ADR 0371): every core-source bytecode method this run leaves
@@ -1560,6 +1563,10 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_owner_class_cache
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
   print gen.emit_hot_only_registration_stubs(compiled, only_owners: only_owners)
+  # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
+  # that compiles only when the closed world proves a fact a desktop build lacks (ADR 0426). It guards such a
+  # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
+  print gen.emit_skipped_entry_macros(skipped_entries)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
   # it is printed ahead of the code that uses it.
   symbol_table = SymbolCache::Table.new
