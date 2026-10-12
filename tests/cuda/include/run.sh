@@ -19,3 +19,5 @@ if ! "$root/nfcxx" -c -I"$cuda/include" -I"$cuda/include/cccl" a.cu -o "$out/a.o
 fi
 run=$(LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" "$out/a") && rc=0 || rc=$?
 if [ "$rc" = 0 ] && grep -q "0 mismatches" <<<"$run"; then echo "cuda include: ok ($run)"; else echo "cuda include: FAIL (exit $rc): $run"; exit 1; fi
+# The device pass finds a kernel body and helper in headers next to the source (devpass/).
+devpass/run.sh || exit 1
