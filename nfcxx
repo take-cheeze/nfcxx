@@ -176,6 +176,16 @@ else
   t=$(trace_start)
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
   trace_end "$t" "host C++ headers" driver
+  # GCC 15's <immintrin.h> includes the AVX10.2 headers, which call builtins EDG does not know
+  # (__builtin_ia32_vcvt2ps2phx256_mask and others). Their include guards are set here, so the
+  # headers are skipped. The AVX10.2 intrinsics are then not declared (a call is an error); the
+  # AVX2/AVX-512 intrinsics are unaffected. The fix that keeps them is in EDG's builtin table.
+  extra+=(-D_AVX10_2_512BF16INTRIN_H_INCLUDED -D_AVX10_2_512MEDIAINTRIN_H_INCLUDED -D_AVX10_2_512MINMAXINTRIN_H_INCLUDED
+          -D_AVX10_2_512SATCVTINTRIN_H_INCLUDED -D_AVX10_2BF16INTRIN_H_INCLUDED -D_AVX10_2CONVERTINTRIN_H_INCLUDED
+          -D_AVX10_2COPYINTRIN_H_INCLUDED -D_AVX10_2MEDIAINTRIN_H_INCLUDED -D_AVX10_2MINMAXINTRIN_H_INCLUDED
+          -D_AVX10_2SATCVTINTRIN_H_INCLUDED -D__AVX10_2_512CONVERTINTRIN_H_INCLUDED
+          -D__AVX10_2_512BF16INTRIN_H_INCLUDED -D__AVX10_2_512MEDIAINTRIN_H_INCLUDED
+          -D__AVX10_2_512MINMAXINTRIN_H_INCLUDED -D__AVX10_2_512SATCVTINTRIN_H_INCLUDED)
   # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
   # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
   hosted_libs=(--c_to_obj_lib=m)
