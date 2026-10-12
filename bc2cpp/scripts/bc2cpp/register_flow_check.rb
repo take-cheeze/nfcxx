@@ -34,9 +34,19 @@ def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
 end
 
-def flow(list, texts, handlers: [], captured: Set.new)
+def flow(list, texts, handlers: [], captured: Set.new, model: nil)
   irep = Irep.new(label: 't', instructions: list, catch_handlers: handlers)
-  RegisterFlow.optimize(irep, texts, captured)
+  RegisterFlow.optimize(irep, texts, captured, handlers: model)
+end
+
+def rescue_handler(begin_addr, end_addr, target)
+  CatchHandler.new(type: :rescue, begin_addr: begin_addr, end_addr: end_addr, target: target)
+end
+
+# The codegen model for one top-level region whose glue sits at begin_addr.
+def rescue_model(begin_addr, end_addr, target, reads: [])
+  { regions: [{ begin_addr: begin_addr, end_addr: end_addr, except_addr: target }],
+    glue_reads: { begin_addr => reads } }
 end
 
 puts '-- hand-built shapes'
@@ -93,6 +103,70 @@ check.call('a loop-carried value is not dropped', loop_out[0] == loop_texts[0] &
 
 check.call('a method with a catch handler is untouched',
            flow(list, texts, handlers: [CatchHandler.new(type: :rescue, begin_addr: 0, end_addr: 4, target: 4)]) == texts)
+
+puts '-- catch handlers (the rescue model, REGISTER_FLOW handler edges)'
+# 0 r3 = r1; 2 glue (protects [2, 4)); 4 goto 8; 6 EXCEPT (its text is empty: the glue
+# runs the handler); 7 the clause reads r3; 8 returns r4.
+rescue_list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'SEND', "R4\t:try\t0"), insn(4, 'JMP', '8'),
+               insn(6, 'EXCEPT', 'R5'), insn(7, 'RETURN', 'R3'), insn(8, 'RETURN', 'R4')]
+rescue_texts = ["  r3 = r1;\n", "  r4 = bc2cpp_try(r1);\n", "  goto L8;\n", '', "  return r3;\n", "  return r4;\n"]
+rescue_on = flow(rescue_list, rescue_texts, handlers: [rescue_handler(2, 4, 6)], model: rescue_model(2, 4, 6))
+check.call('a copy read only by a handler clause is propagated through the handler edge',
+           rescue_on == ['', rescue_texts[1], rescue_texts[2], '', "  return r1;\n", "  return r4;\n"])
+check.call('the same shape without the handler model is refused', flow(rescue_list, rescue_texts,
+                                                                          handlers: [rescue_handler(2, 4, 6)]) == rescue_texts)
+
+# The glue writes r3 on the normal path only: a handler raised before the write
+# still reads the old r3, so the write before the glue stays live.
+kill_list = [insn(0, 'MOVE', "R3\tR2"), insn(2, 'MOVE', "R3\tR1"), insn(4, 'JMP', '8'),
+             insn(6, 'EXCEPT', 'R5'), insn(7, 'RETURN', 'R3'), insn(8, 'RETURN', 'R3')]
+kill_texts = ["  r3 = r2;\n", "  r3 = bc2cpp_try(r1);\n", "  goto L8;\n", '', "  return r3;\n", "  return r3;\n"]
+kill_model = rescue_model(2, 4, 6)
+check.call('a write the glue kills on the normal path stays live for its handler',
+           flow(kill_list, kill_texts, handlers: [rescue_handler(2, 4, 6)], model: kill_model) == kill_texts)
+dead_texts = kill_texts.dup
+dead_texts[4] = "  return r2;\n"
+check.call('the same write is dropped when no handler reads it',
+           flow(kill_list, dead_texts, handlers: [rescue_handler(2, 4, 6)], model: kill_model) ==
+             ['', kill_texts[1], kill_texts[2], '', "  return r2;\n", "  return r3;\n"])
+
+# Each refusal leaves the texts untouched.
+refused = lambda do |label, reason, texts, handlers, model|
+  before = RegisterFlow::Stats["refused #{reason}"]
+  out = flow(rescue_list, texts, handlers: handlers, model: model)
+  check.call(label, out == texts && RegisterFlow::Stats["refused #{reason}"] == before + 1)
+end
+refused.call('a glue that does not name a register its try body reads is refused', 'handlers',
+             rescue_texts, [rescue_handler(2, 4, 6)], rescue_model(2, 4, 6, reads: [7]))
+refused.call('a handler no codegen region describes is refused', 'handlers',
+             rescue_texts, [rescue_handler(2, 4, 6)], { regions: [], glue_reads: {} })
+refused.call('a region whose target differs from the handler is refused', 'handlers',
+             rescue_texts, [rescue_handler(2, 4, 6)], rescue_model(2, 4, 5))
+refused.call('an unresolved handler target is refused', 'handlers',
+             rescue_texts, [rescue_handler(2, 4, 99)], rescue_model(2, 4, 99))
+goto_texts = rescue_texts.dup
+goto_texts[2] = "  goto L6;\n"
+refused.call('a goto to an address the normal flow does not reach is still refused', 'goto',
+             goto_texts, [rescue_handler(2, 4, 6)], rescue_model(2, 4, 6))
+# A non-glue instruction inside the protected range would be a handler edge the
+# outer C++ does not run, so the method is refused.
+protected_list = [insn(0, 'MOVE', "R3\tR1"), insn(2, 'SEND', "R4\t:try\t0"), insn(4, 'MOVE', "R6\tR1"),
+                  insn(6, 'RETURN', 'R4'), insn(7, 'EXCEPT', 'R5'), insn(8, 'RETURN', 'R3')]
+protected_texts = ["  r3 = r1;\n", "  r4 = bc2cpp_try(r1);\n", "  r6 = r1;\n", "  return r4;\n", '', "  return r3;\n"]
+before = RegisterFlow::Stats['refused handlers']
+check.call('a text inside the protected range that is not the glue is refused',
+           flow(protected_list, protected_texts, handlers: [rescue_handler(2, 7, 7)], model: rescue_model(2, 7, 7)) ==
+             protected_texts && RegisterFlow::Stats['refused handlers'] == before + 1)
+check.call('no model passed for a handler method is refused as before',
+           flow(rescue_list, rescue_texts, handlers: [rescue_handler(2, 4, 6)]) == rescue_texts)
+ENV['BC2CPP_REGISTER_FLOW_HANDLERS'] = '0'
+check.call('the handler kill switch refuses the modelled method',
+           flow(rescue_list, rescue_texts, handlers: [rescue_handler(2, 4, 6)], model: rescue_model(2, 4, 6)) == rescue_texts)
+ENV.delete('BC2CPP_REGISTER_FLOW_HANDLERS')
+ENV['BC2CPP_REGISTER_FLOW_WINDOWS'] = '1'
+check.call('window mode keeps refusing handler methods (the model widens only the default pass)',
+           flow(rescue_list, rescue_texts, handlers: [rescue_handler(2, 4, 6)], model: rescue_model(2, 4, 6)) == rescue_texts)
+ENV.delete('BC2CPP_REGISTER_FLOW_WINDOWS')
 check.call('an unresolved branch target leaves the texts alone',
            flow([insn(0, 'JMP', '99'), insn(2, 'RETURN', 'R3')], ["  goto L99;\n", "  return r3;\n"]) ==
              ["  goto L99;\n", "  return r3;\n"])
@@ -201,6 +275,31 @@ fixture = <<~'RUBY'
     end
   end
 
+  class RfResc
+    def guarded(a)
+      b = a
+      begin
+        raise 'x' if a
+        d = b
+      rescue
+        return b
+      end
+      d
+    end
+
+    def guarded2(a)
+      e = a
+      begin
+        x = e
+        raise ArgumentError, 'z' if e == 2
+        raise 'y' if e == 1
+      rescue ArgumentError
+        x = 3
+      end
+      x
+    end
+  end
+
   class RfRunner
     def line(label)
       "#{label}: #{yield.inspect}"
@@ -221,6 +320,11 @@ fixture = <<~'RUBY'
       out << line('captured') { b.captured(10) }
       out << line('swap') { b.swap(1, 2) }
       out << line('state') { b.state(4) }
+      out << line('guarded') { RfResc.new.guarded(1) }
+      out << line('guarded quiet') { RfResc.new.guarded(nil) }
+      out << line('guarded2 caught') { RfResc.new.guarded2(2) }
+      out << line('guarded2 passed') { RfResc.new.guarded2(nil) }
+      out << line('guarded2 reraised') { RfResc.new.guarded2(1) }
       out.join("\n")
     end
   end
@@ -254,6 +358,9 @@ Dir.mktmpdir do |dir|
   check.call('the branch-local nil write is gone', assigns.call(on, 'branchy', 'mrb_nil_value\(\)') <
                                                   assigns.call(off, 'branchy', 'mrb_nil_value\(\)'))
   check.call('the loop body keeps its accumulator copy', body.call(on, 'looped').include?('r'))
+  rescue_body = ->(code, name) { code[/^mrb_value RfResc_#{name}_impl\(mrb_state\* M.*?^\}/m].to_s }
+  check.call('a method with rescue regions shrinks with the pass on',
+             rescue_body.call(on, 'guarded2').bytesize < rescue_body.call(off, 'guarded2').bytesize)
   check.call('no stderr noise from the pass', !on_err.include?('register_flow'))
 
   core = [ENV['BC2CPP_MRUBY_CORE'], *Dir[File.join(ROOT, 'build*/mruby/host/mrbc')]].compact.find do |c|

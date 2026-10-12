@@ -593,8 +593,9 @@ MUTANTS = {
     ['codegen_block_core_direct.rb', 'return false if Array(@prepended_modules[owner]).any? || @unknown_mixins.include?(owner)',
      'return false if @unknown_mixins.include?(owner)'],
   'the target is looked up for the wrong number of arguments' =>
-    ['codegen_core_exact_direct.rb', 'target = core_exact_target(site[:klass], spec[:chain], name, argv.size)',
-     'target = core_exact_target(site[:klass], spec[:chain], name, 0)']
+    ['codegen_core_exact_direct.rb',
+     'target = core_exact_target(site[:klass], spec[:chain], name, argv.size, private_ok: site[:implicit_self])',
+     'target = core_exact_target(site[:klass], spec[:chain], name, 0, private_ok: site[:implicit_self])']
 }.freeze
 
 if ENV['CX_MUTANTS'] == '1' && MODE != 'run' && tool?(MRBC_PATH)
