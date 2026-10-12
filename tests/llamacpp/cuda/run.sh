@@ -28,7 +28,7 @@ while IFS='|' read -r f want; do
     echo "CHANGED $f: expected [$want]"; grep -m1 -E ' error|refused:|cannot open' "$log" | sed 's/^ */  /' | cut -c1-200; fail=1
   fi
 done <<'LIST'
-acc.cu|identifier "__syncwarp" is undefined
+acc.cu|identifier "printf" is undefined
 template-instances/fattn-vec-instance-f16-q5_0.cu|cannot open source file "../fattn-vec.cuh"
 allreduce.cu|refused: template launch of ggml_cuda_ar_add_kernel<T_dst, T_src> depends on the template parameter
 LIST
