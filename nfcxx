@@ -27,7 +27,7 @@ shared=0; pic=0; rdynamic=0; compile_only=0
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
-sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=()
+sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=(); isa=()
 # A .cu input is rewritten to C++ before the front end (scripts/cuda-rewrite.rb: launches become calls of
 # __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
 # directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
@@ -106,6 +106,7 @@ while [ $# -gt 0 ]; do
     # search only looks in -L directories and /lib, /usr/lib, so it cannot find a multiarch libm).
     -l?*) files+=("$1") ;;
     -W*|-w) ;;                                      # warnings do not change the object code
+    -m*) isa+=("$1") ;;                             # ISA/target options (-mavx2, -march=..): see the -m block below
     -MD|-MMD) depmode=$1 ;;
     -MP) depphony=-MP ;;
     -MF) dfile=$2; shift ;;
@@ -175,6 +176,16 @@ else
   t=$(trace_start)
   while IFS= read -r d; do [ -n "$d" ] && sys_inc+=("--sys_include=$d"); done < <(host_sys_includes)
   trace_end "$t" "host C++ headers" driver
+  # GCC 15's <immintrin.h> includes the AVX10.2 headers, which call builtins EDG does not know
+  # (__builtin_ia32_vcvt2ps2phx256_mask and others). Their include guards are set here, so the
+  # headers are skipped. The AVX10.2 intrinsics are then not declared (a call is an error); the
+  # AVX2/AVX-512 intrinsics are unaffected. The fix that keeps them is in EDG's builtin table.
+  extra+=(-D_AVX10_2_512BF16INTRIN_H_INCLUDED -D_AVX10_2_512MEDIAINTRIN_H_INCLUDED -D_AVX10_2_512MINMAXINTRIN_H_INCLUDED
+          -D_AVX10_2_512SATCVTINTRIN_H_INCLUDED -D_AVX10_2BF16INTRIN_H_INCLUDED -D_AVX10_2CONVERTINTRIN_H_INCLUDED
+          -D_AVX10_2COPYINTRIN_H_INCLUDED -D_AVX10_2MEDIAINTRIN_H_INCLUDED -D_AVX10_2MINMAXINTRIN_H_INCLUDED
+          -D_AVX10_2SATCVTINTRIN_H_INCLUDED -D__AVX10_2_512CONVERTINTRIN_H_INCLUDED
+          -D__AVX10_2_512BF16INTRIN_H_INCLUDED -D__AVX10_2_512MEDIAINTRIN_H_INCLUDED
+          -D__AVX10_2_512MINMAXINTRIN_H_INCLUDED -D__AVX10_2_512SATCVTINTRIN_H_INCLUDED)
   # g++ links libm implicitly through libstdc++; the hosted headers (<cmath>, used by doctest for
   # log10) need it too. The EDG link appends --c_to_obj_lib libraries after the objects.
   hosted_libs=(--c_to_obj_lib=m)
@@ -196,9 +207,12 @@ if [ $emit_c = 1 ]; then
   # Run the front end alone and print the generated C.
   base=${EDG_BASE:-$root/build/edg-base}
   tmp=$(mktemp -d); trap 'rm -rf "$tmp" "$cudatmp"; trace_finish' EXIT
-  f=$(realpath "${files[0]}")
+  f=$(realpath "${srcs[0]}")   # the first source, not files[0] (which may be an -I option)
   # host dirs first, then EDG's own, as eccp orders user and default include dirs
   inc=(${sys_inc[@]+"${sys_inc[@]}"} --sys_include="$base/include"); [ $freestanding = 1 ] && inc=("-I$root/lib")
+  # The user's -I directories (kept in files, with the other options) go in front, as eccp puts them.
+  # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
+  for x in ${files[@]+"${files[@]}"}; do case $x in -I?*) inc=("-I$(realpath -m "${x#-I}")" ${inc[@]+"${inc[@]}"}) ;; esac; done
   t=$(trace_start)
   (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
       "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")
@@ -214,7 +228,7 @@ case $backend in
        export NFCXX_CC=$root/scripts/qbe-cc ;;   # for the .c inputs
   qbe) [ -x "$root/build/qbe/qbe" ] || { echo "nfcxx: QBE not built; run scripts/setup-qbe.sh" >&2; exit 2; }
        export NFCXX_CC=$root/scripts/qbe-cc ;;
-  gcc) ;;
+  gcc) export NFCXX_CC=$root/scripts/gcc-cc ;;   # EDG's generated C through gcc, with the pragma filter (edg_eccp_config reads NFCXX_CC)
   *) echo "nfcxx: unknown backend '$backend'" >&2; exit 2 ;;
 esac
 
@@ -235,6 +249,15 @@ fi
 # -fPIC / -rdynamic / -shared reach the C compiler and the link. EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS replaces the
 # options eccp gives its link command (default: the C compile options), so only -shared goes there.
 picopts=(); ldopts=()
+# -m options (ISA and target): the C compile gets them, and the front end gets the macros gcc predefines for them
+# (gcc -mavx2 defines __AVX2__, which the intrinsic headers test). Each macro goes in files, as a -D option does, so
+# eccp passes it to both the front end and the C compile. Macros with arguments are not passed.
+if [ ${#isa[@]} -gt 0 ]; then
+  for o in "${isa[@]}"; do picopts+=(--c_to_obj_option "$o"); done
+  while IFS= read -r d; do files+=("$d"); done < <(
+    comm -13 <(gcc -dM -E -x c /dev/null | sort) <(gcc "${isa[@]}" -dM -E -x c /dev/null | sort) \
+      | sed -n 's/^#define \([^ (]*\) */-D\1=/p')
+fi
 [ $pic = 0 ] || { picopts=(--c_to_obj_option -fPIC); cflags_pic=(-fPIC); }
 [ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
 [ $pthread = 0 ] || picopts+=(--c_to_obj_option -pthread)
@@ -257,6 +280,15 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     trace_end "$t" "C input: $c" cinput
     cobjs+=("$o")
   done
+  if [ $compile_only = 1 ] && [ $ncpp = 0 ]; then
+    # -c with only C sources: the objects are the output (-o names the one object; otherwise each is <source>.o)
+    [ $outset = 0 ] || [ ${#cobjs[@]} = 1 ] || { echo "nfcxx: -c with -o needs exactly one source" >&2; exit 2; }
+    for i in "${!cobjs[@]}"; do
+      dst=$out; [ $outset = 1 ] || dst=$(basename "${cfiles[$i]}" .c).o
+      cp "${cobjs[$i]}" "$dst"
+    done
+    exit 0
+  fi
   if [ $ncpp = 0 ] && { [ $nobj = 0 ] || [ ! -x "$edg/eccp" ]; }; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
