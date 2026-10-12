@@ -61,6 +61,12 @@ jobs:
       - name: nfcc drop-in cc mode (both backends)
         run: tests/c/cc-mode.sh
 
+      - name: Determinism (same objects on every run)
+        run: tests/determinism/run.sh
+
+      - name: Float-to-integer (runtime helpers and folded constants)
+        run: tests/float-to-int/run.sh
+
       - name: nfcxx accepts the compiler-driver options of CMake and mruby (gcc backend)
         run: tests/cxx-driver/run.sh
 

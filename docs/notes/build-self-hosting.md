@@ -156,3 +156,9 @@ The stage-2 link now uses the x86-64 variant of the runtime (`NFCXX_LDRT_X86=1 s
 `-DNFCXX_FLOAT_TO_INT_X86`). It saturates like gcc on x86-64 (a `__float128` value above the maximum gives the maximum,
 below the minimum the minimum, NaN the maximum), and a `long double` value that does not fit gives the x87 integer
 indefinite. User programs still link the default archive, which traps. `tests/float-to-int/run.sh` checks both.
+
+## Known limit: `__int128` on the qbe path
+
+cproc (the qbe backend's C front end) has no `__int128` type, so a C++ input that uses `__int128` fails in `scripts/qbe-cc` with
+"declaration has no type specifier". `__float128` and `long double` work there (runtime helpers). Path B handles `__int128`
+(`docs/notes/pathb-int128.md`), so `tests/pathb-qbe/cases/float128_ops.cpp`, which uses `__int128`, belongs to that suite.
