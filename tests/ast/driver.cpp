@@ -53,8 +53,10 @@ int main(int argc, char** argv) {
   }
   std::fflush(stdout);
   if (stats)
-    std::fprintf(stderr, "rewrites=%llu deopts=%llu generic_ops=%llu gc_cycles=%llu\n",
+    std::fprintf(stderr, "rewrites=%llu deopts=%llu generic_ops=%llu gc_cycles=%llu inlined_sites=%llu inlined_calls=%llu inline_declined=%llu\n",
                  static_cast<unsigned long long>(S.stats.rewrites), static_cast<unsigned long long>(S.stats.deopts),
-                 static_cast<unsigned long long>(S.stats.generic_ops), static_cast<unsigned long long>(S.stats.gc_cycles));
+                 static_cast<unsigned long long>(S.stats.generic_ops), static_cast<unsigned long long>(S.stats.gc_cycles),
+                 static_cast<unsigned long long>(S.stats.inlined_sites), static_cast<unsigned long long>(S.stats.inlined_calls),
+                 static_cast<unsigned long long>(S.stats.inline_declined));
   return rc;
 }

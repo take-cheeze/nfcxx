@@ -1,0 +1,56 @@
+-- a counter and a setting, written and read by small closures
+1	102	1	101
+2	104	2	102
+3	106	3	103
+4	108	4	104
+5	110	5	105
+6	112	6	106
+7	114	7	107
+8	116	8	108
+-- several closures share one variable
+1	1	10	2	10
+2	3	20	4	20
+3	5	30	6	30
+4	7	40	8	40
+5	9	50	10	50
+6	11	60	12	60
+12	0	5
+12	5	10
+12	10	15
+12	15	20
+-- closures made in a loop: one function, a different variable in each
+11 22 33 44
+2 4 6 8
+3 6 9 12
+4 8 12 16
+-- upvalues of upvalues
+11	65	3	30
+13	67	3	30
+15	69	3	30
+17	71	3	30
+19	73	3	30
+21	75	3	30
+-- the caller changes a variable between two calls of an inlined reader
+a	a1	2
+a1	a12	3
+a12	a123	4
+a123	a1234	5
+a1234	a12345	6
+a12345	a123456	7
+-- an upvalue that holds a function, replaced
+2
+3
+4
+400
+500
+600
+-- the upvalue is a table that the callee updates
+8	204	9	22.666666666667
+-- a read-only upvalue declared <const>, and one that is nil
+43	true	1
+44	true	2
+45	true	3
+46	true	4
+47	true	5
+48	true	6
+false	0

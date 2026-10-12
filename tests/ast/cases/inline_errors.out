@@ -1,0 +1,410 @@
+-- arithmetic, indexing, calls, comparisons, concatenation
+1	true	1
+1	true	0
+1	true	false
+1	true	11
+1	true	1
+1	true	-1
+1	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+2	true	3
+2	true	1
+2	true	false
+2	true	72
+2	true	2
+2	true	-7
+2	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+3	false	inline_errors.lua:5: attempt to divide by zero
+3	false	inline_errors.lua:6: attempt to perform 'n%0'
+3	true	false
+3	true	80
+3	true	0
+3	true	-8
+3	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+4	true	3
+4	true	0
+4	true	false
+4	true	93
+4	true	1
+4	true	-9
+4	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+5	true	3.0
+5	true	0.0
+5	true	false
+5	true	1.50.5
+5	false	inline_errors.lua:14: number (local 'a') has no integer representation
+5	true	-1.5
+5	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+6	false	inline_errors.lua:5: attempt to idiv a 'string' with a 'number'
+6	false	inline_errors.lua:6: attempt to mod a 'string' with a 'number'
+6	false	inline_errors.lua:11: attempt to compare string with number
+6	true	x1
+6	false	inline_errors.lua:14: attempt to perform bitwise operation on a string value (local 'a')
+6	false	inline_errors.lua:13: attempt to unm a 'string' with a 'string'
+6	true	1
+7	false	inline_errors.lua:5: attempt to perform arithmetic on a nil value (local 'a')
+7	false	inline_errors.lua:6: attempt to perform arithmetic on a nil value (local 'a')
+7	false	inline_errors.lua:11: attempt to compare nil with number
+7	false	inline_errors.lua:10: attempt to concatenate a nil value (local 'a')
+7	false	inline_errors.lua:14: attempt to perform bitwise operation on a nil value (local 'a')
+7	false	inline_errors.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+7	false	inline_errors.lua:12: attempt to get length of a nil value (local 'x')
+8	true	1
+8	true	0
+8	true	false
+8	true	55
+8	true	5
+8	true	-5
+8	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+9	false	inline_errors.lua:5: attempt to perform arithmetic on a table value (local 'a')
+9	false	inline_errors.lua:6: attempt to perform arithmetic on a table value (local 'a')
+9	false	inline_errors.lua:11: attempt to compare table with number
+9	false	inline_errors.lua:10: attempt to concatenate a table value (local 'a')
+9	false	inline_errors.lua:14: attempt to perform bitwise operation on a table value (local 'a')
+9	false	inline_errors.lua:13: attempt to perform arithmetic on a table value (local 'x')
+9	true	0
+10	false	inline_errors.lua:5: attempt to perform arithmetic on a nil value (local 'b')
+10	false	inline_errors.lua:6: attempt to perform arithmetic on a nil value (local 'b')
+10	false	inline_errors.lua:11: attempt to compare number with nil
+10	false	inline_errors.lua:10: attempt to concatenate a nil value (local 'b')
+10	false	inline_errors.lua:14: attempt to perform bitwise operation on a nil value (local 'b')
+10	true	-2
+10	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+11	true	1
+11	true	0
+11	true	false
+11	true	33
+11	true	3
+11	true	-3
+11	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+12	false	inline_errors.lua:5: attempt to divide by zero
+12	false	inline_errors.lua:6: attempt to perform 'n%0'
+12	true	true
+12	true	-40
+12	true	0
+12	true	4
+12	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+1	true	1
+1	true	0
+1	true	false
+1	true	11
+1	true	1
+1	true	-1
+1	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+2	true	3
+2	true	1
+2	true	false
+2	true	72
+2	true	2
+2	true	-7
+2	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+3	false	inline_errors.lua:5: attempt to divide by zero
+3	false	inline_errors.lua:6: attempt to perform 'n%0'
+3	true	false
+3	true	80
+3	true	0
+3	true	-8
+3	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+4	true	3
+4	true	0
+4	true	false
+4	true	93
+4	true	1
+4	true	-9
+4	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+5	true	3.0
+5	true	0.0
+5	true	false
+5	true	1.50.5
+5	false	inline_errors.lua:14: number (local 'a') has no integer representation
+5	true	-1.5
+5	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+6	false	inline_errors.lua:5: attempt to idiv a 'string' with a 'number'
+6	false	inline_errors.lua:6: attempt to mod a 'string' with a 'number'
+6	false	inline_errors.lua:11: attempt to compare string with number
+6	true	x1
+6	false	inline_errors.lua:14: attempt to perform bitwise operation on a string value (local 'a')
+6	false	inline_errors.lua:13: attempt to unm a 'string' with a 'string'
+6	true	1
+7	false	inline_errors.lua:5: attempt to perform arithmetic on a nil value (local 'a')
+7	false	inline_errors.lua:6: attempt to perform arithmetic on a nil value (local 'a')
+7	false	inline_errors.lua:11: attempt to compare nil with number
+7	false	inline_errors.lua:10: attempt to concatenate a nil value (local 'a')
+7	false	inline_errors.lua:14: attempt to perform bitwise operation on a nil value (local 'a')
+7	false	inline_errors.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+7	false	inline_errors.lua:12: attempt to get length of a nil value (local 'x')
+8	true	1
+8	true	0
+8	true	false
+8	true	55
+8	true	5
+8	true	-5
+8	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+9	false	inline_errors.lua:5: attempt to perform arithmetic on a table value (local 'a')
+9	false	inline_errors.lua:6: attempt to perform arithmetic on a table value (local 'a')
+9	false	inline_errors.lua:11: attempt to compare table with number
+9	false	inline_errors.lua:10: attempt to concatenate a table value (local 'a')
+9	false	inline_errors.lua:14: attempt to perform bitwise operation on a table value (local 'a')
+9	false	inline_errors.lua:13: attempt to perform arithmetic on a table value (local 'x')
+9	true	0
+10	false	inline_errors.lua:5: attempt to perform arithmetic on a nil value (local 'b')
+10	false	inline_errors.lua:6: attempt to perform arithmetic on a nil value (local 'b')
+10	false	inline_errors.lua:11: attempt to compare number with nil
+10	false	inline_errors.lua:10: attempt to concatenate a nil value (local 'b')
+10	false	inline_errors.lua:14: attempt to perform bitwise operation on a nil value (local 'b')
+10	true	-2
+10	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+11	true	1
+11	true	0
+11	true	false
+11	true	33
+11	true	3
+11	true	-3
+11	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+12	false	inline_errors.lua:5: attempt to divide by zero
+12	false	inline_errors.lua:6: attempt to perform 'n%0'
+12	true	true
+12	true	-40
+12	true	0
+12	true	4
+12	false	inline_errors.lua:12: attempt to get length of a number value (local 'x')
+-- indexing
+1	true	1
+1	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+1	true	nil
+2	true	nil
+2	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+2	true	nil
+3	false	inline_errors.lua:7: attempt to index a nil value (local 'v')
+3	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+3	true	nil
+4	true	5
+4	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+4	true	nil
+5	false	inline_errors.lua:7: attempt to index a number value (local 'v')
+5	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+5	true	nil
+6	false	inline_errors.lua:7: attempt to index a nil value (local 'v')
+6	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+6	true	nil
+7	true	deep
+7	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+7	true	nil
+1	true	1
+1	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+1	true	nil
+2	true	nil
+2	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+2	true	nil
+3	false	inline_errors.lua:7: attempt to index a nil value (local 'v')
+3	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+3	true	nil
+4	true	5
+4	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+4	true	nil
+5	false	inline_errors.lua:7: attempt to index a number value (local 'v')
+5	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+5	true	nil
+6	false	inline_errors.lua:7: attempt to index a nil value (local 'v')
+6	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+6	true	nil
+7	true	deep
+7	false	inline_errors.lua:8: attempt to index a nil value (field 'a')
+7	true	nil
+-- calling a value that is not a function, a global that is not defined, an upvalue that is nil
+1	false	inline_errors.lua:9: attempt to call a boolean value (local 'f')
+2	true	2
+3	false	inline_errors.lua:9: attempt to call a number value (local 'f')
+4	false	inline_errors.lua:9: attempt to call a string value (local 'f')
+5	false	inline_errors.lua:9: attempt to call a table value (local 'f')
+6	true	-6
+7	false	inline_errors.lua:9: attempt to call a boolean value (local 'f')
+8	true	8
+1	false	inline_errors.lua:15: attempt to call a nil value (global 'undefined_function')
+1	false	inline_errors.lua:17: attempt to perform arithmetic on a nil value (upvalue 'up')
+1	true	11
+2	false	inline_errors.lua:15: attempt to call a nil value (global 'undefined_function')
+2	true	12
+2	true	12
+3	false	inline_errors.lua:15: attempt to call a nil value (global 'undefined_function')
+3	true	13
+3	false	inline_errors.lua:17: attempt to perform arithmetic on a nil value (upvalue 'up')
+4	false	inline_errors.lua:15: attempt to call a nil value (global 'undefined_function')
+4	false	inline_errors.lua:17: attempt to perform arithmetic on a nil value (upvalue 'up')
+4	false	inline_errors.lua:17: attempt to perform arithmetic on a nil value (upvalue 'up')
+false	inline_errors.lua:18: attempt to index a nil value (field 'x')
+true
+false	inline_errors.lua:18: attempt to index a number value (field 'x')
+-- error with levels
+false	zero 1
+false	zero 1
+false	inline_errors.lua:68: one 1
+false	inline_errors.lua:68: one 1
+false	inline_errors.lua:83: two 1
+false	inline_errors.lua:72: two 1
+false	inline_errors.lua:85: three 1
+false	inline_errors.lua:75: three 1
+false	inline_errors.lua:75: three 1
+false	deep 1
+false	zero 2
+false	zero 2
+false	inline_errors.lua:68: one 2
+false	inline_errors.lua:68: one 2
+false	inline_errors.lua:83: two 2
+false	inline_errors.lua:72: two 2
+false	inline_errors.lua:85: three 2
+false	inline_errors.lua:75: three 2
+false	inline_errors.lua:75: three 2
+false	deep 2
+false	zero 3
+false	zero 3
+false	inline_errors.lua:68: one 3
+false	inline_errors.lua:68: one 3
+false	inline_errors.lua:83: two 3
+false	inline_errors.lua:72: two 3
+false	inline_errors.lua:85: three 3
+false	inline_errors.lua:75: three 3
+false	inline_errors.lua:75: three 3
+false	deep 3
+false	zero 4
+false	zero 4
+false	inline_errors.lua:68: one 4
+false	inline_errors.lua:68: one 4
+false	inline_errors.lua:83: two 4
+false	inline_errors.lua:72: two 4
+false	inline_errors.lua:85: three 4
+false	inline_errors.lua:75: three 4
+false	inline_errors.lua:75: three 4
+false	deep 4
+false	zero 5
+false	zero 5
+false	inline_errors.lua:68: one 5
+false	inline_errors.lua:68: one 5
+false	inline_errors.lua:83: two 5
+false	inline_errors.lua:72: two 5
+false	inline_errors.lua:85: three 5
+false	inline_errors.lua:75: three 5
+false	inline_errors.lua:75: three 5
+false	deep 5
+false	zero 6
+false	zero 6
+false	inline_errors.lua:68: one 6
+false	inline_errors.lua:68: one 6
+false	inline_errors.lua:83: two 6
+false	inline_errors.lua:72: two 6
+false	inline_errors.lua:85: three 6
+false	inline_errors.lua:75: three 6
+false	inline_errors.lua:75: three 6
+false	deep 6
+-- error values that are not strings, and nested pcall
+false	true	7
+false	1
+false	nil
+false	true
+false	inline_errors.lua:92: g1
+false	h1
+2
+false	true	7
+false	2
+false	nil
+false	true
+false	inline_errors.lua:92: g2
+false	h2
+2
+false	true	7
+false	3
+false	nil
+false	true
+false	inline_errors.lua:92: g3
+false	h3
+2
+false	true	7
+false	4
+false	nil
+false	true
+false	inline_errors.lua:92: g4
+false	h4
+2
+false	true	7
+false	5
+false	nil
+false	true
+false	inline_errors.lua:92: g5
+false	h5
+2
+false	true	7
+false	6
+false	nil
+false	true
+false	inline_errors.lua:92: g6
+false	h6
+2
+-- a callee that catches the error of the function it calls
+1	caught: inline_errors.lua:110: attempt to index a nil value (field 'y')	caught: inline_errors.lua:110: attempt to index a number value (local 'x')
+2	caught: inline_errors.lua:110: attempt to index a nil value (field 'y')	caught: inline_errors.lua:110: attempt to index a number value (local 'x')
+3	caught: inline_errors.lua:110: attempt to index a nil value (field 'y')	caught: inline_errors.lua:110: attempt to index a number value (local 'x')
+4	caught: inline_errors.lua:110: attempt to index a nil value (field 'y')	caught: inline_errors.lua:110: attempt to index a number value (local 'x')
+5	caught: inline_errors.lua:110: attempt to index a nil value (field 'y')	caught: inline_errors.lua:110: attempt to index a number value (local 'x')
+6	caught: inline_errors.lua:110: attempt to index a nil value (field 'y')	caught: inline_errors.lua:110: attempt to index a number value (local 'x')
+-- errors in the arguments of an inlined call come from the caller's line
+false	inline_errors.lua:118: attempt to perform arithmetic on a nil value
+false	inline_errors.lua:119: attempt to concatenate a table value
+false	inline_errors.lua:120: attempt to compare number with string
+false	inline_errors.lua:118: attempt to perform arithmetic on a nil value
+false	inline_errors.lua:119: attempt to concatenate a table value
+false	inline_errors.lua:120: attempt to compare number with string
+false	inline_errors.lua:118: attempt to perform arithmetic on a nil value
+false	inline_errors.lua:119: attempt to concatenate a table value
+false	inline_errors.lua:120: attempt to compare number with string
+false	inline_errors.lua:118: attempt to perform arithmetic on a nil value
+false	inline_errors.lua:119: attempt to concatenate a table value
+false	inline_errors.lua:120: attempt to compare number with string
+false	inline_errors.lua:118: attempt to perform arithmetic on a nil value
+false	inline_errors.lua:119: attempt to concatenate a table value
+false	inline_errors.lua:120: attempt to compare number with string
+false	inline_errors.lua:118: attempt to perform arithmetic on a nil value
+false	inline_errors.lua:119: attempt to concatenate a table value
+false	inline_errors.lua:120: attempt to compare number with string
+-- tostring of an error value and the unwinding state afterwards
+false	inline_errors.lua:5: attempt to divide by zero
+1	1	-1
+false	inline_errors.lua:5: attempt to divide by zero
+2	2	-2
+false	inline_errors.lua:5: attempt to divide by zero
+3	3	-3
+false	inline_errors.lua:5: attempt to divide by zero
+4	0	-4
+false	inline_errors.lua:5: attempt to divide by zero
+5	1	-5
+false	inline_errors.lua:5: attempt to divide by zero
+6	2	-6
+-- a callee from another chunk: its own chunk name and lines in messages, its caller's position for level 2
+true	1
+false	other:3: attempt to index a number value (field 'a')
+false	other:3: attempt to index a nil value (field 'a')
+false	inline_errors.lua:136: m1
+true	-1
+true	2
+false	other:3: attempt to index a number value (field 'a')
+false	other:3: attempt to index a nil value (field 'a')
+false	inline_errors.lua:136: m2
+true	-2
+true	3
+false	other:3: attempt to index a number value (field 'a')
+false	other:3: attempt to index a nil value (field 'a')
+false	inline_errors.lua:136: m3
+false	other:8: attempt to divide by zero
+true	4
+false	other:3: attempt to index a number value (field 'a')
+false	other:3: attempt to index a nil value (field 'a')
+false	inline_errors.lua:136: m4
+true	4
+true	5
+false	other:3: attempt to index a number value (field 'a')
+false	other:3: attempt to index a nil value (field 'a')
+false	inline_errors.lua:136: m5
+true	2
+true	6
+false	other:3: attempt to index a number value (field 'a')
+false	other:3: attempt to index a nil value (field 'a')
+false	inline_errors.lua:136: m6
+true	2

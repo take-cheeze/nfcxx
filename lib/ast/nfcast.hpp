@@ -235,6 +235,9 @@ struct Stats {
   std::uint64_t deopts = 0;         // of those, rewrites away from a specialized node after a guard failed
   std::uint64_t generic_ops = 0;    // operations that took a slow path (arithmetic, comparison, index, call, concat)
   std::uint64_t gc_cycles = 0;
+  std::uint64_t inlined_sites = 0;   // call sites that were rewritten into an inlined call (docs/notes/ast.md, "Inlining")
+  std::uint64_t inlined_calls = 0;   // calls run as inlined bodies
+  std::uint64_t inline_declined = 0; // call sites that were looked at and left as calls (callee too big, recursive, ...)
 };
 
 // ---- the interpreter ----------------------------------------------------------------------------------------------
@@ -277,6 +280,13 @@ struct State {
   std::size_t gc_bytes() const { return bytes; }
   std::size_t gc_threshold = 1 << 20;
   bool gc_stress = false;  // collect at every safe point (a function entry, a loop iteration), for tests; NFCAST_GC_STRESS=1
+
+  // ---- inlining ----
+  // A call site that has called the same script function INLINE_WARM times is rewritten into a node that runs a private copy of
+  // the callee's body when the callee is small (docs/notes/ast.md). Set before running scripts; NFCAST_INLINE=0 switches it off,
+  // NFCAST_INLINE_WARM=n sets the count.
+  bool inlining = true;
+  unsigned inline_warm = 2;
 
   // ---- errors ----
   [[noreturn]] void error(const Value& v);                // raise V as is

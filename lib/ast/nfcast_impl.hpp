@@ -63,6 +63,7 @@ struct UpvalDesc {
 
 struct Proto {
   int refs = 1;
+  std::uint64_t uid;  // never reused, unlike the address: an inlined call site is guarded by it (nfcast_inline.inc)
   std::string chunk;  // "snippet"
   std::string name;   // for tracebacks: "function 'twice'", "main chunk", "function <snippet:3>"
   int linedefined = 0;
@@ -104,8 +105,17 @@ struct Frame {
   Rets* rets;   // where `return` puts its values
   Frame* prev;
   bool native_below;  // a native function (pcall, say) sits between this frame and PREV
+  bool inlined;       // the body of a small function run by an inlined call node: no call_closure behind it (nfcast_inline.inc)
   int line;     // the line the function is at, for error messages and tracebacks
 };
+
+// The function whose arena the node running in F belongs to: the nearest frame that is not an inlined body. A body inlined into
+// a function is a clone owned by that function, so the nodes it creates when they rewrite themselves belong to it as well.
+inline Proto* owner_proto(Frame& f) {
+  Frame* r = &f;
+  while (r->inlined) r = r->prev;
+  return r->cl->proto;
+}
 
 struct Node {
   int line = 0;

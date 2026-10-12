@@ -30,13 +30,15 @@ for be in $backends; do
   for lua in tests/ast/cases/*.lua; do
     name=$(basename "$lua" .lua)
     for stress in 0 1; do
-      if ! (cd tests/ast/cases && NFCAST_GC_STRESS=$stress "$out/driver" "$name.lua" > "$out/$name.$stress.out" 2> "$out/$name.$stress.err") ||
-         ! cmp -s "$out/$name.$stress.out" "tests/ast/cases/$name.out"; then
-        echo "FAIL $be ast case $name (GC stress $stress)"; diff "tests/ast/cases/$name.out" "$out/$name.$stress.out" | head -10; head -5 "$out/$name.$stress.err"; fail=1
-      fi
+      for inl in "NFCAST_INLINE=1" "NFCAST_INLINE_WARM=1" "NFCAST_INLINE=0"; do
+        if ! (cd tests/ast/cases && env "$inl" NFCAST_GC_STRESS=$stress "$out/driver" "$name.lua" > "$out/$name.$stress.out" 2> "$out/$name.$stress.err") ||
+           ! cmp -s "$out/$name.$stress.out" "tests/ast/cases/$name.out"; then
+          echo "FAIL $be ast case $name (GC stress $stress, $inl)"; diff "tests/ast/cases/$name.out" "$out/$name.$stress.out" | head -10; head -5 "$out/$name.$stress.err"; fail=1
+        fi
+      done
     done
     n=$((n + 1))
   done
-  echo "ok   $be ast: $(tail -1 <<<"$res"); $n programs equal to Lua 5.4 (also under GC stress)"
+  echo "ok   $be ast: $(tail -1 <<<"$res"); $n programs equal to Lua 5.4 (also under GC stress, with inlining on, early and off)"
 done
 exit $fail
