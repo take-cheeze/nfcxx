@@ -24,6 +24,7 @@ require_relative 'compact_output'
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
 require_relative 'bytecode_ir'
+require_relative 'register_flow'
 require_relative 'registry'
 require_relative 'lint_crosscheck'
 require_relative 'native_names'
