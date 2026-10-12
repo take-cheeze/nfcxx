@@ -11,24 +11,24 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | --- | --- | --- | --- |
 | simpleStreams | streams, async copies, events | builds, runs, exit 0; no result check in the sample (not verified) | — |
 | simpleZeroCopy | mapped host memory | builds, runs, exit 0; computes `errorNorm` but prints nothing (not verified); prelinker prints a name-decoding warning | — |
-| simpleAtomicIntrinsics | atomics (`atomicAdd` and friends), `#define` in the `.cu` | fails to compile | `identifier "atomicAdd" is undefined` (device unit) |
+| simpleAtomicIntrinsics | atomics (`atomicAdd` and friends), `#define` in the `.cu` | fails to compile | device-only unit lost `#define NUM_THREADS`: `identifier "NUM_THREADS" is undefined` |
 | simpleVoteIntrinsics | warp vote (`__any_sync`) | fails to compile | `identifier "__any_sync" is undefined` (in `simpleVote_kernel.cuh`) |
 | simplePrintf | device `printf` | fails to compile | `identifier "printf" is undefined` (device unit) |
-| matrixMul | shared memory, template kernel launch `MatrixMulCUDA<16><<<...>>>` | fails to compile | `static data is not lowered yet` (the shared tile `As`) |
-| asyncAPI | events, streams, profiler API | builds and runs, exit 0; no result check printed (not verified) | none; it needed `cuda_profiler_api.h`, installed from apt (`cuda-profiler-api-13-1`) |
-| reduction | templates, template kernel launches, cooperative groups | fails to compile | `incomplete type "double []" is not allowed` (`extern __shared__` with no size, which needs the launch size) |
-| shfl_scan | warp shuffle (`__shfl_up_sync`), `NULL` from the host headers | fails to compile | `namespace "cooperative_groups" has no member "tiled_partition"`: the cooperative-groups stand-in has only thread blocks |
-| scan | `uint` typedef from the host headers, cooperative groups | fails to compile | `refused: aggregate type "uint4": struct and union values by value are not lowered yet` |
-| histogram | `uchar`/`uint` typedefs from the host headers, shared memory | fails to compile | `refused: aggregate type "uint4": struct and union values by value are not lowered yet` |
-| scalarProd | cooperative groups (`namespace cg = cooperative_groups`) | fails to compile | `refused: global "accumResult" (static data is not lowered yet)` |
-| threadFenceReduction | memory fences, cooperative groups | fails to compile | `device variable` (a `__device__` global; the emitter does not lower it yet) |
-| simpleCooperativeGroups | cooperative groups (`thread_block`, `thread_group`) | fails to compile | `identifier "thread_group" is undefined`: methods on groups and tiled partitions are not provided |
-| MC_EstimatePiP | template kernel launch (curand is not reached) | fails to compile | `incomplete type "unsigned int []" is not allowed` (`extern __shared__` with no size) |
-| Rodinia pathfinder | `__shared__` arrays | fails to compile | `static data is not lowered yet` (the shared arrays) |
-| Rodinia hotspot | `__shared__` 2-D arrays | fails to compile | `static data is not lowered yet` (the shared arrays) |
-| Rodinia nw | `__syncthreads` (barrier) | fails to compile | `static data is not lowered yet` (the shared arrays) |
-| Rodinia gaussian | multi-kernel host loop, null-pointer checks | fails to compile | `refused: statement nonnull` (emitter) |
-| Rodinia bfs | struct `Node` from a header, multi-file kernels | fails to compile | `bool in arithmetic or memory` (emitter) |
+| matrixMul | shared memory, template kernel launch `MatrixMulCUDA<16><<<...>>>` | fails to compile | `linkage specification is not allowed` (rewriter stub, `matrixMul.cu:197`) |
+| asyncAPI | events, streams, profiler API | builds, runs, exit 0; no result check in the sample (not verified) | — |
+| reduction | templates, template kernel launches, cooperative groups | fails to compile | `refused: template kernel name at line 651` (`reduction_kernel.cu`) |
+| shfl_scan | warp shuffle (`__shfl_up_sync`), `NULL` from the host headers | fails to compile | `namespace "cooperative_groups" has no member "tiled_partition"` |
+| scan | `uint` typedef from the host headers, cooperative groups | fails to compile | `refused: aggregate type "uint4"` (struct by value) |
+| histogram | `uchar`/`uint` typedefs from the host headers, shared memory | fails to compile | `refused: aggregate type "uint4"` (struct by value) |
+| scalarProd | cooperative groups (`namespace cg = cooperative_groups`) | fails to compile | `name must be a namespace name` |
+| threadFenceReduction | memory fences, cooperative groups | fails to compile | `name must be a namespace name` (device unit) |
+| simpleCooperativeGroups | cooperative groups (`thread_block`, `thread_group`) | fails to compile | `identifier "thread_group" is undefined` (device unit) |
+| MC_EstimatePiP | template kernel launch (curand is not reached) | fails to compile | `incomplete type "unsigned int []"` (unsized `extern __shared__`) |
+| Rodinia pathfinder | `__shared__` arrays | fails to compile | `identifier "__shared__" is undefined` (device unit) |
+| Rodinia hotspot | `__shared__` 2-D arrays | fails to compile | `identifier "__shared__" is undefined` (device unit) |
+| Rodinia nw | `__syncthreads` (barrier) | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |
+| Rodinia gaussian | multi-kernel host loop, null-pointer checks | fails to compile | `class "cudaDeviceProp" has no member "clockRate"` (host side: CUDA 13 removed the field; the emitter now lowers `nonnull`) |
+| Rodinia bfs | struct `Node` from a header, multi-file kernels | fails to compile | `incomplete type "void" is not allowed` (device unit) |
 
 ## What the failures have in common
 
@@ -58,16 +58,3 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 
 A missing source tree or toolkit is printed as `SKIP`. A recorded failure that still fails with the recorded error is
 `known-fail`. If one starts to build, `run.sh` prints `NOW BUILDS` and the case must be updated.
-
-## Device-unit additions (this round)
-
-- **Vector types** (`uchar2`..`float4`, the `make_*` constructors): the device unit defines a type only when device code
-  names it. The definitions are generated (`vector_defs` in `scripts/cuda-rewrite.rb`). The first error they reach is the
-  aggregate refusal: a struct value is passed or returned by value (`sret` in the IR), which the emitter does not lower.
-- **Cooperative groups** (`cg::thread_block`, `cg::this_thread_block()`, `cg::sync(group)`): the device unit provides a
-  stand-in namespace. The group is a plain `unsigned`, and `sync` is `__nfcxx_syncthreads`. Methods on a group and tiled
-  partitions are not provided.
-- **`__mul24`**: a builtin in the device unit, defined when device code names it (`BUILTIN_DEFS`).
-- **Front-end check of the stand-in with the emitter on `claude/ptx-emit-shared` (#82)**: the cooperative-groups IR
-  lowers, but `ptxas` rejects the forward calls ("requires call prototype"): the `.func` for `cg::sync` is emitted after
-  the kernel that calls it. That is an emitter ordering issue, not a front-end one.
