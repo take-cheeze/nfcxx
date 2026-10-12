@@ -73,6 +73,9 @@ jobs:
       - name: nfceval run-time eval library and nfcxx -shared (both backends)
         run: tests/eval/run.sh
 
+      - name: nfcpoly embedded mruby with C++ exceptions, scripts calling C++ and back (both backends)
+        run: tests/poly/run.sh
+
       - name: mruby scripts (byte-identical to the Python originals)
         run: tests/mruby/run.sh
 
