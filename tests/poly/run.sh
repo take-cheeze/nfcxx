@@ -2,13 +2,15 @@
 # nfcpoly: build the host test (tests/poly/host.cpp with lib/poly/nfcpoly.cpp and the language backends) with nfcxx and run
 # it, per back end. The languages' interpreters are built per back end by scripts/setup-poly.sh (mruby with C++
 # exceptions), scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS, plain C); Python is the
-# system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. See docs/notes/poly.md.
+# system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. Go is yaegi in a cgo
+# shared library built by scripts/setup-poly-go.sh (one library for both back ends), skipped with a SKIP line when Go or the
+# module proxy is missing. See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
-#   POLY_LANGS="ruby lua python ast js"   (default: all five; ast is the nfcast engine, lib/ast, which needs nothing built)
+#   POLY_LANGS="ruby lua python ast js go"   (default: all six; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-langs=${POLY_LANGS:-"ruby lua python ast js"}
+langs=${POLY_LANGS:-"ruby lua python ast js go"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   defs=(); incs=(-I lib/poly); srcs=(); libs=(); built=(); bad=0
@@ -32,6 +34,11 @@ for be in $backends; do
         fi ;;
       ast)
         defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp); built+=(ast) ;;
+      go)
+        out=$(scripts/setup-poly-go.sh 2>&1); rc=$?
+        if [ $rc = 3 ]; then echo "SKIP $be poly go: $(tail -1 <<<"$out" | sed 's/^setup-poly-go: //')"; continue
+        elif [ $rc != 0 ]; then echo "FAIL $be poly go (libnfcgo build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        defs+=(-DTEST_GO); srcs+=(lib/poly/nfcpoly_go.cpp); libs+=(-Lbuild/poly-go -lnfcgo "-Wl,-rpath,$PWD/build/poly-go"); built+=(go) ;;
       *) echo "FAIL poly: unknown language $l"; bad=1 ;;
     esac
   done
