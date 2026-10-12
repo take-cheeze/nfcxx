@@ -357,6 +357,24 @@ SCALAR_U32 = {
   "__nfcxx_umulhi" => ["mul.hi.u32", 2],
   "__nfcxx_popc" => ["popc.b32", 1],
   "__nfcxx_byte_perm" => ["prmt.b32", 3],
+  # __dp4a(a, b, c): c plus the dot product of the four 8-bit lanes of a and b (signed), sm_61 and later.
+  "__nfcxx_dp4a" => ["dp4a.s32.s32", 3],
+}
+# Float intrinsics: name => [PTX instruction, number of operands]. The CUDA names are wrappers in the device prelude
+# (cuda-rewrite.rb, BUILTIN_DEFS). The instructions are exact (max/min follow CUDA's NaN rule: a NaN operand is ignored
+# when the other is a number; sqrt is correctly rounded), except rsqrt and div, which are approximate (rsqrt.approx.f32
+# and div.approx.f32: about 2 ulp). expf, __expf, logf and __logf are ex2.approx / lg2.approx with a scale; see
+# float_builtin. Their error is documented in docs/notes/gpu.md, and tested with a tolerance.
+FLOAT_BUILTINS = {
+  "__nfcxx_fmaxf" => ["max.f32", 2],
+  "__nfcxx_fminf" => ["min.f32", 2],
+  "__nfcxx_fabsf" => ["abs.f32", 1],
+  "__nfcxx_sqrtf" => ["sqrt.rn.f32", 1],
+  "__nfcxx_rsqrtf" => ["rsqrt.approx.f32", 1],
+  "__nfcxx_fdividef" => ["div.approx.f32", 2],
+  "__nfcxx_saturatef" => ["cvt.sat.f32.f32", 1],
+  "__nfcxx_expf" => [:exp, 1],
+  "__nfcxx_logf" => [:log, 1],
 }
 # name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
 ATOMICS = {
@@ -726,6 +744,8 @@ class Fn
         device_builtin(name, x, dest, ty)
       elsif SCALAR_U32.key?(name)
         scalar_u32(name, x, dest, ty)
+      elsif FLOAT_BUILTINS.key?(name)
+        float_builtin(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -1094,6 +1114,33 @@ class Fn
       reg_of(v, vty)
     end
     emit("#{op} #{dest}, #{regs.join(', ')};")
+  end
+
+  # A float intrinsic of FLOAT_BUILTINS: operands and result are 32-bit floats. exp and log are two instructions:
+  # expf(x) = 2^(x * log2(e)) and logf(x) = log2(x) * ln(2), with the scale in the f32 hex form (exact constants).
+  def float_builtin(name, x, dest, ty)
+    op, arity = FLOAT_BUILTINS[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}, not a 32-bit float" unless ty[0] == "float" && type_size(ty) == 4
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "float" && vty[1] == 4
+      reg_of(v, vty)
+    end
+    case op
+    when :exp
+      t = fresh("f")
+      emit("mul.rn.f32 #{t}, #{regs[0]}, 0f3FB8AA3B;")    # log2(e)
+      emit("ex2.approx.f32 #{dest}, #{t};")
+    when :log
+      t = fresh("f")
+      emit("lg2.approx.f32 #{t}, #{regs[0]};")
+      emit("mul.rn.f32 #{dest}, #{t}, 0f3F317218;")       # ln(2)
+    else
+      emit("#{op} #{dest}, #{regs.join(', ')};")
+    end
   end
 
   def device_builtin(name, x, dest, ty)
