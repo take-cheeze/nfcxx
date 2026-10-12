@@ -51,7 +51,7 @@ FileUtils.mkdir_p(File.join(work, 'repos/host'))
 FileUtils.ln_sf(File.join(ROOT, '3rd/mgem-list'), File.join(work, 'repos/host/mgem-list'))
 File.write(File.join(work, 'config.rb'), format(CONFIG, root: ROOT, **VARIANTS.fetch(variant)))
 env = { 'MRUBY_CONFIG' => File.join(work, 'config.rb'), 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
-abort "#{variant} mruby build failed" unless system(env, 'rake', "-j#{Etc.nprocessors}", 'all',
+abort "#{variant} mruby build failed" unless system(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all',
                                                      chdir: File.join(ROOT, '3rd/mruby'))
 %w[lib/libmruby.a bin/mrbc].each do |rel|
   abort "#{variant} build produced no #{rel} under #{work}/host" unless File.exist?(File.join(work, 'host', rel))

@@ -512,7 +512,7 @@ if MODE != 'generated'
               'BC2CPP_CX_FIXTURE_OWNERS' => FIXTURE_OWNERS.join(','), 'BC2CPP_CX_FIXTURE' => File.join(work, "fixture_#{tag}.rb") }
       # ADR 0271 keeps a block's entry as an address in a 32-bit mrb_int slot; this 64-bit host truncates it.
       env['BC2CPP_BLOCK_DIRECT_ENTRY'] = '0' if variant == 'int32'
-      out, status = Open3.capture2e(env, 'rake', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: MRUBY)
+      out, status = Open3.capture2e(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: MRUBY)
       File.write(File.join(work, "#{name}.log"), out)
       bin = File.join(build, 'host/bin/mruby')
       runs = [{}, { 'BC2CPP_CX_INTERPRET' => '1' }].map do |run_env|
