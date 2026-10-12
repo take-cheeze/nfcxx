@@ -291,7 +291,7 @@ build_mruby = lambda do
   FileUtils.ln_sf(File.join(ROOT, '3rd/mgem-list'), File.join(dir, 'repos/host/mgem-list'))
   File.write(File.join(dir, 'config.rb'), MRUBY_CONFIG_RB)
   built_env = { 'MRUBY_CONFIG' => File.join(dir, 'config.rb'), 'MRUBY_BUILD_DIR' => dir, 'BC2CPP_ROOT' => ROOT }.merge(Bc2cppCxx.rake_env)
-  log, st = Open3.capture2e(built_env, 'rake', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: File.join(ROOT, '3rd/mruby'))
+  log, st = Open3.capture2e(built_env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: File.join(ROOT, '3rd/mruby'))
   File.write(File.join(dir, 'build.log'), log)
   st.success? ? host : nil
 end

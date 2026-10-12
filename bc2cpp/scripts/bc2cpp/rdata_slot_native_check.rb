@@ -224,7 +224,7 @@ def build_mruby(dir)
       #{"cc.defines << 'MRB_GC_STRESS'\n      cxx.defines << 'MRB_GC_STRESS'" if STRESS}
     end
   RUBY
-  out, status = run('rake', "-j#{Etc.nprocessors}", env: { 'MRUBY_CONFIG' => config }, chdir: tree)
+  out, status = run('rake', '-m', "-j#{[Etc.nprocessors, 16].min}", env: { 'MRUBY_CONFIG' => config }, chdir: tree)
   abort "mruby build failed:\n#{tail_of(out)}" unless status.success?
   tree
 end

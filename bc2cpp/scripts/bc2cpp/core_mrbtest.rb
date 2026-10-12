@@ -109,7 +109,7 @@ def build_and_test(work, name, harness)
   FileUtils.ln_sf(File.join(ROOT, '3rd/mgem-list'), File.join(build, 'repos/host/mgem-list'))
   env = { 'BC2CPP_ROOT' => ROOT, 'MRUBY_CONFIG' => File.join(work, 'config.rb'), 'MRUBY_BUILD_DIR' => build,
           'BC2CPP_HARNESS_GEM' => (File.join(work, 'gem') if harness) }.compact.merge(Bc2cppCxx.rake_env)
-  out, status = Open3.capture2e(env, 'rake', "-j#{[Etc.nprocessors, 16].min}", 'test', chdir: MRUBY)
+  out, status = Open3.capture2e(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'test', chdir: MRUBY)
   File.write(File.join(work, "#{name}.log"), out)
   totals = %w[Total OK KO Crash].to_h { |k| [k, out[/^\s*#{k}:\s*(\d+)/, 1]&.to_i] }
   [status.success?, totals, build, out]

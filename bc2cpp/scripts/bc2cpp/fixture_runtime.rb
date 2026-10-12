@@ -88,7 +88,7 @@ module Bc2cppFixtureRuntime
     FileUtils.ln_sf(File.join(ROOT, '3rd/mgem-list'), File.join(work, 'repos/host/mgem-list'))
     File.write(File.join(work, 'config.rb'), FULL_CORE_CONFIG)
     env = { 'MRUBY_CONFIG' => File.join(work, 'config.rb'), 'MRUBY_BUILD_DIR' => work }.merge(Bc2cppCxx.rake_env)
-    out, status = Open3.capture2e(env, 'rake', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: File.join(ROOT, '3rd/mruby'))
+    out, status = Open3.capture2e(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: File.join(ROOT, '3rd/mruby'))
     File.write(File.join(work, 'build.log'), out)
     raise "full-core mruby build failed:\n#{out.lines.last(30).join}" unless status.success?
 
