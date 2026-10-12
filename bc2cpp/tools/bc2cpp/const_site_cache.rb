@@ -100,7 +100,9 @@ module StableClassConstants
       source.scan(/\bmrb_define_(?:class|module)(?:_under)?\s*\(\s*\w+(?:\s*,\s*\w+)?\s*,\s*"([^"]+)"/) do
         counts[Regexp.last_match(1)] += 1
       end
-      booted = source.scan(/(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+      booted = source.include?('boot_defclass') ? source.scan(/(?<!\w)(\w+)\s*=\s*boot_defclass\s*\(/).flatten : []
+      next if booted.empty?
+
       source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\(\1\)\s*\)/) do |variable, name|
         counts[name] += 1 if booted.include?(variable)
       end

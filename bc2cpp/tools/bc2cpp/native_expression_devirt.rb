@@ -263,16 +263,26 @@ module NativeExpressionDevirt
     end
   end
 
-  # Class and module variables of a native source: C variable => {field:, class_name:}.
+  # Both ROM scans read each source's map; the sources are the read_source strings, so identity keys it.
+  CLASS_VARIABLE_MAPS = {}.compare_by_identity
+
+  # Class and module variables of a native source: C variable => {field:, class_name:}. The result is shared:
+  # callers only read it.
   def class_variable_map(source)
+    CLASS_VARIABLE_MAPS[source] ||= scan_class_variable_map(source)
+  end
+
+  # `(?<!\w)` before a leading `(\w+)`: a match never starts mid-word (the word's first character matches with
+  # the same tail), so those starts only cost time.
+  def scan_class_variable_map(source)
     class_variables = {}
-    scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+    scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(?<!\w)(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
       class_variables[variable] = { field: field, class_name: class_name }
     end
-    scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+    scan_with(source, %w[mrb_class_get], /(?<!\w)(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
       class_variables[variable] ||= { field: nil, class_name: class_name }
     end
-    scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+    scan_with(source, %w[mrb->], /(?<!\w)(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
       class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
     end
     source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
@@ -283,7 +293,7 @@ module NativeExpressionDevirt
       field = field.first
       class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
     end
-    scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+    scan_with(source, %w[mrb_define_class mrb_define_module], /(?<!\w)(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
       class_variables[variable] ||= { field: nil, class_name: class_name }
     end
     # class.c boots BasicObject/Object/Module/Class through boot_defclass and
@@ -291,11 +301,11 @@ module NativeExpressionDevirt
     # would otherwise have an unknown owner, which disables every name they
     # share with a built-in class. Read the names off the source's own
     # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-    booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+    booted = scan_with(source, %w[boot_defclass], /(?<!\w)(\w+)\s*=\s*boot_defclass\s*\(/).flatten
     source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
       class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
     end
-    scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+    scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(?<!\w)(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
       class_variables[variable] ||= { field: nil, class_name: class_name }
     end
     class_variables
@@ -469,6 +479,9 @@ module NativeExpressionDevirt
   end
 
   def rom_entries(source)
+    # Entries come only from MRB_MT_ENTRY calls, so a source without the literal has none (and no table scan).
+    return [] unless source.include?('MRB_MT_ENTRY')
+
     entries = []
     tables = []
     table_pattern = /(?:static\s+)?const\s+mrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{/
