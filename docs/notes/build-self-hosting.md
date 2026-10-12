@@ -48,7 +48,7 @@ cproc) is ours to vendor.
 | Step | External tools beyond gcc/g++ and coreutils | Network |
 | --- | --- | --- |
 | `scripts/setup-edg.sh` (EDG `cpfe`, `eccp`, `edg_prelink`, `libC.a`) | cmake, ninja, git (submodule `3rd/edg`) | submodule fetch only |
-| `scripts/setup-qbe.sh` (QBE and cproc from the fork) | make, patch, git (submodules `3rd/qbe`, `3rd/cproc`) | submodule fetch only |
+| `scripts/setup-qbe.sh` (QBE and cproc from the fork, and cproc's stage 2 in `build/cproc/stage2`) | make, patch, git (submodules `3rd/qbe`, `3rd/cproc`), libgcc and libstdc++ for the stage-2 link | submodule fetch only |
 | `scripts/setup-mruby.sh` (the interpreter that runs the helper scripts) | ruby, rake, git, flock | one shallow fetch of `mruby/mruby` at the pinned commit |
 | `scripts/setup-pathb.sh` (Path B harness `cpfe`, `build/pathb`) | cmake, ninja, git (the `3rd/edg` submodule) | submodule fetch only |
 | `./nfcxx`, `./nfcc` with the gcc backend | EDG built; gcc | none |
