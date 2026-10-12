@@ -410,7 +410,8 @@ Scalar eval_op(Op op, DType out, const std::vector<Scalar>& a) {
     case Op::Sub: return fl ? Scalar::from_double(out, a[0].f - a[1].f) : Scalar::from_int(out, wrap_sub(a[0].i, a[1].i));
     case Op::Mul: return fl ? Scalar::from_double(out, a[0].f * a[1].f) : Scalar::from_int(out, wrap_mul(a[0].i, a[1].i));
     case Op::Max:
-      return fl ? Scalar::from_double(out, std::fmax(a[0].f, a[1].f)) : Scalar::from_int(out, a[0].i > a[1].i ? a[0].i : a[1].i);
+      return fl ? Scalar::from_double(out, std::isnan(a[0].f) ? a[1].f : std::isnan(a[1].f) ? a[0].f : (a[0].f > a[1].f ? a[0].f : a[1].f))
+                : Scalar::from_int(out, a[0].i > a[1].i ? a[0].i : a[1].i);
     case Op::FDiv: return Scalar::from_double(out, a[0].f / a[1].f);
     case Op::IDiv:
     case Op::Mod: {

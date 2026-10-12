@@ -2,7 +2,8 @@
 """Compare nfcuop::np with real numpy on the expressions of tests/uop/np_compat.cpp (same names, same inputs).
 Values and shapes must match (rtol 1e-5); a dtype difference is reported, and fails only if it is not one of the
 documented ones (DTYPE_DIFFS: numpy's default int64/float64 where nfcuop uses int32/float32).
-usage: np_compat.py RESULT.json"""
+usage: np_compat.py RESULT.json [64]
+With 64 the session ran with numpy's default dtypes (float64, int64) and there must be no dtype difference at all."""
 import json, sys
 
 try:
@@ -11,6 +12,7 @@ except ImportError as e:
     print("SKIP np_compat: %s" % e)
     sys.exit(0)
 
+MODE64 = len(sys.argv) > 2 and sys.argv[2] == "64"
 f32, i32 = np.float32, np.int32
 a = np.arange(1, 7, dtype=f32).reshape(2, 3)
 b = np.array([10, 20, 30], f32)
@@ -53,7 +55,7 @@ CASES = {
     "cos": lambda: np.cos(v), "tanh": lambda: np.tanh(v), "sigmoid": lambda: 1 / (1 + np.exp(-v)), "relu": lambda: np.maximum(v, 0),
     "recip": lambda: 1 / v, "softmax": lambda: softmax(a), "logsoftmax": lambda: logsoftmax(a),
     "matmul_aat": lambda: a @ a.T, "matmul_ab": lambda: a @ b, "matmul_ba": lambda: b @ a.T,
-    "matmul_batch": lambda: m @ np.ones((4, 2), f32), "matmul_gram": lambda: m @ m.transpose(0, 2, 1),
+    "matmul_batch": lambda: m @ (np.ones((4, 2)) if MODE64 else np.ones((4, 2), f32)), "matmul_gram": lambda: m @ m.transpose(0, 2, 1),
     "matmul_vv": lambda: b @ b, "matmul_int": lambda: ia @ ia.T,
     "arange": lambda: np.arange(5), "arange_step": lambda: np.arange(1.0, 2.0, 0.25), "linspace": lambda: np.linspace(0, 1, 5),
     "eye": lambda: np.eye(3), "zeros": lambda: np.zeros((2, 2)), "ones_i": lambda: np.ones((2,), i32), "full": lambda: np.full((2,), 7),
@@ -61,7 +63,7 @@ CASES = {
 
 # nfcuop's dtype differs from numpy's on purpose: ints are int32 and floats float32 unless asked otherwise, so numpy's
 # int64 / float64 defaults (sums, means, true division of ints, arange, linspace, eye, zeros, full) differ
-DTYPE_DIFFS = {"idiv_true", "isum", "imean", "bsum", "mean_all_i", "arange", "arange_step", "linspace", "eye", "zeros", "full"}
+DTYPE_DIFFS = set() if MODE64 else {"idiv_true", "isum", "imean", "bsum", "arange", "arange_step", "linspace", "eye", "zeros", "full"}
 
 got = json.load(open(sys.argv[1]))
 if set(got) != set(CASES):
@@ -83,8 +85,8 @@ for name, fn in CASES.items():
     else:
         same += 1
 total = len(CASES)
-print("numpy compatibility: %d expressions; %d match numpy in shape, values and dtype; %d match in shape and values with a different dtype; %d differ"
-      % (total, same, len(dtype_diffs), len([x for x in bad if "dtype" not in x])))
+print("numpy compatibility (%s defaults): %d expressions; %d match numpy in shape, values and dtype; %d match in shape and values with a different dtype; %d differ"
+      % ("float64/int64" if MODE64 else "float32/int32", total, same, len(dtype_diffs), len([x for x in bad if "dtype" not in x])))
 for n, o, w in dtype_diffs: print("  dtype: %-12s nfcuop %-8s numpy %s" % (n, o, w))
 for x in bad: print("FAIL " + x)
 sys.exit(1 if bad else 0)

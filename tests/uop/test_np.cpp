@@ -50,7 +50,7 @@ static void numpy_api() {
   CHECK(np.scalar(2.5).item() == 2.5);
   CHECK_THROWS(a.item());
   CHECK_THROWS(np.array({1, 2, 3}, {2, 2}));
-  CHECK(np.arange(4).str() == "[0., 1., 2., 3.]");
+  CHECK(np.arange(4).str() == "[0, 1, 2, 3]" && np.arange(4).dtype() == i32);
   CHECK(np.arange(1.0, 2.0, 0.25).str() == "[1., 1.25, 1.5, 1.75]");
   CHECK(np.arange(5, i32).str() == "[0, 1, 2, 3, 4]");
   CHECK(np.linspace(0, 1, 5).str() == "[0., 0.25, 0.5, 0.75, 1.]");
@@ -190,6 +190,41 @@ static void numpy_api() {
 }
 
 
+static void default_dtypes() {
+  const DType i32 = DType::Int32, i64 = DType::Int64, f32 = DType::Float32, f64 = DType::Float64;
+  {  // the 32-bit defaults
+    Session np;
+    CHECK(np.default_float == f32 && np.default_int == i32);
+    CHECK(np.array({1, 2}).dtype() == f32 && np.scalar(1).dtype() == f32 && np.zeros({2}).dtype() == f32 && np.ones({2}).dtype() == f32);
+    CHECK(np.linspace(0, 1, 3).dtype() == f32 && np.eye(2).dtype() == f32 && np.placeholder("p", {2}).dtype() == f32);
+    CHECK(np.arange(3).dtype() == i32 && np.arange(0, 6, 2).dtype() == i32 && np.arange(0.5, 2.0, 0.5).dtype() == f32 && np.arange(0, 6, 2.0).dtype() == f32);
+    CHECK(np.full({2}, 7).dtype() == i32 && np.full({2}, 7.5).dtype() == f32 && np.full({2}, 7, f64).dtype() == f64);
+    Tensor ia = np.array({1, 2, 3, 4}, i32), bo = np.array({1, 0, 1, 1}, DType::Bool);
+    CHECK((ia / 2).dtype() == f32 && ia.mean().dtype() == f32 && ia.exp().dtype() == f32 && ia.softmax().dtype() == f32);
+    CHECK(bo.sum().dtype() == i32 && ia.sum().dtype() == i32 && (bo + bo).dtype() == i32 && (bo + 1).dtype() == i32 && matmul(bo, bo).dtype() == i32);
+    CHECK((ia + 0.5).dtype() == f32 && (ia + 1).dtype() == i32 && (np.array({1.5}, f64) + 1).dtype() == f64 && (np.array({1.5}) * 2.5).dtype() == f32);
+  }
+  {  // numpy's defaults: int64 and float64
+    Session np;
+    np.default_float = f64;
+    np.default_int = i64;
+    CHECK(np.array({1, 2}).dtype() == f64 && np.scalar(1).dtype() == f64 && np.zeros({2}).dtype() == f64 && np.eye(2).dtype() == f64);
+    CHECK(np.arange(3).dtype() == i64 && np.arange(0, 6, 2).dtype() == i64 && np.arange(0.5, 2.0, 0.5).dtype() == f64 && np.full({2}, 7).dtype() == i64);
+    CHECK(np.array({1, 2}, f32).dtype() == f32 && np.arange(3, i32).dtype() == i32 && np.zeros({2}, i32).dtype() == i32);   // an explicit dtype wins
+    Tensor ia = np.array({1, 2, 3, 4}, i32), bo = np.array({1, 0, 1, 1}, DType::Bool);
+    CHECK((ia / 2).dtype() == f64 && ia.mean().dtype() == f64 && ia.sqrt().dtype() == f64 && ia.clip(1, 3).dtype() == f64);
+    CHECK(ia.sum().dtype() == i64 && bo.sum().dtype() == i64 && (bo + bo).dtype() == i64);   // sums widen, as in numpy
+    CHECK((ia + 1).dtype() == i32 && (ia + 0.5).dtype() == f64);                               // a Python-style scalar is weak
+    Tensor f = np.array({1, 2, 3}, f32);
+    CHECK((f * 0.1).dtype() == f32 && (f + 1).dtype() == f32 && f.sum().dtype() == f32);
+    CHECK(ia.mean().item() == 2.5 && np.arange(5).sum().item() == 10 && std::fabs((np.array({1, 2, 3}) / 3.0).tolist()[0] - 1.0 / 3) < 1e-15);   // float64 is real
+    CHECK(softmax(np.array({1, 2, 3}, i32)).dtype() == f64);
+    // the model written for ONNX has the dtypes chosen here
+    Tensor x = np.placeholder("x", {2});
+    CHECK(x.dtype() == f64 && np.to_onnx({{"y", x * 2}}).size() > 20);
+  }
+}
+
 static void slicing_and_concat() {
   Session np;
   const DType i32 = DType::Int32, f64 = DType::Float64;
@@ -215,7 +250,7 @@ static void slicing_and_concat() {
   CHECK(m.at(-1, 2).shape() == (Shape{2, 3}) && m.at(-1, 2).tolist()[0] == 3);
   CHECK_THROWS(m.at(2));
   CHECK_THROWS(m.at(-3));
-  CHECK(np.arange(4).flip().str() == "[3., 2., 1., 0.]" && m.flip(1).tolist()[0] == 8);
+  CHECK(np.arange(4).flip().str() == "[3, 2, 1, 0]" && m.flip(1).tolist()[0] == 8);
   // a chain of slices and arithmetic
   Tensor row = np.arange(10);
   CHECK((row.slice(0, 1, None) - row.slice(0, None, -1)).sum().item() == 9);  // differences of neighbours
@@ -231,7 +266,7 @@ static void slicing_and_concat() {
   CHECK_THROWS(concatenate({}, 0));
   CHECK_THROWS(concatenate({a, np.arange(3)}, 0));
   CHECK(stack({a, b}).shape() == (Shape{2, 2, 3}) && stack({a, b}, 2).shape() == (Shape{2, 3, 2}) && stack({a, b}, -1).shape() == (Shape{2, 3, 2}));
-  CHECK(stack({np.arange(2), np.arange(2) + 5}).str() == "[[0., 1.], [5., 6.]]");
+  CHECK(stack({np.arange(2), np.arange(2) + 5}).str() == "[[0, 1], [5, 6]]");
   CHECK(near(stack({a, b}, 2).tolist(), V{1, 10, 2, 20, 3, 30, 4, 40, 5, 50, 6, 60}));
   CHECK_THROWS(stack({a, a.T()}));
   // -0.0 survives a concatenation (the lowering must not add zeros)
@@ -371,6 +406,7 @@ static void graph_and_onnx(const std::string& dir) {
 
 int main(int argc, char** argv) {
   numpy_api();
+  default_dtypes();
   slicing_and_concat();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }

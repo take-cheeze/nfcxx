@@ -11,11 +11,12 @@ hir::Graph  (ONNX opset 18 operators, static shapes)    nfcuop_hir.hpp ──►
 ut::Tensor  (numpy-style builder directly on UOps)      nfcuop_ut.hpp
    │ builds
 Graph / UOp (hash-consed nodes, shapes, rewrites)       nfcuop.hpp
-   │ evaluate_array()  (reference interpreter)   later: lowering to loops, C rendering, nfcpoly bindings
+   ├── evaluate_array()  the reference interpreter
+   └── render_c()        C source (fused loop nests) ── cc -shared, dlopen ──► CModule::run()      nfcuop_cgen.hpp
 ```
 
 The plan is to grow it stage by stage so that a graph can be built from C++ (and later Ruby, Lua, Python, JavaScript and Go
-through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 3 and the ONNX layer exist; the rest is a plan.
+through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 4 and the ONNX layer exist; the rest is a plan.
 
 | Stage | Content | State |
 | --- | --- | --- |
@@ -23,7 +24,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 3 and the O
 | 2 | `Pat`, `PatternMatcher`, `graph_rewrite`, `symbolic()` | done |
 | 3 | Static shapes: movement ops (`Reshape Permute Expand Shrink Pad Flip`), reductions, `evaluate_array`; the UOp-level builder `ut::Tensor` with broadcasting, slicing, concatenation | done |
 | 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
-| 4 | Lowering UOps to loops (`RANGE`/`LOAD`/`STORE`), rendering C, compiling and running it through `nfceval` | not started |
+| 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`uop_poly.cpp`) and a cross-language test | not started |
 | 6 | Autodiff as a rewrite; ONNX **import** | not started |
 | 7 | Dynamic shapes (below) | not started |
@@ -40,7 +41,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 3 and the O
 - `evaluate` is the reference semantics, and also what constant folding uses (`eval_op`): integers wrap to their
   width, `IDiv` and `Mod` truncate toward zero like C (`INT_MIN / -1` wraps, division by zero throws), a Float32 node is
   computed in double and rounded to float after every node (exact for `+ - * / sqrt`, may differ in the last bit for
-  `Exp2 Log2 Sin` from a float libm), `Max` returns the non-NaN operand, a float-to-int cast truncates, saturates and maps
+  `Exp2 Log2 Sin` from a float libm), `Max` returns the non-NaN operand (the second one when they compare equal, so `max(0.0, -0.0)` is `-0.0`), a float-to-int cast truncates, saturates and maps
   NaN to 0.
 - `dump` prints one numbered line per node; it does not depend on addresses or ids, so tests compare it with a golden.
 
@@ -128,13 +129,23 @@ Mapping to ONNX: `sum` is `ReduceSum` with an axes input, `T` is `Transpose`, `a
 
 ## numpy compatibility
 
-How much of the real numpy library is covered, measured: `tests/uop/np_compat.cpp` evaluates 100 expressions with nfcuop and
-`tests/uop/np_compat.py` the same 100 with numpy 2.5 (same inputs, float32 and int32 arrays). Result: **all 100 agree in shape
-and values** (rtol 1e-5); **90 agree in dtype too**; the other 10 differ only in dtype, and the script lists them: numpy's
-int64/float64 defaults (`arange(5)`, `linspace`, `eye`, `zeros`, `full`, int `sum`/`mean`, `bool.sum()`, `int / int`) against nfcuop's int32/float32. The
-expressions cover arithmetic with broadcasting and scalars, comparisons, logic, `where`, `clip`, reductions, shape ops, slicing and
-negative steps, `concatenate`/`stack`, `exp log sin cos tanh sigmoid softmax`, `matmul` (1-D, 2-D, batched) and the constructors.
-The script fails if a dtype difference appears that is not on its documented list, so the claim cannot drift.
+How much of the real numpy library is covered, measured: `tests/uop/np_compat.cpp` evaluates 100 expressions with nfcuop (interpreter and C backend, which must
+agree bit for bit) and `tests/uop/np_compat.py` the same 100 with numpy 2.5 (same inputs: float32 and int32 arrays). Two runs:
+
+- **32-bit defaults (the default)**: all 100 agree with numpy in shape and values (rtol 1e-5); 90 agree in dtype too; the other 10 differ only in dtype, and the
+  script lists them: numpy's int64/float64 defaults (`arange(5)`, `linspace`, `eye`, `zeros`, `full(.., 7)`, int `sum`/`mean`, `bool.sum()`, `int / int`) against
+  nfcuop's int32/float32.
+- **numpy's defaults** (`np.default_float = Float64; np.default_int = Int64;`): all 100 agree in shape, values **and dtype**.
+
+The script fails if a dtype difference appears that is not on its list, so the claim cannot drift.
+
+**Default dtypes are a per-Session setting**, `np.default_float` (float32) and `np.default_int` (int32). numpy has no global setting (you pass `dtype=` per call, and
+the defaults are float64/int64); here every constructor takes an optional dtype that overrides the session default, and the session default says what the
+rest does: `array`, `zeros`, `ones`, `linspace`, `eye`, `scalar`, `placeholder` and float `arange`/`full` give `default_float`; `arange(5)`, `arange(0, 6, 2)` and `full(shape, 7)`
+give `default_int` (an integer argument gives an integer, like numpy); `/`, `mean`, `var`, `exp`, `softmax`, `clip` and the other float functions of an integer tensor give `default_float`;
+`sum` of bool or of integers narrower than `default_int` gives `default_int` (numpy's rule); bool arithmetic runs in `default_int`. A Python-style scalar is weak, as in numpy 2: it takes the
+tensor's dtype, except a float next to an integer tensor, which makes `default_float`. float32 stays float32 under 64-bit defaults (`float32_array * 0.1` is float32).
+(The UOp-level builder `ut` keeps float32/int32 and takes dtypes explicitly.)
 
 What is the same: broadcasting; negative axes; `keepdims`; Python slicing rules (clamping, negative bounds and steps); `//` and `%` on ints
 follow numpy's floor semantics (the sign of the divisor); `matmul` shape rules including 1-D operands and batch broadcasting; `reshape(-1)`;
@@ -143,8 +154,7 @@ float32 arithmetic is rounded like numpy's float32.
 Where it differs, on purpose:
 
 - **dtypes**: bool, int32, int64, float32, float64 only. Promotion is the larger of the two in that order, so int64 + float32 is float32
-  (numpy: float64); an int scalar keeps an int tensor's dtype, a float scalar makes an int tensor float32; `/` and the float functions of an
-  int tensor compute in float32 (numpy: float64). The defaults are int32/float32 where numpy has int64/float64.
+  (numpy: float64). The defaults are int32/float32 where numpy has int64/float64, unless the session is configured otherwise (above).
 - **no empty tensors**: every dimension is at least 1, so an empty slice, `arange(0)` or `zeros((0,))` is an error.
 - `==` and `!=` are elementwise and return a `Tensor` (as in numpy); `min`/`max` ignore NaN (numpy propagates it); `%` and `floor_divide` are for ints only.
 
@@ -156,6 +166,34 @@ a new ONNX operator in `hir` plus its lowering in `ut` (`Pow`, `Floor`, `IsNaN`,
 (`unique`, boolean masks) are outside a static-shape design.
 A realistic target is "the subset of numpy that a model needs": array creation, broadcasting arithmetic, reductions, shape ops, slicing, matmul, the
 activation functions. Beyond that numpy is a much larger library, and a port would stay a subset.
+
+## C rendering (stage 4, `nfcuop_cgen.hpp`)
+
+`render_c(roots)` turns the graphs of one or more outputs into one C99 program, `CModule::compile` builds it with `cc -O2 -shared` (the command is
+`$NFCUOP_CC`, or `cc`; `nfcxx` also works, see below) and `dlopen`s it, and `CModule::run({name: Array})` feeds the inputs (the `Var`s, sorted by
+name) and returns the outputs as `Array`s. In the numpy API: `np.backend = ut::Session::Backend::C;` then `np.eval(t)` or `np.eval_all({t1, t2, ...})`
+(the second compiles one program for all of them; modules are cached by source text).
+
+- **Fusion**: elementwise ops, casts, `Where` and the movement ops are C expressions in the loop variables, so a chain of them is one loop nest and no
+  temporary exists. A movement op rewrites the index (`Permute` swaps loop variables, `Expand` uses 0, `Shrink` adds the start, `Flip` subtracts, `Reshape`
+  re-derives the indices with `/` and `%` unless only size-1 dimensions changed, `Pad` is a bounds test around the load). Index temporaries are bound to
+  `const int64_t` locals so the text does not grow.
+- **Materialization**: a node gets a buffer when it is a reduction, an output, or is used more than once and is more than an index change of something already
+  stored. A reduction is a loop nest of its own with its producer fused in its body; it accumulates over the reduced axes in row-major order and starts from the
+  first element, exactly like the interpreter. Forty levels of `a = a + a` are forty loop nests, not 2^40 terms (`tests/uop/test_cgen.cpp`).
+  `CProgram::kernels` and `temporaries` count the loop nests and buffers: softmax over a `2x3` input is 4 and 3 (max, shifted exp, sum, divide).
+- **Same bits as the interpreter**: integer `+ - *` run in unsigned arithmetic, `IDiv`/`Mod` handle `-1`, every Float32 operation is rounded to float,
+  `Exp2/Log2/Sin/Sqrt` are called on doubles and rounded, `Max` has the interpreter's NaN and signed-zero rules, float-to-int casts saturate and map NaN to 0, constants are
+  written as hexadecimal floats. The compile flags are `-O2 -fPIC -ffp-contract=off -fwrapv`. **One difference**: an integer division or modulo by zero is 0 in C (the
+  interpreter throws), because a trap would kill the process.
+- **Verification**: `tests/uop/test_cgen.cpp` compares the generated C with the interpreter, element by element, bit for bit (every NaN equal), on 250 random scalar
+  graphs, 150 random integer-tensor graphs (raw and after `symbolic()`), 150 random float32 tensor graphs (inputs include `-0.0`, `1e30`, inf and NaN), hand-written
+  graphs for every dtype (int64 extremes, float64 casts, bool logic, int32 edges), 18 numpy-API graphs in one program, and the 100 expressions of `np_compat`.
+  Each batch is one compiled program. About 32,000 comparisons.
+- **Not done**: no tiling, vectorization, threads or GPU; the loops are plain nested `for`s that the C compiler optimizes. No dynamic shapes. Memory is one
+  `malloc` per materialized node, freed at the end (no buffer reuse). An output that is a reshape of a reduction is copied.
+- **nfcxx as the C compiler**: `NFCUOP_CC=./nfcxx` (it passes `-shared -o`, not the gcc flags). `tests/uop/run.sh` runs the `quick` part of `test_cgen` that way on both
+  nfcxx back ends; that path (cproc with hexadecimal float literals, `INFINITY`, `static inline`) was not run where this was written, so CI is its first run.
 
 ## Dynamic shapes (stage 7, after the static stages)
 
@@ -180,11 +218,12 @@ Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 - `test_ut.cpp`: shape inference and errors, `evaluate_array` on every movement op and reduction, the rewrite rules for them, a second differential run (300
   random chains of permute, reshape, reduce, expand, shrink, pad, flip, `Where` and integer arithmetic, 900 comparisons), and the checks of the
   UOp-level builder against values worked out by hand.
-- `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
+- `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, the default-dtype settings in both configurations, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
   ONNX export bytes), and the `hir` error cases. It writes seven models (an MLP, broadcasting arithmetic, reductions and shape ops, integer
   division and modulo, math functions, slicing and concatenation, batched matmul) with the interpreter's results next to them.
 - `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
-- `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above.
+- `test_cgen.cpp`: the C renderer (above).
+- `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above, with 32-bit and with 64-bit defaults.
 
 Replacing a rule by a wrong one (checked by hand with `x%1 -> x` and with the float reassociation) makes the runs fail.
 The Python checks print SKIP when numpy, onnx or onnxruntime is missing.

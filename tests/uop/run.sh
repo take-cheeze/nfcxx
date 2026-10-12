@@ -6,23 +6,27 @@
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
 #                               errors, slicing, concatenation, the graph, the ONNX export; it also writes models
+#   - tests/uop/test_cgen.cpp   C rendering (nfcuop_cgen.hpp): fusion, and generated C equal bit for bit to the interpreter on random
+#                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
+#                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
 #   - tests/uop/onnx_check.py   those models through onnx.checker and onnxruntime, against the UOp interpreter's results
-#   - tests/uop/np_compat.cpp/.py   100 numpy expressions evaluated by nfcuop and by real numpy, compared
+#   - tests/uop/np_compat.cpp/.py   100 numpy expressions evaluated by nfcuop (interpreter and C) and by real numpy, compared; once
+#                               with the 32-bit default dtypes (10 documented dtype differences) and once with float64/int64 (none)
 #   The two Python checks need numpy, onnx and onnxruntime and print SKIP when they are missing.
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 #   UOP_HOST=1              build with the host g++ (-fsanitize=address,undefined) and nothing else; for a machine
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp)
-tests=(test test_ut test_np np_compat)
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp)
+tests=(test test_ut test_np test_cgen np_compat)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
   label=$1; shift
   mkdir -p "$tmp/$label/onnx"
   for t in "${tests[@]}"; do
-    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" 2>&1); then
+    if ! out=$("$@" -I lib/uop tests/uop/$t.cpp "${lib[@]}" -o "$tmp/$label/$t" -ldl 2>&1); then
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     fi
     case $t in
@@ -33,9 +37,16 @@ run_all() {
     if res=$("$tmp/$label/$t" "${args[@]}" 2>&1); then echo "ok   $label uop/$t: $(tail -1 <<<"$res")"
     else echo "FAIL $label uop/$t"; head -30 <<<"$res"; fail=1; fi
   done
+  if res=$("$tmp/$label/np_compat" "$tmp/$label/compat64.json" 64 2>&1); then echo "ok   $label uop/np_compat (float64/int64 defaults): $(tail -1 <<<"$res")"
+  else echo "FAIL $label uop/np_compat 64"; head -30 <<<"$res"; fail=1; fi
+  if [ -n "$CC_IS_NFCXX" ]; then   # the generated C through the nfcxx driver
+    if res=$(NFCUOP_CC="$PWD/nfcxx" "$tmp/$label/test_cgen" quick 2>&1); then echo "ok   $label uop/test_cgen with nfcxx as the C compiler: $(tail -1 <<<"$res")"
+    else echo "FAIL $label uop/test_cgen with nfcxx as the C compiler"; head -30 <<<"$res"; fail=1; fi
+  fi
   if command -v python3 >/dev/null; then
     python3 tests/uop/onnx_check.py "$tmp/$label/onnx" | sed "s/^/     $label /" ; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label onnx_check"; fail=1; }
     [ -f "$tmp/$label/compat.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat.json" | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat"; fail=1; }; }
+    [ -f "$tmp/$label/compat64.json" ] && { python3 tests/uop/np_compat.py "$tmp/$label/compat64.json" 64 | sed "s/^/     $label /"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "FAIL $label np_compat 64"; fail=1; }; }
   fi
 }
 if [ -n "$UOP_HOST" ]; then
@@ -43,6 +54,6 @@ if [ -n "$UOP_HOST" ]; then
   exit $fail
 fi
 for be in $backends; do
-  NFCXX_BACKEND=$be run_all "$be" ./nfcxx -O2
+  CC_IS_NFCXX=1 NFCXX_BACKEND=$be run_all "$be" ./nfcxx -O2
 done
 exit $fail

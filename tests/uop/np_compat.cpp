@@ -1,6 +1,8 @@
 // Evaluates a fixed list of numpy-style expressions with nfcuop::np and writes the results as JSON to argv[1], for
 // tests/uop/np_compat.py, which evaluates the same expressions with real numpy and compares (docs/notes/uop.md,
 // "numpy compatibility"). The expressions and inputs here and in the script must stay in step, name for name.
+// argv[2] == "64" sets the session's default dtypes to float64 and int64 (numpy's). Every expression is also run through the
+// C backend, and the program fails if it differs from the interpreter in a single bit.
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -13,15 +15,17 @@ using namespace nfcuop;
 using namespace nfcuop::np;
 
 int main(int argc, char** argv) {
-  if (argc < 2) { std::fprintf(stderr, "usage: np_compat OUT.json\n"); return 2; }
+  if (argc < 2) { std::fprintf(stderr, "usage: np_compat OUT.json [64]\n"); return 2; }
   Session np;
+  if (argc > 2 && std::string(argv[2]) == "64") { np.default_float = DType::Float64; np.default_int = DType::Int64; }
   const DType i32 = DType::Int32;
-  Tensor a = np.array({1, 2, 3, 4, 5, 6}, {2, 3});
-  Tensor b = np.array({10, 20, 30});
+  const DType f32 = DType::Float32;   // the inputs are float32 whatever the defaults are, like the numpy side
+  Tensor a = np.array({1, 2, 3, 4, 5, 6}, {2, 3}, f32);
+  Tensor b = np.array({10, 20, 30}, f32);
   Tensor ia = np.array({7, -7, 3, -3, 2, -5}, {2, 3}, i32);
   Tensor ib = np.array({2, -2, 3}, i32);
-  Tensor m = np.arange(24).reshape({2, 3, 4});
-  Tensor v = np.array({-2, -0.5, 0, 0.5, 2});
+  Tensor m = np.arange(24, DType::Float32).reshape({2, 3, 4});
+  Tensor v = np.array({-2, -0.5, 0, 0.5, 2}, f32);
   Tensor bo = np.array({1, 0, 1, 0, 0, 1}, {2, 3}, DType::Bool);
   std::vector<std::pair<std::string, Tensor>> c;
 #define CASE(name, expr) c.push_back({name, expr})
@@ -35,7 +39,7 @@ int main(int argc, char** argv) {
   CASE("and", (a > 2) & (a < 5)); CASE("or", (a < 2) | (a > 5)); CASE("xor", (a > 2) ^ (a > 4));
   CASE("not", logical_not(a > 2)); CASE("band", bo & (a > 2));
   CASE("iand", ia & ib); CASE("ior", ia | ib); CASE("ixor", ia ^ ib);
-  CASE("where", where(a > 3, a, np.scalar(0))); CASE("maximum_s", maximum(a, np.scalar(3)));
+  CASE("where", where(a > 3, a, np.scalar(0, f32))); CASE("maximum_s", maximum(a, np.scalar(3, f32)));
   CASE("minimum", minimum(a, b)); CASE("clip", a.clip(2, 5));
   CASE("sum_all", a.sum()); CASE("sum0", a.sum(0)); CASE("sum1k", a.sum(1, true));
   CASE("mean_all", a.mean()); CASE("mean0", a.mean(0)); CASE("max_all", a.max()); CASE("min1", a.min(1));
@@ -62,10 +66,24 @@ int main(int argc, char** argv) {
   CASE("arange", np.arange(5)); CASE("arange_step", np.arange(1.0, 2.0, 0.25)); CASE("linspace", np.linspace(0, 1, 5));
   CASE("eye", np.eye(3)); CASE("zeros", np.zeros({2, 2})); CASE("ones_i", np.ones({2}, i32)); CASE("full", np.full({2}, 7));
 #undef CASE
+  std::vector<Tensor> all;
+  for (const auto& e : c) all.push_back(e.second);
+  std::vector<Array> results = np.eval_all(all);
+  np.backend = ut::Session::Backend::C;
+  std::vector<Array> viaC = np.eval_all(all);   // one compiled program for all the expressions
+  int mismatches = 0;
+  for (size_t k = 0; k < c.size(); k++) {
+    bool ok = results[k].dtype == viaC[k].dtype && results[k].shape == viaC[k].shape && results[k].data.size() == viaC[k].data.size();
+    for (size_t j = 0; ok && j < results[k].data.size(); j++) {
+      const Scalar &x = results[k].data[j], &y = viaC[k].data[j];
+      ok = (std::isnan(x.f) && std::isnan(y.f)) || x == y;
+    }
+    if (!ok) { std::printf("MISMATCH %s: the C backend differs from the interpreter\n", c[k].first.c_str()); mismatches++; }
+  }
   std::ofstream f(argv[1]);
   f << "{";
   for (size_t k = 0; k < c.size(); k++) {
-    Array r = c[k].second.numpy();
+    const Array& r = results[k];
     f << (k ? "," : "") << "\"" << c[k].first << "\":{\"dtype\":\"" << name(r.dtype) << "\",\"shape\":[";
     for (size_t j = 0; j < r.shape.size(); j++) f << (j ? "," : "") << r.shape[j];
     f << "],\"data\":[";
@@ -79,6 +97,6 @@ int main(int argc, char** argv) {
     f << "]}";
   }
   f << "}";
-  std::printf("%zu expressions evaluated\n", c.size());
-  return 0;
+  std::printf("%zu expressions evaluated, %d differ between the interpreter and C\n", c.size(), mismatches);
+  return mismatches ? 1 : 0;
 }

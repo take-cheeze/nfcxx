@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "nfcuop.hpp"
+#include "nfcuop_cgen.hpp"
 
 namespace nfcuop {
 namespace ut {
@@ -121,12 +122,23 @@ class Session {
 
   // The value of `t`; `feeds` binds the placeholders it depends on. Runs symbolic() first when optimize is true.
   Array eval(const Tensor& t, const std::map<std::string, Array>& feeds = {});
+  // Several values at once; with the C backend they are one program (shared subgraphs are computed once).
+  std::vector<Array> eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds = {});
   bool optimize = true;
+  // How eval runs a graph: the reference interpreter, or rendered C (nfcuop_cgen.hpp) compiled with `cc` (empty: $NFCUOP_CC or
+  // cc) and cached by source text. Both give the same bits (except that an integer division by zero is 0 in C).
+  enum class Backend { Interpreter, C };
+  Backend backend = Backend::Interpreter;
+  std::string cc;
+  const CProgram* last_program() const { return has_program_ ? &last_program_ : nullptr; }  // the last C program run
 
  private:
   Graph g_;
   std::map<std::string, Array> buffers_;
   int next_buf_ = 0;
+  std::map<std::string, std::shared_ptr<CModule>> modules_;
+  CProgram last_program_;
+  bool has_program_ = false;
 };
 
 // ---- functions ----

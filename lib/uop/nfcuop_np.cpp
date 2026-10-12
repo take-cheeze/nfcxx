@@ -44,7 +44,8 @@ Tensor cast_to(const Tensor& t, DType d) {
   }
   return node(t, "Cast", {t.id()}, {Attribute::Int("to", hir::onnx_dtype(d))});
 }
-Tensor to_float(const Tensor& t) { return is_float(t.dtype()) ? t : cast_to(t, DType::Float32); }
+Tensor to_float(const Tensor& t) { return is_float(t.dtype()) ? t : cast_to(t, t.session().default_float); }
+DType int_or_default(const Tensor& like, DType d) { return d == DType::Bool ? like.session().default_int : d; }  // bool arithmetic is done in default_int
 
 // constants, shared by content
 Tensor int64_const(const Tensor& like, const std::vector<int64_t>& v) {
@@ -83,15 +84,14 @@ Axes norm_axes(const Axes& axes, int64_t nd) {
 // Operands cast to `dt`; shapes are broadcast by the ONNX operators themselves.
 Tensor arith(const char* op, Tensor a, Tensor b) {  // Add Sub Mul Max Min: bool operands become int32
   same_session(a, b);
-  DType dt = promote(a.dtype(), b.dtype());
-  if (dt == DType::Bool) dt = DType::Int32;
+  DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
   return node(op, {cast_to(a, dt), cast_to(b, dt)});
 }
 
 Tensor compare(const char* op, Tensor a, Tensor b) {
   same_session(a, b);
   DType dt = promote(a.dtype(), b.dtype());
-  if (dt == DType::Bool && std::string(op) != "Equal") dt = DType::Int32;
+  if (dt == DType::Bool && std::string(op) != "Equal") dt = a.session().default_int;
   return node(op, {cast_to(a, dt), cast_to(b, dt)});
 }
 
@@ -105,8 +105,7 @@ Tensor logic(const char* boolop, const char* intop, Tensor a, Tensor b) {
 Tensor bool_not(const Tensor& x) { return node(x, "Not", {x.id()}); }
 
 DType int_dtype(const Tensor& a, const Tensor& b, const char* what) {
-  DType dt = promote(a.dtype(), b.dtype());
-  if (dt == DType::Bool) dt = DType::Int32;
+  DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
   if (!is_int(dt)) throw Error(std::string("np: ") + what + " is defined for integers only");
   return dt;
 }
@@ -155,7 +154,11 @@ void print(const Array& a, size_t dim, size_t& pos, std::string& out) {
 namespace detail {
 Tensor lift(const Tensor& like, double v, bool integral) {
   check(like);
-  DType dt = integral ? DType::Int32 : (like.dtype() == DType::Float64 ? DType::Float64 : DType::Float32);
+  // a Python-style scalar is weak: it takes the tensor's dtype unless it is a float next to an integer tensor
+  DType dt = like.dtype();
+  if (is_float(dt)) { /* a float tensor keeps its dtype for int and float scalars alike */ }
+  else if (!integral) dt = like.session().default_float;
+  else if (dt == DType::Bool) dt = like.session().default_int;
   return scalar_const(like, dt, v);
 }
 }  // namespace detail
@@ -253,7 +256,10 @@ Tensor Tensor::flip(int64_t axis) const { return slice(axis, None, None, -1); }
 
 Tensor Tensor::sum(const Axes& axes, bool keepdims) const {
   check(*this);
-  return reduce("ReduceSum", dtype() == DType::Bool ? cast_to(*this, DType::Int32) : *this, axes, keepdims);
+  // like numpy, a sum of bool or of narrow integers is at least default_int
+  DType dt = dtype();
+  if (dt == DType::Bool || (is_int(dt) && dt < s_->default_int)) dt = s_->default_int;
+  return reduce("ReduceSum", cast_to(*this, dt), axes, keepdims);
 }
 
 Tensor Tensor::mean(const Axes& axes, bool keepdims) const {
@@ -304,7 +310,7 @@ Tensor Tensor::sigmoid() const { Tensor x = to_float(*this); return node(x, "Sig
 
 Tensor Tensor::relu() const {
   check(*this);
-  Tensor x = dtype() == DType::Bool ? cast_to(*this, DType::Int32) : *this;
+  Tensor x = dtype() == DType::Bool ? cast_to(*this, s_->default_int) : *this;
   return node(x, "Relu", {x.id()});
 }
 
@@ -332,7 +338,7 @@ Tensor Tensor::log_softmax(int64_t axis) const {
 
 Tensor Tensor::clip(double lo, double hi) const {
   check(*this);
-  Tensor x = is_float(dtype()) ? *this : cast_to(*this, DType::Float32);
+  Tensor x = to_float(*this);
   return node(x, "Clip", {x.id(), sconst(x, lo).id(), sconst(x, hi).id()});
 }
 
@@ -390,15 +396,15 @@ int Session::constant(const Array& a) {
 
 Tensor Session::from(const Array& a) { return Tensor(this, constant(a)); }
 
-Tensor Session::array(const std::vector<double>& v, DType d) {
+Tensor Session::array(const std::vector<double>& v, std::optional<DType> d) {
   return array(v, Shape{static_cast<int64_t>(v.size())}, d);
 }
 
-Tensor Session::array(const std::vector<double>& v, const Shape& shape, DType d) {
-  return from(Array::from_doubles(d, shape, v));
+Tensor Session::array(const std::vector<double>& v, const Shape& shape, std::optional<DType> d) {
+  return from(Array::from_doubles(d ? *d : default_float, shape, v));
 }
 
-Tensor Session::array2d(const std::vector<std::vector<double>>& rows, DType d) {
+Tensor Session::array2d(const std::vector<std::vector<double>>& rows, std::optional<DType> d) {
   if (rows.empty() || rows[0].empty()) throw Error("np: array2d needs at least one element");
   std::vector<double> flat;
   for (const auto& r : rows) {
@@ -408,19 +414,22 @@ Tensor Session::array2d(const std::vector<std::vector<double>>& rows, DType d) {
   return array(flat, Shape{static_cast<int64_t>(rows.size()), static_cast<int64_t>(rows[0].size())}, d);
 }
 
-Tensor Session::scalar(double v, DType d) { return from(Array(d, {}, {Scalar::from_double(d, v)})); }
+Tensor Session::scalar(double v, std::optional<DType> d) {
+  DType t = d ? *d : default_float;
+  return from(Array(t, {}, {Scalar::from_double(t, v)}));
+}
 
-Tensor Session::full(const Shape& shape, double v, DType d) {
+Tensor Session::full_impl(const Shape& shape, double v, DType d) {
   for (int64_t k : shape) if (k < 1) throw Error("np: every dimension must be at least 1, got " + to_string(shape));
   Tensor s = scalar(v, d);
   return shape.empty() ? s : s.broadcast_to(shape);  // an Expand of a scalar: small in the ONNX file
 }
-Tensor Session::zeros(const Shape& shape, DType d) { return full(shape, 0, d); }
-Tensor Session::ones(const Shape& shape, DType d) { return full(shape, 1, d); }
+Tensor Session::zeros(const Shape& shape, std::optional<DType> d) { return full_impl(shape, 0, d ? *d : default_float); }
+Tensor Session::ones(const Shape& shape, std::optional<DType> d) { return full_impl(shape, 1, d ? *d : default_float); }
 
-Tensor Session::arange(int64_t n, DType d) { return arange(0.0, static_cast<double>(n), 1.0, d); }
+Tensor Session::arange(int64_t n, std::optional<DType> d) { return arange_impl(0.0, static_cast<double>(n), 1.0, d ? *d : default_int); }
 
-Tensor Session::arange(double start, double stop, double step, DType d) {
+Tensor Session::arange_impl(double start, double stop, double step, DType d) {
   if (step == 0) throw Error("np: arange with step 0");
   double count = std::ceil((stop - start) / step);
   if (!(count >= 1)) throw Error("np: arange would be empty (tensors need at least one element per dimension)");
@@ -429,7 +438,7 @@ Tensor Session::arange(double start, double stop, double step, DType d) {
   return array(v, d);
 }
 
-Tensor Session::linspace(double start, double stop, int64_t num, DType d) {
+Tensor Session::linspace(double start, double stop, int64_t num, std::optional<DType> d) {
   if (num < 1) throw Error("np: linspace needs at least one point");
   std::vector<double> v;
   for (int64_t k = 0; k < num; k++)
@@ -437,23 +446,31 @@ Tensor Session::linspace(double start, double stop, int64_t num, DType d) {
   return array(v, d);
 }
 
-Tensor Session::eye(int64_t n, DType d) {
+Tensor Session::eye(int64_t n, std::optional<DType> d) {
   if (n < 1) throw Error("np: eye needs n >= 1");
   std::vector<double> v(static_cast<size_t>(n * n), 0.0);
   for (int64_t k = 0; k < n; k++) v[static_cast<size_t>(k * n + k)] = 1;
   return array(v, Shape{n, n}, d);
 }
 
-Tensor Session::placeholder(const std::string& name, const Shape& shape, DType d) {
+Tensor Session::placeholder(const std::string& name, const Shape& shape, std::optional<DType> d) {
   if (name.compare(0, 4, "_buf") == 0) throw Error("np: placeholder names starting with _buf are reserved");
-  return Tensor(this, hir_.add_input(name, d, shape));
+  return Tensor(this, hir_.add_input(name, d ? *d : default_float, shape));
 }
 
-Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) {
-  check(t);
-  if (&t.session() != this) throw Error("np: tensor of another session");
+Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) { return eval_all({t}, feeds)[0]; }
+
+std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds) {
+  std::vector<ut::Tensor> lowered;
+  for (const Tensor& t : ts) {
+    check(t);
+    if (&t.session() != this) throw Error("np: tensor of another session");
+    lowered.push_back(lowerer_.get(t.id()));
+  }
   ut_.optimize = optimize;
-  return ut_.eval(lowerer_.get(t.id()), feeds);
+  ut_.backend = backend;
+  ut_.cc = cc;
+  return ut_.eval_all(lowered, feeds);
 }
 
 std::string Session::to_onnx(const std::vector<std::pair<std::string, Tensor>>& outputs, const std::string& graph_name) {
@@ -532,8 +549,7 @@ Tensor stack(const std::vector<Tensor>& ts, int64_t axis) {
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
   same_session(a, b);
-  DType dt = promote(a.dtype(), b.dtype());
-  if (dt == DType::Bool) dt = DType::Int32;
+  DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
   return node("MatMul", {cast_to(a, dt), cast_to(b, dt)});
 }
 
@@ -543,7 +559,7 @@ Tensor operator*(const Tensor& a, const Tensor& b) { return arith("Mul", a, b); 
 Tensor operator/(const Tensor& a, const Tensor& b) {
   same_session(a, b);
   DType dt = promote(a.dtype(), b.dtype());
-  if (!is_float(dt)) dt = DType::Float32;
+  if (!is_float(dt)) dt = a.session().default_float;
   return node("Div", {cast_to(a, dt), cast_to(b, dt)});
 }
 Tensor operator%(const Tensor& a, const Tensor& b) { return remainder(a, b); }

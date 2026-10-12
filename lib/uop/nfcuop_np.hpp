@@ -14,12 +14,19 @@
 //
 // How close this is to numpy, and where it differs on purpose, is in docs/notes/uop.md ("numpy compatibility").
 // In short: the dtypes are bool, int32, int64, float32, float64; promotion is the larger of the two in that order
-// (int64 + float32 is float32); `/` and the float functions of an int tensor compute in float32; `%` and
-// floor_divide follow numpy but only for ints; there are no empty tensors (every dimension is at least 1), no
-// views or in-place updates, no random numbers, and shapes are static.
+// (int64 + float32 is float32); `%` and floor_divide follow numpy but only for ints; there are no empty tensors
+// (every dimension is at least 1), no views or in-place updates, no random numbers, and shapes are static.
+//
+// Default dtypes are 32-bit and configurable per Session, the way numpy takes dtype= per call and the way numpy's own
+// defaults are int64/float64: `np.default_float` (float32) is the dtype of array(), zeros(), arange(0.5, ...), linspace()
+// and of the result of `/`, mean() and the float functions on integer tensors; `np.default_int` (int32) is the dtype of
+// arange(5), full(shape, 7), of sum() of bool and (at least) of integer sums, and of bool arithmetic. Setting them to
+// float64 and int64 gives numpy's defaults. A dtype argument on any constructor overrides them, and a Python-style scalar
+// next to a tensor takes the tensor's dtype (a float scalar next to an int tensor takes default_float).
 #pragma once
 #include <initializer_list>
 #include <map>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -116,23 +123,42 @@ class Session {
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
-  Tensor array(const std::vector<double>& v, DType d = DType::Float32);  // 1-D
-  Tensor array(const std::vector<double>& v, const Shape& shape, DType d = DType::Float32);
-  Tensor array2d(const std::vector<std::vector<double>>& rows, DType d = DType::Float32);
+  // dtypes left out: default_float for array, scalar, zeros, ones, linspace, eye, placeholder and for a float full/arange;
+  // default_int for an integer full/arange (like numpy, which looks at the Python type of the value)
+  DType default_float = DType::Float32;
+  DType default_int = DType::Int32;
+
+  Tensor array(const std::vector<double>& v, std::optional<DType> d = {});  // 1-D
+  Tensor array(const std::vector<double>& v, const Shape& shape, std::optional<DType> d = {});
+  Tensor array2d(const std::vector<std::vector<double>>& rows, std::optional<DType> d = {});
   Tensor from(const Array& a);
-  Tensor scalar(double v, DType d = DType::Float32);
-  Tensor zeros(const Shape& shape, DType d = DType::Float32);
-  Tensor ones(const Shape& shape, DType d = DType::Float32);
-  Tensor full(const Shape& shape, double v, DType d = DType::Float32);
-  Tensor arange(int64_t n, DType d = DType::Float32);
-  Tensor arange(double start, double stop, double step = 1, DType d = DType::Float32);
-  Tensor linspace(double start, double stop, int64_t num, DType d = DType::Float32);  // both ends included
-  Tensor eye(int64_t n, DType d = DType::Float32);
-  Tensor placeholder(const std::string& name, const Shape& shape, DType d = DType::Float32);
+  Tensor scalar(double v, std::optional<DType> d = {});
+  Tensor zeros(const Shape& shape, std::optional<DType> d = {});
+  Tensor ones(const Shape& shape, std::optional<DType> d = {});
+  template <class T, std::enable_if_t<std::is_arithmetic<T>::value, int> = 0>
+  Tensor full(const Shape& shape, T v, std::optional<DType> d = {}) {
+    return full_impl(shape, static_cast<double>(v), d ? *d : (std::is_integral<T>::value ? default_int : default_float));
+  }
+  Tensor arange(int64_t n, std::optional<DType> d = {});  // 0, 1, ..., n-1; default_int
+  // arange(start, stop, step): default_int when start, stop and step are all integers, default_float otherwise
+  template <class A, class B, class C = int,
+            std::enable_if_t<std::is_arithmetic<A>::value && std::is_arithmetic<B>::value && std::is_arithmetic<C>::value, int> = 0>
+  Tensor arange(A start, B stop, C step = 1, std::optional<DType> d = {}) {
+    const bool ints = std::is_integral<A>::value && std::is_integral<B>::value && std::is_integral<C>::value;
+    return arange_impl(static_cast<double>(start), static_cast<double>(stop), static_cast<double>(step), d ? *d : (ints ? default_int : default_float));
+  }
+  Tensor linspace(double start, double stop, int64_t num, std::optional<DType> d = {});  // both ends included
+  Tensor eye(int64_t n, std::optional<DType> d = {});
+  Tensor placeholder(const std::string& name, const Shape& shape, std::optional<DType> d = {});
 
   // The value of `t`; `feeds` binds the placeholders it depends on. Runs symbolic() on the UOps first when optimize is true.
   Array eval(const Tensor& t, const std::map<std::string, Array>& feeds = {});
+  // Several values at once: one lowering, and with the C backend one compiled program.
+  std::vector<Array> eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds = {});
   bool optimize = true;
+  // The reference interpreter or compiled C (nfcuop_cgen.hpp); `cc` is the compiler command (empty: $NFCUOP_CC, else cc).
+  ut::Session::Backend backend = ut::Session::Backend::Interpreter;
+  std::string cc;
 
   // The ONNX ModelProto (opset 18) computing the named tensors from the placeholders, as bytes; nothing is lowered.
   // Each output gets an Identity node carrying its name. save_onnx writes the bytes to a file.
@@ -145,6 +171,8 @@ class Session {
 
   // used by the operators; a constant of this content, shared
   int constant(const Array& a);
+  Tensor full_impl(const Shape& shape, double v, DType d);
+  Tensor arange_impl(double start, double stop, double step, DType d);
 
  private:
   hir::Graph hir_;

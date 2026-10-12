@@ -169,7 +169,8 @@ std::string dump(const UOp* root);
 Scalar eval_op(Op op, DType out, const std::vector<Scalar>& args);
 // The reference interpreter for scalar graphs: the value of `root` (whose shape must be empty) with every
 // Var bound by name (a binding must have the Var's dtype). Integers wrap, IDiv and Mod truncate toward zero
-// like C, a Float32 node is computed in double and rounded to float, Max returns the non-NaN operand.
+// like C, a Float32 node is computed in double and rounded to float, Max returns the non-NaN operand (the second when they
+// compare equal, so max(0.0, -0.0) is -0.0).
 Scalar evaluate(const UOp* root, const std::map<std::string, Scalar>& vars = {});
 
 // A dense row-major tensor value (stage 3), one Scalar per element.

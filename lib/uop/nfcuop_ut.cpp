@@ -478,19 +478,37 @@ Tensor Session::placeholder(const std::string& name, const Shape& shape, DType d
   return Tensor(this, g_.var(name, d, shape));
 }
 
-Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) {
-  check(t);
-  if (&t.session() != this) throw Error("np: tensor of another session");
-  const UOp* root = optimize ? graph_rewrite(g_, symbolic(), t.uop()) : t.uop();
-  std::map<std::string, Array> env;
-  for (const UOp* u : toposort(root)) {
-    if (u->op != Op::Var) continue;
-    auto f = feeds.find(u->name);
-    if (f != feeds.end()) { env[u->name] = f->second; continue; }
-    auto b = buffers_.find(u->name);
-    if (b != buffers_.end()) env[u->name] = b->second;
+Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) { return eval_all({t}, feeds)[0]; }
+
+std::vector<Array> Session::eval_all(const std::vector<Tensor>& ts, const std::map<std::string, Array>& feeds) {
+  if (ts.empty()) throw Error("np: eval_all needs at least one tensor");
+  std::vector<const UOp*> roots;
+  for (const Tensor& t : ts) {
+    check(t);
+    if (&t.session() != this) throw Error("np: tensor of another session");
+    roots.push_back(optimize ? graph_rewrite(g_, symbolic(), t.uop()) : t.uop());
   }
-  return evaluate_array(root, env);
+  std::map<std::string, Array> env;
+  for (const UOp* root : roots)
+    for (const UOp* u : toposort(root)) {
+      if (u->op != Op::Var) continue;
+      auto f = feeds.find(u->name);
+      if (f != feeds.end()) { env[u->name] = f->second; continue; }
+      auto b = buffers_.find(u->name);
+      if (b != buffers_.end()) env[u->name] = b->second;
+    }
+  std::vector<Array> out;
+  if (backend == Backend::Interpreter) {
+    for (const UOp* root : roots) out.push_back(evaluate_array(root, env));
+    return out;
+  }
+  CProgram prog = render_c(roots);
+  std::string key = cc + "\n" + prog.source;
+  auto it = modules_.find(key);
+  if (it == modules_.end()) it = modules_.emplace(key, CModule::compile(prog, cc)).first;
+  last_program_ = prog;
+  has_program_ = true;
+  return it->second->run(env);
 }
 
 // ---- functions ----
