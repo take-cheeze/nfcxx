@@ -62,6 +62,7 @@ require_relative 'codegen_native_send'
 require_relative 'codegen_exact_receiver'
 require_relative 'codegen_native_direct'
 require_relative 'codegen_native_exact_direct'
+require_relative 'codegen_native_singleton'
 require_relative 'codegen_exact_native_wrappers'
 require_relative 'codegen_native_core_direct'
 require_relative 'codegen_native_owner_map'
@@ -890,6 +891,8 @@ if $PROGRAM_NAME == __FILE__
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
+  # NATIVE_SINGLETON_CALL (ADR 0416): the native and outside-Ruby sources the proof must account for.
+  CodeGen.native_singleton_inputs = native_paths && foreign_ruby_srcs ? { native: native_paths, ruby: foreign_ruby_srcs } : nil
   # COMPUTED_SEND_EXPANSION (ADR 0303): frozen Symbol tables a computed-name send may index.
   CodeGen.computed_send_tables = profile_call.call('ComputedSendNames::SymbolTables.analyze') do
     ComputedSendNames::SymbolTables.analyze(ireps, native_paths, foreign_ruby_srcs)

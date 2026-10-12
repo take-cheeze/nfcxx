@@ -1711,9 +1711,21 @@ class CodeGen
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
 
+        constant_object_debug(name, n, owner_def&.owner, constant_owner) if constant_owner
+
         native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton",
                                                                       int_site: [irep, new_proof_idx, owner_def, trace_reg_offset])
         return native_code if native_code
+      end
+
+      # NATIVE_SINGLETON_CALL (ADR 0416): `File.exist?` and the other native singleton functions of a stable
+      # constant, called through a per-site method cache instead of a by-name send.
+      if !self_implicit && irep && constant_site_idx && @closed_world &&
+         %w[SEND0 SEND].include?(irep.instructions[constant_site_idx].op)
+        singleton_code = native_singleton_call_code(name, n, d, recv, argv, irep, constant_site_idx,
+                                                    unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
+                                                    owner_def&.owner, constant_owner)
+        return singleton_code if singleton_code
       end
 
       if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
