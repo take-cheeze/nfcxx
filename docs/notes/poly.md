@@ -255,6 +255,39 @@ function makes. A job that throws is an error of the call that ran it (the first
 rejections are ignored. Top-level `await` and `import` are `SyntaxError`s (an `async` function does the same job; there is no
 module loader).
 
+## Optional arguments, computed properties and operators
+
+Three additions for `lib/uop/nfcuop_poly.cpp` (`uop-poly.md`); a binding that does not use them behaves as before
+(`tests/poly/host.cpp` is unchanged and passes; `tests/poly/ops.cpp` covers the additions in every language).
+
+- **Optional trailing arguments**: `method_fn(name, f, min_args)` and `bind_fn(name, f, min_args)` let a script pass `min_args` to the
+  full count; the missing ones arrive as nil, so those parameters are `Value` or `std::optional<T>`. `Callable::min_arity()` is the
+  hook (equal to `arity()` unless asked), the backends check `min_arity() <= given <= arity()` and pad (`arity_fits`, `arity_message`,
+  `arity_pad` in `nfcpoly_lang.hpp`), the error text is `wrong number of arguments (given 1, expected 2..3)`. In Go, which is typed,
+  the generated function is variadic in the optional parameters (`func (v *Tensor) Sum(o ...any)`, `Index(a0 any, o ...any)`) and pads
+  with nil itself; they must be `Value` parameters (`any`). JavaScript's `length` of the function is `min_arity()`.
+- **Computed properties**: `property_fn(name, getter)` and `property_fn(name, getter, setter)` on a `ClassBuilder`: `obj.name` calls
+  `getter(obj)`, `obj.name = v` calls `setter(obj, v)`; an accessor in JavaScript and Python, `name` / `name=` in Ruby, `__index` in
+  Lua, `Name()` / `SetName(v)` in Go. `field()` stays for data members.
+- **Operator methods**: a class that registers methods under Python's special method names gets the operators of the language.
+
+  | methods | Python | Ruby | Lua | JavaScript, Go, ast |
+  | --- | --- | --- | --- | --- |
+  | `__add__ __sub__ __mul__ __truediv__ __mod__ __and__ __or__ __xor__`, `__neg__` | number slots (`+ - * / % & \| ^`, `-x`) | methods `+ - * / % & \| ^ -@` | metamethods `__add __sub __mul __div __mod __band __bor __bxor __unm` | none |
+  | `__floordiv__`, `__matmul__`, `__abs__` | `//`, `@`, `abs()` | none | `__idiv` (`//`) | none |
+  | `__radd__ ...` (the same names with `r`) | `x OP obj` for a left operand that returns NotImplemented | none (Integer does not ask the other operand) | `x OP obj` | none |
+  | `__lt__ __le__ __gt__ __ge__ __eq__ __ne__` | rich comparison; a class without them compares by identity and stays hashable | methods `< <= > >= == !=` | none (Lua makes the result a boolean) | none |
+  | `__getitem__` | `obj[k]` (a tuple key arrives as one list) | `obj[k, ...]` | none | none |
+  | `__str__`, `__repr__` | `str()`, `repr()` | `to_s`, `inspect` | `__tostring` (`__str__`) | none |
+
+  A method keeps its dunder name in every language too (a script can call `obj.__add__(1)`), except in Go, which skips the names that
+  start with `__` (their Go names would collide with `Add`, `Sub`, ...). Python's `==` on the same object still calls the method; in Ruby
+  mruby's `==` shortcut answers `true` for the same object without a call.
+- **Go: host objects in variables as a `Value`**: yaegi stores a value of an interpreted type that is converted to an interface in a
+  box (`interp.valueInterface`), which the bridge took for a Go value to keep as a handle; `encodeDyn` now unwraps the box (a copy of the
+  struct and its unexported field, read through its address) so a `*Tensor` held in a variable reaches a `Value` parameter as the
+  host object. (`echo(pos)` in the tests used to round-trip as a handle, which hid it.)
+
 ## Go: the typed binding model
 
 Go is the one language here with static types, and `Callable` does not know a bound function's parameter and result types. Two

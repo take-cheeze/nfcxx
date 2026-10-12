@@ -8,9 +8,10 @@
 //     w = np.array([[1, 2], [3, 4]]); x = np.placeholder('x', [2, 2])
 //     y = np.softmax(x @ w + 1.0)                        # operators work where the language has them
 //     print(np.eval(y, [['x', [[1, 0], [0, 1]]]]))       # nested lists in and out
-//     open('m.onnx', 'wb').write(np.to_onnx([['y', y]])))");
+//     np.save_onnx('m.onnx', [['y', y]])                 # or np.to_onnx(...), the bytes
+//   )");
 //
-// The same script in the other languages differs only in syntax (Ruby `np.softmax(x * w)`, Lua `np:softmax(x * w)`, JavaScript
+// The same script in the other languages differs only in syntax (Ruby `np.softmax(x.matmul(w) + 1.0)`, Lua `np:softmax(x:matmul(w) + 1.0)`, JavaScript
 // `np.softmax(x.matmul(w).add(1.0))`, Go `np.Softmax(x.Matmul(w).Add(1.0))`). What each language gets, the operator table and
 // the conventions (dtype names, shapes, feeds, indexing) are in docs/notes/uop-poly.md.
 //

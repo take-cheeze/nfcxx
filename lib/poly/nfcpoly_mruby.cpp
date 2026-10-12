@@ -282,8 +282,8 @@ struct MrubyLang : Lang {
   }
   void class_method(ClassInfo* ci, const std::string& name, Callable* c) override {
     define_on(classes[ci]->klass, name, c, false);
-    // The Python-named operator methods are the operators of Ruby too ("Operators" in poly.md). x OP obj with a number x
-    // goes through `coerce`, which a class defines as an ordinary method.
+    // The Python-named operator methods are the operators of Ruby too ("Operators" in poly.md). Only `obj OP x`: mruby's Integer
+    // and Float do not ask the other operand (no coerce), so `2 - obj` is a TypeError.
     static const char* const ops[][2] = {
         {"__add__", "+"},    {"__sub__", "-"},   {"__mul__", "*"},   {"__truediv__", "/"}, {"__mod__", "%"},
         {"__and__", "&"},    {"__or__", "|"},    {"__xor__", "^"},   {"__neg__", "-@"},    {"__lt__", "<"},

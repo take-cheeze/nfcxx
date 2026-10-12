@@ -25,7 +25,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 4 and the O
 | 3 | Static shapes: movement ops (`Reshape Permute Expand Shrink Pad Flip`), reductions, `evaluate_array`; the UOp-level builder `ut::Tensor` with broadcasting, slicing, concatenation | done |
 | 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
-| 5 | `nfcpoly` bindings (`uop_poly.cpp`) and a cross-language test | not started |
+| 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
 | 6 | Autodiff as a rewrite; ONNX **import** | not started |
 | 7 | Dynamic shapes (below) | not started |
 

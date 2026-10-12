@@ -5,6 +5,10 @@
 //   NumPy   an np::Session: array, zeros, ..., eval, to_onnx, and the free functions of nfcuop_np.hpp. The global `np` is one.
 // Script values come in as nfcpoly::Value (any script value) and are decoded here: numbers next to tensors are weak scalars like
 // the C++ API's scalar overloads, nested lists become arrays, a dtype is a name ("float32"), a shape an integer or a list.
+//
+// The file is empty unless nfcpoly.hpp is on the include path (-I lib/poly), so that building lib/uop/nfcuop*.cpp without nfcpoly,
+// as the other tests of lib/uop do, keeps working; with it, link lib/poly/nfcpoly.cpp and the backends of the languages used.
+#if __has_include("nfcpoly.hpp")
 #include "nfcuop_poly.hpp"
 
 #include <cmath>
@@ -425,8 +429,6 @@ void def_tensor(nfcpoly::ClassBuilder<Tensor> b) {
   b.method_fn("__repr__", str);
   b.method_fn("dump", [](const Tensor& t) { return t.dump(); });
   b.method_fn("dump_uops", [](const Tensor& t) { return t.dump_uops(); });
-  // Ruby: 2 * t calls t.coerce(2) and then x * y on the pair
-  b.method_fn("coerce", [](const Tensor& t, const Value& o) { return std::vector<Tensor>{operand(o, t), t}; });
 }
 
 // ---- NumPy ------------------------------------------------------------------------------------------------------------
@@ -625,3 +627,5 @@ void bind_numpy(nfcpoly::Context& ctx, np::Session& session, const std::string& 
 
 }  // namespace poly
 }  // namespace nfcuop
+
+#endif  // __has_include("nfcpoly.hpp")

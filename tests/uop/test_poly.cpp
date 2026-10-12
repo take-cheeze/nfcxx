@@ -1144,7 +1144,7 @@ static int run_all(int argc, char** argv) {
   for (const Lang& lg : g_langs) {
     g_lang = lg.id;
     std::printf("-- %s\n", lg.title);
-    int before = failed;
+    int before = failed, checks_before = checks;
     test_model(lg, out_dir);
     check_ops(lg, false);
     if (lg.l == L::Python || lg.l == L::Ruby || lg.l == L::Lua) check_ops(lg, true);
@@ -1157,7 +1157,7 @@ static int run_all(int argc, char** argv) {
     else std::printf("   SKIP the C backend (no C compiler: $NFCUOP_CC or cc)\n");
     if (lg.l == L::Python) check_python();
     if (lg.l == L::Ruby) check_ruby();
-    std::printf("   %s: %s\n", lg.id, failed == before ? "ok" : "FAILED");
+    std::printf("   %s: %s (%d checks)\n", lg.id, failed == before ? "ok" : "FAILED", checks - checks_before);
   }
   std::printf("%s: %d checks, %d failed\n", failed ? "FAIL" : "all passed", checks, failed);
   return failed ? 1 : 0;
