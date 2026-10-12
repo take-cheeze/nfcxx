@@ -80,7 +80,7 @@
  	inst = mkinst(f, op, class, arg0, arg1);
  	arrayaddptr(&f->end->insts, inst);
  	return &inst->res;
-@@ -753,6 +812,36 @@
+@@ -753,6 +812,37 @@
  	}
  }
  
@@ -104,6 +104,8 @@
 +	base = funcinst(f, IALLOC16, ptrclass, mkintconst(total), NULL);
 +	obj = funcinst(f, IADD, ptrclass, base, mkintconst(ASANRZ));
 +	right = funcinst(f, IADD, ptrclass, obj, mkintconst(size8));
++	f->end = end;
++	/* the poison is at the declaration, not in the entry block: a return that comes before this declaration never poisons it */
 +	asancall(f, "__asan_unpoison_memory_region", base, mkintconst(total));
 +	asancall(f, "__asan_poison_memory_region", base, mkintconst(ASANRZ));
 +	asancall(f, "__asan_poison_memory_region", right, mkintconst(ASANRZ));
@@ -111,13 +113,12 @@
 +	o->base = base;
 +	o->size = total;
 +	d->value = obj;
-+	f->end = end;
 +}
 +
  static void
  funcalloc(struct func *f, struct decl *d)
  {
-@@ -764,6 +853,11 @@
+@@ -764,6 +854,11 @@
  	assert(!d->type->incomplete);
  	calcvla(f, d->type);
  	end = f->end;
@@ -129,7 +130,7 @@
  	if (d->type->size) {
  		f->end = f->start;
  		v = mkintconst(d->type->size);
-@@ -911,6 +1005,7 @@
+@@ -911,6 +1006,7 @@
  	f->type = t;
  	f->start = f->end = mkblock("start");
  	f->lastid = 0;
@@ -137,7 +138,7 @@
  	mapinit(&f->gotos, 8);
  	emittype(t->base);
  
-@@ -1014,6 +1109,8 @@
+@@ -1014,6 +1110,8 @@
  funcret(struct func *f, struct value *v)
  {
  	struct block *b = f->end;
@@ -146,7 +147,7 @@
  
  	if (!b->jump.kind) {
  		if (v && f->type->base->kind == TYPELDOUBLE) {
-@@ -1024,6 +1121,11 @@
+@@ -1024,6 +1122,11 @@
  		}
  		if (v && f->type->base->kind == TYPEFLOAT16)
  			v = f16tosse(f, v);
@@ -158,7 +159,7 @@
  		b->jump.kind = JUMP_RET;
  		b->jump.arg = v;
  	}
-@@ -2115,16 +2217,29 @@
+@@ -2115,16 +2218,29 @@
  	}
  }
  
@@ -189,7 +190,7 @@
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
  	if (d->u.obj.storage == SDTHREAD)
-@@ -2196,7 +2311,37 @@
+@@ -2196,7 +2312,37 @@
  		++offset;
  	}
  	assert(offset <= d->type->size);
