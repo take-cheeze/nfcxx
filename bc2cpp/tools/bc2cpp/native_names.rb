@@ -3,6 +3,7 @@
 require 'prism'
 require_relative 'source_text'
 require_relative 'scan_cache'
+require_relative 'ruby_parse_cache'
 
 # Step 5b: method names defined or called outside the compiled bytecode.
 
@@ -110,7 +111,7 @@ def foreign_method_names(paths)
   names = Set.new
   Array(paths).each do |path|
     src = SourceText.read(path, 'foreign_method_names') or next
-    parsed = Prism.parse(src, filepath: path)
+    parsed = RubyParseCache.parse(src, path)
     # The tree still recovers around an error and the regexes below cover the rest, but a
     # file that does not parse must not go unnoticed.
     warn "[bc2cpp] foreign_method_names: #{path} does not parse: #{parsed.errors.first.message}" unless parsed.errors.empty?
