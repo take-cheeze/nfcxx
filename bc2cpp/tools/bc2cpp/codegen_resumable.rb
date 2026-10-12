@@ -334,17 +334,32 @@ class CodeGen
   # ---------------------------------------------------------------------------
 
   # The step function's opening: the frame, the registers as references into it, and the
-  # dispatch to the state saved by the last yield. `body` decides how many registers exist.
+  # dispatch to the state saved by the last yield. Only register identifiers need slots.
   def resumable_step_function(step_name, body)
-    max = body.scan(/\br(\d+)\b/).flatten.map(&:to_i).max || 0
-    nregs = [max + 1, @ireps.fetch(@resumable.label).nregs].max
+    registers = Set[0]
+    # Literal contents and comments cannot name frame registers. R[0] and R[1]
+    # remain the yield/resume cells; ordinary registers have dense aliases.
+    tokens = %r{
+      R"(?<delimiter>[^ ()\\\t\r\n]{0,16})\(.*?\)\k<delimiter>"
+      |"(?:\\.|[^"\\])*"
+      |'(?:\\.|[^'\\])*'
+      |//[^\n]*
+      |/\*.*?\*/
+      |\br(?<reg>\d+)\b
+    }mx
+    body.scan(tokens) do
+      reg = Regexp.last_match[:reg]
+      registers << reg.to_i if reg
+    end
+    registers = registers.sort
+    nregs = registers.size
     out = String.new
     out << "static mrb_value #{step_name}(mrb_state* M, mrb_value self, mrb_value bc2cpp_frame_value, mrb_value bc2cpp_resume) {\n"
     out << "  Bc2cppResumeFrame* F = bc2cpp_resume_frame(M, &bc2cpp_frame_value, #{nregs}, #{@resumable.slot_count});\n"
     out << "  mrb_value bc2cpp_regs_ary = bc2cpp_resume_regs(M, bc2cpp_frame_value);\n"
     out << "  mrb_value* R = F->regs;\n"
     out << "  Bc2cppStepGuard bc2cpp_step_guard(F);\n"
-    (0...nregs).each { |i| out << "  mrb_value& r#{i} = R[#{i + 2}];\n" }
+    registers.each_with_index { |reg, slot| out << "  mrb_value& r#{reg} = R[#{slot + 2}];\n" }
     out << "  const mrb_int bc2cpp_state = F->state;\n"
     out << "  if (bc2cpp_state != 0) R[1] = bc2cpp_resume;\n"
     out << "  r0 = self;\n"
