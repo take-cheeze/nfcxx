@@ -54,6 +54,10 @@ jobs:
               tests/c/run.sh
               tests/c/cc-mode.sh
               tests/cxx-driver/run.sh
+          - name: determinism, float-to-integer
+            run: |
+              tests/determinism/run.sh
+              tests/float-to-int/run.sh
           - name: real-world tinyxml2 and nlohmann/json
             run: |
               tests/realworld/run.sh
@@ -65,9 +69,10 @@ jobs:
               tests/multi-tu/run.sh
               tests/ehshim/run.sh
               tests/eval/run.sh
-          - name: nfcpoly, mruby scripts
+          - name: nfcpoly, nfcast, mruby scripts
             run: |
               tests/poly/run.sh
+              tests/ast/run.sh
               tests/mruby/run.sh
           - name: GPU kernel on the PTX interpreter
             run: tests/gpu/run_interp.sh

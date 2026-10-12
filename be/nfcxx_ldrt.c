@@ -47,6 +47,26 @@ double __nfcxx_ld_to_f64(const ld *a) { return (double)*a; }
 
 /* Checked conversion to an integer type of BITS bits, like the `cf2i` operation of the IR on float and double: it traps
    (abort) on a NaN and when the truncated value does not fit. */
+#ifdef NFCXX_FLOAT_TO_INT_X86
+/* The x86-64 results instead of the abort (the stage-2 front end, scripts/selfhost-cpfe.sh): a value that does not fit, or a
+   NaN, gives what the x87 `fistp` gives, the "integer indefinite" (the minimum of the type; for unsigned, its low bits). */
+long __nfcxx_ld_to_s(const ld *a, int bits)
+{
+  ld t = truncl(*a);
+  ld hi = ldexpl(1.0L, bits - 1);
+  if (!(t >= -hi && t < hi)) return (long)(0UL - ((unsigned long)1 << (bits - 1)));
+  return (long)t;
+}
+
+unsigned long __nfcxx_ld_to_u(const ld *a, int bits)
+{
+  ld t = truncl(*a);
+  ld hi = ldexpl(1.0L, bits);
+  unsigned long mask = bits >= 64 ? ~0UL : ((unsigned long)1 << bits) - 1;
+  if (!(t >= 0 && t < hi)) return ((unsigned long)1 << 63) & mask;
+  return (unsigned long)t;
+}
+#else
 long __nfcxx_ld_to_s(const ld *a, int bits)
 {
   ld t = truncl(*a);
@@ -62,6 +82,7 @@ unsigned long __nfcxx_ld_to_u(const ld *a, int bits)
   if (!(t >= 0 && t < hi)) abort();
   return (unsigned long)t;
 }
+#endif
 
 /* va_arg(ap, long double): the argument is 16 bytes in the overflow area. AP is the address of the __va_list_tag. */
 void __nfcxx_ld_vaarg(ld *d, va_list ap) { PUT(d, va_arg(ap, ld)); }
@@ -265,6 +286,28 @@ double __nfcxx_f128_to_f64(const void *a) { return (double)f128_rd(a); }
 /* Checked conversions to an integer type of BITS (at most 64) bits: the value truncated toward zero must fit, else abort.
    The bounds are exact in _Float128 (hi is a power of two below 2^65). For the signed case the test is x > -hi - 1 (or
    x >= -hi, which covers -2^127 exactly in the 128-bit variant below). */
+#ifdef NFCXX_FLOAT_TO_INT_X86
+/* The x86-64 results instead of the abort (the stage-2 front end, scripts/selfhost-cpfe.sh): the libgcc conversions
+   saturate. A NaN or a value above the maximum gives the maximum, a value below the minimum the minimum; for unsigned, a
+   negative value gives 0 and a NaN or a value above the maximum gives the maximum. Checked against gcc on x86-64. */
+long __nfcxx_f128_to_s(const void *a, int bits)
+{
+  f128 x = f128_rd(a);
+  f128 hi = (f128)((u128)1 << (bits - 1));
+  if (!(x < hi)) return (long)(((u128)1 << (bits - 1)) - 1);
+  if (x < -hi) return (long)(0UL - ((unsigned long)1 << (bits - 1)));
+  return (long)x;
+}
+
+unsigned long __nfcxx_f128_to_u(const void *a, int bits)
+{
+  f128 x = f128_rd(a);
+  f128 hi = (f128)((u128)1 << bits);
+  if (x < 0) return 0;
+  if (!(x < hi)) return bits >= 64 ? ~0UL : ((unsigned long)1 << bits) - 1;
+  return (unsigned long)x;
+}
+#else
 long __nfcxx_f128_to_s(const void *a, int bits)
 {
   f128 x = f128_rd(a);
@@ -280,24 +323,37 @@ unsigned long __nfcxx_f128_to_u(const void *a, int bits)
   if (!(x > -1 && x < hi)) abort();
   return (unsigned long)x;
 }
+#endif
 
 /* the 128-bit integer conversions (the IR's from/to of __int128 with a floating type; see the i128 helpers above) */
 void __nfcxx_i128_from_f128_s(void *d, const void *a)
 {
   f128 x = f128_rd(a);
   f128 hi = (f128)((u128)1 << 127);
+#ifdef NFCXX_FLOAT_TO_INT_X86
+  if (!(x < hi)) { i128_wr(d, ((u128)1 << 127) - 1); return; }   /* saturates, as __nfcxx_f128_to_s */
+  if (x < -hi) { i128_wr(d, (u128)1 << 127); return; }
+#else
   if (!((x >= -hi) || (x > -hi - 1)) || !(x < hi)) abort();
+#endif
   i128_wr(d, (u128)(s128)x);
 }
 void __nfcxx_i128_from_f128_u(void *d, const void *a)
 {
   f128 x = f128_rd(a);
   f128 hi = (f128)((u128)1 << 127) * 2;
+#ifdef NFCXX_FLOAT_TO_INT_X86
+  if (x < 0) { i128_wr(d, 0); return; }
+  if (!(x < hi)) { i128_wr(d, ~(u128)0); return; }
+#else
   if (!(x > -1 && x < hi)) abort();
+#endif
   i128_wr(d, (u128)x);
 }
 void __nfcxx_i128_to_f128_s(void *d, const void *a) { f128_wr(d, (f128)(s128)i128_rd(a)); }
 void __nfcxx_i128_to_f128_u(void *d, const void *a) { f128_wr(d, (f128)i128_rd(a)); }
+/* a change of signedness: the same 128 bits */
+void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 /* __builtin_fpclassify, isnormal, isnan, ... on an object (the IR's classification built-ins) */
 int __nfcxx_f128_fpclassify(const void *a)
