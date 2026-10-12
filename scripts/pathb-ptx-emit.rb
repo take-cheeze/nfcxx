@@ -747,7 +747,7 @@ class Fn
         emit("mov.u32 #{dest}, %#{reg};")
       elsif name == "printf"
         printf_call(x, dest, ty)
-      elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name)
+      elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name) || name == "__nfcxx_reduce_add_sync"
         device_builtin(name, x, dest, ty)
       elsif SCALAR_U32.key?(name)
         scalar_u32(name, x, dest, ty)
@@ -1176,6 +1176,20 @@ class Fn
       else
         emit("shfl.sync.#{mode}.b32 #{dest}, #{src}, #{lane}, #{clamp}, 0xffffffff;")
       end
+    elsif name == "__nfcxx_reduce_add_sync"
+      # __reduce_add_sync(mask, value) for the full warp: a butterfly sum over the five lane offsets, so every lane gets
+      # the sum of the 32 values (unsigned addition wraps, as the CUDA intrinsic). redux.sync needs sm_80; this is sm_75.
+      raise Refused, "#{name} takes (mask, value)" unless args.length == 2
+      full_mask!(args[0], name)
+      raise Refused, "#{name} returns #{ty[0]}, not a 32-bit integer" unless ty[0] == "int" && type_size(ty) == 4
+      v, vty = operand(args[1])
+      raise Refused, "#{name}: value of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 4
+      emit("mov.b32 #{dest}, #{reg_of(v, vty)};")
+      [16, 8, 4, 2, 1].each do |off|
+        t = fresh("r")
+        emit("shfl.sync.bfly.b32 #{t}, #{dest}, #{off}, 31, 0xffffffff;")
+        emit("add.s32 #{dest}, #{dest}, #{t};")
+      end
     elsif WARP_VOTES.key?(name)
       raise Refused, "#{name} takes (mask, predicate)" unless args.length == 2
       full_mask!(args[0], name)
@@ -1271,6 +1285,36 @@ class Fn
       raise Refused, "__nfcxx_syncthreads takes no arguments" unless x.length == 3
       raise Refused, "__nfcxx_syncthreads has no value" unless dest.nil?
       emit("bar.sync 0;")
+      return
+    end
+    if cname == "__nfcxx_threadfence_system"
+      # a memory fence visible to the whole system (membar.sys); no operands, no value
+      raise Refused, "__nfcxx_threadfence_system takes no arguments" unless x.length == 3
+      raise Refused, "__nfcxx_threadfence_system has no value" unless dest.nil?
+      emit("membar.sys;")
+      return
+    end
+    if cname == "__nfcxx_nanosleep"
+      # nanosleep.u32: suspend the thread for about the given number of nanoseconds (a hint)
+      raise Refused, "__nfcxx_nanosleep takes (ns)" unless x.length == 4
+      raise Refused, "__nfcxx_nanosleep has no value" unless dest.nil?
+      nv, nty = operand(x[3])
+      raise Refused, "__nfcxx_nanosleep: argument of type #{nty[0]}" unless nty[0] == "int" && nty[1] == 4
+      emit("nanosleep.u32 #{reg_of(nv, nty)};")
+      return
+    end
+    if cname == "__nfcxx_syncthreads_or"
+      # the block barrier that also ORs a predicate over the block: bar.red.or.pred, then 1 or 0 in the result
+      raise Refused, "__nfcxx_syncthreads_or takes (predicate)" unless x.length == 4
+      raise Refused, "__nfcxx_syncthreads_or has no value" if dest.nil?
+      raise Refused, "__nfcxx_syncthreads_or returns #{ty[0]}, not a 32-bit integer" unless ty[0] == "int" && type_size(ty) == 4
+      pv, pty = operand(x[3])
+      raise Refused, "__nfcxx_syncthreads_or: predicate of type #{pty[0]}" unless pty[0] == "int" && pty[1] == 4
+      pr = fresh("p")
+      q = fresh("p")
+      emit("setp.ne.s32 #{pr}, #{reg_of(pv, pty)}, 0;")
+      emit("bar.red.or.pred #{q}, 0, #{pr};")
+      emit("selp.s32 #{dest}, 1, 0, #{q};")
       return
     end
     if cname == "__nfcxx_syncwarp"
