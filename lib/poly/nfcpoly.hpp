@@ -877,6 +877,7 @@ T Value::as() const {
 template <class... A>
 Value Value::call(const std::string& name, A&&... args) const {
   detail::Impl* impl = detail::impl_for(v_);
+  (void)impl;  // unused when there are no arguments
   std::vector<detail::Var> argv;
   argv.reserve(sizeof...(A));
   (argv.push_back(detail::to_var<A>(impl, std::forward<A>(args))), ...);

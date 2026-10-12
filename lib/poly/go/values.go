@@ -5,6 +5,8 @@ import (
 	"math"
 	"reflect"
 	"runtime"
+	"strings"
+	"unsafe"
 	"weak"
 
 	"nfcgo/nfc"
@@ -231,14 +233,41 @@ func (in *Interp) putObj(w *writer, o *nfc.Obj) {
 	w.u32(o.Class)
 }
 
+// yaegi stores a value of an interpreted type that is converted to an interface (a `*Tensor` variable passed as an `any`) as
+// interp.valueInterface{node, value}; the reflect.Value inside is the value the script meant. Reading it takes a copy of the
+// struct, to get an addressable field, and a look at the unexported field through its address.
+func unbox(v reflect.Value) (reflect.Value, bool) {
+	t := v.Type()
+	if v.Kind() != reflect.Struct || t.Name() != "valueInterface" || !strings.HasSuffix(t.PkgPath(), "yaegi/interp") || t.NumField() != 2 {
+		return v, false
+	}
+	p := reflect.New(t)
+	p.Elem().Set(v)
+	f := p.Elem().Field(1)
+	if f.Type() != reflect.TypeOf(reflect.Value{}) {
+		return v, false
+	}
+	inner := *(*reflect.Value)(unsafe.Pointer(f.UnsafeAddr()))
+	if !inner.IsValid() {
+		return v, false
+	}
+	return inner, true
+}
+
 // encodeDyn writes a value of any type: plain data by value, host objects as such, everything else as a handle.
 func (in *Interp) encodeDyn(w *writer, v reflect.Value) {
-	for v.IsValid() && v.Kind() == reflect.Interface {
-		if v.IsNil() {
-			v = reflect.Value{}
+	for v.IsValid() {
+		if v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				v = reflect.Value{}
+				break
+			}
+			v = v.Elem()
+		} else if u, ok := unbox(v); ok {
+			v = u
+		} else {
 			break
 		}
-		v = v.Elem()
 	}
 	if !v.IsValid() {
 		w.u8(tNil)
