@@ -3,6 +3,7 @@
 require 'set'
 require_relative 'native_names'
 require_relative 'native_direct_table'
+require_relative 'scan_cache'
 
 # NATIVE_DIRECT (docs/adr/0253, 0263): name -> RGSS class -> frame-independent
 # entry point, for sends whose native binding (mruby-rgss/src/lib.cxx) unpacks
@@ -91,12 +92,17 @@ module NativeDirect
     end
   end
 
+  # The `*.cxx` files beside `path`: the inputs of its scans, in a fixed order.
+  def sibling_sources(path)
+    Dir[File.join(File.dirname(path), '*.cxx')].sort
+  end
+
   # cross_file_param_owners over the sibling sources of `path`, memoized per directory.
   def sibling_param_owners(path)
     dir = File.dirname(path)
     @sibling_owners ||= {}
     @sibling_owners[dir] ||= begin
-      texts = Dir[File.join(dir, '*.cxx')].to_h { |file| [file, strip_comments(File.binread(file).force_encoding('UTF-8'))] }
+      texts = sibling_sources(path).to_h { |file| [file, strip_comments(File.binread(file).force_encoding('UTF-8'))] }
       cross_file_param_owners(texts)
     end
   end
@@ -104,22 +110,27 @@ module NativeDirect
   # Every "name" registration in `path` as [owner, kind]; owner is nil when
   # the class expression is not a variable defined in the same file. Class
   # methods and module functions register on "<owner>.singleton".
-  # { name => { owners: [..], literals: n } } per file, memoized.
+  # { name => { owners: [..], literals: n } } per file, memoized in process and stored by ScanCache (ADR 0415).
+  # Its inputs are `path` and its sibling sources, whose parameter owners the scan reads.
   def file_registrations(path)
-    @registrations[path] ||= begin
-      text = strip_comments(File.binread(path).force_encoding('UTF-8'))
-      owners = class_variables(text, sibling_param_owners(path))
-      table = Hash.new { |h, k| h[k] = { owners: [], literals: 0 } }
-      text.scan(/"((?:[^"\\\n]|\\.)*)"/) { |(lit)| table[lit][:literals] += 1 }
-      text.scan(MRB_SYM_TOKEN_RE) { |macro, tok| table[resolve_mrb_sym_token(macro, tok)][:literals] += 1 }
-      text.scan(/\bmrb_define_(\w+)\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*"((?:[^"\\\n]|\\.)*)"/) do |kind, var, name|
-        owner = owners[var]
-        owner = "#{owner}.singleton" if owner && kind != 'method' && kind != 'private_method'
-        table[name][:owners] << owner
-      end
-      table.default_proc = nil
-      table
+    @registrations[path] ||= ScanCache.fetch('native_direct.file_registrations', [path, *sibling_sources(path)]) do
+      scan_file_registrations(path)
     end
+  end
+
+  def scan_file_registrations(path)
+    text = strip_comments(File.binread(path).force_encoding('UTF-8'))
+    owners = class_variables(text, sibling_param_owners(path))
+    table = Hash.new { |h, k| h[k] = { owners: [], literals: 0 } }
+    text.scan(/"((?:[^"\\\n]|\\.)*)"/) { |(lit)| table[lit][:literals] += 1 }
+    text.scan(MRB_SYM_TOKEN_RE) { |macro, tok| table[resolve_mrb_sym_token(macro, tok)][:literals] += 1 }
+    text.scan(/\bmrb_define_(\w+)\s*\(\s*\w+\s*,\s*(\w+)\s*,\s*"((?:[^"\\\n]|\\.)*)"/) do |kind, var, name|
+      owner = owners[var]
+      owner = "#{owner}.singleton" if owner && kind != 'method' && kind != 'private_method'
+      table[name][:owners] << owner
+    end
+    table.default_proc = nil
+    table
   end
 
   # How many times `paths` register `name` on `owner`; 0 when the name has a

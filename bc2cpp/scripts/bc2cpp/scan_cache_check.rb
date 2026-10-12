@@ -119,6 +119,66 @@ Dir.mktmpdir do |tmp|
             outside_world_tokens(natives)]
     check.call('the scans return the same with the cache off, cold and warm', plain == cold && cold == warm)
     check.call('the three scans were stored', Dir.children(File.join(tmp, 'real')).size == 3)
+
+    puts '-- the stateful scans (ADR 0415): a closed world, the class registrations and the file registrations'
+    # What a closed world over `decls` ends up holding from the native sources (the state the scan fills).
+    state_names = %i[@native_code_tokens @native_tokens @native_other_literals @outside_names @outside_name_paths
+                     @global_refusal @touches @clone_sent @freeze_possible @singleton_makers @dynamic_constant_mutation
+                     @outside_constant_writes @outside_constant_write_counts]
+    world_state = lambda do |decls|
+      world = ClosedWorld.new(ireps: {}, registry: {}, class_decls: decls.to_h { |name| [name, [{ super: 'Object' }]] },
+                              walked: {}, native_paths: natives, ruby_paths: [])
+      state_names.map { |name| world.instance_variable_get(name) }
+    end
+    # Each scan's in-process memo is emptied, so a phase computes or loads as a new process would.
+    fresh_process = lambda do
+      NativeExpressionDevirt::REGISTRATION_CACHE.clear
+      NativeExpressionDevirt::CLASS_METHOD_CACHE.clear
+      NativeDirect.instance_variable_get(:@registrations).clear
+      NativeDirect.instance_variable_set(:@sibling_owners, nil)
+    end
+    # The result of the three stateful scans under `dir` (nil: cache off), the scan's calls and what it printed.
+    phase = lambda do |dir, decls: %w[Array Hash RGSS::Bitmap]|
+      fresh_process.call
+      ENV[ScanCache::ENV_NAME] = dir
+      calls = Hash.new(0)
+      wrapped = lambda do |owner, name|
+        original = owner.method(name)
+        owner.define_singleton_method(name) do |*args|
+          calls[name] += 1
+          original.call(*args)
+        end
+        original
+      end
+      originals = [[ClosedWorld, :native_facts], [NativeExpressionDevirt, :scan_class_registrations],
+                   [NativeDirect, :scan_file_registrations]].map { |owner, name| [owner, name, wrapped.call(owner, name)] }
+      warned = capture_stderr do
+        @phase_value = [world_state.call(decls), NativeExpressionDevirt.class_registrations(natives),
+                        natives.map { |path| NativeDirect.file_registrations(path) }]
+      end
+      originals.each { |owner, name, original| owner.define_singleton_method(name, original) }
+      [@phase_value, calls, warned]
+    end
+    stateful = File.join(tmp, 'stateful')
+    off, off_calls, off_warned = phase.call(nil)
+    cold, cold_calls, cold_warned = phase.call(stateful)
+    warm, warm_calls, warm_warned = phase.call(stateful)
+    check.call('the closed world, class and file registrations are the same with the cache off, cold and warm',
+               off == cold && cold == warm)
+    # One closed world, one class registration scan, and one file registration scan per native source.
+    computed = 2 + natives.size
+    check.call('the cache off and the cold run compute every scan, the warm run computes none',
+               off_calls.values.sum == computed && cold_calls.values.sum == computed && warm_calls.empty?)
+    check.call('the stateful scans print nothing on success, cache off, cold or warm',
+               [off_warned, cold_warned, warm_warned].all?(&:empty?))
+    stored = Dir.children(stateful)
+    check.call('each stateful scan stores its entries under its name',
+               %w[closed_world.native native_expression_devirt.class_registrations native_direct.file_registrations].all? do |name|
+                 stored.any? { |file| file.start_with?("#{name}-") }
+               end)
+    other_decls = phase.call(stateful, decls: %w[Array Integer Rect])
+    check.call('the closed world depends on the declared classes: a warm entry is not reused for another set',
+               other_decls[0] == phase.call(nil, decls: %w[Array Integer Rect])[0] && other_decls[0] != warm[0])
   end
 
   old_env ? ENV[ScanCache::ENV_NAME] = old_env : ENV.delete(ScanCache::ENV_NAME)

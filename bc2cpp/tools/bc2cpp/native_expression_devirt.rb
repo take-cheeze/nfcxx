@@ -272,8 +272,20 @@ module NativeExpressionDevirt
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     REGISTRATION_CACHE.fetch(key) do
       REGISTRATION_CACHE.clear
-      REGISTRATION_CACHE[key] = scan_class_registrations(files)
+      REGISTRATION_CACHE[key] = registrations_from_plain(
+        ScanCache.fetch('native_expression_devirt.class_registrations', files) { plain_registrations(*scan_class_registrations(files)) }
+      )
     end
+  end
+
+  # ADR 0415: the two maps of scan_class_registrations as plain Hashes, which is what ScanCache stores; the
+  # callers get them back with the access-creates-empty defaults the scan itself uses (registrations_from_plain).
+  def plain_registrations(registrations, opaque_owners)
+    [registrations.to_a.to_h, opaque_owners.to_a.to_h]
+  end
+
+  def registrations_from_plain(plain)
+    plain.map { |map| Hash.new { |hash, name| hash[name] = [] }.merge!(map) }
   end
 
   # Both ROM scans read each source's map; the sources are the read_source strings, so identity keys it.
