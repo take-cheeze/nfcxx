@@ -43,14 +43,17 @@ failures = []
 mutate = lambda do |(_name, file, pattern, replacement, expected, needs_analysis)|
   next :skip if needs_analysis && !ENV['MRBC']
 
-  Dir.mktmpdir do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
-    path = File.join(dir, 'bc2cpp', file)
+  # The copy sits in tools/ with its files at the top, so the generator's root is this repository; a copy in a temp
+  # directory cannot find the mruby sources it reads (compiled_gems.rb).
+  Dir.mktmpdir('bc2cpp-mutant-', File.join(ROOT, 'tools')) do |dir|
+    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp/.'), dir)
+    path = File.join(dir, file)
     text = File.read(path)
     next :site_gone unless text.include?(pattern)
 
     File.write(path, text.sub(pattern) { replacement })
-    env = { 'BC2CPP_TOOLS_DIR' => File.join(dir, 'bc2cpp') }
+    # BC2CPP_TOOL: the generator-driven checks compile through fixture_runtime, which reads it, not BC2CPP_TOOLS_DIR.
+    env = { 'BC2CPP_TOOLS_DIR' => dir, 'BC2CPP_TOOL' => File.join(dir, 'bc2cpp.rb') }
     argv = [RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/rbs_signatures_check.rb')]
     argv << '--unit-only' unless needs_analysis
     Bc2cppMutantPool.run(env, argv, stop_on: /^\s+FAIL .*(?:#{expected.source})/)

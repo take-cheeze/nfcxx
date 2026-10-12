@@ -62,21 +62,25 @@ MUTANTS = [
   ['an embedded ivar type is not reported', 'type_facts.rb',
    "elsif row['embedded']", 'elsif false', /ivar only ever assigned a Fixnum is typed Integer/, true],
   ['the facts mode changes generated code', 'bc2cpp.rb',
-   'TypeFacts.write(type_facts_path, ', 'ivar_layout.clear; class_layout.clear; TypeFacts.write(type_facts_path, ', /byte-identical C\+\+/, true]
+   "skipped, compiled = compiled.partition { |m| m[:code].include?('#error') }",
+   "compiled.each { |m| m[:code] = \"/* facts */\\n\#{m[:code]}\" } if ENV['BC2CPP_TYPE_FACTS']\n  skipped, compiled = compiled.partition { |m| m[:code].include?('#error') }", /byte-identical C\+\+/, true]
 ].freeze
 
 failures = []
 mutate = lambda do |(_name, file, pattern, replacement, expected, needs_analysis)|
   next :skip if needs_analysis && !ENV['MRBC']
 
-  Dir.mktmpdir do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
-    path = File.join(dir, 'bc2cpp', file)
+  # The copy sits in tools/ with its files at the top, so the generator's root is this repository; a copy in a temp
+  # directory cannot find the mruby sources it reads (compiled_gems.rb).
+  Dir.mktmpdir('bc2cpp-mutant-', File.join(ROOT, 'tools')) do |dir|
+    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp/.'), dir)
+    path = File.join(dir, file)
     text = File.read(path)
     next :site_gone unless text.include?(pattern)
 
     File.write(path, text.sub(pattern) { replacement })
-    env = { 'BC2CPP_TOOLS_DIR' => File.join(dir, 'bc2cpp') }
+    # BC2CPP_TOOL: the byte-identical check compiles through fixture_runtime, which reads it, not BC2CPP_TOOLS_DIR.
+    env = { 'BC2CPP_TOOLS_DIR' => dir, 'BC2CPP_TOOL' => File.join(dir, 'bc2cpp.rb') }
     argv = [RbConfig.ruby, File.join(ROOT, 'scripts/bc2cpp/type_check_check.rb')]
     argv << '--render-only' unless needs_analysis
     Bc2cppMutantPool.run(env, argv, stop_on: /^\s+FAIL .*(?:#{expected.source})/)
