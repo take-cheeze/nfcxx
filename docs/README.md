@@ -187,9 +187,10 @@ yaegi, none a bad free).
 `utf8`, `string.pack`, `io`, `os`; speed is 0.8x to 2.4x of PUC Lua's time (one measurement with the host compiler, `ast.md`). The tier
 (off by default) compiles only numeric kernels (no tables, strings, calls of native functions; a loop that runs in a function called
 once is not replaced while it runs) and needs the nfcxx driver at run time. The inlining of small functions (`ast.md`, "Inlining") saves
-15% to 20% of the instructions in a loop made of small calls (1.2x in time with the host compiler, up to 1.7x on the nfcxx back ends,
-one noisy measurement) and nothing for a recursive function; it leaves callees with loops, closures, `...` or multiple assignment as
-calls, inlines method calls on tables only, gives a site up for good after its first guard failure, and does not inline host functions
+17% to 25% of the instructions in a loop made of small calls (wall time within the noise of a shared machine, up to 1.7x on the
+nfcxx back ends against inlining off) and 1% to 3% for a recursive function; it leaves callees with closures or `...` as calls
+(loops and multiple assignment are inlined, except loops when the tier is on), inlines method calls on tables only, inlines a site
+again after a guard failure at most three times, and does not inline host functions
 (the C compiler does that for ordinary C++, not for functions registered as type-erased callables).
 **Hexagon**: no Hexagon SDK, `hexagon-sim` or QuRT; EDG has no Hexagon target, so a 32-bit little-endian stand-in
 (`linux_riscv32`) is used; cases that include hosted C++ headers, need GP-relative relocations or template instantiation

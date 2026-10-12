@@ -126,15 +126,23 @@ are ordinary calls.
 **What is a candidate.** A script closure that is not a vararg function, has at most 16 parameters and locals, and whose body
 clones to at most 64 nodes out of: constants, locals, upvalues, globals, arithmetic / comparison / logic / concatenation, field
 and index reads and writes, table constructors, calls and method calls (which become uninitialized call nodes of their own),
-local declarations, single assignments (local, upvalue, global, field, index), `if` chains, `return`. Not candidates: a body
-with a function expression or a local function (a closure would capture the callee's frame), `...`, a loop or `break`, a
-multiple assignment (`a, b = b, a`), or any node class the cloner does not list (so a node class added later is refused until
-someone teaches the cloner about it). A callee that is a native function, a host method, an object with `__call` or a string
+local declarations, assignments (single or multiple; local, upvalue, global, field, index targets), `if` chains, `return`, and
+the loops: `while`, `repeat`, numeric `for`, generic `for` (and `break`). Not candidates: a body with a function expression or a
+local function (a closure would capture the callee's frame), `...`, or any node class the cloner does not list (so a node class
+added later is refused until someone teaches the cloner about it). **Why loops and multiple assignment are fine** (they were
+refused in the first version, as untested rather than unsound): the clone runs in a `Frame` of its own that is linked like a
+real call's, so a loop sees what it sees in a real call: its slots (the loop variables and the hidden slots of a generic `for`
+are slots of the callee, which the frame has), `break` and `return` travel up the clone as the codes the block nodes already
+pass, the collector's safe point at every back edge (`loop_edge`) finds the inlined frame on the chain, an error inside a loop has
+the callee's position and traceback entry, and `tier_backedge` counts the iteration for the callee's prototype exactly as for a
+real call (it reads the parameters of the frame, which is why a body with a loop keeps its arguments in their slots, see
+"Arguments"). The node limit (64) still applies, so only small loops are inlined; what a loop saves is the same call overhead
+once per call, which is why this matters for helpers called often with a short loop (a sum, a search, a swap). A callee that is a native function, a host method, an object with `__call` or a string
 method is not a script closure and is never inlined; a method call whose receiver is not a table is not inlined either.
 
 **What runs.** The inlined call does what the call node did (the callee expression first, then the arguments left to right
-onto the interpreter stack, extra arguments evaluated and dropped, missing ones nil, a multi-valued last argument expanded),
-then checks the guard, then evaluates the clone in a `Frame` of its own that sits on the C++ stack and is linked into
+onto the interpreter stack, extra arguments evaluated and dropped, missing ones nil, a multi-valued last argument expanded;
+see "Arguments" for how the cheap ones are done), then checks the guard, then evaluates the clone in a `Frame` of its own that sits on the C++ stack and is linked into
 `State::cur` like the frame of a real call: the callee's closure, its arguments in place on the stack as its first slots, its
 other locals above them, the depth counted and the collector's safe point at the entry. A body that is a single
 `return <expr>` is evaluated as the expression, without a block, a return node or a results vector (a longer body keeps its block
@@ -145,12 +153,44 @@ the uninitialized arithmetic node again, a field cache is empty), so it speciali
 sees integers at one site, floats at another and strings at a third has an integer, a float and a generic copy, where the
 shared tree gives way to the generic nodes for all three (`tests/ast/engine.cpp` counts the slow paths of exactly this).
 
+**Arguments.** An argument that is a read of a local that is not boxed, of an upvalue, or a constant is pure: it runs no script
+code, allocates nothing, and nothing can change what it reads before the callee starts. The site keeps a plan with one entry
+per argument (`ArgPlan` in `nfcast_inline.inc`): such an argument is copied into its slot straight from its source, without the
+virtual call to the argument node and the generic loop of `push_args`; any other expression is evaluated as before, in order, and
+an expression that follows is evaluated with the earlier values rooted on the stack. An extra argument (beyond the parameters)
+that is pure is not evaluated at all.
+
+**Parameter substitution.** When the argument is a local or a constant, the parameter is never written by the body (no
+assignment, no multiple assignment, no declaration or loop variable on its slot, found by a first dry clone of the body) and the
+body has no loop, the clone does not read the parameter from the callee's frame: its `LocalNode` is replaced, in the clone, by a
+`SubstLocal` that reads the caller's local (the frame `up` links back along the chain; `S.cur` is the caller's frame when the
+callee's frame is made, so `prev` is the frame of the site, and a site inside a clone whose argument was itself substituted
+reads two or more links back) or by a `SubstConst` that holds the constant. The slot of the callee is set to nil only so the
+collector sees a valid value, and the argument is not evaluated or copied. Why it is sound: a local that is not boxed is written
+by nobody but its own function, which is suspended for the whole call (a boxed one, captured by a closure, is not substituted: its
+node is evaluated at the call like before; tested with a callee that changes it); a constant cannot change; an upvalue can (the
+callee may call something that assigns it), so an upvalue argument is copied but never substituted; a global is not pure (it
+can have `__index`) and is evaluated like any expression. Both substitute nodes describe themselves as `local 'x'` with the
+callee's name for the parameter, so the messages of errors do not change (`attempt to perform arithmetic on a nil value (local
+'x')` whatever the caller passed). When the guard fails the callee that runs for real needs the values in its slots:
+`restore_args` copies them from the sources (they are still there) before the call, for the call site and the method site. A body
+with a loop keeps its arguments in their slots because `tier_backedge` reads the parameters of the frame to decide what to compile.
+A method call substitutes its explicit arguments, not the receiver (which is evaluated once and stored like before).
+`State::stats.inline_substituted` counts the arguments substituted when a site is rewritten. What it saves: the store and the read
+through a frame slot per argument and the evaluation of the argument node (callgrind: about 7 million of 244 million instructions in
+the `helpers`-style loop of `bench/helpers.lua`, on top of 7 million for the plan itself, see "Speed").
+
 **The guard** is the callee's `Proto::uid`, a number that is never reused (an address is: a collected function's proto can be
 freed and another allocated in its place). It identifies the function, not the closure: closures of one function with different
 upvalues pass it and read their own, because the clone's upvalue nodes read through the frame's closure. A value that does not
-pass (another function, a native, a table with `__call`, nil, a method that changed under a method site) rewrites the node
-back into the generic call node, counts a deopt, and the site is not inlined again (a site that alternates between two functions
-would otherwise pay for a clone at every change).
+pass (another function, a native, a table with `__call`, nil, a method that changed under a method site) counts a deopt and
+rewrites the node back. When the new value is a closure, the site becomes the plain call node of a closure again, with the
+count of executions restarted, and is looked at for inlining again: a site that sees a function after another (a helper
+replaced, a callback that differs between phases of the program) is inlined for the new one. This is bounded, `kInlineMaxRetry`
+= 3 times per site (the count travels with the node through the rewrites), because a site that alternates between two functions
+would otherwise pay for a clone at every change; after that, or when the new value is not a closure, it becomes the generic call
+node and the site is not inlined again. (Tested: 200 calls that alternate between two functions at one site rewrite it 4 to 7
+times in all, counting the other sites of the same program, not 100.)
 
 **Why a frame of its own.** The obvious design is to evaluate the clone in the caller's frame, with the callee's slots renumbered
 into slots added to the caller's `Proto`. That is unsound for the activations that are already running: a frame has the size it
@@ -178,7 +218,8 @@ can tell the difference (removing either keeps every check green; see "Verificat
 (`NFCAST_INLINE_WARM=n` / `State::inline_warm` sets the count; 0 means never). The setting is read when a site is created and
 when it reaches its count, so changing it later does not take back a site that was already rewritten. Counters:
 `State::stats.inlined_sites` (sites rewritten), `inlined_calls` (calls run as inlined bodies), `inline_declined` (sites that were
-looked at and left as calls); a guard that fails counts in `deopts`.
+looked at and left as calls), `inline_substituted` (arguments the clones of rewritten sites read where they are); a guard that
+fails counts in `deopts`.
 
 **What the tier does with it.** `InlineCall` and `MethodInline` are ordinary call nodes (`CallBase`, `MethodBase`) that hold an
 `InlineBody`: the callee's `uid`, and the clone of the body or of its single return expression. The tier lowers an `InlineCall`
@@ -193,9 +234,9 @@ both, with every site rewritten at its second call and every function compiled a
 
 **Not done, and out of scope.** Host functions inlined by the C compiler when the generated code can see their bodies (the
 remaining half of the third step above) still needs host functions registered by header and symbol; this milestone does not
-touch it. Inside the engine: no loops in an inlined body, no closures, no `...`, no multiple assignment; no parameter
-substitution (an argument is always evaluated into a slot, so `sq(x)` is not rewritten to `x * x`); no re-inlining of a site
-after a guard failed; the clone is made once, from the callee's tree at that moment, and does not follow later changes to it
+touch it. Inside the engine: no closures and no `...` in an inlined body; no substitution of an upvalue
+or global argument, of the receiver of a method, or when the body has a loop (all explained above); no folding of a substituted
+constant into its consumers (`sq(3)` still multiplies two constant nodes); the clone is made once, from the callee's tree at that moment, and does not follow later changes to it
 (the tree only ever rewrites itself into equivalent nodes, so the copy stays correct, only possibly less specialized).
 
 ## Errors
@@ -471,7 +512,15 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
 - `tests/ast/cases/*.lua`: eleven programs (arithmetic and number formatting, strings and patterns, tables, closures,
   metatables, errors and their messages, control flow, algorithms, garbage-heavy code, numeric kernels, and `tier_osr`: loops taken over
   in the middle of a call (see below)) and, for the inlining, ten more named
-  `inline_*` (argument adjustment and the order of evaluation; errors raised inside inlined bodies: message, position, variable
+  `inline_*` (argument adjustment and the order of evaluation; parameter substitution (`inline_subst`: locals, constants and
+  expressions as arguments, a parameter assigned, the same local twice, side effects between pure arguments, a boxed local and
+  an upvalue the callee changes, error messages that name the callee's parameter, chains four deep, recursion, methods, a site
+  that meets another function afterwards, fewer and more arguments than parameters); loops and multiple assignment
+  (`inline_loops`: numeric, float, while, repeat, generic and nested loops, `break`, `return` from inside, errors with their
+  lines and levels inside loops, swaps and multiple assignment to locals, fields, indexes, upvalues and globals, loops that
+  allocate, recursion through a loop, methods); sites that meet other functions (`inline_retry`: long runs of one function and
+  then another, alternation at every call, a native or `__call` in between, methods replaced in the class or shadowed with
+  arguments, extra arguments that the first callee does not read and the next does); errors raised inside inlined bodies: message, position, variable
   names, `error` levels 0 to 3, error values that are not strings, `pcall` inside and outside, a callee from another chunk, natives
   called with bad arguments; a callee that is assigned again after its site was rewritten, a closure of the same function with
   other upvalues, a native or a `__call` table or nil in its place, methods replaced in the class or shadowed in the instance;
@@ -483,17 +532,22 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   point, each with inlining as it is by default, with a site rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and
   with inlining off (`NFCAST_INLINE=0`); and with the tier on and every function compiled at its first call (`NFCAST_TIER=sync`,
   `NFCAST_TIER_THRESHOLD=1`): normally, with the collector stress, with early inlining, and with the tier compiling in the
-  background (`NFCAST_TIER=async`): 21 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
+  background (`NFCAST_TIER=async`): NPROG programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
-  succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr).
-- `tests/ast/engine.cpp`: 139 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
+  succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr). Thirteen of the 23 programs are `inline_*`.
+- `tests/ast/engine.cpp`: 172 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
   state of the interpreter after errors, pins) and, for the inlining, with `State::stats`: a loop of calls rewrites its site once
   and runs the rest inlined (97 of 100 calls with the default count, 98 with `inline_warm = 1`), a state with inlining off or
-  `inline_warm = 0` inlines nothing; the guard fails exactly once when the global is assigned again (to another function, a
-  native, nil) and the site is not rewritten again; closures of one function with other upvalues do not fail it; three sites
+  `inline_warm = 0` inlines nothing; the guard fails once when the global is assigned again (to another function: the site is inlined again for it and runs every
+  call inlined from then on; to a native or nil: the site is the generic call for good); a site that alternates between two
+  functions at 200 calls is rewritten a bounded number of times (four to seven rewrites in all, not a hundred); closures of one function with other upvalues do not fail it; three sites
   that send integers, floats and strings to one helper take about 100 slow paths with inlining and at least 295 without
-  (the shared tree goes generic); methods (a getter, an instance that shadows it); loops, varargs and multiple assignment are
-  declined and counted, closures too, a body over the size limit too, a chunk with 3500 sites of a three-node function
+  (the shared tree goes generic); methods (a getter, an instance that shadows it); numeric, `while`, `repeat` and generic loops
+  with `break` and multiple assignment (locals, a field and an index) are inlined, varargs are declined and counted, closures
+  too, a body over the size limit too; `State::stats.inline_substituted` counts the substituted arguments (a local and a
+  constant yes; an assigned parameter, a local with a loop in the body, a boxed local and a global no) and the errors raised through
+  a substituted parameter carry its name and the callee's line; with the tier on, a callee with a loop is declined and a
+  loop-free one is inlined; a chunk with 3500 sites of a three-node function
   inlines about 2700 of them and declines the rest (the limit on the clones one function takes), with the same result; recursion
   inlines a few levels and the depth limit gives the same number of nested calls with and without inlining; the
   error raised three calls deep has the same message and the same traceback (four entries, with the lines and the names) with
@@ -505,10 +559,15 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   concatenation and logic over integers, floats, strings and other values, calls of `find`, `match`, `gsub`, `gmatch` with
   random patterns, and (`fuzz/gen_inl.py`) random small helper functions and methods of two classes called from random
   expressions, each expression run over ten tuples of argument values and three receivers so that the sites are hot when the
-  types change; the helper programs run with the default count, with `NFCAST_INLINE_WARM=1` and with inlining off. Equal output
+  types change; since the second inlining the helpers and methods also have loops (numeric, float, `while`, `repeat`, `break`,
+  `return` from inside, `ipairs`), multiple assignment (swapped parameters, fields, an upvalue), assigned parameters, and some
+  expressions call through a list of helpers indexed by the argument tuple, so the callee of a site changes (the guard, the
+  retries); the helper programs run with the default count, with `NFCAST_INLINE_WARM=1` and with inlining off. Equal output
   to the reference, error messages and their positions included, after fixing what it found: float modulo with two negative
   operands (`-2 % -2^63`), string operands of bitwise operators (an error in 5.4), and where Lua's error messages carry a variable
-  name. 300 seeds of each kind (the helper kind three times) ran without a mismatch for the inlining.
+  name. 300 seeds of each kind (the helper kind three times) ran without a mismatch for the inlining. After the second inlining 200 seeds of each kind ran without a mismatch on the gcc back end (the first run of the new generator found 12 programs that
+  differed, all one bug: the arguments of a call that the first callee did not read, extra ones that were never stored, were not
+  put back when the site met a callee that reads them).
 - The same programs under AddressSanitizer and UBSan with the collector at every safe point; the poly host under valgrind
   (the only leaks reported are the `ClassInfo` records of the core, which are never freed by design). A first version of
   `HostObject` converted the pointer to its collector header with `reinterpret_cast`, wrong for a class with a vtable; the
@@ -519,6 +578,23 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   restores the native-call context changes nothing observable: the enclosing native call restores it anyway.
 - Inlining under AddressSanitizer, UBSan and LeakSanitizer (g++ -O1): the engine test and every program in every
   configuration above, clean.
+- Mutation checks of the second inlining (substitution, plans, loops, retries), on scratch copies against the engine test and
+  the inline programs (default count and `NFCAST_INLINE_WARM=1`, collector stress on the second): 16 mutants, 13 caught. Caught:
+  the parameter-written bit not recorded (engine); the values of substituted arguments not put back when the guard fails, for a
+  call site and for a method site (`inline_subst`, `inline_retry`, `inline_redefine`, engine; the method one only by an
+  `inline_retry` section written for it); the same for extra arguments that were never stored (`inline_retry`, which the fuzzer
+  found first: a method site inlined for a one-parameter function and then meeting a two-parameter one read a stale slot); no check
+  for a boxed local as an argument (nine programs); substitution in bodies with loops (engine); no cap on the retries
+  (engine); the arguments not rooted while a later one is evaluated (`inline_subst`, `inline_types`, `inline_gc`);
+  a multiple assignment to a parameter, and an assignment to one, that do not count as writes (engine, `inline_loops`,
+  `inline_args`, `inline_stmts`); the `up` count of the substituted node off by one (nearly every inline program); no refusal of
+  loops when the tier is on (engine). Survivors, all equivalent: the loop variable and the declarations that do not record a
+  write (they cannot be on a parameter's slot, and bodies with loops are never substituted), and the line that sends calls with an
+  expanding last argument past the plan (the plan only substitutes arguments that a real call also reads from a slot, and
+  `place_args` falls back to `push_args` itself).
+- The same inlining with the temporary check `S.cur == &caller` in the frame of an inlined call (the substituted nodes read the
+  caller through `prev`), run over all programs in the eight host configurations, the engine test and 100 fuzz seeds of each
+  kind: never false. It is removed again; nothing in the engine (no coroutines) makes a frame run with another `S.cur`.
 - Mutation checks of the inlining, on scratch copies, each against the engine test and every program (inlining by default and
   as early as possible, the collector at its default and at every safe point, built with the sanitizers): a guard that does not compare the function
   (fails the engine checks and `inline_redefine`, `inline_methods`); an inlined body that does not link its frame into
@@ -624,45 +700,58 @@ A tree walker that rewrites itself is within a small factor of a register-VM wri
 
 ### What the inlining adds
 
-`RUNS=5 tests/ast/bench.sh host gcc qbe` (programs in `tests/ast/bench/`, best of 5 runs, seconds; the machine was shared with other jobs, so times
-move by 10% or more between runs; nothing asserts on them): `helpers` is 5 million iterations of a loop calling small math helpers
-and predicates, a two-level call (`dist2` calls `sq` twice) and table accessors; `getters` is 3 million iterations of method calls
-on objects with a metatable (`a:getx()`, `a:dot(b)` calling two getters, a setter); `fib` is `fib(32)`.
+`RUNS=3 tests/ast/bench.sh host gcc qbe` (programs in `tests/ast/bench/`, best of 3 runs, seconds; the machine was shared with other
+jobs and its load changed during the runs, so times move by 10% to 30% between runs, and the "off" column of the same program
+differed by that much between two runs of an unchanged engine; nothing asserts on them): `helpers` is 5 million iterations of a loop
+calling small math helpers and predicates, a two-level call (`dist2` calls `sq` twice) and table accessors; `getters` is 3 million
+iterations of method calls on objects with a metatable (`a:getx()`, `a:dot(b)` calling two getters, a setter); `fib` is `fib(32)`.
+Times of the second inlining (parameters read where they are, arguments placed without virtual calls, loops and multiple
+assignment accepted, sites inlined again after a guard failure; "before" is the engine of the commit it was developed on, "off" is
+`NFCAST_INLINE=0` of the same engine):
 
-| Target | Program | inlining | off | |
-| --- | --- | --- | --- | --- |
-| host g++ -O2 | `helpers` | 2.11 | 2.56 | 1.21x |
-| | `getters` | 2.12 | 2.51 | 1.18x |
-| | `fib` | 0.47 | 0.46 | 0.98x |
-| nfcxx, gcc back end | `helpers` | 3.53 | 5.52 | 1.56x |
-| | `getters` | 2.48 | 4.15 | 1.67x |
-| | `fib` | 0.84 | 1.00 | 1.19x |
-| nfcxx, qbe back end | `helpers` | 5.56 | 8.65 | 1.56x |
-| | `getters` | 4.44 | 6.11 | 1.38x |
-| | `fib` | 1.31 | 1.39 | 1.06x |
+| Target | Program | before | after | off (after) | before / after |
+| --- | --- | --- | --- | --- | --- |
+| host g++ -O2 | `helpers` | 2.16 | 2.19 | 3.15 (noisy; 2.5 to 3.2 in other runs) | 0.99x |
+| | `getters` | 1.89 | 1.97 | 2.52 | 0.96x |
+| | `fib` | 0.46 | 0.44 | 0.48 | 1.05x |
+| nfcxx, gcc back end | `helpers` | 3.60 | 3.36 | 5.81 | 1.07x |
+| | `getters` | 2.96 | 2.71 | 4.25 | 1.09x |
+| | `fib` | 0.88 | 0.93 | 0.98 | 0.95x |
+| nfcxx, qbe back end | `helpers` | 6.75 | 6.38 | 9.04 | 1.06x |
+| | `getters` | 4.99 | 4.76 | 7.37 | 1.05x |
+| | `fib` | 1.47 | 1.51 | 1.61 | 0.97x |
 
-The same reference Lua 5.4.9 takes 1.3 s on `helpers`, 1.2 s on `getters` and 0.15 s on `fib` on this machine, so the loops
-that call small functions are still 1.6x (`helpers`) to 1.8x (`getters`) slower than Lua with the host compiler and inlining on, and
-`fib` 3x.
+Those wall times cannot show a difference of 5% (the same engine measured twice differs by more), so the honest summary is "no
+slower, a little faster on the back ends"; the instruction counts below are the measurement. The same reference Lua 5.4.9 takes
+1.2 to 1.3 s on `helpers`, 1.2 s on `getters` and 0.16 s on `fib` on this machine, so the loops that call small functions are still
+about 1.7x (`helpers`) to 1.6x (`getters`) slower than Lua with the host compiler and inlining on, and `fib` 3x.
 
 Instructions, which do not depend on the load of the machine (callgrind, the host build, 100 thousand iterations of `helpers`,
-60 thousand of `getters`, `fib(24)`):
+60 thousand of `getters`, `fib(24)`; before = the engine before this change, after = this one; "off" runs the same engine with
+`NFCAST_INLINE=0`):
 
-| Program | inlining | off | |
-| --- | --- | --- | --- |
-| `helpers` | 458.0 M | 561.6 M | -18% |
-| `getters` | 436.3 M | 513.6 M | -15% |
-| `fib(24)` | 88.5 M | 89.3 M | -1% |
+| Program | before, inlining | before, off | after, inlining | after, off | saving before | saving after |
+| --- | --- | --- | --- | --- | --- | --- |
+| `helpers` | 461.2 M | 568.4 M | 430.4 M | 570.2 M | -18.9% | -24.5% |
+| `getters` | 437.8 M | 517.2 M | 429.3 M | 518.8 M | -15.4% | -17.3% |
+| `fib(24)` | 89.1 M | 90.1 M | 88.1 M | 90.4 M | -1.1% | -2.5% |
 
-So what inlining removes is the call. From the callgrind profile of `helpers`: the real call path (`CallBase::eval`, dispatch,
-`call_closure`, the block and return nodes, the results vector) costs about 250 instructions per call and the inlined one about
-100, out of roughly 500 per call of a small function including the nodes of its body. The rest is the cost of the nodes, which
-this milestone does not change: an argument is still evaluated into a slot and
-read back by a local node, `sq(x)` is still a multiplication of two local nodes. That is the honest size of the gain for a tree
-walker that inlines by cloning: 15% to 20% of the instructions in a loop made of small calls, and nothing for `fib`, where
-the unrolled level contains the same two calls it replaced. On the nfcxx back ends the saving in time is larger than the saving in
-instructions of the host build suggests (I counted instructions only for the host build); I did not look into why. The tier does not use the clones (see "What the tier does with it"): it compiles whole kernels, and
-the inlining helps what stays interpreted.
+So the gain over the first inlining is 6.7% of the instructions of `helpers` and 2% of `getters`: the saving relative to no
+inlining went from 15% to 19% up to 17% to 25%, not to the several times that a compiler's inliner gets, because the nodes of the
+body, not the call, are most of what is left. What was done and what it bought, from the callgrind
+profile of a loop of `sq(i % 100)` and `clamp(i % 200, 20, 150)` (400 thousand inlined calls, 259.1 M instructions before):
+placing the arguments by a plan instead of `push_args` and the argument nodes (no virtual call or loop per pure argument; the
+callee expression when it is a local or an upvalue is read directly): -7.2 M instructions (259.1 to 251.9 M); substituting the
+parameters that are locals or constants on top: -7.4 M (to 244.5 M); that is 36 instructions per call out of roughly 600 per
+call including the loop around it (an inlined call still costs about 100 instructions: the frame, the guard, the results, and the nodes of
+the body, which are unchanged: a substituted parameter is a virtual call to `SubstLocal::eval` instead of one to `LocalNode::eval`,
+so the read costs the same and what is saved is the copy and the evaluation at the call). What would save more is outside this
+file: operator nodes that know their operands are locals or constants (no virtual call per operand), and for the method
+benchmark a cache for methods inherited through `__index` (`getters` spends about a quarter of its instructions in
+`find_str` / `index_slow` looking the method up in the instance, missing, and then in the class, which inlining does not touch).
+That is the honest size of the gain for a tree walker that inlines by cloning: about 20% to 25% of the instructions in a loop made of small
+calls, and 1% to 3% for `fib`, where the unrolled level contains the same two calls it replaced. The tier does not use the clones
+(see "What the tier does with it"): it compiles whole kernels, and the inlining helps what stays interpreted.
 
 ### Speed of the tier
 

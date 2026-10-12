@@ -238,6 +238,7 @@ struct Stats {
   std::uint64_t inlined_sites = 0;   // call sites that were rewritten into an inlined call (docs/notes/ast.md, "Inlining")
   std::uint64_t inlined_calls = 0;   // calls run as inlined bodies
   std::uint64_t inline_declined = 0; // call sites that were looked at and left as calls (callee too big, recursive, ...)
+  std::uint64_t inline_substituted = 0;  // arguments of inlined sites that the clone reads where they are instead of from a slot
   // The tier (docs/notes/ast.md, "Tiering"); all zero while it is off.
   std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
   std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver

@@ -977,14 +977,15 @@ struct CallGen : CallBase {
 // ---- inlining (nfcast_inline.inc, included at the end of this file) ----
 // The number of executions of a call or method site left before it is looked at for inlining; 0 when it is switched off.
 inline unsigned inline_hot(Frame& f) { return f.S->inlining ? f.S->inline_warm : 0; }
-void inline_call_site(Frame& f, CallBase* site, Closure* callee);
+void inline_call_site(Frame& f, CallBase* site, Closure* callee, unsigned retry);
 
 struct CallClosure : CallBase {
-  unsigned hot_ = 0;  // executions left before inline_call_site looks at this site
+  unsigned hot_ = 0;    // executions left before inline_call_site looks at this site
+  unsigned retry_ = 0;  // how many inlined versions of this site were given up on after a guard failure
   using CallBase::CallBase;
   void dispatch(Frame& f, const Value& fnv, Value* args, int n, Rets& out) override {
     if (fnv.t == T_FUN && fnv.o->gctype == G_CLOSURE) {
-      if (hot_ && --hot_ == 0) inline_call_site(f, this, fnv.closure());
+      if (hot_ && --hot_ == 0) inline_call_site(f, this, fnv.closure(), retry_);
       call_closure(*f.S, fnv.closure(), args, n, out, false);
       return;
     }
@@ -1105,11 +1106,12 @@ struct MethodGen : MethodBase {
 };
 
 struct MethodTab;
-void inline_method_site(Frame& f, MethodTab* site, Closure* callee);
+void inline_method_site(Frame& f, MethodTab* site, Closure* callee, unsigned retry);
 
 struct MethodTab : MethodBase {  // the receiver is a table: its field (or an inherited one) is the method
   long cache = -1;
-  unsigned hot_ = 0;  // executions left before inline_method_site looks at this site
+  unsigned hot_ = 0;    // executions left before inline_method_site looks at this site
+  unsigned retry_ = 0;  // how many inlined versions of this site were given up on after a guard failure
   using MethodBase::MethodBase;
   void run_with(Frame& f, Rets& out, const Value& o) override {
     if (o.t == T_TAB) {
@@ -1122,7 +1124,7 @@ struct MethodTab : MethodBase {  // the receiver is a table: its field (or an in
       }
       if (i >= 0 && !t->nodes[i].val.is_nil()) ab[0] = t->nodes[i].val;
       else ab[0] = lookup_generic(f, o);
-      if (hot_ && !tail && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure());
+      if (hot_ && !tail && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure(), retry_);
       finish(f, ab, out);
       return;
     }
