@@ -340,21 +340,22 @@ class CodeGen
   # Function assembly
   # ---------------------------------------------------------------------------
 
+  RESUMABLE_REGISTER_TOKENS = %r{
+    R"(?<delimiter>[^ ()\\\t\r\n]{0,16})\(.*?\)\k<delimiter>"
+    |"(?:\\.|[^"\\])*"
+    |'(?:\\.|[^'\\])*'
+    |//[^\n]*
+    |/\*.*?\*/
+    |\br(?<reg>\d+)\b
+  }mx
+
   # The step function's opening: the frame, the registers as references into it, and the
   # dispatch to the state saved by the last yield. Only register identifiers need slots.
   def resumable_step_function(step_name, body)
     registers = Set[0]
     # Literal contents and comments cannot name frame registers. R[0] and R[1]
     # remain the yield/resume cells; ordinary registers have dense aliases.
-    tokens = %r{
-      R"(?<delimiter>[^ ()\\\t\r\n]{0,16})\(.*?\)\k<delimiter>"
-      |"(?:\\.|[^"\\])*"
-      |'(?:\\.|[^'\\])*'
-      |//[^\n]*
-      |/\*.*?\*/
-      |\br(?<reg>\d+)\b
-    }mx
-    body.scan(tokens) do
+    body.scan(RESUMABLE_REGISTER_TOKENS) do
       reg = Regexp.last_match[:reg]
       registers << reg.to_i if reg
     end
