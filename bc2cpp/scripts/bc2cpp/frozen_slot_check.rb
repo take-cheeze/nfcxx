@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# FREEZE_SLOT (docs/adr/0421): a slot of a frozen literal table whose value is `LITERAL.freeze` has the
+# FREEZE_SLOT (docs/adr/0425): a slot of a frozen literal table whose value is `LITERAL.freeze` has the
 # container class of that literal (ARR for an Array, HSH for a Hash), not OTHER.
 #
 # 1. Host (CRuby): hand-built bytecode with the register layout mrbc emits for `T = [[1, 2].freeze, 3].freeze`

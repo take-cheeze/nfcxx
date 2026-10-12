@@ -187,9 +187,9 @@ end
     [lit, at, container]
   end
 
-  # A slot whose value is `LITERAL.freeze` (BC2CPP_FREEZE_SLOT, ADR 0421). Kernel#freeze answers its receiver
+  # A slot whose value is `LITERAL.freeze` (BC2CPP_FREEZE_SLOT, ADR 0425). Kernel#freeze answers its receiver
   # (frozen_table_name_safe? refuses an override), so the slot holds the container class of that literal.
-  # Only the class is claimed: the inner table's own slots are not followed (ADR 0421).
+  # Only the class is claimed: the inner table's own slots are not followed (ADR 0425).
   def frozen_table_freeze_slot(irep, index, insn)
     return NumericFlow::OTHER if ENV['BC2CPP_FREEZE_SLOT'] == '0' || insn.sym != 'freeze'
 
