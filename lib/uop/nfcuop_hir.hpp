@@ -100,9 +100,11 @@ class Graph {
 class Lowerer {
  public:
   Lowerer(const Graph& g, ut::Session& s) : g_(g), s_(s) {}
+  // Iterative (no recursion on the depth of the graph: a chain of thousands of nodes is fine).
   ut::Tensor get(int value);
 
  private:
+  ut::Tensor lower_one(int value);  // its inputs are in memo_ already
   const Graph& g_;
   ut::Session& s_;
   std::map<int, ut::Tensor> memo_;

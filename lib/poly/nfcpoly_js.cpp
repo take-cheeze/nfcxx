@@ -604,7 +604,7 @@ struct JsLang : Lang {
     classes[ci] = jc;
   }
   void class_method(ClassInfo* ci, const std::string& name, Callable* c) override {
-    JSValue fn = make_fn(method_tramp, name, c->arity(), new_bound(c));
+    JSValue fn = make_fn(method_tramp, name, c->min_arity(), new_bound(c));
     if (JS_DefinePropertyValueStr(ctx, classes.at(ci).proto, name.c_str(), fn, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
       throw_error(false);
   }
@@ -686,12 +686,11 @@ JSValue guarded(JsLang* lang, JSContext* ctx, F body) {
 
 // Calls c with the arguments of a JavaScript call; the result as a JavaScript value (a new reference).
 JSValue call_callable(JsLang* lang, Callable* c, JSValueConst this_val, int argc, JSValueConst* argv) {
-  if (argc != c->arity())
-    throw ConversionError("wrong number of arguments (given " + std::to_string(argc) + ", expected " +
-                          std::to_string(c->arity()) + ")");
+  if (!arity_fits(c, argc)) throw ConversionError(arity_message(c, argc));
   std::vector<Var> args;
   args.reserve(static_cast<std::size_t>(argc));
   for (int k = 0; k < argc; ++k) args.push_back(lang->decode(argv[k]));
+  arity_pad(c, args);
   Var selfv;
   const Var* sp = nullptr;
   if (c->wants_self()) {

@@ -80,6 +80,21 @@ int obj_index(lua_State* L);
 int obj_newindex(lua_State* L);
 int obj_gc(lua_State* L);
 int obj_tostring(lua_State* L);
+int obj_arith(lua_State* L);
+// The operators a class can define: the Lua metamethod, the method for `obj OP x`, the method for `x OP obj` (null for a
+// unary operator). Not the comparisons: Lua turns the result of __eq, __lt and __le into a boolean, so a method cannot
+// return a value there.
+struct LuaOpName {
+  const char* meta;
+  const char* fwd;
+  const char* rev;
+};
+const LuaOpName kLuaOp[] = {{"__add", "__add__", "__radd__"},   {"__sub", "__sub__", "__rsub__"},
+                            {"__mul", "__mul__", "__rmul__"},   {"__div", "__truediv__", "__rtruediv__"},
+                            {"__mod", "__mod__", "__rmod__"},   {"__idiv", "__floordiv__", "__rfloordiv__"},
+                            {"__band", "__and__", "__rand__"},  {"__bor", "__or__", "__ror__"},
+                            {"__bxor", "__xor__", "__rxor__"},  {"__unm", "__neg__", nullptr}};
+constexpr int kLuaOps = sizeof(kLuaOp) / sizeof(kLuaOp[0]);
 int live_index(lua_State* L);
 int live_newindex(lua_State* L);
 int msgh(lua_State* L);
@@ -399,6 +414,12 @@ struct LuaLang : Lang {
     lua_setfield(main, -2, "__gc");
     lua_pushcfunction(main, obj_tostring);
     lua_setfield(main, -2, "__tostring");
+    // Arithmetic and bitwise operators call the class's Python-named methods (__add__, __radd__, ...; "Operators" in poly.md).
+    for (int k = 0; k < kLuaOps; ++k) {
+      lua_pushinteger(main, k);
+      lua_pushcclosure(main, obj_arith, 1);
+      lua_setfield(main, -2, kLuaOp[k].meta);
+    }
     metas[ci] = mt;
     lua_newtable(main);  // the class table: Name.new(...) and Name(...)
     lua_setglobal(main, ci->name.c_str());
@@ -486,17 +507,14 @@ int run_callable(lua_State* L, Callable* c, int mode) {
   LuaLang* lang = lang_of(L);
   int nargs = lua_gettop(L);
   int self_slots = mode == 1 ? 1 : 0;
-  if (nargs - self_slots != c->arity()) {
-    raise_error(L, "ArgumentError",
-                "wrong number of arguments (given " + std::to_string(nargs - self_slots) + ", expected " +
-                    std::to_string(c->arity()) + ")");
-  }
+  if (!arity_fits(c, nargs - self_slots)) raise_error(L, "ArgumentError", arity_message(c, nargs - self_slots));
   CurGuard cur(lang, L);
   Pending pend;
   try {
     std::vector<Var> args;
     args.reserve(static_cast<std::size_t>(nargs));
     for (int k = self_slots + 1; k <= nargs; ++k) args.push_back(lang->decode(L, k));
+    arity_pad(c, args);
     Var selfv;
     const Var* sp = nullptr;
     if (mode == 1) {
@@ -592,8 +610,39 @@ int obj_gc(lua_State* L) {
 
 int obj_tostring(lua_State* L) {
   LuaObj* o = static_cast<LuaObj*>(lua_touserdata(L, 1));
+  for (auto& m : o->ci->methods) {
+    if (m.first == "__str__") {
+      lua_settop(L, 1);
+      return run_callable(L, m.second, 1);
+    }
+  }
   lua_pushstring(L, (o->ci->name + " object").c_str());
   return 1;
+}
+
+Callable* method_of_operand(lua_State* L, int idx, const char* name) {  // the method NAME of the bound object at idx, else null
+  LuaObj* o = lang_of(L)->object_at(L, idx);
+  if (!o) return nullptr;
+  for (auto& m : o->ci->methods)
+    if (m.first == name) return m.second;
+  return nullptr;
+}
+
+int obj_arith(lua_State* L) {  // (a, b); upvalue 1: the index in kLuaOp; either operand is the object
+  const LuaOpName& op = kLuaOp[lua_tointeger(L, lua_upvalueindex(1))];
+  if (!op.rev) {  // unary: Lua passes the operand twice
+    lua_settop(L, 1);
+    if (Callable* c = method_of_operand(L, 1, op.fwd)) return run_callable(L, c, 1);
+  } else {
+    lua_settop(L, 2);
+    if (Callable* c = method_of_operand(L, 1, op.fwd)) return run_callable(L, c, 1);
+    if (Callable* c = method_of_operand(L, 2, op.rev)) {
+      lua_pushvalue(L, 1);  // (a, b) -> (b, a)
+      lua_remove(L, 1);
+      return run_callable(L, c, 1);
+    }
+  }
+  raise_error(L, "TypeError", std::string("attempt to perform arithmetic on a ") + luaL_typename(L, 1) + " value");
 }
 
 int live_index(lua_State* L) {  // (_G, key): a bound variable reads live
