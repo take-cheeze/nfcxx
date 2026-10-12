@@ -19,6 +19,7 @@
 
 require 'shellwords'
 require 'set'
+require_relative 'compact_output'
 
 # Parts split out by scripts/bc2cpp/split.rb, loaded in original definition order.
 require_relative 'irep'
@@ -1086,6 +1087,8 @@ if $PROGRAM_NAME == __FILE__
     warn "== hot-only: listed but not compiled (#{lost.size}) =="
     lost.map { |d| HotMethods.key(d) }.uniq.sort.each { |k| warn "  NOT_COMPILED #{k}" }
   end
+
+  CompactOutput.capture_stdout if ENV['BC2CPP_COMPACT_OUTPUT'] == '1'
 
   # SITE_PROFILE (ADR 0298): opt-in counters on by-name dispatch; unset leaves stdout untouched.
   if (site_profile_dir = ENV['BC2CPP_SITE_PROFILE']) && !site_profile_dir.empty?
