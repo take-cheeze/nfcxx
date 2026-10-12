@@ -1482,3 +1482,8 @@ fallback test. See [ADR 0423](../../docs/adr/0423-optcarrot-ir-tile-lut.md).
 The bootstrap method snapshots belong to the probe's single mruby VM per
 process. Embedding this helper in a process with multiple independent VMs
 requires per-VM storage before this protocol can be reused.
+
+The nightly Optcarrot shard runs the native check after its first ordinary
+probe benchmark, reusing that interpreter build and its exact ABI flags and
+regexp gem. Missing native libraries fail the check; an explicit direct
+IR-only invocation without `MRUBY_BUILD` reports the native half as skipped.
