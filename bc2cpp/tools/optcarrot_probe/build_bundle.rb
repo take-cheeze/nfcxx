@@ -102,7 +102,7 @@ File.open(out_file, 'w') do |out|
       source = OptcarrotPPUCore.transform(source)
     end
     if f.end_with?('/optcarrot/ppu.rb') && ENV['OPTCARROT_NO_SHIMS'] != '1' && ENV['OPTCARROT_ORIGINAL_LUT'] != '1'
-      source = OptcarrotPPULUT.transform(source)
+      source = ENV['OPTCARROT_IR_LUT'] == '1' ? OptcarrotPPULUT.extract(source) : OptcarrotPPULUT.transform(source)
     end
     source.each_line do |line|
       next if line =~ /^\s*require_relative\b/
