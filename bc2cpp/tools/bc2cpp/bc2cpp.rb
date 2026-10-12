@@ -131,6 +131,7 @@ require_relative 'codegen_constant_object'
 require_relative 'codegen_unlisted_class_call'
 require_relative 'codegen_arg_shapes'
 require_relative 'codegen_computed_send'
+require_relative 'bytecode_ir_cpu_dispatch'
 require_relative 'codegen_block_core_direct'
 require_relative 'codegen_guarded_block_inline'
 require_relative 'codegen_core_exact_direct'
@@ -184,6 +185,11 @@ if $PROGRAM_NAME == __FILE__
   registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
     struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
     declared_modules, alias_sites = build_registry(ireps, root_label)
+  if ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' && BytecodeIR::CPUDispatch.apply(ireps, registry, fixed_core: ENV['BC2CPP_OPTCARROT_FIXED_CORE'] == '1')
+    registry, superclass_of, container_constants, included_modules, prepended_modules, unknown_mixins,
+      struct_member_lists, class_decls, walked_ireps, module_body_ivar_labels, constant_assignment_sites,
+      declared_modules, alias_sites = build_registry(ireps, root_label)
+  end
   # ESCAPE_ANALYSIS (ADR 0316): callees are every definition of a name, so the registry is copied before
   # the core filtering below drops the methods the build keeps interpreted.
   escape_registry = EscapeAnalysis.enabled? ? registry.transform_values(&:dup) : nil
