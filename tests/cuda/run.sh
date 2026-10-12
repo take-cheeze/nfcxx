@@ -79,4 +79,7 @@ fi
 left=$(find "$root/tests/cuda" "$out" -name .nfcxx 2>/dev/null || true)
 if [ -z "$left" ]; then echo "no .nfcxx left in the tree: ok"; else echo "no .nfcxx left in the tree: FAIL: $left"; fail=1; fi
 
+# 4. The launch path (llama.cpp features): tests/cuda/launch/run.sh.
+"$root/tests/cuda/launch/run.sh" || fail=1
+
 exit $fail

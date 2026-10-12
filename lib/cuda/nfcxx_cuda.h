@@ -36,6 +36,9 @@ inline const uint3 threadIdx{0, 0, 0};
 inline const uint3 blockIdx{0, 0, 0};
 inline const dim3 blockDim{1, 1, 1};
 inline const dim3 gridDim{1, 1, 1};
+// The block's dynamic shared memory (`extern __shared__ T x[]`, scripts/cuda-rewrite.rb): a placeholder for the host
+// copy of a kernel, which never runs. The device side lowers the call to the address of the .extern .shared symbol.
+inline void *__nfcxx_dynshared_addr(void) { return nullptr; }
 
 // One entry per kernel of a translation unit: the host function and the entry name of its device code.
 struct __nfcxx_kernel_entry {
@@ -104,5 +107,36 @@ inline cudaError_t __nfcxx_cuda_launch(void (*kernel)(P...), dim3 grid, dim3 blo
   std::tuple<P...> packed(static_cast<P>(args)...);
   return __nfcxx_cuda_launch_impl(device, grid, block, shmem, stream, packed, std::index_sequence_for<P...>());
 }
+
+// The runtime's host-address calls (cudaFuncSetAttribute, cudaLaunchKernel) do not know the kernels: they are
+// loaded with cudaLibraryLoadData, so the host address is looked up in the registry first. The macros only rewrite
+// direct calls in the source (llama.cpp calls cudaFuncSetAttribute on kernel addresses); cudaLaunchKernelEx goes
+// through the CUDA headers' template and is not covered.
+template <typename F>
+inline cudaError_t __nfcxx_cuda_func_set_attribute(F func, cudaFuncAttribute attr, int value) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  int device = 0;
+  cudaError_t err = cudaGetDevice(&device);
+  if (err != cudaSuccess) return err;
+  return cudaKernelSetAttributeForDevice(kernel, attr, value, device);
+}
+
+template <typename F>
+inline cudaError_t __nfcxx_cuda_launch_raw(F func, dim3 grid, dim3 block, void **args, std::size_t shmem,
+                                           cudaStream_t stream) {
+  cudaKernel_t kernel = __nfcxx_find_kernel(reinterpret_cast<const void *>(func));
+  if (kernel == nullptr) return cudaErrorInvalidDeviceFunction;
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid;
+  cfg.blockDim = block;
+  cfg.dynamicSmemBytes = shmem;
+  cfg.stream = stream;
+  return cudaLaunchKernelExC(&cfg, reinterpret_cast<const void *>(kernel), args);
+}
+
+#define cudaFuncSetAttribute(func, attr, value) __nfcxx_cuda_func_set_attribute((func), (attr), (value))
+#define cudaLaunchKernel(func, grid, block, args, shmem, stream) \
+  __nfcxx_cuda_launch_raw((func), (grid), (block), (args), (shmem), (stream))
 
 #endif  // NFCXX_CUDA_H

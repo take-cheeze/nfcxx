@@ -254,6 +254,52 @@ def template_site(name, targs)
 end
 
 # The template launches of a source: [name, targs] for each `<<<` that follows a template argument list.
+# The nearest `template <...>` header before position i (the function or class the launch is in): if the template
+# arguments of a launch name one of its parameters, that parameter's name; else nil. A launch like that needs an
+# instance that only the instantiation fixes, and the wrapper is a concrete function (see template_site).
+def dependent_on_template(text, i, targs)
+  j = i - 1
+  while j >= 0
+    if word_at?(text, j, "template")
+      k = j + 8
+      k += 1 while k < text.length && white?(text[k])
+      if text[k] == "<"
+        close = matching_angle(text, k)
+        if close && close < i
+          params = split_top(text[(k + 1)...close])
+          names = params.map { |pr| pr.split("=")[0] }.map { |pr| tokens_of(pr).last }.compact
+          used = tokens_of(targs)
+          hit = names.find { |nm| used.include?(nm) }
+          return hit unless hit.nil?
+          return nil
+        end
+      end
+    end
+    j -= 1
+  end
+  nil
+end
+
+# Index of the `>` closing the `<` at s[open] (nesting counted), or nil.
+def matching_angle(s, open)
+  depth = 0
+  k = open
+  while k < s.length
+    e = skip_literal(s, k)
+    if e
+      k = e
+      next
+    end
+    depth += 1 if s[k] == "<"
+    if s[k] == ">"
+      depth -= 1
+      return k if depth == 0
+    end
+    k += 1
+  end
+  nil
+end
+
 def template_launches(text)
   found = []
   i = 0
@@ -359,6 +405,9 @@ def rewrite(text, orig)
       lines = text[i..close_args].count("\n")
       kernel = name
       if targs
+        dep = dependent_on_template(text, i, targs)
+        refuse("template launch of #{name}<#{targs}> depends on the template parameter #{dep} of the enclosing template: " \
+               "the device image would need that instance, which is not built yet (at line #{line})") unless dep.nil?
         kernel = template_site(name, targs)
       end
       if targs
@@ -459,6 +508,7 @@ typedef unsigned long ulong;
 #endif
 #define __shared__ static
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void *__nfcxx_dynshared_addr(void);
 PRELUDE
 
 # CUDA's vector types (uchar4, uint2, float3, ...) come from the CUDA headers, which the device unit does not
@@ -827,6 +877,116 @@ def device_tu(text)
   [out, kernels.uniq]
 end
 
+# __launch_bounds__(...) is a compile hint (register and occupancy limits). The launch path does not use it, so it
+# is removed with its argument list, host and device units alike. Literals and comments are skipped.
+def strip_launch_bounds(s)
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    if word_at?(s, i, "__launch_bounds__")
+      j = i + "__launch_bounds__".length
+      j += 1 while j < s.length && white?(s[j])
+      if j < s.length && s[j] == "("
+        close = matching_paren(s, j)
+        refuse("unterminated __launch_bounds__") if close.nil?
+        # keep the newlines inside the argument list, so line numbers do not move
+        out << ("\n" * s[i..close].count("\n"))
+        i = close + 1
+        next
+      end
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
+# Dynamic shared memory: `extern __shared__ T name[];` has no size at compile time (the launch gives the bytes), so
+# the declaration is removed and each `name[...]` becomes a subscript of a pointer from __nfcxx_dynshared_addr(),
+# the block's dynamic shared memory. The device side lowers that call to the address of a module-level
+# `.extern .shared` symbol (the emitter's job); the host copy has a placeholder (lib/cuda/nfcxx_cuda.h). A pointer
+# subscript has no bounds check, which is right: the size is only known at launch.
+def dynamic_shared_rewrite(s)
+  names = {}
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    if word_at?(s, i, "extern")
+      j = i + 6
+      j += 1 while j < s.length && white?(s[j])
+      if word_at?(s, j, "__shared__")
+        k = j + 10
+        semi = s.index(";", k)
+        refuse("extern __shared__ declaration without ';'") if semi.nil?
+        decl = s[k...semi].strip
+        m = decl.rindex("[")
+        refuse("extern __shared__ #{decl}: only an unsized array (T name[]) is dynamic shared memory") unless m && decl.end_with?("]") && decl[(m + 1)...-1].strip.empty?
+        head = decl[0...m].strip
+        q = head.length
+        q -= 1 while q > 0 && ident_char?(head[q - 1])
+        name = head[q...head.length]
+        type = head[0...q].strip
+        refuse("extern __shared__ #{decl}: no type or name") if name.empty? || type.empty?
+        names[name] = type
+        out << ("\n" * s[i..semi].count("\n"))
+        i = semi + 1
+        next
+      end
+    end
+    out << s[i]
+    i += 1
+  end
+  return out if names.empty?
+  replace_dynamic_uses(out, names)
+end
+
+# Replaces the uses `name[` of the dynamic shared arrays. A member (`.name`, `->name`) is not a use.
+def replace_dynamic_uses(s, names)
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    if ident_char?(s[i]) && !(s[i] >= "0" && s[i] <= "9")
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      tok = s[i...j]
+      q = i - 1
+      q -= 1 while q >= 0 && white?(s[q])
+      member = q >= 0 && (s[q] == "." || (s[q] == ">" && q > 0 && s[q - 1] == "-"))
+      n = j
+      n += 1 while n < s.length && white?(s[n])
+      if names.key?(tok) && !member && s[n] == "["
+        out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
+        i = j
+        next
+      end
+      out << tok
+      i = j
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
 def usage
   $stderr.puts "usage: cuda-rewrite.rb [--device [--kernels=FILE]] FILE.cu"
   exit(2)
@@ -848,6 +1008,7 @@ ARGV.each do |a|
 end
 usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
+text = dynamic_shared_rewrite(strip_launch_bounds(text))
 $expanded = expand_includes(text, File.dirname(path), 0)
 if device
   dev, kernels = device_tu($expanded)
