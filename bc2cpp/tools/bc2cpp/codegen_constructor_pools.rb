@@ -17,7 +17,8 @@ require 'set'
 # D becomes a candidate, in the shape ENTRY_ARG_CALLSITE_PROOF's candidates have so the numeric, Fixnum and
 # class pools read it unchanged, only when nothing else can enter it:
 #
-#   * a `new` whose receiver is not provably a constant or rooted could build any class. It withdraws every D
+#   * a `new` whose receiver is not provably a constant, rooted or a parameter of class constants (CLASS_OBJECT_ARGS,
+#     ADR 0416) could build any class. It withdraws every D
 #     it can get past ENTER for (mand <= argc <= mand + opt, any count with a rest parameter), all of them when
 #     the count is unknown (splat, keyword);
 #   * no `:new`/`:initialize` Symbol, keyword or computed name (an `alias_method :x, :initialize` in a class
@@ -311,6 +312,11 @@ class CodeGen
     site = [irep, idx, insn.reg.to_i, argc, owner]
     kw_argc = constructor_keyword_argc(insn) if argc.nil?
     classes = constructor_named_classes(irep, idx, insn) unless insn.op.start_with?('SS')
+    if classes.nil? && !insn.op.start_with?('SS') && (via_param = class_object_receiver_classes(irep, idx, insn))
+      # CLASS_OBJECT_ARGS (ADR 0416): the receiver is a parameter every caller passes class constants for.
+      classes = via_param
+      stats[:param_named] += 1
+    end
     if classes
       targets = constructor_targets(classes)
       stats[targets.empty? ? :named_no_ruby_init : :named] += 1
