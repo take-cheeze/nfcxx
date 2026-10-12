@@ -1679,9 +1679,21 @@ path = nil
 # include the same header with a kernel must not define the same host symbol. The embedded registration of each
 # unit refers to its own host copy. Literals and comments are skipped; only the whole identifier is replaced.
 # The storage keyword a host copy gets: `static`, unless the declaration already has one (then the qualifier goes).
+# The check is on the declaration so far (from the last ; { or }), so `static constexpr __device__ int f()` keeps
+# its one storage class.
 def host_storage(out, kw)
-  head = out.rstrip
-  already = head.end_with?("static") && (head.length == 6 || !ident_char?(head[-7]))
+  start = [out.rindex(";"), out.rindex("{"), out.rindex("}")].compact.max
+  decl = start ? out[(start + 1)..-1] : out
+  already = false
+  word = ""
+  (decl + " ").each_char do |c|
+    if ident_char?(c)
+      word << c
+    else
+      already = true if word == "static"
+      word = ""
+    end
+  end
   already ? "" : kw
 end
 
