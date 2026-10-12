@@ -122,7 +122,7 @@ Dir.mktmpdir do |dir|
   plain_getconst = emit.call('read_bare', 'GETCONST', 'ALIASED', {})
   check.call('an unproven bare GETCONST keeps the ordinary lookup',
              !plain_getconst.include?('mrb_fixnum_value') &&
-               (plain_getconst.include?('mrb_const_get') || plain_getconst.include?('bc2cpp_const_try')))
+               (plain_getconst.include?('mrb_const_get') || plain_getconst.include?('bc2cpp_const_scope_')))
 
   plain_getmcnst = emit.call('read_scoped', 'GETMCNST', 'SHOW_MESSAGE', {})
   check.call('an unproven GETMCNST keeps the ordinary lookup',
