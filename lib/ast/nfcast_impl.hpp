@@ -105,7 +105,7 @@ struct Frame {
   Rets* rets;   // where `return` puts its values
   Frame* prev;
   bool native_below;  // a native function (pcall, say) sits between this frame and PREV
-  bool inlined;       // the body of a small function run by an inlined call node: no call_closure behind it (nfcast_inline.inc)
+  bool inlined = false;  // the body of a small function run by an inlined call node: no call_closure behind it (nfcast_inline.inc)
   int line;     // the line the function is at, for error messages and tracebacks
 };
 

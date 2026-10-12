@@ -476,7 +476,6 @@ void call_closure(State& S, Closure* cl, Value* args, int n, Rets& out, bool fro
   fr.rets = &out;
   fr.prev = S.cur;
   fr.native_below = from_native;
-  fr.inlined = false;
   fr.line = p->linedefined;
   S.cur = &fr;
   ++S.depth;
