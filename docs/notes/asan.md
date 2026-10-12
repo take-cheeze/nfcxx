@@ -8,7 +8,7 @@ EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`de
 ## qbe backend (default)
 
 `nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
-the `nfcxx-asan` branch of take-cheeze/cproc, which `3rd/cproc` is pinned to, then
+the `nfcxx-asan-unwind` branch of take-cheeze/cproc (on top of `nfcxx-asan`), which `3rd/cproc` is pinned to, then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
@@ -18,8 +18,9 @@ object's 8-byte granule and 32 zero bytes into the same data item, and the unit'
 `.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
-leading redzone (an access before the object is not reported); thread-local globals get none; objects over 16-byte
-alignment, variable-length arrays and `alloca` get no redzones. Use after scope is covered (next section). Not yet:
+leading redzone (an access before the object is not reported); thread-local globals get none. Over-aligned objects,
+variable-length arrays and `alloca` have redzones too (`asanalloc`'s over-aligned path, `asandynalloc`). Use after scope is
+covered (next section). Not yet:
 use-after-return (the `ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block
 copies and `va_arg` loads are checked as ordinary accesses.
 
@@ -28,13 +29,22 @@ copies and `va_arg` loads are checked as ordinary accesses.
 A block-scoped stack object (a local, a for-init declaration, a compound literal) is poisoned when its block is left and
 unpoisoned again when its declaration runs, so a loop that enters the block again is addressable each time. The poison is
 `__asan_poison_stack_memory`, the marker gcc's own instrumentation uses, so the report is `stack-use-after-scope` on both
-backends and the tests need no `ASAN-QBE:` line. Covered ways out of a block (cproc, take-cheeze/cproc `nfcxx-asan`, `qbe.c`):
+backends and the tests need no `ASAN-QBE:` line. Covered ways out of a block (cproc, take-cheeze/cproc `nfcxx-asan-unwind`, `qbe.c`):
 
 - the normal end, after the join point and before the scope is deleted (`asanend`);
 - `break` and `continue` of C input, cproc's own statements (`asanleave`: the objects the loop or switch body has declared);
 - `goto`: a backward goto poisons the objects of the blocks it leaves; a forward goto records the blocks open at it, and its
   label poisons the ones it leaves (`asangoto`, `asanlabel`). EDG lowers every C++ `break`, `continue` and switch exit to a
   `goto __Tn` to a label after the statement, so C++ takes this path, not `asanleave`.
+- a `setjmp` call (`setjmp`, `_setjmp`, `sigsetjmp`, `__sigsetjmp`, the names glibc and EDG use): the call returns twice, and a
+  longjmp to it skips the blocks between the two. The longjmp is not seen, so the return is where the skipped objects are
+  poisoned: the call's block is split, and a pad block that both returns pass through poisons every object of the function
+  whose block is not open at the call (`asansetjmp`, filled by `asanfinish` once all objects are known). Such an object is out
+  of scope at the call (a block's objects are out of scope outside it), so no live object is poisoned, and the open blocks are
+  left alone. A block entered again unpoisons its objects at their declaration. EDG lowers a C++ `try` to a `_setjmp` and a
+  `throw` to a longjmp to it. The poison is at the return and not at the throw because EDG's runtime runs the destructors of
+  the objects being left while it unwinds, and they still use them. A longjmp or throw from a called function that lands in
+  this frame is covered for this frame's objects too (not in the test suite).
 
 Jumps into a block unpoison the objects of the blocks they enter, since C++ allows a jump past a declaration without an
 initializer and the block may have been left by an earlier pass: a goto's label and a `case` or `default` label
@@ -44,16 +54,29 @@ Tests: `tests/asan/cases/use_after_scope.cpp`, `scope_break_escape.cpp`, `scope_
 `scope_continue_escape.cpp`, `scope_compound_escape.cpp` (reports, with the gcc wording), and the `CLEAN` cases
 `scope_reenter.cpp` (a block entered again), `scope_break.cpp` (break, continue, do/while), `scope_return.cpp`,
 `scope_goto.cpp` (backward and forward goto, a jump into a block past a declaration) and `scope_switch.cpp` (a case label
-past a declaration of the switch body).
+past a declaration of the switch body). The setjmp return: `scope_throw_escape.cpp` (a C++ throw in the same frame, report
+`ASAN-ONLY: qbe`: gcc reports nothing, since its scope poison does not run on the EDG setjmp/longjmp path) and
+`scope_longjmp_escape.c` (a C longjmp, `ASAN-ONLY: qbe` for the same reason, gcc's poison does not run on a longjmp); the
+`CLEAN` cases `scope_throw_clean.cpp` (a destructor of a left object runs during the unwinding, an object of the enclosing
+block is read in the handler), `scope_throw_nomatch.cpp` (an inner catch that does not match, the outer one runs),
+`scope_longjmp_clean.c` (the block a longjmp leaves, the enclosing block read after the landing) and `scope_longjmp_vla.c`
+(a VLA and a switch case around a setjmp in a loop).
 
 Limits, all false negatives (nothing is reported that is valid, the missing check is what can be missed):
 
-- A longjmp or a C++ throw (EDG's setjmp ABI) that leaves a block to a handler in the same frame runs no poison, so an access
-  through a pointer kept from that block is not reported.
+- A longjmp or a C++ throw that leaves a block to a `setjmp` in the same frame is covered only on the qbe backend (above);
+  the false negatives left are these, all of them unreported accesses through a pointer kept from an object that was
+  out of scope:
+  - an exit that leaves a called function's frame (a longjmp or a throw from a callee): the callee's objects are not
+    poisoned, since libasan unpoisons the stack a longjmp skips (above). Checked: a pointer to a callee's local, read after
+    the landing, is not reported (cross-frame, out of scope). The landing frame's own objects are covered (the setjmp return
+    does not depend on where the longjmp came from).
+  - a `setjmp` under another name (through a function pointer, `__builtin_setjmp`, a wrapper): there is no pad, so the blocks
+    an exit to it leaves are not poisoned.
+  - a `setjmp` on the gcc backend: gcc's scope poison does not run on these paths (`ASAN-ONLY: qbe`).
 - Use after return (a pointer to a local of a block that `return` left, read after the function returned) needs a fake
   stack; not done. `return` itself poisons nothing.
-- Variable-length arrays and `alloca` have no redzones, so they get no scope poison either (the other milestone, `asan-plan.md`).
-- Objects over 16-byte alignment get none.
+- `alloca` lives until its function returns, so it is never scope-poisoned. A variable-length array is, as the objects above.
 
 The default (non-ASan) output is byte-identical: every hook is gated on `asanon`, and the scope fields are only set and read
 under it.
@@ -77,7 +100,7 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-unwind`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
