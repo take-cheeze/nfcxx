@@ -114,6 +114,7 @@ module NomethodReviewed
 end
 
 NOMETHOD_REVIEWED = Set[
+  "Game.singleton#rpg2003_database? -> rpg2003?",
   "Game.singleton#stat_of -> agi",
   "Game.singleton#stat_of -> atk",
   "Game.singleton#stat_of -> def",

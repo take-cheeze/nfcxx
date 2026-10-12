@@ -78,6 +78,8 @@ $VERBOSE = nil
 load File.join(MRBLIB, 'lcf.rb')
 load File.join(MRBLIB, 'schema.rb')
 load File.join(MRBLIB, 'lcf_file.rb')
+load File.join(MRBLIB, 'save_typed.rb')
+load File.join(MRBLIB, 'save_typed_accessors.rb')
 module LCF
   def self.cp932_to_utf8(s) = s.dup.force_encoding('Windows-31J').encode('UTF-8')
   def self.utf8_to_cp932(s) = s.encode('Windows-31J').b
