@@ -1205,6 +1205,21 @@ HALF_LANE = HALF_LANE.sub("__nfcxx_hlane(unsigned short a, unsigned short b, int
   "__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __float2half(__half2float(a) + __half2float(b)) : __float2half(__half2float(a) * __half2float(b)); }")
 HALF2_PAIR = HALF2_TYPE + HALF_LANE
 
+# __hmax2: the lane rule of __hmax (NaN loses; a zero tie gives +0 for mixed signs), defined once per unit.
+HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
+  "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
+  "#endif\n"
+# bf16 as a 16-bit integer (the upper half of a float, round to nearest even); nv_bfloat162 packs two of them as __half2
+# does. Operators on nv_bfloat16 are integer operators here, as for half: a unit that uses them is not handled correctly.
+BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
+  "typedef unsigned short nv_bfloat16;\n" \
+  "typedef unsigned int nv_bfloat162;\n" \
+  "typedef unsigned short __nv_bfloat16;\n" \
+  "typedef unsigned int __nv_bfloat162;\n" \
+  "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
+  "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return (unsigned short)((x >> 16) | 0x40u); x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
+  "#endif\n"
+
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
   "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
@@ -1264,6 +1279,16 @@ BUILTIN_DEFS = {
   "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { return (a & 0xffffu) | ((b & 0xffffu) << 16); }\n",
   "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { return (a >> 16) | ((b >> 16) << 16); }\n",
   "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float((unsigned short)(h >> 16)); }\n",
+  "__low2float" => HALF2_TYPE + HALF_CORE + "static inline float __low2float(__half2 h) { return __half2float((unsigned short)(h & 0xffffu)); }\n",
+  "__hmax2" => HALF2_TYPE + HALF_CORE + HMAXL + "static inline __half2 __hmax2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hmaxl((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu)) | ((unsigned)__nfcxx_hmaxl((unsigned short)(a >> 16), (unsigned short)(b >> 16)) << 16); }\n",
+  "nv_bfloat16" => BF16_CORE,
+  "nv_bfloat162" => BF16_CORE,
+  "__nv_bfloat16" => BF16_CORE,
+  "__nv_bfloat162" => BF16_CORE,
+  "__float2bfloat16" => BF16_CORE,
+  "__bfloat162float" => BF16_CORE,
+  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return (unsigned short)(h & 0xffffu); }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return (unsigned short)(h >> 16); }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 1) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 1) << 16); }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 0) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 0) << 16); }\n",
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
