@@ -42,6 +42,7 @@ require_relative 'nomethod_reviewed'
 require_relative 'proven_miss_reviewed'
 require_relative 'hot_methods'
 require_relative 'core_methods'
+require_relative 'enumerator_model'
 
 require_relative 'integer_constants'
 require_relative 'integer_constant_ranges'
@@ -200,6 +201,8 @@ if $PROGRAM_NAME == __FILE__
   # ADR 0338: an interpreted core replacement still intercepts inherited lookup.
   CodeGen.core_result_opaque_defs = CoreRubyResults.opaque_definitions(registry, core_ineligible, ireps, alias_sites, CodeGen.core_aliases)
   CodeGen.core_result_installed_names = CoreRubyResults.installed_names(ireps)
+  # ENUMERATOR_MODEL (ADR 0418): read before the core filtering below drops the interpreted Kernel#to_enum.
+  CodeGen.enumerator_model = EnumeratorModel.analyze(registry, ireps, alias_sites)
   core_stale_refusals = CoreMethods.stale(registry, ireps, core_refused)
   core_bytecode = registry.values.flatten.count { |d| d.irep && CoreDefs.core_source?(ireps.fetch(d.irep).file) }
   core_all_defs = registry.values.flatten.select { |d| d.irep && d.core }
@@ -891,6 +894,16 @@ if $PROGRAM_NAME == __FILE__
       StableClassConstants.analyze_native(ireps, native_paths, foreign_ruby_srcs)
   end
   warn "== stable class constants (CONST_SITE_CACHE): #{CodeGen.stable_class_constants.size} =="
+  # ENUMERATOR_MODEL (ADR 0418): the `Enumerator` constant Kernel#to_enum reads, proven apart from StableClassConstants (mruby's
+  # chain/lazy gems reopen the class, which that analysis counts as a second definition).
+  if CodeGen.enumerator_model
+    unstable = EnumeratorModel.constant_unstable_reason(ireps, root_label, native_paths, foreign_ruby_srcs)
+    CodeGen.enumerator_model.constant_stable = unstable.nil?
+    CodeGen.enumerator_model.reason ||= unstable
+  end
+  warn "== enumerator model (ADR 0418): to_enum direct #{CodeGen.enumerator_model&.to_enum_direct ? 'proven' : 'refused'}" \
+       "#{CodeGen.enumerator_model&.reason ? " (#{CodeGen.enumerator_model.reason})" : ''}, Enumerator constant " \
+       "#{CodeGen.enumerator_model&.constant_stable ? 'stable' : 'not stable'} =="
   # NATIVE_SINGLETON_CALL (ADR 0416): the native and outside-Ruby sources the proof must account for.
   CodeGen.native_singleton_inputs = native_paths && foreign_ruby_srcs ? { native: native_paths, ruby: foreign_ruby_srcs } : nil
   # COMPUTED_SEND_EXPANSION (ADR 0303): frozen Symbol tables a computed-name send may index.
@@ -1520,6 +1533,7 @@ if $PROGRAM_NAME == __FILE__
   puts ''
   print gen.emit_structs
   print gen.emit_ary_entry_helper(compiled)
+  print gen.emit_to_enum_helper(compiled)
   print gen.emit_bool_check_helper(compiled)
   print gen.emit_native_core_helpers(compiled)
   print gen.emit_numeric_proof_helpers(compiled)

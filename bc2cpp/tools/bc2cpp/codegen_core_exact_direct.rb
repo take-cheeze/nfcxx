@@ -32,8 +32,11 @@ module CoreExactDirect
     return nil unless core_extend_enabled? && !@call_block_expr && block_core_world && @native_name_sources
 
     site = exact_core_site_for(recv, name)
-    spec = site && BlockCoreDirectFallback::RECEIVERS[site[:klass]]
-    return nil unless spec && tail == dynamic_dispatch_line(d, recv, name, argv)
+    return nil unless site && tail == dynamic_dispatch_line(d, recv, name, argv)
+    return to_enum_direct_line(d, recv, name, argv, site) if EnumeratorModel::NAMES.include?(name)
+
+    spec = BlockCoreDirectFallback::RECEIVERS[site[:klass]]
+    return nil unless spec
 
     target = core_exact_target(site[:klass], spec[:chain], name, argv.size, private_ok: site[:implicit_self])
     return nil unless target
@@ -42,6 +45,45 @@ module CoreExactDirect
     args, = direct_call_args(target, argv, impl)
     "#{CORE_EXACT_DIRECT_NOTE}#{name} -- proven #{site[:klass]} receiver: calls the compiled #{target.owner}##{target.name} " \
       "body, no dispatch\n  r#{d} = #{impl}(M, #{([recv] + args).join(', ')});\n"
+  end
+
+  TO_ENUM_DIRECT_NOTE = '// TO_ENUM_DIRECT :'
+  TO_ENUM_DIRECT_CLASSES = %w[Array Hash Range String].freeze
+
+  # TO_ENUM_DIRECT (ADR 0418): `to_enum(:meth, *args)` / `enum_for` on a receiver proven exactly an Array, Hash, Range or
+  # String builds the Enumerator the way Kernel#to_enum's body does, `Enumerator.new self, meth, *args`, without looking
+  # the name up. EnumeratorModel proves Kernel#to_enum is the program's only to_enum/enum_for and that nothing replaces
+  # the construction chain; the constant must be stable and no runtime installer may name the involved methods.
+  def to_enum_direct_line(d, recv, name, argv, site)
+    model = self.class.enumerator_model
+    return nil unless model&.to_enum_direct && TO_ENUM_DIRECT_CLASSES.include?(site[:klass]) && argv.size <= 8
+    return nil unless model.constant_stable
+    return nil if (EnumeratorModel::NAMES + EnumeratorModel::CONSTRUCTION_NAMES).any? { |n| devirt_blocked_name?(n) }
+
+    # Only the names an installer creates or replaces matter: `alias_method :_old_initialize, :initialize` copies, it does not install `initialize`.
+    installed = symbol_installed_destinations
+    return nil unless installed && (EnumeratorModel::NAMES + EnumeratorModel::CONSTRUCTION_NAMES).none? { |n| installed.include?(n) }
+
+    meth = argv.empty? ? 'mrb_symbol_value(mrb_intern_lit(M, "each"))' : argv.first
+    vector = [recv, meth, *argv.drop(1)]
+    "#{TO_ENUM_DIRECT_NOTE}#{name} -- proven #{site[:klass]} receiver: builds Enumerator.new(self, meth, *args) as " \
+      "Kernel#to_enum does, no lookup of #{name}\n" \
+      "  { mrb_value bc2cpp_te_argv[] = { #{vector.join(', ')} }; " \
+      "r#{d} = bc2cpp_to_enum(M, #{vector.size}, bc2cpp_te_argv); }\n"
+  end
+
+  # The helper TO_ENUM_DIRECT sites call, emitted only when some compiled code does. `mrb_class_get` is the constant
+  # read of the body's `Enumerator` (a TypeError/NameError exactly where the read would raise), `mrb_obj_new` is
+  # Class#new without a block: allocate, then `initialize(self, meth, *args)`.
+  def emit_to_enum_helper(compiled)
+    return '' unless compiled.any? { |m| m[:code].include?('bc2cpp_to_enum(') }
+
+    <<~CPP
+      static inline mrb_value bc2cpp_to_enum(mrb_state* M, mrb_int argc, const mrb_value* argv) {
+        return mrb_obj_new(M, mrb_class_get(M, "Enumerator"), argc, argv);
+      }
+
+    CPP
   end
 
   # FLOW_CORE_DIRECT (ADR 0323): the direct call of an exact-receiver site that would otherwise get a guard

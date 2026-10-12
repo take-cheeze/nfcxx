@@ -1718,7 +1718,7 @@ class CodeGen
         return native_code if native_code
       end
 
-      # NATIVE_SINGLETON_CALL (ADR 0416): `File.exist?` and the other native singleton functions of a stable
+      # NATIVE_SINGLETON_CALL (ADR 0418): `File.exist?` and the other native singleton functions of a stable
       # constant, called through a per-site method cache instead of a by-name send.
       if !self_implicit && irep && constant_site_idx && @closed_world &&
          %w[SEND0 SEND].include?(irep.instructions[constant_site_idx].op)
@@ -1794,6 +1794,8 @@ class CodeGen
       line = with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }
       # CORE_EXACT_DIRECT: no dispatch is left, so the site is not a dynamic one to diagnose.
       return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
+      # TO_ENUM_DIRECT (ADR 0418): the Enumerator is built in place, the checked arm's else is a guard violation.
+      return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
 
       "#{diag}#{note}#{miss}  #{line}"
     end
