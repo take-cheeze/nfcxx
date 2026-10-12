@@ -42,6 +42,50 @@ check.call('an unrelated branch does not hide the dominating write', defs_of.cal
 check.call('MOVE is followed to its source definitions', defs_of.call(across, 4, '4') == [0])
 check.call('follow_moves: false stops at the MOVE', defs_of.call(across, 4, '4', follow_moves: false) == [3])
 
+# Repeated proofs must reuse the walk without sharing mutable answers or caller-owned state.
+cached = program.call(across.instructions.map(&:source))
+walks = 0
+original_walk = cached.method(:compute_reaching_definitions)
+cached.define_singleton_method(:compute_reaching_definitions) do |*args, **opts|
+  walks += 1
+  original_walk.call(*args, **opts)
+end
+reg = +'4'
+first = cached.reaching_definitions(4, reg)
+first.first.reg.replace('99')
+first.first.index = 99
+first.clear
+reg.replace('2')
+second = cached.reaching_definitions(4, '4')
+check.call('cached definitions and register keys survive caller mutation',
+           second.map { |d| [d.index, d.reg] } == [[0, '2']] && walks == 1)
+cached.reaching_definitions(4, '4', max_states: 0)
+cached.reaching_definitions(4, '4', max_states: 0)
+check.call('a refused query is cached and keeps its state cap separate', walks == 2)
+why = {}
+cached.reaching_definitions(4, '4', max_states: 0, refusal: why)
+check.call('refusal diagnostics are still populated after a cached refusal', why[:cause] == :state_cap && walks == 3)
+mutable_opaque = Set['4']
+check.call('a mutable opaque set refuses its register', cached.reaching_definitions(4, '4', opaque_regs: mutable_opaque).nil?)
+mutable_opaque.clear
+check.call('changing a mutable opaque set changes the answer',
+           cached.reaching_definitions(4, '4', opaque_regs: mutable_opaque)&.first&.index == 0)
+check.call('frozen opaque sets are part of the query key',
+           cached.reaching_definitions(4, '4', opaque_regs: Set['4'].freeze).nil? &&
+           cached.reaching_definitions(4, '4', opaque_regs: Set['2'].freeze).nil? &&
+           cached.reaching_definitions(4, '4', opaque_regs: Set['3'].freeze)&.first&.index == 0)
+
+dominance_walks = 0
+original_dominance = cached.method(:compute_write_dominates?)
+cached.define_singleton_method(:compute_write_dominates?) do |*args, **opts|
+  dominance_walks += 1
+  original_dominance.call(*args, **opts)
+end
+2.times { cached.write_dominates?(0, 3, '2') }
+2.times { cached.write_dominates?(1, 3, '2') }
+check.call('dominance caches both true and false answers', dominance_walks == 2 && cached.write_dominates?(0, 3, '2'))
+check.call('dominance accounts for opaque registers', !cached.write_dominates?(0, 3, '2', opaque_regs: Set['2'].freeze))
+
 # Loop: x defined before, redefined in the body; the use in the header sees both.
 loop_ = program.call([
   insn(0, 'LOADNIL', 'R2 (nil)'), insn(2, 'JMPNOT', "R1\t10"), insn(5, 'LOADI_1', 'R2 (1)'),
