@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# nfcxx-cuda: an nvcc-compatible front for nfcxx, for CMake's CMAKE_CUDA_COMPILER (llama.cpp's CUDA build).
+#
+#   Probes are answered by the real nvcc of the toolkit (CUDA_HOME): CMake's compiler identification
+#   (`--version`, `-V`, the CMakeCUDACompilerId.cu compile), and llama.cpp's host-compiler probe (`.c` input
+#   with `-Xcompiler --version`). They have no effect on the build, and only CMake needs them to be nvcc's.
+#   Compiles (`-c file.cu`) go to nfcxx, which compiles the device code of the file into the host object.
+#   Links of host programs do not use this wrapper (CMake links CUDA-free targets with CXX).
+#
+# Flags llama.cpp passes (ggml/src/ggml-cuda/CMakeLists.txt) and what they become:
+#   -use_fast_math        ignored: nfcxx lowers float operations as IEEE (warning printed once)
+#   -extended-lambda      ignored: EDG accepts device lambdas as it accepts host lambdas
+#   -lineinfo             ignored: no debug line tables for device code
+#   -compress-mode=*      ignored: the output is an object, not a fatbin
+#   -Werror all-warnings  ignored: warnings do not stop the build
+#   -Xcompiler FLAGS      host flags: -I, -D, -U, -std=, -include, -isystem, -pthread, -fPIC, -fopenmp (warned)
+#                         go to nfcxx; other -f/-m/-W/-O/-g host flags are dropped (nfcxx ignores most of them)
+#   -arch / -gencode / --generate-code / -code / --gpu-architecture=sm_NN
+#                         the first sm_NN sets NFCXX_SM (the device code is built for that architecture)
+#   -ccbin X, --compiler-bindir X, --allow-unsupported-compiler, -forward-unknown-to-host-compiler
+#                         dropped (nfcxx is the host compiler)
+#   -o FILE, -c FILE.cu   the object (nfcxx's own rules for -o and the default name)
+#   -x cu, --x cu         accepted
+# Anything else is an error with the flag named, so an unhandled flag does not change the build silently.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+cuda=${CUDA_HOME:-/usr/local/cuda}
+nvcc=$cuda/bin/nvcc
+
+# CMake passes the include directories and the flags in response files: `--options-file FILE` (nvcc's option file,
+# shell-quoted words). Expand them in place, before anything is parsed.
+argv=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --options-file|-optf)
+      [ $# -ge 2 ] || { echo "nfcxx-cuda: $1 needs a file" >&2; exit 2; }
+      while IFS= read -r w; do argv+=("$w"); done < <(xargs -n1 < "$2"); shift 2 ;;
+    --options-file=*|-optf=*)
+      while IFS= read -r w; do argv+=("$w"); done < <(xargs -n1 < "${1#*=}"); shift ;;
+    *) argv+=("$1"); shift ;;
+  esac
+done
+set -- ${argv[@]+"${argv[@]}"}
+
+# --- probes: CMake's compiler identification and llama.cpp's host-compiler probe
+for a in "$@"; do
+  case $a in
+    --version|-V|-v) exec "$nvcc" "$@" ;;
+    *CMakeCUDACompilerId.cu|*CMakeCUDACompilerABI.cu) exec "$nvcc" "$@" ;;
+    *.c) exec "$nvcc" "$@" ;;    # llama.cpp: nvcc .c -Xcompiler --version (host compiler probe)
+  esac
+done
+
+# --- compile: map the nvcc command line to nfcxx
+# nvcc puts the toolkit's headers on the include path itself; CMake does not pass them for CUDA sources.
+args=(-I"$cuda/include"); [ -d "$cuda/include/cccl" ] && args+=(-I"$cuda/include/cccl")
+deps=(); inputs=(); out=""; compile=0; warned_fast=0; warned_openmp=0
+add_host() {  # one host flag from -Xcompiler
+  case $1 in
+    -I?*|-D?*|-U?*|-std=*|-include|-isystem?*|-pthread|-fPIC|-fpic|-fPIE|-fpie) args+=("$1") ;;
+    -fopenmp) [ $warned_openmp = 1 ] || { echo "nfcxx-cuda: -fopenmp is not supported; the OpenMP code is not built" >&2; warned_openmp=1; } ;;
+    -W*|-O*|-g*|-f*|-m*|-std*|-pedantic|-Wno-*) ;;   # warnings, optimisation and codegen flags: no effect here
+    *) echo "nfcxx-cuda: host flag $1 (-Xcompiler) is not mapped" >&2; exit 2 ;;
+  esac
+}
+while [ $# -gt 0 ]; do
+  a=$1; shift
+  case $a in
+    -c) compile=1 ;;
+    -MD|-MMD|-MP) deps+=("$a") ;;                      # dependency files (CMake): nfcxx writes them
+    -MF|-MT|-MQ) deps+=("$a" "$1"); shift ;;
+    -o) out=$1; shift ;;
+    -o?*) out=${a#-o} ;;
+    -use_fast_math|--use_fast_math)
+      [ $warned_fast = 1 ] || { echo "nfcxx-cuda: -use_fast_math ignored (float operations stay IEEE)" >&2; warned_fast=1; } ;;
+    -extended-lambda|--extended-lambda|-lineinfo|--generate-line-info|-compress-mode=*|--compress-mode=*) ;;
+    -O|-O[0-3s]|-O[0-3]=*|-g|-G|--device-debug|--debug|-DNDEBUG|-w|--no-host-device-move-forward) ;;   # optimisation/debug level: nfcxx's own
+    -Werror) [ "${1:-}" = all-warnings ] && shift ;;   # -Werror all-warnings: warnings do not stop the build
+    -ccbin|--compiler-bindir) shift ;;
+    -ccbin=*|--compiler-bindir=*|--allow-unsupported-compiler|-forward-unknown-to-host-compiler) ;;
+    -arch|-gencode|--generate-code|-code|--gpu-architecture|--gpu-code) v=$1; shift
+         if [[ $v =~ sm_([0-9]+) ]]; then export NFCXX_SM=${BASH_REMATCH[1]}; fi ;;
+    -arch=*|--gpu-architecture=*|-gencode=*|--generate-code=*|-code=*|--gpu-code=*)
+         if [[ $a =~ sm_([0-9]+) ]]; then export NFCXX_SM=${BASH_REMATCH[1]}; fi ;;
+    -Xcompiler|--compiler-options) hf=$1; shift
+         for h in $hf; do add_host "$h"; done ;;
+    -Xcompiler=*|--compiler-options=*) hf=${a#*=}
+         for h in $hf; do add_host "$h"; done ;;
+    -x|--x) shift ;;               # -x cu: the inputs are .cu anyway
+    -x=*|--x=*) ;;
+    *.cu) inputs+=("$a") ;;
+    -I?*|-D?*|-U?*|-std=*|-isystem?*|-include) args+=("$a") ;;
+    -I|-D|-U|-isystem|-include) args+=("$a" "$1"); shift ;;
+    -*) echo "nfcxx-cuda: nvcc flag $a is not mapped (add it to scripts/nfcxx-cuda)" >&2; exit 2 ;;
+    *) inputs+=("$a") ;;           # object or library inputs (a link): nfcxx gets them as they are
+  esac
+done
+
+# nfcxx compiles .cu inputs (device code into the host object) and links objects, as nfcxx does.
+if [ $compile = 1 ]; then
+  for f in "${inputs[@]}"; do
+    if [ -n "$out" ]; then
+      "$root/nfcxx" ${deps[@]+"${deps[@]}"} "${args[@]}" -c "$f" -o "$out"
+    else
+      "$root/nfcxx" ${deps[@]+"${deps[@]}"} "${args[@]}" -c "$f"
+    fi
+  done
+else
+  "$root/nfcxx" "${args[@]}" ${inputs[@]+"${inputs[@]}"} ${out:+-o "$out"}
+fi
