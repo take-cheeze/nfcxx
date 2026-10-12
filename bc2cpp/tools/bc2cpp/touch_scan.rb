@@ -21,8 +21,9 @@ module TouchScan
   WILD = '*'
   CLASS_FACTORIES = %w[Class Module Struct Data].freeze
 
-  # `evidence` maps a name to the first construct that put it in a set.
-  Result = Struct.new(:hard, :origin, :legacy, :evidence, :text, :reasons) do
+  # `evidence` maps a name to the first construct that put it in a set. `symbols` maps each identifier a
+  # native event argument spells to the local mrb_sym it names (native_facts).
+  Result = Struct.new(:hard, :origin, :legacy, :evidence, :symbols, :reasons) do
     def note(set, names, why)
       names.each do |n|
         set << n
@@ -36,13 +37,14 @@ module TouchScan
     end
   end
 
-  def self.new_result(text = '')
-    Result.new(Set.new, Set.new, nil, {}, text, [])
+  def self.new_result(symbols = {})
+    Result.new(Set.new, Set.new, nil, {}, symbols, [])
   end
 
   # -- Ruby ----------------------------------------------------------------
 
   CONST = /[A-Z]\w*/
+  IDENTIFIER = /\A[A-Za-z_]\w*\z/
   CONST_TOKEN = /\b[A-Z]\w*/
   CONST_PATH = /(?:::)?#{CONST}(?:::#{CONST})*/
   # Calls that reopen, subclass or rebind whatever their receiver evaluates to:
@@ -149,12 +151,38 @@ module TouchScan
   # `text` has comments removed and string literals kept. `decl_simples` are
   # the simple names of the classes the closed world declares.
   def self.native(text, decl_simples)
-    res = new_result(text)
-    norm = decl_simples.group_by { |n| n.downcase.delete('_') }
-    text.scan(NATIVE_SUPER_ASSIGN) { res.give_up('direct ->super assignment') }
+    native_classify(native_facts(text), decl_simples)
+  end
+
+  # The part of native(text, ...) that reads the text, as plain data (ADR 0415): every event of the file in
+  # order as [kind, args, why] (a `->super` assignment as ['super', nil, why]), and the local mrb_sym value of
+  # each identifier an event argument spells, so native_classify never needs the text.
+  def self.native_facts(text)
+    events = []
+    text.scan(NATIVE_SUPER_ASSIGN) { events << ['super', nil, 'direct ->super assignment'] }
     text.to_enum(:scan, NATIVE_EVENT).map { Regexp.last_match }.each do |m|
       args = bc2cpp_c_call_args(text[m.end(0)..])
-      native_event(m[1], args, res, norm, "#{m[0].strip.chomp('(')}(#{args.join(',').strip[0, 50]})")
+      events << [m[1], args, "#{m[0].strip.chomp('(')}(#{args.join(',').strip[0, 50]})"]
+    end
+    symbols = {}
+    events.each do |_kind, args, _why|
+      Array(args).each do |arg|
+        name = arg.to_s.strip
+        symbols[name] = symbol_variable(name, text) if name.match?(IDENTIFIER)
+      end
+    end
+    { events: events, symbols: symbols }
+  end
+
+  def self.native_classify(facts, decl_simples)
+    res = new_result(facts.fetch(:symbols))
+    norm = decl_simples.group_by { |n| n.downcase.delete('_') }
+    facts.fetch(:events).each do |kind, args, why|
+      if kind == 'super'
+        res.give_up(why)
+      else
+        native_event(kind, args, res, norm, why)
+      end
     end
     res
   end
@@ -235,18 +263,19 @@ module TouchScan
     end
   end
 
+  # An identifier is looked up in res.symbols, which native_facts filled for every event argument.
   def self.native_literal(expr, res = nil)
     m = expr.to_s.match(NATIVE_SYM)
     return m[1] || m[2] || m[3] if m
 
-    res && expr.to_s.strip.match?(/\A[A-Za-z_]\w*\z/) ? symbol_variable(expr.strip, res) : nil
+    res && expr.to_s.strip.match?(IDENTIFIER) ? res.symbols.fetch(expr.to_s.strip) : nil
   end
 
   # A `mrb_sym` local whose every declaration in the file initialises it with
   # the same literal. A parameter or an uninitialised declaration disqualifies.
-  def self.symbol_variable(name, res)
+  def self.symbol_variable(name, text)
     values = Set.new
-    res.text.scan(/\b(?:mrb_sym|auto)\b[ \t\n*&]+(?:const[ \t\n]+)?#{Regexp.escape(name)}\b[ \t\n]*([=,;)]?)([^;]*)/) do |delim, rhs|
+    text.scan(/\b(?:mrb_sym|auto)\b[ \t\n*&]+(?:const[ \t\n]+)?#{Regexp.escape(name)}\b[ \t\n]*([=,;)]?)([^;]*)/) do |delim, rhs|
       return nil unless delim == '='
 
       m = rhs.strip.match(NATIVE_SYM)
