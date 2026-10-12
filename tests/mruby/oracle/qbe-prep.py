@@ -47,13 +47,13 @@ preprocessed C and rewrites only those forms; everything else passes through unc
     becomes `_Alignas(N)` just before the declared name (cproc takes the GNU attribute there only on struct members, not on objects). Same alignment.
   * `struct T {...;} __attribute__((__aligned__(N)))` (std::aligned_storage, `struct alignas(N) T`) becomes
     `struct T {_Alignas(N) ...;}` on the first member (not a bit-field): same alignment, same rounded-up size.
-  * Floating types cproc lacks: `__bf16` and `_Float16` (2 bytes) and `_Float128` (16 bytes) become
-    structs with the same size and alignment and no arithmetic, so a real use of the value is a
-    compile error rather than a silent mis-typed float. `_Float32` and `_Float64` are IEEE binary32
-    and binary64, the same formats as `float` and `double` on x86-64, so they map to those.
-    libstdc++'s std::numbers variables (pulled in by <map>) use all of them. Their literals
-    (`2.71875f16`) are rewritten to the exact bit pattern (`f16`, `f128`), or to a plain
-    `float`/`double` literal (`f32`, `f64`).
+  * Floating types cproc lacks: `__bf16` and `_Float128` (16 bytes) become structs with the same size
+    and alignment and no arithmetic, so a real use of the value is a compile error rather than a silent
+    mis-typed float. `_Float16` is passed through: cproc has it (qbe.c, f16binary). `_Float32` and
+    `_Float64` are IEEE binary32 and binary64, the same formats as `float` and `double` on x86-64, so they
+    map to those. libstdc++'s std::numbers variables (pulled in by <map>) use all of them. Their literals
+    (`2.71875f16`) are rewritten to the binary16 value, as a cast of an exact hex float, or to a plain
+    `float`/`double` literal (`f32`, `f64`); `f128` to the bit pattern.
   * Hand-written C (env NFCXX_C_INPUT=1, set by nfcxx for .c inputs; glibc headers and user code):
     `volatile` is dropped (cproc errors on any store to a volatile object; it already emits volatile loads
     as plain loads; a volatile block-scope local gets `__nfcxx_keep(&x);` after its declaration so QBE keeps
@@ -82,7 +82,6 @@ FLOAT_TYPE = {
     '_Float32': 'float',
     '_Float64': 'double',
     '__bf16': 'struct __nfcxx_half16',
-    '_Float16': 'struct __nfcxx_half16',
     '_Float128': 'struct __nfcxx_float128',
 }
 C_INPUT = bool(os.environ.get('NFCXX_C_INPUT'))
@@ -91,6 +90,18 @@ FLOAT_DECL = {
     'struct __nfcxx_half16': 'struct __nfcxx_half16 { unsigned short bits; };',
     'struct __nfcxx_float128': 'struct __nfcxx_float128 { _Alignas(16) unsigned long bits[2]; };',
 }
+def half_literal(bits):
+    """The value of a binary16 bit pattern as a C hexadecimal floating constant (exact)."""
+    e = (bits >> 10) & 31
+    m = bits & 1023
+    x = m << 2
+    digits = '0123456789abcdef'
+    frac = (digits[x >> 8] + digits[(x >> 4) & 15] + digits[x & 15]).rstrip('0')
+    ex = -14 if e == 0 else e - 15
+    return ('-' if bits >> 15 == 1 else '') + '0x' + ('0' if e == 0 else '1') + ('.' + frac if frac else '') + \
+        'p' + ('-' if ex < 0 else '+') + str(abs(ex))
+
+
 FLOAT_LIT = re.compile(r'(\.?\d[\d.]*(?:[eE][+-]?\d+)?)(f16|f32|f64|f128)')
 
 
@@ -742,8 +753,8 @@ def main():
                     i = end
                     continue
 
-        # 4. Floating literals of the types above: f32/f64 drop the suffix; f16/f128 in parentheses become
-        # the bit pattern as a brace initializer.
+        # 4. Floating literals of the types above: f32/f64 drop the suffix; f16 in parentheses becomes a cast of
+        # its exact binary16 value; f128 in parentheses becomes the bit pattern as a brace initializer.
         if t.kind == 'num' and FLOAT_LIT.fullmatch(t.text):
             body, suffix = FLOAT_LIT.fullmatch(t.text).groups()
             paren = is_punct(prev, '(') and is_punct(tok_at(toks, i + 1), ')')
@@ -752,7 +763,8 @@ def main():
             elif suffix == 'f64':
                 edits.append((t.start, t.end, body))
             elif suffix == 'f16' and paren:
-                edits.append((prev.start, toks[i + 1].end, '{ 0x%04x }' % ieee_bits(body, 10, 5)))
+                # the binary16 value, rounded from the decimal literal, as a cast of its exact double
+                edits.append((prev.start, toks[i + 1].end, '((_Float16)' + half_literal(ieee_bits(body, 10, 5)) + ')'))
                 i += 2
                 continue
             elif suffix == 'f128' and paren:

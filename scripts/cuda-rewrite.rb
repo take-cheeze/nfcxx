@@ -10,6 +10,17 @@
 # without a kernel name, and a configuration with fewer than 2 or more than 4 items.
 # No regexp: scripts run on mruby, which has none in core.
 
+# The character before position i, skipping whitespace; "" at the start.
+def text_before(text, i)
+  j = i - 1
+  j -= 1 while j >= 0 && white?(text[j])
+  j < 0 ? "" : text[j]
+end
+
+def white?(c)
+  c == " " || c == "\t" || c == "\n" || c == "\r"
+end
+
 def ident_char?(c)
   return false if c.nil?
   o = c.ord
@@ -109,6 +120,170 @@ def split_config(s, from, to)
   items
 end
 
+# Template kernel launches: `k<T...><<<...>>>(args)` is a call of a generated C-linkage wrapper (see
+# template_sites), so the host registration and the device image name the same entry.
+$expanded = ""   # the source with local quoted includes expanded, for the template definitions
+$sites = {}      # wrapper name => { name:, targs:, decl:, call: }
+
+def split_top(s)
+  parts = []
+  depth = 0
+  start = 0
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    c = s[i]
+    if c == "(" || c == "[" || c == "{" || c == "<"
+      depth += 1
+    elsif c == ")" || c == "]" || c == "}" || c == ">"
+      depth -= 1
+    elsif c == "," && depth == 0
+      parts << s[start...i].strip
+      start = i + 1
+    end
+    i += 1
+  end
+  parts << s[start...s.length].strip
+  parts.reject { |x| x.empty? }
+end
+
+def sanitize(s)
+  out = ""
+  s.each_char do |c|
+    out << (ident_char?(c) ? c : "_")
+  end
+  out.gsub("__", "_")
+end
+
+def wrapper_name(name, targs)
+  "__nfcxx_k_#{sanitize(name)}_#{sanitize(targs)}"
+end
+
+# Index of the first character c at or after from, outside comments and literals; nil if none.
+def index_code(s, c, from)
+  i = from
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    return i if s[i] == c
+    i += 1
+  end
+  nil
+end
+
+# The template header of the first __global__ template named `name` in the source: its parameter names, and its
+# parameter list text.
+def kernel_template(name)
+  top_pieces($expanded).each do |st, en, kind, body|
+    next unless kind == :code && body
+    t = $expanded[st...en]
+    toks = tokens_of(t)
+    next unless toks.first == "template" && toks.include?("__global__")
+    q = remove_words(t, DEVICE_QUALIFIERS)
+    next unless function_name(q) == name
+    lt = index_code(q, "<", 0)
+    depth = 0
+    k = lt
+    while k < q.length
+      depth += 1 if q[k] == "<"
+      depth -= 1 if q[k] == ">"
+      break if depth == 0
+      k += 1
+    end
+    names = split_top(q[(lt + 1)...k]).map { |part| tokens_of(part.split("=")[0]).last }.compact
+    open = index_code(q, "(", k)
+    close = matching_paren(q, open)
+    refuse("unterminated parameter list for #{name}") if close.nil?
+    return { names: names, params: q[(open + 1)...close] }
+  end
+  nil
+end
+
+# Replaces the template parameter names in the parameter list by the explicit arguments.
+def substitute(text, names, args)
+  map = {}
+  names.each_with_index { |n, idx| map[n] = args[idx] }
+  out = ""
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    if ident_char?(text[i]) && !(text[i] >= "0" && text[i] <= "9")
+      j = i
+      j += 1 while j < text.length && ident_char?(text[j])
+      w = text[i...j]
+      out << (map[w] || w)
+      i = j
+    else
+      out << text[i]
+      i += 1
+    end
+  end
+  out
+end
+
+# The wrapper of a template launch: its declaration (the instance's parameters with the arguments substituted) and
+# the names the call passes. Registers it in $sites.
+def template_site(name, targs)
+  kt = kernel_template(name)
+  refuse("template kernel #{name}: no __global__ template of that name in the source") if kt.nil?
+  args = split_top(targs)
+  if args.length != kt[:names].length
+    refuse("template kernel #{name}<#{targs}>: explicit arguments must give every template parameter")
+  end
+  decl = substitute(kt[:params], kt[:names], args)
+  call = split_top(decl).map do |part|
+    n = tokens_of(part.split("=")[0]).last
+    refuse("template kernel #{name}: unnamed parameter #{part}") if n.nil?
+    n
+  end
+  w = wrapper_name(name, targs)
+  $sites[w] = { name: name, targs: targs, decl: decl, call: call } unless $sites.key?(w)
+  w
+end
+
+# The template launches of a source: [name, targs] for each `<<<` that follows a template argument list.
+def template_launches(text)
+  found = []
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if text[i, 3] == "<<<" && text_before(text, i) == ">"
+      j = i - 1
+      depth = 0
+      while j >= 0
+        depth += 1 if text[j] == ">"
+        depth -= 1 if text[j] == "<"
+        break if depth == 0
+        j -= 1
+      end
+      k = j - 1
+      k -= 1 while k >= 0 && white?(text[k])
+      e2 = k + 1
+      k -= 1 while k >= 0 && ident_char?(text[k])
+      name = text[(k + 1)...e2]
+      found << [name, text[(j + 1)...(i - 1)].strip] unless name.empty?
+    end
+    i += 1
+  end
+  found
+end
+
 def rewrite(text, orig)
   out = "#line 1 \"#{orig}\"\n"
   n = text.length
@@ -121,35 +296,51 @@ def rewrite(text, orig)
       next
     end
     if text[i, 3] == "<<<" && !(i + 3 < n && text[i + 3] == "<")
-      # The kernel name is the identifier just before `<<<` in the output so far.
-      k = out.length
-      k -= 1 while k > 0 && ident_char?(out[k - 1])
-      name = out[k...out.length]
       line = text[0...i].count("\n") + 1
-      refuse("template kernel name at line #{line}") if k > 0 && out[k - 1] == ">"
+      # The kernel name is the identifier before `<<<`, or before its template argument list.
+      j = i - 1
+      j -= 1 while j >= 0 && white?(text[j])
+      targs = nil
+      if text[j] == ">"
+        depth = 0
+        while j >= 0
+          depth += 1 if text[j] == ">"
+          depth -= 1 if text[j] == "<"
+          break if depth == 0
+          j -= 1
+        end
+        targs = text[(j + 1)...(i - 1)].strip
+        j -= 1
+        j -= 1 while j >= 0 && white?(text[j])
+      end
+      name_end = j + 1
+      name_start = name_end
+      name_start -= 1 while name_start > 0 && ident_char?(text[name_start - 1])
+      name = text[name_start...name_end]
       refuse("launch without a kernel name at line #{line}") if name.empty?
-      out = out[0...k]
+      # The call copied so far ends with the name and its arguments: take them back out.
+      out = out[0...(out.length - (i - name_start))]
 
       # The configuration runs to the first `>>>` outside brackets.
-      j = i + 3
+      k = i + 3
       depth = 0
       close_cfg = nil
-      while j < n
-        e2 = skip_literal(text, j)
+      while k < n
+        e2 = skip_literal(text, k)
         if e2
-          j = e2
+          k = e2
           next
         end
-        c = text[j]
+        c = text[k]
         if c == "(" || c == "[" || c == "{"
           depth += 1
         elsif c == ")" || c == "]" || c == "}"
           depth -= 1
-        elsif depth == 0 && text[j, 3] == ">>>"
-          close_cfg = j
+        elsif depth == 0 && text[k, 3] == ">>>"
+          close_cfg = k
           break
         end
-        j += 1
+        k += 1
       end
       refuse("unterminated launch configuration for #{name}") if close_cfg.nil?
       cfg = split_config(text, i + 3, close_cfg)
@@ -166,15 +357,31 @@ def rewrite(text, orig)
       args = text[(p + 1)...close_args].strip
 
       lines = text[i..close_args].count("\n")
-      out << "__nfcxx_cuda_launch(#{name}, #{cfg[0]}, #{cfg[1]}, #{cfg[2]}, #{cfg[3]}"
+      kernel = name
+      if targs
+        kernel = template_site(name, targs)
+      end
+      if targs
+        # a block, so the wrapper's declaration is in scope at the call
+        out << "{ extern \"C\" void #{kernel}(#{$sites[kernel][:decl]}); "
+      end
+      out << "__nfcxx_cuda_launch(#{kernel}, #{cfg[0]}, #{cfg[1]}, #{cfg[2]}, #{cfg[3]}"
       out << ", #{args}" unless args.empty?
       out << ")"
+      out << "; }" if targs
       out << ("\n" * lines)
       i = close_args + 1
       next
     end
     out << text[i]
     i += 1
+  end
+  # The wrappers are defined here, after the calls; each call has the declaration in its block.
+  unless $sites.empty?
+    out << "\n"
+    $sites.each do |w, site|
+      out << "extern \"C\" void #{w}(#{site[:decl]}) {}\n"
+    end
   end
   out
 end
@@ -202,6 +409,20 @@ def rewrite_builtins(t)
       i = e
       next
     end
+    # `extern __shared__ T x[];` is a shared-memory declaration: the prelude's static replaces both words
+    if word_at?(t, i, "extern")
+      j = i + 6
+      j += 1 while t[j] == " " || t[j] == "\t" || t[j] == "\n"
+      if word_at?(t, j, "__shared__")
+        i = j
+        next
+      end
+    end
+    if word_at?(t, i, "__syncthreads") && t[i + 13] == "("
+      out << "__nfcxx_syncthreads"
+      i += 13
+      next
+    end
     hit = false
     DEVICE_BUILTINS.each do |name, prefix|
       next if hit || !word_at?(t, i, name)
@@ -226,81 +447,320 @@ def device_decls
   decls.join("\n")
 end
 
-# Returns [device translation unit text, kernel names]. Declarations without a body are skipped; a __device__
-# variable is refused (device data is not lowered yet).
-def device_tu(text)
-  pieces = []
-  kernels = []
-  n = text.length
+# The device unit's prelude: the CUDA names that the host headers would give (uint, NULL), the shared-memory
+# qualifier (a static object here, which the emitter refuses until static data is lowered), and __syncthreads
+# (an intrinsic the emitter does not lower yet, so a kernel that uses it is refused by name).
+DEVICE_PRELUDE = <<'PRELUDE'
+typedef unsigned int uint;
+typedef unsigned short ushort;
+typedef unsigned long ulong;
+#ifndef NULL
+#define NULL 0
+#endif
+#define __shared__ static
+extern "C" void __nfcxx_syncthreads(void);
+PRELUDE
+
+# Identifiers of a piece of code, outside literals and comments, in order.
+def tokens_of(s)
+  out = []
   i = 0
-  while i < n
-    e = skip_literal(text, i)
+  while i < s.length
+    e = skip_literal(s, i)
     if e
       i = e
       next
     end
-    if word_at?(text, i, "__global__") || word_at?(text, i, "__device__")
-      kernel = word_at?(text, i, "__global__")
-      start = i
-      # the signature runs to `{`; a `;` first is a declaration (with `(`) or a variable (without)
+    c = s[i]
+    if c == "_" || (c.ord >= 65 && c.ord <= 90) || (c.ord >= 97 && c.ord <= 122)
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      out << s[i...j]
+      i = j
+    else
+      i += 1
+    end
+  end
+  out
+end
+
+# True if s has code outside comments and whitespace.
+def code_only?(s)
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      if s[i] == "/"
+        i = e
+        next
+      end
+      return true
+    end
+    return true unless s[i] == " " || s[i] == "\t" || s[i] == "\n" || s[i] == "\r"
+    i += 1
+  end
+  false
+end
+
+# Top-level pieces of a translation unit: preprocessor lines, and declarations or definitions ending at a `;` or at
+# the `}` of a function or namespace. Each piece is [start, stop, kind], kind :pp or :code, and :body if it has a
+# brace block at depth 0.
+def top_pieces(text)
+  pieces = []
+  n = text.length
+  i = 0
+  start = 0
+  depth = 0
+  paren0 = false
+  body = false
+  opener = nil   # text of the depth-0 `{`'s chunk start, to tell namespaces and extern "C" blocks
+  while i < n
+    if depth == 0 && text[i] == "#" && !code_only?(text[start...i])
+      # a directive ends at a newline that is not in a comment or literal, or after a backslash
       k = i
-      seen_paren = false
-      body_at = nil
       while k < n
         e2 = skip_literal(text, k)
         if e2
           k = e2
           next
         end
-        c = text[k]
-        seen_paren = true if c == "("
-        if c == ";"
-          break
-        end
-        if c == "{"
-          body_at = k
-          break
-        end
+        break if text[k] == "\n" && text[k - 1] != "\\"
         k += 1
       end
-      if body_at.nil?
-        refuse("device variable at line #{text[0...i].count("\n") + 1}") unless seen_paren
-        i = k + 1
-        next
-      end
-      close = matching_paren(text, body_at)
-      refuse("unterminated function body at line #{text[0...i].count("\n") + 1}") if close.nil?
-      # drop the qualifiers in front of the function
-      p = start
-      loop do
-        moved = false
-        DEVICE_QUALIFIERS.each do |q|
-          if word_at?(text, p, q)
-            p += q.length
-            moved = true
-          end
-        end
-        p += 1 while p < n && (text[p] == " " || text[p] == "\t" || text[p] == "\n")
-        break unless moved
-      end
-      body = text[p..close]
-      pieces << rewrite_builtins(body)
-      if kernel
-        paren = text.index("(", p)
-        head = text[p...paren].strip
-        name = head.reverse.chars.take_while { |c| ident_char?(c) }.reverse.join
-        refuse("kernel without a name at line #{text[0...i].count("\n") + 1}") if name.empty?
-        kernels << name
-      end
-      i = close + 1
+      pieces << [i, k, :pp]
+      i = k
+      start = k
       next
+    end
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    c = text[i]
+    if c == "("
+      paren0 = true if depth == 0
+      depth += 1
+    elsif c == "["
+      depth += 1
+    elsif c == ")" || c == "]"
+      depth -= 1
+    elsif c == "{"
+      if depth == 0
+        body = true
+        opener = tokens_of(text[start...i]).first
+      end
+      depth += 1
+    elsif c == "}"
+      depth -= 1
+      if depth == 0 && (opener == "namespace" || opener == "extern")
+        pieces << [start, i + 1, :code, true]
+        start = i + 1
+        paren0 = false; body = false; opener = nil
+      elsif depth == 0 && !(opener.nil?) && !%w[struct class union enum typedef using].include?(opener) && paren0
+        pieces << [start, i + 1, :code, true]
+        start = i + 1
+        paren0 = false; body = false; opener = nil
+      end
+    elsif c == ";" && depth == 0
+      pieces << [start, i + 1, :code, body]
+      start = i + 1
+      paren0 = false; body = false; opener = nil
     end
     i += 1
   end
+  pieces << [start, n, :code, body] if text[start...n].strip != ""
+  pieces
+end
+
+# Removes the whole words of `words` from s, outside literals and comments.
+def remove_words(s, words)
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    hit = words.find { |w| word_at?(s, i, w) }
+    if hit
+      i += hit.length
+      i += 1 while i < s.length && (s[i] == " " || s[i] == "\t")
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
+# The name of the function a definition declares: the identifier before its first `(`.
+def function_name(text)
+  # the first `(` outside comments and literals
+  paren = nil
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if text[i] == "("
+      paren = i
+      break
+    end
+    i += 1
+  end
+  return nil if paren.nil?
+  head = text[0...paren].strip
+  head.reverse.chars.take_while { |c| ident_char?(c) }.reverse.join
+end
+
+# Device mode: a quoted #include of a file that exists is replaced by that file's text (recursively, relative to the
+# including file), so kernels kept in a .cu or .cuh of the same program are in the unit. System includes stay.
+def expand_includes(text, dir, depth)
+  return text if depth > 8
+  out = ""
+  last = 0
+  top_pieces(text).each do |st, en, kind|
+    next unless kind == :pp
+    rest = text[st...en].sub("#", "").strip
+    next unless rest.start_with?("include")
+    q = rest[7..-1].to_s.strip
+    next unless q.start_with?("\"")
+    name = q[1..-1].split("\"")[0].to_s
+    path = dir + "/" + name
+    next unless File.exist?(path)
+    inc = File.open(path, "rb") { |f| f.read }
+    out << text[last...st] << "\n" << expand_includes(inc, File.dirname(path), depth + 1) << "\n"
+    last = en
+  end
+  out << text[last..-1].to_s
+  out
+end
+
+# Returns [device translation unit text, kernel names].
+#
+# The unit has the prelude, every __global__ and __device__ function definition or declaration, and the host
+# declarations that those reference, transitively: typedefs, using, struct/class/union/enum definitions, variables,
+# and #define/#undef. Host function definitions are not carried over, and neither are the #include lines (their
+# contents are not in the unit; a name they supply is a missing declaration, reported by the front end). The
+# conditional directives (#if, #ifdef, ...) are kept as written. A __device__ variable is refused: device data is
+# not lowered yet.
+def device_tu(text)
+  pieces = top_pieces(text).map do |pc|
+    st, en, kind, body = pc
+    t = text[st...en]
+    info = { text: t, kind: kind, body: body, toks: tokens_of(t), defined: [], keep: false, device: false }
+    if kind == :pp
+      rest = t.sub("#", "").gsub("\n", " ").strip
+      d = rest.split(" ")[0] || ""
+      if d == "define"
+        after = rest[6..-1].strip
+        name = after.split(" ")[0].to_s.split("(")[0]
+        info[:defined] = [name]
+        info[:toks] = tokens_of(after[name.length..-1].to_s)
+        info[:macro] = true
+      elsif d == "undef"
+        info[:keep] = true
+      elsif %w[if ifdef ifndef elif else endif].include?(d)
+        info[:keep] = true
+      end
+    else
+      info[:device] = info[:toks].include?("__global__") || info[:toks].include?("__device__")
+    end
+    info
+  end
+
+  kernels = []
+  seeds = []
+  # The template launches of the source: each instance is a wrapper kernel (see template_site).
+  template_launches(text).each { |nm, ta| template_site(nm, ta) }
+  pieces.each do |pc|
+    next if pc[:kind] == :pp
+    if pc[:device]
+      if pc[:text].include?("__device__") && !pc[:body] && !pc[:text].include?("(")
+        refuse("device variable: #{pc[:text].strip[0, 60]}")
+      end
+      if pc[:body]
+        if pc[:toks].include?("__global__") && pc[:toks].first != "template"
+          name = function_name(remove_words(pc[:text], DEVICE_QUALIFIERS))
+          refuse("kernel without a name: #{pc[:text].strip[0, 60]}") if name.nil? || name.empty?
+          kernels << name
+        end
+        pc[:keep] = true
+        pc[:text] = remove_words(pc[:text], DEVICE_QUALIFIERS)
+        seeds.concat(pc[:toks])
+      elsif pc[:text].include?("(")
+        pc[:keep] = true
+        pc[:text] = remove_words(pc[:text], DEVICE_QUALIFIERS)
+        seeds.concat(pc[:toks])
+      end
+    end
+  end
+
+  # Host declarations: defined names, as far as a piece's text tells them.
+  pieces.each do |pc|
+    next if pc[:keep] || pc[:device]
+    t = pc[:text]
+    toks = pc[:toks]
+    if pc[:kind] == :pp
+      next unless pc[:macro]
+      next
+    end
+    next if toks.empty?
+    next if pc[:body] && t.index("(") && !toks.include?("struct") && !toks.include?("class") && !toks.include?("union") && !toks.include?("enum")
+    next if !pc[:body] && t.index("(") && !t.index("=") # host prototype
+    if toks.first == "typedef"
+      pc[:defined] = [toks.last]
+    elsif toks.first == "using"
+      pc[:defined] = [toks[1]].compact
+    elsif (kw = (toks & %w[struct class union enum]).first)
+      k = toks.index(kw)
+      pc[:defined] = [toks[k + 1]].compact
+      pc[:defined] += toks if kw == "enum"   # the enumerators: over-approximated by every identifier
+    elsif pc[:body]
+      next
+    elsif toks.include?("const") || toks.include?("constexpr")
+      # a constant: device code may read it. Other host variables are not reachable from device code.
+      cut = t.index("=") || t.index("[") || t.index(";") || t.length
+      pc[:defined] = [tokens_of(t[0...cut]).last].compact
+    end
+  end
+
+  # Fixed point: a host declaration is carried over when the unit refers to a name it defines.
+  needed = {}
+  (seeds + tokens_of(DEVICE_PRELUDE)).each { |x| needed[x] = true }
+  changed = true
+  while changed
+    changed = false
+    pieces.each do |pc|
+      next if pc[:keep] || pc[:device]
+      next if pc[:defined].empty?
+      next unless pc[:defined].any? { |d| needed[d] }
+      pc[:keep] = true
+      changed = true
+      pc[:toks].each { |x| needed[x] = true }
+    end
+  end
+  pieces.each do |pc|
+    next unless pc[:kind] == :pp && pc[:macro] && pc[:defined].any? { |d| needed[d] }
+    pc[:keep] = true
+  end
+
   out = "// Device side of a .cu file, generated by scripts/cuda-rewrite.rb --device. Do not edit.\n"
-  out << device_decls << "\n\n"
-  out << pieces.join("\n\n") << "\n"
-  [out, kernels]
+  out << DEVICE_PRELUDE << device_decls << "\n"
+  pieces.each do |pc|
+    next unless pc[:keep]
+    out << rewrite_builtins(pc[:text]) << "\n"
+  end
+  $sites.each do |w, site|
+    out << "extern \"C\" void #{w}(#{site[:decl]}) { #{site[:name]}<#{site[:targs]}>(#{site[:call].join(", ")}); }\n"
+    kernels << w
+  end
+  [out, kernels.uniq]
 end
 
 def usage
@@ -324,8 +784,9 @@ ARGV.each do |a|
 end
 usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
+$expanded = expand_includes(text, File.dirname(path), 0)
 if device
-  dev, kernels = device_tu(text)
+  dev, kernels = device_tu($expanded)
   File.open(kernels_path, "wb") { |f| f.write(kernels.map { |k| k + "\n" }.join) } unless kernels_path.nil?
   print dev
 else
