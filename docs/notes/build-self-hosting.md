@@ -52,6 +52,9 @@ cproc) is ours to vendor.
 | `scripts/setup-mruby.sh` (the interpreter that runs the helper scripts) | ruby, rake, git, flock | one shallow fetch of `mruby/mruby` at the pinned commit |
 | `scripts/setup-pathb.sh` (Path B harness `cpfe`, `build/pathb`) | cmake, ninja, git (the `3rd/edg` submodule) | submodule fetch only |
 | `scripts/selfhost-cpfe.sh` (cpfe built by nfcxx's qbe backend, `build/selfhost/cpfe`) | ninja (reads the source list from `build/edg`), gcc/g++, after `setup-edg.sh` and `setup-qbe.sh` | none |
+| `FRONT_END=build/selfhost/cpfe SELFHOST_OUT=build/selfhost/stage2 scripts/selfhost-cpfe.sh` (stage 2: the nfcxx-built cpfe compiles and links the same sources) | as above | none |
+
+Stage 2 was checked against stage 1: the 22 cases of `tests/run.sh` (qbe) pass with either front end (0 failures); `--emit-c` output matches on 41 inputs after normalising timestamps and temporary names; the object files match on 36 of 37 sources compiled, and the one difference (`tests/cases/qbe_gnu_forms.cpp`) also differs between two runs of stage 1.
 | `./nfcxx`, `./nfcc` with the gcc backend | EDG built; gcc | none |
 | `./nfcxx`, `./nfcc` with the qbe backend (`scripts/qbe-cc`) | EDG, QBE, cproc built; the **mruby interpreter** (`qbe-prep.rb`, `weak-symbols.rb`; built on first use by `scripts/mrb`, which then needs ruby and rake) | none after the setup |
 | C-only inputs (`nfcxx x.c`, `nfcc`) | no EDG; the same QBE chain for the qbe backend | none |
