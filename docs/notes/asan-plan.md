@@ -20,7 +20,7 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-4): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 5-6 below.
+Done (milestones 1-5): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 6 below.
 
 Options considered:
 
@@ -35,7 +35,7 @@ Milestones:
 2. Checks before every load, store and `funccopy`/blit; skip `va_arg`/`reg_save_area` and `__nfcxx_*` helpers. Tests: heap overflow, use after free, double free.
 3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at entry, unpoisons in `funcret`. Still open: alloca/VLA.
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
-5. Source lines: the report shows only function and PC unless cproc plumbs the `#line` info (call-site table).
+5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
 6. Optional: use after scope, fake stack (use after return), elision of checks on non-escaping locals.
 Open check: the unwinder wants `rbp` chains; QBE keeps them, but verify with a report.
 
