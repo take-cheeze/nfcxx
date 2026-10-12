@@ -19,6 +19,7 @@ covers say so.
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
 | [llamacpp.md](notes/llamacpp.md) | llama.cpp's host-side ggml through the gcc backend: what compiles, the driver fixes, and the blockers (EDG AVX10.2 builtins, a cross-TU template instance). `tests/llamacpp/run.sh`. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
+| [poly.md](notes/poly.md) | `nfcpoly` (`lib/poly`): evaluating Ruby (mruby built with C++ exceptions on EDG's runtime) from C++ with bound host objects, GraalVM-polyglot style; the exception model and its test. |
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
@@ -43,6 +44,7 @@ covers say so.
 | Hexagon | Generated C for the `linux_riscv32` stand-in target compiles with clang-19 `--target=hexagon` and runs under qemu-hexagon, HVX kernels included; struct layout equals clang's Hexagon ABI (`tests/hexagon/run.sh`, `tests/hexagon/layout.sh`). Not the Hexagon SDK, QuRT or `hexagon-sim` (unavailable, `docs/notes/hexagon.md` section 4). | hexagon.yml |
 | `nfcc` (drop-in `cc`, C only) | `-c`, link, `-S`, `-E`/`-M*` answered by the host compiler, `-D -U -I`, dependency files, response files, `-shared`, rejected options, on both backends (`tests/c/cc-mode.sh`); Lua through its own makefile (`tests/realworld/run_lua_make.sh`); mruby's rake build (`tests/realworld/run_mruby.sh`) | ci.yml, realworld.yml |
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
+| `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`) | Evaluate Ruby from C++ with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby built with C++ exceptions, `docs/notes/poly.md`); GC release of script-owned objects. Both backends (`tests/poly/run.sh`), also under valgrind by hand | ci.yml |
 | Tracing (`--trace=FILE`, `NFCXX_TRACE`) | Valid trace-event JSON with the driver and backend spans, both backends, exit code unchanged (`tests/trace/run.sh`, needs python3) | ci.yml |
 | mruby scripting (`scripts/mrb`, `*.rb`) | Every ported script gives output byte-identical to its Python original (`tests/mruby/run.sh`; Path B and Hexagon parts need the harness and a clang with the Hexagon target, else they skip) | ci.yml (Path A parts), pathb.yml (with the harness) |
 
@@ -139,6 +141,13 @@ spans that exist).
 **`nfceval`** (`eval.md`, "Limitations"; `tests/eval/run.sh` covers the supported forms, not the limits): no sandbox
 and no run-time timeout; one eval at a time per engine, not thread safe; no overloaded bindings, no generic lambdas or
 C varargs as bound functions; host and snippet must use the same backend.
+
+**`nfcpoly`** (`poly.md`, "Limitations"; `tests/poly/run.sh` covers the supported forms, not the limits): no sandbox and no
+time limit; not thread safe; constness and inheritance of bound classes are not tracked; a libmruby built without
+`enable_cxx_exception` links but loses the destructor guarantee (measured, not part of the suite); the mruby build
+needs `scripts/mruby-cxx-novolatile.patch` because cproc cannot store to a `volatile` (see **`volatile`** above) and
+`MRB_USE_VM_SWITCH_DISPATCH` because EDG rejects mruby's computed-goto table when `vm.c` is compiled as C++; Path B
+untested; only Ruby, no compile-time embedding.
 
 **Hexagon**: no Hexagon SDK, `hexagon-sim` or QuRT; EDG has no Hexagon target, so a 32-bit little-endian stand-in
 (`linux_riscv32`) is used; cases that include hosted C++ headers, need GP-relative relocations or template instantiation
