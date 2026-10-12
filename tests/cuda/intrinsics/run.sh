@@ -51,4 +51,5 @@ pass block.cu "block: no error, 0 mismatches"
 pass hmax.cu "hmax: no error, 0 mismatches"
 pass math.cu "math: no error, 57344 checks, 0 mismatches"
 pass votes_trap.cu "votes: no error, 0 mismatches"
+pass minmax.cu "minmax: no error, 0 mismatches"
 exit $fail
