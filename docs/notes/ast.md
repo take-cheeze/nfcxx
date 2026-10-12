@@ -250,7 +250,8 @@ gone, and level 2 is its caller.
   that send integers, floats and strings to one helper take about 100 slow paths with inlining and at least 295 without
   (the shared tree goes generic); methods (a getter, an instance that shadows it); loops, varargs and multiple assignment are
   declined and counted, closures too, a body over the size limit too, a chunk with 3500 sites of a three-node function
-  inlines about 2700 of them and declines the rest (the limit on the clones one function takes), with the same result; recursion inlines a few levels and the depth limit gives the same number of nested calls with and without inlining; the
+  inlines about 2700 of them and declines the rest (the limit on the clones one function takes), with the same result; recursion
+  inlines a few levels and the depth limit gives the same number of nested calls with and without inlining; the
   error raised three calls deep has the same message and the same traceback (four entries, with the lines and the names) with
   inlining off, on, and with every site rewritten as early as possible, in which case the error is raised inside three inlined
   bodies; the host calling back into the script from inside an inlined body and an error coming back through the inlined frames
@@ -274,14 +275,15 @@ gone, and level 2 is its caller.
   restores the native-call context changes nothing observable: the enclosing native call restores it anyway.
 - Inlining under AddressSanitizer, UBSan and LeakSanitizer (g++ -O1): the engine test and every program in every
   configuration above, clean.
-- Mutation checks of the inlining, on scratch copies, each against the whole suite: a guard that does not compare the function
+- Mutation checks of the inlining, on scratch copies, each against the engine test and every program (inlining by default and
+  as early as possible, the collector at its default and at every safe point, built with the sanitizers): a guard that does not compare the function
   (fails the engine checks and `inline_redefine`, `inline_methods`); an inlined body that does not link its frame into
   `State::cur` (fails the traceback checks and six programs); no nil-fill of missing arguments (fails `inline_args` and, for the
   locals only, the programs under the collector at every safe point, which then reads garbage); the call-site line not set before
   the body runs (fails `inline_recursion`, the one program where the line of a level-2 error differs); no depth count (fails the
   state checks and the runaway recursion); an expression body that returns its first value instead of all (fails `inline_nested`
-  and `inline_errors`); no limit on the clones one function takes (fails the engine check for it). Two mutations are **not** caught by anything:
-  not adding the clone's strings to the owner's constants, and allocating the nodes that clones create in the arena of the
+  and `inline_errors`); no limit on the clones one function takes (fails the engine check for it). Two mutations are **not**
+  caught by anything: not adding the clone's strings to the owner's constants, and allocating the nodes that clones create in the arena of the
   callee instead of the owner's (`owner_proto`). Both are properties that nothing can observe while a clone can run (the callee's
   closure is on the stack, its constants are marked, its arena is alive), and are kept as defences, not as tested behaviour.
 - `tests/poly/run.sh`: the shared suite (117 checks per language) passes for `"ast"` on both back ends, and in the same
@@ -305,7 +307,7 @@ A tree walker that rewrites itself is within a small factor of a register-VM wri
 
 ### What the inlining adds
 
-`tests/ast/bench.sh` (programs in `tests/ast/bench/`, best of 5 runs, seconds; the machine was shared with other jobs, so times
+`RUNS=5 tests/ast/bench.sh host gcc qbe` (programs in `tests/ast/bench/`, best of 5 runs, seconds; the machine was shared with other jobs, so times
 move by 10% or more between runs; nothing asserts on them): `helpers` is 5 million iterations of a loop calling small math helpers
 and predicates, a two-level call (`dist2` calls `sq` twice) and table accessors; `getters` is 3 million iterations of method calls
 on objects with a metatable (`a:getx()`, `a:dot(b)` calling two getters, a setter); `fib` is `fib(32)`.
