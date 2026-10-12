@@ -8,8 +8,8 @@
 #     `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
 #     is left in place, and cproc rejects it.
 #   * Builtins cproc does not know, which doctest uses. `__builtin_memcpy`, `memmove`, `memset`, `memcmp` and
-#     `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_isnan` and
-#     `__builtin_clzl` become small helpers (`__nfcxx_isnan`, `__nfcxx_clzl`), defined in the prelude.
+#     `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_clzl` becomes a small
+#     helper (`__nfcxx_clzl`), defined in the prelude.
 #     `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
 #     uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
 #     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
@@ -666,7 +666,6 @@ LIBC_BUILTINS = {
 }
 # builtin -> [helper name, definition in the prelude]
 HELPER_BUILTINS = {
-  '__builtin_isnan' => ['__nfcxx_isnan', 'static int __nfcxx_isnan(double x) { return x != x; }'],
   # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
   '__builtin_huge_val' => ['__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
