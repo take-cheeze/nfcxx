@@ -20,6 +20,9 @@ GRAY_STACK_SIZE = Integer(ENV.fetch('OPTCARROT_GRAY_STACK_SIZE', '16384'), 10)
 unless (1024..262_144).cover?(GRAY_STACK_SIZE)
   abort 'OPTCARROT_GRAY_STACK_SIZE must be between 1024 and 262144 pointers'
 end
+if ENV['OPTCARROT_STATIC_PPU'] == '1' && ENV['OPTCARROT_CLOSED_WORLD'] == '1'
+  abort 'OPTCARROT_STATIC_PPU currently requires the ordinary host: sealed-world dynamic option accessors are not modeled'
+end
 # Optcarrot::PPU used to be entirely excluded here (a real, 100%-
 # reproducible FiberError -- `PPU#run`'s `@fiber ||= Fiber.new { ... }`
 # compiled its block through the same BLOCK_FALLBACK path every other block
@@ -313,6 +316,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     File.write(transformed_cpu, OptcarrotCPUDispatch.transform(File.read(cpu_source)))
     sources = sources.map { |path| path == cpu_source ? transformed_cpu : path }
   end
+  if !sealed && ENV['OPTCARROT_STATIC_PPU'] == '1'
+    require_relative 'ppu_core'
+    ppu_source = sources.find { |path| path.end_with?('/optcarrot/ppu.rb') }
+    transformed_ppu = File.join(temp, 'ppu.rb')
+    File.write(transformed_ppu, OptcarrotPPUCore.transform(File.read(ppu_source)))
+    sources = sources.map { |path| path == ppu_source ? transformed_ppu : path }
+  end
   base_env = {
     'MRBC' => MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
@@ -435,9 +445,13 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
   target_suffix += 'sealed' if sealed
   target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+  target_suffix += 'ppu' if ENV['OPTCARROT_STATIC_PPU'] == '1'
+  target_suffix += 'irinline' if ENV['BC2CPP_IR_INLINE'] == '1'
   compiled_target = "optcarrotcompiled#{target_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
   puts "Optcarrot CPU dispatch: #{ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : 'dynamic'}; sealed world: #{sealed}"
+  puts "Optcarrot PPU core: #{ENV['OPTCARROT_STATIC_PPU'] == '1' ? 'generated synchronous' : 'Fiber'}"
+  puts 'Optcarrot bytecode IR method inlining: enabled' if ENV['BC2CPP_IR_INLINE'] == '1'
   config = File.join(temp, 'mruby_build_config.rb')
   compiled_base = if sealed
                     ["toolchain", "self.mrbcfile = #{File.expand_path(MRBC).dump}",
@@ -569,8 +583,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   compiled_entries = section_lines(diagnostics, 'compiled entry points').join("\n")
   cpu_run_mode = compiled_entries.include?('(Optcarrot::CPU#run,') ? 'compiled' : 'interpreted'
   ppu_loop_mode = compiled_entries.include?('(Optcarrot::PPU#main_loop,') ? 'compiled' : 'interpreted'
+  ppu_run_mode = compiled_entries.include?('(Optcarrot::PPU#run,') ? 'compiled' : 'interpreted'
   puts "bc2cpp installed #{count} compiled methods; " \
-       "CPU#run=#{cpu_run_mode}; PPU#main_loop=#{ppu_loop_mode}"
+       "CPU#run=#{cpu_run_mode}; PPU#run=#{ppu_run_mode}; PPU#main_loop=#{ppu_loop_mode}"
   benchmarks = []
   benchmarks << run_benchmark('CRuby', [RbConfig.ruby, cruby_bundle, ROM, FRAMES.to_s])
   profile_dir = File.join(temp, 'profile')
@@ -582,7 +597,9 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
-  modes = [sealed && 'sealed', ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && 'static dispatch'].select { |mode| mode }
+  modes = [sealed && 'sealed', ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && 'static dispatch',
+           ENV['OPTCARROT_STATIC_PPU'] == '1' && 'synchronous PPU',
+           ENV['BC2CPP_IR_INLINE'] == '1' && 'IR inlining'].select { |mode| mode }
   core_label += " (#{modes.join(', ')})" unless modes.empty?
   compiled_command = sealed ? [compiled_binary, ROM, FRAMES.to_s] : [compiled_binary, compiled_bundle, ROM, FRAMES.to_s]
   compiled_result = run_benchmark(core_label, compiled_command,
@@ -613,8 +630,10 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
       summary.puts format('Wall-time ratios: mruby/CRuby %.2fx; bc2cpp/mruby %.2fx (lower is faster).',
                           benchmarks[1][:seconds] / benchmarks[0][:seconds],
                           benchmarks[2][:seconds] / benchmarks[1][:seconds])
-      summary.puts "Installed #{count} compiled methods; CPU#run is #{cpu_run_mode}; PPU#main_loop is #{ppu_loop_mode}. " \
-                   'Unsupported and Fiber-unsafe methods stay interpreted. A compiled PPU#main_loop uses a resumable step function (ADR 0273).'
+      summary.puts "Installed #{count} compiled methods; CPU#run is #{cpu_run_mode}; PPU#run is #{ppu_run_mode}; PPU#main_loop is #{ppu_loop_mode}. " \
+                   'Unsupported and Fiber-unsafe methods stay interpreted.'
+      summary.puts(ENV['OPTCARROT_STATIC_PPU'] == '1' ? 'The generated synchronous PPU#run is the active core.' :
+                   'A compiled PPU#main_loop uses a resumable step function (ADR 0273).')
     end
   end
 

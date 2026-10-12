@@ -97,6 +97,10 @@ File.open(out_file, 'w') do |out|
       source = OptcarrotCPUDispatch.transform(source)
       cpu_dispatch_rewritten = true
     end
+    if f.end_with?('/optcarrot/ppu.rb') && ENV['OPTCARROT_STATIC_PPU'] == '1'
+      require_relative 'ppu_core'
+      source = OptcarrotPPUCore.transform(source)
+    end
     if f.end_with?('/optcarrot/ppu.rb') && ENV['OPTCARROT_NO_SHIMS'] != '1' && ENV['OPTCARROT_ORIGINAL_LUT'] != '1'
       source = OptcarrotPPULUT.transform(source)
     end
