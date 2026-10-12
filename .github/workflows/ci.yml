@@ -20,7 +20,7 @@ jobs:
           submodules: true
 
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 ruby rake clang
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 python3-dev ruby rake clang
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -73,7 +73,7 @@ jobs:
       - name: nfceval run-time eval library and nfcxx -shared (both backends)
         run: tests/eval/run.sh
 
-      - name: nfcpoly embedded mruby with C++ exceptions, scripts calling C++ and back (both backends)
+      - name: nfcpoly embedded Ruby, Lua and Python, scripts calling C++ and back, C++ exceptions through mruby and Lua (both backends)
         run: tests/poly/run.sh
 
       - name: mruby scripts (byte-identical to the Python originals)

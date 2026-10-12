@@ -314,6 +314,12 @@ class Value {
   template <class... A>
   Value call(const std::string& name, A&&... args) const;
 
+  // Calls the value itself: a Ruby Proc (its `call`), a Lua function, a Python callable. Same arguments and errors as call.
+  template <class... A>
+  Value execute(A&&... args) const {
+    return call(std::string(), std::forward<A>(args)...);
+  }
+
   const detail::Var& var() const { return v_; }
 
  private:
@@ -344,8 +350,15 @@ struct Conv<I, std::enable_if_t<std::is_integral_v<I> && !std::is_same_v<I, bool
     return Var::integer(static_cast<long long>(x));
   }
   static I from(const Var& v) {
-    if (v.kind() != Var::Int) conversion_error(v, "integer");
-    long long i = v.i();
+    long long i;
+    if (v.kind() == Var::Int) {
+      i = v.i();
+    } else if (v.kind() == Var::Float && v.d() >= -9.2e18 && v.d() <= 9.2e18 &&
+               v.d() == static_cast<double>(static_cast<long long>(v.d()))) {
+      i = static_cast<long long>(v.d());  // 5.0 is losslessly the integer 5 (Lua's 10 / 2, Python's 10 / 2)
+    } else {
+      conversion_error(v, "integer");
+    }
     if constexpr (std::is_signed_v<I>) {
       if (i < static_cast<long long>(std::numeric_limits<I>::min()) ||
           i > static_cast<long long>(std::numeric_limits<I>::max()))

@@ -229,7 +229,9 @@ struct MrubyLang : Lang {
     std::vector<mrb_value> argv;
     argv.reserve(args.size());
     for (const Var& a : args) argv.push_back(encode(a));
-    MethodJob job = {encode(target), mrb_intern_cstr(mrb, method.c_str()), argv.data(), static_cast<mrb_int>(argv.size())};
+    // An empty name calls the value itself: a Proc answers `call`.
+    MethodJob job = {encode(target), mrb_intern_cstr(mrb, method.empty() ? "call" : method.c_str()), argv.data(),
+                     static_cast<mrb_int>(argv.size())};
     mrb_bool err = FALSE;
     mrb_value r = mrb_protect_error(mrb, method_job_body, &job, &err);
     if (err) throw_for_exception(r);

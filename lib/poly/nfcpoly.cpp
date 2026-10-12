@@ -53,9 +53,11 @@ struct Event {  // everything declared to the context, replayed into each langua
   Callable* c2 = nullptr;
   ClassInfo* ci = nullptr;
   Var v;
+  std::string only;  // Val: a script value that is not plain data is visible only in the language it came from
 };
 
 void apply(Lang* l, const Event& e) {
+  if (!e.only.empty() && e.only != l->name()) return;
   switch (e.kind) {
     case Event::Fn: l->define_fn(e.name, e.c); break;
     case Event::Val: l->define_value(e.name, e.v); break;
@@ -91,7 +93,12 @@ struct Impl {
   }
   void record(Event e) {
     events.push_back(std::move(e));
-    for (auto& l : langs) apply(l.second.get(), events.back());
+    try {
+      for (auto& l : langs) apply(l.second.get(), events.back());
+    } catch (...) {
+      events.pop_back();  // a declaration that cannot be made is not replayed into later languages either
+      throw;
+    }
   }
 };
 
@@ -186,7 +193,14 @@ void declare_value(Impl* impl, const std::string& name, const Var& v) {
   Event e;
   e.kind = Event::Val;
   e.name = name;
-  e.v = v;
+  e.v = deep(v);  // arrays are copied into plain data, visible in every language
+  if (e.v.kind() == Var::Script) {
+    // Not plain data (a function, a table with keys, ...): only its own language can hold it.
+    Lang* l = source_lang(e.v);
+    if (!l) empty_value();
+    if (l->impl != impl) throw Error("nfcpoly: a script value of another Context cannot be declared here");
+    e.only = l->name();
+  }
   impl->record(std::move(e));
 }
 
