@@ -246,6 +246,9 @@ class CodeGen
     # drop_unsafe_embeddings runs first, or an ivar it would reject could leak a
     # false proof. The ENTRY_ARG alternation is skipped; the final CodeGen runs it.
     if analysis_only == :fixnum_return
+      # Without the foreign-method scan this probe cannot prove a return, so embedding checks cannot help.
+      return unless @foreign_method_names
+
       @ivar_layout = drop_unsafe_embeddings(ivar_layout)
       compute_fixnum_return_names
       return
