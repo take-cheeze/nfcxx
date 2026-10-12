@@ -320,7 +320,11 @@ if ENV['MRBC']
       d = File.join(dir, what.gsub(/\W+/, '_'))
       Dir.mkdir(d)
       gems = options[:gem] ? [[options[:gem][0], gem_dir.call(d, *options[:gem])]] : []
-      vcode, = generate.call(HOLDER + extra, d, build_gems: gems)
+      vcode, verr = generate.call(HOLDER + extra, d, build_gems: gems)
+      if what == 'a module initialize'
+        check.call('constructor refusal identifies the module defining initialize',
+                   verr.include?('off: initialize defined outside a class: CpMod'))
+      end
       guarded_probes.each do |owner, fn|
         check.call("NEG #{what}: #{owner}##{fn} keeps its guard", kept.call(vcode, owner, fn))
       end
