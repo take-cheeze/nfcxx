@@ -333,6 +333,8 @@ end
 # The dynamic shared memory of a launch: one extern symbol per module, used by every kernel that calls
 # __nfcxx_dynshared_addr. The launch passes its size (dynamicSmemBytes).
 DYNSHARED_SYM = "__nfcxx_dynshared"
+# The module-level symbol of a string constant (a printf format): the IR's data name with this prefix.
+STRING_PREFIX = "__nfcxx_str_"
 
 # Device intrinsics a kernel calls by name (extern "C"), and the special register each reads.
 DEVICE_INTRINSICS = {
@@ -416,7 +418,7 @@ end
 
 class Fn
   attr_reader :name, :params, :ret, :form, :uses_dynshared
-  attr_accessor :kernel, :module_fns, :shared, :globals
+  attr_accessor :kernel, :module_fns, :shared, :globals, :strings, :uses_printf
 
   def initialize(form, index)
     @form = form
@@ -551,6 +553,8 @@ class Fn
         emit("cvta.shared.u64 #{t}, #{ptx_sym(x.name)};")
       elsif @globals.key?(x.name)
         emit("cvta.global.u64 #{t}, #{ptx_sym(x.name)};")
+      elsif @strings.key?(x.name)
+        emit("cvta.const.u64 #{t}, #{ptx_sym(STRING_PREFIX + x.name)};")
       else
         raise Refused, "static object @\"#{x.name}\" (only block-shared and device globals are lowered)"
       end
@@ -741,6 +745,8 @@ class Fn
         raise Refused, "intrinsic #{name} takes no arguments" if x.length != 3
         raise Refused, "intrinsic #{name} returns #{ty[0]}, not a 32-bit unsigned" unless ty[0] == "int" && type_size(ty) == 4
         emit("mov.u32 #{dest}, %#{reg};")
+      elsif name == "printf"
+        printf_call(x, dest, ty)
       elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name)
         device_builtin(name, x, dest, ty)
       elsif SCALAR_U32.key?(name)
@@ -1202,6 +1208,60 @@ class Fn
     end
   end
 
+  # Does this body call printf? (the function then needs its frame pointer, for the argument buffer)
+  def contains_printf?(f)
+    return false unless f.is_a?(Array)
+    return true if head_of(f) == "call" && f.length > 2 && f[2].is_a?(IRSym) && f[2].sig == "&" && f[2].name == "printf"
+    f.any? { |c| contains_printf?(c) }
+  end
+
+  # printf, as CUDA's device runtime lowers it: the format is a string constant (a module-level .const array, the IR's
+  # `(data NAME (string ...))`), the arguments are stored into a frame buffer at their C layout by their IR types, and
+  # vprintf(format, buffer) is called; the runtime prints the line when the kernel completes (cudaDeviceSynchronize).
+  def printf_call(x, dest, ty)
+    raise Refused, "printf returns #{ty[0]}, not int" unless ty[0] == "int" && type_size(ty) == 4
+    raise Refused, "printf is not a variadic call of one fixed argument" unless head_of(x[3]) == "variadic" && x.length >= 5 && as_int(x[3][1]) == 1
+    fmt = x[4]
+    raise Refused, "printf format must be a string constant" unless fmt.is_a?(IRSym) && fmt.sig == "@" && @strings.key?(fmt.name)
+    vargs = x.length > 5 ? x[5..-1] : []
+    # the operands first (they may emit code), then the layout: each argument at its own size, naturally aligned
+    ops = vargs.map { |a| operand(a) }
+    layout = []
+    off = 0
+    ops.each do |op, t|
+      unless (t[0] == "int" && (t[1] == 4 || t[1] == 8)) || (t[0] == "float" && t[1] == 8) || t[0] == "ptr"
+        raise Refused, "printf argument of type #{t[0]} #{t[1]} bytes (an int of 4 or 8 bytes, a double or a pointer)"
+      end
+      size = t[0] == "ptr" ? 8 : t[1]
+      off = (off + size - 1) / size * size
+      layout << [op, t, off]
+      off += size
+    end
+    buf = (@frame + 7) / 8 * 8
+    @frame = buf + (off + 7) / 8 * 8
+    base = fresh("rd")
+    emit("add.u64 #{base}, #{@sp}, #{buf};")
+    layout.each do |op, t, o|
+      value = reg_of(op, t)
+      addr = fresh("rd")
+      emit("add.u64 #{addr}, #{base}, #{o};")
+      emit("st.#{ptx_type(t)} [#{addr}], #{value};")
+    end
+    fmt_reg = fresh("rd")
+    emit("cvta.const.u64 #{fmt_reg}, #{ptx_sym(STRING_PREFIX + fmt.name)};")
+    n = (@nlab += 1)
+    emit("{")
+    emit("  .param .b64 __pf_fmt_#{n};")
+    emit("  .param .b64 __pf_buf_#{n};")
+    emit("  .param .b32 __pf_rv_#{n};")
+    emit("  st.param.b64 [__pf_fmt_#{n}], #{fmt_reg};")
+    emit("  st.param.b64 [__pf_buf_#{n}], #{base};")
+    emit("  call (__pf_rv_#{n}), vprintf, (__pf_fmt_#{n}, __pf_buf_#{n});")
+    emit("  ld.param.b32 #{dest}, [__pf_rv_#{n}];") if dest
+    emit("}")
+    @uses_printf = true
+  end
+
   def call_site(x, dest, ty)
     callee_sym = x[2]
     raise Refused, "indirect call" unless callee_sym.is_a?(IRSym) && callee_sym.sig == "&"
@@ -1257,7 +1317,7 @@ class Fn
 
   def compile
     setup
-    if @frame > 0
+    if @frame > 0 || contains_printf?(@body)
       @sp = fresh("rd")
       @prologue << "mov.u64 #{@sp}, __local_depot#{@index};"
       @prologue << "cvta.local.u64 #{@sp}, #{@sp};"
@@ -1316,12 +1376,20 @@ def emit_module(src, sm, kernels = [])
   fns = []
   shared = {}
   globals = {}
+  strings = {}
   forms.each do |f|
     h = head_of(f)
     if h == "ir-module"
       next
     elsif h == "function"
       fns << Fn.new(f, fns.length)
+    elsif h == "data"
+      # a string constant (a printf format): its bytes, as a .const array in the module
+      name = f[1].to_s
+      payload = f[3]
+      raise Refused, "data #{name} (only string constants are lowered)" unless head_of(payload) == "string" && payload.length == 2
+      raise Refused, "data #{name} is defined twice" if strings.key?(name)
+      strings[name] = payload[1].to_s.bytes
     elsif h == "global"
       # A file-scope static array of the device unit is block-shared memory (CUDA's __shared__): its name and
       # size come from the IR, and it must be zero-initialized. Any other global is refused.
@@ -1391,11 +1459,13 @@ def emit_module(src, sm, kernels = [])
   end
   state = {}
   fns.each { |fn| check_recursion(fn.name, callees, state) }
-  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals }
+  fns.each { |fn| fn.module_fns = by_name; fn.shared = shared; fn.globals = globals; fn.strings = strings }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
   out << ".extern .shared .align 16 .b8 #{DYNSHARED_SYM}[];\n" if fns.any?(&:uses_dynshared)
+  strings.each { |name, bytes| out << ".const .align 1 .b8 #{ptx_sym(STRING_PREFIX + name)}[#{bytes.length}] = {#{bytes.join(',')}};\n" }
+  out << ".extern .func (.param .b32 __vprintf_rv) vprintf (.param .b64 __vprintf_fmt, .param .b64 __vprintf_buf);\n" if fns.any?(&:uses_printf)
   shared.each { |name, (size, align)| out << ".shared .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
   globals.each { |name, (size, align)| out << ".global .align #{align} .b8 #{ptx_sym(name)}[#{size}];\n" }
   out << "\n" unless shared.empty? && globals.empty?

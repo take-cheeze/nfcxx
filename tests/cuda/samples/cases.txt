@@ -13,7 +13,7 @@ simpleStreams | cpp | 0_Introduction/simpleStreams | simpleStreams.cu | unverifi
 simpleZeroCopy | cpp | 0_Introduction/simpleZeroCopy | simpleZeroCopy.cu | unverified | | 
 simpleAtomicIntrinsics | cpp | 0_Introduction/simpleAtomicIntrinsics | simpleAtomicIntrinsics.cu | fail-compile |  | identifier "atomicAdd" is undefined
 simpleVoteIntrinsics | cpp | 0_Introduction/simpleVoteIntrinsics | simpleVoteIntrinsics.cu | fail-compile | | identifier "__any_sync" is undefined
-simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | fail-compile | | identifier "printf" is undefined
+simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | unverified | | 
 matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | unverified | | 
 asyncAPI | cpp | 0_Introduction/asyncAPI | asyncAPI.cu | unverified | | 
 reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | identifier "__smem_d" is undefined

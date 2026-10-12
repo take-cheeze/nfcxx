@@ -9,6 +9,9 @@ typedef unsigned long ulong;
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
+// Device printf: the emitter lowers a call of printf to a call of vprintf with a packed argument buffer.
+extern "C" int printf(const char *, ...);
+extern "C" int vprintf(const char *, const void *);
 extern "C" unsigned __nfcxx_tid_x(void);
 extern "C" unsigned __nfcxx_tid_y(void);
 extern "C" unsigned __nfcxx_tid_z(void);
