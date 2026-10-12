@@ -514,7 +514,10 @@ class CodeGen
     flow_bodies = flow_captured && Array.new(irep.instructions.length, '')
     flow_labels = flow_captured && Array.new(irep.instructions.length, '')
     irep.instructions.each_with_index do |insn, idx|
-      out << guarded_inline[:after][insn.addr] if guarded_inline[:after].key?(insn.addr)
+      # With REGISTER_FLOW the bodies are written at the end, so a label written here would land before the method's
+      # first instruction: the guarded loop's `goto` would then jump back to the top and run the loop again.
+      out << guarded_inline[:after][insn.addr] if !flow_bodies && guarded_inline[:after].key?(insn.addr)
+      flow_labels[idx] = guarded_inline[:after][insn.addr] if flow_bodies && guarded_inline[:after].key?(insn.addr)
       out << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
@@ -522,7 +525,7 @@ class CodeGen
       # The guarded-inline prefix is part of this instruction's text, so the flow pass sees it as one unit.
       text = (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
       if flow_bodies
-        flow_labels[idx] = jump_label
+        flow_labels[idx] = "#{flow_labels[idx]}#{jump_label}"
         flow_bodies[idx] = text
       else
         out << jump_label << text

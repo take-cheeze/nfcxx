@@ -228,15 +228,18 @@ report = err[/== yield-free proof \(YIELD_REACH\) ==.*?(?=\n\n)/m].to_s
 
 check.call('the closed world proof is in force', report.include?('closed, proof in force') && !report.include?('not sealed'))
 
-# A yield-free block is built with the flag set, and its arms drop the root-context test.
+# A yield-free block is built with the flag set, and its arms drop the root-context test. The arms are the
+# BLOCK_CORE_DIRECT region: ADR 0420's guarded inline loop sits before them and keeps the test in its own guard by design.
+core_arms = ->(code) { code[%r{// BLOCK_CORE_DIRECT .*?\} else \{}m].to_s }
 sum = body_of.call('YfRunner', 'sum')
 check.call('the block of a yield-free sum is built with the yield-free flag',
            sum.match?(/bc2cpp_blk_env_\d+\[\] = \{[^}]*mrb_int_value\(M, 1\) \}/))
 check.call('its Array arm calls the compiled body without the root-context test',
            sum.match?(/BLOCK_CORE_DIRECT :each .*\n\s+if \(mrb_array_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->array_class\) \{\n\s+r\d+ = Array_each_impl/m) &&
-           !sum.include?('M->root_c'))
+           !core_arms.call(sum).include?('M->root_c'))
 check.call('a yield-free map / select / each_with_index / inject block drops it too',
-           %w[squares evens idx acc].all? { |fn| !body_of.call('YfRunner', fn).include?('M->root_c') })
+           %w[squares evens idx].all? { |fn| core_arms.call(body_of.call('YfRunner', fn)).then { |arms| arms.include?('BLOCK_CORE_DIRECT') && !arms.include?('M->root_c') } } &&
+           !body_of.call('YfRunner', 'acc').include?('M->root_c'))
 check.call('a block that breaks keeps the wrapper and the guard (no direct entry)',
            body_of.call('YfRunner', 'broke').include?('M->root_c'))
 

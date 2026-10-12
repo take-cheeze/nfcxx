@@ -276,7 +276,7 @@ if ENV['GIA_MUTANTS'] && ENV['BC2CPP_TOOL'].nil? && !builds.empty?
   # nil when the mutation site is gone, else the run of this check against the mutant.
   mutate = lambda do |(_name, file, pattern, replacement)|
     Dir.mktmpdir do |dir|
-      FileUtils.cp_r(File.join(runtime::ROOT, 'tools/bc2cpp'), dir)
+      Bc2cppMutantPool.copy_generator(runtime::ROOT, dir)
       path = File.join(dir, 'bc2cpp', file)
       text = File.read(path)
       next nil unless text.include?(pattern)

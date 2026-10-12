@@ -37,6 +37,7 @@ end
 
 ENV['BC2CPP_LOOP_FLOW_REPORT'] = '1'
 require_relative 'fixture_runtime'
+require_relative 'mutant_pool'
 runtime = Bc2cppFixtureRuntime
 
 # The receiver classes: LfKey and LfPlain answer `wait` (the chain's candidates, so the send keeps an else arm);
@@ -263,7 +264,7 @@ if ENV['LFP_MUTANTS'] == '1'
   ]
   mutants.each do |what, file, from, to|
     Dir.mktmpdir('lfp-mutant') do |tmp|
-      FileUtils.cp_r(File.join(root, 'tools/bc2cpp'), File.join(tmp, 'bc2cpp'))
+      Bc2cppMutantPool.copy_generator(root, tmp)
       target = File.join(tmp, 'bc2cpp', File.basename(file))
       text = File.read(target)
       unless text.include?(from)

@@ -28,7 +28,7 @@ MUTANTS = [
   ['signature switch ignored', 'call_context_arguments.rb', "ENV['BC2CPP_CONTEXT_ARGUMENT_SHAPES'] == '0'", 'false', { 'BC2CPP_CONTEXT_ARGUMENT_SHAPES' => '0' }],
   ['closure gate omitted', 'codegen_return_classes.rb', 'unless Array(body.reps).empty?', 'if false', {}],
   ['LOADSELF fact omitted', 'numeric_flow.rb', 'oracle.respond_to?(:loadself_mask) ? oracle.loadself_mask : OTHER', 'OTHER', {}],
-  ['outside lookup ignored', 'codegen_return_classes.rb', 'definition = closed_world_exact_target(name, receiver_class)', 'definition = @registry.fetch(name, []).find { |d| d.owner == receiver_class }', {}],
+  ['outside lookup ignored', 'codegen_return_classes.rb', 'definition = closed_world_exact_target(name, receiver_class, accessor: argc == 0)', 'definition = @registry.fetch(name, []).find { |d| d.owner == receiver_class }', {}],
   ['implicit receiver ignored', 'codegen_return_classes.rb', 'inputs[insn.reg.to_i] = @receiver', 'inputs[insn.reg.to_i] = NumericFlow::OTHER', {}]
 ].freeze
 work = lambda do |(_name, file, pattern, replacement, extra)|

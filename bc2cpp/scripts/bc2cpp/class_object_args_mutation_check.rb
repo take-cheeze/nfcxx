@@ -55,7 +55,7 @@ MUTANTS = [
 failures = []
 mutate = lambda do |(_name, pattern, replacement, expected)|
   Dir.mktmpdir do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+    Bc2cppMutantPool.copy_generator(ROOT, dir)
     path = File.join(dir, 'bc2cpp', FILE)
     text = File.read(path)
     next :site_gone unless text.include?(pattern)
