@@ -532,10 +532,10 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   point, each with inlining as it is by default, with a site rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and
   with inlining off (`NFCAST_INLINE=0`); and with the tier on and every function compiled at its first call (`NFCAST_TIER=sync`,
   `NFCAST_TIER_THRESHOLD=1`): normally, with the collector stress, with early inlining, and with the tier compiling in the
-  background (`NFCAST_TIER=async`): NPROG programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
+  background (`NFCAST_TIER=async`): 28 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
   succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr). Thirteen of the 23 programs are `inline_*`.
-- `tests/ast/engine.cpp`: 172 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
+- `tests/ast/engine.cpp`: 181 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
   state of the interpreter after errors, pins) and, for the inlining, with `State::stats`: a loop of calls rewrites its site once
   and runs the rest inlined (97 of 100 calls with the default count, 98 with `inline_warm = 1`), a state with inlining off or
   `inline_warm = 0` inlines nothing; the guard fails once when the global is assigned again (to another function: the site is inlined again for it and runs every
@@ -621,7 +621,7 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   capture (integer, float, both kinds, boolean), kernels that assign upvalues (also several at once, both kinds, a boolean, a float
   that is assigned an integer), and one variable reached in two ways while it is assigned. The counters of a run in the four
   configurations: 46 loops taken over, 7 left to the interpreter by a guard or an abandoned run, 10 that cannot be compiled.
-- `tests/ast/tier.cpp`: 317 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
+- `tests/ast/tier.cpp`: 318 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
   its counters; a float argument to an integer kernel (a bailout, later a second version); recursion; mutual recursion; numeric
   upvalues and globals that change their value and their type; numbers of either kind (accumulators that start as an integer,
   results and parameters of either kind, bitwise operators, `//` and `%` and comparisons around 2^53 on them, a call made while a

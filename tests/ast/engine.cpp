@@ -341,7 +341,7 @@ int main() {
       alt.inlining = true;
       alt.inline_warm = 1;
       CHECK(run_int(alt, "local function a(x) return x + 1 end local function b(x) return x * 2 end local fs = {a, b} "
-                         "local function site(f, v) return f(v) end local s = 0 "
+                         "local function site(f, v) local r = f(v) return r end local s = 0 "
                          "for i = 1, 200 do s = s + site(fs[i % 2 + 1], i) end return s") == 30200);
       // `site` is inlined into the loop, and its `f(v)` is a site of its own in the clone and in the original: each is inlined
       // for the first function and again at most three times, not at every change of function (200 calls, 199 changes)
