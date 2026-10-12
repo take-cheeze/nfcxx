@@ -502,14 +502,29 @@ class CodeGen
     end
     # RESUMABLE_ENTRY: the method's own instructions are the flat part of the step function.
     @resumable.flat = true if @resumable
+    # REGISTER_FLOW (ADR 0415): an ordinary method keeps each instruction's text
+    # apart until the whole body exists, so dead copies can be dropped.
+    flow_captured = RegisterFlow.captured_registers(irep) if !@resumable && prefix_at.empty? && RegisterFlow.enabled?
+    flow_bodies = flow_captured && Array.new(irep.instructions.length, '')
+    flow_labels = flow_captured && Array.new(irep.instructions.length, '')
     irep.instructions.each_with_index do |insn, idx|
       out << guarded_inline[:after][insn.addr] if guarded_inline[:after].key?(insn.addr)
       out << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
-      out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
-      out << guarded_inline[:at][insn.addr] if guarded_inline[:at].key?(insn.addr)
-      out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
+      jump_label = targets.include?(insn.addr) ? "  L#{insn.addr}:;\n" : ''
+      # The guarded-inline prefix is part of this instruction's text, so the flow pass sees it as one unit.
+      text = (guarded_inline[:at][insn.addr] || '') + (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
+      if flow_bodies
+        flow_labels[idx] = jump_label
+        flow_bodies[idx] = text
+      else
+        out << jump_label << text
+      end
+    end
+    if flow_bodies
+      flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured)
+      flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable
     @blk_param_name = nil
