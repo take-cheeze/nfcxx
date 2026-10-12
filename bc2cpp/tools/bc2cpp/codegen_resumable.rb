@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'bytecode_ir_resumable'
+
 # CodeGen: resumable compiled methods (ADR 0273). A method that reaches Fiber.yield cannot
 # keep its registers in C++ locals: the yield returns to the fiber's resumer, so everything
 # it needs lives in a heap frame and the method is compiled as a step function that a
@@ -205,6 +207,7 @@ class CodeGen
     return "calls #{name}, which takes arguments" unless helper.enter.nil? || helper.enter.enter_fields.all?(&:zero?)
     return "calls #{name}, which has a rescue or ensure handler" unless helper.catch_handlers.empty?
     return "calls #{name}, which builds a block" unless (helper.reps || []).empty?
+    return "calls #{name}, which has unsupported helper control flow" unless BytecodeIR::ResumableRegion.build(helper)
 
     nil
   end
@@ -285,6 +288,9 @@ class CodeGen
     return resumable_error("helper #{name} called with arguments") unless insn.op == 'SSEND0' || insn.argc == 0
 
     helper = @ireps.fetch(label)
+    region = BytecodeIR::ResumableRegion.build(helper)
+    return resumable_error("helper #{name} has unsupported control flow") unless region
+
     helper_def = @owner_of.fetch(label)
     return resumable_error("helper #{name} calls itself") if @resumable.helper_stack.include?(label)
     return resumable_error("helper nesting too deep at #{name}") if @resumable.helper_stack.size >= RESUMABLE_HELPER_DEPTH
@@ -298,16 +304,17 @@ class CodeGen
     out << "  // RESUMABLE_HELPER #{name}\n"
     (1...helper.nregs).each { |i| out << "  r#{base + i} = mrb_nil_value();\n" }
     out << "  r#{base} = self;\n"
-    targets = BytecodeIR.for(helper).branch_target_addrs
+    targets = region.program.branch_targets
     saved_nested = @inline_nested
     @inline_nested = nil
     @resumable.helper_stack.push(label)
     begin
-      helper.instructions.each_with_index do |hinsn, hidx|
+      region.program.instructions.each do |node|
+        hinsn = node.source
         next if hinsn.op == 'ENTER'
 
         out << "  #{prefix}#{hinsn.addr}:;\n" if targets.include?(hinsn.addr)
-        out << resumable_helper_insn(hinsn, helper, helper_def, base, dest, end_label, prefix, hidx)
+        out << resumable_helper_insn(hinsn, helper, helper_def, base, dest, end_label, prefix, node.index)
       end
     ensure
       @resumable.helper_stack.pop

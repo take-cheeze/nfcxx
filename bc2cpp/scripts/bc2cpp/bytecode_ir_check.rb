@@ -10,6 +10,7 @@ require 'set'
 require_relative '../../tools/bc2cpp/irep'
 require_relative '../../tools/bc2cpp/bytecode_ir'
 require_relative '../../tools/bc2cpp/bytecode_ir_regions'
+require_relative '../../tools/bc2cpp/bytecode_ir_resumable'
 
 def insn(addr, op, args)
   Insn.new(lineno: 1, addr: addr, op: op, args: args, raw: "#{op} #{args}")
@@ -19,6 +20,20 @@ failures = []
 check = ->(label, ok) { failures << label unless ok }
 edge_pairs = ->(edges) { edges.map { |e| [e.src, e.target] } }
 program = ->(list) { BytecodeIR::Program.new(Irep.new(label: 't', instructions: list)) }
+
+# Yielding helper regions must have explicit exits and resolved control flow.
+helper = ->(list, **fields) { Irep.new(label: 'helper', instructions: list, **fields) }
+valid = helper.call([insn(0, 'JMPIF', "R1\t8"), insn(4, 'LOADNIL', 'R2'), insn(8, 'RETURN', 'R2')])
+check.call('resumable region retains decoded instruction identity',
+           BytecodeIR::ResumableRegion.build(valid).program.instructions.first.source.equal?(valid.instructions.first))
+check.call('resumable region rejects unresolved branch',
+           BytecodeIR::ResumableRegion.build(helper.call([insn(0, 'JMP', '7'), insn(4, 'RETNIL', '')])).nil?)
+check.call('resumable region rejects nonlocal exit',
+           BytecodeIR::ResumableRegion.build(helper.call([insn(0, 'BREAK', 'R1'), insn(4, 'RETNIL', '')])).nil?)
+check.call('resumable region rejects fallthrough',
+           BytecodeIR::ResumableRegion.build(helper.call([insn(0, 'LOADNIL', 'R1')])).nil?)
+check.call('resumable region rejects nested blocks',
+           BytecodeIR::ResumableRegion.build(helper.call([insn(0, 'RETNIL', '')], reps: ['child'])).nil?)
 
 # Layout: 0 JMPIF->4 (guard entering region at its first address), region
 # body [4, 12) with one internal jump, exit JMP at 12, 16 JMPUW, 20 outside.

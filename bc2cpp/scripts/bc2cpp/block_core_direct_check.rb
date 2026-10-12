@@ -192,10 +192,13 @@ arm = ->(fn) { body_of.call(closed, fn) }
 # root-context test of the entry guard (ADR 0269). A block that provably cannot yield (ADR 0283) drops it.
 check.call('each on an unknown receiver gets Array, Hash and Range arms with the dynamic send as their else',
            arm.call('each_break').match?(/BLOCK_CORE_DIRECT :each .*exact Array\/Hash\/Range.*\n\s+if \(M->c == M->root_c && mrb_array_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->array_class\) \{\n\s+r\d+ = Array_each_impl\(M, r\d+, mrb_obj_value\(bc2cpp_blk_proc_\d+\)\);\n\s+\} else if \(M->c == M->root_c && mrb_hash_p.*Hash_each_impl.*\} else if \(M->c == M->root_c && mrb_range_p.*Range_each_impl.*\} else \{\n\s+r\d+ = mrb_funcall_with_block\(/m))
-check.call('every arm of a block that may not be yield-free repeats the entry guard of ADR 0269', arm.call('each_break').scan('M->c == M->root_c').size == 3)
+# The BLOCK_CORE_DIRECT arms only: ADR 0420's guarded inline loop sits before them and keeps the root-context test in its own
+# guard by design, so the whole body is not the arms.
+core_arms = ->(fn) { arm.call(fn)[%r{// BLOCK_CORE_DIRECT :each .*?\} else \{}m].to_s }
+check.call('every arm of a block that may not be yield-free repeats the entry guard of ADR 0269', core_arms.call('each_break').scan('M->c == M->root_c').size == 3)
 check.call('the arms of a yield-free block drop the root-context test',
            arm.call('each_sum').match?(/BLOCK_CORE_DIRECT :each .*\n\s+if \(mrb_array_p\(r\d+\) && mrb_obj_ptr\(r\d+\)->c == M->array_class\) \{\n\s+r\d+ = Array_each_impl/m) &&
-           !arm.call('each_sum').include?('M->root_c'))
+           !core_arms.call('each_sum').include?('M->root_c'))
 check.call('downto is an Integer arm', arm.call('downto_list').match?(/mrb_integer_p\(r\d+\)\) \{\n\s+r\d+ = \w*downto_impl\(M, /))
 check.call('times stays with the inlined loop of ADR 0147, not an arm', !arm.call('times_sum').include?('BLOCK_CORE_DIRECT'))
 check.call('map reaches Enumerable#collect through the alias', arm.call('map_sq').include?('Enumerable_collect_impl(M,'))
