@@ -23,6 +23,7 @@
 #   --top N                  how many ranked signature suggestions to print (default 20)
 #   --all                    also print one info diagnostic per untyped parameter / return / ivar
 #   --scope engine|all       engine sources only (default) or the mruby core mrblib too
+#   --sig DIR                RBS signature directory (BC2CPP_SIG_DIRS; default sig/bc2cpp; docs/bc2cpp-type-check.md)
 #   --no-sends               skip the by-name send ranking (the fastest run)
 #   --what-if                estimate, per suggestion, how many by-name lines a signature removes (recompiles each
 #                            send once; several minutes on the engine)
@@ -53,6 +54,7 @@ parser = OptionParser.new do |o|
   o.on('--top N', Integer) { |v| opts[:top] = v }
   o.on('--all') { opts[:all] = true }
   o.on('--scope S', %w[engine all]) { |v| opts[:scope] = v }
+  o.on('--sig DIR') { |v| (opts[:sig] ||= []) << File.expand_path(v) }
   o.on('--no-sends') { opts[:sends] = false }
   o.on('--what-if') { opts[:what_if] = true }
   o.on('-q') { opts[:quiet] = true }

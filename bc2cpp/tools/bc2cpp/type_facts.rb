@@ -31,7 +31,7 @@ module TypeFacts
                    :class_arg_types, :class_layout_raw, :class_poison_reason, :store_log, :poison_buckets,
                    :ivar_layout, :element_raw, :element_poison_reason, :hash_element_raw, :hash_poison_reason,
                    :container_constants, :gen, :contradictions, :dynamic_names, :call_sites, :root,
-                   :signature_diagnostics, :signature_origins, keyword_init: true)
+                   :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -93,6 +93,16 @@ module TypeFacts
     idx = enter.lineno - 2
     idx -= 1 while idx >= 0 && lines[idx].strip.empty?
     idx >= 0 ? idx + 1 : nil
+  end
+
+  # [file, line, col] of the declaration of the hints of +d+: its signature when that is where they came from, else the
+  # `# bc2cpp:` comment above the def.
+  def declared_location(ctx, d, reader)
+    if (l = ctx.signature_locs && ctx.signature_locs[d.irep])
+      return [l.file, l.line, l.col]
+    end
+    irep = ctx.ireps[d.irep]
+    [relative(ctx, irep.file), annotation_line(irep, reader.call(irep.file)) || 0, 1]
   end
 
   def collect(ctx)
@@ -403,6 +413,11 @@ module TypeFacts
           row['type'] = row['embedded']
           row['source'] = 'inferred:ivar-layout'
         end
+        if row['type'].nil? && (seed = ctx.signature_ivars && ctx.signature_ivars[[owner, "@#{name}"]]) &&
+           %i[class array hash].include?(seed.type.kind)
+          row['type'] = seed.type.kind == :class ? seed.type.cls : seed.type.kind.to_s.capitalize
+          row['source'] = 'signature'
+        end
         elem = (ctx.element_raw[owner] || {})[name]
         helem = (ctx.hash_element_raw[owner] || {})[name]
         row['element'] = "Array[#{elem}]" if elem && elem != ClassLayout::UNKNOWN && elem.is_a?(String)
@@ -473,6 +488,7 @@ module TypeFacts
       sig = ctx.signature_origins && ctx.signature_origins[d.irep]
       next unless m || sig
 
+      file, aline, acol = declared_location(ctx, d, reader)
       tokens = m ? m[1].split(',', -1).map(&:strip) : []
       ret = m && m[2]
       enter = irep.enter
@@ -480,9 +496,9 @@ module TypeFacts
       known = ->(t) { t.empty? || Annotations::TYPES.key?(t) || owners.include?(t) || %w[Array Hash].include?(t) || container_known?(t, owners) }
       ignored = tokens.reject(&known)
       ignored << ret unless ret.nil? || known.call(ret.sub(/<.*>\z/, ''))
-      { 'owner' => d.owner, 'name' => d.name, 'file' => relative(ctx, irep.file), 'line' => line || 0, 'col' => 1,
+      { 'owner' => d.owner, 'name' => d.name, 'file' => file, 'line' => aline, 'col' => acol,
         'source' => declared_source(ctx, d), 'tokens' => tokens, 'return_token' => ret, 'ignored' => ignored,
-        'arity_mismatch' => (tokens.size == mand || (tokens.empty? && mand.zero?) ? nil : "lists #{tokens.size} parameter(s), method takes #{mand}"),
+        'arity_mismatch' => (m.nil? || tokens.size == mand || (tokens.empty? && mand.zero?) ? nil : "lists #{tokens.size} parameter(s), method takes #{mand}"),
         'args' => Array(ann&.args).map { |t| t && INT_TYPES.fetch(t, t.to_s) },
         'class_args' => Array(cann&.args),
         'return' => ann&.ret && INT_TYPES.fetch(ann.ret, ann.ret.to_s),
@@ -507,11 +523,10 @@ module TypeFacts
       key = [d.irep, slot, declared]
       next unless seen.add?(key)
 
-      irep = ctx.ireps[line_irep || d.irep]
-      line = annotation_line(irep, reader.call(irep.file)) || 0
+      file, line, col = declared_location(ctx, d, reader)
       where = slot == 'return' ? 'return type' : "parameter #{slot}"
       out << { 'owner' => d.owner, 'name' => d.name, 'slot' => slot.to_s, 'declared' => declared.to_s,
-               'inferred' => inferred.to_s, 'file' => relative(ctx, irep.file), 'line' => line, 'col' => 1,
+               'inferred' => inferred.to_s, 'file' => file, 'line' => line, 'col' => col,
                'source' => declared_source(ctx, d),
                'message' => "#{d.owner}##{d.name} #{where}: declared #{declared}, inferred #{inferred}" }
     end
@@ -528,7 +543,34 @@ module TypeFacts
                                                                          !inherits_any?(ctx, set, eann.ret_class)
       end
     end
+    ivar_contradictions(ctx, out)
     out
+  end
+
+  # A declared ivar class (or Integer / Symbol) against what the analysis proved for the same ivar.
+  def ivar_contradictions(ctx, out)
+    (ctx.signature_ivars || {}).each_value do |sig|
+      name = sig.name.delete_prefix('@')
+      t = sig.type
+      inferred = (ctx.class_layout_raw[sig.owner] || {})[name]
+      embed = (ctx.ivar_layout[sig.owner] || {})[name]
+      got = if inferred && inferred != ClassLayout::UNKNOWN then inferred.to_s
+            elsif INT_TYPES.key?(embed) && embed != :array then INT_TYPES[embed]
+            end
+      want = case t.kind
+             when :class then t.cls
+             when :int then 'Integer'
+             when :sym then 'Symbol'
+             when :array then 'Array'
+             when :hash then 'Hash'
+             end
+      next unless want && got
+      next if got == want || (got == 'Integer?' && want == 'Integer')
+
+      out << { 'owner' => sig.owner, 'name' => sig.name, 'slot' => 'ivar', 'declared' => want, 'inferred' => got,
+               'file' => sig.loc.file, 'line' => sig.loc.line, 'col' => sig.loc.col, 'source' => 'signature',
+               'message' => "#{sig.owner}#{sig.name} ivar: declared #{want}, inferred #{got}" }
+    end
   end
 
   # Class names of an inferred list when it is a closed set of registry classes or Integer/Symbol, else nil.
