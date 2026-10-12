@@ -56,6 +56,7 @@ while IFS='|' read -r name tree dir srcs expect marker known; do
   if ! TMPDIR=$w "$nfcxx" $objs -L"$cuda/lib64" -lcudart -o "$w/$name" > "$w/link.log" 2>&1; then
     echo "FAIL $name: link: $(grep -m1 -i 'undefined\|error' "$w/link.log" | cut -c1-160)"; fail=1; continue
   fi
+  if [ "$expect" = build-only ]; then echo "builds $name: links (needs input files; not run)"; continue; fi
   out=$(cd "$w" && LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" timeout 300 "./$name" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then echo "FAIL $name: run exit $rc"; fail=1; continue; fi
   if [ "$expect" = pass ]; then
