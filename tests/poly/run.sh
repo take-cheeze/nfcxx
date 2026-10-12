@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # nfcpoly: build the host test (tests/poly/host.cpp with lib/poly/nfcpoly.cpp and the language backends) with nfcxx and run
 # it, per back end. The languages' interpreters are built per back end by scripts/setup-poly.sh (mruby with C++
-# exceptions) and scripts/setup-poly-lua.sh (Lua with ldo.c as C++); Python is the system CPython (python3-config), and is
-# skipped with a SKIP line when its development files are missing. See docs/notes/poly.md.
+# exceptions), scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS, plain C); Python is the
+# system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. Go is yaegi in a cgo
+# shared library built by scripts/setup-poly-go.sh (one library for both back ends), skipped with a SKIP line when Go or the
+# module proxy is missing. See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
-#   POLY_LANGS="ruby lua python ast"   (default: all four; ast is the nfcast engine, lib/ast, which needs nothing built)
-#   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
+#   POLY_LANGS="ruby lua python ast js go"   (default: all six; ast is the nfcast engine, lib/ast, which needs nothing built)
+#   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
+#   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-langs=${POLY_LANGS:-"ruby lua python ast"}
+langs=${POLY_LANGS:-"ruby lua python ast js go"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   defs=(); incs=(-I lib/poly); srcs=(); libs=(); built=(); bad=0
@@ -20,6 +23,9 @@ for be in $backends; do
       lua)
         if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-lua.sh 2>&1); then echo "FAIL $be poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_LUA); incs+=(-I build/poly-lua/$be/include); srcs+=(lib/poly/nfcpoly_lua.cpp); libs+=(build/poly-lua/$be/lib/liblua.a); built+=(lua) ;;
+      js)
+        if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-js.sh 2>&1); then echo "FAIL $be poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        defs+=(-DTEST_JS); incs+=(-I build/poly-js/$be/include); srcs+=(lib/poly/nfcpoly_js.cpp); libs+=(build/poly-js/$be/lib/libquickjs.a); built+=(js) ;;
       python)
         if command -v python3-config >/dev/null && pyinc=$(python3-config --includes 2>/dev/null) && pylib=$(python3-config --ldflags --embed 2>/dev/null) &&
            [ -f "$(python3-config --includes | sed 's/^-I\([^ ]*\).*/\1/')/Python.h" ]; then
@@ -28,20 +34,27 @@ for be in $backends; do
           echo "SKIP $be poly python: python3-config or Python.h not found (apt-get install python3-dev)"
         fi ;;
       ast)
-        defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp); built+=(ast) ;;
+        defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp); built+=(ast) ;;
+      go)
+        out=$(scripts/setup-poly-go.sh 2>&1); rc=$?
+        if [ $rc = 3 ]; then echo "SKIP $be poly go: $(tail -1 <<<"$out" | sed 's/^setup-poly-go: //')"; continue
+        elif [ $rc != 0 ]; then echo "FAIL $be poly go (libnfcgo build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        defs+=(-DTEST_GO); srcs+=(lib/poly/nfcpoly_go.cpp); godir=${POLY_GO_DIR:-$PWD/build/poly-go}; libs+=(-L"$godir" -lnfcgo "-Wl,-rpath,$godir"); built+=(go) ;;
       *) echo "FAIL poly: unknown language $l"; bad=1 ;;
     esac
   done
   [ $bad = 0 ] || { fail=1; continue; }
   [ ${#built[@]} -gt 0 ] || { echo "SKIP $be poly: no language available"; continue; }
-  if ! out=$(NFCXX_BACKEND=$be ./nfcxx "${defs[@]}" "${incs[@]}" tests/poly/host.cpp lib/poly/nfcpoly.cpp "${srcs[@]}" "${libs[@]}" -o "$tmp/host-$be" 2>&1); then
-    echo "FAIL $be poly (host build)"; grep -v 'prelinker' <<<"$out" | head -40; fail=1; continue
-  fi
-  [ -z "${POLY_OUT:-}" ] || { mkdir -p "$POLY_OUT" && cp "$tmp/host-$be" "$POLY_OUT/host-$be"; }
-  if out=$("$tmp/host-$be" 2>&1); then
-    echo "ok   $be poly [${built[*]}]: $(tail -1 <<<"$out")"
-  else
-    echo "FAIL $be poly [${built[*]}]"; head -60 <<<"$out"; fail=1
-  fi
+  for t in host ops; do   # host.cpp: the library; ops.cpp: optional arguments, computed properties, operator methods
+    if ! out=$(NFCXX_BACKEND=$be ./nfcxx "${defs[@]}" "${incs[@]}" tests/poly/$t.cpp lib/poly/nfcpoly.cpp "${srcs[@]}" "${libs[@]}" -o "$tmp/$t-$be" 2>&1); then
+      echo "FAIL $be poly/$t (build)"; grep -v 'prelinker' <<<"$out" | head -40; fail=1; continue
+    fi
+    [ -z "${POLY_OUT:-}" ] || { mkdir -p "$POLY_OUT" && cp "$tmp/$t-$be" "$POLY_OUT/$t-$be"; }
+    if out=$("$tmp/$t-$be" 2>&1); then
+      echo "ok   $be poly/$t [${built[*]}]: $(tail -1 <<<"$out")"
+    else
+      echo "FAIL $be poly/$t [${built[*]}]"; head -60 <<<"$out"; fail=1
+    fi
+  done
 done
 exit $fail

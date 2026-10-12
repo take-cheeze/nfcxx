@@ -524,7 +524,7 @@ fi
 if [ $errors -lt 8 ]; then echo "FAIL qbe-prep: only $errors refusal cases compared"; fail=1; fi
 for m in 'struct __nfcxx_half16 {' 'struct __nfcxx_float128 {' '{ 0x' 'UL, 0x' '_Alignas(' '__attribute__((__aligned__(' \
          '__nfcxx_int3();' '__nfcxx_mulov_ul(' '__nfcxx_ovx_' '__nfcxx_addov_' '__nfcxx_popcount' '__builtin_alloca(' \
-         '__nfcxx_keep(&' 'unsigned long __atomic_fetch_add_' 'memcpy(void *' '__nfcxx_isnan' '1.5f;'; do
+         '__nfcxx_keep(&' 'unsigned long __atomic_fetch_add_' 'memcpy(void *' '__nfcxx_clzl' '1.5f;'; do
   grep -qF -e "$m" "$tmp/all.out" || { echo "FAIL qbe-prep: no input produced '$m'"; fail=1; }
 done
 for m in '.init_array' '.set ' '.globl ' '.weak _ZTH' '__nfcxx_int3,@function' '.quad '; do

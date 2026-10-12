@@ -1,0 +1,32 @@
+5000050000
+false
+done
+called
+1	2	3
+1
+2	nil	nil
+false	boom
+false	boom
+false	tail_calls.lua:28: boom
+false	tail_calls.lua:24: boom
+false	boom
+false	tail_calls.lua:24: boom
+false	deep
+false	tail_calls.lua:35: deep
+false	deep
+false	tail_calls.lua:39: bad argument #1 to 'rep' (string expected, got no value)
+false	tail_calls.lua:42: native level 2
+false	native level 2
+false	tail_calls.lua:45: attempt to call a nil value (global 'nothing')
+false	tail_calls.lua:46: attempt to call a nil value (field 'x')
+false	tail_calls.lua:47: attempt to call a nil value (method 'nope')
+false	tail_calls.lua:49: bad argument #2 to 'error' (number expected, got string)
+3	1,2
+4
+500500
+500501
+4
+false	tail_calls.lua:68: late
+true	0
+ABC
+1

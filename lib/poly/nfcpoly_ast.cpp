@@ -419,15 +419,13 @@ void PropMember::set(nfcast::State& S, nfcast::HostObject* self, const Value& v)
 // script error, raised after the handlers have finished.
 void run_callable(nfcast::State& S, Callable* c, const Value* self, Args a, Rets& r) {
   AstLang* lang = lang_of(S);
-  if (a.n != c->arity()) {
-    raise_error(S, "ArgumentError",
-                "wrong number of arguments (given " + std::to_string(a.n) + ", expected " + std::to_string(c->arity()) + ")");
-  }
+  if (!arity_fits(c, a.n)) raise_error(S, "ArgumentError", arity_message(c, a.n));
   Pending pend;
   try {
     std::vector<Var> args;
     args.reserve(static_cast<std::size_t>(a.n));
     for (int k = 0; k < a.n; ++k) args.push_back(lang->decode(a.v[k]));
+    arity_pad(c, args);
     Var selfv;
     const Var* sp = nullptr;
     if (self) {

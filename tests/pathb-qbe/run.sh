@@ -10,7 +10,8 @@
 #                                 relies on a case C++ leaves undefined: only EXPECT is checked, gcc is not compared.
 #                                 volatile.cpp and tls.cpp: volatile accesses and thread-local objects (a second pthread).
 #                                 A probe may carry `// ASM-COUNT: FUNCTION PREFIX N` lines: the assembly of FUNCTION must
-#                                 call exactly N functions whose name starts with PREFIX (check_asm below).
+#                                 call exactly N functions whose name starts with PREFIX (check_asm below);
+#                                 `// ASM-ORDER: FUNCTION FIRST SECOND` lines: a call of FIRST* comes before one of SECOND*.
 #                                 A probe with a `// STDOUT: same` line also needs the same standard output as the gcc
 #                                 backend (dyn_*.cpp: constructor/destructor order of global, static and heap objects).
 #                                 eh_*.cpp: C++ exceptions through EDG's setjmp/longjmp ABI and the runtime in libC.a
@@ -22,6 +23,8 @@
 #                                 `// TRAP-STDERR: text` line also requires that text on stderr (EH runtime messages).
 #                                 Built with NFCXX_IR_OVERFLOW=trap. The gcc backend is not compared: C leaves
 #                                 these cases undefined (gcc dies with SIGFPE or SIGSEGV instead).
+#                                 `// TRAP-SANITIZE: undefined` builds with the sanitizer instead (a `// SANITIZE:` line does the
+#                                 same for a probe in cases/ that must run clean and agree with gcc; docs/notes/ubsan.md).
 #                                 `// TRAP-EXIT: 132` expects another signal (128 + 4, SIGILL: __builtin_trap, asm ud2);
 #                                 `// TRAP-IR: default` builds without NFCXX_IR_OVERFLOW=trap (VLA lowering contains a
 #                                 checked 64-bit signed multiply, which trap mode refuses).
@@ -70,6 +73,17 @@ check_asm() {
       END { print n + 0 }' "$asm")
     if [ "$got" != "$want" ]; then echo "asm check: $fnname has $got calls to $prefix*, expected $want"; return 1; fi
   done < <(sed -n 's,^// ASM-COUNT: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([0-9]*\).*,\1 \2 \3,p' "$src")
+  # `// ASM-ORDER: FUNCTION FIRST SECOND`: in the assembly of FUNCTION the first call of a function starting with FIRST comes
+  # before the first call of one starting with SECOND (the layout that [[likely]] and [[unlikely]] ask for).
+  while read -r fnname prefix want; do
+    got=$(awk -v f="$fnname" -v a="$prefix" -v b="$want" '
+      $0 == f ":" { on = 1; next }
+      on && /^\.size / { on = 0 }
+      on && $1 == "callq" && index($2, a) == 1 && !pa { pa = NR }
+      on && $1 == "callq" && index($2, b) == 1 && !pb { pb = NR }
+      END { print (pa && pb && pa < pb) ? "ok" : "no" }' "$asm")
+    if [ "$got" != ok ]; then echo "asm check: in $fnname, a call of $prefix* does not come before a call of $want*"; return 1; fi
+  done < <(sed -n 's,^// ASM-ORDER: *\([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\) \([A-Za-z_0-9]*\).*,\1 \2 \3,p' "$src")
   return 0
 }
 
@@ -80,7 +94,13 @@ run_one() {
   total=$((total + 1))
   n=$(basename "$f" .cpp); name=${f#tests/}
   ir=$tmp/$n.ir; ssa=$tmp/$n.ssa; s=$tmp/$n.s; obj=$tmp/$n.o; exe=$tmp/$n.exe
-  if [ "$mode" = trap ] && ! grep -q '^// TRAP-IR: default' "$f"; then
+  # `// SANITIZE: undefined` (or `// TRAP-SANITIZE:` in traps/) builds as `nfcxx -fsanitize=` does (NFCXX_IR_SANITIZE,
+  # docs/notes/ubsan.md): signed overflow is checked and a failing check reports its place on stderr before it aborts.
+  san=$(sed -n 's#^// \(TRAP-\)\{0,1\}SANITIZE: *\([a-z,-]*\).*#\2#p' "$f" | head -1)
+  if [ -n "$san" ]; then
+    NFCXX_IR_SANITIZE=$san scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {
+      failed=$((failed + 1)); lines+=("FAIL     $name: front end: $(head -1 "$tmp/$n.fe")"); return; }
+  elif [ "$mode" = trap ] && ! grep -q '^// TRAP-IR: default' "$f"; then
     # (`// TRAP-IR: default` keeps the wrapping arithmetic: a checked 64-bit signed multiply, which the lowering of a
     # variable-length array contains, is refused in trap mode.)
     NFCXX_IR_OVERFLOW=trap scripts/pathb-dump --ir $std "$f" > "$ir" 2> "$tmp/$n.fe" || {

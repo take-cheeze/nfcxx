@@ -1,0 +1,27 @@
+1
+0
+1
+1
+0
+1
+4
+4
+1
+0
+4
+1
+1
+float	true
+int	2
+int	1
+int	0
+int	-1
+int	1
+int	0
+int	-1
+int	-2
+int	-3
+9223372036854775803
+false	for_nan.lua:36: 'for' step is zero
+false	for_nan.lua:37: 'for' step is zero
+false	for_nan.lua:38: 'for' step is zero

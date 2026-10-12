@@ -10,6 +10,8 @@ covers say so.
 | Note | One line |
 | --- | --- |
 | [build-self-hosting.md](notes/build-self-hosting.md) | What the build fetches, which host tools it needs for which step, and how to build offline from mirrored submodules. |
+| [asan.md](notes/asan.md) | `nfcxx -fsanitize=address`: gcc's AddressSanitizer on the gcc backend; backend selection, limits. `tests/asan/run.sh`. |
+| [asan-plan.md](notes/asan-plan.md) | Plan (not implemented) for AddressSanitizer on the qbe, Path B and wasm backends: cproc checks, emitter checks, libasan reuse, milestones. |
 | [builtins.md](notes/builtins.md) | Table of compiler builtins: what EDG accepts per dialect and what runs on the gcc and qbe backends. |
 | [cxx-driver.md](notes/cxx-driver.md) | `nfcxx` as `CXX` for CMake and mruby: the driver options accepted, and the rpg-maker-clone desktop build's remaining blockers. |
 | [eval.md](notes/eval.md) | `nfceval` (`lib/eval`): evaluating C++ snippets at run time with bound host objects, and `nfcxx -shared`. |
@@ -19,14 +21,18 @@ covers say so.
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
 | [llamacpp.md](notes/llamacpp.md) | llama.cpp's host-side ggml through the gcc backend: what compiles, the driver fixes, and the blockers (EDG AVX10.2 builtins, a cross-TU template instance). `tests/llamacpp/run.sh`. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
-| [ast.md](notes/ast.md) | `nfcast` (`lib/ast`): a self-specializing AST interpreter for a Lua 5.4 subset, the first step of a Truffle-style plan (tiering and inlining are not done): nodes that rewrite themselves, its own collector, differential tests against a real Lua. `tests/ast/run.sh`. |
-| [poly.md](notes/poly.md) | `nfcpoly` (`lib/poly`): evaluating Ruby (mruby), Lua, Python and `ast` (the nfcast engine) from C++ with bound host objects, GraalVM-polyglot style; mruby and Lua are built with C++ exceptions on EDG's runtime; the exception model and its test. |
+| [ast.md](notes/ast.md) | `nfcast` (`lib/ast`): a self-specializing AST interpreter for a Lua 5.4 subset and the three steps of a Truffle-style plan (the AST level of the third): nodes that rewrite themselves, a tier that compiles hot numeric kernels through the nfcxx driver, small script functions inlined at hot call sites by cloning their bodies, its own collector, differential tests against a real Lua. `tests/ast/run.sh`. |
+| [poly.md](notes/poly.md) | `nfcpoly` (`lib/poly`): evaluating Ruby (mruby), Lua, Python, JavaScript (QuickJS-NG), Go (yaegi) and `ast` (the nfcast engine) from C++ with bound host objects, GraalVM-polyglot style; mruby and Lua are built with C++ exceptions on EDG's runtime, QuickJS is plain C patched for cproc, Go is a statically typed binding model over a cgo shared library; the exception model and its test. |
+| [uop.md](notes/uop.md) | `nfcuop` (`lib/uop`): a tinygrad-style UOp IR (hash-consed nodes, shapes, rewriting, a reference interpreter), an ONNX-style graph (`hir`) with ONNX export, and a numpy-like `np::Tensor` API over it; measured numpy compatibility, the static-then-dynamic shape plan. C rendering (`render_c`), autodiff (`uop-autodiff.md`) and the script-language bindings (`uop-poly.md`) are in; dynamic shapes and ONNX import still to come. `tests/uop/run.sh`. |
+| [uop-poly.md](notes/uop-poly.md) | `nfcuop_poly` (`lib/uop`): the numpy-like `np::Tensor` API in Ruby, Lua, Python, JavaScript and Go through `nfcpoly`: operators where the language has them, named methods everywhere, nested lists in and out, ONNX bytes identical to the C++ model's; what was run (host g++) and what was not. `tests/uop/run_poly.sh`. |
+| [uop-autodiff.md](notes/uop-autodiff.md) | Reverse-mode autodiff for `nfcuop` (`lib/uop/nfcuop_grad.*`): `hir::gradients` / `np::grad` build the gradient as ordinary ONNX operators (including a new `Pad`), so it exports, runs in onnxruntime and evaluates on both backends; rule table, tie conventions, limits, measurements. `tests/uop/test_grad.cpp`. |
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
 | [pathb-stage3.md](notes/pathb-stage3.md) | The IR-to-QBE emitter, translation validation, and the rounds of closed gaps (volatile, TLS, exceptions, dynamic init, bit-fields, VLAs). |
 | [pathb-wasm.md](notes/pathb-wasm.md) | The IR-to-WebAssembly emitter: the LP64 layout kept with i64 pointers, the shadow stack, traps, what is refused, and the node tests (`tests/wasm/run.sh`). |
 | [realworld.md](notes/realworld.md) | tinyxml2, doctest, Lua, mruby built with nfcxx/nfcc, what each needed, `nfcc` options. |
+| [ubsan.md](notes/ubsan.md) | `nfcxx -fsanitize=undefined` (Path B): checked operations that report `file:line: runtime error: ...`, and `[[likely]]`/`[[unlikely]]` as block layout. `tests/pathb-qbe/run.sh` (traps/ubsan_*, cases/ubsan_clean, cases/likely_unlikely). |
 | [tracing.md](notes/tracing.md) | `--trace` Chrome/Perfetto JSON of the driver steps. |
 
 ## Status matrix
@@ -45,14 +51,18 @@ covers say so.
 | Hexagon | Generated C for the `linux_riscv32` stand-in target compiles with clang-19 `--target=hexagon` and runs under qemu-hexagon, HVX kernels included; struct layout equals clang's Hexagon ABI (`tests/hexagon/run.sh`, `tests/hexagon/layout.sh`). Not the Hexagon SDK, QuRT or `hexagon-sim` (unavailable, `docs/notes/hexagon.md` section 4). | hexagon.yml |
 | `nfcc` (drop-in `cc`, C only) | `-c`, link, `-S`, `-E`/`-M*` answered by the host compiler, `-D -U -I`, dependency files, response files, `-shared`, rejected options, on both backends (`tests/c/cc-mode.sh`); Lua through its own makefile (`tests/realworld/run_lua_make.sh`); mruby's rake build (`tests/realworld/run_mruby.sh`) | ci.yml, realworld.yml |
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
-| `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`, `scripts/setup-poly-lua.sh`) | Evaluate Ruby, Lua, Python and `ast` (Lua syntax on the nfcast engine) from C++, alone or together in one `Context`, with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby and Lua built with C++ exceptions, the nfcast engine is C++; `docs/notes/poly.md`); GC release of script-owned objects. 559 checks on both backends (`tests/poly/run.sh`), also under valgrind by hand | ci.yml |
-| `nfcast` (`lib/ast`) | A Lua 5.4 subset on a self-specializing AST interpreter: nine programs whose output equals a real Lua 5.4.9's, normally and with the collector at every safe point; 71 checks of the specialization counters, collector, host objects and errors (`tests/ast/run.sh`, both backends); random-program fuzzing against the reference by hand (`tests/ast/fuzz.sh`). No coroutines, `goto`, `<close>`, `utf8`, `io`/`os`; no tiering or inlining yet (`docs/notes/ast.md`) | ci.yml |
+| `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`, `scripts/setup-poly-lua.sh`, `scripts/setup-poly-js.sh`, `scripts/setup-poly-go.sh`) | Evaluate Ruby, Lua, Python, JavaScript (QuickJS-NG, plain C, `scripts/quickjs-cproc.patch`), Go and `ast` (Lua syntax on the nfcast engine) from C++, alone or together in one `Context`, with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby and Lua built with C++ exceptions, the nfcast engine is C++; `docs/notes/poly.md`); GC release of script-owned objects. Go is yaegi in a cgo shared library (`build/poly-go/libnfcgo.so`, one for both back ends) with a statically typed binding model: typed functions, generated wrapper types with methods, bound variables synchronized at the boundaries, no host callbacks from goroutines. `recover()` in scripts gives the plain panic value, `nfc.Go` starts a goroutine whose panic is an error instead of the end of the process. 1206 checks on both backends (`tests/poly/run.sh`; Go alone 318; Python and Go report SKIP when python3-dev, or Go >= 1.24 and the Go module proxy, are missing), the Ruby/Lua/Python/JavaScript binary also under valgrind by hand, the Go one under AddressSanitizer and LeakSanitizer on both back ends (`tests/poly/asan-go.sh`; valgrind only with `tests/poly/valgrind-go.supp`, `poly.md`) | ci.yml (with `actions/setup-go`) |
+| `nfcast` (`lib/ast`) | A Lua 5.4 subset on a self-specializing AST interpreter, with the inlining of small script functions at hot call sites (a clone of the callee's body, loops and multiple assignment included, with pure arguments substituted, guarded by the function, run in a frame that looks like a real call's) and a tier that compiles hot numeric kernels and hot numeric loops (on-stack replacement; off by default): 28 programs whose output equals a real Lua 5.4.9's, with the collector at its default and at every safe point, each with inlining on, as early as possible and off, with the tier compiling every function at its first call (also with early inlining) and with it compiling in the background; 181 checks of the specialization and inlining counters, the guard, tracebacks, collector, host objects and errors and 318 checks of the tier (compiled code and its counters, bailouts, rebinding, error texts, the cache, failed compiles) (`tests/ast/run.sh`, both backends); random-program fuzzing against the reference by hand (`tests/ast/fuzz.sh`, including random small helpers and methods called over changing argument types; `tests/ast/fuzz_tier.sh` for random numeric kernels); speed by hand (`tests/ast/bench.sh` for the inlining, `tests/ast/bench_tier.sh` for the tier). The tier compiles numeric kernels only: no tables, strings, native calls or on-stack replacement. No coroutines, `goto`, `<close>`, `utf8`, `io`/`os` (`docs/notes/ast.md`) | ci.yml |
+| `nfcuop` (`lib/uop`; `docs/notes/uop.md`) | UOp graph with static shapes (reshape/permute/expand/shrink/pad/flip, reductions), interning, rewriting and an exact symbolic simplifier checked against the interpreter on random graphs; an ONNX-style graph (`hir`, ONNX opset 18) whose export is accepted by `onnx.checker` and computes the interpreter's results in onnxruntime; a numpy-like `np::Tensor` API over it (broadcasting, slicing, concatenation, reductions, `matmul`, `softmax`, ...), 100 expressions equal to real numpy in shape and values (`tests/uop/run.sh`, both backends; the Python checks need numpy/onnx/onnxruntime and SKIP without). C rendering (fused loop nests compiled with `cc`, bit-identical to the interpreter on ~32,000 random and hand-written comparisons) and configurable default dtypes (32-bit; float64/int64 give numpy's, all 100 expressions equal to numpy in dtype too). Autodiff and the script bindings have their own rows below; no dynamic shapes or ONNX import yet | ci.yml |
+| `nfcuop_poly` (`lib/uop/nfcuop_poly.cpp`; `docs/notes/uop-poly.md`) | The numpy-like API from Ruby (mruby), Lua, Python, JavaScript (QuickJS-NG) and Go (yaegi): `np.array/zeros/arange/placeholder/eval/to_onnx/...`, `Tensor` with shape/dtype/T properties, operators `+ - * / % // @ & \| ^ < > ...` on Python, Ruby (right operand) and Lua (arithmetic) with numbers on either side where the language allows it, named methods in all five; one MLP-with-softmax model built in each language gives values equal bit for bit to the C++ API and ONNX bytes identical to the C++ model's, and the operators, `nfcuop::Error` as a script error with its message (and out of `eval` unrescued), dtype configuration and the C backend are checked per language (`tests/uop/run_poly.sh`, run from `tests/uop/run.sh`; 1375 checks on the host g++ in the session that wrote it, the nfcxx back ends not run there). The optional-argument, computed-property and operator-method support it needs is in nfcpoly (`tests/poly/ops.cpp`) | ci.yml |
+| `nfcuop` autodiff (`lib/uop/nfcuop_grad.*`; `docs/notes/uop-autodiff.md`) | `hir::gradients` / `np::grad`: VJP rules for every differentiable `hir` operator, expressed as ONNX operators (with ONNX `Pad` added); 100 finite-difference cases in float64 (max relative error ~3e-9), hand-derived exact gradients, second derivatives, C backend bit-identical to the interpreter, gradient models accepted by `onnx.checker` and equal in onnxruntime (`tests/uop/run.sh`). The gradient graph is not optimized (equal small nodes are not merged in `hir`); integer/bool values are constants, a path through a float-to-integer cast is an error | ci.yml |
+| AddressSanitizer (`nfcxx -fsanitize=address`; `docs/notes/asan.md`) | Heap/stack/global overflow, use after free and scope, double free, alloc/dealloc mismatch and leaks reported with the C++ source line, exceptions and containers clean; the qbe default switches to the gcc backend, explicit qbe, Path B and other sanitizers refused (`tests/asan/run.sh`) | ci.yml |
 | Tracing (`--trace=FILE`, `NFCXX_TRACE`) | Valid trace-event JSON with the driver and backend spans, both backends, exit code unchanged (`tests/trace/run.sh`, needs python3) | ci.yml |
 | mruby scripting (`scripts/mrb`, `*.rb`) | Every ported script gives output byte-identical to its Python original (`tests/mruby/run.sh`; Path B and Hexagon parts need the harness and a clang with the Hexagon target, else they skip) | ci.yml (Path A parts), pathb.yml (with the harness) |
 
 Every `tests/*/run.sh` and `tests/realworld/*.sh` is wired into a workflow, with these exceptions:
 `tests/builtins/fe_matrix.sh` prints a table (EDG acceptance of each builtin in three dialects) and has no pass/fail,
-and `tests/mruby/qbe-prep.sh` and `qbe-prep-tap.sh` are run by `tests/mruby/run.sh`. `tests/realworld/*.sh` clone
+and `tests/mruby/qbe-prep.sh` and `qbe-prep-tap.sh` are run by `tests/mruby/run.sh`, and `tests/uop/run_poly.sh` by `tests/uop/run.sh`. `tests/realworld/*.sh` clone
 upstream sources at pinned commits and report SKIP (exit 0) when the fetch fails, so an unreachable GitHub shows up as a
 SKIP line in the log, not as a red job.
 
@@ -134,7 +144,17 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
 - Empty classes have size 0 in the C that cproc sees, while EDG folds `sizeof` as 1 (`freestanding.md`; no test asserts it).
 - `nfcc` on qbe ignores `-O*` and `-g*` (no optimisation levels, no debug info); `-Wp,` items outside the listed
   preprocessor options are rejected (`tests/c/cc-mode.sh`, `realworld.md`).
-- qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`).
+- qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`);
+  so does QuickJS (`scripts/quickjs-cproc.patch`, `poly.md`).
+- `-D_GNU_SOURCE` (or `#define _GNU_SOURCE`) plus `#include <stdlib.h>` or `<math.h>` fails on qbe with `declaration has no type
+  specifier`: glibc then declares `strtof32x`, `acosf32x` and friends with the types `_Float32x` and `_Float64x`, whose typedefs
+  `qbe-prep.rb` drops without mapping them (it maps `_Float32` and `_Float64`; `_Float64x` is `long double` here). Checked by hand
+  with a three-line C file on both back ends (qbe fails, gcc compiles); QuickJS, whose CMake build defines the macro, is built
+  without it (`poly.md`). No test asserts the failure.
+- QuickJS needed three more constructs that cproc rejects, patched in the throwaway checkout (`scripts/quickjs-cproc.patch`):
+  `_Atomic` (`quickjs-c-atomics.h`, replaced by libatomic's sized functions chosen with `_Generic`; `Atomics` results are checked
+  for every element size by `tests/poly/run.sh`), `return f();` of a `void` call inside a `void` function, and the spelling
+  `__attribute((...))`.
 
 **Driver**: `nfcxx --emit-c` does not pass user `-I` options to `cpfe` (`realworld.md`; no test). Tracing uses GNU `date`
 (Linux only) and does not time EDG's front end separately inside `eccp` (`tracing.md`; `tests/trace/run.sh` checks the
@@ -145,20 +165,35 @@ and no run-time timeout; one eval at a time per engine, not thread safe; no over
 C varargs as bound functions; host and snippet must use the same backend.
 
 **`nfcpoly`** (`poly.md`, "Limitations"; `tests/poly/run.sh` covers the supported forms, not the limits): no sandbox and no
-time limit; not thread safe; constness and inheritance of bound classes are not tracked; a libmruby built without
+time limit (Go: a whitelist of standard packages, no files or processes unless bound; an endless loop still hangs); not thread safe; constness and inheritance of bound classes are not tracked; a libmruby built without
 `enable_cxx_exception` links but loses the destructor guarantee (measured, not part of the suite); the mruby build
 needs `scripts/mruby-cxx-novolatile.patch` because cproc cannot store to a `volatile` (see **`volatile`** above) and
 `MRB_USE_VM_SWITCH_DISPATCH` because EDG rejects mruby's computed-goto table when `vm.c` is compiled as C++; Path B
 untested; no compile-time embedding. Lua needs `scripts/lua-cxx-novolatile.patch` for the same `volatile` reason and
 opens only the base (without `dofile`/`loadfile`), coroutine, table, string, math and utf8 libraries. Python is the system
 CPython (`python3-config`, tested with 3.12 only; the suite skips it when the headers are missing), one interpreter per process that is
-never finalized, and a write through `global` in a function shadows a bound variable.
+never finalized, and a write through `global` in a function shadows a bound variable. JavaScript is QuickJS-NG v0.17.0 compiled as
+plain C (no C++ build) with `scripts/quickjs-cproc.patch`; a script has no modules, files, timers or `console`, a script error is
+any thrown value (a non-error is class `Error`), a number is an integer when it is whole and a safe integer, promise jobs run when
+the outermost call returns; the library is built with QuickJS's asserts on, so a `JSValue` leaked through the raw API aborts when
+the `Context` closes (untested). Go is yaegi v0.16.1 (pinned in `lib/poly/go/go.mod`)
+in a 30 MB cgo shared library that needs Go >= 1.24, cgo and the Go module proxy to build (the suite skips Go otherwise): it is a Go
+interpreter with gaps (`poly.md`, "Speed and coverage gaps", each asserted by `tests/poly/host.cpp`), compile errors are `SyntaxError`,
+bound variables are synchronized only at the boundaries of an evaluation and of a host call, a host function called from a goroutine
+of the script panics (`GoroutineError`) and a panic that a script goroutine does not recover ends the process, `Value::call` does not
+reach methods of types the script defines, and valgrind is not usable with the Go runtime loaded (3800 reports from the runtime and
+yaegi, none a bad free).
 
 **`nfcast`** (`ast.md`, "The language"; `tests/ast/run.sh` covers the supported forms): no sandbox and no time limit; the evaluator recurses on the C++ stack
 (1500 nested script calls, `State::max_depth`; tail calls are not eliminated); no coroutines, `goto`, `<close>`, `__gc`, weak tables,
-`utf8`, `string.pack`, `io`, `os`; speed is 0.8x to 2.4x of PUC Lua's time (one measurement with the host compiler, `ast.md`), and
-there is no compilation of hot code or inlining yet.
-
+`utf8`, `string.pack`, `io`, `os`; speed is 0.8x to 2.4x of PUC Lua's time (one measurement with the host compiler, `ast.md`). The tier
+(off by default) compiles only numeric kernels (no tables, strings, calls of native functions; a loop that runs in a function called
+once is not replaced while it runs) and needs the nfcxx driver at run time. The inlining of small functions (`ast.md`, "Inlining") saves
+17% to 25% of the instructions in a loop made of small calls (wall time within the noise of a shared machine, up to 1.7x on the
+nfcxx back ends against inlining off) and 1% to 3% for a recursive function; it leaves callees with closures or `...` as calls
+(loops and multiple assignment are inlined, except loops when the tier is on), inlines method calls on tables only, inlines a site
+again after a guard failure at most three times, and does not inline host functions
+(the C compiler does that for ordinary C++, not for functions registered as type-erased callables).
 **Hexagon**: no Hexagon SDK, `hexagon-sim` or QuRT; EDG has no Hexagon target, so a 32-bit little-endian stand-in
 (`linux_riscv32`) is used; cases that include hosted C++ headers, need GP-relative relocations or template instantiation
 (`edg_prelink`) are reported as SKIP by `tests/hexagon/run.sh` (`hexagon.md`).

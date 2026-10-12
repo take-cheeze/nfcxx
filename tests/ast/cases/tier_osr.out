@@ -1,0 +1,82 @@
+sum	3003
+float	7219.9720840721
+either	2.5	float
+either, never a float	5	integer
+wrap	2293070008301402073
+collatz	111
+repeat	23	3795
+boolean	false	12
+down	10741
+floor limit	6
+float loop	5.5
+maxint	4
+minint	3
+empty and single	10
+step 4	15
+float down	2.5
+nested	25
+calls	133170
+calls, other types	198310.0
+callee rebound	2870
+firstdiv	1000003	7	97
+find	1346269	832040
+mixed	11	25.5	integer	float
+noret	55
+two	nil	30
+swap	32951280099	53316291173	3	kept
+after	32951280105
+divloop ok	649
+divloop	false	tier_osr.lua:146: attempt to divide by zero
+modloop	false	tier_osr.lua:153: attempt to perform 'n%0'
+bitloop	true	true	false	tier_osr.lua:159: number (local 'x') has no integer representation
+bits2	false	tier_osr.lua:165: number (local 'x') has no integer representation
+divloop again	352	false	tier_osr.lua:146: attempt to divide by zero
+after	false	tier_osr.lua:177: attempt to concatenate a nil value
+table	2870
+string	12345678910
+closures	1	2	3
+upvalue write	10
+native call	17
+types	20	30.0	20.5	21
+types again	42	42.5
+tri	4960
+fibl	21880
+big	1200007
+harmonic	12.090146129863
+local callee	42925
+recursive local callee	5313
+local callee rebound between loops	9950
+callee assigned in the loop	10319
+callee not a function	false	tier_osr.lua:254: attempt to call a number value (upvalue 'notf')
+captured local	5050	5050
+captured float	512.0	512.0
+captured, both kinds	6.0	6.0	float
+captured boolean	false	false
+upvalue write	5050
+hits	1000	1000
+upvalue, both kinds	5.0	float
+multiple assignment to upvalues	2178309	3524578
+error after writes	false	tier_osr.lua:293: attempt to divide by zero
+seen	5
+recursion writing an upvalue	50	51
+runaway	false	tier_osr.lua:299: stack overflow
+depth after	true
+alias, a local and a function	550
+alias, two functions	820	40
+two counters	80	40
+a function that reads and one that writes	465
+upvalue: a float, assigned an integer and a float	1.5	float
+integer upvalue	1	integer
+boolean upvalue	false
+either kind, decided late	25.0	float
+a float that becomes an integer	3	integer
+types, only the loop is compiled	50	75.0	50.5	51	101	102.5
+upvalue: a float, entry kind	2.75	float
+the same upvalue twice	1
+loop variable assigned	110
+shadowing	137	1
+while true	32
+repeat scope	1240	16
+nested shadowing	1	2	217
+cells survive a return	1035	1035	17592186044416.0
+again	1035	1035	17592186044416.0
