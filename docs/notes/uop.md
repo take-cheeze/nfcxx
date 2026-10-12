@@ -26,7 +26,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 4 and the O
 | 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`uop_poly.cpp`) and a cross-language test | not started |
-| 6 | Autodiff as a rewrite; ONNX **import** | not started |
+| 6 | Autodiff on the `hir` graph (`hir::gradients`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** | autodiff done, import not started |
 | 7 | Dynamic shapes (below) | not started |
 
 ## Stage 1: the scalar core
