@@ -27,6 +27,8 @@
 #     rounds the same decimal to the target format. A long double literal anywhere else is left alone.
 #   * `alloca(n)` (hand-written C only; glibc's <alloca.h> declares a function when `__GNUC__` is unset, and libc
 #     has no such symbol) becomes cproc's `__builtin_alloca(n)`. A declaration (`... *alloca(...)`) is left alone.
+#   * `__builtin_fabs`, `__builtin_fabsf` (libcu++ and the CUDA headers) become the libm functions, with
+#     prototypes. `fabsl` is not mapped: cproc has no `long double`.
 #   * `__builtin_popcount{,l,ll}`, `__builtin_ctz{,l,ll}`, `__builtin_clz{,ll}` become helper functions
 #     (like `__builtin_clzl` above). For a zero argument ctz and clz return the width; GCC leaves that undefined.
 #   * Sized atomics `__atomic_{load,store,exchange,compare_exchange,fetch_OP,OP_fetch}_{1,2,4,8}` (what
@@ -562,6 +564,8 @@ LIBC_BUILTINS = {
   '__builtin_strlen' => ['strlen', 'unsigned long strlen(const char *);'],
   '__builtin_ldexp' => ['ldexp', 'double ldexp(double, int);'],
   '__builtin_strcmp' => ['strcmp', 'int strcmp(const char *, const char *);'],  # JSON_HEDLEY / char_traits
+  '__builtin_fabsf' => ['fabsf', 'float fabsf(float);'],  # libcu++ (<cuda/cmath>) and the CUDA headers
+  '__builtin_fabs' => ['fabs', 'double fabs(double);'],
 }
 # builtin -> [helper name, definition in the prelude]
 HELPER_BUILTINS = {

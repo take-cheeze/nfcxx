@@ -955,6 +955,8 @@ def emit_module(src, sm, kernels = [])
       fns << Fn.new(f, fns.length)
     elsif h == "global"
       raise Refused, "global #{form_text(f[1])} (static data is not lowered yet)"
+    elsif h == "abi-type"
+      raise Refused, "aggregate type #{form_text(f[1])}: struct and union values by value are not lowered yet"
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
