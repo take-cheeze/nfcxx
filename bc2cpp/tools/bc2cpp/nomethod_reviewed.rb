@@ -114,7 +114,6 @@ module NomethodReviewed
 end
 
 NOMETHOD_REVIEWED = Set[
-  "Game.singleton#rpg2003_database? -> rpg2003?",
   "Game.singleton#stat_of -> agi",
   "Game.singleton#stat_of -> atk",
   "Game.singleton#stat_of -> def",
@@ -765,6 +764,7 @@ NOMETHOD_REVIEWED = Set[
   "Game::Interpreter#do_tile_substitution -> param",
   "Game::Interpreter#do_tile_substitution -> substitute_tile",
   "Game::Interpreter#do_timer -> param",
+  "Game::Interpreter#do_timer -> stop",
   "Game::Interpreter#do_timer -> timer",
   "Game::Interpreter#do_tint_screen -> param",
   "Game::Interpreter#do_tint_screen -> screen",
@@ -2338,8 +2338,11 @@ NOMETHOD_REVIEWED = Set[
   "RPG2k::Scene::Map#passable? -> x",
   "RPG2k::Scene::Map#passable? -> y",
   "RPG2k::Scene::Map#patch_anim_cells -> elevated?",
+  "RPG2k::Scene::Map#perform_exit_game -> stop",
   "RPG2k::Scene::Map#perform_game_over -> show_game_over",
+  "RPG2k::Scene::Map#perform_game_over -> stop",
   "RPG2k::Scene::Map#perform_return_to_title -> return_to_title",
+  "RPG2k::Scene::Map#perform_return_to_title -> stop",
   "RPG2k::Scene::Map#perform_teleport -> clear_parallax",
   "RPG2k::Scene::Map#perform_teleport -> direction=",
   "RPG2k::Scene::Map#perform_teleport -> encounter_rate=",

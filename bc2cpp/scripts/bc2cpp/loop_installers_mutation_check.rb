@@ -57,7 +57,7 @@ MUTANTS = [
 # nil when the mutation site is gone, else the run of the check against the mutant.
 mutate = lambda do |(_name, file, pattern, replacement, expected)|
   Dir.mktmpdir do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+    Bc2cppMutantPool.copy_generator(ROOT, dir)
     path = File.join(dir, 'bc2cpp', file)
     text = File.read(path)
     next nil unless text.include?(pattern)
