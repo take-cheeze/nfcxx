@@ -287,10 +287,11 @@ def closed_world_mrblib_srcs(gems_root, core_gems: :canonical)
   # defines them before any gem's mrblib, and a reopening gem (mruby-rgss's
   # Array#include?) must follow the file it reopens. `core_gems`: the build's
   # gem names, :canonical, or nil for a build that compiles no core Ruby.
-  core_compiled_mrblib_srcs(gems_root, core_gems) +
+  # RITE carries these filenames; gem/.. aliases must not give identical worlds different cache keys.
+  (core_compiled_mrblib_srcs(gems_root, core_gems) +
     (Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
       Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
-      Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort
+      Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort).map { |path| File.expand_path(path) }
 end
 
 # `gem_names`: names of the gems in the build (:canonical: BC2CPP_CANONICAL_CORE_GEMS,
