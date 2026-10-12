@@ -74,6 +74,10 @@ const Array* Graph::initializer(int id) const {
   auto it = inits_.find(id);
   return it == inits_.end() ? nullptr : &it->second;
 }
+int Graph::find_value(const std::string& n) const {
+  auto it = names_.find(n);
+  return it == names_.end() ? -1 : it->second;
+}
 int Graph::producer(int id) const { return producer_.at(static_cast<size_t>(id)); }
 
 std::vector<int64_t> Graph::const_ints(int id) const {
@@ -382,6 +386,9 @@ std::string Graph::str() const {
       out += " " + a.name + "=";
       if (a.kind == AttrKind::Int) out += std::to_string(a.i);
       else if (a.kind == AttrKind::Ints) out += to_string(a.ints);
+      else if (a.kind == AttrKind::Float) out += std::to_string(a.f);
+      else if (a.kind == AttrKind::Floats) { out += "["; for (size_t k = 0; k < a.floats.size(); k++) out += (k ? "," : "") + std::to_string(a.floats[k]); out += "]"; }
+      else if (a.kind == AttrKind::Tensor) out += std::string(name(a.t.dtype)) + to_string(a.t.shape);
       else out += "\"" + a.s + "\"";
     }
     out += " : " + std::string(name(values_[n.output].dtype)) + to_string(values_[n.output].shape) + "\n";
@@ -401,6 +408,7 @@ struct PB {
   }
   void tag(int field, int wire) { varint(static_cast<uint64_t>(field) << 3 | static_cast<uint64_t>(wire)); }
   void i64(int field, int64_t v) { tag(field, 0); varint(static_cast<uint64_t>(v)); }
+  void f32(int field, float v) { tag(field, 5); b.append(reinterpret_cast<const char*>(&v), 4); }
   void bytes(int field, const std::string& s) { tag(field, 2); varint(s.size()); b += s; }
   void msg(int field, const PB& m) { bytes(field, m.b); }
 };
@@ -417,6 +425,16 @@ std::string raw_data(const Array& a) {
     }
   }
   return out;
+}
+
+// A TensorProto: dims, data_type, name (if any) and raw_data.
+PB tensor_proto(const std::string& name, const Array& a) {
+  PB t;
+  for (int64_t d : a.shape) t.i64(1, d);
+  t.i64(2, onnx_dtype(a.dtype));
+  if (!name.empty()) t.bytes(8, name);
+  t.bytes(9, raw_data(a));
+  return t;
 }
 
 PB value_info(const Value& v) {
@@ -467,7 +485,10 @@ std::string Graph::to_onnx(const std::vector<int>& outputs, const std::string& g
       at.bytes(1, a.name);
       if (a.kind == AttrKind::Int) { at.i64(3, a.i); at.i64(20, 2); }
       else if (a.kind == AttrKind::Ints) { for (int64_t v : a.ints) at.i64(8, v); at.i64(20, 7); }
-      else { at.bytes(4, a.s); at.i64(20, 3); }
+      else if (a.kind == AttrKind::String) { at.bytes(4, a.s); at.i64(20, 3); }
+      else if (a.kind == AttrKind::Float) { at.f32(2, static_cast<float>(a.f)); at.i64(20, 1); }
+      else if (a.kind == AttrKind::Floats) { for (double v : a.floats) at.f32(7, static_cast<float>(v)); at.i64(20, 6); }
+      else { at.msg(5, tensor_proto("", a.t)); at.i64(20, 4); }
       node.msg(5, at);
     }
     graph.msg(1, node);
@@ -475,12 +496,7 @@ std::string Graph::to_onnx(const std::vector<int>& outputs, const std::string& g
   graph.bytes(2, graph_name);
   for (const auto& kv : inits_) {
     if (!need_values.count(kv.first)) continue;
-    PB t;
-    for (int64_t d : kv.second.shape) t.i64(1, d);
-    t.i64(2, onnx_dtype(kv.second.dtype));
-    t.bytes(8, values_[kv.first].name);
-    t.bytes(9, raw_data(kv.second));
-    graph.msg(5, t);
+    graph.msg(5, tensor_proto(values_[kv.first].name, kv.second));
   }
   for (int in : inputs_) if (need_values.count(in)) graph.msg(11, value_info(values_[in]));
   for (int o : outputs) graph.msg(12, value_info(values_[o]));

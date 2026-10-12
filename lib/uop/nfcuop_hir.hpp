@@ -1,6 +1,6 @@
 // nfcuop::hir: a high-level graph in the shape of ONNX (opset 18): tensors with static shapes, one node per
 // operator with ONNX's names, inputs and attributes (Reshape takes its shape as a constant input, ReduceSum its
-// axes, and so on), shape and dtype inference, and an exporter to an ONNX ModelProto. The numpy-like API
+// axes, and so on), shape and dtype inference, an exporter to an ONNX ModelProto and a reader for one (merge_onnx). The numpy-like API
 // (nfcuop_np.hpp) builds this graph; Lowerer turns it into UOps (nfcuop_ut.hpp) for evaluation, so a model can be
 // exported to ONNX before it is lowered, from the same graph that is run here.
 //
@@ -26,16 +26,22 @@
 namespace nfcuop {
 namespace hir {
 
-enum class AttrKind { Int, Ints, String };
+enum class AttrKind { Int, Ints, String, Float, Floats, Tensor };
 struct Attribute {
   std::string name;
   AttrKind kind = AttrKind::Int;
   int64_t i = 0;
   std::vector<int64_t> ints;
   std::string s;
+  double f = 0;             // Float (stored as an ONNX float: 32 bits)
+  std::vector<double> floats;
+  Array t;                  // Tensor
   static Attribute Int(const std::string& name, int64_t v) { Attribute a; a.name = name; a.kind = AttrKind::Int; a.i = v; return a; }
   static Attribute Ints(const std::string& name, std::vector<int64_t> v) { Attribute a; a.name = name; a.kind = AttrKind::Ints; a.ints = std::move(v); return a; }
   static Attribute String(const std::string& name, const std::string& v) { Attribute a; a.name = name; a.kind = AttrKind::String; a.s = v; return a; }
+  static Attribute Float(const std::string& name, double v) { Attribute a; a.name = name; a.kind = AttrKind::Float; a.f = static_cast<float>(v); return a; }
+  static Attribute Floats(const std::string& name, std::vector<double> v) { Attribute a; a.name = name; a.kind = AttrKind::Floats; a.floats = std::move(v); for (double& x : a.floats) x = static_cast<float>(x); return a; }
+  static Attribute Tensor(const std::string& name, Array v) { Attribute a; a.name = name; a.kind = AttrKind::Tensor; a.t = std::move(v); return a; }
 };
 
 struct Value {
@@ -69,6 +75,18 @@ class Graph {
   // bounds, ...) must be initializers.
   // `out_name` names the output value in the ONNX file; "" picks one.
   int add_node(const std::string& op, std::vector<int> inputs, std::vector<Attribute> attrs = {}, const std::string& out_name = "");
+
+  // The reader for to_onnx's format: parses a ModelProto (any producer; IR version 3+, default-domain opset 13+; nodes, initializers
+  // in raw_data or the typed fields, Constant nodes, int/ints/float/floats/string/tensor attributes, static shapes) and adds its
+  // values to this graph. Values whose names already exist here (inputs, initializers, node outputs) are the existing values
+  // (dtype and shape must agree, else Error), a node whose output exists is skipped, everything else is appended: this is how a
+  // model computed from a sub-graph of this graph (the gradient models of nfcuop_onnxgrad.hpp) is merged back. Constant nodes
+  // become initializers; an input that has an initializer of the same name is the initializer. Returns the ids of the model's
+  // graph outputs in order. Throws Error for what hir does not support (unknown operator, dtype, dynamic shape, several outputs).
+  std::vector<int> merge_onnx(const std::string& model_bytes);
+  // A new graph with the model's content; `outputs` receives the ids of its graph outputs.
+  static Graph from_onnx(const std::string& model_bytes, std::vector<int>* outputs = nullptr);
+  int find_value(const std::string& name) const;  // the id of the value of this name, or -1
 
   size_t num_values() const { return values_.size(); }
   const Value& value(int id) const;
