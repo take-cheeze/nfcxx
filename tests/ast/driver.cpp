@@ -52,9 +52,22 @@ int main(int argc, char** argv) {
     rc = 1;
   }
   std::fflush(stdout);
-  if (stats)
-    std::fprintf(stderr, "rewrites=%llu deopts=%llu generic_ops=%llu gc_cycles=%llu\n",
+  if (stats) {
+    std::fprintf(stderr, "rewrites=%llu deopts=%llu generic_ops=%llu gc_cycles=%llu inlined_sites=%llu inlined_calls=%llu inline_declined=%llu\n",
                  static_cast<unsigned long long>(S.stats.rewrites), static_cast<unsigned long long>(S.stats.deopts),
-                 static_cast<unsigned long long>(S.stats.generic_ops), static_cast<unsigned long long>(S.stats.gc_cycles));
+                 static_cast<unsigned long long>(S.stats.generic_ops), static_cast<unsigned long long>(S.stats.gc_cycles),
+                 static_cast<unsigned long long>(S.stats.inlined_sites), static_cast<unsigned long long>(S.stats.inlined_calls),
+                 static_cast<unsigned long long>(S.stats.inline_declined));
+    if (S.tier) {  // NFCAST_TIER=sync|async
+      const nfcast::Stats& st = S.stats;
+      std::fprintf(stderr,
+                   "tier: compiled=%llu compiles=%llu cache_hits=%llu ineligible=%llu failed=%llu calls=%llu bailouts=%llu (guard_misses=%llu aborts=%llu)\n",
+                   static_cast<unsigned long long>(st.tier_compiled), static_cast<unsigned long long>(st.tier_compiles),
+                   static_cast<unsigned long long>(st.tier_cache_hits), static_cast<unsigned long long>(st.tier_ineligible),
+                   static_cast<unsigned long long>(st.tier_failed), static_cast<unsigned long long>(st.tier_calls),
+                   static_cast<unsigned long long>(st.tier_bailouts), static_cast<unsigned long long>(st.tier_guard_misses),
+                   static_cast<unsigned long long>(st.tier_aborts));
+    }
+  }
   return rc;
 }

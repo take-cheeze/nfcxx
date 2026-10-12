@@ -1,0 +1,46 @@
+-- a global function assigned again
+65	65	65
+110	110
+45
+55	55
+-55	-55
+false inline_redefine.lua:14: attempt to call a nil value (global 'g')
+55	55
+65	65
+-- the same function, closures with different upvalues
+1	1	20
+1	2	65
+1	3	515
+1	4	-10
+2	1	20
+2	2	65
+2	3	515
+2	4	-10
+3	1	20
+3	2	65
+3	3	515
+3	4	-10
+-- a call through a table field
+63	63	63
+105	105
+false inline_redefine.lua:50: attempt to call a nil value (field 'f')
+true 6
+false	true	21
+-- the argument count at the site and the callee's parameters change together
+12,23,34,45,56	12,23,34,45,56	12,23,34,45,56
+1,2,3,4,5
+
+-- methods: replaced in the class, shadowed by the instance, removed
+25	25	25
+50
+-5
+50
+505
+50	505	50
+false inline_redefine.lua:84: attempt to call a nil value (method 'get')
+false inline_redefine.lua:84: attempt to call a number value (method 'get')
+25
+30
+-- a function replaced while it runs
+5	5
+101	101

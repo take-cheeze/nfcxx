@@ -1,0 +1,76 @@
+-- direct recursion
+0	1	0	0	1
+1	1	1	1	2
+2	2	1	3	4
+3	6	2	6	8
+4	24	3	10	16
+5	120	5	15	32
+6	720	8	21	64
+7	5040	13	28	128
+8	40320	21	36	256
+9	362880	34	45	512
+10	3628800	55	55	1024
+2432902008176640000	6765	5050	6	1	9	9
+-- mutual recursion
+0	true	false
+1	false	true
+2	true	false
+3	false	true
+4	true	false
+5	false	true
+6	true	false
+7	false	true
+8	true	false
+9	false	true
+true	true	false	false
+-- a recursion that builds a table and one that passes functions
+6,4,2
+8,6,4,2
+10,8,6,4,2
+12,10,8,6,4,2
+14,12,10,8,6,4,2
+-- small helpers around a recursive function
+1	2
+0	2
+-2	4
+-18	6
+9	10
+15	16
+24	26
+36	42
+-- recursion with errors in the middle
+false	inline_recursion.lua:38: bottom
+false	bottom2
+false	inline_recursion.lua:38: bottom
+false	inline_recursion.lua:43: bottom2
+false	inline_recursion.lua:38: bottom
+false	inline_recursion.lua:43: bottom2
+false	inline_recursion.lua:38: bottom
+false	inline_recursion.lua:43: bottom2
+false	inline_recursion.lua:38: bottom
+false	inline_recursion.lua:43: bottom2
+false	inline_recursion.lua:38: bottom
+false	inline_recursion.lua:43: bottom2
+false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
+-- runaway recursion is a stack overflow whatever was inlined
+false	string	true
+false	string	true
+false	string	true
+120	55
+false	string	true
+false	string	true
+false	string	true
+120	55
+false	string	true
+false	string	true
+false	string	true
+120	55
+-- deep but legal
+100	150
+200	150
+300	150
+1000

@@ -43,16 +43,7 @@ struct State::Impl {
 };
 
 // ---- Value helpers ------------------------------------------------------------------------------------------------------
-bool float_to_integer(double d, std::int64_t* out) {
-  if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
-    std::int64_t i = static_cast<std::int64_t>(d);
-    if (static_cast<double>(i) == d) {
-      *out = i;
-      return true;
-    }
-  }
-  return false;
-}
+bool float_to_integer(double d, std::int64_t* out) { return nfcr_f2i(d, out) != 0; }
 
 bool str_equal(const String* a, const String* b) {
   if (a == b) return true;
@@ -435,9 +426,12 @@ State::State() : impl(new Impl) {
   top = stack;
   impl->strtab.assign(256, nullptr);
   if (const char* e = std::getenv("NFCAST_GC_STRESS")) gc_stress = e[0] == '1';
+  if (const char* e = std::getenv("NFCAST_INLINE")) inlining = e[0] != '0';
+  if (const char* e = std::getenv("NFCAST_INLINE_WARM")) inline_warm = static_cast<unsigned>(std::atoi(e));
   for (int i = 0; i < TM_N; ++i) impl->tmname[i] = nullptr;
   for (int i = 0; i < TM_N; ++i) impl->tmname[i] = str(tm_name(static_cast<TM>(i)));
   globals = new_table();
+  tier_init_from_env(*this);
 }
 
 static void free_object(State& S, GCObject* o);
@@ -450,6 +444,7 @@ State::~State() {
     o = nx;
   }
   all = nullptr;
+  tier_shutdown(*this);
   delete[] stack;
   delete impl;
 }

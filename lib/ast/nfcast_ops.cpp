@@ -305,46 +305,15 @@ Value arith_slow(State& S, int op, const Value& a, const Value& b, Node* na, Nod
 }
 
 // ---- comparison --------------------------------------------------------------------------------------------------------
-static bool flt_to_int_mode(double f, bool ceil_mode, std::int64_t* out) {
-  double fl = std::floor(f);
-  if (fl != f && ceil_mode) fl += 1;
-  if (fl >= -9223372036854775808.0 && fl < 9223372036854775808.0) {
-    *out = static_cast<std::int64_t>(fl);
-    return true;
-  }
-  return false;
-}
-
-static inline bool fits_double(std::int64_t i) { return -(1LL << 53) <= i && i <= (1LL << 53); }
-
+// Integer against float is compared exactly (nfcast_tier_rt.h, shared with the code the tier generates).
 static bool lt_num(const Value& a, const Value& b) {
-  if (a.t == T_INT) {
-    if (b.t == T_INT) return a.i < b.i;
-    if (fits_double(a.i)) return static_cast<double>(a.i) < b.d;
-    std::int64_t fi;
-    if (flt_to_int_mode(b.d, true, &fi)) return a.i < fi;
-    return b.d > 0;
-  }
-  if (b.t == T_FLT) return a.d < b.d;
-  if (fits_double(b.i)) return a.d < static_cast<double>(b.i);
-  std::int64_t fi;
-  if (flt_to_int_mode(a.d, false, &fi)) return fi < b.i;
-  return a.d < 0;
+  if (a.t == T_INT) return b.t == T_INT ? a.i < b.i : nfcr_lt_if(a.i, b.d);
+  return b.t == T_FLT ? a.d < b.d : nfcr_lt_fi(a.d, b.i);
 }
 
 static bool le_num(const Value& a, const Value& b) {
-  if (a.t == T_INT) {
-    if (b.t == T_INT) return a.i <= b.i;
-    if (fits_double(a.i)) return static_cast<double>(a.i) <= b.d;
-    std::int64_t fi;
-    if (flt_to_int_mode(b.d, false, &fi)) return a.i <= fi;
-    return b.d > 0;
-  }
-  if (b.t == T_FLT) return a.d <= b.d;
-  if (fits_double(b.i)) return a.d <= static_cast<double>(b.i);
-  std::int64_t fi;
-  if (flt_to_int_mode(a.d, true, &fi)) return fi <= b.i;
-  return a.d < 0;
+  if (a.t == T_INT) return b.t == T_INT ? a.i <= b.i : nfcr_le_if(a.i, b.d);
+  return b.t == T_FLT ? a.d <= b.d : nfcr_le_fi(a.d, b.i);
 }
 
 static int str_compare(const String* a, const String* b) {
@@ -447,6 +416,7 @@ Value concat_slow(State& S, Value* vals, int n, Node** nodes) {
 // ---- calls ---------------------------------------------------------------------------------------------------------------
 void call_closure(State& S, Closure* cl, Value* args, int n, Rets& out, bool from_native) {
   Proto* p = cl->proto;
+  if (S.tier && tier_dispatch(S, cl, args, n, out)) return;  // a hot numeric kernel runs as native code (nfcast_tier.cpp)
   if (S.depth >= S.max_depth) S.rt_error("stack overflow");
   Value* base = args;
   int nslots = p->nslots, np = p->nparams;
