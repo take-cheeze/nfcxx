@@ -46,7 +46,7 @@ Each backend has a header for raw access to its interpreter next to nfcpoly (`nf
 `nfcpoly_python.hpp`, `nfcpoly_js.hpp`, `nfcpoly_go.hpp`): the interpreter's state, and a way to get the script value behind a `Value`. For
 JavaScript: `js_context(ctx)` (a `JSContext*`), `js_value(v)` (a new `JSValue` reference to free with `JS_FreeValue`) and
 `js_wrap(ctx, jsvalue)` (a `Value` for a raw `JSValue`); `tests/poly/host.cpp` uses them to run `JS_RunGC`, to read a promise's
-state, to define a native function with `JS_NewCFunction` and to build a `Value` from a `JSValue`. For Go there is `go_collect(ctx)`: it runs Go's collector and waits for the finalizers of the dropped wrappers of host objects (`nfcpoly_go.hpp`).
+state, to define a native function with `JS_NewCFunction` and to build a `Value` from a `JSValue`. For Go there is `go_collect(ctx)`: it runs `nfc.GC()`, a full collection of Go's collector followed by the sweep of the weak pointers of the wrappers of host objects, so that the host objects the script dropped are released when it returns (`nfcpoly_go.hpp`).
 
 ## Architecture
 
@@ -377,8 +377,28 @@ touches any host state, and answers with a status (two independent checks; the m
 that removing both makes the goroutine test fail). That also covers a goroutine that outlives the evaluation (the host is not
 inside the interpreter then). A goroutine that recovers the panic gets a clean error. **A panic that nothing in the goroutine
 recovers ends the process**: yaegi starts goroutines with a bare `go`, so Go's rule applies, for a `GoroutineError` as for a nil
-pointer or an index out of range (not tested: it would end the test; seen by hand). Several `Context`s each have their own
-interpreter and one thread at a time (`tests/poly/host.cpp` uses one from another thread than the one that created it).
+pointer or an index out of range. Tested in a child process of the host binary (`go_child` in `tests/poly/host.cpp`): the child
+that starts `go func() { panic("...") }()` dies (status 2, or SIGABRT: a c-shared Go runtime aborts), the child that does the same
+through `nfc.Go` runs on.
+
+Whether the bridge can guard script goroutines was investigated (yaegi v0.16.1, and its master of February 2026 reads the same):
+- `interp.Options` has no hook for goroutines (GoPath, BuildTags, the three streams, Args, Env, SourcecodeFilesystem,
+  Unrestricted); a `go` statement is `go runCfg(...)`, and a call of a function value `go callFn(...)` (`interp/run.go`), and
+  `runCfg`'s deferred function prints the panic to the interpreter's stderr and panics again. Nothing in the embedding API
+  reaches it.
+- Go has no process-wide way to survive an unrecovered panic of a goroutine: `runtime/debug.SetPanicOnFault`, `SetCrashOutput`
+  and signal handlers only change what is written before the process ends.
+- The only other way is to rewrite the script, wrapping the body of every `go f(x)` in a function that recovers. That has to
+  understand `go` in every position (a method value, a call with arguments that are evaluated first, a call inside a closure) and
+  is not done: it is the kind of text surgery that fails on the one program nobody tried. (`recover()` is rewritten, because
+  there the AST says exactly what to wrap; see below.)
+- What is provided instead is the opt-in `nfc.Go(f func()) <-chan error`: it starts `f` in a goroutine and gives a channel that
+  receives `nil` when `f` returned or an `*nfc.Error` (`Class` and `Msg` as the host would see them) for a panic nothing in `f`
+  recovered, so `err := <-nfc.Go(f)` is a guarded join. It does not make a bare `go` safe, and a `go` statement inside `f` is
+  as unguarded as anywhere. Scripts that run untrusted or experimental goroutines should use it; a host cannot make them.
+
+Several `Context`s each have their own interpreter and one thread at a time (`tests/poly/host.cpp` uses one from another thread
+than the one that created it).
 
 ### Errors, the class name and the backtrace
 
@@ -386,10 +406,21 @@ interpreter and one thread at a time (`tests/poly/host.cpp` uses one from anothe
 runtime's errors that yaegi reports as such (division by zero, a write to a nil map), the Go type of an `error`
 (`errors.errorString`, `fmt.wrapError`), and the `Class` of an `*nfc.Error` raised by the bridge. `message()` is the panic value
 printed (`Error()` for an error). `backtrace()` is the Go stack of the interpreter (yaegi's frames, not script lines). Three yaegi
-quirks matter to scripts and are covered by tests: `recover()` after a script's own `panic(x)` returns a `reflect.Value`, which defeats
-`r.(string)` and `r.(error)` (`nfc.Unwrap(r)` gives `x` back; `nfc.ErrClass(r)` and `nfc.ErrMessage(r)` classify as the host does);
-a script-defined error type loses its methods when it is panicked with, so the host sees `panic` and `&{3}`; and the value of
-`recover()` for a panic raised by the bridge (`*nfc.Error`, `*nfc.HostError`) is the typed value, which a script can assert.
+quirks matter to scripts and are covered by tests:
+- `recover()` after a script's own `panic(x)` is a `reflect.Value` in yaegi, which defeats `r.(string)` and `r.(error)`. **Fixed in the
+  bridge** (`lib/poly/go/recover.go`): every call of the builtin `recover()` in a script is wrapped as `nfc.Unwrap(recover())`
+  (`nfc.Unwrap` gives `x` back; `nfc.ErrClass(r)` and `nfc.ErrMessage(r)` classify as the host does), found with `go/parser`
+  and inserted at the byte offsets of the call, nothing else of the text changes. Not wrapped: `defer recover()` and `go recover()`
+  (the call is not made by a deferred function, and Go's `defer recover()` recovers nothing either), a `recover` that is declared
+  in the same text, and everything once the script declared its own top-level `recover`. A text that does not parse is left to
+  yaegi's error. The explicit form `nfc.Unwrap(recover())` keeps working.
+- A script-defined error type loses its methods when it is panicked with (`panic(&MyErr{3})`): the panic builtin is compiled inside
+  yaegi and hands over the bare struct, so the host sees `panic` and `&{3}`; this is not fixable in the bridge, which never sees
+  the type. After the `recover()` fix an assertion `r.(*MyErr)` to the script's own type succeeds (the reflect types are identical)
+  and its methods work, but `r.(error)` is false. A variable of type `error` keeps its methods: `var e error = &MyErr{3}; panic(e)`
+  reaches the host as class `interp._error` (yaegi's wrapper type) with message `myerr`. Both are pinned in the tests.
+- The value of `recover()` for a panic raised by the bridge (`*nfc.Error`, `*nfc.HostError`) is the typed value, which a script can
+  assert.
 
 ### Speed and coverage gaps
 
@@ -426,7 +457,10 @@ tests, so a yaegi upgrade that fixes one shows up there:
 - The generic standard packages are yaegi's own partial sources: `slices.Contains`, `slices.Index` and `cmp.Compare` work, `slices.Sort`
   and `slices.Max` do not compile, `maps.Keys` is missing.
 - Methods of a type the script defines are invisible to `reflect`, so `Value::call("Add")` on such a value is a `ScriptError` (a
-  function value, a compiled type's method and a host object's method work).
+  function value, a compiled type's method and a host object's method work). Not fixable without forking yaegi: a value that
+  crosses into compiled code (which every `Value` does) is the bare reflect value of an unnamed struct type (`struct { N int }`,
+  tried with a scratch program: no name, no methods, `NumMethod() == 0`), so the bridge cannot even tell which script type to
+  dispatch on; a script-side trampoline would need the static type at compile time. Pinned in the tests.
 - A statement that starts with `func` is run again after every evaluation by yaegi's own REPL (worked around, above).
 - Not tried: the rest of the language (struct tags, `unsafe`, cgo-free reflection of interpreted types, `select` with timeouts, labels
   beyond `continue`/`break`, channels of channels); only what the tests above use is known to work.
@@ -440,10 +474,15 @@ tests, so a yaegi upgrade that fixes one shows up there:
 - Garbage collection: Ruby `GC.start`, Lua and ast `collectgarbage()`, Python reference counting (`gc.collect()` for cycles) release the
   script-owned C++ objects (`Vec3::live` in the test). JavaScript: reference counting releases an object as soon as nothing
   refers to it, and `JS_RunGC` collects cycles (the test binds it as `js_gc()` with the raw access). Go: a wrapper holds a `*nfc.Obj`; when the Go collector finds it dead (a
-  finalizer, and a table of weak pointers that `nfc.GC()` / `go_collect(ctx)` sweep right after `runtime.GC()`) the id is queued, and the host
+  finalizer, and a table of weak pointers that `nfc.GC()` / `go_collect(ctx)` sweep after a full collection) the id is queued, and the host
   drops its reference at the next boundary, on the host thread (the end of the evaluation, or the next callback). With `nfc.GC()` that
   is exact for what Go no longer references (`tests/poly/host.cpp`, "the script's GC", and "host objects and the collector"), so the
-  shared test passes without waiting; without it the release happens when Go's collector runs. What the interpreter still refers to
+  shared test passes without waiting; without it the release happens when Go's collector runs. `nfc.GC()` is held to that: it stops
+  the collector from starting another cycle while it works (`debug.SetGCPercent(-1)` and no memory limit, under a mutex; a weak pointer
+  is cleared when its span is swept, and `runtime.GC` returns before the sweep is complete if a second cycle began), runs at least two
+  full passes (a `sync.Pool` keeps what it holds for one more cycle) and goes on while a pass still finds dead wrappers, at most four.
+  `nfc.FinalizersOff(true)` silences the finalizers of the wrappers (a test knob): then only the sweep releases anything, which is how
+  the tests check the sweep itself (below). What the interpreter still refers to
   keeps its object alive: the temporaries of a top-level `var x = NewVec3()` or `x := NewVec3()` stay in yaegi's top-level frame
   until a later evaluation reuses the slot (observed, untested), so the code that creates and drops objects belongs in a function, or
   in a statement that declares nothing (those run inside the function `nfc_run`, which is what the tests do).
@@ -482,10 +521,12 @@ None of these is covered by a test unless stated.
   they are atomic between threads is untested (nothing here runs a second thread).
 - Path B (`NFCXX_PATH=b`) was not tried. The Python backend needs the development files of CPython and is skipped without them.
 - Go (`tests/poly/host.cpp` covers the supported forms; the rest is stated as untested):
-  - A panic that nothing in a script's own goroutine recovers ends the process (Go's rule; yaegi has no recover around `go`).
-    A host function called from a goroutine panics with a `GoroutineError` the goroutine can recover; it is never run.
+  - A panic that nothing in a script's own goroutine recovers ends the process (Go's rule; yaegi has no recover around `go` and no
+    hook; `nfc.Go` is the guarded way to start one, "Threads and goroutines"). A host function called from a goroutine panics with
+    a `GoroutineError` the goroutine can recover; it is never run.
   - yaegi is an interpreter and its coverage of Go has gaps (the list in "Speed and coverage gaps"); compile errors of every kind
-    are `SyntaxError`; recovered panics are `reflect.Value`s; script-defined error types lose their methods across a panic.
+    are `SyntaxError`; script-defined error types lose their methods across a panic (`recover()` itself gives the plain value since the
+    bridge wraps it).
   - `Value::call` works on function values, methods of compiled types (`strings.Builder`) and host objects (by their Go names),
     not on methods of types the script defines.
   - Bound variables are synchronized at the boundaries only; a write to a read-only one is noticed at the next boundary; goroutines
@@ -508,7 +549,8 @@ None of these is covered by a test unless stated.
     with the number of declarations made so far (measured in a scratch test, not tested: 12000 evaluations of `x := fmt.Sprint(1)`
     took 5.6 s against 0.7 s for 12000 of `1 + 1`).
   - `fmt.Print*` and `println` write to the process's standard output; a script cannot capture or redirect them from the host side.
-  - valgrind does not give a clean pass with the Go runtime loaded (below).
+  - Under AddressSanitizer the Go-only host is clean on both back ends (`tests/poly/asan-go.sh`); valgrind needs the suppression
+    file and is much weaker (below).
 - Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `scripts/cuda-embed.rb` does for GPU
   images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep.rb` handles it for C inputs only, which is
   why mruby and Lua are patched).
@@ -517,7 +559,7 @@ None of these is covered by a test unless stated.
 
 ## Checks run
 
-`tests/poly/run.sh` on both back ends with all six languages (the host prints how many checks it ran: 1172; JavaScript alone 321, Go alone 284),
+`tests/poly/run.sh` on both back ends with all six languages (the host prints how many checks it ran: 1206; JavaScript alone 321, Go alone 318),
 8 repeated runs of each binary, each binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`, no errors
 reported), the setjmp control build described above, and mutation checks on scratch copies of the backends: dropping the
 interpreter pass-through in the Ruby or Lua trampoline, losing script error identity in Python, or leaking the ownership record in
@@ -535,7 +577,7 @@ objects that the core never frees on purpose (`nfcpoly.cpp`, `Impl::classes`), n
 
 For Go (before it met JavaScript and `ast` in one binary): `tests/poly/run.sh` with ruby, lua, python and go gave 697 checks, the
 Ruby/Lua/Python binary (`POLY_LANGS="ruby lua python"`) 409, which is the count before Go was added, so the Go edits of the shared checks
-changed nothing for the other three, and the Go-only binary (`POLY_LANGS=go`) 284 (the shared checks written through the `Lg` builders, and `go_tests()`). Repeated runs of the built host
+changed nothing for the other three, and the Go-only binary (`POLY_LANGS=go`) 284 at the time (the shared checks written through the `Lg` builders, and `go_tests()`; 318 now, after the hardening below, which added 34 and changed no shared check, so the six-language binary went from 1172 to 1206). Repeated runs of the built host
 binaries (`POLY_OUT=DIR`): 25 of each back end's Go-only binary and 10 of each back end's four-language binary, all passed, on a machine
 that was busy with other builds. The Ruby/Lua/Python binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`) on
 the final code, once per back end, no errors reported (8 repeated runs per back end on an earlier state of the change). The setjmp
@@ -563,12 +605,74 @@ Each row is a change that was made and what the tests then did:
 | the finalizer of a wrapper refers to the interpreter | the closed-`Context` memory check fails (the test is the one that found the leak) |
 | the thread check of the Go side removed, or that of the host side removed | nothing fails: either one alone refuses the call (both are kept deliberately) |
 | both thread checks removed | the goroutine checks fail |
-| no weak-pointer sweep in `nfc.GC()` | **passed in the last run**: the finalizers usually release the objects in time; in 20 earlier runs it failed 4 times, so the sweep is what makes `gc()` exact, but this check is not deterministic |
+| no weak-pointer sweep in `nfc.GC()` (`sweepDead` finds the dead wrappers but queues nothing) | **6 checks fail in every run, 200 of 200** (`tests/poly/stress-go.sh`-style loop against the modified library): the "host objects and the collector" scenario runs a second time with `nfc.FinalizersOff(true)`, so only the sweep can release the objects. Before that pass existed this mutation was not deterministic (the finalizer goroutine usually released the objects in time: it passed in the last run and failed 4 of 20 earlier ones), which is the flakiness this row used to record |
+| `recover()` is not wrapped in `nfc.Unwrap` (`rewriteRecover` returns the text as it is) | the first `recover().(string)` check fails, and the next one ends the test in an uncaught exception (`reflect: Method on nil interface value`) |
+| `nfc.Go` does not recover | the in-process check ends the process with Go's fatal panic (the child-process check of the goroutine test would also fail: it expects the guarded child to run on) |
+| `go_collect` runs one pass and no sweep when a second collection began (the old `nfc.GC()`: `debug.FreeOSMemory()`, then the sweep) | passes: not distinguishable by the tests, see "The exact collector" |
 
-valgrind with the Go runtime loaded (`PYTHONMALLOC` is irrelevant): the Go-only host binary runs to completion under valgrind and
-passes all its checks, but valgrind reports 3800 to 6100 errors (two runs), none a bad free: uninitialised-value reports inside the Go
-runtime and yaegi (stack copying, the collector's mark phase, `memmove`) and "invalid read/write ... in a rw- anonymous segment" for
-accesses on goroutine stacks, which valgrind's stack-switch heuristics cannot follow. In the first run two blocks had a host function
-on top (`host_cb` and `host_dispatch`: the write of the reply into the pointer cgo passed, memory that Go owns); in the second none
-mentioned the host's functions. valgrind is therefore not an oracle for this backend; there is no `--error-exitcode` check for Go.
-AddressSanitizer was not tried.
+### The exact collector
+
+`nfc.GC()` (`go_collect(ctx)`) has to release, before the evaluation that called it returns, every host object whose wrapper the
+script dropped. Two things release a wrapper's object: its finalizer (on the runtime's finalizer goroutine, at a time nobody
+controls) and the sweep of the weak pointers that `nfc.GC()` makes after a full collection (`sweepDead`, `lib/poly/go/interp.go`).
+The sweep is what makes the call exact, and the check of it was flaky because the finalizer usually released everything first: a
+copy of the library without the sweep passed the suite in most runs and failed it in 4 of 20 (the old row of the mutation table).
+
+- Cause of the flaky check: the check could not tell the sweep from the finalizers. Fixed by `nfc.FinalizersOff(true)`, a knob that
+  makes the finalizers release nothing, and by running the whole collector scenario of `go_tests()` a second time with it on
+  (`NFC_GO_REPS=N` repeats each pass N times in one process). With it on, the library without the sweep fails 6 checks in every run
+  (200 of 200 runs), and the real library passes.
+- A second, much rarer failure of the collector check itself was seen once in about 14,300 in-process repetitions of the scenario
+  (the last `echo` loop: `Vec3::live != base` after `go_collect`) in the old code with both release paths on. It did not recur in the
+  other 14,000, with the finalizers off (600 repetitions, 800 more under a background allocator and `GOGC=5`), or in a
+  pure Go program that makes 150,000 objects with finalizers and weak pointers under three allocating goroutines at `GOGC=5`, so the
+  cause is not proven. Two things can leave a weak pointer set after `runtime.GC()` returns, and
+  `nfc.GC()` now rules both out: `runtime.GC` finishes the sweep only `for work.cycles.Load() == n+1` (`runtime/mgc.go`), so a second
+  cycle that began meanwhile (the heap goal, the memory limit or an allocation can start one) ends the wait for the sweep of the
+  first, and a weak pointer is cleared when its span is swept; and values held in a `sync.Pool` (yaegi and `reflect` use them for call frames) survive one more
+  cycle in the victim cache. So it holds the collector off while it works (`debug.SetGCPercent(-1)`, `SetMemoryLimit(MaxInt64)`,
+  restored afterwards, under a mutex), runs two full passes at least and repeats while a pass still finds dead wrappers, four at most. The
+  cost is a second collection (and the memory scavenge) per `nfc.GC()`.
+- Stress: `tests/poly/stress-go.sh [N]` builds the Go-only host and runs it N times per back end (default 200, `JOBS=4` at a time).
+  Result on this change: 200 runs of each back end's binary, 3 at a time on 4 cores with other builds and a valgrind run going:
+  0 failed on qbe, 0 failed on gcc. The same 200 runs of the qbe binary against the library without the sweep: 200 failed, 6 checks each.
+
+### Sanitizers and valgrind
+
+AddressSanitizer works with the Go backend, on both back ends, and gives a clean run: `tests/poly/asan-go.sh` builds the Go-only host
+with `nfcxx -fsanitize=address` (gcc: gcc's instrumentation of the C that EDG generates; qbe: cproc's checks of every load and store,
+`asan.md`) and links the uninstrumented `libnfcgo.so`; it runs all the checks, and LeakSanitizer finds nothing at exit. (CI runs it
+after `tests/poly/run.sh`.) What this covers and what it does not:
+
+- What works: libasan is the first library in the process, so its `malloc` is the one `C.malloc` in cgo calls: the replies that Go
+  hands to the host are ASan blocks, and a read past one, a write past the buffer the host allocates for a reply, or a reply nobody
+  frees is found. The Go runtime does not mind: it starts its threads, installs its signal handlers and runs the whole suite
+  with libasan loaded (nothing needed beyond `detect_leaks=1`; that the two coexist was found by trying, not by reading either one).
+- What is not instrumented: the Go runtime and yaegi themselves (Go code; a Go build with `-asan` would need the whole library and
+  cgo's `-asan` mode, not tried), and EDG's runtime library (`asan.md`, "Limits").
+- Not clean without a suppression: nfcpoly's core keeps the table of registered classes for the life of the process on purpose
+  (`Impl::classes`, "never freed"), so LeakSanitizer reports 164 allocations (12816 bytes) from `declare_class` and the `ClassBuilder`
+  calls that hang off it. `tests/poly/lsan.supp` suppresses `declare_class`; the rest of the report is then empty. All of it
+  was from the core: not one block from `GoLang` or the Go library.
+- The signal is real (mutated copies of `nfcpoly_go.cpp`): without the `std::free(out)` of the reply in `go()`, LeakSanitizer
+  reports 163,259 bytes in 6,587 blocks allocated in cgo's `_Cfunc__Cmalloc` (gcc); with the reply buffer of `host_cb`
+  allocated 2 bytes short (`reply.b.size() - 1`), ASan reports a `heap-buffer-overflow` in `memcpy` from `host_dispatch`, on gcc and
+  on qbe. The sanitizers are not run on the six-language binary; the Go-only one is the subject.
+
+valgrind is much weaker. The Go runtime switches and copies goroutine stacks, which valgrind's stack-switch heuristics cannot
+follow ("client switching stacks?"), and the collector reads memory it has not initialised, so an unfiltered run reports 3,800 to
+6,100 errors (two earlier runs) and millions of reports are matched by the file. `tests/poly/valgrind-go.supp` and
+`tests/poly/valgrind-go.sh` (by hand, 5-8 minutes per back end; `NFCXX_BACKEND=gcc|qbe`) give a run with a meaningful signal: the
+rules drop an error kind (`Cond`, `Value*`, `Addr*`) only when its innermost frame is in `libnfcgo.so`; the `Addr*` errors whose
+innermost frame is one of the host's functions that read memory Go owns (`host_cb`, `host_dispatch`, `GoLang::decode`, the `Rd`
+reader: every such access to a Go stack or heap block is reported as "invalid ... in a rw- anonymous segment", whatever the code
+does); the uses of "uninitialised" bytes that Go wrote, in any stack that passes through the reply parser (`read_meta`, `decode`) or the
+two callbacks; the class table of the core; and the thread-local storage of the Go runtime's threads. What is left is a leak
+of a block that C or C++ code, or cgo's `C.malloc`, allocated (Go allocates with `mmap`, so a leak report is never Go's), a bad or
+mismatched free, and an invalid access by any C++ code that is not one of those functions. It cannot see a read past the end of a
+buffer inside the suppressed functions: ASan does. Results: `NFCXX_BACKEND=gcc tests/poly/valgrind-go.sh` and the same with `qbe` run all 318 checks and report
+0 errors (3.6 to 5.0 million reports matched by the file). The two mutated copies above are both found: no `free` of the reply gives
+`definitely lost: 161,910 bytes in 6,587 blocks` (allocated in `_Cfunc__Cmalloc`, 51 errors, exit 9), and the short reply buffer an
+`Invalid write of size 1` in `memmove` from `host_dispatch` (exit 9).
+
+

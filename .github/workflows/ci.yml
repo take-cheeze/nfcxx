@@ -72,6 +72,7 @@ jobs:
           - name: nfcpoly, nfcast, mruby scripts
             run: |
               tests/poly/run.sh
+              tests/poly/asan-go.sh
               tests/ast/run.sh
               tests/uop/run.sh
               tests/mruby/run.sh

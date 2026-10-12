@@ -7,6 +7,7 @@
 # module proxy is missing. See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
 #   POLY_LANGS="ruby lua python ast js go"   (default: all six; ast is the nfcast engine, lib/ast, which needs nothing built)
+#   POLY_GO_DIR=DIR                use the Go library in DIR instead of build/poly-go (scripts/setup-poly-go.sh)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
@@ -38,7 +39,7 @@ for be in $backends; do
         out=$(scripts/setup-poly-go.sh 2>&1); rc=$?
         if [ $rc = 3 ]; then echo "SKIP $be poly go: $(tail -1 <<<"$out" | sed 's/^setup-poly-go: //')"; continue
         elif [ $rc != 0 ]; then echo "FAIL $be poly go (libnfcgo build)"; tail -20 <<<"$out"; bad=1; continue; fi
-        defs+=(-DTEST_GO); srcs+=(lib/poly/nfcpoly_go.cpp); libs+=(-Lbuild/poly-go -lnfcgo "-Wl,-rpath,$PWD/build/poly-go"); built+=(go) ;;
+        defs+=(-DTEST_GO); srcs+=(lib/poly/nfcpoly_go.cpp); godir=${POLY_GO_DIR:-$PWD/build/poly-go}; libs+=(-L"$godir" -lnfcgo "-Wl,-rpath,$godir"); built+=(go) ;;
       *) echo "FAIL poly: unknown language $l"; bad=1 ;;
     esac
   done

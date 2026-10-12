@@ -146,6 +146,7 @@ func (in *Interp) run(g group) (res reflect.Value, err error) {
 			err = &compileError{msg: fmt.Sprint("internal error of the interpreter: ", r)}
 		}
 	}()
+	g.text = in.rewriteRecover(g.text, g.decl)
 	if g.decl {
 		g.text = in.dropImported(g.text)
 		if strings.TrimSpace(g.text) == "" {

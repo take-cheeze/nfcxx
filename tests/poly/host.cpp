@@ -31,6 +31,10 @@
 #include "nfcpoly_js.hpp"
 #endif
 #ifdef TEST_GO
+#include <csignal>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <fstream>
@@ -1290,6 +1294,8 @@ struct Late {  // registered after a function that mentions it (go_tests)
 
 // ---- Go only ------------------------------------------------------------------------------------------------------------
 #ifdef TEST_GO
+static const char* g_self = "/proc/self/exe";  // this binary, for the child process of the goroutine test (main sets it from argv[0])
+
 static void go_tests() {
   g_lang = "go (only)";
   std::printf("-- [go only] typed bindings, what is live, goroutines, generics, errors, the standard library whitelist\n");
@@ -1625,6 +1631,68 @@ outer:
   CHECK(msg_of("with_guard(func() { with_guard(func() { panic(\"deep\") }) })") == "deep");  // through two frames of host code
   CHECK(Guard::alive == 0);
 
+  // recover() gives the panic's value as Go does: the bridge wraps each call of the builtin in nfc.Unwrap (recover.go)
+  CHECK(str("func() (s string) { defer func() { s, _ = recover().(string) }(); panic(\"text\") }()") == "text");
+  CHECK(str("func() (s string) { defer func() { e, _ := recover().(error); s = e.Error() }(); panic(errors.New(\"an error\")) }()") == "an error");
+  CHECK(str("func() (s string) { defer func() { if r := recover(); r != nil { s = fmt.Sprint(\"got \", r) } }(); panic(\"p\") }()") == "got p");
+  CHECK(yes("func() (ok bool) { defer func() { ok = recover() == nil }(); return }()"));  // nothing to recover: nil
+  CHECK(num("func() (n int) { defer func() { n = recover().(int) }(); panic(41 + 1) }()") == 42);
+  CHECK(str("func() (s string) { defer func() { r := recover(); s = fmt.Sprintf(\"%T\", r) }(); panic(\"p\") }()") == "string");
+  CHECK(yes("func() (ok bool) { defer func() { _, ok = recover().(error) }(); a := 0; _ = 1 / a; return }()"));  // an error of the runtime
+  // a recover that is not called directly by a deferred function, and `defer recover()` itself, recover nothing, as in Go
+  CHECK(script_error("func() { defer recover(); panic(\"still\") }()") == "panic|still");
+  CHECK(script_error("func() { defer func() { func() { recover() }() }(); panic(\"nested\") }()") == "panic|nested");
+  CHECK(str("\"recover() in a string\"") == "recover() in a string");
+  ctx.eval_void("go", "func guarded() (s string) { defer func() { s, _ = recover().(string) }(); panic(\"in a declaration\") }");
+  CHECK(str("guarded()") == "in a declaration");
+  CHECK(str("func() (s string) { defer func() { s, _ = nfc.Unwrap(recover()).(string) }(); panic(\"both\") }()") == "both");  // the explicit form still works
+  {
+    Context c;  // a script that declares its own recover: the builtin is not wrapped for the rest of that interpreter
+    c.eval_void("go", "func recover() int { return 7 }");
+    CHECK(c.eval<int>("go", "recover()") == 7);
+  }
+  // script-defined error types: yaegi hands panic(&MyErr{3}) over as the bare struct, without its methods (the panic builtin is
+  // compiled inside yaegi, nothing in the bridge sees the type). recover() gives the struct back, an assertion to *MyErr succeeds
+  // (the reflect types are identical) and the methods work on the result, but the value is not an error; an error-typed variable
+  // keeps its methods, and so does the Error() the host sees for it. These pin that state of affairs.
+  CHECK(str("func() (s string) { defer func() { e, _ := recover().(*MyErr); s = e.Error() }(); panic(&MyErr{3}) }()") == "myerr");
+  CHECK(yes("func() (ok bool) { defer func() { _, ok = recover().(error) }(); panic(&MyErr{3}) }()") == false);       // gap: not an error
+  CHECK(str("func() (s string) { defer func() { e, _ := recover().(error); s = e.Error() }(); var e error = &MyErr{3}; panic(e) }()") == "myerr");
+  CHECK(script_error("var e2 error = &MyErr{3}; panic(e2)") == "interp._error|myerr");  // an error value keeps its Error() at the host
+
+  // nfc.Go: a goroutine whose panic is turned into an error (a script's own `go f()` ends the process when f panics: yaegi
+  // starts it with a bare go statement and offers no hook; see "Threads and goroutines" in docs/notes/poly.md)
+  CHECK(yes("<-nfc.Go(func() {}) == nil"));
+  CHECK(str("e := <-nfc.Go(func() { panic(\"in a goroutine\") }); e.Error()") == "in a goroutine");
+  CHECK(str("e := (<-nfc.Go(func() { panic(\"x\") })).(*nfc.Error); e.Class") == "panic");
+  CHECK(str("e := (<-nfc.Go(func() { var m map[string]int; m[\"a\"] = 1 })).(*nfc.Error); e.Class") == "runtime.Error");
+  CHECK(str("e := (<-nfc.Go(func() { thrower() })).(*nfc.Error); e.Class") == "GoroutineError");  // a host function from a goroutine
+  CHECK(num("n := 0; var mu sync.Mutex; done := make(chan bool, 8); for i := 0; i < 8; i++ { go func() { <-nfc.Go(func() { mu.Lock(); n++; mu.Unlock() }); done <- true }() }; for i := 0; i < 8; i++ { <-done }; n") == 8);
+  CHECK(num("1 + 1") == 2);  // and the interpreter is still there
+
+  // A goroutine of the script that panics with nothing to recover it ends the process (yaegi starts `go f()` with a bare go
+  // statement; the runtime's fatal panic aborts the process, SIGABRT, or exits with 2). Run in a child process of this very binary so that the test can
+  // see it: the unguarded goroutine kills the child, nfc.Go does not.
+  {
+    auto child = [](const char* mode) {
+      pid_t pid = 0;
+      posix_spawn_file_actions_t fa;
+      posix_spawn_file_actions_init(&fa);
+      posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);  // the Go runtime prints the panic and a trace there
+      char arg0[] = "host", arg1[] = "--go-child";
+      char* argv[] = {arg0, arg1, const_cast<char*>(mode), nullptr};
+      int rc = posix_spawn(&pid, g_self, &fa, nullptr, argv, environ);
+      posix_spawn_file_actions_destroy(&fa);
+      if (rc != 0) return -1;
+      int st = 0;
+      if (waitpid(pid, &st, 0) != pid) return -2;
+      return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+    };
+    int raw = child("raw");
+    CHECK(raw == 2 || raw == 128 + SIGABRT);  // the process ended by Go's fatal panic (a c-shared runtime aborts)
+    CHECK(child("guarded") == 0);  // the same panic inside nfc.Go: reported, and the child ran on
+  }
+
   // ---- the evaluation of a source text
   std::printf("-- [go only] evaluating sources\n");
   CHECK(num("func sq(a int) int { return a * a }; sq(9)") == 81);                  // declarations and an expression
@@ -1733,37 +1801,47 @@ outer:
 
   // ---- host objects and the collector
   std::printf("-- [go only] host objects and the collector\n");
-  {
-    go_collect(ctx);
-    int base = Vec3::live;
-    ctx.eval_void("go", "var held *Vec3\nvar heldSlice []*Vec3");
-    ctx.eval_void("go", "held = NewVec3(1, 2, 3)");
-    ctx.eval_void("go", "heldSlice = []*Vec3{NewVec3(4, 5, 6), vmake()[0]}");
-    CHECK(Vec3::live > base);
-    go_collect(ctx);            // vmake() made two objects, one of which the script kept
-    int with = Vec3::live;
-    CHECK(with == base + 3);
-    go_collect(ctx);
-    CHECK(Vec3::live == with);  // still referenced from the script's variables
-    ctx.eval_void("go", "held = nil");
-    ctx.eval_void("go", "heldSlice = nil");
-    go_collect(ctx);
-    CHECK(Vec3::live == base);  // dropped by the script: released by the next collection
-    ctx.eval_void("go", "func() { m := map[int]*Vec3{}; for i := 0; i < 100; i++ { m[i] = NewVec3(1, 1, 1) } }()");
-    go_collect(ctx);
-    CHECK(Vec3::live == base);
-    // an object that the host also holds stays alive
-    Value hv = ctx.eval_value("go", "NewVec3(8, 8, 8)");
-    go_collect(ctx);
-    CHECK(Vec3::live == base + 1 && hv.as<Vec3&>().x == 8);
-    hv = Value();
-    go_collect(ctx);
-    CHECK(Vec3::live == base);
-    // a host object that crossed as a Value argument and a result
-    ctx.eval_void("go", "func() { for i := 0; i < 200; i++ { echo(NewVec3(1, 2, 3)) } }()");
-    go_collect(ctx);
-    CHECK(Vec3::live == base);
+  // The same scenario twice. With the finalizers of the wrappers on, an object dropped by the script is released by whichever
+  // comes first, nfc.GC()'s sweep of the weak pointers or the finalizer goroutine. With them off (nfc.FinalizersOff) only the sweep
+  // can release it, so these checks fail every time when the sweep is missing (the mutation check in docs/notes/poly.md) instead of
+  // when the finalizer goroutine happens to be late. NFC_GO_REPS=N repeats each pass N times in one process (a stress knob).
+  int reps = std::getenv("NFC_GO_REPS") ? std::atoi(std::getenv("NFC_GO_REPS")) : 1;
+  for (int pass = 0; pass < 2; ++pass) {
+    ctx.eval_void("go", pass ? "nfc.FinalizersOff(true)" : "nfc.FinalizersOff(false)");
+    for (int rep = 0; rep < reps; ++rep) {
+      std::string R = std::to_string(pass) + "_" + std::to_string(rep);
+      go_collect(ctx);
+      int base = Vec3::live;
+      ctx.eval_void("go", "var held" + R + " *Vec3\nvar heldSlice" + R + " []*Vec3");
+      ctx.eval_void("go", "held" + R + " = NewVec3(1, 2, 3)");
+      ctx.eval_void("go", "heldSlice" + R + " = []*Vec3{NewVec3(4, 5, 6), vmake()[0]}");
+      CHECK(Vec3::live > base);
+      go_collect(ctx);            // vmake() made two objects, one of which the script kept
+      int with = Vec3::live;
+      CHECK(with == base + 3);
+      go_collect(ctx);
+      CHECK(Vec3::live == with);  // still referenced from the script's variables
+      ctx.eval_void("go", "held" + R + " = nil");
+      ctx.eval_void("go", "heldSlice" + R + " = nil");
+      go_collect(ctx);
+      CHECK(Vec3::live == base);  // dropped by the script: released by the next collection
+      ctx.eval_void("go", "func() { m := map[int]*Vec3{}; for i := 0; i < 100; i++ { m[i] = NewVec3(1, 1, 1) } }()");
+      go_collect(ctx);
+      CHECK(Vec3::live == base);
+      // an object that the host also holds stays alive
+      Value hv = ctx.eval_value("go", "NewVec3(8, 8, 8)");
+      go_collect(ctx);
+      CHECK(Vec3::live == base + 1 && hv.as<Vec3&>().x == 8);
+      hv = Value();
+      go_collect(ctx);
+      CHECK(Vec3::live == base);
+      // a host object that crossed as a Value argument and a result
+      ctx.eval_void("go", "func() { for i := 0; i < 200; i++ { echo(NewVec3(1, 2, 3)) } }()");
+      go_collect(ctx);
+      CHECK(Vec3::live == base);
+    }
   }
+  ctx.eval_void("go", "nfc.FinalizersOff(false)");
   {
     // A closed Context is collected even though its script held host objects (a Go interpreter is about 1 MB, so sixty that
     // were kept alive show in the size of the process; the pages go back to the system at the collection).
@@ -1863,8 +1941,22 @@ static void cross_tests(const std::vector<Lg>& ls) {
   }
 }
 
-int main() {
+#ifdef TEST_GO
+// The child process of the goroutine test in go_tests(): "raw" starts a goroutine that panics, "guarded" does it through nfc.Go.
+static int go_child(const std::string& mode) {
+  Context c;
+  if (mode == "raw") c.eval_void("go", "go func() { panic(\"nobody recovers this\") }()\ntime.Sleep(3 * time.Second)");
+  else c.eval_void("go", "e := <-nfc.Go(func() { panic(\"recovered by nfc.Go\") })\ntime.Sleep(100 * time.Millisecond)\n_ = e");
+  return 0;  // reached when the panic did not end the process
+}
+#endif
+
+int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+#ifdef TEST_GO
+  if (argc > 2 && std::string(argv[1]) == "--go-child") return go_child(argv[2]);
+  if (argc > 0 && std::string(argv[0]).find('/') != std::string::npos) g_self = argv[0];  // not /proc/self/exe: under valgrind that is valgrind
+#endif
   std::vector<Lg> langs;
 #ifdef TEST_RUBY
   langs.push_back(Lg{Ruby, "ruby"});
