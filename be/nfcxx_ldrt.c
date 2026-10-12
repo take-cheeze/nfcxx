@@ -556,3 +556,35 @@ unsigned __nfcxx_f16_from_f128(const void *a)
   e2 = (int)(e ? e : 1) - 16383 - 112 + 51;
   return f16_round(sign, m, e2);
 }
+
+/* ---- undefined behavior sanitizer (docs/notes/ubsan.md) ---- */
+
+/* 1 when the signed 64-bit product a * b does not fit (the emitter's cmul on a 64-bit type; QBE has no wide product) */
+int __nfcxx_smul64_ovf(long a, long b)
+{
+  long r;
+  return __builtin_mul_overflow(a, b, &r);
+}
+
+/* A check of the IR failed at FILE:LINE (-fsanitize=..., the emitter's per-site blocks). KIND is scripts/pathb-qbe-emit.rb's
+   UB_KIND. Prints one line in the format of gcc's and clang's runtime ("file:line: runtime error: ...") and aborts, the
+   way the silent checks do (SIGABRT). NFCXX_UBSAN_OPTIONS=continue is not offered: the IR has no code after a failed check. */
+void __nfcxx_ubsan_report(int kind, const char *file, int line)
+{
+  static const char *const msg[] = {
+    "undefined behavior",                                                         /* 0 trap */
+    "signed integer overflow",                                                    /* 1 */
+    "division by zero",                                                           /* 2 */
+    "shift exponent is negative or not less than the width of the type",          /* 3 */
+    "index out of bounds for the array",                                          /* 4 */
+    "null pointer dereference or call through a null pointer",                    /* 5 */
+    "execution reached an unreachable program point",                             /* 6 */
+    "execution reached the end of a value-returning function without returning a value", /* 7 */
+    "value is outside the range of representable values of the target integer type",    /* 8 */
+    "signed integer overflow: division of the minimum value by -1",               /* 9 */
+  };
+  if (kind < 0 || kind >= (int)(sizeof msg / sizeof msg[0])) kind = 0;
+  fflush(stdout);
+  fprintf(stderr, "%s:%d: runtime error: %s\n", file, line, msg[kind]);
+  abort();
+}

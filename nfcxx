@@ -10,6 +10,8 @@
 #                  Needs the Path B harness (scripts/setup-pathb.sh, PATHB_CPFE/PATHB_BASE); docs/notes/pathb-hosted.md.
 #   --dialect:     EDG front-end mode (default g++; NFCXX_DIALECT overrides the default)
 #   --gnu-version: GCC version the g++ front end emulates, e.g. 130000 (EDG default when unset)
+#   -fsanitize=undefined|CHECK[,CHECK...]: the undefined behavior sanitizer (docs/notes/ubsan.md). Implies Path B, whose IR has the
+#                  checks; a failing check prints "file:line: runtime error: ..." and aborts. -fno-sanitize=all turns it off.
 #   --trace=FILE: write a Chrome trace-event JSON file (open in ui.perfetto.dev); NFCXX_TRACE=FILE too.
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
@@ -21,6 +23,7 @@ root=$(cd "$(dirname "$0")" && pwd)
 source "$root/scripts/trace.sh"
 edg=${EDG_BUILD:-$root/build/edg}/bin
 
+sanitize=""
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
@@ -95,6 +98,9 @@ while [ $# -gt 0 ]; do
     -) stdin_src=1 ;;           # the source on stdin: only -E reads it
     -pthread) pthread=1 ;;
     -fexceptions|-fwrapv|-fno-strict-aliasing) ;;   # EDG always lowers exceptions; the C side already gets -fwrapv -fno-strict-aliasing
+    -fsanitize=*) sanitize=${sanitize:+$sanitize,}${1#-fsanitize=} ;;
+    -fno-sanitize=all) sanitize="" ;;
+    -fno-sanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=undefined and its checks, docs/notes/ubsan.md)" >&2; exit 2 ;;
     -pipe) ;;                                       # pass data between the compiler stages through pipes: no effect on the output
     # Symbol visibility is not implemented; nfcc ignores it too (docs/notes/realworld.md), so nfcxx does the same
     # for consistency. It changes the exports of a -shared object, which is the one place it could matter.
@@ -211,6 +217,19 @@ if [ $emit_c = 1 ]; then
   exit 0
 fi
 
+if [ -n "$sanitize" ]; then
+  # The checks live in the Path B IR (docs/notes/ubsan.md); the names are gcc's, and not every one is implemented.
+  IFS=, read -ra sz <<< "$sanitize"
+  for c in "${sz[@]}"; do
+    case $c in
+      undefined|signed-integer-overflow|integer-divide-by-zero|shift|bounds|null|unreachable|return|float-cast-overflow) ;;
+      *) echo "nfcxx: -fsanitize=$c is not supported (implemented: undefined, signed-integer-overflow, integer-divide-by-zero, shift, bounds, null, unreachable, return, float-cast-overflow)" >&2; exit 2 ;;
+    esac
+  done
+  [ $freestanding = 0 ] || { echo "nfcxx: -fsanitize needs Path B, which compiles hosted programs only" >&2; exit 2; }
+  export NFCXX_IR_SANITIZE=$sanitize
+  backend=pathb
+fi
 [ "${NFCXX_PATH:-}" != b ] || backend=pathb   # NFCXX_PATH=b: the Path B compiler (docs/notes/pathb-hosted.md)
 case $backend in
   pathb) [ $freestanding = 0 ] || { echo "nfcxx: Path B (NFCXX_PATH=b) compiles hosted programs only" >&2; exit 2; }
