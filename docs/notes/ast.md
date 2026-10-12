@@ -294,7 +294,7 @@ evaluated has not specialized at all. It recomputes the types from the operands 
 boolean): the types of the parameters come from the arguments of the call, constants and the results of calls follow. A
 variable, parameter or result that gets an integer in one place and a float in another (`local s = 0 ... s = s + 0.5`) is a
 **number of either kind** (`n` in `tier_state`, as in `compiled if->n`): the generated code keeps it as an `nfcr_N`, the value
-and a 64-bit flag that says which, and its operators (`nfcr_nadd`, `nfcr_nlt` ...) do what the interpreter's do on two numbers: an
+and a 32-bit flag that says which, and its operators (`nfcr_nadd`, `nfcr_nlt` ...) do what the interpreter's do on two numbers: an
 integer with an integer gives an integer (wrapping), anything with a float a float, so `s` is the integer `0` for as long as the
 loop has not run and the result of the function has the kind the run gave it (`acc(0, 0.5)` is `0`, `acc(4, 0.5)` is `2.0`). An
 arithmetic operation on one of these and an integer is one again, on one and a float a float. A function is refused when the
@@ -385,10 +385,12 @@ call), `tier_bailouts` (calls of a function that has compiled code that neverthe
   boolean and a number, or a function called with a string or a table, is not compiled. A number of either kind carries its flag and
   tests it in every operation, so it is slower than a plain `double`. At most four versions
   per function, 12 parameters, 24 functions in a unit, 48 typed instances.
-- A toolchain finding, kept in `nfcast_tier_rt.h` as a comment: the QBE back end (cproc and QBE) miscompiles a struct that has a
-  4-byte member next to padding and is copied by value, as the generated code copies an `nfcr_N`: it tests the wrong half of the
-  word (a float came back as its integer part). `nfcr_N`'s flag is a 64-bit word for that reason. It was found by comparing a small
-  accumulator with real Lua; with a 32-bit flag put back, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on qbe. Not reported upstream.
+- A toolchain finding, kept in `nfcast_tier_rt.h` as a comment: the QBE back end miscompiled a struct that has a 4-byte member next to
+  padding and is copied by value, as the generated code copies an `nfcr_N`: the branch on the member tested the padding half of the
+  word (a float came back as its integer part). It was found by comparing a small accumulator with real Lua. Root cause: amd64 isel
+  of QBE (fixed by `scripts/qbe-wflag.patch`, test `tests/cases/qbe_wflag_padding.cpp`, report `docs/notes/qbe-wflag.md`). With the
+  patch `nfcr_N`'s flag is a 32-bit `int` again; with a QBE built without it, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on
+  qbe, so re-run `scripts/setup-qbe.sh` after pulling.
 - A kernel that fails often costs the failed run plus the interpreter's run until it is given up.
 - Entering native code from the interpreter costs about as much as a call of a small function in the interpreter (the checks, a
   `setjmp`): a tiny kernel called from a loop in the interpreter gains little (ten million calls of

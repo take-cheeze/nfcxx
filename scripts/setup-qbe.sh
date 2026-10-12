@@ -8,7 +8,7 @@
 # nfcxx-patches is the pinned upstream commit plus nfcxx's cproc patches as commits (empty-struct,
 # vaarg-aggregate, empty-copy, array-qual; see docs/notes/freestanding.md and docs/notes/realworld.md for what
 # each one fixes). Move the pin in .gitmodules and the fork together when rebasing those patches onto a new upstream.
-# scripts/qbe-uninit-slot.patch is applied to the QBE copy. Re-run this script after changing the pin.
+# scripts/qbe-uninit-slot.patch and scripts/qbe-wflag.patch are applied to the QBE copy. Re-run this script after changing the pin.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 git -C "$root" submodule update --init 3rd/qbe 3rd/cproc
@@ -20,6 +20,8 @@ for p in qbe cproc; do
 done
 # QBE: scripts/qbe-uninit-slot.patch (a never-stored struct slot passed by value must not become a null load)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
+# QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
+patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
 # cproc: scripts/cproc-asan.patch (the -fsanitize=address checks of loads and stores, active with NFCXX_ASAN=1; docs/notes/asan-plan.md)
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-asan.patch"
 make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
