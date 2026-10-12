@@ -1258,6 +1258,9 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  # CUDA math overloads of min and max for the numeric types (unqualified calls in device code; fattn-common.cuh).
+  "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n",
+  "max" => "static inline int max(int a, int b) { return a > b ? a : b; }\nstatic inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }\nstatic inline long long max(long long a, long long b) { return a > b ? a : b; }\nstatic inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }\nstatic inline float max(float a, float b) { return a > b ? a : b; }\nstatic inline double max(double a, double b) { return a > b ? a : b; }\n",
   # std::is_same and std::is_same_v for device code (ggml-cuda's templates): the device unit has no host <type_traits>,
   # so the two are defined here over plain types only.
   "is_same_v" => "",   # rewritten to std::is_same<A, B>::value (rewrite_is_same_v), which needs is_same below
@@ -1324,6 +1327,10 @@ BUILTIN_DEFS = {
   "__shfl_down_sync" => SHFL_DEFS["down"],
   "__shfl_up_sync" => SHFL_DEFS["up"],
   "__shfl_sync" => SHFL_DEFS["idx"],
+  # The warp votes: the emitter lowers __nfcxx_ballot_sync / __nfcxx_any_sync / __nfcxx_all_sync (full mask only).
+  "__ballot_sync" => "extern \"C\" unsigned __nfcxx_ballot_sync(unsigned, int);\nstatic inline unsigned __ballot_sync(unsigned m, int p) { (void)m; return __nfcxx_ballot_sync(0xffffffffu, p); }\n",
+  "__any_sync" => "extern \"C\" int __nfcxx_any_sync(unsigned, int);\nstatic inline int __any_sync(unsigned m, int p) { (void)m; return __nfcxx_any_sync(0xffffffffu, p); }\n",
+  "__all_sync" => "extern \"C\" int __nfcxx_all_sync(unsigned, int);\nstatic inline int __all_sync(unsigned m, int p) { (void)m; return __nfcxx_all_sync(0xffffffffu, p); }\n",
 }
 
 # The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
@@ -2301,6 +2308,40 @@ def host_storage(out, kw)
   already ? "" : kw
 end
 
+# True when the output so far is inside a class, struct or union body (the innermost unmatched {). A member keeps its
+# own linkage: `static` on a member function (or a constructor, or a const member) is an error.
+def in_class_body?(out)
+  depth = 0
+  j = out.length - 1
+  while j >= 0
+    c = out[j]
+    if c == "}"
+      depth += 1
+    elsif c == "{"
+      if depth == 0
+        # The head is the text since the last ; { or }: `struct Name` (or `class Name : Base`) names a class body.
+        start = [out.rindex(";", j - 1), out.rindex("}", j - 1), out.rindex("{", j - 1)].compact.max
+        head = start ? out[(start + 1)...j] : out[0...j]
+        word = ""
+        (head + " ").each_char do |ch|
+          if ident_char?(ch)
+            word << ch
+          else
+            return true if KEYWORDS_OF_CLASS.include?(word)
+            word = ""
+          end
+        end
+        return false
+      end
+      depth -= 1
+    end
+    j -= 1
+  end
+  false
+end
+
+KEYWORDS_OF_CLASS = %w[class struct union]
+
 def host_linkage(text)
   out = ""
   i = 0
@@ -2327,8 +2368,9 @@ def host_linkage(text)
       k += 1 while k < text.length && !"(=;{".include?(text[k])
       if k < text.length && text[k] == "("
         # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
+        # A class member keeps its linkage (static is not allowed on a member function, const member or constructor).
         after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
-        out << (after_static ? "" : host_storage(out, "static"))
+        out << (after_static || in_class_body?(out) ? "" : host_storage(out, "static"))
         i += 10
         next
       end
