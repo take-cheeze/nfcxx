@@ -1538,46 +1538,15 @@ struct NumForNode : Node {
       if (lim.t == T_INT) {
         limit = lim.i;
       } else if (lim.t == T_FLT) {
-        double fl = lim.d;
-        if (fl != fl) return C_NORMAL;
-        double r = step < 0 ? std::ceil(fl) : std::floor(fl);
-        if (r >= -9223372036854775808.0 && r < 9223372036854775808.0) {
-          limit = static_cast<std::int64_t>(r);
-        } else if (fl > 0) {
-          if (step < 0) return C_NORMAL;
-          limit = INT64_MAX;
-        } else {
-          if (step > 0) return C_NORMAL;
-          limit = INT64_MIN;
-        }
+        if (!nfcr_forlimit(lim.d, step, &limit)) return C_NORMAL;
       } else {
         Value conv;
         if (lim.t != T_STR || !to_number(lim, &conv)) for_error(f, line, "limit", lim);
-        double fl = num_d(conv);
-        if (conv.t == T_INT) {
-          limit = conv.i;
-        } else {
-          if (fl != fl) return C_NORMAL;
-          double r = step < 0 ? std::ceil(fl) : std::floor(fl);
-          if (r >= -9223372036854775808.0 && r < 9223372036854775808.0) limit = static_cast<std::int64_t>(r);
-          else if (fl > 0) {
-            if (step < 0) return C_NORMAL;
-            limit = INT64_MAX;
-          } else {
-            if (step > 0) return C_NORMAL;
-            limit = INT64_MIN;
-          }
-        }
+        if (conv.t == T_INT) limit = conv.i;
+        else if (!nfcr_forlimit(conv.d, step, &limit)) return C_NORMAL;
       }
       if (step > 0 ? i0 > limit : i0 < limit) return C_NORMAL;
-      std::uint64_t count;
-      if (step > 0) {
-        count = static_cast<std::uint64_t>(limit) - static_cast<std::uint64_t>(i0);
-        if (step != 1) count /= static_cast<std::uint64_t>(step);
-      } else {
-        count = static_cast<std::uint64_t>(i0) - static_cast<std::uint64_t>(limit);
-        count /= static_cast<std::uint64_t>(-(step + 1)) + 1u;
-      }
+      std::uint64_t count = nfcr_forcount(i0, limit, step);  // the loop arithmetic is shared with the tier (nfcast_tier_rt.h)
       std::int64_t i = i0;
       for (;;) {
         declare(f, var_, Value::integer(i));

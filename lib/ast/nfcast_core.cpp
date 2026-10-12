@@ -43,16 +43,7 @@ struct State::Impl {
 };
 
 // ---- Value helpers ------------------------------------------------------------------------------------------------------
-bool float_to_integer(double d, std::int64_t* out) {
-  if (d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
-    std::int64_t i = static_cast<std::int64_t>(d);
-    if (static_cast<double>(i) == d) {
-      *out = i;
-      return true;
-    }
-  }
-  return false;
-}
+bool float_to_integer(double d, std::int64_t* out) { return nfcr_f2i(d, out) != 0; }
 
 bool str_equal(const String* a, const String* b) {
   if (a == b) return true;
