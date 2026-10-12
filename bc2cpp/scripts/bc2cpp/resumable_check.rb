@@ -17,6 +17,8 @@
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/resumable_check.rb
 
 require 'tmpdir'
+require 'set'
+require_relative '../../tools/bc2cpp/codegen_resumable'
 require_relative 'fixture_runtime'
 
 failures = []
@@ -24,6 +26,25 @@ check = lambda do |what, condition|
   puts "  #{condition ? 'ok  ' : 'FAIL'} #{what}"
   failures << what unless condition
 end
+
+assembler = CodeGen.allocate
+assembler.instance_variable_set(:@resumable, ResumableCtx.new('unit', {}))
+sparse = assembler.resumable_step_function('sparse_step', <<~'CPP')
+  // r999999 and r888888 are diagnostic text.
+  /* r777777 */
+  r42 = mrb_str_new_lit(M, "r666666 \\\" r555555");
+  r1000 = r42;
+  char quote = '\''; // r444444
+  const char* raw = R"TAG(r333333 " r222222 )OTHER" r111111)TAG";
+  const char* empty_raw = R"(r123456 " r234567)";
+  return r1000;
+CPP
+check.call('only register identifiers reserve compact frame slots',
+           sparse.include?('&bc2cpp_frame_value, 3, 0)') &&
+           sparse.scan(/mrb_value& r(\d+) = R\[(\d+)\];/) == [%w[0 2], %w[42 3], %w[1000 4]])
+empty = assembler.resumable_step_function('empty_step', 'return self;')
+check.call('a body without register references still reserves self',
+           empty.include?('&bc2cpp_frame_value, 1, 0)') && empty.include?('mrb_value& r0 = R[2];'))
 
 FIXTURE = <<~'RUBY'
 # Every class is a Fiber.new root (`Fiber.new { run; :done }`) so `run` qualifies for the
@@ -78,10 +99,11 @@ class RcHelper
 end
 
 class RcLocals
+  def r9999; "hello r8888"; end
   def initialize; @f = Fiber.new { run; :done }; end
   def go(v = nil); @f.resume(v); end
   def run
-    s = "hello"
+    s = r9999
     a = [1, 2, 3]
     h = { k: "v" }
     got = Fiber.yield s
@@ -374,6 +396,9 @@ Dir.mktmpdir do |dir|
   step = body_of(code, 'RcStep_run')
   check.call('step loops are flat: counters in the frame, no C++ for', step.include?('F->slots[') && !step.include?('for (long long'))
   check.call('registers are references into the heap frame', step.include?('mrb_value& r0 = R[2];'))
+  check.call('register-like method names in diagnostics do not inflate a resumable frame',
+             !body_of(code, 'RcLocals_run').include?('mrb_value& r9999') &&
+             body_of(code, 'RcLocals_run').scan(/mrb_value& r\d+/).size < 100)
   check.call('a yield saves its state, marks the frame for the GC and returns the frame',
              step.include?('F->state = 1;') && step.include?('mrb_write_barrier') && step.include?('return bc2cpp_frame_value;'))
   check.call('each yield point has a resume label the entry switch jumps to',

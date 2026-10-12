@@ -236,7 +236,7 @@ module SiteCensus
     when /mrb_iv_get/ then 'ivar_read'
     when /_ivars\*\)DATA_PTR/ then 'embedded_ivar'
     when /bc2cpp_getidx|bc2cpp_ary_entry|mrb_hash_get/ then 'indexed_result'
-    when /bc2cpp_cconst|mrb_const_get|bc2cpp_const_try/ then 'constant'
+    when /bc2cpp_cconst|mrb_const_get|bc2cpp_const_try|bc2cpp_const_scope_/ then 'constant'
     when /upvar/ then 'captured_upvar'
     when 'self' then 'self'
     when /\Ar\d+\z/ then follow_copy(lines, at, rhs, fn, params, hops)

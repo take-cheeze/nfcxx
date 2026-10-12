@@ -36,6 +36,19 @@ FIXTURE = <<~'RUBY'
   class AsBox
     def initialize; end
 
+    # bc2cpp: (fixnum, float, bool)
+    def boxed_registers(a, b, c)
+      [a, b, c]
+    end
+
+    def register_slots(a)
+      if a
+        local = "live"
+      end
+      result = section(a, local) { |x, y| [x, y, local] }
+      [local, result]
+    end
+
     def as_yield2(a, b)
       yield a, b
     end
@@ -331,6 +344,9 @@ FIXTURE = <<~'RUBY'
         end
         i += 1
       end
+      out << line('boxed_registers') { b.boxed_registers(-3, 1.25, false) }
+      out << line('register_slots_true') { b.register_slots(true) }
+      out << line('register_slots_false') { b.register_slots(false) }
       out << line('splat_two') { b.splat_two([1], [2]) }
       out << line('splat_two_empty') { b.splat_two([], []) }
       out << line('splat_obj_to_a') { b.splat_obj(AsToA.new) }

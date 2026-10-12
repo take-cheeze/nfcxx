@@ -94,6 +94,12 @@ module ReceiverProofReport
     BlockSendReport::ENGINE_GEMS.find { |g| irep.file.to_s.include?("/#{g}/") }
   end
 
+  # BC2CPP_RECEIVER_PROOF_NO_WHATIF=1 (scripts/bc2cpp/type_check.rb without --what-if): rows carry the source, detail and
+  # why columns and the as-compiled `before` count; the forced recompiles (the expensive part) are skipped.
+  def self.what_if?
+    ENV['BC2CPP_RECEIVER_PROOF_NO_WHATIF'] != '1'
+  end
+
   def self.by_name(code)
     code.lines.count { |l| !l.lstrip.start_with?('//') && l.match?(BY_NAME) }
   end
@@ -113,7 +119,7 @@ module ReceiverProofReport
     mask_s = mask.nil? ? 'unmodelled' : class_mask_name(mask) + ((mask & NumericFlow::OTHER).zero? ? '' : '+OTHER')
     classes = reg ? rp_instance_classes(mask) : nil
     base = [irep.label, site, gem, owner_name, name, argc, source, detail, classes ? classes.sort.join('|') : '-', mask_s]
-    return (base + ['-', '-', '-', before, before, before, 0, 0, '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', where]).join("\t") if classes || !reg
+    return (base + ['-', '-', '-', before, before, before, 0, 0, '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', where]).join("\t") if classes || !reg || !ReceiverProofReport.what_if?
 
     # A merge never holds nil; every other source may, and a set that includes nil is what a real proof would be.
     nilable = !%w[merge literal].include?(source)
@@ -219,12 +225,12 @@ module ReceiverProofReport
   # The register was never written in the body: self, or an incoming argument with its class pool state.
   def rp_incoming(irep, reg, hypothesis)
     return ['self', '-', nil] if reg == '0'
-    return ['argument', '-', nil] unless hypothesis
+    return ['argument', "arg#{reg}", nil] unless hypothesis
 
     key = [irep.label, reg.to_i]
     pool = @class_arg_pools && @class_arg_pools[key]
     mask = pool || NumericFlow::OTHER
-    ['argument', '-', { mask: mask & ~NumericFlow::OTHER & ~NumericFlow::NIL, complete: mask.nobits?(NumericFlow::OTHER),
+    ['argument', "arg#{reg}", { mask: mask & ~NumericFlow::OTHER & ~NumericFlow::NIL, complete: mask.nobits?(NumericFlow::OTHER),
                         why: rp_argument_why(key, pool) }]
   end
 
