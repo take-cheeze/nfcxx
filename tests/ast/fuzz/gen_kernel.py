@@ -257,7 +257,7 @@ def gen_block(env, ret, depth, indent, in_loop, self_fn, nstmts):
                     out.append('%srepeat\n%s\n%s\n%suntil %s >= 5 or %s' % (pad, inc, body, pad, cnt, cond))
         elif k < 0.76 and in_loop:
             out.append('%sif %s then break end' % (pad, gen_expr(env, 'b', 2, self_fn)))
-        elif k < 0.84:
+        elif k < 0.84 and ret is not None:
             if ret == 'v':
                 out.append('%sif %s then return end' % (pad, gen_expr(env, 'b', 2, self_fn)))
             else:
@@ -316,6 +316,65 @@ def arg_for(t, wrong):
     return R.choice(['true', 'false'])
 
 
+def seg_loop(env, ret, indent):
+    """A loop statement for an on-stack-replacement segment: the kind and the counts vary, the body is random."""
+    pad = '  ' * indent
+    e2 = dict(env)
+    v = fresh('c')
+    kind = R.choice(['for', 'for', 'forstep', 'fordown', 'forflt', 'while', 'repeat'])
+    if kind in ('for', 'forstep', 'fordown'):
+        e2[v] = 'i'
+    elif kind == 'forflt':
+        e2[v] = 'f'
+    body = gen_block(e2, ret, 2, indent + 1, True, None, R.choice([2, 3, 4]))
+    if kind == 'for':
+        return '%sfor %s = %s, %s do\n%s\n%send' % (pad, v, R.choice(['1', '0', '-2', '3']), R.choice(['1', '2', '3', '7', '20', '50']), body, pad)
+    if kind == 'forstep':
+        return '%sfor %s = %s, %s, %s do\n%s\n%send' % (pad, v, R.choice(['1', '0', '-5']), R.choice(['9', '30', '60']), R.choice(['2', '3', '7']), body, pad)
+    if kind == 'fordown':
+        return '%sfor %s = %s, %s, %s do\n%s\n%send' % (pad, v, R.choice(['10', '40', '3']), R.choice(['1', '-3', '2']), R.choice(['-1', '-2', '-3']), body, pad)
+    if kind == 'forflt':
+        return '%sfor %s = %s, %s, %s do\n%s\n%send' % (pad, v, R.choice(['0.5', '0.0', '1.0', '-1.5']), R.choice(['3', '9.5', '20.0']), R.choice(['0.5', '1', '0.75', '0.25']), body, pad)
+    cnt = fresh('c')
+    pre = '%slocal %s = 0\n' % (pad, cnt)
+    e2[cnt] = 'i'
+    if kind == 'while':
+        cond = gen_expr(e2, 'b', 2, None)
+        return '%s%swhile %s < %s and %s do\n%s  %s = %s + 1\n%s\n%send' % (pre, pad, cnt, R.choice(['3', '8', '30']), cond, pad, cnt, cnt, body, pad)
+    cond = gen_expr(e2, 'b', 2, None)
+    return '%srepeat\n%s  %s = %s + 1\n%s\n%suntil %s >= %s or %s' % (pre + pad, pad, cnt, cnt, body, pad, cnt, R.choice(['3', '8', '30']), cond)
+
+
+def gen_segment(idx):
+    """A function that is not a kernel as a whole (it makes a table) and so is only ever compiled by its loops: locals of all four
+    types, a few loops that read and assign them, and a result. It is called three times with arguments that vary."""
+    name = 'seg%d' % idx
+    CUR_LEVEL[0] = 99
+    BUDGET[0] = 2
+    SELF_BUDGET[0] = 0
+    params = [('a', R.choice(['i', 'f', 'n'])), ('b', R.choice(['i', 'f', 'b']))]
+    env = dict(params)
+    lines = ['local function %s(a, b)' % name, '  local _tab = {}']
+    for _ in range(R.choice([2, 3, 4])):
+        t = R.choice(['i', 'f', 'b', 'n', 'n'])
+        n = fresh('s')
+        lines.append('  local %s = %s' % (n, gen_expr(env, 'i' if t == 'n' else t, 2, None)))
+        env[n] = t
+    ret = R.choice([None, None, 'i', 'f', 'n'])  # None: the function returns its locals; else a loop may return a value of that type
+    for _ in range(R.choice([1, 2, 2, 3])):
+        if R.random() < 0.8:
+            lines.append(seg_loop(env, ret, 1))
+        else:
+            lines.append(gen_block(env, ret, 2, 1, False, None, 2))
+    lines.append('  _tab[1] = 0')
+    if ret is None:
+        lines.append('  return ' + ', '.join([v for v in env if v not in ('a', 'b')] + ['a', 'b']))
+    else:
+        lines.append('  return ' + gen_expr(env, ret, 3, None))
+    lines.append('end')
+    return name, '\n'.join(lines)
+
+
 def mutate_ups():
     u, t = R.choice(UPS)
     if R.random() < 0.15:
@@ -345,4 +404,13 @@ for i in range(nfuncs):
         if R.random() < 0.25:
             out.append(mutate_ups())
         out.append('show("%s", pcall(%s%s))' % (f.name, f.name, ''.join(', ' + a for a in args)))
+for i in range(R.choice([0, 0, 1, 2, 3]) if len(sys.argv) <= 3 else int(sys.argv[3])):  # segments for on-stack replacement (after the rest, so that seeds keep their functions)
+    name, text = gen_segment(i)
+    out.append(text)
+    for _ in range(3):
+        a = arg_for(R.choice(['i', 'f']), False)
+        b = arg_for(R.choice(['i', 'f', 'b']), R.random() < 0.1)
+        if R.random() < 0.3:
+            out.append(mutate_ups())
+        out.append('show("%s", pcall(%s, %s, %s))' % (name, name, a, b))
 print('\n'.join(out))

@@ -249,6 +249,11 @@ struct Stats {
                                       // the code did not assume (tier_guard_misses), or a run abandoned half way (tier_aborts)
   std::uint64_t tier_guard_misses = 0;
   std::uint64_t tier_aborts = 0;      // runs abandoned after starting: an integer // or % by zero, a for step of zero, a recursion too deep
+  // On-stack replacement of loops (a `for`, `while` or `repeat` loop taken over by compiled code in the middle of a call).
+  std::uint64_t tier_osr_runs = 0;        // loops (or the rest of a loop) that native code ran to the end
+  std::uint64_t tier_osr_bailouts = 0;    // times a loop that has compiled code went on in the interpreter: a local or a binding the code
+                                          // did not assume, or a run abandoned half way (the interpreter then goes on from the same point)
+  std::uint64_t tier_osr_ineligible = 0;  // loops that cannot be compiled (counted once per loop)
 };
 
 // Tiering is off unless a State is given options (or NFCAST_TIER is set in the environment, for the test drivers). A function
@@ -265,6 +270,7 @@ struct TierOptions {
   std::string cache_dir;            // default: $NFCAST_TIER_CACHE, else $TMPDIR (or /tmp)/nfcast-tier-cache-<uid>
   std::string rt_dir;               // the directory with nfcast_tier_rt.h; default: lib/ast next to the driver, or next to this source file
   unsigned timeout = 120;           // seconds one compile may take
+  bool osr = true;                  // a hot loop is compiled and taken over in the middle of the call (NFCAST_TIER_OSR=0 turns it off)
 };
 
 struct TierState;
@@ -341,6 +347,7 @@ struct State {
   void enable_tier(const TierOptions& opt);  // TierOptions::Off turns it off again; versions already compiled stay usable
   std::string tier_state(const Value& fn);   // what the tier made of a script function: "cold", "compiled ...", "ineligible: why", ...
   void tier_wait();                          // Async: waits for the compiles that are running and installs the results
+  std::string tier_loops(const Value& fn);   // what the tier made of the loops of a script function ("line 3: compiled ii; line 9: ineligible: why")
   TierState* tier = nullptr;                 // null: tiering is off
 
   // ---- internal ----

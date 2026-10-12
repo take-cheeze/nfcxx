@@ -1,0 +1,45 @@
+sum	3003
+float	7219.9720840721
+either	2.5	float
+either, never a float	5	integer
+wrap	2293070008301402073
+collatz	111
+repeat	23	3795
+boolean	false	12
+down	10741
+floor limit	6
+float loop	5.5
+maxint	4
+minint	3
+empty and single	10
+step 4	15
+float down	2.5
+nested	25
+calls	133170
+calls, other types	198310.0
+callee rebound	2870
+firstdiv	1000003	7	97
+find	1346269	832040
+mixed	11	25.5	integer	float
+noret	55
+two	nil	30
+swap	32951280099	53316291173	3	kept
+after	32951280105
+divloop ok	649
+divloop	false	tier_osr.lua:146: attempt to divide by zero
+modloop	false	tier_osr.lua:153: attempt to perform 'n%0'
+bitloop	true	true	false	tier_osr.lua:159: number (local 'x') has no integer representation
+bits2	false	tier_osr.lua:165: number (local 'x') has no integer representation
+divloop again	352	false	tier_osr.lua:146: attempt to divide by zero
+after	false	tier_osr.lua:177: attempt to concatenate a nil value
+table	2870
+string	12345678910
+closures	1	2	3
+upvalue write	10
+native call	17
+types	20	30.0	20.5	21
+types again	42	42.5
+tri	4960
+fibl	21880
+big	1200007
+harmonic	12.090146129863
