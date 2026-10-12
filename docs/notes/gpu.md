@@ -63,6 +63,20 @@ NVIDIA `cuda-samples` `0_Introduction/vectorAdd`, unmodified, builds with `-I/us
 match". On qbe, `scripts/qbe-prep.rb` maps `__builtin_fabsf` and `__builtin_fabs` (used by libcu++) to libm. Note that the
 sample exits 0 even when its check fails: the check is its output line.
 
+Device unit (`scripts/cuda-rewrite.rb --device`): the top-level pieces of the source (preprocessor lines, declarations,
+definitions) are classified. The unit has every `__global__`/`__device__` function, and the host declarations those
+reference, transitively: typedefs, using, struct/class/union/enum, `const`/`constexpr` variables and #define/#undef. Host
+functions, host variables and `#include` lines are left out; quoted includes of files that exist are inlined first, so a
+kernel in a `.cu` or `.cuh` of the same program is in the unit. A short prelude gives `uint`, `NULL`, `__shared__`
+(a static object, refused by the emitter until static data is lowered) and `__syncthreads` (an intrinsic the emitter
+does not lower yet).
+
+Template kernel launches: `k<T...><<<...>>>(args)` is a call of `__nfcxx_k_<name>_<args>`, a C-linkage wrapper. The
+device unit defines it as a call of the instance (which lowers as a helper); the host declares it at the launch and
+defines a stub at the end of the file, so the embedded table finds it by name. The parameter list is the template's
+with the explicit arguments substituted. Launches whose arguments depend on an enclosing template parameter fail to
+compile (the stub refers to the parameter).
+
 The CPU interpreter (`tests/gpu/ptx-interp`) runs `.func` and `call` (no recursion), so `helper_kernel` runs in
 `tests/gpu/run_interp.sh` with the same check as the GPU run. A struct passed by value is refused with a message that
 names the type.
