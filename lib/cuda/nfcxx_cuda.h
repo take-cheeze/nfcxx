@@ -45,6 +45,39 @@ inline const dim3 gridDim{1, 1, 1};
 
 // The block barrier, for the host copy of a kernel body (never run; the device code has the real barrier).
 inline void __syncthreads(void) {}
+
+// The integer intrinsics, for the host copy of a kernel and for host code that calls them (the device side is in the
+// device unit, scripts/cuda-rewrite.rb BUILTIN_DEFS). Real C++ here, with CUDA's definitions. The shuffles on the host
+// return the value of the calling lane (there is one lane on the host).
+inline unsigned __umulhi(unsigned a, unsigned b) { return (unsigned)(((unsigned long long)a * b) >> 32); }
+inline int __popc(unsigned x) { int n = 0; while (x) { x &= x - 1; ++n; } return n; }
+inline int __popcll(unsigned long long x) { return __popc((unsigned)x) + __popc((unsigned)(x >> 32)); }
+inline unsigned __byte_perm(unsigned x, unsigned y, unsigned s) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) {
+    unsigned sel = (s >> (4 * i)) & 7u;
+    unsigned src = sel < 4 ? x : y;
+    r |= ((src >> (8 * (sel & 3))) & 0xffu) << (8 * i);
+  }
+  return r;
+}
+inline unsigned __vsub4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) r |= (((a >> (8 * i)) - (b >> (8 * i))) & 0xffu) << (8 * i);
+  return r;
+}
+inline unsigned __vcmpne4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++)
+    if (((a >> (8 * i)) & 0xffu) != ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
+  return r;
+}
+inline int __shfl_xor_sync(unsigned, int v, int, int = 32) { return v; }
+inline float __shfl_xor_sync(unsigned, float v, int, int = 32) { return v; }
+inline int __shfl_down_sync(unsigned, int v, unsigned, int = 32) { return v; }
+inline float __shfl_down_sync(unsigned, float v, unsigned, int = 32) { return v; }
+inline int __shfl_sync(unsigned, int v, int, int = 32) { return v; }
+inline float __shfl_sync(unsigned, float v, int, int = 32) { return v; }
 // The block's dynamic shared memory (`extern __shared__ T x[]`, scripts/cuda-rewrite.rb): a placeholder for the host
 // copy of a kernel, which never runs. The device side lowers the call to the address of the .extern .shared symbol.
 inline void *__nfcxx_dynshared_addr(void) { return nullptr; }
