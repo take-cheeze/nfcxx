@@ -969,6 +969,22 @@ if $PROGRAM_NAME == __FILE__
   contradictions = AnnotationContradictions.find(ireps, registry, annotations, arg_types,
                                                 gen.fixnum_return_names, class_annotations,
                                                 class_arg_types)
+  # TYPE_CHECK (docs/adr/0412): the report front-end reads the settled types as data; a build never sets this.
+  type_facts_path = ENV['BC2CPP_TYPE_FACTS']
+  type_facts_path = nil if type_facts_path&.empty?
+  if type_facts_path
+    require_relative 'type_facts'
+    TypeFacts.write(type_facts_path, TypeFacts.collect(TypeFacts::Ctx.new(
+      ireps: ireps, registry: registry, annotations: annotations, class_annotations: class_annotations,
+      element_annotations: element_annotations, arg_types: arg_types, class_arg_types: class_arg_types,
+      class_layout_raw: class_layout_raw, class_poison_reason: class_poison_reason, store_log: ivar_store_log,
+      poison_buckets: poison_buckets, ivar_layout: ivar_layout, element_raw: element_raw,
+      element_poison_reason: element_poison_reason, hash_element_raw: hash_element_raw,
+      hash_poison_reason: hash_poison_reason, container_constants: container_constants, gen: gen,
+      contradictions: contradictions, dynamic_names: DynamicNames.universe(ireps), call_sites: call_sites,
+      root: ENV['BC2CPP_TYPE_FACTS_ROOT']
+    )))
+  end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='
   if contradictions.empty?
     warn '  (none)'
@@ -978,8 +994,9 @@ if $PROGRAM_NAME == __FILE__
       warn "  CONTRADICTION #{owner}##{name} #{where}: annotation says #{declared.inspect}, " \
            "inference proved #{got.inspect}"
     end
+    # The type check reports them (with file:line) instead of stopping the run that collects them.
     abort "\n[bc2pp] RBS_SEED_CONTRADICTION: #{contradictions.size} annotation(s) disagree with a " \
-          "proved type (see above). Fix the annotation, or the code it claims to describe."
+          "proved type (see above). Fix the annotation, or the code it claims to describe." unless type_facts_path
   end
   warn ''
   # ARRAY_RETURN_PROOF listing, one line per name like the one above, so the
