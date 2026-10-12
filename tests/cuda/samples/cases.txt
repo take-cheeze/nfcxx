@@ -1,6 +1,7 @@
 # Test beds: real CUDA programs through the nfcxx driver (tests/cuda/samples/run.sh).
 # Fields: name | source tree (cpp = cuda-samples cpp/, rodinia = Rodinia cuda/) | dir in that tree | sources | expect | marker | known error
 # expect:
+#   build-only   compiles and links; the program needs input files (Rodinia), so it is not run here.
 #   pass         builds, runs, exits 0, and prints marker (the sample's own check). Mutants must lose the marker.
 #   unverified   builds, runs, exits 0; the sample has no printed check (marker empty).
 #   fail-compile currently fails to compile; the run checks that the recorded error text still appears, and
@@ -11,7 +12,7 @@ simpleZeroCopy | cpp | 0_Introduction/simpleZeroCopy | simpleZeroCopy.cu | unver
 simpleAtomicIntrinsics | cpp | 0_Introduction/simpleAtomicIntrinsics | simpleAtomicIntrinsics.cu | fail-compile |  | identifier "atomicAdd" is undefined
 simpleVoteIntrinsics | cpp | 0_Introduction/simpleVoteIntrinsics | simpleVoteIntrinsics.cu | fail-compile | | identifier "__any_sync" is undefined
 simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | fail-compile | | identifier "printf" is undefined
-matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile |  | linkage specification is not allowed
+matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | unverified | | 
 asyncAPI | cpp | 0_Introduction/asyncAPI | asyncAPI.cu | unverified | | 
 reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | refused: template launch of reduce0<T> depends on the template parameter T of the enclosing template
 shfl_scan | cpp | 2_Concepts_and_Techniques/shfl_scan | shfl_scan.cu | fail-compile |  | namespace "cooperative_groups" has no member "tiled_partition"

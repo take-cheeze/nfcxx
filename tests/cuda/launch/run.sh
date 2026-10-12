@@ -41,5 +41,6 @@ refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
 pass bounds.cu "launch_bounds: no error, 0 mismatches"
 pass async.cu "async: no error, 0 mismatches"
 pass dynshared.cu "dynamic shared: no error, 0 mismatches"
+pass tmpl_explicit.cu "templates: no error, 0 mismatches"
 refuse tmpl_dep.cu "depends on the template parameter T"
 exit $fail
