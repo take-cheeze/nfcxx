@@ -52,12 +52,17 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
     dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cu/$key
     mkdir -p "$dir"
   fi
-  local src copy i
+  local src copy i sdir
   for src in "${cu_inputs[@]}"; do
+    # The copy is not next to the source, so quoted includes that are relative to the source (`#include "../x.cuh"`
+    # in a .cu, and in the headers it includes) are found through the source's own directory, as a user -I.
+    sdir=$(realpath -- "$(dirname -- "$src")")
+    cflags+=("-I$sdir"); files+=("-I$sdir")
     copy=$dir/$(basename "$src" .cu).cpp
     cu_rewrite "$src" "$copy"
-    for i in "${!srcs[@]}"; do [ "${srcs[$i]}" = "$src" ] && srcs[$i]=$copy; done
-    for i in "${!files[@]}"; do [ "${files[$i]}" = "$src" ] && files[$i]=$copy; done
+    # if, not `[ ] && x`: a loop whose last test fails returns non-zero, and set -e would end the driver.
+    for i in "${!srcs[@]}"; do if [ "${srcs[$i]}" = "$src" ]; then srcs[$i]=$copy; fi; done
+    for i in "${!files[@]}"; do if [ "${files[$i]}" = "$src" ]; then files[$i]=$copy; fi; done
   done
 }
 cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
