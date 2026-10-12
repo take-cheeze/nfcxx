@@ -32,8 +32,8 @@ extern "C" unsigned __nfcxx_ntid_z(void);
 extern "C" unsigned __nfcxx_nctaid_x(void);
 extern "C" unsigned __nfcxx_nctaid_y(void);
 extern "C" unsigned __nfcxx_nctaid_z(void);
-// A template kernel, launched with explicit arguments from a host function; a helper that the kernel calls; and a
-// constant the kernel reads. Host-only declarations stay out of the device unit.
+                                                                                                                  
+                                                                                 
 
 typedef unsigned int uint;
 #define SCALE 3
