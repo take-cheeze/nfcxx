@@ -266,23 +266,15 @@ class CodeGen
       # blocks it builds carry the guard's token.
       out << "  Bc2cppFrameGuard bc2cpp_ret_guard(&bc2cpp_return_frames);\n" if needs_return_catch
       out << "  Bc2cppVmMark bc2cpp_ret_mark = bc2cpp_vm_mark(M);\n  try {\n" if needs_return_catch
-      (0...irep.nregs).each { |i| out << "  mrb_value r#{i}" << (i.zero? ? ' = self;' : ' = mrb_nil_value();') << "\n" }
-      # A native-typed argument's register is still an mrb_value (NATIVE_ARG_TARGETS
-      # moves the coercion, it does not specialize registers), so box it with
-      # TYPE_OPS[:box] on entry.
-      arg_names.each_with_index do |a, i|
-        t = arg_native_types[i]
-        out << if t
-                  "  r#{i + 1} = #{TYPE_OPS.fetch(t)[:box]}(#{a});\n"
-                else
-                  "  r#{i + 1} = #{a};\n"
-                end
+      # Box arguments in parameter order; the remaining registers start as nil.
+      initial = arg_names.each_with_index.map do |arg, i|
+        type = arg_native_types[i]
+        type ? "#{TYPE_OPS.fetch(type)[:box]}(#{arg})" : arg
       end
-      # EXPLICIT_BLOCK_PARAM_SUPPORT: store the block into its register once, where
-      # ENTER would put it: mand+1, or mand+rest+1 with a rest parameter (ENTER
-      # 1:0:1:0:0:0:1:0 puts it in R3); `total_args + 1` covers both. The following
-      # MOVE etc. is ordinary bytecode.
-      out << "  r#{total_args + 1} = bc2cpp_blk;\n" if has_blk
+      initial[total_args] = 'bc2cpp_blk' if has_blk
+      registers_start = out.length
+      out << emit_register_initializers(irep.nregs, initial)
+      registers_end = out.length
       if embedded_ivars && d.name == 'initialize'
         # At the start of #initialize self is a bare MRB_TT_DATA shell (data == NULL):
         # allocate the struct before any embedded SETIV.
@@ -515,6 +507,7 @@ class CodeGen
     end
     # INLINE_NESTED_BLOCK_SUPPORT: `@inline_nested_pre` goes first so a nested
     # block's cfunc is defined before the loop that uses it.
+    out = drop_unused_nil_registers(out, registers_start...registers_end) unless @resumable
     out = @inline_nested_pre + block_fallback_pre + rescue_pre + out
     @inline_nested_pre = bc2cpp_saved_inline_pre
     out << runtime_def_devirt_audit(out)
@@ -693,6 +686,23 @@ class CodeGen
     { label: label, owner: d.owner, name: d.name, entry: entry_name, impl: impl_name,
       arity: arg_names.size, arg_c_types: arg_c_types, aspec: aspec.join(' | '),
       code: out, visibility: d.visibility, guard: guard&.fetch(:index), resumable: !resumable.nil? }
+  end
+
+  # Generated register references are literal r<N> identifiers. Counting comments
+  # and strings too only retains extra declarations; address-taken locals count.
+  def drop_unused_nil_registers(code, declarations)
+    uses = code.scan(/\br\d+\b/).tally
+    code[declarations] = code[declarations].gsub(/^  mrb_value (r\d+) = mrb_nil_value\(\);\n/) do |declaration|
+      uses.fetch(Regexp.last_match(1)) == 1 ? '' : declaration
+    end
+    code
+  end
+
+  def emit_register_initializers(nregs, arguments)
+    (0...nregs).map do |reg|
+      value = reg.zero? ? 'self' : arguments[reg - 1] || 'mrb_nil_value()'
+      "  mrb_value r#{reg} = #{value};\n"
+    end.join
   end
 
   # The stub compile_method returns for a Fiber.new root that turned out not to qualify.
