@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -61,6 +62,7 @@ const (
 const hostOpCall = 1
 
 var (
+	gcMu    sync.Mutex // one nfc.GC() at a time: it changes process-wide collector settings
 	regMu   sync.Mutex
 	interps = map[int64]*Interp{}
 	nextID  int64
@@ -78,22 +80,24 @@ type Interp struct {
 	id  int64
 	itp *interp.Interpreter
 
-	mu         sync.Mutex // handles, nextHandle, released, closed
-	handles    map[uint64]reflect.Value
-	nextHandle uint64
-	released   []uint64
-	closed     bool
-	weakObjs   map[uint64]weak.Pointer[nfc.Obj] // the wrappers of host objects, to find the dead ones at gcNow
+	mu           sync.Mutex // handles, nextHandle, released, closed
+	handles      map[uint64]reflect.Value
+	nextHandle   uint64
+	released     []uint64
+	closed       bool
+	weakObjs     map[uint64]weak.Pointer[nfc.Obj] // the wrappers of host objects, to find the dead ones at gcNow
+	noFinalizers atomic.Bool                      // the finalizers release nothing (a test knob: nfc.FinalizersOff)
 
 	tabMu sync.RWMutex // calls, wraps
 	calls map[uint32]*callInfo
 	wraps map[uint32]reflect.Value
 
-	live      []*liveVar
-	lastPanic any
-	ret       []any
-	imported  map[string]bool
-	ownerTid  atomic.Int64
+	live            []*liveVar
+	lastPanic       any
+	recoverShadowed bool // the script declared its own recover: the builtin is no longer wrapped (recover.go)
+	ret             []any
+	imported        map[string]bool
+	ownerTid        atomic.Int64
 }
 
 func lookup(id int64) *Interp {
@@ -144,17 +148,19 @@ func newInterp() *Interp {
 
 func (in *Interp) nfcExports() map[string]reflect.Value {
 	return map[string]reflect.Value{
-		"Obj":        reflect.ValueOf((*nfc.Obj)(nil)),
-		"Error":      reflect.ValueOf((*nfc.Error)(nil)),
-		"HostError":  reflect.ValueOf((*nfc.HostError)(nil)),
-		"Call":       reflect.ValueOf(in.call),
-		"Ref":        reflect.ValueOf(in.ref),
-		"Handle":     reflect.ValueOf(in.handleAny),
-		"Ret":        reflect.ValueOf(in.setRet),
-		"GC":         reflect.ValueOf(in.gcNow),
-		"Unwrap":     reflect.ValueOf(unwrap),
-		"ErrClass":   reflect.ValueOf(errClass),
-		"ErrMessage": reflect.ValueOf(errMessage),
+		"Obj":           reflect.ValueOf((*nfc.Obj)(nil)),
+		"Error":         reflect.ValueOf((*nfc.Error)(nil)),
+		"HostError":     reflect.ValueOf((*nfc.HostError)(nil)),
+		"Call":          reflect.ValueOf(in.call),
+		"Ref":           reflect.ValueOf(in.ref),
+		"Handle":        reflect.ValueOf(in.handleAny),
+		"Ret":           reflect.ValueOf(in.setRet),
+		"GC":            reflect.ValueOf(in.gcNow),
+		"FinalizersOff": reflect.ValueOf(in.finalizersOff),
+		"Go":            reflect.ValueOf(goSafe),
+		"Unwrap":        reflect.ValueOf(unwrap),
+		"ErrClass":      reflect.ValueOf(errClass),
+		"ErrMessage":    reflect.ValueOf(errMessage),
 	}
 }
 
@@ -178,19 +184,50 @@ func (in *Interp) setRet(v ...any) { in.ret = v }
 // host applies them at the next boundary. The finalizers (newObj) release the same objects, but they run on a goroutine of
 // their own at a time of the runtime's choosing; weak pointers are cleared by the time runtime.GC returns, which makes this
 // exact: what the script no longer references is released before the evaluation that called gc returns.
+//
+// "By the time runtime.GC returns" holds only while no other collection starts: runtime.GC finishes the sweep of its own cycle
+// unless a second cycle (triggered by allocation, by the heap goal or by GOMEMLIMIT) has started meanwhile, and a weak pointer is
+// cleared when its span is swept. So the collector is held off while this runs (the heap goal and the memory limit are lifted
+// for the duration; gcMu keeps two interpreters from restoring each other's settings), and a second pass runs because
+// sync.Pool buffers survive one cycle (their victim cache) and may hold the last reference to a value. More passes run while a
+// pass still finds something new, up to four.
 func (in *Interp) gcNow() {
-	debug.FreeOSMemory() // a collection, and the memory the interpreter's garbage took goes back to the system
+	gcMu.Lock()
+	defer gcMu.Unlock()
+	oldPercent := debug.SetGCPercent(-1)
+	oldLimit := debug.SetMemoryLimit(math.MaxInt64)
+	defer func() {
+		debug.SetMemoryLimit(oldLimit)
+		debug.SetGCPercent(oldPercent)
+	}()
+	for pass := 1; pass <= 4; pass++ {
+		debug.FreeOSMemory() // a full collection with the sweep finished, and the memory the interpreter's garbage took goes back
+		if in.sweepDead() == 0 && pass >= 2 {
+			break
+		}
+	}
+}
+
+// sweepDead queues the release of the objects whose weak pointers were cleared and returns how many there were.
+func (in *Interp) sweepDead() int {
+	n := 0
 	in.mu.Lock()
 	for id, w := range in.weakObjs {
 		if w.Value() == nil {
 			delete(in.weakObjs, id)
+			n++
 			if !in.closed {
 				in.released = append(in.released, id)
 			}
 		}
 	}
 	in.mu.Unlock()
+	return n
 }
+
+// finalizersOff silences the finalizers of the wrappers (for tests): the objects are then released only by nfc.GC(), so a
+// check of the weak-pointer sweep does not depend on when the finalizer goroutine runs.
+func (in *Interp) finalizersOff(off bool) { in.noFinalizers.Store(off) }
 
 // ---- the host ---------------------------------------------------------------------------------------------------------
 func (in *Interp) hostCall(op int, payload []byte) (int, []byte) {
@@ -721,6 +758,25 @@ func unwrap(v any) any {
 		return nil
 	}
 	return v
+}
+
+// goSafe is nfc.Go: it runs f in a goroutine and hands back a channel that receives nil when f returned, or the *nfc.Error
+// (the class and message the host would see) of the panic that f did not recover. A script's own `go f()` cannot be guarded: yaegi
+// starts it with a bare go statement (run.go, `go runCfg(...)`) and has no option or hook for goroutines, and a panic that no
+// frame of a goroutine recovers ends the process, whatever the embedder does. nfc.Go is the guarded way to start one.
+func goSafe(f func()) <-chan error {
+	ch := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				cls, msg := describePanic(r)
+				ch <- &nfc.Error{Class: cls, Msg: msg}
+			}
+		}()
+		f()
+		ch <- nil
+	}()
+	return ch
 }
 
 func errClass(v any) string   { c, _ := describePanic(v); return c }

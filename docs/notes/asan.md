@@ -80,3 +80,7 @@ qbe: cproc checks every load and store, and stack, dynamic (alloca, C-input VLA)
 `tests/asan/run.sh` (CI: `ci.yml`): one program per error class with the expected report text, a clean program with
 exceptions and containers, the source line in the report, the flag-off cases, backend selection and refusals, `-c`
 then link, and a `.c` input in the same program.
+
+A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on both back ends and links it
+with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
+instrumented (`poly.md`, "Sanitizers and valgrind").

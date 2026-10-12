@@ -186,6 +186,9 @@ func queueReleaseOf(iid int64, id uint64) {
 }
 
 func (in *Interp) queueRelease(id uint64) {
+	if in.noFinalizers.Load() {
+		return
+	}
 	in.mu.Lock()
 	delete(in.weakObjs, id)
 	if !in.closed {
