@@ -323,7 +323,7 @@ def template_launches(text)
       e2 = k + 1
       k -= 1 while k >= 0 && ident_char?(text[k])
       name = text[(k + 1)...e2]
-      found << [name, text[(j + 1)...(i - 1)].strip] unless name.empty?
+      found << [name, text[(j + 1)...(i - 1)].strip, i] unless name.empty?
     end
     i += 1
   end
@@ -334,7 +334,20 @@ def rewrite(text, orig)
   out = "#line 1 \"#{orig}\"\n"
   n = text.length
   i = 0
+  # The wrapper declarations of the template launches, at file scope just before the top-level piece that holds
+  # each launch: EDG rejects a linkage specification in block scope. Keyed by the piece's start index.
+  pieces = top_pieces(text)
+  decls_at = Hash.new { |h, k| h[k] = [] }
+  template_launches(text).each do |nm, ta, pos|
+    next unless dependent_on_template(text, pos, ta).nil?
+    w = template_site(nm, ta)
+    piece = pieces.find { |st, en, _kind, _body| st <= pos && pos < en }
+    decls_at[piece ? piece[0] : 0] << w unless decls_at[piece ? piece[0] : 0].include?(w)
+  end
   while i < n
+    if decls_at.key?(i)
+      decls_at.delete(i).each { |w| out << "extern \"C\" void #{w}(#{$sites[w][:decl]});\n" }
+    end
     e = skip_literal(text, i)
     if e
       out << text[i...e]
@@ -410,14 +423,9 @@ def rewrite(text, orig)
                "the device image would need that instance, which is not built yet (at line #{line})") unless dep.nil?
         kernel = template_site(name, targs)
       end
-      if targs
-        # a block, so the wrapper's declaration is in scope at the call
-        out << "{ extern \"C\" void #{kernel}(#{$sites[kernel][:decl]}); "
-      end
       out << "__nfcxx_cuda_launch(#{kernel}, #{cfg[0]}, #{cfg[1]}, #{cfg[2]}, #{cfg[3]}"
       out << ", #{args}" unless args.empty?
       out << ")"
-      out << "; }" if targs
       out << ("\n" * lines)
       i = close_args + 1
       next
@@ -1126,7 +1134,10 @@ def device_tu(text)
   kernels = []
   seeds = []
   # The template launches of the source: each instance is a wrapper kernel (see template_site).
-  template_launches(text).each { |nm, ta| template_site(nm, ta) }
+  # A launch whose template arguments depend on an enclosing template parameter is not a wrapper: its instance is
+  # fixed only by the instantiation, and the host pass refuses it (see rewrite). Registering it here would give a
+  # wrapper that still names the parameter.
+  template_launches(text).each { |nm, ta, pos| template_site(nm, ta) if dependent_on_template(text, pos, ta).nil? }
   pieces.each do |pc|
     next if pc[:kind] == :pp
     if pc[:device]
@@ -1372,5 +1383,6 @@ if device
   File.open(kernels_path, "wb") { |f| f.write(kernels.map { |k| k + "\n" }.join) } unless kernels_path.nil?
   print dev
 else
-  print rewrite(text, path)
+  # The host copy has the local headers expanded too: their launches are in the host unit as well.
+  print rewrite($expanded, path)
 end

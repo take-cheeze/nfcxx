@@ -20,11 +20,12 @@ template <class T> __device__ T helper(int i)
 static const int kLimit = 64;
 struct HostOnly { int x; void run(); };
 
-void HostOnly::run() { printf("%d\n", x); }
+void HostOnly::run() { printf("%d\n", x); }extern "C" void __nfcxx_k_scaled_2_float(float *out, const float *in, int n);
+
 
 int main() {
   float *a = 0, *b = 0;
-  { extern "C" void __nfcxx_k_scaled_2_float(float *out, const float *in, int n); __nfcxx_cuda_launch(__nfcxx_k_scaled_2_float, 4, 16, 0, 0, a, b, kLimit); };
+  __nfcxx_cuda_launch(__nfcxx_k_scaled_2_float, 4, 16, 0, 0, a, b, kLimit);
   return 0;
 }
 

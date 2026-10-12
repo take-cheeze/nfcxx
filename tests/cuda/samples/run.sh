@@ -66,6 +66,7 @@ while IFS='|' read -r name tree dir srcs expect marker known; do
   if [ "$expect" = fail-link ]; then echo "NOW LINKS $name: update cases.txt (it was recorded as $known)"; fi
   # builds: compiles and links, but the program needs input arguments to run, so it is not run here.
   if [ "$expect" = builds ]; then echo "builds $name: links; not run ($known)"; continue; fi
+  if [ "$expect" = build-only ]; then echo "builds $name: links (needs input files; not run)"; continue; fi
   out=$(cd "$w" && LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" timeout 300 "./$name" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then echo "FAIL $name: run exit $rc"; fail=1; continue; fi
   if [ "$expect" = pass ]; then
