@@ -30,6 +30,13 @@ Dir.mktmpdir('ppu-ir-lut') do |temp|
   source = "class PPU\n#{OptcarrotPPULUT::ORIGINAL.lines.map { |line| "    #{line}" }.join}\nend"
   extracted = OptcarrotPPULUT.extract(source)
   emitted, capture = OptcarrotIRTileLUT.prepare(extracted, temp)
+  explicit_source = File.join(temp, 'explicit_source.rb')
+  File.write(explicit_source, extracted)
+  child = 'result = OptcarrotIRTileLUT.prepare(File.read(ARGV[0]), ARGV[1], mrbc: ARGV[2]); puts result.first.size'
+  out, err, status = Open3.capture3({ 'MRBC' => nil }, RbConfig.ruby,
+                                  '-r', File.join(root, 'tools/optcarrot_probe/ir_tile_lut'),
+                                  '-e', child, explicit_source, temp, MRBC)
+  raise "explicit compiler with MRBC unset failed: #{out}#{err}" unless status.success? && err.empty? && out.to_i.positive?
   altered = extracted.sub('(0..7)', '(0..8)')
   begin
     OptcarrotIRTileLUT.prepare(altered, temp)

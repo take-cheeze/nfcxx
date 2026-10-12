@@ -7,12 +7,12 @@ module OptcarrotIRTileLUT
   CORE_METHODS = { 'Array' => %w[map each transpose [] []=], 'Range' => %w[map each],
                    'Integer' => %w[* + - | >> & != ==] }.freeze
 
-  def self.prepare(source, directory)
+  def self.prepare(source, directory, mrbc: MRBC)
     path = File.join(directory, 'ir_lut_candidate.rb')
     File.write(path, source)
-    candidates, = compile_ireps([path], 'ir_lut_candidate', directory)
+    candidates, = compile_ireps([path], 'ir_lut_candidate', directory, mrbc: mrbc)
     reference_path = File.expand_path('../bc2cpp/fixtures/tile_lut.rb', __dir__)
-    reference_image = run_mrbc([reference_path], 'ir_lut_reference', directory)
+    reference_image = run_mrbc([reference_path], 'ir_lut_reference', directory, mrbc: mrbc)
     references, = load_ireps(reference_image)
     reference = references.values.find { |irep| irep.enter && irep.enter.enter_fields.first.zero? }
     matches = candidates.values.filter_map { |irep| BytecodeIR::TileLUT.build(irep, reference) }
@@ -20,7 +20,7 @@ module OptcarrotIRTileLUT
 
     shim_path = File.join(directory, 'ir_lut_bitref.rb')
     File.write(shim_path, 'class Integer; def [](i); (self >> i) & 1; end; end')
-    shim_image = run_mrbc([shim_path], 'ir_lut_bitref', directory)
+    shim_image = run_mrbc([shim_path], 'ir_lut_bitref', directory, mrbc: mrbc)
     shim = RiteBinary.parse(shim_image.bytes).find { |irep| irep.rlen.zero? }
     raise 'unexpected bitref shim structure' unless shim.pool.empty? && shim.catch_handlers.empty?
 
