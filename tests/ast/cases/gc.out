@@ -1,0 +1,14 @@
+20	63071
+1092	1,2,3,4,5,6,7,8,9,10	299,300,
+65
+100	10100
+4LPH4 BET4 G4MM4 DELT4
+true	1	60
+1 two 3	aa bb cc
+20	40
+table	1
+2
+1,2,3,5,8,13,21,34,55,89
+5000	10000
+number	true	false	bad argument #1 to 'collectgarbage' (invalid option 'bogus')
+true	true
