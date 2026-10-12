@@ -61,7 +61,10 @@ class CodeGen
     return 'Class has a mixin' unless Array(@included_modules['Class']).empty? && Array(@prepended_modules['Class']).empty? &&
                                       !@unknown_mixins.include?('Class')
     return 'Ruby-defined new' unless (@registry['new'] || []).all? { |d| d.owner == '<native>' }
-    return 'initialize defined outside a class' unless constructor_initializers_in_classes?
+    unless constructor_initializers_in_classes?
+      owners = (@registry['initialize'] || []).reject { |d| d.owner == '<native>' || world.class_declared?(d.owner) }.map(&:owner).uniq.sort
+      return "initialize defined outside a class: #{owners.join(', ')}"
+    end
     return 'new/initialize installed out of sight' if %w[new initialize].any? { |name| world.unknown_def?(name) }
 
     constructor_naming_refusal
