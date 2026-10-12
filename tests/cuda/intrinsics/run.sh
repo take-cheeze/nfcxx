@@ -2,7 +2,7 @@
 # CUDA's integer intrinsics that llama.cpp's ggml-cuda uses, through the nfcxx driver (device prelude in
 # scripts/cuda-rewrite.rb, BUILTIN_DEFS; the emitter's SCALAR_U32 and WARP_SHUFFLES).
 #   pass:    int.cu builds, links, runs on the GPU and checks every intrinsic against the CUDA definitions (0 mismatches).
-#   refuse:  half.cu (__float2half, __half2float): the emitter refuses the 16-bit half type, by name, with exit 3.
+#   pass:    half.cu and half_arith.cu: the 16-bit half type (conversions, __hadd, __hmul, __hfma) against CUDA host results.
 # Needs the CUDA toolkit (CUDA_HOME, default /usr/local/cuda) and an NVIDIA GPU; skips (exit 0) when missing.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -40,5 +40,6 @@ refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
 }
 
 pass int.cu "intrinsics: no error, 0 mismatches"
-refuse half.cu "returns a int"
+pass half.cu "half: no error, 0 mismatches"
+pass half_arith.cu "half arith: no error, 0 mismatches"
 exit $fail
