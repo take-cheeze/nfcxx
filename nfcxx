@@ -14,6 +14,9 @@
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
+#   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Only the gcc backend
+#                  can instrument the code, so the backend becomes gcc unless --backend= says otherwise (then it is an error).
+#                  docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are refused.
 #   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
 set -euo pipefail
@@ -24,6 +27,7 @@ edg=${EDG_BUILD:-$root/build/edg}/bin
 std=--c++23; out=a.out; emit_c=0; backend=${NFCXX_BACKEND:-qbe}; files=()
 cfiles=(); cflags=(); cflags_pic=(); ncpp=0; nobj=0
 shared=0; pic=0; rdynamic=0; compile_only=0
+asan=0; backend_explicit=0; asanopts=()
 dialect=${NFCXX_DIALECT:-g++}; freestanding=0; gnu=""; trace=${NFCXX_TRACE:-}
 # Compiler-driver options a build system passes (CMake, ninja, make; mruby's rake build). See docs/notes/cxx-driver.md.
 pthread=0; preprocess=0; outset=0; depmode=""; dfile=""; dtarget=""; depphony=""
@@ -77,7 +81,11 @@ cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, wi
 while [ $# -gt 0 ]; do
   case $1 in
     --emit-c) emit_c=1 ;;
-    --backend=*) backend=${1#--backend=} ;;
+    --backend=*) backend=${1#--backend=}; backend_explicit=1 ;;
+    -fsanitize=address) asan=1 ;;
+    -fno-sanitize=address) asan=0 ;;
+    -fsanitize=*|-fsanitize-*) echo "nfcxx: $1 is not supported (only -fsanitize=address; docs/notes/asan.md)" >&2; exit 2 ;;
+    -fno-omit-frame-pointer|-fomit-frame-pointer) asanopts+=("$1") ;;   # asan's usual companions; they go to the C compile
     --dialect=*) dialect=${1#--dialect=} ;;
     --gnu-version=*) gnu=${1#--gnu-version=} ;;
     --freestanding) freestanding=1 ;;
@@ -152,6 +160,19 @@ if [ $ncpp -gt 0 ] || [ $emit_c = 1 ] || { [ $nobj -gt 0 ] && [ ${#cfiles[@]} = 
 fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
 [ -z "$trace" ] || trace_begin "$trace"
+
+# -fsanitize=address: the instrumentation is gcc's, so it needs the gcc backend (docs/notes/asan.md).
+asan_c=()   # options for every C compile and link of the program
+if [ $asan = 1 ]; then
+  [ "${NFCXX_PATH:-}" != b ] || { echo "nfcxx: -fsanitize=address does not work with Path B (NFCXX_PATH=b); use the gcc backend" >&2; exit 2; }
+  if [ "$backend" != gcc ]; then
+    [ $backend_explicit = 0 ] || { echo "nfcxx: -fsanitize=address needs --backend=gcc (the $backend backend cannot instrument code)" >&2; exit 2; }
+    backend=gcc
+  fi
+  asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+"${asanopts[@]}"})
+else
+  asanopts=()
+fi
 
 # C inputs: a .c file does not go through EDG. It is compiled to an object file by the backend's C compiler
 # (qbe: scripts/qbe-cc, the same cproc -> QBE pipeline as EDG's generated C; gcc: gcc -O2 -fwrapv
@@ -252,6 +273,7 @@ fi
 [ $rdynamic = 0 ] || picopts+=(--c_to_obj_option -rdynamic)
 [ $pthread = 0 ] || picopts+=(--c_to_obj_option -pthread)
 picopts+=(${pie_opts[@]+"${pie_opts[@]}"})
+for o in ${asan_c[@]+"${asan_c[@]}"}; do picopts+=(--c_to_obj_option "$o"); done
 [ $shared = 0 ] || { export EDG_OBJ_TO_EXEC_DEFAULT_OPTIONS=-shared; ldopts=(-shared); }
 
 # C inputs: compile each .c to an object. Link options (-l, -L, ...) stay in files for the final link.
@@ -265,7 +287,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     if [ $backend != gcc ]; then
       NFCXX_C_INPUT=1 "$NFCXX_CC" -c ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
     else
-      gcc -c -O2 -fwrapv -fno-strict-aliasing ${cflags_pic[@]+"${cflags_pic[@]}"} ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
+      gcc -c -O2 -fwrapv -fno-strict-aliasing ${asan_c[@]+"${asan_c[@]}"} ${cflags_pic[@]+"${cflags_pic[@]}"} ${cflags[@]+"${cflags[@]}"} "$c" -o "$o"
     fi
     trace_end "$t" "C input: $c" cinput
     cobjs+=("$o")
@@ -283,7 +305,7 @@ if [ ${#cfiles[@]} -gt 0 ]; then
     # Only C: link with the C compiler (qbe-cc adds -latomic for the QBE backend).
     t=$(trace_start)
     if [ $backend != gcc ]; then "$NFCXX_CC" ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"
-    else gcc ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
+    else gcc ${asan_c[@]+"${asan_c[@]}"} ${ldopts[@]+"${ldopts[@]}"} "${cobjs[@]}" ${files[@]+"${files[@]}"} -o "$out"; fi
     trace_end "$t" "link (C only)" cinput
     exit 0
   fi

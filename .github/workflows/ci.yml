@@ -70,6 +70,9 @@ jobs:
       - name: nfcxx accepts the compiler-driver options of CMake and mruby (gcc backend)
         run: tests/cxx-driver/run.sh
 
+      - name: AddressSanitizer (-fsanitize=address, gcc backend)
+        run: tests/asan/run.sh
+
       - name: Several translation units sharing libstdc++ templates (both backends)
         run: tests/multi-tu/run.sh
 

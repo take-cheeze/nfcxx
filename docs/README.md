@@ -10,6 +10,7 @@ covers say so.
 | Note | One line |
 | --- | --- |
 | [build-self-hosting.md](notes/build-self-hosting.md) | What the build fetches, which host tools it needs for which step, and how to build offline from mirrored submodules. |
+| [asan.md](notes/asan.md) | `nfcxx -fsanitize=address`: gcc's AddressSanitizer on the gcc backend; backend selection, limits. `tests/asan/run.sh`. |
 | [builtins.md](notes/builtins.md) | Table of compiler builtins: what EDG accepts per dialect and what runs on the gcc and qbe backends. |
 | [cxx-driver.md](notes/cxx-driver.md) | `nfcxx` as `CXX` for CMake and mruby: the driver options accepted, and the rpg-maker-clone desktop build's remaining blockers. |
 | [eval.md](notes/eval.md) | `nfceval` (`lib/eval`): evaluating C++ snippets at run time with bound host objects, and `nfcxx -shared`. |
@@ -47,6 +48,7 @@ covers say so.
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
 | `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`, `scripts/setup-poly-lua.sh`) | Evaluate Ruby, Lua, Python and `ast` (Lua syntax on the nfcast engine) from C++, alone or together in one `Context`, with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby and Lua built with C++ exceptions, the nfcast engine is C++; `docs/notes/poly.md`); GC release of script-owned objects. 559 checks on both backends (`tests/poly/run.sh`), also under valgrind by hand | ci.yml |
 | `nfcast` (`lib/ast`) | A Lua 5.4 subset on a self-specializing AST interpreter: nine programs whose output equals a real Lua 5.4.9's, normally and with the collector at every safe point; 71 checks of the specialization counters, collector, host objects and errors (`tests/ast/run.sh`, both backends); random-program fuzzing against the reference by hand (`tests/ast/fuzz.sh`). No coroutines, `goto`, `<close>`, `utf8`, `io`/`os`; no tiering or inlining yet (`docs/notes/ast.md`) | ci.yml |
+| AddressSanitizer (`nfcxx -fsanitize=address`; `docs/notes/asan.md`) | Heap/stack/global overflow, use after free and scope, double free, alloc/dealloc mismatch and leaks reported with the C++ source line, exceptions and containers clean; the qbe default switches to the gcc backend, explicit qbe, Path B and other sanitizers refused (`tests/asan/run.sh`) | ci.yml |
 | Tracing (`--trace=FILE`, `NFCXX_TRACE`) | Valid trace-event JSON with the driver and backend spans, both backends, exit code unchanged (`tests/trace/run.sh`, needs python3) | ci.yml |
 | mruby scripting (`scripts/mrb`, `*.rb`) | Every ported script gives output byte-identical to its Python original (`tests/mruby/run.sh`; Path B and Hexagon parts need the harness and a clang with the Hexagon target, else they skip) | ci.yml (Path A parts), pathb.yml (with the harness) |
 
