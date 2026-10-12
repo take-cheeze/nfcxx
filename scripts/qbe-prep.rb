@@ -667,13 +667,10 @@ LIBC_BUILTINS = {
 # builtin -> [helper name, definition in the prelude]
 HELPER_BUILTINS = {
   '__builtin_isnan' => ['__nfcxx_isnan', 'static int __nfcxx_isnan(double x) { return x != x; }'],
-  # nlohmann::json: float classification and constants (double only; cproc has no long double anyway)
+  # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
   '__builtin_huge_val' => ['__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
-  '__builtin_isfinite' => ['__nfcxx_isfinite', 'static int __nfcxx_isfinite(double x) { return x - x == 0; }'],
-  '__builtin_isinf' => ['__nfcxx_isinf',
-                        'static int __nfcxx_isinf(double x) {' \
-                        ' return x == __builtin_inff() ? 1 : x == -__builtin_inff() ? -1 : 0; }'],
+  # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
   '__builtin_bswap16' => ['__nfcxx_bswap16',
                           'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'],
   '__builtin_bswap32' => ['__nfcxx_bswap32',
