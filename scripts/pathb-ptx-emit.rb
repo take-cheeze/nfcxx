@@ -8,7 +8,11 @@
 #   3  refused: the IR has a node, type or form this emitter does not handle yet; the reason is on stderr
 #   1  error: malformed IR text
 #
-# Model. Each IR function is a kernel (.visible .entry); a function that returns a value is refused. A parameter of
+# Model. A kernel is a `.visible .entry`; a device function is a `.func`. With --kernel=NAME (repeatable) the kernels
+# are the named functions; with no --kernel, a function that another function calls is a `.func` and every other
+# function is a kernel. A `.func` returns a scalar (4- or 8-byte integer, pointer, f32, f64) in a register; a kernel
+# returns nothing. A call passes its operands in `.param` space (st.param, then call), and a call's callee must be a
+# function of the same module. Recursion is refused. A parameter of
 # pointer or of 4- or 8-byte integer type is a .param; the body copies it into its slot, as the IR says. A slot is a
 # frame in .local memory (__local_depot<N>), addressed through its generic address (cvta.local). A register is a PTX
 # register of its class: .pred for bool, .b32 for 4-byte integers (%r), .b64 for 8-byte integers and pointers (%rd).
@@ -22,7 +26,7 @@
 # iconv, fconv, i2f, u2f, cf2i (checked: trap on NaN or out of range), const (floats too, including +Infinity and
 # -Infinity), and gpu (the special registers tid, ctaid, ntid, nctaid, .x .y .z, a Path B form for the GPU). Operands:
 # registers, constants, slot addresses, null. Everything else is refused: the next steps are 1- and 2-byte integers,
-# bool in memory, aggregates, switch, goto, static data, calls, and float constants that are not exact decimals.
+# bool in memory, aggregates, switch, goto, static data, calls of anything but the device intrinsics and the module's own functions (see the model above), and float constants that are not exact decimals.
 #
 # Checked operations emit `trap;`, which aborts the kernel (the launch reports an error). PTX has no abort block, so
 # each check is a predicated trap at the operation.
@@ -310,10 +314,37 @@ end
 
 # ------------------------------------------------------------------ functions
 
+# The names of the functions a form calls directly (the `&"name"` callee of every `call`), in order.
+def collect_calls(x, acc)
+  return acc unless x.is_a?(Array)
+  if head_of(x) == "call" && x.length > 2 && x[2].is_a?(IRSym) && x[2].sig == "&"
+    acc << x[2].name
+  end
+  x.each { |y| collect_calls(y, acc) }
+  acc
+end
+
+# Raises Refused when a call cycle is reachable from name (PTX has no recursion in our lowering).
+def check_recursion(name, callees, state)
+  return if state[name] == :done
+  raise Refused, "recursive call of #{name}" if state[name] == :open
+  state[name] = :open
+  (callees[name] || []).each { |c| check_recursion(c, callees, state) }
+  state[name] = :done
+end
+
 class Fn
+  attr_reader :name, :params, :ret, :form
+  attr_accessor :kernel, :module_fns
+
   def initialize(form, index)
     @form = form
     @index = index
+    @kernel = true
+    @module_fns = {}
+    @ret = nil
+    @setup_done = false
+    @ncall = 0
     @name = form[1].to_s
     @regs = {}              # IR register "%N" => [PTX register, IR type]
     @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0 }
@@ -350,6 +381,8 @@ class Fn
   # ---- the header: return type, parameters, slots
 
   def setup
+    return if @setup_done
+    @setup_done = true
     @body = []
     ret = nil
     @form.each_with_index do |f, i|
@@ -357,7 +390,15 @@ class Fn
       h = head_of(f)
       if h == "ret"
         ret = parse_type(f[1])
-        raise Refused, "function #{@name} returns a value (only void kernels are emitted)" unless ret[0] == "void"
+        if ret[0] == "void"
+          @ret = nil
+        elsif @kernel
+          raise Refused, "kernel #{@name} returns a value"
+        else
+          ok = (ret[0] == "ptr") || (ret[0] == "int" && !ret[3] && (ret[1] == 4 || ret[1] == 8)) || (ret[0] == "float" && (ret[1] == 4 || ret[1] == 8))
+          raise Refused, "function #{@name} returns a #{ret[0]} (scalars only)" unless ok
+          @ret = ret
+        end
       elsif h == "params"
         f.drop(1).each_with_index do |p, k|
           raise Refused, "variadic function" if head_of(p) == "ellipsis"
@@ -562,16 +603,20 @@ class Fn
       raise BadIR, "comparison result is not bool" unless reg_class(dty) == "p"
       compare(h.split(".")[0], dest, ty, x[2], x[3])
     when "call"
-      # The device intrinsics of a kernel: `extern "C" unsigned __nfcxx_tid_x(void)` and the rest of the table
-      # below. Any other call is refused (calls of device functions are not lowered yet).
+      # The device intrinsics of a kernel (`extern "C" unsigned __nfcxx_tid_x(void)` and the rest of the table
+      # below) are special-register reads. Any other callee is a function of the module (call_site).
       ty = parse_type(x[1])
       expect(dty, ty)
       callee = x[2]
       name = callee.is_a?(IRSym) && callee.sig == "&" ? callee.name : nil
       reg = name && DEVICE_INTRINSICS[name]
-      raise Refused, "call of #{name || form_text(callee)} (only the device intrinsics are lowered)" if reg.nil? || x.length != 3
-      raise Refused, "intrinsic #{name} returns #{ty[0]}, not a 32-bit unsigned" unless ty[0] == "int" && type_size(ty) == 4
-      emit("mov.u32 #{dest}, %#{reg};")
+      if reg
+        raise Refused, "intrinsic #{name} takes no arguments" if x.length != 3
+        raise Refused, "intrinsic #{name} returns #{ty[0]}, not a 32-bit unsigned" unless ty[0] == "int" && type_size(ty) == 4
+        emit("mov.u32 #{dest}, %#{reg};")
+      else
+        call_site(x, dest, ty)
+      end
     when "gpu"
       ty = parse_type(x[1])
       expect(dty, ty)
@@ -780,14 +825,68 @@ class Fn
     when "trap"
       emit("trap;")
     when "return"
-      raise Refused, "return with a value" if s.length > 1
-      emit("ret;")
+      if @ret.nil?
+        raise Refused, "return with a value in a void function" if s.length > 1
+        emit("ret;")
+      else
+        raise Refused, "return without a value in #{@name}" unless s.length == 2
+        v, vty = operand(s[1])
+        expect(@ret, vty)
+        emit("mov.#{ret_bits(@ret)} %rv, #{reg_of(v, vty)};")
+        emit("ret;")
+      end
+    when "eval"
+      # an expression statement: only a call, whose value is discarded
+      raise Refused, "eval of #{form_text(s[1])}" unless s.length == 2 && head_of(s[1]) == "call"
+      call_site(s[1], nil, nil)
     else
       raise Refused, "statement #{h || form_text(s)}"
     end
   end
 
   # ---- the function text
+
+  def ret_bits(t)
+    t[0] == "float" ? "f#{t[1] * 8}" : bits_type(t)
+  end
+
+  # A call of a function of the module. dest is the PTX register of the value (nil if discarded); ty its IR type.
+  def call_site(x, dest, ty)
+    callee_sym = x[2]
+    raise Refused, "indirect call" unless callee_sym.is_a?(IRSym) && callee_sym.sig == "&"
+    cname = callee_sym.name
+    raise Refused, "call of intrinsic #{cname} as a statement" if DEVICE_INTRINSICS.key?(cname)
+    callee = @module_fns[cname]
+    raise Refused, "call of #{cname} (not a function of this module)" if callee.nil?
+    raise Refused, "call of kernel #{cname}" if callee.kernel
+    callee.setup
+    args = x.length > 3 ? x[3..-1] : []
+    raise Refused, "call of #{cname} with #{args.length} arguments, it takes #{callee.params.length}" unless args.length == callee.params.length
+    if dest
+      raise Refused, "call of #{cname} as a value, but it returns nothing" if callee.ret.nil?
+      expect(ty, callee.ret)
+    end
+    @ncall += 1
+    c = "$call#{@ncall}"
+    emit("{")
+    regs = []
+    args.each_with_index do |a, k|
+      v, aty = operand(a)
+      expect(callee.params[k], aty)
+      regs << reg_of(v, aty)
+    end
+    regs.each_with_index do |r, k|
+      emit("  .param .#{ptx_type(callee.params[k])} #{c}_p#{k};")
+      emit("  st.param.#{ptx_type(callee.params[k])} [#{c}_p#{k}], #{r};")
+    end
+    list = (0...regs.length).map { |k| "#{c}_p#{k}" }.join(", ")
+    if dest
+      emit("  call (#{dest}), #{cname}, (#{list});")
+    else
+      emit("  call #{cname}, (#{list});")
+    end
+    emit("}")
+  end
 
   def compile
     setup
@@ -807,7 +906,13 @@ class Fn
 
   def text
     out = []
-    out << ".visible .entry #{@name}("
+    if @kernel
+      out << ".visible .entry #{@name}("
+    elsif @ret
+      out << ".func (.reg .#{ret_bits(@ret)} %rv) #{@name}("
+    else
+      out << ".func #{@name}("
+    end
     @params.each_with_index do |ty, k|
       comma = k + 1 < @params.length ? "," : ""
       out << "  .param .#{ptx_type(ty)} #{@name}_param_#{k}#{comma}"
@@ -839,7 +944,7 @@ def strip_comments(src)
   keep.join("\n")
 end
 
-def emit_module(src, sm)
+def emit_module(src, sm, kernels = [])
   forms = parse_forms(tokenize(strip_comments(src)))
   fns = []
   forms.each do |f|
@@ -850,11 +955,29 @@ def emit_module(src, sm)
       fns << Fn.new(f, fns.length)
     elsif h == "global"
       raise Refused, "global #{form_text(f[1])} (static data is not lowered yet)"
+    elsif h == "abi-type"
+      raise Refused, "aggregate type #{form_text(f[1])}: struct and union values by value are not lowered yet"
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end
   end
   raise BadIR, "no function in the IR" if fns.empty?
+  by_name = {}
+  fns.each { |fn| by_name[fn.name] = fn }
+  callees = {}
+  fns.each { |fn| callees[fn.name] = collect_calls(fn.form, []).select { |c| by_name.key?(c) }.uniq }
+  called = {}
+  callees.each { |caller, cs| cs.each { |c| called[c] = caller } }
+  if kernels.empty?
+    fns.each { |fn| fn.kernel = !called.key?(fn.name) }
+  else
+    kernels.each { |k| raise BadIR, "no function named #{k} in the IR" unless by_name.key?(k) }
+    fns.each { |fn| fn.kernel = kernels.include?(fn.name) }
+    called.each { |c, caller| raise Refused, "kernel #{c} is called by #{caller}" if by_name[c].kernel }
+  end
+  state = {}
+  fns.each { |fn| check_recursion(fn.name, callees, state) }
+  fns.each { |fn| fn.module_fns = by_name }
   fns.each { |fn| fn.compile }
   out = "// Generated by scripts/pathb-ptx-emit.rb from the Path B IR; do not edit.\n"
   out << ".version 8.0\n.target #{sm}\n.address_size 64\n\n"
@@ -869,16 +992,25 @@ end
 def main(argv)
   args = argv.dup
   sm = "sm_75"
-  if args.length > 0 && args[0].start_with?("--sm=")
-    sm = "sm_" + args.shift[5..-1]
+  kernels = []
+  while args.length > 0 && args[0].start_with?("--")
+    opt = args.shift
+    if opt.start_with?("--sm=")
+      sm = "sm_" + opt[5..-1]
+    elsif opt.start_with?("--kernel=")
+      kernels << opt[9..-1]
+    else
+      $stderr.write("usage: pathb-ptx-emit.rb [--sm=75] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n")
+      return 1
+    end
   end
   if args.length > 1
-    $stderr.write("usage: pathb-ptx-emit.rb [--sm=75] [FILE.ir | -] > out.ptx\n")
+    $stderr.write("usage: pathb-ptx-emit.rb [--sm=75] [--kernel=NAME]... [FILE.ir | -] > out.ptx\n")
     return 1
   end
   src = (args.empty? || args[0] == "-") ? $stdin.read : read_input(args[0])
   begin
-    ptx = emit_module(src, sm)
+    ptx = emit_module(src, sm, kernels)
   rescue Refused => e
     $stderr.write("refused: #{e.message}\n")
     return 3

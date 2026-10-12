@@ -55,3 +55,37 @@ status=0
 "$out/ptxi" "$out/mul2.ptx" mul2 --grid 9 --block 128 ptr:1064:iota=-299 ptr:1064 s32:2000 > /dev/null 2>&1 || status=$?
 [ "$status" -eq 4 ] || { echo "out-of-bounds launch: expected exit 4, got $status" >&2; exit 1; }
 echo "out-of-bounds access faults (exit 4)"
+
+# Device helpers (tests/gpu/device/helper.ir): helper_kernel calls square_plus_one, which calls square, so the PTX has
+# .func bodies and call instructions. The same launch as tests/gpu/device/launch_helper.c: out[i] = in[i]^2 + 1 for
+# i < 1000 (in[i] = i - 300), and the guard ints stay zero. A mutant (+1 becomes +2) must be caught.
+"$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" "$root/tests/gpu/device/helper.ir" > "$out/helper.ptx"
+hlaunch=(helper_kernel --grid 8 --block 128 ptr:1064:iota=-300 ptr:1064 s32:1000 --dump 1)
+check_helper() {
+  awk 'BEGIN { bad = 0; guard = 0 }
+       { i = NR - 1
+         if (i < 1000) { if ($1 + 0 != (i - 300) * (i - 300) + 1) bad++ }
+         else if ($1 + 0 != 0) guard++ }
+       END { if (NR != 1064) { printf "  wrong line count %d\n", NR; exit 1 }
+             printf "  %d elements, %d mismatches, %d guard writes\n", 1000, bad, guard
+             exit (bad != 0 || guard != 0) }' "$1"
+}
+"$out/ptxi" "$out/helper.ptx" "${hlaunch[@]}" > "$out/helper.out"
+check_helper "$out/helper.out"
+echo "helper_kernel (calls .func square_plus_one, which calls square) on the PTX interpreter: ok"
+
+sed 's/add\.s32 %r3, %r2, 1;/add.s32 %r3, %r2, 2;/' "$out/helper.ptx" > "$out/helper_mut.ptx"
+status=0
+"$out/ptxi" "$out/helper_mut.ptx" "${hlaunch[@]}" > "$out/helper_mut.out" || status=$?
+if [ "$status" -eq 0 ] && check_helper "$out/helper_mut.out"; then
+  echo "helper mutant was not caught" >&2
+  exit 1
+fi
+echo "helper mutant caught (interpreter exit $status)"
+
+# A call of a function the module does not define is refused (exit 3).
+sed 's/call (%r13), square_plus_one, /call (%r13), no_such_function, /' "$out/helper.ptx" > "$out/helper_nocallee.ptx"
+status=0
+"$out/ptxi" "$out/helper_nocallee.ptx" "${hlaunch[@]}" > /dev/null 2>&1 || status=$?
+[ "$status" -eq 3 ] || { echo "undefined callee: expected exit 3, got $status" >&2; exit 1; }
+echo "call of an undefined function refused (exit 3)"

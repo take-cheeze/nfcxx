@@ -32,11 +32,47 @@ sysdirs=(); srcs=(); ppflags=(); pie_opts=(); xlang=""; stdin_src=0; preinc=()
 # __nfcxx_cuda_launch), and the runtime helper lib/cuda/nfcxx_cuda.h is included first. The copy goes in a temp
 # directory that the EXIT traps below remove. Its basename is the source's, so default output names are unchanged.
 cudatmp=""
-cu_rewrite() {  # cu_rewrite FILE.cu: sets cu_out to the rewritten copy
-  if [ -z "$cudatmp" ]; then cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT; fi
-  cu_out=$cudatmp/$(basename "$1" .cu).cpp
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1" > "$cu_out" || exit $?
+# Device code of a .cu file: its __global__ and __device__ functions go through the Path B front end
+# (scripts/pathb-dump), the IR-to-PTX emitter (scripts/pathb-ptx-emit.rb) and ptxas for NFCXX_SM (default 75). The
+# cubin is embedded at the end of the host copy with a registration tail (scripts/cuda-embed.rb), so the one object
+# holds the host code and its device image. A file with no kernel gets no device image.
+# The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
+# with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
+cu_inputs=()
+cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
+  [ ${#cu_inputs[@]} -gt 0 ] || return 0
+  cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT
+  local dir=$cudatmp
+  if [ $compile_only = 1 ]; then
+    # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
+    # and a failed link deletes the objects. It goes to a per-user cache, keyed by the absolute object path, and the
+    # object records that absolute path, so the link finds it from any directory.
+    local obj=$out; [ $outset = 1 ] || obj=$(basename "${cu_inputs[0]}" .cu).o
+    local key; key=$(realpath -m "$obj" | sha1sum | cut -c1-16)
+    dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cu/$key
+    mkdir -p "$dir"
+  fi
+  local src copy i
+  for src in "${cu_inputs[@]}"; do
+    copy=$dir/$(basename "$src" .cu).cpp
+    cu_rewrite "$src" "$copy"
+    for i in "${!srcs[@]}"; do [ "${srcs[$i]}" = "$src" ] && srcs[$i]=$copy; done
+    for i in "${!files[@]}"; do [ "${files[$i]}" = "$src" ] && files[$i]=$copy; done
+  done
+}
+cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
+  local src=$1 copy=$2
+  local base; base=$(basename "$src" .cu)
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
+  local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  [ -s "$dev.kernels" ] || return 0
+  "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
+    || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
+  "$root/scripts/mrb" "$root/scripts/pathb-ptx-emit.rb" --sm=$sm "$dev.ir" > "$dev.ptx" || exit $?
+  "$ptxas" -arch=sm_$sm "$dev.ptx" -o "$dev.cubin" || exit $?
+  "$root/scripts/mrb" "$root/scripts/cuda-embed.rb" "$dev.cubin" "$dev.ir" "$dev.kernels" >> "$copy" || exit $?
 }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -86,12 +122,13 @@ while [ $# -gt 0 ]; do
               cflags+=("$1$2"); files+=("$1$2"); shift ;;
     *.o) files+=("$1"); nobj=$((nobj + 1)) ;;
     -*|*.a|*.so) files+=("$1") ;;
-    *.cu) cu_rewrite "$1"; files+=("$cu_out"); ncpp=$((ncpp + 1)); srcs+=("$cu_out") ;;
+    *.cu) cu_inputs+=("$1"); files+=("$1"); ncpp=$((ncpp + 1)); srcs+=("$1") ;;
     *) files+=("$1"); ncpp=$((ncpp + 1)); srcs+=("$1") ;;
   esac
   shift
 done
 [ $((ncpp + nobj + ${#cfiles[@]} + stdin_src)) -gt 0 ] || { echo "nfcxx: no input files" >&2; exit 2; }
+cu_prepare
 if [ $preprocess = 1 ]; then
   # -E: the host C++ compiler preprocesses, as nfcc does for C (build systems run the compiler this way).
   hostcxx=${NFCXX_CXX:-g++}
