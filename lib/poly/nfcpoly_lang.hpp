@@ -1,5 +1,5 @@
 // The interface between the language-neutral core (nfcpoly.cpp) and a language backend (nfcpoly_mruby.cpp,
-// nfcpoly_lua.cpp, nfcpoly_python.cpp). Not for users of the library. A backend subclasses Lang, converts between its
+// nfcpoly_lua.cpp, nfcpoly_python.cpp, nfcpoly_js.cpp). Not for users of the library. A backend subclasses Lang, converts between its
 // interpreter's values and the neutral Var, and registers itself with a static LangRegistrar.
 //
 // The rules every backend keeps (docs/notes/poly.md, "Exceptions"):

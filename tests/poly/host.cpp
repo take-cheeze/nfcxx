@@ -1,11 +1,13 @@
 // nfcpoly host test: exit status 0 when every check passes. Run by tests/poly/run.sh, which builds it with nfcxx together
-// with lib/poly/nfcpoly.cpp and the language backends it defines TEST_RUBY / TEST_LUA / TEST_PYTHON for.
+// with lib/poly/nfcpoly.cpp and the language backends it defines TEST_RUBY / TEST_LUA / TEST_PYTHON / TEST_JS for.
 //
 // The checks that every language must pass are written once and run per language through the snippet builders of Lg;
 // what only one language can express follows, then the checks that share one Context between languages.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -24,6 +26,9 @@
 #endif
 #ifdef TEST_AST
 #include "nfcpoly_ast.hpp"
+#endif
+#ifdef TEST_JS
+#include "nfcpoly_js.hpp"
 #endif
 
 using nfcpoly::Context;
@@ -101,19 +106,20 @@ static bool throws(F f) {
 }
 
 // ---- one language's way of writing things -----------------------------------------------------------------------
-enum Kind { Ruby, Lua, Python, Ast };  // Ast: Lua syntax, run by the nfcast engine
+enum Kind { Ruby, Lua, Python, Ast, Js };  // Ast: Lua syntax, run by the nfcast engine
 struct Lg {
   Kind k;
   std::string name;
   bool rb() const { return k == Ruby; }
   bool lu() const { return k == Lua || k == Ast; }  // Lua syntax
   bool py() const { return k == Python; }
+  bool js() const { return k == Js; }
   const char* ln() const { return name.c_str(); }
 
-  std::string nil() const { return py() ? "None" : "nil"; }
+  std::string nil() const { return py() ? "None" : js() ? "null" : "nil"; }
   std::string list(const std::string& items) const { return lu() ? "{" + items + "}" : "[" + items + "]"; }
   std::string ctor(const std::string& cls, const std::string& args) const {
-    return py() ? cls + "(" + args + ")" : cls + ".new(" + args + ")";
+    return py() ? cls + "(" + args + ")" : js() ? "new " + cls + "(" + args + ")" : cls + ".new(" + args + ")";
   }
   std::string call0(const std::string& obj, const std::string& m) const {
     return rb() ? obj + "." + m : lu() ? obj + ":" + m + "()" : obj + "." + m + "()";
@@ -127,44 +133,61 @@ struct Lg {
   std::string gref(const std::string& n) const { return rb() ? "$" + n : n; }  // a script global
   // The error message / class name of EXPR, or nil when it raises nothing. EXPR must be an expression.
   std::string guard_msg(const std::string& e) const {
-    return rb() ? "errmsg { " + e + " }" : lu() ? "errmsg(function() return " + e + " end)" : "errmsg(lambda: " + e + ")";
+    return rb() ? "errmsg { " + e + " }" : lu() ? "errmsg(function() return " + e + " end)"
+           : js() ? "errmsg(() => " + e + ")" : "errmsg(lambda: " + e + ")";
   }
   std::string guard_cls(const std::string& e) const {
-    return rb() ? "errcls { " + e + " }" : lu() ? "errcls(function() return " + e + " end)" : "errcls(lambda: " + e + ")";
+    return rb() ? "errcls { " + e + " }" : lu() ? "errcls(function() return " + e + " end)"
+           : js() ? "errcls(() => " + e + ")" : "errcls(lambda: " + e + ")";
   }
 
-  std::string str_rep() const { return lu() ? "('ab'):rep(3)" : "'ab' * 3"; }
+  std::string str_rep() const { return lu() ? "('ab'):rep(3)" : js() ? "'ab'.repeat(3)" : "'ab' * 3"; }
   std::string nul_string() const { return "\"a\\0b\""; }
   std::string pow40() const { return lu() ? "1 << 40" : "2**40"; }
-  std::string array_class() const { return rb() ? "Array" : lu() ? "table" : "list"; }
-  std::string upper() const { return rb() ? "upcase" : "upper"; }
-  std::string raise_boom() const { return rb() ? "raise ArgumentError, 'boom'" : lu() ? "error('boom')" : "raise ValueError('boom')"; }
-  std::string err_class() const { return rb() ? "ArgumentError" : lu() ? "LuaError" : "ValueError"; }
-  std::string raiser_class() const { return rb() ? "RuntimeError" : lu() ? "LuaError" : "ValueError"; }
-  std::string zero_div() const { return lu() ? "1 // 0" : "1 / 0"; }
-  std::string zero_div_class() const { return lu() ? "LuaError" : "ZeroDivisionError"; }
-  std::string nil_call() const { return rb() ? "nil.foo" : lu() ? "local t = nil; return t.foo" : "None.foo"; }
-  std::string nil_call_class() const { return rb() ? "NoMethodError" : lu() ? "LuaError" : "AttributeError"; }
+  std::string array_class() const { return rb() ? "Array" : lu() ? "table" : js() ? "Array" : "list"; }
+  std::string upper() const { return rb() ? "upcase" : js() ? "toUpperCase" : "upper"; }
+  std::string raise_boom() const {
+    return rb() ? "raise ArgumentError, 'boom'" : lu() ? "error('boom')" : js() ? "throw new Error('boom')" : "raise ValueError('boom')";
+  }
+  std::string err_class() const { return rb() ? "ArgumentError" : lu() ? "LuaError" : js() ? "Error" : "ValueError"; }
+  std::string raiser_class() const { return rb() ? "RuntimeError" : lu() ? "LuaError" : js() ? "Error" : "ValueError"; }
+  std::string zero_div() const { return lu() ? "1 // 0" : js() ? "1n / 0n" : "1 / 0"; }  // JavaScript's 1 / 0 is Infinity
+  std::string zero_div_class() const { return lu() ? "LuaError" : js() ? "RangeError" : "ZeroDivisionError"; }
+  std::string nil_call() const {
+    return rb() ? "nil.foo" : lu() ? "local t = nil; return t.foo" : js() ? "null.foo" : "None.foo";
+  }
+  std::string nil_call_class() const {
+    return rb() ? "NoMethodError" : lu() ? "LuaError" : js() ? "TypeError" : "AttributeError";
+  }
   std::string host_cls() const { return py() ? "HostError" : "NfcPoly::HostError"; }
-  std::string noop() const { return rb() ? "proc { 5 }" : lu() ? "function() return 5 end" : "lambda: 5"; }
+  std::string noop() const { return rb() ? "proc { 5 }" : lu() ? "function() return 5 end" : js() ? "() => 5" : "lambda: 5"; }
   std::string def_twice() const {
-    return rb() ? "def twice(n) n * 2 end" : lu() ? "function twice(n) return n * 2 end" : "def twice(n):\n    return n * 2";
+    return rb() ? "def twice(n) n * 2 end"
+           : lu() ? "function twice(n) return n * 2 end"
+           : js() ? "function twice(n) { return n * 2 }" : "def twice(n):\n    return n * 2";
   }
   std::string sum_loop() const {  // twice_c(1) + ... + twice_c(4)
     return rb() ? "(1..4).map { |i| twice_c(i) }.sum"
-                : lu() ? "local s = 0 for i = 1, 4 do s = s + twice_c(i) end return s" : "sum(twice_c(i) for i in range(1, 5))";
+                : lu() ? "local s = 0 for i = 1, 4 do s = s + twice_c(i) end return s"
+                : js() ? "(() => { let s = 0; for (let i = 1; i <= 4; i++) s += twice_c(i); return s; })()"
+                       : "sum(twice_c(i) for i in range(1, 5))";
   }
-  std::string gc() const { return rb() ? "GC.start" : lu() ? "collectgarbage(); collectgarbage()" : "import gc\ngc.collect()"; }
+  std::string gc() const {  // js_gc is bound by register_all with the raw QuickJS API (JS_RunGC)
+    return rb() ? "GC.start" : lu() ? "collectgarbage(); collectgarbage()" : js() ? "js_gc()" : "import gc\ngc.collect()";
+  }
   std::string spawn(int n) const {
     std::string c = std::to_string(n);
     return rb() ? c + ".times { Vec3.new(1, 2, 3) }"
-                : lu() ? "for i = 1, " + c + " do Vec3.new(1, 2, 3) end" : "for i in range(" + c + "):\n    Vec3(1, 2, 3)";
+                : lu() ? "for i = 1, " + c + " do Vec3.new(1, 2, 3) end"
+                : js() ? "for (let i = 0; i < " + c + "; i++) { new Vec3(1, 2, 3); }"
+                       : "for i in range(" + c + "):\n    Vec3(1, 2, 3)";
   }
   std::string keep(const std::string& n, const std::string& e) const { return gref(n) + " = " + e; }
   // A statement that raises a host error out of a loop with a cleanup that must run, and sets the global `flag` to 1.
   std::string ensure_flag() const {
     return rb() ? "begin; [1, 2, 3].each { |i| fail7 if i == 2 }; ensure; $flag = 1; end"
                 : lu() ? "local ok, e = pcall(function() for i = 1, 3 do if i == 2 then fail7() end end end) flag = 1 error(e, 0)"
+                : js() ? "try { for (const i of [1, 2, 3]) { if (i === 2) fail7(); } } finally { flag = 1; }"
                        : "try:\n    for i in [1, 2, 3]:\n        if i == 2:\n            fail7()\nfinally:\n    flag = 1";
   }
   std::string prelude() const {
@@ -181,6 +204,12 @@ struct Lg {
              "return 'LuaError' end\n"
              "function raiser(m) return function() error(m) end end\n"
              "function raiser_host() return function() fail7() end end\n";
+    if (js())
+      return "function errmsg(f) { try { f(); return null; } catch (e) { return (e instanceof Error) ? e.message : String(e); } }\n"
+             "function errcls(f) { try { f(); return null; } catch (e) { return (e instanceof Error) ? e.constructor.name : typeof e; } }\n"
+             "function raiser(m) { return () => { throw new Error(m); }; }\n"
+             "function raiser_host() { return () => fail7(); }\n"
+             "class MyErr extends Error {}\n";
     return "class MyErr(Exception):\n    pass\n"
            "def errmsg(f):\n    try:\n        f()\n    except Exception as e:\n        return str(e)\n"
            "def errcls(f):\n    try:\n        f()\n    except Exception as e:\n        return type(e).__name__\n"
@@ -248,6 +277,10 @@ static void register_all(Context& ctx, State& st) {
     f.execute();
     return 1;
   });
+#ifdef TEST_JS
+  // JavaScript's gc() snippet: QuickJS frees by reference counting and collects cycles on JS_RunGC (raw access to the runtime).
+  ctx.bind_fn("js_gc", [&ctx]() { JS_RunGC(JS_GetRuntime(nfcpoly::js_context(ctx))); });
+#endif
 }
 
 // ---- the checks every language passes -----------------------------------------------------------------------------
@@ -744,6 +777,382 @@ static void ast_tests() {
 }
 #endif
 
+// ---- JavaScript only ----------------------------------------------------------------------------------------------------
+#ifdef TEST_JS
+// A native function made with the raw QuickJS API: throws a TypeError itself.
+static JSValue raw_throw(JSContext* c, JSValueConst, int, JSValueConst*) { return JS_ThrowTypeError(c, "%s", "from raw code"); }
+// Calls its argument with the raw API with an RAII object in the C++ frame; a JavaScript exception is just the return value.
+static JSValue raw_call(JSContext* c, JSValueConst, int argc, JSValueConst* argv) {
+  Guard g;
+  if (argc < 1) return JS_ThrowTypeError(c, "%s", "raw_call needs a function");
+  return JS_Call(c, argv[0], JS_UNDEFINED, 0, nullptr);
+}
+
+struct Tag {  // a class with a read-only field
+  const int id = 7;
+  int n = 1;
+};
+
+struct Holder {  // a C++ object that keeps a script value: its destructor drops a handle while the context closes
+  Value v;
+  explicit Holder(Value x) : v(std::move(x)) {}
+};
+
+static void js_tests() {
+  g_lang = "js (only)";
+  std::printf("-- [js only] numbers, BigInt, objects, closures, promises, the standard library, raw QuickJS access\n");
+  State st;
+  Context ctx;
+  register_all(ctx, st);
+  const Lg L{Js, "js"};
+  ctx.eval_void("js", L.prelude());
+  auto num = [&](const char* code) { return ctx.eval_value("js", code); };
+
+  // numbers: JavaScript has one type; a whole value within the safe integer range is an integer for the host
+  CHECK(num("5.0").is_int() && num("5").is_int() && num("-7").is_int());
+  CHECK(num("1.5").is_float() && num("0.1 + 0.2").is_float());
+  CHECK(num("2 ** 40").is_int() && num("10 / 4 * 2").is_int() && num("Math.sqrt(16)").is_int() && num("0.5 + 0.5").is_int());  // computed as doubles
+  CHECK(num("-(2 ** 53 - 1)").is_int() && num("-(2 ** 53)").is_float() && num("1e15").is_int());
+  CHECK(num("2 ** 53 - 1").is_int());   // Number.MAX_SAFE_INTEGER
+  CHECK(num("2 ** 53").is_float());     // beyond it a number is a float ...
+  CHECK(ctx.eval<long long>("js", "2 ** 60") == (1LL << 60));  // ... which still converts to an integer type when whole
+  CHECK(num("-0").is_float() && num("NaN").is_float() && num("Infinity").is_float() && num("1e21").is_float());
+  CHECK(std::isnan(ctx.eval<double>("js", "NaN")) && ctx.eval<double>("js", "-Infinity") < 0);
+  CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<int>("js", "Infinity"); }));
+  CHECK(ctx.eval<double>("js", "0.1 + 0.2") == 0.1 + 0.2);
+  CHECK(ctx.eval<double>("js", "1 / 3") == 1.0 / 3.0);
+  // BigInt: an integer of 64 bits is an integer for the host, a larger one stays in JavaScript
+  CHECK(num("5n").is_int() && ctx.eval<long long>("js", "2n ** 62n") == (1LL << 62));
+  CHECK(ctx.eval<long long>("js", "-(2n ** 63n)") == std::numeric_limits<long long>::min());
+  {
+    Value huge = num("2n ** 70n");
+    CHECK(!huge.is_int() && huge.class_name() == "bigint" && huge.inspect() == "1180591620717411303424");
+    CHECK(throws<nfcpoly::ConversionError>([&] { huge.as<long long>(); }));
+    CHECK(ctx.eval<bool>("js", "2n ** 63n > 9223372036854775807n"));
+  }
+  // and the other way: a C++ integer that is not a safe integer becomes a BigInt, so that it survives
+  ctx.set("bigi", static_cast<long long>(1) << 60).set("safe", static_cast<long long>(1) << 40);
+  ctx.set("lowest", std::numeric_limits<long long>::min()).set("nothing", std::optional<int>());
+  CHECK(ctx.eval<std::string>("js", "typeof bigi + ',' + typeof safe") == "bigint,number");
+  CHECK(ctx.eval<long long>("js", "bigi") == (static_cast<long long>(1) << 60) && ctx.eval<bool>("js", "bigi === 2n ** 60n"));
+  CHECK(ctx.eval<long long>("js", "lowest") == std::numeric_limits<long long>::min());
+  CHECK(ctx.eval<long long>("js", "safe") == (static_cast<long long>(1) << 40));
+  CHECK(throws<nfcpoly::ScriptError>([&] { ctx.eval<int>("js", "bigi + 1"); }));  // JavaScript does not mix BigInt and Number
+
+  // undefined and null are both nil for the host; the host's nil is null
+  CHECK(num("undefined").is_nil() && num("null").is_nil() && num("void 0").is_nil());
+  CHECK(ctx.eval<bool>("js", "nothing === null") && ctx.eval<bool>("js", "hit(0) === null"));
+  CHECK(!ctx.eval<std::optional<int>>("js", "undefined").has_value());
+  {
+    std::vector<std::optional<int>> holes = ctx.eval<std::vector<std::optional<int>>>("js", "[1, , 3]");  // a hole reads undefined
+    CHECK(holes.size() == 3 && holes[0] == 1 && !holes[1].has_value() && holes[2] == 3);
+  }
+
+  // objects and arrays
+  {
+    Value hostobj = num("pos");
+    CHECK(hostobj.class_name() == "Vec3" && hostobj.inspect() == "<Vec3 object>" && &hostobj.as<Vec3&>() == &st.pos);
+    CHECK(num("({get a() { throw new Error('x'); }})").inspect() == "[object Object]");  // inspect never throws
+    CHECK(num("(() => 1)").inspect() == "() => 1" && num("'ab'").inspect() == "\"ab\"" && num("Symbol('s')").inspect() == "Symbol(s)");
+    Value o = num("({a: 1, b: [1, 2], c: {d: 'x'}})");
+    CHECK(!o.is_array() && o.class_name() == "Object" && o.inspect() == "{\"a\":1,\"b\":[1,2],\"c\":{\"d\":\"x\"}}");
+    CHECK(o.call("hasOwnProperty", "a").as<bool>() && !o.call("hasOwnProperty", "z").as<bool>());
+    CHECK(throws<nfcpoly::ConversionError>([&] { o.as<std::vector<int>>(); }));
+    Value nested = num("[[1, 2], [3]]");
+    CHECK((nested.as<std::vector<std::vector<int>>>() == std::vector<std::vector<int>>{{1, 2}, {3}}));
+    CHECK(!num("new Uint8Array(2)").is_array() && num("new Uint8Array(2)").class_name() == "Uint8Array");
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<std::vector<Value>>("js", "var cyc = []; cyc.push(cyc); cyc"); }));  // cyclic
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<std::vector<Value>>("js", "var sp = []; sp[20000000] = 1; sp"); }));  // too long to copy
+    CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<std::string>("js", "new Uint8Array(2)"); }));  // bytes are not text
+    Value sorted = num("[3, 1, 2]").call("sort");
+    CHECK((sorted.as<std::vector<int>>() == std::vector<int>{1, 2, 3}) && sorted.call("join", "-").as<std::string>() == "1-2-3");
+    Value m = num("new Map([[1, 'a'], [2, 'b']])");
+    CHECK(m.class_name() == "Map" && m.call("get", 2).as<std::string>() == "b" && m.call("has", 3).as<bool>() == false);
+  }
+
+  // functions and closures
+  {
+    Value ctr = num("(() => { let n = 0; return () => ++n; })()");
+    CHECK(ctr.execute().as<int>() == 1 && ctr.execute().as<int>() == 2 && ctr.execute().as<int>() == 3);
+    Value add = num("(a, b) => a + b");
+    CHECK(add.execute(2, 3).as<int>() == 5 && add.execute(std::string("a"), std::string("b")).as<std::string>() == "ab");
+    Value getx = num("(v) => v.x * 2");
+    Vec3 v{4, 0, 0};
+    CHECK(getx.execute(v).as<int>() == 8);  // a host object goes in by reference
+    Value obj = num("({k: 3, get() { return this.k; }})");
+    CHECK(obj.call("get").as<int>() == 3);  // `this` is the receiver
+    CHECK(throws<nfcpoly::ScriptError>([&] { obj.execute(); }));  // an object is not callable
+    CHECK(num("(function () {})").class_name() == "Function" && num("(async () => 1)").class_name() == "AsyncFunction");
+  }
+  // state: function, var, let, const and class declarations persist between evals
+  ctx.eval_void("js", "let lv = 5; const cv = 6; class K { get n() { return 7; } } var vv = 8; function ff() { return 9; }");
+  CHECK(ctx.eval<int>("js", "lv + cv + new K().n + vv + ff()") == 35);
+  CHECK(ctx.eval<bool>("js", "this === globalThis") && ctx.eval<int>("js", "'use strict'; 3") == 3);
+  CHECK(throws<nfcpoly::ScriptError>([&] { ctx.eval_void("js", "'use strict'; undeclared_name = 1"); }));
+  CHECK(ctx.eval<int>("js", "{ 1; 2 }") == 2 && num("var q1 = 1").is_nil() && ctx.eval<int>("js", "q1 = 4") == 4);  // completion values
+  CHECK(ctx.eval<int>("js", "{a: 7}") == 7 && num("({a: 7})").class_name() == "Object");  // `{` starts a block: an object literal needs ()
+  CHECK(ctx.eval<int>("javascript", "q1") == 4 && ctx.eval<int>("quickjs", "q1") == 4);  // the aliases name the same interpreter
+
+  // bound classes are JavaScript classes
+  CHECK(ctx.eval<bool>("js", "typeof Vec3 === 'function' && Vec3.name === 'Vec3' && typeof Vec3.prototype.len2 === 'function'"));
+  CHECK(ctx.eval<std::string>("js", "String(new Vec3(1, 2, 3)) + ' ' + String(pos)") == "<Vec3 object> <Vec3 object>");
+  CHECK(ctx.eval<std::string>("js", L.guard_cls("Vec3(1, 2, 3)")) == "TypeError");  // without new
+  CHECK(ctx.eval<std::string>("js", L.guard_msg("Vec3(1, 2, 3)")).find("new") != std::string::npos);
+  CHECK(ctx.eval<std::string>("js", L.guard_msg("new Vec3(1)")) == "wrong number of arguments (given 1, expected 3)");
+  CHECK(ctx.eval<std::string>("js", L.guard_msg("new Vec3('a', 2, 3)")) == "expected number, got string");
+  CHECK(ctx.eval<bool>("js", "new Vec3(1, 2, 3) instanceof Vec3 && !(({}) instanceof Vec3)"));
+  CHECK(ctx.eval<int>("js", "Object.getOwnPropertyNames(new Vec3(1, 2, 3)).length") == 0);  // fields live on the prototype
+  CHECK(ctx.eval<std::string>("js", "JSON.stringify(new Vec3(1, 2, 3)) + Object.keys(pos).length") == "{}0");
+  CHECK(ctx.eval<std::string>("js", L.guard_cls("(() => { const f = pos.len2; return f(); })()")) == "TypeError");  // detached method
+  CHECK(ctx.eval<double>("js", "(() => { const f = pos.len2; return f.call(new Vec3(1, 2, 3)); })()") == 14.0);
+  ctx.eval_void("js", "class P3 extends Vec3 { norm1() { return Math.abs(this.x) + Math.abs(this.y) + Math.abs(this.z); } }");
+  CHECK(ctx.eval<double>("js", "new P3(1, -2, 3).norm1()") == 6.0);  // a JavaScript class can extend a bound one
+  CHECK(ctx.eval<bool>("js", "(() => { const p = new P3(1, 2, 3); return p instanceof Vec3 && p instanceof P3 && p.len2() === 14; })()"));
+  CHECK(ctx.eval<double>("js", "vadd(new P3(1, 2, 3), new Vec3(1, 1, 1)).x") == 2.0);  // and is accepted where a Vec3 is
+  {
+    Tag tag;
+    Context c;
+    c.def_class<Tag>("Tag").field("id", &Tag::id).field("n", &Tag::n);
+    c.bind("tag", tag);
+    CHECK(c.eval<int>("js", "tag.id + tag.n") == 8);
+    CHECK(c.eval<std::string>("js", "(() => { try { tag.id = 9; } catch (e) { return e.name + ': ' + e.message; } })()") ==
+          "TypeError: field id of Tag is read-only");
+    c.eval_void("js", "tag.n = 5");
+    CHECK(tag.n == 5 && tag.id == 7);
+  }
+  // a bound variable is an accessor property of the global object
+  CHECK(ctx.eval<bool>("js", "typeof Object.getOwnPropertyDescriptor(globalThis, 'counter').get === 'function'"));
+  {
+    Context c;
+    int cnt = 5;
+    c.bind("counter", cnt);
+    c.eval_void("js", "let counter = 99");  // a global `let` shadows the bound variable, which stays reachable on globalThis
+    CHECK(c.eval<int>("js", "counter") == 99 && c.eval<int>("js", "globalThis.counter") == 5);
+    c.eval_void("js", "globalThis.counter = 6");
+    CHECK(cnt == 6);
+  }
+  CHECK(ctx.eval<std::string>("js", L.guard_msg("limit = 3")) == "variable limit is read-only");
+
+  // strings are UTF-8 on the host side
+  CHECK(ctx.eval<std::string>("js", "'\\u00e9'") == "\xc3\xa9" && ctx.eval<std::string>("js", "String.fromCodePoint(0x1F600)") == "\xf0\x9f\x98\x80");
+  CHECK(ctx.eval<std::string>("js", "shout('\xf0\x9f\x98\x80')") == "\xf0\x9f\x98\x80!");
+  CHECK(ctx.eval<int>("js", "length_of('\xf0\x9f\x98\x80')") == 4 && ctx.eval<int>("js", "'\xf0\x9f\x98\x80'.length") == 2);  // bytes vs code units
+  ctx.set("nulstr", std::string("a\0b", 3));
+  CHECK(ctx.eval<int>("js", "nulstr.length") == 3 && ctx.eval<std::string>("js", "nulstr").size() == 3);
+  ctx.bind_fn("blob", []() { return std::string("\xff\x01"); });  // not text: a Uint8Array
+  CHECK(ctx.eval<bool>("js", "(() => { const b = blob(); return b instanceof Uint8Array && b.length === 2 && b[0] === 255; })()"));
+  {  // a lone surrogate has no UTF-8 form: the string stays in JavaScript
+    Value lone = num("'a\\ud800b'");
+    CHECK(!lone.is_string() && lone.class_name() == "string" && lone.call("charCodeAt", 1).as<int>() == 0xd800);
+    CHECK(throws<nfcpoly::ConversionError>([&] { lone.as<std::string>(); }));
+    CHECK(ctx.eval<std::string>("js", "'\\ud83d\\ude00'") == "\xf0\x9f\x98\x80");  // a pair is a character
+  }
+
+  // exceptions: what JavaScript can throw
+  {
+    auto script_error = [&](const std::string& code, const std::string& cls, const std::string& msg) {
+      try {
+        ctx.eval_void("js", code);
+      } catch (const nfcpoly::ScriptError& e) {
+        return e.class_name() == cls && e.message() == msg;
+      }
+      return false;
+    };
+    CHECK(script_error("throw 'str'", "Error", "str") && script_error("throw 42", "Error", "42"));
+    CHECK(script_error("throw {code: 3}", "Error", "[object Object]") && script_error("throw null", "Error", "null"));
+    CHECK(script_error("throw {name: 'Odd', message: 'm'}", "Odd", "m"));  // an object that looks like an error is read as one
+    CHECK(script_error("null.x", "TypeError", "cannot read property 'x' of null"));
+    CHECK(script_error("undefined_name", "ReferenceError", "undefined_name is not defined"));
+    CHECK(script_error("class VE extends Error {}; throw new VE('bad')", "VE", "bad"));  // a subclass that keeps the name
+    CHECK(script_error("const e1 = new Error('x'); e1.name = 'Custom'; throw e1", "Custom", "x"));
+    CHECK(script_error("throw new SyntaxError('rt')", "SyntaxError", "rt") && script_error("let lv = 2", "SyntaxError", "redeclaration of 'lv'"));
+    CHECK(ctx.eval<std::string>("js", L.guard_msg("new Function('1 +')")).find("unexpected token") == 0);  // a runtime SyntaxError is a ScriptError
+    CHECK(throws<nfcpoly::SyntaxError>([&] { ctx.eval_void("js", "1 +"); }) && !throws<nfcpoly::ScriptError>([&] { ctx.eval_void("js", "1"); }));
+    bool got = false;
+    try {
+      ctx.eval_void("js", "(function f() {\n  throw new RangeError('deep');\n})()");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = !e.backtrace().empty() && e.backtrace()[0].rfind("at f", 0) == 0 && e.backtrace()[0].find("snippet:2") != std::string::npos;
+    }
+    CHECK(got);
+    // runaway recursion is an error, not a crash, and the interpreter survives it
+    CHECK(throws<nfcpoly::ScriptError>([&] { ctx.eval_void("js", "(function r(n) { return r(n + 1) + 1; })(0)"); }));
+    CHECK(ctx.eval<int>("js", "1 + 1") == 2);
+  }
+  // a HostError is a JavaScript Error that carries the C++ exception where JavaScript cannot see it
+  CHECK(ctx.eval<bool>("js", "(() => { try { thrower(); } catch (e) { return e instanceof Error && e.name === 'NfcPoly::HostError' && "
+                             "e.message === 'host boom' && typeof e.stack === 'string'; } })()"));
+  CHECK(ctx.eval<bool>("js", "(() => { try { fail7(); } catch (e) { return Object.getOwnPropertySymbols(e).length === 0 && "
+                             "JSON.stringify(e) === '{}' && !Object.getOwnPropertyNames(e).some((n) => /host|nfcpoly/i.test(n)); } })()"));
+  // the very value that went through Value::execute and a bound function is thrown again, whatever it is
+  CHECK(ctx.eval<bool>("js", "var tobj = new MyErr('x'); function boom() { throw tobj; }\n"
+                             "(() => { try { with_guard(boom); } catch (e) { return e === tobj; } })()"));
+  CHECK(ctx.eval<bool>("js", "var plain = {tag: 1}; (() => { try { with_guard(() => { throw plain; }); } catch (e) { return e === plain; } })()"));
+  CHECK(ctx.eval<std::string>("js", L.guard_msg("with_guard(() => { throw 'prim'; })")) == "prim");
+
+  // re-entrancy: eval inside a bound function inside eval, nested
+  ctx.bind_fn("down", [&ctx](int n) -> int { return n == 0 ? 0 : 1 + ctx.eval<int>("js", "down(" + std::to_string(n - 1) + ")"); });
+  CHECK(ctx.eval<int>("js", "down(40)") == 40);
+
+  // promises: the jobs they queue run when the outermost call into JavaScript ends
+  ctx.eval_void("js", "var order = []; Promise.resolve().then(() => order.push('then')); order.push('sync');");
+  CHECK(ctx.eval<std::string>("js", "order.join(',')") == "sync,then");
+  ctx.eval_void("js", "var res = 0; (async () => { res = (await Promise.resolve(40)) + 2; })()");
+  CHECK(ctx.eval<int>("js", "res") == 42);
+  ctx.bind_fn("later", [](Value f) { return f.execute().as<int>(); });  // a job is not run inside a nested call ...
+  ctx.bind_fn("later_eval", [&ctx]() { return ctx.eval<int>("js", "1"); });  // ... or a nested eval
+  CHECK(ctx.eval<std::string>("js", "(() => { const log = []; Promise.resolve().then(() => log.push('job')); "
+                                    "log.push(String(later(() => 1))); log.push(String(later_eval())); return log.join(','); })()") == "1,1");
+  ctx.eval_void("js", "var joblog = []; Promise.resolve().then(() => joblog.push('job')); later(() => 1); joblog.push('after');");
+  CHECK(ctx.eval<std::string>("js", "joblog.join(',')") == "after,job");  // it ran when the outermost eval ended
+  {  // a job that throws is an error of the eval that ran it: the first one, after every job has run
+    bool got = false;
+    try {
+      ctx.eval_void("js", "queueMicrotask(() => { throw new RangeError('first'); }); queueMicrotask(() => { throw new TypeError('second'); }); "
+                          "queueMicrotask(() => { globalThis.third = 1; });");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = e.class_name() == "RangeError" && e.message() == "first";
+    }
+    CHECK(got && ctx.eval<int>("js", "third") == 1 && ctx.eval<int>("js", "1 + 1") == 2);
+  }
+  {
+    JSContext* c = nfcpoly::js_context(ctx);
+    Value p = num("Promise.resolve(7)");
+    CHECK(p.class_name() == "Promise");
+    JSValue jp = nfcpoly::js_value(p);
+    CHECK(JS_PromiseState(c, jp) == JS_PROMISE_FULFILLED);
+    JSValue r = JS_PromiseResult(c, jp);
+    CHECK(JS_IsNumber(r) && JS_VALUE_GET_INT(r) == 7);
+    JS_FreeValue(c, r);
+    JS_FreeValue(c, jp);
+    Value times6 = num("(x) => x * 6");
+    Value q = p.call("then", times6);  // the callback has run when the call returns
+    JSValue jq = nfcpoly::js_value(q);
+    JSValue qr = JS_PromiseResult(c, jq);
+    CHECK(JS_PromiseState(c, jq) == JS_PROMISE_FULFILLED && JS_VALUE_GET_INT(qr) == 42);
+    JS_FreeValue(c, qr);
+    JS_FreeValue(c, jq);
+    Value rej = num("Promise.reject(new TypeError('no'))");
+    rej.call("catch", num("(e) => 0"));
+    JSValue jr = nfcpoly::js_value(rej);
+    CHECK(JS_PromiseState(c, jr) == JS_PROMISE_REJECTED);
+    JS_FreeValue(c, jr);
+  }
+
+  // the standard library, compiled by the backend under test
+  CHECK(ctx.eval<std::string>("js", "JSON.stringify({a: [1, 2, {b: 3}], s: 'q\"'})") == "{\"a\":[1,2,{\"b\":3}],\"s\":\"q\\\"\"}");
+  CHECK(ctx.eval<std::string>("js", "'2024-05-06'.replace(/(\\d+)-(\\d+)-(\\d+)/, '$3.$2.$1')") == "06.05.2024");
+  CHECK(ctx.eval<std::string>("js", "/(?<y>\\d{4})-(?<m>\\d\\d)/u.exec('on 1999-12-31').groups.y") == "1999");
+  CHECK(ctx.eval<std::string>("js", "new Date(86400000).toISOString()") == "1970-01-02T00:00:00.000Z");
+  CHECK(ctx.eval<long long>("js", "Date.UTC(2000, 0, 1)") == 946684800000LL);
+  CHECK(ctx.eval<std::string>("js", "[(1 / 3).toString(), (123.456).toFixed(1), (1e21).toString(), (255).toString(16), "
+                                    "Number.MIN_VALUE.toString(), (0.000001234).toExponential(2)].join(' ')") ==
+        "0.3333333333333333 123.5 1e+21 ff 5e-324 1.23e-6");
+  CHECK(ctx.eval<double>("js", "Number.parseFloat('1.7976931348623157e308')") == std::numeric_limits<double>::max());
+  CHECK(ctx.eval<double>("js", "Math.hypot(3, 4)") == 5.0 && ctx.eval<double>("js", "Math.pow(2, 0.5)") == std::pow(2.0, 0.5));
+  CHECK(ctx.eval<std::string>("js", "['\\u00e9'.normalize('NFD').length, '\\u01c6'.toUpperCase().codePointAt(0), 'stra\\u00dfe'.toUpperCase()].join()") ==
+        "2,452,STRASSE");
+  CHECK(ctx.eval<std::string>("js", "(() => { function* g() { yield 1; yield* [2, 3]; } const [a, ...rest] = g(); "
+                                    "const m = new Map([['k', new Set([1, 2])]]); const {x = 10, ...o} = {y: 1, z: 2}; "
+                                    "return `${a} ${rest} ${m.get('k').size} ${x} ${Object.keys(o)}`; })()") == "1 2,3 2 10 y,z");
+  CHECK(ctx.eval<std::string>("js", "(() => { class A { #p = 1; static s = 2; get p() { return this.#p; } } "
+                                    "const px = new Proxy({}, {get: (t, k) => 'p' + String(k)}); const w = new WeakRef(px); "
+                                    "return [new A().p, A.s, px.q, typeof w.deref(), Symbol('s').toString()].join(); })()") == "1,2,pq,object,Symbol(s)");
+  // Atomics, all element sizes (the backend maps them to the libatomic functions on the qbe back end)
+  {
+    std::string one = "2,3,2,1,2,3,2,1";
+    std::string expect;
+    for (int k = 0; k < 8; ++k) expect += (k ? "," : "") + one;
+    CHECK(ctx.eval<std::string>("js",
+                                "(() => { const out = []; for (const T of [Int8Array, Uint8Array, Int16Array, Uint16Array, Int32Array, "
+                                "Uint32Array, BigInt64Array, BigUint64Array]) { const big = T === BigInt64Array || T === BigUint64Array; "
+                                "const c = (n) => big ? BigInt(n) : n; const a = new T(new SharedArrayBuffer(T.BYTES_PER_ELEMENT * 2)); "
+                                "Atomics.store(a, 0, c(2)); out.push(Number(Atomics.add(a, 0, c(1))), Number(Atomics.sub(a, 0, c(1))), "
+                                "Number(Atomics.exchange(a, 0, c(1))), Number(Atomics.compareExchange(a, 0, c(1), c(2))), "
+                                "Number(Atomics.or(a, 0, c(1))), Number(Atomics.and(a, 0, c(2))), Number(Atomics.xor(a, 0, c(3))), "
+                                "Number(Atomics.load(a, 0))); } return out.join(','); })()") == expect);
+    // Atomics.wait would block the host thread for good: it is refused
+    CHECK(ctx.eval<std::string>("js", L.guard_cls("Atomics.wait(new Int32Array(new SharedArrayBuffer(8)), 0, 0)")) == "TypeError");
+  }
+  // what a script does not get: no files, no timers, no console, no module system
+  CHECK(ctx.eval<bool>("js", "[typeof require, typeof process, typeof console, typeof setTimeout, typeof std, typeof os, typeof print, "
+                             "typeof fetch].every((t) => t === 'undefined')"));
+  CHECK(throws<nfcpoly::SyntaxError>([&] { ctx.eval_void("js", "import x from 'y'"); }));  // no modules
+  CHECK(throws<nfcpoly::SyntaxError>([&] { ctx.eval_void("js", "await Promise.resolve(1)"); }));  // no top-level await
+
+  // script-owned C++ objects: a cycle in JavaScript is released by JS_RunGC, and closing the context releases the rest
+  {
+    ctx.eval_void("js", L.gc());
+    int base = Vec3::live;
+    ctx.eval_void("js", "(() => { const a = new Vec3(1, 2, 3); a.me = a; })()");
+    CHECK(Vec3::live == base + 1);  // reference counting alone cannot free a cycle
+    ctx.eval_void("js", L.gc());
+    CHECK(Vec3::live == base);
+    for (int k = 0; k < 20; ++k) {
+      Value fn, keep;  // handles that outlive the context
+      {
+        Context c;
+        c.def_class<Vec3>("Vec3").ctor<double, double, double>();
+        c.eval_void("js", "var a = {}; a.self = a; a.v = new Vec3(1, 2, 3); var f = () => a; f.v = new Vec3(4, 5, 6); a.f = f;");
+        fn = c.eval_value("js", "(() => a)");
+        keep = c.eval_value("js", "new Vec3(7, 8, 9)");
+        CHECK(Vec3::live == base + 3);
+      }
+      CHECK(Vec3::live == base + 1);  // closing the context released the cycle; the Value still co-owns its object
+      CHECK(keep.as<Vec3&>().x == 7 && !fn.is_array() && throws<nfcpoly::Error>([&] { fn.execute(); }));
+    }
+    CHECK(Vec3::live == base);
+    // closing a context drops handles that other handles' objects own (a Holder's Value is a handle too)
+    for (int k = 0; k < 5; ++k) {
+      Value arr, fn;
+      {
+        Context c;
+        c.def_class<Holder>("Holder").ctor<Value>();
+        arr = c.eval_value("js", "var f = () => 1; [new Holder(f), new Holder(() => 2)]");
+        fn = c.eval_value("js", "f");
+      }
+      CHECK(!arr.is_array() && !fn.is_int());
+    }
+  }
+
+  // raw QuickJS access
+  {
+    JSContext* c = nfcpoly::js_context(ctx);
+    JSValue gl = JS_GetGlobalObject(c);
+    JS_SetPropertyStr(c, gl, "raw_throw", JS_NewCFunction(c, raw_throw, "raw_throw", 0));
+    JS_SetPropertyStr(c, gl, "raw_call", JS_NewCFunction(c, raw_call, "raw_call", 1));
+    JS_FreeValue(c, gl);
+    CHECK(ctx.eval<std::string>("js", L.guard_cls("raw_throw()")) == "TypeError" && ctx.eval<std::string>("js", L.guard_msg("raw_throw()")) == "from raw code");
+    bool got = false;
+    try {
+      ctx.eval_void("js", "raw_throw()");
+    } catch (const nfcpoly::ScriptError& e) {
+      got = e.class_name() == "TypeError";
+    }
+    CHECK(got);
+    int d0 = Guard::destroyed;
+    CHECK(ctx.eval<std::string>("js", L.guard_msg("raw_call(raiser('inner'))")) == "inner" && Guard::alive == 0);
+    CHECK(ctx.eval<int>("js", "raw_call(() => 5)") == 5 && Guard::destroyed == d0 + 2);
+    CHECK(ctx.eval<bool>("js", "(() => { try { raw_call(raiser_host()); } catch (e) { return e instanceof Error; } })()"));  // a host error through raw code
+    CHECK(throws<HostFail>([&] { ctx.eval<int>("js", "raw_call(raiser_host())"); }) && Guard::alive == 0);
+    Value arr = num("[1, 2, 3]");
+    JSValue ja = nfcpoly::js_value(arr);
+    int64_t len = 0;
+    CHECK(JS_IsArray(ja) && JS_GetLength(c, ja, &len) == 0 && len == 3);
+    JS_FreeValue(c, ja);
+    JSValue plain = nfcpoly::js_value(num("41 + 1"));  // a plain value is converted
+    CHECK(JS_IsNumber(plain) && JS_VALUE_GET_INT(plain) == 42);
+    JSValue made = JS_NewObject(c);
+    JS_SetPropertyStr(c, made, "k", JS_NewInt32(c, 5));
+    Value w = nfcpoly::js_wrap(ctx, made);  // the reference is duplicated
+    JS_FreeValue(c, made);
+    CHECK(w.inspect() == "{\"k\":5}" && w.call("hasOwnProperty", "k").as<bool>());
+    CHECK(throws<nfcpoly::Error>([&] { nfcpoly::js_value(Value()); }));
+    CHECK(throws<nfcpoly::Error>([&] { nfcpoly::js_value(Value(nfcpoly::detail::Var::integer(1))); }));
+  }
+}
+#endif
+
 // ---- several languages in one Context -----------------------------------------------------------------------------------
 static void cross_tests(const std::vector<Lg>& ls) {
   g_lang = "cross";
@@ -799,12 +1208,16 @@ static void cross_tests(const std::vector<Lg>& ls) {
     CHECK(hidden);
     // and cannot be passed as an argument into another language
     Value lst = ctx.eval_value(B.ln(), B.list(""));
-    if (B.rb() || B.py()) {
+    if (B.rb() || B.py() || B.js()) {
       CHECK(throws<nfcpoly::ConversionError>([&] { lst.call(B.py() ? "append" : "push", fn); }));
       // an array can: Value::call converts it by copy
       Value nums = ctx.eval_value(A.ln(), A.list("4, 5"));
-      lst.call(B.py() ? "extend" : "concat", nums);
-      CHECK((lst.as<std::vector<int>>() == std::vector<int>{4, 5}));
+      if (B.js()) {  // concat returns a new array
+        CHECK((lst.call("concat", nums).as<std::vector<int>>() == std::vector<int>{4, 5}));
+      } else {
+        lst.call(B.py() ? "extend" : "concat", nums);
+        CHECK((lst.as<std::vector<int>>() == std::vector<int>{4, 5}));
+      }
     }
   }
 }
@@ -824,6 +1237,9 @@ int main() {
 #ifdef TEST_AST
   langs.push_back(Lg{Ast, "ast"});
 #endif
+#ifdef TEST_JS
+  langs.push_back(Lg{Js, "js"});
+#endif
   try {
     for (const Lg& L : langs) shared_tests(L);
 #ifdef TEST_RUBY
@@ -837,6 +1253,9 @@ int main() {
 #endif
 #ifdef TEST_AST
     ast_tests();
+#endif
+#ifdef TEST_JS
+    js_tests();
 #endif
     if (langs.size() > 1) cross_tests(langs);
   } catch (const std::exception& e) {

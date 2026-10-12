@@ -22,7 +22,7 @@ covers say so.
 | [llamacpp.md](notes/llamacpp.md) | llama.cpp's host-side ggml through the gcc backend: what compiles, the driver fixes, and the blockers (EDG AVX10.2 builtins, a cross-TU template instance). `tests/llamacpp/run.sh`. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
 | [ast.md](notes/ast.md) | `nfcast` (`lib/ast`): a self-specializing AST interpreter for a Lua 5.4 subset, the first step of a Truffle-style plan (tiering and inlining are not done): nodes that rewrite themselves, its own collector, differential tests against a real Lua. `tests/ast/run.sh`. |
-| [poly.md](notes/poly.md) | `nfcpoly` (`lib/poly`): evaluating Ruby (mruby), Lua, Python and `ast` (the nfcast engine) from C++ with bound host objects, GraalVM-polyglot style; mruby and Lua are built with C++ exceptions on EDG's runtime; the exception model and its test. |
+| [poly.md](notes/poly.md) | `nfcpoly` (`lib/poly`): evaluating Ruby (mruby), Lua, Python, JavaScript (QuickJS-NG) and `ast` (the nfcast engine) from C++ with bound host objects, GraalVM-polyglot style; mruby and Lua are built with C++ exceptions on EDG's runtime, QuickJS is plain C patched for cproc; the exception model and its test. |
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
@@ -47,7 +47,7 @@ covers say so.
 | Hexagon | Generated C for the `linux_riscv32` stand-in target compiles with clang-19 `--target=hexagon` and runs under qemu-hexagon, HVX kernels included; struct layout equals clang's Hexagon ABI (`tests/hexagon/run.sh`, `tests/hexagon/layout.sh`). Not the Hexagon SDK, QuRT or `hexagon-sim` (unavailable, `docs/notes/hexagon.md` section 4). | hexagon.yml |
 | `nfcc` (drop-in `cc`, C only) | `-c`, link, `-S`, `-E`/`-M*` answered by the host compiler, `-D -U -I`, dependency files, response files, `-shared`, rejected options, on both backends (`tests/c/cc-mode.sh`); Lua through its own makefile (`tests/realworld/run_lua_make.sh`); mruby's rake build (`tests/realworld/run_mruby.sh`) | ci.yml, realworld.yml |
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
-| `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`, `scripts/setup-poly-lua.sh`) | Evaluate Ruby, Lua, Python and `ast` (Lua syntax on the nfcast engine) from C++, alone or together in one `Context`, with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby and Lua built with C++ exceptions, the nfcast engine is C++; `docs/notes/poly.md`); GC release of script-owned objects. 559 checks on both backends (`tests/poly/run.sh`), also under valgrind by hand | ci.yml |
+| `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`, `scripts/setup-poly-lua.sh`, `scripts/setup-poly-js.sh`) | Evaluate Ruby, Lua, Python, JavaScript (QuickJS-NG, plain C, `scripts/quickjs-cproc.patch`) and `ast` (Lua syntax on the nfcast engine) from C++, alone or together in one `Context`, with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby and Lua built with C++ exceptions, the nfcast engine is C++; `docs/notes/poly.md`); GC release of script-owned objects. 884 checks on both backends (`tests/poly/run.sh`), also under valgrind by hand | ci.yml |
 | `nfcast` (`lib/ast`) | A Lua 5.4 subset on a self-specializing AST interpreter: nine programs whose output equals a real Lua 5.4.9's, normally and with the collector at every safe point; 71 checks of the specialization counters, collector, host objects and errors (`tests/ast/run.sh`, both backends); random-program fuzzing against the reference by hand (`tests/ast/fuzz.sh`). No coroutines, `goto`, `<close>`, `utf8`, `io`/`os`; no tiering or inlining yet (`docs/notes/ast.md`) | ci.yml |
 | AddressSanitizer (`nfcxx -fsanitize=address`; `docs/notes/asan.md`) | Heap/stack/global overflow, use after free and scope, double free, alloc/dealloc mismatch and leaks reported with the C++ source line, exceptions and containers clean; the qbe default switches to the gcc backend, explicit qbe, Path B and other sanitizers refused (`tests/asan/run.sh`) | ci.yml |
 | Tracing (`--trace=FILE`, `NFCXX_TRACE`) | Valid trace-event JSON with the driver and backend spans, both backends, exit code unchanged (`tests/trace/run.sh`, needs python3) | ci.yml |
@@ -137,7 +137,17 @@ the unit and x86-64 ELF (`alias_attr.cpp`, `alias_static.cpp`). `__builtin_trap`
 - Empty classes have size 0 in the C that cproc sees, while EDG folds `sizeof` as 1 (`freestanding.md`; no test asserts it).
 - `nfcc` on qbe ignores `-O*` and `-g*` (no optimisation levels, no debug info); `-Wp,` items outside the listed
   preprocessor options are rejected (`tests/c/cc-mode.sh`, `realworld.md`).
-- qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`).
+- qbe-compiled mruby uses the portable `switch` dispatch, not computed goto (`realworld.md`; `tests/realworld/run_mruby.sh`);
+  so does QuickJS (`scripts/quickjs-cproc.patch`, `poly.md`).
+- `-D_GNU_SOURCE` (or `#define _GNU_SOURCE`) plus `#include <stdlib.h>` or `<math.h>` fails on qbe with `declaration has no type
+  specifier`: glibc then declares `strtof32x`, `acosf32x` and friends with the types `_Float32x` and `_Float64x`, whose typedefs
+  `qbe-prep.rb` drops without mapping them (it maps `_Float32` and `_Float64`; `_Float64x` is `long double` here). Checked by hand
+  with a three-line C file on both back ends (qbe fails, gcc compiles); QuickJS, whose CMake build defines the macro, is built
+  without it (`poly.md`). No test asserts the failure.
+- QuickJS needed three more constructs that cproc rejects, patched in the throwaway checkout (`scripts/quickjs-cproc.patch`):
+  `_Atomic` (`quickjs-c-atomics.h`, replaced by libatomic's sized functions chosen with `_Generic`; `Atomics` results are checked
+  for every element size by `tests/poly/run.sh`), `return f();` of a `void` call inside a `void` function, and the spelling
+  `__attribute((...))`.
 
 **Driver**: `nfcxx --emit-c` does not pass user `-I` options to `cpfe` (`realworld.md`; no test). Tracing uses GNU `date`
 (Linux only) and does not time EDG's front end separately inside `eccp` (`tracing.md`; `tests/trace/run.sh` checks the
@@ -155,7 +165,11 @@ needs `scripts/mruby-cxx-novolatile.patch` because cproc cannot store to a `vola
 untested; no compile-time embedding. Lua needs `scripts/lua-cxx-novolatile.patch` for the same `volatile` reason and
 opens only the base (without `dofile`/`loadfile`), coroutine, table, string, math and utf8 libraries. Python is the system
 CPython (`python3-config`, tested with 3.12 only; the suite skips it when the headers are missing), one interpreter per process that is
-never finalized, and a write through `global` in a function shadows a bound variable.
+never finalized, and a write through `global` in a function shadows a bound variable. JavaScript is QuickJS-NG v0.17.0 compiled as
+plain C (no C++ build) with `scripts/quickjs-cproc.patch`; a script has no modules, files, timers or `console`, a script error is
+any thrown value (a non-error is class `Error`), a number is an integer when it is whole and a safe integer, promise jobs run when
+the outermost call returns; the library is built with QuickJS's asserts on, so a `JSValue` leaked through the raw API aborts when
+the `Context` closes (untested).
 
 **`nfcast`** (`ast.md`, "The language"; `tests/ast/run.sh` covers the supported forms): no sandbox and no time limit; the evaluator recurses on the C++ stack
 (1500 nested script calls, `State::max_depth`; tail calls are not eliminated); no coroutines, `goto`, `<close>`, `__gc`, weak tables,
