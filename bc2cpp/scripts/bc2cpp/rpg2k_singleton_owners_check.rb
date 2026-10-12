@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Game::CommonEvent.singleton and Game::MoveRoute.singleton as compiled owners (docs/adr/0422), and the bare
+# Game::CommonEvent.singleton and Game::MoveRoute.singleton as compiled owners (docs/adr/0426), and the bare
 # `new(a, k: v)` of a class method (KEYWORD_IMPLICIT_NEW) that Game::MoveRoute.from_page needs.
 #
 # The fixture is the engine's own source: Prism slices `module CommonEvent` and the two class methods

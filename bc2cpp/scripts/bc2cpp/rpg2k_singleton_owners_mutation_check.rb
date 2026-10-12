@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 # Mutation test for the compiled Game::CommonEvent.singleton / Game::MoveRoute.singleton owners and the bare
-# `new(a, k: v)` of a class method (docs/adr/0422). Each mutant is a copy of tools/bc2cpp with one condition
+# `new(a, k: v)` of a class method (docs/adr/0426). Each mutant is a copy of tools/bc2cpp with one condition
 # broken (or a copy of register.cxx with one registration moved or removed);
 # scripts/bc2cpp/rpg2k_singleton_owners_check.rb, run against the mutant on the one world that exercises that
 # condition, must FAIL on the check that guards it. An unmutated copy runs first and must pass.
@@ -60,8 +60,8 @@ MUTANTS = [
    /  mrb_define_class_method\(M, move_route, "same_route\?",\n\s+Game__MoveRoute_singleton_same_route\$3f,\n\s+MRB_ARGS_REQ\(2\)\);\n/, '', BASE, false,
    /register\.cxx registers move_route\.same_route\?/],
   ['the registrations sit outside the full-build region', REGISTER,
-   '  // Game::CommonEvent.singleton and Game::MoveRoute.singleton (docs/adr/0422):',
-   "#endif  // BC2CPP_HOT_ONLY_STUBS\n  // Game::CommonEvent.singleton and Game::MoveRoute.singleton (docs/adr/0422):", BASE, false,
+   '  // Game::CommonEvent.singleton and Game::MoveRoute.singleton (docs/adr/0426):',
+   "#endif  // BC2CPP_HOT_ONLY_STUBS\n  // Game::CommonEvent.singleton and Game::MoveRoute.singleton (docs/adr/0426):", BASE, false,
    /register\.cxx registers common_event\.load/],
   ['a hot-only build lists same_route?', 'hot_methods.txt',
    "Game.singleton#camera_offset\n", "Game.singleton#camera_offset\nGame::MoveRoute.singleton#same_route?\n", BASE, false,
