@@ -12,13 +12,15 @@
  * one buffer or inside the accessing thread's own frame; anything else is a fault, so a missing
  * bounds check shows up as an error or as a write into a guard buffer, not as silent corruption.
  *
- * Accepted: .version, .target, .address_size (ignored), .visible .entry with .param, .reg (ignored:
+ * Accepted: .version, .target, .address_size (ignored), .visible .entry and .func with .param, call (of a
+ * .func of the module, no recursion), st.param (call arguments), .reg (ignored:
  * registers are created on first use), .local, labels, ld (param, generic, global, local), st,
  * mov, cvta, add, sub, mul.lo / mul.wide, mad.lo, shl, and, or, setp, bra, ret, predicates
  * (@%p, @!%p), and the special registers %tid, %ntid, %ctaid, %nctaid (x, y, z).
  *
  * Exit: 0 ran, 2 usage or malformed input, 3 unsupported PTX (refused before running), 4 memory fault.
- * Limits: 8192 instructions, 1024 registers, 64 parameters, 64 local symbols, 1024 labels.
+ * Limits: 8192 instructions, 1024 registers, 64 parameters, 64 local symbols, 1024 labels, 32 functions.
+ * Only the kernel and the functions it reaches are parsed, so an unreached .func is not checked.
  */
 #include <ctype.h>
 #include <stdarg.h>
@@ -39,6 +41,8 @@
 #define MAXLABEL 1024
 #define MAXNAME 64
 #define MAXTEXT 96
+#define MAXFUNC 32
+#define MAXFPARAM 8
 
 static void fail(int code, const char *fmt, ...) {
   va_list ap;
@@ -88,7 +92,7 @@ enum {
 };
 enum {
   OP_LD, OP_ST, OP_MOV, OP_CVTA, OP_ADD, OP_SUB, OP_MUL, OP_MAD,
-  OP_SHL, OP_AND, OP_OR, OP_SETP, OP_BRA, OP_RET
+  OP_SHL, OP_AND, OP_OR, OP_SETP, OP_BRA, OP_RET, OP_CALL
 };
 enum { SPACE_NONE, SPACE_PARAM, SPACE_GLOBAL, SPACE_LOCAL };
 enum { CMP_NONE, CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE };
@@ -110,6 +114,10 @@ typedef struct {
   Operand a[4];
   int n;
   int target; /* bra: instruction index */
+  int callee; /* call: index into funcs, -1 until resolved */
+  int ret;    /* call: register that receives the result, -1 for none */
+  int nargs;  /* call: number of arguments */
+  int argp[4]; /* call: parameter index of each argument */
   char label[MAXNAME];
   char text[MAXTEXT];
 } Inst;
@@ -142,11 +150,32 @@ static Label labels[MAXLABEL];
 static int nlabels;
 static uint64_t frame_bytes; /* per-thread local bytes used by the .local declarations */
 
+/* A .entry or .func. Its instructions are [start, end); its parameters are params[param[k]]. */
+typedef struct {
+  char name[MAXNAME];
+  int is_entry;
+  int start, end;
+  int rv;     /* register holding the result of a .func, -1 for none */
+  int nparam;
+  int param[MAXFPARAM];
+} Func;
+static Func funcs[MAXFUNC];
+static int nfuncs;
+/* The function being parsed, "name/": registers, labels and parameters are scoped by it, so the same
+ * names in two functions (%r1, $L0, $call1_p0) are different objects. */
+static char scope[MAXNAME];
+
+static void scoped(char *out, size_t n, const char *name) {
+  if (snprintf(out, n, "%s%s", scope, name) >= (int)n) fail(EXIT_UNSUPPORTED, "name too long: %s", name);
+}
+
 static int reg_index(const char *name) {
+  char key[MAXNAME];
+  scoped(key, sizeof key, name);
   for (int i = 0; i < nregs; i++)
-    if (!strcmp(regs[i], name)) return i;
+    if (!strcmp(regs[i], key)) return i;
   if (nregs == MAXREG) fail(EXIT_UNSUPPORTED, "too many registers");
-  snprintf(regs[nregs], MAXNAME, "%s", name);
+  snprintf(regs[nregs], MAXNAME, "%s", key);
   return nregs++;
 }
 
@@ -189,7 +218,9 @@ static Operand parse_operand(const char *tok) {
       o.kind = K_MEM;
       o.idx = reg_index(inner);
     } else {
-      int p = param_index(inner);
+      char key[MAXNAME];
+      scoped(key, sizeof key, inner);
+      int p = param_index(key);
       if (p < 0) fail(EXIT_BAD, "unknown parameter in '%s'", tok);
       o.kind = K_PARAM;
       o.idx = p;
@@ -265,10 +296,12 @@ static int cmp_index(const char *m) {
 }
 
 static void add_label(const char *name) {
+  char key[MAXNAME];
+  scoped(key, sizeof key, name);
   if (nlabels == MAXLABEL) fail(EXIT_UNSUPPORTED, "too many labels");
   for (int i = 0; i < nlabels; i++)
-    if (!strcmp(labels[i].name, name)) fail(EXIT_BAD, "duplicate label '%s'", name);
-  snprintf(labels[nlabels].name, MAXNAME, "%s", name);
+    if (!strcmp(labels[i].name, key)) fail(EXIT_BAD, "duplicate label '%s'", name);
+  snprintf(labels[nlabels].name, MAXNAME, "%s", key);
   labels[nlabels].index = ninst;
   nlabels++;
 }
@@ -324,6 +357,36 @@ static void add_inst(char *stmt) {
   char *parts[8];
   int np = split_dots(opbuf, parts, 8);
   const char *op = parts[0];
+  if (!strcmp(op, "call")) {
+    /* call (%rv), NAME, (ARG, ...): the result register is optional; each argument is a parameter. */
+    in.op = OP_CALL;
+    in.callee = -1;
+    in.ret = -1;
+    if (nt - i < 1) fail(EXIT_BAD, "call needs a function name: '%s'", stmt);
+    if (tok[i][0] == '(') {
+      size_t l = strlen(tok[i]);
+      if (l < 3 || tok[i][l - 1] != ')') fail(EXIT_BAD, "bad call result: '%s'", stmt);
+      tok[i][l - 1] = 0;
+      in.ret = reg_index(tok[i] + 1);
+      i++;
+    }
+    if (nt - i < 1) fail(EXIT_BAD, "call needs a function name: '%s'", stmt);
+    snprintf(in.label, sizeof in.label, "%s", tok[i++]);
+    for (; i < nt; i++) {
+      size_t l = strlen(tok[i]);
+      if (tok[i][0] != '(' || l < 3 || tok[i][l - 1] != ')') fail(EXIT_BAD, "bad call argument: '%s'", stmt);
+      tok[i][l - 1] = 0;
+      if (in.nargs == 4) fail(EXIT_UNSUPPORTED, "call with more than 4 arguments: '%s'", stmt);
+      char key[MAXNAME];
+      scoped(key, sizeof key, tok[i] + 1);
+      int p = param_index(key);
+      if (p < 0) fail(EXIT_BAD, "unknown call argument '%s'", tok[i] + 1);
+      in.argp[in.nargs++] = p;
+    }
+    if (ninst == MAXINST) fail(EXIT_UNSUPPORTED, "too many instructions");
+    insts[ninst++] = in;
+    return;
+  }
   static const char *known[] = {"ld", "st", "mov", "cvta", "add", "sub", "mul", "mad",
                                 "shl", "and", "or", "setp", "bra", "ret"};
   int is_known = 0;
@@ -404,7 +467,7 @@ static void add_inst(char *stmt) {
 
   if (in.op == OP_BRA) {
     if (nt - i != 1) fail(EXIT_BAD, "bra takes one label: '%s'", stmt);
-    snprintf(in.label, sizeof in.label, "%s", tok[i]);
+    scoped(in.label, sizeof in.label, tok[i]);
     i = nt;
   } else {
     if (nt - i != want) fail(EXIT_BAD, "expected %d operands: '%s'", want, stmt);
@@ -417,7 +480,8 @@ static void add_inst(char *stmt) {
     if (in.space == SPACE_PARAM ? in.a[1].kind != K_PARAM : in.a[1].kind != K_MEM)
       fail(EXIT_BAD, "bad ld source: '%s'", stmt);
   } else if (in.op == OP_ST) {
-    if (in.a[0].kind != K_MEM) fail(EXIT_BAD, "st destination must be a memory operand: '%s'", stmt);
+    if (in.a[0].kind != K_MEM && !(in.space == SPACE_PARAM && in.a[0].kind == K_PARAM))
+      fail(EXIT_BAD, "st destination must be a memory or parameter operand: '%s'", stmt);
   } else if (in.op != OP_BRA && in.op != OP_RET) {
     if (in.a[0].kind != K_REG) fail(EXIT_BAD, "destination must be a register: '%s'", stmt);
   }
@@ -431,6 +495,8 @@ static int is_label(const char *s, const char *end) {
     if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '$')) return 0;
   return 1;
 }
+
+static void parse_params(char *text);
 
 /* The body between the braces of one .entry. Statements end at ';'; labels may precede one. */
 static void parse_body(char *body) {
@@ -446,11 +512,14 @@ static void parse_body(char *body) {
       add_label(s);
       s = trim(colon + 1);
     }
+    while (*s == '{' || *s == '}') s = trim(s + 1); /* the braces of a call's parameter block */
     if (*s == '.') {
       if (!strncmp(s, ".reg", 4)) {
         /* registers are created on first use */
       } else if (!strncmp(s, ".local", 6)) {
         parse_local(s);
+      } else if (!strncmp(s, ".param", 6)) {
+        parse_params(s); /* a call's parameter, declared in its block */
       } else {
         fail(EXIT_UNSUPPORTED, "unsupported directive '%s'", s);
       }
@@ -474,7 +543,7 @@ static void parse_params(char *text) {
     if (nt) {
       if (nparams == MAXPARAM) fail(EXIT_UNSUPPORTED, "too many parameters");
       Param *pr = &params[nparams++];
-      snprintf(pr->name, MAXNAME, "%s", tok[nt - 1]);
+      scoped(pr->name, MAXNAME, tok[nt - 1]);
       int found = 0;
       for (int i = 0; i < nt - 1; i++) {
         if (tok[i][0] == '.' && strcmp(tok[i], ".param") && parse_ty(tok[i] + 1, &pr->ty)) found = 1;
@@ -501,9 +570,9 @@ static void strip_comments(char *s) {
   }
 }
 
-static char *match_close(char *open, char oc, char cc) {
+static const char *match_close(const char *open, char oc, char cc) {
   int depth = 0;
-  for (char *p = open; *p; p++) {
+  for (const char *p = open; *p; p++) {
     if (*p == oc) depth++;
     else if (*p == cc && --depth == 0) return p;
   }
@@ -511,49 +580,165 @@ static char *match_close(char *open, char oc, char cc) {
   return NULL;
 }
 
-/* Find the .entry called kernel, parse its parameters and body. */
-static void parse_kernel(char *text, const char *kernel) {
-  char *p = text;
+/* ---- definitions and functions ---- */
+
+static char *dup_range(const char *s, size_t n) {
+  char *d = malloc(n + 1);
+  if (!d) fail(EXIT_FAULT, "out of memory");
+  memcpy(d, s, n);
+  d[n] = 0;
+  return d;
+}
+
+/* An .entry or .func in the text. The pointers point into the text, which is not changed. */
+typedef struct {
+  char name[MAXNAME];
+  char rv[MAXNAME];          /* the result register of a .func: "%rv" in .func (.reg .b32 %rv) f(...); "" if none */
+  const char *open, *close;  /* the parameter list, between the parentheses */
+  const char *brace, *body_end;
+  int is_entry;
+} Def;
+
+/* Find the .entry or .func called name. Returns 0 when the text has no such definition. */
+static int find_def(const char *text, const char *name, Def *d) {
+  const char *p = text;
   for (;;) {
-    p = strstr(p, ".entry");
-    if (!p) fail(EXIT_BAD, "kernel '%s' not found", kernel);
-    char *q = p + 6;
-    if (!isspace((unsigned char)*q)) {
-      p = q;
+    const char *e = strstr(p, ".entry");
+    const char *f = strstr(p, ".func");
+    const char *k = (e && (!f || e < f)) ? e : f;
+    if (!k) return 0;
+    int is_entry = k == e;
+    p = k + (is_entry ? 6 : 5);
+    if (!isspace((unsigned char)*p) && *p != '(') continue;
+    const char *q = p;
+    while (isspace((unsigned char)*q)) q++;
+    char rv[MAXNAME] = "";
+    if (*q == '(') {
+      const char *rc = strchr(q, ')');
+      if (!rc) fail(EXIT_BAD, "unbalanced result list");
+      size_t n = (size_t)(rc - q - 1);
+      if (n >= MAXTEXT) fail(EXIT_UNSUPPORTED, "result list too long");
+      char tmp[MAXTEXT];
+      memcpy(tmp, q + 1, n);
+      tmp[n] = 0;
+      char *tok[8];
+      int nt = split_tokens(tmp, tok, 8);
+      if (nt) snprintf(rv, sizeof rv, "%s", tok[nt - 1]);
+      q = rc + 1;
+      while (isspace((unsigned char)*q)) q++;
+    }
+    const char *ne = q;
+    while (isalnum((unsigned char)*ne) || *ne == '_' || *ne == '$') ne++;
+    size_t nl = (size_t)(ne - q);
+    if (nl == 0 || nl >= MAXNAME) {
+      p = ne;
       continue;
     }
-    while (isspace((unsigned char)*q)) q++;
-    char *name_end = q;
-    while (isalnum((unsigned char)*name_end) || *name_end == '_' || *name_end == '$') name_end++;
-    char name[MAXNAME];
-    size_t nl = (size_t)(name_end - q);
-    if (nl == 0 || nl >= sizeof name) fail(EXIT_BAD, "bad .entry name");
-    memcpy(name, q, nl);
-    name[nl] = 0;
-    char *open = strchr(name_end, '(');
-    if (!open) fail(EXIT_BAD, "no parameter list for '%s'", name);
-    char *close = match_close(open, '(', ')');
-    char *brace = strchr(close, '{');
-    if (!brace) fail(EXIT_BAD, "no body for '%s'", name);
-    char *body_end = match_close(brace, '{', '}');
-    if (!strcmp(name, kernel)) {
-      *close = 0;
-      parse_params(open + 1);
-      *body_end = 0;
-      parse_body(brace + 1);
-      for (int i = 0; i < ninst; i++) {
-        Inst *in = &insts[i];
-        if (in->op != OP_BRA) continue;
-        in->target = -1;
-        for (int k = 0; k < nlabels; k++)
-          if (!strcmp(labels[k].name, in->label)) in->target = labels[k].index;
-        if (in->target < 0) fail(EXIT_BAD, "unknown label '%s'", in->label);
-      }
-      return;
+    char dn[MAXNAME];
+    memcpy(dn, q, nl);
+    dn[nl] = 0;
+    while (isspace((unsigned char)*ne)) ne++;
+    if (*ne != '(') {
+      p = ne;
+      continue;
     }
-    p = body_end + 1;
+    const char *cl = match_close(ne, '(', ')');
+    const char *brace = strchr(cl, '{');
+    if (!brace) fail(EXIT_BAD, "no body for '%s'", dn);
+    const char *be = match_close(brace, '{', '}');
+    if (!strcmp(dn, name)) {
+      snprintf(d->name, MAXNAME, "%s", dn);
+      snprintf(d->rv, MAXNAME, "%s", rv);
+      d->open = ne;
+      d->close = cl;
+      d->brace = brace;
+      d->body_end = be;
+      d->is_entry = is_entry;
+      return 1;
+    }
+    p = be + 1;
   }
 }
+
+static int func_index(const char *name) {
+  for (int i = 0; i < nfuncs; i++)
+    if (!strcmp(funcs[i].name, name)) return i;
+  return -1;
+}
+
+/* Parse one definition into the instruction stream: its parameters, registers and labels are scoped by its name. */
+static int parse_function(const Def *d) {
+  if (nfuncs == MAXFUNC) fail(EXIT_UNSUPPORTED, "too many functions");
+  int idx = nfuncs++;
+  Func *fn = &funcs[idx];
+  memset(fn, 0, sizeof *fn);
+  snprintf(fn->name, MAXNAME, "%s", d->name);
+  fn->is_entry = d->is_entry;
+  fn->rv = -1;
+  size_t sl = strlen(d->name);
+  if (sl + 2 > sizeof scope) fail(EXIT_UNSUPPORTED, "function name too long: %s", d->name);
+  memcpy(scope, d->name, sl);
+  scope[sl] = '/';
+  scope[sl + 1] = 0;
+  int p0 = nparams;
+  char *plist = dup_range(d->open + 1, (size_t)(d->close - d->open - 1));
+  parse_params(plist);
+  fn->nparam = nparams - p0;
+  if (fn->nparam > MAXFPARAM) fail(EXIT_UNSUPPORTED, "too many parameters in '%s'", d->name);
+  for (int k = 0; k < fn->nparam; k++) fn->param[k] = p0 + k;
+  if (d->rv[0]) fn->rv = reg_index(d->rv);
+  fn->start = ninst;
+  char *body = dup_range(d->brace + 1, (size_t)(d->body_end - d->brace - 1));
+  parse_body(body);
+  fn->end = ninst;
+  return idx;
+}
+
+/* Every call names a function of the module. A callee not parsed yet is parsed here, so only the functions a
+ * kernel reaches are checked. */
+static void resolve_calls(const char *text) {
+  for (int i = 0; i < ninst; i++) {
+    Inst *in = &insts[i];
+    if (in->op != OP_CALL || in->callee >= 0) continue;
+    int f = func_index(in->label);
+    if (f < 0) {
+      Def d;
+      if (!find_def(text, in->label, &d) || d.is_entry)
+        fail(EXIT_UNSUPPORTED, "call of '%s': not a device function of this module", in->label);
+      f = parse_function(&d);
+    }
+    if (funcs[f].is_entry) fail(EXIT_UNSUPPORTED, "call of the kernel '%s'", in->label);
+    if (funcs[f].nparam != in->nargs)
+      fail(EXIT_BAD, "call of '%s' with %d arguments; it takes %d", in->label, in->nargs, funcs[f].nparam);
+    in->callee = f;
+  }
+}
+
+static int visit[MAXFUNC]; /* 0 new, 1 on the call path, 2 done */
+
+/* Refuses a call cycle: the interpreter runs calls as nested runs, which need a finite call depth. */
+static void check_calls(int f) {
+  visit[f] = 1;
+  for (int i = funcs[f].start; i < funcs[f].end; i++) {
+    if (insts[i].op != OP_CALL) continue;
+    int g = insts[i].callee;
+    if (visit[g] == 1) fail(EXIT_UNSUPPORTED, "recursive call of '%s'", funcs[g].name);
+    if (!visit[g]) check_calls(g);
+  }
+  visit[f] = 2;
+}
+
+static void resolve_labels(void) {
+  for (int i = 0; i < ninst; i++) {
+    Inst *in = &insts[i];
+    if (in->op != OP_BRA) continue;
+    in->target = -1;
+    for (int k = 0; k < nlabels; k++)
+      if (!strcmp(labels[k].name, in->label)) in->target = labels[k].index;
+    if (in->target < 0) fail(EXIT_BAD, "unknown label '%s'", in->label);
+  }
+}
+
 
 /* ---- launch and execution ---- */
 
@@ -612,10 +797,13 @@ static void store_bytes(uint8_t *m, int n, uint64_t v) {
   for (int i = 0; i < n; i++) m[i] = (uint8_t)(v >> (8 * i));
 }
 
-static void run_thread(const Launch *l, uint64_t *r, const uint64_t *tid, const uint64_t *ctaid,
-                       uint64_t local_base, uint64_t frame) {
-  int pc = 0;
-  while (pc < ninst) {
+/* Runs the instructions [start, end): the kernel's, or a function's, which a call runs in a nested run.
+ * Parameters are per thread (pv): the kernel's arguments, then the formal parameters of the functions and the
+ * call-site copies. Registers are per thread too, and names are scoped by function, so they do not collide. */
+static void run_range(const Launch *l, uint64_t *r, uint64_t *pv, const uint64_t *tid, const uint64_t *ctaid,
+                      uint64_t local_base, uint64_t frame, int start, int end) {
+  int pc = start;
+  while (pc < end) {
     const Inst *in = &insts[pc];
     if (in->pred >= 0) {
       int v = r[in->pred] != 0;
@@ -627,7 +815,7 @@ static void run_thread(const Launch *l, uint64_t *r, const uint64_t *tid, const 
     }
     int next = pc + 1;
     uint64_t a = 0, b = 0, c = 0;
-    if (in->op != OP_RET && in->op != OP_BRA && in->op != OP_LD) {
+    if (in->op != OP_RET && in->op != OP_BRA && in->op != OP_LD && in->op != OP_CALL) {
       a = value(l, r, tid, ctaid, local_base, in->a[1]);
       if (in->n > 2) b = value(l, r, tid, ctaid, local_base, in->a[2]);
       if (in->n > 3) c = value(l, r, tid, ctaid, local_base, in->a[3]);
@@ -636,13 +824,25 @@ static void run_thread(const Launch *l, uint64_t *r, const uint64_t *tid, const 
     switch (in->op) {
       case OP_RET:
         return;
+      case OP_CALL: {
+        const Func *callee = &funcs[in->callee];
+        uint64_t args[4];
+        for (int k = 0; k < in->nargs; k++) args[k] = pv[in->argp[k]];
+        for (int k = 0; k < in->nargs; k++) pv[callee->param[k]] = args[k];
+        run_range(l, r, pv, tid, ctaid, local_base, frame, callee->start, callee->end);
+        if (in->ret >= 0) {
+          if (callee->rv < 0) fail(EXIT_UNSUPPORTED, "'%s' returns no value", callee->name);
+          r[in->ret] = r[callee->rv];
+        }
+        break;
+      }
       case OP_BRA:
         next = in->target;
         break;
       case OP_LD: {
         uint64_t v;
         if (in->space == SPACE_PARAM) {
-          v = l->params[in->a[1].idx];
+          v = pv[in->a[1].idx];
         } else {
           uint64_t addr = r[in->a[1].idx] + (uint64_t)in->a[1].imm;
           v = load_bytes(mem_at(l, local_base, frame, addr, nbytes, in), nbytes);
@@ -651,6 +851,10 @@ static void run_thread(const Launch *l, uint64_t *r, const uint64_t *tid, const 
         break;
       }
       case OP_ST: {
+        if (in->space == SPACE_PARAM) {
+          pv[in->a[0].idx] = a;
+          break;
+        }
         uint64_t addr = r[in->a[0].idx] + (uint64_t)in->a[0].imm;
         store_bytes(mem_at(l, local_base, frame, addr, nbytes, in), nbytes, a);
         break;
@@ -715,6 +919,11 @@ static void run_thread(const Launch *l, uint64_t *r, const uint64_t *tid, const 
     }
     pc = next;
   }
+}
+
+static void run_thread(const Launch *l, uint64_t *r, uint64_t *pv, const uint64_t *tid, const uint64_t *ctaid,
+                       uint64_t local_base, uint64_t frame) {
+  run_range(l, r, pv, tid, ctaid, local_base, frame, funcs[0].start, funcs[0].end);
 }
 
 static void parse_dims(const char *s, uint64_t d[3]) {
@@ -810,8 +1019,13 @@ int main(int argc, char **argv) {
   text[len] = 0;
   fclose(f);
   strip_comments(text);
-  parse_kernel(text, kernel);
-  if (nparams != nargs) fail(EXIT_BAD, "kernel takes %d parameters, got %d arguments", nparams, nargs);
+  Def kd;
+  if (!find_def(text, kernel, &kd) || !kd.is_entry) fail(EXIT_BAD, "kernel '%s' not found", kernel);
+  parse_function(&kd);
+  resolve_calls(text);
+  resolve_labels();
+  check_calls(0);
+  if (funcs[0].nparam != nargs) fail(EXIT_BAD, "kernel takes %d parameters, got %d arguments", funcs[0].nparam, nargs);
 
   /* Arena: the buffers, then one local frame per thread. */
   uint64_t cursor = 0;
@@ -852,6 +1066,7 @@ int main(int argc, char **argv) {
   /* Run every thread. Blocks in x-major order, threads within a block in x-major order. */
   uint64_t *r = calloc(nregs ? nregs : 1, sizeof *r);
   if (!r) fail(EXIT_FAULT, "out of memory");
+  uint64_t pv[MAXPARAM];
   uint64_t tid[3], ctaid[3];
   uint64_t gid = 0;
   for (uint64_t cz = 0; cz < grid[2]; cz++)
@@ -863,8 +1078,10 @@ int main(int argc, char **argv) {
               tid[0] = tx; tid[1] = ty; tid[2] = tz;
               ctaid[0] = cx; ctaid[1] = cy; ctaid[2] = cz;
               memset(r, 0, (nregs ? nregs : 1) * sizeof *r);
+              memset(pv, 0, sizeof pv);
+              memcpy(pv, L.params, sizeof(uint64_t) * (size_t)nargs);
               uint64_t local_base = ARENA_BASE + local_start + gid * frame;
-              run_thread(&L, r, tid, ctaid, local_base, frame);
+              run_thread(&L, r, pv, tid, ctaid, local_base, frame);
             }
 
   for (int d = 0; d < ndump; d++) {

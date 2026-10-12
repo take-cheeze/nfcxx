@@ -1015,6 +1015,8 @@ def emit_module(src, sm, kernels = [])
       raise Refused, "global #{name} has an initializer (only zero is lowered)" unless f.length == 7 && head_of(init) == "init" && init.length == 2 && head_of(init[1]) == "zero"
       raise Refused, "global #{name}: partial zero initializer" unless as_int(init[1][1]) == 0 && as_int(init[1][2]) == size
       shared[name] = [size, align]
+    elsif h == "abi-type"
+      raise Refused, "aggregate type #{form_text(f[1])}: struct and union values by value are not lowered yet"
     else
       raise Refused, "top-level form #{h || form_text(f)}"
     end

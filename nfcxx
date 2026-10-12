@@ -37,16 +37,20 @@ cudatmp=""
 # cubin is embedded at the end of the host copy with a registration tail (scripts/cuda-embed.rb), so the one object
 # holds the host code and its device image. A file with no kernel gets no device image.
 # The rewritten copy of each .cu input is made after the arguments are read (cu_prepare), so that -c and -o are known:
-# with -c the copy stays beside the object (.nfcxx/), because the EDG prelinker re-reads the source recorded in an
-# object at link time (the object of a .cu file must find its copy then). Otherwise it goes in a temp directory.
+# with -c the copy goes to the per-user cache (see cu_prepare), not to the user's tree. Otherwise it goes in a temp directory.
 cu_inputs=()
 cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs and files in place of the source
   [ ${#cu_inputs[@]} -gt 0 ] || return 0
   cudatmp=$(mktemp -d); trap 'rm -rf "$cudatmp"' EXIT
   local dir=$cudatmp
   if [ $compile_only = 1 ]; then
-    local odir=.; [ $outset = 0 ] || odir=$(dirname "$out")
-    dir=$odir/.nfcxx; mkdir -p "$dir"
+    # The copy must outlive the compile: the prelinker re-reads it when it needs a template instance at link time,
+    # and a failed link deletes the objects. It goes to a per-user cache, keyed by the absolute object path, and the
+    # object records that absolute path, so the link finds it from any directory.
+    local obj=$out; [ $outset = 1 ] || obj=$(basename "${cu_inputs[0]}" .cu).o
+    local key; key=$(realpath -m "$obj" | sha1sum | cut -c1-16)
+    dir=${NFCXX_CU_CACHE:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nfcxx}/cu/$key
+    mkdir -p "$dir"
   fi
   local src copy i
   for src in "${cu_inputs[@]}"; do
