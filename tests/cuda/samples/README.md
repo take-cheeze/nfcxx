@@ -16,14 +16,14 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | simplePrintf | device `printf` | fails to compile | `identifier "printf" is undefined` (device unit) |
 | matrixMul | shared memory, template kernel launch `MatrixMulCUDA<16><<<...>>>` | fails to compile | `linkage specification is not allowed` (rewriter stub, `matrixMul.cu:197`) |
 | asyncAPI | events, streams, profiler API | builds, runs, exit 0; no result check in the sample (not verified) | — |
-| reduction | templates, template kernel launches, cooperative groups | fails to compile | `refused: template kernel name at line 651` (`reduction_kernel.cu`) |
+| reduction | templates, template kernel launches, cooperative groups | fails to compile | `refused: template launch of reduce0<T>`: the launch depends on the enclosing template's `T` (the instance is not built yet; see docs/notes/gpu.md, "Launch path") |
 | shfl_scan | warp shuffle (`__shfl_up_sync`), `NULL` from the host headers | fails to compile | `namespace "cooperative_groups" has no member "tiled_partition"` |
 | scan | `uint` typedef from the host headers, cooperative groups | fails to compile | `refused: aggregate type "uint4"` (struct by value) |
 | histogram | `uchar`/`uint` typedefs from the host headers, shared memory | fails to compile | `refused: aggregate type "uint4"` (struct by value) |
 | scalarProd | cooperative groups (`namespace cg = cooperative_groups`) | fails to compile | `name must be a namespace name` |
 | threadFenceReduction | memory fences, cooperative groups | fails to compile | `name must be a namespace name` (device unit) |
 | simpleCooperativeGroups | cooperative groups (`thread_block`, `thread_group`) | fails to compile | `identifier "thread_group" is undefined` (device unit) |
-| MC_EstimatePiP | template kernel launch (curand is not reached) | fails to compile | `incomplete type "unsigned int []"` (unsized `extern __shared__`) |
+| MC_EstimatePiP | template kernel launch (curand is not reached) | fails to compile | `refused: template launch of computeValue<Real>`: the launch depends on the enclosing template's `Real` |
 | Rodinia pathfinder | `__shared__` arrays | fails to compile | `identifier "__shared__" is undefined` (device unit) |
 | Rodinia hotspot | `__shared__` 2-D arrays | fails to compile | `identifier "__shared__" is undefined` (device unit) |
 | Rodinia nw | `__syncthreads` (barrier) | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |

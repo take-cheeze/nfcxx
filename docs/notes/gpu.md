@@ -31,6 +31,27 @@ call the emitter does not lower (exit 3). Calls of other functions are refused, 
 This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda-rewrite.rb` leaves
 `threadIdx`/`blockIdx`/`blockDim` as host placeholders, and the kernel is not registered with the runtime.
 
+## Launch path (llama.cpp features)
+
+`tests/cuda/launch/run.sh` (run by `tests/cuda/run.sh`) covers the launch-path features of llama.cpp's CUDA backend.
+
+- **`__launch_bounds__`** (18 files): removed with its argument list, in the host and device units (`strip_launch_bounds`
+  in `scripts/cuda-rewrite.rb`). A compile hint, so nothing is lost. `bounds.cu` runs on the GPU.
+- **Dynamic extern shared memory** (13 files): `extern __shared__ T name[];` is removed and each `name[...]` becomes
+  `((T *)__nfcxx_dynshared_addr())[...]` (`dynamic_shared_rewrite`). The launch's third configuration item already
+  reaches `cudaLaunchConfig_t::dynamicSmemBytes`. The device side is refused until the emitter lowers the call. The IR
+  it needs: `(let %N (ptr void) (call (ptr void) &"__nfcxx_dynshared_addr"))`, which lowers to `cvta.shared.u64` of a
+  module-level `.extern .shared .align 16 .b8 <name>[];` (name chosen by the emitter). A pointer subscript has no bounds
+  check, which is right: the size is known only at launch.
+- **`cudaFuncSetAttribute`, `cudaLaunchKernel` on kernel addresses** (llama.cpp calls them directly): macros in
+  `lib/cuda/nfcxx_cuda.h` look the host address up in the registry (`cudaKernelSetAttributeForDevice`,
+  `cudaLaunchKernelExC`). `async.cu` covers them with `cudaMallocAsync`, `cudaMemcpyAsync`, `cudaFreeAsync` and a
+  kernel address in a variable. Not covered: `cudaLaunchKernelEx` (a template in the CUDA headers, which calls
+  `cudaLaunchKernelExC` directly, so the host address is not looked up).
+- **Template launch depending on an enclosing template parameter** (reduction, MC_EstimatePiP, and most ggml-cuda
+  templated launches): refused with exit 3 (`dependent_on_template`). The device image would need that instance, and the
+  rewriter does not know which instances a program uses. Needs the instantiation set from the front end.
+
 ## CUDA source (`.cu`)
 
 `nfcxx` takes `.cu` inputs. The driver makes two things from each file:

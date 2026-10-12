@@ -13,14 +13,14 @@ simpleVoteIntrinsics | cpp | 0_Introduction/simpleVoteIntrinsics | simpleVoteInt
 simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | fail-compile | | identifier "printf" is undefined
 matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile |  | linkage specification is not allowed
 asyncAPI | cpp | 0_Introduction/asyncAPI | asyncAPI.cu | unverified | | 
-reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | incomplete type "double []" is not allowed
+reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | refused: template launch of reduce0<T> depends on the template parameter T of the enclosing template
 shfl_scan | cpp | 2_Concepts_and_Techniques/shfl_scan | shfl_scan.cu | fail-compile |  | namespace "cooperative_groups" has no member "tiled_partition"
 scan | cpp | 2_Concepts_and_Techniques/scan | main.cpp scan.cu scan_gold.cpp | fail-compile |  | refused: aggregate type "uint4": struct and union values by value are not lowered yet
 histogram | cpp | 2_Concepts_and_Techniques/histogram | main.cpp histogram64.cu histogram256.cu histogram_gold.cpp | fail-compile |  | refused: aggregate type "uint4": struct and union values by value are not lowered yet
 scalarProd | cpp | 2_Concepts_and_Techniques/scalarProd | scalarProd.cu scalarProd_cpu.cpp | fail-compile |  | name must be a namespace name
 threadFenceReduction | cpp | 2_Concepts_and_Techniques/threadFenceReduction | threadFenceReduction.cu | fail-compile |  | device variable
 simpleCooperativeGroups | cpp | 0_Introduction/simpleCooperativeGroups | simpleCooperativeGroups.cu | fail-compile | | identifier "thread_group" is undefined
-MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | incomplete type "unsigned int []" is not allowed
+MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | refused: template launch of computeValue<Real> depends on the template parameter Real of the enclosing template
 pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile |  | refused: statement goto
 hotspot | rodinia | hotspot | hotspot.cu | fail-compile |  | refused: statement goto
 nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile |  | identifier "__syncthreads" is undefined
