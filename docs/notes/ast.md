@@ -228,18 +228,31 @@ lower reverse rep byte char find match gmatch gsub format`), table (`insert remo
 
 Not there: coroutines, `goto` and labels, to-be-closed variables (`<close>`), `__gc`, `__close` and weak tables (`__mode` is
 ignored), `utf8`, `string.pack` / `unpack`, `io`, `os`, `package`, `debug`, `dofile`, `loadfile`, a custom environment for
-`load`, a function as the argument of `load`. Differences that a program can see: tail calls are ordinary calls (they count
-against the depth limit); `table.sort` is a merge sort (stable, never reads out of bounds whatever the comparison does);
+`load`, a function as the argument of `load`. Differences that a program can see: `table.sort` is a merge sort (stable, never reads out of bounds whatever the comparison does);
 the order of `pairs` over a hash part differs from Lua's (the array part first, then the nodes); `xpcall`'s handler runs
 after the stack has unwound, so it cannot inspect it; `collectgarbage("step")` always collects and returns `true`; the
 table functions treat a table without a metatable raw and respect `__index` / `__newindex` / `__len` otherwise; `==` on two
 host objects of one class compares the C++ objects; strings compare as bytes.
-Three more that the tests of the inlining ran into (they exist with inlining on and off, and are worked around in the programs
-with a comment, not fixed): an error message about a value read with a variable key (`t[k].x` with `t[k]` nil) says `(field '?')`
-in Lua and has no name here; the errors of integer division and modulo by zero have no position in Lua when an operand is a
-string (the string metamethod raises them) and have one here; and because a tail call is an ordinary call, `error(msg, 2)` in a
-function that was called as `return f()` blames the function that made the tail call here; in Lua that function's frame is
-gone, and level 2 is its caller.
+
+**Tail calls** are proper ones. `return f(args)` (a call that is the whole of a `return`, a method call included, not `return (f(x))`)
+marks its call node (`Node::tail`, set by `ReturnNode`, kept by every rewrite of the node). When the callee turns out to be a script
+function (or an object whose `__call` is one), the node does not call it: it moves the callee and its arguments to the bottom of the
+running frame (`tail_closure`) and returns; `call_closure` sees `Frame::tail_cl` after the body returned and runs the new function in
+the same `Frame`, in a loop, so a chain of tail calls takes neither C++ stack nor interpreter stack nor depth, and the caller is gone
+from the frame chain: `error(msg, 2)` blames the caller of the function that made the tail call, as in Lua, and a traceback says
+`(...tail calls...)` after the entry of a frame that was entered that way. A native callee is called as usual (Lua keeps the caller's
+frame for those too). The tier is asked about the callee again each time round the loop, like for a call. Two consequences for
+the inliner: a tail site is never inlined (the inlined frame would sit above the caller's), and a callee whose body has a `return f(x)`
+is not a candidate (a clone cannot replace its frame); both are decided in `nfcast_inline.inc` and `CallUninit` / `MethodTab`.
+Native code made by the tier recurses in C: a tail recursion deeper than the depth limit bails out of it, and the interpreter then
+runs it in constant stack.
+
+An error message about a value read with a computed key (`t[k].x` with `t[k]` nil) says `(field '?')` as Lua's does, `t[1]` says
+`(field 'integer index')`; and the errors of integer division and modulo by zero when an operand is a string have no position, like
+Lua's (the string metamethod raises them). What is still different in error messages: a `<const>` local used as a key
+(`local k <const> = "a"; t[k].x`) is a compile-time constant for Lua's compiler, which names it (`field 'a'`), and a variable here.
+A numeric `for` loop follows Lua's `forprep` with a NaN: a float loop whose start or limit is NaN runs its body once, an integer loop
+with a NaN limit does not run when it counts up and counts down to `math.mininteger` otherwise.
 
 ## Tiering
 
@@ -395,8 +408,8 @@ call), `tier_bailouts` (calls of a function that has compiled code that neverthe
 - Entering native code from the interpreter costs about as much as a call of a small function in the interpreter (the checks, a
   `setjmp`): a tiny kernel called from a loop in the interpreter gains little (ten million calls of
   `x * 2 + 1`, 0.54 s instead of 0.53 s); what gains is a kernel with a loop or a recursion inside, which runs inside one entry.
-- The engine's own deviations from Lua are the tier's: a float `for` loop with a NaN start does not run its body (Lua runs it once),
-  and an integer loop with a NaN limit and a negative step does not run (Lua counts down to `math.mininteger`).
+- A `for` loop with a NaN start or limit does what Lua's `forprep` does (the body of a float loop runs once; `nfcr_forlimit` takes a
+  NaN limit as Lua does), in the generated code as in the interpreter.
 - It needs POSIX (`fork`, `dlopen`), the nfcxx driver and the `lib/ast` directory next to it at run time.
 
 ## Verification
@@ -482,9 +495,9 @@ call), `tier_bailouts` (calls of a function that has compiled code that neverthe
   operator, `if` / `while` / `repeat` / `for`, `break`, upvalues and globals that change type between calls, calls between functions,
   recursion, functions without a result, wrong and missing arguments) run by a real Lua 5.4.9 and by nfcast with every function
   compiled at its first call, output and error messages compared. On the final code: 24 seeds of 10 functions on the gcc back end (321 functions compiled, 1251 calls ran as native code) and 25 seeds on qbe (268 and 1224), no mismatch. It also found two differences between the engine and
-  Lua that have nothing to do with the tier (a float `for` loop whose start is NaN runs its body once in Lua and not at all here; an
-  integer loop with a NaN limit and a negative step counts down to `math.mininteger` in Lua and does not run here), which the
-  generator now stays away from.
+  Lua that have nothing to do with the tier (a float `for` loop whose start is NaN runs its body once in Lua and not at all; an
+  integer loop with a NaN limit and a negative step counts down to `math.mininteger` in Lua): both are fixed since, and the generator
+  only stays away from a computed limit in a loop that counts down (it would run to the smallest integer).
 - The tier test, the engine test and the programs of `tests/ast/cases` with the tier at threshold 1 and the collector stress, under
   AddressSanitizer and UBSan (host g++ for the engine, nfcxx for the generated code): no report.
 - Mutation checks on scratch copies of `nfcast_tier.cpp`: 21 mutants, each breaking one guard or one rule (the check of the callee, of the argument types, of the types of the free variables; the integer `//` by zero left to the interpreter; the depth limit; a `for` step of zero; the exact comparison of an integer with a float, in the generated code and in the shared header, for `<`, `<=` and `==` and for each order of the operands; the order in which a multiple assignment stores; the number type's zero divisor, conversion for bitwise operators, `>`, widening and result kind; the instances that widened types leave behind). The tier test fails for 20 of them (one by running into its `alarm`), and the golden kernels program differs for 13; the mutant of the equality of an integer and a float of either kind passed at first, which is why the test now has a grid of every comparison around 2^53 and 2^63 on such numbers. The one it does not notice: the hoisting of operands that can fail into temporaries is not needed by this toolchain, which evaluates operands left to right, so removing it changes nothing here; the check that would hang without it only has teeth on a C compiler that evaluates the other way.

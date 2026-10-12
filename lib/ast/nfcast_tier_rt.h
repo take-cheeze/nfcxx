@@ -123,9 +123,9 @@ static inline int nfcr_eq_if(nfcr_i64 a, double b) {  // a == b
 
 // ---- numeric for loops ----------------------------------------------------------------------------------------------------------
 // The limit of an integer loop (integer start and step) given as a float FL: clipped to an integer the way Lua does. Returns 0 when
-// the loop does not run at all (a NaN, or a limit beyond the range on the side the step moves away from).
+// the loop does not run at all (a limit beyond the range on the side the step moves away from). A NaN is treated like Lua does (it is
+// not positive): the limit is the smallest integer, so a loop that counts down runs to there and one that counts up does not run.
 static inline int nfcr_forlimit(double fl, nfcr_i64 step, nfcr_i64* out) {
-  if (fl != fl) return 0;
   double r = step < 0 ? ceil(fl) : floor(fl);
   if (r >= -9223372036854775808.0 && r < 9223372036854775808.0) {
     *out = (nfcr_i64)r;
