@@ -66,17 +66,32 @@ void tier_view(Node* n, TierView& v) {
   } else if (AssignLocal* al = dynamic_cast<AssignLocal*>(n)) {
     v.kind = TV::K_ASSIGN;
     v.slots.push_back(al->target_->slot);
+    v.tkinds.push_back(al->target_->cell ? TV::T_CELL : TV::T_LOCAL);
     if (al->target_->cell) v.captured = true;
     v.kids = {al->val_};
+  } else if (AssignUpval* au = dynamic_cast<AssignUpval*>(n)) {
+    v.kind = TV::K_ASSIGN;
+    v.slots.push_back(au->idx);
+    v.tkinds.push_back(TV::T_UPVAL);
+    v.captured = true;
+    v.kids = {au->val_};
   } else if (AssignMulti* am = dynamic_cast<AssignMulti*>(n)) {
     v.kind = TV::K_ASSIGN;
     for (Node* t : am->targets_) {
       LocalNode* tl = dynamic_cast<LocalNode*>(t);
-      if (!tl || tl->cell) {
-        v.captured = true;  // an upvalue, a global or an indexed target: not a kernel
-        v.slots.push_back(-1);
-      } else {
+      UpvalNode* tu = dynamic_cast<UpvalNode*>(t);
+      if (tl) {
         v.slots.push_back(tl->slot);
+        v.tkinds.push_back(tl->cell ? TV::T_CELL : TV::T_LOCAL);
+        if (tl->cell) v.captured = true;
+      } else if (tu) {
+        v.slots.push_back(tu->idx);
+        v.tkinds.push_back(TV::T_UPVAL);
+        v.captured = true;
+      } else {
+        v.slots.push_back(-1);  // a global or an indexed target: not a kernel
+        v.tkinds.push_back(TV::T_OTHER);
+        v.captured = true;
       }
     }
     v.kids = am->exprs_;

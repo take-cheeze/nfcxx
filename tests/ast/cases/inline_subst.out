@@ -1,0 +1,228 @@
+-- locals, constants and expressions as arguments
+1	9	4	103	6	8	2	b
+2	8	2	3	4	1	s	nil
+4	9	9	106	6	11	4	b
+3	8	4	6	4	2	s	nil
+9	9	16	109	6	14	6	b
+4	8	6	9	4	3	s	nil
+16	9	25	112	6	17	8	b
+5	8	8	12	4	4	s	nil
+25	9	36	115	6	20	5	b
+6	8	10	15	4	5	s	nil
+36	9	49	118	6	23	6	b
+7	8	12	18	4	6	s	nil
+49	9	64	121	6	26	7	b
+8	8	14	21	4	7	s	nil
+64	9	81	124	6	29	8	b
+9	8	16	24	4	8	s	nil
+-- the same local twice, one parameter assigned
+2	3	3
+4	6	5
+6	9	7
+8	12	9
+10	15	11
+12	18	13
+-- evaluation order with side effects between the pure arguments
+11	4	2	3
+2	8	4	5
+3	12	6	7
+4	16	8	9
+5	20	10	11
+6	24	12	13
+order	m1,m2,m3,m4,m5,m6
+-- a captured local is a cell: read at the call
+3	2
+5	3
+7	4
+9	5
+11	6
+13	7
+-- an upvalue the callee changes
+102	101
+302	201
+502	301
+702	401
+902	501
+1102	601
+-- errors name the parameter of the callee, whatever was passed
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to unm a 'string' with a 'string'
+false inline_subst.lua:55: attempt to perform arithmetic on a table value (local 'v')
+false inline_subst.lua:56: attempt to index a nil value (local 't')
+true nil
+false inline_subst.lua:56: attempt to index a number value (local 't')
+false inline_subst.lua:57: attempt to call a nil value (local 'f')
+false inline_subst.lua:57: attempt to call a number value (local 'f')
+false inline_subst.lua:57: attempt to call a table value (local 'f')
+false inline_subst.lua:58: attempt to concatenate a nil value (local 'a')
+false inline_subst.lua:58: attempt to concatenate a table value (local 'b')
+true 12
+false inline_subst.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+false inline_subst.lua:13: attempt to mul a 'string' with a 'string'
+false inline_subst.lua:13: attempt to perform arithmetic on a boolean value (local 'x')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to unm a 'string' with a 'string'
+false inline_subst.lua:55: attempt to perform arithmetic on a table value (local 'v')
+false inline_subst.lua:56: attempt to index a nil value (local 't')
+true nil
+false inline_subst.lua:56: attempt to index a number value (local 't')
+false inline_subst.lua:57: attempt to call a nil value (local 'f')
+false inline_subst.lua:57: attempt to call a number value (local 'f')
+false inline_subst.lua:57: attempt to call a table value (local 'f')
+false inline_subst.lua:58: attempt to concatenate a nil value (local 'a')
+false inline_subst.lua:58: attempt to concatenate a table value (local 'b')
+true 12
+false inline_subst.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+false inline_subst.lua:13: attempt to mul a 'string' with a 'string'
+false inline_subst.lua:13: attempt to perform arithmetic on a boolean value (local 'x')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to unm a 'string' with a 'string'
+false inline_subst.lua:55: attempt to perform arithmetic on a table value (local 'v')
+false inline_subst.lua:56: attempt to index a nil value (local 't')
+true nil
+false inline_subst.lua:56: attempt to index a number value (local 't')
+false inline_subst.lua:57: attempt to call a nil value (local 'f')
+false inline_subst.lua:57: attempt to call a number value (local 'f')
+false inline_subst.lua:57: attempt to call a table value (local 'f')
+false inline_subst.lua:58: attempt to concatenate a nil value (local 'a')
+false inline_subst.lua:58: attempt to concatenate a table value (local 'b')
+true 12
+false inline_subst.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+false inline_subst.lua:13: attempt to mul a 'string' with a 'string'
+false inline_subst.lua:13: attempt to perform arithmetic on a boolean value (local 'x')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to unm a 'string' with a 'string'
+false inline_subst.lua:55: attempt to perform arithmetic on a table value (local 'v')
+false inline_subst.lua:56: attempt to index a nil value (local 't')
+true nil
+false inline_subst.lua:56: attempt to index a number value (local 't')
+false inline_subst.lua:57: attempt to call a nil value (local 'f')
+false inline_subst.lua:57: attempt to call a number value (local 'f')
+false inline_subst.lua:57: attempt to call a table value (local 'f')
+false inline_subst.lua:58: attempt to concatenate a nil value (local 'a')
+false inline_subst.lua:58: attempt to concatenate a table value (local 'b')
+true 12
+false inline_subst.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+false inline_subst.lua:13: attempt to mul a 'string' with a 'string'
+false inline_subst.lua:13: attempt to perform arithmetic on a boolean value (local 'x')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to unm a 'string' with a 'string'
+false inline_subst.lua:55: attempt to perform arithmetic on a table value (local 'v')
+false inline_subst.lua:56: attempt to index a nil value (local 't')
+true nil
+false inline_subst.lua:56: attempt to index a number value (local 't')
+false inline_subst.lua:57: attempt to call a nil value (local 'f')
+false inline_subst.lua:57: attempt to call a number value (local 'f')
+false inline_subst.lua:57: attempt to call a table value (local 'f')
+false inline_subst.lua:58: attempt to concatenate a nil value (local 'a')
+false inline_subst.lua:58: attempt to concatenate a table value (local 'b')
+true 12
+false inline_subst.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+false inline_subst.lua:13: attempt to mul a 'string' with a 'string'
+false inline_subst.lua:13: attempt to perform arithmetic on a boolean value (local 'x')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to perform arithmetic on a nil value (local 'v')
+false inline_subst.lua:55: attempt to unm a 'string' with a 'string'
+false inline_subst.lua:55: attempt to perform arithmetic on a table value (local 'v')
+false inline_subst.lua:56: attempt to index a nil value (local 't')
+true nil
+false inline_subst.lua:56: attempt to index a number value (local 't')
+false inline_subst.lua:57: attempt to call a nil value (local 'f')
+false inline_subst.lua:57: attempt to call a number value (local 'f')
+false inline_subst.lua:57: attempt to call a table value (local 'f')
+false inline_subst.lua:58: attempt to concatenate a nil value (local 'a')
+false inline_subst.lua:58: attempt to concatenate a table value (local 'b')
+true 12
+false inline_subst.lua:13: attempt to perform arithmetic on a nil value (local 'x')
+false inline_subst.lua:13: attempt to mul a 'string' with a 'string'
+false inline_subst.lua:13: attempt to perform arithmetic on a boolean value (local 'x')
+-- chains: a local passed down through several inlined bodies
+-8	28	4	3
+-4	28	6	4
+0	28	8	5
+4	28	10	6
+8	28	12	7
+12	28	14	8
+16	28	16	9
+20	28	18	10
+true nil
+false inline_subst.lua:75: attempt to index a nil value (local 'z')
+false inline_subst.lua:75: attempt to index a number value (local 'z')
+true nil
+false inline_subst.lua:75: attempt to index a nil value (local 'z')
+false inline_subst.lua:75: attempt to index a number value (local 'z')
+true nil
+false inline_subst.lua:75: attempt to index a nil value (local 'z')
+false inline_subst.lua:75: attempt to index a number value (local 'z')
+true nil
+false inline_subst.lua:75: attempt to index a nil value (local 'z')
+false inline_subst.lua:75: attempt to index a number value (local 'z')
+true nil
+false inline_subst.lua:75: attempt to index a nil value (local 'z')
+false inline_subst.lua:75: attempt to index a number value (local 'z')
+true nil
+false inline_subst.lua:75: attempt to index a nil value (local 'z')
+false inline_subst.lua:75: attempt to index a number value (local 'z')
+-- recursion with a substituted parameter
+13	5040	1
+21	40320	1
+34	362880	2
+55	3628800	3
+89	39916800	5
+144	479001600	8
+-- methods: arguments are locals and constants
+3	4	22	1	45	1
+4	5	23	2	45	2
+6	7	25	3	45	3
+8	9	27	4	45	4
+10	11	29	5	45	5
+12	13	31	6	45	6
+14	15	33	7	45	7
+16	17	35	8	45	8
+false inline_subst.lua:88: attempt to perform arithmetic on a nil value (local 'a')
+false inline_subst.lua:91: attempt to index a nil value (local 'o')
+false inline_subst.lua:88: attempt to perform arithmetic on a nil value (local 'a')
+false inline_subst.lua:91: attempt to index a nil value (local 'o')
+false inline_subst.lua:88: attempt to perform arithmetic on a nil value (local 'a')
+false inline_subst.lua:91: attempt to index a nil value (local 'o')
+false inline_subst.lua:88: attempt to perform arithmetic on a nil value (local 'a')
+false inline_subst.lua:91: attempt to index a nil value (local 'o')
+false inline_subst.lua:88: attempt to perform arithmetic on a nil value (local 'a')
+false inline_subst.lua:91: attempt to index a nil value (local 'o')
+false inline_subst.lua:88: attempt to perform arithmetic on a nil value (local 'a')
+false inline_subst.lua:91: attempt to index a nil value (local 'o')
+-- the site meets another function: the substituted values must reach it
+1	1	9
+1	2	135
+1	3	48
+1	4	45
+2	1	9
+2	2	135
+2	3	48
+2	4	45
+3	1	9
+3	2	135
+3	3	48
+3	4	45
+9k	7	none	nil
+9k	7	none	nil
+9k	7	none	nil
+9k	7	none	nil
+9k	7	none	nil
+9k	7	none	nil
+9k	7	none	nil
+9k	7	none	nil
+-- fewer and more arguments than parameters with pure arguments
+nil	1	1	1	1nilnilnil	11cnil	1234	nilnilnilnil
+nil	2	2	1	2nilnilnil	22cnil	2234	nilnilnilnil
+nil	3	3	1	3nilnilnil	33cnil	3234	nilnilnilnil
+nil	4	4	1	4nilnilnil	44cnil	4234	nilnilnilnil
+nil	5	5	1	5nilnilnil	55cnil	5234	nilnilnilnil
+nil	6	6	1	6nilnilnil	66cnil	6234	nilnilnilnil
+nil	7	7	1	7nilnilnil	77cnil	7234	nilnilnilnil
+nil	8	8	1	8nilnilnil	88cnil	8234	nilnilnilnil
