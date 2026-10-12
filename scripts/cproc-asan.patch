@@ -1,6 +1,20 @@
 --- a/qbe.c
 +++ b/qbe.c
-@@ -244,6 +244,47 @@
+@@ -97,6 +97,13 @@
+ 	struct block *start, *end;
+ 	struct map gotos;
+ 	unsigned lastid;
++	struct array asan;   /* -fsanitize=address: the stack objects with redzones (asanalloc), unpoisoned by funcret */
++};
++
++/* a stack object with redzones: the base of its allocation (an entry block temporary) and the allocation's size */
++struct asanobj {
++	struct value *base;
++	unsigned long long size;
+ };
+ 
+ static const int ptrclass = 'l';
+@@ -244,6 +251,56 @@
  	return inst;
  }
  
@@ -13,8 +27,9 @@
 +
 +static struct value *funcinst(struct func *f, int op, int class, struct value *arg0, struct value *arg1);
 +
++/* a call of the runtime function name with one or two pointer-sized arguments (b may be NULL) */
 +static void
-+asancheck(struct func *f, const char *name, struct value *addr)
++asancall(struct func *f, const char *name, struct value *a, struct value *b)
 +{
 +	struct value *fn;
 +	char *s;
@@ -26,7 +41,15 @@
 +	fn->u.name = s;
 +	fn->id = 0;
 +	funcinst(f, ICALL, 0, fn, NULL);
-+	funcinst(f, IARG, ptrclass, addr, NULL);
++	funcinst(f, IARG, ptrclass, a, NULL);
++	if (b)
++		funcinst(f, IARG, ptrclass, b, NULL);
++}
++
++static void
++asancheck(struct func *f, const char *name, struct value *addr)
++{
++	asancall(f, name, addr, NULL);
 +}
 +
 +static void
@@ -48,7 +71,7 @@
  static struct value *
  funcinst(struct func *f, int op, int class, struct value *arg0, struct value *arg1)
  {
-@@ -254,6 +295,8 @@
+@@ -254,6 +311,8 @@
  		b = mkblock("dead");
  		funclabel(f, b);
  	}
@@ -57,6 +80,81 @@
  	inst = mkinst(f, op, class, arg0, arg1);
  	arrayaddptr(&f->end->insts, inst);
  	return &inst->res;
+@@ -753,6 +812,36 @@
+ 	}
+ }
+ 
++/*
++-fsanitize=address: a stack object with a redzone of ASANRZ bytes on each side, allocated in the entry block. The object's
++size is rounded up to a granule (8 bytes) so the right redzone starts on one: the bytes between the size and the rounding
++are not covered. The object's whole allocation is unpoisoned on entry (poison left by a frame that longjmp left must not
++catch this object), the redzones are poisoned, and funcret unpoisons the allocation before the function returns.
++*/
++#define ASANRZ 32
++
++static void
++asanalloc(struct func *f, struct decl *d)
++{
++	struct block *end = f->end;
++	unsigned long long size8 = (d->type->size + 7) & ~7ULL, total = size8 + 2 * ASANRZ;
++	struct value *base, *obj, *right;
++	struct asanobj *o;
++
++	f->end = f->start;
++	base = funcinst(f, IALLOC16, ptrclass, mkintconst(total), NULL);
++	obj = funcinst(f, IADD, ptrclass, base, mkintconst(ASANRZ));
++	right = funcinst(f, IADD, ptrclass, obj, mkintconst(size8));
++	asancall(f, "__asan_unpoison_memory_region", base, mkintconst(total));
++	asancall(f, "__asan_poison_memory_region", base, mkintconst(ASANRZ));
++	asancall(f, "__asan_poison_memory_region", right, mkintconst(ASANRZ));
++	o = arrayadd(&f->asan, sizeof(*o));
++	o->base = base;
++	o->size = total;
++	d->value = obj;
++	f->end = end;
++}
++
+ static void
+ funcalloc(struct func *f, struct decl *d)
+ {
+@@ -764,6 +853,11 @@
+ 	assert(!d->type->incomplete);
+ 	calcvla(f, d->type);
+ 	end = f->end;
++	if (asanon && d->type->size && !(d->type->prop & PROPVM) && d->u.obj.align <= 16) {
++		asanalloc(f, d);
++		f->end = end;
++		return;
++	}
+ 	if (d->type->size) {
+ 		f->end = f->start;
+ 		v = mkintconst(d->type->size);
+@@ -911,6 +1005,7 @@
+ 	f->type = t;
+ 	f->start = f->end = mkblock("start");
+ 	f->lastid = 0;
++	f->asan = (struct array){0};
+ 	mapinit(&f->gotos, 8);
+ 	emittype(t->base);
+ 
+@@ -1014,10 +1109,17 @@
+ funcret(struct func *f, struct value *v)
+ {
+ 	struct block *b = f->end;
++	struct asanobj *o;
++	size_t i;
+ 
+ 	if (!b->jump.kind) {
+ 		if (v && f->type->base->kind == TYPEFLOAT16)
+ 			v = f16tosse(f, v);
++		/* -fsanitize=address: the redzones of this frame's objects are addressable again when the frame is left */
++		for (i = 0; i < f->asan.len / sizeof(*o); i++) {
++			o = (struct asanobj *)f->asan.val + i;
++			asancall(f, "__asan_unpoison_memory_region", o->base, mkintconst(o->size));
++		}
+ 		b->jump.kind = JUMP_RET;
+ 		b->jump.arg = v;
+ 	}
 --- a/main.c
 +++ b/main.c
 @@ -12,6 +12,8 @@

@@ -20,7 +20,7 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-2): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 3-6 below.
+Done (milestones 1-3): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 4-6 below.
 
 Options considered:
 
@@ -33,7 +33,7 @@ Options considered:
 Milestones:
 1. cproc flag `-fsanitize=address`; `scripts/qbe-cc` passes it and links with `-fsanitize=address`.
 2. Checks before every load, store and `funccopy`/blit; skip `va_arg`/`reg_save_area` and `__nfcxx_*` helpers. Tests: heap overflow, use after free, double free.
-3. Stack redzones: `funcalloc` allocates `size + 2*RZ` (RZ 32, align 16), poisons at entry, unpoisons at the single return path; alloca/VLA. Test: stack overflow.
+3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at entry, unpoisons in `funcret`. Still open: alloca/VLA.
 4. Global redzones in `emitdata` plus an `.init_array` constructor (the mechanism `qbe-prep.rb` already handles).
 5. Source lines: the report shows only function and PC unless cproc plumbs the `#line` info (call-site table).
 6. Optional: use after scope, fake stack (use after return), elision of checks on non-escaping locals.
