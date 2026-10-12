@@ -1,21 +1,19 @@
-// nfcuop::np: the numpy-like Tensor API. See nfcuop_np.hpp.
+// nfcuop::np: the numpy-like API over the ONNX-style graph. See nfcuop_np.hpp.
 #include "nfcuop_np.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 
 namespace nfcuop {
 namespace np {
 
 namespace {
 
-const double kLog2E = 1.4426950408889634074;
-const double kLn2 = 0.69314718055994530942;
-const double kPi = 3.14159265358979323846;
+using hir::Attribute;
 
-Graph& G(const Tensor& t) { return t.session().graph(); }
-Tensor wrap(const Tensor& like, const UOp* u) { return Tensor(&like.session(), u); }
+hir::Graph& H(const Tensor& t) { return t.session().graph(); }
 void check(const Tensor& t) {
   if (!t.valid()) throw Error("np: use of an empty Tensor");
 }
@@ -27,82 +25,44 @@ void same_session(const Tensor& a, const Tensor& b) {
 
 DType promote(DType a, DType b) { return a > b ? a : b; }  // the enum is ordered bool < int32 < int64 < float32 < float64
 
-Tensor cast_to(const Tensor& t, DType d) { return t.dtype() == d ? t : wrap(t, G(t).cast(t.uop(), d)); }
+Tensor node(const Tensor& like, const std::string& op, std::vector<int> in, std::vector<Attribute> attrs = {}) {
+  return Tensor(&like.session(), H(like).add_node(op, std::move(in), std::move(attrs)));
+}
+Tensor node(const std::string& op, const std::vector<Tensor>& in, std::vector<Attribute> attrs = {}) {
+  std::vector<int> ids;
+  for (const Tensor& t : in) ids.push_back(t.id());
+  return node(in.at(0), op, ids, std::move(attrs));
+}
+
+Tensor cast_to(const Tensor& t, DType d) {
+  if (t.dtype() == d) return t;
+  const Array* c = H(t).initializer(t.id());
+  if (c && c->data.size() <= 64) {  // a small constant is converted now, not by a Cast node in the model
+    Array conv(d, c->shape, {});
+    for (const Scalar& v : c->data) conv.data.push_back(is_float(v.dtype) ? Scalar::from_double(d, v.f) : Scalar::from_int(d, v.i));
+    return Tensor(&t.session(), t.session().constant(conv));
+  }
+  return node(t, "Cast", {t.id()}, {Attribute::Int("to", hir::onnx_dtype(d))});
+}
 Tensor to_float(const Tensor& t) { return is_float(t.dtype()) ? t : cast_to(t, DType::Float32); }
 
-// A constant tensor of t's shape and dtype (floats and ints; v is converted).
-const UOp* cst(const Tensor& like, double v) { return G(like).constant(Scalar::from_double(like.dtype(), v), like.shape()); }
-Tensor cst_t(const Tensor& like, double v) { return wrap(like, cst(like, v)); }
+// constants, shared by content
+Tensor int64_const(const Tensor& like, const std::vector<int64_t>& v) {
+  Array a;
+  a.dtype = DType::Int64;
+  a.shape = {static_cast<int64_t>(v.size())};
+  for (int64_t x : v) a.data.push_back(Scalar::from_int(DType::Int64, x));
+  return Tensor(&like.session(), like.session().constant(a));
+}
+Tensor scalar_const(const Tensor& like, DType d, double v) {
+  Array a(d, {}, {Scalar::from_double(d, v)});
+  return Tensor(&like.session(), like.session().constant(a));
+}
+Tensor sconst(const Tensor& like, double v) { return scalar_const(like, like.dtype(), v); }  // of like's dtype
 
 int64_t norm_axis(int64_t ax, int64_t nd) {
   if (ax < -nd || ax >= nd) throw Error("np: axis " + std::to_string(ax) + " is out of range for " + std::to_string(nd) + " dimensions");
   return ax < 0 ? ax + nd : ax;
-}
-
-Shape broadcast_shape(const Shape& a, const Shape& b) {
-  size_t n = std::max(a.size(), b.size());
-  Shape out(n);
-  for (size_t k = 0; k < n; k++) {
-    int64_t da = k < n - a.size() ? 1 : a[k - (n - a.size())];
-    int64_t db = k < n - b.size() ? 1 : b[k - (n - b.size())];
-    if (da != db && da != 1 && db != 1)
-      throw Error("np: shapes " + to_string(a) + " and " + to_string(b) + " cannot be broadcast together");
-    out[k] = da == 1 ? db : da;
-  }
-  return out;
-}
-
-Tensor bcast(const Tensor& t, const Shape& out) {
-  if (t.shape() == out) return t;
-  Shape padded(out.size() - t.shape().size(), 1);
-  padded.insert(padded.end(), t.shape().begin(), t.shape().end());
-  const UOp* u = t.uop();
-  if (padded != t.shape()) u = G(t).reshape(u, padded);
-  if (padded != out) u = G(t).expand(u, out);
-  return wrap(t, u);
-}
-
-// Both operands cast to `dt` and broadcast to one shape.
-void prepare(Tensor& a, Tensor& b, DType dt) {
-  same_session(a, b);
-  Shape out = broadcast_shape(a.shape(), b.shape());
-  a = bcast(cast_to(a, dt), out);
-  b = bcast(cast_to(b, dt), out);
-}
-
-Tensor arith(Op op, Tensor a, Tensor b) {  // Add Sub Mul Max: bool operands become int32
-  DType dt = promote(a.dtype(), b.dtype());
-  if (dt == DType::Bool) dt = DType::Int32;
-  prepare(a, b, dt);
-  return wrap(a, G(a).alu(op, {a.uop(), b.uop()}));
-}
-
-Tensor logic(Op op, Tensor a, Tensor b) {  // And Or Xor
-  prepare(a, b, promote(a.dtype(), b.dtype()));
-  return wrap(a, G(a).alu(op, {a.uop(), b.uop()}));
-}
-
-Tensor compare(Op op, Tensor a, Tensor b) {  // CmpLt CmpNe
-  prepare(a, b, promote(a.dtype(), b.dtype()));
-  return wrap(a, G(a).alu(op, {a.uop(), b.uop()}));
-}
-
-Tensor bool_not(const Tensor& x) {  // x is Bool
-  return wrap(x, G(x).alu(Op::Xor, {x.uop(), G(x).iconst(DType::Bool, 1, x.shape())}));
-}
-
-Tensor int_only(const Tensor& a, const Tensor& b, const char* what, DType& dt) {
-  dt = promote(a.dtype(), b.dtype());
-  if (dt == DType::Bool) dt = DType::Int32;
-  if (!is_int(dt)) throw Error(std::string("np: ") + what + " is defined for integers only");
-  return a;
-}
-
-// numpy's floor semantics from C's truncation: adjust when the remainder is nonzero and its sign differs from b's.
-Tensor floor_adjust(const Tensor& r, const Tensor& b) {
-  Tensor nonzero = compare(Op::CmpNe, r, cst_t(r, 0));
-  Tensor signs_differ = compare(Op::CmpNe, compare(Op::CmpLt, r, cst_t(r, 0)), compare(Op::CmpLt, b, cst_t(b, 0)));
-  return logic(Op::And, nonzero, signs_differ);
 }
 
 Axes all_axes(int64_t nd) {
@@ -120,19 +80,51 @@ Axes norm_axes(const Axes& axes, int64_t nd) {
   return out;
 }
 
-Tensor drop_axes(const Tensor& t, const Axes& axes) {  // t has those axes with size 1
-  Shape s;
-  for (int64_t k = 0; k < t.ndim(); k++)
-    if (!std::binary_search(axes.begin(), axes.end(), k)) s.push_back(t.shape()[k]);
-  return wrap(t, G(t).reshape(t.uop(), s));
+// Operands cast to `dt`; shapes are broadcast by the ONNX operators themselves.
+Tensor arith(const char* op, Tensor a, Tensor b) {  // Add Sub Mul Max Min: bool operands become int32
+  same_session(a, b);
+  DType dt = promote(a.dtype(), b.dtype());
+  if (dt == DType::Bool) dt = DType::Int32;
+  return node(op, {cast_to(a, dt), cast_to(b, dt)});
 }
 
-Tensor reduce(const Tensor& x, Op op, const Axes& axes_in, bool keepdims) {
+Tensor compare(const char* op, Tensor a, Tensor b) {
+  same_session(a, b);
+  DType dt = promote(a.dtype(), b.dtype());
+  if (dt == DType::Bool && std::string(op) != "Equal") dt = DType::Int32;
+  return node(op, {cast_to(a, dt), cast_to(b, dt)});
+}
+
+Tensor logic(const char* boolop, const char* intop, Tensor a, Tensor b) {
+  same_session(a, b);
+  DType dt = promote(a.dtype(), b.dtype());
+  if (is_float(dt)) throw Error(std::string("np: ") + boolop + " is not defined for floats");
+  return node(dt == DType::Bool ? boolop : intop, {cast_to(a, dt), cast_to(b, dt)});
+}
+
+Tensor bool_not(const Tensor& x) { return node(x, "Not", {x.id()}); }
+
+DType int_dtype(const Tensor& a, const Tensor& b, const char* what) {
+  DType dt = promote(a.dtype(), b.dtype());
+  if (dt == DType::Bool) dt = DType::Int32;
+  if (!is_int(dt)) throw Error(std::string("np: ") + what + " is defined for integers only");
+  return dt;
+}
+
+// numpy's floor semantics from C's truncation (ONNX Div and Mod with fmod=1 on ints): adjust when the remainder is
+// nonzero and its sign differs from the divisor's.
+Tensor floor_adjust(const Tensor& r, const Tensor& y) {
+  Tensor zero = sconst(r, 0);
+  Tensor nonzero = bool_not(node("Equal", {r, zero}));
+  Tensor differ = node("Xor", {node("Less", {r, zero}), node("Less", {y, sconst(y, 0)})});
+  return node("And", {nonzero, differ});
+}
+
+Tensor reduce(const char* op, const Tensor& x, const Axes& axes_in, bool keepdims) {
   check(x);
   Axes axes = norm_axes(axes_in, x.ndim());
-  const UOp* u = op == Op::ReduceSum ? G(x).reduce_sum(x.uop(), axes) : G(x).reduce_max(x.uop(), axes);
-  Tensor r = wrap(x, u);
-  return keepdims ? r : drop_axes(r, axes);
+  Tensor ax = int64_const(x, axes);
+  return node(op, {x, ax}, {Attribute::Int("keepdims", keepdims ? 1 : 0)});
 }
 
 std::string fmt(const Scalar& s) {
@@ -152,7 +144,7 @@ void print(const Array& a, size_t dim, size_t& pos, std::string& out) {
   if (dim == a.shape.size()) { out += fmt(a.data[pos++]); return; }
   out += "[";
   for (int64_t k = 0; k < a.shape[dim]; k++) {
-    if (k) out += dim + 1 == a.shape.size() ? ", " : ", ";
+    if (k) out += ", ";
     print(a, dim + 1, pos, out);
   }
   out += "]";
@@ -164,29 +156,24 @@ namespace detail {
 Tensor lift(const Tensor& like, double v, bool integral) {
   check(like);
   DType dt = integral ? DType::Int32 : (like.dtype() == DType::Float64 ? DType::Float64 : DType::Float32);
-  return Tensor(&like.session(), like.session().graph().constant(Scalar::from_double(dt, v)));
+  return scalar_const(like, dt, v);
 }
 }  // namespace detail
 
+const Shape& Tensor::shape() const {
+  if (!valid()) throw Error("np: use of an empty Tensor");
+  return s_->graph().value(id_).shape;
+}
+DType Tensor::dtype() const {
+  if (!valid()) throw Error("np: use of an empty Tensor");
+  return s_->graph().value(id_).dtype;
+}
+
 // ---- Tensor: shape ----
 
-Tensor Tensor::reshape(Shape shape) const {
+Tensor Tensor::reshape(Shape shape_) const {
   check(*this);
-  int64_t known = 1, unknown = -1;
-  for (size_t k = 0; k < shape.size(); k++) {
-    if (shape[k] == -1) {
-      if (unknown >= 0) throw Error("np: can only specify one unknown dimension");
-      unknown = static_cast<int64_t>(k);
-    } else {
-      if (shape[k] < 1) throw Error("np: bad dimension in reshape to " + to_string(shape));
-      known *= shape[k];
-    }
-  }
-  if (unknown >= 0) {
-    if (size() % known) throw Error("np: cannot reshape " + to_string(this->shape()) + " into " + to_string(shape));
-    shape[unknown] = size() / known;
-  }
-  return wrap(*this, G(*this).reshape(u_, shape));
+  return node(*this, "Reshape", {id_, int64_const(*this, shape_).id()});
 }
 
 Tensor Tensor::transpose() const {
@@ -199,44 +186,39 @@ Tensor Tensor::transpose(const Axes& perm) const {
   check(*this);
   Axes p;
   for (int64_t a : perm) p.push_back(norm_axis(a, ndim()));
-  return wrap(*this, G(*this).permute(u_, p));
+  return node(*this, "Transpose", {id_}, {Attribute::Ints("perm", p)});
 }
 
 Tensor Tensor::swapaxes(int64_t a, int64_t b) const {
   check(*this);
   Axes p = all_axes(ndim());
   std::swap(p[norm_axis(a, ndim())], p[norm_axis(b, ndim())]);
-  return wrap(*this, G(*this).permute(u_, p));
+  return transpose(p);
 }
 
 Tensor Tensor::squeeze() const {
   check(*this);
-  Shape s;
-  for (int64_t d : shape()) if (d != 1) s.push_back(d);
-  return wrap(*this, G(*this).reshape(u_, s));
+  return node(*this, "Squeeze", {id_});
 }
 
 Tensor Tensor::squeeze(int64_t axis) const {
   check(*this);
   axis = norm_axis(axis, ndim());
   if (shape()[axis] != 1) throw Error("np: cannot squeeze axis " + std::to_string(axis) + " of shape " + to_string(shape()));
-  Shape s = shape();
-  s.erase(s.begin() + axis);
-  return wrap(*this, G(*this).reshape(u_, s));
+  return node(*this, "Squeeze", {id_, int64_const(*this, {axis}).id()});
 }
 
 Tensor Tensor::expand_dims(int64_t axis) const {
   check(*this);
   axis = norm_axis(axis, ndim() + 1);
-  Shape s = shape();
-  s.insert(s.begin() + axis, 1);
-  return wrap(*this, G(*this).reshape(u_, s));
+  return node(*this, "Unsqueeze", {id_, int64_const(*this, {axis}).id()});
 }
 
 Tensor Tensor::broadcast_to(const Shape& shape_) const {
   check(*this);
-  if (shape_.size() < shape().size()) throw Error("np: cannot broadcast " + to_string(shape()) + " to " + to_string(shape_));
-  return bcast(*this, shape_);
+  Tensor r = node(*this, "Expand", {id_, int64_const(*this, shape_).id()});
+  if (r.shape() != shape_) throw Error("np: cannot broadcast " + to_string(shape()) + " to " + to_string(shape_));
+  return r;
 }
 
 Tensor Tensor::astype(DType d) const {
@@ -244,32 +226,51 @@ Tensor Tensor::astype(DType d) const {
   return cast_to(*this, d);
 }
 
+Tensor Tensor::slice(int64_t axis, int64_t start, int64_t stop, int64_t step) const {
+  check(*this);
+  axis = norm_axis(axis, ndim());
+  SliceIdx ix = slice_indices(shape()[axis], start != None, start, stop != None, stop, step);
+  if (ix.count < 1) throw Error("np: the slice of axis " + std::to_string(axis) + " is empty (tensors need at least one element per dimension)");
+  // concrete bounds; a negative step that runs to the front ends before index 0, which ONNX spells INT64_MIN
+  int64_t end = ix.start + ix.count * ix.step;
+  if (ix.step < 0 && end < 0) end = INT64_MIN;
+  return node(*this, "Slice", {id_, int64_const(*this, {ix.start}).id(), int64_const(*this, {end}).id(), int64_const(*this, {axis}).id(),
+                               int64_const(*this, {ix.step}).id()});
+}
+
+Tensor Tensor::at(int64_t index, int64_t axis) const {
+  check(*this);
+  axis = norm_axis(axis, ndim());
+  int64_t dim = shape()[axis];
+  if (index < -dim || index >= dim) throw Error("np: index " + std::to_string(index) + " is out of bounds for axis " + std::to_string(axis) + " with size " + std::to_string(dim));
+  if (index < 0) index += dim;
+  return slice(axis, index, index + 1).squeeze(axis);
+}
+
+Tensor Tensor::flip(int64_t axis) const { return slice(axis, None, None, -1); }
+
 // ---- Tensor: reductions ----
 
 Tensor Tensor::sum(const Axes& axes, bool keepdims) const {
   check(*this);
-  return reduce(dtype() == DType::Bool ? cast_to(*this, DType::Int32) : *this, Op::ReduceSum, axes, keepdims);
+  return reduce("ReduceSum", dtype() == DType::Bool ? cast_to(*this, DType::Int32) : *this, axes, keepdims);
 }
 
 Tensor Tensor::mean(const Axes& axes, bool keepdims) const {
   check(*this);
-  Tensor x = to_float(*this);
-  Tensor s = x.sum(axes, keepdims);
-  int64_t n = size() / numel(reduce(x, Op::ReduceSum, axes, true).shape());
-  return s / detail::lift(s, static_cast<double>(n), false);
+  return reduce("ReduceMean", to_float(*this), axes, keepdims);
 }
 
-Tensor Tensor::max(const Axes& axes, bool keepdims) const { return reduce(*this, Op::ReduceMax, axes, keepdims); }
+Tensor Tensor::max(const Axes& axes, bool keepdims) const {
+  check(*this);
+  if (dtype() != DType::Bool) return reduce("ReduceMax", *this, axes, keepdims);
+  return cast_to(reduce("ReduceMax", cast_to(*this, DType::Int32), axes, keepdims), DType::Bool);  // ONNX has no bool ReduceMax
+}
 
 Tensor Tensor::min(const Axes& axes, bool keepdims) const {
   check(*this);
-  // min(x) = -max(-x) for floats; for ints and bool use the complement, which cannot overflow
-  Tensor flipped = is_float(dtype()) ? -*this
-                   : dtype() == DType::Bool ? bool_not(*this)
-                                            : wrap(*this, G(*this).alu(Op::Xor, {u_, G(*this).iconst(dtype(), -1, shape())}));
-  Tensor m = reduce(flipped, Op::ReduceMax, axes, keepdims);
-  return is_float(dtype()) ? -m : dtype() == DType::Bool ? bool_not(m)
-                                                         : wrap(m, G(m).alu(Op::Xor, {m.uop(), G(m).iconst(dtype(), -1, m.shape())}));
+  if (dtype() != DType::Bool) return reduce("ReduceMin", *this, axes, keepdims);
+  return cast_to(reduce("ReduceMin", cast_to(*this, DType::Int32), axes, keepdims), DType::Bool);
 }
 
 Tensor Tensor::var(const Axes& axes, bool keepdims) const {
@@ -285,62 +286,54 @@ Tensor Tensor::stddev(const Axes& axes, bool keepdims) const { return var(axes, 
 
 Tensor Tensor::operator-() const {
   check(*this);
-  return wrap(*this, G(*this).neg(u_));
+  return node(*this, "Neg", {id_});
 }
 
 Tensor Tensor::abs() const {
   check(*this);
-  if (dtype() == DType::Bool) return *this;
-  return where(*this < cst_t(*this, 0), -*this, *this);
+  return dtype() == DType::Bool ? *this : node(*this, "Abs", {id_});
 }
 
-Tensor Tensor::sqrt() const { return wrap(*this, G(*this).sqrt(to_float(*this).uop())); }
-Tensor Tensor::sin() const { return wrap(*this, G(*this).sin(to_float(*this).uop())); }
-Tensor Tensor::cos() const {
-  Tensor x = to_float(*this);
-  return wrap(x, G(x).sin((x + cst_t(x, kPi / 2)).uop()));
-}
-Tensor Tensor::exp() const {
-  Tensor x = to_float(*this);
-  return wrap(x, G(x).exp2((x * cst_t(x, kLog2E)).uop()));
-}
-Tensor Tensor::log() const {
-  Tensor x = to_float(*this);
-  return wrap(x, G(x).log2(x.uop())) * cst_t(x, kLn2);
-}
-Tensor Tensor::tanh() const {  // 1 - 2 / (exp(2x) + 1): exact limits +-1 where exp overflows or vanishes
-  Tensor x = to_float(*this);
-  return cst_t(x, 1) - cst_t(x, 2) / ((x * cst_t(x, 2)).exp() + cst_t(x, 1));
-}
-Tensor Tensor::sigmoid() const {
-  Tensor x = to_float(*this);
-  return cst_t(x, 1) / ((-x).exp() + cst_t(x, 1));
-}
+Tensor Tensor::sqrt() const { Tensor x = to_float(*this); return node(x, "Sqrt", {x.id()}); }
+Tensor Tensor::exp() const { Tensor x = to_float(*this); return node(x, "Exp", {x.id()}); }
+Tensor Tensor::log() const { Tensor x = to_float(*this); return node(x, "Log", {x.id()}); }
+Tensor Tensor::sin() const { Tensor x = to_float(*this); return node(x, "Sin", {x.id()}); }
+Tensor Tensor::cos() const { Tensor x = to_float(*this); return node(x, "Cos", {x.id()}); }
+Tensor Tensor::tanh() const { Tensor x = to_float(*this); return node(x, "Tanh", {x.id()}); }
+Tensor Tensor::sigmoid() const { Tensor x = to_float(*this); return node(x, "Sigmoid", {x.id()}); }
+
 Tensor Tensor::relu() const {
   check(*this);
-  return maximum(*this, cst_t(*this, 0));
+  Tensor x = dtype() == DType::Bool ? cast_to(*this, DType::Int32) : *this;
+  return node(x, "Relu", {x.id()});
 }
+
 Tensor Tensor::square() const {
   check(*this);
   return *this * *this;
 }
+
 Tensor Tensor::reciprocal() const {
   Tensor x = to_float(*this);
-  return cst_t(x, 1) / x;
+  return sconst(x, 1) / x;
 }
+
 Tensor Tensor::softmax(int64_t axis) const {
   Tensor x = to_float(*this);
-  Tensor e = (x - x.max(Axes{axis}, true)).exp();
-  return e / e.sum(Axes{axis}, true);
+  norm_axis(axis, x.ndim());
+  return node(x, "Softmax", {x.id()}, {Attribute::Int("axis", axis)});
 }
+
 Tensor Tensor::log_softmax(int64_t axis) const {
   Tensor x = to_float(*this);
-  Tensor z = x - x.max(Axes{axis}, true);
-  return z - z.exp().sum(Axes{axis}, true).log();
+  norm_axis(axis, x.ndim());
+  return node(x, "LogSoftmax", {x.id()}, {Attribute::Int("axis", axis)});
 }
+
 Tensor Tensor::clip(double lo, double hi) const {
   check(*this);
-  return minimum(maximum(*this, detail::lift(*this, lo, false)), detail::lift(*this, hi, false));
+  Tensor x = is_float(dtype()) ? *this : cast_to(*this, DType::Float32);
+  return node(x, "Clip", {x.id(), sconst(x, lo).id(), sconst(x, hi).id()});
 }
 
 // ---- Tensor: realization ----
@@ -372,16 +365,30 @@ std::string Tensor::str() const {
 
 std::string Tensor::dump() const {
   check(*this);
-  return nfcuop::dump(u_);
+  return H(*this).str();
+}
+
+std::string Tensor::dump_uops() const {
+  check(*this);
+  return nfcuop::dump(s_->lower(*this).uop());
 }
 
 // ---- Session ----
 
-Tensor Session::from(const Array& a) {
-  std::string name = "_buf" + std::to_string(next_buf_++);
-  buffers_[name] = a;
-  return Tensor(this, g_.var(name, a.dtype, a.shape));
+int Session::constant(const Array& a) {
+  std::string key = std::string(name(a.dtype)) + to_string(a.shape) + ":";
+  if (a.data.size() <= 64) {  // small constants (scalars, shapes, axes) are shared
+    for (const Scalar& s : a.data) key += to_string(s) + ",";
+    auto it = consts_.find(key);
+    if (it != consts_.end()) return it->second;
+    int id = hir_.add_initializer("", a);
+    consts_[key] = id;
+    return id;
+  }
+  return hir_.add_initializer("", a);
 }
+
+Tensor Session::from(const Array& a) { return Tensor(this, constant(a)); }
 
 Tensor Session::array(const std::vector<double>& v, DType d) {
   return array(v, Shape{static_cast<int64_t>(v.size())}, d);
@@ -401,8 +408,13 @@ Tensor Session::array2d(const std::vector<std::vector<double>>& rows, DType d) {
   return array(flat, Shape{static_cast<int64_t>(rows.size()), static_cast<int64_t>(rows[0].size())}, d);
 }
 
-Tensor Session::scalar(double v, DType d) { return Tensor(this, g_.constant(Scalar::from_double(d, v))); }
-Tensor Session::full(const Shape& shape, double v, DType d) { return Tensor(this, g_.constant(Scalar::from_double(d, v), shape)); }
+Tensor Session::scalar(double v, DType d) { return from(Array(d, {}, {Scalar::from_double(d, v)})); }
+
+Tensor Session::full(const Shape& shape, double v, DType d) {
+  for (int64_t k : shape) if (k < 1) throw Error("np: every dimension must be at least 1, got " + to_string(shape));
+  Tensor s = scalar(v, d);
+  return shape.empty() ? s : s.broadcast_to(shape);  // an Expand of a scalar: small in the ONNX file
+}
 Tensor Session::zeros(const Shape& shape, DType d) { return full(shape, 0, d); }
 Tensor Session::ones(const Shape& shape, DType d) { return full(shape, 1, d); }
 
@@ -434,22 +446,31 @@ Tensor Session::eye(int64_t n, DType d) {
 
 Tensor Session::placeholder(const std::string& name, const Shape& shape, DType d) {
   if (name.compare(0, 4, "_buf") == 0) throw Error("np: placeholder names starting with _buf are reserved");
-  return Tensor(this, g_.var(name, d, shape));
+  return Tensor(this, hir_.add_input(name, d, shape));
 }
 
 Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) {
   check(t);
   if (&t.session() != this) throw Error("np: tensor of another session");
-  const UOp* root = optimize ? graph_rewrite(g_, symbolic(), t.uop()) : t.uop();
-  std::map<std::string, Array> env;
-  for (const UOp* u : toposort(root)) {
-    if (u->op != Op::Var) continue;
-    auto f = feeds.find(u->name);
-    if (f != feeds.end()) { env[u->name] = f->second; continue; }
-    auto b = buffers_.find(u->name);
-    if (b != buffers_.end()) env[u->name] = b->second;
+  ut_.optimize = optimize;
+  return ut_.eval(lowerer_.get(t.id()), feeds);
+}
+
+std::string Session::to_onnx(const std::vector<std::pair<std::string, Tensor>>& outputs, const std::string& graph_name) {
+  std::vector<int> ids;
+  for (const auto& o : outputs) {
+    check(o.second);
+    if (&o.second.session() != this) throw Error("np: tensor of another session");
+    ids.push_back(hir_.add_node("Identity", {o.second.id()}, {}, o.first));
   }
-  return evaluate_array(root, env);
+  return hir_.to_onnx(ids, graph_name);
+}
+
+void Session::save_onnx(const std::string& path, const std::vector<std::pair<std::string, Tensor>>& outputs) {
+  std::string bytes = to_onnx(outputs);
+  std::ofstream f(path, std::ios::binary);
+  f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  if (!f) throw Error("np: cannot write " + path);
 }
 
 // ---- functions ----
@@ -457,83 +478,84 @@ Array Session::eval(const Tensor& t, const std::map<std::string, Array>& feeds) 
 Tensor where(const Tensor& cond, const Tensor& a, const Tensor& b) {
   same_session(a, b);
   check(cond);
-  Tensor c = cond.dtype() == DType::Bool ? cond : cond != detail::lift(cond, 0, true);
+  Tensor c = cond.dtype() == DType::Bool ? cond : cast_to(cond, DType::Bool);
   DType dt = promote(a.dtype(), b.dtype());
-  Shape out = broadcast_shape(broadcast_shape(c.shape(), a.shape()), b.shape());
-  Tensor ca = bcast(cast_to(c, DType::Bool), out), x = bcast(cast_to(a, dt), out), y = bcast(cast_to(b, dt), out);
-  return wrap(ca, G(ca).where(ca.uop(), x.uop(), y.uop()));
+  return node("Where", {c, cast_to(a, dt), cast_to(b, dt)});
 }
 
-Tensor maximum(const Tensor& a, const Tensor& b) { return arith(Op::Max, a, b); }
-Tensor minimum(const Tensor& a, const Tensor& b) { return where(a < b, a, b); }
+Tensor maximum(const Tensor& a, const Tensor& b) { return arith("Max", a, b); }
+Tensor minimum(const Tensor& a, const Tensor& b) { return arith("Min", a, b); }
 
 Tensor floor_divide(const Tensor& a, const Tensor& b) {
-  DType dt;
-  int_only(a, b, "floor_divide", dt);
+  same_session(a, b);
+  DType dt = int_dtype(a, b, "floor_divide");
   Tensor x = cast_to(a, dt), y = cast_to(b, dt);
-  prepare(x, y, dt);
-  Tensor q = wrap(x, G(x).idiv(x.uop(), y.uop()));
-  Tensor r = wrap(x, G(x).mod(x.uop(), y.uop()));
-  return q - cast_to(floor_adjust(r, y), dt);
+  Tensor q = node("Div", {x, y});
+  Tensor r = node("Mod", {x, y}, {Attribute::Int("fmod", 1)});
+  return node("Sub", {q, cast_to(floor_adjust(r, y), dt)});
 }
 
 Tensor remainder(const Tensor& a, const Tensor& b) {
-  DType dt;
-  int_only(a, b, "remainder", dt);
-  Tensor x = cast_to(a, dt), y = cast_to(b, dt);
-  prepare(x, y, dt);
-  Tensor r = wrap(x, G(x).mod(x.uop(), y.uop()));
-  return r + where(floor_adjust(r, y), y, cst_t(y, 0));
+  same_session(a, b);
+  DType dt = int_dtype(a, b, "remainder");
+  return node("Mod", {cast_to(a, dt), cast_to(b, dt)}, {Attribute::Int("fmod", 0)});
 }
 
 Tensor logical_not(const Tensor& a) {
   check(a);
-  return a.dtype() == DType::Bool ? bool_not(a) : a == detail::lift(a, 0, true);
+  return a.dtype() == DType::Bool ? bool_not(a) : node("Equal", {a, sconst(a, 0)});
+}
+
+Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis) {
+  if (ts.empty()) throw Error("np: concatenate needs at least one tensor");
+  DType dt = ts[0].dtype();
+  for (const Tensor& t : ts) {
+    same_session(ts[0], t);
+    dt = promote(dt, t.dtype());
+  }
+  axis = norm_axis(axis, ts[0].ndim());
+  std::vector<Tensor> parts;
+  for (const Tensor& t : ts) parts.push_back(cast_to(t, dt));
+  return node("Concat", parts, {Attribute::Int("axis", axis)});
+}
+
+Tensor stack(const std::vector<Tensor>& ts, int64_t axis) {
+  if (ts.empty()) throw Error("np: stack needs at least one tensor");
+  axis = norm_axis(axis, ts[0].ndim() + 1);
+  std::vector<Tensor> parts;
+  for (const Tensor& t : ts) {
+    if (t.shape() != ts[0].shape()) throw Error("np: stack needs tensors of the same shape");
+    parts.push_back(t.expand_dims(axis));
+  }
+  return concatenate(parts, axis);
 }
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
   same_session(a, b);
-  if (a.ndim() < 1 || b.ndim() < 1) throw Error("np: matmul needs at least 1-D operands");
-  const bool a1 = a.ndim() == 1, b1 = b.ndim() == 1;
   DType dt = promote(a.dtype(), b.dtype());
   if (dt == DType::Bool) dt = DType::Int32;
-  Tensor A = cast_to(a1 ? a.reshape({1, a.shape()[0]}) : a, dt);
-  Tensor B = cast_to(b1 ? b.reshape({b.shape()[0], 1}) : b, dt);
-  const int64_t m = A.shape()[A.ndim() - 2], k = A.shape()[A.ndim() - 1];
-  const int64_t k2 = B.shape()[B.ndim() - 2], n = B.shape()[B.ndim() - 1];
-  if (k != k2) throw Error("np: matmul shapes " + to_string(a.shape()) + " and " + to_string(b.shape()) + " do not align");
-  Shape sa(A.shape().begin(), A.shape().end() - 2), sb(B.shape().begin(), B.shape().end() - 2);
-  sa.insert(sa.end(), {m, k, 1});
-  sb.insert(sb.end(), {1, k, n});
-  Tensor p = A.reshape(sa) * B.reshape(sb);              // batch..., m, k, n
-  Tensor s = p.sum(Axes{p.ndim() - 2});                  // batch..., m, n
-  Shape out(s.shape().begin(), s.shape().end());
-  if (b1) out.pop_back();
-  if (a1) out.erase(out.end() - (b1 ? 1 : 2));
-  return out.empty() ? s.reshape({}) : s.reshape(out);
+  return node("MatMul", {cast_to(a, dt), cast_to(b, dt)});
 }
 
-Tensor operator+(const Tensor& a, const Tensor& b) { return arith(Op::Add, a, b); }
-Tensor operator-(const Tensor& a, const Tensor& b) { return arith(Op::Sub, a, b); }
-Tensor operator*(const Tensor& a, const Tensor& b) { return arith(Op::Mul, a, b); }
+Tensor operator+(const Tensor& a, const Tensor& b) { return arith("Add", a, b); }
+Tensor operator-(const Tensor& a, const Tensor& b) { return arith("Sub", a, b); }
+Tensor operator*(const Tensor& a, const Tensor& b) { return arith("Mul", a, b); }
 Tensor operator/(const Tensor& a, const Tensor& b) {
   same_session(a, b);
   DType dt = promote(a.dtype(), b.dtype());
   if (!is_float(dt)) dt = DType::Float32;
-  Tensor x = a, y = b;
-  prepare(x, y, dt);
-  return wrap(x, G(x).fdiv(x.uop(), y.uop()));
+  return node("Div", {cast_to(a, dt), cast_to(b, dt)});
 }
 Tensor operator%(const Tensor& a, const Tensor& b) { return remainder(a, b); }
-Tensor operator<(const Tensor& a, const Tensor& b) { return compare(Op::CmpLt, a, b); }
-Tensor operator>(const Tensor& a, const Tensor& b) { return compare(Op::CmpLt, b, a); }
-Tensor operator!=(const Tensor& a, const Tensor& b) { return compare(Op::CmpNe, a, b); }
-Tensor operator==(const Tensor& a, const Tensor& b) { return bool_not(compare(Op::CmpNe, a, b)); }
-Tensor operator<=(const Tensor& a, const Tensor& b) { return logic(Op::Or, compare(Op::CmpLt, a, b), a == b); }
-Tensor operator>=(const Tensor& a, const Tensor& b) { return logic(Op::Or, compare(Op::CmpLt, b, a), a == b); }
-Tensor operator&(const Tensor& a, const Tensor& b) { return logic(Op::And, a, b); }
-Tensor operator|(const Tensor& a, const Tensor& b) { return logic(Op::Or, a, b); }
-Tensor operator^(const Tensor& a, const Tensor& b) { return logic(Op::Xor, a, b); }
+Tensor operator<(const Tensor& a, const Tensor& b) { return compare("Less", a, b); }
+Tensor operator>(const Tensor& a, const Tensor& b) { return compare("Greater", a, b); }
+Tensor operator<=(const Tensor& a, const Tensor& b) { return compare("LessOrEqual", a, b); }
+Tensor operator>=(const Tensor& a, const Tensor& b) { return compare("GreaterOrEqual", a, b); }
+Tensor operator==(const Tensor& a, const Tensor& b) { return compare("Equal", a, b); }
+Tensor operator!=(const Tensor& a, const Tensor& b) { return bool_not(compare("Equal", a, b)); }
+Tensor operator&(const Tensor& a, const Tensor& b) { return logic("And", "BitwiseAnd", a, b); }
+Tensor operator|(const Tensor& a, const Tensor& b) { return logic("Or", "BitwiseOr", a, b); }
+Tensor operator^(const Tensor& a, const Tensor& b) { return logic("Xor", "BitwiseXor", a, b); }
 
 }  // namespace np
 }  // namespace nfcuop

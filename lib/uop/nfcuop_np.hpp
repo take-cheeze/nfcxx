@@ -1,5 +1,6 @@
-// nfcuop::np: a numpy-like Tensor API over the UOp graph. Tensors are lazy: operations build nodes of a
-// Graph, and numpy()/item()/str() realize a tensor with the reference interpreter (after symbolic()).
+// nfcuop::np: the numpy-like user API. Operations build a high-level ONNX-style graph (nfcuop_hir.hpp); the graph can be
+// exported to an ONNX file before anything is lowered, and evaluating a tensor lowers the graph to UOps
+// (nfcuop_ut.hpp) and runs the reference interpreter. Tensors are lazy.
 //
 //   nfcuop::np::Session np;
 //   auto a = np.array({1, 2, 3, 4, 5, 6}, {2, 3});          // float32, shape (2, 3)
@@ -7,40 +8,46 @@
 //   auto c = (a * 2.0 + b).sum(/*axis=*/1);                  // broadcasting, like numpy
 //   std::cout << relu(matmul(a, a.T())).str() << "\n";       // [[14., 32.], [32., 77.]]
 //   auto x = np.placeholder("x", {2, 3});                    // an input bound when realized
-//   Array r = np.eval(x * x, {{"x", some_array}});
+//   auto y = softmax(matmul(x, w) + bias);                   // w, bias: tensors made with np.array
+//   Array r = np.eval(y, {{"x", some_array}});
+//   np.save_onnx("model.onnx", {{"y", y}});                  // the graph as ONNX, nothing lowered
 //
-// Differences from numpy, all deliberate: the dtype set is bool, int32, int64, float32, float64; promotion is the
-// larger of the two in that order (int64 + float32 is float32, an int scalar keeps an int tensor's dtype, a
-// float scalar makes an int tensor float32); `/` and the float functions of an int tensor compute in float32;
-// `%` and floor_divide follow numpy (the sign of the divisor) but only for ints; there is no indexing, slicing,
-// concatenation or random numbers yet (they need Shrink/Pad ops, a later stage). See docs/notes/uop.md.
+// How close this is to numpy, and where it differs on purpose, is in docs/notes/uop.md ("numpy compatibility").
+// In short: the dtypes are bool, int32, int64, float32, float64; promotion is the larger of the two in that order
+// (int64 + float32 is float32); `/` and the float functions of an int tensor compute in float32; `%` and
+// floor_divide follow numpy but only for ints; there are no empty tensors (every dimension is at least 1), no
+// views or in-place updates, no random numbers, and shapes are static.
 #pragma once
 #include <initializer_list>
 #include <map>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "nfcuop.hpp"
+#include "nfcuop_hir.hpp"
+#include "nfcuop_ut.hpp"
 
 namespace nfcuop {
 namespace np {
 
 class Session;
 using Axes = std::vector<int64_t>;  // negative axes count from the end, like numpy
+constexpr int64_t None = INT64_MIN;  // an omitted slice bound: t.slice(0, None, None, -1) is t[::-1]
 
 class Tensor {
  public:
   Tensor() {}
-  Tensor(Session* s, const UOp* u) : s_(s), u_(u) {}
-  bool valid() const { return u_ != nullptr; }
-  const UOp* uop() const { return u_; }
+  Tensor(Session* s, int id) : s_(s), id_(id) {}
+  bool valid() const { return s_ != nullptr && id_ >= 0; }
+  int id() const { return id_; }  // the value in the Session's hir::Graph
   Session& session() const { return *s_; }
 
-  const Shape& shape() const { return u_->shape; }
-  int64_t ndim() const { return static_cast<int64_t>(u_->shape.size()); }
-  int64_t size() const { return numel(u_->shape); }
-  DType dtype() const { return u_->dtype; }
+  const Shape& shape() const;
+  int64_t ndim() const { return static_cast<int64_t>(shape().size()); }
+  int64_t size() const { return numel(shape()); }
+  DType dtype() const;
 
   // shape
   Tensor reshape(Shape shape) const;  // one dimension may be -1
@@ -55,6 +62,10 @@ class Tensor {
   Tensor expand_dims(int64_t axis) const;
   Tensor broadcast_to(const Shape& shape) const;
   Tensor astype(DType d) const;
+  // a[start:stop:step] along one axis (None omits a bound); the result must keep at least one element
+  Tensor slice(int64_t axis, int64_t start, int64_t stop, int64_t step = 1) const;
+  Tensor at(int64_t index, int64_t axis = 0) const;  // a[index] along `axis`, dropping that axis
+  Tensor flip(int64_t axis = 0) const;
 
   // reductions: no axis means all of them; the result drops the reduced axes unless keepdims
   Tensor sum(const Axes& axes = {}, bool keepdims = false) const;
@@ -85,25 +96,25 @@ class Tensor {
   Tensor log_softmax(int64_t axis = -1) const;
   Tensor clip(double lo, double hi) const;
 
-  // realization (evaluates the graph)
+  // realization (lowers the graph to UOps and evaluates it)
   Array numpy() const;
   std::vector<double> tolist() const;  // flattened, row-major
   double item() const;                 // the only element
   std::string str() const;             // "[[1., 2.], [3., 4.]]"
-  std::string dump() const;            // the UOp graph, as nfcuop::dump
+  std::string dump() const;            // the Session's graph, as hir::Graph::str
+  std::string dump_uops() const;       // the UOp graph this tensor lowers to, as nfcuop::dump
 
  private:
   Session* s_ = nullptr;
-  const UOp* u_ = nullptr;
+  int id_ = -1;
 };
 
 // Owns the graph and the data of tensors made from arrays. Not copyable; tensors must not outlive it.
 class Session {
  public:
-  Session() {}
+  Session() : lowerer_(hir_, ut_) {}
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
-  Graph& graph() { return g_; }
 
   Tensor array(const std::vector<double>& v, DType d = DType::Float32);  // 1-D
   Tensor array(const std::vector<double>& v, const Shape& shape, DType d = DType::Float32);
@@ -119,14 +130,28 @@ class Session {
   Tensor eye(int64_t n, DType d = DType::Float32);
   Tensor placeholder(const std::string& name, const Shape& shape, DType d = DType::Float32);
 
-  // The value of `t`; `feeds` binds the placeholders it depends on. Runs symbolic() first when optimize is true.
+  // The value of `t`; `feeds` binds the placeholders it depends on. Runs symbolic() on the UOps first when optimize is true.
   Array eval(const Tensor& t, const std::map<std::string, Array>& feeds = {});
   bool optimize = true;
 
+  // The ONNX ModelProto (opset 18) computing the named tensors from the placeholders, as bytes; nothing is lowered.
+  // Each output gets an Identity node carrying its name. save_onnx writes the bytes to a file.
+  std::string to_onnx(const std::vector<std::pair<std::string, Tensor>>& outputs, const std::string& graph_name = "nfcuop");
+  void save_onnx(const std::string& path, const std::vector<std::pair<std::string, Tensor>>& outputs);
+
+  hir::Graph& graph() { return hir_; }
+  ut::Tensor lower(const Tensor& t) { return lowerer_.get(t.id()); }  // the UOp tensor of `t`
+  ut::Session& uop_session() { return ut_; }
+
+  // used by the operators; a constant of this content, shared
+  int constant(const Array& a);
+
  private:
-  Graph g_;
-  std::map<std::string, Array> buffers_;
-  int next_buf_ = 0;
+  hir::Graph hir_;
+  ut::Session ut_;
+  hir::Lowerer lowerer_;
+  std::map<std::string, int> consts_;
+  int next_tensor_ = 0;
 };
 
 // ---- functions ----
@@ -138,12 +163,15 @@ Tensor remainder(const Tensor& a, const Tensor& b);     // ints only; the sign o
 Tensor matmul(const Tensor& a, const Tensor& b);        // 1-D and N-D like numpy, batch dimensions broadcast
 inline Tensor dot(const Tensor& a, const Tensor& b) { return matmul(a, b); }  // for 1-D and 2-D operands
 Tensor logical_not(const Tensor& a);
+Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis = 0);
+Tensor stack(const std::vector<Tensor>& ts, int64_t axis = 0);
 inline Tensor relu(const Tensor& a) { return a.relu(); }
 inline Tensor exp(const Tensor& a) { return a.exp(); }
 inline Tensor log(const Tensor& a) { return a.log(); }
 inline Tensor sqrt(const Tensor& a) { return a.sqrt(); }
 inline Tensor tanh(const Tensor& a) { return a.tanh(); }
 inline Tensor abs(const Tensor& a) { return a.abs(); }
+inline Tensor softmax(const Tensor& a, int64_t axis = -1) { return a.softmax(axis); }
 
 Tensor operator+(const Tensor& a, const Tensor& b);
 Tensor operator-(const Tensor& a, const Tensor& b);

@@ -1,6 +1,8 @@
-// nfcuop stage 3 (shapes, movement ops, reductions, evaluate_array) and the numpy-like API of nfcuop_np.hpp.
+// The numpy-like API (nfcuop_np.hpp) over the ONNX-style graph: values, errors, slicing and concatenation, the graph, the
+// ONNX export (written to the directory given as argv[1], when there is one, for tests/uop/onnx_check.py).
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <string>
@@ -34,139 +36,6 @@ static bool near(const V& a, const V& b, double tol = 1e-5) {
 }
 #define CHECK_VALS(t, ...) do { V want_ = __VA_ARGS__; V got_ = (t).tolist(); CHECK(near(got_, want_)); \
     if (!near(got_, want_)) { std::printf("  got:"); for (double d : got_) std::printf(" %g", d); std::printf("\n"); } } while (0)
-
-static void stage3_ir() {
-  Graph g;
-  const DType f32 = DType::Float32, i32 = DType::Int32;
-  const UOp* x = g.var("x", f32, {2, 3});
-  // shape inference and errors
-  CHECK(g.reshape(x, {3, 2})->shape == (Shape{3, 2}));
-  CHECK(g.permute(x, {1, 0})->shape == (Shape{3, 2}));
-  CHECK(g.expand(g.reshape(x, {2, 1, 3}), {2, 4, 3})->shape == (Shape{2, 4, 3}));
-  CHECK(g.reduce_sum(x, {1})->shape == (Shape{2, 1}));
-  CHECK(g.reduce_max(x, {1, 0})->shape == (Shape{1, 1}));
-  CHECK(g.reduce_sum(x, {1, 0}) == g.reduce_sum(x, {0, 1}));  // axes are sorted before interning
-  CHECK(g.add(x, x)->shape == (Shape{2, 3}));
-  CHECK_THROWS(g.reshape(x, {4, 2}));
-  CHECK_THROWS(g.reshape(x, {0, 6}));
-  CHECK_THROWS(g.permute(x, {0, 0}));
-  CHECK_THROWS(g.permute(x, {0}));
-  CHECK_THROWS(g.expand(x, {4, 3}));
-  CHECK_THROWS(g.expand(x, {2, 3, 1}));
-  CHECK_THROWS(g.reduce_sum(x, {2}));
-  CHECK_THROWS(g.reduce_sum(x, {1, 1}));
-  CHECK_THROWS(g.add(x, g.var("y", f32, {3, 2})));
-  CHECK_THROWS(g.add(x, g.fconst(f32, 1)));  // no implicit broadcasting in the IR
-  CHECK_THROWS(g.var("z", f32, {2, 0}));
-  CHECK(g.var("x", f32, {2, 3}) == x);
-  CHECK(g.var("x", f32, {3, 2}) != x);
-  CHECK(g.fconst(f32, 1, {2}) != g.fconst(f32, 1, {3}));
-  // evaluation
-  Array in = Array::from_doubles(f32, {2, 3}, {1, 2, 3, 4, 5, 6});
-  std::map<std::string, Array> env{{"x", in}};
-  auto vals = [&](const UOp* u) { V v; for (const Scalar& s : evaluate_array(u, env).data) v.push_back(s.as_double()); return v; };
-  CHECK(vals(g.permute(x, {1, 0})) == (V{1, 4, 2, 5, 3, 6}));
-  CHECK(vals(g.reshape(x, {3, 2})) == (V{1, 2, 3, 4, 5, 6}));
-  CHECK(vals(g.expand(g.reshape(x, {2, 3, 1}), {2, 3, 2})) == (V{1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6}));
-  CHECK(vals(g.reduce_sum(x, {0})) == (V{5, 7, 9}));
-  CHECK(vals(g.reduce_sum(x, {1})) == (V{6, 15}));
-  CHECK(vals(g.reduce_max(x, {1})) == (V{3, 6}));
-  CHECK(vals(g.reduce_sum(x, {0, 1})) == (V{21}));
-  CHECK(vals(g.permute(g.reshape(x, {1, 2, 3}), {2, 0, 1})) == (V{1, 4, 2, 5, 3, 6}));
-  CHECK_THROWS(evaluate_array(x));  // unbound
-  CHECK_THROWS(evaluate_array(x, {{"x", Array::from_doubles(f32, {3, 2}, {1, 2, 3, 4, 5, 6})}}));  // wrong shape
-  CHECK_THROWS(evaluate(x, {}));    // a tensor: evaluate() is for scalars
-  // int sums wrap
-  const UOp* big = g.iconst(i32, 2147483647, {4});
-  CHECK(evaluate_array(g.reduce_sum(big, {0})).data[0] == Scalar::from_int(i32, -4));  // 4 * (2^31 - 1) mod 2^32
-  // dump shows shapes
-  const UOp* e = g.reduce_sum(g.permute(x, {1, 0}), {0});
-  const char* golden =
-      "  0 VAR    float32 () x shape=[2,3]\n"
-      "  1 PERMUTE float32 (0) shape=[3,2] perm=[1,0]\n"
-      "  2 REDUCE_SUM float32 (1) shape=[1,2] axes=[0]\n";
-  CHECK(dump(e) == golden);
-  if (dump(e) != golden) std::printf("%s", dump(e).c_str());
-}
-
-static void stage3_rewrite() {
-  Graph g;
-  const DType f32 = DType::Float32, i32 = DType::Int32;
-  auto rw = [&](const UOp* u) { return graph_rewrite(g, symbolic(), u); };
-  const UOp* x = g.var("x", f32, {2, 3});
-  CHECK(rw(g.reshape(x, {2, 3})) == x);
-  CHECK(rw(g.reshape(g.reshape(x, {3, 2}), {6})) == g.reshape(x, {6}));
-  CHECK(rw(g.reshape(g.reshape(x, {3, 2}), {2, 3})) == x);
-  CHECK(rw(g.permute(x, {0, 1})) == x);
-  CHECK(rw(g.permute(g.permute(x, {1, 0}), {1, 0})) == x);
-  const UOp* y = g.var("y", f32, {2, 3, 4});
-  CHECK(rw(g.permute(g.permute(y, {2, 0, 1}), {1, 2, 0})) == y);   // composes to the identity
-  CHECK(rw(g.permute(g.permute(y, {2, 0, 1}), {2, 1, 0})) == g.permute(y, {1, 0, 2}));
-  CHECK(rw(g.expand(g.reshape(x, {2, 3, 1}), {2, 3, 1})) == g.reshape(x, {2, 3, 1}));
-  CHECK(rw(g.reduce_sum(g.reshape(x, {2, 1, 3}), {1})) == g.reshape(x, {2, 1, 3}));  // reducing a size-1 axis
-  CHECK(rw(g.reduce_sum(x, {0})) == g.reduce_sum(x, {0}));
-  // constants stay constants under movement and reduction
-  CHECK(rw(g.expand(g.reshape(g.fconst(f32, 3), {}), {})) == g.fconst(f32, 3));
-  CHECK(rw(g.permute(g.fconst(f32, 3, {2, 5}), {1, 0})) == g.fconst(f32, 3, {5, 2}));
-  CHECK(rw(g.reshape(g.fconst(f32, 3, {2, 5}), {10})) == g.fconst(f32, 3, {10}));
-  CHECK(rw(g.reduce_max(g.fconst(f32, 3, {2, 5}), {0})) == g.fconst(f32, 3, {1, 5}));
-  CHECK(rw(g.reduce_sum(g.iconst(i32, 3, {2, 5}), {0, 1})) == g.iconst(i32, 30, {1, 1}));
-  CHECK(rw(g.reduce_sum(g.fconst(f32, 3, {2, 5}), {0})) == g.reduce_sum(g.fconst(f32, 3, {2, 5}), {0}));  // float sums round
-  // the scalar rules work on tensors, and keep the shape
-  CHECK(rw(g.add(x, g.fconst(f32, 0, {2, 3}))) == x);
-  CHECK(rw(g.mul(g.fconst(f32, 2, {2, 3}), g.fconst(f32, 4, {2, 3}))) == g.fconst(f32, 8, {2, 3}));
-  const UOp* k = g.var("k", i32, {4, 2});
-  CHECK(rw(g.sub(k, k)) == g.iconst(i32, 0, {4, 2}));
-  CHECK(rw(g.mul(k, g.iconst(i32, 0, {4, 2}))) == g.iconst(i32, 0, {4, 2}));
-  CHECK(rw(g.cmplt(k, k)) == g.iconst(DType::Bool, 0, {4, 2}));
-  CHECK(rw(g.add(g.add(k, g.iconst(i32, 1, {4, 2})), g.iconst(i32, 2, {4, 2}))) == g.add(k, g.iconst(i32, 3, {4, 2})));
-  CHECK(rw(g.where(g.iconst(DType::Bool, 1, {4, 2}), k, g.neg(k))) == k);
-
-  // differential: random movement/reduction/elementwise chains evaluate the same before and after symbolic()
-  unsigned long long seed = 777;
-  auto rnd = [&](unsigned n) { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return static_cast<unsigned>((seed >> 33) % n); };
-  const UOp* a = g.var("a", i32, {2, 3, 2});
-  std::vector<int> data(12);
-  Array arr;
-  arr.dtype = i32;
-  arr.shape = {2, 3, 2};
-  int compared = 0;
-  for (int t = 0; t < 300; t++) {
-    const UOp* e = a;
-    for (int step = 0; step < 6; step++) {
-      switch (rnd(9)) {
-        case 0: {
-          size_t r = e->shape.size();
-          Shape perm;
-          for (size_t k2 = 0; k2 < r; k2++) perm.push_back(static_cast<int64_t>(rnd(2) ? (k2 + 1) % r : r - 1 - k2));
-          std::vector<bool> seen(r, false);
-          bool ok = true;
-          for (int64_t q : perm) { ok = ok && !seen[q]; seen[q] = true; }
-          if (ok) e = g.permute(e, perm);
-          break;
-        }
-        case 1: { int64_t n = numel(e->shape); e = g.reshape(g.reshape(e, {n}), {1, n}); break; }
-        case 2: { Shape ax{static_cast<int64_t>(rnd(static_cast<unsigned>(e->shape.size())))}; e = g.reduce_sum(e, ax); break; }
-        case 3: { Shape ax{static_cast<int64_t>(rnd(static_cast<unsigned>(e->shape.size())))}; e = g.reduce_max(e, ax); break; }
-        case 4: e = g.add(e, g.iconst(i32, static_cast<int>(rnd(3)), e->shape)); break;
-        case 5: e = g.mul(e, g.iconst(i32, static_cast<int>(rnd(3)) - 1, e->shape)); break;
-        case 6: e = g.sub(e, e); e = g.add(e, g.neg(e)); break;
-        case 7: { Shape s = e->shape; if (s.back() == 1) { s.back() = 3; e = g.expand(e, s); } break; }
-        default: e = g.where(g.cmplt(e, g.iconst(i32, 2, e->shape)), e, g.neg(e)); break;
-      }
-    }
-    const UOp* s = rw(e);
-    CHECK(rw(s) == s);
-    for (int trial = 0; trial < 3; trial++) {
-      arr.data.clear();
-      for (int k2 = 0; k2 < 12; k2++) arr.data.push_back(Scalar::from_int(i32, static_cast<int>(rnd(9)) - 4));
-      Array want = evaluate_array(e, {{"a", arr}}), got = evaluate_array(s, {{"a", arr}});
-      compared++;
-      CHECK(want.shape == got.shape && want.data == got.data);
-    }
-  }
-  std::printf("  tensor differential: %d comparisons\n", compared);
-}
 
 static void numpy_api() {
   Session np;
@@ -297,9 +166,9 @@ static void numpy_api() {
   CHECK(matmul(np.array({1, 2}, i32), np.array({3, 4}, i32)).item() == 11);
 
   // laziness, placeholders, optimization on and off
-  size_t before = np.graph().size();
+  size_t before = np.graph().num_values();
   Tensor lazy = (a * 2 + 1).sum();
-  CHECK(np.graph().size() > before);
+  CHECK(np.graph().num_values() > before);
   Tensor ph = np.placeholder("input", {2, 3});
   Tensor f = (ph * ph).sum(1);
   Array fed = Array::from_doubles(f32, {2, 3}, {1, 2, 3, 4, 5, 6});
@@ -313,17 +182,197 @@ static void numpy_api() {
   CHECK(raw == lazy.item() && raw == 2 * 21 + 6);
   // x + 0 and x * 1 vanish from the graph that is evaluated
   Tensor plain = (a + 0) * 1;
-  CHECK(graph_rewrite(np.graph(), symbolic(), plain.uop()) == a.uop());
+  CHECK(graph_rewrite(np.uop_session().graph(), symbolic(), np.lower(plain).uop()) == np.lower(a).uop());
   Session other;
   CHECK_THROWS(a + other.scalar(1));
   CHECK_THROWS(Tensor().numpy());
   CHECK(!a.dump().empty());
 }
 
-int main() {
-  stage3_ir();
-  stage3_rewrite();
+
+static void slicing_and_concat() {
+  Session np;
+  const DType i32 = DType::Int32, f64 = DType::Float64;
+  Tensor m = np.arange(24).reshape({2, 3, 4});
+  CHECK(m.slice(2, 1, 3).shape() == (Shape{2, 3, 2}));
+  CHECK(m.slice(2, 1, 3).tolist()[0] == 1 && m.slice(2, 1, 3).tolist()[2] == 5);
+  CHECK(m.slice(1, 1, None).shape() == (Shape{2, 2, 4}) && m.slice(1, None, 2).shape() == (Shape{2, 2, 4}));
+  CHECK(m.slice(2, None, None, 2).str() == m.slice(2, 0, 4, 2).str() && m.slice(2, None, None, 2).shape() == (Shape{2, 3, 2}));
+  CHECK(near(m.slice(2, None, None, 2).slice(0, 1, 2).slice(1, 0, 1).tolist(), {12, 14}));
+  CHECK(near(m.slice(2, None, None, 3).slice(0, 0, 1).slice(1, 0, 1).tolist(), {0, 3}));
+  CHECK(near(m.slice(2, None, None, -1).slice(0, 0, 1).slice(1, 0, 1).tolist(), {3, 2, 1, 0}));
+  CHECK(near(m.slice(2, -1, None, -2).slice(0, 0, 1).slice(1, 0, 1).tolist(), {3, 1}));
+  CHECK(near(m.slice(2, 3, 0, -1).slice(0, 0, 1).slice(1, 0, 1).tolist(), {3, 2, 1}));
+  CHECK(near(m.slice(2, -3, -1).slice(0, 0, 1).slice(1, 0, 1).tolist(), {1, 2}));
+  CHECK(m.slice(0, -1, None).shape() == (Shape{1, 3, 4}) && m.slice(0, -1, None).tolist()[0] == 12);
+  CHECK(m.slice(-1, 100, None, -1).shape() == (Shape{2, 3, 4}));  // out of range bounds clamp, like Python
+  CHECK_THROWS(m.slice(2, 3, 1));        // empty
+  CHECK_THROWS(m.slice(2, 5, None));     // empty
+  CHECK_THROWS(m.slice(3, 0, 1));        // bad axis
+  CHECK_THROWS(m.slice(2, 0, 3, 0));     // step 0
+  CHECK(m.at(1).shape() == (Shape{3, 4}) && m.at(1).tolist()[0] == 12 && m.at(-1).tolist()[0] == 12);
+  CHECK(m.at(2, 1).shape() == (Shape{2, 4}) && m.at(2, 1).tolist()[1] == 9);
+  CHECK(m.at(-1, 2).shape() == (Shape{2, 3}) && m.at(-1, 2).tolist()[0] == 3);
+  CHECK_THROWS(m.at(2));
+  CHECK_THROWS(m.at(-3));
+  CHECK(np.arange(4).flip().str() == "[3., 2., 1., 0.]" && m.flip(1).tolist()[0] == 8);
+  // a chain of slices and arithmetic
+  Tensor row = np.arange(10);
+  CHECK((row.slice(0, 1, None) - row.slice(0, None, -1)).sum().item() == 9);  // differences of neighbours
+  // concatenate and stack
+  Tensor a = np.array({1, 2, 3, 4, 5, 6}, {2, 3}), b = a * 10;
+  CHECK(concatenate({a, b}, 0).shape() == (Shape{4, 3}) && concatenate({a, b}, 1).shape() == (Shape{2, 6}));
+  CHECK(concatenate({a, b}, 1).str() == "[[1., 2., 3., 10., 20., 30.], [4., 5., 6., 40., 50., 60.]]");
+  CHECK(concatenate({a, b, a}, -1).shape() == (Shape{2, 9}));
+  CHECK(concatenate({a}, 0).str() == a.str());
+  CHECK(concatenate({np.array({1, 2}, i32), np.array({0.5}, f64)}).dtype() == f64);
+  CHECK(concatenate({np.array({1, 2}, i32), np.array({3}, i32)}).str() == "[1, 2, 3]");
+  CHECK_THROWS(concatenate({a, a.T()}, 0));
+  CHECK_THROWS(concatenate({}, 0));
+  CHECK_THROWS(concatenate({a, np.arange(3)}, 0));
+  CHECK(stack({a, b}).shape() == (Shape{2, 2, 3}) && stack({a, b}, 2).shape() == (Shape{2, 3, 2}) && stack({a, b}, -1).shape() == (Shape{2, 3, 2}));
+  CHECK(stack({np.arange(2), np.arange(2) + 5}).str() == "[[0., 1.], [5., 6.]]");
+  CHECK(near(stack({a, b}, 2).tolist(), V{1, 10, 2, 20, 3, 30, 4, 40, 5, 50, 6, 60}));
+  CHECK_THROWS(stack({a, a.T()}));
+  // -0.0 survives a concatenation (the lowering must not add zeros)
+  Tensor nz = np.array({-0.0, 1.0});
+  CHECK(std::signbit(concatenate({nz, nz}).numpy().data[0].f));
+}
+
+static void graph_and_onnx(const std::string& dir) {
+  const DType i32 = DType::Int32;
+  Session np;
+  Tensor x = np.placeholder("x", {2, 3});
+  Tensor w = np.array({1, 0, 0, 1, 1, 1}, {3, 2});
+  Tensor bias = np.array({0.5, -0.5});
+  Tensor y = softmax(matmul(x, w) + bias);
+  // the high-level graph has ONNX operators, not UOps
+  std::string g = y.dump();
+  CHECK(g.find("MatMul") != std::string::npos && g.find("Softmax") != std::string::npos && g.find("Add") != std::string::npos);
+  CHECK(g.find("input %x : float32[2,3]") != std::string::npos);
+  CHECK(y.shape() == (Shape{2, 2}) && y.dtype() == DType::Float32);
+  // constants are shared
+  size_t before = np.graph().nodes().size();
+  Tensor t2 = (y * 2 + y * 2);
+  CHECK(np.graph().nodes().size() == before + 3);
+  // lowering happens on demand: before eval nothing was lowered; afterwards the UOps exist
+  Array fed = Array::from_doubles(DType::Float32, {2, 3}, {1, 2, 3, 4, 5, 6});
+  Array r = np.eval(y, {{"x", fed}});
+  CHECK(r.shape == (Shape{2, 2}));
+  CHECK(std::fabs(r.data[0].f + r.data[1].f - 1) < 1e-6);
+  CHECK(!y.dump_uops().empty());
+  // export
+  std::string onnx = np.to_onnx({{"y", y}});
+  CHECK(onnx.size() > 50);
+  CHECK(static_cast<unsigned char>(onnx[0]) == 0x08 && static_cast<unsigned char>(onnx[1]) == 8);  // ir_version = 8
+  CHECK(onnx.find("MatMul") != std::string::npos && onnx.find("Softmax") != std::string::npos && onnx.find("nfcuop") != std::string::npos);
+  CHECK(onnx.find("Identity") != std::string::npos);   // the named output
+  std::string only_t2 = np.to_onnx({{"t2", t2}});
+  CHECK(only_t2.find("Softmax") != std::string::npos);  // t2 depends on y
+  Session np2;
+  Tensor lone = np2.placeholder("p", {2}) + 1;
+  std::string small = np2.to_onnx({{"q", lone}});
+  CHECK(small.find("Softmax") == std::string::npos && small.find("\x01p") != std::string::npos);
+  CHECK_THROWS(np.to_onnx({}));
+  CHECK_THROWS(np.to_onnx({{"y", y}, {"y", y}}));            // the same output name twice
+  CHECK(!np.to_onnx({{"w2", w}}).empty());                  // an initializer is passed through Identity
+  // hir errors
+  hir::Graph hg;
+  int a = hg.add_input("a", DType::Float32, {2, 3});
+  int i = hg.add_input("i", DType::Int32, {2, 3});
+  CHECK_THROWS(hg.add_node("Add", {a, i}));                  // ONNX has no implicit conversion
+  CHECK_THROWS(hg.add_node("Sqrt", {i}));
+  CHECK_THROWS(hg.add_node("Nonsense", {a}));
+  CHECK_THROWS(hg.add_node("Reshape", {a, a}));              // the shape must be an initializer
+  CHECK_THROWS(hg.add_input("a", DType::Float32, {1}));      // duplicate name
+  CHECK_THROWS(hg.add_node("MatMul", {a, a}));
+  CHECK_THROWS(hg.add_node("Softmax", {i}));
+  int s = hg.add_node("Add", {a, a});
+  CHECK(hg.value(s).shape == (Shape{2, 3}) && hg.producer(s) == 0 && hg.producer(a) == -1);
+
+  if (!dir.empty()) {
+    // models for tests/uop/onnx_check.py: onnxruntime must compute what the UOp interpreter computes
+    struct Case { std::string name; Session s; std::map<std::string, Tensor> out; std::map<std::string, Array> feeds; };
+    auto write = [&](const std::string& path, const std::string& bytes) { std::ofstream f(path, std::ios::binary); f.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); };
+    auto jarr = [](const Array& a) {
+      std::string o = "{\"dtype\":\"" + std::string(name(a.dtype)) + "\",\"shape\":[";
+      for (size_t k = 0; k < a.shape.size(); k++) o += (k ? "," : "") + std::to_string(a.shape[k]);
+      o += "],\"data\":[";
+      for (size_t k = 0; k < a.data.size(); k++) {
+        char buf[64];
+        if (is_float(a.dtype)) std::snprintf(buf, sizeof buf, "%.17g", a.data[k].f);
+        else std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(a.data[k].i));
+        std::string num = buf;
+        if (num == "nan" || num == "-nan") num = "null"; else if (num == "inf") num = "1e999"; else if (num == "-inf") num = "-1e999";
+        o += (k ? "," : "") + num;
+      }
+      return o + "]}";
+    };
+    auto emit = [&](const std::string& name, Session& s, const std::vector<std::pair<std::string, Tensor>>& outs, const std::map<std::string, Array>& feeds) {
+      write(dir + "/" + name + ".onnx", s.to_onnx(outs));
+      std::string j = "{\"inputs\":{";
+      bool first = true;
+      for (const auto& f : feeds) { j += (first ? "" : ",") + ("\"" + f.first + "\":" + jarr(f.second)); first = false; }
+      j += "},\"outputs\":{";
+      first = true;
+      for (const auto& o : outs) { j += (first ? "" : ",") + ("\"" + o.first + "\":" + jarr(s.eval(o.second, feeds))); first = false; }
+      write(dir + "/" + name + ".json", j + "}}");
+    };
+    Array fx = Array::from_doubles(DType::Float32, {2, 3}, {1, -2, 3, 4, -5, 6});
+    {  // an MLP
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3});
+      Tensor w1 = s.array({0.1, -0.2, 0.3, 0.4, 0.5, -0.6, 0.7, 0.8, -0.9, 1.0, 1.1, 1.2}, {3, 4});
+      Tensor b1 = s.array({0.1, 0.2, -0.3, 0.4});
+      Tensor w2 = s.array({1, -1, 0.5, 2, -0.5, 1, 0.25, 0.75}, {4, 2});
+      Tensor h = relu(matmul(x2, w1) + b1);
+      emit("mlp", s, {{"logits", matmul(h, w2)}, {"probs", softmax(matmul(h, w2))}}, {{"x", fx}});
+    }
+    {  // broadcasting arithmetic, scalars, comparisons and where
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3});
+      Tensor v = s.array({10, 20, 30});
+      emit("arith", s, {{"a", x2 * 2 + v}, {"b", (x2 - 1.5) / v}, {"c", where(x2 > 0, x2, -x2)}, {"d", (x2 >= 3) & (x2 != 4)}, {"e", maximum(x2, v - 25)}, {"f", x2.clip(-1, 3)}, {"g", x2.abs().sqrt()}}, {{"x", fx}});
+    }
+    {  // reductions and shape ops
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3});
+      Tensor t = x2.reshape({3, 2}).T();
+      emit("shape", s, {{"sum0", x2.sum(0)}, {"mean1", x2.mean(1, true)}, {"max", x2.max()}, {"min1", x2.min(1)}, {"var", x2.var(Axes{1})}, {"t", t}, {"sq", x2.expand_dims(0).squeeze(0)}, {"bc", x2.sum(1).broadcast_to({2, 2})}}, {{"x", fx}});
+    }
+    {  // integers: truncating Div, both Mod flavours, the numpy floor forms
+      Session s;
+      Tensor n = s.placeholder("n", {4}, i32), d = s.placeholder("d", {4}, i32);
+      Array an = Array::from_doubles(i32, {4}, {-7, 7, -7, 7}), ad = Array::from_doubles(i32, {4}, {2, -2, -2, 2});
+      emit("ints", s, {{"floordiv", floor_divide(n, d)}, {"mod", n % d}, {"sum", n + d}, {"mul", n * d}, {"cmp", n < d}, {"cast", n.astype(DType::Float32) / 2}}, {{"n", an}, {"d", ad}});
+    }
+    {  // math
+      Session s;
+      Tensor x2 = s.placeholder("x", {5});
+      Array av = Array::from_doubles(DType::Float32, {5}, {-2, -0.5, 0.25, 0.5, 2});
+      emit("math", s, {{"exp", x2.exp()}, {"log", (x2.abs() + 1).log()}, {"sin", x2.sin()}, {"cos", x2.cos()}, {"tanh", x2.tanh()}, {"sigmoid", x2.sigmoid()}, {"lsm", x2.log_softmax(0)}}, {{"x", av}});
+    }
+    {  // slicing and concatenation
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3, 4});
+      Array am = Array::from_doubles(DType::Float32, {2, 3, 4}, [] { V v; for (int k = 0; k < 24; k++) v.push_back(k * 0.5); return v; }());
+      emit("slice", s, {{"a", x2.slice(2, 1, 3)}, {"b", x2.slice(2, None, None, 2)}, {"c", x2.slice(2, None, None, -1)}, {"d", x2.slice(1, -2, None)}, {"e", x2.at(1)}, {"f", concatenate({x2, x2 * 2}, 1)}, {"g", stack({x2.at(0), x2.at(1)}, 2)}}, {{"x", am}});
+    }
+    {  // matmul variants
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3, 4});
+      Tensor w3 = s.array([] { V v; for (int k = 0; k < 8; k++) v.push_back(k - 3.5); return v; }(), {4, 2});
+      Tensor vec = s.array({1, 2, 3, 4});
+      Array am = Array::from_doubles(DType::Float32, {2, 3, 4}, [] { V v; for (int k = 0; k < 24; k++) v.push_back(k * 0.25 - 2); return v; }());
+      emit("matmul", s, {{"batch", matmul(x2, w3)}, {"vec", matmul(x2, vec)}, {"gram", matmul(x2, x2.transpose({0, 2, 1}))}, {"dot", matmul(vec, vec)}}, {{"x", am}});
+    }
+  }
+}
+
+int main(int argc, char** argv) {
   numpy_api();
+  slicing_and_concat();
+  graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);
   return 0;

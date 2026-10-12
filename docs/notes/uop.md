@@ -1,23 +1,37 @@
-# nfcuop: a UOp IR (`lib/uop`)
+# nfcuop: a UOp IR, an ONNX-style graph and a numpy-like API (`lib/uop`)
 
 A small version of tinygrad's `UOp`: one IR whose nodes are immutable and hash-consed, optimized by pattern-matching
-rewrites. The plan is to grow it, stage by stage, from a scalar core to tensor graphs, lowering to loops, C rendering
-through `nfceval`, and bindings for the `nfcpoly` languages, so that a graph can be built from Ruby, Lua, Python,
-JavaScript or Go and optimized and run by the C++ side. Stages 1 to 3 exist (stage 3 with a numpy-like user API); the rest is a plan.
+rewrites. Above it sits a high-level graph in the shape of ONNX, and above that a numpy-like Tensor API:
+
+```
+np::Tensor  (numpy-style C++ API, lazy)                 nfcuop_np.hpp
+   │ builds
+hir::Graph  (ONNX opset 18 operators, static shapes)    nfcuop_hir.hpp ──► to_onnx(): a .onnx file, nothing lowered
+   │ hir::Lowerer (nfcuop_lower.cpp)
+ut::Tensor  (numpy-style builder directly on UOps)      nfcuop_ut.hpp
+   │ builds
+Graph / UOp (hash-consed nodes, shapes, rewrites)       nfcuop.hpp
+   │ evaluate_array()  (reference interpreter)   later: lowering to loops, C rendering, nfcpoly bindings
+```
+
+The plan is to grow it stage by stage so that a graph can be built from C++ (and later Ruby, Lua, Python, JavaScript and Go
+through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 3 and the ONNX layer exist; the rest is a plan.
 
 | Stage | Content | State |
 | --- | --- | --- |
 | 1 | `Graph` with interning, `DType`/`Scalar`, type-checked ALU ops, `toposort`, `dump`, the interpreter `evaluate` | done |
 | 2 | `Pat`, `PatternMatcher`, `graph_rewrite`, `symbolic()` | done |
-| 3 | Tensors: shapes, movement ops (reshape, permute, expand), reductions, `evaluate_array`; the numpy-like `np::Tensor` API with broadcasting | done (no slicing, `Shrink`/`Pad` yet) |
-| 4 | Lowering to ranges and loads/stores, rendering C, compiling and running it through `nfceval` | not started |
+| 3 | Static shapes: movement ops (`Reshape Permute Expand Shrink Pad Flip`), reductions, `evaluate_array`; the UOp-level builder `ut::Tensor` with broadcasting, slicing, concatenation | done |
+| 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
+| 4 | Lowering UOps to loops (`RANGE`/`LOAD`/`STORE`), rendering C, compiling and running it through `nfceval` | not started |
 | 5 | `nfcpoly` bindings (`uop_poly.cpp`) and a cross-language test | not started |
-| 6 | Autodiff as a rewrite; ONNX import; a WebNN-style builder as a facade | not started |
+| 6 | Autodiff as a rewrite; ONNX **import** | not started |
+| 7 | Dynamic shapes (below) | not started |
 
-## Stage 1
+## Stage 1: the scalar core
 
-- `Graph` owns every node and interns them: building the same `(op, dtype, sources, value or name)` twice returns the
-  same `const UOp*`, so pointer equality is structural equality. This is what lets a pattern name be used twice
+- `Graph` owns every node and interns them: building the same `(op, dtype, sources, value or name, shape, arg)` twice returns
+  the same `const UOp*`, so pointer equality is structural equality. This is what lets a pattern name be used twice
   ("both sources are the same node") and makes `graph_rewrite`'s memo table cheap. A node's `id` is its creation
   order; sources always have smaller ids.
 - Ops: `Const`, `Var`; `Neg Sqrt Exp2 Log2 Sin` (all but `Neg` float only); `Add Sub Mul Max`, `IDiv Mod` (ints),
@@ -30,10 +44,10 @@ JavaScript or Go and optimized and run by the C++ side. Stages 1 to 3 exist (sta
   NaN to 0.
 - `dump` prints one numbered line per node; it does not depend on addresses or ids, so tests compare it with a golden.
 
-## Stage 2
+## Stage 2: patterns and rewriting
 
 - `Pat::any`, `cvar` (any constant), `cval` (a constant with this value, any dtype) and `op(Op, {sources})` build a
-  pattern; `.named("x")`/a name argument captures the node, `with_dtype` constrains it, `ordered()` stops the
+  pattern; a name argument captures the node, `with_dtype` constrains it, `ordered()` stops the
   commutative matching (two sources are otherwise tried in both orders). `Pat::op(Op)` matches the op with any sources.
 - `PatternMatcher::add(pat, fn)`: the first rule whose pattern matches and whose function returns a node other than
   the input wins; a function returns `nullptr` to decline. `extend` appends another matcher's rules.
@@ -47,52 +61,134 @@ JavaScript or Go and optimized and run by the C++ side. Stages 1 to 3 exist (sta
   `x*0`, `x-x`, `x!=x` and the reassociation are skipped (they are wrong for inf and NaN, or change rounding), and
   `x+0 -> x` changes only the sign of a zero (`-0.0 + 0.0` is `+0.0`, the rule returns `-0.0`).
 
-## Stage 3: tensors and the numpy-like API
+## Stage 3: shapes, tensors, slicing
 
-- Every node has a `shape` (the empty shape is a scalar; every dimension is at least 1, so there are no empty tensors).
+- Every node has a `shape` (the empty shape is a scalar; every dimension is at least 1, so there are **no empty tensors**).
   `Var` and `Const` take a shape; a shaped `Const` is a tensor with every element equal. ALU ops need sources of
   the same shape: **the IR has no implicit broadcasting**; `expand` is explicit. `Reshape`, `Permute` (`arg` is the
   permutation, result dim `i` is source dim `perm[i]`), `Expand` (same rank, a dimension stays or grows from 1), `ReduceSum` and
-  `ReduceMax` (`arg` is the sorted axes, which stay with size 1 like tinygrad's `REDUCE_AXIS`) are checked at
-  construction and interned with shape and `arg`. `dump` appends `shape=[..]`, `perm=[..]`, `axes=[..]` for them.
+  `ReduceMax` (`arg` is the sorted axes, which stay with size 1 like tinygrad's `REDUCE_AXIS`), `Shrink` (`arg` is starts then
+  ends), `Pad` (before then after, zero or false fill) and `Flip` (axes) are checked at construction and interned with shape
+  and `arg`. `dump` appends `shape=[..]` and `perm=`, `axes=`, `starts=`/`ends=`, `before=`/`after=`.
 - `evaluate_array(root, {name: Array})` interprets tensor graphs (`Array`: dtype, shape, one `Scalar` per element). A
   reduction starts from the first element of each group and adds (or takes the max) in row-major order of the source.
   It is a reference, not fast.
-- `symbolic()` gained: a movement op of a `Const` is a `Const` of the new shape (so `x + 0`, folding and the other rules apply to
-  tensors); same-shape `Reshape`/`Expand`, the identity `Permute`, `Reshape(Reshape)`, `Expand(Expand)`, `Permute(Permute)` (composed),
-  and a reduction over axes of size 1 are removed; `ReduceMax` of a `Const` and an integer `ReduceSum` of a `Const` fold.
-  Folded constants and zero/true results take the node's shape.
-- **The numpy-like API** is `lib/uop/nfcuop_np.hpp`: a `Session` (owns the `Graph` and the data of tensors made from arrays) and
-  a lazy `Tensor`: `np.array`, `array2d`, `from`, `scalar`, `zeros`, `ones`, `full`, `arange`, `linspace`, `eye`, `placeholder`;
-  `reshape` (with `-1`), `transpose`, `T`, `swapaxes`, `flatten`, `squeeze`, `expand_dims`, `broadcast_to`, `astype`; `sum`, `mean`,
-  `max`, `min`, `var`, `stddev` (axes, negative axes, `keepdims`); `+ - * / % < > <= >= == != & | ^`, with numpy broadcasting and with scalars on
-  either side; `where`, `maximum`, `minimum`, `clip`, `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `square`,
-  `reciprocal`, `softmax`, `log_softmax`, `floor_divide`, `matmul`/`dot` (1-D and N-D, batch dimensions broadcast); `numpy()`,
-  `tolist()`, `item()`, `str()`, `dump()` realize or show a tensor. `Session::eval(t, feeds)` realizes with placeholders bound; with
-  `Session::optimize` (default) the graph goes through `symbolic()` first.
-  Everything is built from the ~20 IR ops: `exp` is `exp2(x*log2 e)`, `matmul` is reshape + broadcast `Mul` + `ReduceSum`, `min` is
-  `-max(-x)` (the complement for ints), `softmax` is `exp(x-max)/sum`.
-- Differences from numpy, on purpose: five dtypes (bool, int32, int64, float32, float64); promotion is the larger in that order, so
-  int64 + float32 is float32; `/` and the float functions of ints compute in float32 (numpy uses float64); a float scalar next to a
-  float64 tensor stays exact; `%` and `floor_divide` follow numpy's sign rules but only for ints; `==` and `!=` are elementwise
-  (they return a `Tensor`); `min`/`max` skip NaN. Not there: indexing and slicing, concatenate/stack/pad (need `Shrink`/`Pad` ops),
-  random numbers, `argmax`, `cumsum`, `prod`, `pow`, complex numbers, in-place updates, autodiff.
+- `symbolic()` also: a movement op of a `Const` is a `Const` of the new shape (so `x + 0`, folding and the other rules apply to
+  tensors); same-shape `Reshape`/`Expand`/`Shrink`/`Pad`, the identity `Permute`, `Reshape(Reshape)`, `Expand(Expand)`,
+  `Permute(Permute)` (composed), `Flip(Flip)`, a flip of size-1 axes and a reduction over size-1 axes are removed; `ReduceMax` of a
+  `Const` and an integer `ReduceSum` of a `Const` fold. Folded constants and zero/true results take the node's shape.
+- `ut::Tensor` (`nfcuop_ut.hpp`) is the numpy-style builder directly on UOps: broadcasting by `reshape`+`expand`, dtype promotion,
+  reductions, `matmul` as reshape + broadcast `Mul` + `ReduceSum`, `exp` as `exp2(x*log2 e)`, `min` as `-max(-x)` (the
+  complement for ints), `softmax` as `exp(x-max)/sum`. Slicing `a[start:stop:step]`: `slice_indices` (Python's rules) gives
+  the elements; the run `low..high` is a `Shrink`, a step above 1 is a `Pad` to a multiple of the step, a `Reshape` to
+  `(count, step)` and a `Shrink` to column 0, and a negative step is a `Flip`. `concatenate` pads every part to the full
+  length and selects with a padded Bool mask through `Where`, so it is exact (adding zeros would turn `-0.0` into `+0.0`).
+  This layer is also what `hir::Lowerer` calls; use it directly if you want UOps and no graph.
+
+## The ONNX-style graph (`nfcuop_hir.hpp`)
+
+- `hir::Graph` holds `Value`s (name, dtype, static shape) and `Node`s that are ONNX operators with ONNX's names, inputs and
+  attributes: `Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min And Or Xor BitwiseAnd
+  BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Transpose Reshape Squeeze Unsqueeze
+  Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat`. Operands that ONNX wants as constants
+  (Reshape's shape, the axes of Squeeze/Unsqueeze/Reduce*, Slice's bounds) are initializers; `add_node` infers dtype and shape
+  with ONNX's rules (numpy broadcasting, no implicit dtype conversion, `Div` on ints truncates, `Mod` with `fmod=0` follows the
+  divisor's sign) and throws `Error` for anything ONNX would reject.
+- `Graph::to_onnx(outputs)` writes a **ModelProto** (IR version 8, opset 18, producer `nfcuop`) with a hand-written protobuf
+  writer: only the nodes, initializers (raw little-endian data) and inputs the outputs depend on. No ONNX library is linked.
+  `tests/uop/onnx_check.py` loads every exported test model with `onnx.checker.check_model(full_check=True)` and runs it in
+  onnxruntime; the results equal the UOp interpreter's.
+- `hir::Lowerer` lowers values to `ut::Tensor`s, memoized: inputs become placeholders, initializers buffers (a uniform initializer
+  becomes a shaped `Const` so it folds), each operator calls the matching `ut` function. It checks that every lowered tensor has
+  the dtype and shape the graph inferred. An ONNX `Cast` float-to-int truncates like the interpreter's cast; for NaN and out-of-range
+  values ONNX leaves the result undefined while nfcuop saturates and maps NaN to 0.
+
+## The numpy-like API (`nfcuop_np.hpp`)
+
+`np::Session` owns the `hir::Graph`, a `ut::Session` and the `Lowerer`; `np::Tensor` is a lazy handle to a value of the graph.
+
+```cpp
+nfcuop::np::Session np;
+auto x = np.placeholder("x", {2, 3});
+auto w = np.array({1, 0, 0, 1, 1, 1}, {3, 2});
+auto y = softmax(matmul(x, w) + np.array({0.5, -0.5}));
+np.save_onnx("model.onnx", {{"y", y}});            // ONNX, nothing lowered
+Array r = np.eval(y, {{"x", some_array}});         // lowers to UOps, symbolic(), interpreter
+```
+
+Constructors: `array`, `array2d`, `from`, `scalar`, `zeros`, `ones`, `full`, `arange`, `linspace`, `eye`, `placeholder`. Shape: `reshape` (with
+`-1`), `transpose`, `T`, `swapaxes`, `flatten`, `squeeze`, `expand_dims`, `broadcast_to`, `astype`, `slice(axis, start, stop, step)` (`None`
+omits a bound), `at(index, axis)`, `flip`, `concatenate`, `stack`. Reductions `sum mean max min var stddev` (axes, negative axes, `keepdims`).
+Operators `+ - * / % < > <= >= == != & | ^` with numpy broadcasting and scalars on either side, `where maximum minimum clip abs sqrt exp log sin cos
+tanh sigmoid relu square reciprocal softmax log_softmax floor_divide matmul/dot logical_not`. Realization: `numpy() tolist() item() str()`;
+`dump()` shows the ONNX-style graph, `dump_uops()` the UOps it lowers to. Small constants (scalars, shapes, axes) are shared, and a cast of a
+small constant is folded into the constant, so `a * 2` is one `Mul` and one scalar initializer in the model.
+Mapping to ONNX: `sum` is `ReduceSum` with an axes input, `T` is `Transpose`, `a[::-1]` is `Slice` with step -1 (end `INT64_MIN`),
+`floor_divide` is `Div`, `Mod(fmod=1)`, a sign test and a `Sub`, `%` is `Mod(fmod=0)`, `!=` is `Not(Equal)`, `zeros((2,2))` is an `Expand` of a scalar.
+
+## numpy compatibility
+
+How much of the real numpy library is covered, measured: `tests/uop/np_compat.cpp` evaluates 100 expressions with nfcuop and
+`tests/uop/np_compat.py` the same 100 with numpy 2.5 (same inputs, float32 and int32 arrays). Result: **all 100 agree in shape
+and values** (rtol 1e-5); **90 agree in dtype too**; the other 10 differ only in dtype, and the script lists them: numpy's
+int64/float64 defaults (`arange(5)`, `linspace`, `eye`, `zeros`, `full`, int `sum`/`mean`, `bool.sum()`, `int / int`) against nfcuop's int32/float32. The
+expressions cover arithmetic with broadcasting and scalars, comparisons, logic, `where`, `clip`, reductions, shape ops, slicing and
+negative steps, `concatenate`/`stack`, `exp log sin cos tanh sigmoid softmax`, `matmul` (1-D, 2-D, batched) and the constructors.
+The script fails if a dtype difference appears that is not on its documented list, so the claim cannot drift.
+
+What is the same: broadcasting; negative axes; `keepdims`; Python slicing rules (clamping, negative bounds and steps); `//` and `%` on ints
+follow numpy's floor semantics (the sign of the divisor); `matmul` shape rules including 1-D operands and batch broadcasting; `reshape(-1)`;
+float32 arithmetic is rounded like numpy's float32.
+
+Where it differs, on purpose:
+
+- **dtypes**: bool, int32, int64, float32, float64 only. Promotion is the larger of the two in that order, so int64 + float32 is float32
+  (numpy: float64); an int scalar keeps an int tensor's dtype, a float scalar makes an int tensor float32; `/` and the float functions of an
+  int tensor compute in float32 (numpy: float64). The defaults are int32/float32 where numpy has int64/float64.
+- **no empty tensors**: every dimension is at least 1, so an empty slice, `arange(0)` or `zeros((0,))` is an error.
+- `==` and `!=` are elementwise and return a `Tensor` (as in numpy); `min`/`max` ignore NaN (numpy propagates it); `%` and `floor_divide` are for ints only.
+
+Not there (numpy features a numpy user would reach for next): fancy and boolean-mask indexing, `...` and `None` in an index (use `slice`, `at`,
+`expand_dims`), views (every result is a new tensor, nothing aliases), in-place updates, random numbers, `argmax`/`argsort`/`sort`/`unique`,
+`cumsum`/`cumprod`, `prod`, `pow` and `**`, `isnan`/`isinf`/`floor`/`ceil`/`round`, `tile`/`repeat`/`pad`/`roll`, `einsum`/`tensordot`/`outer`/`linalg`, complex
+and unsigned/small-int/float16 dtypes, strings and structured arrays, and anything that needs a data-dependent output shape. Most of these are
+a new ONNX operator in `hir` plus its lowering in `ut` (`Pow`, `Floor`, `IsNaN`, `CumSum`, `ArgMax`, `Gather`, `Tile`); data-dependent shapes
+(`unique`, boolean masks) are outside a static-shape design.
+A realistic target is "the subset of numpy that a model needs": array creation, broadcasting arithmetic, reductions, shape ops, slicing, matmul, the
+activation functions. Beyond that numpy is a much larger library, and a port would stay a subset.
+
+## Dynamic shapes (stage 7, after the static stages)
+
+The static design is deliberate: every shape is a known integer, so shape inference, rewriting and the interpreter are simple and exact. Dynamic
+shapes are added in two steps, without changing what the static path means:
+
+1. **Symbolic dimensions in `hir`** (ONNX `dim_param`, e.g. a batch size `N`): a `Dim` is an integer or a name; broadcasting and reshape rules
+   follow ONNX's (`N` against `N` or 1), and the exporter writes `dim_param`. Evaluation **specializes**: binding the symbols to integers
+   at `eval` time gives a static graph, lowered and cached per binding. This keeps UOps static and is enough for batch-size changes.
+2. **Symbolic shapes in UOps** (tinygrad's `Variable` in shapes): a bounded `Var` as a dimension, needed only when kernels should be compiled
+   once for all sizes. It touches shape inference, `Reshape`/`Expand` validation and the C renderer, so it waits for stage 4.
+
+Data-dependent shapes (`NonZero`, boolean masks) stay unsupported.
 
 ## Tests
 
-`tests/uop/run.sh` builds `tests/uop/test.cpp` with the three library files per back end (`UOP_HOST=1` builds it with
-the host g++ and the address and undefined-behaviour sanitizers). It checks interning, the type errors, the interpreter
-(wraparound, division, casts, float32 rounding, NaN), a golden `dump`, pattern matching and captures, about 50
-simplifications by pointer identity, custom rules and the step limit, and a differential run: 400 random integer
-expressions (with `Where`, casts through float, division by 1 to 3) are evaluated before and after `symbolic()` on 35
-variable assignments each; the results must be equal, and the rewrite must be idempotent. Replacing a rule by a wrong
-one (checked by hand with `x%1 -> x` and with the float reassociation) makes the run fail.
+`tests/uop/run.sh` builds and runs, per back end (`UOP_HOST=1`: with the host g++ and the address and undefined-behaviour sanitizers only):
 
-`tests/uop/test_np.cpp` adds shape inference and errors, `evaluate_array` on every movement op and reduction, tensor rewrite
-rules, a second differential run (300 random chains of permute, reshape, reduce, expand, `Where` and integer arithmetic over
-a `2x3x2` input, 900 comparisons before and after `symbolic()`), and about 150 checks of the numpy-like API against values worked out by hand
-(`matmul`, broadcasting, promotion, numpy's floor semantics, `softmax`, reductions, placeholders, laziness, errors).
+- `test.cpp`: interning, the type errors, the interpreter (wraparound, division, casts, float32 rounding, NaN), a golden `dump`, pattern
+  matching and captures, about 50 simplifications by pointer identity, custom rules and the step limit, and a differential run: 400 random integer
+  expressions are evaluated before and after `symbolic()` on 35 variable assignments each; the results must be equal, and rewriting twice changes nothing.
+- `test_ut.cpp`: shape inference and errors, `evaluate_array` on every movement op and reduction, the rewrite rules for them, a second differential run (300
+  random chains of permute, reshape, reduce, expand, shrink, pad, flip, `Where` and integer arithmetic, 900 comparisons), and the checks of the
+  UOp-level builder against values worked out by hand.
+- `test_np.cpp`: the same checks through the user-facing API and the graph (values, errors, `slice`/`at`/`flip`, `concatenate`/`stack`, constant sharing, the
+  ONNX export bytes), and the `hir` error cases. It writes seven models (an MLP, broadcasting arithmetic, reductions and shape ops, integer
+  division and modulo, math functions, slicing and concatenation, batched matmul) with the interpreter's results next to them.
+- `onnx_check.py`: every model through `onnx.checker` (with `full_check`, which re-infers all shapes) and onnxruntime, outputs compared with the interpreter's.
+- `np_compat.cpp`/`np_compat.py`: the 100-expression numpy comparison above.
 
-Not checked here: the nfcxx builds. The test and the library were written against the host g++ in an environment where
-the EDG submodule (`3rd/edg`) is not available, so `tests/uop/run.sh` has only run with `UOP_HOST=1`; CI runs it with
-nfcxx on both back ends. If cproc rejects something in the library, that is where it will show.
+Replacing a rule by a wrong one (checked by hand with `x%1 -> x` and with the float reassociation) makes the runs fail.
+The Python checks print SKIP when numpy, onnx or onnxruntime is missing.
+
+Not checked here: the nfcxx builds. The library and tests were written against the host g++ in an environment where the EDG submodule (`3rd/edg`) is not
+available, so `tests/uop/run.sh` has only run with `UOP_HOST=1`; CI runs it with nfcxx on both back ends. If cproc rejects something in the library
+(it uses `std::map`, `std::function`, `std::deque`, templates with `enable_if_t`), that is where it will show.

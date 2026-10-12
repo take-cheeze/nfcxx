@@ -79,7 +79,7 @@ PatternMatcher build() {
   pm.add(P::op(Op::Where, {P::any("c"), X(), X()}), keep_x, "where same");
 
   // Movement ops and reductions (stage 3). A constant tensor stays a Const under any of them.
-  for (Op op : {Op::Reshape, Op::Expand, Op::Permute})
+  for (Op op : {Op::Reshape, Op::Expand, Op::Permute, Op::Shrink, Op::Flip})
     pm.add(P::op(op, {P::cvar("c")}, "self"),
            [](Graph& g, const Match& m) { return g.constant(m["c"]->value, m["self"]->shape); }, "move const");
   pm.add(P::op(Op::ReduceMax, {P::cvar("c")}, "self"),
@@ -110,6 +110,19 @@ PatternMatcher build() {
     for (int64_t i : p2) c.push_back(p1[i]);
     return g.permute(m["x"], c);
   }, "permute permute");
+  pm.add(P::op(Op::Shrink, {X()}, "self"), [](Graph&, const Match& m) -> const UOp* {  // keeping everything
+    return m["x"]->shape == m["self"]->shape ? m["x"] : nullptr;
+  }, "shrink all");
+  pm.add(P::op(Op::Pad, {X()}, "self"), [](Graph&, const Match& m) -> const UOp* {  // padding by nothing
+    return m["x"]->shape == m["self"]->shape ? m["x"] : nullptr;
+  }, "pad none");
+  pm.add(P::op(Op::Flip, {X()}, "self"), [](Graph&, const Match& m) -> const UOp* {  // flipping no axis, or axes of size 1
+    for (int64_t ax : m["self"]->arg) if (m["x"]->shape[ax] != 1) return nullptr;
+    return m["x"];
+  }, "flip trivial");
+  pm.add(P::op(Op::Flip, {P::op(Op::Flip, {X()}, "inner")}, "self"), [](Graph&, const Match& m) -> const UOp* {
+    return m["inner"]->arg == m["self"]->arg ? m["x"] : nullptr;  // the same flip twice
+  }, "flip flip");
   for (Op op : {Op::ReduceSum, Op::ReduceMax})  // reducing axes of size 1 changes nothing
     pm.add(P::op(op, {X()}, "self"), [](Graph&, const Match& m) -> const UOp* {
       return m["x"]->shape == m["self"]->shape ? m["x"] : nullptr;

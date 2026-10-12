@@ -46,18 +46,24 @@ enum class Op : uint8_t {
   Cast,                                                // one source, the node's dtype is the target
   Reshape, Permute, Expand,                            // movement ops (stage 3): the node's shape is the result's
   ReduceSum, ReduceMax,                                // reductions over `arg` axes; the reduced axes stay, with size 1
+  Shrink, Pad, Flip,                                   // static slicing (arg = starts ++ ends), zero padding (arg = before ++ after), reversal over arg axes
   Count_
 };
 const char* name(Op op);
 int arity(Op op);  // number of sources (0 for leaves)
 bool is_alu(Op op);
 bool is_commutative(Op op);
-bool is_movement(Op op);  // Reshape, Permute, Expand
+bool is_movement(Op op);  // Reshape, Permute, Expand, Shrink, Pad, Flip
 bool is_reduce(Op op);    // ReduceSum, ReduceMax
 
 using Shape = std::vector<int64_t>;  // empty: a scalar; every dimension is at least 1
 int64_t numel(const Shape& s);
 std::string to_string(const Shape& s);  // "[2,3]"
+// Python's slice(start, stop, step).indices(dim) with the count of elements; has_* false means omitted. step != 0.
+struct SliceIdx {
+  int64_t start, step, count;  // elements start, start+step, ... (count of them; may be 0)
+};
+SliceIdx slice_indices(int64_t dim, bool has_start, int64_t start, bool has_stop, int64_t stop, int64_t step);
 
 // One value of one dtype. Bool and the ints keep the value in `i` (sign extended, already wrapped to the
 // width of the dtype); the floats keep it in `f` (a Float32 is always a value representable as float).
@@ -81,7 +87,7 @@ struct UOp {
   std::string name;  // Var only
   uint32_t id;       // creation order in its Graph; a source always has a smaller id
   Shape shape;       // of the value this node computes; the empty shape is a scalar
-  Shape arg;         // Permute: the permutation; ReduceSum/ReduceMax: the axes, ascending
+  Shape arg;         // Permute: the permutation; reductions and Flip: the axes, ascending; Shrink: starts then ends; Pad: before then after
   bool is_const() const { return op == Op::Const; }
 };
 
@@ -114,6 +120,11 @@ class Graph {
   const UOp* expand(const UOp* x, const Shape& shape);
   const UOp* reduce_sum(const UOp* x, const Shape& axes);
   const UOp* reduce_max(const UOp* x, const Shape& axes);
+  // shrink: keep [starts[i], ends[i]) of each dimension (non-empty). pad: add before[i] and after[i] zeros (false for
+  // bool) to each dimension. flip: reverse the given axes.
+  const UOp* shrink(const UOp* x, const Shape& starts, const Shape& ends);
+  const UOp* pad(const UOp* x, const Shape& before, const Shape& after);
+  const UOp* flip(const UOp* x, const Shape& axes);
   // The node `u` with other sources (u->op and u->dtype are kept; Const and Var are returned as they are).
   const UOp* rebuild(const UOp* u, std::vector<const UOp*> src);
 

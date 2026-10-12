@@ -25,7 +25,7 @@ bool is_int(DType d) { return d == DType::Int32 || d == DType::Int64; }
 
 static const char* const kOpNames[] = {"CONST", "VAR", "NEG", "SQRT", "EXP2", "LOG2", "SIN", "ADD", "SUB",
                                        "MUL",   "IDIV", "FDIV", "MOD", "MAX", "CMPLT", "CMPNE", "AND", "OR",
-                                       "XOR",   "WHERE", "CAST",  "RESHAPE", "PERMUTE", "EXPAND", "REDUCE_SUM", "REDUCE_MAX"};
+                                       "XOR",   "WHERE", "CAST",  "RESHAPE", "PERMUTE", "EXPAND", "REDUCE_SUM", "REDUCE_MAX", "SHRINK", "PAD", "FLIP"};
 static_assert(sizeof(kOpNames) / sizeof(kOpNames[0]) == static_cast<size_t>(Op::Count_), "op name table");
 const char* name(Op op) { return kOpNames[static_cast<int>(op)]; }
 
@@ -33,7 +33,8 @@ int arity(Op op) {
   switch (op) {
     case Op::Const: case Op::Var: return 0;
     case Op::Neg: case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: case Op::Cast:
-    case Op::Reshape: case Op::Permute: case Op::Expand: case Op::ReduceSum: case Op::ReduceMax: return 1;
+    case Op::Reshape: case Op::Permute: case Op::Expand: case Op::ReduceSum: case Op::ReduceMax:
+    case Op::Shrink: case Op::Pad: case Op::Flip: return 1;
     case Op::Where: return 3;
     default: return 2;
   }
@@ -46,7 +47,9 @@ bool is_commutative(Op op) {
   }
 }
 
-bool is_movement(Op op) { return op == Op::Reshape || op == Op::Permute || op == Op::Expand; }
+bool is_movement(Op op) {
+  return op == Op::Reshape || op == Op::Permute || op == Op::Expand || op == Op::Shrink || op == Op::Pad || op == Op::Flip;
+}
 bool is_reduce(Op op) { return op == Op::ReduceSum || op == Op::ReduceMax; }
 
 int64_t numel(const Shape& s) {
@@ -59,6 +62,23 @@ std::string to_string(const Shape& s) {
   for (size_t k = 0; k < s.size(); k++) out += (k ? "," : "") + std::to_string(s[k]);
   return out + "]";
 }
+SliceIdx slice_indices(int64_t dim, bool has_start, int64_t start, bool has_stop, int64_t stop, int64_t step) {
+  if (step == 0) throw Error("slice step cannot be 0");
+  const int64_t lo = step < 0 ? -1 : 0, hi = step < 0 ? dim - 1 : dim;
+  auto norm = [&](bool has, int64_t v, int64_t dflt) {
+    if (!has) return dflt;
+    if (v < 0) v = v + dim < lo ? lo : v + dim;
+    return v > hi ? hi : v;
+  };
+  SliceIdx r;
+  r.step = step;
+  r.start = norm(has_start, start, step < 0 ? dim - 1 : 0);
+  int64_t end = norm(has_stop, stop, step < 0 ? -1 : dim);
+  int64_t span = step < 0 ? r.start - end : end - r.start, mag = step < 0 ? -step : step;
+  r.count = span <= 0 ? 0 : (span + mag - 1) / mag;
+  return r;
+}
+
 static void check_shape(const Shape& s, const char* what) {
   int64_t n = 1;
   for (int64_t d : s) {
@@ -255,6 +275,44 @@ const UOp* Graph::reduce(Op op, const UOp* x, Shape axes) {
 const UOp* Graph::reduce_sum(const UOp* x, const Shape& axes) { return reduce(Op::ReduceSum, x, axes); }
 const UOp* Graph::reduce_max(const UOp* x, const Shape& axes) { return reduce(Op::ReduceMax, x, axes); }
 
+const UOp* Graph::shrink(const UOp* x, const Shape& starts, const Shape& ends) {
+  need(x, "SHRINK");
+  size_t r = x->shape.size();
+  if (starts.size() != r || ends.size() != r) throw Error("SHRINK: bounds for " + std::to_string(r) + " dimensions needed");
+  Shape out, arg = starts;
+  arg.insert(arg.end(), ends.begin(), ends.end());
+  for (size_t k = 0; k < r; k++) {
+    if (starts[k] < 0 || ends[k] > x->shape[k] || starts[k] >= ends[k])
+      throw Error("SHRINK: bounds " + to_string(starts) + ".." + to_string(ends) + " do not fit shape " + to_string(x->shape));
+    out.push_back(ends[k] - starts[k]);
+  }
+  return intern(Op::Shrink, x->dtype, {x}, Scalar{}, "", out, arg);
+}
+
+const UOp* Graph::pad(const UOp* x, const Shape& before, const Shape& after) {
+  need(x, "PAD");
+  size_t r = x->shape.size();
+  if (before.size() != r || after.size() != r) throw Error("PAD: amounts for " + std::to_string(r) + " dimensions needed");
+  Shape out, arg = before;
+  arg.insert(arg.end(), after.begin(), after.end());
+  for (size_t k = 0; k < r; k++) {
+    if (before[k] < 0 || after[k] < 0) throw Error("PAD: negative padding");
+    out.push_back(x->shape[k] + before[k] + after[k]);
+  }
+  check_shape(out, "PAD");
+  return intern(Op::Pad, x->dtype, {x}, Scalar{}, "", out, arg);
+}
+
+const UOp* Graph::flip(const UOp* x, const Shape& axes_in) {
+  need(x, "FLIP");
+  Shape axes = axes_in;
+  std::sort(axes.begin(), axes.end());
+  for (size_t k = 0; k < axes.size(); k++)
+    if (axes[k] < 0 || axes[k] >= static_cast<int64_t>(x->shape.size()) || (k && axes[k] == axes[k - 1]))
+      throw Error("FLIP: bad axes " + to_string(axes_in) + " for shape " + to_string(x->shape));
+  return intern(Op::Flip, x->dtype, {x}, Scalar{}, "", x->shape, axes);
+}
+
 const UOp* Graph::rebuild(const UOp* u, std::vector<const UOp*> src) {
   if (u->op == Op::Const || u->op == Op::Var) return u;
   if (src.size() != 1 && arity(u->op) == 1) throw Error(std::string(name(u->op)) + ": wrong number of sources");
@@ -265,6 +323,15 @@ const UOp* Graph::rebuild(const UOp* u, std::vector<const UOp*> src) {
     case Op::Expand: return expand(src[0], u->shape);
     case Op::ReduceSum: return reduce_sum(src[0], u->arg);
     case Op::ReduceMax: return reduce_max(src[0], u->arg);
+    case Op::Shrink: {
+      size_t r = u->arg.size() / 2;
+      return shrink(src[0], Shape(u->arg.begin(), u->arg.begin() + r), Shape(u->arg.begin() + r, u->arg.end()));
+    }
+    case Op::Pad: {
+      size_t r = u->arg.size() / 2;
+      return pad(src[0], Shape(u->arg.begin(), u->arg.begin() + r), Shape(u->arg.begin() + r, u->arg.end()));
+    }
+    case Op::Flip: return flip(src[0], u->arg);
     default: return alu(u->op, std::move(src));
   }
 }
@@ -306,7 +373,12 @@ std::string dump(const UOp* root) {
     if (u->op == Op::Var) out += " " + u->name;
     if (!u->shape.empty()) out += " shape=" + to_string(u->shape);
     if (u->op == Op::Permute) out += " perm=" + to_string(u->arg);
-    if (is_reduce(u->op)) out += " axes=" + to_string(u->arg);
+    if (is_reduce(u->op) || u->op == Op::Flip) out += " axes=" + to_string(u->arg);
+    if (u->op == Op::Shrink || u->op == Op::Pad) {
+      size_t r = u->arg.size() / 2;
+      out += (u->op == Op::Shrink ? " starts=" : " before=") + to_string(Shape(u->arg.begin(), u->arg.begin() + r)) +
+             (u->op == Op::Shrink ? " ends=" : " after=") + to_string(Shape(u->arg.begin() + r, u->arg.end()));
+    }
     out += "\n";
   }
   return out;
@@ -382,10 +454,10 @@ static std::vector<int64_t> strides_of(const Shape& s) {
 // The elements of `out` shape in row-major order, each as the flat index into a source whose element for
 // output coordinate c is at sum(c[k] * mult[k]).
 template <class F>
-static void for_each_index(const Shape& out, const std::vector<int64_t>& mult, F f) {
+static void for_each_index(const Shape& out, const std::vector<int64_t>& mult, F f, int64_t base = 0) {
   int64_t n = numel(out);
   std::vector<int64_t> c(out.size(), 0);
-  int64_t src = 0;
+  int64_t src = base;
   for (int64_t i = 0; i < n; i++) {
     f(i, src);
     for (size_t k = out.size(); k-- > 0;) {
@@ -425,6 +497,30 @@ static Array eval_node(const UOp* u, const std::vector<const Array*>& in, const 
       for (size_t k = 0; k < st.size(); k++) mult.push_back(in[0]->shape[k] == 1 ? 0 : st[k]);
       out.data.resize(static_cast<size_t>(numel(out.shape)));
       for_each_index(out.shape, mult, [&](int64_t i, int64_t s) { out.data[i] = in[0]->data[s]; });
+      return out;
+    }
+    case Op::Shrink: {
+      std::vector<int64_t> st = strides_of(in[0]->shape);
+      int64_t base = 0;
+      for (size_t k = 0; k < st.size(); k++) base += u->arg[k] * st[k];
+      out.data.resize(static_cast<size_t>(numel(out.shape)));
+      for_each_index(out.shape, st, [&](int64_t i, int64_t s) { out.data[i] = in[0]->data[s]; }, base);
+      return out;
+    }
+    case Op::Pad: {
+      std::vector<int64_t> st = strides_of(out.shape);
+      int64_t base = 0;
+      for (size_t k = 0; k < st.size(); k++) base += u->arg[k] * st[k];
+      out.data.assign(static_cast<size_t>(numel(out.shape)), Scalar::from_int(u->dtype, 0));
+      for_each_index(in[0]->shape, st, [&](int64_t i, int64_t o) { out.data[o] = in[0]->data[i]; }, base);
+      return out;
+    }
+    case Op::Flip: {
+      std::vector<int64_t> st = strides_of(in[0]->shape), mult = st;
+      int64_t base = 0;
+      for (int64_t ax : u->arg) { base += (in[0]->shape[ax] - 1) * st[ax]; mult[ax] = -st[ax]; }
+      out.data.resize(in[0]->data.size());
+      for_each_index(out.shape, mult, [&](int64_t i, int64_t s) { out.data[i] = in[0]->data[s]; }, base);
       return out;
     }
     case Op::ReduceSum:
