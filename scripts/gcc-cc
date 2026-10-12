@@ -1,24 +1,65 @@
 #!/usr/bin/env bash
-# The C compiler of the gcc backend, as eccp runs it on EDG's generated C (EDG_C_TO_OBJ_COMPILER). It is gcc, with one
-# filter: a `#pragma GCC unroll N` line in a generated .c file is removed first. EDG passes the pragma through from
-# libstdc++ 15's __find_if (bits/stl_algobase.h), and gcc rejects it when a declaration follows it in the generated
-# code ("for, while or do statement expected before 'auto'"). The pragma is only a loop hint, so removing it keeps
-# the program's meaning. Other arguments and files are unchanged.
+# The C compiler of the gcc backend, as eccp runs it on EDG's generated C (EDG_C_TO_OBJ_COMPILER). It is gcc, with
+# three filters on a `-c file.c` compile of EDG's output (other arguments and files are unchanged):
+#
+# 1. A `#pragma GCC unroll N` line is removed. EDG passes the pragma through from libstdc++ 15's __find_if
+#    (bits/stl_algobase.h), and gcc rejects it when a declaration follows it ("for, while or do statement expected
+#    before 'auto'"). The pragma is only a loop hint.
+#
+# 2. EDG emits a class's complete-object destructor (the D1 of the Itanium ABI, when it is an alias of the D2 body)
+#    as `extern __inline__`. Under gnu89 inline rules that is no external definition, so a static object whose data
+#    refers to D1 (std::filesystem's directory_iterator holds a shared_ptr<_Dir>) does not link. D2 is written
+#    without `extern`, weak, as EDG marks COMDAT members; the D1 wrapper is made the same, so both are emitted and
+#    the copies of several units merge.
+#
+# 3. Weak symbols. EDG marks its COMDAT functions and data __attribute__((__weak__)) and GCC honours that, but a
+#    non-extern `__inline__` member is an external definition under gnu89, so each object carries a strong copy
+#    and the link fails with "multiple definition". The QBE path appends .weak directives for them
+#    (scripts/weak-symbols.rb, which also covers `extern __inline__` members). Here the compile stops at the
+#    assembly, the directives are appended, and the assembly is assembled to the object.
 set -euo pipefail
 cc=${NFCXX_GCC:-cc}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 args=(); n=0
+csrc=""; obj=""; compile=0
 for a in "$@"; do
   case $a in
+    -c) compile=1; args+=("$a") ;;
     *.c)
-      if [ -f "$a" ] && grep -q '^[[:space:]]*#pragma GCC unroll' "$a"; then
+      csrc=$a
+      if [ -f "$a" ] && { grep -q '^[[:space:]]*#pragma GCC unroll' "$a" || grep -q '^extern __inline__ __attribute__((visibility("default"))) void _ZN.*D1Ev(' "$a"; }; then
         n=$((n + 1)); f=$tmp/src$n.c
-        grep -v '^[[:space:]]*#pragma GCC unroll' "$a" > "$f"
+        grep -v '^[[:space:]]*#pragma GCC unroll' "$a" \
+          | sed -e 's/^extern __inline__ __attribute__((visibility("default"))) void \(_ZN.*D1Ev\)(/__attribute__((__weak__)) __inline__ __attribute__((visibility("default"))) void \1(/' > "$f"
         args+=("$f")
+        csrc=$f
       else
         args+=("$a")
       fi ;;
     *) args+=("$a") ;;
   esac
 done
+# The output of a `-c ... -o FILE` compile is FILE; without -o, gcc writes the basename.o.
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then obj=$a; fi
+  prev=$a
+done
+if [ $compile = 1 ] && [ -n "$csrc" ] && [ -f "$csrc" ] && [ -n "$obj" ]; then
+  # Weak directives are for EDG's own output only (the original .c file names the directives' symbols).
+  asmf=$tmp/out.s
+  build=()
+  skip=0
+  for a in "${args[@]}"; do
+    if [ $skip = 1 ]; then skip=0; continue; fi
+    case $a in
+      -c) build+=(-S) ;;
+      -o) build+=(-o "$asmf"); skip=1 ;;
+      *) build+=("$a") ;;
+    esac
+  done
+  "$cc" "${build[@]}"
+  "$(dirname "$0")/mrb" "$(dirname "$0")/weak-symbols.rb" "$csrc" "$asmf"
+  exec as -o "$obj" "$asmf"
+fi
 exec "$cc" "${args[@]}"
