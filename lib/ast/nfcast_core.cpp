@@ -609,6 +609,7 @@ std::vector<std::string> State::traceback() const {
   for (const Frame* f = cur; f; f = f->prev) {
     const Proto* p = f->cl->proto;
     out.push_back(p->chunk + ":" + std::to_string(f->line) + ": in " + p->name);
+    if (f->tailed) out.push_back("(...tail calls...)");
   }
   return out;
 }
