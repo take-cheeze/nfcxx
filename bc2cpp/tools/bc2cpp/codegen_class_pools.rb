@@ -131,7 +131,7 @@ class CodeGen
   end
 
   # The pooled class set of a GETCONST/GETMCNST: the join of what every definition it reads stores
-  # (ADR 0301, scoped by ADR 0421). A name the numeric proof poisons has no pool; a read with no
+  # (ADR 0301, scoped by ADR 0423). A name the numeric proof poisons has no pool; a read with no
   # proven definition falls back to the integer-constant proof, else OTHER.
   def class_pool_const_mask(insn)
     name = insn.const_name

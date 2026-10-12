@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# LEXICAL_CONST (ADR 0421): LexicalConsts.analyze names the definition each GETCONST / GETMCNST reads.
+# LEXICAL_CONST (ADR 0423): LexicalConsts.analyze names the definition each GETCONST / GETMCNST reads.
 # Each fixture is compiled by the host mrbc and its reads are checked against the lexical rule: a
 # bare name resolves to the first scope of its lexical chain that defines it, only when no other
 # definition reachable from that scope (chain, ancestors, Object) could be read instead; anything
