@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The C compiler of the gcc backend, as eccp runs it on EDG's generated C (EDG_C_TO_OBJ_COMPILER). It is gcc, with one
+# filter: a `#pragma GCC unroll N` line in a generated .c file is removed first. EDG passes the pragma through from
+# libstdc++ 15's __find_if (bits/stl_algobase.h), and gcc rejects it when a declaration follows it in the generated
+# code ("for, while or do statement expected before 'auto'"). The pragma is only a loop hint, so removing it keeps
+# the program's meaning. Other arguments and files are unchanged.
+set -euo pipefail
+cc=${NFCXX_GCC:-cc}
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+args=(); n=0
+for a in "$@"; do
+  case $a in
+    *.c)
+      if [ -f "$a" ] && grep -q '^[[:space:]]*#pragma GCC unroll' "$a"; then
+        n=$((n + 1)); f=$tmp/src$n.c
+        grep -v '^[[:space:]]*#pragma GCC unroll' "$a" > "$f"
+        args+=("$f")
+      else
+        args+=("$a")
+      fi ;;
+    *) args+=("$a") ;;
+  esac
+done
+exec "$cc" "${args[@]}"
