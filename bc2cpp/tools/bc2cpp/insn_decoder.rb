@@ -173,7 +173,8 @@ module InsnDecoder
         start = pc
         name, format = FORMATS.fetch(@iseq.getbyte(pc)) { raise "bc2cpp: unknown opcode at #{pc}" }
         # codedump prints the file at the start of every loop turn.
-        file = debug_file_at(start)&.filename || file
+        debug_file = debug_file_at(start)
+        file = debug_file&.filename || file
         sizes = InsnDecoder.operand_sizes(format, ext)
         pc += 1
         values = sizes.map do |size|
@@ -193,7 +194,7 @@ module InsnDecoder
         end
         # The folded Insn starts at the prefix byte (branch and handler addresses name it) but takes
         # its line from the widened opcode, as the unfolded listing does.
-        insns << build(name, values, pc, ext_start || start, start)
+        insns << build(name, values, pc, ext_start || start, start, debug_file)
         ext = fold ? 0 : EXT_WIDTH.fetch(name, 0)
         ext_start = nil
       end
@@ -208,12 +209,14 @@ module InsnDecoder
       files = @rite.debug_files
       return nil if files.nil? || files.empty? || pc >= @iseq.bytesize
 
-      files.reverse_each.find { |f| f.start_pos <= pc } || files.first
+      return files.first if files.length == 1
+
+      files.reverse_each { |file| return file if file.start_pos <= pc }
+      files.first
     end
 
     # mrb_debug_get_line for a packed line map (-1 without debug info).
-    def line_at(pc)
-      file = debug_file_at(pc)
+    def line_at(pc, file = debug_file_at(pc))
       return -1 unless file
 
       table = (@lines[file.object_id] ||= packed_line_table(file.lines))
@@ -400,10 +403,10 @@ module InsnDecoder
       SEPS.fetch(name)
     end
 
-    def build(name, values, next_pc, start, line_pc = start)
+    def build(name, values, next_pc, start, line_pc = start, debug_file = debug_file_at(line_pc))
       rest, operands = body(name, values, next_pc)
       op = name == 'ARRAY2' ? 'ARRAY' : name
-      lineno = line_at(line_pc)
+      lineno = line_at(line_pc, debug_file)
       raise "bc2cpp: no line info for #{op} at #{line_pc}" if lineno.negative?
 
       # The disassembly is line-oriented: a pool string with a newline is cut there.
