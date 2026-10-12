@@ -65,7 +65,7 @@ MUTANTS = [
    'mrb_str_new_lit(M, "[RPG2k] hint violation: ")', 'mrb_str_new_lit(M, "")',
    /logs `\[RPG2k\] hint violation/, true],
   ['the helper dispatches instead of raising', 'symbol_cache.rb',
-   '#ifdef BC2CPP_HINT_VIOLATION_DISPATCH', '#if 1',
+   '#if defined(BC2CPP_HINT_VIOLATION_DISPATCH) || defined(BC2CPP_HINT_VIOLATION_LOG)', '#if 1',
    /raises BC2cppHintViolation/, true],
   ['the raised error is not a NoMethodError', 'symbol_cache.rb',
    'mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")))',
