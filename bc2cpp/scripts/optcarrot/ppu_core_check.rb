@@ -44,8 +44,10 @@ rescue RuntimeError => e
 end
 
 original = Optcarrot::PPU.instance_method(:run)
-rom = File.expand_path('../../3rd/optcarrot/examples/Lan_Master.nes', __dir__)
-[1, 2, 30, 60, 180, 181, 360].each do |frames|
+rom = ARGV.empty? ? File.expand_path('../../3rd/optcarrot/examples/Lan_Master.nes', __dir__) : File.expand_path(ARGV.shift)
+frame_counts = ARGV.empty? ? [1, 2, 30, 60, 180, 181, 360] : ARGV.map { |value| Integer(value, 10) }
+raise 'frame counts must be positive' unless frame_counts.all?(&:positive?)
+frame_counts.each do |frames|
   snapshots = [false, true].map do |generated|
     if generated
       Optcarrot::PPU.class_eval(entry.location.slice, path, entry.location.start_line)
@@ -63,4 +65,4 @@ rom = File.expand_path('../../3rd/optcarrot/examples/Lan_Master.nes', __dir__)
   raise "PPU output/state differs at #{frames} frames" unless snapshots[0] == snapshots[1]
 end
 Optcarrot::PPU.define_method(:run, original)
-puts 'Optcarrot synchronous PPU: PASS (AST ranges, drift, full pixels/RAM/registers at seven frame counts)'
+puts "Optcarrot synchronous PPU: PASS (AST ranges, drift, full pixels/audio/RAM/registers for #{File.basename(rom)} at #{frame_counts.join(', ')} frames)"
