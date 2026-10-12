@@ -45,6 +45,8 @@ inline const dim3 gridDim{1, 1, 1};
 
 // The block barrier, for the host copy of a kernel body (never run; the device code has the real barrier).
 inline void __syncthreads(void) {}
+// The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
+inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
 
 // The integer intrinsics, for the host copy of a kernel and for host code that calls them (the device side is in the
 // device unit, scripts/cuda-rewrite.rb BUILTIN_DEFS). Real C++ here, with CUDA's definitions. The shuffles on the host
