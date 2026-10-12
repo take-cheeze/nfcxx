@@ -324,7 +324,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     benchmark_source, sealed_gems = OptcarrotSealedBuild.prepare(ROOT, temp, File.dirname(output_dir))
     sources = [benchmark_source]
     native_sources, foreign_sources = bc2cpp_closed_world_outside_srcs('optcarrot-probe', sealed_gems, ROOT)
-  elsif ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+  elsif ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1'
     require_relative 'cpu_dispatch'
     cpu_source = sources.find { |path| path.end_with?('/optcarrot/cpu.rb') }
     transformed_cpu = File.join(temp, 'cpu.rb')
@@ -340,6 +340,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   end
   base_env = {
     'MRBC' => PROBE_MRBC,
+    'BC2CPP_OPTCARROT_FIXED_CORE' => ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' ? '1' : '0',
     'OUT_SYMBOL' => 'optcarrot_probe',
     'NATIVE_SRCS' => Shellwords.join(native_sources),
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources),
@@ -465,13 +466,15 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   gray_stack_config = "cc.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'\ncxx.defines << 'MRB_GRAY_STACK_SIZE=#{GRAY_STACK_SIZE}'"
   interpreted_target = "optcarrotinterpreted#{target_suffix}"
   target_suffix += 'sealed' if sealed
-  target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+  target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1'
+  target_suffix += 'ircpu' if ENV['BC2CPP_IR_CPU_DISPATCH'] == '1'
   target_suffix += 'ppu' if ENV['OPTCARROT_STATIC_PPU'] == '1'
   target_suffix += 'irinline' if ENV['BC2CPP_IR_INLINE'] == '1'
   target_suffix += 'irlut' if ENV['OPTCARROT_IR_LUT'] == '1'
   compiled_target = "optcarrotcompiled#{target_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
-  puts "Optcarrot CPU dispatch: #{ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : 'dynamic'}; sealed world: #{sealed}"
+  cpu_mode = ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' ? 'bytecode IR' : (ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : 'dynamic')
+  puts "Optcarrot CPU dispatch: #{cpu_mode}; sealed world: #{sealed}"
   puts "Optcarrot tile LUT: #{ir_lut ? 'decoded IR native helper with runtime fallback' : 'bundle generator'}"
   puts "Optcarrot PPU core: #{ENV['OPTCARROT_STATIC_PPU'] == '1' ? 'generated synchronous' : 'Fiber'}"
   puts 'Optcarrot bytecode IR method inlining: enabled' if ENV['BC2CPP_IR_INLINE'] == '1'
@@ -623,7 +626,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
                                 chdir: (interpreted_profile_dir if profiling))
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
-  modes = [sealed && 'sealed', ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && 'static dispatch',
+  modes = [sealed && 'sealed', ENV['BC2CPP_IR_CPU_DISPATCH'] == '1' && 'IR CPU dispatch',
+           ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1' && 'static dispatch',
            ENV['OPTCARROT_STATIC_PPU'] == '1' && 'synchronous PPU',
            ENV['BC2CPP_IR_INLINE'] == '1' && 'IR inlining'].select { |mode| mode }
   core_label += " (#{modes.join(', ')})" unless modes.empty?

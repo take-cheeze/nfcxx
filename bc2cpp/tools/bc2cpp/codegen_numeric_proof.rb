@@ -256,6 +256,7 @@ class CodeGen
     found = names.filter_map { |bit, name| name if mask.anybits?(bit) }
     @lcf_rows&.kinds&.each { |k| found << @lcf_rows.name(k.bit) if mask.anybits?(k.bit) }
     @frozen_tables&.each_shape_in(mask) { |s| found << @frozen_tables.name(s.bit) }
+    found << 'SYM' if frozen_symbol_bit && mask.anybits?(frozen_symbol_bit)
     found.empty? ? 'NONE' : found.join('|')
   end
 

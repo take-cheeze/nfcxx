@@ -174,6 +174,7 @@ BC2CPP_COMPILED_GEMS = {
                Game::WindowCursor.singleton Game::Message.singleton
                Game::EventPage.singleton Game::CharSet.singleton
                Game::Backdrop.singleton RPG2k::Scene.singleton
+               Game::CommonEvent.singleton Game::MoveRoute.singleton
                RPG2k::Scene::Map::LRUBitmapCache
                # docs/adr/0215: the record classes that replaced Structs.
                RPG2k::Scene::Map::MapEventState RPG2k::Scene::Map::MessageState

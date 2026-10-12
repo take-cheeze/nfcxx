@@ -508,7 +508,7 @@ if ENV['BR_MUTANTS'] == '1' && MODE != 'run' && tool?(MRBC_PATH)
   # and each mutant costs a full generated-code run of this check.
   mutate = lambda do |(name, (file, from, to))|
     Dir.mktmpdir('bc2cpp_reach_mutant') do |dir|
-      FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+      Bc2cppMutantPool.copy_generator(ROOT, dir)
       path = File.join(dir, 'bc2cpp', file)
       text = File.read(path)
       next [:site_gone, file] unless text.include?(from)

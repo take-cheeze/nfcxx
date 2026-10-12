@@ -145,13 +145,13 @@ module TypeCheckReport
       next unless a['file'] && a['line'].to_i.positive?
 
       a['ignored'].each do |tok|
-        out << Diagnostic.new(file: a['file'], line: a['line'], col: a['col'], severity: 'warning', code: 'TC1004',
+        out << Diagnostic.new(file: a['file'], line: a['line'], col: a['col'], severity: 'error', code: 'TC1004',
                               message: "#{a['owner']}##{a['name']}: annotation token `#{tok}` is ignored (not a type bc2cpp reads, " \
                                        'or not a class the program defines)')
       end
       next unless a['arity_mismatch']
 
-      out << Diagnostic.new(file: a['file'], line: a['line'], col: a['col'], severity: 'warning', code: 'TC1004',
+      out << Diagnostic.new(file: a['file'], line: a['line'], col: a['col'], severity: 'error', code: 'TC1004',
                             message: "#{a['owner']}##{a['name']}: annotation #{a['arity_mismatch']}")
     end
     Array(facts['signature_diagnostics']).each do |d|

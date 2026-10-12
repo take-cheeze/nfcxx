@@ -208,9 +208,9 @@ else
     check.call('class argument', lines.include?('sig/contra.rbs:4:3: error: TcSym#pick parameter 1: declared TcOther, inferred TcSym (signature) [TC1001]'))
     check.call('class return', lines.include?('sig/contra.rbs:5:3: error: TcSym#make return type: declared TcOther, inferred TcSym (signature) [TC1001]'))
     check.call('ivar class', lines.include?('sig/contra.rbs:2:3: error: TcSym@tag ivar: declared TcOther, inferred TcSym (signature) [TC1001]'))
-    check.call('a method the program lacks is a TC1003 warning', lines.include?('sig/contra.rbs:6:3: warning: TcSym#ghost: no such method in the program [TC1003]'))
-    check.call('a wrong parameter count is a TC1004 warning',
-               lines.include?('sig/contra.rbs:7:3: warning: TcSym#go: signature lists 1 required parameter(s), method takes 0; not used [TC1004]'))
+    check.call('a method the program lacks is a TC1003 error', lines.include?('sig/contra.rbs:6:3: error: TcSym#ghost: no such method in the program [TC1003]'))
+    check.call('a wrong parameter count is a TC1004 error',
+               lines.include?('sig/contra.rbs:7:3: error: TcSym#go: signature lists 1 required parameter(s), method takes 0; not used [TC1004]'))
 
     puts '== a signature has the effect of the comment'
     File.write(File.join(dir, 'sig/use.rbs'), USE_SIG)

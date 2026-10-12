@@ -93,7 +93,7 @@ File.open(out_file, 'w') do |out|
   cpu_dispatch_rewritten = false
   FILES.each do |f|
     source = File.read(f)
-    if f.end_with?('/optcarrot/cpu.rb') && ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
+    if f.end_with?('/optcarrot/cpu.rb') && ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1'
       source = OptcarrotCPUDispatch.transform(source)
       cpu_dispatch_rewritten = true
     end
@@ -107,7 +107,7 @@ File.open(out_file, 'w') do |out|
     source.each_line do |line|
       next if line =~ /^\s*require_relative\b/
 
-      if f.end_with?('/optcarrot/cpu.rb') && line.include?(CPU_DISPATCH_SPLAT)
+      if f.end_with?('/optcarrot/cpu.rb') && line.include?(CPU_DISPATCH_SPLAT) && ENV['BC2CPP_IR_CPU_DISPATCH'] != '1'
         raise 'CPU dispatch splat occurs more than once' if cpu_dispatch_rewritten
 
         cpu_dispatch_rewritten = true
@@ -117,7 +117,7 @@ File.open(out_file, 'w') do |out|
     end
     out.write("\n")
   end
-  raise 'optcarrot CPU dispatch splat not found' unless cpu_dispatch_rewritten
+  raise 'optcarrot CPU dispatch splat not found' unless cpu_dispatch_rewritten || ENV['BC2CPP_IR_CPU_DISPATCH'] == '1'
 
   out.write(File.read(File.join(PROBE_DIR, 'runner_tail.rb')))
 end

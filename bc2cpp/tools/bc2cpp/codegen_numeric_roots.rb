@@ -242,7 +242,8 @@ class CodeGen
     when 'GETIV' then ["iv:#{insn.args[/@\w+/]}[#{numeric_root_ivar_status(irep, insn.ivar)}]"]
     when 'GETCONST', 'GETMCNST'
       cname = insn.const_name || insn.mcnst_name
-      group = @numeric_const_groups && @numeric_const_groups[cname]
+      key = const_group_key(insn)
+      group = key && @numeric_const_groups && @numeric_const_groups[key]
       state = group ? (group.failed ? (group.structural ? 'structural' : 'flowfail') : numeric_mask_name(group.mask)) : 'nogroup'
       ["const:#{cname}[#{state}#{@integer_constants&.include?(cname) ? ',intconst' : ''}]"]
     when 'GETUPVAR' then ['upvar']
