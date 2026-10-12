@@ -20,7 +20,7 @@ require_relative 'site_census'
 # receiver is a kind of Array/Hash/String/Range), plus the parameter(s) the receiver copies when its origin
 # is a parameter or a join. At exit it appends to the file named
 # by BC2CPP_TRACE_ELSE_OUT, or writes to stderr when that is unset. Read it with
-# scripts/bc2cpp_else_trace_report.rb.
+# scripts/bc2cpp/else_trace_report.rb.
 module ElseTrace
   MAX_CLASSES = 8
   SEND_CALL = /bc2cpp_send\(M, (\w+), /
@@ -63,7 +63,7 @@ module ElseTrace
       recv = lines[i][SEND_CALL, 1]
       id = rows.size
       method = impls.fetch(s[:fn], nil) || "(#{s[:fn] || 'file scope'})"
-      # The parameter(s) the receiver copies (scripts/bc2cpp_param_trace_report.rb joins on it): `name` when
+      # The parameter(s) the receiver copies (scripts/bc2cpp/param_trace_report.rb joins on it): `name` when
       # exact, `~a|b` when a control-flow join made the origin a may-set, `-` when none.
       names, exact = %w[parameter join].include?(s[:origin]) ? SiteCensus.feeding_parameters(lines, s[:line], recv) : [[], true]
       param = names.empty? ? '-' : "#{exact ? '' : '~'}#{names.join('|')}"

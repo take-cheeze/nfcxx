@@ -2,7 +2,7 @@
 
 # NATIVE_RESULT_FACTS (ADR 0302): what a call that returns from an RGSS native hands back, per exact
 # receiver class. A fact pins the registration's callee text and the delegation chain down to the
-# function whose `return`s decide the kind; scripts/bc2cpp_native_result_facts_check.rb re-audits both.
+# function whose `return`s decide the kind; scripts/bc2cpp/native_result_facts_check.rb re-audits both.
 # Kinds: :fixnum (mrb_fixnum_value), :float (mrb_float_value), a class name (mrb_obj_new of that constant).
 # Left out on purpose, as not one class on every path: Viewport#rect/#ox/#oy (an unset ivar reads nil),
 # Window/Plane readers, and setters and drawing calls (they return self, which no bytecode reads).

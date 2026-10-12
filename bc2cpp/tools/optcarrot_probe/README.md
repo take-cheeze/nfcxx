@@ -114,7 +114,7 @@ dispatch; the CI coverage report counts the emitted sites.
 (`3rd/optcarrot/lib`, unmodified) as its own standalone closed world --
 entirely separate from bc2cpp's real registry (the RPG engine's own 3
 compiled gems), same NATIVE_SRCS/FOREIGN_RUBY_SRCS inputs
-`scripts/bc2cpp_coverage_report.rb` feeds the real one, and the same
+`scripts/bc2cpp/coverage_report.rb` feeds the real one, and the same
 method-level attempted/compiled-clean/`#error`-reason parsing logic reused
 directly from that script. CI publishes the full report in the build job
 summary alongside the real project's report, keeping generated coverage
@@ -164,7 +164,7 @@ inert for the real project -- see below):
     was checked the way the list's own comments demand: a whole-program grep
     found no `def` of any of these names in this project's own sources that
     stores its block, `mruby-enum-lazy` (the `Lazy#zip`/`Lazy#with_index` twin)
-    is not built, and `scripts/bc2cpp_coverage_report.rb`'s real-project output
+    is not built, and `scripts/bc2cpp/coverage_report.rb`'s real-project output
     is **byte-identical** with and without the change. See that array's own
     comment for the per-name argument.
 4. **KEYWORD_HASH_POSITIONAL_SUPPORT's own gate relaxed** off
@@ -177,7 +177,7 @@ inert for the real project -- see below):
     fields and an out-of-range positional count are refused. This closes
     `PPU::OptimizedCodeBuilder#batch_render_pixels`'s
     `expand_methods(fastpath, render_pixel: gen(...))`; real-project
-    `scripts/bc2cpp_coverage_report.rb` output stays byte-identical.
+    `scripts/bc2cpp/coverage_report.rb` output stays byte-identical.
  5. **`ENSURE_DISPATCH_MERGE_SUPPORT`**: `recognize_ensure_region` now accepts
     one jump shape it used to reject outright -- one from *inside* the
     protected range whose target is exactly the handler's own address.
@@ -267,13 +267,13 @@ which only requires ENTER's key/kdict fields (the real `kd == 0` vm.c's
 OP_ENTER keys on) to be zero plus `total` inside the callee's accepted
 positional range. The packed Hash then lands in the callee's next free
 positional slot exactly as Ruby hands `foo(k: v)` to `def foo(a, b = 1)`.
-Real-project `scripts/bc2cpp_coverage_report.rb` output stays byte-identical.
+Real-project `scripts/bc2cpp/coverage_report.rb` output stays byte-identical.
 
 **Verifying "no regression to the real project"**: both fixes above touch
 shared code (`tools/bc2cpp/bc2cpp.rb`), so before landing either, this
 probe's own `mrbc` (imperfect -- missing several of `3rd/mruby`'s other
 real patches, see `mruby_build_config.rb`) was used to run
-`scripts/bc2cpp_coverage_report.rb` against the *real* project's closed
+`scripts/bc2cpp/coverage_report.rb` against the *real* project's closed
 world twice with the *same* binary -- once with the bc2cpp.rb change, once
 without (`git stash` on just that file) -- and the raw output diffed
 directly. `SUPER_TARGETS`' new entries are exclusively `Optcarrot::...`-
@@ -818,7 +818,7 @@ only when actually used), and a `GETCONST`/`GETMCNST` case that embeds as
 `CodeGen` itself consumed that proof).
 
 **Correction, same session**: the obvious way to measure this --
-`scripts/bc2cpp_coverage_report.rb`'s own `ivar embedding (EMBED)` line,
+`scripts/bc2cpp/coverage_report.rb`'s own `ivar embedding (EMBED)` line,
 115 -> 216 -- is the wrong number, and does not mean any of it reaches this
 probe. That count is `IvarLayout`'s own raw proof, printed by the driver
 before `CodeGen` even exists; it says nothing about what the real generated

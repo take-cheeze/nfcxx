@@ -3,10 +3,10 @@
 # CodeGen: unbox a native entry point's arguments with the conversion mrb_get_args performs (ADR 0372).
 #
 # An RGSS binding is `T a; ...; mrb_get_args(M, "<fmt>", &a, ...); return entry(M, self, a, ...)` and
-# scripts/native_binding_split.rb refuses any body with a statement before the mrb_get_args call, so the call site that
+# scripts/native/binding_split.rb refuses any body with a statement before the mrb_get_args call, so the call site that
 # has proven the receiver and the argument count can run the same conversions itself. "i" is exactly
 # `mrb_as_int(mrb, arg)` and "f" `mrb_as_float(mrb, arg)` (3rd/mruby/src/class.c, pinned by
-# scripts/bc2cpp_native_param_unbox_check.rb), so for EVERY argument value the unboxed call raises, converts and
+# scripts/bc2cpp/native_param_unbox_check.rb), so for EVERY argument value the unboxed call raises, converts and
 # calls to_int exactly as dispatch does: an Integer tag test with a by-name else only re-derived that.
 module NativeParamUnbox
   # BC2CPP_NATIVE_PARAM_UNBOX=0 restores the Integer tag test and the by-name else.

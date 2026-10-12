@@ -10,7 +10,7 @@ require_relative 'native_direct'
 # so can be split into a frame-independent `rgss::<function>_direct` entry
 # point plus a thin binding that unpacks mrb_get_args.
 #
-# The facts come from scripts/native_binding_facts.py (libclang); everything
+# The facts come from scripts/native/binding_facts.py (libclang); everything
 # here is plain Ruby over that JSON and the C++ source text, so the
 # classification, the report, the source rewrite and the compiler's table are
 # reproducible and testable without a compiler. The rule is fail closed: a

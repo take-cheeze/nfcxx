@@ -4,7 +4,7 @@ require_relative 'native_class_results'
 
 module ProfilerResults
   PATH = 'mruby-rgss/src/profiler.cxx'
-  SHA = '570124ed60611c04e5d69ef862f7f42ab207b706421cb7bfce6fcd35749d806b'
+  SHA = 'ff7e51de6a2e92745169e91c77b9e793676fa1e092f7e6212d09c8b2e344c0fc'
 
   # Captures and pools could recurse into the enclosing flow being computed.
   class Oracle < CodeGen::ExactOracle

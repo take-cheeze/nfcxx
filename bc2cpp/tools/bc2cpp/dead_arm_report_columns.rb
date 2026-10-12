@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# The row layout of BC2CPP_DEAD_ARM_REPORT (dead_arm_report.rb), shared with scripts/bc2cpp_dead_arm_report.rb.
+# The row layout of BC2CPP_DEAD_ARM_REPORT (dead_arm_report.rb), shared with scripts/bc2cpp/dead_arm_report.rb.
 module DeadArmReport
   COLUMNS = %w[kind gem method irep idx op name shape live entry guard where origin path].freeze
 

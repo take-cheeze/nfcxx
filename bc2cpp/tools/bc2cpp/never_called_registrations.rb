@@ -122,8 +122,8 @@ module NeverCalledRegistrations
 
   # Every compiled entry point of `gem_name` that is never called and whose
   # owner passes safe_to_unregister?, whether or not register.cxx still
-  # registers it. scripts/bc2cpp_prune_never_called_registrations.rb and
-  # scripts/bc2cpp_never_called_registrations_check.rb cross-check it against
+  # registers it. scripts/bc2cpp/prune_never_called_registrations.rb and
+  # scripts/bc2cpp/never_called_registrations_check.rb cross-check it against
   # the real register.cxx.
   def prunable_entries(gem_name, repo_root, mrbc)
     stderr = run_bc2cpp(gem_name, repo_root, mrbc)
@@ -151,7 +151,7 @@ module NeverCalledRegistrations
   # or generated `bc2cpp_define_private_class_method` call installs, across
   # the gem's hand register.cxx and bc2cpp.rb's own generated
   # bc2cpp_register_owner_methods -- the same shape
-  # scripts/bc2cpp_wired_embedding_check.rb matches. A name argument may be
+  # scripts/bc2cpp/wired_embedding_check.rb matches. A name argument may be
   # a string literal or a macro/variable; the function is always the fourth.
   # Comments are dropped first: register.cxx quotes calls in prose.
   INSTALL_CALL = /(?:mrb_define_(?:private_|class_)?method|bc2cpp_define_private_class_method)\(\s*M\s*,\s*[^,]+,\s*(?:"[^"]*"|\S+)\s*,\s*(\w+)\s*,/m

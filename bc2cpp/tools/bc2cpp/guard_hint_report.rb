@@ -8,7 +8,7 @@
 #
 # `family` is the construct compile_send chose, `else_arm` is what its guard falls to (`nomethod`,
 # `kept:<reason>`, `send`, `none`) and `receiver_origin` is receiver_trace_origin's nearest
-# defining instruction; `class_set` is the class pools' set for the receiver register. scripts/bc2cpp_guard_hint_report.rb aggregates it.
+# defining instruction; `class_set` is the class pools' set for the receiver register. scripts/bc2cpp/guard_hint_report.rb aggregates it.
 module GuardHintReport
   FAMILIES = %w[EXACT_TYPED TYPED ELEMENT IVAR_ACCESSOR MONO_EMBED_GUARD POLY_SMALL_N POLY_TABLE
                 CLOSED_WORLD_EXACT_CLASS CLOSED_WORLD_SELF POLY].freeze

@@ -41,21 +41,21 @@ BC2CPP = File.join(ROOT, 'tools/bc2cpp/bc2cpp.rb')
 # [path relative to ROOT, note on what it can add evidence for], run in order;
 # the note is printed in the report.
 #
-# scripts/rpg2k_command_soak.rb and scripts/rpg2k_save_load_check.rb are left
+# scripts/rpg2k/command_soak.rb and scripts/rpg2k/save_load_check.rb are left
 # out: like rpg2k_testbed_logic_check.rb they need a real RPG_RT.ldb test bed
 # and exercise nothing without one. rpg2k_testbed_logic_check.rb stays so the
 # "no test bed" data point is re-checked every run.
 DEFAULT_HARNESSES = [
-  ['scripts/rpg2k_logic_check.rb',
+  ['scripts/rpg2k/logic_check.rb',
    'fixture-based Game::*/LCF::* checks (hand-built Struct fixtures, not a real .ldb)'],
-  ['scripts/rpg2k_scene_check.rb',
+  ['scripts/rpg2k/scene_check.rb',
    'RPG2k::Scene::* (Map/Menu/ItemMenu/SkillMenu/EquipMenu/SaveLoad/Order/Battle/...) behind RGSS stubs'],
-  ['scripts/rpg2k_testbed_logic_check.rb',
+  ['scripts/rpg2k/testbed_logic_check.rb',
    'real RPG_RT.ldb test-bed driven Game::*/Interpreter checks -- only runs if ./data has one'],
   ['scripts/error_report_check.rb',
    'RGSS::ErrorReport::Tee'],
-  ['scripts/rgss_cruby_test_check.rb',
-   'mruby-rgss/test/test.rb under the CRuby RGSS compat layer (scripts/rgss_cruby_compat.rb)'],
+  ['scripts/rgss/cruby_test_check.rb',
+   'mruby-rgss/test/test.rb under the CRuby RGSS compat layer (scripts/rgss/cruby_compat.rb)'],
 ].freeze
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@
 # Read by bc2cpp.rb's emit_owner_registrations (generated registration for
 # BC2CPP_WIRED_EMBEDDINGS owners), by scripts/bc2cpp_prune_static_dispatch_
 # registrations.rb (the hand-written register.cxx lines), and re-proven name
-# by name on every CI run by scripts/bc2cpp_static_dispatch_check.rb -- a
+# by name on every CI run by scripts/bc2cpp/static_dispatch_check.rb -- a
 # later change that adds a dynamic reference to any name here fails that
 # check rather than shipping a NoMethodError. Regenerate with
 # `MRBC=... ruby tools/bc2cpp/static_dispatch_registrations.rb --write`.

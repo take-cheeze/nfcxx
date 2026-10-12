@@ -9,9 +9,9 @@
 # Key: "<compiled owner>#<compiled method> -> <called name>", the method the
 # site sits in (owners as in STATIC_DISPATCH_UNREGISTERED) and the name it
 # sends. bc2cpp.rb enforces the list on every closed-world run;
-# scripts/bc2cpp_nomethod_reviewed_check.rb re-proves it exactly in both
+# scripts/bc2cpp/nomethod_reviewed_check.rb re-proves it exactly in both
 # directions over a full (not hot-only) wio run of all three gems.
-# Regenerate with `MRBC=... ruby scripts/bc2cpp_nomethod_reviewed_update.rb`.
+# Regenerate with `MRBC=... ruby scripts/bc2cpp/nomethod_reviewed_update.rb`.
 require 'set'
 
 module NomethodReviewed
@@ -24,7 +24,7 @@ module NomethodReviewed
   # NIL_RECEIVER (ADR 0296): the nil arm of a receiver the class pools prove is nil or one class.
   # A real program path (a nil dereference), so listed, never gated.
   NIL_RECEIVER_MARKER = %r{/\* CLOSED_WORLD nil-receiver: (\S+) \*/}
-  # Test-only escape for fixture worlds (scripts/bc2cpp_closed_world_check.rb):
+  # Test-only escape for fixture worlds (scripts/bc2cpp/closed_world_check.rb):
   # their dead sites are the point of the fixture, not code a build ships.
   ALLOW_ENV = 'BC2CPP_NOMETHOD_UNREVIEWED'
   # Generator kill switch: =0 keeps every guard's dispatch fallback (ADR 0290).

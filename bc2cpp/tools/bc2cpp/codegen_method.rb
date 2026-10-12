@@ -359,7 +359,7 @@ class CodeGen
     @inline_nested_pre = String.new
     # RESCUE_INLINE_BLOCK_FIX: a loop emitted here for an address the rescue loop claimed would run
     # after the rescue glue, on the exception-only path, with the exception as its receiver
-    # (scripts/bc2cpp_rescue_inline_block_check.rb). The range's own loops are inlined in the try body.
+    # (scripts/bc2cpp/rescue_inline_block_check.rb). The range's own loops are inlined in the try body.
     run_inline_loop_passes(irep, d, mand, suppressed.dup, suppressed, glue_at)
 
     # BLOCK_CFUNC_FALLBACK_SUPPORT: the catch-all, run last, for BLOCK/SENDB pairs

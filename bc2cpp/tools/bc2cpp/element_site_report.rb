@@ -13,7 +13,7 @@
 # instructions of that register, with an element read shown as `elem<container origin>`. `store` rows are
 # element writes (`[]=`, `<<`, `push` ...) whose container is an ivar read; `value_class_set` is the numeric
 # flow's class set of the stored value ("unmodelled" when the method has no flow states).
-# scripts/bc2cpp_element_site_report.rb aggregates it.
+# scripts/bc2cpp/element_site_report.rb aggregates it.
 module ElementSiteReport
   DYNAMIC = /bc2cpp_send\(|bc2cpp_getidx0?\(|bc2cpp_setidx\(|mrb_funcall|bc2cpp_slow_|bc2cpp_eqq\(/
   # Sends that return one element of their receiver.

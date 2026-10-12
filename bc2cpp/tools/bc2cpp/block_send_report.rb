@@ -7,7 +7,7 @@ require_relative 'block_send_report_columns'
 # Debug report for block sends (ADR 0325): with BC2CPP_BLOCK_SEND_REPORT=<path>, every literal-block and `&expr`
 # send of the generated code is written as one TSV row (the last compile of a site wins) with what keeps its
 # dynamic `mrb_funcall_with_block` and what each candidate lever would do to it. It changes no generated code;
-# scripts/bc2cpp_block_send_report.rb aggregates it.
+# scripts/bc2cpp/block_send_report.rb aggregates it.
 #
 # Columns (BlockSendReport::COLUMNS):
 #   - kind: `literal` (a BLOCK region) or `explicit` (`&expr`, no body).

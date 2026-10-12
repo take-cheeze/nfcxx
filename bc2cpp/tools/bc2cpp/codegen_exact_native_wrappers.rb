@@ -14,7 +14,7 @@
 module ExactNativeWrappers
   # name => owner => [arities, builder]; the builder gets (receiver, arguments) and returns the C++
   # call expression. The bodies are the ones compile_send's guarded arms emit
-  # (scripts/bc2cpp_exact_native_wrappers_check.rb compares the two).
+  # (scripts/bc2cpp/exact_native_wrappers_check.rb compares the two).
   ONE_VALUE = lambda do |function|
     ->(recv, argv) { "rgss::#{function}(M, #{recv}, #{argv[0]})" }
   end

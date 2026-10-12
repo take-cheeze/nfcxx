@@ -8,7 +8,7 @@ require_relative 'refine_report_columns'
 # generated code is written as one TSV row (the last compile of a site wins), with what the call facts prove
 # about its receiver and what that would do to its by-name dispatch. It changes no generated code.
 #
-# Columns (scripts/bc2cpp_refine_report.rb aggregates them, see COLUMNS):
+# Columns (scripts/bc2cpp/refine_report.rb aggregates them, see COLUMNS):
 #   - existing: `proven:<classes>` when the exact-class flow already proves the receiver set.
 #   - facts: the names an earlier call on the same value answered on every path (the FORWARD interface, sound).
 #   - web: every name called on the value anywhere in the method (the BACKWARD interface, unsound for codegen:
