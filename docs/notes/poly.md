@@ -484,7 +484,7 @@ None of these is covered by a test unless stated.
 
 ## Checks run
 
-`tests/poly/run.sh` on both back ends with all six languages (the host prints how many checks it ran: NPOLY; JavaScript alone 321, Go alone 284),
+`tests/poly/run.sh` on both back ends with all six languages (the host prints how many checks it ran: 1172; JavaScript alone 321, Go alone 284),
 8 repeated runs of each binary, each binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`, no errors
 reported), the setjmp control build described above, and mutation checks on scratch copies of the backends: dropping the
 interpreter pass-through in the Ruby or Lua trampoline, losing script error identity in Python, or leaking the ownership record in
