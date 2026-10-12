@@ -1,7 +1,8 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done, and the qbe backend has milestones 1-6 below (loads and stores, redzones, use after scope;
-`asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
+Status: the gcc backend is done, and the qbe backend has milestones 1-7 below (loads and stores, redzones, use after scope,
+use after return; `asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter.
+Nothing of Path B or wasm is implemented; the qbe part is, and its notes say what is done. The plan was written from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
 ## Common design
@@ -20,7 +21,9 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-6): the cproc changes are the `nfcxx-asan` branch of take-cheeze/cproc (pinned as `3rd/cproc`), see `asan.md`. Remaining: the optional part of 6 below.
+Done (milestones 1-7): the cproc changes are the `nfcxx-asan` branch of take-cheeze/cproc (`3rd/cproc` is pinned to its
+`nfcxx-asan-uar` commit, which adds use after return on top of `nfcxx-asan`), see `asan.md`. Remaining: elision of checks
+(optional, below).
 
 Options considered:
 
@@ -33,14 +36,19 @@ Options considered:
 Milestones:
 1. cproc flag `-fsanitize=address`; `scripts/qbe-cc` passes it and links with `-fsanitize=address`.
 2. Checks before every load, store and `funccopy`/blit; skip `va_arg`/`reg_save_area` and `__nfcxx_*` helpers. Tests: heap overflow, use after free, double free.
-3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at entry, unpoisons in `funcret`. Still open: alloca/VLA.
+3. Stack redzones (done, `asanalloc`, `asandynalloc` for alloca and VLA): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons the
+   redzones at the declaration, unpoisons in `funcret`.
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
 5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
 6. Use after scope (done, `asanend`/`asanleave`/`asangoto`/`asanlabel`/`asancase`, `asan.md` "Use after scope"): a block's
    objects are poisoned with `__asan_poison_stack_memory` when the block is left (normal end, break, continue, goto, and
    the jumps EDG lowers from C++ break, continue and switch) and unpoisoned by their declaration or by a jump into the
-   block. Return needs nothing (funcret). Still open, optional: fake stack (use after return), elision of checks on
+   block. Return needs nothing (funcret). Still open, optional: elision of checks on
    non-escaping locals.
+7. Use after return (done, `asanalloc`, `asanselect`, `asanfree`, `asan.md` "Use after return"): every fixed-size object of
+   align 16 or less is in a libasan fake frame (`__asan_stack_malloc_N` at the entry, `__asan_stack_free_N` at each return),
+   with gcc's ABI and header, so the report is `stack-use-after-return` on both backends. Not done: one frame per function
+   (gcc's), objects over 16-byte alignment, VLA and alloca (the real frame only).
 Open check: the unwinder wants `rbp` chains; QBE keeps them, but verify with a report.
 
 ## Path B: emit from `pathb-qbe-emit.rb`

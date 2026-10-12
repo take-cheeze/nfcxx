@@ -8,19 +8,19 @@ EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`de
 ## qbe backend (default)
 
 `nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
-the `nfcxx-asan` branch of take-cheeze/cproc, which `3rd/cproc` is pinned to, then
+the `nfcxx-asan-uar` branch of take-cheeze/cproc (`nfcxx-asan` plus use after return), which `3rd/cproc` is pinned to, then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
 Stack objects get redzones (`asanalloc` in cproc's `funcalloc`): 32 bytes on each side, allocated in the entry block,
-poisoned on entry and unpoisoned in `funcret`. Globals get a trailing redzone: `emitdata` writes the rest of the
+their redzones poisoned at the declaration and the whole object unpoisoned in `funcret`. The object is in a fake frame
+(use after return, below). Variable-length arrays and `alloca` get redzones too (`asandynalloc`), not a fake frame. Globals get a trailing redzone: `emitdata` writes the rest of the
 object's 8-byte granule and 32 zero bytes into the same data item, and the unit's constructor (`emitasanctor`, in
 `.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
-leading redzone (an access before the object is not reported); thread-local globals get none; objects over 16-byte
-alignment, variable-length arrays and `alloca` get no redzones. Use after scope is covered (next section). Not yet:
-use-after-return (the `ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block
+leading redzone (an access before the object is not reported); thread-local globals get none. Use after scope and use
+after return are covered (next two sections). Not yet: volatile (qbe rejects volatile stores, a known limit). Block
 copies and `va_arg` loads are checked as ordinary accesses.
 
 ## Use after scope (qbe)
@@ -50,10 +50,8 @@ Limits, all false negatives (nothing is reported that is valid, the missing chec
 
 - A longjmp or a C++ throw (EDG's setjmp ABI) that leaves a block to a handler in the same frame runs no poison, so an access
   through a pointer kept from that block is not reported.
-- Use after return (a pointer to a local of a block that `return` left, read after the function returned) needs a fake
-  stack; not done. `return` itself poisons nothing.
-- Variable-length arrays and `alloca` have no redzones, so they get no scope poison either (the other milestone, `asan-plan.md`).
-- Objects over 16-byte alignment get none.
+- Use after return is the next section. `return` itself poisons nothing here: funcret gives the fake frames back.
+- `alloca` lives until its function returns, as C requires, so it has no scope poison.
 
 The default (non-ASan) output is byte-identical: every hook is gated on `asanon`, and the scope fields are only set and read
 under it.
@@ -62,6 +60,46 @@ Source lines: with `NFCXX_ASAN=1`, `qbe-cc` keeps the preprocessor's line marker
 expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `dbgfile` names the file of the function.
 QBE turns those into `.loc` lines, so libasan's report names `file:line` like the gcc backend. The line is the expression's
 start token, so a multi-line expression may name a line inside it; `qbe-prep.rb` skips the markers as comments.
+
+## Use after return (qbe)
+
+A pointer to a local of a function, read after that function returned, is reported as `stack-use-after-return`, the gcc
+wording (`tests/asan/cases/use_after_return.cpp`, the same expected text on both backends). The object lives in a fake frame,
+libasan's fake stack, as gcc's `-fsanitize=address` puts it. cproc (`asanalloc`, `asanselect`, `asanfree`, `qbe.c`):
+
+- At the entry of the function, each object of the frame (a declaration, a parameter, a compound literal, of align 16 or less)
+  gets `p = __asan_stack_malloc_N(frame)`, N the smallest class with `64 << N >= frame`, and `frame` the object's allocation
+  (redzones included) rounded up to 64 bytes: `__asan_stack_malloc_0` with 64, `__asan_stack_malloc_2` with 192, as gcc
+  passes them. It returns 0 when `detect_stack_use_after_return` is off or the class is full (`libasan`'s default is on here),
+  and then the object stays in the real frame, which is always allocated too (`asanselect` picks the frame branch-free).
+- The header is gcc's: magic `0x41B58AB3` at offset 0, the description at 8 (a data item, `asandesc.N`, with
+  `1 32 SIZE NAMELEN NAME:LINE`, the object at offset 32 as in gcc; the line is the declarator's, `tok.loc` in `mkdecl`), the
+  function's address (the pc, which names the frame) at 16. The header and the redzones are written by the same code as the real frame's.
+- At each return, `__asan_stack_free_N(p, frame)` runs when `p` is not NULL (`asanfree`, before the dynamic-block unpoison of
+  `asandynret`). libasan's free dereferences its pointer (`FakeStack::Deallocate` reads the frame's flag at offset 56, which
+  its malloc wrote), so it is never called with NULL; it poisons the frame with 0xf5, the stack-after-return shadow, and so a
+  later read of the object reports `stack-use-after-return`.
+
+Symbols (libsanitizer on this machine, `/usr/lib/x86_64-linux-gnu/libasan.so.8`, `nm -D`): `__asan_stack_malloc_0` to
+`_10`, `__asan_stack_free_0` to `_10`, and the flag `__asan_option_detect_stack_use_after_return` (a data symbol,
+`cmpl $0` in gcc's output). `__asan_stack_malloc_always_N`, `__asan_get_current_fake_stack`,
+`__asan_addr_is_in_fake_stack` and `__asan_handle_no_return` are not used. The public header
+(`/usr/lib/gcc/x86_64-linux-gnu/13/include/sanitizer/asan_interface.h`) does not document the `_N` entry points: their
+ABI is gcc's output, which is what the code copies.
+
+Limits, all false negatives:
+
+- One fake frame per object, not one per function: gcc's report lists every object of the frame ("This frame has N
+  object(s)"), the qbe one lists the object it reports. Each call costs one `__asan_stack_malloc_N` and one `__asan_stack_free_N`
+  per object.
+- Objects over 16-byte alignment, variable-length arrays and `alloca` stay in the real frame: a pointer to one of them
+  read after its function returned is not reported.
+- A frame over 64 KiB (after the rounding) is not made, and when the thread's fake stack is full libasan returns 0: the
+  object is in the real frame.
+- A frame whose function leaves by longjmp or a C++ throw (EDG's setjmp ABI) is never freed; its shadow stays as it was,
+  so reads through pointers into it are not reported, and its slot in the fake stack is not given back.
+- Deep recursion uses the real stack for every frame as well (the real frame is still allocated); the fake frames add
+  their own memory, so the real stack limit is the same as without the flag.
 
 ## How it works
 
@@ -77,7 +115,7 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan-uar`, the pin of `3rd/cproc`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 
@@ -93,7 +131,9 @@ qbe: cproc checks every load and store, and stack and global objects get redzone
 
 `tests/asan/run.sh` (CI: `ci.yml`): one program per error class with the expected report text, a clean program with
 exceptions and containers, the source line in the report, the flag-off cases, backend selection and refusals, `-c`
-then link, and a `.c` input in the same program.
+then link, and a `.c` input in the same program. Use after return: `use_after_return.cpp` (a report), and the clean programs
+`clean_return_heap.cpp` (pointers to heap and static data returned), `clean_recursive.cpp` and `clean_callee_return.cpp` (a
+callee returns before the caller reads the local whose address it got).
 
 A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on both back ends and links it
 with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
