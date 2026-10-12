@@ -376,6 +376,12 @@ def tokenize(src)
       next
     end
     c2 = src.getbyte(i + 1)
+    # a line of the preprocessor (`# 12 "file"`, the markers of cc -E without -P): not C, skipped like a comment
+    if c == 35 && (i == 0 || src.getbyte(i - 1) == 10)
+      j = src.index("\n", i)
+      i = j.nil? ? n : j
+      next
+    end
     if c == 47 && c2 == 47
       j = src.index("\n", i)
       i = j.nil? ? n : j

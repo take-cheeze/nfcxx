@@ -20,7 +20,12 @@ object's 8-byte granule and 32 zero bytes into the same data item, and the unit'
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
 leading redzone (an access before the object is not reported); thread-local globals get none; objects over 16-byte
 alignment, variable-length arrays and `alloca` get no redzones. Not yet: use-after-scope and use-after-return (the
-`ASAN-ONLY: gcc` case skips on qbe), the report's source line, and volatile (qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+`ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+
+Source lines: with `NFCXX_ASAN=1`, `qbe-cc` keeps the preprocessor's line markers (no `-P`), cproc records the location of each
+expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `dbgfile` names the file of the function.
+QBE turns those into `.loc` lines, so libasan's report names `file:line` like the gcc backend. The line is the expression's
+start token, so a multi-line expression may name a line inside it; `qbe-prep.rb` skips the markers as comments.
 
 ## How it works
 

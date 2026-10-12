@@ -40,8 +40,8 @@ for f in tests/asan/cases/*.cpp; do
   fi
 done
 
-# The report names the source line of the faulting access (gcc: EDG's #line directives; qbe has no line info yet, asan-plan.md 5).
-if [ "$B" = gcc ]; then
+# The report names the source line of the faulting access (gcc: EDG #line directives; qbe: cproc dbgloc, see asan.md).
+if true; then
   "$nfcxx" --backend=gcc -fsanitize=address -g tests/asan/cases/heap_overflow.cpp -o "$tmp/h" 2>/dev/null
   "$tmp/h" 2>"$tmp/rep" >/dev/null
   if grep -q "heap_overflow.cpp:5" "$tmp/rep"; then ok "report has the C++ source line"; else bad "report has the C++ source line" "$(grep -m3 '#[0-9]' "$tmp/rep" | tr '\n' ' ')"; fi

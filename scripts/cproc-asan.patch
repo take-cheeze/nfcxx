@@ -1,10 +1,11 @@
 --- a/qbe.c
 +++ b/qbe.c
-@@ -97,6 +97,13 @@
+@@ -97,6 +97,14 @@
  	struct block *start, *end;
  	struct map gotos;
  	unsigned lastid;
 +	struct array asan;   /* -fsanitize=address: the stack objects with redzones (asanalloc), unpoisoned by funcret */
++	const char *asanfile;   /* -fsanitize=address: the file of the first check, for dbgfile before the function */
 +};
 +
 +/* a stack object with redzones: the base of its allocation (an entry block temporary) and the allocation's size */
@@ -14,7 +15,7 @@
  };
  
  static const int ptrclass = 'l';
-@@ -244,6 +251,56 @@
+@@ -244,6 +252,63 @@
  	return inst;
  }
  
@@ -24,6 +25,8 @@
 +so this is the one place. A check is an ordinary call, so QBE cannot merge or forward the access past it.
 +*/
 +bool asanon;   /* set by main from NFCXX_ASAN */
++/* -fsanitize=address: the location of the expression being generated (funcexpr), for dbgloc before each check */
++static struct location asanloc;
 +
 +static struct value *funcinst(struct func *f, int op, int class, struct value *arg0, struct value *arg1);
 +
@@ -49,6 +52,11 @@
 +static void
 +asancheck(struct func *f, const char *name, struct value *addr)
 +{
++	if (asanloc.line) {
++		funcinst(f, IDBGLOC, 0, mkintconst(asanloc.line), NULL);
++		if (!f->asanfile)
++			f->asanfile = asanloc.file;
++	}
 +	asancall(f, name, addr, NULL);
 +}
 +
@@ -71,7 +79,7 @@
  static struct value *
  funcinst(struct func *f, int op, int class, struct value *arg0, struct value *arg1)
  {
-@@ -254,6 +311,8 @@
+@@ -254,6 +319,8 @@
  		b = mkblock("dead");
  		funclabel(f, b);
  	}
@@ -80,7 +88,7 @@
  	inst = mkinst(f, op, class, arg0, arg1);
  	arrayaddptr(&f->end->insts, inst);
  	return &inst->res;
-@@ -753,6 +812,36 @@
+@@ -753,6 +820,37 @@
  	}
  }
  
@@ -104,6 +112,8 @@
 +	base = funcinst(f, IALLOC16, ptrclass, mkintconst(total), NULL);
 +	obj = funcinst(f, IADD, ptrclass, base, mkintconst(ASANRZ));
 +	right = funcinst(f, IADD, ptrclass, obj, mkintconst(size8));
++	f->end = end;
++	/* the poison is at the declaration, not in the entry block: a return that comes before this declaration never poisons it */
 +	asancall(f, "__asan_unpoison_memory_region", base, mkintconst(total));
 +	asancall(f, "__asan_poison_memory_region", base, mkintconst(ASANRZ));
 +	asancall(f, "__asan_poison_memory_region", right, mkintconst(ASANRZ));
@@ -111,13 +121,12 @@
 +	o->base = base;
 +	o->size = total;
 +	d->value = obj;
-+	f->end = end;
 +}
 +
  static void
  funcalloc(struct func *f, struct decl *d)
  {
-@@ -764,6 +853,11 @@
+@@ -764,6 +862,11 @@
  	assert(!d->type->incomplete);
  	calcvla(f, d->type);
  	end = f->end;
@@ -129,15 +138,16 @@
  	if (d->type->size) {
  		f->end = f->start;
  		v = mkintconst(d->type->size);
-@@ -911,6 +1005,7 @@
+@@ -911,6 +1014,8 @@
  	f->type = t;
  	f->start = f->end = mkblock("start");
  	f->lastid = 0;
 +	f->asan = (struct array){0};
++	f->asanfile = NULL;
  	mapinit(&f->gotos, 8);
  	emittype(t->base);
  
-@@ -1014,6 +1109,8 @@
+@@ -1014,6 +1119,8 @@
  funcret(struct func *f, struct value *v)
  {
  	struct block *b = f->end;
@@ -146,7 +156,7 @@
  
  	if (!b->jump.kind) {
  		if (v && f->type->base->kind == TYPELDOUBLE) {
-@@ -1024,6 +1121,11 @@
+@@ -1024,6 +1131,11 @@
  		}
  		if (v && f->type->base->kind == TYPEFLOAT16)
  			v = f16tosse(f, v);
@@ -158,7 +168,28 @@
  		b->jump.kind = JUMP_RET;
  		b->jump.arg = v;
  	}
-@@ -2115,16 +2217,29 @@
+@@ -1282,6 +1394,9 @@
+ {
+ 	struct expr *callee;
+ 	enum instkind op = INONE;
++
++	if (e->loc.line)
++		asanloc = e->loc;
+ 	struct decl *d;
+ 	struct value *l, *r, *v, **argvals;
+ 	struct lvalue lval;
+@@ -1999,6 +2114,10 @@
+ 	struct decl *p;
+ 	struct value *v;
+ 
++	/* dbgfile is top-level: it names the file of the .loc lines (dbgloc) of this function */
++	if (f->asanfile)
++		printf("dbgfile \"%s\"\n", f->asanfile);
++
+ 	if (f->end->jump.kind == JUMP_NONE) {
+ 		v = NULL;
+ 		/* implicitly return 0 from main if we reach the end of the function */
+@@ -2115,16 +2234,29 @@
  	}
  }
  
@@ -189,7 +220,7 @@
  	for (cur = init; cur; cur = cur->next)
  		cur->expr = eval(cur->expr);
  	if (d->u.obj.storage == SDTHREAD)
-@@ -2196,7 +2311,37 @@
+@@ -2196,7 +2328,37 @@
  		++offset;
  	}
  	assert(offset <= d->type->size);
@@ -258,7 +289,16 @@
  
 --- a/cc.h
 +++ b/cc.h
-@@ -424,6 +424,7 @@
+@@ -243,6 +243,8 @@
+ 
+ struct expr {
+ 	enum exprkind kind;
++	/* where the expression starts (set by mkexpr from the current token; the qbe backend's -fsanitize=address uses it) */
++	struct location loc;
+ 	/* whether this expression is an lvalue */
+ 	bool lvalue;
+ 	/* whether this expression is a pointer decayed from an array or function designator */
+@@ -424,6 +426,7 @@
  
  void emittentativedefns(void);
  void checkf128calls(void);
@@ -266,3 +306,22 @@
  
  /* scope */
  
+--- a/ops.h
++++ b/ops.h
+@@ -102,3 +102,6 @@
+ /* variadic */
+ OP(IVASTART, "vastart")
+ OP(IVAARG,   "vaarg")
++
++/* -fsanitize=address: the source line of the accesses that follow (qbe.c asanaccess) */
++OP(IDBGLOC,  "dbgloc")
+--- a/expr.c
++++ b/expr.c
+@@ -14,6 +14,7 @@
+ 	struct expr *e;
+ 
+ 	e = xmalloc(sizeof(*e));
++	e->loc = tok.loc;
+ 	e->qual = QUALNONE;
+ 	e->type = t;
+ 	e->lvalue = false;
