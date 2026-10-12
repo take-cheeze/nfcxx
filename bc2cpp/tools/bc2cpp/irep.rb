@@ -7,6 +7,7 @@
 require_relative 'insn_operands'
 require_relative 'insn_decoder'
 require_relative 'irep_scans'
+require_relative 'irep_cache'
 
 MRBC = ENV['MRBC'] || 'mrbc'
 
@@ -137,7 +138,7 @@ end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
 def compile_ireps(src_paths, symbol, out_dir)
-  load_ireps(run_mrbc(src_paths, symbol, out_dir))
+  load_ireps(run_mrbc(src_paths, symbol, out_dir), cache: IrepCache.directory_for_sources(src_paths))
 end
 
 CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze
@@ -201,7 +202,13 @@ def symbol_name(bytes)
 end
 
 # The whole Irep tree of a RITE image: [ireps (label => Irep), root_label].
-def load_ireps(image)
+def load_ireps(image, cache: ENV['BC2CPP_IREP_CACHE_DIR'])
+  return decode_ireps(image) if cache.nil? || cache.empty?
+
+  IrepCache.fetch(image.bytes, cache) { decode_ireps(image) }
+end
+
+def decode_ireps(image)
   rites = RiteBinary.parse(image.bytes)
   labels = Array.new(rites.length)
   children = Array.new(rites.length) { [] }
