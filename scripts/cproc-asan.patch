@@ -158,6 +158,77 @@
  		b->jump.kind = JUMP_RET;
  		b->jump.arg = v;
  	}
+@@ -2115,16 +2217,29 @@
+ 	}
+ }
+ 
++/*
++-fsanitize=address: a global of the unit is followed, in its own data item, by the rest of its 8-byte granule and ASANRZ zero
++bytes (emitdata). The unit's constructor (emitasanctor, in .init_array) poisons that tail, so an access past the object
++reports. A symbol is only the object's address, so the redzone has to be inside the item.
++*/
++struct asanglobal {
++	struct value *v;
++	unsigned long long granule;   /* the object's size rounded up to 8: the start of its redzone */
++};
++static struct array asanglobals;
++
+ void
+ emitdata(struct decl *d, struct init *init)
+ {
+ 	struct init *cur;
+ 	struct type *t;
+-	unsigned long long offset = 0, start, end, bits = 0;
++	unsigned long long offset = 0, start, end, bits = 0, size, pad = 0;
++	struct asanglobal *g;
+ 	size_t i;
+ 	int align;
+ 
+ 	align = d->u.obj.align;
++	size = d->type->size;
+ 	for (cur = init; cur; cur = cur->next)
+ 		cur->expr = eval(cur->expr);
+ 	if (d->u.obj.storage == SDTHREAD)
+@@ -2196,7 +2311,37 @@
+ 		++offset;
+ 	}
+ 	assert(offset <= d->type->size);
+-	if (offset < d->type->size)
+-		printf("z %llu ", d->type->size - offset);
++	if (asanon && size && d->u.obj.storage != SDTHREAD) {
++		pad = ((size + 7) & ~7ULL) - size + ASANRZ;
++		g = arrayadd(&asanglobals, sizeof(*g));
++		g->v = d->value;
++		g->granule = (size + 7) & ~7ULL;
++	}
++	if (offset < size || pad)
++		printf("z %llu ", size - offset + pad);
++	puts("}");
++}
++
++/* the constructor of the unit: poisons the redzone of each global emitdata wrote (see asanglobal), then the .init_array entry */
++void
++emitasanctor(void)
++{
++	struct asanglobal *g;
++	size_t i, n = asanglobals.len / sizeof(*g);
++
++	if (n == 0)
++		return;
++	puts("function $__nfcxx_asan_globals() {");
++	puts("@start");
++	for (i = 0; i < n; i++) {
++		g = (struct asanglobal *)asanglobals.val + i;
++		printf("\t%%g%zu =l add ", i);
++		emitname(g->v);
++		printf(", %llu\n", g->granule);
++		printf("\tcall $__asan_poison_memory_region(l %%g%zu, l %d)\n", i, ASANRZ);
++	}
++	puts("\tret");
+ 	puts("}");
++	puts("section \".init_array\" \"aw\"");
++	puts("data $__nfcxx_asan_ctor = align 8 { l $__nfcxx_asan_globals }");
+ }
 --- a/main.c
 +++ b/main.c
 @@ -12,6 +12,8 @@
@@ -177,3 +248,21 @@
  	ARGBEGIN {
  	case 'E':
  		pponly = true;
+@@ -64,6 +67,7 @@
+ 			}
+ 		}
+ 		emittentativedefns();
++		emitasanctor();
+ 		checkf128calls();
+ 	}
+ 
+--- a/cc.h
++++ b/cc.h
+@@ -424,6 +424,7 @@
+ 
+ void emittentativedefns(void);
+ void checkf128calls(void);
++void emitasanctor(void);
+ 
+ /* scope */
+ 
