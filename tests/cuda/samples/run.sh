@@ -68,7 +68,11 @@ while IFS='|' read -r name tree dir srcs expect marker known; do
   if [ "$expect" = builds ]; then echo "builds $name: links; not run ($known)"; continue; fi
   if [ "$expect" = build-only ]; then echo "builds $name: links (needs input files; not run)"; continue; fi
   out=$(cd "$w" && LD_LIBRARY_PATH="$cuda/lib64:/usr/lib/x86_64-linux-gnu" timeout 300 "./$name" 2>&1); rc=$?
-  if [ "$rc" != 0 ]; then echo "FAIL $name: run exit $rc"; fail=1; continue; fi
+  if [ "$rc" != 0 ]; then
+    if [ "$expect" = fail-run ] && [ "$known" = "run exit $rc" ]; then echo "known-fail $name: $known"
+    else echo "FAIL $name: run exit $rc"; fail=1; fi
+    continue
+  fi
   if [ "$expect" = pass ]; then
     if echo "$out" | grep -qF "$marker"; then echo "pass $name"
     else echo "FAIL $name: marker not printed: $marker"; fail=1; fi
