@@ -22,7 +22,7 @@ trap 'rm -rf "$out"' EXIT
 rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1"; }
 
 # 1. The rewrite matches the goldens.
-for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp; do
+for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage; do
   if rw "$c.cu" > "$out/$(basename "$c").cpp" && diff -u "$c.expected.cpp" "$out/$(basename "$c").cpp"; then
     echo "rewrite $c: ok"
   else
