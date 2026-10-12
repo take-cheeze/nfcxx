@@ -1873,6 +1873,30 @@ def enum_enumerators(t)
   names
 end
 
+# The text with its comments blanked (each comment character becomes a space; newlines and literals stay). The
+# classification searches for ( = { in the text, and a comment's parentheses or braces must not count there.
+def blank_comments(s)
+  out = ""
+  i = 0
+  while i < s.length
+    if s[i] == "/" && (s[i + 1] == "/" || s[i + 1] == "*")
+      e = skip_literal(s, i)
+      (i...e).each { |k| out << (s[k] == "\n" ? "\n" : " ") }
+      i = e
+      next
+    end
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
 # A function definition or declaration whose head names a type keyword (`static enum ggml_status f(...) {`): the
 # keyword is not a type definition. The head is the text before the first brace; a `(` in it marks a function.
 def function_head?(t)
@@ -1945,7 +1969,7 @@ def device_tu(text)
   # Host declarations: defined names, as far as a piece's text tells them.
   pieces.each do |pc|
     next if pc[:keep] || pc[:device]
-    t = pc[:text]
+    t = blank_comments(pc[:text])
     toks = pc[:toks]
     if pc[:kind] == :pp
       next unless pc[:macro]
