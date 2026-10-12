@@ -1,0 +1,22 @@
+--- a/ldo.c	2026-10-12 08:12:58.481492427 +0000
++++ b/ldo.c	2026-10-12 08:12:58.485697566 +0000
+@@ -84,7 +84,7 @@
+ struct lua_longjmp {
+   struct lua_longjmp *previous;
+   luai_jmpbuf b;
+-  volatile int status;  /* error code */
++  int status;  /* error code */
+ };
+ 
+ 
+--- a/lstate.h	2026-10-12 08:12:58.481635898 +0000
++++ b/lstate.h	2026-10-12 08:12:58.488233089 +0000
+@@ -181,7 +181,7 @@
+   union {
+     struct {  /* only for Lua functions */
+       const Instruction *savedpc;
+-      volatile l_signalT trap;  /* function is tracing lines/counts */
++      l_signalT trap;  /* function is tracing lines/counts */
+       int nextraargs;  /* # of extra arguments in vararg functions */
+     } l;
+     struct {  /* only for C functions */

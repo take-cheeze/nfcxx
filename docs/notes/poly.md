@@ -1,133 +1,177 @@
-# nfcpoly: scripts in another language, embedded in a C++ program
+# nfcpoly: scripts in other languages, embedded in a C++ program
 
-`lib/poly/nfcpoly.hpp` + `nfcpoly.cpp` let a program compiled with nfcxx evaluate source text of another language
-while it runs, with host objects and functions visible to that code and the script's values visible to C++: a small
-version of GraalVM's polyglot `Context.eval(language, source)` with shared bindings. The language is Ruby, run by
-mruby 4.0.0 (the pin of `scripts/setup-mruby.sh`) embedded as a library. The `language` argument of `eval` is the
-place a second language would plug in; only `"ruby"` (alias `"mruby"`) exists.
+`lib/poly` lets a program compiled with nfcxx evaluate source text of **Ruby** (mruby), **Lua** and **Python** (CPython)
+while it runs, with host objects and functions visible to the scripts and the scripts' values visible to C++: a small
+version of GraalVM's polyglot `Context.eval(language, source)` with shared bindings, several languages in one `Context`.
+Unlike `nfceval` (`eval.md`) no compiler runs per snippet.
 
-What this is not: GraalVM's partial evaluation or a heap shared by languages. Values cross by copy, or as handles to
-objects (a script wrapper around a C++ object, or a `Value` rooting a script object), and the C++ side declares what a
-script may touch. Unlike `nfceval` (`eval.md`) there is no compiler run per snippet: a script is parsed by mruby.
+What it is not: GraalVM's partial evaluation, or one heap shared by the languages. Values cross by copy (plain data), or
+as handles (a script wrapper around a C++ object, a `Value` rooting a script object), and the C++ side declares what a
+script may touch. Each language has its own interpreter.
 
 ```cpp
 #include "nfcpoly.hpp"
 nfcpoly::Context ctx;
 ctx.def_class<Vec3>("Vec3").ctor<double, double, double>().field("x", &Vec3::x).method("len2", &Vec3::len2);
 Vec3 pos{1, 2, 3};
-ctx.bind("pos", pos);                       // `pos` in a script is this very object
-ctx.bind_fn("scale", &scale);               // `scale(2.0)` calls the C++ function
-int r = ctx.eval<int>("ruby", "pos.x = 4; pos.x * scale(2.0)");   // pos.x is 4 in C++ afterwards
-Value v = ctx.eval_value("ruby", "[3, 1, 2]");
-std::vector<int> sorted = v.call("sort").as<std::vector<int>>();
+ctx.bind("pos", pos);                    // `pos` in a script is this very object, in every language
+ctx.bind_fn("scale", &scale);            // `scale(2.0)` calls the C++ function
+int    r = ctx.eval<int>("ruby", "pos.x = 4; pos.x * scale(2.0)");       // pos.x is 4 in C++ afterwards
+double d = ctx.eval<double>("lua", "pos.x + scale(1.0)");
+auto   v = ctx.eval<std::vector<int>>("python", "sorted([3, 1, 2])");
+Value  f = ctx.eval_value("lua", "function(a) return a * 2 end");
+int    n = f.execute(21).as<int>();                                       // 42
 ```
 
-Build and test: `scripts/setup-poly.sh` (per back end), then
-`nfcxx -I lib/poly -I build/poly/<backend>/include host.cpp lib/poly/nfcpoly.cpp build/poly/<backend>/lib/libmruby.a`;
-`tests/poly/run.sh` does both for `qbe` and `gcc` (CI: `ci.yml`).
+Build and test: link `nfcpoly.cpp` and the backend of each language you want (a backend registers itself when it is
+linked in), plus that language's library:
 
-## Building mruby with C++ exceptions
+| Language | backend | library | built by |
+| --- | --- | --- | --- |
+| Ruby (`"ruby"`, `"mruby"`) | `nfcpoly_mruby.cpp` | `build/poly/<backend>/lib/libmruby.a` | `scripts/setup-poly.sh` |
+| Lua (`"lua"`) | `nfcpoly_lua.cpp` | `build/poly-lua/<backend>/lib/liblua.a` | `scripts/setup-poly-lua.sh` |
+| Python (`"python"`, `"python3"`, `"py"`) | `nfcpoly_python.cpp` | the system libpython (`python3-config --ldflags --embed`) | `apt-get install python3-dev` |
 
-`scripts/setup-poly.sh` builds mruby with its own rake build (`scripts/mruby-rt-config.rb`) into
-`build/poly/<backend>/{lib/libmruby.a,include}`: `nfcc` is the C compiler, `nfcxx` the C++ compiler and the linker,
-and `conf.enable_cxx_exception` is on. In that mode mruby's `MRB_THROW` is a C++ `throw` of an `mrb_jmpbuf*`,
-`MRB_TRY`/`MRB_CATCH` are `try`/`catch`, and mruby compiles `src/vm.c`, `error.c`, `gc.c` (and the compiler gem's
-parser and code generator) as C++ through generated `*-cxx.cxx` wrappers; every other file stays C. With nfcxx as the
-C++ compiler those throws are EDG's exception runtime (`libC.a`: `__throw`, the try stack), the same one every `throw`
-and `catch` in the host uses (checked with `nm` on both back ends: exactly the five `-cxx.o` members of `libmruby.a`, `vm`, `error`, `gc`,
-`codegen` and `y.tab`, reference `__throw` and `__curr_eh_stack_entry`; the `_setjmp` they also reference is EDG's own
-try stack; no other member references `setjmp` or `longjmp`).
+`tests/poly/run.sh` builds all three for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
+with a `SKIP` line when `python3-config` or `Python.h` is missing. `POLY_LANGS="lua"` selects languages.
 
-Two things had to be handled:
+## Architecture
 
-- **Computed goto.** `vm.c` compiled as C++ by EDG fails on `goto *optable[insn]` (the table is `const void *`;
-  `cxx-driver.md`). The config defines `MRB_USE_VM_SWITCH_DISPATCH`.
-- **`volatile`.** The three C++ files hold exactly one volatile, `volatile int err` in `mrb_core_init_protect`
-  (`src/error.c`), a setjmp guard. cproc rejects the store (`volatile store is not yet supported`, qbe back end;
-  README "Known limitations"). With real `try` blocks the guard is redundant (EDG keeps the locals of a try block in
-  memory itself, it emits `__suppress_optim_on_vars_in_try` for them), so `scripts/mruby-cxx-novolatile.patch` drops
-  the qualifier, applied to the throwaway checkout under `build/poly/src` for both back ends. A `-Dvolatile=` in the
-  config was tried first and does not work: it breaks the hosted libstdc++ headers (`std::launder`,
-  `numeric_limits<volatile T>`). The general fix would be to let `qbe-prep.rb` treat volatile in EDG's C as it does for
-  C inputs (`realworld.md`); not done.
+- `nfcpoly.hpp` (the whole public API, no interpreter header) and `nfcpoly.cpp` are language neutral. C++ values convert to
+  and from a neutral `Var` (nil, bool, integer, float, string, array, a registered C++ object, or a handle to a script
+  value). `nfcpoly_lang.hpp` is the interface a backend implements: `eval`, `call`, deep conversion of arrays, and the
+  declarations (global function, value, live variable, class with methods, properties and constructor).
+- A backend converts between `Var` and its interpreter's values, defines what was declared, and registers itself with a
+  static `LangRegistrar`. A language's interpreter starts on its first `eval`; everything declared before is replayed into
+  it, and later declarations reach the running ones.
+- Decoding is shallow (plain data and registered objects convert, everything else becomes a rooted handle); arrays are
+  converted when a C++ type asks for one (`std::vector<T>`, `Value::as`), so a script array passed to a `Value` parameter
+  keeps its identity.
+- Registered C++ objects carry a shared ownership record (`Owned`): the C++ object is deleted when the last script wrapper
+  and the last `Var`/`Value` are gone. A handle to a script value is orphaned, not left dangling, when its `Context` goes
+  away, so a `Value` outlives its `Context` safely (plain values and co-owned objects keep working; asking the interpreter
+  throws `Error`).
 
-The gems are `scripts/mruby-rt-config.rb`'s list: the compiler (scripts are parsed at run time), sprintf, the `*-ext`
-gems, `mruby-set`, `-error`, `-metaprog`, `-math`, `-bigint`, `-struct`, `-toplevel-ext`. No `mruby-io`, `-exit`,
-`-time` or `-sleep`: a script has no files, no `exit` and no clock unless the host binds them. No `_Complex` gems
-(cproc).
+## Building the interpreters
+
+All three are checked on both back ends.
+
+**Ruby: mruby with C++ exceptions.** `scripts/setup-poly.sh` builds mruby 4.0.0 (the pin of `scripts/setup-mruby.sh`) with
+its own rake build (`scripts/mruby-rt-config.rb`): `nfcc` is the C compiler, `nfcxx` the C++ compiler and the linker, and
+`conf.enable_cxx_exception` is on. In that mode mruby's `MRB_THROW` is a C++ `throw` of an `mrb_jmpbuf*`, and mruby compiles
+`src/vm.c`, `error.c`, `gc.c` and the compiler gem's parser and code generator as C++ through generated `*-cxx.cxx`
+wrappers; every other file stays C. With nfcxx as the C++ compiler those throws are EDG's exception runtime, the one the
+host's `throw` and `catch` use (checked with `nm` on both back ends: exactly those five members of `libmruby.a` reference
+`__throw`; no other member references `setjmp` or `longjmp`). Two workarounds: `MRB_USE_VM_SWITCH_DISPATCH` (EDG rejects
+mruby's `const void *` computed-goto table when `vm.c` is compiled as C++, `cxx-driver.md`), and
+`scripts/mruby-cxx-novolatile.patch` (the only `volatile` in those files is a setjmp guard; cproc cannot store to a volatile,
+and a `-Dvolatile=` breaks the hosted libstdc++ headers). The gems are the compiler, sprintf, the `*-ext` gems, `mruby-set`,
+`-error`, `-metaprog`, `-math`, `-bigint`, `-struct`: no `mruby-io`, `-exit`, `-time` or `-sleep`.
+
+**Lua: ldo.c as C++.** `scripts/setup-poly-lua.sh` builds Lua 5.4.9 (the pin of `tests/realworld/run_lua.sh`) into
+`liblua.a`. Lua raises an error with `longjmp`, or, when the file is compiled as C++, with `throw`; `ldo.c` is the only file
+that does either, so it is built by nfcxx as C++ (in a generated wrapper that includes it inside `extern "C"`) and every
+other file by nfcc as C. Checked with `nm`: only `ldo.o` references `__throw`. `scripts/lua-cxx-novolatile.patch` drops the two
+volatile members that `ldo.c` writes (`lua_longjmp.status`, and `CallInfo.u.l.trap`, which only a signal handler could race
+with). The libraries a script gets are base (without `dofile` and `loadfile`), coroutine, table, string, math and utf8: no
+`io`, `os`, `package` or `debug`.
+
+**Python: the system CPython.** Python reports errors through return values, never by unwinding, so nothing needs building:
+`Python.h` compiles under EDG as it is, and the backend links `python3-config --ldflags --embed` (Python 3.12 here; the
+backend uses `PyErr_GetRaisedException` from 3.12 and `PyErr_Fetch` before). One interpreter per process, started on first use
+and never finalized; each `Context` gets its own globals (a `dict` subclass).
 
 ## Exceptions
 
-An exception in mruby is a C++ `throw`, so three rules keep the two worlds consistent (all in `nfcpoly.cpp`):
+Every backend keeps the same three rules (`nfcpoly_lang.hpp`):
 
-1. **C++ calling the interpreter** goes through `mrb_protect_error`. A script error becomes `nfcpoly::ScriptError`
-   (`class_name()`, `message()`, `backtrace()`; `SyntaxError` for a parse failure), never an `mrb_jmpbuf*` in host code.
-2. **The interpreter calling C++** goes through one trampoline per bound function or method. Whatever the C++ code
-   throws is caught there and raised in the script instead (a foreign C++ exception passing through the VM would
-   leave `mrb->jmp` and the call stack inconsistent): a conversion failure is a `TypeError`, a wrong argument count an
-   `ArgumentError`, a `ScriptError` coming from a nested `Value::call` re-raises that very script exception object, and
-   anything else is an `NfcPoly::HostError` (a `RuntimeError`) carrying the C++ exception in a `std::exception_ptr`
-   (hidden ivar `@__host`). The one type the trampoline lets through is `mrb_jmpbuf*`, a script raise passing through a
-   bound function (raw mruby API) on its way to a script handler.
-3. **A script raise unwinds C++ frames properly.** The destructors of a bound function's locals run when a script it
-   called back into raises (`tests/poly/host.cpp`, `with_guard`).
+1. **C++ calling an interpreter** checks for failure and converts it: `nfcpoly::ScriptError` (`class_name()`, `message()`,
+   `backtrace()`), or `SyntaxError` for a parse failure. Never a raw interpreter exception in host code.
+2. **An interpreter calling C++** goes through one trampoline per bound function or method. Whatever the C++ code throws is
+   caught there and raised in the script instead: a conversion failure is a `TypeError`, a wrong argument count an
+   `ArgumentError` (a `TypeError` in Python), a `ScriptError` coming from a nested `Value::call` raises that very script error
+   object again, and anything else is an `NfcPoly::HostError` carrying the C++ exception in a `std::exception_ptr`.
+3. **A script error unwinds C++ frames properly** where the interpreter's errors are C++ exceptions (Ruby, Lua): the destructors of
+   a bound function's locals run when a script it called back into raises (`tests/poly/host.cpp`, `with_guard_raw`). The trampoline
+   lets the interpreter's own throw pass (`catch (void*)`: mruby throws an `mrb_jmpbuf*`, Lua a pointer to its private
+   `lua_longjmp`). Python needs no such care: its errors are return values, and a C++ frame is unwound by the `ScriptError`
+   that `Value::call` throws.
 
-At the host boundary the identity round-trips: a `HostError` that no script code rescued is rethrown by `eval` /
-`Value::call` as the original C++ exception, same type and payload (`HostFail` with a code, an `int`), through
-`std::rethrow_exception`; script `ensure` blocks run on the way.
+At the host boundary the identity round-trips: a `HostError` that no script code rescued is rethrown by `eval` / `Value::call`
+as the original C++ exception, same type and payload (`HostFail` with a code, an `int`); script `ensure`/`finally` blocks run on
+the way.
 
-What the C++ build buys, measured with `tests/poly/host.cpp` on the gcc back end: the same checks against mruby in
-its default setjmp/longjmp mode (a scratch build with the `enable_cxx_exception` line removed) fail exactly the destructor checks (the `Guard` of a bound function is not
-destroyed when a script raise passes through its frame) and the process then aborts with `double free or corruption`:
-`longjmp` over frames that EDG registered on its try stack. With `enable_cxx_exception` all pass.
+| | script error is | host exception inside a script is | `class_name()` of a script error |
+| --- | --- | --- | --- |
+| Ruby | a Ruby exception | `NfcPoly::HostError < RuntimeError` | the Ruby class (`ArgumentError`) |
+| Lua | any value; the backend raises tables `{class, message}` with a `__tostring` | such a table, with a hidden `host` userdata | `LuaError` for `error("text")` |
+| Python | a Python exception | `HostError(RuntimeError)`, capsule in `_host` | the Python class (`ValueError`) |
 
-## Values
+What the C++ exceptions of mruby buy, measured with `tests/poly/host.cpp` on the gcc back end: the same checks against mruby in
+its default setjmp/longjmp mode (a scratch build without `enable_cxx_exception`) fail exactly the destructor checks (the `Guard`
+of a bound function is not destroyed when a script raise passes through its frame) and the process then aborts with `double free
+or corruption`: `longjmp` over frames that EDG registered on its try stack.
+
+## Values and language idioms
 
 | C++ | script | notes |
 | --- | --- | --- |
-| `bool`; integer types; `float`, `double` | `true`/`false`; Integer; Float | integers are range checked (`ConversionError`; `TypeError` in a script); a Float parameter accepts an Integer; no implicit truthiness |
-| `std::string`, `const char*` (result) | String | byte strings; `std::string_view` only as a parameter (a view into the script's string); `const char*` parameters and `string_view` results are refused at compile time |
-| `std::vector<T>`, `std::optional<T>` | Array; `nil` or T | copies |
-| `Value` | any | rooted until destroyed; `as<T>()`, `call(name, args...)`, `inspect()`, `class_name()` |
-| registered class `T` (`def_class`) | an instance of the script class | `T&`, `const T&`, `T*` (nil is nullptr) share the object; `T` by value copies it in, and as a result is a new object the script's GC owns |
+| `bool`; integer types; `float`, `double` | boolean; integer; float | integers are range checked (`ConversionError`; a `TypeError` in a script); a float parameter accepts an integer, an integer parameter a whole float (`5.0`); no implicit truthiness |
+| `std::string`, `std::string_view`, `const char*` | string | byte strings (Python: UTF-8 text, other bytes become `bytes`); a view or `const char*` is for parameters (valid during the call); as a result it is refused at compile time |
+| `std::vector<T>`, `std::optional<T>` | Array / table / list; nil / None | copies; a Lua table is an array when its keys are exactly 1..n (`{}` is one), a Python tuple is one too |
+| `Value` | any | rooted until destroyed; `as<T>()`, `call(name, args...)`, `execute(args...)`, `inspect()`, `class_name()` |
+| registered class `T` | an object of the script class | `T&`, `const T&`, `T*` (nil is nullptr) share the object; `T` by value copies it in, and as a result is a new object the script owns |
 
-`def_class<T>(name)` returns a `ClassBuilder` with `ctor<Args...>()`, `method(name, &T::f)`, `method_fn(name, f)` (first
-parameter is the object), `field(name, &T::m)` (reader, and `name=` unless const). A script can subclass a bound class.
-Class-typed members and `T&` results are shared with their owner (a borrowed wrapper); other members are copied.
+`def_class<T>(name)` returns a `ClassBuilder` with `ctor<Args...>()`, `method(name, &T::f)`, `method_fn(name, f)` (the first
+parameter is the object), `field(name, &T::m)` (reader, and writer unless const). Class-typed members and `T&` results are
+shared with their owner; other members are copied. `bind(name, obj)` of a class object gives every language that object (the
+same wrapper on every read); `set(name, value)` gives a copy; `bind_fn(name, f)` a function, exact arity. Names of globals are
+lower-case identifiers.
 
-`bind(name, obj)` of a class object gives the script that object (the same wrapper on every read); of an arithmetic or
-`std::string` variable a live reader, and `self.name = v` writes it back (a plain `name = v` in Ruby is a new local).
-`set(name, value)` gives a copy. `bind_fn(name, f)`: a function, function pointer or lambda with one non-template call
-operator, exact arity. Names are lower-case identifiers; bound things are methods of `Kernel`.
+| | `eval` returns | state between evals | class use | bound variable `counter` |
+| --- | --- | --- | --- | --- |
+| Ruby | the last expression | top-level locals, methods, globals | `Vec3.new(1, 2, 3)`, `v.len2`, `v.x = 4` | `counter`, and `self.counter = 5` |
+| Lua | the chunk's `return` value; a single expression is returned as is (tried as `return <code>` first) | globals (not `local`s) | `Vec3.new(1, 2, 3)` or `Vec3(1, 2, 3)`, `v:len2()`, `v.x = 4` | `counter`, and `counter = 5` (the globals' metatable) |
+| Python | the last expression statement (the source is split with `ast`) | the globals | `Vec3(1, 2, 3)`, `v.len2()`, `v.x = 4` | `counter`, and `counter = 5` at the top level (a `dict` subclass; reads work in functions too; a write through `global counter` does not reach the host and shadows the live variable from then on, so assign at the top level or with `set`) |
+
+Several languages in one `Context`: every declaration is visible in all of them, and one host object is the same C++ object in
+each (`tests/poly/host.cpp`, "cross"). A script array declared with `set` is copied into plain data and visible everywhere; a
+script value that is not plain data (a function, a table with keys) stays in its own language, and passing one into another
+language (`Value::call` argument) throws `ConversionError`.
 
 ## Lifetime
 
-- Objects bound by reference must outlive their use in scripts, as with `nfceval`. A `Value` and anything borrowed from
-  one must not outlive the `Context`. Closing the interpreter finalizes the objects the script owns.
-- `Value` roots its script object (`mrb_gc_register`); `eval` and `Value::call` restore the GC arena, so a host loop of
-  evaluations does not grow it (`tests/poly/host.cpp`: 3000 iterations).
-- Top-level local variables, methods and constants persist between `eval` calls; a parse error does not lose them.
+- Objects bound by reference must outlive their use in scripts, as with `nfceval`. Closing a `Context` finalizes the objects the
+  scripts still own.
+- A `Value` roots its script value (`mrb_gc_register`, `luaL_ref`, a Python reference); `eval` and `Value::call` restore the GC
+  arena, so a host loop does not grow it (`tests/poly/host.cpp`: 3000 iterations per language).
+- Garbage collection: Ruby `GC.start`, Lua `collectgarbage()`, Python reference counting (`gc.collect()` for cycles) release the
+  script-owned C++ objects (`Vec3::live` in the test).
 
 ## Limitations
 
 None of these is covered by a test unless stated.
 
-- No sandbox and no time limit: a script runs in the host process and can loop forever (mruby may offer a
-  per-instruction hook; not looked at). Not thread safe: one `Context` per thread.
-- Constness is not enforced for scripts (a `const T&` result can be mutated by calling a non-const method); inheritance
-  is not tracked (a `Derived` is not accepted as a `Base`); a wrapper returned for `T&` is a new object on every call
-  (`a.child.equal?(a.child)` is false).
-- `nfcpoly.cpp` includes `<mruby/throw.h>`, which mruby documents as core-internal, to name the type `mrb_jmpbuf` in
-  one `catch`; it defines `MRB_USE_CXX_EXCEPTION` for it, so the library must be linked against a libmruby built by
-  `setup-poly.sh` (a setjmp build links and runs, but loses the destructor guarantee above, see the control).
-- Re-entrancy (a bound function that evaluates script code) works in `tests/poly/host.cpp` for one level of plain code;
-  deeper nesting and `Fiber`s are untested.
-- Path B (`NFCXX_PATH=b`) was not tried. mruby needs gcc or cproc for its C files and EDG for three C++ ones.
-- Not done: a second language, and compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as
-  `scripts/cuda-embed.rb` does for GPU images).
-- `setup-poly.sh` fetches mruby from GitHub at the pin (and needs `ruby` + `rake` once), like `setup-mruby.sh`.
+- No sandbox and no time limit: a script runs in the host process and can loop forever. Not thread safe: one `Context` per
+  thread. Python is one interpreter per process (contexts have separate globals but share modules and `sys`).
+- Everything crossing the boundary is copied through the neutral `Var` (strings and arrays twice); this is an embedding API, not
+  a fast path.
+- Constness is not enforced for scripts; inheritance is not tracked (a `Derived` is not accepted as a `Base`); a wrapper returned
+  for `T&` is a new script object on every call. Only a Ruby script can subclass a bound class.
+- A bound function that throws a pointer to a non-const object is taken for the interpreter's own throw and passes through.
+- Re-entrancy (a bound function that evaluates script code itself) is tested for one level of plain code in each language;
+  deeper nesting is not. Ruby `Fiber`s are untested; Lua coroutines are tested.
+- Path B (`NFCXX_PATH=b`) was not tried. The Python backend needs the development files of CPython and is skipped without them.
+- Not done: compile-time embedding of scripts (mruby's `mrbc` bytecode in the executable, as `scripts/cuda-embed.rb` does for GPU
+  images), and a general fix for `volatile` in EDG's C on the qbe back end (`qbe-prep.rb` handles it for C inputs only, which is
+  why mruby and Lua are patched).
+- `setup-poly.sh` and `setup-poly-lua.sh` fetch mruby and Lua from GitHub at their pins (mruby also needs `ruby` + `rake` once),
+  like `setup-mruby.sh` and `run_lua.sh`.
 
 ## Checks run
 
-`tests/poly/run.sh` on both back ends (the host prints how many checks it ran), 8 repeated runs of each binary, each
-binary under valgrind (`-q --error-exitcode=9`, no errors reported), and the control build described above.
+`tests/poly/run.sh` on both back ends with all three languages (the host prints how many checks it ran), 8 repeated runs of each
+binary, each binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`, no errors reported), the setjmp control
+build described above, and mutation checks on scratch copies of the backends: dropping the interpreter pass-through in the Ruby or
+Lua trampoline, losing script error identity in Python, or leaking the ownership record in the Ruby or Lua wrappers each fail the
+checks written for it.
