@@ -17,7 +17,12 @@ module SymbolCache
   # OP_SEND / OP_SSEND check and mrb_funcall does not; the slot carries the check's level.
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
-  private_constant :STRING, :INTERN, :CHECKED_FUNCALLS, :FUNCALLS
+  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
+  FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
+  NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
+  SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
+  private_constant :STRING, :INTERN, :CHECKED_FUNCALLS, :FUNCALLS,
+                   :FUNCALL_START, :FUNCALL_NAME, :NAMED_NAME, :SEND_INDEX
 
   # Symbols found so far, in first-seen order: C string literal => index.
   class Table
@@ -77,19 +82,21 @@ module SymbolCache
   # `bc2cpp_guard_violation_named(M, RECV, "name", "site", ...)` becomes
   # `bc2cpp_guard_violation(M, RECV, i, "site", ...)`; NIL_RECEIVER's
   # `bc2cpp_nil_receiver_named(M, RECV, "name", ...)` becomes `bc2cpp_nil_receiver(M, RECV, i, ...)`.
-  def rewrite_funcalls(code, table)
-    out = +''
+  def rewrite_funcalls(code, table, encoding: code.encoding)
+    # The grammar is ASCII; byte offsets avoid rescanning UTF-8 prefixes at each match.
+    code = code.b
+    out = +''.b
     pos = 0
-    while (start = code.index(/\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/, pos))
+    while (start = code.index(FUNCALL_START, pos))
       kind = Regexp.last_match(1)
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
-      name = recv_end && code[recv_end..].match(FUNCALLS.include?(kind) ? /\A,\s*(#{STRING})\s*,/ : /\A,\s*(#{STRING})(?=\s*[,)])/)
+      name = recv_end && (FUNCALLS.include?(kind) ? FUNCALL_NAME : NAMED_NAME).match(code, recv_end)
       if name
         # The receiver may itself contain a funcall; rewrite it first so its
         # names take their slots before this call's own.
-        receiver = rewrite_funcalls(code[head_end...recv_end], table)
-        index = table.index_for(name[1], CHECKED_FUNCALLS.fetch(kind, 0))
+        receiver = rewrite_funcalls(code[head_end...recv_end], table, encoding: encoding)
+        index = table.index_for(name[1].force_encoding(encoding), CHECKED_FUNCALLS.fetch(kind, 0))
         table.nomethod_used = true if kind == 'bc2cpp_nomethod_named' || kind == 'bc2cpp_nomethod_raise_named'
         table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
@@ -100,7 +107,7 @@ module SymbolCache
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
-        out << code[pos...start] << replacement
+        out << code[pos...start] << replacement.b
         pos = recv_end + name[0].length
       else
         out << code[pos...head_end]
@@ -108,18 +115,21 @@ module SymbolCache
       end
     end
     out << code[pos..]
+    out.force_encoding(encoding)
   end
 
   # The symbol index of every `bc2cpp_send(M, RECV, i, ...)` (and
   # `bc2cpp_nomethod(M, RECV, i...)`) in `code`, found with the same receiver
   # scan the rewrite uses (RECV may nest sends).
   def send_indices(code)
+    code = code.b
     found = []
     pos = 0
     while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|nil_receiver)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
-      idx = recv_end && code[recv_end..][/\A,\s*(\d+)\s*[,)]/, 1]
+      match = recv_end && SEND_INDEX.match(code, recv_end)
+      idx = match && match[1]
       found << idx.to_i if idx
       pos = head_end
     end
