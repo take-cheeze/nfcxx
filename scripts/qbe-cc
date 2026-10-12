@@ -57,7 +57,16 @@ trace_end "$t" "cc -E (preprocess)" qbe-backend
 # The C-input mode (hand-written C) is an argument: the mruby interpreter has no ENV.
 t=$(trace_start)
 prepflags=(); [ -z "${NFCXX_C_INPUT:-}" ] || prepflags=(--c-input)
-"$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+"${prepflags[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+# qbe-prep.rb changes only the forms named in its header, and all of them contain one of these tokens. With
+# none present (and no CR, which it would normalize), its output is its input and the tail is empty, so the
+# file goes through unchanged. Under mruby the scan costs minutes on a multi-MB file (unicode_name_fsm: 11 MB).
+# NFCXX_PREP_ALWAYS=1 runs qbe-prep.rb on every input (tests/mruby/qbe-prep.sh counts them through the tap).
+if [ -z "${NFCXX_C_INPUT:-}" ] && [ -z "${NFCXX_PREP_ALWAYS:-}" ] && ! grep -q -E '__asm|__attribute__|__builtin_|__atomic_|_Float|__bf16|f(16|32|64|128)' "$tmp/pp.c" &&
+   ! grep -q "$(printf '\r')" "$tmp/pp.c"; then
+  cp "$tmp/pp.c" "$tmp/prep.c"; : > "$tmp/tail.s"
+else
+  "$(dirname "$0")/mrb" "$(dirname "$0")/qbe-prep.rb" ${prepflags[@]+"${prepflags[@]}"} "$tmp/pp.c" "$tmp/prep.c" "$tmp/tail.s"
+fi
 trace_end "$t" "qbe-prep.rb (mruby, rewrite for cproc)" qbe-backend
 t=$(trace_start)
 "$cproc" < "$tmp/prep.c" > "$tmp/out.ssa"

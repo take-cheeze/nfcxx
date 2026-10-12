@@ -295,6 +295,14 @@ def imm(t, v)
 end
 
 # The special registers of the GPU: tid, ctaid, ntid, nctaid with a component x, y or z (no regex: mruby's build may lack it).
+# Device intrinsics a kernel calls by name (extern "C"), and the special register each reads.
+DEVICE_INTRINSICS = {
+  "__nfcxx_tid_x" => "tid.x", "__nfcxx_tid_y" => "tid.y", "__nfcxx_tid_z" => "tid.z",
+  "__nfcxx_ctaid_x" => "ctaid.x", "__nfcxx_ctaid_y" => "ctaid.y", "__nfcxx_ctaid_z" => "ctaid.z",
+  "__nfcxx_ntid_x" => "ntid.x", "__nfcxx_ntid_y" => "ntid.y", "__nfcxx_ntid_z" => "ntid.z",
+  "__nfcxx_nctaid_x" => "nctaid.x", "__nfcxx_nctaid_y" => "nctaid.y", "__nfcxx_nctaid_z" => "nctaid.z",
+}
+
 def special_register?(name)
   parts = name.split(".")
   parts.length == 2 && ["tid", "ctaid", "ntid", "nctaid"].include?(parts[0]) && ["x", "y", "z"].include?(parts[1])
@@ -553,6 +561,17 @@ class Fn
       ty = parse_type(x[1])
       raise BadIR, "comparison result is not bool" unless reg_class(dty) == "p"
       compare(h.split(".")[0], dest, ty, x[2], x[3])
+    when "call"
+      # The device intrinsics of a kernel: `extern "C" unsigned __nfcxx_tid_x(void)` and the rest of the table
+      # below. Any other call is refused (calls of device functions are not lowered yet).
+      ty = parse_type(x[1])
+      expect(dty, ty)
+      callee = x[2]
+      name = callee.is_a?(IRSym) && callee.sig == "&" ? callee.name : nil
+      reg = name && DEVICE_INTRINSICS[name]
+      raise Refused, "call of #{name || form_text(callee)} (only the device intrinsics are lowered)" if reg.nil? || x.length != 3
+      raise Refused, "intrinsic #{name} returns #{ty[0]}, not a 32-bit unsigned" unless ty[0] == "int" && type_size(ty) == 4
+      emit("mov.u32 #{dest}, %#{reg};")
     when "gpu"
       ty = parse_type(x[1])
       expect(dty, ty)

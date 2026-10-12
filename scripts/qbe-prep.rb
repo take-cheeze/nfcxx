@@ -245,25 +245,96 @@ end
 
 # ---- tokens ---------------------------------------------------------------------------------------
 
-class Tok
-  attr_reader :kind, :text, :start, :end, :depth, :pdepth
+# Token codes: a punctuation token is its byte value (0..255); the other kinds are these.
+ID_CODE = 256
+NUM_CODE = 257
+STR_CODE = 258
+CHR_CODE = 259
 
-  # depth: brace depth before this token, pdepth: paren depth before it
-  def initialize(kind, text, start, stop, depth, pdepth)
-    @kind = kind
-    @text = text
-    @start = start
-    @end = stop
-    @depth = depth
-    @pdepth = pdepth
+# One shared string per single-byte punct token.
+PUNCT_S = (0..255).map { |b| b.chr }
+
+# The tokens are three parallel Arrays of Integers, not an object per token: the 34 MB preprocessed sys_predef
+# has about 9 million tokens, and the mruby GC marks every live object on each collection.
+#   K[i]  code | (brace depth before token i + DEP_OFF) << 9 | (paren depth before it + DEP_OFF) << 31
+#   P[i]  byte offset of token i in the source
+#   L[i]  byte length of token i; for an identifier also the index of its name << SYM_SHIFT
+# An identifier's text is names[sym], one string per distinct name, so comparing names allocates nothing.
+DEP_OFF = 1 << 20
+DEP_SHIFT = 9
+PDEP_SHIFT = 31
+LEN_MASK = (1 << 40) - 1
+SYM_SHIFT = 40
+
+class Toks
+  attr_reader :src, :k, :p, :l, :names
+
+  def initialize(src, k, p, l, names)
+    @src = src
+    @k = k
+    @p = p
+    @l = l
+    @names = names
+  end
+
+  def size
+    @k.size
+  end
+
+  # Code of token i, or -1 when i is out of range (the nil of the Python original).
+  def code(i)
+    i >= 0 && i < @k.size ? @k[i] & 511 : -1
+  end
+
+  def start(i)
+    @p[i]
+  end
+
+  def stop(i)
+    @p[i] + (@l[i] & LEN_MASK)
+  end
+
+  def sym(i)
+    @l[i] >> SYM_SHIFT
+  end
+
+  def depth(i)
+    ((@k[i] >> DEP_SHIFT) & ((1 << 22) - 1)) - DEP_OFF
+  end
+
+  def pdepth(i)
+    (@k[i] >> PDEP_SHIFT) - DEP_OFF
+  end
+
+  def text(i)
+    c = code(i)
+    if c == ID_CODE
+      @names[sym(i)]
+    elsif c < 256
+      PUNCT_S[c]
+    else
+      @src.byteslice(start(i), stop(i) - start(i))
+    end
+  end
+
+  # Token i is the punctuation token whose one byte is s (a one-character string).
+  def punct?(i, s)
+    c = code(i)
+    c >= 0 && c < 256 && PUNCT_S[c] == s
+  end
+
+  def id?(i, s)
+    code(i) == ID_CODE && @names[sym(i)] == s
+  end
+
+  # The text of token i is s (any kind of token).
+  def text?(i, s)
+    code(i) >= 0 && text(i) == s
   end
 end
 
-# One shared string per single-byte punct token (about half of all tokens).
-PUNCT_S = (0..255).map { |b| b.chr }
-
-# Scan a quoted literal whose opening quote is at q; returns the index just past the closing quote, or nil
-# (the Python regexes: `(?:[^"\\\n]|\\.)*` with re.S, so a backslash takes any next character).
+# Scan a quoted literal whose opening quote is at q; returns the index just past
+# the closing quote, or nil (the Python regexes: `(?:[^"\\\n]|\\.)*` with re.S, so a backslash takes any next character).
 def scan_quoted(src, q, n)
   quote = src.getbyte(q)
   k = q + 1
@@ -286,7 +357,11 @@ end
 # The ordered alternation of the Python TOKEN_RE, tried at each position: whitespace, comments, string,
 # char literal, number, identifier, any single character. Whitespace and comments are dropped.
 def tokenize(src)
-  toks = []
+  ks = []
+  ps = []
+  ls = []
+  names = []
+  syms = {}
   n = src.bytesize
   i = 0
   braces = 0
@@ -323,7 +398,10 @@ def tokenize(src)
     unless q.nil?
       stop = scan_quoted(src, q, n)
       unless stop.nil?
-        toks << Tok.new(src.getbyte(q) == 34 ? :str : :chr, src.byteslice(i, stop - i), i, stop, braces, parens)
+        code = src.getbyte(q) == 34 ? STR_CODE : CHR_CODE
+        ks << (code | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+        ps << i
+        ls << (stop - i)
         i = stop
         next
       end
@@ -340,18 +418,31 @@ def tokenize(src)
           break
         end
       end
-      toks << Tok.new(:num, src.byteslice(i, j - i), i, j, braces, parens)
+      ks << (NUM_CODE | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+      ps << i
+      ls << (j - i)
       i = j
       next
     end
     if IDSTART_B[c]
       j = i + 1
       j += 1 while j < n && WORD_B[src.getbyte(j)]
-      toks << Tok.new(:id, src.byteslice(i, j - i), i, j, braces, parens)
+      name = src.byteslice(i, j - i)
+      sym = syms[name]
+      if sym.nil?
+        sym = names.size
+        names << name
+        syms[name] = sym
+      end
+      ks << (ID_CODE | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+      ps << i
+      ls << ((j - i) | (sym << SYM_SHIFT))
       i = j
       next
     end
-    toks << Tok.new(:punct, PUNCT_S[c], i, i + 1, braces, parens)
+    ks << (c | ((braces + DEP_OFF) << DEP_SHIFT) | ((parens + DEP_OFF) << PDEP_SHIFT))
+    ps << i
+    ls << 1
     if c == 123
       braces += 1
     elsif c == 125
@@ -363,29 +454,17 @@ def tokenize(src)
     end
     i += 1
   end
-  toks
-end
-
-def is_punct(t, s)
-  !t.nil? && t.kind == :punct && t.text == s
-end
-
-def tok_at(toks, i)
-  i >= 0 && i < toks.size ? toks[i] : nil
-end
-
-def id_tok?(t, s)
-  !t.nil? && t.kind == :id && t.text == s
+  Toks.new(src, ks, ps, ls, names)
 end
 
 # Index of the token matching the close token at i, searching backwards.
-def match_back(toks, i, open_s, close_s)
+def match_back(tk, i, open_s, close_s)
   level = 0
   j = i
   while j >= 0
-    if is_punct(toks[j], close_s)
+    if tk.punct?(j, close_s)
       level += 1
-    elsif is_punct(toks[j], open_s)
+    elsif tk.punct?(j, open_s)
       level -= 1
       return j if level == 0
     end
@@ -394,19 +473,25 @@ def match_back(toks, i, open_s, close_s)
   -1
 end
 
-def match_fwd(toks, i, open_s, close_s)
+def match_fwd(tk, i, open_s, close_s)
   level = 0
   j = i
-  while j < toks.size
-    if is_punct(toks[j], open_s)
+  while j < tk.size
+    if tk.punct?(j, open_s)
       level += 1
-    elsif is_punct(toks[j], close_s)
+    elsif tk.punct?(j, close_s)
       level -= 1
       return j if level == 0
     end
     j += 1
   end
   -1
+end
+
+# The statement starts at token i: nothing, or `;`, `{` or `}` before it.
+def stmt_ctx?(tk, i)
+  c = tk.code(i - 1)
+  c == -1 || c == 59 || c == 123 || c == 125
 end
 
 # Python's int(text, 0): decimal, 0x, 0o, 0b, underscores between digits; anything else is a ValueError.
@@ -439,14 +524,14 @@ end
 
 # True if the struct body toks[o+1...close] starts with a member that is not a bit-field (a first member
 # can carry _Alignas; a bit-field cannot). Python: first_member_plain.
-def first_member_plain?(toks, o, close)
+def first_member_plain?(tk, o, close)
   return false if o + 1 >= close
   depth = 0
   k = o + 1
   while k < close
-    x = toks[k]
-    if x.kind == :punct
-      case x.text
+    c = tk.code(k)
+    if c < 256
+      case PUNCT_S[c]
       when '(', '[', '{' then depth += 1
       when ')', ']', '}' then depth -= 1
       when ':' then return false if depth == 0
@@ -461,33 +546,32 @@ end
 # `T x __attribute__((__aligned__(N)))` on a plain (non-array) object: toks[i] is the name, the attribute follows
 # it and the declarator ends with `;`, `,` or `=`. Not a typedef, and not `struct T __attribute__...` (a tag).
 # Python: plain_aligned_object.
-def plain_aligned_object?(toks, i)
-  nxt = tok_at(toks, i + 1)
-  return false if nxt.nil? || nxt.kind != :id || nxt.text != '__attribute__'
-  g = aligned_group(toks, i + 1)
+def plain_aligned_object?(tk, i)
+  return false unless tk.id?(i + 1, '__attribute__')
+  g = aligned_group(tk, i + 1)
   return false if g.nil?
-  f = tok_at(toks, g[0])
-  return false unless is_punct(f, ';') || is_punct(f, ',') || is_punct(f, '=')
-  prv = tok_at(toks, i - 1)
-  return false if i == 0 || prv.nil? || (prv.kind == :id && ['struct', 'union', 'enum'].include?(prv.text))
+  f = g[0]
+  return false unless tk.punct?(f, ';') || tk.punct?(f, ',') || tk.punct?(f, '=')
+  return false if i == 0 || tk.code(i - 1) == -1 || tk.id?(i - 1, 'struct') || tk.id?(i - 1, 'union') ||
+                  tk.id?(i - 1, 'enum')
   k = i - 1
   while k >= 0
-    x = toks[k]
-    break if x.kind == :punct && (x.text == ';' || x.text == '{' || x.text == '}')
-    return false if x.kind == :id && x.text == 'typedef'
+    c = tk.code(k)
+    break if c == 59 || c == 123 || c == 125   # ; { }
+    return false if tk.id?(k, 'typedef')
     k -= 1
   end
   true
 end
 
 # If toks[i] starts __attribute__((__aligned__(N))), return [end_index_exclusive, N].
-def aligned_group(toks, i)
-  return nil if i + 8 >= toks.size || toks[i].kind != :id || toks[i].text != '__attribute__'
-  s = toks[i + 1, 8]
-  return nil unless is_punct(s[0], '(') && is_punct(s[1], '(') && s[2].kind == :id &&
-                    (s[2].text == '__aligned__' || s[2].text == 'aligned') && is_punct(s[3], '(') &&
-                    s[4].kind == :num && is_punct(s[5], ')') && is_punct(s[6], ')') && is_punct(s[7], ')')
-  [i + 9, py_int0(s[4].text)]
+def aligned_group(tk, i)
+  return nil if i + 8 >= tk.size || !tk.id?(i, '__attribute__')
+  return nil unless tk.punct?(i + 1, '(') && tk.punct?(i + 2, '(') && tk.code(i + 3) == ID_CODE &&
+                    (tk.text(i + 3) == '__aligned__' || tk.text(i + 3) == 'aligned') && tk.punct?(i + 4, '(') &&
+                    tk.code(i + 5) == NUM_CODE && tk.punct?(i + 6, ')') && tk.punct?(i + 7, ')') &&
+                    tk.punct?(i + 8, ')')
+  [i + 9, py_int0(tk.text(i + 5))]
 end
 
 # unicode_escape decoding of the body of a string literal (what Python's decode_str does for ASCII text).
@@ -647,20 +731,20 @@ def ov_helper(op, t, suf, u)
 end
 
 # Top-level argument token ranges of the call whose '(' is toks[lp]; returns [ranges, index of the ')'].
-def split_args(toks, lp)
-  rp = match_fwd(toks, lp, '(', ')')
+def split_args(tk, lp)
+  rp = match_fwd(tk, lp, '(', ')')
   return [nil, -1] if rp < 0
   ranges = []
   start = lp + 1
   level = 0
   (lp + 1...rp).each do |k|
-    t = toks[k]
-    next unless t.kind == :punct
-    if t.text == '(' || t.text == '[' || t.text == '{'
+    c = tk.code(k)
+    next unless c >= 0 && c < 256
+    if c == 40 || c == 91 || c == 123   # ( [ {
       level += 1
-    elsif t.text == ')' || t.text == ']' || t.text == '}'
+    elsif c == 41 || c == 93 || c == 125   # ) ] }
       level -= 1
-    elsif t.text == ',' && level == 0
+    elsif c == 44 && level == 0   # ,
       ranges << [start, k]
       start = k + 1
     end
@@ -668,6 +752,7 @@ def split_args(toks, lp)
   ranges << [start, rp]
   [ranges, rp]
 end
+
 
 VOLATILE_QUALS = ['volatile', '__volatile__', '__volatile']
 KEEP_NAME = '__nfcxx_keep'
@@ -688,100 +773,99 @@ end
 # `__nfcxx_keep(&x);` (a call to an empty function in the prelude), which makes the address escape.
 # Skipped: arrays, function pointers and function declarations, typedef/static/extern/register
 # declarations, `for` declarations and function parameters (none of which need it or can take it).
-def volatile_locals(toks)
+def volatile_locals(tk)
   edits = []
   stack = []  # :func, :block or :other for each open brace
   seen = {}
-  toks.each_with_index do |t, i|
-    if t.kind == :punct
-      if t.text == '{'
-        prev = tok_at(toks, i - 1)
+  n = tk.size
+  (0...n).each do |i|
+    c = tk.code(i)
+    if c < 256
+      if c == 123
         if stack.empty?
-          stack << (is_punct(prev, ')') ? :func : :other)
+          stack << (tk.punct?(i - 1, ')') ? :func : :other)
         elsif stack.last == :other
           stack << :other
-        elsif prev.nil? || (prev.kind == :punct && [';', '{', '}', ')', ':'].include?(prev.text)) ||
-              (prev.kind == :id && (prev.text == 'else' || prev.text == 'do'))
+        elsif [-1, 59, 123, 125, 41, 58].include?(tk.code(i - 1)) || tk.id?(i - 1, 'else') || tk.id?(i - 1, 'do')
           stack << :block
         else
           stack << :other
         end
-      elsif t.text == '}' && !stack.empty?
+      elsif c == 125 && !stack.empty?
         stack.pop
       end
       next
     end
-    next if t.kind != :id || !VOLATILE_QUALS.include?(t.text)
-    next if stack.empty? || stack.last == :other || t.pdepth != 0
+    next unless c == ID_CODE && VOLATILE_QUALS.include?(tk.text(i))
+    next if stack.empty? || stack.last == :other || tk.pdepth(i) != 0
     # A declaration: only identifiers and `*` between the statement start and the qualifier.
     s = i
-    while s > 0 && !(toks[s - 1].kind == :punct && [';', '{', '}'].include?(toks[s - 1].text))
-      s -= 1
-    end
-    next if seen[s] || !(s...i).all? { |k| toks[k].kind == :id || is_punct(toks[k], '*') }
+    s -= 1 while s > 0 && ![59, 123, 125].include?(tk.code(s - 1))
+    next if seen[s] || !(s...i).all? { |k| tk.code(k) == ID_CODE || tk.punct?(k, '*') }
     seen[s] = true
     e = i  # the terminating `;`
     level = 0
-    while e < toks.size
-      x = toks[e]
-      if x.kind == :punct
-        if opener?(x.text)
+    while e < n
+      x = tk.code(e)
+      if x < 256
+        xs = PUNCT_S[x]
+        if opener?(xs)
           level += 1
-        elsif closer?(x.text)
+        elsif closer?(xs)
           level -= 1
           break if level < 0
-        elsif x.text == ';' && level == 0
+        elsif xs == ';' && level == 0
           break
         end
       end
       e += 1
     end
-    next if e >= toks.size || level < 0
+    next if e >= n || level < 0
     next if (s...e).any? { |k|
-      x = toks[k]
-      x.kind == :id && ['typedef', 'static', 'extern', 'register', '_Thread_local', '__thread'].include?(x.text)
+      tk.code(k) == ID_CODE && ['typedef', 'static', 'extern', 'register', '_Thread_local', '__thread'].include?(tk.text(k))
     }
     pieces = []
     cur = []
     level = 0
     (s...e).each do |k|
-      x = toks[k]
-      if x.kind == :punct
-        if opener?(x.text)
+      x = tk.code(k)
+      if x < 256
+        xs = PUNCT_S[x]
+        if opener?(xs)
           level += 1
-        elsif closer?(x.text)
+        elsif closer?(xs)
           level -= 1
-        elsif x.text == ',' && level == 0
+        elsif xs == ',' && level == 0
           pieces << cur
           cur = []
           next
         end
       end
-      cur << x
+      cur << k
     end
     pieces << cur
     names = []
     base_vol = false
-    pieces.each_with_index do |piece, n|
+    pieces.each_with_index do |piece, idx|
       decl = []
-      piece.each do |x|
-        break if is_punct(x, '=')
-        decl << x
+      piece.each do |k|
+        break if tk.punct?(k, '=')
+        decl << k
       end
       stars = []
       vols = []
-      decl.each_with_index do |x, k|
-        stars << k if is_punct(x, '*')
-        vols << k if x.kind == :id && VOLATILE_QUALS.include?(x.text)
+      decl.each_with_index do |k, kk|
+        stars << kk if tk.punct?(k, '*')
+        vols << kk if tk.code(k) == ID_CODE && VOLATILE_QUALS.include?(tk.text(k))
       end
-      base_vol = vols.any? { |k| stars.empty? || k < stars[0] } if n == 0
-      next if decl.any? { |x| is_punct(x, '(') || is_punct(x, '[') }
-      ids = decl.select { |x| x.kind == :id }
-      vol = stars.empty? ? base_vol : vols.any? { |k| k > stars[-1] }
-      names << ids[-1].text if vol && !ids.empty?
+      base_vol = vols.any? { |kk| stars.empty? || kk < stars[0] } if idx == 0
+      next if decl.any? { |k| tk.punct?(k, '(') || tk.punct?(k, '[') }
+      ids = decl.select { |k| tk.code(k) == ID_CODE }
+      vol = stars.empty? ? base_vol : vols.any? { |kk| kk > stars[-1] }
+      names << tk.text(ids[-1]) if vol && !ids.empty?
     end
     unless names.empty?
-      edits << [toks[e].end, toks[e].end, names.map { |nm| " #{KEEP_NAME}(&#{nm});" }.join]
+      edits << [tk.stop(e), tk.stop(e), names.map { |nm| " #{KEEP_NAME}(&#{nm});" }.join]
     end
   end
   edits
@@ -893,52 +977,50 @@ def atomic_prototype(name)
 end
 
 # True if toks[lp] is the '(' of `( x , C , &x )` (or `( x , C , (&x) )`), x an identifier and C an unsigned long constant.
-def mulov_const_shape(toks, lp)
-  return false unless is_punct(tok_at(toks, lp), '(')
+def mulov_const_shape(tk, lp)
+  return false unless tk.punct?(lp, '(')
   k = lp + 1
-  x = tok_at(toks, k)
-  return false if x.nil? || x.kind != :id || !is_punct(tok_at(toks, k + 1), ',')
-  c = tok_at(toks, k + 2)
-  return false if c.nil? || c.kind != :num || !ul_const?(c.text) || !is_punct(tok_at(toks, k + 3), ',')
+  return false unless tk.code(k) == ID_CODE && tk.punct?(k + 1, ',')
+  xname = tk.text(k)
+  return false unless tk.code(k + 2) == NUM_CODE && ul_const?(tk.text(k + 2)) && tk.punct?(k + 3, ',')
   k += 4
-  paren = is_punct(tok_at(toks, k), '(')
+  paren = tk.punct?(k, '(')
   k += 1 if paren
-  y = tok_at(toks, k + 1)
-  return false if !is_punct(tok_at(toks, k), '&') || y.nil? || y.kind != :id || y.text != x.text
+  return false if !tk.punct?(k, '&') || tk.code(k + 1) != ID_CODE || tk.text(k + 1) != xname
   k += 2
   if paren
-    return false unless is_punct(tok_at(toks, k), ')')
+    return false unless tk.punct?(k, ')')
     k += 1
   end
-  is_punct(tok_at(toks, k), ')')
+  tk.punct?(k, ')')
 end
 
 # If toks[i] starts `__asm__ [volatile] ("int $3\n" : :);`, return the index just past its `;`, else nil.
-def int3_statement_end(toks, i)
+def int3_statement_end(tk, i)
   j = i + 1
-  j += 1 if !tok_at(toks, j).nil? && toks[j].kind == :id && VOLATILE_QUALS.include?(toks[j].text)
-  s = tok_at(toks, j + 1)
-  return nil if !is_punct(tok_at(toks, j), '(') || s.nil? || s.kind != :str || !INT3_TEXT.include?(decode_str(s.text))
-  [':', ':', ')', ';'].each_with_index { |p, k| return nil unless is_punct(tok_at(toks, j + 2 + k), p) }
+  j += 1 if tk.code(j) == ID_CODE && VOLATILE_QUALS.include?(tk.text(j))
+  return nil unless tk.punct?(j, '(') && tk.code(j + 1) == STR_CODE && INT3_TEXT.include?(decode_str(tk.text(j + 1)))
+  [':', ':', ')', ';'].each_with_index { |p, k| return nil unless tk.punct?(j + 2 + k, p) }
   j + 6
 end
 
 # Names of functions declared or defined with __attribute__((__weak__)), as weak-symbols.rb finds them.
-def weak_function_names(toks)
+def weak_function_names(tk)
   names = {}
-  toks.each_with_index do |t, i|
-    next if t.kind != :id || t.text != '__attribute__' || !is_punct(tok_at(toks, i + 1), '(')
-    stop = match_fwd(toks, i + 1, '(', ')') + 1
-    next unless (i...stop).any? { |k| toks[k].kind == :id && toks[k].text == '__weak__' }
+  n = tk.size
+  (0...n).each do |i|
+    next unless tk.id?(i, '__attribute__') && tk.punct?(i + 1, '(')
+    stop = match_fwd(tk, i + 1, '(', ')') + 1
+    next unless (i...stop).any? { |k| tk.id?(k, '__weak__') }
     # The first identifier followed by '(' after the attribute, before the declaration ends.
     k = stop
-    while k < toks.size && !(is_punct(toks[k], ';') || is_punct(toks[k], '{') || is_punct(toks[k], '}'))
-      if toks[k].kind == :id && toks[k].text == '__attribute__' && is_punct(tok_at(toks, k + 1), '(')
-        k = match_fwd(toks, k + 1, '(', ')') + 1
+    while k < n && !(tk.punct?(k, ';') || tk.punct?(k, '{') || tk.punct?(k, '}'))
+      if tk.id?(k, '__attribute__') && tk.punct?(k + 1, '(')
+        k = match_fwd(tk, k + 1, '(', ')') + 1
         next
       end
-      if toks[k].kind == :id && is_punct(tok_at(toks, k + 1), '(')
-        names[toks[k].text] = true
+      if tk.code(k) == ID_CODE && tk.punct?(k + 1, '(')
+        names[tk.text(k)] = true
         break
       end
       k += 1
@@ -1044,10 +1126,11 @@ def main(argv)
   die 'usage: qbe-prep.rb [--c-input] PREPROCESSED_C REWRITTEN_C ASM_TAIL' if args.size != 3
   src_path, out_path, tail_path = args
   src = read_text(src_path)
-  toks = tokenize(src)
+  tk = tokenize(src)
+  n = tk.size
   edits = []  # [start, end, replacement]
   tail = []   # assembly directives, in source order
-  weak = weak_function_names(toks)
+  weak = weak_function_names(tk)
   weak_marked = {}
   ctors = []  # constructor functions, in source order
   need_float = {}
@@ -1055,12 +1138,15 @@ def main(argv)
   need_fence = false
   prelude = {}  # name -> C declaration or definition that the rewritten code uses; prepended to the file
   if c_input
-    keep = volatile_locals(toks)
+    keep = volatile_locals(tk)
     unless keep.empty?
       edits.concat(keep)
       prelude[KEEP_NAME] = KEEP_DEF
     end
   end
+  # Identifiers some rewrite looks at (by sym: a name in SPECIAL_ID, or __atomic_*). Every other token
+  # falls through all the rewrites below and is skipped at once.
+  flags = tk.names.map { |nm| SPECIAL_ID.key?(nm) || nm.start_with?('__atomic_') }
 
   # _ZTHx is the thread_local init alias for _ZTWx; if the wrapper is COMDAT (weak), so is the alias.
   mark_weak_alias = lambda do |name|
@@ -1071,31 +1157,27 @@ def main(argv)
   end
 
   i = 0
-  while i < toks.size
-    t = toks[i]
-    kind = t.kind
-    if kind == :id
-      x = t.text
-      unless SPECIAL_ID.key?(x) || (x.getbyte(0) == 95 && x.start_with?('__atomic_')) || is_punct(toks[i + 1], '[') ||
-           (toks[i + 1] && toks[i + 1].kind == :id && toks[i + 1].text == '__attribute__')
+  while i < n
+    c = tk.code(i)
+    if c == ID_CODE
+      unless flags[tk.sym(i)] || tk.punct?(i + 1, '[') || tk.id?(i + 1, '__attribute__')
         i += 1
         next
       end
-    elsif kind == :str || kind == :chr || (kind == :punct && t.text != '}')
+    elsif c == STR_CODE || c == CHR_CODE || (c < 256 && c != 125)
       i += 1
       next
     end
-    prev = tok_at(toks, i - 1)
-    stmt_ctx = prev.nil? || (prev.kind == :punct && [';', '}', '{'].include?(prev.text))
+    nm = c == ID_CODE ? tk.text(i) : nil
 
     # 0b. Hand-written C only (--c-input): cproc rejects every store to a volatile object ("volatile store is
     # not yet supported"), yet it already emits volatile loads as plain loads and QBE does not reorder or remove
     # memory accesses of an object whose address escapes (struct members, globals). So the qualifier is
     # dropped, except on inline asm. A volatile local whose address is never taken is promoted to a register
     # by QBE, so volatile_locals() makes its address escape.
-    if c_input && t.kind == :id && VOLATILE_QUALS.include?(t.text) &&
-       !(!prev.nil? && prev.kind == :id && ['__asm__', '__asm', 'asm'].include?(prev.text))
-      edits << [t.start, t.end, '']
+    if c_input && nm && VOLATILE_QUALS.include?(nm) &&
+       !(tk.code(i - 1) == ID_CODE && ['__asm__', '__asm', 'asm'].include?(tk.text(i - 1)))
+      edits << [tk.start(i), tk.stop(i), '']
       i += 1
       next
     end
@@ -1103,39 +1185,38 @@ def main(argv)
     # 0a. glibc's <bits/floatn.h> (hand-written C, no __GNUC__) typedefs `float _Float32;`,
     # `long double _Float64x;` and the like. The names are mapped below (or have no cproc
     # equivalent), so the plain typedef of one of them is dropped; a use of an unmapped one is an error.
-    if t.kind == :id && t.text == 'typedef'
+    if nm == 'typedef'
       j = i + 1
-      while j < toks.size && !(toks[j].kind == :punct && [';', '{', '(', '['].include?(toks[j].text))
+      while j < n && !(tk.punct?(j, ';') || tk.punct?(j, '{') || tk.punct?(j, '(') || tk.punct?(j, '['))
         j += 1
       end
-      if j < toks.size && toks[j].text == ';' && toks[j - 1].kind == :id && DROP_TYPEDEF.include?(toks[j - 1].text)
-        edits << [t.start, toks[j].end, '']
+      if j < n && tk.punct?(j, ';') && tk.code(j - 1) == ID_CODE && DROP_TYPEDEF.include?(tk.text(j - 1))
+        edits << [tk.start(i), tk.stop(j), '']
         i = j + 1
         next
       end
     end
 
     # 0. __attribute__((__constructor__)) on a function declaration: remove it, and list the function.
-    if t.kind == :id && t.text == '__attribute__'
+    if nm == '__attribute__'
       # Exactly __attribute__((__constructor__)), after a parameter list: NAME ( params ) __attribute__(...)
-      if is_punct(tok_at(toks, i + 1), '(') && is_punct(tok_at(toks, i + 2), '(') &&
-         !tok_at(toks, i + 3).nil? && tok_at(toks, i + 3).text == '__constructor__' &&
-         is_punct(tok_at(toks, i + 4), ')') && is_punct(tok_at(toks, i + 5), ')') && is_punct(prev, ')')
-        lp = match_back(toks, i - 1, '(', ')')
-        name = lp > 0 ? tok_at(toks, lp - 1) : nil
-        die 'qbe-prep: cannot find the name of a constructor declaration' if name.nil? || name.kind != :id
-        ctors << name.text unless ctors.include?(name.text)
-        edits << [t.start, toks[i + 5].end, '']
+      if tk.punct?(i + 1, '(') && tk.punct?(i + 2, '(') && tk.id?(i + 3, '__constructor__') &&
+         tk.punct?(i + 4, ')') && tk.punct?(i + 5, ')') && tk.punct?(i - 1, ')')
+        lp = match_back(tk, i - 1, '(', ')')
+        name_i = lp > 0 ? lp - 1 : -1
+        die 'qbe-prep: cannot find the name of a constructor declaration' if name_i < 0 || tk.code(name_i) != ID_CODE
+        ctors << tk.text(name_i) unless ctors.include?(tk.text(name_i))
+        edits << [tk.start(i), tk.stop(i + 5), '']
         i += 6
         next
       end
     end
 
     # 1a. __asm__ volatile("int $3\n" : :); (doctest's debugger break): a call to the int3 stub.
-    if t.kind == :id && (t.text == '__asm__' || t.text == '__asm') && stmt_ctx
-      stop = int3_statement_end(toks, i)
+    if (nm == '__asm__' || nm == '__asm') && stmt_ctx?(tk, i)
+      stop = int3_statement_end(tk, i)
       unless stop.nil?
-        edits << [t.start, toks[stop - 1].end, '__nfcxx_int3();']
+        edits << [tk.start(i), tk.stop(stop - 1), '__nfcxx_int3();']
         need_int3 = true
         i = stop
         next
@@ -1143,23 +1224,23 @@ def main(argv)
     end
 
     # 1. __asm__("...") statements.
-    if t.kind == :id && (t.text == '__asm__' || t.text == '__asm') && is_punct(tok_at(toks, i + 1), '(') && stmt_ctx
+    if (nm == '__asm__' || nm == '__asm') && tk.punct?(i + 1, '(') && stmt_ctx?(tk, i)
       j = i + 2
       strs = []
-      while j < toks.size && toks[j].kind == :str
-        strs << decode_str(toks[j].text)
+      while j < n && tk.code(j) == STR_CODE
+        strs << decode_str(tk.text(j))
         j += 1
       end
-      if !strs.empty? && is_punct(tok_at(toks, j), ')') && is_punct(tok_at(toks, j + 1), ';')
+      if !strs.empty? && tk.punct?(j, ')') && tk.punct?(j + 1, ';')
         text = py_strip(strs.join)
-        stmt_start = t.start
-        stmt_end = toks[j + 1].end
+        stmt_start = tk.start(i)
+        stmt_end = tk.stop(j + 1)
         if align_text?(text)
           edits << [stmt_start, stmt_end, '']
           i = j + 2
           next
         end
-        if t.depth == 0 && t.pdepth == 0
+        if tk.depth(i) == 0 && tk.pdepth(i) == 0
           m = globl_name(text)
           s = m.nil? ? set_names(text) : nil
           if m
@@ -1179,18 +1260,18 @@ def main(argv)
     end
 
     # 2. __attribute__((__aligned__(N))) after a declarator name (array or not): becomes _Alignas(N) before the name (valid for members and objects; cproc takes the GNU form only on members).
-    if t.kind == :id && t.text != '__attribute__' && (is_punct(tok_at(toks, i + 1), '[') || plain_aligned_object?(toks, i))
+    if c == ID_CODE && nm != '__attribute__' && (tk.punct?(i + 1, '[') || plain_aligned_object?(tk, i))
       j = i + 1
-      while j < toks.size && is_punct(toks[j], '[')
-        j = match_fwd(toks, j, '[', ']')
+      while j < n && tk.punct?(j, '[')
+        j = match_fwd(tk, j, '[', ']')
         break if j < 0
         j += 1
       end
-      g = j > 0 && j < toks.size ? aligned_group(toks, j) : nil
+      g = j > 0 && j < n ? aligned_group(tk, j) : nil
       unless g.nil?
-        stop, n = g
-        edits << [toks[j].start, toks[stop - 1].end, '']
-        edits << [t.start, t.start, "_Alignas(#{n}) "]
+        stop, nn = g
+        edits << [tk.start(j), tk.stop(stop - 1), '']
+        edits << [tk.start(i), tk.start(i), "_Alignas(#{nn}) "]
         i = stop
         next
       end
@@ -1198,14 +1279,15 @@ def main(argv)
 
     # 3. struct T { ...; } __attribute__((__aligned__(N)));  (alignas on a class, std::aligned_storage):
     # _Alignas(N) on the first member gives the struct the same alignment and the same rounded-up size.
-    if is_punct(t, '}')
-      g = aligned_group(toks, i + 1)
-      if !g.nil? && is_punct(tok_at(toks, g[0]), ';')
-        stop, n = g
-        o = match_back(toks, i, '{', '}')
-        if first_member_plain?(toks, o, i)
-          edits << [toks[o].end, toks[o].end, " _Alignas(#{n})"]
-          edits << [toks[i + 1].start, toks[stop - 1].end, '']
+    if c == 125
+      g = aligned_group(tk, i + 1)
+      if !g.nil? && tk.punct?(g[0], ';')
+        stop, nn = g
+        o = match_back(tk, i, '{', '}')
+        ob = o < 0 ? n + o : o   # toks[o] in the Python original: a negative o indexes from the end
+        if first_member_plain?(tk, o, i)
+          edits << [tk.stop(ob), tk.stop(ob), " _Alignas(#{nn})"]
+          edits << [tk.start(i + 1), tk.stop(stop - 1), '']
           i = stop
           next
         end
@@ -1214,83 +1296,85 @@ def main(argv)
 
     # 4. Floating literals of the types above: f32/f64 drop the suffix; f16/f128 in parentheses become
     # the bit pattern as a brace initializer.
-    if t.kind == :num && (fl = float_lit(t.text))
+    if c == NUM_CODE && (fl = float_lit(tk.text(i)))
       body, suffix = fl
-      paren = is_punct(prev, '(') && is_punct(tok_at(toks, i + 1), ')')
+      paren = tk.punct?(i - 1, '(') && tk.punct?(i + 1, ')')
       if suffix == 'f32'
-        edits << [t.start, t.end, body + 'f']
+        edits << [tk.start(i), tk.stop(i), body + 'f']
       elsif suffix == 'f64'
-        edits << [t.start, t.end, body]
+        edits << [tk.start(i), tk.stop(i), body]
       elsif suffix == 'f16' && paren
         # the binary16 value, rounded from the decimal literal, as a cast of its exact double
-        edits << [prev.start, toks[i + 1].end, '((_Float16)' + half_literal(ieee_bits(body, 10, 5)) + ')']
+        edits << [tk.start(i - 1), tk.stop(i + 1), '((_Float16)' + half_literal(ieee_bits(body, 10, 5)) + ')']
         i += 2
         next
       elsif suffix == 'f128' && paren
         bits = ieee_bits(body, 112, 15)
-        edits << [prev.start, toks[i + 1].end,
+        edits << [tk.start(i - 1), tk.stop(i + 1),
                   '{ { 0x' + hex_pad(bits & ((1 << 64) - 1), 16) + 'UL, 0x' + hex_pad(bits >> 64, 16) + 'UL } }']
         i += 2
         next
       else
-        die "qbe-prep: float literal #{t.text} is not in a supported form"
+        die "qbe-prep: float literal #{tk.text(i)} is not in a supported form"
       end
       i += 1
       next
     end
 
     # 4c. (double)LITERALL: see the file comment.
-    if c_input && t.kind == :num && long_double_literal?(t.text) &&
-       is_punct(tok_at(toks, i - 3), '(') && !tok_at(toks, i - 2).nil? &&
-       (tok_at(toks, i - 2).text == 'double' || tok_at(toks, i - 2).text == 'float') && is_punct(tok_at(toks, i - 1), ')')
-      edits << [t.end - 1, t.end, '']
+    if c_input && c == NUM_CODE && long_double_literal?(tk.text(i)) &&
+       tk.punct?(i - 3, '(') && tk.code(i - 2) >= 0 &&
+       (tk.text?(i - 2, 'double') || tk.text?(i - 2, 'float')) && tk.punct?(i - 1, ')')
+      edits << [tk.stop(i) - 1, tk.stop(i), '']
       i += 1
       next
     end
 
     # 4a. alloca (hand-written C): a call, not the declaration `void *alloca (size_t)`, is cproc's builtin.
-    if c_input && t.kind == :id && t.text == 'alloca' && is_punct(tok_at(toks, i + 1), '(') && !is_punct(prev, '*')
-      edits << [t.start, t.end, '__builtin_alloca']
+    if c_input && nm == 'alloca' && tk.punct?(i + 1, '(') && !tk.punct?(i - 1, '*')
+      edits << [tk.start(i), tk.stop(i), '__builtin_alloca']
       i += 1
       next
     end
 
     # 4b. Builtins cproc lacks (see the file comment).
-    if t.kind == :id && LIBC_BUILTINS.key?(t.text)
-      name, proto = LIBC_BUILTINS[t.text]
-      edits << [t.start, t.end, name]
-      prelude[name] = proto
-    elsif t.kind == :id && HELPER_BUILTINS.key?(t.text)
-      name, definition = HELPER_BUILTINS[t.text]
-      edits << [t.start, t.end, name]
-      prelude[name] = definition
-    elsif t.kind == :id && t.text == '__builtin_mul_overflow' && mulov_const_shape(toks, i + 1)
-      edits << [t.start, t.end, MULOV_NAME]
-      prelude[MULOV_NAME] = MULOV_DEF
-    elsif t.kind == :id && OV_OPS.key?(t.text) && is_punct(tok_at(toks, i + 1), '(')
-      ranges, rp = split_args(toks, i + 1)
-      die "qbe-prep: #{t.text} expects three arguments" if ranges.nil? || ranges.size != 3
-      text = ranges.map { |a, b| src.byteslice(toks[a].start, toks[b - 1].end - toks[a].start) }
-      edits << [t.start, toks[rp].end, overflow_call(OV_OPS[t.text], text, prelude)]
-      i = rp + 1
-      next
-    elsif t.kind == :id && (t.text == '__atomic_thread_fence' || t.text == '__atomic_signal_fence')
-      edits << [t.start, t.end, '__nfcxx_fence']
-      prelude['__nfcxx_fence'] = 'void __nfcxx_fence(int);'
-      need_fence = true
-    elsif t.kind == :id && t.text.start_with?('__atomic_') && atomic_parts(t.text)
-      prelude[t.text] = atomic_prototype(t.text)
+    if nm
+      if LIBC_BUILTINS.key?(nm)
+        name, proto = LIBC_BUILTINS[nm]
+        edits << [tk.start(i), tk.stop(i), name]
+        prelude[name] = proto
+      elsif HELPER_BUILTINS.key?(nm)
+        name, definition = HELPER_BUILTINS[nm]
+        edits << [tk.start(i), tk.stop(i), name]
+        prelude[name] = definition
+      elsif nm == '__builtin_mul_overflow' && mulov_const_shape(tk, i + 1)
+        edits << [tk.start(i), tk.stop(i), MULOV_NAME]
+        prelude[MULOV_NAME] = MULOV_DEF
+      elsif OV_OPS.key?(nm) && tk.punct?(i + 1, '(')
+        ranges, rp = split_args(tk, i + 1)
+        die "qbe-prep: #{nm} expects three arguments" if ranges.nil? || ranges.size != 3
+        text = ranges.map { |a, b| src.byteslice(tk.start(a), tk.stop(b - 1) - tk.start(a)) }
+        edits << [tk.start(i), tk.stop(rp), overflow_call(OV_OPS[nm], text, prelude)]
+        i = rp + 1
+        next
+      elsif nm == '__atomic_thread_fence' || nm == '__atomic_signal_fence'
+        edits << [tk.start(i), tk.stop(i), '__nfcxx_fence']
+        prelude['__nfcxx_fence'] = 'void __nfcxx_fence(int);'
+        need_fence = true
+      elsif nm.start_with?('__atomic_') && atomic_parts(nm)
+        prelude[nm] = atomic_prototype(nm)
+      end
     end
 
     # 5. Floating types cproc lacks.
-    if t.kind == :id && FLOAT_TYPE.key?(t.text)
-      edits << [t.start, t.end, FLOAT_TYPE[t.text]]
-      need_float[FLOAT_TYPE[t.text]] = true
+    if nm && FLOAT_TYPE.key?(nm)
+      edits << [tk.start(i), tk.stop(i), FLOAT_TYPE[nm]]
+      need_float[FLOAT_TYPE[nm]] = true
     end
     i += 1
   end
 
-  decls = ['struct __nfcxx_half16', 'struct __nfcxx_float128'].select { |n| need_float.key?(n) }.map { |n| FLOAT_DECL[n] }
+  decls = ['struct __nfcxx_half16', 'struct __nfcxx_float128'].select { |nm| need_float.key?(nm) }.map { |nm| FLOAT_DECL[nm] }
   if need_int3
     prelude['__nfcxx_int3'] = 'void __nfcxx_int3(void);'
     tail << INT3_STUB
