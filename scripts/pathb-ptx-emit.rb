@@ -1300,6 +1300,14 @@ def emit_module(src, sm, kernels = [])
     end
   end
   raise BadIR, "no function in the IR" if fns.empty?
+  # A listed kernel is named as the source names it (cuda-rewrite.rb --kernels writes plain names). A C++ function's IR
+  # name is its Itanium mangled name, so a plain name matches by the rule scripts/cuda-embed.rb uses.
+  kernels = kernels.map do |k|
+    hits = fns.map(&:name).select { |n| n == k || n.start_with?("_Z#{k.length}#{k}") }
+    raise BadIR, "no function named #{k} in the IR" if hits.empty?
+    raise BadIR, "#{hits.length} functions named #{k} in the IR" if hits.length > 1
+    hits[0]
+  end
   # Keep the functions reachable from the kernels: the listed kernels, or else the functions that are not static and
   # not called. A static function that nothing reaches is dead code (a C++ header's unused inline helper): it is not
   # emitted, rather than taken for a kernel (which could not return its value).

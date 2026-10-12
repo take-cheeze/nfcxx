@@ -26,6 +26,6 @@ simpleCooperativeGroups | cpp | 0_Introduction/simpleCooperativeGroups | simpleC
 MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | refused: template launch of computeValue<Real> depends on the template parameter Real of the enclosing template
 pathfinder | rodinia | pathfinder | pathfinder.cu | builds |  | needs input arguments to run (not run by the runner)
 hotspot | rodinia | hotspot | hotspot.cu | builds |  | needs input arguments to run (not run by the runner)
-nw | rodinia | nw | needle.cu needle_kernel.cu | fail-link |  | multiple definition of `_Z20needle_cuda_shared_1PiS_iiii'
+nw | rodinia | nw | needle.cu needle_kernel.cu | builds |  | needs input arguments to run (not run by the runner)
 gaussian | rodinia | gaussian | gaussian.cu | fail-compile | | class "cudaDeviceProp" has no member "clockRate"
 bfs | rodinia | bfs | bfs.cu kernel.cu kernel2.cu | fail-compile |  | incomplete type "void" is not allowed
