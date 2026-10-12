@@ -1487,3 +1487,7 @@ The nightly Optcarrot shard runs the native check after its first ordinary
 probe benchmark, reusing that interpreter build and its exact ABI flags and
 regexp gem. Missing native libraries fail the check; an explicit direct
 IR-only invocation without `MRUBY_BUILD` reports the native half as skipped.
+
+The ordinary runner passes its selected compiler path explicitly to the IR
+initializer proof, so `OPTCARROT_IR_LUT=1` works with the default probe compiler
+when `MRBC` is unset. The check covers this path in an isolated subprocess.

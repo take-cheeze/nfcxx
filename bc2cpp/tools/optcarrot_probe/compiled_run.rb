@@ -19,7 +19,7 @@ end
 
 ROOT = File.expand_path('../..', __dir__)
 MRUBY = File.join(ROOT, '3rd/mruby')
-MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
+PROBE_MRBC = ENV['MRBC'] || File.join(MRUBY, 'bin/mrbc')
 FRAMES = Integer(ARGV.fetch(0, '180'))
 ROM = ARGV.fetch(1, File.join(ROOT, '3rd/optcarrot/examples/Lan_Master.nes'))
 GRAY_STACK_SIZE = Integer(ENV.fetch('OPTCARROT_GRAY_STACK_SIZE', '16384'), 10)
@@ -122,7 +122,7 @@ FIBER_SAFE_FRAME_BOUNDARY_METHODS = {
   # and sample bookkeeping stay outside the PPU Fiber execution path.
   'Optcarrot::APU' => %w[flush_sound vsync]
 }.freeze
-abort "#{MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(MRBC)
+abort "#{PROBE_MRBC} is missing -- build the optcarrot probe mrbc first" unless File.executable?(PROBE_MRBC)
 abort "#{ROM} is missing -- initialize the optcarrot submodule first" unless File.file?(ROM)
 
 require File.join(ROOT, 'tools/bc2cpp/compiled_gems')
@@ -339,7 +339,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     sources = sources.map { |path| path == ppu_source ? transformed_ppu : path }
   end
   base_env = {
-    'MRBC' => MRBC,
+    'MRBC' => PROBE_MRBC,
     'OUT_SYMBOL' => 'optcarrot_probe',
     'NATIVE_SRCS' => Shellwords.join(native_sources),
     'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_sources),
@@ -431,7 +431,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   if ENV['OPTCARROT_IR_LUT'] == '1'
     require_relative 'ir_tile_lut'
     ppu_source = sources.find { |path| File.basename(path) == 'ppu.rb' }
-    ir_lut = OptcarrotIRTileLUT.prepare(OptcarrotPPULUT.extract(File.read(ppu_source)), temp)
+    ir_lut = OptcarrotIRTileLUT.prepare(OptcarrotPPULUT.extract(File.read(ppu_source)), temp, mrbc: PROBE_MRBC)
   end
   count = emit_register(diagnostics, output_dir, ir_lut: ir_lut)
 
@@ -477,7 +477,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   puts 'Optcarrot bytecode IR method inlining: enabled' if ENV['BC2CPP_IR_INLINE'] == '1'
   config = File.join(temp, 'mruby_build_config.rb')
   compiled_base = if sealed
-                    ["toolchain", "self.mrbcfile = #{File.expand_path(MRBC).dump}",
+                    ["toolchain", "self.mrbcfile = #{File.expand_path(PROBE_MRBC).dump}",
                      (debug ? 'enable_debug' : nil),
                      *sealed_gems.reject { |name, _| name.start_with?('optcarrot-') }.values.map { |dir| "gem #{dir.dump}" }].compact.join("\n      ")
                   else
