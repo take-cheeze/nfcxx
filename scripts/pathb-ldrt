@@ -3,16 +3,24 @@
 # building it with the host C compiler first when it is missing or older than its source. Every Path B link step adds
 # the archive after its objects: $(scripts/pathb-ldrt) (the archive only pulls in the helpers a program calls).
 # PATHB_LDRT_OUT: build somewhere else (default build/pathb-ldrt).
+# NFCXX_LDRT_X86=1: the x86-64 variant of the checked float-to-integer conversions (saturating, as gcc on x86-64, instead of
+# the abort), built into build/pathb-ldrt-x86 unless PATHB_LDRT_OUT is set. Only the stage-2 front end links it
+# (scripts/selfhost-cpfe.sh); user programs keep the trap.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${PATHB_LDRT_OUT:-$root/build/pathb-ldrt}
+defines=
+if [ "${NFCXX_LDRT_X86:-0}" = 1 ]; then
+  out=${PATHB_LDRT_OUT:-$root/build/pathb-ldrt-x86}
+  defines=-DNFCXX_FLOAT_TO_INT_X86
+fi
 src=$root/be/nfcxx_ldrt.c
 lib=$out/libnfcxxld.a
 if [ ! -f "$lib" ] || [ "$src" -nt "$lib" ]; then
   mkdir -p "$out"
   tmp=$(mktemp -d "$out/.tmp.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
   # -ffunction-sections: one helper per archive member would be better, but one object keeps the link line trivial
-  cc -O2 -fno-strict-aliasing -fPIC -c -o "$tmp/nfcxx_ldrt.o" "$src"
+  cc -O2 -fno-strict-aliasing -fPIC $defines -c -o "$tmp/nfcxx_ldrt.o" "$src"
   ar rcs "$tmp/libnfcxxld.a" "$tmp/nfcxx_ldrt.o"
   mv "$tmp/libnfcxxld.a" "$lib"
 fi
