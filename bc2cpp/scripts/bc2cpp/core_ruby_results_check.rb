@@ -180,10 +180,14 @@ if ENV['MRBC']
           check.call("#{name}: unknown union member stays unproved", !exact_size.call(code, 'mixed_map_other'))
           check.call("#{name}: union caller break stays unproved", !exact_size.call(code, 'mixed_map_break'))
           if ['core bodies', 'kill switch'].include?(name)
-            check.call('core bodies: union map preserves both receiver paths',
-                       !body_of.call(code, 'reject_map').include?('Array receiver for inlined #map'))
-            check.call("#{name}: select-map preserves both receiver paths",
-                       !body_of.call(code, 'select_map').include?('Array receiver for inlined #map'))
+            # ADR 0420: a map over an unproven receiver is inlined behind a run-time exact-class test with the ordinary
+            # send as the else, so both receiver paths are kept. What must not appear is the unconditional inline of a
+            # proven Array: its TypeError text without the GUARDED_BLOCK_INLINE guard that opens the same loop.
+            guarded_map = lambda do |body|
+              body.scan('Array receiver for inlined #map').size == body.scan('GUARDED_BLOCK_INLINE :map -- exact Array receiver').size
+            end
+            check.call('core bodies: union map preserves both receiver paths', guarded_map.call(body_of.call(code, 'reject_map')))
+            check.call("#{name}: select-map preserves both receiver paths", guarded_map.call(body_of.call(code, 'select_map')))
           end
         end
         if name.start_with?('positional ') || ['core bodies', 'kill switch', 'open world', 'name kill switch', 'method missing'].include?(name)
