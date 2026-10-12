@@ -33,7 +33,9 @@ if [ $compile = 0 ]; then
   # qbe-prep.rb maps to fabs/fabsf (a C-only program does not pull libm in through libstdc++).
   # libnfcxxld.a (be/nfcxx_ldrt.c) is the runtime of the helper calls cproc emits for long double and __float128.
   # Its __float128 to_chars wrappers need libstdc++; the archive member is only pulled in when a program calls a helper.
-  exec cc "$@" "$("$(dirname "$0")/pathb-ldrt")" -latomic -lstdc++ -lm
+  # -fsanitize=address (NFCXX_ASAN=1): the program links libasan, whose preinit runs before main (docs/notes/asan.md)
+  asan=(); [ -z "${NFCXX_ASAN:-}" ] || asan=(-fsanitize=address)
+  exec cc "$@" ${asan[@]+"${asan[@]}"} "$("$(dirname "$0")/pathb-ldrt")" -latomic -lstdc++ -lm
 fi
 if [ -z "$src" ]; then
   exec cc "$@"

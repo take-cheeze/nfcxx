@@ -11,6 +11,7 @@ scripts/setup-mruby.sh    # the mruby interpreter that runs the helper scripts (
 ./nfcxx hello.cpp -o hello   # C++ -> C -> cproc -> QBE -> asm (default backend)
 ./nfcxx --backend=gcc ...    # C++ -> C -> gcc -O2 -fwrapv -fno-strict-aliasing
 ./nfcxx --emit-c hello.cpp   # print the generated C
+./nfcxx -fsanitize=address x.cpp -o x # AddressSanitizer via the gcc backend (docs/notes/asan.md); tests/asan/run.sh
 ./nfcxx --trace=t.json x.cpp # Chrome/Perfetto trace of the driver steps (docs/notes/tracing.md)
 ./nfcc -c x.c -o x.o         # drop-in cc for C, for make/rake/autoconf (docs/notes/realworld.md)
 tests/run.sh              # regression cases in tests/cases (// EXPECT: <exit code>); C++17 evaluation order: docs/notes/eval-order.md

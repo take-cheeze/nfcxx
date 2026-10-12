@@ -76,6 +76,10 @@ jobs:
               tests/mruby/run.sh
           - name: GPU kernel on the PTX interpreter
             run: tests/gpu/run_interp.sh
+          - name: AddressSanitizer (gcc and qbe backends)
+            run: |
+              tests/asan/run.sh
+              ASAN_BACKEND=qbe tests/asan/run.sh
     name: ${{ matrix.name }}
     env:
       SCCACHE_GHA_ENABLED: "true"
