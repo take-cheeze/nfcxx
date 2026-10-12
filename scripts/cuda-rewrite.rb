@@ -573,10 +573,20 @@ static inline float #{base}(unsigned m, float v, int l, int w) { (void)m; (void)
   SHFL
 end
 
+# The half type and its conversions, shared by the entries below (include-guarded: each entry carries them, the
+# device unit gets them once). __float2half rounds to nearest, even, as CUDA does; __half2float is exact.
+HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
+  "typedef unsigned short __half;\n" \
+  "static inline unsigned short __float2half(float f) { unsigned x = *(const unsigned *)&f; unsigned sign = x & 0x80000000u; x ^= sign; unsigned o; if (x >= 0x47800000u) { o = x > 0x7f800000u ? 0x7e00u : 0x7c00u; } else if (x < 0x38800000u) { float t = *(const float *)&x * 16777216.0f; float r = (t + 8388608.0f) - 8388608.0f; o = (unsigned)r; } else { unsigned odd = (x >> 13) & 1u; x += (0u - 112u) * 0x800000u + 0xfffu; x += odd; o = x >> 13; } return (unsigned short)((sign >> 16) | o); }\n" \
+  "static inline float __half2float(unsigned short h) { unsigned u = (unsigned)h; unsigned sign = (u & 0x8000u) << 16; unsigned e = (u >> 10) & 0x1fu; unsigned m = u & 0x3ffu; unsigned r; if (e == 0) { if (m == 0) { r = sign; } else { float f = (float)m * (1.0f / 16777216.0f); r = *(const unsigned *)&f | sign; } } else if (e == 31) { r = sign | 0x7f800000u | (m << 13); } else { r = sign | ((e + 112u) << 23) | (m << 13); } return *(const float *)&r; }\n" \
+  "#endif\n"
+
 # The integer intrinsics of llama.cpp's ggml-cuda. __umulhi, __popc and __byte_perm wrap the scalar intrinsics of the
 # emitter (SCALAR_U32 in pathb-ptx-emit.rb, one PTX instruction each); the others are plain integer code. The half type
-# is an unsigned short here (the emitter refuses 16-bit values), and the conversions do the IEEE work in 32-bit integers
-# and float additions: round to nearest, even, as CUDA's __float2half.
+# is an unsigned short here (16-bit integers are lowered by the emitter), and the conversions do the IEEE work in 32-bit
+# integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub, __hmul and __hfma compute
+# in float and round once more to half: for these operands the float result is exact or rounds the same way, except for
+# rare double-rounding cases of __hfma (the sum of an exact product with c).
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
   "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
@@ -586,15 +596,19 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
-  "__half" => "typedef unsigned short __half;\n",
-  "__float2half" => "typedef unsigned short __half;\nstatic inline unsigned short __float2half(float f) { unsigned x = *(const unsigned *)&f; unsigned sign = x & 0x80000000u; x ^= sign; unsigned o; if (x >= 0x47800000u) { o = x > 0x7f800000u ? 0x7e00u : 0x7c00u; } else if (x < 0x38800000u) { unsigned mg = 254u << 23; float t = *(const float *)&x + *(const float *)&mg; o = *(const unsigned *)&t - mg; } else { unsigned odd = (x >> 13) & 1u; x += (0u - 112u) * 0x800000u + 0xfffu; x += odd; o = x >> 13; } return (unsigned short)((sign >> 16) | o); }\n",
   # The warp shuffles (the emitter's WARP_SHUFFLES): int and float overloads, with and without the width. The mask and the
   # width are ignored: the wrapper is the full warp (width 32, mask 0xffffffff), because the emitter needs the constant
   # mask at the call and a wrapper's parameter is not one. Llama.cpp uses the full warp; a partial mask is not honoured.
+  "__half" => HALF_CORE,
+  "__float2half" => HALF_CORE,
+  "__half2float" => HALF_CORE,
+  "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
+  "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
+  "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",
+  "__hfma" => HALF_CORE + "static inline unsigned short __hfma(unsigned short a, unsigned short b, unsigned short c) { return __float2half(__half2float(a) * __half2float(b) + __half2float(c)); }\n",
   "__shfl_xor_sync" => SHFL_DEFS["bfly"],
   "__shfl_down_sync" => SHFL_DEFS["down"],
   "__shfl_sync" => SHFL_DEFS["idx"],
-  "__half2float" => "typedef unsigned short __half;\nstatic inline float __half2float(unsigned short h) { unsigned u = (unsigned)h; unsigned sign = (u & 0x8000u) << 16; unsigned e = (u >> 10) & 0x1fu; unsigned m = u & 0x3ffu; unsigned r; if (e == 0) { if (m == 0) { r = sign; } else { float f = (float)m * (1.0f / 16777216.0f); r = *(const unsigned *)&f | sign; } } else if (e == 31) { r = sign | 0x7f800000u | (m << 13); } else { r = sign | ((e + 112u) << 23) | (m << 13); } return *(const float *)&r; }\n",
 }
 
 # The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
