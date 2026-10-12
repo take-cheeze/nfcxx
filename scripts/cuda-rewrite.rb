@@ -212,19 +212,36 @@ def kernel_template_uncached(name, src)
       break if depth == 0
       k += 1
     end
-    names = split_top(q[(lt + 1)...k]).map { |part| tokens_of(part.split("=")[0]).last }.compact
+    parts = split_top(q[(lt + 1)...k])
+    names = parts.map { |part| tokens_of(part.split("=")[0]).last }.compact
+    pack = parts.index { |part| part.include?("...") }
     open = index_code(q, "(", k)
     close = matching_paren(q, open)
     refuse("unterminated parameter list for #{name}") if close.nil?
-    return { names: names, params: q[(open + 1)...close] }
+    return { names: names, params: q[(open + 1)...close], pack: pack }
   end
   nil
 end
 
 # Replaces the template parameter names in the parameter list by the explicit arguments.
-def substitute(text, names, args)
+# With pack (the index of a parameter pack in names), the pack takes args[pack, size] where size is what the other
+# parameters leave: `Ns...` in the text is the pack's values joined; a bare pack name is refused.
+def substitute(text, names, args, pack = nil)
   map = {}
-  names.each_with_index { |n, idx| map[n] = args[idx] }
+  if pack.nil?
+    names.each_with_index { |n, idx| map[n] = args[idx] }
+  else
+    size = args.length - (names.length - 1)
+    names.each_with_index do |n, idx|
+      if idx < pack
+        map[n] = [args[idx]]
+      elsif idx == pack
+        map[n] = args[pack, size]
+      else
+        map[n] = [args[idx - 1 + size]]
+      end
+    end
+  end
   out = ""
   i = 0
   while i < text.length
@@ -238,7 +255,16 @@ def substitute(text, names, args)
       j = i
       j += 1 while j < text.length && ident_char?(text[j])
       w = text[i...j]
-      out << (map[w] || w)
+      if pack && names[pack] == w && map.key?(w)
+        k = j
+        k += 1 while k < text.length && white?(text[k])
+        refuse("parameter pack #{w} used without ...") unless text[k, 3] == "..."
+        out << map[w].join(", ")
+        i = k + 3
+        next
+      end
+      v = map[w]
+      out << (v.is_a?(Array) ? v[0].to_s : (v || w))
       i = j
     else
       out << text[i]
@@ -254,10 +280,11 @@ def template_site(name, targs)
   kt = kernel_template(name)
   refuse("template kernel #{name}: no __global__ template of that name in the source") if kt.nil?
   args = split_top(targs)
-  if args.length != kt[:names].length
+  # A parameter pack takes the arguments the other parameters leave (at least none); without one, every parameter.
+  if kt[:pack] ? args.length < kt[:names].length - 1 : args.length != kt[:names].length
     refuse("template kernel #{name}<#{targs}>: explicit arguments must give every template parameter")
   end
-  decl = substitute(kt[:params], kt[:names], args)
+  decl = substitute(kt[:params], kt[:names], args, kt[:pack])
   call = split_top(decl).map do |part|
     n = tokens_of(part.split("=")[0]).last
     refuse("template kernel #{name}: unnamed parameter #{part}") if n.nil?
@@ -423,11 +450,14 @@ def enclosing_template(text, pos)
   tb = cand.max_by { |x| x[:open] }
   t = tb[:tmpl]
   params = split_top(text[(t[:lt] + 1)...t[:close]])
-  refuse("template header with a parameter pack (at line #{text[0...pos].count("\n") + 1})") if params.any? { |pr| pr.include?("...") }
+  # One parameter pack is allowed (`int... Ns`): its index is recorded; its values come from the explicit calls.
+  packs = params.each_index.select { |k| params[k].include?("...") }
+  refuse("template with #{packs.length} parameter packs (at line #{text[0...pos].count("\n") + 1}): one is supported") if packs.length > 1
   decls = params.map { |pr| pr.split("=")[0].strip }
   names = decls.map { |pr| tokens_of(pr).last }
   header = text[(t[:close] + 1)...tb[:open]]
-  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header), open: tb[:open] }
+  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header), open: tb[:open],
+    pack: packs.first }
 end
 
 # The value of a local compile-time constant `T name = VALUE;` (for example `constexpr bool fallback = true;`) that
@@ -582,7 +612,8 @@ def template_instances(name, text, stack)
     end
     if outer && args.any? { |a| tokens_of(a).any? { |tk| outer[:names].include?(tk) } }
       template_instances(outer[:fname], text, stack + [name]).each do |inst|
-        out << args.map { |a| substitute(a, outer[:names], inst) }
+        # A pack expands to several arguments: the list is split again after the substitution.
+        out << split_top(args.map { |a| substitute(a, outer[:names], inst, outer[:pack]) }.join(", "))
       end
     else
       out << args
@@ -641,8 +672,10 @@ def dependent_launches(text)
     refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep} of #{outer[:fname]}: the unit has no " \
            "explicit call of it with all its template arguments, so its instances are not known") if insts.empty?
     insts.each do |inst|
+      # Without a pack, one argument per template parameter; with one, the other parameters' count is the minimum.
+      ok = outer[:pack] ? inst.length >= outer[:names].length - 1 : inst.length == outer[:names].length
       refuse("template launch of #{nm}<#{ta}>: a call of #{outer[:fname]} does not give all its template arguments " \
-             "explicitly") if inst.length != outer[:names].length
+             "explicitly") unless ok
     end
     outer[:line] = line_col(text, outer[:st])[0]
     out[line_col(text, pos)] = { name: nm, targs: ta, outer: outer, insts: insts, dname: "__nfcxx_disp_#{sanitize(nm)}_#{idx}" }
@@ -656,7 +689,7 @@ def dependent_decls(dl, orig)
   lines = []
   dl.each_value do |d|
     d[:insts].each do |inst|
-      concrete = split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", ")
+      concrete = split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst, d[:outer][:pack]) }.join(", ")
       d[:wrapper] ||= {}
       d[:wrapper][inst] = template_site(d[:name], concrete)
     end
@@ -785,7 +818,9 @@ def rewrite(text, orig)
       if targs
         d = dl[line_col(text, i)]
         if d
-          kernel = "#{d[:dname]}<#{d[:outer][:names].join(', ')}>::fn"
+          # The pack keeps its ... (disp<Ns...> expands it inside the template body).
+          tn = d[:outer][:names].each_with_index.map { |n, k| k == d[:outer][:pack] ? "#{n}..." : n }
+          kernel = "#{d[:dname]}<#{tn.join(', ')}>::fn"
         else
           refuse("template launch of #{name}<#{targs}> depends on a template parameter, and its enclosing template is not " \
                  "resolved in this unit (at line #{line})") unless dependent_on_template(text, i, targs).nil?
@@ -2021,7 +2056,7 @@ def device_tu(text)
   # the dependent launches: the wrapper of each instance of their enclosing template (see dependent_launches)
   dependent_launches(text).each_value do |d|
     d[:insts].each do |inst|
-      template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", "))
+      template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst, d[:outer][:pack]) }.join(", "))
     end
   end
   pieces.each do |pc|

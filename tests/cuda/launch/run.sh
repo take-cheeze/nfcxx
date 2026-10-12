@@ -56,4 +56,6 @@ pass dep_value.cu "dep value: no error, 0 mismatches"
 refuse refuse_dep_nocall.cu "instances are not known"
 refuse refuse_dep_cycle.cu "instantiates itself through its template arguments"
 refuse refuse_dep_deduced.cu "instances are not known"
+pass pack.cu "pack: no error, 0 mismatches"
+refuse pack_refuse.cu "instances are not known"
 exit $fail
