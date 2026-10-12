@@ -46,6 +46,22 @@ check.call('other calls and other state variables are untouched', out == 'x = mr
 check.call('the rewritten text has no leftover literal interning',
            !rw.call('mrb_intern_cstr(M, "a") mrb_funcall(M, r, "b", 0)').match?(/mrb_intern_cstr\(M, "|mrb_funcall\(M/))
 
+unicode_table = SymbolCache::Table.new
+unicode_source = 'préface; mrb_funcall(M, mrb_funcall(M, r, "内", 0), "外", 0); fin'
+unicode_output = SymbolCache.rewrite(unicode_source, unicode_table)
+check.call('byte scanning preserves Unicode text, nested names and encoding',
+           unicode_output == 'préface; bc2cpp_send(M, bc2cpp_send(M, r, 0, 0), 1, 0); fin' &&
+           unicode_output.encoding == unicode_source.encoding && unicode_table.literals == ['"内"', '"外"'])
+check.call('Unicode prefixes do not shift send indices', SymbolCache.send_indices(unicode_output) == [1, 0])
+miss = 'mrb_funcall(M, r, dynamic_name, 0); f(r, "later", 0);'
+check.call('a nonliteral name cannot match a later argument', SymbolCache.rewrite(miss, SymbolCache::Table.new) == miss)
+check.call('a nonnumeric slot cannot match a later number',
+           SymbolCache.send_indices('bc2cpp_send(M, r, dynamic_slot, 0); f(r, 7, 0);').empty?)
+many = 'mrb_funcall(M, r, "tick", 0);' * 5_000
+many_output = SymbolCache.rewrite(many, SymbolCache::Table.new)
+check.call('a large flat scan preserves every call and slot',
+           many_output == 'bc2cpp_send(M, r, 0, 0);' * 5_000 && SymbolCache.send_indices(many_output) == [0] * 5_000)
+
 cache = SymbolCache.emit(table)
 check.call('the cache declares its table, reset and accessor',
            cache.include?('static void bc2cpp_reset_symbol_cache()') && cache.include?('static inline mrb_sym bc2cpp_sym(mrb_state* M, int i)') &&
