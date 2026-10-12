@@ -130,13 +130,15 @@ class CodeGen
     @class_arg_pools[[irep.label, reg.to_i]] || NumericFlow::OTHER
   end
 
-  # The pooled class set of a GETCONST/GETMCNST: the join of what every definition of the bare name
-  # stores (ADR 0301). A name the numeric proof poisons has no pool.
+  # The pooled class set of a GETCONST/GETMCNST: the join of what every definition it reads stores
+  # (ADR 0301, scoped by ADR 0421). A name the numeric proof poisons has no pool; a read with no
+  # proven definition falls back to the integer-constant proof, else OTHER.
   def class_pool_const_mask(insn)
     name = insn.const_name
     return NumericFlow::OTHER unless @class_pools_on && name && const_missing_free?
 
-    @class_const_pools[name] || (@integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER)
+    key = const_group_key(insn)
+    (key && @class_const_pools[key]) || (@integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER)
   end
 
   # One growth pass over every pool; true when a mask grew or a pool was dropped.
