@@ -21,18 +21,9 @@ extern "C" unsigned __nfcxx_ntid_z(void);
 extern "C" unsigned __nfcxx_nctaid_x(void);
 extern "C" unsigned __nfcxx_nctaid_y(void);
 extern "C" unsigned __nfcxx_nctaid_z(void);
-#ifndef H0
-#ifndef H1
-#ifndef H2
-#ifndef H3
-#ifndef H4
-#ifndef H5
-#ifndef H6
-#ifndef H7
-#ifndef H8
 
 int f8(int x) { return x + 8; }
-#endif
+
 
 
 
@@ -41,7 +32,7 @@ int f8(int x) { return x + 8; }
 
 
 int f7(int x) { return x + 7; }
-#endif
+
 
 
 
@@ -50,7 +41,7 @@ int f7(int x) { return x + 7; }
 
 
 int f6(int x) { return x + 6; }
-#endif
+
 
 
 
@@ -59,7 +50,7 @@ int f6(int x) { return x + 6; }
 
 
 int f5(int x) { return x + 5; }
-#endif
+
 
 
 
@@ -68,7 +59,7 @@ int f5(int x) { return x + 5; }
 
 
 int f4(int x) { return x + 4; }
-#endif
+
 
 
 
@@ -77,7 +68,7 @@ int f4(int x) { return x + 4; }
 
 
 int f3(int x) { return x + 3; }
-#endif
+
 
 
 
@@ -86,7 +77,7 @@ int f3(int x) { return x + 3; }
 
 
 int f2(int x) { return x + 2; }
-#endif
+
 
 
 
@@ -95,7 +86,7 @@ int f2(int x) { return x + 2; }
 
 
 int f1(int x) { return x + 1; }
-#endif
+
 
 
 
@@ -104,7 +95,7 @@ int f1(int x) { return x + 1; }
 
 
 int f0(int x) { return x + 0; }
-#endif
+
 
 
 

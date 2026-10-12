@@ -21,7 +21,7 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | scan | `uint` typedef from the host headers, cooperative groups | fails to compile | `refused: aggregate type "uint4"` (struct by value) |
 | histogram | `uchar`/`uint` typedefs from the host headers, shared memory | fails to compile | `refused: aggregate type "uint4"` (struct by value) |
 | scalarProd | cooperative groups (`namespace cg = cooperative_groups`) | fails to compile | `name must be a namespace name` |
-| threadFenceReduction | memory fences, cooperative groups | fails to compile | `name must be a namespace name` (device unit) |
+| threadFenceReduction | memory fences, cooperative groups | fails to compile | `name must be a namespace name` (the conditionals of the source are now evaluated; the device-variable refusal is no longer reached) |
 | simpleCooperativeGroups | cooperative groups (`thread_block`, `thread_group`) | fails to compile | `identifier "thread_group" is undefined` (device unit) |
 | MC_EstimatePiP | template kernel launch (curand is not reached) | fails to compile | `refused: template launch of computeValue<Real>`: the launch depends on the enclosing template's `Real` |
 | Rodinia pathfinder | `__shared__` arrays | fails to compile | `identifier "__syncthreads" is undefined` (device unit) |

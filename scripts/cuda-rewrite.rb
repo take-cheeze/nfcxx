@@ -767,6 +767,302 @@ end
 # contents are not in the unit; a name they supply is a missing declaration, reported by the front end). The
 # conditional directives (#if, #ifdef, ...) are kept as written. A __device__ variable is refused: device data is
 # not lowered yet.
+# ---- conditionals of the device pass
+
+# An expression the evaluator does not handle (a float literal, a string, a call with odd arguments): the conditional
+# is kept as it was, with its lines and both branches, as before the evaluator existed.
+class CondUnsupported < StandardError
+end
+
+def cond_fail(msg)
+  raise CondUnsupported, msg
+end
+#
+# The device unit is cut into top-level pieces by brace counting, and a preprocessor conditional opens or closes
+# braces in the text of both of its branches, so a kernel inside #if/#else never returns the count to zero. The
+# device pass therefore evaluates the conditionals first: the branches not taken are blanked (the line count is
+# kept), the #if/#ifdef/#else/#endif lines are removed, and #define and #undef of the taken branches stay.
+# The device pass defines CUDA's device-compile macros; the host pass is not affected.
+DEVICE_PASS_MACROS = { "__CUDACC__" => "1", "__NVCC__" => "1", "__CUDA_ARCH__" => "750" }
+
+def cond_tokens(s, line)
+  toks = []
+  i = 0
+  n = s.length
+  while i < n
+    c = s[i]
+    if white?(c)
+      i += 1
+    elsif ident_char?(c)
+      j = i
+      j += 1 while j < n && ident_char?(s[j])
+      w = s[i...j]
+      if c.ord >= 48 && c.ord <= 57
+        w = w[0...-1] while w.length > 0 && "uUlL".include?(w[-1])
+        v = (w.length > 2 && w[0] == "0" && (w[1] == "x" || w[1] == "X")) ? w[2..-1].to_i(16) : w.to_i
+        toks << [:num, v]
+      else
+        toks << [:id, w]
+      end
+      i = j
+    else
+      two = i + 1 < n ? s[i, 2] : ""
+      if %w[&& || == != <= >= << >>].include?(two)
+        toks << [:op, two]
+        i += 2
+      elsif "!~+-*/%<>&|^()?:,".include?(c)
+        toks << [:op, c]
+        i += 1
+      else
+        cond_fail("unsupported character #{c.inspect} in #if at line #{line}")
+      end
+    end
+  end
+  toks
+end
+
+# Evaluates a #if expression: integers, identifiers (their object-like macro value, else 0), defined(X), the usual C
+# operators. An unknown function-like call, such as __has_include(...), counts as 0.
+def cond_eval(s, defs, line, depth = 0)
+  cond_fail("#if nesting too deep at line #{line}") if depth > 16
+  st = { toks: cond_tokens(s, line), pos: 0 }
+  v = cond_expr(st, defs, line, depth)
+  cond_fail("unsupported #if expression at line #{line}") if st[:pos] != st[:toks].length
+  v
+end
+
+def cond_peek(st, x = nil)
+  t = st[:toks][st[:pos]]
+  return false if t.nil?
+  return false if x && !(t[0] == :op && t[1] == x)
+  true
+end
+
+def cond_expr(st, defs, line, depth)
+  c = cond_binary(st, defs, line, depth, 0)
+  return c unless cond_peek(st, "?")
+  st[:pos] += 1
+  a = cond_expr(st, defs, line, depth)
+  cond_fail("expected ':' in #if at line #{line}") unless cond_peek(st, ":")
+  st[:pos] += 1
+  b = cond_expr(st, defs, line, depth)
+  c != 0 ? a : b
+end
+
+# Binary operators by precedence level, lowest first.
+COND_LEVELS = [["||"], ["&&"], ["|"], ["^"], ["&"], ["==", "!="], ["<", ">", "<=", ">="], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]]
+
+def cond_binary(st, defs, line, depth, level)
+  return cond_unary(st, defs, line, depth) if level >= COND_LEVELS.length
+  l = cond_binary(st, defs, line, depth, level + 1)
+  loop do
+    t = st[:toks][st[:pos]]
+    break unless t && t[0] == :op && COND_LEVELS[level].include?(t[1])
+    op = t[1]
+    st[:pos] += 1
+    if op == "||"
+      r = cond_binary(st, defs, line, depth, level + 1)
+      l = (l != 0 || r != 0) ? 1 : 0
+    elsif op == "&&"
+      r = cond_binary(st, defs, line, depth, level + 1)
+      l = (l != 0 && r != 0) ? 1 : 0
+    else
+      r = cond_binary(st, defs, line, depth, level + 1)
+      l = case op
+          when "|" then l | r
+          when "^" then l ^ r
+          when "&" then l & r
+          when "==" then l == r ? 1 : 0
+          when "!=" then l != r ? 1 : 0
+          when "<" then l < r ? 1 : 0
+          when ">" then l > r ? 1 : 0
+          when "<=" then l <= r ? 1 : 0
+          when ">=" then l >= r ? 1 : 0
+          when "<<" then l << r
+          when ">>" then l >> r
+          when "+" then l + r
+          when "-" then l - r
+          when "*" then l * r
+          when "/" then (r == 0 ? cond_fail("division by zero in #if at line #{line}") : l / r)
+          when "%" then (r == 0 ? cond_fail("division by zero in #if at line #{line}") : l % r)
+          end
+    end
+  end
+  l
+end
+
+def cond_unary(st, defs, line, depth)
+  t = st[:toks][st[:pos]]
+  cond_fail("unexpected end of #if expression at line #{line}") if t.nil?
+  if t[0] == :op && t[1] == "!"
+    st[:pos] += 1
+    return cond_unary(st, defs, line, depth) == 0 ? 1 : 0
+  elsif t[0] == :op && t[1] == "-"
+    st[:pos] += 1
+    return -cond_unary(st, defs, line, depth)
+  elsif t[0] == :op && t[1] == "+"
+    st[:pos] += 1
+    return cond_unary(st, defs, line, depth)
+  elsif t[0] == :op && t[1] == "~"
+    st[:pos] += 1
+    return ~cond_unary(st, defs, line, depth)
+  elsif t[0] == :op && t[1] == "("
+    st[:pos] += 1
+    v = cond_expr(st, defs, line, depth)
+    cond_fail("expected ')' in #if at line #{line}") unless cond_peek(st, ")")
+    st[:pos] += 1
+    return v
+  elsif t[0] == :num
+    st[:pos] += 1
+    return t[1]
+  elsif t[0] == :id && t[1] == "defined"
+    st[:pos] += 1
+    paren = cond_peek(st, "(")
+    st[:pos] += 1 if paren
+    name = st[:toks][st[:pos]]
+    cond_fail("defined without a name at line #{line}") unless name && name[0] == :id
+    st[:pos] += 1
+    if paren
+      cond_fail("expected ')' after defined at line #{line}") unless cond_peek(st, ")")
+      st[:pos] += 1
+    end
+    return defs.key?(name[1]) ? 1 : 0
+  elsif t[0] == :id
+    st[:pos] += 1
+    if cond_peek(st, "(")
+      # a call of a function-like macro or an unknown function: 0, with its arguments skipped
+      st[:pos] += 1
+      nest = 1
+      while nest > 0
+        u = st[:toks][st[:pos]]
+        cond_fail("unbalanced parentheses in #if at line #{line}") if u.nil?
+        nest += 1 if u[0] == :op && u[1] == "("
+        nest -= 1 if u[0] == :op && u[1] == ")"
+        st[:pos] += 1
+      end
+      return 0
+    end
+    val = defs[t[1]]
+    return 0 if val.nil? || val == :function
+    return cond_eval(val, defs, line, depth + 1)
+  end
+  cond_fail("unsupported #if expression at line #{line}")
+end
+
+# Resolves the conditionals of a translation unit. defs maps a name to its object-like replacement text, a function-like
+# macro to :function, and a macro with no value to "". A conditional that cannot be evaluated (CondUnsupported) is
+# kept with its branches; the lines of the other conditionals are blanked, so the line count does not change.
+def resolve_conditionals(text, defs)
+  out = []
+  stack = []
+  active = true
+  pending = nil
+  lineno = 0
+  text.split("\n", -1).each do |raw|
+    lineno += 1
+    line = raw
+    if pending
+      line = pending + "\n" + raw
+      pending = nil
+    end
+    if line.end_with?("\\")
+      pending = line[0...-1]
+      out << ""
+      next
+    end
+    s = line.lstrip
+    unless s.start_with?("#")
+      out << (active ? line : "")
+      next
+    end
+    d = s[1..-1].lstrip
+    name = ""
+    k = 0
+    while k < d.length && ident_char?(d[k])
+      name += d[k]
+      k += 1
+    end
+    rest = d[k..-1].to_s.strip
+    case name
+    when "if", "ifdef", "ifndef"
+      parent = active
+      begin
+        if name == "if"
+          cond = parent ? cond_eval(rest, defs, lineno) != 0 : false
+        else
+          nm = rest.split(" ")[0].to_s
+          cond = parent ? (defs.key?(nm) == (name == "ifdef")) : false
+        end
+        stack << { parent: parent, taken: cond, kept: false }
+        active = parent && cond
+        out << ""
+      rescue CondUnsupported
+        stack << { parent: parent, taken: true, kept: true }
+        active = parent
+        out << (parent ? line : "")
+      end
+    when "elif"
+      refuse("#elif without #if at line #{lineno}") if stack.empty?
+      fr = stack.last
+      if fr[:kept]
+        out << (fr[:parent] ? line : "")
+      elsif fr[:taken]
+        active = false
+        out << ""
+      else
+        begin
+          cond = fr[:parent] ? cond_eval(rest, defs, lineno) != 0 : false
+          fr[:taken] = cond
+          active = fr[:parent] && cond
+          out << ""
+        rescue CondUnsupported
+          fr[:kept] = true
+          fr[:taken] = true
+          active = fr[:parent]
+          out << (fr[:parent] ? line : "")
+        end
+      end
+    when "else"
+      refuse("#else without #if at line #{lineno}") if stack.empty?
+      fr = stack.last
+      if fr[:kept]
+        out << (fr[:parent] ? line : "")
+      else
+        active = fr[:parent] && !fr[:taken]
+        fr[:taken] = true
+        out << ""
+      end
+    when "endif"
+      refuse("#endif without #if at line #{lineno}") if stack.empty?
+      fr = stack.pop
+      active = fr[:parent]
+      out << (fr[:kept] && fr[:parent] ? line : "")
+    when "define"
+      if active
+        mname = ""
+        j = 0
+        while j < rest.length && ident_char?(rest[j])
+          mname += rest[j]
+          j += 1
+        end
+        if rest[j] == "("
+          defs[mname] = :function
+        else
+          defs[mname] = rest[j..-1].to_s.strip
+        end
+      end
+      out << (active ? line : "")
+    when "undef"
+      defs.delete(rest.split(" ")[0].to_s) if active
+      out << (active ? line : "")
+    else
+      out << (active ? line : "")
+    end
+  end
+  refuse("#if without #endif") unless stack.empty?
+  out.join("\n")
+end
+
 def device_tu(text)
   pieces = top_pieces(text).map do |pc|
     st, en, kind, body = pc
@@ -1033,6 +1329,10 @@ text = File.open(path, "rb") { |f| f.read }
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
 $expanded = expand_includes(text, File.dirname(path), 0)
 if device
+  # The device unit is built from the conditionals of the device pass (see resolve_conditionals).
+  defs = {}
+  DEVICE_PASS_MACROS.each { |k, v| defs[k] = v }
+  $expanded = resolve_conditionals($expanded, defs)
   dev, kernels = device_tu($expanded)
   File.open(kernels_path, "wb") { |f| f.write(kernels.map { |k| k + "\n" }.join) } unless kernels_path.nil?
   print dev
