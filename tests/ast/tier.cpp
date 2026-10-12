@@ -703,6 +703,12 @@ int main() {
       CHECK(eval(S, "local function f(d) local acc = 0 for i = 1, 100 do acc = acc + 1000 // (d - i) end return acc end "
                     "local n = 0 for k = 1, 40 do if not pcall(f, 50) then n = n + 1 end end return n") == "40");
       CHECK(S.stats.tier_osr_bailouts <= 12);   // 8 abandoned runs, then the loop is left to the interpreter
+      // a guard that keeps failing (one cell assigned and reached in two ways) is given up in the same way
+      std::uint64_t b0 = S.stats.tier_osr_bailouts;
+      const char* alias = "local c = 0 local function inc() c = c + 1 end local function f() for i = 1, 50 do c = c + 2 inc() end return c end "
+                          "local t = 0 for k = 1, 40 do t = t + f() end return t, c";
+      CHECK(eval(S, alias) == eval_plain(alias));
+      CHECK(S.stats.tier_osr_bailouts - b0 <= 12 && S.stats.tier_osr_bailouts > b0);
       CHECK(consistent(S));
     }
     // other types of the locals: another version; a binding that changed; the option that turns it off
@@ -772,7 +778,7 @@ int main() {
       for (int k = 0; k < 3; ++k) same(P, S, "local s = 0 for i = 1, 3000 do s = s + i % 7 end return s", "async");
       S.tier_wait();
       same(P, S, "local s = 0 for i = 1, 3000 do s = s + i % 7 end return s", "async, after the compile");
-      CHECK(S.stats.tier_compiled >= 1);
+      CHECK(S.stats.tier_compiled >= 1 && S.stats.tier_failed == 0);   // three chunks with the same loop were being built at once
     }
     // a parse-level corner: a vararg main chunk with a loop that reads `...`: not a kernel
     {
@@ -836,6 +842,10 @@ int main() {
       CHECK(S.stats.tier_osr_runs == r0 + 1);   // a callee in a Cell is found too
       same(P, S, "local f = function(x) return x + 1 end local s = 0 for i = 1, 20 do s = s + f(i) end f = function(x) return x * 2 end for i = 1, 20 do s = s + f(i) end return s", "the local is another function the next time");
       same(P, S, "local f = function(x) return x + 1 end local s = 0 for i = 1, 20 do if i == 10 then f = function(x) return x * 2 end end s = s + f(i) end return s", "the local is assigned in the loop");
+      r0 = S.stats.tier_osr_runs;
+      same(P, S, "local G local function mk() local c = 0 G = function() return c end for i = 1, 100 do c = c + i if c > 1000 then return c end end return -1 end "
+                 "local r = mk() return r, G()", "a return from a loop: the cell a closure holds is written first");
+      CHECK(S.stats.tier_osr_runs == r0 + 1);
       same(P, S, "local f = 5 local s = 0 for i = 1, 20 do s = s + f(i) end return s", "a local that is not a function");
       same(P, S, "local f = math.abs local s = 0 for i = 1, 30 do s = s + f(-i) end return s", "a native function in a local");
       CHECK(consistent(S) && consistent(P));

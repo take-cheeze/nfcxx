@@ -68,3 +68,15 @@ a function that reads and one that writes	465
 upvalue: a float, assigned an integer and a float	1.5	float
 integer upvalue	1	integer
 boolean upvalue	false
+either kind, decided late	25.0	float
+a float that becomes an integer	3	integer
+types, only the loop is compiled	50	75.0	50.5	51	101	102.5
+upvalue: a float, entry kind	2.75	float
+the same upvalue twice	1
+loop variable assigned	110
+shadowing	137	1
+while true	32
+repeat scope	1240	16
+nested shadowing	1	2	217
+cells survive a return	1035	1035	17592186044416.0
+again	1035	1035	17592186044416.0

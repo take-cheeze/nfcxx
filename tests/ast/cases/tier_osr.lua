@@ -329,3 +329,65 @@ local bu = false
 local function bud(i) bu = i % 3 == 0 end
 for i = 1, 10 do bud(i) end
 print("boolean upvalue", bu)
+
+-- 17. kinds of numbers that are decided late, the loop alone compiled for several sets of types, the order of assignments to an upvalue
+local ev = 0
+for i = 1, 100 do if i > 50 then ev = ev + 0.5 end end
+print("either kind, decided late", ev, math.type(ev))
+local ev2 = 1.5
+for i = 1, 100 do if i > 50 then ev2 = 3 end end
+print("a float that becomes an integer", ev2, math.type(ev2))
+local function total2(a, b)
+  local _t = {}
+  local r = a
+  for i = 1, 50 do r = r + b end
+  _t[1] = r
+  return _t[1]
+end
+print("types, only the loop is compiled", total2(0, 1), total2(0, 1.5), total2(0.5, 1), total2(1, 1), total2(1, 2), total2(2.5, 2))
+local fz = 0.25
+local function fzd(i) if i > 100 then fz = 7 else fz = fz + 0.5 end end
+for i = 1, 5 do fzd(i) end
+print("upvalue: a float, entry kind", fz, math.type(fz))
+local dup = 0
+local function dupd() dup, dup = 1, 2 end
+for i = 1, 5 do dupd() end
+print("the same upvalue twice", dup)
+
+-- 18. scoping inside a loop that is taken over: the loop variable assigned, a local that shadows a live one, `repeat` scope
+local sa = 0
+for i = 1, 10 do i = i * 2; sa = sa + i end
+print("loop variable assigned", sa)
+local x1 = 1
+for i = 1, 6 do local x1 = x1 + i; sa = sa + x1 end
+print("shadowing", sa, x1)
+local wc = 0
+while true do wc = wc + 1; if wc * wc > 1000 then break end end
+print("while true", wc)
+local n3, k3 = 0, 0
+repeat local sq3 = k3 * k3; n3 = n3 + sq3; k3 = k3 + 1 until sq3 > 200
+print("repeat scope", n3, k3)
+do
+  local a, b = 1, 2
+  for i = 1, 5 do
+    local a = a + i
+    for j = 1, 3 do local b = b + j; a = a + b end
+    sa = sa + a
+  end
+  print("nested shadowing", a, b, sa)
+end
+
+-- 19. a `return` from a loop that was taken over: the locals that closures hold are written back first
+local G
+local function mk()
+  local c, d = 0, 0.5
+  G = function() return c, d end
+  for i = 1, 100 do
+    c = c + i
+    d = d * 2
+    if c > 1000 then return c end
+  end
+  return -1
+end
+print("cells survive a return", mk(), G())
+print("again", mk(), G())

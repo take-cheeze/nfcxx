@@ -3,11 +3,16 @@
 // A script function that is called (or loops) often enough, and whose body is a numeric kernel, is lowered to C++, compiled by the
 // nfcxx driver into a shared object and called in place of the tree. A kernel is a function whose body has only numeric and boolean
 // locals and parameters, constants, arithmetic, bitwise and comparison operators, `if` / `while` / `repeat` / numeric `for` /
-// `return` / `break`, reads of numeric upvalues and globals, and calls of other kernels through an upvalue or a global (itself
-// included). Nothing else is lowered: a function that does anything more simply stays interpreted.
+// `return` / `break`, reads and assignments of numeric upvalues, reads of numeric globals, and calls of other kernels through an
+// upvalue or a global (itself included). Nothing else is lowered: a function that does anything more simply stays interpreted.
 //
-// Soundness. The compiled code has no side effects: it reads its arguments and the free variables it was given at entry, and
-// returns one number. So whatever it assumed and finds untrue (an argument of another type than the one it was compiled for, a
+// A loop of a function that is called once (or of the main chunk, which is never a kernel) is compiled alone, as the first function of
+// a unit, and taken over by compiled code in the middle of the call, at the top of an iteration (on-stack replacement): the locals the
+// loop reads or assigns without declaring them go in by value and come out when it ends.
+//
+// Soundness. The compiled code has no side effects until it ends: it reads its arguments and the free variables it was given at entry,
+// works on copies of the locals and of the upvalues it assigns (the engine writes those back when the run has ended), and returns one
+// number. So whatever it assumed and finds untrue (an argument of another type than the one it was compiled for, a
 // callee that is another function now, an integer division by zero, a recursion deeper than the interpreter allows) is handled by
 // abandoning the run (a longjmp to the entry) and doing the whole call again in the interpreter, which then produces the result,
 // the error text and the position exactly as it would have without a tier. The arithmetic itself is the interpreter's
@@ -1541,6 +1546,7 @@ struct Gen {
             else if (rt == Y_F) cur += "o[" + num(static_cast<long long>(at)) + "].d = " + t + ";\n";
             else cur += "o[" + num(static_cast<long long>(at)) + "].i = " + t + ";\n";
           }
+          writeback();
           cur += "return 1;\n";
           break;
         }
@@ -1635,6 +1641,21 @@ struct Gen {
     return h + ", nfcr_W* o)";
   }
 
+  // The values of the live locals go out through O (the engine stores them in the frame, or in the cells that closures share: a
+  // `return` writes them too, since a closure may outlive the frame).
+  void writeback() {
+    Inst& I = inst();
+    ProtoIR& P = proto();
+    for (int k = 0; k < P.nparams; ++k) {
+      int v = P.pvars[static_cast<std::size_t>(k)];
+      Ty t = I.vty[static_cast<std::size_t>(v)];
+      std::string o = "o[" + num(2 * k) + "]";
+      if (t == Y_N) cur += o + " = " + vname(v) + ".w;\no[" + num(2 * k + 1) + "].i = " + vname(v) + ".f;\n";
+      else if (t == Y_F) cur += o + ".d = " + vname(v) + ";\n";
+      else cur += o + ".i = " + vname(v) + ";\n";
+    }
+  }
+
   std::string function_osr() {
     inst_idx = 0;
     Inst& I = inst();
@@ -1650,14 +1671,7 @@ struct Gen {
       cur += std::string(ty_c(t)) + " " + vname(v) + " = " + init + ";\n";
     }
     stmt(P.body);
-    for (int k = 0; k < P.nparams; ++k) {
-      int v = P.pvars[static_cast<std::size_t>(k)];
-      Ty t = I.vty[static_cast<std::size_t>(v)];
-      std::string o = "o[" + num(2 * k) + "]";
-      if (t == Y_N) cur += o + " = " + vname(v) + ".w;\no[" + num(2 * k + 1) + "].i = " + vname(v) + ".f;\n";
-      else if (t == Y_F) cur += o + ".d = " + vname(v) + ";\n";
-      else cur += o + ".i = " + vname(v) + ";\n";
-    }
+    writeback();
     return head_osr() + " {\n" + cur + "return 0;\n}\n";
   }
 
@@ -2302,17 +2316,7 @@ int osr_run(State& S, Frame& f, Version* v, const TierLoopState& st) {
   }
   ++S.stats.tier_osr_runs;
   commit(v->meta, T->closbuf, T->fvbuf);
-  if (rc == 2) {  // the function returns
-    switch (v->ret) {
-      case Y_I: f.rets->push(Value::integer(out[2 * n].i)); break;
-      case Y_F: f.rets->push(Value::number(out[2 * n].d)); break;
-      case Y_B: f.rets->push(Value::boolean(out[2 * n].i != 0)); break;
-      case Y_N: f.rets->push(out[2 * n + 1].i ? Value::number(out[2 * n].d) : Value::integer(out[2 * n].i)); break;
-      default: break;
-    }
-    return 2;
-  }
-  for (std::size_t k = 0; k < n; ++k) {
+  for (std::size_t k = 0; k < n; ++k) {  // also when the function returns: a closure may hold the cell of a local
     Value& x = v->in_cell[k] ? static_cast<Cell*>(f.base[v->in_slots[k]].o)->v : f.base[v->in_slots[k]];
     switch (v->out_ty[k]) {
       case Y_I: x = Value::integer(out[2 * k].i); break;
@@ -2321,7 +2325,15 @@ int osr_run(State& S, Frame& f, Version* v, const TierLoopState& st) {
       default: x = out[2 * k + 1].i ? Value::number(out[2 * k].d) : Value::integer(out[2 * k].i); break;
     }
   }
-  return 1;
+  if (rc != 2) return 1;
+  switch (v->ret) {  // the function returns
+    case Y_I: f.rets->push(Value::integer(out[2 * n].i)); break;
+    case Y_F: f.rets->push(Value::number(out[2 * n].d)); break;
+    case Y_B: f.rets->push(Value::boolean(out[2 * n].i != 0)); break;
+    case Y_N: f.rets->push(out[2 * n + 1].i ? Value::number(out[2 * n].d) : Value::integer(out[2 * n].i)); break;
+    default: break;
+  }
+  return 2;
 }
 
 bool want_compile(TierState* T, TierProto* tp, std::uint32_t count, std::uint32_t threshold) {
