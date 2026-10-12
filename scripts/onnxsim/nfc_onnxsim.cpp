@@ -9,7 +9,6 @@
 #include <onnx/onnx_pb.h>
 #include <onnx/shape_inference/implementation.h>
 
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -24,40 +23,6 @@
 namespace {
 
 using onnx::TensorProto;
-
-// The gradient nodes are built in float32 (GraphBuilder::Const, Cast to FLOAT for the masks); a float64 model gets the
-// constants and the masks in float64.
-void to_double(GraphBuilder& b) {
-  for (TensorProto& t : b.initializer()) {
-    if (t.data_type() != TensorProto::FLOAT) continue;
-    std::vector<double> v;
-    if (!t.raw_data().empty()) {
-      const size_t n = t.raw_data().size() / 4;
-      for (size_t k = 0; k < n; k++) {
-        float f;
-        std::memcpy(&f, t.raw_data().data() + 4 * k, 4);
-        v.push_back(f);
-      }
-    } else {
-      for (float f : t.float_data()) v.push_back(f);
-    }
-    t.clear_raw_data();
-    t.clear_float_data();
-    for (double& d : v) {
-      // the mean rules build 1/N in float32; N is recovered so that float64 models get 1/N to double precision
-      if (d > 0 && d < 1) {
-        double n = std::floor(1.0 / d + 0.5);
-        if (n >= 2 && static_cast<float>(1.0 / n) == static_cast<float>(d)) d = 1.0 / n;
-      }
-      t.add_double_data(d);
-    }
-    t.set_data_type(TensorProto::DOUBLE);
-  }
-  for (onnx::NodeProto& n : b.nodes())
-    if (n.op_type() == "Cast")
-      for (onnx::AttributeProto& a : *n.mutable_attribute())
-        if (a.name() == "to" && a.i() == TensorProto::FLOAT) a.set_i(TensorProto::DOUBLE);
-}
 
 std::string run(const char* bytes, size_t n, const std::string& loss, const std::vector<std::string>& wrt, const std::string& prefix) {
   onnx::ModelProto model;
@@ -125,6 +90,7 @@ std::string run(const char* bytes, size_t n, const std::string& loss, const std:
   std::map<std::string, std::string> got;
   for (;;) {
     b.reset(new GraphBuilder(prefix));
+    b->SetFloatType(ldt);   // float64 constants and masks for a float64 loss (scripts/onnxsim/patches/0001-*)
     std::map<std::string, std::string> seeds;
     seeds[loss] = b->Const(1.0f, "seed");
     try {
@@ -145,7 +111,6 @@ std::string run(const char* bytes, size_t n, const std::string& loss, const std:
       targets = keep;
     }
   }
-  if (ldt == TensorProto::DOUBLE) to_double(*b);
 
   // the zero gradients, and one Identity per wrt so that every result has a name of its own
   std::vector<std::string> results;
@@ -158,10 +123,10 @@ std::string run(const char* bytes, size_t n, const std::string& loss, const std:
       src = it->second;
     } else {
       GraphBuilder z(prefix + "z" + std::to_string(k) + "_");
+      z.SetFloatType(dtypes[wrt[k]]);
       const std::string zero = z.Const(0.0f, "zero");
       src = zero;
       if (!shapes[wrt[k]].empty()) src = z.Op("Expand", {zero, z.ConstInt64(shapes[wrt[k]], "shape")}, "zeros");
-      if (dtypes[wrt[k]] == TensorProto::DOUBLE) to_double(z);
       for (const auto& nd : z.nodes()) tail.push_back(nd);
       for (const auto& t : z.initializer()) tail_init.push_back(t);
     }

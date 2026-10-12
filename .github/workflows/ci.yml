@@ -121,7 +121,7 @@ jobs:
           path: |
             build/onnxsim/libnfconnxsim.so
             build/onnxsim/built-*
-          key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/*') }}
+          key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/**') }}
 
       - name: Build libnfconnxsim.so
         if: startsWith(matrix.name, 'nfcpoly') && steps.onnxsim.outputs.cache-hit != 'true'
