@@ -427,7 +427,32 @@ def enclosing_template(text, pos)
   decls = params.map { |pr| pr.split("=")[0].strip }
   names = decls.map { |pr| tokens_of(pr).last }
   header = text[(t[:close] + 1)...tb[:open]]
-  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header) }
+  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header), open: tb[:open] }
+end
+
+# The value of a local compile-time constant `T name = VALUE;` (for example `constexpr bool fallback = true;`) that
+# precedes pos in the body of the enclosing template, starting at open: the nearest such declaration before pos, as
+# its text, or nil. A call inside an if-branch follows the declaration of its own branch, so the nearest one is the
+# one in scope for it.
+def local_constant(text, open, pos, name)
+  seg = text[open...pos]
+  found = nil
+  i = 0
+  while (k = seg.index(name, i))
+    e = k + name.length
+    i = e
+    next if (k > 0 && ident_char?(seg[k - 1])) || (e < seg.length && ident_char?(seg[e]))
+    b = k - 1
+    b -= 1 while b >= 0 && white?(seg[b])
+    next unless b >= 0 && ident_char?(seg[b])
+    a = e
+    a += 1 while a < seg.length && white?(seg[a])
+    next unless seg[a] == "=" && seg[a + 1] != "="
+    semi = seg.index(";", a)
+    next if semi.nil?
+    found = seg[(a + 1)...semi].strip
+  end
+  found
 end
 
 # `Q<args>::member` in a header of a member defined out of its class template: { name: Q, args: [...] }, else nil.
@@ -497,11 +522,17 @@ end
 def call_sites(text, name)
   unless $call_index_for.equal?(text)
     index = Hash.new { |h, k| h[k] = [] }
+    # Directives are not code: a #define's body names its parameters (DECL_MMQ_CASE(type)), which are not calls.
+    pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
     i = 0
     while i < text.length
       e = skip_literal(text, i)
       if e
         i = e
+        next
+      end
+      if pp.any? { |a, b| a <= i && i < b }
+        i = pp.find { |a, b| a <= i && i < b }[1]
         next
       end
       if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && !(text[i] >= "0" && text[i] <= "9")
@@ -538,6 +569,17 @@ def template_instances(name, text, stack)
   call_sites(text, name).each do |targs, pos|
     args = split_top(targs)
     outer = enclosing_template(text, pos)
+    # A bare local constant of the enclosing body (fallback in mmq's mul_mat_q_case) is its literal value.
+    if outer
+      args = args.map do |a|
+        v = a.strip
+        if v.length > 0 && v.chars.all? { |c| ident_char?(c) } && !outer[:names].include?(v)
+          local_constant(text, outer[:open], pos, v) || a
+        else
+          a
+        end
+      end
+    end
     if outer && args.any? { |a| tokens_of(a).any? { |tk| outer[:names].include?(tk) } }
       template_instances(outer[:fname], text, stack + [name]).each do |inst|
         out << args.map { |a| substitute(a, outer[:names], inst) }
@@ -792,7 +834,9 @@ def launch_macros(text)
     close = after.index(")")
     next if close.nil?
     body = after[(close + 1)..-1].strip
-    next unless body.include?("<<<")
+    # A launch macro, or a macro whose body is a template declaration (mmq's DECL_MMQ_CASE: an explicit instantiation
+    # of mul_mat_q_case per type), is expanded so that its instances are the calls the unit really has.
+    next unless body.include?("<<<") || body.start_with?("template ") || body.start_with?("extern template ")
     out[name] = { params: split_top(after[1...close]), body: body }
   end
   out
@@ -1229,6 +1273,15 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  # CUDA math overloads of min and max for the numeric types (unqualified calls in device code; fattn-common.cuh).
+  "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n",
+  "max" => "static inline int max(int a, int b) { return a > b ? a : b; }\nstatic inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }\nstatic inline long long max(long long a, long long b) { return a > b ? a : b; }\nstatic inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }\nstatic inline float max(float a, float b) { return a > b ? a : b; }\nstatic inline double max(double a, double b) { return a > b ? a : b; }\n",
+  # std::is_same and std::is_same_v for device code (ggml-cuda's templates): the device unit has no host <type_traits>,
+  # so the two are defined here over plain types only.
+  "is_same_v" => "",   # rewritten to std::is_same<A, B>::value (rewrite_is_same_v), which needs is_same below
+  "is_same" => "namespace std { template <class A, class B> struct is_same { enum : bool { value = false }; }; template <class A> struct is_same<A, A> { enum : bool { value = true }; }; }\n",
+  # assert in device code: a failed condition traps the kernel (CUDA's device assert). The host copy keeps <assert.h>.
+  "assert" => "static inline void assert(int c) { if (!c) __builtin_trap(); }\n",
   # The float math functions and __dp4a: wrappers over the emitter's FLOAT_BUILTINS / SCALAR_U32 intrinsics. The
   # accuracy of the approximate ones (rsqrt, div, exp, log) is in docs/notes/gpu.md.
   "fmaxf" => "extern \"C\" float __nfcxx_fmaxf(float, float);\nstatic inline float fmaxf(float a, float b) { return __nfcxx_fmaxf(a, b); }\n",
@@ -1299,6 +1352,10 @@ BUILTIN_DEFS = {
   "__shfl_down_sync" => SHFL_DEFS["down"],
   "__shfl_up_sync" => SHFL_DEFS["up"],
   "__shfl_sync" => SHFL_DEFS["idx"],
+  # The warp votes: the emitter lowers __nfcxx_ballot_sync / __nfcxx_any_sync / __nfcxx_all_sync (full mask only).
+  "__ballot_sync" => "extern \"C\" unsigned __nfcxx_ballot_sync(unsigned, int);\nstatic inline unsigned __ballot_sync(unsigned m, int p) { (void)m; return __nfcxx_ballot_sync(0xffffffffu, p); }\n",
+  "__any_sync" => "extern \"C\" int __nfcxx_any_sync(unsigned, int);\nstatic inline int __any_sync(unsigned m, int p) { (void)m; return __nfcxx_any_sync(0xffffffffu, p); }\n",
+  "__all_sync" => "extern \"C\" int __nfcxx_all_sync(unsigned, int);\nstatic inline int __all_sync(unsigned m, int p) { (void)m; return __nfcxx_all_sync(0xffffffffu, p); }\n",
 }
 
 # The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
@@ -1349,6 +1406,29 @@ def tokens_of(s)
 end
 
 # True if s has code outside comments and whitespace.
+# The text of a piece without its comments (each comment becomes a space; its newlines stay, so offsets of lines hold).
+# The classifier reads a piece's text for '(' and '=' before a body: a comment that has one of them (as the comment
+# before `enum { N = 4096 };` in a benchmark has) must not make the piece a function.
+def code_text(s)
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      if s[i] == "/"
+        s[i...e].each_char { |c| out << (c == "\n" ? "\n" : " ") }
+      else
+        out << s[i...e]
+      end
+      i = e
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
 def code_only?(s)
   i = 0
   while i < s.length
@@ -1527,7 +1607,8 @@ def expand_includes(text, dir, depth, seen = {})
       seen[key] = true
       # The same two rewrites as the main file: a header of the backend has __launch_bounds__ in front of its
       # template kernels, which kernel_template would not match.
-      inc = dynamic_shared_rewrite(strip_launch_bounds(File.open(path, "rb") { |f| f.read }))
+      inc = File.open(path, "rb") { |f| f.read }
+      inc = dynamic_shared_rewrite(strip_launch_bounds($device ? blank_comments(inc) : inc))
       out << "\n" << expand_includes(inc, File.dirname(path), depth + 1, seen) << "\n"
     end
     last = en
@@ -1898,6 +1979,30 @@ def enum_enumerators(t)
   names
 end
 
+# The text with its comments blanked (each comment character becomes a space; newlines and literals stay). The
+# classification searches for ( = { in the text, and a comment's parentheses or braces must not count there.
+def blank_comments(s)
+  out = ""
+  i = 0
+  while i < s.length
+    if s[i] == "/" && (s[i + 1] == "/" || s[i + 1] == "*")
+      e = skip_literal(s, i)
+      (i...e).each { |k| out << (s[k] == "\n" ? "\n" : " ") }
+      i = e
+      next
+    end
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
 # A function definition or declaration whose head names a type keyword (`static enum ggml_status f(...) {`): the
 # keyword is not a type definition. The head is the text before the first brace; a `(` in it marks a function.
 def function_head?(t)
@@ -1970,7 +2075,7 @@ def device_tu(text)
   # Host declarations: defined names, as far as a piece's text tells them.
   pieces.each do |pc|
     next if pc[:keep] || pc[:device]
-    t = pc[:text]
+    t = blank_comments(pc[:text])
     toks = pc[:toks]
     if pc[:kind] == :pp
       next unless pc[:macro]
@@ -2031,6 +2136,7 @@ def device_tu(text)
     done[base] = true
     out << VECTOR_DEFS[base] << "\n"
   end
+  needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
@@ -2041,13 +2147,50 @@ def device_tu(text)
   end
   pieces.each do |pc|
     next unless pc[:keep]
-    out << rewrite_builtins(pc[:text]) << "\n"
+    out << rewrite_is_same_v(rewrite_builtins(pc[:text])) << "\n"
   end
   $sites.each do |w, site|
     out << "extern \"C\" void #{w}(#{site[:decl]}) { #{site[:name]}<#{site[:targs]}>(#{site[:call].join(", ")}); }\n"
     kernels << w
   end
   [out, kernels.uniq]
+end
+
+# std::is_same_v<A, B> is a variable template, and the emitter lowers only zero-initialized globals, so a device
+# unit reads it through the struct form: std::is_same<A, B>::value (the prelude defines both over plain types).
+# Literals and comments are skipped; the closing '>' is the one that balances the '<' after is_same_v.
+def rewrite_is_same_v(s)
+  key = "std::is_same_v<"
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    if s[i, key.length] == key && !(i > 0 && ident_char?(s[i - 1]))
+      j = i + key.length
+      depth = 1
+      while j < s.length && depth > 0
+        e2 = skip_literal(s, j)
+        if e2
+          j = e2
+          next
+        end
+        depth += 1 if s[j] == "<"
+        depth -= 1 if s[j] == ">"
+        j += 1
+      end
+      out << "std::is_same<" << s[(i + key.length)...(j - 1)] << ">::value"
+      i = j
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
 end
 
 # __launch_bounds__(...) is a compile hint (register and occupancy limits). The launch path does not use it, so it
@@ -2190,6 +2333,40 @@ def host_storage(out, kw)
   already ? "" : kw
 end
 
+# True when the output so far is inside a class, struct or union body (the innermost unmatched {). A member keeps its
+# own linkage: `static` on a member function (or a constructor, or a const member) is an error.
+def in_class_body?(out)
+  depth = 0
+  j = out.length - 1
+  while j >= 0
+    c = out[j]
+    if c == "}"
+      depth += 1
+    elsif c == "{"
+      if depth == 0
+        # The head is the text since the last ; { or }: `struct Name` (or `class Name : Base`) names a class body.
+        start = [out.rindex(";", j - 1), out.rindex("}", j - 1), out.rindex("{", j - 1)].compact.max
+        head = start ? out[(start + 1)...j] : out[0...j]
+        word = ""
+        (head + " ").each_char do |ch|
+          if ident_char?(ch)
+            word << ch
+          else
+            return true if KEYWORDS_OF_CLASS.include?(word)
+            word = ""
+          end
+        end
+        return false
+      end
+      depth -= 1
+    end
+    j -= 1
+  end
+  false
+end
+
+KEYWORDS_OF_CLASS = %w[class struct union]
+
 def host_linkage(text)
   out = ""
   i = 0
@@ -2216,8 +2393,9 @@ def host_linkage(text)
       k += 1 while k < text.length && !"(=;{".include?(text[k])
       if k < text.length && text[k] == "("
         # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
+        # A class member keeps its linkage (static is not allowed on a member function, const member or constructor).
         after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
-        out << (after_static ? "" : host_storage(out, "static"))
+        out << (after_static || in_class_body?(out) ? "" : host_storage(out, "static"))
         i += 10
         next
       end
@@ -2228,11 +2406,49 @@ def host_linkage(text)
   out
 end
 
+# The text with its comments blanked: each comment character becomes a space, a newline stays. Parentheses and
+# quotes inside a comment then cannot confuse a scan of the text (a comment's `(` made a top-level piece look like a
+# host function). Positions and line numbers do not change.
+def blank_comments(text)
+  out = ""
+  i = 0
+  n = text.length
+  while i < n
+    c = text[i]
+    if c == "/" && text[i + 1] == "/"
+      while i < n && text[i] != "\n"
+        out << " "
+        i += 1
+      end
+      next
+    end
+    if c == "/" && text[i + 1] == "*"
+      close = text.index("*/", i + 2)
+      stop = close.nil? ? n : close + 2
+      while i < stop
+        out << (text[i] == "\n" ? "\n" : " ")
+        i += 1
+      end
+      next
+    end
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    out << c
+    i += 1
+  end
+  out
+end
+
 ARGV.each do |a|
   if a.start_with?("-I")
     $incdirs << a[2..-1]
   elsif a == "--device"
     device = true
+    $device = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
   elsif path.nil?
@@ -2243,6 +2459,7 @@ ARGV.each do |a|
 end
 usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
+text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
