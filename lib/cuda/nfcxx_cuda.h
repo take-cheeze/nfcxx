@@ -47,6 +47,11 @@ inline const dim3 gridDim{1, 1, 1};
 inline void __syncthreads(void) {}
 // The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
 inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
+// The trap and the warp votes, for the host copy (never run).
+inline void __trap(void) {}
+inline unsigned int __ballot_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0u; }
+inline int __any_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0; }
+inline int __all_sync(unsigned int mask, int pred) { (void)mask; (void)pred; return 0; }
 
 // Device intrinsics, for the host copy of a kernel body (never run; the device code has the real instruction).
 // Signatures follow CUDA's; the values are placeholders.

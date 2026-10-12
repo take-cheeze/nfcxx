@@ -1324,6 +1324,10 @@ BUILTIN_DEFS = {
   "__shfl_down_sync" => SHFL_DEFS["down"],
   "__shfl_up_sync" => SHFL_DEFS["up"],
   "__shfl_sync" => SHFL_DEFS["idx"],
+  # The warp votes: the emitter lowers __nfcxx_ballot_sync / __nfcxx_any_sync / __nfcxx_all_sync (full mask only).
+  "__ballot_sync" => "extern \"C\" unsigned __nfcxx_ballot_sync(unsigned, int);\nstatic inline unsigned __ballot_sync(unsigned m, int p) { (void)m; return __nfcxx_ballot_sync(0xffffffffu, p); }\n",
+  "__any_sync" => "extern \"C\" int __nfcxx_any_sync(unsigned, int);\nstatic inline int __any_sync(unsigned m, int p) { (void)m; return __nfcxx_any_sync(0xffffffffu, p); }\n",
+  "__all_sync" => "extern \"C\" int __nfcxx_all_sync(unsigned, int);\nstatic inline int __all_sync(unsigned m, int p) { (void)m; return __nfcxx_all_sync(0xffffffffu, p); }\n",
 }
 
 # The cooperative-groups names that the device code of scan, scalarProd and MC_EstimatePiP uses: a thread block
