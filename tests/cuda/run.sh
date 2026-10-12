@@ -22,13 +22,21 @@ trap 'rm -rf "$out"' EXIT
 rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1"; }
 
 # 1. The rewrite matches the goldens.
-for c in rewrite/cases mul2; do
+for c in rewrite/cases mul2 rewrite/template; do
   if rw "$c.cu" > "$out/$(basename "$c").cpp" && diff -u "$c.expected.cpp" "$out/$(basename "$c").cpp"; then
     echo "rewrite $c: ok"
   else
     echo "rewrite $c: FAIL"; fail=1
   fi
 done
+
+# 1b. The device unit of the template case matches its golden (template kernel, helper, no host-only code).
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/template.cu > "$out/template.device.cpp" \
+   && diff -u rewrite/template.device.expected.cpp "$out/template.device.cpp"; then
+  echo "device unit template: ok"
+else
+  echo "device unit template: FAIL"; fail=1
+fi
 
 # 2. Unsupported launch forms are refused with exit 3.
 for f in rewrite/refuse_*.cu; do

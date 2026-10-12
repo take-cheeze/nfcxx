@@ -8,21 +8,21 @@
 # Lines starting with # are comments.
 simpleStreams | cpp | 0_Introduction/simpleStreams | simpleStreams.cu | unverified | | 
 simpleZeroCopy | cpp | 0_Introduction/simpleZeroCopy | simpleZeroCopy.cu | unverified | | 
-simpleAtomicIntrinsics | cpp | 0_Introduction/simpleAtomicIntrinsics | simpleAtomicIntrinsics.cu | fail-compile | | identifier "NUM_THREADS" is undefined
+simpleAtomicIntrinsics | cpp | 0_Introduction/simpleAtomicIntrinsics | simpleAtomicIntrinsics.cu | fail-compile |  | identifier "atomicAdd" is undefined
 simpleVoteIntrinsics | cpp | 0_Introduction/simpleVoteIntrinsics | simpleVoteIntrinsics.cu | fail-compile | | identifier "__any_sync" is undefined
 simplePrintf | cpp | 0_Introduction/simplePrintf | simplePrintf.cu | fail-compile | | identifier "printf" is undefined
-matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile | | refused: template kernel name at line 197
+matrixMul | cpp | 0_Introduction/matrixMul | matrixMul.cu | fail-compile |  | static data is not lowered yet
 asyncAPI | cpp | 0_Introduction/asyncAPI | asyncAPI.cu | fail-compile | | cannot open source file "cuda_profiler_api.h"
-reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile | | refused: template kernel name at line 651
-shfl_scan | cpp | 2_Concepts_and_Techniques/shfl_scan | shfl_scan.cu | fail-compile | | identifier "NULL" is undefined
-scan | cpp | 2_Concepts_and_Techniques/scan | main.cpp scan.cu scan_gold.cpp | fail-compile | | identifier "uint" is undefined
-histogram | cpp | 2_Concepts_and_Techniques/histogram | main.cpp histogram64.cu histogram256.cu histogram_gold.cpp | fail-compile | | incomplete type "void" is not allowed
-scalarProd | cpp | 2_Concepts_and_Techniques/scalarProd | scalarProd.cu scalarProd_cpu.cpp | fail-compile | | name must be a namespace name
-threadFenceReduction | cpp | 2_Concepts_and_Techniques/threadFenceReduction | threadFenceReduction.cu | fail-compile | | name must be a namespace name
+reduction | cpp | 2_Concepts_and_Techniques/reduction | reduction.cpp reduction_kernel.cu | fail-compile |  | incomplete type "double []" is not allowed
+shfl_scan | cpp | 2_Concepts_and_Techniques/shfl_scan | shfl_scan.cu | fail-compile |  | identifier "uchar4" is undefined
+scan | cpp | 2_Concepts_and_Techniques/scan | main.cpp scan.cu scan_gold.cpp | fail-compile |  | identifier "cg" is undefined
+histogram | cpp | 2_Concepts_and_Techniques/histogram | main.cpp histogram64.cu histogram256.cu histogram_gold.cpp | fail-compile |  | identifier "uint4" is undefined
+scalarProd | cpp | 2_Concepts_and_Techniques/scalarProd | scalarProd.cu scalarProd_cpu.cpp | fail-compile |  | name followed by "::" must be a class or namespace name
+threadFenceReduction | cpp | 2_Concepts_and_Techniques/threadFenceReduction | threadFenceReduction.cu | fail-compile |  | device variable
 simpleCooperativeGroups | cpp | 0_Introduction/simpleCooperativeGroups | simpleCooperativeGroups.cu | fail-compile | | identifier "thread_group" is undefined
-MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile | | refused: template kernel name at line 250
-pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile | | identifier "__shared__" is undefined
-hotspot | rodinia | hotspot | hotspot.cu | fail-compile | | identifier "__shared__" is undefined
-nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile | | identifier "__syncthreads" is undefined
+MC_EstimatePiP | cpp | 2_Concepts_and_Techniques/MC_EstimatePiP | src/piestimator.cu | fail-compile |  | identifier "cg" is undefined
+pathfinder | rodinia | pathfinder | pathfinder.cu | fail-compile |  | static data is not lowered yet
+hotspot | rodinia | hotspot | hotspot.cu | fail-compile |  | static data is not lowered yet
+nw | rodinia | nw | needle.cu needle_kernel.cu | fail-compile |  | static data is not lowered yet
 gaussian | rodinia | gaussian | gaussian.cu | fail-compile | | refused: statement nonnull
-bfs | rodinia | bfs | bfs.cu kernel.cu kernel2.cu | fail-compile | | incomplete type "void" is not allowed
+bfs | rodinia | bfs | bfs.cu kernel.cu kernel2.cu | fail-compile |  | bool in arithmetic or memory
