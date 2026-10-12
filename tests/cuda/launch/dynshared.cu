@@ -1,6 +1,6 @@
 // Dynamic extern shared memory (13 files of llama.cpp's CUDA backend): `extern __shared__ T buf[]`, sized by the
 // launch's third configuration item. The rewrite makes it a pointer from __nfcxx_dynshared_addr(); the emitter lowers
-// that call to the .extern .shared symbol (not built yet: the device compile refuses it with exit 3).
+// that call to the .extern .shared symbol, and the launch passes the byte count.
 #include <cuda_runtime.h>
 #include <stdio.h>
 
