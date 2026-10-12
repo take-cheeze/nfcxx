@@ -1564,7 +1564,7 @@ if $PROGRAM_NAME == __FILE__
   print gen.emit_owner_registrations(compiled, (BC2CPP_WIRED_EMBEDDINGS + BC2CPP_CORE_OWNERS).uniq)
   print gen.emit_hot_only_registration_stubs(compiled, only_owners: only_owners)
   # SKIPPED_ENTRY_MACROS: a hand-written register.cxx names entries this run refused (SKIP_UNSUPPORTED), e.g. a method
-  # that compiles only when the closed world proves a fact a desktop build lacks (ADR 0422). It guards such a
+  # that compiles only when the closed world proves a fact a desktop build lacks (ADR 0426). It guards such a
   # registration with #ifndef BC2CPP_SKIPPED_<entry>, so it follows what the generator emitted instead of assuming it.
   print gen.emit_skipped_entry_macros(skipped_entries)
   # SYMBOL_CACHE: rewrite every function first, so the table is complete before
