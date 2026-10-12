@@ -8,9 +8,12 @@ require 'set'
 # and writes; the CFG is BytecodeIR's. Kill switch: BC2CPP_REGISTER_FLOW=0.
 #
 # Soundness: the pass refuses (returns the texts untouched) unless the CFG is
-# resolved, the method has no catch handler, and every `goto` in a text lands on
-# a label that text defines or on an address its instruction's IR successors
-# reach through instructions that emitted nothing. A register is pinned, never
+# resolved, every `goto` in a text lands on a label that text defines or on an
+# address its instruction's normal IR successors reach through instructions that
+# emitted nothing, and every catch handler is a rescue region codegen emitted
+# (see handler_model_ok?). A handler's edges run from every instruction it
+# protects to its target, and a write is never killed on that edge: the raise
+# may come before the write completes. A register is pinned, never
 # dropped or substituted, when it is r0, is read or written through a nested
 # block (Insn#upvar_ref), has its address taken or is redeclared inside a text.
 # Only a text of the exact shape `  rD = <side-effect-free expression>;` counts
@@ -34,6 +37,11 @@ class RegisterFlow
 
   def self.windows?
     ENV['BC2CPP_REGISTER_FLOW_WINDOWS'] == '1'
+  end
+
+  # Kill switch for the handler model alone: 0 refuses every method with a catch handler.
+  def self.handlers_enabled?
+    ENV['BC2CPP_REGISTER_FLOW_HANDLERS'] != '0'
   end
 
   if ENV['BC2CPP_REGISTER_FLOW_STATS']
@@ -66,20 +74,25 @@ class RegisterFlow
   end
 
   # Returns the new per-instruction texts (the same Array when nothing changed).
-  def self.optimize(irep, texts, captured)
+  # +handlers+ is the rescue model codegen emitted (see handler_model_ok?), or nil
+  # when the method has no model: a method with a catch handler is then refused.
+  #   { regions: [{begin_addr:, end_addr:, except_addr:}, ...],   every recognized region
+  #     glue_reads: { begin_addr => [reg, ...] } }                 top-level regions only
+  def self.optimize(irep, texts, captured, handlers: nil)
     return texts unless enabled? && captured
 
     Stats['methods'] += 1
-    flow = new(irep, texts, captured)
+    flow = new(irep, texts, captured, handlers)
     flow.run
   end
 
-  def initialize(irep, texts, captured)
+  def initialize(irep, texts, captured, handlers = nil)
     @irep = irep
     @insns = irep.instructions
     @original = texts
     @texts = texts.dup
     @captured = captured
+    @handlers = handlers
     @program = BytecodeIR.for(irep)
   end
 
@@ -90,6 +103,7 @@ class RegisterFlow
       return @original
     end
 
+    Stats['methods with handlers'] += 1 if @program.handlers?
     scan
     propagate_copies
     drop_dead_writes
@@ -115,11 +129,15 @@ class RegisterFlow
   # nil when the pass may run, else why not.
   def refusal
     return 'unresolved' unless @program.resolved?
-    return 'handlers' if @program.handlers?
+    return 'handlers' if @program.handlers? && !self.class.handlers_enabled?
     return 'empty' if @insns.empty?
     return 'alias' if @texts.any? { |text| text.match?(/mrb_value\s*&|\[\s*&/) }
 
     @transparent = @texts.each_index.map { |i| transparent?(i) }
+    # Window mode (experimental) keeps refusing handler methods: the handler model widens
+    # only the default pass.
+    return 'handlers' if @program.handlers? && (self.class.windows? || !handler_model_ok?)
+
     build_edges
     return 'goto' unless gotos_follow_ir?
     return 'fallthrough' unless terminators_leave?
@@ -127,29 +145,69 @@ class RegisterFlow
     nil
   end
 
-  # IR successors plus the text-level fall-through of an instruction that emitted
-  # nothing: its jump or return left no code, so control runs into the next text.
+  # Exact handler coverage (docs/bc2cpp-register-output.md): each handler is a
+  # recognized rescue region, each glue names the registers its try body reads,
+  # and only that glue emitted text in a protected range.
+  def handler_model_ok?
+    return false unless @handlers && @program.handlers_resolved?
+
+    regions = @handlers[:regions]
+    handlers = @program.catch_handlers
+    return false unless handlers.map { |h| [h.begin_addr, h.end_addr, h.target] }.sort ==
+                        regions.map { |r| [r[:begin_addr], r[:end_addr], r[:except_addr]] }.sort
+
+    glue = @handlers[:glue_reads]
+    glue.each do |addr, regs|
+      index = @program.address_to_index[addr] or return false
+      mentioned = mentions(@texts[index])
+      return false unless regs.all? { |reg| mentioned.include?(reg) }
+    end
+
+    handlers.all? do |handler|
+      @insns.each_index.all? do |i|
+        addr = @insns[i].addr
+        next true unless addr >= handler.begin_addr && addr < handler.end_addr
+        next true if glue.key?(addr)
+
+        @transparent[i]
+      end
+    end
+  end
+
+  # Normal IR successors plus the text-level fall-through of an instruction that
+  # emitted nothing: its jump or return left no code, so control runs into the
+  # next text. @succ adds the handler edges (every instruction a handler
+  # protects to its target), which liveness treats apart from normal flow.
   def build_edges
     count = @insns.length
-    @succ = Array.new(count) { |i| @program.instruction_at(i).successors.dup }
+    @normal_succ = Array.new(count) { |i| @program.instruction_at(i).successors.dup }
     count.times do |i|
-      @succ[i] << i + 1 if @transparent[i] && i + 1 < count && !@succ[i].include?(i + 1)
+      @normal_succ[i] << i + 1 if @transparent[i] && i + 1 < count && !@normal_succ[i].include?(i + 1)
     end
+    @handler_succ = Array.new(count) { [] }
+    if @program.handlers?
+      count.times do |i|
+        @handler_succ[i] = @program.successors_of(i, include_handlers: true) - @program.successors_of(i)
+      end
+    end
+    @succ = Array.new(count) { |i| (@normal_succ[i] + @handler_succ[i]).uniq }
     @pred = Array.new(count) { [] }
     @succ.each_with_index { |targets, i| targets.each { |t| @pred[t] << i } }
     @pred[0] << BytecodeIR::ENTRY
   end
 
+  # Goto targets are judged on normal flow: the glue's `goto` to a shared exit
+  # is a normal-flow edge, and a handler edge is not a jump the text makes.
   def allowed_goto_addrs(index)
     seen = Set.new
-    work = @succ[index].dup
+    work = @normal_succ[index].dup
     addrs = Set.new
     until work.empty?
       node = work.pop
       next unless seen.add?(node)
 
       addrs << @insns[node].addr
-      work.concat(@succ[node]) if @transparent[node]
+      work.concat(@normal_succ[node]) if @transparent[node]
     end
     addrs
   end
@@ -218,14 +276,19 @@ class RegisterFlow
     while changed
       changed = false
       (count - 1).downto(0) do |i|
-        out = pinned_mask
-        @succ[i].each { |s| out |= live_in[s] }
+        normal_out = pinned_mask
+        @normal_succ[i].each { |s| normal_out |= live_in[s] }
+        # A handler edge leaves before this instruction's write completes, so
+        # the handler's reads stay live above the write and are never killed.
+        handler_out = 0
+        @handler_succ[i].each { |s| handler_out |= live_in[s] }
+        out = normal_out | handler_out
         live_out[i] = out
         if dropped.include?(i)
           incoming = out
         else
           kill, reads, = @info[i]
-          incoming = reads | (kill ? out & ~(1 << kill) : out)
+          incoming = reads | (kill ? normal_out & ~(1 << kill) : normal_out) | handler_out
         end
         next if incoming == live_in[i]
 

@@ -327,6 +327,9 @@ class CodeGen
     blk_field = needs_blk_param || has_blk ? [{ name: 'bc2cpp_blk', c_type: 'mrb_value' }] : []
     @blk_param_name = blk_field.empty? ? nil : 'bc2cpp_blk'
     @blk_param_level = 0
+    # REGISTER_FLOW: the outer registers each glue's try body reads, by the same fields the glue
+    # initialises (saved copies and `&rN` aliases). The pass checks the glue text names them.
+    rescue_glue_reads = {}
     rescue_regions.each_with_index do |region, i|
       suppressed.merge((region[:begin_addr]..region[:end_addr]).to_a)
       suppressed << region[:except_addr]
@@ -336,6 +339,9 @@ class CodeGen
                                                                                                   inline_mand: mand)
       glue_at[region[:begin_addr]] = emit_rescue_glue(try_name, region, arg_names, arg_native_types,
                                                       extra_field_values: saved.map { |f| rescue_field_value(f) })
+      rescue_glue_reads[region[:begin_addr]] = saved.filter_map do |f|
+        f[:name][/\Abc2cpp_(?:saved|ref)_r(\d+)\z/, 1]&.to_i
+      end
     end
     @blk_param_name = nil
 
@@ -494,7 +500,9 @@ class CodeGen
       end
     end
     if flow_bodies
-      flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured)
+      flow_handlers = { regions: recognize_rescue_regions(irep).map { |r| r.slice(:begin_addr, :end_addr, :except_addr) },
+                        glue_reads: rescue_glue_reads }
+      flow_bodies = RegisterFlow.optimize(irep, flow_bodies, flow_captured, handlers: flow_handlers)
       flow_labels.each_with_index { |jump_label, idx| out << jump_label << flow_bodies[idx] }
     end
     @resumable.flat = false if @resumable
