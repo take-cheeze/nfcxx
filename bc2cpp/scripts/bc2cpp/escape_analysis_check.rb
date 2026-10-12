@@ -509,7 +509,7 @@ if run_behaviour
               'BC2CPP_HARNESS_GEM' => gem_dir, 'BC2CPP_ESCAPE_COMPILED' => compiled_build ? '1' : '0',
               'BC2CPP_ESCAPE_FIXTURE' => File.join(work, 'fixture.rb') }
       env['BC2CPP_BLOCK_DIRECT_ENTRY'] = '0' if variant == 'int32'
-      out, status = Open3.capture2e(env, 'rake', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: MRUBY)
+      out, status = Open3.capture2e(env, 'rake', '-m', "-j#{[Etc.nprocessors, 16].min}", 'all', chdir: MRUBY)
       File.write(File.join(work, "#{name}.log"), out)
       bin = File.join(build, 'host/bin/mruby')
       result = status.success? && File.exist?(bin) ? Open3.capture2e(bin, File.join(work, 'driver.rb')).first : nil
