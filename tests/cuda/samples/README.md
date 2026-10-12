@@ -13,7 +13,7 @@ Status as of this branch (CUDA 13.1, RTX 2060, gcc backend). "First error" is th
 | simpleZeroCopy | mapped host memory | builds, runs, exit 0; computes `errorNorm` but prints nothing (not verified); prelinker prints a name-decoding warning | — |
 | simpleAtomicIntrinsics | atomics (`atomicAdd` and friends), `#define` in the `.cu` | fails to compile | device-only unit lost `#define NUM_THREADS`: `identifier "NUM_THREADS" is undefined` |
 | simpleVoteIntrinsics | warp vote (`__any_sync`) | fails to compile | `identifier "__any_sync" is undefined` (in `simpleVote_kernel.cuh`) |
-| simplePrintf | device `printf` | fails to compile | `identifier "printf" is undefined` (device unit) |
+| simplePrintf | device printf | builds, runs, exit 0; the sample prints but has no result check (not verified) | — |
 | matrixMul | shared memory, template kernel launch `MatrixMulCUDA<16><<<...>>>` | fails to compile | `linkage specification is not allowed` (rewriter stub, `matrixMul.cu:197`) |
 | asyncAPI | events, streams, profiler API | builds, runs, exit 0; no result check in the sample (not verified) | — |
 | reduction | templates, template kernel launches, cooperative groups | fails to compile | `refused: template launch of reduce0<T>`: the launch depends on the enclosing template's `T` (the instance is not built yet; see docs/notes/gpu.md, "Launch path") |
