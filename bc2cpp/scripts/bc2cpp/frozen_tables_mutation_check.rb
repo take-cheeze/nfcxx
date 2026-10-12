@@ -12,7 +12,6 @@
 #
 # Usage: MRBC=path/to/mrbc ruby scripts/bc2cpp/frozen_tables_mutation_check.rb
 
-require 'fileutils'
 require 'tmpdir'
 require_relative 'mutant_pool'
 
@@ -68,7 +67,8 @@ failures = []
 mutate = lambda do |(_name, file, pattern, replacement, expected, also, worlds)|
   # Inside the repo so the copy's own ../.. is the repo root: the closed world reads the build's sources from there.
   Dir.mktmpdir('.ftmut', ROOT) do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+    # copy_generator also brings the tools/*.rb siblings that compiled_gems.rb requires as ../ (rgss_tts_config).
+    Bc2cppMutantPool.copy_generator(ROOT, dir)
     # `also`: more [file, pattern, replacement] edits of the same mutant (a condition two gates enforce).
     edits = [[file, pattern, replacement]] + Array(also)
     gone = edits.reject do |edit_file, edit_pattern, edit_replacement|
