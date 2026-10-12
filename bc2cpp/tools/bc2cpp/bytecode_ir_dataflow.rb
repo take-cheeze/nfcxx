@@ -83,6 +83,8 @@ module BytecodeIR
 
   # Expanded (instruction, register) states before a query gives up.
   DATAFLOW_MAX_STATES = 400
+  # Exhaustive test/report queries must not retain a quadratic number of answers per body.
+  DATAFLOW_CACHE_SIZE = 1024
 
   class Program
     # Definitions of +reg+ (digits) that reach the read at the entry of
@@ -104,6 +106,30 @@ module BytecodeIR
     # refused) and is otherwise not read: the answer is the same with or without it.
     def reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
                              through_handlers: false, origin_transfers: false, refusal: nil)
+      # Mutable opaque sets and refusal diagnostics belong to the caller; do not retain them.
+      if refusal || (opaque_regs && !opaque_regs.frozen?)
+        return compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
+                                            max_states: max_states, through_handlers: through_handlers,
+                                            origin_transfers: origin_transfers, refusal: refusal)
+      end
+
+      @reaching_definitions_cache ||= {}
+      opaque_key = opaque_regs&.map { |r| r.dup.freeze }&.sort&.freeze
+      key = [index, reg.to_s.dup.freeze, opaque_key, follow_moves, max_states, through_handlers, origin_transfers]
+      unless @reaching_definitions_cache.key?(key)
+        result = compute_reaching_definitions(index, reg, opaque_regs: opaque_regs, follow_moves: follow_moves,
+                                             max_states: max_states, through_handlers: through_handlers,
+                                             origin_transfers: origin_transfers)
+        return result if @reaching_definitions_cache.size >= DATAFLOW_CACHE_SIZE
+
+        @reaching_definitions_cache[key] = result&.map { |d| Definition.new(d.index, d.reg.dup.freeze, d.built).freeze }&.freeze
+      end
+      # Definitions have a mutable public API; each caller receives its own copies.
+      @reaching_definitions_cache[key]&.map { |d| Definition.new(d.index, d.reg.dup, d.built) }
+    end
+
+    def compute_reaching_definitions(index, reg, opaque_regs: nil, follow_moves: true, max_states: DATAFLOW_MAX_STATES,
+                                     through_handlers: false, origin_transfers: false, refusal: nil)
       preds = instruction_predecessors
       return refused(refusal, :unresolved) unless preds
       return refused(refusal, :bad_index) unless index.between?(0, @instructions.length - 1)
@@ -179,6 +205,8 @@ module BytecodeIR
       defs.sort_by { |d| [d.index, d.reg.to_i] }
     end
 
+    private :compute_reaching_definitions
+
     # JOIN_DOMINANCE (ADR 0261): does the write at +w+ (ENTRY: the method's
     # incoming value) supply +reg+ at +use+ on every path? True when no edge,
     # jump or exception, enters (w, use] from outside [w, use] and every op
@@ -191,6 +219,21 @@ module BytecodeIR
     # when an edge set is incomplete or a nested block writes +reg+. Codegen's answer: ENTER's typed slots
     # (origin_effect typed_enter) stay refused here, as they were before the origin walk typed them.
     def write_dominates?(w, use, reg, opaque_regs: nil)
+      return compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs) if opaque_regs && !opaque_regs.frozen?
+
+      @write_dominates_cache ||= {}
+      opaque_key = opaque_regs&.map { |r| r.dup.freeze }&.sort&.freeze
+      key = [w, use, reg.to_s.dup.freeze, opaque_key]
+      unless @write_dominates_cache.key?(key)
+        result = compute_write_dominates?(w, use, reg, opaque_regs: opaque_regs)
+        return result if @write_dominates_cache.size >= DATAFLOW_CACHE_SIZE
+
+        @write_dominates_cache[key] = result
+      end
+      @write_dominates_cache[key]
+    end
+
+    def compute_write_dominates?(w, use, reg, opaque_regs: nil)
       return false if opaque_regs&.include?(reg.to_s)
       return false unless use.between?(0, @instructions.length - 1) && w >= ENTRY && w < use
 
@@ -209,6 +252,8 @@ module BytecodeIR
       end
       true
     end
+
+    private :compute_write_dominates?
 
     # Ops that leave the frame.
     FRAME_EXIT_OPS = Set['RETURN', 'RETURN_BLK', 'RETSELF', 'RETNIL', 'RETTRUE', 'RETFALSE', 'BREAK', 'STOP'].freeze
