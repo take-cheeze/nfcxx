@@ -196,13 +196,13 @@ module RbsSignatures
     loaded.methods.each_value do |sig|
       d = defs_by[[sig.owner, sig.name]]
       unless d
-        note(ap, sig.loc, 'warning', 'TC1003', "#{sig.owner}##{sig.name}: no such method in the program")
+        note(ap, sig.loc, 'error', 'TC1003', "#{sig.owner}##{sig.name}: no such method in the program")
         next
       end
       irep = ireps[d.irep]
       mand = irep.enter ? irep.enter.enter_fields.first.to_i : 0
       if sig.args.size != mand
-        note(ap, sig.loc, 'warning', 'TC1004', "#{sig.owner}##{sig.name}: signature lists #{sig.args.size} required parameter(s), method takes #{mand}; not used")
+        note(ap, sig.loc, 'error', 'TC1004', "#{sig.owner}##{sig.name}: signature lists #{sig.args.size} required parameter(s), method takes #{mand}; not used")
         next
       end
       unless annotations[d.irep] || class_annotations[d.irep] || element_annotations[d.irep]
@@ -213,7 +213,7 @@ module RbsSignatures
     end
     loaded.ivars.each_value do |iv|
       unless known_owners.include?(iv.owner)
-        note(ap, iv.loc, 'warning', 'TC1003', "#{iv.owner}: no such class in the program (#{iv.name})")
+        note(ap, iv.loc, 'error', 'TC1003', "#{iv.owner}: no such class in the program (#{iv.name})")
         next
       end
       seed_ivar(ap, iv, known_owners)

@@ -121,10 +121,10 @@ Dir.mktmpdir do |dir|
              diag.include?('app/shape.rb:9:1: error: Shape#area parameter 1: declared Symbol, inferred Integer (annotation) [TC1001]'))
   check.call('an unusable signature file is an error at its own file:line:col',
              diag.include?('sig/shape.rbs:4:3: error: unsupported RBS syntax: intersection type [TC1002]'))
-  check.call('an ignored annotation token is a warning',
-             diag.any? { |l| l.start_with?('app/shape.rb:9:1: warning: Shape#area: annotation token `Gizmo` is ignored') && l.end_with?('[TC1004]') })
-  check.call('an annotation with the wrong parameter count is a warning',
-             diag.include?('app/shape.rb:9:1: warning: Shape#area: annotation lists 1 parameter(s), method takes 2 [TC1004]'))
+  check.call('an ignored annotation token is an error',
+             diag.any? { |l| l.start_with?('app/shape.rb:9:1: error: Shape#area: annotation token `Gizmo` is ignored') && l.end_with?('[TC1004]') })
+  check.call('an annotation with the wrong parameter count is an error',
+             diag.include?('app/shape.rb:9:1: error: Shape#area: annotation lists 1 parameter(s), method takes 2 [TC1004]'))
   sev = diag.map { |l| l[/: (error|warning|info): /, 1] }
   check.call('errors come before warnings before info', sev == sev.sort_by { |s| %w[error warning info].index(s) })
   check.call('every diagnostic matches file:line:col: severity: message [CODE]',
@@ -147,7 +147,8 @@ Dir.mktmpdir do |dir|
   q, _e, qs = type_check.call('--facts', facts, '--rows', rows, '-q')
   check.call('-q prints diagnostics only', qs.exitstatus == 1 && q.lines.all? { |l| l.match?(/\A\S+:\d+:\d+: /) })
 
-  clean = FACTS.merge('contradictions' => [], 'signature_diagnostics' => [])
+  clean = FACTS.merge('contradictions' => [], 'signature_diagnostics' => [],
+                      'annotations' => Array(FACTS['annotations']).map { |a| a.merge('ignored' => [], 'arity_mismatch' => nil) })
   File.write(facts, JSON.generate(clean))
   _o, _e, st2 = type_check.call('--facts', facts, '--rows', rows)
   check.call('no error diagnostics: exit status 0 (warnings and info do not fail)', st2.exitstatus.zero?)
@@ -271,11 +272,11 @@ else
     check.call('class return contradiction',
                lines.include?("contra.rb:#{line_of.(CONTRA, 'bc2cpp: () -> TcOther')}:1: error: TcSym#make return type: declared TcOther, inferred TcSym (annotation) [TC1001]"))
     two = line_of.(CONTRA, 'bc2cpp: (Nonesuch, fixnum)')
-    check.call('an unknown class token is a warning at the annotation line',
-               lines.any? { |l| l.start_with?("contra.rb:#{two}:1: warning: TcSym#two: annotation token `Nonesuch` is ignored") })
-    check.call('an annotation with too many parameters is a warning',
-               lines.include?("contra.rb:#{two}:1: warning: TcSym#two: annotation lists 2 parameter(s), method takes 1 [TC1004]"))
-    check.call('nothing else is an error', lines.count { |l| l.include?(': error: ') } == 3)
+    check.call('an unknown class token is an error at the annotation line',
+               lines.any? { |l| l.start_with?("contra.rb:#{two}:1: error: TcSym#two: annotation token `Nonesuch` is ignored") })
+    check.call('an annotation with too many parameters is an error',
+               lines.include?("contra.rb:#{two}:1: error: TcSym#two: annotation lists 2 parameter(s), method takes 1 [TC1004]"))
+    check.call('nothing else is an error', lines.count { |l| l.include?(': error: ') } == 5)
 
     puts '== inferred types, reasons and send ranking (fixture sends.rb)'
     keep = File.join(dir, 'keep')
