@@ -22,8 +22,6 @@ done
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-uninit-slot.patch"
 # QBE: scripts/qbe-wflag.patch (amd64 isel: a class-l "and" must not feed the flags of a word-sized jnz/select; docs/notes/qbe-wflag.md)
 patch -d "$root/build/qbe" -p1 --batch < "$root/scripts/qbe-wflag.patch"
-# cproc: scripts/cproc-asan.patch (the -fsanitize=address checks of loads and stores, active with NFCXX_ASAN=1; docs/notes/asan-plan.md)
-patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-asan.patch"
 make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
 (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$(nproc)" cproc-qbe >/dev/null)
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld

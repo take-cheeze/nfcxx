@@ -30,7 +30,7 @@ runs:
       shell: bash
       run: |
         echo "edg=$(git rev-parse HEAD:3rd/edg)-${{ hashFiles('scripts/setup-edg.sh') }}" >> "$GITHUB_OUTPUT"
-        echo "qbe=$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)-${{ hashFiles('scripts/setup-qbe.sh', 'scripts/qbe-uninit-slot.patch', 'scripts/qbe-wflag.patch', 'scripts/cproc-asan.patch', 'scripts/pathb-ldrt', 'be/nfcxx_ldrt.c') }}" >> "$GITHUB_OUTPUT"
+        echo "qbe=$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)-${{ hashFiles('scripts/setup-qbe.sh', 'scripts/qbe-uninit-slot.patch', 'scripts/qbe-wflag.patch', 'scripts/pathb-ldrt', 'be/nfcxx_ldrt.c') }}" >> "$GITHUB_OUTPUT"
 
     - name: Restore the EDG front end
       id: edg

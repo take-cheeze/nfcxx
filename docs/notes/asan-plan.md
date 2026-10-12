@@ -20,7 +20,7 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-5): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 6 below.
+Done (milestones 1-5): the cproc changes are the `nfcxx-asan` branch of take-cheeze/cproc (pinned as `3rd/cproc`), see `asan.md`. Remaining: 6 below.
 
 Options considered:
 
