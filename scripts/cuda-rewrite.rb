@@ -301,10 +301,22 @@ def matching_angle(s, open)
   nil
 end
 
+# The directives of a text: start index => end index (a launch in a #define is not a launch in code).
+def directive_ends(text)
+  out = {}
+  top_pieces(text).each { |st, en, kind, _b| out[st] = en if kind == :pp }
+  out
+end
+
 def template_launches(text)
   found = []
   i = 0
+  dirs = directive_ends(text)
   while i < text.length
+    if dirs.key?(i)
+      i = dirs[i]
+      next
+    end
     e = skip_literal(text, i)
     if e
       i = e
@@ -414,7 +426,70 @@ def enclosing_template(text, pos)
   refuse("template header with a parameter pack (at line #{text[0...pos].count("\n") + 1})") if params.any? { |pr| pr.include?("...") }
   decls = params.map { |pr| pr.split("=")[0].strip }
   names = decls.map { |pr| tokens_of(pr).last }
-  { st: t[:st], names: names, decls: decls, fname: function_name(text[(t[:close] + 1)...tb[:open]]) }
+  header = text[(t[:close] + 1)...tb[:open]]
+  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header) }
+end
+
+# `Q<args>::member` in a header of a member defined out of its class template: { name: Q, args: [...] }, else nil.
+def member_qualifier(header)
+  cc = header.index("::")
+  return nil if cc.nil?
+  before = header[0...cc].rstrip
+  return nil unless before.end_with?(">")
+  open = before.length - 1
+  depth = 0
+  while open >= 0
+    depth += 1 if before[open] == ">"
+    depth -= 1 if before[open] == "<"
+    break if depth == 0
+    open -= 1
+  end
+  return nil if open < 0
+  name_start = open
+  name_start -= 1 while name_start > 0 && ident_char?(before[name_start - 1])
+  name = before[name_start...open]
+  return nil if name.empty?
+  { name: name, args: split_top(before[(open + 1)...(before.length - 1)]) }
+end
+
+# The explicit instantiations `template class|struct Q<args>;` of a class template in the text, as their argument
+# lists, mapped onto the member template's names: one instance (a list in the member's own parameter order) each.
+def member_instances(outer, text)
+  q = outer[:qual]
+  out = []
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(text, i, "template")
+      k = i + 8
+      k += 1 while k < text.length && white?(text[k])
+      if word_at?(text, k, "class") || word_at?(text, k, "struct")
+        k += (text[k, 5] == "class" ? 5 : 6)
+        k += 1 while k < text.length && white?(text[k])
+        if word_at?(text, k, q[:name])
+          k += q[:name].length
+          k += 1 while k < text.length && white?(text[k])
+          if text[k] == "<"
+            close = matching_angle(text, k)
+            out << split_top(text[(k + 1)...close]) if close
+          end
+        end
+      end
+    end
+    i += 1
+  end
+  out.map do |args|
+    refuse("member template #{outer[:fname]}: the class instance #{q[:name]}<#{args.join(', ')}> does not give all its arguments") unless args.length == q[:args].length
+    outer[:names].map do |nm|
+      k = q[:args].index(nm)
+      refuse("member template #{outer[:fname]}: its parameter #{nm} is not a parameter of #{q[:name]}") if k.nil?
+      args[k]
+    end
+  end.uniq
 end
 
 # The explicit template-argument lists of the calls of template function `name` in the text: [targs, position].
@@ -520,7 +595,7 @@ def dependent_launches(text)
     outer = enclosing_template(text, pos)
     refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep}, which is not a parameter of a top-level " \
            "template function (at line #{text[0...pos].count("\n") + 1})") if outer.nil?
-    insts = template_instances(outer[:fname], text, [])
+    insts = outer[:qual] ? member_instances(outer, text) : template_instances(outer[:fname], text, [])
     refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep} of #{outer[:fname]}: the unit has no " \
            "explicit call of it with all its template arguments, so its instances are not known") if insts.empty?
     insts.each do |inst|
@@ -578,9 +653,22 @@ def rewrite(text, orig)
     decls_at[piece ? piece[0] : 0] << line unless decls_at[piece ? piece[0] : 0].include?(line)
   end
   dependent_decls(dl, text).each { |at, line| decls_at[at] << line unless decls_at[at].include?(line) }
+  dirs = directive_ends(text)
   while i < n
     if decls_at.key?(i)
       decls_at.delete(i).each { |line| out << line }
+    end
+    if dirs.key?(i)
+      # a directive ends before its newline: the newline (and the declarations of the piece after it) follow it
+      k = dirs[i]
+      out << text[i...k]
+      i = k
+      if k < n && text[k] == "\n"
+        out << "\n"
+        i = k + 1
+        decls_at.delete(k).each { |line| out << line } if decls_at.key?(k)
+      end
+      next
     end
     e = skip_literal(text, i)
     if e
@@ -680,6 +768,275 @@ def rewrite(text, orig)
     end
   end
   out
+end
+
+# ---- launch forms the scan does not see: a launch inside a function-like macro, and template arguments that the
+# launch leaves to deduction. Both are rewritten before the launch scan, so the scan and the dependent-launch analysis
+# see ordinary explicit launches. An expansion keeps the line count: its newlines go after it.
+
+QUAL_WORDS = ["const", "volatile", "__restrict__", "__restrict", "restrict"]
+
+# The function-like macros whose body holds a launch: name => { params:, body: } (continuation lines joined).
+def launch_macros(text)
+  out = {}
+  top_pieces(text).each do |st, en, kind, _body|
+    next unless kind == :pp
+    t = text[st...en].sub("#", "").gsub("\\\n", " ").strip
+    next unless t.start_with?("define")
+    rest = t[6..-1].lstrip
+    k = 0
+    k += 1 while k < rest.length && ident_char?(rest[k])
+    name = rest[0...k]
+    after = rest[k..-1]
+    next if name.empty? || !after.start_with?("(")
+    close = after.index(")")
+    next if close.nil?
+    body = after[(close + 1)..-1].strip
+    next unless body.include?("<<<")
+    out[name] = { params: split_top(after[1...close]), body: body }
+  end
+  out
+end
+
+# Expands the calls of those macros in code (not in directives, comments or literals), nested calls included.
+def expand_launch_macros(text, depth = 0)
+  macros = launch_macros(text)
+  return text if macros.empty?
+  refuse("launch macros nest more than 4 deep") if depth > 4
+  code = top_pieces(text).select { |pc| pc[2] == :code }.map { |pc| [pc[0], pc[1]] }
+  n = text.length
+  out = ""
+  changed = false
+  i = 0
+  while i < n
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && code.any? { |a, b| a <= i && i < b }
+      j = i
+      j += 1 while j < n && ident_char?(text[j])
+      name = text[i...j]
+      m = macros[name]
+      k = j
+      k += 1 while k < n && white?(text[k])
+      if m && k < n && text[k] == "("
+        close = matching_paren(text, k)
+        refuse("unterminated call of launch macro #{name}") if close.nil?
+        args = split_top(text[(k + 1)...close])
+        refuse("launch macro #{name} takes #{m[:params].length} arguments, its call gives #{args.length}") unless args.length == m[:params].length
+        body = substitute(m[:body], m[:params], args).gsub("\n", " ")
+        out << body << ("\n" * text[i..close].count("\n"))
+        i = close + 1
+        changed = true
+        next
+      end
+      out << name
+      i = j
+      next
+    end
+    out << text[i]
+    i += 1
+  end
+  changed ? expand_launch_macros(out, depth + 1) : out
+end
+
+# The argument expressions of the launch whose `<<<` is at i, split at the top-level commas; nil if not readable.
+def launch_arguments(text, i)
+  k = i + 3
+  depth = 0
+  while k < text.length
+    e = skip_literal(text, k)
+    if e
+      k = e
+      next
+    end
+    c = text[k]
+    if c == "(" || c == "[" || c == "{"
+      depth += 1
+    elsif c == ")" || c == "]" || c == "}"
+      depth -= 1
+    elsif depth == 0 && text[k, 3] == ">>>"
+      break
+    end
+    k += 1
+  end
+  return nil if k >= text.length
+  p = k + 3
+  p += 1 while p < text.length && white?(text[p])
+  return nil if text[p] != "("
+  close = matching_paren(text, p)
+  return nil if close.nil?
+  split_top(text[(p + 1)...close])
+end
+
+# The span of the template arguments of the launch whose `<<<` is at i (the text between `<` and `>`).
+def targs_span(text, i)
+  gt = i - 1
+  gt -= 1 while gt >= 0 && white?(text[gt])
+  j = gt
+  depth = 0
+  while j >= 0
+    depth += 1 if text[j] == ">"
+    depth -= 1 if text[j] == "<"
+    break if depth == 0
+    j -= 1
+  end
+  [j + 1, gt]
+end
+
+# The type of a parameter, as its identifiers, `*` and `&` in order (the parameter's name is left out).
+def type_tokens(s)
+  out = []
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    c = s[i]
+    if c == "*" || c == "&"
+      out << c
+      i += 1
+    elsif ident_char?(c) && !(c >= "0" && c <= "9")
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      out << s[i...j]
+      i = j
+    else
+      i += 1
+    end
+  end
+  out
+end
+
+# The declared type written before the identifier at i, as its tokens: `const float *` for `const float *x`. Empty when
+# the identifier is not a declaration (a call argument, an assignment, a return).
+def type_before(text, i)
+  toks = []
+  j = i - 1
+  loop do
+    j -= 1 while j >= 0 && white?(text[j])
+    break if j < 0
+    c = text[j]
+    if c == "*" || c == "&"
+      toks.unshift(c)
+      j -= 1
+    elsif ident_char?(c)
+      k = j
+      k -= 1 while k >= 0 && ident_char?(text[k])
+      toks.unshift(text[(k + 1)..j])
+      j = k
+    else
+      break
+    end
+  end
+  return [] if toks.empty? || %w[return else case new delete throw do].include?(toks.first)
+  # a declaration has a type name; `&p` (an address taken in a call) has only punctuation before it
+  return [] unless toks.any? { |t| ident_char?(t[0]) && !(t[0] >= "0" && t[0] <= "9") }
+  toks
+end
+
+# The type of a launch argument: a literal's, or the declared type of an identifier in the same top-level piece.
+def argument_type(text, pos, arg, nm)
+  if arg.length > 0 && arg.chars.all? { |c| (c >= "0" && c <= "9") || c == "u" || c == "U" || c == "l" || c == "L" }
+    return ["int"]
+  end
+  if arg.length > 1 && arg[0] >= "0" && arg[0] <= "9" && (arg.end_with?("f") || arg.end_with?("F"))
+    return ["float"]
+  end
+  if arg.length > 0 && arg[0] >= "0" && arg[0] <= "9" && (arg.include?(".") || arg.include?("e") || arg.include?("E"))
+    return ["double"]
+  end
+  unless arg.chars.all? { |c| ident_char?(c) } && !(arg[0] >= "0" && arg[0] <= "9")
+    refuse("template launch of #{nm}: cannot deduce a template argument from the argument #{arg} (only identifiers and literals)")
+  end
+  piece = top_pieces(text).find { |st, en, kind, _b| kind == :code && st <= pos && pos < en }
+  found = nil
+  i = piece ? piece[0] : 0
+  while i < pos
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    if text[i, arg.length] == arg && !(i > 0 && ident_char?(text[i - 1])) && i + arg.length < pos &&
+       !ident_char?(text[i + arg.length])
+      after = i + arg.length
+      after += 1 while after < pos && white?(text[after])
+      if "=;,)".include?(text[after].to_s)
+        t = type_before(text, i)
+        found = t unless t.empty?
+      end
+    end
+    i += 1
+  end
+  refuse("template launch of #{nm}: no declaration of #{arg} before the launch, so its type is not known") if found.nil?
+  found
+end
+
+# The type a kernel parameter of type ptoks gives to the template parameter p, from an argument of type atoks; nil when
+# the shapes do not match.
+def match_type(ptoks, atoks, p)
+  pt = ptoks.reject { |x| QUAL_WORDS.include?(x) }
+  at = atoks.reject { |x| QUAL_WORDS.include?(x) }
+  return at.join(" ") if pt == [p]
+  return nil unless pt.length == at.length
+  k = pt.index(p)
+  return nil if k.nil?
+  at[k]
+end
+
+# The explicit arguments for the template parameters the launch leaves out (the trailing ones).
+def deduce_types(nm, ta, kt, missing, args, text, pos)
+  parts = split_top(kt[:params])
+  refuse("launch of #{nm}: #{args.length} arguments for #{parts.length} kernel parameters") unless args.length == parts.length
+  found = {}
+  parts.each_with_index do |part, idx|
+    ptoks = type_tokens(part)
+    ptoks.pop if ptoks.last && !ptoks.last.start_with?("*") && !ptoks.last.start_with?("&") && ptoks.length > 1
+    missing.each do |p|
+      next unless ptoks.include?(p)
+      at = argument_type(text, pos, args[idx], nm)
+      t = match_type(ptoks, at, p)
+      refuse("template launch of #{nm}<#{ta}>: cannot deduce #{p} from the argument #{args[idx]} of type #{at.join(' ')}") if t.nil?
+      refuse("template launch of #{nm}<#{ta}>: #{p} is deduced as #{found[p]} and as #{t} (ambiguous)") if found[p] && found[p] != t
+      found[p] = t
+    end
+  end
+  missing.map do |p|
+    found[p] || refuse("template launch of #{nm}<#{ta}>: no argument gives #{p}, so it cannot be deduced")
+  end
+end
+
+# Every launch with fewer template arguments than the kernel's parameters gets the deduced ones written after its own.
+def deduce_launch_targs(text)
+  edits = []
+  template_launches(text).each do |nm, ta, pos|
+    kt = kernel_template(nm)
+    next if kt.nil?
+    given = split_top(ta)
+    next if given.length >= kt[:names].length
+    args = launch_arguments(text, pos)
+    refuse("template launch of #{nm}<#{ta}>: its arguments are not readable (at line #{text[0...pos].count("\n") + 1})") if args.nil?
+    deduced = deduce_types(nm, ta, kt, kt[:names][given.length..-1], args, text, pos)
+    a, b = targs_span(text, pos)
+    edits << [a, b, (given + deduced).join(", ")]
+  end
+  edits.sort_by { |a, _b, _n| -a }.each do |a, b, new|
+    text = text[0...a] + new + text[b..-1]
+  end
+  text
+end
+
+# The launch forms before the scan: the macro calls that hold a launch, then the deduced template arguments.
+def launch_prepare(text)
+  t = expand_launch_macros(text)
+  $expanded = t
+  deduce_launch_targs(t)
 end
 
 # ---- device side (--device): the __global__ and __device__ functions as a device-only translation unit
@@ -1738,6 +2095,7 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
 $expanded = expand_includes(text, File.dirname(path), 0)
+$expanded = launch_prepare($expanded)
 if device
   # The device unit is built from the conditionals of the device pass (see resolve_conditionals).
   defs = {}
