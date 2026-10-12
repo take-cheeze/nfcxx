@@ -96,3 +96,17 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  # Keeps the required check named "build-and-test" (the job this workflow had before the split): it passes only when
+  # the build and every test group passed. if: always() stops a skipped dependency from skipping this job.
+  build-and-test:
+    if: always()
+    needs: [build, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every build and test job to pass
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ] || [ "${{ needs.test.result }}" != "success" ]; then
+            echo "build=${{ needs.build.result }} test=${{ needs.test.result }}"
+            exit 1
+          fi
