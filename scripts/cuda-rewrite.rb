@@ -759,10 +759,18 @@ DEVICE_PRELUDE = <<'PRELUDE'
 typedef unsigned int uint;
 typedef unsigned short ushort;
 typedef unsigned long ulong;
+typedef unsigned long size_t;
 #ifndef NULL
 #define NULL 0
 #endif
 #define __shared__ static
+// The device pass architecture, for plain uses of __CUDA_ARCH__ (the conditionals are resolved with it too).
+#define __CUDA_ARCH__ 750
+// The qualifiers as macros too: a macro body of a carried header can name them (ggml-common.h: GGML_TABLE_BEGIN).
+#define __device__
+#define __global__
+#define __host__
+#define __forceinline__
 extern "C" void __nfcxx_syncthreads(void);
 extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
@@ -926,6 +934,17 @@ def tokens_of(s)
       i = e
       next
     end
+    # comments are not code: a word in one (a `__device__` mentioned above a host function) is no token
+    if s[i] == "/" && s[i + 1] == "/"
+      e = s.index("\n", i)
+      i = e.nil? ? s.length : e
+      next
+    end
+    if s[i] == "/" && s[i + 1] == "*"
+      e = s.index("*/", i + 2)
+      i = e.nil? ? s.length : e + 2
+      next
+    end
     c = s[i]
     if c == "_" || (c.ord >= 65 && c.ord <= 90) || (c.ord >= 97 && c.ord <= 122)
       j = i
@@ -1078,6 +1097,24 @@ end
 # Each file is expanded once per unit (`seen`, by absolute path): the headers of a CUDA backend include each other
 # heavily, and without this the expansion repeats them at every branch (llama.cpp's mmq.cu grew to 24 MB, from 20 KB).
 # Its include guards would drop the repeats anyway; a file meant to be included twice is not expanded twice.
+# The -I directories of the driver (project headers). A quoted include is looked up beside the including file first,
+# then in these, as the compiler does; an angle-bracket include is looked up in these only. System headers (CUDA's,
+# the C library's) are never inlined: the device unit has no use for them.
+$incdirs = []
+
+# mruby has no ENV, so the toolkit is the default prefix /usr/local/cuda (where the driver's CUDA_HOME points).
+def system_path?(path)
+  p = File.expand_path(path)
+  p.start_with?("/usr/", "/opt/", "/usr/local/cuda/")
+end
+
+def find_include(dir, name, quoted)
+  cands = []
+  cands << dir + "/" + name if quoted
+  $incdirs.each { |d| cands << d + "/" + name }
+  cands.find { |c| File.file?(c) && !system_path?(c) }
+end
+
 def expand_includes(text, dir, depth, seen = {})
   return text if depth > 8
   out = ""
@@ -1087,10 +1124,11 @@ def expand_includes(text, dir, depth, seen = {})
     rest = text[st...en].sub("#", "").strip
     next unless rest.start_with?("include")
     q = rest[7..-1].to_s.strip
-    next unless q.start_with?("\"")
-    name = q[1..-1].split("\"")[0].to_s
-    path = dir + "/" + name
-    next unless File.exist?(path)
+    quoted = q.start_with?("\"")
+    next unless quoted || q.start_with?("<")
+    name = q[1..-1].split(quoted ? "\"" : ">")[0].to_s
+    path = find_include(dir, name, quoted)
+    next if path.nil?
     key = File.expand_path(path)
     out << text[last...st]
     if seen[key]
@@ -1304,6 +1342,26 @@ end
 # Resolves the conditionals of a translation unit. defs maps a name to its object-like replacement text, a function-like
 # macro to :function, and a macro with no value to "". A conditional that cannot be evaluated (CondUnsupported) is
 # kept with its branches; the lines of the other conditionals are blanked, so the line count does not change.
+# A line without its // comment (and without /* */ comments on it): for the values of #define in the conditionals.
+def strip_comments_line(v)
+  out = ""
+  i = 0
+  while i < v.length
+    if v[i] == "/" && v[i + 1] == "/"
+      break
+    elsif v[i] == "/" && v[i + 1] == "*"
+      e = v.index("*/", i + 2)
+      break if e.nil?
+      out << " "
+      i = e + 2
+    else
+      out << v[i]
+      i += 1
+    end
+  end
+  out
+end
+
 def resolve_conditionals(text, defs)
   out = []
   stack = []
@@ -1401,7 +1459,8 @@ def resolve_conditionals(text, defs)
         if rest[j] == "("
           defs[mname] = :function
         else
-          defs[mname] = rest[j..-1].to_s.strip
+          # the value without its comment: `#define CUDART_HMAX 11070 // CUDA 11.7` is 11070
+          defs[mname] = strip_comments_line(rest[j..-1].to_s).strip
         end
       end
       out << (active ? line : "")
@@ -1414,6 +1473,47 @@ def resolve_conditionals(text, defs)
   end
   refuse("#if without #endif") unless stack.empty?
   out.join("\n")
+end
+
+# The identifier written right after the first whole-word occurrence of kw in t, or nil (anonymous, or not found).
+def tag_after(t, kw)
+  i = 0
+  while (j = t.index(kw, i))
+    k = j + kw.length
+    whole = (j == 0 || !ident_char?(t[j - 1])) && (k >= t.length || !ident_char?(t[k]))
+    if whole
+      k += 1 while k < t.length && white?(t[k])
+      return nil unless k < t.length && (ident_char?(t[k]) && !(t[k].ord >= 48 && t[k].ord <= 57))
+      e = k
+      e += 1 while e < t.length && ident_char?(t[e])
+      return t[k...e]
+    end
+    i = k
+  end
+  nil
+end
+
+# The names an enum defines: its enumerators (the identifier at the start of each comma-separated item of its body).
+# Only these: every other identifier of the enum (a type it mentions) is not defined by it.
+def enum_enumerators(t)
+  open = t.index("{")
+  return [] if open.nil?
+  close = matching_brace(t, open)
+  body = t[(open + 1)...(close || t.length)]
+  names = []
+  body.split(",").each do |item|
+    first = tokens_of(item.split("=")[0].to_s)[0]
+    names << first if first
+  end
+  names
+end
+
+# A function definition or declaration whose head names a type keyword (`static enum ggml_status f(...) {`): the
+# keyword is not a type definition. The head is the text before the first brace; a `(` in it marks a function.
+def function_head?(t)
+  b = t.index("{")
+  h = b.nil? ? t : t[0...b]
+  h.index("(") && !(h.index("=") && h.index("=") < h.index("("))
 end
 
 def device_tu(text)
@@ -1488,15 +1588,18 @@ def device_tu(text)
     end
     next if toks.empty?
     next if pc[:body] && t.index("(") && !toks.include?("struct") && !toks.include?("class") && !toks.include?("union") && !toks.include?("enum")
-    next if !pc[:body] && t.index("(") && !t.index("=") # host prototype
+    next if !pc[:body] && t.index("(") && !t.index("=") && toks.first != "typedef" # host prototype (a typedef is not one)
     if toks.first == "typedef"
-      pc[:defined] = [toks.last]
+      # `typedef R (*name)(args)` names `name`, which follows the `(*`; otherwise the name is the last identifier.
+      fp = t.index("(*")
+      pc[:defined] = [fp ? tokens_of(t[(fp + 2)..-1].to_s)[0] : toks.last].compact
     elsif toks.first == "using"
       pc[:defined] = [toks[1]].compact
-    elsif (kw = (toks & %w[struct class union enum]).first)
-      k = toks.index(kw)
-      pc[:defined] = [toks[k + 1]].compact
-      pc[:defined] += toks if kw == "enum"   # the enumerators: over-approximated by every identifier
+    elsif (kw = (toks & %w[struct class union enum]).first) && !function_head?(t)
+      # The tag is the identifier written right after the keyword; an anonymous one (`union { ... }` inside a function)
+      # names nothing. (The next token in tokens_of skips the brace, so it must not be taken from there.)
+      pc[:defined] = [tag_after(t, kw)].compact
+      pc[:defined] += enum_enumerators(t) if kw == "enum"
     elsif pc[:body]
       next
     elsif toks.include?("const") || toks.include?("constexpr")
@@ -1724,7 +1827,9 @@ def host_linkage(text)
 end
 
 ARGV.each do |a|
-  if a == "--device"
+  if a.start_with?("-I")
+    $incdirs << a[2..-1]
+  elsif a == "--device"
     device = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
@@ -1743,6 +1848,9 @@ if device
   defs = {}
   DEVICE_PASS_MACROS.each { |k, v| defs[k] = v }
   $expanded = resolve_conditionals($expanded, defs)
+  # #include lines of system headers (and of headers not inlined) are not in the device unit: a top-level piece may
+  # carry one in front of a declaration, so they are removed here, not by the piece's keep decision.
+  $expanded = $expanded.split("\n").reject { |l| l.lstrip.start_with?("#include") || (l.lstrip.start_with?("#") && l.lstrip[1..-1].to_s.lstrip.start_with?("include")) }.join("\n")
   dev, kernels = device_tu($expanded)
   File.open(kernels_path, "wb") { |f| f.write(kernels.map { |k| k + "\n" }.join) } unless kernels_path.nil?
   print dev

@@ -68,10 +68,12 @@ cu_prepare() {  # cu_prepare: rewrites every .cu input and puts its copy in srcs
 cu_rewrite() {  # cu_rewrite FILE.cu COPY: writes the rewritten copy to COPY, with the device image appended
   local src=$1 copy=$2
   local base; base=$(basename "$src" .cu)
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$src" > "$copy" || exit $?
+  # The -I directories: the rewriter inlines the project headers they name (quoted and angle-bracket includes).
+  local incs=(); local f; for f in ${cflags[@]+"${cflags[@]}"}; do case $f in -I*) incs+=("$f");; esac; done
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} "$src" > "$copy" || exit $?
   case " ${preinc[*]+${preinc[*]}} " in *" $root/lib/cuda/nfcxx_cuda.h "*) ;; *) preinc+=("$root/lib/cuda/nfcxx_cuda.h") ;; esac
   local dev=$cudatmp/$base.dev sm=${NFCXX_SM:-75} ptxas=${NFCXX_PTXAS:-${CUDA_HOME:-/usr/local/cuda}/bin/ptxas}
-  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
+  "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" ${incs[@]+"${incs[@]}"} --device --kernels="$dev.kernels" "$src" > "$dev.cpp" || exit $?
   [ -s "$dev.kernels" ] || return 0
   "$root/scripts/pathb-dump" --ir --freestanding "$dev.cpp" > "$dev.ir" \
     || { echo "nfcxx: $src: device code: the front end refused it (see above; needs scripts/setup-pathb.sh)" >&2; exit 2; }
