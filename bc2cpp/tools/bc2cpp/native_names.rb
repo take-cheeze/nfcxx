@@ -2,6 +2,7 @@
 
 require 'prism'
 require_relative 'source_text'
+require_relative 'scan_cache'
 
 # Step 5b: method names defined or called outside the compiled bytecode.
 
@@ -154,13 +155,16 @@ end
 # ---------------------------------------------------------------------------
 OUTSIDE_TOKEN_RE = /[A-Za-z_][A-Za-z_0-9]*[?!=]?/.freeze
 
+# A missing file is reported by SourceText, so a scan with one is not memoized (ScanCache, ADR 0415).
 def outside_world_tokens(paths)
-  names = Set.new
-  Array(paths).each do |path|
-    src = SourceText.read(path, 'outside_world_tokens', binary: true) or next
-    src.scan(OUTSIDE_TOKEN_RE) { |t| names << t }
+  ScanCache.fetch('outside_world_tokens', Array(paths), cache_absent: false) do
+    names = Set.new
+    Array(paths).each do |path|
+      src = SourceText.read(path, 'outside_world_tokens', binary: true) or next
+      src.scan(OUTSIDE_TOKEN_RE) { |t| names << t }
+    end
+    names
   end
-  names
 end
 
 # ---------------------------------------------------------------------------
