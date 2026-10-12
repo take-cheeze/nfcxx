@@ -1,7 +1,7 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done, and the qbe backend has its first checks (loads and stores, milestone 2 below; `asan.md`,
-`tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
+Status: the gcc backend is done, and the qbe backend has milestones 1-6 below (loads and stores, redzones, use after scope;
+`asan.md`, `tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
 ## Common design
@@ -20,7 +20,7 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 
 ## qbe backend (Path A): patch cproc
 
-Done (milestones 1-5): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 6 below.
+Done (milestones 1-6): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: the optional part of 6 below.
 
 Options considered:
 
@@ -36,7 +36,11 @@ Milestones:
 3. Stack redzones (done, `asanalloc`): `funcalloc` allocates `size + 2*RZ` (RZ 32), poisons at entry, unpoisons in `funcret`. Still open: alloca/VLA.
 4. Global redzones (done, `emitdata` and `emitasanctor`): a trailing redzone in each global's own data item, poisoned by a per-unit constructor in `.init_array`. No leading redzone.
 5. Source lines (done): `qbe-cc` keeps the line markers under `NFCXX_ASAN`, cproc emits `dbgloc` and `dbgfile`.
-6. Optional: use after scope, fake stack (use after return), elision of checks on non-escaping locals.
+6. Use after scope (done, `asanend`/`asanleave`/`asangoto`/`asanlabel`/`asancase`, `asan.md` "Use after scope"): a block's
+   objects are poisoned with `__asan_poison_stack_memory` when the block is left (normal end, break, continue, goto, and
+   the jumps EDG lowers from C++ break, continue and switch) and unpoisoned by their declaration or by a jump into the
+   block. Return needs nothing (funcret). Still open, optional: fake stack (use after return), elision of checks on
+   non-escaping locals.
 Open check: the unwinder wants `rbp` chains; QBE keeps them, but verify with a report.
 
 ## Path B: emit from `pathb-qbe-emit.rb`

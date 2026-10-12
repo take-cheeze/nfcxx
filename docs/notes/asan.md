@@ -19,8 +19,44 @@ object's 8-byte granule and 32 zero bytes into the same data item, and the unit'
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
 leading redzone (an access before the object is not reported); thread-local globals get none; objects over 16-byte
-alignment, variable-length arrays and `alloca` get no redzones. Not yet: use-after-scope and use-after-return (the
-`ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+alignment, variable-length arrays and `alloca` get no redzones. Use after scope is covered (next section). Not yet:
+use-after-return (the `ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block
+copies and `va_arg` loads are checked as ordinary accesses.
+
+## Use after scope (qbe)
+
+A block-scoped stack object (a local, a for-init declaration, a compound literal) is poisoned when its block is left and
+unpoisoned again when its declaration runs, so a loop that enters the block again is addressable each time. The poison is
+`__asan_poison_stack_memory`, the marker gcc's own instrumentation uses, so the report is `stack-use-after-scope` on both
+backends and the tests need no `ASAN-QBE:` line. Covered ways out of a block (cproc, `scripts/cproc-asan.patch`, `qbe.c`):
+
+- the normal end, after the join point and before the scope is deleted (`asanend`);
+- `break` and `continue` of C input, cproc's own statements (`asanleave`: the objects the loop or switch body has declared);
+- `goto`: a backward goto poisons the objects of the blocks it leaves; a forward goto records the blocks open at it, and its
+  label poisons the ones it leaves (`asangoto`, `asanlabel`). EDG lowers every C++ `break`, `continue` and switch exit to a
+  `goto __Tn` to a label after the statement, so C++ takes this path, not `asanleave`.
+
+Jumps into a block unpoison the objects of the blocks they enter, since C++ allows a jump past a declaration without an
+initializer and the block may have been left by an earlier pass: a goto's label and a `case` or `default` label
+(`asancase`, `asanswitch`) do this. A return poisons nothing: `funcret` unpoisons the frame and nothing of it runs after.
+
+Tests: `tests/asan/cases/use_after_scope.cpp`, `scope_break_escape.cpp`, `scope_goto_escape.cpp`,
+`scope_continue_escape.cpp`, `scope_compound_escape.cpp` (reports, with the gcc wording), and the `CLEAN` cases
+`scope_reenter.cpp` (a block entered again), `scope_break.cpp` (break, continue, do/while), `scope_return.cpp`,
+`scope_goto.cpp` (backward and forward goto, a jump into a block past a declaration) and `scope_switch.cpp` (a case label
+past a declaration of the switch body).
+
+Limits, all false negatives (nothing is reported that is valid, the missing check is what can be missed):
+
+- A longjmp or a C++ throw (EDG's setjmp ABI) that leaves a block to a handler in the same frame runs no poison, so an access
+  through a pointer kept from that block is not reported.
+- Use after return (a pointer to a local of a block that `return` left, read after the function returned) needs a fake
+  stack; not done. `return` itself poisons nothing.
+- Variable-length arrays and `alloca` have no redzones, so they get no scope poison either (the other milestone, `asan-plan.md`).
+- Objects over 16-byte alignment get none.
+
+The default (non-ASan) output is byte-identical: every hook is gated on `asanon`, and the scope fields are only set and read
+under it.
 
 Source lines: with `NFCXX_ASAN=1`, `qbe-cc` keeps the preprocessor's line markers (no `-P`), cproc records the location of each
 expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `dbgfile` names the file of the function.
