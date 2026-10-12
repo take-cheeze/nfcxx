@@ -826,6 +826,17 @@ HALF_CORE = "#ifndef __NFCXX_HALF_CORE\n#define __NFCXX_HALF_CORE\n" \
 # integers and float arithmetic: round to nearest, even, as CUDA's __float2half. __hadd, __hsub, __hmul and __hfma compute
 # in float and round once more to half: for these operands the float result is exact or rounds the same way, except for
 # rare double-rounding cases of __hfma (the sum of an exact product with c).
+# __half2: two halves packed in an unsigned int, the low half in bits 0..15 (x) and the high half in bits 16..31 (y).
+# The pair functions are plain integer code on that packing; the lanes use the half operations above, through one
+# guarded helper so that several pair functions in a unit define it once.
+HALF2_TYPE = "#ifndef __NFCXX_HALF2_TYPE\n#define __NFCXX_HALF2_TYPE\ntypedef unsigned int __half2;\n#endif\n"
+HALF_LANE = HALF_CORE + "#ifndef __NFCXX_HALF_LANE\n#define __NFCXX_HALF_LANE\n" \
+  "static inline unsigned short __nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __hadd(a, b) : __hmul(a, b); }\n" \
+  "#endif\n"
+HALF_LANE = HALF_LANE.sub("__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __hadd(a, b) : __hmul(a, b); }",
+  "__nfcxx_hlane(unsigned short a, unsigned short b, int add) { return add ? __float2half(__half2float(a) + __half2float(b)) : __float2half(__half2float(a) * __half2float(b)); }")
+HALF2_PAIR = HALF2_TYPE + HALF_LANE
+
 BUILTIN_DEFS = {
   "__mul24" => "static inline int __mul24(int x, int y) { int a = (int)((unsigned)x << 8) >> 8; int b = (int)((unsigned)y << 8) >> 8; return (int)((unsigned)a * (unsigned)b); }\n",
   "__umulhi" => "extern \"C\" unsigned __nfcxx_umulhi(unsigned, unsigned);\nstatic inline unsigned __umulhi(unsigned a, unsigned b) { return __nfcxx_umulhi(a, b); }\n",
@@ -841,6 +852,28 @@ BUILTIN_DEFS = {
   "__half" => HALF_CORE,
   "__float2half" => HALF_CORE,
   "__half2float" => HALF_CORE,
+  "half" => HALF_CORE + "typedef __half half;\n",
+  "half2" => HALF2_TYPE + "typedef __half2 half2;\n",
+  "int8_t" => "typedef signed char int8_t;\n",
+  "uint8_t" => "typedef unsigned char uint8_t;\n",
+  "int16_t" => "typedef short int16_t;\n",
+  "uint16_t" => "typedef unsigned short uint16_t;\n",
+  "int32_t" => "typedef int int32_t;\n",
+  "uint32_t" => "typedef unsigned int uint32_t;\n",
+  "int64_t" => "typedef long long int64_t;\n",
+  "uint64_t" => "typedef unsigned long long uint64_t;\n",
+  "ldexpf" => "static inline float ldexpf(float x, int e) { return x * (float)(1 << (e > 30 ? 30 : (e < -30 ? -30 : e))); }\n",
+  "fmaxf" => "static inline float fmaxf(float a, float b) { return a != a ? b : (b != b ? a : (a > b ? a : b)); }\n",
+  "__half2" => HALF2_TYPE,
+  "__halves2half2" => HALF2_TYPE + "static inline __half2 __halves2half2(unsigned short a, unsigned short b) { return (unsigned)a | ((unsigned)b << 16); }\n",
+  "__low2half" => HALF2_TYPE + "static inline unsigned short __low2half(__half2 h) { return (unsigned short)(h & 0xffffu); }\n",
+  "__high2half" => HALF2_TYPE + "static inline unsigned short __high2half(__half2 h) { return (unsigned short)(h >> 16); }\n",
+  "__half2half2" => HALF2_TYPE + "static inline __half2 __half2half2(unsigned short h) { return (unsigned)h | ((unsigned)h << 16); }\n",
+  "__lows2half2" => HALF2_TYPE + "static inline __half2 __lows2half2(__half2 a, __half2 b) { return (a & 0xffffu) | ((b & 0xffffu) << 16); }\n",
+  "__highs2half2" => HALF2_TYPE + "static inline __half2 __highs2half2(__half2 a, __half2 b) { return (a >> 16) | ((b >> 16) << 16); }\n",
+  "__high2float" => HALF2_TYPE + HALF_CORE + "static inline float __high2float(__half2 h) { return __half2float((unsigned short)(h >> 16)); }\n",
+  "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 1) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 1) << 16); }\n",
+  "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { return (unsigned)__nfcxx_hlane((unsigned short)(a & 0xffffu), (unsigned short)(b & 0xffffu), 0) | ((unsigned)__nfcxx_hlane((unsigned short)(a >> 16), (unsigned short)(b >> 16), 0) << 16); }\n",
   "__hadd" => HALF_CORE + "static inline unsigned short __hadd(unsigned short a, unsigned short b) { return __float2half(__half2float(a) + __half2float(b)); }\n",
   "__hsub" => HALF_CORE + "static inline unsigned short __hsub(unsigned short a, unsigned short b) { return __float2half(__half2float(a) - __half2float(b)); }\n",
   "__hmul" => HALF_CORE + "static inline unsigned short __hmul(unsigned short a, unsigned short b) { return __float2half(__half2float(a) * __half2float(b)); }\n",

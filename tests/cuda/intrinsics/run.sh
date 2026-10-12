@@ -3,6 +3,7 @@
 # scripts/cuda-rewrite.rb, BUILTIN_DEFS; the emitter's SCALAR_U32 and WARP_SHUFFLES).
 #   pass:    int.cu builds, links, runs on the GPU and checks every intrinsic against the CUDA definitions (0 mismatches).
 #   pass:    half.cu and half_arith.cu: the 16-bit half type (conversions, __hadd, __hmul, __hfma) against CUDA host results.
+#   pass:    half2.cu (the packed __half2 and its pair functions) and int8.cu (8-bit integers), against host results.
 # Needs the CUDA toolkit (CUDA_HOME, default /usr/local/cuda) and an NVIDIA GPU; skips (exit 0) when missing.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -42,4 +43,6 @@ refuse() {  # refuse FILE.cu MESSAGE-SUBSTRING
 pass int.cu "intrinsics: no error, 0 mismatches"
 pass half.cu "half: no error, 0 mismatches"
 pass half_arith.cu "half arith: no error, 0 mismatches"
+pass half2.cu "half2: no error, 0 mismatches"
+pass int8.cu "int8: no error, 0 mismatches"
 exit $fail

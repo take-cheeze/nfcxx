@@ -248,7 +248,7 @@ end
 def reg_class(t)
   return "p" if t[0] == "int" && t[3]
   return "rd" if t[0] == "ptr" || (t[0] == "int" && t[1] == 8)
-  return "r" if t[0] == "int" && (t[1] == 2 || t[1] == 4)
+  return "r" if t[0] == "int" && (t[1] == 1 || t[1] == 2 || t[1] == 4)
   return "f" if t[0] == "float" && t[1] == 4
   return "fd" if t[0] == "float" && t[1] == 8
   raise Refused, "value of type #{t[0]} #{t[1]} bytes"
@@ -261,21 +261,22 @@ def ptx_type(t)
   raise Refused, "bool in arithmetic or memory" if t[0] == "int" && t[3]
   # a 2-byte integer (the IR's unsigned_short, and CUDA's half, which is one) is computed in 32 bits: its register
   # holds the value sign- or zero-extended, so the 32-bit operations give the 16-bit result (see Fn#canon)
-  return(t[2] ? "s32" : "u32") if t[0] == "int" && t[1] == 2
+  return(t[2] ? "s32" : "u32") if t[0] == "int" && (t[1] == 1 || t[1] == 2)
   raise Refused, "integer of #{t[1]} bytes" unless t[0] == "int" && (t[1] == 4 || t[1] == 8)
   (t[2] ? "s" : "u") + (t[1] * 8).to_s
 end
 
 # The memory suffix of a load or store: the 16-bit forms for a 2-byte integer, else ptx_type.
 def mem_type(t)
+  return(t[2] ? "s8" : "u8") if t[0] == "int" && t[1] == 1 && !t[3]
   return(t[2] ? "s16" : "u16") if t[0] == "int" && t[1] == 2 && !t[3]
   ptx_type(t)
 end
 
 # The untyped bit suffix (b32, b64) for and, or, xor, not and shl, where the signedness does not matter.
 def bits_type(t)
-  raise Refused, "bitwise operation on #{t[0]}" unless (t[0] == "int" && !t[3] && (t[1] == 2 || t[1] == 4 || t[1] == 8)) || t[0] == "ptr"
-  "b" + (t[0] == "int" && t[1] == 2 ? 32 : type_size(t) * 8).to_s
+  raise Refused, "bitwise operation on #{t[0]}" unless (t[0] == "int" && !t[3] && (t[1] == 1 || t[1] == 2 || t[1] == 4 || t[1] == 8)) || t[0] == "ptr"
+  "b" + (t[0] == "int" && (t[1] == 1 || t[1] == 2) ? 32 : type_size(t) * 8).to_s
 end
 
 # A decimal float literal, exact in the type: a finite number as printed by the IR (shortest form that reads back), or
@@ -465,7 +466,7 @@ class Fn
         elsif @kernel
           raise Refused, "kernel #{@name} returns a value"
         else
-          ok = (ret[0] == "ptr") || (ret[0] == "int" && !ret[3] && (ret[1] == 2 || ret[1] == 4 || ret[1] == 8)) || (ret[0] == "float" && (ret[1] == 4 || ret[1] == 8))
+          ok = (ret[0] == "ptr") || (ret[0] == "int" && !ret[3] && (ret[1] == 1 || ret[1] == 2 || ret[1] == 4 || ret[1] == 8)) || (ret[0] == "float" && (ret[1] == 4 || ret[1] == 8))
           raise Refused, "function #{@name} returns a #{ret[0]} (scalars only)" unless ok
           @ret = ret
         end
@@ -475,7 +476,7 @@ class Fn
           raise Refused, "parameter form #{form_text(p)}" unless head_of(p) == "param" && p.length == 4
           raise BadIR, "parameter register must be %#{k}" unless p[1] == "%#{k}"
           ty = parse_type(p[3])
-          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
+          raise Refused, "parameter of type #{ty[0]}" unless ty[0] == "ptr" || (ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)) || (ty[0] == "float" && (ty[1] == 4 || ty[1] == 8))
           @params << ty
         end
       elsif h == "static" || h == "weak"
@@ -775,7 +776,7 @@ class Fn
   # cdiv (signed or unsigned) and crem: trap on a zero divisor, and for signed types on INT_MIN / -1.
   # The checks are predicated traps; a constant divisor needs only the checks that can fail.
   def checked_div(op, dest, ty, xa, xb)
-    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
+    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
     t = ptx_type(ty)
     a, _ = operand(xa)
     b, _ = operand(xb)
@@ -806,7 +807,7 @@ class Fn
   # cshl and cshr (count in ty's width, as the IR gives it): trap unless 0 <= count < width. The count is compared
   # unsigned, so a negative count fails the test too. A 64-bit count is narrowed to 32 bits after the test.
   def checked_shift(op, dest, ty, xa, xb)
-    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
+    raise Refused, "#{op} on #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
     bits = ty[1] * 8
     a, _ = operand(xa)
     a = reg_of(a, ty)
@@ -837,7 +838,7 @@ class Fn
   # iconv: integer to integer, sign-extending from a signed source and zero-extending from an unsigned one, and
   # truncating to a narrower target (cvt does all three).
   def int_convert(dest, ty, a, aty)
-    raise Refused, "iconv to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
+    raise Refused, "iconv to #{ty[0]}" unless ty[0] == "int" && !ty[3] && (ty[1] == 1 || ty[1] == 2 || ty[1] == 4 || ty[1] == 8)
     raise BadIR, "iconv of a #{aty[0]}" unless aty[0] == "int"
     if aty[3]
       b = fresh("r")
@@ -849,9 +850,9 @@ class Fn
       end
       return
     end
-    if type_size(ty) == type_size(aty) || (type_size(ty) == 2 && type_size(aty) == 4)
+    if type_size(ty) == type_size(aty) || (type_size(ty) < 4 && type_size(aty) == 4)
       emit("mov.#{ptx_type(ty)} #{dest}, #{a};")
-    elsif type_size(ty) == 2
+    elsif type_size(ty) < 4
       emit("cvt.u32.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
     else
       emit("cvt.#{ptx_type(ty)}.#{ptx_type(aty)} #{dest}, #{reg_of(a, aty)};")
@@ -891,13 +892,14 @@ class Fn
   # A 2-byte integer lives in a 32-bit register extended to 32 bits: sign-extended for a signed type, zero-extended
   # for an unsigned one. A result computed in 32 bits is brought back into that form here.
   def canon(dest, t)
-    return unless t[0] == "int" && t[1] == 2 && !t[3]
+    return unless t[0] == "int" && (t[1] == 1 || t[1] == 2) && !t[3]
+    bits = t[1] * 8
     if t[2]
       tmp = fresh("r")
-      emit("shl.b32 #{tmp}, #{dest}, 16;")
-      emit("shr.s32 #{dest}, #{tmp}, 16;")
+      emit("shl.b32 #{tmp}, #{dest}, #{32 - bits};")
+      emit("shr.s32 #{dest}, #{tmp}, #{32 - bits};")
     else
-      emit("and.b32 #{dest}, #{dest}, 65535;")
+      emit("and.b32 #{dest}, #{dest}, #{(1 << bits) - 1};")
     end
   end
 
