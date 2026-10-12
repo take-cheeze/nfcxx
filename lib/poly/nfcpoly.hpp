@@ -1,7 +1,7 @@
 // nfcpoly: evaluate scripts of other languages from C++ and share objects with them, GraalVM-polyglot style.
-// Languages: Ruby (mruby), Lua and Python. Each is a backend (nfcpoly_mruby.cpp, nfcpoly_lua.cpp, nfcpoly_python.cpp) that
-// registers itself when linked in; this header and nfcpoly.cpp are the language-neutral core and include no interpreter
-// header.
+// Languages: Ruby (mruby), Lua, Python and JavaScript. Each is a backend (nfcpoly_mruby.cpp, nfcpoly_lua.cpp, nfcpoly_python.cpp,
+// nfcpoly_js.cpp) that registers itself when linked in; this header and nfcpoly.cpp are the language-neutral core and include
+// no interpreter header.
 //
 //   nfcpoly::Context ctx;
 //   ctx.def_class<Vec3>("Vec3").ctor<double, double, double>().field("x", &Vec3::x).method("len2", &Vec3::len2);
@@ -11,6 +11,7 @@
 //   int r = ctx.eval<int>("ruby", "pos.x * scale(2.0)");
 //   double d = ctx.eval<double>("lua", "pos.x * scale(2.0)");        // the same bindings, in Lua
 //   double e = ctx.eval<double>("python", "pos.x * scale(2.0)");     // and in Python
+//   double f = ctx.eval<double>("js", "pos.x * scale(2.0)");         // and in JavaScript
 //
 // A C++ exception thrown by a bound function is a script error to the script; an uncaught script error reaches the host
 // as nfcpoly::ScriptError, or, when it carries a host exception that nothing rescued, as that very C++ exception.
@@ -688,7 +689,7 @@ class Context {
   Context(const Context&) = delete;
   Context& operator=(const Context&) = delete;
 
-  // The languages eval accepts: the backends linked into the program ("ruby" (alias "mruby"), "lua", "python"). A
+  // The languages eval accepts: the backends linked into the program ("ruby" (alias "mruby"), "lua", "python", "js"). A
   // language's interpreter is started on its first use; everything declared before that is replayed into it.
   static std::vector<std::string> languages();
 

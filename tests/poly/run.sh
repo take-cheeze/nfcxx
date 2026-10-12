@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # nfcpoly: build the host test (tests/poly/host.cpp with lib/poly/nfcpoly.cpp and the language backends) with nfcxx and run
 # it, per back end. The languages' interpreters are built per back end by scripts/setup-poly.sh (mruby with C++
-# exceptions) and scripts/setup-poly-lua.sh (Lua with ldo.c as C++); Python is the system CPython (python3-config), and is
-# skipped with a SKIP line when its development files are missing. See docs/notes/poly.md.
+# exceptions), scripts/setup-poly-lua.sh (Lua with ldo.c as C++) and scripts/setup-poly-js.sh (QuickJS, plain C); Python is the
+# system CPython (python3-config), and is skipped with a SKIP line when its development files are missing. See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
-#   POLY_LANGS="ruby lua python ast"   (default: all four; ast is the nfcast engine, lib/ast, which needs nothing built)
+#   POLY_LANGS="ruby lua python ast js"   (default: all five; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-langs=${POLY_LANGS:-"ruby lua python ast"}
+langs=${POLY_LANGS:-"ruby lua python ast js"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   defs=(); incs=(-I lib/poly); srcs=(); libs=(); built=(); bad=0
@@ -20,6 +20,9 @@ for be in $backends; do
       lua)
         if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-lua.sh 2>&1); then echo "FAIL $be poly lua (Lua build)"; tail -20 <<<"$out"; bad=1; continue; fi
         defs+=(-DTEST_LUA); incs+=(-I build/poly-lua/$be/include); srcs+=(lib/poly/nfcpoly_lua.cpp); libs+=(build/poly-lua/$be/lib/liblua.a); built+=(lua) ;;
+      js)
+        if ! out=$(NFCXX_BACKEND=$be scripts/setup-poly-js.sh 2>&1); then echo "FAIL $be poly js (QuickJS build)"; tail -20 <<<"$out"; bad=1; continue; fi
+        defs+=(-DTEST_JS); incs+=(-I build/poly-js/$be/include); srcs+=(lib/poly/nfcpoly_js.cpp); libs+=(build/poly-js/$be/lib/libquickjs.a); built+=(js) ;;
       python)
         if command -v python3-config >/dev/null && pyinc=$(python3-config --includes 2>/dev/null) && pylib=$(python3-config --ldflags --embed 2>/dev/null) &&
            [ -f "$(python3-config --includes | sed 's/^-I\([^ ]*\).*/\1/')/Python.h" ]; then
