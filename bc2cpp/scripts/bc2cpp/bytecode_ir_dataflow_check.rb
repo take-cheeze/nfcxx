@@ -255,41 +255,66 @@ def forward_reaching(irep)
 
   regs = (0...[irep.nregs.to_i, 1].max + 8).map(&:to_s)
   inn = Array.new(ins.length) { {} }
-  regs.each { |r| (inn[0][r] ||= Set.new) << :entry }
+  entry = Set[:entry].freeze
+  clobber = Set[:clobber].freeze
+  unknown = Set[:unknown].freeze
+  definitions = ins.each_index.map { |i| Set[i].freeze }
+  regs.each { |r| inn[0][r] = entry }
   reads = %w[JMPIF JMPNOT JMPNIL RAISEIF MATCHERR SETUPVAR]
   calls = %w[SEND SEND0 SENDB SSEND SSEND0 SSENDB SUPER EXEC]
   work = [0]
   visited = Set[0]
+  pending = Set[0]
   until work.empty?
     i = work.pop
+    pending.delete(i)
     insn = ins[i]
-    out = inn[i].transform_values(&:dup)
+    # Frozen value sets may be shared until a transfer or join changes that register.
+    out = inn[i].dup
     if reads.include?(insn.op)
       nil
     elsif (run = run_of_text(insn))
       # ARGARY/APOST write a run (vm.c): every register of it gets this instruction as its definition.
-      run.each { |r| out[r.to_s] = Set[i] }
+      run.each { |r| out[r.to_s] = definitions[i] }
     elsif BytecodeIR::WRITES_LEADING_REG_OPS.include?(insn.op) || insn.op.start_with?('LOADI')
       lead = insn.reg
       if calls.include?(insn.op) && lead
-        regs.each { |r| out[r] = Set[:clobber] if r.to_i > lead.to_i }
+        regs.each { |r| out[r] = clobber if r.to_i > lead.to_i }
       end
-      out[lead] = Set[i] if lead
+      out[lead] = definitions[i] if lead
     else
-      regs.each { |r| (out[r] ||= Set.new) << :unknown }
+      regs.each do |r|
+        next if out[r]&.include?(:unknown)
+
+        out[r] = ((out[r] || Set.new) | unknown).freeze
+      end
     end
     prog.instruction_at(i).successors.each do |s|
       changed = false
       out.each do |r, set|
-        cur = (inn[s][r] ||= Set.new)
-        changed = true unless set.subset?(cur)
-        cur.merge(set)
+        cur = inn[s][r]
+        next if cur && set.subset?(cur)
+
+        inn[s][r] = cur ? (cur | set).freeze : set
+        changed = true
       end
-      work << s if changed || visited.add?(s)
+      first_visit = visited.add?(s)
+      work << s if (changed || first_visit) && pending.add?(s)
     end
   end
   inn
 end
+
+forward_join = forward_reaching(Irep.new(label: 'forward_join', nregs: 3, instructions: join.instructions.map(&:source)))
+check.call('forward joins retain independent predecessor values',
+           forward_join[4]['2'] == Set[1, 3] && forward_join[2]['2'] == Set[1] && forward_join[3]['2'] == Set[:entry])
+forward_loop = forward_reaching(Irep.new(label: 'forward_loop', nregs: 3, instructions: loop_.instructions.map(&:source)))
+check.call('forward loop convergence does not change the entry state',
+           forward_loop[1]['2'] == Set[0, 2] && forward_loop[0]['2'] == Set[:entry])
+forward_unknown = forward_reaching(Irep.new(label: 'forward_unknown', nregs: 3,
+                                           instructions: [insn(0, 'CALL', ''), insn(1, 'RETURN', 'R1')]))
+check.call('an unmodelled transfer poisons its successors without changing its input',
+           forward_unknown[1]['1'] == Set[:entry, :unknown] && forward_unknown[0]['1'] == Set[:entry])
 
 def crosscheck(irep, stats)
   program = BytecodeIR.for(irep)
