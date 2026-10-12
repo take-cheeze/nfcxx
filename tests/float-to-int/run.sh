@@ -21,5 +21,11 @@ if [ "$got" = "$want" ]; then echo "ok   x86-64 variant"; else echo "FAIL x86-64
 cc -O1 -o "$tmp/def" tests/float-to-int/helpers.c "$def" -lstdc++ -lquadmath -lm -latomic || { echo "FAIL build default"; exit 1; }
 "$tmp/def" >/dev/null 2>&1; rc=$?
 if [ $rc -eq 134 ]; then echo "ok   default archive traps (exit 134)"; else echo "FAIL default archive exit $rc, want 134"; fail=1; fi
+# Folded constants (EDG's constant folder, through the gcc backend so the folded values are printed): gcc's values.
+want_fold='127 255 65535 32767 0 255 65535 4294967295
+0 18446744073709551615 0 4294967295 18446744073709551615 0 18446744073709551615 0'
+NFCXX_BACKEND=gcc ./nfcxx tests/float-to-int/fold.cpp -o "$tmp/fold" >/dev/null 2>&1 || { echo "FAIL build fold.cpp"; exit 1; }
+got_fold=$("$tmp/fold")
+if [ "$got_fold" = "$want_fold" ]; then echo "ok   folded out-of-range conversions match gcc"; else echo "FAIL folded conversions"; diff <(echo "$want_fold") <(echo "$got_fold"); fail=1; fi
 echo "$fail failures"
 exit $fail
