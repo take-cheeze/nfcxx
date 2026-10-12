@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative 'scan_cache'
+
 # Extracts a deliberately small set of direct-call expressions from mruby's
 # C method implementations. This is not a C-to-C++ translator: it accepts
 # supported zero-argument or single-required-argument registrations with a
@@ -73,7 +75,13 @@ module NativeExpressionDevirt
     source.scan(pattern, &block)
   end
 
+  # The scans that read only `paths` (and, for the exact-class scan, the public API headers) are memoized across
+  # processes (ScanCache, ADR 0415); the bodies are scan_analyze and scan_exact_class_expressions.
   def analyze(paths)
+    ScanCache.fetch('native_expression_devirt.analyze', Array(paths)) { scan_analyze(paths) }
+  end
+
+  def scan_analyze(paths)
     registrations = Hash.new { |hash, name| hash[name] = [] }
     implementations = {}
 
@@ -164,6 +172,11 @@ module NativeExpressionDevirt
   # MRB_MT_INIT_ROM, and the class's instance tag comes from
   # MRB_SET_INSTANCE_TT. Both are needed to emit a guarded call-site path.
   def analyze_exact_class_expressions(paths)
+    inputs = Array(paths) + public_api_header_paths(mruby_core_root(paths))
+    ScanCache.fetch('native_expression_devirt.exact_class', inputs) { scan_exact_class_expressions(paths) }
+  end
+
+  def scan_exact_class_expressions(paths)
     registrations, opaque_owners = class_registrations(paths)
     implementations = Hash.new { |hash, function| hash[function] = [] }
     target_classes = BUILTIN_CLASS_TAGS.keys.to_set
@@ -259,20 +272,42 @@ module NativeExpressionDevirt
     key = files.map { |path| stat = File.stat(path); [path, stat.mtime, stat.size] }
     REGISTRATION_CACHE.fetch(key) do
       REGISTRATION_CACHE.clear
-      REGISTRATION_CACHE[key] = scan_class_registrations(files)
+      REGISTRATION_CACHE[key] = registrations_from_plain(
+        ScanCache.fetch('native_expression_devirt.class_registrations', files) { plain_registrations(*scan_class_registrations(files)) }
+      )
     end
   end
 
-  # Class and module variables of a native source: C variable => {field:, class_name:}.
+  # ADR 0415: the two maps of scan_class_registrations as plain Hashes, which is what ScanCache stores; the
+  # callers get them back with the access-creates-empty defaults the scan itself uses (registrations_from_plain).
+  def plain_registrations(registrations, opaque_owners)
+    [registrations.to_a.to_h, opaque_owners.to_a.to_h]
+  end
+
+  def registrations_from_plain(plain)
+    plain.map { |map| Hash.new { |hash, name| hash[name] = [] }.merge!(map) }
+  end
+
+  # Both ROM scans read each source's map; the sources are the read_source strings, so identity keys it.
+  CLASS_VARIABLE_MAPS = {}.compare_by_identity
+
+  # Class and module variables of a native source: C variable => {field:, class_name:}. The result is shared:
+  # callers only read it.
   def class_variable_map(source)
+    CLASS_VARIABLE_MAPS[source] ||= scan_class_variable_map(source)
+  end
+
+  # `(?<!\w)` before a leading `(\w+)`: a match never starts mid-word (the word's first character matches with
+  # the same tail), so those starts only cost time.
+  def scan_class_variable_map(source)
     class_variables = {}
-    scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
+    scan_with(source, %w[mrb_define_class_id mrb_define_module_id], /(?:mrb->(\w+)\s*=\s*)?(?<!\w)(\w+)\s*=\s*mrb_define_(?:class|module)_id\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |field, variable, class_name|
       class_variables[variable] = { field: field, class_name: class_name }
     end
-    scan_with(source, %w[mrb_class_get], /(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
+    scan_with(source, %w[mrb_class_get], /(?<!\w)(\w+)\s*=\s*mrb_class_get(?:_id)?\s*\(\s*\w+\s*,\s*MRB_SYM\((\w+)\)/) do |variable, class_name|
       class_variables[variable] ||= { field: nil, class_name: class_name }
     end
-    scan_with(source, %w[mrb->], /(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
+    scan_with(source, %w[mrb->], /(?<!\w)(\w+)\s*=\s*mrb->(\w+_class)\b/) do |variable, field|
       class_variables[variable] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
     end
     source.scan(/mrb->(\w+_class)\s*=\s*(\w+)\s*;/) do |field, variable|
@@ -283,7 +318,7 @@ module NativeExpressionDevirt
       field = field.first
       class_variables["mrb->#{field}"] ||= { field: field, class_name: field.sub(/_class\z/, '').capitalize }
     end
-    scan_with(source, %w[mrb_define_class mrb_define_module], /(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+    scan_with(source, %w[mrb_define_class mrb_define_module], /(?<!\w)(\w+)\s*=\s*mrb_define_(?:class|module)\s*\(\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
       class_variables[variable] ||= { field: nil, class_name: class_name }
     end
     # class.c boots BasicObject/Object/Module/Class through boot_defclass and
@@ -291,11 +326,11 @@ module NativeExpressionDevirt
     # would otherwise have an unknown owner, which disables every name they
     # share with a built-in class. Read the names off the source's own
     # mrb_define_const_id(mrb, holder, MRB_SYM(Name), mrb_obj_value(var)) calls.
-    booted = scan_with(source, %w[boot_defclass], /(\w+)\s*=\s*boot_defclass\s*\(/).flatten
+    booted = scan_with(source, %w[boot_defclass], /(?<!\w)(\w+)\s*=\s*boot_defclass\s*\(/).flatten
     source.scan(/mrb_define_const_id\s*\(\s*\w+\s*,\s*\w+\s*,\s*MRB_SYM\((\w+)\)\s*,\s*mrb_obj_value\((\w+)\)\s*\)/) do |class_name, variable|
       class_variables[variable] ||= { field: nil, class_name: class_name } if booted.include?(variable)
     end
-    scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
+    scan_with(source, %w[mrb_define_class_under mrb_define_module_under], /(?<!\w)(\w+)\s*=\s*mrb_define_(?:class|module)_under\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"/) do |variable, class_name|
       class_variables[variable] ||= { field: nil, class_name: class_name }
     end
     class_variables
@@ -469,6 +504,9 @@ module NativeExpressionDevirt
   end
 
   def rom_entries(source)
+    # Entries come only from MRB_MT_ENTRY calls, so a source without the literal has none (and no table scan).
+    return [] unless source.include?('MRB_MT_ENTRY')
+
     entries = []
     tables = []
     table_pattern = /(?:static\s+)?const\s+mrb_mt_entry\s+(\w+)\s*\[\s*\]\s*=\s*\{/
@@ -676,12 +714,18 @@ module NativeExpressionDevirt
     end.first
   end
 
+  # Every header public_mrb_value_functions may read, whether or not it exists.
+  def public_api_header_paths(root)
+    return [] unless root
+
+    PUBLIC_API_HEADERS.map { |relative| File.join(root, '3rd/mruby/include', relative) }.uniq
+  end
+
   def public_mrb_value_functions(root)
     return Set.new unless root
 
-    include_dir = File.join(root, '3rd/mruby/include')
-    headers = PUBLIC_API_HEADERS.map { |relative| File.join(include_dir, relative) }.select { |path| File.file?(path) }
-    headers.uniq.flat_map do |header|
+    headers = public_api_header_paths(root).select { |path| File.file?(path) }
+    headers.flat_map do |header|
       File.read(header, encoding: 'UTF-8').scan(/\bMRB_API\s+mrb_value\s+(\w+)\s*\(\s*mrb_state\s*\*\s*\w+\s*,\s*mrb_value\s+\w+\s*\)\s*;/)
     end.flatten.to_set
   end

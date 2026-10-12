@@ -131,7 +131,7 @@ module NativeArmsReport
     argc = insn.argc.to_i
     kept = code.scan(/CLOSED_WORLD kept: (\w+)/).flatten.uniq
     else_kind = if code.include?('bc2cpp_nomethod_named') then 'nomethod'
-                elsif code.include?('bc2cpp_guard_violation') then 'violation'
+                elsif code.include?('bc2cpp_guard_violation') || code.include?('bc2cpp_hint_violation') then 'violation'
                 elsif !kept.empty? then "kept:#{kept.join('+')}"
                 else 'send'
                 end

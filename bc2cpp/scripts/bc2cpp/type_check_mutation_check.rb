@@ -43,8 +43,8 @@ MUTANTS = [
    %("\#{file}:\#{line}:\#{col}: \#{severity}: \#{message} [\#{code}]"), %("\#{file}:\#{line}: \#{severity}: \#{message} [\#{code}]"),
    /every diagnostic matches/, false],
   ['core methods are counted in the engine summary', 'type_check_report.rb',
-   "methods = facts['methods'].select { |m| scope == 'all' || m['scope'] == scope }\n    ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }\n    params = methods",
-   "methods = facts['methods']\n    ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }\n    params = methods",
+   "methods = facts['methods'].select { |m| scope == 'all' || m['scope'] == scope }\n    ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }\n    consts = facts['constants'].select { |c| scope == 'all' || c['scope'] == scope }\n    params = methods",
+   "methods = facts['methods']\n    ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }\n    consts = facts['constants'].select { |c| scope == 'all' || c['scope'] == scope }\n    params = methods",
    /summary counts engine scope only|typed parameter percentage/, false],
   ['an ignored annotation token is not reported', 'type_check_report.rb',
    "a['ignored'].each do |tok|", "[].each do |tok|", /ignored annotation token is a warning/, false],
@@ -61,8 +61,8 @@ MUTANTS = [
    /Fixnum is typed Integer from call-sites/, true],
   ['an embedded ivar type is not reported', 'type_facts.rb',
    "elsif row['embedded']", 'elsif false', /ivar only ever assigned a Fixnum is typed Integer/, true],
-  ['the facts mode changes generated code', 'type_facts.rb',
-   'def collect(ctx)', "def collect(ctx)\n    ctx.gen.instance_variable_set(:@fixnum_return_names, Set.new)", /byte-identical C\+\+/, true]
+  ['the facts mode changes generated code', 'bc2cpp.rb',
+   'TypeFacts.write(type_facts_path, ', 'ivar_layout.clear; class_layout.clear; TypeFacts.write(type_facts_path, ', /byte-identical C\+\+/, true]
 ].freeze
 
 failures = []

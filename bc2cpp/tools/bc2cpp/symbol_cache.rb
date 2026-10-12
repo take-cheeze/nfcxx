@@ -15,9 +15,13 @@ module SymbolCache
   INTERN = /\bmrb_intern_(?:cstr|lit)\(M,\s*(#{STRING})\)/
   # CHECKED_SEND (ADR 0299): codegen_checked_send.rb marks a by-name call that must do what
   # OP_SEND / OP_SSEND check and mrb_funcall does not; the slot carries the check's level.
-  CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2 }.freeze
+  # NATIVE_SINGLETON_CALL (ADR 0416): `bc2cpp_native_singleton_named` is an explicit-receiver by-name call whose
+  # method the compiler proved to be one native singleton function; it keeps level 2 as its fallback is a
+  # checked send, and gets a per-site method cache slot (BC2CPP_NSC_SLOT).
+  CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
+                       'bc2cpp_native_singleton_named' => 2 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
-  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
+  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
   NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
   SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
@@ -30,8 +34,12 @@ module SymbolCache
     attr_accessor :nomethod_used
     # GUARD_VIOLATION (ADR 0290): the same for bc2cpp_guard_violation.
     attr_accessor :violation_used
+    # STRICT_HINTS (ADR 0419): the same for bc2cpp_hint_violation.
+    attr_accessor :hint_violation_used
     # NIL_RECEIVER (ADR 0296): the same for bc2cpp_nil_receiver.
     attr_accessor :nil_receiver_used
+    # NATIVE_SINGLETON_CALL (ADR 0416): the same for bc2cpp_native_singleton.
+    attr_accessor :native_singleton_used
 
     # CHECKED_SEND (ADR 0299): per slot, 0 plain, 1 argument count of an attr_reader, 2 that and
     # the explicit-receiver visibility check.
@@ -42,7 +50,9 @@ module SymbolCache
       @checks = []
       @nomethod_used = false
       @violation_used = false
+      @hint_violation_used = false
       @nil_receiver_used = false
+      @native_singleton_used = false
     end
 
     # A checked send gets a slot of its own, apart from the same name's plain slot.
@@ -99,12 +109,16 @@ module SymbolCache
         index = table.index_for(name[1].force_encoding(encoding), CHECKED_FUNCALLS.fetch(kind, 0))
         table.nomethod_used = true if kind == 'bc2cpp_nomethod_named' || kind == 'bc2cpp_nomethod_raise_named'
         table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
+        table.hint_violation_used = true if kind == 'bc2cpp_hint_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
+        table.native_singleton_used = true if kind == 'bc2cpp_native_singleton_named'
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
                       when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
                       when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
+                      when 'bc2cpp_hint_violation_named' then "bc2cpp_hint_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
+                      when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
                       end
         out << code[pos...start] << replacement.b
@@ -125,7 +139,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|nil_receiver)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
@@ -177,9 +191,11 @@ module SymbolCache
       static const char* const bc2cpp_sym_names[#{[table.size, 1].max}] = {
       #{names.empty? ? '  "",' : names}
       };
+      #{table.native_singleton_used ? "// NATIVE_SINGLETON_CALL: bumped with the symbol table, so no slot outlives its VM.\nstatic unsigned bc2cpp_nsc_epoch = 1;" : ''}
       static void bc2cpp_reset_symbol_cache() {
         bc2cpp_sym_state = nullptr;
         for (mrb_sym& s : bc2cpp_syms) s = 0;
+      #{table.native_singleton_used ? '  ++bc2cpp_nsc_epoch;' : ''}
       }
       static inline mrb_sym bc2cpp_sym(mrb_state* M, int i) {
         if (bc2cpp_sym_state != M) {
@@ -203,8 +219,9 @@ module SymbolCache
       #{checked ? "  if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, bc2cpp_sym(M, i), argc, argv, bc2cpp_sym_check[i] == 2);" : ''}
         return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
       }
+      #{table.native_singleton_used ? NATIVE_SINGLETON : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
-      #{table.violation_used ? GUARD_VIOLATION : ''}
+      #{table.violation_used ? GUARD_VIOLATION : ''}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
     CPP
   end
@@ -234,6 +251,68 @@ module SymbolCache
     }
   CPP
   private_constant :CHECKED_SEND
+
+  # NATIVE_SINGLETON_CALL (ADR 0416): `Const.name(args)` where the compiler proved `name` is one C function
+  # registered on the constant's singleton class (tools/bc2cpp/native_singletons.rb). The function reads its
+  # arguments through mrb_get_args from the call frame, so it cannot be called bare; this runs the frame
+  # mrb_funcall would push (mrb_funcall_with_method is funcall_with_block_m with the lookup done), once per site
+  # instead of the two lookups a checked bc2cpp_send makes. The slot is filled by the first call and is valid for
+  # one VM (epoch, state) and one receiver. Anything the proof assumed but the VM does not show -- the method is
+  # not a public C function, or an attr_reader-style NOARG function is given arguments -- is not cached and takes
+  # the ordinary checked send, so a wrong proof costs speed, never the error or the answer.
+  NATIVE_SINGLETON = <<~CPP
+    extern "C" mrb_value mrb_funcall_with_method(mrb_state*, mrb_value, mrb_sym, const mrb_method_t*, struct RClass*, mrb_int, const mrb_value*, mrb_value);
+    struct bc2cpp_nsc_slot {
+      unsigned epoch;
+      mrb_state* state;
+      struct RObject* recv;
+      mrb_method_t m;
+      struct RClass* owner;
+    };
+    #define BC2CPP_NSC_SLOT ([]() -> bc2cpp_nsc_slot& { static bc2cpp_nsc_slot s; return s; }())
+    [[gnu::noinline]] static bool bc2cpp_nsc_fill(mrb_state* M, bc2cpp_nsc_slot& s, mrb_value recv, mrb_sym mid, mrb_int argc) {
+      if (mrb_type(recv) != MRB_TT_CLASS && mrb_type(recv) != MRB_TT_MODULE) return false;
+      struct RClass* c = mrb_class(M, recv);
+      mrb_method_t m = mrb_method_search_vm(M, &c, mid);
+      if (MRB_METHOD_UNDEF_P(m) || !MRB_METHOD_CFUNC_P(m)) return false;
+      if (m.flags & (MRB_METHOD_PRIVATE_FL | MRB_METHOD_PROTECTED_FL)) return false;
+      if (!MRB_METHOD_PROC_P(m)) {
+        // A raw C function: OP_SEND checks the aspec it was registered with (vm.c check_argument_count) before the call.
+        mrb_aspec aspec = MRB_MT_ASPEC(m.flags);
+        int min = MRB_ASPEC_REQ(aspec) + MRB_ASPEC_POST(aspec);
+        int max = MRB_ASPEC_REST(aspec) ? -1 : min + MRB_ASPEC_OPT(aspec);
+        if (argc < min || (max >= 0 && argc > max)) mrb_argnum_error(M, argc, min, max);
+      }
+      if (argc > 0 && MRB_METHOD_PROC_P(m)) {
+        const struct RProc* p = MRB_METHOD_PROC(m);
+        if (MRB_PROC_ALIAS_P(p)) p = p->upper;
+        if (MRB_PROC_CFUNC_P(p) && MRB_PROC_NOARG_P(p)) return false;
+      }
+      s.epoch = bc2cpp_nsc_epoch;
+      s.state = M;
+      s.recv = mrb_obj_ptr(recv);
+      s.m = m;
+      s.owner = c;
+      return true;
+    }
+    static mrb_value bc2cpp_native_singleton(mrb_state* M, mrb_value recv, int i, bc2cpp_nsc_slot& s, mrb_int argc, ...) {
+      mrb_value argv[16];
+      if (argc > 16) mrb_raise(M, mrb_exc_get_id(M, mrb_intern_lit(M, "ArgumentError")), "Too long arguments. (limit=16)");
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      mrb_sym mid = bc2cpp_sym(M, i);
+      bool cached = s.epoch == bc2cpp_nsc_epoch && s.state == M && (mrb_type(recv) == MRB_TT_CLASS || mrb_type(recv) == MRB_TT_MODULE) &&
+                    s.recv == mrb_obj_ptr(recv);
+      if (cached || bc2cpp_nsc_fill(M, s, recv, mid, argc)) {
+        return mrb_funcall_with_method(M, recv, mid, &s.m, s.owner, argc, argv, mrb_nil_value());
+      }
+      if (bc2cpp_sym_check[i]) bc2cpp_check_send(M, recv, mid, argc, argv, bc2cpp_sym_check[i] == 2);
+      return bc2cpp_funcall_argv(M, recv, mid, argc, argv);
+    }
+  CPP
+  private_constant :NATIVE_SINGLETON
 
   # CLOSED_WORLD (docs/adr/0210): the else arm of a guard chain proven to list
   # every class that answers the name, on a receiver with no method_missing.
@@ -343,6 +422,47 @@ module SymbolCache
     }
   CPP
   private_constant :GUARD_VIOLATION
+
+  # STRICT_HINTS (docs/adr/0419): the else arm of a guard on a whole-program class HINT, forced by
+  # BC2CPP_STRICT_HINTS. A wrong hint is reached here with a correct program: log, then raise
+  # BC2cppHintViolation < NoMethodError (a `rescue NoMethodError` sees it after the log line). Never
+  # dispatches, never undefined behavior. -DBC2CPP_NOMETHOD_VERIFY aborts, naming class, name and site,
+  # so CI can run real workloads and prove zero violations; -DBC2CPP_HINT_VIOLATION_DISPATCH restores
+  # the by-name send (silently) to bisect a suspected wrong hint without regenerating.
+  HINT_VIOLATION = <<~CPP
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #endif
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_hint_violation_raise(mrb_state* M, mrb_value recv, mrb_sym mid, const char* site) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: hint violation reached: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s at %s\\n", mrb_sym_name(M, mid), site);
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_value msg = mrb_format(M, "%T#%n at %s", recv, mid, site);
+      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_sym puts_id = mrb_intern_lit(M, "puts");
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] hint violation: "), msg));
+      struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, mrb_str_plus(M, mrb_str_new_lit(M, "hint violation: "), msg)));
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    #ifdef BC2CPP_HINT_VIOLATION_DISPATCH
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
+    #else
+      (void)argc;
+      bc2cpp_hint_violation_raise(M, recv, bc2cpp_sym(M, i), site);
+    #endif
+    }
+  CPP
+  private_constant :HINT_VIOLATION
 
   # NIL_RECEIVER (docs/adr/0296): the nil arm of a receiver the class pools prove is nil or one
   # class, for a name nil does not answer. It is a real program path (a nil dereference), so it

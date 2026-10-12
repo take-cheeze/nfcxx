@@ -2,6 +2,7 @@
 
 require 'prism'
 require 'set'
+require_relative 'ruby_parse_cache'
 
 # FOREIGN_DEFINERS (docs/adr/0257): which method names outside Ruby (the build's
 # mrblib sources) defines, aliases, undefines or re-scopes on which class. The
@@ -37,7 +38,7 @@ module ForeignDefiners
   def scan_files(files)
     collector = Collector.new
     files.each do |path|
-      parsed = Prism.parse_file(path)
+      parsed = RubyParseCache.parse_file(path)
       raise "foreign Ruby source #{path} does not parse: #{parsed.errors.first&.message}" unless parsed.errors.empty?
 
       collector.visit(parsed.value)

@@ -23,9 +23,11 @@
 #   --top N                  how many ranked signature suggestions to print (default 20)
 #   --all                    also print one info diagnostic per untyped parameter / return / ivar
 #   --scope engine|all       engine sources only (default) or the mruby core mrblib too
+#   --sig DIR                RBS signature directory (BC2CPP_SIG_DIRS; default sig/bc2cpp; docs/bc2cpp-type-check.md)
 #   --no-sends               skip the by-name send ranking (the fastest run)
 #   --what-if                estimate, per suggestion, how many by-name lines a signature removes (recompiles each
 #                            send once; several minutes on the engine)
+#   --emit-rbs DIR           write the inferred types as RBS files below DIR (docs/bc2cpp-type-check.md)
 #   -q                       no summary: diagnostics only
 #
 # Exit status: 0 clean, 1 when a declared type contradicts the inference or a signature cannot be used, 2 when the
@@ -53,8 +55,10 @@ parser = OptionParser.new do |o|
   o.on('--top N', Integer) { |v| opts[:top] = v }
   o.on('--all') { opts[:all] = true }
   o.on('--scope S', %w[engine all]) { |v| opts[:scope] = v }
+  o.on('--sig DIR') { |v| (opts[:sig] ||= []) << File.expand_path(v) }
   o.on('--no-sends') { opts[:sends] = false }
   o.on('--what-if') { opts[:what_if] = true }
+  o.on('--emit-rbs DIR') { |v| opts[:emit_rbs] = v }
   o.on('-q') { opts[:quiet] = true }
 end
 rest = parser.parse(ARGV)
@@ -85,6 +89,13 @@ end
 suggestions = opts[:sends] ? TypeCheckReport.suggestions(facts, rows, scope: opts[:scope]) : []
 diags = TypeCheckReport.diagnostics(facts, suggestions, all: opts[:all], top: opts[:top], scope: opts[:scope])
 summary = TypeCheckReport.summary(facts, scope: opts[:scope])
+
+if opts[:emit_rbs]
+  require 'type_check_rbs'
+  emitted = TypeCheckRbs.emit(facts, opts[:emit_rbs], scope: opts[:scope])
+  warn "type_check: wrote #{emitted[:files].size} RBS file(s), #{emitted[:methods]} method signature(s) to #{opts[:emit_rbs]}" \
+       "#{emitted[:skipped].empty? ? '' : " (#{emitted[:skipped].size} skipped: #{emitted[:skipped].first(3).map(&:last).join(', ')})"}"
+end
 
 body = case opts[:format]
        when 'json' then TypeCheckReport.json(facts, suggestions, diags, summary, scope: opts[:scope])

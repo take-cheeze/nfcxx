@@ -85,18 +85,23 @@ class CodeGen
 
   # Names an `alias`/`alias_method`/`define_method` gives a body another name:
   # the registry lists the body under its original name only.
+  #
+  # Asked per name by the numeric dataflow, so it is computed once: @ireps is fixed at construction and no pass
+  # edits an irep's instructions. Frozen, so a caller that tried to extend it would fail instead of leaking.
   def numeric_aliased_names
-    names = Set.new
-    @ireps.each_value do |irep|
-      insns = irep.instructions
-      aliasing = insns.any? do |i|
-        i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
-      end
-      next unless aliasing
+    @numeric_aliased_names ||= begin
+      names = Set.new
+      @ireps.each_value do |irep|
+        insns = irep.instructions
+        aliasing = insns.any? do |i|
+          i.op == 'ALIAS' || (i.op.include?('SEND') && ALIAS_NAME_ARGUMENTS.key?(i.sym))
+        end
+        next unless aliasing
 
-      insns.each { |i| names << i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') }
+        insns.each { |i| names << i.sym if i.sym && (i.op == 'ALIAS' || i.op == 'LOADSYM') }
+      end
+      names.freeze
     end
-    names
   end
 
   # The names the aliasing operations of the program spell (an irep with a computed operand keeps every Symbol it

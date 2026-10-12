@@ -200,6 +200,7 @@ module TypeCheckReport
   def summary(facts, scope: 'engine')
     methods = facts['methods'].select { |m| scope == 'all' || m['scope'] == scope }
     ivars = facts['ivars'].select { |i| scope == 'all' || i['scope'] == scope }
+    consts = facts['constants'].select { |c| scope == 'all' || c['scope'] == scope }
     params = methods.flat_map { |m| m['params'] }
     {
       'methods' => methods.size,
@@ -211,7 +212,7 @@ module TypeCheckReport
       'methods_fully_typed' => methods.count { |m| m['return']['type'] && m['params'].all? { |p| p['type'] } },
       'ivars' => ivars.size, 'ivars_typed' => ivars.count { |i| i['type'] },
       'ivars_with_element' => ivars.count { |i| i['element'] },
-      'constants' => facts['constants'].size, 'constants_typed' => facts['constants'].count { |c| c['type'] },
+      'constants' => consts.size, 'constants_typed' => consts.count { |c| c['type'] },
       'annotations' => facts['annotations'].size, 'contradictions' => facts['contradictions'].size,
       'param_reasons' => tally(params.reject { |p| p['type'] }.map { |p| reason_bucket(p['reason']) }),
       'param_reasons_detail' => tally(params.reject { |p| p['type'] }.map { |p| p['reason'].to_s.sub(/\Adropped:.*/, 'dropped') }),
@@ -292,6 +293,8 @@ module TypeCheckReport
       rows << ['ivar', i['owner'], i['name'], '', type, i['source'], i['reason'], i['file'], i['line'], i['col']].join("\t")
     end
     facts['constants'].each do |c|
+      next unless scope == 'all' || c['scope'] == scope
+
       rows << ['const', '', c['name'], '', c['type'], c['source'], '', c['file'], c['line'], c['col']].join("\t")
     end
     rows.join("\n") << "\n"

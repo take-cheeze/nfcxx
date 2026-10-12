@@ -55,14 +55,19 @@ class CodeGen
     mask = exact_flow_mask(irep, idx, dest_reg)
     core_bits = RETURN_CORE_CLASS.keys.reduce(0, :|)
     if mask.is_a?(Integer) && mask.positive? && (mask & ~core_bits).zero?
-      return RETURN_CORE_CLASS[mask] == klass
+      proven = RETURN_CORE_CLASS[mask]
+      return proven == klass if proven || !guarded_inline_sites?
     end
 
     traced = trace_new_target(irep, idx, dest_reg, ivar_classes, mand, arg_classes, owner: owner_name,
                                class_layout: @class_layout, registry: @registry,
                                container_constants: @container_constants)
     traced = proven_array_source(irep, idx, dest_reg) if klass == 'Array' && traced != 'Array'
-    traced == klass
+    return true if traced == klass
+
+    # GUARDED_BLOCK_INLINE (ADR 0420): an unproven receiver is asked at run time (guarded_inline_receiver?).
+    guarded_inline_why(irep, insn, klass, "receiver traced to #{traced}") if traced && guarded_inline_sites?
+    !traced && guarded_inline_receiver?(insn, klass)
   end
 
   # BLOCK_SUPPORT (ADR 0147): inline `receiver.times { |i| BODY }` as a native

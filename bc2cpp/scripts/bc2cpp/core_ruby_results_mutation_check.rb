@@ -34,6 +34,8 @@ MUTANTS = [
   ['foreign name ignored', 'return nil unless @closed_world.native_return_sources_visible?(name, paths)', 'return nil if false', 'foreign filter definition', /unknown filter result/],
   ['opaque name ignored', 'return nil unless opaque && opaque.none? { |_owner, method| method == name }', 'return nil if false', 'outside filter definition', /unknown filter result/],
   ['kill switch ignored', "return nil if ENV['BC2CPP_CORE_RUBY_RESULTS'] == '0'", 'return nil if false', 'kill switch', /mapped result/],
+  ['symbol block switch ignored', "writer.op == 'LOADSYM' && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'", "writer.op == 'LOADSYM'", 'symbol block kill switch', /Symbol block reject result/],
+  ['any block writer taken for a Symbol', "writer.op == 'LOADSYM' && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'", 'true', 'core bodies', /block held in a local stays unproved/],
   ['caller break ignored', 'caller ? %w[BREAK] : %w[BREAK RETURN_BLK]', 'caller ? [] : %w[BREAK RETURN_BLK]', 'core bodies', /breaking stays unproved/],
   ['callee nonlocal return ignored', 'caller ? %w[BREAK] : %w[BREAK RETURN_BLK]', 'caller ? %w[BREAK] : %w[BREAK]', 'core nonlocal return', /mapped result/],
   ['captured writes ignored', 'fixnum_proof_ctx(body)[:upvars]', 'Set.new', 'core captured write', /mapped result/],

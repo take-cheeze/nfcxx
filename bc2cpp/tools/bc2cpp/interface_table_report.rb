@@ -49,7 +49,7 @@ module InterfaceTableReport
     name = insn.sym
     kept = code.scan(/CLOSED_WORLD kept: (\w+)/).flatten.uniq
     else_kind = if code.include?('bc2cpp_nomethod_named') then 'nomethod'
-                elsif code.include?('bc2cpp_guard_violation') then 'violation'
+                elsif code.include?('bc2cpp_guard_violation') || code.include?('bc2cpp_hint_violation') then 'violation'
                 elsif !kept.empty? then "kept:#{kept.join('+')}"
                 elsif code.match?(/\bmrb_funcall(?:_id|_with_block)?\(M,/) then 'send'
                 else 'no_dispatch'
