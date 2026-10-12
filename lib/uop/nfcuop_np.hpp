@@ -201,6 +201,13 @@ inline Tensor tanh(const Tensor& a) { return a.tanh(); }
 inline Tensor abs(const Tensor& a) { return a.abs(); }
 inline Tensor softmax(const Tensor& a, int64_t axis = -1) { return a.softmax(axis); }
 
+// Reverse-mode derivatives (nfcuop_grad.hpp, docs/notes/uop-autodiff.md): d loss / d wrt[k], one tensor per `wrt`, with its shape
+// and dtype. `loss` is a float scalar (e.g. `.sum()` or `.mean()` of something); each `wrt` is a float placeholder, a constant made
+// with array() or any other tensor. The result is more nodes of the same graph: evaluate it with eval/eval_all, or export it
+// with to_onnx next to the loss. Constants with equal content (up to 64 elements) are one tensor, so two equal arrays are one `wrt`.
+std::vector<Tensor> grad(const Tensor& loss, const std::vector<Tensor>& wrt);
+Tensor grad(const Tensor& loss, const Tensor& wrt);
+
 Tensor operator+(const Tensor& a, const Tensor& b);
 Tensor operator-(const Tensor& a, const Tensor& b);
 Tensor operator*(const Tensor& a, const Tensor& b);

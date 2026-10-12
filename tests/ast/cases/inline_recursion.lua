@@ -40,11 +40,16 @@ local function down(n)
 end
 local function down2(n)
   if n == 0 then error("bottom2", 2) end
-  return (down2(n - 1))        -- not a tail call: Lua would drop the caller's frame, the engine does not
+  return (down2(n - 1))        -- not a tail call: the frame of each level stays
+end
+local function down3(n)
+  if n == 0 then error("bottom3", 2) end
+  return down3(n - 1)          -- a tail call: level 2 is the caller of the first call
 end
 for i = 0, 5 do
   print(pcall(down, i))
   print(pcall(down2, i))
+  print(pcall(down3, i))
 end
 local function bad(n) if n == 0 then return nil + 1 end return bad(n - 1) end
 for i = 0, 4 do print(pcall(bad, i)) end

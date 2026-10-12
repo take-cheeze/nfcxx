@@ -25916,6 +25916,7 @@
       (set %18 %22)))
   (if %18
     (then
+      (likely)
       (block
         (let %23 (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) $"__r"))
         (nonnull %23)
@@ -26121,6 +26122,7 @@
       (set %8 %12)))
   (if %8
     (then
+      (likely)
       (block
         (let %13 (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) (load (ptr (const (struct "_ZNSt6ranges8__detail15__max_size_typeE"))) $"__r"))
         (nonnull %13)
@@ -26272,6 +26274,7 @@
           (let %31 bool (ne int %30 (const int 0)))
           (if %31
             (then
+              (unlikely)
               (block
                 (let %32 (ptr unsigned_long) (offset $"tmp.22" 8))
                 (store unsigned_long $"tmp.22" (const unsigned_long 0))
@@ -26390,6 +26393,7 @@
           (let %22 bool (ne int %21 (const int 0)))
           (if %22
             (then
+              (unlikely)
               (block
                 (let %23 (ptr unsigned_long) (offset $"tmp.15" 8))
                 (store unsigned_long $"tmp.15" (const unsigned_long 0))
@@ -26415,6 +26419,7 @@
           (let %31 bool (ne unsigned_int %30 (const unsigned_int 0)))
           (if %31
             (then
+              (unlikely)
               (block
                 (block
                   (let %32 (ptr unsigned_long) (offset $"tmp.19" 8))

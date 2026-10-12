@@ -6,6 +6,9 @@
 #                               (also differential), and the UOp-level numpy-style builder (nfcuop_ut.hpp)
 #   - tests/uop/test_np.cpp     the user-facing numpy-like API over the ONNX-style graph (nfcuop_np.hpp, nfcuop_hir.hpp): values,
 #                               errors, slicing, concatenation, the graph, the ONNX export; it also writes models
+#   - tests/uop/test_grad.cpp   reverse-mode autodiff (nfcuop_grad.hpp): finite differences in float64 for every rule, exact gradients (ties,
+#                               second derivatives), the Pad operator, errors, gradients on the C backend equal to the interpreter bit for
+#                               bit; it also writes models (a loss and its gradients) for onnx_check.py
 #   - tests/uop/test_cgen.cpp   C rendering (nfcuop_cgen.hpp): fusion, and generated C equal bit for bit to the interpreter on random
 #                               graphs of every dtype and through the numpy API; the generated C is compiled with $NFCUOP_CC or cc.
 #                               On the nfcxx back ends it is run a second time with `nfcxx` itself as the C compiler (the `quick` set)
@@ -21,8 +24,8 @@
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp)
-tests=(test test_ut test_np test_cgen np_compat)
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_grad.cpp)
+tests=(test test_ut test_np test_grad test_cgen np_compat)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
 run_all() {
@@ -33,7 +36,7 @@ run_all() {
       echo "FAIL $label uop/$t (build)"; head -30 <<<"$out"; fail=1; continue
     fi
     case $t in
-      test_np) args=("$tmp/$label/onnx") ;;
+      test_np|test_grad) args=("$tmp/$label/onnx") ;;
       np_compat) args=("$tmp/$label/compat.json") ;;
       *) args=() ;;
     esac

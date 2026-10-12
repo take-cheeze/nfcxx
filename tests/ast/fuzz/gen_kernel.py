@@ -32,7 +32,7 @@ class Func:
 
 
 CUR_LEVEL = [0]
-ALLOW_N = [True]  # off while the start of a loop is made: a NaN there meets a difference of the engine from Lua
+ALLOW_N = [True]
 BUDGET = [0]       # calls of other functions this function may still contain (the cost of a call is bounded this way)
 SELF_BUDGET = [0]  # and of itself
 
@@ -225,14 +225,12 @@ def gen_block(env, ret, depth, indent, in_loop, self_fn, nstmts):
             e2 = dict(env)
             v = fresh('c')
             if kind == 'int':
-                ALLOW_N[0] = False
                 start = R.choice(['1', '0', '-3', '5', gen_expr(env, 'i', 1, self_fn) + ' % 7'])
-                ALLOW_N[0] = True
                 limit = R.choice(['3', '5', '0', '-2', '(%s) %% 5' % gen_expr(env, 'i', 2, self_fn), '(%s) %% 4.5' % gen_expr(env, 'f', 2, self_fn)])
                 step = R.choice(['', '', ', 1', ', 2', ', -1', ', 3', ', -2'])
                 if step.startswith(', -') and '%' in limit:
-                    # Lua runs `for i = 0, 0/0, -1` down to the smallest integer (a NaN limit that is not positive); nfcast skips it
-                    # (a difference of the engine, not of the tier), so a computed limit stays out of loops that count down
+                    # a computed limit that is NaN makes `for i = 0, 0/0, -1` count down to the smallest integer (as in Lua): it
+                    # would not end, so a computed limit stays out of loops that count down
                     limit = R.choice(['-3', '-5', '0', '-2'])
                 e2[v] = 'i'
                 body = gen_block(e2, ret, depth - 1, indent + 1, True, self_fn, R.choice([1, 2, 3]))
@@ -323,8 +321,6 @@ def mutate_ups():
     if R.random() < 0.15:
         t = R.choice('ifb')  # a different type: the compiled code assumed the old one
     v = lit(t)
-    while '1e308' in v:  # no infinities in the free variables: a NaN start of a float loop would meet a difference of the engine
-        v = lit(t)       # from Lua's (the loop's body is skipped, Lua runs it once)
     return '%s = %s' % (u, v)
 
 

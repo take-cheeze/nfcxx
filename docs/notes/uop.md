@@ -16,7 +16,7 @@ Graph / UOp (hash-consed nodes, shapes, rewrites)       nfcuop.hpp
 ```
 
 The plan is to grow it stage by stage so that a graph can be built from C++ (and later Ruby, Lua, Python, JavaScript and Go
-through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 4 and the ONNX layer exist; the rest is a plan.
+through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 5, autodiff (stage 6, see the table) and the ONNX layer exist; ONNX import and dynamic shapes are plans.
 
 | Stage | Content | State |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ through `nfcpoly`), exported to ONNX, optimized and run. Stages 1 to 4 and the O
 | 3b | `hir::Graph`: ONNX-style operators with shape inference, ONNX export, lowering to UOps; `np::Tensor` over it | done |
 | 4 | Rendering UOp graphs to C (fused loop nests), compiling with `cc` and running through `dlopen`; selectable as a backend of `eval` | done (plain loops: no tiling, vectorization or threads) |
 | 5 | `nfcpoly` bindings (`nfcuop_poly.cpp`) and a cross-language test | done (`uop-poly.md`) |
-| 6 | Autodiff as a rewrite; ONNX **import** | not started |
+| 6 | Autodiff on the `hir` graph (`hir::gradients`, `np::grad`; [uop-autodiff.md](uop-autodiff.md)); ONNX **import** | autodiff done, import not started |
 | 7 | Dynamic shapes (below) | not started |
 
 ## Stage 1: the scalar core

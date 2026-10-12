@@ -8,19 +8,46 @@ EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`de
 ## qbe backend (default)
 
 `nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
-`scripts/cproc-asan.patch` (applied to the build copy by `scripts/setup-qbe.sh`, so the submodule stays clean), then
+the `nfcxx-asan` branch of take-cheeze/cproc, which `3rd/cproc` is pinned to, then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
 Stack objects get redzones (`asanalloc` in cproc's `funcalloc`): 32 bytes on each side, allocated in the entry block,
-poisoned on entry and unpoisoned in `funcret`. Globals get a trailing redzone: `emitdata` writes the rest of the
+poisoned at the declaration and unpoisoned in `funcret`. Globals get a trailing redzone: `emitdata` writes the rest of the
 object's 8-byte granule and 32 zero bytes into the same data item, and the unit's constructor (`emitasanctor`, in
 `.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
 leading redzone (an access before the object is not reported); thread-local globals get none; objects over 16-byte
-alignment, variable-length arrays and `alloca` get no redzones. Not yet: use-after-scope and use-after-return (the
-`ASAN-ONLY: gcc` case skips on qbe), the report's source line, and volatile (qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+alignment get no redzones (variable-length arrays and `alloca`: see Dynamic allocations). Not yet: use-after-scope and use-after-return (the
+`ASAN-ONLY: gcc` case skips on qbe), and volatile (qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+
+Source lines: with `NFCXX_ASAN=1`, `qbe-cc` keeps the preprocessor's line markers (no `-P`), cproc records the location of each
+expression (`struct expr` `loc`) and emits `dbgloc N` before each check, and a `dbgfile` names the file of the function.
+QBE turns those into `.loc` lines, so libasan's report names `file:line` like the gcc backend. The line is the expression's
+start token, so a multi-line expression may name a line inside it; `qbe-prep.rb` skips the markers as comments.
+
+## Dynamic allocations (qbe)
+
+`alloca` (`__builtin_alloca`) and the variable-length arrays of C input get redzones like a stack object
+(`asandynalloc` in cproc's `qbe.c`). The block is `round8(size) + 2 * 32` bytes from QBE's `alloc16`, at the place of the
+call or declaration: the whole block is unpoisoned, then the two redzones are poisoned, so a return before a declaration
+never poisons it. QBE does not release a dynamic allocation before the function returns (`subq` on `rsp`; a loop
+allocates again on each pass), so the blocks stay until then. The entry block keeps two slots, the lowest base and the
+highest end of the function's dynamic blocks (QBE moves the stack down, so the latest base is the lowest). `asandynret`
+adds, to each return block, a test of the lowest base: if a dynamic block was allocated on this path, it unpoisons
+[lowest, highest) before the `ret`. Returns that run before any dynamic allocation (a return before a declaration, or
+earlier in a loop body) skip the call. A function without a dynamic allocation is emitted as before.
+`tests/asan/cases/alloca_*.cpp`, `vla_*.c`: an overflow past the block (`use-after-poison` on qbe), an alloca loop that
+stays in bounds, and returns before and inside a loop after a VLA, followed by a check that its redzones are addressable.
+
+Limits: a C++ variable-length array does not use this. EDG lowers it to `__vla_alloc` (`3rd/edg/lib_src/vla_alloc.c`),
+which carves VLAs out of shared 32 KB blocks (a VLA of 4096 bytes or more has its own malloc block), so no redzone
+separates two VLAs of one C++ function, and gcc misses that overflow too. Removing it needs EDG's lowering or runtime
+(the investigation found no way inside cproc). The size is rounded up to 8 bytes as for stack objects, so bytes between
+the size and the rounding are not covered; `alloca(0)` returns the start of the right redzone (it cannot be dereferenced).
+Alignments over 16 get no redzone. A block is not released at the end of its scope, so a pointer to a VLA or alloca block
+used after its loop pass or after the function returned is not reported (no use-after-scope or use-after-return here).
 
 ## How it works
 
@@ -36,7 +63,7 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (`scripts/cproc-asan.patch`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack, dynamic (alloca, C-input VLA) and global objects get redzones (take-cheeze/cproc `nfcxx-asan`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 

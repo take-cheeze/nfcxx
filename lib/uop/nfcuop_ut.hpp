@@ -51,6 +51,10 @@ class Tensor {
   // one element (there are no empty tensors); a negative step reverses.
   Tensor slice(int64_t axis, bool has_start, int64_t start, bool has_stop, int64_t stop, int64_t step = 1) const;
   Tensor flip(const Axes& axes) const;
+  // `before[i]` and `after[i]` extra elements on each side of axis i (non-negative), zero (false) or `value` (a Scalar of this
+  // tensor's dtype) in the new places: ONNX Pad in constant mode.
+  Tensor pad(const Shape& before, const Shape& after) const;
+  Tensor pad(const Shape& before, const Shape& after, const Scalar& value) const;
   Tensor squeeze() const;  // all axes of size 1
   Tensor squeeze(int64_t axis) const;
   Tensor expand_dims(int64_t axis) const;

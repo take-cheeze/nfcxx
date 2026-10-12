@@ -1404,7 +1404,9 @@ struct Gen {
       cur += "double " + ix + " = " + D(o[0], ts) + ";\ndouble " + lim + " = " + D(o[1], tl) + ";\ndouble " + st + " = " +
              (o.size() > 2 ? D(o[2], tp) : std::string("1.0")) + ";\n";
       cur += "if (" + st + " == 0) nfct_bail(cx);\n";
-      cur += "for (; " + st + " > 0 ? " + ix + " <= " + lim + " : " + lim + " <= " + ix + "; " + ix + " += " + st + ") {\n";
+      // like Lua's forprep: only a start beyond the limit skips the loop, so a NaN bound runs the body once
+      cur += "for (int f" + id + " = 1; f" + id + " ? !(0 < " + st + " ? " + lim + " < " + ix + " : " + ix + " < " + lim + ") : (0 < " + st + " ? " + ix + " <= " + lim +
+             " : " + lim + " <= " + ix + "); " + ix + " += " + st + ", f" + id + " = 0) {\n";
       cur += var + " = " + conv(ix, Y_F, vt) + ";\n";
       emit_block(s->blocks[0]);
       cur += "}\n";

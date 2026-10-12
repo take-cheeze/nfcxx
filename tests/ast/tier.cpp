@@ -277,6 +277,9 @@ int main() {
         // loops: bounds of every kind
         "local function f(a, b, c) local n = 0 for i = a, b, c do n = n + 1 end return n end return f(1, 10, 1), f(10, 1, -1), f(1, 3.5, 1), f(1, 0, 1), f(math.maxinteger - 2, math.maxinteger, 1), f(1, 2, 0.25), f(1, math.huge, math.maxinteger)",
         "local function f(a, b, c) local n = 0 for i = a, b, c do n = n + 1 end return n end return pcall(f, 1, 10, 0), pcall(f, 1.0, 10, 0)",
+        // a NaN start or limit: a float loop runs its body once; an integer loop with a NaN limit runs down to the smallest integer
+        "local function f(a, b, c) local n = 0 for i = a, b, c do n = n + 1 if n > 5 then break end end return n end local nan = 0 / 0 "
+        "return f(nan, 3.0, 1.0), f(1.0, nan, 1.0), f(1, nan, 1), f(1, nan, -1), f(nan, 3.0, -1.0), f(1, 3, nan), f(3, nan, -2), f(1, 3.0, 1), f(4, 1, -1.0)",
         "local function f(n) local x = 0.0 for i = 1, n do x = x + i / 2 end return x end return f(0), f(1), f(10), f(100000)",
         // comparisons between integers and floats
         "local function lt(a, b) return a < b end local function le(a, b) return a <= b end return lt(1, 1.5), lt(2^53, 2^53 + 1), lt(9007199254740993, 9007199254740992.0), le(math.maxinteger, 2^63), lt(math.mininteger, -2^63), lt(0/0, 1), le(1, 0/0)",

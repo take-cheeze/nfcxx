@@ -313,6 +313,24 @@ Value infer(const Graph& g, const Node& n) {
     }
     return Value{"", V(0).dtype, out};
   }
+  if (op == "Pad") {
+    want_inputs(2, 3);
+    const Shape& in = V(0).shape;
+    if (const Attribute* m = n.attr("mode")) if (m->s != "constant") fail("only mode constant is supported");
+    std::vector<int64_t> pads = consts(1);
+    if (pads.size() != 2 * in.size()) fail("pads must have 2 * rank = " + std::to_string(2 * in.size()) + " entries, got " + std::to_string(pads.size()));
+    if (present(2)) {
+      same_dtype(V(0), V(2));
+      if (!V(2).shape.empty()) fail("constant_value must be a scalar");
+      if (g.initializer(n.inputs[2]) == nullptr) fail("constant_value must be an initializer");
+    }
+    Shape out = in;
+    for (size_t k = 0; k < in.size(); k++) {
+      if (pads[k] < 0 || pads[k + in.size()] < 0) fail("negative pads (cropping) are not supported");
+      out[k] += pads[k] + pads[k + in.size()];
+    }
+    return Value{"", V(0).dtype, out};
+  }
   if (op == "Concat") {
     want_inputs(1, 1000);
     if (!n.has_attr("axis")) fail("attribute axis is required");

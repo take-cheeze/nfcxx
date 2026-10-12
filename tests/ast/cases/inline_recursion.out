@@ -41,21 +41,27 @@ true	true	false	false
 -- recursion with errors in the middle
 false	inline_recursion.lua:38: bottom
 false	bottom2
+false	bottom3
 false	inline_recursion.lua:38: bottom
 false	inline_recursion.lua:43: bottom2
+false	bottom3
 false	inline_recursion.lua:38: bottom
 false	inline_recursion.lua:43: bottom2
+false	bottom3
 false	inline_recursion.lua:38: bottom
 false	inline_recursion.lua:43: bottom2
+false	bottom3
 false	inline_recursion.lua:38: bottom
 false	inline_recursion.lua:43: bottom2
+false	bottom3
 false	inline_recursion.lua:38: bottom
 false	inline_recursion.lua:43: bottom2
-false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
-false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
-false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
-false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
-false	inline_recursion.lua:49: attempt to perform arithmetic on a nil value
+false	bottom3
+false	inline_recursion.lua:54: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:54: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:54: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:54: attempt to perform arithmetic on a nil value
+false	inline_recursion.lua:54: attempt to perform arithmetic on a nil value
 -- runaway recursion is a stack overflow whatever was inlined
 false	string	true
 false	string	true

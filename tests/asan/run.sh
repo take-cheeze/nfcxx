@@ -17,8 +17,8 @@ pass=0; fail=0; skip=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 
-for f in tests/asan/cases/*.cpp; do
-  n=$(basename "$f" .cpp)
+for f in tests/asan/cases/*.cpp tests/asan/cases/*.c; do
+  n=$(basename "$f"); n=${n%.*}
   want=$(sed -n 's,^// ASAN: *\(.*\),\1,p' "$f" | head -1)
   # qbe may word the same error differently (its redzones are poisoned by __asan_poison_memory_region)
   [ "$B" = qbe ] && alt=$(sed -n 's,^// ASAN-QBE: *\([^ ]*\).*,\1,p' "$f" | head -1) && [ -n "$alt" ] && want=$alt
@@ -40,8 +40,8 @@ for f in tests/asan/cases/*.cpp; do
   fi
 done
 
-# The report names the source line of the faulting access (gcc: EDG's #line directives; qbe has no line info yet, asan-plan.md 5).
-if [ "$B" = gcc ]; then
+# The report names the source line of the faulting access (gcc: EDG #line directives; qbe: cproc dbgloc, see asan.md).
+if true; then
   "$nfcxx" --backend=gcc -fsanitize=address -g tests/asan/cases/heap_overflow.cpp -o "$tmp/h" 2>/dev/null
   "$tmp/h" 2>"$tmp/rep" >/dev/null
   if grep -q "heap_overflow.cpp:5" "$tmp/rep"; then ok "report has the C++ source line"; else bad "report has the C++ source line" "$(grep -m3 '#[0-9]' "$tmp/rep" | tr '\n' ' ')"; fi

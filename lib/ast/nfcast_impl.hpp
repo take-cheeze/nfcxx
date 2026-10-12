@@ -111,6 +111,9 @@ struct Frame {
   bool native_below;  // a native function (pcall, say) sits between this frame and PREV
   bool inlined = false;  // the body of a small function run by an inlined call node: no call_closure behind it (nfcast_inline.inc)
   int line;     // the line the function is at, for error messages and tracebacks
+  Closure* tail_cl = nullptr;  // set by `return f(...)` when f is a script function: call_closure runs it in this frame (proper tail call)
+  int tail_n = 0;              // its number of arguments, which `return` has moved to base[0..tail_n)
+  bool tailed = false;         // this frame was entered by a tail call: a traceback says "(...tail calls...)"
 };
 
 // The function whose arena the node running in F belongs to: the nearest frame that is not an inlined body. A body inlined into
@@ -124,6 +127,7 @@ inline Proto* owner_proto(Frame& f) {
 struct Node {
   int line = 0;
   Node** slot = nullptr;  // where the parent holds this node; a rewrite stores the replacement there
+  bool tail = false;      // a call that is the whole of a `return`: a tail call (set by ReturnNode; a rewrite keeps it)
   virtual ~Node() {}
   virtual Value eval(Frame& f) = 0;                                   // an expression's value (the first, if it has several)
   virtual void evalMulti(Frame& f, Rets& out) { out.push(eval(f)); }  // all its values (a call, `...`)
@@ -153,6 +157,7 @@ struct Node {
   void rewire(Node* neu) {
     neu->line = line;
     neu->slot = slot;
+    neu->tail = tail;
     if (slot) *slot = neu;
   }
 };

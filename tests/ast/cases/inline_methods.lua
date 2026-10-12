@@ -76,7 +76,8 @@ function Point:level2() error("level2 from " .. self.x, 2) end
 for i = 1, 6 do
   try(function() return bad:dot(p) end)
   try(function() return p:boom() end)
-  try(function() p:level2() end)           -- not a tail call (the engine runs tail calls as calls)
+  try(function() p:level2() end)
+  try(function() return p:level2() end)    -- a tail call: the function that made it is gone, level 2 is its caller
   try(function() return p:missing() end)
   try(function() return (nil):getx() end)
   try(function() local n = nil; return n:getx() end)
