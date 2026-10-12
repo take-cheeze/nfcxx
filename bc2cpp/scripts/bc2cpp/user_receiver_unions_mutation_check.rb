@@ -19,7 +19,7 @@ MUTANTS = [
   ['member receiver not substituted', 'inputs[insn.reg.to_i] = bit', 'inputs[insn.reg.to_i] = NumericFlow::OTHER', {}],
   ['case class guard ignored', '#{owner_class_ptr_expr(klass)} == bc2cpp_union_class', 'true', { 'UF_GENERATED_ONLY' => '0' }],
   ['emitted owner gate ignored', 'return nil if @only_owners && !@only_owners.include?(candidate.owner) && !@other_owners&.include?(candidate.owner)', 'return nil if false', {}],
-  ['outside lookup ignored', 'definition = closed_world_exact_target(name, receiver_class)', 'definition = @registry.fetch(name, []).find { |d| d.owner == receiver_class }', {}]
+  ['outside lookup ignored', 'definition = closed_world_exact_target(name, receiver_class, accessor: argc == 0)', 'definition = @registry.fetch(name, []).find { |d| d.owner == receiver_class }', {}]
 ].freeze
 work = lambda do |(_name, pattern, replacement, extra)|
   Dir.mktmpdir('user-union-mutant') do |dir|
