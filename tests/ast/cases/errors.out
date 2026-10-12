@@ -1,0 +1,37 @@
+false	false	false	false	false	table
+2	false	42	true
+false	false	false	lvl0
+false	tostr
+false	table	7	boom
+false	true
+false	false	false	errors.lua:10: attempt to perform arithmetic on a nil value (upvalue 'u')
+false	false	false	errors.lua:11: attempt to index a nil value (global 'nofunc')
+false	false	false	errors.lua:12: attempt to index a nil value (field 'y')
+false	false	false	true	11
+false	false	false	false	errors.lua:14: attempt to compare string with number
+false	false	false	false	false	errors.lua:15: attempt to perform bitwise operation on a string value (constant 'a')
+false	false	false	true	-9223372036854775807
+false	false	false	errors.lua:17: attempt to concatenate a nil value (upvalue 'u')
+false	false	false	false	errors.lua:18: bad 'for' step (number expected, got table)
+true	true	false	resulting string too large
+false	errors.lua:20: idx foo
+false	false	false	errors.lua:21: attempt to get length of a function value (global 'print')
+false	false	false	deep
+false	outer:inner
+false	x
+false	handled: errors.lua:30: bad
+true	7
+false	table
+false	false	true	3	table
+false	false	nil
+true	true
+true	true	false	bad argument #1 to 'pcall' (value expected)
+12	number	s
+false	true
+false	false	false	false	bad argument #2 to 'setmetatable' (nil or table expected, got no value)
+false	false	false	false	false	bad argument #1 to 'tonumber' (string expected, got number)
+3
+nil	nil	[string "return +"]:1: unexpected symbol near '+'
+false	nil	[string "x ="]:1: unexpected symbol near <eof>
+5	5
+7	8

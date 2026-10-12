@@ -1,0 +1,25 @@
+(4,6)	(-2,-2)	11	(2,4)	0.5	1	1	1.0	(-1,-2)
+false	true	true	true	true	false	false	2	(1,2)|(3,4)	(1,2)|s	s|(1,2)	1|(1,2)
+10	band	shl	bnot	false	0
+base	true	nil	nil
+foo!	1!	nil
+a,b	2	3
+nil	5
+cat makes a sound	rex makes a sound (woof)	true
+true	nil	nil
+locked	false	cannot change a protected metatable
+false	false	true
+(1,2)	(0,0)
+custom
+true	false	'__tostring' must return a string
+1one,2more,3more
+false	false	false	metatables.lua:4: attempt to index a number value (local 'b')
+false	false	false	metatables.lua:62: attempt to concatenate a table value
+true	true	false	2
+false	false	metatables.lua:67: attempt to index a nil value (field 'x')
+0	2	true	1	a
+false	true
+T1	1T	TT	abT	Tab
+42	5	2
+v	dflt	nil	false	metatables.lua:80: no
+true

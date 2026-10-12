@@ -4,11 +4,11 @@
 # exceptions) and scripts/setup-poly-lua.sh (Lua with ldo.c as C++); Python is the system CPython (python3-config), and is
 # skipped with a SKIP line when its development files are missing. See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
-#   POLY_LANGS="ruby lua python"   (default: all three)
+#   POLY_LANGS="ruby lua python ast"   (default: all four; ast is the nfcast engine, lib/ast, which needs nothing built)
 #   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-langs=${POLY_LANGS:-"ruby lua python"}
+langs=${POLY_LANGS:-"ruby lua python ast"}
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 for be in $backends; do
   defs=(); incs=(-I lib/poly); srcs=(); libs=(); built=(); bad=0
@@ -27,6 +27,8 @@ for be in $backends; do
         else
           echo "SKIP $be poly python: python3-config or Python.h not found (apt-get install python3-dev)"
         fi ;;
+      ast)
+        defs+=(-DTEST_AST); incs+=(-I lib/ast); srcs+=(lib/poly/nfcpoly_ast.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp); built+=(ast) ;;
       *) echo "FAIL poly: unknown language $l"; bad=1 ;;
     esac
   done

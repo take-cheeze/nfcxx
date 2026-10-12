@@ -22,6 +22,9 @@
 #ifdef TEST_PYTHON
 #include "nfcpoly_python.hpp"
 #endif
+#ifdef TEST_AST
+#include "nfcpoly_ast.hpp"
+#endif
 
 using nfcpoly::Context;
 using nfcpoly::Value;
@@ -98,12 +101,12 @@ static bool throws(F f) {
 }
 
 // ---- one language's way of writing things -----------------------------------------------------------------------
-enum Kind { Ruby, Lua, Python };
+enum Kind { Ruby, Lua, Python, Ast };  // Ast: Lua syntax, run by the nfcast engine
 struct Lg {
   Kind k;
   std::string name;
   bool rb() const { return k == Ruby; }
-  bool lu() const { return k == Lua; }
+  bool lu() const { return k == Lua || k == Ast; }  // Lua syntax
   bool py() const { return k == Python; }
   const char* ln() const { return name.c_str(); }
 
@@ -662,6 +665,85 @@ static void python_tests() {
 }
 #endif
 
+// ---- ast only (the nfcast engine) -------------------------------------------------------------------------------------------
+#ifdef TEST_AST
+static void ast_tests() {
+  g_lang = "ast (only)";
+  std::printf("-- [ast only] specialization, the collector, limits, the standard library, raw access\n");
+  State st;
+  Context ctx;
+  register_all(ctx, st);
+  const Lg L{Ast, "ast"};
+  ctx.eval_void("ast", L.prelude());
+  nfcast::State& S = nfcpoly::ast_state(ctx);
+  // the nodes specialize on what they see, and a guard that fails falls back
+  auto s0 = S.stats;
+  CHECK(ctx.eval<int>("ast", "local s = 0 for i = 1, 1000 do s = s + i * 2 end return s") == 1001000);
+  CHECK(S.stats.rewrites > s0.rewrites && S.stats.generic_ops == s0.generic_ops && S.stats.deopts == s0.deopts);
+  ctx.eval_void("ast", "function addv(a, b) return a + b end");
+  CHECK(ctx.eval<int>("ast", "addv(1, 2)") == 3);
+  auto s1 = S.stats;
+  CHECK(ctx.eval<double>("ast", "addv(1.5, 2)") == 3.5);  // a float reaches the integer node
+  CHECK(S.stats.deopts == s1.deopts + 1);
+  // the members of a host object are cached by its class: reading them again takes no slow path
+  auto s2 = S.stats;
+  CHECK(ctx.eval<double>("ast", "local t = 0 for i = 1, 200 do t = t + pos.x + pos.y end return t") == 200 * (1 + 2));
+  CHECK(S.stats.generic_ops == s2.generic_ops);
+  // the collector runs at every safe point and still frees what scripts own
+  int base = Vec3::live;
+  S.gc_stress = true;
+  ctx.eval_void("ast", "for i = 1, 200 do local v = Vec3.new(i, 2, 3) local w = v:plus(v) w:scale(2) end");
+  CHECK(ctx.eval<double>("ast", "local t = Vec3.new(1, 2, 3) local u = {t, Vec3.new(4, 5, 6)} return u[1].x + u[2]:len2()") == 1 + 77);
+  S.gc_stress = false;
+  ctx.eval_void("ast", L.gc());
+  CHECK(Vec3::live == base);
+  // a runaway recursion is a script error, not a crash
+  CHECK(ctx.eval<bool>("ast", "local function f() return 1 + f() end local ok, e = pcall(f) return (not ok) and tostring(e):find('stack overflow') ~= nil"));
+  bool got = false;
+  try {
+    ctx.eval<int>("ast", "local function f() return 1 + f() end return f()");
+  } catch (const nfcpoly::ScriptError& e) {
+    got = e.message().find("stack overflow") != std::string::npos;
+  }
+  CHECK(got);
+  CHECK(ctx.eval<int>("ast", "twice_c(4)") == 8);  // and the interpreter is still consistent
+  // the libraries a script gets: no files, no clock, no coroutines
+  CHECK(ctx.eval<bool>("ast", "io == nil and os == nil and package == nil and dofile == nil and loadfile == nil and coroutine == nil and debug == nil"));
+  CHECK(ctx.eval<std::string>("ast", "('abc'):upper() .. math.type(1) .. string.format('%03d', 7)") == "ABCinteger007");
+  // arrays are tables with keys 1..n only
+  CHECK(ctx.eval_value("ast", "{1, 2, x = 3}").is_array() == false);
+  CHECK(ctx.eval_value("ast", "{}").is_array());
+  CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<std::vector<int>>("ast", "{1, 2, x = 3}"); }));
+  // an error value that is not a string or one of ours goes through a bound function as the same object
+  CHECK(ctx.eval<bool>("ast", "local myobj = {k = 1}; local ok, e = pcall(with_guard, function() error(myobj) end); return e == myobj"));
+  // a script error passes through a bound C++ function that uses the engine's own API (nfcast::Thrown is an ordinary C++
+  // exception) and releases its RAII objects; the script that called the function rescues the very same error
+  ctx.bind_fn("with_guard_raw", [&ctx](Value f) -> int {
+    Guard g;
+    nfcast::Rets out;
+    nfcpoly::ast_state(ctx).call(nfcpoly::ast_value(f), nullptr, 0, out);
+    return 1;
+  });
+  int d0 = Guard::destroyed;
+  CHECK(ctx.eval<bool>("ast", "local ok, e = pcall(with_guard_raw, raiser('inner')) return (not ok) and tostring(e):find('inner') ~= nil"));
+  CHECK(Guard::alive == 0 && Guard::destroyed == d0 + 1);
+  CHECK(ctx.eval<bool>("ast", "local myobj = {k = 1}; local ok, e = pcall(with_guard_raw, function() error(myobj) end); return e == myobj"));
+  // a host method is a value too: obj.method(obj, ...)
+  CHECK(ctx.eval<double>("ast", "local f = pos.len2 return f(pos)") == st.pos.len2());
+  CHECK(ctx.eval<std::string>("ast", L.guard_msg("pos:nope()")).find("attempt to call a nil value (method 'nope')") != std::string::npos);
+  CHECK(ctx.eval<std::string>("ast", L.guard_msg("limit.x")).find("attempt to index a number value (global 'limit')") != std::string::npos);
+  // load builds code at run time
+  CHECK(ctx.eval<int>("ast", "load('return 6 * 7')()") == 42);
+  CHECK(ctx.eval<bool>("ast", "local f, e = load('x ='); return f == nil and e:find('unexpected symbol') ~= nil"));
+  // callbacks into script code from a bound function, with arguments
+  ctx.bind_fn("call2", [](Value f, int a, int b) { return f.execute(a, b).as<int>(); });
+  CHECK(ctx.eval<int>("ast", "call2(function(x, y) return x * 10 + y end, 4, 2)") == 42);
+  // raw access: the engine's own State
+  CHECK(S.globals->get_str(S.str("answer")).i == 42);
+  CHECK(S.depth == 0 && S.top == S.stack && S.cur == nullptr);
+}
+#endif
+
 // ---- several languages in one Context -----------------------------------------------------------------------------------
 static void cross_tests(const std::vector<Lg>& ls) {
   g_lang = "cross";
@@ -739,6 +821,9 @@ int main() {
 #ifdef TEST_PYTHON
   langs.push_back(Lg{Python, "python"});
 #endif
+#ifdef TEST_AST
+  langs.push_back(Lg{Ast, "ast"});
+#endif
   try {
     for (const Lg& L : langs) shared_tests(L);
 #ifdef TEST_RUBY
@@ -749,6 +834,9 @@ int main() {
 #endif
 #ifdef TEST_PYTHON
     python_tests();
+#endif
+#ifdef TEST_AST
+    ast_tests();
 #endif
     if (langs.size() > 1) cross_tests(langs);
   } catch (const std::exception& e) {

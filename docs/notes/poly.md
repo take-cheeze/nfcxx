@@ -1,7 +1,7 @@
 # nfcpoly: scripts in other languages, embedded in a C++ program
 
-`lib/poly` lets a program compiled with nfcxx evaluate source text of **Ruby** (mruby), **Lua** and **Python** (CPython)
-while it runs, with host objects and functions visible to the scripts and the scripts' values visible to C++: a small
+`lib/poly` lets a program compiled with nfcxx evaluate source text of **Ruby** (mruby), **Lua**, **Python** (CPython) and
+**ast** (Lua syntax, run by the self-specializing AST interpreter of `lib/ast`, `ast.md`) while it runs, with host objects and functions visible to the scripts and the scripts' values visible to C++: a small
 version of GraalVM's polyglot `Context.eval(language, source)` with shared bindings, several languages in one `Context`.
 Unlike `nfceval` (`eval.md`) no compiler runs per snippet.
 
@@ -31,9 +31,10 @@ linked in), plus that language's library:
 | Ruby (`"ruby"`, `"mruby"`) | `nfcpoly_mruby.cpp` | `build/poly/<backend>/lib/libmruby.a` | `scripts/setup-poly.sh` |
 | Lua (`"lua"`) | `nfcpoly_lua.cpp` | `build/poly-lua/<backend>/lib/liblua.a` | `scripts/setup-poly-lua.sh` |
 | Python (`"python"`, `"python3"`, `"py"`) | `nfcpoly_python.cpp` | the system libpython (`python3-config --ldflags --embed`) | `apt-get install python3-dev` |
+| ast (`"ast"`, `"nfcast"`) | `nfcpoly_ast.cpp` | the five `lib/ast/nfcast_*.cpp` files (`-I lib/ast`) | nothing to build |
 
-`tests/poly/run.sh` builds all three for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
-with a `SKIP` line when `python3-config` or `Python.h` is missing. `POLY_LANGS="lua"` selects languages.
+`tests/poly/run.sh` builds all four for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
+with a `SKIP` line when `python3-config` or `Python.h` is missing. `POLY_LANGS="lua ast"` selects languages.
 
 ## Architecture
 
@@ -54,7 +55,7 @@ with a `SKIP` line when `python3-config` or `Python.h` is missing. `POLY_LANGS="
 
 ## Building the interpreters
 
-All three are checked on both back ends.
+All three that need building are checked on both back ends; the `ast` engine is C++ and is compiled with the host.
 
 **Ruby: mruby with C++ exceptions.** `scripts/setup-poly.sh` builds mruby 4.0.0 (the pin of `scripts/setup-mruby.sh`) with
 its own rake build (`scripts/mruby-rt-config.rb`): `nfcc` is the C compiler, `nfcxx` the C++ compiler and the linker, and
@@ -81,6 +82,11 @@ with). The libraries a script gets are base (without `dofile` and `loadfile`), c
 backend uses `PyErr_GetRaisedException` from 3.12 and `PyErr_Fetch` before). One interpreter per process, started on first use
 and never finalized; each `Context` gets its own globals (a `dict` subclass).
 
+**ast: the nfcast engine.** `lib/ast` is an interpreter for a Lua 5.4 subset written in C++ (`ast.md`: self-specializing AST
+nodes, its own collector, Lua's error messages), so a script error is a C++ exception natively and nothing needs to be built or
+patched: the backend links the five `nfcast_*.cpp` files. It exists for what a bytecode VM cannot offer: nodes that specialize
+on the types they see, host-object members cached per class, and a tree that later steps can lower to compiled code.
+
 ## Exceptions
 
 Every backend keeps the same three rules (`nfcpoly_lang.hpp`):
@@ -91,10 +97,10 @@ Every backend keeps the same three rules (`nfcpoly_lang.hpp`):
    caught there and raised in the script instead: a conversion failure is a `TypeError`, a wrong argument count an
    `ArgumentError` (a `TypeError` in Python), a `ScriptError` coming from a nested `Value::call` raises that very script error
    object again, and anything else is an `NfcPoly::HostError` carrying the C++ exception in a `std::exception_ptr`.
-3. **A script error unwinds C++ frames properly** where the interpreter's errors are C++ exceptions (Ruby, Lua): the destructors of
+3. **A script error unwinds C++ frames properly** where the interpreter's errors are C++ exceptions (Ruby, Lua, ast): the destructors of
    a bound function's locals run when a script it called back into raises (`tests/poly/host.cpp`, `with_guard_raw`). The trampoline
    lets the interpreter's own throw pass (`catch (void*)`: mruby throws an `mrb_jmpbuf*`, Lua a pointer to its private
-   `lua_longjmp`). Python needs no such care: its errors are return values, and a C++ frame is unwound by the `ScriptError`
+   `lua_longjmp`; the ast engine throws `nfcast::Thrown`, caught by name and rethrown). Python needs no such care: its errors are return values, and a C++ frame is unwound by the `ScriptError`
    that `Value::call` throws.
 
 At the host boundary the identity round-trips: a `HostError` that no script code rescued is rethrown by `eval` / `Value::call`
@@ -106,6 +112,7 @@ the way.
 | Ruby | a Ruby exception | `NfcPoly::HostError < RuntimeError` | the Ruby class (`ArgumentError`) |
 | Lua | any value; the backend raises tables `{class, message}` with a `__tostring` | such a table, with a hidden `host` userdata | `LuaError` for `error("text")` |
 | Python | a Python exception | `HostError(RuntimeError)`, capsule in `_host` | the Python class (`ValueError`) |
+| ast | any value, as in Lua; the backend raises the same `{class, message}` tables | such a table, with a hidden `host` object | `LuaError` for `error("text")` |
 
 What the C++ exceptions of mruby buy, measured with `tests/poly/host.cpp` on the gcc back end: the same checks against mruby in
 its default setjmp/longjmp mode (a scratch build without `enable_cxx_exception`) fail exactly the destructor checks (the `Guard`
@@ -132,6 +139,7 @@ lower-case identifiers.
 | --- | --- | --- | --- | --- |
 | Ruby | the last expression | top-level locals, methods, globals | `Vec3.new(1, 2, 3)`, `v.len2`, `v.x = 4` | `counter`, and `self.counter = 5` |
 | Lua | the chunk's `return` value; a single expression is returned as is (tried as `return <code>` first) | globals (not `local`s) | `Vec3.new(1, 2, 3)` or `Vec3(1, 2, 3)`, `v:len2()`, `v.x = 4` | `counter`, and `counter = 5` (the globals' metatable) |
+| ast | as Lua | globals (not `local`s) | as Lua: `Vec3.new(1, 2, 3)` or `Vec3(1, 2, 3)`, `v:len2()`, `v.x = 4` | as Lua (the globals' metatable) |
 | Python | the last expression statement (the source is split with `ast`) | the globals | `Vec3(1, 2, 3)`, `v.len2()`, `v.x = 4` | `counter`, and `counter = 5` at the top level (a `dict` subclass; reads work in functions too; a write through `global counter` does not reach the host and shadows the live variable from then on, so assign at the top level or with `set`) |
 
 Several languages in one `Context`: every declaration is visible in all of them, and one host object is the same C++ object in
@@ -145,7 +153,7 @@ language (`Value::call` argument) throws `ConversionError`.
   scripts still own.
 - A `Value` roots its script value (`mrb_gc_register`, `luaL_ref`, a Python reference); `eval` and `Value::call` restore the GC
   arena, so a host loop does not grow it (`tests/poly/host.cpp`: 3000 iterations per language).
-- Garbage collection: Ruby `GC.start`, Lua `collectgarbage()`, Python reference counting (`gc.collect()` for cycles) release the
+- Garbage collection: Ruby `GC.start`, Lua and ast `collectgarbage()`, Python reference counting (`gc.collect()` for cycles) release the
   script-owned C++ objects (`Vec3::live` in the test).
 
 ## Limitations
@@ -170,8 +178,9 @@ None of these is covered by a test unless stated.
 
 ## Checks run
 
-`tests/poly/run.sh` on both back ends with all three languages (the host prints how many checks it ran), 8 repeated runs of each
+`tests/poly/run.sh` on both back ends with all four languages (the host prints how many checks it ran; 559), 8 repeated runs of each
 binary, each binary under valgrind (`PYTHONMALLOC=malloc valgrind -q --error-exitcode=9`, no errors reported), the setjmp control
 build described above, and mutation checks on scratch copies of the backends: dropping the interpreter pass-through in the Ruby or
 Lua trampoline, losing script error identity in Python, or leaking the ownership record in the Ruby or Lua wrappers each fail the
-checks written for it.
+checks written for it. The same for the ast backend: dropping the pass-through of `nfcast::Thrown` in its trampoline, losing script
+error identity, and not counting the ownership of a wrapped object each fail (the engine's own mutation checks are in `ast.md`).

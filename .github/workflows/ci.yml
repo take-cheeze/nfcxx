@@ -73,8 +73,11 @@ jobs:
       - name: nfceval run-time eval library and nfcxx -shared (both backends)
         run: tests/eval/run.sh
 
-      - name: nfcpoly embedded Ruby, Lua and Python, scripts calling C++ and back, C++ exceptions through mruby and Lua (both backends)
+      - name: nfcpoly embedded Ruby, Lua, Python and ast, scripts calling C++ and back, C++ exceptions through mruby, Lua and ast (both backends)
         run: tests/poly/run.sh
+
+      - name: nfcast self-specializing AST interpreter, output equal to Lua 5.4, collector stress (both backends)
+        run: tests/ast/run.sh
 
       - name: mruby scripts (byte-identical to the Python originals)
         run: tests/mruby/run.sh
