@@ -48,6 +48,25 @@ inline void __syncthreads(void) {}
 // The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
 inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
 
+// Device intrinsics, for the host copy of a kernel body (never run; the device code has the real instruction).
+// Signatures follow CUDA's; the values are placeholders.
+inline float __fdividef(float a, float b) { return a / b; }
+inline float __saturatef(float a) { return a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a); }
+inline float __ldg(const float *p) { return *p; }
+inline int __ldg(const int *p) { return *p; }
+inline unsigned int __ldg(const unsigned int *p) { return *p; }
+inline int __dp4a(int a, int b, int c) { (void)a; (void)b; return c; }
+inline float __shfl_up_sync(unsigned int mask, float v, unsigned int delta, int width = 32) { (void)mask; (void)delta; (void)width; return v; }
+inline int __shfl_up_sync(unsigned int mask, int v, unsigned int delta, int width = 32) { (void)mask; (void)delta; (void)width; return v; }
+inline int __syncthreads_or(int predicate) { return predicate != 0; }
+inline unsigned int __reduce_add_sync(unsigned int mask, unsigned int value) { (void)mask; return value; }
+inline void __threadfence_system(void) {}
+inline void __nanosleep(unsigned int ns) { (void)ns; }
+inline unsigned short __hmax(unsigned short a, unsigned short b) { return a > b ? a : b; }
+// glibc declares these (C linkage, throw()); the inline definitions match it, so every unit may include this header.
+extern "C" inline float __expf(float x) throw() { return __builtin_expf(x); }
+extern "C" inline float __logf(float x) throw() { return __builtin_logf(x); }
+
 // The integer intrinsics, for the host copy of a kernel and for host code that calls them (the device side is in the
 // device unit, scripts/cuda-rewrite.rb BUILTIN_DEFS). Real C++ here, with CUDA's definitions. The shuffles on the host
 // return the value of the calling lane (there is one lane on the host).

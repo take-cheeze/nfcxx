@@ -1228,6 +1228,14 @@ BUILTIN_DEFS = {
   "__fdividef" => "extern \"C\" float __nfcxx_fdividef(float, float);\nstatic inline float __fdividef(float a, float b) { return __nfcxx_fdividef(a, b); }\n",
   "__saturatef" => "extern \"C\" float __nfcxx_saturatef(float);\nstatic inline float __saturatef(float a) { return __nfcxx_saturatef(a); }\n",
   "__dp4a" => "extern \"C\" int __nfcxx_dp4a(int, int, int);\nstatic inline int __dp4a(int a, int b, int c) { return __nfcxx_dp4a(a, b, c); }\n",
+  # Block and system intrinsics (the emitter lowers the extern ones: bar.red.or.pred, the butterfly reduction, membar.sys, nanosleep).
+  # __reduce_add_sync ignores its mask, as the shuffles do: the full warp is lowered; a partial mask is not honoured.
+  "__syncthreads_or" => "extern \"C\" int __nfcxx_syncthreads_or(int);\nstatic inline int __syncthreads_or(int p) { return __nfcxx_syncthreads_or(p); }\n",
+  "__reduce_add_sync" => "extern \"C\" unsigned __nfcxx_reduce_add_sync(unsigned, unsigned);\nstatic inline unsigned __reduce_add_sync(unsigned m, unsigned v) { (void)m; return __nfcxx_reduce_add_sync(0xffffffffu, v); }\n",
+  "__threadfence_system" => "extern \"C\" void __nfcxx_threadfence_system(void);\nstatic inline void __threadfence_system(void) { __nfcxx_threadfence_system(); }\n",
+  "__nanosleep" => "extern \"C\" void __nfcxx_nanosleep(unsigned);\nstatic inline void __nanosleep(unsigned ns) { __nfcxx_nanosleep(ns); }\n",
+  "__isnanf" => "static inline int __isnanf(float x) { return x != x; }\n",
+  "__hmax" => HALF_CORE + "static inline unsigned short __hmax(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n",
   # __ldg: a plain load of the pointee (the read-only cache is a performance hint, not a semantic change).
   "__ldg" => "static inline float __ldg(const float *p) { return *p; }\nstatic inline int __ldg(const int *p) { return *p; }\nstatic inline unsigned __ldg(const unsigned *p) { return *p; }\n",
   # The warp shuffles (the emitter's WARP_SHUFFLES): int and float overloads, with and without the width. The mask and the
