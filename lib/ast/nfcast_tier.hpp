@@ -36,7 +36,8 @@ struct TierView {
     // statements
     K_BLOCK,   // kids = statements
     K_DECL,    // slots = declared locals, kids = values, captured
-    K_ASSIGN,  // slots = assigned locals, kids = values, captured (a target that is not a plain local: captured is set)
+    K_ASSIGN,  // slots = the slot (T_LOCAL, T_CELL) or upvalue index (T_UPVAL) of each target, tkinds, kids = values, captured (set unless
+               // every target is a plain local)
     K_IF,      // kids = conditions, blocks = their blocks, els = else block or null
     K_WHILE,   // cond, blocks = {body}
     K_REPEAT,  // cond, blocks = {body}
@@ -57,6 +58,8 @@ struct TierView {
   Node* els = nullptr;
   Node* cond = nullptr;
   std::vector<int> slots;
+  enum Target { T_LOCAL, T_CELL, T_UPVAL, T_OTHER };  // K_ASSIGN: a local, a local captured by a closure (in a Cell), an upvalue, a global or a field
+  std::vector<int> tkinds;
   bool captured = false;
   bool multi_last = false;
 };

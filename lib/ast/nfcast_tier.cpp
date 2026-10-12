@@ -128,14 +128,16 @@ struct FreeVar {
   int kind;  // 0: upvalue INDEX of the closure, 1: global NAME
   int idx;
   std::string name;
-  Ty ty;
+  Ty ty;     // the type of the value when the unit was built (what the entry guard checks)
+  bool written = false;  // assigned by the code (upvalues only): copied in at entry, copied out when the run has ended
 };
 
 struct Dep {
-  int kind;  // as FreeVar: the binding that holds the callee
+  int kind;  // as FreeVar, or 2: a local of the frame the unit's loop runs in (on-stack replacement), slot IDX, in a Cell if CELL
   int idx;
   std::string name;
   int callee;  // index of the callee in the unit
+  bool cell = false;
 };
 
 struct ProtoIR {
@@ -152,6 +154,8 @@ struct ProtoIR {
   // assigns without having declared them (IN_SLOTS, their slots in the interpreter's frame), found while the loop is lowered.
   bool osr = false;
   std::vector<int> pvars, in_slots;
+  std::vector<char> in_cell;     // a live local that is captured by a closure: its slot holds a Cell
+  std::vector<char> in_written;  // a live local the loop assigns
 };
 
 // What the engine needs at every entry to check that the code's assumptions about the functions and variables it reads still
@@ -159,12 +163,15 @@ struct ProtoIR {
 struct MFree {
   int kind, idx;
   std::string name;
-  Ty ty;
+  Ty ty;           // the type the guard wants at entry
+  bool written;
+  Ty sty = Y_UNK;  // the type it is kept in while the code runs (a written variable that took both kinds of number is an N)
 };
 struct MDep {
   int kind, idx;
   std::string name;
   int callee;
+  bool cell;
 };
 struct MProto {
   std::uint64_t serial;
@@ -202,6 +209,7 @@ struct Version {
   std::uint32_t runs = 0, aborts = 0;
   int style = 0;                // on-stack replacement: the TierLoopState::Kind of the loop (its sig is the types of the live locals)
   std::vector<int> in_slots;    //   the live locals: slots of the frame
+  std::vector<char> in_cell, in_written;
   std::vector<Ty> out_ty;       //   their types when the loop has ended (a local that took both kinds of number is an N)
   TierState* T = nullptr;
   ~Version();
@@ -214,6 +222,7 @@ struct Version {
 struct TierLoop {
   std::vector<std::unique_ptr<Version>> vers;
   std::vector<int> in_slots;  // the slots of the frame the loop reads or assigns without declaring them (known once it was lowered)
+  std::vector<char> in_cell, in_written;
   bool in_known = false;
   std::uint32_t edges = 0, next_try = 0;  // iterations counted since the last compile request, and how many make the next
   unsigned rejects = 0;
@@ -245,9 +254,12 @@ struct TierState {
   std::vector<Version*> pending;  // compiles running (Async)
   std::vector<Version*> queued;   // compiles waiting for one of the TierOptions::jobs to end (Async)
   unsigned tick = 0;
+  unsigned build_seq = 0;
   bool debug = false;
-  std::vector<nfcr_W> fvbuf;
+  std::vector<nfcr_W> fvbuf;  // two words for each free variable of a unit: the value, and for an N its kind
   std::vector<Closure*> closbuf;
+  std::vector<std::pair<Cell*, bool>> cellbuf;  // the cells a run can reach, and whether it assigns them
+  std::vector<std::pair<Cell*, bool>> extrabuf; // the same for the locals a loop hands over
 };
 
 namespace {
@@ -316,6 +328,7 @@ struct Unit {
   int max_nslots = 0;
   Node* osr_loop = nullptr;  // a unit for on-stack replacement: the loop that its first function is (the closure is the one that runs it)
   int osr_style = 0;         //   its TierLoopState::Kind
+  Frame* osr_frame = nullptr;  //   the frame of the running function (while the unit is built: the locals that hold functions are read there)
 };
 
 // The first function of a unit that starts at the loop LOOP of the function of CL (on-stack replacement).
@@ -324,7 +337,7 @@ int unit_add_osr(State& S, Unit& U, Closure* cl, Node* loop, int style) {
   if (!p->tier) new_tier_proto(S, p);
   std::unique_ptr<ProtoIR> ir(new ProtoIR());
   ir->serial = 0;  // no function has this serial: a call of the function the loop is in is a call of a function, not of the loop
-  ir->nslots = p->nslots;
+  ir->nslots = 0;  // the frame of the function the loop is in exists already; only the frames of what it calls count for the stack guard
   ir->line = p->linedefined;
   ir->osr = true;
   U.protos.push_back(std::move(ir));
@@ -399,7 +412,7 @@ struct Builder {
 
   // The variable of the local in SLOT, as it is read or assigned. In the first function of a unit for on-stack replacement a slot
   // that nothing in the loop declared yet is a local of the running function that was declared before the loop: a live variable.
-  int var_of_slot(int slot) {
+  int var_of_slot(int slot, bool cell, bool write) {
     if (slot < 0 || slot >= static_cast<int>(slot_var.size())) return -1;
     int v = slot_var[static_cast<std::size_t>(slot)];
     if (v < 0 && P.osr) {
@@ -407,6 +420,18 @@ struct Builder {
       slot_var[static_cast<std::size_t>(slot)] = v;
       P.in_slots.push_back(slot);
       P.pvars.push_back(v);
+      P.in_cell.push_back(cell);
+      P.in_written.push_back(0);
+    }
+    if (v >= 0 && P.osr)
+      for (std::size_t k = 0; k < P.pvars.size(); ++k)
+        if (P.pvars[k] == v) {
+          if (static_cast<bool>(P.in_cell[k]) != cell) fail.set("internal: a local that is a cell in one place and not in another");
+          if (write) P.in_written[k] = 1;
+        }
+    if (cell && !P.osr) {
+      fail.set("a local captured by a closure");
+      return -1;
     }
     return v;
   }
@@ -477,7 +502,13 @@ struct Builder {
     return t;
   }
 
-  Value read_binding(int kind, int idx, const std::string& name) {
+  Value read_binding(int kind, int idx, const std::string& name, bool cell = false) {
+    if (kind == 2) {  // a local of the frame the loop runs in
+      Frame* fr = U.osr_frame;
+      if (!fr || idx < 0) return Value();
+      const Value& sv = fr->base[idx];
+      return cell ? static_cast<Cell*>(sv.o)->v : sv;
+    }
     if (kind == 0) {
       if (idx < 0 || static_cast<std::uint32_t>(idx) >= cl->nup || !cl->up[idx]) return Value();
       return cl->up[idx]->v;
@@ -493,6 +524,7 @@ struct Builder {
     f.idx = idx;
     f.name = name;
     f.ty = ty;
+    f.written = false;
     P.fvs.push_back(f);
     return static_cast<int>(P.fvs.size()) - 1;
   }
@@ -501,6 +533,7 @@ struct Builder {
     TierView fv;
     tier_view(v.kids[0], fv);
     int kind, idx = -1;
+    bool cell = false;
     std::string name;
     if (fv.kind == TierView::K_UPVAL) {
       kind = 0;
@@ -508,13 +541,18 @@ struct Builder {
     } else if (fv.kind == TierView::K_GLOBAL) {
       kind = 1;
       name = std::string(fv.name->view());
+    } else if (fv.kind == TierView::K_LOCAL && P.osr && fv.slot >= 0 && fv.slot < static_cast<int>(slot_var.size()) &&
+               slot_var[static_cast<std::size_t>(fv.slot)] < 0) {
+      kind = 2;  // the loop calls a function that a local of the running function holds (not one the loop declares or assigns)
+      idx = fv.slot;
+      cell = fv.flag;
     } else {
       fail.set("a call of something that is not a named function");
       return nullptr;
     }
-    Value cv = read_binding(kind, idx, name);
+    Value cv = read_binding(kind, idx, name, cell);
     if (!cv.is_closure()) {
-      fail.set("a call of '" + (kind == 1 ? name : std::string("an upvalue")) + "', which is not a script function now");
+      fail.set("a call of '" + (kind == 1 ? name : std::string(kind == 2 ? "a local" : "an upvalue")) + "', which is not a script function now");
       return nullptr;
     }
     int callee = unit_add(S, U, cv.closure(), fail);
@@ -528,6 +566,7 @@ struct Builder {
       d.idx = idx;
       d.name = name;
       d.callee = callee;
+      d.cell = cell;
       P.deps.push_back(d);
       dep = static_cast<int>(P.deps.size()) - 1;
     }
@@ -564,8 +603,7 @@ struct Builder {
         return e;
       }
       case TV::K_LOCAL: {
-        if (v.flag) return fail.set("a local captured by a closure"), nullptr;
-        int var = var_of_slot(v.slot);
+        int var = var_of_slot(v.slot, v.flag, false);
         if (var < 0) return fail.set("internal: a local that is not bound"), nullptr;
         IExpr* e = mk_expr(IExpr::Var, v.line);
         e->var = var;
@@ -639,7 +677,9 @@ struct Builder {
       case TV::K_DECL:
       case TV::K_ASSIGN: {
         bool decl = v.kind == TV::K_DECL;
-        if (v.captured) return fail.set(decl ? "a local captured by a closure" : "an assignment to an upvalue, a global or a field"), nullptr;
+        if (decl && v.captured) return fail.set("a local captured by a closure"), nullptr;
+        for (int tk : v.tkinds)
+          if (tk == TV::T_OTHER) return fail.set("an assignment to a global or a field"), nullptr;
         if (v.kids.size() != v.slots.size()) return fail.set("an assignment or declaration with a different number of values and variables"), nullptr;
         IStmt* s = mk_stmt(decl ? IStmt::Decl : IStmt::Assign, v.line);
         for (Node* k : v.kids) {
@@ -652,8 +692,15 @@ struct Builder {
             int var = bind_slot(slot);
             if (var < 0) return nullptr;
             s->vars.push_back(var);
+          } else if (v.tkinds[s->vars.size()] == TV::T_UPVAL) {
+            Value cv = read_binding(0, slot, std::string());
+            Ty t = free_ty(cv, "an assigned upvalue");
+            if (t == Y_UNK) return nullptr;
+            int fi = free_index(0, slot, std::string(), t);
+            P.fvs[static_cast<std::size_t>(fi)].written = true;
+            s->vars.push_back(-1 - fi);  // an upvalue: -1 - its index among the free variables
           } else {
-            int var = var_of_slot(slot);
+            int var = var_of_slot(slot, v.tkinds[s->vars.size()] == TV::T_CELL, true);
             if (var < 0) return fail.set("internal: an assignment to a local that is not bound"), nullptr;
             s->vars.push_back(var);
           }
@@ -818,8 +865,14 @@ struct Infer {
   std::deque<Inst> insts;  // a deque: get_inst adds to it while a caller holds a reference to one of its elements
   bool changed = false;
   std::string error;
+  std::vector<Ty> fvty;  // the type each free variable of the unit is kept in (by the unit's index: fvbase + the function's own)
 
-  explicit Infer(Unit& u) : U(u) {}
+  explicit Infer(Unit& u) : U(u) {
+    for (const std::unique_ptr<ProtoIR>& p : u.protos) {
+      if (fvty.size() < static_cast<std::size_t>(p->fvbase) + p->fvs.size()) fvty.resize(static_cast<std::size_t>(p->fvbase) + p->fvs.size(), Y_UNK);
+      for (std::size_t j = 0; j < p->fvs.size(); ++j) fvty[static_cast<std::size_t>(p->fvbase) + j] = p->fvs[j].ty;
+    }
+  }
 
   ProtoIR& proto(const Inst& I) { return *U.protos[static_cast<std::size_t>(I.proto)]; }
 
@@ -887,7 +940,7 @@ struct Infer {
     switch (e->k) {
       case IExpr::Const: return e->cty;
       case IExpr::Var: return I.vty[static_cast<std::size_t>(e->var)];
-      case IExpr::Free: return P.fvs[static_cast<std::size_t>(e->fv)].ty;
+      case IExpr::Free: return fvty[static_cast<std::size_t>(P.fvbase + e->fv)];
       case IExpr::Arith: {
         Ty a = ex(I, e->kids[0]), b = ex(I, e->kids[1]);
         if (a == Y_UNK || b == Y_UNK) return Y_UNK;
@@ -987,7 +1040,10 @@ struct Infer {
       case IStmt::Assign:
         for (std::size_t i = 0; i < s->exprs.size(); ++i) {
           Ty t = ex(I, s->exprs[i]);
-          if (need_val(I, t, "a value that is assigned")) join(I, I.vty[static_cast<std::size_t>(s->vars[i])], t, "a variable");
+          if (!need_val(I, t, "a value that is assigned")) continue;
+          int var = s->vars[i];
+          if (var >= 0) join(I, I.vty[static_cast<std::size_t>(var)], t, "a variable");
+          else join(I, fvty[static_cast<std::size_t>(proto(I).fvbase - 1 - var)], t, "an assigned upvalue");
         }
         break;
       case IStmt::If:
@@ -1143,6 +1199,7 @@ const char* kPostRt =
     "static nfcr_N nfct_nidiv(nfcr_Ctx* cx, nfcr_N a, nfcr_N b) { if (!(a.f | b.f) && b.w.i == 0) nfct_bail(cx); return nfcr_nidiv(a, b); }\n"
     "static nfcr_N nfct_nmod(nfcr_Ctx* cx, nfcr_N a, nfcr_N b) { if (!(a.f | b.f) && b.w.i == 0) nfct_bail(cx); return nfcr_nmod(a, b); }\n"
     "static nfcr_i64 nfct_ntoi(nfcr_Ctx* cx, nfcr_N n) { nfcr_i64 r = 0; if (!nfcr_ntoi(n, &r)) nfct_bail(cx); return r; }\n"
+    "static nfcr_N nfct_fvn(const nfcr_W* p) { nfcr_N n; n.w = p[0]; n.f = p[1].i; return n; }\n"
     "static double nfct_dbl(nfcr_u64 bits) { union { nfcr_u64 u; double d; } x; x.u = bits; return x.d; }\n"
     // The C compiler folds 0.0 / 0.0 to a positive NaN where the interpreter divides at run time and gets the processor's (negative on
     // x86); an operation on two constants, which the parser leaves alone exactly when its result is a NaN, goes through this.
@@ -1272,9 +1329,10 @@ struct Gen {
         return e->ci ? "1" : "0";
       case IExpr::Var: return vname(e->var);
       case IExpr::Free: {
-        const FreeVar& f = proto().fvs[static_cast<std::size_t>(e->fv)];
-        std::string a = "cx->fv[" + num(proto().fvbase + e->fv) + "]";
-        return f.ty == Y_F ? a + ".d" : (f.ty == Y_B ? "(int)" + a + ".i" : a + ".i");
+        Ty ft = in.fvty[static_cast<std::size_t>(proto().fvbase + e->fv)];
+        std::string a = "cx->fv[" + num(2 * (proto().fvbase + e->fv)) + "]";
+        if (ft == Y_N) return "nfct_fvn(&" + a + ")";
+        return ft == Y_F ? a + ".d" : (ft == Y_B ? "(int)" + a + ".i" : a + ".i");
       }
       case IExpr::Arith: {
         Ty ta = ty(e->kids[0]), tb = ty(e->kids[1]), rt = ty(e);
@@ -1416,8 +1474,18 @@ struct Gen {
     }
   }
 
-  // The C expression S for the value of E, as a value of the variable VAR.
-  std::string into(int var, const IExpr* e, const std::string& s) { return conv(s, ty(e), inst().vty[static_cast<std::size_t>(var)]); }
+  // The C statement that stores S, the C expression for the value of E, in the variable VAR (a negative VAR is the upvalue -1 - VAR).
+  std::string store(int var, const IExpr* e, const std::string& s) {
+    if (var >= 0) return vname(var) + " = " + conv(s, ty(e), inst().vty[static_cast<std::size_t>(var)]) + ";\n";
+    int g = proto().fvbase - 1 - var;
+    Ty st = in.fvty[static_cast<std::size_t>(g)];
+    std::string a = "cx->fv[" + num(2 * g) + "]";
+    if (st == Y_N) {
+      std::string t = tmp();
+      return "{ nfcr_N " + t + " = " + conv(s, ty(e), Y_N) + "; " + a + " = " + t + ".w; cx->fv[" + num(2 * g + 1) + "].i = " + t + ".f; }\n";
+    }
+    return a + (st == Y_F ? ".d" : ".i") + " = " + s + ";\n";
+  }
 
   void stmt(const IStmt* s) {
     switch (s->k) {
@@ -1426,11 +1494,11 @@ struct Gen {
       case IStmt::Assign: {
         std::vector<std::string> o = operands(s->exprs);
         if (s->vars.size() == 1) {
-          cur += vname(s->vars[0]) + " = " + into(s->vars[0], s->exprs[0], o[0]) + ";\n";
+          cur += store(s->vars[0], s->exprs[0], o[0]);
           break;
         }
         if (s->k == IStmt::Decl) {  // new variables: nothing the values read changes
-          for (std::size_t i = 0; i < s->vars.size(); ++i) cur += vname(s->vars[i]) + " = " + into(s->vars[i], s->exprs[i], o[i]) + ";\n";
+          for (std::size_t i = 0; i < s->vars.size(); ++i) cur += store(s->vars[i], s->exprs[i], o[i]);
           break;
         }
         std::vector<std::string> t;
@@ -1438,7 +1506,7 @@ struct Gen {
           t.push_back(tmp());
           cur += std::string(ty_c(ty(s->exprs[i]))) + " " + t[i] + " = " + o[i] + ";\n";
         }
-        for (std::size_t i = s->vars.size(); i > 0; --i) cur += vname(s->vars[i - 1]) + " = " + into(s->vars[i - 1], s->exprs[i - 1], t[i - 1]) + ";\n";  // right to left, as the interpreter stores
+        for (std::size_t i = s->vars.size(); i > 0; --i) cur += store(s->vars[i - 1], s->exprs[i - 1], t[i - 1]);  // right to left, as the interpreter stores
         break;
       }
       case IStmt::If: emit_if(s, 0); break;
@@ -1816,7 +1884,8 @@ void start_build(State& S, Version* v, const std::string& src) {
   }
   // Every file this process makes has its pid in its name: another process may be building the same code, and a half-written
   // source must never be what a compiler reads.
-  std::string pid = std::to_string(static_cast<long>(::getpid()));
+  // Two functions or loops of one State can have the same code (a chunk loaded twice): the sequence number keeps their files apart.
+  std::string pid = std::to_string(static_cast<long>(::getpid())) + "-" + std::to_string(T->build_seq++);
   v->cpp = base + "." + pid + ".cpp";
   v->tmp = base + "." + pid + ".so";
   v->log = base + "." + pid + ".log";
@@ -1845,13 +1914,20 @@ UnitMeta make_meta(const Unit& U) {
     mp.serial = p->serial;
     mp.nslots = p->nslots;
     mp.fvbase = p->fvbase;
-    for (const FreeVar& f : p->fvs) mp.fvs.push_back(MFree{f.kind, f.idx, f.name, f.ty});
-    for (const Dep& d : p->deps) mp.deps.push_back(MDep{d.kind, d.idx, d.name, d.callee});
+    for (const FreeVar& f : p->fvs) mp.fvs.push_back(MFree{f.kind, f.idx, f.name, f.ty, f.written, f.ty});
+    for (const Dep& d : p->deps) mp.deps.push_back(MDep{d.kind, d.idx, d.name, d.callee, d.cell});
     m.protos.push_back(std::move(mp));
   }
   m.nfv = U.nfv;
   m.max_nslots = U.max_nslots;
   return m;
+}
+
+// The types the typing settled on for the free variables, into the meta data the entry guard and the copy-back use.
+void set_storage_types(UnitMeta& m, const Unit& U, const Infer& in) {
+  for (std::size_t p = 0; p < m.protos.size(); ++p)
+    for (std::size_t j = 0; j < m.protos[p].fvs.size(); ++j)
+      m.protos[p].fvs[j].sty = in.fvty[static_cast<std::size_t>(U.protos[p]->fvbase) + j];
 }
 
 // The function of CL called with arguments of types SIG has been hot: lower it, and build it.
@@ -1893,6 +1969,7 @@ void request(State& S, TierProto* tp, Closure* cl, const std::vector<Ty>& sig) {
   }
   v->ret = in.insts[0].ret;
   v->meta = make_meta(U);
+  set_storage_types(v->meta, U, in);
   Gen g(U, in);
   std::string src = g.source(T->rt_text);
   Version* raw = v.get();
@@ -1914,8 +1991,14 @@ bool signature(const Value* args, int n, int nparams, std::vector<Ty>& sig) {
 // ================================================================================================================================
 // calling
 // ================================================================================================================================
-// Reads the binding KIND/IDX/NAME as seen from CL.
-bool lookup(State& S, Closure* cl, int kind, int idx, const std::string& name, Value* out) {
+// Reads the binding KIND/IDX/NAME as seen from CL (kind 2: the local in slot IDX of the frame FR, in a Cell if CELL).
+bool lookup(State& S, Closure* cl, Frame* fr, int kind, int idx, const std::string& name, bool cell, Value* out) {
+  if (kind == 2) {
+    if (!fr || idx < 0) return false;
+    const Value& sv = fr->base[idx];
+    *out = cell ? static_cast<Cell*>(sv.o)->v : sv;
+    return true;
+  }
   if (kind == 0) {
     if (idx < 0 || static_cast<std::uint32_t>(idx) >= cl->nup || !cl->up[idx]) return false;
     *out = cl->up[idx]->v;
@@ -1927,19 +2010,32 @@ bool lookup(State& S, Closure* cl, int kind, int idx, const std::string& name, V
 
 // Checks that every function and variable the code was compiled against is still what it assumed, as seen from the closure CL that
 // is being called, and collects the values of the free variables. Nothing runs between this check and the end of the compiled
-// run, so the answer holds for the whole run.
-bool bind(State& S, Closure* root, const UnitMeta& m, std::vector<Closure*>& clos, std::vector<nfcr_W>& fv) {
+// run, so the answer holds for the whole run. FR is the frame of the running function when the unit is a loop of it; EXTRA are the
+// cells of the locals that the loop reads or assigns (with whether it assigns them).
+//
+// The upvalues that the code assigns are worked on as copies and written back when the run has ended; that is only right if no
+// other way into the same cell is used meanwhile, so a cell that is assigned and is reached in more than one place (two upvalues
+// of two functions of the unit that are one variable, or a local of the loop's frame that a function of the unit also has as an
+// upvalue) is a guard that fails.
+bool bind(State& S, Closure* root, const UnitMeta& m, std::vector<Closure*>& clos, std::vector<nfcr_W>& fv, Frame* fr,
+          const std::vector<std::pair<Cell*, bool>>* extra) {
+  TierState* T = S.tier;
   clos.assign(m.protos.size(), nullptr);
-  fv.resize(static_cast<std::size_t>(m.nfv));
+  fv.resize(2 * static_cast<std::size_t>(m.nfv));
   clos[0] = root;
   if (!root->proto->tier || root->proto->tier->serial != m.protos[0].serial) return false;
+  std::vector<std::pair<Cell*, bool>>& cells = T->cellbuf;
+  cells.clear();
+  if (extra) cells = *extra;
+  bool any_written = false;
+  for (const std::pair<Cell*, bool>& c : cells) any_written = any_written || c.second;
   for (std::size_t p = 0; p < m.protos.size(); ++p) {
     if (!clos[p]) continue;  // reached only through a call that the code does not make
     Closure* cl = clos[p];
     const MProto& mp = m.protos[p];
     for (const MDep& d : mp.deps) {
       Value v;
-      if (!lookup(S, cl, d.kind, d.idx, d.name, &v) || !v.is_closure()) return false;
+      if (!lookup(S, cl, p == 0 ? fr : nullptr, d.kind, d.idx, d.name, d.cell, &v) || !v.is_closure()) return false;
       Closure* c = v.closure();
       const MProto& cp = m.protos[static_cast<std::size_t>(d.callee)];
       if (!c->proto->tier || c->proto->tier->serial != cp.serial) return false;
@@ -1950,13 +2046,44 @@ bool bind(State& S, Closure* root, const UnitMeta& m, std::vector<Closure*>& clo
     for (std::size_t j = 0; j < mp.fvs.size(); ++j) {
       const MFree& f = mp.fvs[j];
       Value v;
-      if (!lookup(S, cl, f.kind, f.idx, f.name, &v) || ty_of_tag(v.t) != f.ty) return false;
-      nfcr_W& w = fv[static_cast<std::size_t>(mp.fvbase) + j];
-      if (f.ty == Y_F) w.d = v.d;
-      else w.i = f.ty == Y_B ? (v.t == T_TRUE ? 1 : 0) : v.i;
+      if (!lookup(S, cl, nullptr, f.kind, f.idx, f.name, false, &v) || ty_of_tag(v.t) != f.ty) return false;
+      nfcr_W* w = &fv[2 * (static_cast<std::size_t>(mp.fvbase) + j)];
+      if (f.ty == Y_F) w[0].d = v.d;
+      else w[0].i = f.ty == Y_B ? (v.t == T_TRUE ? 1 : 0) : v.i;
+      w[1].i = (f.sty == Y_N && f.ty == Y_F) ? 1 : 0;
+      if (f.kind == 0) {
+        cells.push_back(std::make_pair(cl->up[f.idx], f.written));
+        any_written = any_written || f.written;
+      }
     }
   }
+  if (any_written)
+    for (std::size_t i = 0; i < cells.size(); ++i)
+      if (cells[i].second)
+        for (std::size_t j = 0; j < cells.size(); ++j)
+          if (j != i && cells[j].first == cells[i].first) return false;
   return true;
+}
+
+// The run has ended: the upvalues it assigned get their values.
+void commit(const UnitMeta& m, const std::vector<Closure*>& clos, const std::vector<nfcr_W>& fv) {
+  for (std::size_t p = 0; p < m.protos.size(); ++p) {
+    if (!clos[p]) continue;
+    const MProto& mp = m.protos[p];
+    for (std::size_t j = 0; j < mp.fvs.size(); ++j) {
+      const MFree& f = mp.fvs[j];
+      if (!f.written) continue;
+      const nfcr_W* w = &fv[2 * (static_cast<std::size_t>(mp.fvbase) + j)];
+      Value x;
+      switch (f.sty) {
+        case Y_I: x = Value::integer(w[0].i); break;
+        case Y_F: x = Value::number(w[0].d); break;
+        case Y_B: x = Value::boolean(w[0].i != 0); break;
+        default: x = w[1].i ? Value::number(w[0].d) : Value::integer(w[0].i); break;
+      }
+      clos[p]->up[f.idx]->v = x;
+    }
+  }
 }
 
 // A deeper recursion than the value stack of the interpreter could hold must be left to the interpreter, which reports it.
@@ -1973,7 +2100,7 @@ bool run_version(State& S, Version* v, Closure* cl, const nfcr_W* argv, Rets& ou
     ++S.stats.tier_guard_misses;
     return false;
   }
-  if (!bind(S, cl, v->meta, T->closbuf, T->fvbuf)) {
+  if (!bind(S, cl, v->meta, T->closbuf, T->fvbuf, nullptr, nullptr)) {
     ++S.stats.tier_bailouts;
     ++S.stats.tier_guard_misses;
     return false;
@@ -1995,6 +2122,7 @@ bool run_version(State& S, Version* v, Closure* cl, const nfcr_W* argv, Rets& ou
     if (v->aborts >= 8 && v->aborts * 4 > v->runs) v->st = Version::Dead;  // it mostly fails: stop trying
     return false;
   }
+  commit(v->meta, T->closbuf, T->fvbuf);
   ++S.stats.tier_calls;
   switch (v->ret) {
     case Y_I: out.push(Value::integer(r.i)); break;
@@ -2035,10 +2163,15 @@ bool try_versions(State& S, TierProto* tp, Closure* cl, Value* args, int n, Rets
 // on-stack replacement
 // ================================================================================================================================
 // The types of the live locals of a loop, as the frame holds them now; false when one is not a number or a boolean.
-bool osr_signature(Frame& f, const std::vector<int>& slots, std::vector<Ty>& sig) {
+const Value& osr_local(Frame& f, int slot, bool cell) {
+  const Value& x = f.base[slot];
+  return cell ? static_cast<Cell*>(x.o)->v : x;
+}
+
+bool osr_signature(Frame& f, const std::vector<int>& slots, const std::vector<char>& cells, std::vector<Ty>& sig) {
   sig.clear();
-  for (int slot : slots) {
-    Ty t = ty_of_tag(f.base[slot].t);
+  for (std::size_t k = 0; k < slots.size(); ++k) {
+    Ty t = ty_of_tag(osr_local(f, slots[k], cells[k]).t);
     if (t == Y_UNK) return false;
     sig.push_back(t);
   }
@@ -2072,11 +2205,14 @@ void osr_request(State& S, TierProto* tp, TierLoop* tl, Frame& f, Node* loop, in
   resolve(T);
   Unit U;
   Fail fl;
+  U.osr_frame = &f;
   if (!build_unit(S, U, f.cl, fl, loop, style)) return osr_reject(S, tl, fl.why);
   tl->in_slots = U.protos[0]->in_slots;
+  tl->in_cell = U.protos[0]->in_cell;
+  tl->in_written = U.protos[0]->in_written;
   tl->in_known = true;
   std::vector<Ty> sig;
-  if (!osr_signature(f, tl->in_slots, sig)) return osr_reject(S, tl, "a local used in the loop is not a number or a boolean");
+  if (!osr_signature(f, tl->in_slots, tl->in_cell, sig)) return osr_reject(S, tl, "a local used in the loop is not a number or a boolean");
   tl->rejects = 0;
   tl->reason.clear();
   tl->edges = 0;  // another version (other types of the locals) has to earn its compile by its own iterations
@@ -2100,8 +2236,11 @@ void osr_request(State& S, TierProto* tp, TierLoop* tl, Frame& f, Node* loop, in
   }
   v->ret = in.insts[0].ret;
   v->meta = make_meta(U);
+  set_storage_types(v->meta, U, in);
   v->meta.protos[0].serial = tp->serial;  // the guard checks that the closure that runs the loop is of the function the loop is in
   v->in_slots = tl->in_slots;
+  v->in_cell = tl->in_cell;
+  v->in_written = tl->in_written;
   const ProtoIR& P = *U.protos[0];
   for (int var : P.pvars) v->out_ty.push_back(in.insts[0].vty[static_cast<std::size_t>(var)]);
   Gen g(U, in);
@@ -2116,16 +2255,24 @@ void osr_request(State& S, TierProto* tp, TierLoop* tl, Frame& f, Node* loop, in
 // copies, has no side effects, and the interpreter goes on from where it was.
 int osr_run(State& S, Frame& f, Version* v, const TierLoopState& st) {
   TierState* T = S.tier;
-  if (S.depth >= S.max_depth || !stack_room(S, v->meta) || !bind(S, f.cl, v->meta, T->closbuf, T->fvbuf)) {
+  std::size_t n = v->sig.size();
+  std::vector<std::pair<Cell*, bool>>& extra = T->extrabuf;
+  extra.clear();
+  for (std::size_t k = 0; k < n; ++k)
+    if (v->in_cell[k]) extra.push_back(std::make_pair(static_cast<Cell*>(f.base[v->in_slots[k]].o), static_cast<bool>(v->in_written[k])));
+  const char* why = S.depth >= S.max_depth ? "the depth" : !stack_room(S, v->meta) ? "the stack" : !bind(S, f.cl, v->meta, T->closbuf, T->fvbuf, &f, &extra) ? "a binding" : nullptr;
+  if (why) {
     ++S.stats.tier_osr_bailouts;
-    note(T, "loop: a guard failed%s", std::string());
+    ++v->runs;  // a guard that keeps failing (a cell reached in two ways, say) is given up like a run that keeps being abandoned
+    ++v->aborts;
+    if (v->aborts >= 8 && v->aborts * 4 > v->runs) v->st = Version::Dead;
+    note(T, "loop: a guard failed: %s", std::string(why));
     return 0;
   }
   nfcr_W argv[kMaxLive + 3];
   nfcr_W out[2 * kMaxLive + 2];
-  std::size_t n = v->sig.size();
   for (std::size_t k = 0; k < n; ++k) {
-    const Value& x = f.base[v->in_slots[k]];
+    const Value& x = osr_local(f, v->in_slots[k], v->in_cell[k]);
     if (v->sig[k] == Y_F) argv[k].d = x.d;
     else argv[k].i = v->sig[k] == Y_B ? (x.t == T_TRUE ? 1 : 0) : x.i;
   }
@@ -2154,6 +2301,7 @@ int osr_run(State& S, Frame& f, Version* v, const TierLoopState& st) {
     return 0;
   }
   ++S.stats.tier_osr_runs;
+  commit(v->meta, T->closbuf, T->fvbuf);
   if (rc == 2) {  // the function returns
     switch (v->ret) {
       case Y_I: f.rets->push(Value::integer(out[2 * n].i)); break;
@@ -2165,7 +2313,7 @@ int osr_run(State& S, Frame& f, Version* v, const TierLoopState& st) {
     return 2;
   }
   for (std::size_t k = 0; k < n; ++k) {
-    Value& x = f.base[v->in_slots[k]];
+    Value& x = v->in_cell[k] ? static_cast<Cell*>(f.base[v->in_slots[k]].o)->v : f.base[v->in_slots[k]];
     switch (v->out_ty[k]) {
       case Y_I: x = Value::integer(out[2 * k].i); break;
       case Y_F: x = Value::number(out[2 * k].d); break;
@@ -2260,7 +2408,7 @@ int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bo
   std::vector<Ty> sig;
   bool have_sig = false;
   if (ready && tl->in_known) {
-    have_sig = osr_signature(f, tl->in_slots, sig);
+    have_sig = osr_signature(f, tl->in_slots, tl->in_cell, sig);
     if (have_sig) {
       Version* v = find_osr_version(tl, sig, st.kind);
       if (v && v->st == Version::Ready) {
@@ -2276,7 +2424,7 @@ int tier_loop(Frame& f, Node* loop, TierLoop*& hook, const TierLoopState& st, bo
     osr_request(S, tp, tl, f, loop, st.kind);
     if (tl->dead) return 0;
     // A synchronous compile is ready now.
-    if (tl->in_known && osr_signature(f, tl->in_slots, sig)) {
+    if (tl->in_known && osr_signature(f, tl->in_slots, tl->in_cell, sig)) {
       Version* v = find_osr_version(tl, sig, st.kind);
       if (v && v->st == Version::Ready) {
         if (int r = osr_run(S, f, v, st)) return r;

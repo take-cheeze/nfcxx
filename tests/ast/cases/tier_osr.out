@@ -43,3 +43,28 @@ tri	4960
 fibl	21880
 big	1200007
 harmonic	12.090146129863
+local callee	42925
+recursive local callee	5313
+local callee rebound between loops	9950
+callee assigned in the loop	10319
+callee not a function	false	tier_osr.lua:254: attempt to call a number value (upvalue 'notf')
+captured local	5050	5050
+captured float	512.0	512.0
+captured, both kinds	6.0	6.0	float
+captured boolean	false	false
+upvalue write	5050
+hits	1000	1000
+upvalue, both kinds	5.0	float
+multiple assignment to upvalues	2178309	3524578
+error after writes	false	tier_osr.lua:293: attempt to divide by zero
+seen	5
+recursion writing an upvalue	50	51
+runaway	false	tier_osr.lua:299: stack overflow
+depth after	true
+alias, a local and a function	550
+alias, two functions	820	40
+two counters	80	40
+a function that reads and one that writes	465
+upvalue: a float, assigned an integer and a float	1.5	float
+integer upvalue	1	integer
+boolean upvalue	false

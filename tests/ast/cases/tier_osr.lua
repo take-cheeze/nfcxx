@@ -232,3 +232,100 @@ local bf = 0.0
 local bx = 0
 while bx < 100000 do bx = bx + 1; bf = bf + 1 / bx end
 print("harmonic", bf)
+
+-- 13. callees that are held by locals of the running function
+local function lsq(x) return x * x end
+local lt = 0
+for i = 1, 50 do lt = lt + lsq(i) end
+print("local callee", lt)
+local function lfact(n) if n <= 1 then return 1 end return n * lfact(n - 1) end   -- calls itself, so it is captured: a local in a Cell
+local lf = 0
+for i = 1, 20 do lf = lf + lfact(i) % 1000 end
+print("recursive local callee", lf)
+local callee = lsq
+lt = 0
+for i = 1, 30 do lt = lt + callee(i) end
+callee = function(x) return x + 1 end
+for i = 1, 30 do lt = lt + callee(i) end
+print("local callee rebound between loops", lt)
+for i = 1, 10 do if i == 5 then callee = lsq end lt = lt + callee(i) end
+print("callee assigned in the loop", lt)
+local notf = 5
+print("callee not a function", pcall(function() local z = 0 for i = 1, 5 do z = z + notf(i) end return z end))
+
+-- 14. locals captured by closures, read and assigned by the loop
+local ctr = 0
+local function ctrget() return ctr end
+for i = 1, 100 do ctr = ctr + i end
+print("captured local", ctr, ctrget())
+local fl = 0.5
+local function flget() return fl end
+for i = 1, 10 do fl = fl * 2 end
+print("captured float", fl, flget())
+local mix = 1
+local function mixget() return mix end
+for i = 1, 10 do mix = mix + 0.5 end
+print("captured, both kinds", mix, mixget(), math.type(mix))
+local cb = true
+local function cbget() return cb end
+for i = 1, 5 do cb = not cb end
+print("captured boolean", cb, cbget())
+
+-- 15. functions that assign upvalues: the assignments are made when the call has ended, as if they had been made along the way
+local tot = 0
+local function addtot(x) tot = tot + x end
+for i = 1, 100 do addtot(i) end
+print("upvalue write", tot)
+local hits = 0
+local function hit(x) hits = hits + 1; return x + 1 end
+local hr = 0
+for i = 1, 1000 do hr = hit(hr) end
+print("hits", hits, hr)
+local both = 0
+local function addf(x) both = both + x end
+for i = 1, 10 do addf(0.5) end
+print("upvalue, both kinds", both, math.type(both))
+local up1, up2 = 1, 2
+local function swapup() up1, up2 = up2, up1 + up2 end
+for i = 1, 30 do swapup() end
+print("multiple assignment to upvalues", up1, up2)
+local seen = 0
+local function risky(i) seen = seen + 1; return 100 // (5 - i) end
+print("error after writes", pcall(function() for i = 1, 10 do risky(i) end end))
+print("seen", seen)
+local depth = 0
+local function down(n) depth = depth + 1; if n == 0 then return 0 end return down(n - 1) + 1 end
+print("recursion writing an upvalue", down(50), depth)
+print("runaway", pcall(function() local function runaway(n) depth = depth + 1; return runaway(n + 1) + 1 end return runaway(1) end))
+print("depth after", depth > 100)
+
+-- 16. one cell reached in two ways while it is assigned: the interpreter runs it
+local shared = 0
+local function bump() shared = shared + 1 end
+for i = 1, 50 do bump(); shared = shared + 10 end
+print("alias, a local and a function", shared)
+local function counter()
+  local c = 0
+  return function() c = c + 1 end, function() return c end
+end
+local inc, get = counter()
+local ca = 0
+for i = 1, 40 do inc(); ca = ca + get() end
+print("alias, two functions", ca, get())
+local inc2, get2 = counter()
+for i = 1, 40 do inc2(); inc() end
+print("two counters", get(), get2())
+print("a function that reads and one that writes", (function() local c3 = 0 local function w() c3 = c3 + 1 end local function r() return c3 end
+  local x = 0 for i = 1, 30 do w() x = x + r() end return x end)())
+local fu = 0.5
+local function fupd(i) if i % 2 == 0 then fu = 1 else fu = fu + 0.5 end end
+for i = 1, 21 do fupd(i) end
+print("upvalue: a float, assigned an integer and a float", fu, math.type(fu))
+local ib = 7
+local function ibd(i) ib = ib // 2 + i % 3 end
+for i = 1, 25 do ibd(i) end
+print("integer upvalue", ib, math.type(ib))
+local bu = false
+local function bud(i) bu = i % 3 == 0 end
+for i = 1, 10 do bud(i) end
+print("boolean upvalue", bu)

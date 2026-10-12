@@ -195,6 +195,15 @@ def gen_block(env, ret, depth, indent, in_loop, self_fn, nstmts):
                 out.append('%slocal %s = %s' % (pad, n, gen_expr(env, t, 3, self_fn)))
             env[n] = t
         elif k < 0.46:
+            if R.random() < 0.15:  # an assignment to an upvalue of the chunk: a kernel may make it (on a copy, written back at the end of the call)
+                u, t = R.choice([x for x in UPS if x[0].startswith('u')])
+                if R.random() < 0.3:
+                    u2, t2 = R.choice([x for x in UPS if x[0].startswith('u') and x[1] == t])
+                    if u2 != u:
+                        out.append('%s%s, %s = %s, %s' % (pad, u, u2, gen_expr(env, t, 3, self_fn), gen_expr(env, t, 3, self_fn)))
+                        continue
+                out.append('%s%s = %s' % (pad, u, gen_expr(env, t, 3, self_fn)))
+                continue
             cand = list(env.items())
             if cand:
                 v, t = R.choice(cand)
@@ -355,6 +364,14 @@ def gen_segment(idx):
     params = [('a', R.choice(['i', 'f', 'n'])), ('b', R.choice(['i', 'f', 'b']))]
     env = dict(params)
     lines = ['local function %s(a, b)' % name, '  local _tab = {}']
+    # a local that a closure captures (it lives in a cell, and a loop that uses it hands it over through the cell), and a local
+    # function that the loops may call
+    lines.append('  local cap = %s' % gen_expr(env, 'i', 2, None))
+    lines.append('  local function capget() return cap end')
+    env['cap'] = 'i'
+    lf = Func('lf', [('x', 'i')], 'i', 0)
+    lines.append('  local function lf(x) return %s end' % gen_expr({'x': 'i'}, 'i', 2, None))
+    funcs.append(lf)
     for _ in range(R.choice([2, 3, 4])):
         t = R.choice(['i', 'f', 'b', 'n', 'n'])
         n = fresh('s')
@@ -367,8 +384,9 @@ def gen_segment(idx):
         else:
             lines.append(gen_block(env, ret, 2, 1, False, None, 2))
     lines.append('  _tab[1] = 0')
+    funcs.remove(lf)
     if ret is None:
-        lines.append('  return ' + ', '.join([v for v in env if v not in ('a', 'b')] + ['a', 'b']))
+        lines.append('  return capget(), ' + ', '.join([v for v in env if v not in ('a', 'b')] + ['a', 'b']))
     else:
         lines.append('  return ' + gen_expr(env, ret, 3, None))
     lines.append('end')
@@ -404,6 +422,7 @@ for i in range(nfuncs):
         if R.random() < 0.25:
             out.append(mutate_ups())
         out.append('show("%s", pcall(%s%s))' % (f.name, f.name, ''.join(', ' + a for a in args)))
+        out.append('show("ups", u1, u2, u3, g1, g2)')
 for i in range(R.choice([0, 0, 1, 2, 3]) if len(sys.argv) <= 3 else int(sys.argv[3])):  # segments for on-stack replacement (after the rest, so that seeds keep their functions)
     name, text = gen_segment(i)
     out.append(text)
@@ -413,4 +432,5 @@ for i in range(R.choice([0, 0, 1, 2, 3]) if len(sys.argv) <= 3 else int(sys.argv
         if R.random() < 0.3:
             out.append(mutate_ups())
         out.append('show("%s", pcall(%s, %s, %s))' % (name, name, a, b))
+        out.append('show("ups", u1, u2, u3, g1, g2)')
 print('\n'.join(out))
