@@ -7,11 +7,12 @@
 # Needs Go (>= 1.24: weak pointers make the collector exact, from $GO, PATH or /usr/local/go/bin) and a C compiler for cgo, and the module proxy for the first build
 # (yaegi is pinned in lib/poly/go/go.mod and go.sum; the module cache serves later builds offline).
 #   FORCE=1   rebuild even if the library is newer than its sources
+#   POLY_GO_DIR=DIR   build into DIR instead of build/poly-go (a private copy: build/ may be shared between checkouts)
 # Exit status: 0 built (or up to date); 3 cannot be built here (no Go, Go too old, no C compiler, module proxy unreachable):
 # tests/poly/run.sh reports that as a SKIP; 1 the build failed.
 self=$(realpath "$0")
 cd "$(dirname "$0")/.."
-root=$PWD; work=$root/build/poly-go; src=$root/lib/poly/go
+root=$PWD; work=${POLY_GO_DIR:-$root/build/poly-go}; src=$root/lib/poly/go
 lib=$work/libnfcgo.so
 skip() { echo "setup-poly-go: $*" >&2; exit 3; }
 fresh() {

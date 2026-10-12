@@ -1,0 +1,305 @@
+# valgrind suppressions for the nfcpoly Go backend (tests/poly/valgrind-go.sh).
+#
+# The Go runtime and yaegi live in libnfcgo.so. valgrind cannot follow what they do with goroutine stacks (they are switched and
+# copied by the runtime, not by the kernel's rules), and the collector reads memory it has not initialised by design, so memcheck
+# reports thousands of errors whose innermost frame is in that library and none of which says anything about the host. Each rule
+# below matches an error KIND only when the innermost frame is in libnfcgo.so; an error whose innermost frame is the host's
+# (nfcpoly_go.cpp, nfcpoly.cpp, libc called by them) is not matched, so a read of an uninitialised reply, a bad free or a use
+# after free on the C++ side still shows. Leaks are not suppressed here: Go allocates with mmap, so a leak report is a block that
+# C code (the host, or cgo's C.malloc) allocated and nobody freed.
+#
+# The one leak the core keeps on purpose (the class table, lib/poly/nfcpoly.cpp: "never freed: a Var that outlives the context
+# still points at its class") is the last rule.
+{
+   go-runtime-cond
+   Memcheck:Cond
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-value1
+   Memcheck:Value1
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-value2
+   Memcheck:Value2
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-value4
+   Memcheck:Value4
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-value8
+   Memcheck:Value8
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-value16
+   Memcheck:Value16
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-addr1
+   Memcheck:Addr1
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-addr2
+   Memcheck:Addr2
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-addr4
+   Memcheck:Addr4
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-addr8
+   Memcheck:Addr8
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-addr16
+   Memcheck:Addr16
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-memcpy
+   Memcheck:Overlap
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-addr32
+   Memcheck:Addr32
+   obj:*/libnfcgo.so
+}
+{
+   go-runtime-value32
+   Memcheck:Value32
+   obj:*/libnfcgo.so
+}
+# The host's own functions that touch memory Go owns: host_cb and host_dispatch read the request cgo passes (a Go slice) and write
+# the reply into the pointers cgo passes (a Go stack variable), GoLang::decode reads a reply. Go's stacks and heap are in the
+# "rw- anonymous segment" ranges valgrind believes are outside of the stack after its stack-switch heuristic gave up ("client
+# switching stacks?"), so every such access is reported as invalid, whatever the code does (the tests pass; AddressSanitizer
+# checks the same lines and finds nothing). These rules only match when the access is made by one of those three functions
+# themselves; a call into libc (memcpy, strlen, free) from them has libc's interceptor as the innermost frame and is not matched.
+{
+   host-reads-go-memory-addr1-host_cb
+   Memcheck:Addr1
+   fun:*host_cb*
+}
+{
+   host-reads-go-memory-addr1-host_dispatch
+   Memcheck:Addr1
+   fun:*host_dispatch*
+}
+{
+   host-reads-go-memory-addr1-GoLang-decode
+   Memcheck:Addr1
+   fun:*GoLang*decode*
+}
+{
+   host-reads-go-memory-addr2-host_cb
+   Memcheck:Addr2
+   fun:*host_cb*
+}
+{
+   host-reads-go-memory-addr2-host_dispatch
+   Memcheck:Addr2
+   fun:*host_dispatch*
+}
+{
+   host-reads-go-memory-addr2-GoLang-decode
+   Memcheck:Addr2
+   fun:*GoLang*decode*
+}
+{
+   host-reads-go-memory-addr4-host_cb
+   Memcheck:Addr4
+   fun:*host_cb*
+}
+{
+   host-reads-go-memory-addr4-host_dispatch
+   Memcheck:Addr4
+   fun:*host_dispatch*
+}
+{
+   host-reads-go-memory-addr4-GoLang-decode
+   Memcheck:Addr4
+   fun:*GoLang*decode*
+}
+{
+   host-reads-go-memory-addr8-host_cb
+   Memcheck:Addr8
+   fun:*host_cb*
+}
+{
+   host-reads-go-memory-addr8-host_dispatch
+   Memcheck:Addr8
+   fun:*host_dispatch*
+}
+{
+   host-reads-go-memory-addr8-GoLang-decode
+   Memcheck:Addr8
+   fun:*GoLang*decode*
+}
+{
+   host-reads-go-memory-addr1-Rd
+   Memcheck:Addr1
+   fun:*Rd::*
+}
+{
+   host-reads-go-memory-addr2-Rd
+   Memcheck:Addr2
+   fun:*Rd::*
+}
+{
+   host-reads-go-memory-addr4-Rd
+   Memcheck:Addr4
+   fun:*Rd::*
+}
+{
+   host-reads-go-memory-addr8-Rd
+   Memcheck:Addr8
+   fun:*Rd::*
+}
+# Bytes that Go wrote look uninitialised to valgrind when they sit where its stack-switch heuristic marked memory undefined (a
+# reply built on a goroutine stack, the ids of dropped wrappers): the host's use of them in the functions that parse a reply or a
+# request is reported as a use of an uninitialised value, with the bridge's reply parser, or the hash table it releases an id
+# from, on top. The rules match any stack that passes through one of those functions.
+{
+   host-parses-go-bytes-cond-read_meta
+   Memcheck:Cond
+   ...
+   fun:*read_meta*
+}
+{
+   host-parses-go-bytes-cond-GoLang-decode
+   Memcheck:Cond
+   ...
+   fun:*GoLang*decode*
+}
+{
+   host-parses-go-bytes-cond-host_dispatch
+   Memcheck:Cond
+   ...
+   fun:*host_dispatch*
+}
+{
+   host-parses-go-bytes-cond-host_cb
+   Memcheck:Cond
+   ...
+   fun:*host_cb*
+}
+{
+   host-parses-go-bytes-value1-read_meta
+   Memcheck:Value1
+   ...
+   fun:*read_meta*
+}
+{
+   host-parses-go-bytes-value1-GoLang-decode
+   Memcheck:Value1
+   ...
+   fun:*GoLang*decode*
+}
+{
+   host-parses-go-bytes-value1-host_dispatch
+   Memcheck:Value1
+   ...
+   fun:*host_dispatch*
+}
+{
+   host-parses-go-bytes-value1-host_cb
+   Memcheck:Value1
+   ...
+   fun:*host_cb*
+}
+{
+   host-parses-go-bytes-value4-read_meta
+   Memcheck:Value4
+   ...
+   fun:*read_meta*
+}
+{
+   host-parses-go-bytes-value4-GoLang-decode
+   Memcheck:Value4
+   ...
+   fun:*GoLang*decode*
+}
+{
+   host-parses-go-bytes-value4-host_dispatch
+   Memcheck:Value4
+   ...
+   fun:*host_dispatch*
+}
+{
+   host-parses-go-bytes-value4-host_cb
+   Memcheck:Value4
+   ...
+   fun:*host_cb*
+}
+{
+   host-parses-go-bytes-value8-read_meta
+   Memcheck:Value8
+   ...
+   fun:*read_meta*
+}
+{
+   host-parses-go-bytes-value8-GoLang-decode
+   Memcheck:Value8
+   ...
+   fun:*GoLang*decode*
+}
+{
+   host-parses-go-bytes-value8-host_dispatch
+   Memcheck:Value8
+   ...
+   fun:*host_dispatch*
+}
+{
+   host-parses-go-bytes-value8-host_cb
+   Memcheck:Value8
+   ...
+   fun:*host_cb*
+}
+{
+   core-class-table-class
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:*declare_class*
+}
+{
+   core-class-table-method
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:*declare_method*
+}
+{
+   core-class-table-prop
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:*declare_prop*
+}
+{
+   core-class-table-ctor
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:*declare_ctor*
+}
+# The thread-local storage of the Go runtime's threads (cgo starts them with pthread_create and they live until the process
+# ends): reported as possibly lost.
+{
+   go-thread-tls
+   Memcheck:Leak
+   match-leak-kinds: definite,indirect,possible,reachable
+   ...
+   fun:_cgo_try_pthread_create
+}
