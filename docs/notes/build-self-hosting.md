@@ -145,3 +145,14 @@ Notes from the checks:
 - Disk: a full build tree (EDG, QBE, mruby, Path B) takes about 4.3 GB; the four mirrors 113 MB.
 - Nothing else in the build or in `tests/run.sh` reaches the network or files outside the clone, apart
   from the host toolchain listed above.
+
+## Float-to-integer in the stage-2 front end
+
+The stage-2 front end (`scripts/selfhost-cpfe.sh` with `FRONT_END` set to the stage-1 `cpfe`) aborted on an out-of-range
+`__float128` or `long double` to integer conversion. EDG folds such a constant in its own code, and that code calls the
+checked runtime helper (`__nfcxx_f128_to_s` in `be/nfcxx_ldrt.c`). Stage 1 is built by gcc, so it gave the x86-64 result.
+
+The stage-2 link now uses the x86-64 variant of the runtime (`NFCXX_LDRT_X86=1 scripts/pathb-ldrt`, compiled with
+`-DNFCXX_FLOAT_TO_INT_X86`). It saturates like gcc on x86-64 (a `__float128` value above the maximum gives the maximum,
+below the minimum the minimum, NaN the maximum), and a `long double` value that does not fit gives the x87 integer
+indefinite. User programs still link the default archive, which traps. `tests/float-to-int/run.sh` checks both.

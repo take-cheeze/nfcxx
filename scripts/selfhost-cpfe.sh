@@ -71,9 +71,13 @@ printf '%s\n' "${names[@]}" | xargs -P "$jobs" -I{} bash -c 'compile_one "$@"' _
 echo "selfhost-cpfe: $(ls "$out/obj"/*.o | wc -l) objects"
 
 # The link: nfcxx passes the objects to eccp, which links libC.a; qbe-cc adds libnfcxxld.a and -lstdc++.
+# The x86-64 runtime (NFCXX_LDRT_X86=1, scripts/pathb-ldrt) goes first: the front end folds out-of-range float-to-integer
+# conversions the way x86-64 gcc does, where user programs keep the trap. Its archive has the same symbols as the default
+# one, so the default archive is not pulled for them.
 objs=()
 for name in "${names[@]}"; do objs+=("$out/obj/$name.o"); done
+x86rt=$(NFCXX_LDRT_X86=1 "$root/scripts/pathb-ldrt")
 (cd "$out/run" && NFCXX_BACKEND=qbe EDG_BUILD=$fe_build EDG_BASE=$base "$root/nfcxx" \
-  "${objs[@]}" -o "$out/cpfe" > "$out/link.log" 2>&1) \
+  "${objs[@]}" "$x86rt" -o "$out/cpfe" > "$out/link.log" 2>&1) \
   || { echo "selfhost-cpfe: link failed (see $out/link.log)" >&2; exit 1; }
 echo "selfhost-cpfe: built $out/cpfe"
