@@ -85,7 +85,7 @@ SELECTED = MUTANTS.select { |m| ENV['SH_MUTANTS'].nil? || m.first.match?(Regexp.
 failures = []
 mutate = lambda do |(_name, file, pattern, replacement, _expected, needs_run)|
   Dir.mktmpdir do |dir|
-    FileUtils.cp_r(File.join(ROOT, 'tools/bc2cpp'), dir)
+    Bc2cppMutantPool.copy_generator(ROOT, dir)
     path = File.join(dir, 'bc2cpp', file)
     text = File.read(path)
     next :site_gone unless text.include?(pattern)
