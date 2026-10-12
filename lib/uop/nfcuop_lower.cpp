@@ -79,6 +79,12 @@ ut::Tensor Lowerer::get(int id) {
       out = arg(0);
       for (size_t k = 0; k < starts.size(); k++) out = out.slice(axes[k], true, starts[k], true, ends[k], steps[k]);
     }
+    else if (op == "Pad") {
+      std::vector<int64_t> pads = ints(1);
+      const size_t r = pads.size() / 2;
+      Shape before(pads.begin(), pads.begin() + static_cast<std::ptrdiff_t>(r)), after(pads.begin() + static_cast<std::ptrdiff_t>(r), pads.end());
+      out = has(2) ? arg(0).pad(before, after, g_.initializer(n.inputs[2])->data[0]) : arg(0).pad(before, after);
+    }
     else if (op == "Concat") {
       std::vector<ut::Tensor> parts;
       for (size_t k = 0; k < n.inputs.size(); k++) parts.push_back(arg(k));

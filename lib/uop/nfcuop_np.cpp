@@ -1,6 +1,8 @@
 // nfcuop::np: the numpy-like API over the ONNX-style graph. See nfcuop_np.hpp.
 #include "nfcuop_np.hpp"
 
+#include "nfcuop_grad.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -552,6 +554,20 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
   DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
   return node("MatMul", {cast_to(a, dt), cast_to(b, dt)});
 }
+
+std::vector<Tensor> grad(const Tensor& loss, const std::vector<Tensor>& wrt) {
+  check(loss);
+  std::vector<int> ids;
+  for (const Tensor& w : wrt) {
+    same_session(loss, w);
+    ids.push_back(w.id());
+  }
+  std::vector<Tensor> out;
+  for (int id : hir::gradients(H(loss), loss.id(), ids)) out.push_back(Tensor(&loss.session(), id));
+  return out;
+}
+
+Tensor grad(const Tensor& loss, const Tensor& wrt) { return grad(loss, std::vector<Tensor>{wrt})[0]; }
 
 Tensor operator+(const Tensor& a, const Tensor& b) { return arith("Add", a, b); }
 Tensor operator-(const Tensor& a, const Tensor& b) { return arith("Sub", a, b); }
