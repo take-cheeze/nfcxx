@@ -1,15 +1,18 @@
-# nfcast: a self-specializing AST interpreter, with inlining (milestones 1 and 3)
+# nfcast: a self-specializing AST interpreter, a tier that compiles numeric kernels, and inlining (milestones 1 to 3)
 
 `lib/ast` is an interpreter for a Lua 5.4 subset written in C++ and built by nfcxx. It is the first of three steps towards
-what GraalVM's Truffle does for a language; the first and, at the AST level, the third are done:
+what GraalVM's Truffle does for a language; the first two and, at the AST level, the third are done:
 
 1. **An AST evaluator whose nodes specialize themselves** (this note). The source becomes a tree of nodes that evaluate
    themselves. A node starts generic, looks at the types that reach it, and replaces itself in its parent by a specialized
    node (integer addition, a table field with an inline cache, a call of a known kind). A specialized node guards what it
    assumed and replaces itself by the generic node when the guard fails.
-2. Not done: tiering. A hot function would be lowered to C++, compiled through the `nfceval` path (`eval.md`; a tiny
-   translation unit takes 0.5 to 0.7 s to compile here, 0.49 s on the gcc back end and 0.67 s on qbe, so it would run in the
-   background) and called in place of the tree, with the guards of the specialized nodes becoming run-time checks.
+2. **Tiering** (the section "Tiering" below; off unless a `State` is given options). A hot function that is a numeric kernel
+   is lowered to C++, compiled by the nfcxx driver into a shared object (cached on disk by a hash of the source, loaded with
+   `dlopen`: the path of `nfceval`, `eval.md`) and called in place of the tree. What the compiled code assumes is checked at
+   every entry, and a run that fails half way is redone in the interpreter, so the compiled code never has to produce an error
+   itself. `fib(32)` takes 0.03 s instead of 0.93 s on the gcc back end once the code is compiled (a compile of a small unit takes
+   about 0.2 s on either back end).
 3. **Inlining of small script functions at the AST level** (the section "Inlining" below): a hot call site evaluates a private
    clone of a small callee's body instead of calling it. Not done, and out of scope here: host functions inlined by the C
    compiler when the generated code can see their bodies. That works today for ordinary C++: a loop calling an `inline`
@@ -36,9 +39,10 @@ nfcast::Rets out;
 S.call(nfcast::Value::function(chunk), nullptr, 0, out);   // out.first() is the integer 3; a script error is a nfcast::Thrown
 ```
 
-Tests: `tests/ast/run.sh` (the engine on its own, both back ends, in CI) and `tests/poly/run.sh` (the shared suite of every
-language, plus `ast_tests()` and the cross-language checks, with `POLY_LANGS=ast` to run only this one). The engine needs
-nothing built: the five `lib/ast/nfcast_*.cpp` files plus `-I lib/ast` (`nfcast_inline.inc` is included by `nfcast_nodes.cpp`).
+Tests: `tests/ast/run.sh` (the engine, its tier and its inlining on their own, both back ends, in CI) and `tests/poly/run.sh`
+(the shared suite of every language, plus `ast_tests()` and the cross-language checks, with `POLY_LANGS=ast` to run only this
+one). The engine needs nothing built: the six `lib/ast/nfcast_*.cpp` files plus `-I lib/ast` (`nfcast_inline.inc` is included by
+`nfcast_nodes.cpp`; the tier needs the nfcxx driver only when it is switched on).
 
 ## Layout
 
@@ -52,6 +56,11 @@ nothing built: the five `lib/ast/nfcast_*.cpp` files plus `-I lib/ast` (`nfcast_
 | `nfcast_nodes.cpp` | the node classes and the specialization |
 | `nfcast_inline.inc` | inlining: the cloner, the inlined call nodes, the rules (included at the end of `nfcast_nodes.cpp`) |
 | `nfcast_lib.cpp` | `State::load` and the standard library |
+| `nfcast_tier.cpp` | the tier: lowering, types, source text, the compile and its cache, the entry guards, the hooks |
+| `nfcast_tier.hpp` | what the tier shares with the engine: the hooks and `TierView` (a node as the tier sees it) |
+| `nfcast_tier_view.inc` | `#include`d by `nfcast_nodes.cpp`, where the node classes are: turns a node into a `TierView` |
+| `nfcast_tier_rt.h` | the numeric operators, written once for the interpreter and for the generated code |
+| `../eval/nfceval_build.hpp` | finding the driver, the cache directory, running the driver, `dlopen`: the half of nfceval that the tier shares |
 | `../poly/nfcpoly_ast.cpp` | the `nfcpoly` backend |
 
 ## Values and the heap
@@ -170,9 +179,16 @@ when it reaches its count, so changing it later does not take back a site that w
 `State::stats.inlined_sites` (sites rewritten), `inlined_calls` (calls run as inlined bodies), `inline_declined` (sites that were
 looked at and left as calls); a guard that fails counts in `deopts`.
 
-**What the tier of milestone 2 can use.** `InlineCall` and `MethodInline` are ordinary call nodes (`CallBase`, `MethodBase`)
-that hold an `InlineBody`: the callee's `uid`, and the clone of the body or of its single return expression. A tier that lowers
-a function can lower the clone with the callee's slots as fresh locals; nothing here does that.
+**What the tier does with it.** `InlineCall` and `MethodInline` are ordinary call nodes (`CallBase`, `MethodBase`) that hold an
+`InlineBody`: the callee's `uid`, and the clone of the body or of its single return expression. The tier lowers an `InlineCall`
+as the call it was (`nfcast_tier_view.inc` sees a `CallBase` with `fn_` and `args_` and ignores the clone), so the callee is found
+and checked at every entry like at any other call and a function whose sites were inlined is still a candidate for the tier. A
+call that is inlined does not go through `call_closure`, where the tier counts calls and enters compiled code: such calls do not
+count towards the callee's threshold, and when the interpreter reaches an inlined site it runs the clone even if the callee was
+compiled meanwhile. That is the case where the tier gains little anyway (a small callee without loops called from interpreted
+code; inlined bodies have no loops). `MethodInline` is a method call on a table, which the tier does not compile (such a function
+is ineligible with or without inlining). The configurations "tier+inline-early" of `tests/ast/run.sh` run every program with
+both, with every site rewritten at its second call and every function compiled at its first.
 
 **Not done, and out of scope.** Host functions inlined by the C compiler when the generated code can see their bodies (the
 remaining half of the third step above) still needs host functions registered by header and symbol; this milestone does not
@@ -225,10 +241,166 @@ string (the string metamethod raises them) and have one here; and because a tail
 function that was called as `return f()` blames the function that made the tail call here; in Lua that function's frame is
 gone, and level 2 is its caller.
 
+## Tiering
+
+The tier is **off unless a `State` is given options**: `nfcast` itself has no run-time dependency on the nfcxx driver, and the
+default `State` never starts a process.
+
+```cpp
+nfcast::State S;  S.open_libs();
+nfcast::TierOptions t;     // Sync, 2000 calls or 50000 loop iterations; the driver is found the way nfceval finds it
+S.enable_tier(t);          // t.mode = nfcast::TierOptions::Async: compile in the background (a child process)
+```
+
+For the test drivers the environment does the same when the `State` is created: `NFCAST_TIER=sync|async|0`,
+`NFCAST_TIER_THRESHOLD=n` (calls and loop iterations; the tests use 1), `NFCAST_TIER_CACHE=dir`, `NFCAST_TIER_RT=dir` (where
+`nfcast_tier_rt.h` is, if not next to `nfcast_tier.cpp`), `NFCAST_TIER_DEBUG=1` (what it compiles, loads and refuses, on stderr);
+the driver is `$NFCXX`, else `<repo>/nfcxx`, else `nfcxx` on `PATH`. `State::tier_state(fn)` says what became of a function
+(`cold`, `compiled ii->i`, `ineligible: why`, `failed ...`), `State::tier_wait()` waits for the compiles that are running. The other
+fields of `TierOptions` are `threshold` and `loop_threshold`, `jobs` (compiles running at once in `Async`), `driver`, `cache_dir`,
+`rt_dir` and `timeout`.
+
+### When, and what
+
+Every call of a script function that no compiled code served counts for it, and so does every iteration of its loops (a second
+counter). When one reaches its threshold, the function is looked at: if it is a numeric kernel it is lowered for the types of
+the arguments of that call (of its parameters as they are when a loop triggers it), compiled, and its next calls with arguments
+of those types run as native code. A function has up to four versions (other argument types); a call that no version fits runs
+in the interpreter and counts towards the next one (the count starts again at every compile, so another set of argument types
+has to earn its own). A function that is not a kernel is looked at three times, with growing
+gaps, and then left alone for good (`tier_ineligible` counts it once).
+
+A **numeric kernel** is a function whose body has only:
+
+| In the body | |
+| --- | --- |
+| parameters, locals, loop variables | integers, floats, booleans, or numbers of either kind (below); **one type for the whole function** per variable |
+| constants | integers, floats, `true`, `false` |
+| arithmetic `+ - * / // % ^`, unary `-` | with the interpreter's integer and float rules (wraparound, `//` and `%` rounding down, `/` and `^` always float, `x // 0.0`) |
+| `& \| ~ << >> ~x` | on integers, and on numbers of either kind (a float with an integer value is converted; any other abandons the run); not on a float that is one for certain |
+| comparisons, `== ~=`, `and`, `or`, `not` | an integer against a float is compared exactly; `and` / `or` on booleans, or as conditions |
+| `local`, assignment (also several at once), `if` / `elseif` / `else`, `while`, `repeat`, numeric `for` (integer and float loops), `break`, `return` with one value or none | |
+| reads of upvalues and globals | numbers and booleans, read again at every entry |
+| calls of a script function through an upvalue or a global, as an expression or a statement | itself, mutual recursion, other kernels |
+
+and nothing else: no tables, strings, closures, varargs, assignments to upvalues, globals or fields, native functions (the math
+library included), method calls, function values used as values (as arguments, say), several results. A function with any of
+those simply stays interpreted.
+
+The lowering does not read the specialized state of the arithmetic and comparison nodes (`ArithII`, `ArithNN`, `CmpFF` ...):
+they record that a node saw only integers, or numbers, but not which numbers an `ArithNN` met, and a node that was never
+evaluated has not specialized at all. It recomputes the types from the operands with the rules the specialized nodes encode
+(integer op integer is an integer for `+ - * // %`, anything with a float is a float, `/` and `^` are floats, a comparison is a
+boolean): the types of the parameters come from the arguments of the call, constants and the results of calls follow. A
+variable, parameter or result that gets an integer in one place and a float in another (`local s = 0 ... s = s + 0.5`) is a
+**number of either kind** (`n` in `tier_state`, as in `compiled if->n`): the generated code keeps it as an `nfcr_N`, the value
+and a 64-bit flag that says which, and its operators (`nfcr_nadd`, `nfcr_nlt` ...) do what the interpreter's do on two numbers: an
+integer with an integer gives an integer (wrapping), anything with a float a float, so `s` is the integer `0` for as long as the
+loop has not run and the result of the function has the kind the run gave it (`acc(0, 0.5)` is `0`, `acc(4, 0.5)` is `2.0`). An
+arithmetic operation on one of these and an integer is one again, on one and a float a float. A function is refused when the
+result depends on the values in a way that does not fit that: a boolean and a number in one variable or result, a path that
+returns a value and another that falls off the end, a bitwise operation on a float that is one for certain, an order comparison of
+booleans, a `for` loop whose start or step is a number of either kind (it counts in integers or in floats depending on them; its
+limit may be one).
+
+### Soundness
+
+The compiled code has **no side effects**: it reads its arguments and the values of the upvalues and globals it uses, and
+returns a number, a boolean or nothing. It allocates nothing, so it needs no safe point, and calls nothing that is not a kernel.
+That is what lets every assumption that fails be handled by *abandoning the run and doing the whole call again in the
+interpreter*, with nothing to undo:
+
+- **Entry guards**, checked by the engine before every run: the argument tags are those of the version; for every function the
+  code calls, the upvalue or global that names it holds a closure of the function that was compiled (checked by identity of
+  the function, not of the closure, so the closures of one function made by a factory work, each with its own upvalues);
+  every upvalue and global it reads has the type it had; the recursion fits under `State::max_depth` and the value stack. The
+  values of the free variables are collected at the same time. Nothing runs between the check and the end of the run, so the
+  answer holds for the whole run. A guard that fails is `tier_guard_misses`; the call is interpreted.
+- **A run that fails half way**: an integer `//` or `%` by zero (also two numbers of either kind that turn out to be integers),
+  a bitwise operation on a float without an integer value, a `for` loop with a step of zero, a recursion that reaches
+  `State::max_depth` (these are the places where the generated code calls `nfct_bail`) jumps back to the entry with a
+  `longjmp`, which costs nothing on the way in, and the engine redoes the call in the interpreter. That finds the same error
+  with its message, its position and its traceback (or, for a recursion that was too deep, the `stack overflow`), and, for a
+  call that was only abandoned, the same result. `tier_aborts` counts them. A version that aborts in more than a quarter of its
+  runs, after eight aborts, is given up.
+- **The same arithmetic**: the integer and float operators, the shifts, the comparison of an integer with a float and the
+  arithmetic of a numeric `for` loop are in `nfcast_tier_rt.h`, which the interpreter includes and the generated code pastes
+  into its source; the interpreter's own copies were removed. `pow` is called through a pointer the C compiler cannot see through,
+  so that it does not fold `pow(2.0, 0.5)` with its own correctly rounded result where the interpreter calls the library.
+- **The order of evaluation**: C leaves the order of operands open; a program in which the first of two operands raises an
+  error and the second loops for ever must still fail, so an operand with a call or a division in it that is followed by another
+  such operand goes into a temporary first.
+- **Depth**: the compiled calls count like `State::depth`, with the same limit (`stack overflow` comes from the interpreter
+  after the abandoned run), and the code is not run at all when the interpreter's value stack could not hold that many frames of
+  the unit.
+
+What the tier does not promise: timings; *when* the collector runs (compiled code has no safe points, so a program that watches
+`collectgarbage("count")` sees other numbers); and the **sign of a NaN**, which `print` shows (`nan` or `-nan`). The interpreter's
+operations make the processor's NaN; the front end folds `0.0 / 0.0` to a positive one, so an operation on two literals goes
+through a call the compilers cannot see through (checked in `tier.cpp`), but nothing else was done about a C compiler that folds
+a NaN-making operation it can follow through locals (not seen with gcc here). On a target where the C compiler fuses a multiplication
+and an addition (aarch64, `__aarch64__` / `__FP_FAST_FMA`) the last bit of a float result could differ, and the tier does not compile
+float kernels there: that code is untested, there is no such host in the tests.
+
+### Compiling
+
+`request` builds the unit: the function and the kernels it calls, found through the bindings at that moment; types them for the
+argument types of the call (one instance per combination of argument types, found by iterating to a fixed point, which is also
+how a recursion gets its result type); writes C++ with one `static` function per instance on unboxed `long long`, `double` and `nfcr_N` and an entry point `nfcast_tier_run(ctx, args, result)`; pastes `nfcast_tier_rt.h` in front; and hashes the text with the
+driver's path and `NFCXX_BACKEND`. If `<cache>/nfcast-tier-<hash>.so` exists it is loaded (`tier_cache_hits`, no process runs: a
+second `State`, or a second run of the program, compiles nothing); if not, `nfcxx -shared` makes it (`tier_compiles`; about 0.2 s for a
+small unit on either back end) and it is installed with a rename, so that another process building the same code
+never sees half a file. The source stays next to it as `.cpp`. The cache directory is created with mode 0700 and refused unless
+the user owns it and nobody else can write to it, because the shared objects in it are executed (nfceval's rule; the cache is
+never cleaned). Nothing generated depends on addresses or on the State: the text of a program's kernels is the same on every run.
+
+The generated code includes only `<setjmp.h>` and declares the three libm functions it needs itself, which makes it compile twice
+as fast as with `<math.h>` (0.22 s against 0.45 s on gcc, 0.24 s against 0.54 s on qbe, best of five, for the unit of `fib`).
+
+`Sync`: the call that makes a function hot waits for the compile and then runs the new code. `Async`: the engine starts the
+driver as a **child process** and goes on; the calls it serves afterwards look at the process now and then, and a call after it
+has ended picks the code up. At most `TierOptions::jobs` (2) run at once, the others wait. There is no compile thread, and the
+reason is not taste: EDG's exception runtime keeps one global stack of try blocks (`lib_src/throw.c` of the front end; the
+interpreter pushes on it all the time, to run destructors when a script error unwinds), so a second thread running C++ code with
+destructors while the engine runs would corrupt it (`__curr_eh_stack_entry` is a plain global in `3rd/edg/lib_src/eh.h`; that is from reading
+the source: no thread was run to watch it fail). A State that is destroyed with compiles running kills them. A failed compile
+(no driver, the driver exits non-zero, a timeout, a bad `dlopen`) is `tier_failed` and nothing else: the function stays
+interpreted.
+
+### Counters
+
+`State::stats` gets: `tier_compiled` (versions that became callable: compiled or loaded), `tier_compiles` (driver runs),
+`tier_cache_hits`, `tier_ineligible`, `tier_failed`, `tier_calls` (calls that ran as native code; a recursion inside one run is one
+call), `tier_bailouts` (calls of a function that has compiled code that nevertheless ran in the interpreter), of which
+`tier_guard_misses` (an argument or a binding the code did not assume) and `tier_aborts` (a run abandoned half way).
+
+### Limits
+
+- **No on-stack replacement.** A loop is counted, but a function that is called once and runs a hot loop is compiled for its
+  *next* calls; the loop of the main chunk never is (it is a vararg function). `for i = 1, 1e8 do s = s + i end` at the top
+  level of a script stays interpreted.
+- Only the shapes above. In particular calls of native functions (`math.sqrt`, `math.floor`), tables and function values stay
+  interpreted.
+- Types are static: a variable is an integer, a float, a boolean or a number of either kind for the whole function; one that is a
+  boolean and a number, or a function called with a string or a table, is not compiled. A number of either kind carries its flag and
+  tests it in every operation, so it is slower than a plain `double`. At most four versions
+  per function, 12 parameters, 24 functions in a unit, 48 typed instances.
+- A toolchain finding, kept in `nfcast_tier_rt.h` as a comment: the QBE back end (cproc and QBE) miscompiles a struct that has a
+  4-byte member next to padding and is copied by value, as the generated code copies an `nfcr_N`: it tests the wrong half of the
+  word (a float came back as its integer part). `nfcr_N`'s flag is a 64-bit word for that reason. It was found by comparing a small
+  accumulator with real Lua; with a 32-bit flag put back, 4 checks of `tier.cpp` and `tier_kernels.lua` fail on qbe. Not reported upstream.
+- A kernel that fails often costs the failed run plus the interpreter's run until it is given up.
+- Entering native code from the interpreter costs about as much as a call of a small function in the interpreter (the checks, a
+  `setjmp`): a tiny kernel called from a loop in the interpreter gains little (ten million calls of
+  `x * 2 + 1`, 0.54 s instead of 0.53 s); what gains is a kernel with a loop or a recursion inside, which runs inside one entry.
+- The engine's own deviations from Lua are the tier's: a float `for` loop with a NaN start does not run its body (Lua runs it once),
+  and an integer loop with a NaN limit and a negative step does not run (Lua counts down to `math.mininteger`).
+- It needs POSIX (`fork`, `dlopen`), the nfcxx driver and the `lib/ast` directory next to it at run time.
+
 ## Verification
 
-- `tests/ast/cases/*.lua`: nine programs (arithmetic and number formatting, strings and patterns, tables, closures,
-  metatables, errors and their messages, control flow, algorithms, garbage-heavy code) and, for the inlining, ten more named
+- `tests/ast/cases/*.lua`: ten programs (arithmetic and number formatting, strings and patterns, tables, closures,
+  metatables, errors and their messages, control flow, algorithms, garbage-heavy code, numeric kernels) and, for the inlining, ten more named
   `inline_*` (argument adjustment and the order of evaluation; errors raised inside inlined bodies: message, position, variable
   names, `error` levels 0 to 3, error values that are not strings, `pcall` inside and outside, a callee from another chunk, natives
   called with bad arguments; a callee that is assigned again after its site was rewritten, a closure of the same function with
@@ -239,7 +411,9 @@ gone, and level 2 is its caller.
   them is the output of a real Lua 5.4.9 (`tests/ast/regen.sh`, built from the pin of `setup-poly-lua.sh`), and
   `tests/ast/run.sh` requires the same stdout from nfcast on both back ends, with the collector at its default and at every safe
   point, each with inlining as it is by default, with a site rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and
-  with inlining off (`NFCAST_INLINE=0`): 19 programs, 6 runs each, per back end. Two of the first programs had a syntax error in my
+  with inlining off (`NFCAST_INLINE=0`); and with the tier on and every function compiled at its first call (`NFCAST_TIER=sync`,
+  `NFCAST_TIER_THRESHOLD=1`): normally, with the collector stress, with early inlining, and with the tier compiling in the
+  background (`NFCAST_TIER=async`): 20 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
   succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr).
 - `tests/ast/engine.cpp`: 139 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
@@ -287,8 +461,32 @@ gone, and level 2 is its caller.
   callee instead of the owner's (`owner_proto`). Both are properties that nothing can observe while a clone can run (the callee's
   closure is on the stack, its constants are marked, its arena is alive), and are kept as defences, not as tested behaviour.
 - `tests/poly/run.sh`: the shared suite (117 checks per language) passes for `"ast"` on both back ends, and in the same
-  `Context` as Ruby, Lua and Python (559 checks in all); `POLY_LANGS=ast tests/poly/run.sh` (146 checks) also passes with the
-  inlining, on both back ends.
+  `Context` as Ruby, Lua, Python and JavaScript (884 checks in all); `POLY_LANGS=ast tests/poly/run.sh` (146 checks) also passes
+  with the inlining and the tier compiled in, on both back ends.
+- `tests/ast/tier.cpp`: 205 checks of the tier through the C++ API, with the nfcxx driver of the build. The first compile and
+  its counters; a float argument to an integer kernel (a bailout, later a second version); recursion; mutual recursion; numeric
+  upvalues and globals that change their value and their type; numbers of either kind (accumulators that start as an integer,
+  results and parameters of either kind, bitwise operators, `//` and `%` and comparisons around 2^53 on them, a call made while a
+  variable still had the type it was later widened from); a function rebound after it was compiled (a local, a global,
+  closures of one function with different upvalues); 54 programs run in a State without the tier and in one with it at
+  threshold 1, which must print the same text, errors included (integer wraparound, `//` and `%` by zero with the line of the
+  error, loops with every kind of bound, integer against float comparisons, shifts, NaN made from constants, recursion at and beyond
+  the depth limit, ineligible shapes); the traceback of an error raised by the re-run; loops counting towards the threshold;
+  functions that are not kernels; the limit of four versions; operands that can fail keeping their order (a check that would hang
+  otherwise); the collector at every safe point; the second `State` finding the code in the cache (no driver run); a driver that does not
+  exist, that exits 1, that makes nothing, and a damaged cache file; asynchronous compiles (with fewer jobs than compiles, and a
+  `State` destroyed while one runs); a host that ignores `SIGCHLD`.
+- `tests/ast/fuzz_tier.sh` (by hand): random numeric kernels (`fuzz/gen_kernel.py`: integer, float, boolean and "number of either kind" locals, parameters and results, every
+  operator, `if` / `while` / `repeat` / `for`, `break`, upvalues and globals that change type between calls, calls between functions,
+  recursion, functions without a result, wrong and missing arguments) run by a real Lua 5.4.9 and by nfcast with every function
+  compiled at its first call, output and error messages compared. On the final code: 24 seeds of 10 functions on the gcc back end (321 functions compiled, 1251 calls ran as native code) and 25 seeds on qbe (268 and 1224), no mismatch. It also found two differences between the engine and
+  Lua that have nothing to do with the tier (a float `for` loop whose start is NaN runs its body once in Lua and not at all here; an
+  integer loop with a NaN limit and a negative step counts down to `math.mininteger` in Lua and does not run here), which the
+  generator now stays away from.
+- The tier test, the engine test and the programs of `tests/ast/cases` with the tier at threshold 1 and the collector stress, under
+  AddressSanitizer and UBSan (host g++ for the engine, nfcxx for the generated code): no report.
+- Mutation checks on scratch copies of `nfcast_tier.cpp`: 21 mutants, each breaking one guard or one rule (the check of the callee, of the argument types, of the types of the free variables; the integer `//` by zero left to the interpreter; the depth limit; a `for` step of zero; the exact comparison of an integer with a float, in the generated code and in the shared header, for `<`, `<=` and `==` and for each order of the operands; the order in which a multiple assignment stores; the number type's zero divisor, conversion for bitwise operators, `>`, widening and result kind; the instances that widened types leave behind). The tier test fails for 20 of them (one by running into its `alarm`), and the golden kernels program differs for 13; the mutant of the equality of an integer and a float of either kind passed at first, which is why the test now has a grid of every comparison around 2^53 and 2^63 on such numbers. The one it does not notice: the hoisting of operands that can fail into temporaries is not needed by this toolchain, which evaluates operands left to right, so removing it changes nothing here; the check that would hang without it only has teeth on a C compiler that evaluates the other way.
+- `tests/eval/run.sh` passes with nfceval built on `nfceval_build.hpp`, `tests/poly/run.sh` with `POLY_LANGS=ast` too, both back ends.
 
 ## Speed
 
@@ -344,5 +542,43 @@ this milestone does not change: an argument is still evaluated into a slot and
 read back by a local node, `sq(x)` is still a multiplication of two local nodes. That is the honest size of the gain for a tree
 walker that inlines by cloning: 15% to 20% of the instructions in a loop made of small calls, and nothing for `fib`, where
 the unrolled level contains the same two calls it replaced. On the nfcxx back ends the saving in time is larger than the saving in
-instructions of the host build suggests (I counted instructions only for the host build); I did not look into why. The gain that inlining is for, a body
-that a compiled tier can see through, belongs to milestone 2.
+instructions of the host build suggests (I counted instructions only for the host build); I did not look into why. The tier does not use the clones (see "What the tier does with it"): it compiles whole kernels, and
+the inlining helps what stays interpreted.
+
+### Speed of the tier
+
+`tests/ast/bench_tier.sh` runs the programs of `tests/ast/bench` with the tier off and with it compiling every function at its first call
+(wall seconds, one machine with four cores that other jobs were using, so the figures are good to about 20%; the interpreter and
+warm-cache figures are the best of three, the cold-cache figure is one run). Every run prints what the interpreter prints.
+
+| Program | back end | interpreter | tier, cache empty | tier, cache warm | |
+| --- | --- | --- | --- | --- | --- |
+| `fib(32)` | qbe | 1.35 | 0.35 | 0.03 | 45x |
+| `fib(32)` | gcc | 0.93 | 0.24 | 0.03 | 31x |
+| `intloop`: integer loop, 30 million iterations | qbe | 2.08 | 0.43 | 0.16 | 13x |
+| `intloop` | gcc | 1.40 | 0.26 | 0.04 | 35x |
+| `accum`: a sum that becomes a float, 30 million iterations | qbe | 1.73 | 0.38 | 0.08 | 22x |
+| `accum` | gcc | 1.07 | 0.24 | 0.03 | 36x |
+| `mandel`: Mandelbrot over a 200 by 200 grid | qbe | 0.43 | 0.30 | 0.03 | 14x |
+| `mandel` | gcc | 0.30 | 0.25 | 0.02 | 15x |
+| `integrate`: 20 integrations of 500000 steps | qbe | 2.72 | 0.45 | 0.16 | 17x |
+| `integrate` | gcc | 1.68 | 0.25 | 0.02 | 84x |
+
+"Cache empty" includes the compile (a few tenths of a second per function; the programs have one or two functions); "cache warm" is
+every run after the first one of a program, when the shared object is only loaded. The last column is the interpreter's time over the
+warm time; the warm times of a few hundredths of a second include starting the process and loading the object, so the quotients are
+rough. The programs: `fib(32)`; ten calls of a function
+that runs a loop of three million iterations of `s + i * 3 % 7` (`intloop`); the same shape with a sum that starts as the integer 0
+and becomes a float, a number of either kind (`accum`); the Mandelbrot iteration count over a 200 by 200 grid (a `while` loop and a
+multiple assignment on floats; 1.5 million iterations, so little time to gain on); twenty integrations of 500000 steps that call
+another kernel through an upvalue and read a numeric upvalue.
+
+What the tier does not help: the work has to be inside a function that is called, or called again after the loop that made it hot
+(there is no on-stack replacement), and it has to be a kernel. A tiny kernel called from an interpreted loop gains little (ten
+million calls of `x * 2 + 1` from a loop at the top level: 0.53 s to 0.54 s on the host compiler). With the tier off the
+engine runs as fast as before the hooks: measured with the host g++ -O2, best of three, with the tier off
+against the engine of the milestone-1 commit: `fib(32)` (with `fib(20)` and `fib(27)` before it) 0.44 s against 0.46 s; 5 million
+calls of a function that reads a table field, so is not a kernel, and `fib(30)`, 0.44 s against 0.42 s; the loop of ten million calls of a
+tiny kernel 0.53 to 0.61 s against 0.52 to 0.58 s over three repetitions; `intloop` 0.93 against 0.99, `mandel` 0.23 against 0.25,
+`integrate` 1.02 against 1.08, `accum` 0.67 against 0.70: no difference beyond the noise of a machine that other jobs were using (about
+10%). A `State` without a tier pays one pointer test per call and per loop iteration.

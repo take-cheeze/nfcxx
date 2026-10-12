@@ -23,6 +23,9 @@ eng.eval_void("pos.x = 42;");
 Build the host with `nfcxx -I lib/eval -rdynamic host.cpp` (see "Linking the host" below). Tests: `tests/eval/run.sh`
 (both backends, wired into CI).
 
+Finding the driver, hashing a source, the per-user cache directory, running the driver in a child process and `dlopen` are in
+`lib/eval/nfceval_build.hpp` (header only, no exceptions); the tier of `lib/ast` (`ast.md`) uses the same functions.
+
 ## Mechanism
 
 1. `Engine::generate` writes one translation unit: default includes (`<new> <exception> <stdexcept> <string>
