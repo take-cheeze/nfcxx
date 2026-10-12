@@ -33,6 +33,8 @@ class CodeGen
   # Every ivar one compile_method call sets and clears for itself, with its
   # top-level value. A probe runs mid-way through another method's compile.
   METHOD_COMPILE_STATE = {
+    :@ir_inline_remaining => 512,
+    :@ir_inline_stack => nil,
     :@elem_class_hint => nil, :@block_hash_capture_hints => nil, :@block_fallback_upvars => nil,
     :@block_fallback_active => false, :@blk_param_name => nil, :@blk_param_level => 0,
     # NESTED_BLOCK_FORWARD (ADR 0330): the BLOCK_FALLBACK body's nesting depth,

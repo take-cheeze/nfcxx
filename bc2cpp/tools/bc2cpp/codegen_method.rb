@@ -84,6 +84,7 @@ class CodeGen
   end
 
   def compile_method(label)
+    @ir_inline_remaining = 512
     irep = @ireps.fetch(label)
     d = @owner_of.fetch(label)
     # ADR 0264: mruby's own methods are compiled with no closed-world proof (the closed

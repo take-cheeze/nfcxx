@@ -446,10 +446,12 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   target_suffix += 'sealed' if sealed
   target_suffix += 'static' if ENV['OPTCARROT_STATIC_DISPATCH'] == '1'
   target_suffix += 'ppu' if ENV['OPTCARROT_STATIC_PPU'] == '1'
+  target_suffix += 'irinline' if ENV['BC2CPP_IR_INLINE'] == '1'
   compiled_target = "optcarrotcompiled#{target_suffix}"
   puts "Optcarrot build mode: #{build_mode}"
   puts "Optcarrot CPU dispatch: #{ENV['OPTCARROT_STATIC_DISPATCH'] == '1' ? 'static' : 'dynamic'}; sealed world: #{sealed}"
   puts "Optcarrot PPU core: #{ENV['OPTCARROT_STATIC_PPU'] == '1' ? 'generated synchronous' : 'Fiber'}"
+  puts 'Optcarrot bytecode IR method inlining: enabled' if ENV['BC2CPP_IR_INLINE'] == '1'
   config = File.join(temp, 'mruby_build_config.rb')
   compiled_base = if sealed
                     ["toolchain", "self.mrbcfile = #{File.expand_path(MRBC).dump}",
@@ -596,7 +598,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   end
   core_label = nullable ? 'mruby + bc2cpp (nullable @opcode)' : 'mruby + bc2cpp'
   modes = [sealed && 'sealed', ENV['OPTCARROT_STATIC_DISPATCH'] == '1' && 'static dispatch',
-           ENV['OPTCARROT_STATIC_PPU'] == '1' && 'synchronous PPU'].select { |mode| mode }
+           ENV['OPTCARROT_STATIC_PPU'] == '1' && 'synchronous PPU',
+           ENV['BC2CPP_IR_INLINE'] == '1' && 'IR inlining'].select { |mode| mode }
   core_label += " (#{modes.join(', ')})" unless modes.empty?
   compiled_command = sealed ? [compiled_binary, ROM, FRAMES.to_s] : [compiled_binary, compiled_bundle, ROM, FRAMES.to_s]
   compiled_result = run_benchmark(core_label, compiled_command,
