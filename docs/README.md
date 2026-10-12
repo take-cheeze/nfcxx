@@ -17,6 +17,7 @@ covers say so.
 | [freestanding.md](notes/freestanding.md) | The `lib/` headers, `nfcxx --freestanding`, and the cproc limits met while writing them. |
 | [gpu.md](notes/gpu.md) | GPU first step: a hand-written IR kernel, lowered to PTX by `scripts/pathb-ptx-emit.rb`, run with ptxas and the CUDA runtime on an RTX 2060 (`tests/gpu/run.sh`). |
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
+| [llamacpp.md](notes/llamacpp.md) | llama.cpp's host-side ggml through the gcc backend: what compiles, the driver fixes, and the blockers (EDG AVX10.2 builtins, a cross-TU template instance). `tests/llamacpp/run.sh`. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
