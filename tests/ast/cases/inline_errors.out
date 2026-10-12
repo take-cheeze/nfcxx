@@ -408,3 +408,40 @@ false	other:3: attempt to index a number value (field 'a')
 false	other:3: attempt to index a nil value (field 'a')
 false	inline_errors.lua:136: m6
 true	2
+-- natives called from an inlined body with bad arguments: the name at the call site, the position of the callee
+true	ab
+true	x
+true	1
+true	0x1p-1
+false	inline_errors.lua:145: bad argument #1 to 'tonumber' (string expected, got number)
+true	1
+true	abab
+false	inline_errors.lua:142: bad argument #1 to 'rep' (string expected, got table)
+true	2
+true	1
+false	inline_errors.lua:145: bad argument #1 to 'tonumber' (string expected, got number)
+true	1
+false	inline_errors.lua:141: bad argument #1 to 'rep' (number expected, got table)
+true	xxx
+false	inline_errors.lua:143: bad argument #1 to 'floor' (number expected, got string)
+true	0x1.8p+0
+false	inline_errors.lua:145: bad argument #1 to 'tonumber' (string expected, got number)
+true	1
+true	abababab
+false	inline_errors.lua:142: bad argument #1 to 'rep' (string expected, got table)
+true	4
+true	2
+false	inline_errors.lua:145: bad argument #1 to 'tonumber' (string expected, got number)
+false	inline_errors.lua:146: bad argument #1 to 'insert' (table expected, got number)
+true	ababababab
+true	xxxxx
+true	5
+true	0x1.4p+1
+false	inline_errors.lua:145: bad argument #1 to 'tonumber' (string expected, got number)
+true	1
+false	inline_errors.lua:141: bad argument #1 to 'rep' (number expected, got table)
+false	inline_errors.lua:142: bad argument #1 to 'rep' (string expected, got table)
+false	inline_errors.lua:143: bad argument #1 to 'floor' (number expected, got string)
+true	3
+false	inline_errors.lua:145: bad argument #1 to 'tonumber' (string expected, got number)
+true	1

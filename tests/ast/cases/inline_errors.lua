@@ -136,3 +136,19 @@ for i = 1, 6 do
   print(pcall(function() other.lvl2("m" .. i) end))
   print(pcall(function() return other.div(i, i - 3) end))
 end
+
+print("-- natives called from an inlined body with bad arguments: the name at the call site, the position of the callee")
+local function rep1(s, n) return s:rep(n) end
+local function rep2(s, n) return string.rep(s, n) end
+local function flo(x) return math.floor(x) end
+local function fmt(f, x) return string.format(f, x) end
+local function tn(x, b) return tonumber(x, b) end
+local function ins(t, v) table.insert(t, v) return #t end
+for i = 1, 6 do
+  print(pcall(function() return rep1("ab", i % 3 == 0 and {} or i) end))
+  print(pcall(function() return rep2(i % 2 == 0 and {} or "x", i) end))
+  print(pcall(function() return flo(i % 3 == 0 and "x" or i + 0.5) end))
+  print(pcall(function() return fmt(i % 2 == 0 and "%d" or "%q", i / 2) end))
+  print(pcall(function() return tn(i, i % 2 == 0 and 99 or 10) end))
+  print(pcall(function() return ins(i % 4 == 0 and 5 or {}, i) end))
+end

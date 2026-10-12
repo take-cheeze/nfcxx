@@ -24,7 +24,7 @@ scripts/setup-poly.sh     # mruby built with C++ exceptions for lib/poly (NFCXX_
 scripts/setup-poly-lua.sh # Lua 5.4 built with C++ exceptions for lib/poly (Python uses the system python3-dev)
 scripts/setup-poly-js.sh  # QuickJS-NG (plain C, patched for cproc) for lib/poly
 tests/poly/run.sh         # nfcpoly: evaluate Ruby, Lua, Python, JavaScript and ast from C++ with bound host objects, exceptions across the boundary (both backends; docs/notes/poly.md)
-tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpreter, checked against a real Lua 5.4 (both backends; docs/notes/ast.md)
+tests/ast/run.sh          # nfcast (lib/ast): the self-specializing AST interpreter with inlining of small functions, checked against a real Lua 5.4 (both backends; docs/notes/ast.md)
 scripts/setup-pathb.sh    # Path B harness (own back end on EDG's IL); then tests/pathb{,-ir,-qbe}/run.sh (docs/notes/pathb-stage3.md)
 ./nfcxx -c a.cpp -o a.o; ./nfcxx a.o b.o -o x # separate compilation (docs/notes/multi-tu.md)
 tests/multi-tu/run.sh     # several translation units sharing libstdc++ templates (both backends)

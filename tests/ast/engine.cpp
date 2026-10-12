@@ -78,6 +78,13 @@ struct Probe : nfcast::HostObject {
 int Probe::live = 0;
 const char Probe::key = 0;
 
+// cb(f, args...): the host calls f from inside the script, the way a bound function that takes a callback does.
+static void native_cb(State& S, Args a, Rets& r, nfcast::Native&) {
+  Rets out;
+  S.call(a[0], a.v + 1, a.n > 0 ? a.n - 1 : 0, out);
+  for (int i = 0; i < out.n; ++i) r.push(out.p[i]);
+}
+
 static void native_make_probe(State& S, Args a, Rets& r, nfcast::Native&) {
   r.push(Value::host(S.new_host<Probe>(a.n ? static_cast<int>(a.v[0].i) : 0)));
 }
@@ -384,6 +391,19 @@ int main() {
     const char* count = "local depth = 0 local function rec() depth = depth + 1 return rec() + 1 end local ok = pcall(rec) return depth";
     CHECK(run_int(on, count) == run_int(off, count) && run_int(on, count) > 1000);
 
+    // A function with a very large tree (over 20000 nodes) takes no clones: what chains of clones can add to one function is bounded.
+    {
+      std::string big = "local function sm(x) return x + 1 end local s = 0 for i = 1, 10 do s = s + sm(i) end ";
+      for (int i = 0; i < 7000; ++i) big += "s = s + 1 ";               // four nodes each
+      big += "return s";
+      auto g0 = stats_of(on);
+      CHECK(run_int(on, big) == 65 + 7000);
+      CHECK(on.stats.inlined_sites == g0.inlined_sites && on.stats.inline_declined == g0.inline_declined + 1);
+      auto g1 = stats_of(on);
+      CHECK(run_int(on, "local function sm(x) return x + 1 end local s = 0 for i = 1, 10 do s = s + sm(i) end return s") == 65);
+      CHECK(on.stats.inlined_sites == g1.inlined_sites + 1);            // the same site in a small function is inlined
+    }
+
     // Errors: the same message, the same traceback (every function of the chain, innermost first, with the lines they were at).
     const char* chain = "local function c(x) if x > 6 then error('deep') end return x end\n"
                         "local function b(x) return c(x) + 1 end\n"
@@ -419,6 +439,27 @@ int main() {
             tr[2].find("local 'a'") != std::string::npos && tr[3].find("main chunk") != std::string::npos);
     }
     CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr && early_t.depth == 0 && early_t.cur == nullptr);
+
+    // The host calls back into the script from inside an inlined body, and an error comes back through the inlined frames.
+    {
+      State cbs;
+      cbs.open_libs();
+      cbs.inlining = true;
+      cbs.inline_warm = 1;
+      cbs.globals->set_str(cbs, cbs.str("cb"), Value::function(cbs.new_native(native_cb, "cb")));
+      CHECK(run_int(cbs, "local function twice(x) return x * 2 end local function viacb(x) return cb(twice, x) + 1 end "
+                         "local t = 0 for i = 1, 20 do t = t + viacb(i) end return t") == 440);
+      CHECK(cbs.stats.inlined_calls == 18);                          // viacb, from the third call of its site on
+      CHECK(run_int(cbs, "local function boom(f) return cb(f, 1) end local n = 0 "
+                         "for i = 1, 10 do local ok, e = pcall(function() return boom(function() error('x' .. i) end) end) "
+                         "if not ok and e == 'test:1: x' .. i then n = n + 1 end end return n") == 10);
+      CHECK(cbs.depth == 0 && cbs.top == cbs.stack && cbs.cur == nullptr && cbs.pcall_depth == 0);
+      std::string cerr;
+      run(cbs, "local function boom(f) return cb(f, 1) end for i = 1, 5 do boom(function() local t = nil; return t.x end) end", &cerr);
+      CHECK(cerr == "test:1: attempt to index a nil value (local 't')");
+      CHECK(cbs.depth == 0 && cbs.top == cbs.stack && cbs.cur == nullptr);
+      CHECK(run_int(cbs, "return 1 + 1") == 2);
+    }
 
     // The collector: bodies that allocate and mention strings of their own, under a collector that runs at every safe point.
     {

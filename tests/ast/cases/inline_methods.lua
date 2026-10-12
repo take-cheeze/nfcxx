@@ -106,3 +106,15 @@ for i = 1, 5 do
   local a, b, c, d = M:many()
   print(a, b, c, d, #{M:many()}, #{M:none()})
 end
+
+print("-- one method function, a different closure (other upvalues) in each object")
+local function mkobj(n, step)
+  local calls = 0
+  return {n = n, get = function(self) calls = calls + 1; return n + self.n + calls * step end, count = function() return calls end}
+end
+local objs = {mkobj(1, 10), mkobj(100, 1000), mkobj(-5, 0)}
+for round = 1, 5 do
+  local out = {}
+  for i, o in ipairs(objs) do out[#out + 1] = o:get() .. "/" .. o:count() end
+  print(table.concat(out, " "))
+end
