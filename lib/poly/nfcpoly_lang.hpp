@@ -60,6 +60,19 @@ Impl* impl_of(Lang* l);
 [[noreturn]] void raise_script_error(Lang* l, const std::string& cls, const std::string& msg,
                                      std::vector<std::string> backtrace, bool syntax);
 
+// The argument count a script passed against what the callable takes (arity() down to min_arity(), the rest nil), and the
+// words of the ArgumentError / TypeError when it does not fit: "wrong number of arguments (given 1, expected 2..3)".
+inline bool arity_fits(const Callable* c, long given) { return given >= c->min_arity() && given <= c->arity(); }
+inline std::string arity_message(const Callable* c, long given) {
+  std::string want = std::to_string(c->arity());
+  if (c->min_arity() != c->arity()) want = std::to_string(c->min_arity()) + ".." + want;
+  return "wrong number of arguments (given " + std::to_string(given) + ", expected " + want + ")";
+}
+// Fills out the missing trailing arguments of a call with nil, up to arity().
+inline void arity_pad(const Callable* c, std::vector<Var>& args) {
+  while (static_cast<long>(args.size()) < c->arity()) args.emplace_back();
+}
+
 // A global name a script can write as a bare identifier: lower-case or '_' first, then letters, digits, '_'.
 bool valid_global_name(const std::string& name);
 

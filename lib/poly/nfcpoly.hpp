@@ -254,6 +254,10 @@ struct Callable {
   Impl* impl = nullptr;
   virtual ~Callable() {}
   virtual int arity() const = 0;
+  // The fewest arguments a script may pass: the missing trailing ones arrive as nil (a script's None / null / nil), so the
+  // parameters from min_arity() on should be std::optional<T> or Value. Equal to arity() unless a binding asks for optional
+  // arguments (method_fn / bind_fn with min_args).
+  virtual int min_arity() const { return arity(); }
   virtual bool wants_self() const { return false; }  // true for methods: invoke gets the receiver
   virtual Var invoke(const Var* self, const Var* args) = 0;
   virtual bool signature(Sig&) const { return false; }  // fills the parameter and result types; false when not known
@@ -618,8 +622,9 @@ struct fn_sig<F, std::void_t<decltype(&F::operator())>> : fn_sig<decltype(&F::op
 template <bool Self, class F, class R, class... A>
 class FnCallable : public Callable {
  public:
-  explicit FnCallable(F f) : f_(std::move(f)) {}
+  FnCallable(F f, int min_args) : f_(std::move(f)), min_(min_args) {}
   int arity() const override { return static_cast<int>(sizeof...(A)) - (Self ? 1 : 0); }
+  int min_arity() const override { return min_ < 0 || min_ > arity() ? arity() : min_; }
   bool wants_self() const override { return Self; }
   Var invoke(const Var* self, const Var* args) override { return call(self, args, std::index_sequence_for<A...>{}); }
   bool signature(Sig& s) const override {
@@ -648,18 +653,19 @@ class FnCallable : public Callable {
     }
   }
   F f_;
+  int min_;
 };
 
 template <bool Self, class F, class R, class... A>
-std::unique_ptr<Callable> make_callable_impl(Impl* impl, F f, Tag<R, A...>*) {
-  std::unique_ptr<Callable> c(new FnCallable<Self, F, R, A...>(std::move(f)));
+std::unique_ptr<Callable> make_callable_impl(Impl* impl, F f, int min_args, Tag<R, A...>*) {
+  std::unique_ptr<Callable> c(new FnCallable<Self, F, R, A...>(std::move(f), min_args));
   c->impl = impl;
   return c;
 }
 template <bool Self, class F>
-std::unique_ptr<Callable> make_callable(Impl* impl, F f) {
+std::unique_ptr<Callable> make_callable(Impl* impl, F f, int min_args = -1) {
   using S = fn_sig<std::decay_t<F>>;
-  return make_callable_impl<Self>(impl, std::move(f), static_cast<typename S::tag*>(nullptr));
+  return make_callable_impl<Self>(impl, std::move(f), min_args, static_cast<typename S::tag*>(nullptr));
 }
 
 template <class C, class R, class... A>
@@ -718,10 +724,25 @@ class ClassBuilder {
     detail::declare_method(impl_, ci_, name, detail::make_callable<true>(impl_, detail::member_lambda(m)));
     return *this;
   }
-  // A function whose first parameter is the object (T&, const T& or T*): obj.name(args...).
+  // A function whose first parameter is the object (T&, const T& or T*): obj.name(args...). With min_args >= 0 a script
+  // may leave out trailing arguments down to that many (after the object): they arrive as nil, so those parameters are
+  // std::optional<T> or Value (Go: the function is variadic in them, `obj.Name(a, opt ...any)`).
   template <class F>
-  ClassBuilder& method_fn(const std::string& name, F f) {
-    detail::declare_method(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(f)));
+  ClassBuilder& method_fn(const std::string& name, F f, int min_args = -1) {
+    detail::declare_method(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(f), min_args));
+    return *this;
+  }
+  // obj.name reads a value that GET computes from the object (the first parameter, no others), obj.name = v calls SET (the
+  // object and the value) when there is one. Like field(), but for a value that is not a member (a computed property).
+  template <class G>
+  ClassBuilder& property_fn(const std::string& name, G get) {
+    detail::declare_prop(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(get)), nullptr);
+    return *this;
+  }
+  template <class G, class S>
+  ClassBuilder& property_fn(const std::string& name, G get, S set) {
+    detail::declare_prop(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(get)),
+                         detail::make_callable<true>(impl_, std::move(set)));
     return *this;
   }
   // obj.name reads the member, obj.name = v writes it (not for const members). A member of a registered class type is
@@ -805,10 +826,11 @@ class Context {
 
   // A script can call `name(args...)`. F is a function, function pointer, lambda or other callable with one
   // non-template call operator. Parameters: values by copy, registered classes by T&, const T& or T* (the script's
-  // object), results likewise (T& and T* are shared, a T is a new script-owned object). Exact arity.
+  // object), results likewise (T& and T* are shared, a T is a new script-owned object). Exact arity, or min_args..arity
+  // when min_args >= 0 (trailing arguments left out are nil).
   template <class F>
-  Context& bind_fn(const std::string& name, F f) {
-    detail::declare_fn(impl(), name, detail::make_callable<false>(impl(), std::move(f)));
+  Context& bind_fn(const std::string& name, F f, int min_args = -1) {
+    detail::declare_fn(impl(), name, detail::make_callable<false>(impl(), std::move(f), min_args));
     return *this;
   }
 
