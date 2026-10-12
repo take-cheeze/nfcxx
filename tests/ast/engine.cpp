@@ -332,7 +332,7 @@ int main() {
     // Closures of one function with different upvalues pass the guard (it is the function, not the closure), and read their own.
     auto d0 = stats_of(on);
     CHECK(run_int(on, "local function mk(k) return function(x) return x + k end end local a, b = mk(1), mk(100) "
-                      "local function call(f) return f(1) end local s = 0 for i = 1, 20 do s = s + call(a) + call(b) end return s") == 20 * (2 + 101));
+                      "local function call(f) local r = f(1) return r end local s = 0 for i = 1, 20 do s = s + call(a) + call(b) end return s") == 20 * (2 + 101));
     CHECK(on.stats.deopts == d0.deopts);                                  // the second closure did not fail the guard
     CHECK(on.stats.inlined_calls > d0.inlined_calls + 30);
 
@@ -438,6 +438,22 @@ int main() {
             tr[2].find("local 'a'") != std::string::npos && tr[3].find("main chunk") != std::string::npos);
     }
     CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr && early_t.depth == 0 && early_t.cur == nullptr);
+
+    // Tail calls: a chain of them takes no depth (a million deep here, the limit is 1500), and the frame of the function that made
+    // one is gone from a traceback, which says so; with inlining on, early and off alike.
+    for (State* st : {&on, &off, &early_t}) {
+      CHECK(run_int(*st, "local function l(n, a) if n == 0 then return a end return l(n - 1, a + 1) end return l(1000000, 0)") == 1000000);
+      nfcast::Closure* cl = st->load("local function c(x) error('deep') end\nlocal function b(x) return c(x) end\nb(1)", "tail", &err);
+      Rets o;
+      std::vector<std::string> tr;
+      try {
+        st->call(Value::function(cl), nullptr, 0, o);
+      } catch (Thrown& t) {
+        tr = t.trace;
+      }
+      CHECK(tr.size() == 3 && tr[0].find("tail:1:") == 0 && tr[1] == "(...tail calls...)" && tr[2].find("tail:3:") == 0);
+      CHECK(st->depth == 0 && st->top == st->stack && st->cur == nullptr);
+    }
 
     // The host calls back into the script from inside an inlined body, and an error comes back through the inlined frames.
     {

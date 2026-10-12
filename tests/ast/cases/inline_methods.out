@@ -36,63 +36,69 @@ woof 1;tweet 2;woof 3;...	10
 false	inline_methods.lua:10: attempt to perform arithmetic on a nil value (field 'y')
 false	inline_methods.lua:74: attempt to index a nil value (field 'nope')
 false	inline_methods.lua:79: level2 from 8
-false	inline_methods.lua:80: attempt to call a nil value (method 'missing')
-false	inline_methods.lua:81: attempt to index a nil value
-false	inline_methods.lua:82: attempt to index a nil value (local 'n')
+false	level2 from 8
+false	inline_methods.lua:81: attempt to call a nil value (method 'missing')
+false	inline_methods.lua:82: attempt to index a nil value
+false	inline_methods.lua:83: attempt to index a nil value (local 'n')
 true	8
 false	inline_methods.lua:10: attempt to perform arithmetic on a nil value (field 'y')
 false	inline_methods.lua:74: attempt to index a nil value (field 'nope')
 false	inline_methods.lua:79: level2 from 8
-false	inline_methods.lua:80: attempt to call a nil value (method 'missing')
-false	inline_methods.lua:81: attempt to index a nil value
-false	inline_methods.lua:82: attempt to index a nil value (local 'n')
+false	level2 from 8
+false	inline_methods.lua:81: attempt to call a nil value (method 'missing')
+false	inline_methods.lua:82: attempt to index a nil value
+false	inline_methods.lua:83: attempt to index a nil value (local 'n')
 true	8
 false	inline_methods.lua:10: attempt to perform arithmetic on a nil value (field 'y')
 false	inline_methods.lua:74: attempt to index a nil value (field 'nope')
 false	inline_methods.lua:79: level2 from 8
-false	inline_methods.lua:80: attempt to call a nil value (method 'missing')
-false	inline_methods.lua:81: attempt to index a nil value
-false	inline_methods.lua:82: attempt to index a nil value (local 'n')
+false	level2 from 8
+false	inline_methods.lua:81: attempt to call a nil value (method 'missing')
+false	inline_methods.lua:82: attempt to index a nil value
+false	inline_methods.lua:83: attempt to index a nil value (local 'n')
 true	8
 false	inline_methods.lua:10: attempt to perform arithmetic on a nil value (field 'y')
 false	inline_methods.lua:74: attempt to index a nil value (field 'nope')
 false	inline_methods.lua:79: level2 from 8
-false	inline_methods.lua:80: attempt to call a nil value (method 'missing')
-false	inline_methods.lua:81: attempt to index a nil value
-false	inline_methods.lua:82: attempt to index a nil value (local 'n')
+false	level2 from 8
+false	inline_methods.lua:81: attempt to call a nil value (method 'missing')
+false	inline_methods.lua:82: attempt to index a nil value
+false	inline_methods.lua:83: attempt to index a nil value (local 'n')
 true	8
 false	inline_methods.lua:10: attempt to perform arithmetic on a nil value (field 'y')
 false	inline_methods.lua:74: attempt to index a nil value (field 'nope')
 false	inline_methods.lua:79: level2 from 8
-false	inline_methods.lua:80: attempt to call a nil value (method 'missing')
-false	inline_methods.lua:81: attempt to index a nil value
-false	inline_methods.lua:82: attempt to index a nil value (local 'n')
+false	level2 from 8
+false	inline_methods.lua:81: attempt to call a nil value (method 'missing')
+false	inline_methods.lua:82: attempt to index a nil value
+false	inline_methods.lua:83: attempt to index a nil value (local 'n')
 true	8
 false	inline_methods.lua:10: attempt to perform arithmetic on a nil value (field 'y')
 false	inline_methods.lua:74: attempt to index a nil value (field 'nope')
 false	inline_methods.lua:79: level2 from 8
-false	inline_methods.lua:80: attempt to call a nil value (method 'missing')
-false	inline_methods.lua:81: attempt to index a nil value
-false	inline_methods.lua:82: attempt to index a nil value (local 'n')
+false	level2 from 8
+false	inline_methods.lua:81: attempt to call a nil value (method 'missing')
+false	inline_methods.lua:82: attempt to index a nil value
+false	inline_methods.lua:83: attempt to index a nil value (local 'n')
 true	8
 -- the receiver stops being a table
 1	true	8
 2	true	3
 3	true	7
-4	false	inline_methods.lua:87: attempt to call a nil value (method 'getx')
-5	false	inline_methods.lua:87: attempt to index a number value (local 'o')
+4	false	inline_methods.lua:88: attempt to call a nil value (method 'getx')
+5	false	inline_methods.lua:88: attempt to index a number value (local 'o')
 6	true	dyn getx
 1	true	8
 2	true	3
 3	true	7
-4	false	inline_methods.lua:87: attempt to call a nil value (method 'getx')
-5	false	inline_methods.lua:87: attempt to index a number value (local 'o')
+4	false	inline_methods.lua:88: attempt to call a nil value (method 'getx')
+5	false	inline_methods.lua:88: attempt to index a number value (local 'o')
 6	true	dyn getx
 1	true	8
 2	true	3
 3	true	7
-4	false	inline_methods.lua:87: attempt to call a nil value (method 'getx')
-5	false	inline_methods.lua:87: attempt to index a number value (local 'o')
+4	false	inline_methods.lua:88: attempt to call a nil value (method 'getx')
+5	false	inline_methods.lua:88: attempt to index a number value (local 'o')
 6	true	dyn getx
 -- string methods through the same syntax
 A1!	x	1

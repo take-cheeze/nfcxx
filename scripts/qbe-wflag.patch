@@ -1,0 +1,58 @@
+Local patch for 3rd/qbe (c9x.me/git/qbe.git mirror), applied to the build copy by scripts/setup-qbe.sh.
+
+amd64 isel fused the flags of a 64-bit "and" (and of any other class-l zflag instruction) into a jnz or a
+select whose condition is a word. The condition is a word, so only its low 32 bits count, but the fused
+code (testq with a mask / andq + jnz) looks at all 64. QBE's own passes produce this shape from well-typed
+input: load elimination turns a 4-byte load that follows an 8-byte copy of "4-byte member + 4 bytes of
+padding" into "%w =w copy %l" (the low half of a long), copy elimination then makes the jnz read the long
+temporary directly, and that long is "and %x, 0xffffffff00000000" (the padding half, forwarded from a
+partial store into the wider load). The jnz then tests the padding bytes instead of the member. In C
+terms: a struct like struct { double v; int flag; } (16 bytes, 4 of them padding) that is copied by value
+takes the wrong branch on "if (s.flag)" when the padding bytes are not zero.
+Test: tests/cases/qbe_wflag_padding.cpp. Report: docs/notes/qbe-wflag.md.
+
+The patch lets a flag-setting instruction feed jnz/select only when it is a compare or has class w; a
+class-l result is tested with an explicit "cmpl $0" on its low word instead.
+--- a/amd64/isel.c
++++ b/amd64/isel.c
+@@ -510,6 +510,22 @@
+ 	return 0;
+ }
+ 
++/* nfcxx: the flags of a 64-bit arithmetic or logic instruction
++ * describe all 64 bits of its result, but jnz and select test a
++ * word.  The optimizer (load elimination followed by copy
++ * elimination) can make a word-class use refer to the long
++ * temporary directly, so "and" and friends of class l must not be
++ * used as the source of the flags; plain compare/test is used. */
++static int
++wflagi(Ins *fi, Ref r, int *k, int *c)
++{
++	if (!fi || !req(fi->to, r))
++		return 0;
++	if (iscmp(fi->op, k, c))
++		return 1;
++	return !KWIDE(fi->cls);
++}
++
+ static Ins*
+ selsel(Fn *fn, Blk *b, Ins *i, Num *tn)
+ {
+@@ -533,7 +549,7 @@
+ 	gencmp = gencpy = swap = 0;
+ 	k = Kw;
+ 	c = Cine;
+-	if (!fi || !req(fi->to, r)) {
++	if (!wflagi(fi, r, &k, &c)) {
+ 		gencmp = 1;
+ 		cr[0] = r;
+ 		cr[1] = CON_Z;
+@@ -616,7 +632,7 @@
+ 		return;
+ 	}
+ 	fi = flagi(b->ins, &b->ins[b->nins]);
+-	if (!fi || !req(fi->to, r)) {
++	if (!wflagi(fi, r, &k, &c)) {
+ 		selcmp((Ref[2]){r, CON_Z}, Kw, 0, fn);
+ 		b->jmp.type = Jjf + Cine;
+ 	}

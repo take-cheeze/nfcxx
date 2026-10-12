@@ -8,7 +8,7 @@ EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`de
 ## qbe backend (default)
 
 `nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
-`scripts/cproc-asan.patch` (applied to the build copy by `scripts/setup-qbe.sh`, so the submodule stays clean), then
+the `nfcxx-asan` branch of take-cheeze/cproc, which `3rd/cproc` is pinned to, then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
@@ -28,7 +28,7 @@ copies and `va_arg` loads are checked as ordinary accesses.
 A block-scoped stack object (a local, a for-init declaration, a compound literal) is poisoned when its block is left and
 unpoisoned again when its declaration runs, so a loop that enters the block again is addressable each time. The poison is
 `__asan_poison_stack_memory`, the marker gcc's own instrumentation uses, so the report is `stack-use-after-scope` on both
-backends and the tests need no `ASAN-QBE:` line. Covered ways out of a block (cproc, `scripts/cproc-asan.patch`, `qbe.c`):
+backends and the tests need no `ASAN-QBE:` line. Covered ways out of a block (cproc, take-cheeze/cproc `nfcxx-asan`, `qbe.c`):
 
 - the normal end, after the join point and before the scope is deleted (`asanend`);
 - `break` and `continue` of C input, cproc's own statements (`asanleave`: the objects the loop or switch body has declared);
@@ -77,7 +77,7 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-qbe: cproc checks every load and store, and stack and global objects get redzones (`scripts/cproc-asan.patch`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store, and stack and global objects get redzones (take-cheeze/cproc `nfcxx-asan`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 

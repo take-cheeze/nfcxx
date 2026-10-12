@@ -576,6 +576,14 @@ struct IndexBase : Node {
   }
   int target_kind() const override { return 4; }
   int node_kind() const override { return 3; }
+  // What Lua's getobjname says about the value of t[k]: a small integer constant is OP_GETI ("integer index"), any other key is
+  // an operand in a register and the name is "?" (a string constant never gets here, it is a FieldBase).
+  void describe(std::string& out) const override {
+    const ConstNode* c = dynamic_cast<const ConstNode*>(key_);
+    if (c && c->v.t == T_INT && static_cast<std::uint64_t>(c->v.i) <= 255) out = "field 'integer index'";
+    else if (c && c->v.t == T_STR) out = "field '" + std::string(c->v.s()->view()) + "'";
+    else out = "field '?'";
+  }
   Value eval(Frame& f) override {
     Value o = obj_->eval(f), k;
     if (o.is_gc() && !key_->is_simple()) {
@@ -895,6 +903,32 @@ inline int push_args(Frame& f, std::vector<Node*>& args, bool multi_last, Value*
   return n;
 }
 
+// `return f(args)` with f a script function (or an object whose __call is one): instead of calling it, the callee and its N arguments
+// (at AB[1..N], the function at AB[0]) are left in the running frame, whose call_closure runs it in place of the caller. False for
+// anything else (a native function, a value that cannot be called), which is called as usual.
+bool tail_closure(Frame& f, Value* ab, int n) {
+  State& S = *f.S;
+  Value fnv = ab[0];
+  if (!fnv.is_closure()) {
+    if (fnv.t == T_FUN) return false;
+    Value tm = tm_value(S, fnv, TM_CALL);
+    if (!tm.is_closure()) return false;
+    if (ab + n + 130 > S.stack_end) S.rt_error("stack overflow");
+    for (int k = n; k > 0; --k) ab[k + 1] = ab[k];  // the called object becomes the first argument
+    ab[1] = fnv;
+    ab[0] = tm;
+    ++n;
+    fnv = tm;
+  }
+  Value* base = f.base;
+  base[-1] = fnv;  // the slot that roots the running function
+  for (int k = 0; k < n; ++k) base[k] = ab[1 + k];
+  f.tail_cl = fnv.closure();
+  f.tail_n = n;
+  S.top = base + n;
+  return true;
+}
+
 struct CallBase : Node {
   Node* fn_;
   std::vector<Node*> args_;
@@ -926,6 +960,7 @@ struct CallBase : Node {
     S.top = ab + 1;
     int n = push_args(f, args_, multi_last_, ab + 1);
     f.line = line;
+    if (tail && !f.inlined && tail_closure(f, ab, n)) return;
     dispatch(f, ab[0], ab + 1, n, out);
     S.top = ab;
   }
@@ -975,7 +1010,7 @@ struct CallNative : CallBase {
 struct CallUninit : CallBase {
   using CallBase::CallBase;
   void dispatch(Frame& f, const Value& fnv, Value* args, int n, Rets& out) override {
-    if (fnv.is_closure()) respec<CallClosure>(f, this, fn_, args_)->hot_ = inline_hot(f);
+    if (fnv.is_closure()) respec<CallClosure>(f, this, fn_, args_)->hot_ = tail ? 0 : inline_hot(f);
     else if (fnv.is_native()) respec<CallNative>(f, this, fn_, args_);
     else respec<CallGen>(f, this, fn_, args_);
     call_value(*f.S, fnv, args, n, out, fn_);
@@ -1018,6 +1053,7 @@ struct MethodBase : Node {
     State& S = *f.S;
     int n = push_args(f, args_, multi_last_, ab + 2);
     f.line = line;
+    if (tail && !f.inlined && tail_closure(f, ab, n + 1)) return;
     call_value(S, ab[0], ab + 1, n + 1, out, &desc_);
     S.top = ab;
   }
@@ -1086,7 +1122,7 @@ struct MethodTab : MethodBase {  // the receiver is a table: its field (or an in
       }
       if (i >= 0 && !t->nodes[i].val.is_nil()) ab[0] = t->nodes[i].val;
       else ab[0] = lookup_generic(f, o);
-      if (hot_ && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure());
+      if (hot_ && !tail && ab[0].is_closure() && --hot_ == 0) inline_method_site(f, this, ab[0].closure());
       finish(f, ab, out);
       return;
     }
@@ -1569,7 +1605,8 @@ struct NumForNode : Node {
       f.line = line;
       S.rt_error("'for' step is zero");
     }
-    for (; step > 0 ? idx <= limit : limit <= idx; idx += step) {
+    // Lua's forprep skips the loop only when the start is beyond the limit; a NaN is beyond nothing, so the body runs once
+    for (bool first = true; first ? !(0 < step ? limit < idx : idx < limit) : (0 < step ? idx <= limit : limit <= idx); idx += step, first = false) {
       declare(f, var_, Value::number(idx));
       int c = body_->exec(f);
       if (c == C_BREAK) break;
@@ -1752,6 +1789,7 @@ struct ReturnNode : Node {
   explicit ReturnNode(std::vector<Node*> e) : exprs_(std::move(e)) {
     multi_last_ = !exprs_.empty() && exprs_.back()->is_multi();
     for (Node*& n : exprs_) adopt(n);
+    if (exprs_.size() == 1 && exprs_[0]->is_call()) exprs_[0]->tail = true;  // `return f(x)` is a tail call
   }
   Value eval(Frame& f) override {
     exec(f);

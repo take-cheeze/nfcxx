@@ -220,6 +220,7 @@ struct Cloner {
       return make<IfNode>(n, std::move(conds), std::move(blocks), els);
     }
     if (auto* x = dynamic_cast<ReturnNode*>(n)) {
+      if (x->exprs_.size() == 1 && x->exprs_[0]->is_call()) return nullptr;  // a tail call replaces its frame, which a clone cannot
       std::vector<Node*> exprs;
       return list(exprs, x->exprs_) ? make<ReturnNode>(n, std::move(exprs)) : nullptr;
     }
@@ -406,7 +407,7 @@ bool inline_body(Frame& f, Proto* cp, Cloner& cl, InlineBody* ib) {
   BlockNode* b = dynamic_cast<BlockNode*>(cp->body);
   if (!b) return false;
   ReturnNode* r = b->stmts_.size() == 1 ? dynamic_cast<ReturnNode*>(b->stmts_[0]) : nullptr;
-  if (r && r->exprs_.size() == 1) ib->expr = cl.clone(r->exprs_[0]);
+  if (r && r->exprs_.size() == 1 && !r->exprs_[0]->is_call()) ib->expr = cl.clone(r->exprs_[0]);
   else ib->body = cl.clone(b);
   ib->uid = cp->uid;
   return ib->expr || ib->body;

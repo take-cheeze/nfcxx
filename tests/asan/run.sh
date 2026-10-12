@@ -17,8 +17,8 @@ pass=0; fail=0; skip=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1: $2"; fail=$((fail + 1)); }
 
-for f in tests/asan/cases/*.cpp; do
-  n=$(basename "$f" .cpp)
+for f in tests/asan/cases/*.cpp tests/asan/cases/*.c; do
+  n=$(basename "$f"); n=${n%.*}
   want=$(sed -n 's,^// ASAN: *\(.*\),\1,p' "$f" | head -1)
   # qbe may word the same error differently (its redzones are poisoned by __asan_poison_memory_region)
   [ "$B" = qbe ] && alt=$(sed -n 's,^// ASAN-QBE: *\([^ ]*\).*,\1,p' "$f" | head -1) && [ -n "$alt" ] && want=$alt

@@ -167,7 +167,7 @@ fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
 [ -z "$trace" ] || trace_begin "$trace"
 
-# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (scripts/cproc-asan.patch,
+# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc branch nfcxx-asan, 3rd/cproc,
 # NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then

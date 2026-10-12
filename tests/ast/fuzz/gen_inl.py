@@ -5,8 +5,6 @@
 # (integers, floats, strings, tables, nil) and three receivers (two classes, and an object that shadows a method), so that a call
 # site is hot by the time the values change type or the receiver changes class, the number of arguments at a site is not the number
 # of parameters, and errors are raised inside the callees (the message, with its position, is compared with the reference's).
-# Two messages are compared without their position, the modulo and the division of integers by zero: Lua raises them without one
-# when an operand is a string, because the string metamethod raises them, and nfcast does not yet.
 # usage: gen_inl.py SEED N
 import random, sys
 seed = int(sys.argv[1]); n = int(sys.argv[2])
@@ -63,7 +61,7 @@ argsets = [
     "{math.maxinteger, 1, 1.5, '1e1', {n = 1}}", "{nil, 2, 3, 4, 5}", "{'a', 'b', 'c', 'd', 'e'}", "{true, false, 1, 2, 3}", "{1, 2, 3, 4, 5}",
 ]
 out = ["local up, cnt, tab = 3, 0, {f = 1}",
-       "local function show(ok, ...) if ok then local t = table.pack(...) for i = 1, t.n do t[i] = (math.type(t[i]) or type(t[i])) .. ':' .. tostring(t[i]) end print('ok', table.concat(t, ' ')) else print('err', (tostring((...)):gsub('^[^:]*:%d+: (attempt to perform .n%%0.)$', '%1'):gsub('^[^:]*:%d+: (attempt to divide by zero)$', '%1'))) end end"]
+       "local function show(ok, ...) if ok then local t = table.pack(...) for i = 1, t.n do t[i] = (math.type(t[i]) or type(t[i])) .. ':' .. tostring(t[i]) end print('ok', table.concat(t, ' ')) else print('err', tostring((...))) end end"]
 helpers = []
 for i in range(rnd.randint(4, 9)):
     src, h = helper(i, helpers)
