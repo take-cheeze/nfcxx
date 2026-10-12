@@ -44,6 +44,19 @@ module OptcarrotPPULUT
     end
   RUBY
 
+  # Extraction preserves the original computation as the interpreter fallback.
+  def self.extract(source)
+    raise 'tile LUT scaffold name already exists' if source.include?('__bc2cpp_tile_lut')
+
+    original = ORIGINAL.lines.map { |line| "    #{line}" }.join
+    raise 'expected exactly one upstream PPU tile table generator' unless source.scan(original).size == 1
+
+    body = ORIGINAL.sub('TILE_LUT = ', '')
+    replacement = "    def self.__bc2cpp_tile_lut\n" + body.lines.map { |line| "      #{line}" }.join +
+                  "\n    end\n    TILE_LUT = __bc2cpp_tile_lut"
+    source.sub(original, replacement)
+  end
+
   # Exact bounds permit eight fixed pixel expressions. Each attribute owns new
   # rows; color zero stays transparent when attribute bits are added.
   def self.transform(source)

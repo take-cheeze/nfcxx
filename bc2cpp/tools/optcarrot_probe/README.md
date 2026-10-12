@@ -1459,3 +1459,26 @@ See [PPU core](../../docs/optcarrot-ppu-core.md) for measurements and proof limi
 probe, with a separate `irinline` build suffix. It keeps the Ruby helpers
 small enough for mrbc and expands eligible direct-call bodies afterward.
 See [method inlining](../../docs/bc2cpp-method-inlining.md) for scope and checks.
+
+## Bytecode IR tile-table startup
+
+`OPTCARROT_IR_LUT=1` selects a guarded native table builder for the ordinary
+compiled host. The bundle extracts the original generator verbatim into a
+singleton helper; it does not generate optimized Ruby pixel expressions. An
+exact decoded `BytecodeIR` tree proof (including operands, pool, symbols, child
+indices and exception absence) authorizes native lowering. The compiled gem
+bootstraps just this helper before `TILE_LUT` is assigned, while the interpreter
+runs the extracted original helper. Core method identity guards and an exact
+bit-index shim IREP check fall back to that helper when Ruby methods change.
+The native implementation also checks guards on later calls. Each attribute
+owns fresh mutable rows, and only the first table extracts pattern bits.
+
+Sealed mode and `OPTCARROT_ORIGINAL_LUT=1` are refused for this experiment.
+The compiled build gets its own `irlut` target suffix. Run
+`MRBC=/path/to/mrbc ruby scripts/optcarrot/ppu_ir_lut_check.rb`; set
+`MRUBY_BUILD=/path/to/compatible/mruby/build` for the native equality and
+fallback test. See [ADR 0423](../../docs/adr/0423-optcarrot-ir-tile-lut.md).
+
+The bootstrap method snapshots belong to the probe's single mruby VM per
+process. Embedding this helper in a process with multiple independent VMs
+requires per-VM storage before this protocol can be reused.
