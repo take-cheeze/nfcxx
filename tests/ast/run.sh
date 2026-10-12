@@ -3,11 +3,13 @@
 #   - tests/ast/engine.cpp   checks through the C++ API (specialization counters, the collector, host objects, errors)
 #   - tests/ast/tier.cpp     checks of the tier through the C++ API (what is compiled and when, bailouts, the cache, failures)
 #   - tests/ast/driver.cpp   runs every tests/ast/cases/*.lua; its stdout must equal the .out file next to it, which a real
-#                            Lua 5.4 wrote (tests/ast/regen.sh), in five configurations: normally; with the collector forced to
-#                            run at every safe point (NFCAST_GC_STRESS=1); with the tier on and every function compiled at its
-#                            first call (NFCAST_TIER=sync, NFCAST_TIER_THRESHOLD=1), with and without the collector stress; and
-#                            with the tier compiling in the background (NFCAST_TIER=async), where which calls run as native
-#                            code depends on timing and the output must not
+#                            Lua 5.4 wrote (tests/ast/regen.sh), in ten configurations: with the inlining of small functions as it
+#                            is by default, as early as possible (NFCAST_INLINE_WARM=1) and off (NFCAST_INLINE=0), each with the
+#                            collector at its default and forced to run at every safe point (NFCAST_GC_STRESS=1); with the tier on
+#                            and every function compiled at its first call (NFCAST_TIER=sync, NFCAST_TIER_THRESHOLD=1), with
+#                            and without the collector stress and with early inlining; and with the tier compiling in the
+#                            background (NFCAST_TIER=async), where which calls run as native code depends on timing and the
+#                            output must not
 #   NFCXX_BACKEND=gcc|qbe   (default: both)
 #   NFCAST_TIER_CACHE=dir   where the tier keeps the code it compiles (default: the library's, under $TMPDIR; a rerun reuses it)
 cd "$(dirname "$0")/../.."
