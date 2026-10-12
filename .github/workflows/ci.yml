@@ -11,8 +11,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Builds the EDG front end and QBE/cproc once; the test jobs below download build/ instead of rebuilding it.
-  # Test jobs run at the same checkout path, so absolute paths inside build/ (cmake caches, symlinks) stay valid.
+  # Builds the EDG front end and QBE/cproc once and saves them to the Actions cache (.github/actions/toolchain); the
+  # test jobs below, and the hexagon, pathb and realworld workflows, restore them instead of rebuilding.
+  # build/ holds absolute paths, so every job uses the same checkout path.
   build:
     runs-on: ubuntu-24.04
     env:
@@ -26,27 +27,9 @@ jobs:
         with:
           submodules: true
 
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 python3-dev ruby rake clang
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Build EDG front end
-        run: scripts/setup-edg.sh
-
-      - name: Build QBE and cproc
-        run: scripts/setup-qbe.sh
-
-      - name: Pack build/
-        run: tar -cf build.tar build
-
-      - uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/toolchain
         with:
-          name: build
-          path: build.tar
-          retention-days: 1
-          compression-level: 1
+          packages: python3 python3-dev ruby rake clang
 
       - name: sccache stats
         if: always()
@@ -98,18 +81,9 @@ jobs:
         with:
           submodules: true
 
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 python3-dev ruby rake clang
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: actions/download-artifact@v4
+      - uses: ./.github/actions/toolchain
         with:
-          name: build
-
-      - name: Unpack build/
-        run: tar -xf build.tar && rm build.tar
+          packages: python3 python3-dev ruby rake clang
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.run }}
