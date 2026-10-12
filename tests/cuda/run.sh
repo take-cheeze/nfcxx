@@ -38,6 +38,16 @@ else
   echo "device unit template: FAIL"; fail=1
 fi
 
+# 1b3. The device pass takes only the branches of the conditionals it evaluates (#if/#elif/#else/#ifndef), so the
+# kernels of the untaken branches are not in the unit and not in the kernel list.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device --kernels="$out/cond.kernels" rewrite/conditional_kernel.cu > "$out/cond.device.cpp" \
+   && diff -u rewrite/conditional_kernel.device.expected.cpp "$out/cond.device.cpp" \
+   && [ "$(cat "$out/cond.kernels")" = "$(printf 'fast_kernel\narch_kernel\nifndef_kernel')" ]; then
+  echo "device unit conditionals: ok"
+else
+  echo "device unit conditionals: FAIL"; fail=1
+fi
+
 # 1b2. The device unit of __syncwarp (both forms) matches its golden.
 if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/syncwarp.cu > "$out/syncwarp.device.cpp" \
    && diff -u rewrite/syncwarp.device.expected.cpp "$out/syncwarp.device.cpp"; then
