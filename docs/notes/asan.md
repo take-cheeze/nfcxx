@@ -19,6 +19,8 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
+Other backends: planned, not built (`asan-plan.md`).
+
 ## Limits
 
 - EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented. `operator new` ends in
