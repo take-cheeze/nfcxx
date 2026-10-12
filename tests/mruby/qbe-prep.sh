@@ -463,7 +463,8 @@ par() { while [ "$(jobs -r | wc -l)" -ge "$jobs_max" ]; do wait -n; done; "$@" &
 build() { "$@" >/dev/null 2>&1 || true; }   # the compile may fail (documented limits); qbe-prep ran first
 
 if [ -x "$root/build/edg/bin/cpfe" ] && [ -x "$root/build/qbe/qbe" ] && [ -x "$root/build/cproc/cproc-qbe" ]; then
-  export QBE_PREP_REAL_MRB=$real MRB=$root/tests/mruby/qbe-prep-tap.sh NFCXX_BACKEND=qbe
+  # NFCXX_PREP_ALWAYS: every input must reach qbe-prep.rb (through the tap), or the counts below are meaningless.
+  export QBE_PREP_REAL_MRB=$real MRB=$root/tests/mruby/qbe-prep-tap.sh NFCXX_BACKEND=qbe NFCXX_PREP_ALWAYS=1
   tap_dir cases; n=0
   for f in "$root"/tests/cases/*.cpp; do par build "$root/nfcxx" "$f" -o "$tmp/bin/case$n"; n=$((n + 1)); done; wait
   corpus cases "$n"
