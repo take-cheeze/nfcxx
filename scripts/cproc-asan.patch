@@ -1,0 +1,78 @@
+--- a/qbe.c
++++ b/qbe.c
+@@ -244,6 +244,47 @@
+ 	return inst;
+ }
+ 
++/*
++-fsanitize=address (nfcxx: the environment variable NFCXX_ASAN, set by the driver): every load and store is preceded by a
++call of libasan's check on its address, __asan_load{1,2,4,8} and __asan_store{1,2,4,8}. Every access goes through funcinst,
++so this is the one place. A check is an ordinary call, so QBE cannot merge or forward the access past it.
++*/
++bool asanon;   /* set by main from NFCXX_ASAN */
++
++static struct value *funcinst(struct func *f, int op, int class, struct value *arg0, struct value *arg1);
++
++static void
++asancheck(struct func *f, const char *name, struct value *addr)
++{
++	struct value *fn;
++	char *s;
++
++	s = xmalloc(strlen(name) + 1);
++	strcpy(s, name);
++	fn = xmalloc(sizeof(*fn));
++	fn->kind = VALUE_GLOBAL;
++	fn->u.name = s;
++	fn->id = 0;
++	funcinst(f, ICALL, 0, fn, NULL);
++	funcinst(f, IARG, ptrclass, addr, NULL);
++}
++
++static void
++asanaccess(struct func *f, int op, struct value *arg0, struct value *arg1)
++{
++	switch (op) {
++	/* a load's address is arg0; a store's is arg1 (the value stored is arg0) */
++	case ILOADUB: case ILOADSB: asancheck(f, "__asan_load1", arg0); break;
++	case ILOADUH: case ILOADSH: asancheck(f, "__asan_load2", arg0); break;
++	case ILOADW:  case ILOADS:  asancheck(f, "__asan_load4", arg0); break;
++	case ILOADL:  case ILOADD:  asancheck(f, "__asan_load8", arg0); break;
++	case ISTOREB: asancheck(f, "__asan_store1", arg1); break;
++	case ISTOREH: asancheck(f, "__asan_store2", arg1); break;
++	case ISTOREW: case ISTORES: asancheck(f, "__asan_store4", arg1); break;
++	case ISTOREL: case ISTORED: asancheck(f, "__asan_store8", arg1); break;
++	}
++}
++
+ static struct value *
+ funcinst(struct func *f, int op, int class, struct value *arg0, struct value *arg1)
+ {
+@@ -254,6 +295,8 @@
+ 		b = mkblock("dead");
+ 		funclabel(f, b);
+ 	}
++	if (asanon)
++		asanaccess(f, op, arg0, arg1);
+ 	inst = mkinst(f, op, class, arg0, arg1);
+ 	arrayaddptr(&f->end->insts, inst);
+ 	return &inst->res;
+--- a/main.c
++++ b/main.c
+@@ -12,6 +12,8 @@
+ 	exit(2);
+ }
+ 
++extern bool asanon;
++
+ int
+ main(int argc, char *argv[])
+ {
+@@ -19,6 +21,7 @@
+ 	char *output = NULL, *target = NULL;
+ 
+ 	argv0 = progname(argv[0], "cproc-qbe");
++	asanon = getenv("NFCXX_ASAN") != NULL;
+ 	ARGBEGIN {
+ 	case 'E':
+ 		pponly = true;

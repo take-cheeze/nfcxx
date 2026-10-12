@@ -73,6 +73,9 @@ jobs:
       - name: AddressSanitizer (-fsanitize=address, gcc backend)
         run: tests/asan/run.sh
 
+      - name: AddressSanitizer (-fsanitize=address, qbe backend: cproc checks)
+        run: ASAN_BACKEND=qbe tests/asan/run.sh
+
       - name: Several translation units sharing libstdc++ templates (both backends)
         run: tests/multi-tu/run.sh
 

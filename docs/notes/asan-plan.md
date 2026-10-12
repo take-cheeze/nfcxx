@@ -1,7 +1,7 @@
 # AddressSanitizer for the other backends: plan
 
-Status: the gcc backend is done (`asan.md`, `tests/asan/run.sh`). This note plans the qbe backend (Path A, default),
-Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
+Status: the gcc backend is done, and the qbe backend has its first checks (loads and stores, milestone 2 below; `asan.md`,
+`tests/asan/run.sh`). This note plans the rest of the qbe backend, Path B and the wasm emitter. Nothing here is implemented; it comes from reading `qbe-prep.rb`, cproc's `qbe.c`,
 QBE, `be/nfcxx_ir.c` and `scripts/pathb-qbe-emit.rb`, and nothing was run. Line numbers are approximate.
 
 ## Common design
@@ -19,6 +19,8 @@ The driver rule of `asan.md` (qbe/Path B refused) is lifted per milestone below,
 `tests/asan/run.sh`. The same cases run on every backend; the report text is the contract, so results are comparable.
 
 ## qbe backend (Path A): patch cproc
+
+Done (milestones 1-2): `scripts/cproc-asan.patch`, see `asan.md`. Remaining: 3-6 below.
 
 Options considered:
 

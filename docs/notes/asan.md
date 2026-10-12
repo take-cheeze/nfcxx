@@ -5,6 +5,16 @@
 mismatch, and (LeakSanitizer, on by default in libasan) leaks at exit. The report names the C++ source line, since
 EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
 
+## qbe backend (default)
+
+`nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
+`scripts/cproc-asan.patch` (applied to the build copy by `scripts/setup-qbe.sh`, so the submodule stays clean), then
+puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
+one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
+heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
+Not yet: redzones for stack and globals (`ASAN-ONLY: gcc` cases skip there), the report's source line, and volatile
+(qbe rejects volatile stores, a known limit). Block copies and `va_arg` loads are checked as ordinary accesses.
+
 ## How it works
 
 The instrumentation is gcc's, applied to the C that EDG generates, so only the gcc backend can do it. The driver:
@@ -12,14 +22,14 @@ The instrumentation is gcc's, applied to the C that EDG generates, so only the g
 - passes `-fsanitize=address -fno-omit-frame-pointer` to every C compile and to the link (`--c_to_obj_option` for
   `eccp`, directly to `gcc` for `.c` inputs and the C-only link), so `-c` objects and the final link agree;
 - selects the gcc backend when the backend was only the default (`qbe`); with an explicit `--backend=qbe` it is an
-  error, and so is `NFCXX_PATH=b` (Path B), because cproc/QBE and the Path B emitter have no instrumentation;
+  Path B (`NFCXX_PATH=b` or `--backend=pathb`) is an error: its emitter has no instrumentation yet;
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
   every other `-fsanitize=...` value is refused (`nfcc` still refuses all of them).
 
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
 
-Other backends: planned, not built (`asan-plan.md`).
+qbe: cproc checks every load and store (`scripts/cproc-asan.patch`, applied by `scripts/setup-qbe.sh`; `NFCXX_ASAN=1` selects it). Path B and wasm: planned, not built (`asan-plan.md`).
 
 ## Limits
 

@@ -161,14 +161,16 @@ fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
 [ -z "$trace" ] || trace_begin "$trace"
 
-# -fsanitize=address: the instrumentation is gcc's, so it needs the gcc backend (docs/notes/asan.md).
+# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (scripts/cproc-asan.patch,
+# NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
-  [ "${NFCXX_PATH:-}" != b ] || { echo "nfcxx: -fsanitize=address does not work with Path B (NFCXX_PATH=b); use the gcc backend" >&2; exit 2; }
-  if [ "$backend" != gcc ]; then
-    [ $backend_explicit = 0 ] || { echo "nfcxx: -fsanitize=address needs --backend=gcc (the $backend backend cannot instrument code)" >&2; exit 2; }
-    backend=gcc
-  fi
+  [ "${NFCXX_PATH:-}" != b ] && [ "$backend" != pathb ] || { echo "nfcxx: -fsanitize=address does not work with Path B yet; use the gcc or qbe backend (docs/notes/asan-plan.md)" >&2; exit 2; }
+  case $backend in
+    gcc) ;;
+    qbe) export NFCXX_ASAN=1 ;;
+    *) echo "nfcxx: -fsanitize=address: unknown backend $backend" >&2; exit 2 ;;
+  esac
   asan_c=(-fsanitize=address -fno-omit-frame-pointer ${asanopts[@]+"${asanopts[@]}"})
 else
   asanopts=()

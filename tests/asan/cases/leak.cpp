@@ -1,9 +1,10 @@
 // ASAN: detected memory leaks
 // ASAN-OPTIONS: detect_leaks=1
 #include <cstdlib>
-void *volatile sink;
+void *sink;
+__attribute__((noinline)) void escape(void *p) { sink = p; }
 int main() {
-  sink = malloc(100);
-  sink = 0;   // the only pointer is gone
+  escape(malloc(100));
+  escape(0);   // the only pointer is gone
   return 0;
 }

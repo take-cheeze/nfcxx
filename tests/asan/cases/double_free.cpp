@@ -1,9 +1,10 @@
 // ASAN: attempting double-free
 #include <cstdlib>
-void *volatile slot;
+void *sink;
+__attribute__((noinline)) void escape(void *p) { sink = p; }   // the optimizer keeps both frees
 int main() {
-  slot = malloc(16);   // escapes, so the optimizer keeps both frees
-  free(slot);
-  free(slot);
+  escape(malloc(16));
+  free(sink);
+  free(sink);
   return 0;
 }
