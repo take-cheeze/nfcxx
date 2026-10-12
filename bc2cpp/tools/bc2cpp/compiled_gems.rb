@@ -91,6 +91,8 @@ BC2CPP_CORE_OWNERS = %w[
 ].freeze
 BC2CPP_CORE_REFUSED_PATH = File.expand_path('core_refused.txt', __dir__)
 
+require_relative '../rgss_tts_config'
+
 BC2CPP_COMPILED_GEMS = {
   'mruby-lcf-compiled' => {
     # Owners are emission targets: every method of theirs that compiles clean is
@@ -262,13 +264,27 @@ end
 # codegen task, when the gem list is complete.
 def bc2cpp_closed_world_srcs(spec, gems_root)
   core_gems = bc2cpp_hot_only_build?(spec.build) ? nil : spec.build.gems.map(&:name)
-  closed_world_mrblib_srcs(gems_root, core_gems: core_gems)
+  closed_world_mrblib_srcs(gems_root, core_gems: core_gems, tts: RgssTtsConfig.backend_possible?(spec.build.name))
+end
+
+# mruby-rgss's native sources as the build compiles them: tts.cxx only where a
+# RGSS::Tts backend can exist (RgssTtsConfig, ADR 0417); the other builds compile
+# tts_off.cxx, which registers nothing. A native registration
+# the build does not have must not shape the registry (bare-name POLY
+# collisions on `stop`/`speak`/`available?`), so it is left out of NATIVE_SRCS.
+def bc2cpp_rgss_native_srcs(gems_root, build_name)
+  srcs = Dir["#{gems_root}/mruby-rgss/src/*.cxx"]
+  return srcs if RgssTtsConfig.backend_possible?(build_name)
+
+  srcs.reject { |path| path.end_with?("/#{File.basename(RgssTtsConfig::RGSS_TTS_CXX)}") }
 end
 
 # Every file bc2cpp_closed_world_srcs can name, for make prerequisites (fixed
 # before the gem list is complete).
 def bc2cpp_closed_world_prerequisites(gems_root)
-  closed_world_mrblib_srcs(gems_root, core_gems: BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS)
+  core = BC2CPP_CORE_MRBLIB_GEMS + BC2CPP_EXTERNAL_MRBLIB_GEMS
+  (closed_world_mrblib_srcs(gems_root, core_gems: core, tts: true) +
+    closed_world_mrblib_srcs(gems_root, core_gems: core, tts: false)).uniq
 end
 
 # The whole-program mrblib source set every *-compiled mrbgem.rake feeds into
@@ -277,7 +293,13 @@ end
 # `LCF::Database#rpg2003?` is MONO in isolation but not with Game::Actor/
 # Party/Battle#rpg2003?). Shared here so the gems cannot drift apart: a
 # drifted set fails silently, with different MONO/POLY conclusions per gem.
-def closed_world_mrblib_srcs(gems_root, core_gems: :canonical)
+#
+# `tts`: whether the build can have a RGSS::Tts backend (RgssTtsConfig, ADR
+# 0417). The canonical world is wio's, which cannot: Scene::Map#speak_message is
+# then mruby-rpg2k/mrblib_limited/map_tts_off.rb, which mruby-rpg2k/mrbgem.rake
+# also swaps in for that build, and no Ruby names RGSS::Tts. A desktop world
+# keeps scene/map_tts.rb.
+def closed_world_mrblib_srcs(gems_root, core_gems: :canonical, tts: false)
   # Sorted: Dir[] returns filesystem order (ext4 vs APFS disagree), and
   # bc2cpp's capped fixed-point sweeps converge order-dependently, so ARGV order
   # changes devirtualization. A canonical order makes every consumer agree; the
@@ -288,9 +310,14 @@ def closed_world_mrblib_srcs(gems_root, core_gems: :canonical)
   # Array#include?) must follow the file it reopens. `core_gems`: the build's
   # gem names, :canonical, or nil for a build that compiles no core Ruby.
   # RITE carries these filenames; gem/.. aliases must not give identical worlds different cache keys.
+  rpg2k = Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"]
+  unless tts
+    rpg2k.reject! { |path| path.end_with?("/#{RgssTtsConfig::RPG2K_TTS_RB.delete_prefix('mruby-rpg2k/')}") }
+    # After every mrblib/ file, as mrbgem.rake appends it (the sort below keeps it there).
+    rpg2k << "#{gems_root}/#{RgssTtsConfig::RPG2K_TTS_OFF_RB}"
+  end
   (core_compiled_mrblib_srcs(gems_root, core_gems) +
-    (Dir["#{gems_root}/mruby-rpg2k/mrblib/**/*.rb"] +
-      Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
+    (rpg2k + Dir["#{gems_root}/mruby-lcf/mrblib/*.rb"] +
       Dir["#{gems_root}/mruby-rgss/mrblib/*.rb"]).sort).map { |path| File.expand_path(path) }
 end
 
@@ -439,6 +466,7 @@ def bc2cpp_closed_world_outside_srcs(build_name, gems, repo_root)
     next if BC2CPP_COMPILED_GEMS.key?(name)
 
     native += Dir["#{dir}/{src,core}/**/#{BC2CPP_NATIVE_GLOB}"]
+    native.reject! { |path| path.end_with?("/#{RgssTtsConfig::RGSS_TTS_CXX}") } unless RgssTtsConfig.backend_possible?(build_name)
     ruby += Dir["#{dir}/mrblib/**/*.rb"] unless BC2CPP_CLOSED_WORLD_GEMS.include?(name) ||
                                                (build_name == 'optcarrot-probe' && name == 'optcarrot-benchmark')
   end
