@@ -1,0 +1,6 @@
+a*b fffffffffffffffffffffffffffffff1
+shl 00000010000000000000000000000000
+u-1 ffffffffffffffffffffffffffffffff
+cmp 1 0
+lo 21
+div -2 rem -1

@@ -352,6 +352,8 @@ void __nfcxx_i128_from_f128_u(void *d, const void *a)
 }
 void __nfcxx_i128_to_f128_s(void *d, const void *a) { f128_wr(d, (f128)(s128)i128_rd(a)); }
 void __nfcxx_i128_to_f128_u(void *d, const void *a) { f128_wr(d, (f128)i128_rd(a)); }
+/* a change of signedness: the same 128 bits */
+void __nfcxx_i128_copy(void *d, const void *a) { i128_wr(d, i128_rd(a)); }
 
 /* __builtin_fpclassify, isnormal, isnan, ... on an object (the IR's classification built-ins) */
 int __nfcxx_f128_fpclassify(const void *a)

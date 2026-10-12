@@ -157,8 +157,13 @@ The stage-2 link now uses the x86-64 variant of the runtime (`NFCXX_LDRT_X86=1 s
 below the minimum the minimum, NaN the maximum), and a `long double` value that does not fit gives the x87 integer
 indefinite. User programs still link the default archive, which traps. `tests/float-to-int/run.sh` checks both.
 
-## Known limit: `__int128` on the qbe path
+## `__int128` on the qbe path
 
-cproc (the qbe backend's C front end) has no `__int128` type, so a C++ input that uses `__int128` fails in `scripts/qbe-cc` with
-"declaration has no type specifier". `__float128` and `long double` work there (runtime helpers). Path B handles `__int128`
-(`docs/notes/pathb-int128.md`), so `tests/pathb-qbe/cases/float128_ops.cpp`, which uses `__int128`, belongs to that suite.
+cproc (the qbe backend's C front end) has `__int128` and `unsigned __int128` as soft 128-bit integers (PROPSOFT, like
+`long double`): each operation and conversion is a call of a helper of be/nfcxx_ldrt.c (`__nfcxx_i128_<op>`), so a value is
+a 16-byte object. Not handled yet: bit-fields, `switch` and pointer arithmetic on `__int128`. `tests/int128/run.sh` compares
+the programs with gcc's output.
+
+The qbe path still has two gaps for `tests/pathb-qbe/cases/float128_ops.cpp`: the float classification built-ins
+(`__builtin_isnormal`, `isinf`, `signbit`, ...) are not in cproc, and a `long double` passed to a variadic function is
+passed in two integer registers, not on the stack (SysV passes it in memory), so `printf` reads the wrong value.
