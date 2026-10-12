@@ -7,6 +7,7 @@ typedef unsigned long ulong;
 #endif
 #define __shared__ static
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
 extern "C" unsigned __nfcxx_tid_x(void);
 extern "C" unsigned __nfcxx_tid_y(void);

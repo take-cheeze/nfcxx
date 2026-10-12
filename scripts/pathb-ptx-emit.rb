@@ -1099,6 +1099,15 @@ class Fn
       emit("bar.sync 0;")
       return
     end
+    if cname == "__nfcxx_syncwarp"
+      # the warp barrier of the mask: bar.warp.sync takes the mask (32 bits) as its operand
+      raise Refused, "__nfcxx_syncwarp takes one mask argument" unless x.length == 4
+      raise Refused, "__nfcxx_syncwarp has no value" unless dest.nil?
+      mop, mty = operand(x[3])
+      raise Refused, "__nfcxx_syncwarp mask is not a 32-bit integer" unless mty[0] == "int" && type_size(mty) == 4
+      emit("bar.warp.sync #{reg_of(mop, mty)};")
+      return
+    end
     raise Refused, "call of intrinsic #{cname} as a statement" if DEVICE_INTRINSICS.key?(cname)
     callee = @module_fns[cname]
     raise Refused, "call of #{cname} (not a function of this module)" if callee.nil?

@@ -472,6 +472,15 @@ def rewrite_builtins(t)
       i += 13
       next
     end
+    # __syncwarp(mask) is the warp barrier of the mask; __syncwarp() is the full warp (CUDA's default mask)
+    if word_at?(t, i, "__syncwarp") && t[i + 10] == "("
+      out << "__nfcxx_syncwarp("
+      j = i + 11
+      j += 1 while j < t.length && white?(t[j])
+      out << "0xffffffffu" if t[j] == ")"
+      i += 11
+      next
+    end
     hit = false
     DEVICE_BUILTINS.each do |name, prefix|
       next if hit || !word_at?(t, i, name)
@@ -508,6 +517,7 @@ typedef unsigned long ulong;
 #endif
 #define __shared__ static
 extern "C" void __nfcxx_syncthreads(void);
+extern "C" void __nfcxx_syncwarp(unsigned int mask);
 extern "C" void *__nfcxx_dynshared_addr(void);
 PRELUDE
 
@@ -716,7 +726,10 @@ end
 
 # Device mode: a quoted #include of a file that exists is replaced by that file's text (recursively, relative to the
 # including file), so kernels kept in a .cu or .cuh of the same program are in the unit. System includes stay.
-def expand_includes(text, dir, depth)
+# Each file is expanded once per unit (`seen`, by absolute path): the headers of a CUDA backend include each other
+# heavily, and without this the expansion repeats them at every branch (llama.cpp's mmq.cu grew to 24 MB, from 20 KB).
+# Its include guards would drop the repeats anyway; a file meant to be included twice is not expanded twice.
+def expand_includes(text, dir, depth, seen = {})
   return text if depth > 8
   out = ""
   last = 0
@@ -729,8 +742,17 @@ def expand_includes(text, dir, depth)
     name = q[1..-1].split("\"")[0].to_s
     path = dir + "/" + name
     next unless File.exist?(path)
-    inc = File.open(path, "rb") { |f| f.read }
-    out << text[last...st] << "\n" << expand_includes(inc, File.dirname(path), depth + 1) << "\n"
+    key = File.expand_path(path)
+    out << text[last...st]
+    if seen[key]
+      out << "\n"
+    else
+      seen[key] = true
+      # The same two rewrites as the main file: a header of the backend has __launch_bounds__ in front of its
+      # template kernels, which kernel_template would not match.
+      inc = dynamic_shared_rewrite(strip_launch_bounds(File.open(path, "rb") { |f| f.read }))
+      out << "\n" << expand_includes(inc, File.dirname(path), depth + 1, seen) << "\n"
+    end
     last = en
   end
   out << text[last..-1].to_s
