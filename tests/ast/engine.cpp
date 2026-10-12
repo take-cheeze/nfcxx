@@ -391,17 +391,16 @@ int main() {
     const char* count = "local depth = 0 local function rec() depth = depth + 1 return rec() + 1 end local ok = pcall(rec) return depth";
     CHECK(run_int(on, count) == run_int(off, count) && run_int(on, count) > 1000);
 
-    // A function with a very large tree (over 20000 nodes) takes no clones: what chains of clones can add to one function is bounded.
+    // What clones can add to one function is bounded (8192 nodes): a chunk with 3500 different sites that call a three-node
+    // function four times each inlines a part of them and declines the rest, and computes the same.
     {
-      std::string big = "local function sm(x) return x + 1 end local s = 0 for i = 1, 10 do s = s + sm(i) end ";
-      for (int i = 0; i < 7000; ++i) big += "s = s + 1 ";               // four nodes each
-      big += "return s";
+      std::string big = "local function sm(x) return x + 1 end local s = 0 for i = 1, 4 do ";
+      for (int i = 0; i < 3500; ++i) big += "s = s + sm(i) ";
+      big += "end return s";
       auto g0 = stats_of(on);
-      CHECK(run_int(on, big) == 65 + 7000);
-      CHECK(on.stats.inlined_sites == g0.inlined_sites && on.stats.inline_declined == g0.inline_declined + 1);
-      auto g1 = stats_of(on);
-      CHECK(run_int(on, "local function sm(x) return x + 1 end local s = 0 for i = 1, 10 do s = s + sm(i) end return s") == 65);
-      CHECK(on.stats.inlined_sites == g1.inlined_sites + 1);            // the same site in a small function is inlined
+      CHECK(run_int(on, big) == 3500 * (2 + 3 + 4 + 5));
+      std::uint64_t sites = on.stats.inlined_sites - g0.inlined_sites, declined = on.stats.inline_declined - g0.inline_declined;
+      CHECK(sites >= 2000 && sites <= 2800 && declined >= 700 && sites + declined == 3500);
     }
 
     // Errors: the same message, the same traceback (every function of the chain, innermost first, with the lines they were at).

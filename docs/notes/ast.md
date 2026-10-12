@@ -152,8 +152,8 @@ looks at the frame chain (`rt_error`, `where`, `traceback`) finds the same chain
 set-up, part of the roughly 100 instructions an inlined call still costs (see "Speed").
 
 **Recursion and growth.** A function may occur at most twice in a chain of inlined bodies (a recursive call is unrolled once,
-the copy's own recursive call stays a call), a chain has at most four frames, a function whose arena has more than 20000 nodes
-takes no more clones, and every inlined call counts against `State::max_depth`, so runaway recursion is still a
+the copy's own recursive call stays a call), a chain has at most four frames, a function takes at most 8192 nodes of clones in
+all (the size of the function itself does not matter), and every inlined call counts against `State::max_depth`, so runaway recursion is still a
 `stack overflow` after the same number of nested calls with and without inlining (tested: the engine counts the nested calls
 both ways). Nested inlining arises by itself: the clone of a function whose body calls a small function contains an
 uninitialized call node, which becomes an inlined call when it is hot (tested for chains of six calls; the exact limits of two
@@ -242,15 +242,15 @@ gone, and level 2 is its caller.
   with inlining off (`NFCAST_INLINE=0`): 19 programs, 6 runs each, per back end. Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
   succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr).
-- `tests/ast/engine.cpp`: 141 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
+- `tests/ast/engine.cpp`: 139 checks through the C++ API (the specialization counters, the collector, host objects, errors, the
   state of the interpreter after errors, pins) and, for the inlining, with `State::stats`: a loop of calls rewrites its site once
   and runs the rest inlined (97 of 100 calls with the default count, 98 with `inline_warm = 1`), a state with inlining off or
   `inline_warm = 0` inlines nothing; the guard fails exactly once when the global is assigned again (to another function, a
   native, nil) and the site is not rewritten again; closures of one function with other upvalues do not fail it; three sites
   that send integers, floats and strings to one helper take about 100 slow paths with inlining and at least 295 without
   (the shared tree goes generic); methods (a getter, an instance that shadows it); loops, varargs and multiple assignment are
-  declined and counted, closures too, a body over the size limit too, a function with a tree of over 20000 nodes takes no
-  clone; recursion inlines a few levels and the depth limit gives the same number of nested calls with and without inlining; the
+  declined and counted, closures too, a body over the size limit too, a chunk with 3500 sites of a three-node function
+  inlines about 2700 of them and declines the rest (the limit on the clones one function takes), with the same result; recursion inlines a few levels and the depth limit gives the same number of nested calls with and without inlining; the
   error raised three calls deep has the same message and the same traceback (four entries, with the lines and the names) with
   inlining off, on, and with every site rewritten as early as possible, in which case the error is raised inside three inlined
   bodies; the host calling back into the script from inside an inlined body and an error coming back through the inlined frames
@@ -280,7 +280,7 @@ gone, and level 2 is its caller.
   locals only, the programs under the collector at every safe point, which then reads garbage); the call-site line not set before
   the body runs (fails `inline_recursion`, the one program where the line of a level-2 error differs); no depth count (fails the
   state checks and the runaway recursion); an expression body that returns its first value instead of all (fails `inline_nested`
-  and `inline_errors`); no limit on the arena (fails the engine check for it). Two mutations are **not** caught by anything:
+  and `inline_errors`); no limit on the clones one function takes (fails the engine check for it). Two mutations are **not** caught by anything:
   not adding the clone's strings to the owner's constants, and allocating the nodes that clones create in the arena of the
   callee instead of the owner's (`owner_proto`). Both are properties that nothing can observe while a clone can run (the callee's
   closure is on the stack, its constants are marked, its arena is alive), and are kept as defences, not as tested behaviour.

@@ -40,7 +40,7 @@ constexpr int kInlineMaxNodes = 64;   // nodes of the cloned body
 constexpr int kInlineMaxSlots = 16;   // parameters and locals of the callee
 constexpr int kInlineMaxNesting = 4;  // frames in a chain: the running function and the bodies inlined in it
 constexpr int kInlineMaxRepeat = 2;   // times one function may occur in such a chain
-constexpr std::size_t kInlineMaxArena = 20000;  // nodes in the arena of a function that may still take clones
+constexpr std::size_t kInlineMaxClones = 8192;  // nodes of clones one function takes in all (bounds what chains of clones can add)
 
 // ---- cloning ------------------------------------------------------------------------------------------------------------
 // Copies a tree into fresh nodes in the uninitialized form. The nodes are collected here and handed to the owner's arena only
@@ -74,6 +74,7 @@ struct Cloner {
     return true;
   }
   void commit(Proto& P) {
+    P.inline_nodes += made.size();
     for (std::unique_ptr<Node>& n : made) P.arena.push_back(std::move(n));
     for (String* s : strs) P.consts.push_back(s);
     made.clear();
@@ -394,7 +395,7 @@ struct MethodInline : MethodBase {
 // Builds the body CP would have if inlined at a site whose running frame is F; false when CP is not a candidate.
 bool inline_body(Frame& f, Proto* cp, Cloner& cl, InlineBody* ib) {
   if (cp->vararg || !cp->captured_params.empty() || cp->nslots > kInlineMaxSlots || !cp->body) return false;
-  if (owner_proto(f)->arena.size() > kInlineMaxArena) return false;   // bounds what chains of clones can add to one function
+  if (owner_proto(f)->inline_nodes > kInlineMaxClones) return false;
   int depth = 0, same = 0;
   for (Frame* r = &f;; r = r->prev) {
     ++depth;

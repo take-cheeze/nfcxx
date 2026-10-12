@@ -76,6 +76,7 @@ struct Proto {
   std::vector<std::unique_ptr<Node>> arena;  // every node of this function, including the ones that were rewritten away
   std::vector<Node*> patchables;             // nodes to patch() when the function is complete (captured locals)
   std::vector<String*> consts;               // the strings the nodes refer to, marked by the collector
+  std::size_t inline_nodes = 0;              // nodes of inlined bodies that were cloned into this function (nfcast_inline.inc)
   std::vector<Proto*> children;
   std::uint32_t mark_epoch = 0;
 
