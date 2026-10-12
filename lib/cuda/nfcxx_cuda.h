@@ -36,6 +36,9 @@ inline const uint3 threadIdx{0, 0, 0};
 inline const uint3 blockIdx{0, 0, 0};
 inline const dim3 blockDim{1, 1, 1};
 inline const dim3 gridDim{1, 1, 1};
+
+// The block barrier, for the host copy of a kernel body (never run; the device code has the real barrier).
+inline void __syncthreads(void) {}
 // The block's dynamic shared memory (`extern __shared__ T x[]`, scripts/cuda-rewrite.rb): a placeholder for the host
 // copy of a kernel, which never runs. The device side lowers the call to the address of the .extern .shared symbol.
 inline void *__nfcxx_dynshared_addr(void) { return nullptr; }
