@@ -427,7 +427,32 @@ def enclosing_template(text, pos)
   decls = params.map { |pr| pr.split("=")[0].strip }
   names = decls.map { |pr| tokens_of(pr).last }
   header = text[(t[:close] + 1)...tb[:open]]
-  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header) }
+  { st: t[:st], names: names, decls: decls, fname: function_name(header), qual: member_qualifier(header), open: tb[:open] }
+end
+
+# The value of a local compile-time constant `T name = VALUE;` (for example `constexpr bool fallback = true;`) that
+# precedes pos in the body of the enclosing template, starting at open: the nearest such declaration before pos, as
+# its text, or nil. A call inside an if-branch follows the declaration of its own branch, so the nearest one is the
+# one in scope for it.
+def local_constant(text, open, pos, name)
+  seg = text[open...pos]
+  found = nil
+  i = 0
+  while (k = seg.index(name, i))
+    e = k + name.length
+    i = e
+    next if (k > 0 && ident_char?(seg[k - 1])) || (e < seg.length && ident_char?(seg[e]))
+    b = k - 1
+    b -= 1 while b >= 0 && white?(seg[b])
+    next unless b >= 0 && ident_char?(seg[b])
+    a = e
+    a += 1 while a < seg.length && white?(seg[a])
+    next unless seg[a] == "=" && seg[a + 1] != "="
+    semi = seg.index(";", a)
+    next if semi.nil?
+    found = seg[(a + 1)...semi].strip
+  end
+  found
 end
 
 # `Q<args>::member` in a header of a member defined out of its class template: { name: Q, args: [...] }, else nil.
@@ -497,11 +522,17 @@ end
 def call_sites(text, name)
   unless $call_index_for.equal?(text)
     index = Hash.new { |h, k| h[k] = [] }
+    # Directives are not code: a #define's body names its parameters (DECL_MMQ_CASE(type)), which are not calls.
+    pp = top_pieces(text).select { |pc| pc[2] == :pp }.map { |pc| [pc[0], pc[1]] }
     i = 0
     while i < text.length
       e = skip_literal(text, i)
       if e
         i = e
+        next
+      end
+      if pp.any? { |a, b| a <= i && i < b }
+        i = pp.find { |a, b| a <= i && i < b }[1]
         next
       end
       if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && !(text[i] >= "0" && text[i] <= "9")
@@ -538,6 +569,17 @@ def template_instances(name, text, stack)
   call_sites(text, name).each do |targs, pos|
     args = split_top(targs)
     outer = enclosing_template(text, pos)
+    # A bare local constant of the enclosing body (fallback in mmq's mul_mat_q_case) is its literal value.
+    if outer
+      args = args.map do |a|
+        v = a.strip
+        if v.length > 0 && v.chars.all? { |c| ident_char?(c) } && !outer[:names].include?(v)
+          local_constant(text, outer[:open], pos, v) || a
+        else
+          a
+        end
+      end
+    end
     if outer && args.any? { |a| tokens_of(a).any? { |tk| outer[:names].include?(tk) } }
       template_instances(outer[:fname], text, stack + [name]).each do |inst|
         out << args.map { |a| substitute(a, outer[:names], inst) }
@@ -792,7 +834,9 @@ def launch_macros(text)
     close = after.index(")")
     next if close.nil?
     body = after[(close + 1)..-1].strip
-    next unless body.include?("<<<")
+    # A launch macro, or a macro whose body is a template declaration (mmq's DECL_MMQ_CASE: an explicit instantiation
+    # of mul_mat_q_case per type), is expanded so that its instances are the calls the unit really has.
+    next unless body.include?("<<<") || body.start_with?("template ") || body.start_with?("extern template ")
     out[name] = { params: split_top(after[1...close]), body: body }
   end
   out
@@ -1531,7 +1575,8 @@ def expand_includes(text, dir, depth, seen = {})
       seen[key] = true
       # The same two rewrites as the main file: a header of the backend has __launch_bounds__ in front of its
       # template kernels, which kernel_template would not match.
-      inc = dynamic_shared_rewrite(strip_launch_bounds(File.open(path, "rb") { |f| f.read }))
+      inc = File.open(path, "rb") { |f| f.read }
+      inc = dynamic_shared_rewrite(strip_launch_bounds($device ? blank_comments(inc) : inc))
       out << "\n" << expand_includes(inc, File.dirname(path), depth + 1, seen) << "\n"
     end
     last = en
@@ -2294,11 +2339,49 @@ def host_linkage(text)
   out
 end
 
+# The text with its comments blanked: each comment character becomes a space, a newline stays. Parentheses and
+# quotes inside a comment then cannot confuse a scan of the text (a comment's `(` made a top-level piece look like a
+# host function). Positions and line numbers do not change.
+def blank_comments(text)
+  out = ""
+  i = 0
+  n = text.length
+  while i < n
+    c = text[i]
+    if c == "/" && text[i + 1] == "/"
+      while i < n && text[i] != "\n"
+        out << " "
+        i += 1
+      end
+      next
+    end
+    if c == "/" && text[i + 1] == "*"
+      close = text.index("*/", i + 2)
+      stop = close.nil? ? n : close + 2
+      while i < stop
+        out << (text[i] == "\n" ? "\n" : " ")
+        i += 1
+      end
+      next
+    end
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    out << c
+    i += 1
+  end
+  out
+end
+
 ARGV.each do |a|
   if a.start_with?("-I")
     $incdirs << a[2..-1]
   elsif a == "--device"
     device = true
+    $device = true
   elsif a.start_with?("--kernels=")
     kernels_path = a[10..-1]
   elsif path.nil?
@@ -2309,6 +2392,7 @@ ARGV.each do |a|
 end
 usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
+text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
