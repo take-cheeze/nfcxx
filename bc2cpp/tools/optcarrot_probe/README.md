@@ -1432,3 +1432,16 @@ The runner now removes the generated gem's object directory before each build:
 mruby's rake can otherwise relink objects from an earlier temporary gem directory
 even when its preprocessed `.pi` changes. A run under load (other builds on the
 machine) moved the same binary by 10 percent or more between repeats.
+
+## Native-host GC gray stack
+
+The probe defaults to `MRB_GRAY_STACK_SIZE=16384` for both mruby hosts. This
+reduces full-heap rescans after the mark stack overflows on the large retained
+PPU lookup table. `OPTCARROT_GRAY_STACK_SIZE=1024` restores upstream capacity;
+other decimal capacities from 1024 through 262144 are accepted. The selected
+capacity is printed in the build mode and summary.
+
+The stack is embedded in `mrb_gc`, so the setting reaches both C and C++ and
+each capacity has separate build targets. This prevents mixing incompatible
+VM and generated-gem layouts. The RPG engine and constrained-target builds
+retain their existing defaults. See [GC measurements](../../docs/optcarrot-gc.md).
