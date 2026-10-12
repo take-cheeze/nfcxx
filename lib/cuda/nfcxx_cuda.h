@@ -150,6 +150,27 @@ inline cudaError_t __nfcxx_cuda_launch(void (*kernel)(P...), dim3 grid, dim3 blo
   return __nfcxx_cuda_launch_impl(device, grid, block, shmem, stream, packed, std::index_sequence_for<P...>());
 }
 
+// cudaLaunchKernelEx (the CUDA headers' template calls cudaLaunchKernelExC with the host function, which is not a
+// device kernel here). The name is redirected below to this template, which looks the kernel up in the registry and
+// passes the configuration through unchanged. A host function that is not registered is an error, as in the launch.
+template <typename... P, std::size_t... I>
+inline cudaError_t __nfcxx_launch_ex_impl(const cudaLaunchConfig_t *config, cudaKernel_t kernel,
+                                          std::tuple<P...> &packed, std::index_sequence<I...>) {
+  void *argv[sizeof...(P) + 1] = {static_cast<void *>(&std::get<I>(packed))..., nullptr};
+  return cudaLaunchKernelExC(config, reinterpret_cast<const void *>(kernel), argv);
+}
+
+template <typename... P, typename... A>
+inline cudaError_t __nfcxx_cudaLaunchKernelEx(const cudaLaunchConfig_t *config, void (*kernel)(P...), A &&...args) {
+  static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
+  cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
+  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
+  std::tuple<P...> packed(static_cast<P>(args)...);
+  return __nfcxx_launch_ex_impl(config, device, packed, std::index_sequence_for<P...>());
+}
+// Calls of cudaLaunchKernelEx from here on (the CUDA template above stays, for code that includes it before this header).
+#define cudaLaunchKernelEx __nfcxx_cudaLaunchKernelEx
+
 // The runtime's host-address calls (cudaFuncSetAttribute, cudaLaunchKernel) do not know the kernels: they are
 // loaded with cudaLibraryLoadData, so the host address is looked up in the registry first. The macros only rewrite
 // direct calls in the source (llama.cpp calls cudaFuncSetAttribute on kernel addresses); cudaLaunchKernelEx goes
