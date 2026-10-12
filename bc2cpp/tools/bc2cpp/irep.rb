@@ -130,15 +130,15 @@ MethodDef = Struct.new(:name, :owner, :irep, :visibility, :kind, :copy_irep, :co
 # ---------------------------------------------------------------------------
 RiteImage = Struct.new(:bytes)
 
-def run_mrbc(src_paths, symbol, out_dir)
+def run_mrbc(src_paths, symbol, out_dir, mrbc: MRBC)
   mrb_path = File.join(out_dir, "#{symbol}.mrb")
-  system(MRBC, '-g', '-o', mrb_path, *Array(src_paths), exception: true)
+  system(mrbc, '-g', '-o', mrb_path, *Array(src_paths), exception: true)
   RiteImage.new(File.binread(mrb_path))
 end
 
 # [ireps (label => Irep), root_label] for +src_paths+ compiled by mrbc.
-def compile_ireps(src_paths, symbol, out_dir)
-  load_ireps(run_mrbc(src_paths, symbol, out_dir), cache: IrepCache.directory_for_sources(src_paths))
+def compile_ireps(src_paths, symbol, out_dir, mrbc: MRBC)
+  load_ireps(run_mrbc(src_paths, symbol, out_dir, mrbc: mrbc), cache: IrepCache.directory_for_sources(src_paths))
 end
 
 CATCH_TYPES = { 0 => :rescue, 1 => :ensure }.freeze

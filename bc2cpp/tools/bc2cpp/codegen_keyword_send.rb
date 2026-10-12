@@ -242,7 +242,7 @@ class CodeGen
                                        name:, d:, n:, recv:, argv:, kw_names:, kw_val_exprs:)
     return nil unless name == 'new' && irep && idx
 
-    # KEYWORD_IMPLICIT_NEW (ADR 0422): a bare `new(a, k: v)` in a class method has the class object for its receiver,
+    # KEYWORD_IMPLICIT_NEW (ADR 0426): a bare `new(a, k: v)` in a class method has the class object for its receiver,
     # exactly as the positional path knows it (implicit_singleton_self_class). Unlike a `Const.new` site, a subclass
     # reaches this one by inheriting the class method, and the guard-miss arm below cannot build its object (the
     # keywords travel as a trailing positional Hash, which a keyword #initialize does not take from a funcall). So
