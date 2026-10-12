@@ -7,7 +7,7 @@
 # module proxy is missing. See docs/notes/poly.md.
 #   NFCXX_BACKEND=gcc|qbe          (default: both)
 #   POLY_LANGS="ruby lua python ast js go"   (default: all six; ast is the nfcast engine, lib/ast, which needs nothing built)
-#   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
+#   POLY_OUT=DIR                   keep the built hosts as DIR/host-<backend> and DIR/ops-<backend> (to run them under valgrind: PYTHONMALLOC=malloc)
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 langs=${POLY_LANGS:-"ruby lua python ast js go"}
@@ -44,14 +44,16 @@ for be in $backends; do
   done
   [ $bad = 0 ] || { fail=1; continue; }
   [ ${#built[@]} -gt 0 ] || { echo "SKIP $be poly: no language available"; continue; }
-  if ! out=$(NFCXX_BACKEND=$be ./nfcxx "${defs[@]}" "${incs[@]}" tests/poly/host.cpp lib/poly/nfcpoly.cpp "${srcs[@]}" "${libs[@]}" -o "$tmp/host-$be" 2>&1); then
-    echo "FAIL $be poly (host build)"; grep -v 'prelinker' <<<"$out" | head -40; fail=1; continue
-  fi
-  [ -z "${POLY_OUT:-}" ] || { mkdir -p "$POLY_OUT" && cp "$tmp/host-$be" "$POLY_OUT/host-$be"; }
-  if out=$("$tmp/host-$be" 2>&1); then
-    echo "ok   $be poly [${built[*]}]: $(tail -1 <<<"$out")"
-  else
-    echo "FAIL $be poly [${built[*]}]"; head -60 <<<"$out"; fail=1
-  fi
+  for t in host ops; do   # host.cpp: the library; ops.cpp: optional arguments, computed properties, operator methods
+    if ! out=$(NFCXX_BACKEND=$be ./nfcxx "${defs[@]}" "${incs[@]}" tests/poly/$t.cpp lib/poly/nfcpoly.cpp "${srcs[@]}" "${libs[@]}" -o "$tmp/$t-$be" 2>&1); then
+      echo "FAIL $be poly/$t (build)"; grep -v 'prelinker' <<<"$out" | head -40; fail=1; continue
+    fi
+    [ -z "${POLY_OUT:-}" ] || { mkdir -p "$POLY_OUT" && cp "$tmp/$t-$be" "$POLY_OUT/$t-$be"; }
+    if out=$("$tmp/$t-$be" 2>&1); then
+      echo "ok   $be poly/$t [${built[*]}]: $(tail -1 <<<"$out")"
+    else
+      echo "FAIL $be poly/$t [${built[*]}]"; head -60 <<<"$out"; fail=1
+    fi
+  done
 done
 exit $fail
