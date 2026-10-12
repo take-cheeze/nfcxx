@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 # CodeGen: compile_send and const/owner caches.
+require_relative 'strict_hints'
 
 class CodeGen
   def compile_send(insn, self_implicit:, irep: nil, idx: nil, owner_def: nil,
@@ -1397,6 +1398,12 @@ class CodeGen
         exact_via_flow = true
       end
       # EXACT_CORE_ARMS (ADR 0309): a core class the flow proves exact; only the TYPED guard below uses it.
+      # EXACT_FLOW_RESULT_CLASS: when the receiver trace names no class at all (a call result such as
+      # `h.keys`, `x.to_s`, `r.to_a`), the flow's proof supplies the class; the TYPED lookup below still decides
+      # whether any direct target exists, so a class without one changes nothing.
+      if known_class.nil? && exact_class.nil? && exact_flow_result_class_enabled?
+        known_class = exact_core_arm_class(irep, proof_idx, proof_reg, self_implicit)
+      end
       exact_core_typed = exact_class.nil? && !known_class.nil? &&
                          exact_core_arm_class(irep, proof_idx, proof_reg, self_implicit) == known_class
       if exact_class
@@ -1534,9 +1541,11 @@ class CodeGen
         note = "  // #{kind} :#{name} -> #{target.owner}##{target.name} (#{traced_note}), " \
                "runtime-class-checked direct C++ call, mrb_funcall fallback#{native_note}\n"
         fallback = typed_fallback ||
-                   guarded_fallback_line(d, recv, name, argv, [check_owner],
-                                         closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
-                                                           trace_insn: insn, trace_reg_offset: trace_reg_offset))
+                   strict_hint_wrap(via_element ? 'element' : 'typed', d, recv, name, argv, check_owner) do
+                     guarded_fallback_line(d, recv, name, argv, [check_owner],
+                                           closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                                             trace_insn: insn, trace_reg_offset: trace_reg_offset))
+                   end
         "#{note}  if (#{check}) {\n" \
           "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n" \
           "  } else {\n" \
@@ -1598,7 +1607,13 @@ class CodeGen
         note = "  // MONO_EMBED_GUARD :#{name} -> #{target.owner}##{target.name} (embeds ivars; " \
                "method_missing elsewhere could otherwise mistarget this), runtime-class-checked " \
                "direct C++ call, mrb_funcall fallback#{native_note}\n"
-        fallback = guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
+        # STRICT_HINTS: a ClassLayout / annotation / element hint naming this owner makes the else arm an error.
+        hinted = strict_hint_enabled?('mono_embed') &&
+                 strict_hint_names?(target.owner, irep, idx || trace_idx, trace_receiver_reg || d, trace_reg_offset,
+                                    owner_def, elem_class_hint)
+        fallback = strict_hint_wrap('mono_embed', d, recv, name, argv, target.owner, hinted: hinted) do
+          guarded_fallback_line(d, recv, name, argv, [target.owner], cw_site)
+        end
         body = ir_inline ? ir_inline.lines.map { |line| "  #{line}" }.join : "    r#{d} = #{impl}(M, #{([recv] + call_argv).join(', ')});\n"
         "#{note}  if (#{check}) {\n" \
           "#{body}" \
@@ -1654,9 +1669,11 @@ class CodeGen
                "#{ivar_accessor_call_code(owner, recv, name, d, argv)}\n"
       end
 
-      fallback = guarded_fallback_line(d, recv, name, argv, [owner],
-                                       closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
-                                                         trace_insn: insn, trace_reg_offset: trace_reg_offset))
+      fallback = strict_hint_wrap('ivar_accessor', d, recv, name, argv, owner) do
+        guarded_fallback_line(d, recv, name, argv, [owner],
+                              closed_world_site(recv, irep, idx, owner_def, trace_idx: trace_idx,
+                                                trace_insn: insn, trace_reg_offset: trace_reg_offset))
+      end
       "#{note}  if (#{check}) {\n" \
         "    #{ivar_accessor_call_code(owner, recv, name, d, argv, indent: '    ')}\n" \
         "  } else {\n" \
@@ -1705,9 +1722,21 @@ class CodeGen
         constant_code = constant_object_send_code(name, n, d, recv, argv, constant_owner) if constant_owner
         return constant_code if constant_code
 
+        constant_object_debug(name, n, owner_def&.owner, constant_owner) if constant_owner
+
         native_code = constant_owner && native_exact_direct_code(name, d, recv, argv, "#{constant_owner}.singleton",
                                                                       int_site: [irep, new_proof_idx, owner_def, trace_reg_offset])
         return native_code if native_code
+      end
+
+      # NATIVE_SINGLETON_CALL (ADR 0418): `File.exist?` and the other native singleton functions of a stable
+      # constant, called through a per-site method cache instead of a by-name send.
+      if !self_implicit && irep && constant_site_idx && @closed_world &&
+         %w[SEND0 SEND].include?(irep.instructions[constant_site_idx].op)
+        singleton_code = native_singleton_call_code(name, n, d, recv, argv, irep, constant_site_idx,
+                                                    unshift_proof_reg(trace_receiver_reg || d, trace_reg_offset),
+                                                    owner_def&.owner, constant_owner)
+        return singleton_code if singleton_code
       end
 
       if self_implicit && %w[SEND0 SEND SSEND0 SSEND].include?(insn.op)
@@ -1776,6 +1805,8 @@ class CodeGen
       line = with_exact_core_site(exact_site) { native_direct_dynamic_line(d, recv, name, argv) }
       # CORE_EXACT_DIRECT: no dispatch is left, so the site is not a dynamic one to diagnose.
       return "  #{line}" if line.start_with?(CORE_EXACT_DIRECT_NOTE)
+      # TO_ENUM_DIRECT (ADR 0418): the Enumerator is built in place, the checked arm's else is a guard violation.
+      return "  #{line}" if line.include?(TO_ENUM_DIRECT_NOTE)
 
       "#{diag}#{note}#{miss}  #{line}"
     end
@@ -2188,6 +2219,78 @@ class CodeGen
     args = ", #{argv.size}#{argv.map { |a| ", #{a}" }.join}"
     "r#{d} = bc2cpp_guard_violation_named(M, #{recv}, \"#{name}\", \"@@SITE@@ (#{family})\"#{args}); " \
       "#{NomethodReviewed.violation_marker(name)}\n"
+  end
+
+  # STRICT_HINTS (docs/adr/0419): the else arm of a guard on a whole-program class hint, as an error.
+  # Same marker rewrite as guard_violation_line; the STRICT_HINT comment keeps the site listed and gated.
+  def strict_hint_line(d, recv, name, argv, family)
+    args = ", #{argv.size}#{argv.map { |a| ", #{a}" }.join}"
+    "r#{d} = bc2cpp_hint_violation_named(M, #{recv}, \"#{name}\", \"@@SITE@@ (#{family.upcase})\"#{args}); " \
+      "#{StrictHints.marker(family, name)}\n"
+  end
+
+  def strict_hint_enabled?(family)
+    StrictHints.enabled?(family)
+  end
+
+  # The outlined index helpers are emitted outside any compiled method, where `@@SITE@@` is never
+  # resolved and the marker is never read: they keep their dispatch.
+  def without_strict_hints
+    previous = @strict_hints_off
+    @strict_hints_off = true
+    yield
+  ensure
+    @strict_hints_off = previous
+  end
+
+  # The strict else line when `family` is on. Policy (ADR 0419): a hint is not a proof and a violation
+  # is a wrong hint to fix, so no proof gates it; BC2CPP_STRICT_HINTS_PROVEN=1 restricts it to owners
+  # with no descendant and a name nil does not answer. Core owners, singletons, literal-block sites and
+  # argument lists the helper cannot carry keep the dispatch. `owner` is nil for a chain (POLY, table).
+  def strict_hint_fallback(family, d, recv, name, argv, owner)
+    return nil unless strict_hint_enabled?(family) && @closed_world && argv.size <= FUNCALL_ARGC_MAX
+    return nil if @call_block_expr || @strict_hints_off
+
+    if owner
+      return nil if StrictHints::CORE_OWNERS.include?(owner) || owner.end_with?('.singleton') || owner.start_with?('<')
+      return nil if StrictHints.proven_only? && !(@closed_world.exact_class?(owner) && nil_unanswerable?(name))
+    elsif StrictHints.proven_only?
+      return nil
+    end
+
+    strict_hint_line(d, recv, name, argv, family)
+  end
+
+  # `base` is the chain's ordinary else (the block): only its terminal by-name send is replaced, so the
+  # native and singleton arms in front of it keep answering their receivers, and a chain whose else is
+  # already `bc2cpp_nomethod` (a proven-dead arm, NOMETHOD_REVIEWED) is left alone: it has no send to force.
+  # `hinted: false` keeps the base (MONO_EMBED_GUARD without a hint naming the owner).
+  def strict_hint_wrap(family, d, recv, name, argv, owner, hinted: true)
+    base = yield
+    return base unless hinted && strict_hint_fallback(family, d, recv, name, argv, owner)
+
+    dispatch = dynamic_dispatch_line(d, recv, name, argv).chomp
+    pattern = %r{#{Regexp.escape(dispatch)}(?: /\* CLOSED_WORLD kept: \w+ \*/)?}
+    return base unless base.match?(pattern)
+
+    base.gsub(pattern) { strict_hint_line(d, recv, name, argv, family).chomp }
+  end
+
+  # Does a ClassLayout / annotation / element hint (what TYPED consults) name `owner` for this receiver?
+  def strict_hint_names?(owner, irep, proof_idx, receiver_reg, reg_offset, owner_def, elem_class_hint)
+    return true if elem_class_hint == owner
+    return false unless irep && proof_idx
+
+    cur_enter = irep.enter
+    cur_mand = cur_enter ? cur_enter.enter_fields.first : 0
+    cur_arg_classes = owner_def && @class_annotations[irep.label]&.args
+    ivar_classes = owner_def && @class_layout[owner_def.owner]
+    trace_new_target(irep, proof_idx, unshift_proof_reg(receiver_reg, reg_offset), ivar_classes, cur_mand,
+                     cur_arg_classes, owner: owner_def&.owner, class_layout: @class_layout, registry: @registry,
+                     container_constants: @container_constants, element_annotations: @element_annotations,
+                     known_owners: @known_owners, capture_hints: @block_hash_capture_hints,
+                     method_return_class: ->(method_name) { class_return_for_dispatch(method_name) },
+                     guarded: true) == owner
   end
 
   # UNLISTED_CLASS_GUARDS: a definer class the chain leaves out (its definition

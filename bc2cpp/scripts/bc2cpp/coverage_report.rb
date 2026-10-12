@@ -48,7 +48,7 @@ MRBC = ENV['MRBC'] || 'mrbc'
 REPORT_PATH = ENV['BC2CPP_COVERAGE_REPORT_PATH']
 
 srcs = closed_world_mrblib_srcs(ROOT)
-native_srcs = Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{ROOT}/3rd/mruby") +
+native_srcs = bc2cpp_rgss_native_srcs(ROOT, 'wio') + core_native_srcs("#{ROOT}/3rd/mruby") +
               external_gem_native_srcs(ROOT)
 # INTEGER_CONSTANT_PROOF's own out-of-closed-world poison source -- see
 # foreign_mrblib_srcs (compiled_gems.rb) and bc2cpp.rb's own IntegerConstants

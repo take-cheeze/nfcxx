@@ -19,6 +19,7 @@ require 'shellwords'
 require 'tmpdir'
 require_relative '../../tools/bc2cpp/compiled_gems'
 require_relative '../../tools/bc2cpp/nomethod_reviewed_probe'
+require_relative '../../tools/bc2cpp/warm_generator'
 require_relative 'cxx'
 
 module Bc2cppFixtureRuntime
@@ -126,8 +127,7 @@ module Bc2cppFixtureRuntime
       write_outside = lambda do |pairs|
         pairs.map { |name, text| File.join(dir, name).tap { |file| File.write(file, text) } }
       end
-      natives = core_native_srcs("#{ROOT}/3rd/mruby") + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] +
-                external_gem_native_srcs(ROOT) + write_outside.call(native)
+      natives = closed_world_native_srcs + write_outside.call(native)
       env.merge!('NATIVE_SRCS' => Shellwords.join(natives),
                  'FOREIGN_RUBY_SRCS' => Shellwords.join(foreign_mrblib_srcs(ROOT) + write_outside.call(foreign)),
                  'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio',
@@ -136,11 +136,25 @@ module Bc2cppFixtureRuntime
       env['BC2CPP_COLLECTION_EXPORTS'] = '1' if Bc2cppFixtureRuntime.collection_exports_linked
     end
     core_srcs = core ? core_compiled_mrblib_srcs(ROOT) : []
-    code, err, status = Open3.capture3(env, RbConfig.ruby, BC2CPP, *core_srcs, src, *extra_srcs)
+    code, err, status = generator_run(env, [*core_srcs, src, *extra_srcs])
     raise "bc2cpp.rb failed:\n#{(err[-3000..] || err)}" unless status.success?
 
     File.write(File.join(dir, 'fixture_gen.cpp'), code)
     [code, err]
+  end
+
+  # The outside-world sources a closed-world run scans before its own `native` ones (generate's NATIVE_SRCS).
+  def closed_world_native_srcs
+    core_native_srcs("#{ROOT}/3rd/mruby") + Dir["#{ROOT}/mruby-rgss/src/*.cxx"] + external_gem_native_srcs(ROOT)
+  end
+
+  # One bc2cpp.rb run over `argv` with `env`: a subprocess, or with BC2CPP_WARM_GENERATOR=1 a fork of a warm server
+  # that has the tool loaded and its scans warmed (ADR 0416). Both return [stdout, stderr, status].
+  def generator_run(env, argv)
+    return Open3.capture3(env, RbConfig.ruby, BC2CPP, *argv) unless WarmGenerator.enabled?
+
+    WarmGenerator.client(tool: BC2CPP, native: closed_world_native_srcs, foreign: foreign_mrblib_srcs(ROOT))
+                 .run(argv, env)
   end
 
   # `mrb_define_method` lines registering every compiled entry point of `owners`. With

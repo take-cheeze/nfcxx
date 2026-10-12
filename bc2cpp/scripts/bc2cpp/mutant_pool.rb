@@ -8,6 +8,7 @@
 # BC2CPP_JOBS bounds the concurrency (default: the core count, at most 4); 1 is the old serial run.
 require 'etc'
 require 'open3'
+require 'rbconfig'
 
 module Bc2cppMutantPool
   Result = Struct.new(:out, :success, :stopped)
@@ -31,6 +32,11 @@ module Bc2cppMutantPool
   # reports as caught need not run to the end.
   def run(env, argv, stop_on: nil)
     env = MUTANT_ENV.merge(env)
+    # Piped Ruby stdout is buffered: flush failures before the check starts
+    # another compiler run. Load only in this child, not its Ruby subprocesses.
+    if stop_on && argv.first == RbConfig.ruby
+      argv = [argv.first, '-r', File.join(__dir__, 'unbuffered_stdout.rb'), *argv.drop(1)]
+    end
     out = +''
     stopped = false
     status = nil

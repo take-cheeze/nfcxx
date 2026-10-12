@@ -12,6 +12,11 @@ class CodeGen
     ENV.fetch('BC2CPP_EXACT_CORE_ARMS', '1') != '0'
   end
 
+  # BC2CPP_EXACT_FLOW_RESULT_CLASS=0 withdraws the flow's class as a receiver class where the trace names none.
+  def exact_flow_result_class_enabled?
+    exact_core_arms_enabled? && ENV.fetch('BC2CPP_EXACT_FLOW_RESULT_CLASS', '1') != '0'
+  end
+
   # 'Array' | 'Hash' | 'String' | 'Range' when the receiver register of the send at +idx+ is exactly
   # that class on every path, else nil. Not for an implicit-self send.
   def exact_core_arm_class(irep, idx, reg, self_implicit)

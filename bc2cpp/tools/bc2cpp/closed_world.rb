@@ -9,6 +9,7 @@ require_relative 'native_names'
 require_relative 'native_direct'
 require_relative 'dynamic_names'
 require_relative 'loop_installers'
+require_relative 'scan_cache'
 
 # CLOSED_WORLD (docs/adr/0210): with BC2CPP_CLOSED_WORLD=1 the only Ruby that
 # can ever run is the closed world bc2cpp compiles, plus the scanned core and
@@ -686,74 +687,143 @@ class ClosedWorld
 
   # -- outside the closed world ------------------------------------------------
 
+  # The facts are a function of the bytes alone, so ScanCache may store them; replaying them in order leaves the
+  # state a direct scan would (ADR 0415).
   def scan_native(paths)
-    paths.each do |path|
-      # Drop comments, keeping string and char literals (a "//" inside one).
-      source = File.binread(path)
-      text = source.gsub(%r{"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|/\*.*?\*/|//[^\n]*}m) do |tok|
-        tok.start_with?('/') ? ' ' : tok
-      end
-      names = Set.new
-      @native_code_tokens[path] = Set.new(text.scan(/[A-Za-z_]\w*/))
-      merge_native_funcall_names(text)
-      record_native_other_literals(text)
-      dynamic = text.match?(NATIVE_DYNAMIC)
-      defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
-      unless path.match?(NATIVE_CORE)
-        source.scan(/\bmrb_(?:const_set|const_remove)\s*\(([^;]*?)\);/m) do |(body)|
-          args = bc2cpp_c_call_args(body)
-          target = args[2].to_s
-          constant = target[/\bmrb_intern_(?:lit|cstr)\s*\(\s*\w+\s*,\s*"(\w+)"/, 1] ||
-                     target[/\bMRB_SYM\((\w+)\)/, 1]
-          if constant
-            names << constant
-            note_outside_constant_write(constant)
-          else
-            @dynamic_constant_mutation = true
-          end
-        end
-        source.scan(/\bmrb_define_global_const\s*\(\s*\w+\s*,\s*"([A-Z]\w*)"/) do |m|
-          names << m.first
-          note_outside_constant_write(m.first)
-        end
-      end
-      text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
-        literals = body.scan(C_STRING).flatten
-        tokens = body.scan(MRB_SYM_TOKEN_RE).map { |m, n| resolve_mrb_sym_token(m, n) }
-        if kind.match?(/\A(?:(?:class|module)(?:_under)?(?:_id)?|(?:global_)?const(?:_id)?)\z/)
-          defines_class = true
-          args = bc2cpp_c_call_args(body)
-          positions = kind.match?(/\A(?:class|module)/) ? [1, 2] : [2]
-          positions.each do |position|
-            constant = args[position].to_s[/\bMRB_SYM\((\w+)\)/, 1] || args[position].to_s[/"(\w+)"/, 1]
-            note_outside_constant_write(constant) if constant
-          end
-          next
-        end
-        names.merge(literals)
-        names.merge(tokens)
-        # The name argument (after mrb and the class) must be spelled out.
-        args = bc2cpp_c_call_args(body)
-        [args[2], (args[3] if kind == 'alias')].compact.each do |arg|
-          dynamic = true unless arg.match?(/\A\s*(?:#{C_STRING}|#{MRB_SYM_TOKEN_RE})\s*\z/o)
-        end
-      end
-      global!(:outside_dynamic_definition) if dynamic && !path.match?(NATIVE_CORE)
-      # Struct members named by C strings (mruby-marshal checks for Struct).
-      dynamic ||= text.match?(/"Struct"|MRB_SYM\(Struct\)/)
-      text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
-      record_native_touches(path, text, defines_class)
-      @clone_sent = true if !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING)
-      @freeze_possible = true if !path.match?(NATIVE_CORE) && text.match?(NATIVE_FREEZE)
-      @singleton_makers << [path, :native] if !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON)
-      names.merge(text.scan(C_STRING).flatten) if dynamic
-      @outside_names.merge(names)
-      names.each { |n| (@outside_name_paths[n] ||= Set.new) << path }
-      # Only mruby's own defaults: BasicObject#method_missing, Kernel#respond_to_missing?.
-      global!(:outside_method_missing) if names.include?('method_missing') && !path.end_with?('/3rd/mruby/src/class.c')
-      global!(:outside_respond_to_missing) if names.include?('respond_to_missing?') &&
-                                              !path.end_with?('/3rd/mruby/src/kernel.c')
+    facts = ScanCache.fetch('closed_world.native', Array(paths)) { self.class.native_facts(paths) }
+    facts.each { |file| apply_native_file(file) }
+  end
+
+  def apply_native_file(file)
+    path = file.fetch(:path)
+    @native_code_tokens[path] = Set.new(file.fetch(:code_tokens))
+    @native_tokens.merge(file.fetch(:funcall_tokens))
+    @native_other_literals.merge(file.fetch(:other_literals))
+    file.fetch(:constant_writes).each { |name| note_outside_constant_write(name) }
+    @dynamic_constant_mutation = true if file.fetch(:dynamic_constant_mutation)
+    @outside_names.merge(file.fetch(:names))
+    file.fetch(:names).each { |n| (@outside_name_paths[n] ||= Set.new) << path }
+    file.fetch(:refusals).each { |reason| global!(reason) }
+    @clone_sent = true if file.fetch(:clone_sent)
+    @freeze_possible = true if file.fetch(:freeze_possible)
+    @singleton_makers << [path, :native] if file.fetch(:singleton_maker)
+    record_native_touches(path, file.fetch(:touch), file.fetch(:defines_class), file.fetch(:legacy_names))
+  end
+
+  # The facts of each path in `paths`, in order: plain data (Hash, Array, Set, String, Symbol, true/false) with
+  # no state and no ENV, so the result can be stored and loaded as it is.
+  def self.native_facts(paths)
+    Array(paths).map { |path| native_file_facts(path) }
+  end
+
+  def self.native_file_facts(path)
+    # Drop comments, keeping string and char literals (a "//" inside one).
+    source = File.binread(path)
+    text = source.gsub(%r{"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|/\*.*?\*/|//[^\n]*}m) do |tok|
+      tok.start_with?('/') ? ' ' : tok
     end
+    names = Set.new
+    constant_writes = []
+    dynamic_constant_mutation = false
+    refusals = []
+    code_tokens = Set.new(text.scan(/[A-Za-z_]\w*/))
+    dynamic = text.match?(NATIVE_DYNAMIC)
+    defines_class = text.match?(/\bmrb_(?:const_set|const_remove|define_global_const)\b/)
+    unless path.match?(NATIVE_CORE)
+      source.scan(/\bmrb_(?:const_set|const_remove)\s*\(([^;]*?)\);/m) do |(body)|
+        args = bc2cpp_c_call_args(body)
+        target = args[2].to_s
+        constant = target[/\bmrb_intern_(?:lit|cstr)\s*\(\s*\w+\s*,\s*"(\w+)"/, 1] ||
+                   target[/\bMRB_SYM\((\w+)\)/, 1]
+        if constant
+          names << constant
+          constant_writes << constant
+        else
+          dynamic_constant_mutation = true
+        end
+      end
+      source.scan(/\bmrb_define_global_const\s*\(\s*\w+\s*,\s*"([A-Z]\w*)"/) do |m|
+        names << m.first
+        constant_writes << m.first
+      end
+    end
+    text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
+      literals = body.scan(C_STRING).flatten
+      tokens = body.scan(MRB_SYM_TOKEN_RE).map { |m, n| resolve_mrb_sym_token(m, n) }
+      if kind.match?(/\A(?:(?:class|module)(?:_under)?(?:_id)?|(?:global_)?const(?:_id)?)\z/)
+        defines_class = true
+        args = bc2cpp_c_call_args(body)
+        positions = kind.match?(/\A(?:class|module)/) ? [1, 2] : [2]
+        positions.each do |position|
+          constant = args[position].to_s[/\bMRB_SYM\((\w+)\)/, 1] || args[position].to_s[/"(\w+)"/, 1]
+          constant_writes << constant if constant
+        end
+        next
+      end
+      names.merge(literals)
+      names.merge(tokens)
+      # The name argument (after mrb and the class) must be spelled out.
+      args = bc2cpp_c_call_args(body)
+      [args[2], (args[3] if kind == 'alias')].compact.each do |arg|
+        dynamic = true unless arg.match?(/\A\s*(?:#{C_STRING}|#{MRB_SYM_TOKEN_RE})\s*\z/o)
+      end
+    end
+    refusals << :outside_dynamic_definition if dynamic && !path.match?(NATIVE_CORE)
+    # Struct members named by C strings (mruby-marshal checks for Struct).
+    dynamic ||= text.match?(/"Struct"|MRB_SYM\(Struct\)/)
+    text.scan(/MRB_MT_ENTRY\s*\(\s*\w+\s*,\s*#{MRB_SYM_TOKEN_RE}/o) { |m, n| names << resolve_mrb_sym_token(m, n) }
+    names.merge(text.scan(C_STRING).flatten) if dynamic
+    # Only mruby's own defaults: BasicObject#method_missing, Kernel#respond_to_missing?.
+    refusals << :outside_method_missing if names.include?('method_missing') && !path.end_with?('/3rd/mruby/src/class.c')
+    refusals << :outside_respond_to_missing if names.include?('respond_to_missing?') &&
+                                               !path.end_with?('/3rd/mruby/src/kernel.c')
+    {
+      path: path,
+      code_tokens: code_tokens.to_a,
+      funcall_tokens: native_funcall_names(text),
+      other_literals: native_other_literals(text),
+      constant_writes: constant_writes,
+      dynamic_constant_mutation: dynamic_constant_mutation,
+      names: names.to_a,
+      refusals: refusals,
+      clone_sent: !path.match?(NATIVE_CORE) && text.match?(CLONE_SPELLING),
+      freeze_possible: !path.match?(NATIVE_CORE) && text.match?(NATIVE_FREEZE),
+      singleton_maker: !path.match?(NATIVE_CORE) && text.match?(NATIVE_SINGLETON),
+      defines_class: defines_class,
+      touch: TouchScan.native_facts(text),
+      legacy_names: native_legacy_names(text)
+    }
+  end
+
+  # The names a legacy touch spells (TouchScan's fallback), in the order of the text.
+  def self.native_legacy_names(text)
+    (text.scan(C_STRING).flatten + text.scan(/MRB_SYM\(([A-Z]\w*)\)/).flatten)
+      .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.uniq
+  end
+
+  # The tokens an outside native source's funcall-family arguments name (YIELD_REACH, ADR 0283), plus the
+  # hooks the VM and core call implicitly.
+  def self.native_funcall_names(text)
+    names = Set.new(IMPLICIT_HOOKS)
+    text.scan(FUNCALL_CALL) do |(body)|
+      arg = bc2cpp_c_call_args(body)[2].to_s
+      arg.scan(MRB_SYM_TOKEN_RE) { |m, n| names << resolve_mrb_sym_token(m, n) }
+      arg.scan(C_STRING) { |(lit)| names << lit }
+    end
+    names.to_a
+  end
+
+  # The string literals of a native source that are not the name of a registration (SETTER_POOLS, ADR 0370).
+  def self.native_other_literals(text)
+    counts = Hash.new(0)
+    text.scan(C_STRING) { |(lit)| counts[lit] += 1 }
+    text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
+      next unless NATIVE_REGISTRATION_KINDS.include?(kind)
+
+      lit = bc2cpp_c_call_args(body)[2].to_s[/\A\s*#{C_STRING}\s*\z/o, 1]
+      counts[lit] -= 1 if lit
+    end
+    counts.filter_map { |lit, n| lit if n.positive? }
   end
 
   # Every `def name` anywhere in the text, not only at a line start: foreign_method_names
@@ -797,30 +867,9 @@ class ClosedWorld
                       to_hash to_proc to_i to_f to_int hash eql? equal? coerce exception message backtrace each
                       call].freeze
 
-  def merge_native_funcall_names(text)
-    @native_tokens.merge(IMPLICIT_HOOKS)
-    text.scan(FUNCALL_CALL) do |(body)|
-      arg = bc2cpp_c_call_args(body)[2].to_s
-      arg.scan(MRB_SYM_TOKEN_RE) { |m, n| @native_tokens << resolve_mrb_sym_token(m, n) }
-      arg.scan(C_STRING) { |(lit)| @native_tokens << lit }
-    end
-  end
-
   # SETTER_POOLS (ADR 0370): every string literal of an outside native source except the name a registration
   # (`mrb_define_method(M, cls, "x=", ...)`) gives, so a setter only a registration spells is not one native code calls.
   NATIVE_REGISTRATION_KINDS = %w[method class_method module_function].freeze
-
-  def record_native_other_literals(text)
-    counts = Hash.new(0)
-    text.scan(C_STRING) { |(lit)| counts[lit] += 1 }
-    text.scan(/\bmrb_define_(\w+)\s*\(([^;]*)/m) do |kind, body|
-      next unless NATIVE_REGISTRATION_KINDS.include?(kind)
-
-      lit = bc2cpp_c_call_args(body)[2].to_s[/\A\s*#{C_STRING}\s*\z/o, 1]
-      counts[lit] -= 1 if lit
-    end
-    counts.each { |lit, n| @native_other_literals << lit if n.positive? }
-  end
 
   def merge_outside_tokens(path, text)
     tokens = (@ruby_tokens[path] = Set.new)
@@ -1202,11 +1251,10 @@ class ClosedWorld
   # ADR 0256: a native file touches what it subclasses, mixes into or rebinds by
   # name. Any construct TouchScan cannot classify keeps the old rule, gated as
   # before on the file defining classes or constants at all.
-  def record_native_touches(path, text, defines_class)
-    scan = TouchScan.native(text, @class_decls.keys.map { |k| simple(k) }.uniq)
+  def record_native_touches(path, facts, defines_class, legacy_names)
+    scan = TouchScan.native_classify(facts, @class_decls.keys.map { |k| simple(k) }.uniq)
     if scan.legacy && defines_class
-      names = (text.scan(C_STRING).flatten + text.scan(/MRB_SYM\(([A-Z]\w*)\)/).flatten)
-              .grep(/\A[A-Z]/).flat_map { |s| s.split('::') }.to_set
+      names = legacy_names.to_set
       @touches << Touch.new(path, names, {}, "legacy (#{scan.reasons.uniq.first(3).join('; ')}): spells #{names.size} constants", false)
     end
     @touches << Touch.new(path, scan.hard, scan.evidence, '', false) unless scan.hard.empty?

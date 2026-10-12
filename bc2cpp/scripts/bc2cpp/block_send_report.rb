@@ -69,6 +69,18 @@ end
 table('why the dynamic line is kept', tally(dyn, &reason))
 table('no core arm: first failing gate per name', tally(dyn.select { |r| r['shape'] == 'dynamic' }) { |r| "#{r['name']}: #{r['why'][0, 90]}" }.first(30))
 
+# GUARDED_BLOCK_INLINE (ADR 0420): the sends that also have an inline loop behind a run-time class test. Their
+# by-name line is still counted above (it is the else path); what changed is the run-time work for an exact Array
+# or Hash. The second table is what has no such loop, with its shape, receiver proof and arms.
+if cols.include?('guarded') && sel.any? { |r| r['guarded'] == '1' }
+  guarded = sel.select { |r| r['guarded'] == '1' }
+  table('guarded inline loops, by callee name', tally(guarded) { |r| r['name'] })
+  rest = dyn.reject { |r| r['guarded'] == '1' }
+  table('by-name sites with no guarded loop, by callee name and shape', tally(rest) { |r| "#{r['name']} #{r['shape']} arms=#{r['arms'].empty? ? '-' : r['arms']}" }.first(40))
+  puts format('%6d  by-name sites, %d with a guarded loop in front, %d without', dyn.size, dyn.size - rest.size, rest.size)
+  puts
+end
+
 # Levers.
 puts '-- levers (sites that would lose their by-name line if the proof held) --'
 a = dyn.select { |r| !proven.call(r) && r['fact_usable'] == '1' }

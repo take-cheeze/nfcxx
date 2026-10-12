@@ -10,6 +10,7 @@ require 'tmpdir'
 require_relative 'compiled_gems'
 require_relative 'nomethod_reviewed'
 require_relative 'proven_miss_reviewed'
+require_relative 'strict_hints'
 
 module NomethodReviewedProbe
   # The wio build's gem list: build_config.rb's rpg_maker_gems for
@@ -36,7 +37,7 @@ module NomethodReviewedProbe
   def run(gem_name, root, mrbc, hot_methods: nil, allow: true)
     this_gem = BC2CPP_COMPILED_GEMS.fetch(gem_name)
     others = BC2CPP_COMPILED_GEMS.reject { |name, _| name == gem_name }
-    native_srcs = Dir["#{root}/mruby-rgss/src/*.cxx"] + core_native_srcs("#{root}/3rd/mruby") +
+    native_srcs = bc2cpp_rgss_native_srcs(root, 'wio') + core_native_srcs("#{root}/3rd/mruby") +
                   external_gem_native_srcs(root)
     Dir.mktmpdir('bc2cpp_nomethod_probe') do |tmp|
       env = {
@@ -49,7 +50,8 @@ module NomethodReviewedProbe
         'BC2CPP_CLOSED_WORLD' => '1', 'BC2CPP_BUILD_NAME' => 'wio', 'BC2CPP_COLLECTION_EXPORTS' => '1',
         'BC2CPP_BUILD_GEMS' => Shellwords.join(wio_gems(root).map { |n, d| "#{n}=#{d}" }),
         'BC2CPP_HOT_METHODS' => hot_methods,
-        NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil)
+        NomethodReviewed::ALLOW_ENV => (allow ? 'allow' : nil),
+        StrictHints::ALLOW_ENV => (allow ? 'allow' : nil)
       }
       world = closed_world_mrblib_srcs(root, core_gems: hot_methods ? nil : :canonical)
       Open3.capture3(env, RbConfig.ruby, File.join(__dir__, 'bc2cpp.rb'), *world)

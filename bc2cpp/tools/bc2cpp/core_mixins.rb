@@ -68,6 +68,14 @@ module CoreMixins
   # Every def and alias of `name` in one Ruby source, with its enclosing
   # class/module, by indentation (how mruby's core is formatted).
   def self.definers_in(path, text, name)
+    # Every match below needs the literal name, so a source without it has no definer (and the three
+    # per-name regexes are built once, not once per line).
+    return [] unless text.include?(name)
+
+    quoted = Regexp.escape(name)
+    def_re = /\A(\s*)def\s+(self\.)?#{quoted}(?![\w?!=<>])/
+    alias_re = /\A\s*alias(?:_method)?\b.*[\s:,(]#{quoted}(?![\w?!=<>])/
+    define_re = /define_method\s*\(?\s*:#{quoted}(?![\w?!=<>])/
     stack = []
     lines = text.lines
     lines.each_with_index.filter_map do |raw, index|
@@ -78,12 +86,11 @@ module CoreMixins
         stack.pop
       end
       owner = stack.last ? stack.last[1] : '<top>'
-      if (m = line.match(/\A(\s*)def\s+(self\.)?#{Regexp.escape(name)}(?![\w?!=<>])/))
+      if (m = line.match(def_re))
         stop = (index + 1...lines.size).find { |i| lines[i].match?(/\A#{m[1]}end\b/) } || lines.size - 1
         Definer.new(owner: m[2] ? "#{owner}.singleton" : owner, path: path,
                     body: normalize(lines[index..stop]), alias_only: false)
-      elsif line.match?(/\A\s*alias(?:_method)?\b.*[\s:,(]#{Regexp.escape(name)}(?![\w?!=<>])/) ||
-            line.match?(/define_method\s*\(?\s*:#{Regexp.escape(name)}(?![\w?!=<>])/)
+      elsif line.match?(alias_re) || line.match?(define_re)
         Definer.new(owner: owner, path: path, body: nil, alias_only: true)
       end
     end

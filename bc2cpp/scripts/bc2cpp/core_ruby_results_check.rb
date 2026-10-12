@@ -69,6 +69,12 @@ SOURCE = <<~RUBY
     def memo_keyword; [1, 2].each_with_object([], extra: 1) { |x, out| x }.size; end
     def memo_splat(args); [1, 2].each_with_object(*args) { |x, out| x }.size; end
     def dropped; [1, 2].drop(1).size; end
+    # SYMBOL_BLOCK_ARG: `&:sym` compiles to LOADSYM then SENDB; the Symbol proc has no `break` to replace the result.
+    def sym_reject; [1, nil, 2].reject(&:nil?).size; end
+    def sym_map; [1, 2].map(&:to_s).size; end
+    def sym_choice(flag); [1, 2].map(&(flag ? :to_s : proc { |x| break KrOther.new })).size; end
+    def sym_unknown(input); input.reject(&:nil?).size; end
+    def proc_block; pr = proc { |x| x }; [1, 2].map(&pr).size; end
     def initialize; @sl = []; end
     # BOTTOM_BLOCK_RECEIVER: the receiver is a name or slot the growth loop has not classed yet when the block send is first run.
     def keys_sel(h); h.keys.select { |x| x }; end
@@ -142,6 +148,7 @@ worlds = [
   ['core helper installer', SOURCE, {}, true, nil, "class Array; alias_method :__uniq, :size; end"],
   ['interpreted core helper', SOURCE, {}, true, nil, "class Array; def __uniq; ignored = -> { 1 }; KrOther.new; end; end"],
   ['core computed installer', SOURCE, {}, false, nil, "class Array; alias_method ('m' + 'ap'), :size; end"],
+  ['symbol block kill switch', SOURCE, { 'BC2CPP_CORE_RUBY_SYMBOL_BLOCKS' => '0' }, true],
   ['bottom kill switch', SOURCE, { 'BC2CPP_BOTTOM_BLOCK_RECEIVERS' => '0' }, true],
   ['keys override', SOURCE + "class KrOther; def keys; self; end; end\n", {}, true],
   ['slot store of another class', SOURCE + "class KrRunner; def sl_other; @sl = KrOther.new; end; end\n", {}, true],
@@ -200,6 +207,14 @@ if ENV['MRBC']
           check.call("#{name}: keys.select enters the return table", err.include?('RETCLASS keys_sel (Array)') == %w[core\ bodies slot\ store\ of\ another\ class].include?(name))
           check.call("#{name}: @sl = @sl.select enters the return table", err.include?('RETCLASS sl_sel (Array)') == %w[core\ bodies keys\ override].include?(name))
         end
+        if ['core bodies', 'kill switch', 'symbol block kill switch', 'open world'].include?(name)
+          symbol_proven = name == 'core bodies'
+          check.call("#{name}: Symbol block reject result", exact_size.call(code, 'sym_reject') == symbol_proven)
+          check.call("#{name}: Symbol block map result", exact_size.call(code, 'sym_map') == symbol_proven)
+          check.call("#{name}: a chosen block (Symbol or breaking proc) stays unproved", !exact_size.call(code, 'sym_choice'))
+          check.call("#{name}: a block held in a local stays unproved", !exact_size.call(code, 'proc_block'))
+          check.call("#{name}: a Symbol block on an unknown receiver does not pick one class", !exact_size.call(code, 'sym_unknown'))
+        end
         check.call("#{name}: nested sort result", exact_size.call(code, 'sorted') == (name == 'core bodies')) if ['core bodies', 'kill switch', 'nested kill switch', 'nested project override', 'nested core override', 'nested core recursion', 'nested caller break', 'open world'].include?(name)
         if ['core bodies', 'kill switch', 'nested kill switch', 'super core override', 'super included override', 'native range switch', 'open world'].include?(name)
           check.call("#{name}: range helper and super result", exact_size.call(code, 'range_strings') == (name == 'core bodies'))
@@ -240,7 +255,7 @@ if ENV['MRBC']
         harness = <<~CPP
           static int scenario(mrb_state* M) {
             mrb_value runner = mrb_obj_new(M, mrb_class_get(M, "KrRunner"), 0, nullptr);
-            for (const char* name : {"mapped", "collected", "selected", "found", "rejected", "hash_map", "range_map", "next_value", "breaking", "nested_break", "nonlocal_return", "no_block", "dedup", "dedup_block", "sorted", "range_sorted", "range_strings", "hash_identity", "tallied", "partitioned", "memo_array", "memo_hash", "memo_nil", "memo_break", "memo_no_block", "memo_wrong_arity", "memo_keyword", "dropped"}) {
+            for (const char* name : {"mapped", "collected", "selected", "found", "rejected", "hash_map", "range_map", "next_value", "breaking", "nested_break", "nonlocal_return", "no_block", "dedup", "dedup_block", "sorted", "range_sorted", "range_strings", "hash_identity", "tallied", "partitioned", "memo_array", "memo_hash", "memo_nil", "memo_break", "memo_no_block", "memo_wrong_arity", "memo_keyword", "dropped", "sym_reject", "sym_map", "proc_block"}) {
               call(M, name, runner, name);
             }
             for (mrb_value flag : {mrb_true_value(), mrb_false_value()}) {
@@ -270,6 +285,9 @@ if ENV['MRBC']
             call(M, "hash_reject", runner, "unknown_reject", 1, &unknown);
             call(M, "hash_reject_map", runner, "reject_map", 1, &unknown);
             call(M, "hash_select_map", runner, "select_map", 1, &unknown);
+            mrb_value flag_true = mrb_true_value();
+            call(M, "sym_choice", runner, "sym_choice", 1, &flag_true);
+            call(M, "sym_unknown", runner, "sym_unknown", 1, &unknown);
             call(M, "stored", runner, "stored");
             call(M, "read", runner, "read");
             for (mrb_value flag : {mrb_true_value(), mrb_false_value()}) {

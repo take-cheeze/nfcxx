@@ -89,7 +89,7 @@ end
 # Consulted only for non-block sends: a `break` in the caller's block makes
 # the send evaluate to the BREAK operand (ops.h OP_BREAK). Same argument as
 # compute_fixnum_return_names.
-def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret_proof = nil)
+def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret_proof = nil, receiver_class: nil)
   # The block proc register (BLOCK writes dest+1) sits between the call and its
   # receiver write, so BLOCK is skipped. CORE_ARRAY_CHAIN: MOVE is followed to the
   # register actually written (`regs[a] = regs[b]`, vm.c OP_MOVE); skipping it would
@@ -108,7 +108,10 @@ def proven_array_source_scan(irep, idx, dest_reg, registry, annotated = nil, ret
     # SEND0/SSEND0 print no `n=` field: absent means 0 args.
     argc = pin.argc || 0
     if block_carrying && CHAINED_ARRAY_METHODS.include?(called)
-      next 'Array' if called == 'map' || trace_new_target(irep, pin_idx, pin.reg, registry: registry) == 'Array'
+      # CHAINED_IVAR_RECEIVER: ClassLayout passes the class it has proven so far, so `@q = @q.reject { }` on an ivar
+      # that every other store makes an Array is an Array store too (a plain trace cannot read the ivar).
+      traced = receiver_class ? receiver_class.call(pin_idx, pin) : trace_new_target(irep, pin_idx, pin.reg, registry: registry)
+      next 'Array' if called == 'map' || traced == 'Array'
     end
     next 'Array' if annotated&.call(called)
     next 'Array' if core_array_return?(called, block_carrying, registry, argc: argc)
@@ -181,8 +184,13 @@ class ClassLayout
             # proven to return an Array count as Array evidence (Game::Battle#@queue =
             # turn_order). Monotone: it only turns UNKNOWN into 'Array'; the join is
             # unchanged, and LOADNIL writes still reach NIL_TOLERANT_JOIN.
+            receiver_class = lambda do |pin_idx, pin|
+              trace_new_target(irep, pin_idx, pin.reg, known_so_far, mand, arg_classes, owner: owner,
+                                                                                         class_layout: classes, registry: registry,
+                                                                                         container_constants: container_constants)
+            end
             found ||= proven_array_source_scan(irep, idx, src_reg, registry, annotated_array_return,
-                                               array_ret_proof)
+                                               array_ret_proof, receiver_class: receiver_class)
 
             # NIL_TOLERANT_JOIN: `@x = nil` (LOADNIL Rn; SETIV @x Rn) is evidence of
             # nothing, so it is skipped rather than joined. Poisoning on it would kill

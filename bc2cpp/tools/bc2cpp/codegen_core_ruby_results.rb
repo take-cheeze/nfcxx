@@ -246,8 +246,14 @@ class CodeGen
     core_ruby_result_target(chain.drop(position + 1), target.name)
   end
 
+  # SYMBOL_BLOCK_ARG: `x.reject(&:dead?)` compiles to `LOADSYM R(a+1) :dead?` then SENDB. The block is a Symbol
+  # that vm.c's OP_SENDB converts with to_proc; calling that proc only sends the method to the element, so it has
+  # no `break` that could replace the callee's result (an exception unwinds past the call and yields none), the
+  # same fact a literal block without BREAK states. BC2CPP_CORE_RUBY_SYMBOL_BLOCKS=0 withdraws it.
   def core_ruby_literal_block_safe?(irep, index, insn)
     irep.walk_dominating_writers(index - 1, (insn.reg.to_i + insn.argc + 1).to_s, follow_moves: true) do |writer|
+      next true if writer.op == 'LOADSYM' && ENV['BC2CPP_CORE_RUBY_SYMBOL_BLOCKS'] != '0'
+
       body = writer.op == 'BLOCK' && @ireps[irep.reps[writer.block_index]]
       body && core_ruby_result_exits_safe?(body, caller: true)
     end || false
