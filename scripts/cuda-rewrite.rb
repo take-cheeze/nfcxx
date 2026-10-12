@@ -1214,6 +1214,12 @@ BUILTIN_DEFS = {
   "__vsub4" => "static inline unsigned __vsub4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; r |= ((((a >> sh) & 0xffu) - ((b >> sh) & 0xffu)) & 0xffu) << sh; } return r; }\n",
   "__vcmpne4" => "static inline unsigned __vcmpne4(unsigned a, unsigned b) { unsigned r = 0; for (int i = 0; i < 4; i++) { unsigned sh = 8u * (unsigned)i; if (((a >> sh) & 0xffu) != ((b >> sh) & 0xffu)) r |= 0xffu << sh; } return r; }\n",
   "__trap" => "static inline void __trap(void) { __builtin_trap(); }\n",
+  # std::is_same and std::is_same_v for device code (ggml-cuda's templates): the device unit has no host <type_traits>,
+  # so the two are defined here over plain types only.
+  "is_same_v" => "",   # rewritten to std::is_same<A, B>::value (rewrite_is_same_v), which needs is_same below
+  "is_same" => "namespace std { template <class A, class B> struct is_same { enum : bool { value = false }; }; template <class A> struct is_same<A, A> { enum : bool { value = true }; }; }\n",
+  # assert in device code: a failed condition traps the kernel (CUDA's device assert). The host copy keeps <assert.h>.
+  "assert" => "static inline void assert(int c) { if (!c) __builtin_trap(); }\n",
   # The float math functions and __dp4a: wrappers over the emitter's FLOAT_BUILTINS / SCALAR_U32 intrinsics. The
   # accuracy of the approximate ones (rsqrt, div, exp, log) is in docs/notes/gpu.md.
   "fmaxf" => "extern \"C\" float __nfcxx_fmaxf(float, float);\nstatic inline float fmaxf(float a, float b) { return __nfcxx_fmaxf(a, b); }\n",
@@ -1324,6 +1330,29 @@ def tokens_of(s)
 end
 
 # True if s has code outside comments and whitespace.
+# The text of a piece without its comments (each comment becomes a space; its newlines stay, so offsets of lines hold).
+# The classifier reads a piece's text for '(' and '=' before a body: a comment that has one of them (as the comment
+# before `enum { N = 4096 };` in a benchmark has) must not make the piece a function.
+def code_text(s)
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      if s[i] == "/"
+        s[i...e].each_char { |c| out << (c == "\n" ? "\n" : " ") }
+      else
+        out << s[i...e]
+      end
+      i = e
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
+end
+
 def code_only?(s)
   i = 0
   while i < s.length
@@ -2030,6 +2059,7 @@ def device_tu(text)
     done[base] = true
     out << VECTOR_DEFS[base] << "\n"
   end
+  needed["is_same"] = true if needed["is_same_v"]   # std::is_same_v is rewritten to std::is_same (rewrite_is_same_v)
   BUILTIN_DEFS.each do |name, text|
     next unless needed[name]
     next if pieces.any? { |pc| pc[:keep] && pc[:defined].include?(name) }
@@ -2040,13 +2070,50 @@ def device_tu(text)
   end
   pieces.each do |pc|
     next unless pc[:keep]
-    out << rewrite_builtins(pc[:text]) << "\n"
+    out << rewrite_is_same_v(rewrite_builtins(pc[:text])) << "\n"
   end
   $sites.each do |w, site|
     out << "extern \"C\" void #{w}(#{site[:decl]}) { #{site[:name]}<#{site[:targs]}>(#{site[:call].join(", ")}); }\n"
     kernels << w
   end
   [out, kernels.uniq]
+end
+
+# std::is_same_v<A, B> is a variable template, and the emitter lowers only zero-initialized globals, so a device
+# unit reads it through the struct form: std::is_same<A, B>::value (the prelude defines both over plain types).
+# Literals and comments are skipped; the closing '>' is the one that balances the '<' after is_same_v.
+def rewrite_is_same_v(s)
+  key = "std::is_same_v<"
+  out = ""
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      out << s[i...e]
+      i = e
+      next
+    end
+    if s[i, key.length] == key && !(i > 0 && ident_char?(s[i - 1]))
+      j = i + key.length
+      depth = 1
+      while j < s.length && depth > 0
+        e2 = skip_literal(s, j)
+        if e2
+          j = e2
+          next
+        end
+        depth += 1 if s[j] == "<"
+        depth -= 1 if s[j] == ">"
+        j += 1
+      end
+      out << "std::is_same<" << s[(i + key.length)...(j - 1)] << ">::value"
+      i = j
+      next
+    end
+    out << s[i]
+    i += 1
+  end
+  out
 end
 
 # __launch_bounds__(...) is a compile hint (register and occupancy limits). The launch path does not use it, so it
