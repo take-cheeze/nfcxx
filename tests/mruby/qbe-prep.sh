@@ -118,7 +118,7 @@ float x1 = 1.5f32; double x2 = 2.5f64; float x3 = 1e10f32; double x4 = .25e-3f64
 float x5 = 1e+5f32, x6 = 3.f32; double x7 = 1.e5f64, x8 = .5f32; const _Float16 *hp; _Float16 f(_Float16 a, __bf16 b);
 EOF
 both floats
-expect floats out '{ 0x3e00 }'
+expect floats out '((_Float16)0x1.8p+0)'
 expect floats out 'struct __nfcxx_float128 q2 = { { 0x'
 expect floats out 'float x1 = 1.5f;'
 expect floats out 'double x2 = 2.5;'
@@ -388,7 +388,7 @@ int a = 1; /* unterminated __bf16 x;
 _Float16 y;
 EOF
 both tok_comment
-expect tok_comment out 'struct __nfcxx_half16 y;'
+expect tok_comment out '_Float16 y;'
 cat >"$tmp/edge/tok_strings.c" <<'EOF'
 char *s = "esc \" quote __bf16"; char *t = u8"x_Float16"; wchar_t w = L'\''; char u = u'x'; int z = u8'q';
 char *bad = "unterminated __bf16
