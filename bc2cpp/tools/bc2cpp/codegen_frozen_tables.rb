@@ -63,12 +63,12 @@ class CodeGen
   end
 
   # BC2CPP_LOADSYM_CLASS=0 turns off the Symbol bit of a LOADSYM register in the numeric flow and the Symbol class
-  # chain of a class test (ADR 0428); the output is then the output before that change.
+  # chain of a class test (ADR 0429); the output is then the output before that change.
   def loadsym_class_enabled?
     ENV.fetch('BC2CPP_LOADSYM_CLASS', '1') != '0'
   end
 
-  # The Symbol bit a LOADSYM register carries in the numeric flow (ADR 0428): the same bit as frozen_symbol_bit, so
+  # The Symbol bit a LOADSYM register carries in the numeric flow (ADR 0429): the same bit as frozen_symbol_bit, so
   # the register and a table slot name Symbol alike. nil (OTHER) when the switch is off, and when no bit was
   # allocated (BC2CPP_SYMBOL_CLASS=0, or frozen tables refused): the bit is never allocated here.
   def numeric_loadsym_bit

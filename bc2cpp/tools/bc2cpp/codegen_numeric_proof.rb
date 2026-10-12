@@ -76,7 +76,7 @@ class CodeGen
       @cg.numeric_upvar_mask(irep, insn)
     end
 
-    # A Symbol literal in a register carries the Symbol bit (ADR 0428), as it does in the exact-class run; the
+    # A Symbol literal in a register carries the Symbol bit (ADR 0429), as it does in the exact-class run; the
     # consumers of the numeric masks are audited in docs/bc2cpp-symbol-class.md. TrueClass and FalseClass stay OTHER.
     def literal_class_mask(insn)
       insn.op == 'LOADSYM' ? @cg.numeric_loadsym_bit : nil

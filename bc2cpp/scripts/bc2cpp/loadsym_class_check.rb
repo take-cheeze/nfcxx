@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# LOADSYM_CLASS (docs/adr/0428): a Symbol literal in a register carries the Symbol class bit in the numeric flow,
+# LOADSYM_CLASS (docs/adr/0429): a Symbol literal in a register carries the Symbol class bit in the numeric flow,
 # the bit a Symbol slot of a frozen table already carries (ADR 0424), and a kind_of test against Symbol decides that
 # bit (the one-class chain of class_test_chain). Every other consumer of the numeric masks keeps refusing or
 # treating the bit as an ordinary class bit (docs/bc2cpp-symbol-class.md).
