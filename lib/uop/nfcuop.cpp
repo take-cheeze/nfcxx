@@ -1,6 +1,7 @@
 // nfcuop core: dtypes, scalars, the interning Graph, the reference interpreter. See nfcuop.hpp.
 #include "nfcuop.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -24,14 +25,15 @@ bool is_int(DType d) { return d == DType::Int32 || d == DType::Int64; }
 
 static const char* const kOpNames[] = {"CONST", "VAR", "NEG", "SQRT", "EXP2", "LOG2", "SIN", "ADD", "SUB",
                                        "MUL",   "IDIV", "FDIV", "MOD", "MAX", "CMPLT", "CMPNE", "AND", "OR",
-                                       "XOR",   "WHERE", "CAST"};
+                                       "XOR",   "WHERE", "CAST",  "RESHAPE", "PERMUTE", "EXPAND", "REDUCE_SUM", "REDUCE_MAX"};
 static_assert(sizeof(kOpNames) / sizeof(kOpNames[0]) == static_cast<size_t>(Op::Count_), "op name table");
 const char* name(Op op) { return kOpNames[static_cast<int>(op)]; }
 
 int arity(Op op) {
   switch (op) {
     case Op::Const: case Op::Var: return 0;
-    case Op::Neg: case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: case Op::Cast: return 1;
+    case Op::Neg: case Op::Sqrt: case Op::Exp2: case Op::Log2: case Op::Sin: case Op::Cast:
+    case Op::Reshape: case Op::Permute: case Op::Expand: case Op::ReduceSum: case Op::ReduceMax: return 1;
     case Op::Where: return 3;
     default: return 2;
   }
@@ -41,6 +43,28 @@ bool is_commutative(Op op) {
   switch (op) {
     case Op::Add: case Op::Mul: case Op::Max: case Op::CmpNe: case Op::And: case Op::Or: case Op::Xor: return true;
     default: return false;
+  }
+}
+
+bool is_movement(Op op) { return op == Op::Reshape || op == Op::Permute || op == Op::Expand; }
+bool is_reduce(Op op) { return op == Op::ReduceSum || op == Op::ReduceMax; }
+
+int64_t numel(const Shape& s) {
+  int64_t n = 1;
+  for (int64_t d : s) n *= d;
+  return n;
+}
+std::string to_string(const Shape& s) {
+  std::string out = "[";
+  for (size_t k = 0; k < s.size(); k++) out += (k ? "," : "") + std::to_string(s[k]);
+  return out + "]";
+}
+static void check_shape(const Shape& s, const char* what) {
+  int64_t n = 1;
+  for (int64_t d : s) {
+    if (d < 1) throw Error(std::string(what) + ": every dimension must be at least 1, got " + to_string(s));
+    if (n > (int64_t(1) << 40) / d) throw Error(std::string(what) + ": shape too large " + to_string(s));
+    n *= d;
   }
 }
 
@@ -98,9 +122,13 @@ Graph::~Graph() {}
 
 static size_t mix(size_t h, size_t v) { return h ^ (v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2)); }
 
-const UOp* Graph::intern(Op op, DType dt, std::vector<const UOp*> src, const Scalar& value, const std::string& name) {
+const UOp* Graph::intern(Op op, DType dt, std::vector<const UOp*> src, const Scalar& value, const std::string& name,
+                         const Shape& shape, const Shape& arg) {
   size_t h = mix(static_cast<size_t>(op), static_cast<size_t>(dt));
   for (const UOp* s : src) h = mix(h, s->id);
+  for (int64_t d : shape) h = mix(h, static_cast<size_t>(d) + 1);
+  h = mix(h, 0x51ed);
+  for (int64_t d : arg) h = mix(h, static_cast<size_t>(d) + 1);
   if (op == Op::Const) {
     uint64_t bits;
     std::memcpy(&bits, &value.f, sizeof bits);
@@ -109,14 +137,31 @@ const UOp* Graph::intern(Op op, DType dt, std::vector<const UOp*> src, const Sca
   if (op == Op::Var) h = mix(h, std::hash<std::string>()(name));
   std::vector<const UOp*>& bucket = table_[h];
   for (const UOp* c : bucket)
-    if (c->op == op && c->dtype == dt && c->src == src && c->name == name && (op != Op::Const || c->value == value)) return c;
-  nodes_.push_back(UOp{op, dt, std::move(src), op == Op::Const ? value : Scalar{}, name, static_cast<uint32_t>(nodes_.size())});
+    if (c->op == op && c->dtype == dt && c->src == src && c->name == name && c->shape == shape && c->arg == arg &&
+        (op != Op::Const || c->value == value))
+      return c;
+  UOp u;
+  u.op = op;
+  u.dtype = dt;
+  u.src = std::move(src);
+  if (op == Op::Const) u.value = value;
+  u.name = name;
+  u.id = static_cast<uint32_t>(nodes_.size());
+  u.shape = shape;
+  u.arg = arg;
+  nodes_.push_back(std::move(u));
   bucket.push_back(&nodes_.back());
   return &nodes_.back();
 }
 
-const UOp* Graph::constant(const Scalar& s) { return intern(Op::Const, s.dtype, {}, s, ""); }
-const UOp* Graph::var(const std::string& name, DType d) { return intern(Op::Var, d, {}, Scalar{}, name); }
+const UOp* Graph::constant(const Scalar& s, const Shape& shape) {
+  check_shape(shape, "CONST");
+  return intern(Op::Const, s.dtype, {}, s, "", shape, {});
+}
+const UOp* Graph::var(const std::string& name, DType d, const Shape& shape) {
+  check_shape(shape, "VAR");
+  return intern(Op::Var, d, {}, Scalar{}, name, shape, {});
+}
 
 static DType infer(Op op, const std::vector<const UOp*>& src) {
   auto bad = [&](const char* why) -> DType { throw Error(std::string(name(op)) + ": " + why); };
@@ -147,21 +192,81 @@ static DType infer(Op op, const std::vector<const UOp*>& src) {
 
 const UOp* Graph::alu(Op op, std::vector<const UOp*> src) {
   DType d = infer(op, src);
-  return intern(op, d, std::move(src), Scalar{}, "");
+  for (const UOp* s : src)
+    if (s->shape != src[0]->shape)
+      throw Error(std::string(name(op)) + ": sources differ in shape, " + to_string(src[0]->shape) + " and " + to_string(s->shape));
+  Shape shape = src[0]->shape;
+  return intern(op, d, std::move(src), Scalar{}, "", shape, {});
+}
+
+static const UOp* need(const UOp* x, const char* what) {
+  if (!x) throw Error(std::string(what) + ": null source");
+  return x;
 }
 
 const UOp* Graph::cast(const UOp* x, DType to) {
-  if (!x) throw Error("CAST: null source");
-  return intern(Op::Cast, to, {x}, Scalar{}, "");
+  need(x, "CAST");
+  return intern(Op::Cast, to, {x}, Scalar{}, "", x->shape, {});
 }
+
+const UOp* Graph::reshape(const UOp* x, const Shape& shape) {
+  need(x, "RESHAPE");
+  check_shape(shape, "RESHAPE");
+  if (numel(shape) != numel(x->shape))
+    throw Error("RESHAPE: cannot reshape " + to_string(x->shape) + " into " + to_string(shape));
+  return intern(Op::Reshape, x->dtype, {x}, Scalar{}, "", shape, {});
+}
+
+const UOp* Graph::permute(const UOp* x, const Shape& perm) {
+  need(x, "PERMUTE");
+  size_t r = x->shape.size();
+  std::vector<bool> seen(r, false);
+  if (perm.size() != r) throw Error("PERMUTE: " + to_string(perm) + " is not a permutation of the " + std::to_string(r) + " axes");
+  Shape out;
+  for (int64_t p : perm) {
+    if (p < 0 || p >= static_cast<int64_t>(r) || seen[p]) throw Error("PERMUTE: " + to_string(perm) + " is not a permutation of the " + std::to_string(r) + " axes");
+    seen[p] = true;
+    out.push_back(x->shape[p]);
+  }
+  return intern(Op::Permute, x->dtype, {x}, Scalar{}, "", out, perm);
+}
+
+const UOp* Graph::expand(const UOp* x, const Shape& shape) {
+  need(x, "EXPAND");
+  check_shape(shape, "EXPAND");
+  bool ok = shape.size() == x->shape.size();
+  for (size_t k = 0; ok && k < shape.size(); k++) ok = x->shape[k] == shape[k] || x->shape[k] == 1;
+  if (!ok) throw Error("EXPAND: cannot expand " + to_string(x->shape) + " to " + to_string(shape));
+  return intern(Op::Expand, x->dtype, {x}, Scalar{}, "", shape, {});
+}
+
+const UOp* Graph::reduce(Op op, const UOp* x, Shape axes) {
+  need(x, name(op));
+  std::sort(axes.begin(), axes.end());
+  Shape out = x->shape;
+  for (size_t k = 0; k < axes.size(); k++) {
+    if (axes[k] < 0 || axes[k] >= static_cast<int64_t>(out.size()) || (k && axes[k] == axes[k - 1]))
+      throw Error(std::string(name(op)) + ": bad axes " + to_string(axes) + " for shape " + to_string(x->shape));
+    out[axes[k]] = 1;
+  }
+  if (op == Op::ReduceSum && x->dtype == DType::Bool) throw Error("REDUCE_SUM: not defined for bool");
+  return intern(op, x->dtype, {x}, Scalar{}, "", out, axes);
+}
+const UOp* Graph::reduce_sum(const UOp* x, const Shape& axes) { return reduce(Op::ReduceSum, x, axes); }
+const UOp* Graph::reduce_max(const UOp* x, const Shape& axes) { return reduce(Op::ReduceMax, x, axes); }
 
 const UOp* Graph::rebuild(const UOp* u, std::vector<const UOp*> src) {
   if (u->op == Op::Const || u->op == Op::Var) return u;
-  if (u->op == Op::Cast) {
-    if (src.size() != 1) throw Error("CAST: wrong number of sources");
-    return cast(src[0], u->dtype);
+  if (src.size() != 1 && arity(u->op) == 1) throw Error(std::string(name(u->op)) + ": wrong number of sources");
+  switch (u->op) {
+    case Op::Cast: return cast(src[0], u->dtype);
+    case Op::Reshape: return reshape(src[0], u->shape);
+    case Op::Permute: return permute(src[0], u->arg);
+    case Op::Expand: return expand(src[0], u->shape);
+    case Op::ReduceSum: return reduce_sum(src[0], u->arg);
+    case Op::ReduceMax: return reduce_max(src[0], u->arg);
+    default: return alu(u->op, std::move(src));
   }
-  return alu(u->op, std::move(src));
 }
 
 // ---- traversal ----
@@ -199,6 +304,9 @@ std::string dump(const UOp* root) {
     out += ")";
     if (u->op == Op::Const) out += " " + to_string(u->value);
     if (u->op == Op::Var) out += " " + u->name;
+    if (!u->shape.empty()) out += " shape=" + to_string(u->shape);
+    if (u->op == Op::Permute) out += " perm=" + to_string(u->arg);
+    if (is_reduce(u->op)) out += " axes=" + to_string(u->arg);
     out += "\n";
   }
   return out;
@@ -248,24 +356,119 @@ Scalar eval_op(Op op, DType out, const std::vector<Scalar>& a) {
   throw Error(std::string(name(op)) + ": unhandled op");
 }
 
-Scalar evaluate(const UOp* root, const std::map<std::string, Scalar>& vars) {
-  std::unordered_map<const UOp*, Scalar> val;
-  for (const UOp* u : toposort(root)) {
-    if (u->op == Op::Const) {
-      val[u] = u->value;
-    } else if (u->op == Op::Var) {
+Array Array::full(DType d, const Shape& shape, const Scalar& v) {
+  if (v.dtype != d) throw Error("Array::full: value is " + std::string(name(v.dtype)) + ", not " + name(d));
+  check_shape(shape, "Array");
+  return Array(d, shape, std::vector<Scalar>(static_cast<size_t>(numel(shape)), v));
+}
+
+Array Array::from_doubles(DType d, const Shape& shape, const std::vector<double>& v) {
+  check_shape(shape, "Array");
+  if (static_cast<int64_t>(v.size()) != numel(shape))
+    throw Error("Array::from_doubles: " + std::to_string(v.size()) + " values for shape " + to_string(shape));
+  Array a;
+  a.dtype = d;
+  a.shape = shape;
+  for (double x : v) a.data.push_back(Scalar::from_double(d, x));
+  return a;
+}
+
+static std::vector<int64_t> strides_of(const Shape& s) {
+  std::vector<int64_t> st(s.size(), 1);
+  for (size_t k = s.size(); k-- > 1;) st[k - 1] = st[k] * s[k];
+  return st;
+}
+
+// The elements of `out` shape in row-major order, each as the flat index into a source whose element for
+// output coordinate c is at sum(c[k] * mult[k]).
+template <class F>
+static void for_each_index(const Shape& out, const std::vector<int64_t>& mult, F f) {
+  int64_t n = numel(out);
+  std::vector<int64_t> c(out.size(), 0);
+  int64_t src = 0;
+  for (int64_t i = 0; i < n; i++) {
+    f(i, src);
+    for (size_t k = out.size(); k-- > 0;) {
+      src += mult[k];
+      if (++c[k] < out[k]) break;
+      src -= mult[k] * out[k];
+      c[k] = 0;
+    }
+  }
+}
+
+static Array eval_node(const UOp* u, const std::vector<const Array*>& in, const std::map<std::string, Array>& vars) {
+  Array out;
+  out.dtype = u->dtype;
+  out.shape = u->shape;
+  switch (u->op) {
+    case Op::Const: return Array::full(u->dtype, u->shape, u->value);
+    case Op::Var: {
       auto it = vars.find(u->name);
       if (it == vars.end()) throw Error("unbound variable " + u->name);
       if (it->second.dtype != u->dtype)
         throw Error("variable " + u->name + " is " + name(u->dtype) + ", bound to a " + name(it->second.dtype));
-      val[u] = it->second;
-    } else {
-      std::vector<Scalar> args;
-      for (const UOp* s : u->src) args.push_back(val[s]);
-      val[u] = eval_op(u->op, u->dtype, args);
+      if (it->second.shape != u->shape)
+        throw Error("variable " + u->name + " has shape " + to_string(u->shape) + ", bound to " + to_string(it->second.shape));
+      return it->second;
     }
+    case Op::Reshape: out.data = in[0]->data; return out;
+    case Op::Permute: {
+      std::vector<int64_t> st = strides_of(in[0]->shape), mult;
+      for (int64_t p : u->arg) mult.push_back(st[p]);
+      out.data.resize(in[0]->data.size());
+      for_each_index(out.shape, mult, [&](int64_t i, int64_t s) { out.data[i] = in[0]->data[s]; });
+      return out;
+    }
+    case Op::Expand: {
+      std::vector<int64_t> st = strides_of(in[0]->shape), mult;
+      for (size_t k = 0; k < st.size(); k++) mult.push_back(in[0]->shape[k] == 1 ? 0 : st[k]);
+      out.data.resize(static_cast<size_t>(numel(out.shape)));
+      for_each_index(out.shape, mult, [&](int64_t i, int64_t s) { out.data[i] = in[0]->data[s]; });
+      return out;
+    }
+    case Op::ReduceSum:
+    case Op::ReduceMax: {
+      const Array& a = *in[0];
+      std::vector<int64_t> ost = strides_of(out.shape), mult(a.shape.size());
+      for (size_t k = 0; k < mult.size(); k++) mult[k] = out.shape[k] == 1 ? 0 : ost[k];
+      std::vector<bool> have(static_cast<size_t>(numel(out.shape)), false);
+      out.data.resize(have.size());
+      const Op bin = u->op == Op::ReduceSum ? Op::Add : Op::Max;
+      for_each_index(a.shape, mult, [&](int64_t i, int64_t o) {
+        if (!have[o]) { out.data[o] = a.data[i]; have[o] = true; }
+        else out.data[o] = eval_op(bin, u->dtype, {out.data[o], a.data[i]});
+      });
+      return out;
+    }
+    default: break;
+  }
+  size_t n = in[0]->data.size();
+  out.data.reserve(n);
+  std::vector<Scalar> args(in.size());
+  for (size_t i = 0; i < n; i++) {
+    for (size_t k = 0; k < in.size(); k++) args[k] = in[k]->data[i];
+    out.data.push_back(eval_op(u->op, u->dtype, args));
+  }
+  return out;
+}
+
+Array evaluate_array(const UOp* root, const std::map<std::string, Array>& vars) {
+  std::unordered_map<const UOp*, Array> val;
+  for (const UOp* u : toposort(root)) {
+    std::vector<const Array*> in;
+    for (const UOp* s : u->src) in.push_back(&val[s]);
+    Array r = eval_node(u, in, vars);
+    val[u] = std::move(r);
   }
   return val[root];
+}
+
+Scalar evaluate(const UOp* root, const std::map<std::string, Scalar>& vars) {
+  if (!root->shape.empty()) throw Error("evaluate: the result has shape " + to_string(root->shape) + "; use evaluate_array");
+  std::map<std::string, Array> arrays;
+  for (const auto& kv : vars) arrays[kv.first] = Array(kv.second.dtype, {}, {kv.second});
+  return evaluate_array(root, arrays).data[0];
 }
 
 }  // namespace nfcuop

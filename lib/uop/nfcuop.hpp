@@ -8,8 +8,9 @@
 //   nfcuop::Scalar r = nfcuop::evaluate(s, {{"x", nfcuop::Scalar::from_int(nfcuop::DType::Int32, 5)}});
 //
 // Stage 1 (scalar core): Graph, interning, a reference interpreter, a text dump. Stage 2: Pat,
-// PatternMatcher, graph_rewrite and the symbolic simplifier. Tensors, lowering to loops, C rendering and
-// the nfcpoly bindings come in later stages. See docs/notes/uop.md.
+// PatternMatcher, graph_rewrite and the symbolic simplifier. Stage 3: every node has a shape; reshape,
+// permute, expand and reductions; evaluate_array. The numpy-like Tensor API is nfcuop_np.hpp. Lowering to
+// loops, C rendering and the nfcpoly bindings come in later stages. See docs/notes/uop.md.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -43,12 +44,20 @@ enum class Op : uint8_t {
   And, Or, Xor,                                        // binary, ints and Bool
   Where,                                               // (Bool, a, b) -> a or b
   Cast,                                                // one source, the node's dtype is the target
+  Reshape, Permute, Expand,                            // movement ops (stage 3): the node's shape is the result's
+  ReduceSum, ReduceMax,                                // reductions over `arg` axes; the reduced axes stay, with size 1
   Count_
 };
 const char* name(Op op);
 int arity(Op op);  // number of sources (0 for leaves)
 bool is_alu(Op op);
 bool is_commutative(Op op);
+bool is_movement(Op op);  // Reshape, Permute, Expand
+bool is_reduce(Op op);    // ReduceSum, ReduceMax
+
+using Shape = std::vector<int64_t>;  // empty: a scalar; every dimension is at least 1
+int64_t numel(const Shape& s);
+std::string to_string(const Shape& s);  // "[2,3]"
 
 // One value of one dtype. Bool and the ints keep the value in `i` (sign extended, already wrapped to the
 // width of the dtype); the floats keep it in `f` (a Float32 is always a value representable as float).
@@ -68,9 +77,11 @@ struct UOp {
   Op op;
   DType dtype;
   std::vector<const UOp*> src;
-  Scalar value;      // Const only
+  Scalar value;      // Const only: every element of the (possibly shaped) constant
   std::string name;  // Var only
   uint32_t id;       // creation order in its Graph; a source always has a smaller id
+  Shape shape;       // of the value this node computes; the empty shape is a scalar
+  Shape arg;         // Permute: the permutation; ReduceSum/ReduceMax: the axes, ascending
   bool is_const() const { return op == Op::Const; }
 };
 
@@ -84,14 +95,25 @@ class Graph {
   Graph(const Graph&) = delete;
   Graph& operator=(const Graph&) = delete;
 
-  const UOp* constant(const Scalar& s);
-  const UOp* iconst(DType d, int64_t v) { return constant(Scalar::from_int(d, v)); }
-  const UOp* fconst(DType d, double v) { return constant(Scalar::from_double(d, v)); }
-  const UOp* var(const std::string& name, DType d);
+  // A constant tensor with every element `s`; the default shape is a scalar.
+  const UOp* constant(const Scalar& s, const Shape& shape = {});
+  const UOp* iconst(DType d, int64_t v, const Shape& shape = {}) { return constant(Scalar::from_int(d, v), shape); }
+  const UOp* fconst(DType d, double v, const Shape& shape = {}) { return constant(Scalar::from_double(d, v), shape); }
+  // A named input; evaluate() binds it to a value of this dtype and shape.
+  const UOp* var(const std::string& name, DType d, const Shape& shape = {});
 
-  // Builds an ALU node (anything but Const, Var and Cast), inferring the dtype and checking the sources.
+  // Builds an ALU node (anything but Const, Var and Cast), inferring the dtype and checking the sources,
+  // which must have the same shape (broadcasting is explicit: expand, or the Tensor API).
   const UOp* alu(Op op, std::vector<const UOp*> src);
   const UOp* cast(const UOp* x, DType to);
+  // Movement and reductions (stage 3). reshape: same number of elements. permute: result dim i is source
+  // dim perm[i]. expand: same rank, a dimension stays or grows from 1. reduce_*: `axes` need not be sorted;
+  // the reduced axes remain with size 1 (keepdims), reshape drops them.
+  const UOp* reshape(const UOp* x, const Shape& shape);
+  const UOp* permute(const UOp* x, const Shape& perm);
+  const UOp* expand(const UOp* x, const Shape& shape);
+  const UOp* reduce_sum(const UOp* x, const Shape& axes);
+  const UOp* reduce_max(const UOp* x, const Shape& axes);
   // The node `u` with other sources (u->op and u->dtype are kept; Const and Var are returned as they are).
   const UOp* rebuild(const UOp* u, std::vector<const UOp*> src);
 
@@ -117,7 +139,9 @@ class Graph {
   size_t size() const { return nodes_.size(); }
 
  private:
-  const UOp* intern(Op op, DType dt, std::vector<const UOp*> src, const Scalar& value, const std::string& name);
+  const UOp* intern(Op op, DType dt, std::vector<const UOp*> src, const Scalar& value, const std::string& name,
+                    const Shape& shape, const Shape& arg);
+  const UOp* reduce(Op op, const UOp* x, Shape axes);
   std::deque<UOp> nodes_;                                        // stable addresses
   std::unordered_map<size_t, std::vector<const UOp*>> table_;    // hash -> nodes
 };
@@ -132,10 +156,25 @@ std::string dump(const UOp* root);
 // constant folding of symbolic(). `op` is an ALU op or Cast, `out` the dtype of the result. Throws Error on
 // an integer division by zero.
 Scalar eval_op(Op op, DType out, const std::vector<Scalar>& args);
-// The reference interpreter: the value of `root` with every Var bound by name (a binding must have the
-// Var's dtype). Integers wrap, IDiv and Mod truncate toward zero like C, a Float32 node is computed in
-// double and rounded to float, Max returns the non-NaN operand.
+// The reference interpreter for scalar graphs: the value of `root` (whose shape must be empty) with every
+// Var bound by name (a binding must have the Var's dtype). Integers wrap, IDiv and Mod truncate toward zero
+// like C, a Float32 node is computed in double and rounded to float, Max returns the non-NaN operand.
 Scalar evaluate(const UOp* root, const std::map<std::string, Scalar>& vars = {});
+
+// A dense row-major tensor value (stage 3), one Scalar per element.
+struct Array {
+  DType dtype = DType::Float32;
+  Shape shape;
+  std::vector<Scalar> data;  // numel(shape) elements
+  Array() {}
+  Array(DType d, Shape s, std::vector<Scalar> v) : dtype(d), shape(std::move(s)), data(std::move(v)) {}
+  static Array full(DType d, const Shape& shape, const Scalar& v);
+  // From doubles (converted to `d` as Scalar::from_double does); data.size() must equal numel(shape).
+  static Array from_doubles(DType d, const Shape& shape, const std::vector<double>& v);
+};
+// The reference interpreter for tensor graphs. Elementwise ops apply eval_op per element; ReduceSum
+// accumulates in row-major order of the source starting from its first element, ReduceMax likewise.
+Array evaluate_array(const UOp* root, const std::map<std::string, Array>& vars = {});
 
 // ---- stage 2: patterns and rewriting ----
 
