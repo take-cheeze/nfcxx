@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "nfcpoly.hpp"
+#include "nfcpoly_mruby.hpp"
 
 using nfcpoly::Context;
 using nfcpoly::Value;
@@ -188,7 +189,7 @@ static int run_tests() {
     try {
       ctx.eval<int>("ruby", "'a'");
     } catch (const nfcpoly::ConversionError& e) {
-      got = std::string(e.what()) == "expected Integer, got String";
+      got = std::string(e.what()) == "expected integer, got string";
     }
     CHECK(got);
     CHECK(throws<nfcpoly::ConversionError>([&] { ctx.eval<std::string>("ruby", "1"); }));
@@ -220,7 +221,7 @@ static int run_tests() {
     CHECK(ctx.eval<std::string>("ruby", "begin; twice_c(1, 2); rescue ArgumentError => e; e.message; end") ==
           "wrong number of arguments (given 2, expected 1)");
     CHECK(ctx.eval<std::string>("ruby", "begin; twice_c('a'); rescue TypeError => e; e.message; end") ==
-          "expected Integer, got String");
+          "expected integer, got string");
     CHECK(throws<nfcpoly::Error>([&] { ctx.bind_fn("Upper", +[] { return 1; }); }));
     CHECK(throws<nfcpoly::Error>([&] { ctx.bind_fn("a b", +[] { return 1; }); }));
     std::vector<int> big(10000);
@@ -287,9 +288,9 @@ static int run_tests() {
     ctx.eval_void("ruby", "self_ref.x = 5");
     CHECK(pos.x == 5);
     CHECK(ctx.eval<bool>("ruby", "is_null(nil)") && !ctx.eval<bool>("ruby", "is_null(pos)"));
-    CHECK(ctx.eval<std::string>("ruby", "begin; vadd(1, 2); rescue TypeError => e; e.message; end") == "expected Vec3, got Integer");
+    CHECK(ctx.eval<std::string>("ruby", "begin; vadd(1, 2); rescue TypeError => e; e.message; end") == "expected Vec3, got integer");
     CHECK(ctx.eval<std::string>("ruby", "begin; Person.new('a', 1).greet(3); rescue TypeError => e; e.message; end") ==
-          "expected String, got Integer");
+          "expected string, got integer");
 
     Vec3 copy = ctx.eval<Vec3>("ruby", "Vec3.new(7, 8, 9)");  // by value: a copy of the script's object
     CHECK(copy.x == 7 && copy.z == 9);
@@ -356,6 +357,26 @@ static int run_tests() {
     CHECK(Vec3::live == before);  // closing the interpreter finalizes what the script still owned
   }
 
+  std::printf("-- a Value outlives its context safely\n");
+  {
+    Value arr, num, obj;
+    {
+      Context c3;
+      c3.def_class<Vec3>("Vec3").ctor<double, double, double>();
+      arr = c3.eval_value("ruby", "[1, 2, 3]");
+      num = c3.eval_value("ruby", "42");
+      obj = c3.eval_value("ruby", "Vec3.new(1, 2, 3)");
+    }
+    CHECK(num.as<int>() == 42);                    // plain values keep working
+    CHECK(obj.as<Vec3&>().z == 3);                 // and so does an object the Value co-owns
+    CHECK(!arr.is_array());                        // the interpreter is gone: nothing can be asked of it any more
+    CHECK(throws<nfcpoly::Error>([&] { arr.call("size"); }));
+    CHECK(throws<nfcpoly::Error>([&] { num.call("to_s"); }));
+    CHECK(throws<nfcpoly::ConversionError>([&] { arr.as<std::vector<int>>(); }));
+    arr = Value();
+    obj = Value();
+  }
+
   std::printf("-- C++ exceptions through scripts\n");
   {
     ctx.bind_fn("thrower", []() -> int { throw std::runtime_error("host boom"); });
@@ -400,10 +421,10 @@ static int run_tests() {
     CHECK(ctx.eval<int>("ruby", "twice_c(4)") == 8);  // and the interpreter is still consistent
 
     // A script raise passes through a bound C++ function (raw mruby API: mruby's own throw) and releases its RAII objects.
-    mrb_state* mrb = ctx.mrb();
+    mrb_state* mrb = nfcpoly::mruby_state(ctx);
     ctx.bind_fn("with_guard", [mrb](Value proc) -> int {
       Guard g;
-      mrb_funcall(mrb, proc.raw(), "call", 0);
+      mrb_funcall(mrb, nfcpoly::mruby_raw(proc), "call", 0);
       return 1;
     });
     int d0 = Guard::destroyed;

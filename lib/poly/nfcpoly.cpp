@@ -1,209 +1,37 @@
-// nfcpoly implementation. See nfcpoly.hpp and docs/notes/poly.md.
-//
-// libmruby is built with C++ exceptions (scripts/mruby-rt-config.rb): a script raise is `throw (mrb_jmpbuf*)` on the
-// same exception runtime as every C++ `throw` in the host. Three rules follow from that and are kept here:
-//   1. Every call from C++ into the interpreter goes through mrb_protect_error (or checks mrb->exc), so a script
-//      error becomes a C++ exception (ScriptError) and never unwinds host frames that do not expect it.
-//   2. Every call from the interpreter into C++ goes through `trampoline`, which catches whatever the bound code
-//      throws and raises a script exception instead. A foreign C++ exception passing through the VM would leave
-//      mrb->jmp and the call stack inconsistent. The one type it must not catch is mruby's own `mrb_jmpbuf*`: a
-//      script raise that is merely passing through a bound function on its way to a script handler.
-//   3. mruby's raise runs the destructors of the C++ frames it crosses (that is what C++ exceptions buy over
-//      longjmp), so a bound function's RAII objects are released when a script it called back into raises.
-#ifndef MRB_USE_CXX_EXCEPTION
-#define MRB_USE_CXX_EXCEPTION  // as libmruby was built; only <mruby/throw.h>, for the type mrb_jmpbuf, depends on it
-#endif
-#include "nfcpoly.hpp"
+// nfcpoly language-neutral core. See nfcpoly.hpp, nfcpoly_lang.hpp and docs/notes/poly.md.
+#include "nfcpoly_lang.hpp"
 
-#include <mruby/class.h>
-#include <mruby/compile.h>
-#include <mruby/data.h>
-#include <mruby/error.h>
-#include <mruby/proc.h>
-#include <mruby/throw.h>
-#include <mruby/variable.h>
-
+#include <algorithm>
 #include <cctype>
-#include <cstdlib>
+#include <map>
+#include <set>
 
 namespace nfcpoly {
 namespace detail {
 
 namespace {
-unsigned long g_serial = 0;  // script exception objects handed to the host, numbered across all contexts
-}
 
-struct ClassInfo {
+unsigned long g_serial = 0;  // script error objects handed to the host, numbered across all contexts
+
+struct Registered {
   std::string name;
-  RClass* klass = nullptr;
-  mrb_data_type ref_type = {nullptr, nullptr};  // wrapper of an object the host owns
-  mrb_data_type own_type = {nullptr, nullptr};  // wrapper of an object the script's GC owns
+  LangFactory factory;
 };
-
-struct Impl {
-  mrb_state* mrb = nullptr;
-  mrb_ccontext* cxt = nullptr;
-  std::map<const void*, std::unique_ptr<ClassInfo>> classes;
-  std::vector<std::unique_ptr<Callable>> callables;
-  mrb_value roots = mrb_nil_value();  // an Array held against the GC; slot 0 is the last script exception handed out
-  unsigned long exc_serial = 0;
-  RClass* host_error = nullptr;       // NfcPoly::HostError < RuntimeError: a C++ exception that entered a script
-  ~Impl() {
-    if (mrb) {
-      if (cxt) mrb_ccontext_free(mrb, cxt);
-      mrb_close(mrb);  // runs the finalizers of script-owned C++ objects, so classes (their data types) outlive it
-    }
-  }
-};
-
-namespace {
-
-Impl* impl_of(mrb_state* mrb) { return static_cast<Impl*>(mrb->ud); }
-
-// A C++ exception carried by a script exception object (ivar @__host), so that it can come back out unchanged.
-struct HostExc {
-  std::exception_ptr ep;
-};
-void host_exc_free(mrb_state*, void* p) { delete static_cast<HostExc*>(p); }
-const mrb_data_type host_exc_type = {"NfcPoly::HostException", host_exc_free};
-
-[[noreturn]] void raise_class(mrb_state* mrb, const char* cls, const std::string& msg) {
-  mrb_exc_raise(mrb, mrb_exc_new_str(mrb, mrb_exc_get(mrb, cls), mrb_str_new(mrb, msg.data(), static_cast<mrb_int>(msg.size()))));
-  std::abort();  // not reached: the front end does not see mrb_exc_raise (mrb_noreturn) as noreturn
-}
-
-// Text of a script method (message, inspect), or "" when it raises or does not answer a String.
-struct CallJob {
-  mrb_value self;
-  const char* name;
-};
-mrb_value call_job_body(mrb_state* mrb, void* p) {
-  CallJob* j = static_cast<CallJob*>(p);
-  return mrb_funcall(mrb, j->self, j->name, 0);
-}
-mrb_value protected_call0(Impl* i, mrb_value self, const char* name, bool* ok) {
-  CallJob job = {self, name};
-  mrb_bool err = FALSE;
-  mrb_value r = mrb_protect_error(i->mrb, call_job_body, &job, &err);
-  *ok = !err;
+std::vector<Registered>& registry() {
+  static std::vector<Registered> r;
   return r;
 }
-std::string protected_string(Impl* i, mrb_value self, const char* name) {
-  bool ok = false;
-  mrb_value r = protected_call0(i, self, name, &ok);
-  if (ok && mrb_string_p(r)) return std::string(RSTRING_PTR(r), static_cast<std::size_t>(RSTRING_LEN(r)));
-  return std::string();
+std::vector<std::pair<std::string, std::string>>& aliases() {  // alias -> canonical name
+  static std::vector<std::pair<std::string, std::string>> a;
+  return a;
 }
-
-// The host side of an exception the interpreter handed back: the original C++ exception when the script carried one
-// out unrescued, else ScriptError (SyntaxError for a parse failure). Never returns.
-[[noreturn]] void throw_for_exception(Impl* i, mrb_value exc) {
-  mrb_state* mrb = i->mrb;
-  mrb_value h = mrb_iv_get(mrb, exc, mrb_intern_cstr(mrb, "@__host"));
-  if (mrb_data_p(h) && DATA_TYPE(h) == &host_exc_type && DATA_PTR(h)) {
-    std::exception_ptr ep = static_cast<HostExc*>(DATA_PTR(h))->ep;
-    std::rethrow_exception(ep);
-  }
-  std::string cls = mrb_obj_classname(mrb, exc);
-  std::string msg = protected_string(i, exc, "message");
-  std::vector<std::string> bt;
-  {
-    bool ok = false;
-    mrb_value b = protected_call0(i, exc, "backtrace", &ok);
-    if (ok && mrb_array_p(b)) {
-      for (mrb_int k = 0; k < RARRAY_LEN(b); ++k) {
-        mrb_value line = mrb_ary_entry(b, k);
-        if (mrb_string_p(line)) bt.push_back(std::string(RSTRING_PTR(line), static_cast<std::size_t>(RSTRING_LEN(line))));
-      }
-    }
-  }
-  mrb_ary_set(mrb, i->roots, 0, exc);
-  i->exc_serial = ++g_serial;
-  if (mrb_obj_is_kind_of(mrb, exc, mrb_exc_get(mrb, "SyntaxError"))) throw SyntaxError(cls + ": " + msg);
-  throw ScriptError(cls, msg, std::move(bt), i, i->exc_serial);
+std::set<Lang*>& live_langs() {
+  static std::set<Lang*> s;
+  return s;
 }
-
-// ---- running C++ from a script -----------------------------------------------------------------------------------
-// What the trampoline raises, decided inside the C++ handlers and carried out after them: building script objects
-// there could itself raise (out of memory) while a C++ exception is being handled.
-struct Pending {
-  enum Kind { None, Existing, Plain, Host } kind = None;
-  std::string cls, msg;
-  std::exception_ptr host;
-};
-
-[[noreturn]] void raise_pending(Impl* i, mrb_state* mrb, Pending& p) {
-  if (p.kind == Pending::Existing) {
-    mrb_exc_raise(mrb, mrb_ary_entry(i->roots, 0));
-  }
-  if (p.kind == Pending::Host) {
-    mrb_value exc = mrb_exc_new_str(mrb, i->host_error, mrb_str_new(mrb, p.msg.data(), static_cast<mrb_int>(p.msg.size())));
-    HostExc* he = new HostExc;
-    he->ep = p.host;
-    mrb_value d = mrb_obj_value(mrb_data_object_alloc(mrb, mrb->object_class, he, &host_exc_type));
-    mrb_obj_iv_set(mrb, mrb_obj_ptr(exc), mrb_intern_cstr(mrb, "@__host"), d);
-    mrb_exc_raise(mrb, exc);
-  }
-  raise_class(mrb, p.cls.c_str(), p.msg);
-}
-
-mrb_value trampoline(mrb_state* mrb, mrb_value self) {
-  Impl* impl = impl_of(mrb);
-  Callable* c = static_cast<Callable*>(mrb_cptr(mrb_proc_cfunc_env_get(mrb, 0)));
-  mrb_int argc = mrb_get_argc(mrb);
-  if (argc != c->arity()) {
-    raise_class(mrb, "ArgumentError",
-                "wrong number of arguments (given " + std::to_string(argc) + ", expected " + std::to_string(c->arity()) + ")");
-  }
-  Pending pend;
-  mrb_value result = mrb_nil_value();
-  try {
-    result = c->invoke(mrb, self, argc, mrb_get_argv(mrb));
-  } catch (mrb_jmpbuf*) {
-    throw;  // a script raise passing through on its way to a script handler
-  } catch (const ScriptError& e) {
-    if (e.owner() == impl && e.serial() == impl->exc_serial) {
-      pend.kind = Pending::Existing;  // the script exception this came from: raise that very object again
-    } else {
-      pend.kind = Pending::Plain;
-      pend.cls = "RuntimeError";
-      pend.msg = e.what();
-    }
-  } catch (const ConversionError& e) {
-    pend.kind = Pending::Plain;
-    pend.cls = "TypeError";
-    pend.msg = e.what();
-  } catch (const std::exception& e) {
-    pend.kind = Pending::Host;
-    pend.host = std::current_exception();
-    pend.msg = e.what();
-  } catch (...) {
-    pend.kind = Pending::Host;
-    pend.host = std::current_exception();
-    pend.msg = "unknown C++ exception";
-  }
-  if (pend.kind != Pending::None) raise_pending(impl, mrb, pend);
-  return result;
-}
-
-class ValueCallable : public Callable {
- public:
-  explicit ValueCallable(mrb_value v) : v_(v) {}
-  int arity() const override { return 0; }
-  mrb_value invoke(mrb_state*, mrb_value, mrb_int, const mrb_value*) override { return v_; }
-
- private:
-  mrb_value v_;
-};
-
-void define_on(Impl* i, RClass* klass, const std::string& name, std::unique_ptr<Callable> c) {
-  mrb_state* mrb = i->mrb;
-  mrb_value env = mrb_cptr_value(mrb, c.get());
-  RProc* p = mrb_proc_new_cfunc_with_env(mrb, trampoline, 1, &env);
-  mrb_method_t m;
-  MRB_METHOD_FROM_PROC(m, p);
-  mrb_define_method_raw(mrb, klass, mrb_intern_cstr(mrb, name.c_str()), m);
-  i->callables.push_back(std::move(c));
+std::map<const void*, std::string>& hints() {
+  static std::map<const void*, std::string> m;
+  return m;
 }
 
 bool ident_char(char c, bool first) {
@@ -211,210 +39,313 @@ bool ident_char(char c, bool first) {
   return std::isalpha(u) || c == '_' || (!first && std::isdigit(u));
 }
 
-// A name the script can write as a bare identifier: it starts with a lower-case letter or '_' (an upper-case one would
-// parse as a constant), and may end in '?', '!' or '=' (a setter).
-void check_global_name(const std::string& name) {
-  std::size_t n = name.size();
-  if (n > 0 && (name[n - 1] == '?' || name[n - 1] == '!' || name[n - 1] == '=')) --n;
-  bool ok = n > 0 && ident_char(name[0], true) && !std::isupper(static_cast<unsigned char>(name[0]));
-  for (std::size_t k = 1; ok && k < n; ++k) ok = ident_char(name[k], false);
-  if (!ok) throw Error("nfcpoly: '" + name + "' is not a usable global name (a lower-case identifier)");
+// The language a script value came from, if its interpreter is still running.
+Lang* source_lang(const Var& v) {
+  Lang* l = v.kind() == Var::Script ? v.handle()->lang : v.src();
+  if (l && live_langs().count(l)) return l;
+  return nullptr;
 }
 
-mrb_value no_constructor(mrb_state* mrb, mrb_value self) {
-  raise_class(mrb, "NoMethodError", std::string(mrb_obj_classname(mrb, self)) + " has no constructor (ClassBuilder::ctor)");
+struct Event {  // everything declared to the context, replayed into each language when it starts
+  enum Kind { Fn, Val, Variable, Class, Method, Prop, Ctor } kind;
+  std::string name;
+  Callable* c = nullptr;
+  Callable* c2 = nullptr;
+  ClassInfo* ci = nullptr;
+  Var v;
+};
+
+void apply(Lang* l, const Event& e) {
+  switch (e.kind) {
+    case Event::Fn: l->define_fn(e.name, e.c); break;
+    case Event::Val: l->define_value(e.name, e.v); break;
+    case Event::Variable: l->define_variable(e.name, e.c, e.c2); break;
+    case Event::Class: l->class_define(e.ci); break;
+    case Event::Method: l->class_method(e.ci, e.name, e.c); break;
+    case Event::Prop: l->class_prop(e.ci, e.name, e.c, e.c2); break;
+    case Event::Ctor: l->class_ctor(e.ci, e.c); break;
+  }
 }
 
 }  // namespace
 
-mrb_state* state_of(Impl* impl) { return impl->mrb; }
-
-void root_add(Impl* impl, mrb_value v) {
-  if (!mrb_immediate_p(v)) mrb_gc_register(impl->mrb, v);
-}
-void root_del(Impl* impl, mrb_value v) {
-  if (!mrb_immediate_p(v)) mrb_gc_unregister(impl->mrb, v);
-}
-
-Value make_value(Impl* impl, mrb_value v) { return Value(impl, v); }
-
-ClassInfo* find_class(mrb_state* mrb, const void* key) {
-  Impl* i = impl_of(mrb);
-  auto it = i->classes.find(key);
-  return it == i->classes.end() ? nullptr : it->second.get();
-}
-
-void conversion_error(mrb_state* mrb, mrb_value v, const char* want) {
-  throw ConversionError(std::string("expected ") + want + ", got " + mrb_obj_classname(mrb, v));
-}
-void range_error(const char* what) { throw ConversionError(what); }
-void unregistered_class(const char* what) {
-  throw ConversionError(std::string("nfcpoly: a C++ ") + what + " crossed into the script without Context::def_class");
-}
-void empty_value() { throw Error("nfcpoly: the Value is empty (default constructed)"); }
-
-mrb_value cstr_value(mrb_state* mrb, const char* s) { return s ? mrb_str_new_cstr(mrb, s) : mrb_nil_value(); }
-
-Value Conv<Value>::from(mrb_state* mrb, mrb_value v) { return make_value(impl_of(mrb), v); }
-
-void* unwrap_object(mrb_state* mrb, ClassInfo* ci, mrb_value v, bool allow_nil) {
-  if (allow_nil && mrb_nil_p(v)) return nullptr;
-  if (mrb_data_p(v) && (DATA_TYPE(v) == &ci->ref_type || DATA_TYPE(v) == &ci->own_type)) {
-    void* p = DATA_PTR(v);
-    if (!p) throw ConversionError("nfcpoly: " + ci->name + " object is not initialised");
-    return p;
+struct Impl {
+  std::map<const void*, ClassInfo*> classes;  // never freed: a Var that outlives the context still points at its class
+  std::vector<std::unique_ptr<Callable>> callables;
+  std::vector<Event> events;
+  std::vector<std::pair<std::string, std::unique_ptr<Lang>>> langs;  // started interpreters, by canonical name
+  Handle* handles = nullptr;  // every live Handle of this context
+  ~Impl() {
+    // Handles outlive the interpreters safely: they forget their script value, and only their memory remains.
+    Handle* h = handles;
+    handles = nullptr;
+    while (h) {
+      Handle* n = h->next;
+      h->orphan();
+      h->lang = nullptr;
+      h->impl = nullptr;
+      h->prev = h->next = nullptr;
+      h = n;
+    }
+    langs.clear();  // closes the interpreters; the finalizers of script-owned objects run here
   }
-  conversion_error(mrb, v, ci->name.c_str());
+  void record(Event e) {
+    events.push_back(std::move(e));
+    for (auto& l : langs) apply(l.second.get(), events.back());
+  }
+};
+
+Lang::Lang(Impl* i) : impl(i) { live_langs().insert(this); }
+Lang::~Lang() { live_langs().erase(this); }
+
+Handle::Handle(Lang* l, Impl* i) : lang(l), impl(i) {
+  next = i->handles;
+  if (next) next->prev = this;
+  i->handles = this;
+}
+Handle::~Handle() {
+  if (!impl) return;
+  if (prev) prev->next = next;
+  else impl->handles = next;
+  if (next) next->prev = prev;
 }
 
-mrb_value wrap_borrowed(mrb_state* mrb, ClassInfo* ci, void* p) {
-  return mrb_obj_value(mrb_data_object_alloc(mrb, ci->klass, p, &ci->ref_type));
-}
-mrb_value wrap_owned(mrb_state* mrb, ClassInfo* ci, void* p) {
-  return mrb_obj_value(mrb_data_object_alloc(mrb, ci->klass, p, &ci->own_type));
+LangRegistrar::LangRegistrar(const char* name, const char* alias1, const char* alias2, LangFactory factory) {
+  registry().push_back(Registered{name, factory});
+  aliases().push_back(std::make_pair(std::string(name), std::string(name)));
+  if (alias1) aliases().push_back(std::make_pair(std::string(alias1), std::string(name)));
+  if (alias2) aliases().push_back(std::make_pair(std::string(alias2), std::string(name)));
 }
 
-ClassInfo* register_class(Impl* i, const void* key, const std::string& name, void (*deleter)(mrb_state*, void*)) {
+Impl* impl_of(Lang* l) { return l->impl; }
+
+bool valid_global_name(const std::string& name) {
+  if (name.empty() || !ident_char(name[0], true) || std::isupper(static_cast<unsigned char>(name[0]))) return false;
+  for (std::size_t k = 1; k < name.size(); ++k)
+    if (!ident_char(name[k], false)) return false;
+  return true;
+}
+
+static void check_global_name(const std::string& name) {
+  if (!valid_global_name(name))
+    throw Error("nfcpoly: '" + name + "' is not a usable global name (a lower-case identifier)");
+}
+
+Lang* get_lang(Impl* impl, std::string_view language) {
+  std::string canonical;
+  for (auto& a : aliases())
+    if (language == a.first) canonical = a.second;
+  if (canonical.empty()) {
+    std::string have;
+    std::vector<std::string> names = nfcpoly::Context::languages();
+    for (std::size_t k = 0; k < names.size(); ++k) have += (k ? ", " : "") + names[k];
+    throw UnsupportedLanguage("nfcpoly: unsupported language '" + std::string(language) + "' (available: " + have + ")");
+  }
+  for (auto& l : impl->langs)
+    if (l.first == canonical) return l.second.get();
+  LangFactory factory = nullptr;
+  for (auto& r : registry())
+    if (r.name == canonical) factory = r.factory;
+  std::unique_ptr<Lang> l = factory(impl);
+  for (const Event& e : impl->events) apply(l.get(), e);
+  Lang* raw = l.get();
+  impl->langs.push_back(std::make_pair(canonical, std::move(l)));
+  return raw;
+}
+
+[[noreturn]] void raise_script_error(Lang* l, const std::string& cls, const std::string& msg,
+                                     std::vector<std::string> backtrace, bool syntax) {
+  l->exc_serial = ++g_serial;
+  if (syntax) throw SyntaxError(cls + ": " + msg);
+  throw ScriptError(cls, msg, std::move(backtrace), l, l->exc_serial);
+}
+
+// ---- declarations -------------------------------------------------------------------------------------------------
+ClassInfo* find_class(Impl* impl, const void* key) {
+  auto it = impl->classes.find(key);
+  return it == impl->classes.end() ? nullptr : it->second;
+}
+
+std::string class_name_hint(const void* key) {
+  auto it = hints().find(key);
+  return it == hints().end() ? std::string("a registered class") : it->second;
+}
+
+void declare_fn(Impl* impl, const std::string& name, std::unique_ptr<Callable> c) {
+  check_global_name(name);
+  Event e;
+  e.kind = Event::Fn;
+  e.name = name;
+  e.c = c.get();
+  impl->callables.push_back(std::move(c));
+  impl->record(std::move(e));
+}
+
+void declare_value(Impl* impl, const std::string& name, const Var& v) {
+  check_global_name(name);
+  Event e;
+  e.kind = Event::Val;
+  e.name = name;
+  e.v = v;
+  impl->record(std::move(e));
+}
+
+void declare_variable(Impl* impl, const std::string& name, std::unique_ptr<Callable> get, std::unique_ptr<Callable> set) {
+  check_global_name(name);
+  Event e;
+  e.kind = Event::Variable;
+  e.name = name;
+  e.c = get.get();
+  e.c2 = set.get();
+  impl->callables.push_back(std::move(get));
+  if (set) impl->callables.push_back(std::move(set));
+  impl->record(std::move(e));
+}
+
+ClassInfo* declare_class(Impl* impl, const void* key, const std::string& name) {
   if (name.empty() || !std::isupper(static_cast<unsigned char>(name[0])))
     throw Error("nfcpoly: '" + name + "' is not a script class name (a constant: upper-case first letter)");
   for (std::size_t k = 1; k < name.size(); ++k)
     if (!ident_char(name[k], false)) throw Error("nfcpoly: '" + name + "' is not a script class name");
-  if (i->classes.count(key)) throw Error("nfcpoly: this C++ class is already registered as " + i->classes[key]->name);
-  for (auto& kv : i->classes)
+  if (impl->classes.count(key)) throw Error("nfcpoly: this C++ class is already registered as " + impl->classes[key]->name);
+  for (auto& kv : impl->classes)
     if (kv.second->name == name) throw Error("nfcpoly: the script class name " + name + " is already registered");
-  std::unique_ptr<ClassInfo> ci(new ClassInfo);
+  ClassInfo* ci = new ClassInfo;
   ci->name = name;
-  ci->ref_type.struct_name = ci->name.c_str();
-  ci->ref_type.dfree = nullptr;
-  ci->own_type.struct_name = ci->name.c_str();
-  ci->own_type.dfree = deleter;
-  ci->klass = mrb_define_class(i->mrb, name.c_str(), i->mrb->object_class);
-  MRB_SET_INSTANCE_TT(ci->klass, MRB_TT_CDATA);
-  mrb_define_method(i->mrb, ci->klass, "initialize", no_constructor, MRB_ARGS_ANY());
-  ClassInfo* raw = ci.get();
-  i->classes[key] = std::move(ci);
-  return raw;
+  ci->key = key;
+  impl->classes[key] = ci;
+  hints()[key] = name;
+  Event e;
+  e.kind = Event::Class;
+  e.ci = ci;
+  impl->record(std::move(e));
+  return ci;
 }
 
-void define_global_fn(Impl* i, const std::string& name, std::unique_ptr<Callable> c) {
-  check_global_name(name);
-  define_on(i, i->mrb->kernel_module, name, std::move(c));
-}
-
-void define_global_value(Impl* i, const std::string& name, mrb_value v) {
-  check_global_name(name);
-  root_add(i, v);  // the context's lifetime: released with the interpreter
-  define_on(i, i->mrb->kernel_module, name, std::unique_ptr<Callable>(new ValueCallable(v)));
-}
-
-void define_method(Impl* i, ClassInfo* ci, const std::string& name, std::unique_ptr<Callable> c) {
+void declare_method(Impl* impl, ClassInfo* ci, const std::string& name, std::unique_ptr<Callable> c) {
   if (name.empty()) throw Error("nfcpoly: empty method name");
-  define_on(i, ci->klass, name, std::move(c));
+  Event e;
+  e.kind = Event::Method;
+  e.ci = ci;
+  e.name = name;
+  e.c = c.get();
+  ci->methods.push_back(std::make_pair(name, c.get()));
+  impl->callables.push_back(std::move(c));
+  impl->record(std::move(e));
 }
 
-void define_initializer(Impl* i, ClassInfo* ci, std::unique_ptr<Callable> c) {
-  define_on(i, ci->klass, "initialize", std::move(c));
+void declare_prop(Impl* impl, ClassInfo* ci, const std::string& name, std::unique_ptr<Callable> get,
+                  std::unique_ptr<Callable> set) {
+  if (name.empty()) throw Error("nfcpoly: empty field name");
+  Event e;
+  e.kind = Event::Prop;
+  e.ci = ci;
+  e.name = name;
+  e.c = get.get();
+  e.c2 = set.get();
+  ClassInfo::Prop p;
+  p.name = name;
+  p.get = get.get();
+  p.set = set.get();
+  ci->props.push_back(p);
+  impl->callables.push_back(std::move(get));
+  if (set) impl->callables.push_back(std::move(set));
+  impl->record(std::move(e));
 }
 
-void check_uninitialised(mrb_state*, ClassInfo* ci, mrb_value self) {
-  if (!mrb_data_p(self)) throw ConversionError("nfcpoly: " + ci->name + "#initialize on a non-" + ci->name + " object");
-  if (DATA_PTR(self)) throw ConversionError("nfcpoly: " + ci->name + " object is already initialised");
+void declare_ctor(Impl* impl, ClassInfo* ci, std::unique_ptr<Callable> c) {
+  Event e;
+  e.kind = Event::Ctor;
+  e.ci = ci;
+  e.c = c.get();
+  ci->ctor = c.get();
+  impl->callables.push_back(std::move(c));
+  impl->record(std::move(e));
 }
 
-void init_owned(mrb_state*, ClassInfo* ci, mrb_value self, void* p) {
-  mrb_data_init(self, p, &ci->own_type);
+// ---- evaluation and script values ----------------------------------------------------------------------------------
+Var eval_in(Impl* impl, std::string_view language, std::string_view code) {
+  Lang* l = get_lang(impl, language);
+  return l->eval(code);
 }
 
-// ---- calling a script method from C++ ----------------------------------------------------------------------------
-namespace {
-struct MethodJob {
-  mrb_value self;
-  mrb_sym name;
-  const mrb_value* argv;
-  mrb_int argc;
-};
-mrb_value method_job_body(mrb_state* mrb, void* p) {
-  MethodJob* j = static_cast<MethodJob*>(p);
-  return mrb_funcall_argv(mrb, j->self, j->name, j->argc, j->argv);
+Var call_in(const Var& target, const std::string& method, const std::vector<Var>& args) {
+  Lang* l = source_lang(target);
+  if (!l) empty_value();
+  return l->call(target, method, args);
 }
 
-struct ArenaGuard {  // a host loop must not grow the GC arena without bound
-  mrb_state* mrb;
-  int ai;
-  explicit ArenaGuard(mrb_state* m) : mrb(m), ai(mrb_gc_arena_save(m)) {}
-  ~ArenaGuard() { mrb_gc_arena_restore(mrb, ai); }
-};
-}  // namespace
-
-Value call_method(Impl* i, mrb_value self, const std::string& name, const mrb_value* argv, mrb_int argc) {
-  ArenaGuard guard(i->mrb);
-  MethodJob job = {self, mrb_intern_cstr(i->mrb, name.c_str()), argv, argc};
-  mrb_bool err = FALSE;
-  mrb_value r = mrb_protect_error(i->mrb, method_job_body, &job, &err);
-  if (err) throw_for_exception(i, r);
-  return make_value(i, r);
+Impl* impl_for(const Var& v) {
+  Lang* l = source_lang(v);
+  if (!l) empty_value();
+  return l->impl;
 }
+
+Var deep(const Var& v) {
+  if (v.kind() != Var::Script) return v;
+  Lang* l = source_lang(v);
+  return l ? l->to_var(v) : v;
+}
+
+std::string inspect_of(const Var& v) {
+  Lang* l = source_lang(v);
+  if (!l) return v.kind() == Var::Str ? v.s() : std::string(v.kind_name());
+  return l->inspect(v);
+}
+
+std::string type_name_of(const Var& v) {
+  if (v.kind() == Var::Obj) return v.ci()->name;
+  Lang* l = source_lang(v);
+  return l ? l->type_name(v) : std::string(v.kind_name());
+}
+
+bool is_array_value(const Var& v) {
+  if (v.kind() != Var::Script) return false;
+  Lang* l = source_lang(v);
+  return l && l->is_array(v);
+}
+
+const char* Var::kind_name() const {
+  switch (k_) {
+    case Nil: return "nil";
+    case Bool: return "boolean";
+    case Int: return "integer";
+    case Float: return "float";
+    case Str: return "string";
+    case Arr: return "array";
+    case Obj: return "object";
+    case Script: return "script value";
+  }
+  return "?";
+}
+
+static std::string got_name(const Var& v) {
+  if (v.kind() == Var::Obj) return v.ci()->name;
+  if (v.kind() == Var::Script) return type_name_of(v);
+  return v.kind_name();
+}
+
+void conversion_error(const Var& v, const char* want) {
+  throw ConversionError(std::string("expected ") + want + ", got " + got_name(v));
+}
+void range_error(const char* what) { throw ConversionError(what); }
+void unregistered_class(const void* key) {
+  throw ConversionError("nfcpoly: a C++ object of a class that is not registered (" + class_name_hint(key) +
+                        ") crossed into the script without Context::def_class");
+}
+void empty_value() { throw Error("nfcpoly: the Value is empty or its context is gone"); }
 
 }  // namespace detail
 
-// ---- Value --------------------------------------------------------------------------------------------------------
-std::string Value::class_name() const {
-  if (!impl_) detail::empty_value();
-  return mrb_obj_classname(detail::state_of(impl_), v_);
-}
-
-std::string Value::inspect() const {
-  if (!impl_) detail::empty_value();
-  return detail::protected_string(impl_, v_, "inspect");
-}
-
 // ---- Context ------------------------------------------------------------------------------------------------------
-Context::Context() : p_(new detail::Impl) {
-  detail::Impl* i = p_.get();
-  i->mrb = mrb_open();
-  if (!i->mrb) throw Error("nfcpoly: mrb_open failed (out of memory)");
-  mrb_state* mrb = i->mrb;
-  mrb->ud = i;
-  i->cxt = mrb_ccontext_new(mrb);
-  i->cxt->capture_errors = TRUE;
-  mrb_ccontext_filename(mrb, i->cxt, "snippet");
-  i->roots = mrb_ary_new(mrb);
-  mrb_gc_register(mrb, i->roots);
-  mrb_ary_set(mrb, i->roots, 0, mrb_nil_value());
-  RClass* mod = mrb_define_module(mrb, "NfcPoly");
-  i->host_error = mrb_define_class_under(mrb, mod, "HostError", mrb_exc_get(mrb, "RuntimeError"));
-}
-
+Context::Context() : p_(new detail::Impl) {}
 Context::~Context() {}
 
-mrb_state* Context::mrb() const { return p_->mrb; }
-
-std::vector<std::string> Context::languages() { return std::vector<std::string>{"ruby"}; }
-
-namespace {
-struct EvalJob {
-  detail::Impl* impl;
-  std::string_view code;
-};
-mrb_value eval_body(mrb_state* mrb, void* p) {
-  EvalJob* j = static_cast<EvalJob*>(p);
-  j->impl->cxt->lineno = 1;
-  mrb_value v = mrb_load_nstring_cxt(mrb, j->code.empty() ? "" : j->code.data(), j->code.size(), j->impl->cxt);
-  if (mrb->exc) mrb_exc_raise(mrb, mrb_obj_value(mrb->exc));  // report through mrb_protect_error
-  return v;
-}
-}  // namespace
-
-Value Context::eval_value(std::string_view language, std::string_view code) {
-  if (language != "ruby" && language != "mruby")
-    throw UnsupportedLanguage("nfcpoly: unsupported language '" + std::string(language) + "' (available: ruby)");
-  detail::Impl* i = p_.get();
-  detail::ArenaGuard guard(i->mrb);
-  EvalJob job = {i, code};
-  mrb_bool err = FALSE;
-  mrb_value r = mrb_protect_error(i->mrb, eval_body, &job, &err);
-  if (err) detail::throw_for_exception(i, r);
-  return detail::make_value(i, r);
+std::vector<std::string> Context::languages() {
+  std::vector<std::string> names;
+  for (auto& r : detail::registry()) names.push_back(r.name);
+  std::sort(names.begin(), names.end());
+  return names;
 }
 
 }  // namespace nfcpoly

@@ -10,7 +10,7 @@ for be in $backends; do
     echo "FAIL $be poly (mruby build)"; tail -20 <<<"$out"; fail=1; continue
   fi
   if ! out=$(NFCXX_BACKEND=$be ./nfcxx -I lib/poly -I build/poly/$be/include tests/poly/host.cpp lib/poly/nfcpoly.cpp \
-               build/poly/$be/lib/libmruby.a -o "$tmp/host-$be" 2>&1); then
+               lib/poly/nfcpoly_mruby.cpp build/poly/$be/lib/libmruby.a -o "$tmp/host-$be" 2>&1); then
     echo "FAIL $be poly (host build)"; grep -v 'prelinker' <<<"$out" | head -30; fail=1; continue
   fi
   if out=$("$tmp/host-$be" 2>&1); then
