@@ -181,9 +181,24 @@ end
 # The template header of the first __global__ template named `name` in the source: its parameter names, and its
 # parameter list text.
 def kernel_template(name)
-  top_pieces($expanded).each do |st, en, kind, body|
+  # the host pass searches the host-resolved unit (its pieces are balanced); the device pass has resolved already
+  src = $kernel_text || $expanded
+  # memoized per unit: many launches name the same kernel
+  $kernel_memo = {} unless $kernel_memo_for.equal?(src)
+  $kernel_memo_for = src
+  return $kernel_memo[name] if $kernel_memo.key?(name)
+  $kernel_memo[name] = kernel_template_uncached(name, src)
+end
+
+def kernel_template_uncached(name, src)
+  $kernel_pieces = nil unless $kernel_pieces_for.equal?(src)
+  unless $kernel_pieces
+    $kernel_pieces = top_pieces(src)
+    $kernel_pieces_for = src
+  end
+  $kernel_pieces.each do |st, en, kind, body|
     next unless kind == :code && body
-    t = $expanded[st...en]
+    t = src[st...en]
     toks = tokens_of(t)
     next unless toks.first == "template" && toks.include?("__global__")
     q = remove_words(t, DEVICE_QUALIFIERS)
@@ -258,26 +273,12 @@ end
 # arguments of a launch name one of its parameters, that parameter's name; else nil. A launch like that needs an
 # instance that only the instantiation fixes, and the wrapper is a concrete function (see template_site).
 def dependent_on_template(text, i, targs)
-  j = i - 1
-  while j >= 0
-    if word_at?(text, j, "template")
-      k = j + 8
-      k += 1 while k < text.length && white?(text[k])
-      if text[k] == "<"
-        close = matching_angle(text, k)
-        if close && close < i
-          params = split_top(text[(k + 1)...close])
-          names = params.map { |pr| pr.split("=")[0] }.map { |pr| tokens_of(pr).last }.compact
-          used = tokens_of(targs)
-          hit = names.find { |nm| used.include?(nm) }
-          return hit unless hit.nil?
-          return nil
-        end
-      end
-    end
-    j -= 1
-  end
-  nil
+  cand = template_bodies(text).select { |tb| tb[:open] < i && i < tb[:close] }
+  return nil if cand.empty?
+  t = cand.max_by { |x| x[:open] }[:tmpl]
+  names = split_top(text[(t[:lt] + 1)...t[:close]]).map { |pr| tokens_of(pr.split("=")[0]).last }.compact
+  used = tokens_of(targs)
+  names.find { |nm| used.include?(nm) }
 end
 
 # Index of the `>` closing the `<` at s[open] (nesting counted), or nil.
@@ -310,7 +311,10 @@ def template_launches(text)
       next
     end
     if text[i, 3] == "<<<" && text_before(text, i) == ">"
-      j = i - 1
+      # the `>` closing the template arguments: the nearest one before `<<<` (a line break may come between)
+      gt = i - 1
+      gt -= 1 while gt >= 0 && white?(text[gt])
+      j = gt
       depth = 0
       while j >= 0
         depth += 1 if text[j] == ">"
@@ -323,11 +327,232 @@ def template_launches(text)
       e2 = k + 1
       k -= 1 while k >= 0 && ident_char?(text[k])
       name = text[(k + 1)...e2]
-      found << [name, text[(j + 1)...(i - 1)].strip, i] unless name.empty?
+      found << [name, text[(j + 1)...gt].strip, i] unless name.empty?
     end
     i += 1
   end
   found
+end
+
+# Index of the `}` closing the `{` at s[open], skipping literals; nil if unbalanced.
+def matching_brace(s, open)
+  depth = 0
+  i = open
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    depth += 1 if s[i] == "{"
+    if s[i] == "}"
+      depth -= 1
+      return i if depth == 0
+    end
+    i += 1
+  end
+  nil
+end
+
+# The bodies of the function templates of the text, in one pass: each `{` whose header (the text since the last `;`
+# or brace of its level) starts with `template <...>`, with the body's open and close braces, the header's
+# `template` position and its angle brackets. Braces of the text are balanced once the conditionals are resolved.
+def template_bodies(text)
+  return $template_bodies if $template_bodies_for.equal?(text)
+  out = []
+  stack = [{ hs: 0 }]
+  i = 0
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      i = e
+      next
+    end
+    c = text[i]
+    if c == "{"
+      # the header's last `template <`: a comment, a preprocessor line or a declaration may come before it
+      tmpl = nil
+      k = stack.last[:hs]
+      while k < i
+        e2 = skip_literal(text, k)
+        if e2
+          k = e2
+          next
+        end
+        if word_at?(text, k, "template")
+          lt = index_code(text, "<", k + 8)
+          if lt && lt < i && text[k + 8...lt].strip.empty?
+            close = matching_angle(text, lt)
+            tmpl = { st: k, lt: lt, close: close } if close && close < i
+          end
+        end
+        k += 1
+      end
+      stack << { hs: i + 1, open: i, tmpl: tmpl }
+    elsif c == "}"
+      frame = stack.size > 1 ? stack.pop : stack.last
+      out << { open: frame[:open], close: i, tmpl: frame[:tmpl] } if frame[:tmpl]
+      stack.last[:hs] = i + 1
+    elsif c == ";"
+      stack.last[:hs] = i + 1
+    end
+    i += 1
+  end
+  $template_bodies_for = text
+  $template_bodies = out
+  out
+end
+
+# The function template that holds position pos: the innermost template body containing pos, as its parameter
+# names, declaration texts, the header's position and the function's name. nil when no template encloses pos.
+def enclosing_template(text, pos)
+  cand = template_bodies(text).select { |tb| tb[:open] < pos && pos < tb[:close] }
+  return nil if cand.empty?
+  tb = cand.max_by { |x| x[:open] }
+  t = tb[:tmpl]
+  params = split_top(text[(t[:lt] + 1)...t[:close]])
+  refuse("template header with a parameter pack (at line #{text[0...pos].count("\n") + 1})") if params.any? { |pr| pr.include?("...") }
+  decls = params.map { |pr| pr.split("=")[0].strip }
+  names = decls.map { |pr| tokens_of(pr).last }
+  { st: t[:st], names: names, decls: decls, fname: function_name(text[(t[:close] + 1)...tb[:open]]) }
+end
+
+# The explicit template-argument lists of the calls of template function `name` in the text: [targs, position].
+# The text is indexed once (every `name<...>(` in it), so the lookups of many launches do not rescan it.
+def call_sites(text, name)
+  unless $call_index_for.equal?(text)
+    index = Hash.new { |h, k| h[k] = [] }
+    i = 0
+    while i < text.length
+      e = skip_literal(text, i)
+      if e
+        i = e
+        next
+      end
+      if ident_char?(text[i]) && !(i > 0 && ident_char?(text[i - 1])) && !(text[i] >= "0" && text[i] <= "9")
+        j = i
+        j += 1 while j < text.length && ident_char?(text[j])
+        id = text[i...j]
+        k = j
+        k += 1 while k < text.length && white?(text[k])
+        if text[k] == "<"
+          close = matching_angle(text, k)
+          if close
+            m = close + 1
+            m += 1 while m < text.length && white?(text[m])
+            index[id] << [text[(k + 1)...close].strip, i] if text[m] == "("
+          end
+        end
+        i = j
+        next
+      end
+      i += 1
+    end
+    $call_index_for = text
+    $call_index = index
+  end
+  $call_index.key?(name) ? $call_index[name] : []
+end
+
+# The concrete argument lists that instantiate template function `name`: each explicit call of it, with the
+# arguments that name an enclosing template's parameters replaced by that template's own instances (transitively).
+# A call through a cycle of templates is refused with the chain.
+def template_instances(name, text, stack)
+  refuse("dependent launch: #{(stack + [name]).join(' -> ')} instantiates itself through its template arguments") if stack.include?(name)
+  out = []
+  call_sites(text, name).each do |targs, pos|
+    args = split_top(targs)
+    outer = enclosing_template(text, pos)
+    if outer && args.any? { |a| tokens_of(a).any? { |tk| outer[:names].include?(tk) } }
+      template_instances(outer[:fname], text, stack + [name]).each do |inst|
+        out << args.map { |a| substitute(a, outer[:names], inst) }
+      end
+    else
+      out << args
+    end
+  end
+  out.uniq
+end
+
+# Line (1-based) and column (0-based) of position pos in s. The newline positions of s are indexed once.
+def line_col(s, pos)
+  unless $newlines_for.equal?(s)
+    nl = []
+    i = 0
+    while (k = s.index("\n", i))
+      nl << k
+      i = k + 1
+    end
+    $newlines = nl
+    $newlines_for = s
+  end
+  lo = 0
+  hi = $newlines.length
+  while lo < hi
+    mid = (lo + hi) / 2
+    if $newlines[mid] < pos
+      lo = mid + 1
+    else
+      hi = mid
+    end
+  end
+  line_start = lo == 0 ? 0 : $newlines[lo - 1] + 1
+  [lo + 1, pos - line_start]
+end
+
+def line_start(s, line)
+  i = 0
+  (line - 1).times { i = s.index("\n", i) + 1 }
+  i
+end
+
+# The launches whose template arguments depend on an enclosing template parameter, keyed by [line, column] of their
+# `<<<` (in the text they are given; the rewrite maps them, see rewrite). The text is the host-resolved unit, where the
+# conditionals of the host pass are resolved and each function is one top-level piece.
+# `<<<`: the enclosing template, its concrete instances, and the dispatch struct that carries each instance's wrapper
+# address (see dependent_decls). The instances come from the explicit calls of the enclosing template in the unit.
+def dependent_launches(text)
+  out = {}
+  template_launches(text).each_with_index do |(nm, ta, pos), idx|
+    next if ta.empty?
+    dep = dependent_on_template(text, pos, ta)
+    next if dep.nil?
+    outer = enclosing_template(text, pos)
+    refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep}, which is not a parameter of a top-level " \
+           "template function (at line #{text[0...pos].count("\n") + 1})") if outer.nil?
+    insts = template_instances(outer[:fname], text, [])
+    refuse("template launch of #{nm}<#{ta}> depends on the template parameter #{dep} of #{outer[:fname]}: the unit has no " \
+           "explicit call of it with all its template arguments, so its instances are not known") if insts.empty?
+    insts.each do |inst|
+      refuse("template launch of #{nm}<#{ta}>: a call of #{outer[:fname]} does not give all its template arguments " \
+             "explicitly") if inst.length != outer[:names].length
+    end
+    outer[:line] = line_col(text, outer[:st])[0]
+    out[line_col(text, pos)] = { name: nm, targs: ta, outer: outer, insts: insts, dname: "__nfcxx_disp_#{sanitize(nm)}_#{idx}" }
+  end
+  out
+end
+
+# The declarations of the dependent launches' dispatch, at the top-level piece of their enclosing template: each
+# instance's wrapper (see template_site), the primary dispatch template, and one specialization per instance.
+def dependent_decls(dl, orig)
+  lines = []
+  dl.each_value do |d|
+    d[:insts].each do |inst|
+      concrete = split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", ")
+      d[:wrapper] ||= {}
+      d[:wrapper][inst] = template_site(d[:name], concrete)
+    end
+  end
+  dl.each_value do |d|
+    at = line_start(orig, d[:outer][:line])
+    d[:wrapper].values.uniq.each { |w| lines << [at, "static void #{w}(#{$sites[w][:decl]});\n"] }
+    lines << [at, "template <#{d[:outer][:decls].join(', ')}> struct #{d[:dname]};\n"]
+    d[:insts].each do |inst|
+      lines << [at, "template <> struct #{d[:dname]}<#{inst.join(', ')}> { static constexpr auto fn = &#{d[:wrapper][inst]}; };\n"]
+    end
+  end
+  lines
 end
 
 def rewrite(text, orig)
@@ -338,15 +563,24 @@ def rewrite(text, orig)
   # each launch: EDG rejects a linkage specification in block scope. Keyed by the piece's start index.
   pieces = top_pieces(text)
   decls_at = Hash.new { |h, k| h[k] = [] }
+  # The dependent launches are found in the host-resolved unit: its top-level pieces are balanced (the untaken branches
+  # of the conditionals are blank lines, the lines of the taken ones are unchanged).
+  $cond_strict = true
+  resolved = resolve_conditionals(text, {})
+  $cond_strict = false
+  $kernel_text = resolved
+  dl = dependent_launches(resolved)
   template_launches(text).each do |nm, ta, pos|
     next unless dependent_on_template(text, pos, ta).nil?
     w = template_site(nm, ta)
     piece = pieces.find { |st, en, _kind, _body| st <= pos && pos < en }
-    decls_at[piece ? piece[0] : 0] << w unless decls_at[piece ? piece[0] : 0].include?(w)
+    line = "static void #{w}(#{$sites[w][:decl]});\n"
+    decls_at[piece ? piece[0] : 0] << line unless decls_at[piece ? piece[0] : 0].include?(line)
   end
+  dependent_decls(dl, text).each { |at, line| decls_at[at] << line unless decls_at[at].include?(line) }
   while i < n
     if decls_at.key?(i)
-      decls_at.delete(i).each { |w| out << "static void #{w}(#{$sites[w][:decl]});\n" }
+      decls_at.delete(i).each { |line| out << line }
     end
     e = skip_literal(text, i)
     if e
@@ -355,11 +589,12 @@ def rewrite(text, orig)
       next
     end
     if text[i, 3] == "<<<" && !(i + 3 < n && text[i + 3] == "<")
-      line = text[0...i].count("\n") + 1
+      line = line_col(text, i)[0]
       # The kernel name is the identifier before `<<<`, or before its template argument list.
       j = i - 1
       j -= 1 while j >= 0 && white?(text[j])
       targs = nil
+      gt_at = j
       if text[j] == ">"
         depth = 0
         while j >= 0
@@ -368,7 +603,7 @@ def rewrite(text, orig)
           break if depth == 0
           j -= 1
         end
-        targs = text[(j + 1)...(i - 1)].strip
+        targs = text[(j + 1)...gt_at].strip
         j -= 1
         j -= 1 while j >= 0 && white?(text[j])
       end
@@ -418,10 +653,14 @@ def rewrite(text, orig)
       lines = text[i..close_args].count("\n")
       kernel = name
       if targs
-        dep = dependent_on_template(text, i, targs)
-        refuse("template launch of #{name}<#{targs}> depends on the template parameter #{dep} of the enclosing template: " \
-               "the device image would need that instance, which is not built yet (at line #{line})") unless dep.nil?
-        kernel = template_site(name, targs)
+        d = dl[line_col(text, i)]
+        if d
+          kernel = "#{d[:dname]}<#{d[:outer][:names].join(', ')}>::fn"
+        else
+          refuse("template launch of #{name}<#{targs}> depends on a template parameter, and its enclosing template is not " \
+                 "resolved in this unit (at line #{line})") unless dependent_on_template(text, i, targs).nil?
+          kernel = template_site(name, targs)
+        end
       end
       out << "__nfcxx_cuda_launch(#{kernel}, #{cfg[0]}, #{cfg[1]}, #{cfg[2]}, #{cfg[3]}"
       out << ", #{args}" unless args.empty?
@@ -1000,6 +1239,9 @@ def cond_unary(st, defs, line, depth)
       return 0
     end
     val = defs[t[1]]
+    # The host analysis (see rewrite) keeps both branches of a condition on a name the unit does not define: the name
+    # may come from a system header (CUDART_VERSION), so its value is not known here.
+    cond_fail("#if names #{t[1]}, which the unit does not define (line #{line})") if val.nil? && $cond_strict
     return 0 if val.nil? || val == :function
     return cond_eval(val, defs, line, depth + 1)
   end
@@ -1019,7 +1261,8 @@ def resolve_conditionals(text, defs)
     lineno += 1
     line = raw
     if pending
-      line = pending + "\n" + raw
+      # the joined line is one output line: a newline here would shift every later line (launches are keyed by line)
+      line = pending + " " + raw
       pending = nil
     end
     if line.end_with?("\\")
@@ -1152,6 +1395,12 @@ def device_tu(text)
   # fixed only by the instantiation, and the host pass refuses it (see rewrite). Registering it here would give a
   # wrapper that still names the parameter.
   template_launches(text).each { |nm, ta, pos| template_site(nm, ta) if dependent_on_template(text, pos, ta).nil? }
+  # the dependent launches: the wrapper of each instance of their enclosing template (see dependent_launches)
+  dependent_launches(text).each_value do |d|
+    d[:insts].each do |inst|
+      template_site(d[:name], split_top(d[:targs]).map { |a| substitute(a, d[:outer][:names], inst) }.join(", "))
+    end
+  end
   pieces.each do |pc|
     next if pc[:kind] == :pp
     if pc[:device]
