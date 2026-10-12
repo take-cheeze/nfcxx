@@ -73,6 +73,7 @@ jobs:
             run: |
               tests/poly/run.sh
               tests/ast/run.sh
+              tests/uop/run.sh
               tests/mruby/run.sh
           - name: GPU kernel on the PTX interpreter
             run: tests/gpu/run_interp.sh
