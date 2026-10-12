@@ -1,0 +1,11 @@
+--- a/src/error.c
++++ b/src/error.c
+@@ -733,7 +733,7 @@
+ {
+   struct mrb_jmpbuf *prev_jmp = mrb->jmp;
+   struct mrb_jmpbuf c_jmp;
+-  volatile int err = 1;
++  int err = 1;
+
+   MRB_TRY(&c_jmp) {
+     mrb->jmp = &c_jmp;

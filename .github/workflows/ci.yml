@@ -20,7 +20,7 @@ jobs:
           submodules: true
 
       - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 ruby rake clang
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 python3-dev ruby rake clang
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -61,6 +61,12 @@ jobs:
       - name: nfcc drop-in cc mode (both backends)
         run: tests/c/cc-mode.sh
 
+      - name: Determinism (same objects on every run)
+        run: tests/determinism/run.sh
+
+      - name: Float-to-integer (runtime helpers and folded constants)
+        run: tests/float-to-int/run.sh
+
       - name: nfcxx accepts the compiler-driver options of CMake and mruby (gcc backend)
         run: tests/cxx-driver/run.sh
 
@@ -72,6 +78,12 @@ jobs:
 
       - name: nfceval run-time eval library and nfcxx -shared (both backends)
         run: tests/eval/run.sh
+
+      - name: nfcpoly embedded Ruby, Lua, Python and ast, scripts calling C++ and back, C++ exceptions through mruby, Lua and ast (both backends)
+        run: tests/poly/run.sh
+
+      - name: nfcast self-specializing AST interpreter, output equal to Lua 5.4, collector stress (both backends)
+        run: tests/ast/run.sh
 
       - name: mruby scripts (byte-identical to the Python originals)
         run: tests/mruby/run.sh

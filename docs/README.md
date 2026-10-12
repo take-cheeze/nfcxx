@@ -19,6 +19,8 @@ covers say so.
 | [hexagon.md](notes/hexagon.md) | Generated C through clang for Hexagon, run on qemu-hexagon; what blocks a real Hexagon target. |
 | [llamacpp.md](notes/llamacpp.md) | llama.cpp's host-side ggml through the gcc backend: what compiles, the driver fixes, and the blockers (EDG AVX10.2 builtins, a cross-TU template instance). `tests/llamacpp/run.sh`. |
 | [mruby-scripting.md](notes/mruby-scripting.md) | The build's helper scripts run on a self-built mruby instead of Python; how each port is verified byte for byte. |
+| [ast.md](notes/ast.md) | `nfcast` (`lib/ast`): a self-specializing AST interpreter for a Lua 5.4 subset, the first step of a Truffle-style plan (tiering and inlining are not done): nodes that rewrite themselves, its own collector, differential tests against a real Lua. `tests/ast/run.sh`. |
+| [poly.md](notes/poly.md) | `nfcpoly` (`lib/poly`): evaluating Ruby (mruby), Lua, Python and `ast` (the nfcast engine) from C++ with bound host objects, GraalVM-polyglot style; mruby and Lua are built with C++ exceptions on EDG's runtime; the exception model and its test. |
 | [pathb-longdouble.md](notes/pathb-longdouble.md) | Path B `long double`: 16-byte objects, helper calls compiled by gcc, x87 thunks for the C calling convention; tests and named limits. |
 | [pathb-stage1.md](notes/pathb-stage1.md) | Path B harness: a `cpfe` with our own back end that dumps EDG's lowered IL (historical; harness still used). |
 | [pathb-stage2.md](notes/pathb-stage2.md) | The mid-level IR: structured control flow, typed three-address form, explicit checks; spec and coverage. |
@@ -43,6 +45,8 @@ covers say so.
 | Hexagon | Generated C for the `linux_riscv32` stand-in target compiles with clang-19 `--target=hexagon` and runs under qemu-hexagon, HVX kernels included; struct layout equals clang's Hexagon ABI (`tests/hexagon/run.sh`, `tests/hexagon/layout.sh`). Not the Hexagon SDK, QuRT or `hexagon-sim` (unavailable, `docs/notes/hexagon.md` section 4). | hexagon.yml |
 | `nfcc` (drop-in `cc`, C only) | `-c`, link, `-S`, `-E`/`-M*` answered by the host compiler, `-D -U -I`, dependency files, response files, `-shared`, rejected options, on both backends (`tests/c/cc-mode.sh`); Lua through its own makefile (`tests/realworld/run_lua_make.sh`); mruby's rake build (`tests/realworld/run_mruby.sh`) | ci.yml, realworld.yml |
 | `nfceval` (`lib/eval`) and `nfcxx -shared` | Evaluate snippets with bound objects/functions/methods, errors as exceptions, cache, shared objects, on both backends (`tests/eval/run.sh`) | ci.yml |
+| `nfcpoly` (`lib/poly`, `scripts/setup-poly.sh`, `scripts/setup-poly-lua.sh`) | Evaluate Ruby, Lua, Python and `ast` (Lua syntax on the nfcast engine) from C++, alone or together in one `Context`, with bound functions, objects of registered classes and variables; values both ways; script errors as `ScriptError`, host exceptions caught by scripts and rethrown unchanged when unrescued; destructors of C++ frames run when a script raise crosses them (mruby and Lua built with C++ exceptions, the nfcast engine is C++; `docs/notes/poly.md`); GC release of script-owned objects. 559 checks on both backends (`tests/poly/run.sh`), also under valgrind by hand | ci.yml |
+| `nfcast` (`lib/ast`) | A Lua 5.4 subset on a self-specializing AST interpreter: nine programs whose output equals a real Lua 5.4.9's, normally and with the collector at every safe point; 71 checks of the specialization counters, collector, host objects and errors (`tests/ast/run.sh`, both backends); random-program fuzzing against the reference by hand (`tests/ast/fuzz.sh`). No coroutines, `goto`, `<close>`, `utf8`, `io`/`os`; no tiering or inlining yet (`docs/notes/ast.md`) | ci.yml |
 | Tracing (`--trace=FILE`, `NFCXX_TRACE`) | Valid trace-event JSON with the driver and backend spans, both backends, exit code unchanged (`tests/trace/run.sh`, needs python3) | ci.yml |
 | mruby scripting (`scripts/mrb`, `*.rb`) | Every ported script gives output byte-identical to its Python original (`tests/mruby/run.sh`; Path B and Hexagon parts need the harness and a clang with the Hexagon target, else they skip) | ci.yml (Path A parts), pathb.yml (with the harness) |
 
@@ -139,6 +143,21 @@ spans that exist).
 **`nfceval`** (`eval.md`, "Limitations"; `tests/eval/run.sh` covers the supported forms, not the limits): no sandbox
 and no run-time timeout; one eval at a time per engine, not thread safe; no overloaded bindings, no generic lambdas or
 C varargs as bound functions; host and snippet must use the same backend.
+
+**`nfcpoly`** (`poly.md`, "Limitations"; `tests/poly/run.sh` covers the supported forms, not the limits): no sandbox and no
+time limit; not thread safe; constness and inheritance of bound classes are not tracked; a libmruby built without
+`enable_cxx_exception` links but loses the destructor guarantee (measured, not part of the suite); the mruby build
+needs `scripts/mruby-cxx-novolatile.patch` because cproc cannot store to a `volatile` (see **`volatile`** above) and
+`MRB_USE_VM_SWITCH_DISPATCH` because EDG rejects mruby's computed-goto table when `vm.c` is compiled as C++; Path B
+untested; no compile-time embedding. Lua needs `scripts/lua-cxx-novolatile.patch` for the same `volatile` reason and
+opens only the base (without `dofile`/`loadfile`), coroutine, table, string, math and utf8 libraries. Python is the system
+CPython (`python3-config`, tested with 3.12 only; the suite skips it when the headers are missing), one interpreter per process that is
+never finalized, and a write through `global` in a function shadows a bound variable.
+
+**`nfcast`** (`ast.md`, "The language"; `tests/ast/run.sh` covers the supported forms): no sandbox and no time limit; the evaluator recurses on the C++ stack
+(1500 nested script calls, `State::max_depth`; tail calls are not eliminated); no coroutines, `goto`, `<close>`, `__gc`, weak tables,
+`utf8`, `string.pack`, `io`, `os`; speed is 0.8x to 2.4x of PUC Lua's time (one measurement with the host compiler, `ast.md`), and
+there is no compilation of hot code or inlining yet.
 
 **Hexagon**: no Hexagon SDK, `hexagon-sim` or QuRT; EDG has no Hexagon target, so a 32-bit little-endian stand-in
 (`linux_riscv32`) is used; cases that include hosted C++ headers, need GP-relative relocations or template instantiation
