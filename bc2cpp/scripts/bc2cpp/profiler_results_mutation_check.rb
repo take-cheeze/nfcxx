@@ -14,7 +14,7 @@ MUTANTS = [
   ['native source audit ignored', 'NativeClassResults.source_matches?(paths.first, ProfilerResults::PATH, ProfilerResults::SHA)', 'true', 'native', /changed native source withdraws/],
   ['constant bindings ignored', "@closed_world.native_class_constant_stable?('RGSS::Profiler', bindings: 2)", 'true', 'constant rebind', /direct result/],
   ['kill switch ignored', "return nil if ENV['BC2CPP_PROFILER_RESULTS'] == '0'", 'return nil if false', 'kill switch', /direct result/],
-  ['Ruby lookup ignored', "(@registry[name] || []).all? { |definition| definition.owner == '<native>' && definition.irep.nil? }", 'true', 'Ruby override', /direct result/],
+  ['Ruby lookup ignored', 'definitions.none? { |definition| profiler_owner?(definition.owner) }', 'true', 'Ruby override', /direct result/],
   ['lexical resolution ignored', "return nil unless resolve_class_constant_name('RGSS', numeric_owner_of(irep)&.owner) == 'RGSS'", 'return nil if false', 'lexical shadow', /direct result/],
   ['native source closure ignored', "(@closed_world.native_paths_spelling(name) + Array(@native_name_sources&.fetch(name, nil))).uniq", '@closed_world.native_paths_spelling(name)', 'native replacement', /direct result/],
   ['block exits ignored', 'return nil unless core_ruby_result_exits_safe?(body)', 'return nil if false', 'native', /breaking stays unproved/],
