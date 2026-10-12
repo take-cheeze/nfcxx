@@ -78,5 +78,11 @@ printf 'extern "C" int cget(int *, int);\n#include <cstdlib>\nint main(int argc,
 "$nfcxx" --backend=$B -fsanitize=address "$tmp/m.cpp" "$tmp/c.c" -o "$tmp/cm" 2>"$tmp/err" && ! "$tmp/cm" >/dev/null 2>"$tmp/rep" && grep -q "heap-buffer-overflow" "$tmp/rep" \
   && ok "C input instrumented" || bad "C input instrumented" "$(head -3 "$tmp/err" "$tmp/rep" 2>/dev/null | tr '\n' ' ')"
 
+# C++ VLAs: EDG's live-allocation counter (tests/pathb-qbe/cases/vla_scope.cpp, exit code = wrong results) must hold with
+# the runtime of lib/asan/nfcxx_vla_asan.c, which replaces EDG's allocator under this flag.
+if "$nfcxx" --backend=$B -fsanitize=address tests/pathb-qbe/cases/vla_scope.cpp -o "$tmp/vs" 2>"$tmp/err" \
+   && "$tmp/vs" >/dev/null 2>"$tmp/rep" && ! grep -q Sanitizer "$tmp/rep"; then ok "C++ VLA counts (vla_scope.cpp)"
+else bad "C++ VLA counts (vla_scope.cpp)" "$(head -3 "$tmp/err" "$tmp/rep" 2>/dev/null | tr '\n' ' ')"; fi
+
 echo "asan: $pass passed, $fail failed, $skip skipped"
 [ $fail = 0 ]
