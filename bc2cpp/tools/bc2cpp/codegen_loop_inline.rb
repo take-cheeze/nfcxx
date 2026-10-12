@@ -154,7 +154,7 @@ class CodeGen
     block_irep = region[:block_irep]
     offset = irep.nregs
     break_dest = break_label ? region[:dest_reg] : nil
-    label_prefix = "LBLK#{region[:block_addr]}_"
+    label_prefix = "LBLK#{region[:block_addr]}#{region[:label_tag]}_"
     compile_insn = lambda do |insn, i|
       if result_var
         compile_collect_body_insn(insn, block_irep, d, offset, iter_label, label_prefix,
@@ -174,7 +174,7 @@ class CodeGen
     @inline_loop_parent = { block_irep: block_irep, irep: irep, idx: irep.index_of_addr(region[:sendb_addr]) }
     @blk_param_name = 'bc2cpp_blk' if forwarded_blk
     @blk_param_level = 1 if forwarded_blk
-    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, region[:block_addr])
+    @inline_nested = inline_nested_block_pass(block_irep, irep, d, offset, "#{region[:block_addr]}#{region[:label_tag]}")
     body_targets = @inline_nested.targets(BytecodeIR.for(block_irep).branch_target_addrs)
     body = String.new
     compile_all = lambda do
@@ -550,7 +550,8 @@ class CodeGen
     out << inline_receiver_guard('mrb_array_p', recv_expr, "Array receiver for inlined ##{meth}")
     out << "    mrb_value bc2cpp_collect_acc_#{addr} = mrb_ary_new(M);\n" if %w[map select reject flat_map filter_map].include?(meth)
     out << "    mrb_value bc2cpp_collect_found_#{addr} = mrb_nil_value();\n" if meth == 'find'
-    out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index'
+    # each_with_index has no final assignment to skip, but a `break` in its block still sets the flag.
+    out << "    mrb_bool bc2cpp_collect_broke_#{addr} = FALSE;\n" if meth != 'each_with_index' || body.include?("bc2cpp_collect_broke_#{addr}")
     out << "    for (mrb_int bc2cpp_collect_i_#{addr} = 0; " \
            "bc2cpp_collect_i_#{addr} < RARRAY_LEN(#{recv_expr}); " \
            "++bc2cpp_collect_i_#{addr}) {\n"

@@ -56,7 +56,13 @@ class CodeGen
   # INLINE_LOOP_PASSES over one scope: a region not in `claimed` is emitted, its addresses join
   # `suppressed` and its code `glue_at`. `try_range` (emit_rescue_try_body, ADR 0376) filters the
   # whole-method regions to a protected range (rescue_try_inlinable?).
-  def run_inline_loop_passes(irep, d, mand, claimed, suppressed, glue_at, try_range: nil)
+  def run_inline_loop_passes(irep, d, mand, claimed, suppressed, glue_at, try_range: nil, guarded: nil)
+    return with_guarded_inline_sites { run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, guarded) } if guarded && !try_range
+
+    run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, nil, try_range: try_range)
+  end
+
+  def run_inline_loop_passes_in(irep, d, mand, claimed, suppressed, glue_at, guarded, try_range: nil)
     ctx_ivar = @class_layout[d.owner]
     ctx_args = @class_annotations[irep.label]&.args
     INLINE_LOOP_PASSES.each do |pass|
@@ -69,11 +75,28 @@ class CodeGen
         next if try_range && !rescue_try_inlinable?(region, anchor, try_range)
 
         pre_start = @inline_nested_pre.length
+        # GUARDED_BLOCK_INLINE: a second loop over the same block (another receiver class) keeps its own labels.
+        guarded_klass = guarded && GUARDED_INLINE_PASS_CLASS[pass.recognize]
+        guarded_klass = nil unless @guarded_inline_sites&.[]([region[:sendb_addr], guarded_klass])
+        region[:label_tag] = guarded_klass ? "_#{guarded_klass[0]}" : nil
+        # No element-class hint: it describes the elements of a receiver the flow proved, and this one is not.
+        region[:elem_class] = nil if guarded_klass
         inlined = send(pass.emit, region, irep, d)
-        next unless inlined
+        unless inlined
+          guarded_inline_why(irep, irep.instructions[irep.index_of_addr(region[:sendb_addr])], guarded_klass, 'the block body is not clean') if guarded_klass
+          next
+        end
 
         if try_range && !rescue_try_glue_safe?(inlined, try_range)
           @inline_nested_pre.slice!(pre_start..) # the refused body's nested cfuncs are not used either
+          next
+        end
+
+        # GUARDED_BLOCK_INLINE (ADR 0420): the send stays; the loop runs ahead of it behind a class test, once the
+        # send's arms are known (guarded_inline_finish).
+        if guarded_klass
+          guarded[:pending] << { region: region, inlined: inlined, klass: guarded_klass, anchor: anchor,
+                                 pre: @inline_nested_pre[pre_start..].dup }
           next
         end
 
@@ -353,7 +376,9 @@ class CodeGen
     # RESCUE_INLINE_BLOCK_FIX: a loop emitted here for an address the rescue loop claimed would run
     # after the rescue glue, on the exception-only path, with the exception as its receiver
     # (scripts/bc2cpp/rescue_inline_block_check.rb). The range's own loops are inlined in the try body.
-    run_inline_loop_passes(irep, d, mand, suppressed.dup, suppressed, glue_at)
+    guarded_inline = { at: {}, after: {}, pending: [] }
+    run_inline_loop_passes(irep, d, mand, suppressed.dup, suppressed, glue_at, guarded: (@resumable ? nil : guarded_inline))
+    proven_inlined = suppressed.dup
 
     # BLOCK_CFUNC_FALLBACK_SUPPORT: the catch-all, run last, for BLOCK/SENDB pairs
     # no named inliner claimed (checked via `suppressed`). A qualifying region
@@ -365,6 +390,8 @@ class CodeGen
     # emit_block_fallback_glue_pass).
     block_fallback_pre = emit_block_fallback_glue_pass(block_fallback_regions, recognize_explicit_block_arg_regions(irep),
                                                         d, suppressed, glue_at)
+    guarded_inline_finish(irep, guarded_inline)
+    guarded_inline_unclaimed(irep, block_fallback_regions, guarded_inline, proven_inlined)
 
     # LAMBDA_FALLBACK_SUPPORT: like BLOCK_CFUNC_FALLBACK_SUPPORT, but the RProc is
     # stored into the destination register with no dispatch
@@ -476,10 +503,12 @@ class CodeGen
     # RESUMABLE_ENTRY: the method's own instructions are the flat part of the step function.
     @resumable.flat = true if @resumable
     irep.instructions.each_with_index do |insn, idx|
+      out << guarded_inline[:after][insn.addr] if guarded_inline[:after].key?(insn.addr)
       out << prefix_at[insn.addr] if prefix_at.key?(insn.addr)
       next if suppressed.include?(insn.addr) && !glue_at.key?(insn.addr)
 
       out << "  L#{insn.addr}:;\n" if targets.include?(insn.addr)
+      out << guarded_inline[:at][insn.addr] if guarded_inline[:at].key?(insn.addr)
       out << (glue_at[insn.addr] || compile_insn(insn, irep, d, idx))
     end
     @resumable.flat = false if @resumable
