@@ -81,11 +81,24 @@ module NativeSingletonCall
           elsif candidate.irep.nil? then :no_irep
           elsif !pure_mandatory_or_optional_arity?(@ireps.fetch(candidate.irep)) then :arity_shape
           elsif hot_only_excluded?(candidate.irep) then :hot_only
-          elsif !constant_object_candidate_clean?(candidate.irep) then :candidate_not_compiled_clean
+          elsif !constant_object_candidate_clean?(candidate.irep) then constant_object_unclean_reason(candidate.irep)
           elsif @only_owners && !@only_owners.include?(candidate.owner) && !@other_owners&.include?(candidate.owner) then :owner_not_emitted
           else :other
           end
     warn "[CONSTANT_OBJECT] #{name}/#{n} #{constant_owner} at #{lexical_owner}: #{why}"
+  end
+
+  # BC2CPP_NSC_DEBUG only: which of compiles_clean?'s answers made the candidate unclean (the symbol keeps the
+  # :candidate_not_compiled_clean prefix the debug output has always had).
+  def constant_object_unclean_reason(label)
+    why = if self.class.core_guarded&.include?(label) then :core_guarded
+          elsif resumable_method?(label) then :resumable
+          elsif @probing.include?(label) then :cycle
+          elsif @constant_object_probe then :nested_probe
+          elsif @clean_cache[label] == false then :error_marker
+          else :not_cached
+          end
+    :"candidate_not_compiled_clean(#{why})"
   end
 
   private

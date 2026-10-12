@@ -817,6 +817,14 @@ class CodeGen
     excluded ? !excluded.empty? : false
   end
 
+  # SKIPPED_ENTRY_MACROS: one `#define BC2CPP_SKIPPED_<entry> 1` per entry SKIP_UNSUPPORTED dropped from this output.
+  def emit_skipped_entry_macros(entries)
+    return '' if entries.empty?
+
+    "// SKIPPED_ENTRY_MACROS: entries refused by this run (left on the interpreter).\n" +
+      entries.sort.map { |e| "#define BC2CPP_SKIPPED_#{e} 1\n" }.join + "\n"
+  end
+
   # HOT_ONLY: register.cxx still names uncompiled entries. Each becomes a constant
   # of an empty type whose registration overloads are no-ops, so the bytecode
   # `def` stays the method; exact-type overloading keeps real entries unaffected

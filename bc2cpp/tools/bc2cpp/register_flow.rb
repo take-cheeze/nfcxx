@@ -11,7 +11,9 @@ require 'set'
 # resolved, every `goto` in a text lands on a label that text defines or on an
 # address its instruction's normal IR successors reach through instructions that
 # emitted nothing, and every catch handler is a rescue region codegen emitted
-# (see handler_model_ok?). A handler's edges run from every instruction it
+# (see handler_model_ok?). The optional-argument switch is the one generated text
+# whose targets the IR does not give its instruction; add_dispatch_edges adds them,
+# for that exact text only. A handler's edges run from every instruction it
 # protects to its target, and a write is never killed on that edge: the raise
 # may come before the write completes. A register is pinned, never
 # dropped or substituted, when it is r0, is read or written through a nested
@@ -37,6 +39,23 @@ class RegisterFlow
 
   def self.windows?
     ENV['BC2CPP_REGISTER_FLOW_WINDOWS'] == '1'
+  end
+
+  # BC2CPP_REGISTER_FLOW_GOTO=0 turns off the dispatch-switch edges; such a method is refused again.
+  def self.goto_model?
+    ENV['BC2CPP_REGISTER_FLOW_GOTO'] != '0'
+  end
+
+  # The text of the optional-argument switch. codegen_method.rb's emit_optional_dispatch
+  # calls this too, so the text the pass matches is the text codegen emits.
+  def self.dispatch_text(targets)
+    out = String.new
+    out << "  switch (bc2cpp_given_opt) {\n"
+    targets.each_with_index do |addr, i|
+      out << (i == targets.size - 1 ? "    default: goto L#{addr};\n" : "    case #{i}: goto L#{addr};\n")
+    end
+    out << "  }\n"
+    out
   end
 
   # Kill switch for the handler model alone: 0 refuses every method with a catch handler.
@@ -184,6 +203,7 @@ class RegisterFlow
     count.times do |i|
       @normal_succ[i] << i + 1 if @transparent[i] && i + 1 < count && !@normal_succ[i].include?(i + 1)
     end
+    add_dispatch_edges if self.class.goto_model?
     @handler_succ = Array.new(count) { [] }
     if @program.handlers?
       count.times do |i|
@@ -194,6 +214,28 @@ class RegisterFlow
     @pred = Array.new(count) { [] }
     @succ.each_with_index { |targets, i| targets.each { |t| @pred[t] << i } }
     @pred[0] << BytecodeIR::ENTRY
+  end
+
+  # OPTIONAL_ARG_SUPPORT (irep_arity.rb): the first table JMP's text is the switch
+  # of RegisterFlow.dispatch_text over the table's targets, and every other table
+  # JMP emitted nothing. The switch can reach each default-value target, but the IR
+  # gives that JMP only its own target, so the targets become its normal successors here.
+  # Only that exact text counts; any other shape keeps the goto refusal.
+  def add_dispatch_edges
+    table = optional_arg_table(@irep)
+    table = optional_block_arg_table(@irep) || table unless table[1]
+    _opt, sources, targets = table
+    return unless sources
+
+    indexes = sources.map { |addr| @program.address_to_index[addr] }
+    target_indexes = targets.map { |addr| @program.address_to_index[addr] }
+    return if indexes.include?(nil) || target_indexes.include?(nil)
+
+    first = indexes.first
+    return unless @texts[first] == self.class.dispatch_text(targets)
+    return unless indexes.drop(1).all? { |i| @texts[i].empty? }
+
+    @normal_succ[first] = (@normal_succ[first] + target_indexes).uniq
   end
 
   # Goto targets are judged on normal flow: the glue's `goto` to a shared exit

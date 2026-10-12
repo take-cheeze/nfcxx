@@ -240,10 +240,20 @@ class CodeGen
   # nil (a safe miss) otherwise.
   def compile_keyword_direct_construct(irep:, idx:, owner_def:, self_implicit:,
                                        name:, d:, n:, recv:, argv:, kw_names:, kw_val_exprs:)
-    return nil unless name == 'new' && !self_implicit && irep && idx
+    return nil unless name == 'new' && irep && idx
 
-    known = trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
-                             canonical: false)
+    # KEYWORD_IMPLICIT_NEW (ADR 0422): a bare `new(a, k: v)` in a class method has the class object for its receiver,
+    # exactly as the positional path knows it (implicit_singleton_self_class). Unlike a `Const.new` site, a subclass
+    # reaches this one by inheriting the class method, and the guard-miss arm below cannot build its object (the
+    # keywords travel as a trailing positional Hash, which a keyword #initialize does not take from a funcall). So
+    # the class must have no descendants: the miss is then only a constant reassigned after the gem's init.
+    known = if self_implicit
+              implicit = implicit_singleton_self_class(owner_def)
+              implicit if implicit && @closed_world&.exact_class?(implicit)
+            else
+              trace_new_target(irep, idx, d, nil, 0, nil, resolving_new: true, owner: owner_def&.owner,
+                               canonical: false)
+            end
     return nil unless known && DIRECT_CONSTRUCT_TARGETS.include?(known)
 
     # 1/2: no custom `self.new`/`self.allocate` on this class ("X.singleton"), and
