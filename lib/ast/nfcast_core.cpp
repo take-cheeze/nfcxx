@@ -431,6 +431,7 @@ State::State() : impl(new Impl) {
   for (int i = 0; i < TM_N; ++i) impl->tmname[i] = nullptr;
   for (int i = 0; i < TM_N; ++i) impl->tmname[i] = str(tm_name(static_cast<TM>(i)));
   globals = new_table();
+  tier_init_from_env(*this);
 }
 
 static void free_object(State& S, GCObject* o);
@@ -443,6 +444,7 @@ State::~State() {
     o = nx;
   }
   all = nullptr;
+  tier_shutdown(*this);
   delete[] stack;
   delete impl;
 }

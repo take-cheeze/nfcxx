@@ -19,7 +19,7 @@ if [ -z "$lua" ]; then
 fi
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 NFCXX_BACKEND=${NFCXX_BACKEND:-gcc} ./nfcxx -O2 -I lib/ast tests/ast/driver.cpp lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp \
-  lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp -o "$tmp/driver" || exit 1
+  lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp -o "$tmp/driver" || exit 1
 bad=0
 for kind in expr pat inl; do
   envs=("")

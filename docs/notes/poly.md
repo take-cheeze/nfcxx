@@ -34,7 +34,7 @@ linked in), plus that language's library:
 | Lua (`"lua"`) | `nfcpoly_lua.cpp` | `build/poly-lua/<backend>/lib/liblua.a` | `scripts/setup-poly-lua.sh` |
 | Python (`"python"`, `"python3"`, `"py"`) | `nfcpoly_python.cpp` | the system libpython (`python3-config --ldflags --embed`) | `apt-get install python3-dev` |
 | JavaScript (`"js"`, `"javascript"`, `"quickjs"`) | `nfcpoly_js.cpp` | `build/poly-js/<backend>/lib/libquickjs.a` | `scripts/setup-poly-js.sh` |
-| ast (`"ast"`, `"nfcast"`) | `nfcpoly_ast.cpp` | the five `lib/ast/nfcast_*.cpp` files (`-I lib/ast`) | nothing to build |
+| ast (`"ast"`, `"nfcast"`) | `nfcpoly_ast.cpp` | the six `lib/ast/nfcast_*.cpp` files (`-I lib/ast`) | nothing to build |
 
 `tests/poly/run.sh` builds all five for `qbe` and `gcc` and runs `tests/poly/host.cpp` (CI: `ci.yml`); Python is skipped
 with a `SKIP` line when `python3-config` or `Python.h` is missing. `POLY_LANGS="lua js ast"` selects languages.
@@ -126,7 +126,7 @@ and never finalized; each `Context` gets its own globals (a `dict` subclass).
 
 **ast: the nfcast engine.** `lib/ast` is an interpreter for a Lua 5.4 subset written in C++ (`ast.md`: self-specializing AST
 nodes, its own collector, Lua's error messages), so a script error is a C++ exception natively and nothing needs to be built or
-patched: the backend links the five `nfcast_*.cpp` files. It exists for what a bytecode VM cannot offer: nodes that specialize
+patched: the backend links the six `nfcast_*.cpp` files. It exists for what a bytecode VM cannot offer: nodes that specialize
 on the types they see, host-object members cached per class, and a tree that later steps can lower to compiled code.
 
 ## Exceptions

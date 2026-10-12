@@ -16,6 +16,7 @@ namespace nfcast {
 static std::atomic<std::uint64_t> g_proto_uid{0};
 Proto::Proto() : uid(++g_proto_uid) {}
 Proto::~Proto() {
+  if (tier) tier_free(tier);
   for (Proto* c : children) c->release();
 }
 
@@ -1451,7 +1452,7 @@ struct WhileNode : Node {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
-      safepoint(*f.S);
+      loop_edge(f);
     }
     return C_NORMAL;
   }
@@ -1473,7 +1474,7 @@ struct RepeatNode : Node {
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
       if (cond_->eval(f).truthy()) break;
-      safepoint(*f.S);
+      loop_edge(f);
     }
     return C_NORMAL;
   }
@@ -1555,7 +1556,7 @@ struct NumForNode : Node {
         if (c == C_RETURN) return c;
         if (count-- == 0) break;
         i = static_cast<std::int64_t>(static_cast<std::uint64_t>(i) + static_cast<std::uint64_t>(step));
-        safepoint(S);
+        loop_edge(f);
       }
       return C_NORMAL;
     }
@@ -1573,7 +1574,7 @@ struct NumForNode : Node {
       int c = body_->exec(f);
       if (c == C_BREAK) break;
       if (c == C_RETURN) return c;
-      safepoint(S);
+      loop_edge(f);
     }
     return C_NORMAL;
   }
@@ -1788,6 +1789,8 @@ struct BreakNode : Node {
 };
 
 }  // namespace
+
+#include "nfcast_tier_view.inc"  // the tier's read-only view of the node classes above
 
 // ================================================================================================================
 // factories

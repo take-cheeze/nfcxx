@@ -416,6 +416,7 @@ Value concat_slow(State& S, Value* vals, int n, Node** nodes) {
 // ---- calls ---------------------------------------------------------------------------------------------------------------
 void call_closure(State& S, Closure* cl, Value* args, int n, Rets& out, bool from_native) {
   Proto* p = cl->proto;
+  if (S.tier && tier_dispatch(S, cl, args, n, out)) return;  // a hot numeric kernel runs as native code (nfcast_tier.cpp)
   if (S.depth >= S.max_depth) S.rt_error("stack overflow");
   Value* base = args;
   int nslots = p->nslots, np = p->nparams;

@@ -11,7 +11,7 @@ runs=${RUNS:-3}
 lua=${LUA:-}
 [ -z "$lua" ] && [ -x build/ast-ref/lua ] && lua=build/ast-ref/lua
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp)
+srcs=(lib/ast/nfcast_core.cpp lib/ast/nfcast_ops.cpp lib/ast/nfcast_parse.cpp lib/ast/nfcast_nodes.cpp lib/ast/nfcast_lib.cpp lib/ast/nfcast_tier.cpp)
 best() {  # best RUNS wall-clock times of a command (output discarded), in seconds
   local b=999999 t i
   for i in $(seq 1 "$runs"); do

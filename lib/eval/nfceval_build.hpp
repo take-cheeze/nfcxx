@@ -167,10 +167,16 @@ inline bool wait(Child& c, bool block, unsigned timeout_s) {
       c.finished = true;
       return true;
     }
-    if (r < 0 && errno != EINTR) {  // not our child any more (SIGCHLD ignored, say): treat as ended
-      c.status = c.killed ? -1 : 0;
-      c.finished = true;
-      return true;
+    if (r < 0 && errno != EINTR) {
+      // Not ours to wait for any more (the program ignores SIGCHLD, so the child is reaped on its own): it has ended when the process
+      // is gone, and its exit status is not known (the caller looks at what it was to make).
+      if (errno == ECHILD && (::kill(c.pid, 0) == 0 || errno == EPERM)) {
+        if (!block) return false;
+      } else {
+        c.status = c.killed ? -1 : 0;
+        c.finished = true;
+        return true;
+      }
     }
     if (timeout_s && !c.killed && now_ms() - c.started_ms > (long)timeout_s * 1000) {
       ::kill(-c.pid, SIGKILL);

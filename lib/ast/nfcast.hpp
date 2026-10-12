@@ -238,7 +238,36 @@ struct Stats {
   std::uint64_t inlined_sites = 0;   // call sites that were rewritten into an inlined call (docs/notes/ast.md, "Inlining")
   std::uint64_t inlined_calls = 0;   // calls run as inlined bodies
   std::uint64_t inline_declined = 0; // call sites that were looked at and left as calls (callee too big, recursive, ...)
+  // The tier (docs/notes/ast.md, "Tiering"); all zero while it is off.
+  std::uint64_t tier_compiled = 0;    // versions of functions that became callable native code (compiled here or loaded from the cache)
+  std::uint64_t tier_compiles = 0;    // runs of the nfcxx driver
+  std::uint64_t tier_cache_hits = 0;  // versions loaded from the cache without running the driver
+  std::uint64_t tier_ineligible = 0;  // functions that are not numeric kernels (counted once per function)
+  std::uint64_t tier_failed = 0;      // versions whose compile failed (no driver, a compiler error, a timeout, a dlopen error)
+  std::uint64_t tier_calls = 0;       // calls that ran as native code
+  std::uint64_t tier_bailouts = 0;    // calls of a compiled function that ran in the interpreter instead: an argument or a binding
+                                      // the code did not assume (tier_guard_misses), or a run abandoned half way (tier_aborts)
+  std::uint64_t tier_guard_misses = 0;
+  std::uint64_t tier_aborts = 0;      // runs abandoned after starting: a division by zero, too deep a recursion, a float with no integer value
 };
+
+// Tiering is off unless a State is given options (or NFCAST_TIER is set in the environment, for the test drivers). A function
+// that is called (or loops) often enough and is a numeric kernel (docs/notes/ast.md) is lowered to C++, compiled by the nfcxx
+// driver into a shared object (cached on disk by a hash of the source) and called in place of the tree.
+struct TierOptions {
+  enum Mode { Off, Sync, Async };
+  Mode mode = Sync;                 // Sync: the call that makes a function hot waits for the compile; Async: the compile runs in a child
+                                    // process while the interpreter goes on, and its result is picked up by a later call
+  unsigned threshold = 2000;        // calls (that no compiled code served) before a function is compiled
+  unsigned loop_threshold = 50000;  // loop iterations in a function before it is compiled
+  unsigned jobs = 2;                // Async: how many compiles run at once; the others wait
+  std::string driver;               // the nfcxx driver; default: $NFCXX, <repo>/nfcxx found from this source file, `nfcxx` on PATH
+  std::string cache_dir;            // default: $NFCAST_TIER_CACHE, else $TMPDIR (or /tmp)/nfcast-tier-cache-<uid>
+  std::string rt_dir;               // the directory with nfcast_tier_rt.h; default: lib/ast next to the driver, or next to this source file
+  unsigned timeout = 120;           // seconds one compile may take
+};
+
+struct TierState;
 
 // ---- the interpreter ----------------------------------------------------------------------------------------------
 struct State {
@@ -307,6 +336,12 @@ struct State {
 
   Stats stats;
   void* userdata = nullptr;  // for the host's use (the nfcpoly backend keeps its Lang here)
+
+  // ---- tiering (nfcast_tier.cpp) ----
+  void enable_tier(const TierOptions& opt);  // TierOptions::Off turns it off again; versions already compiled stay usable
+  std::string tier_state(const Value& fn);   // what the tier made of a script function: "cold", "compiled ...", "ineligible: why", ...
+  void tier_wait();                          // Async: waits for the compiles that are running and installs the results
+  TierState* tier = nullptr;                 // null: tiering is off
 
   // ---- internal ----
   struct Impl;

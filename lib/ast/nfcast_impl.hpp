@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "nfcast.hpp"
+#include "nfcast_tier.hpp"
 #include "nfcast_tier_rt.h"
 
 namespace nfcast {
@@ -80,6 +81,7 @@ struct Proto {
   std::size_t inline_nodes = 0;              // nodes of inlined bodies that were cloned into this function (nfcast_inline.inc)
   std::vector<Proto*> children;
   std::uint32_t mark_epoch = 0;
+  TierProto* tier = nullptr;  // the tier's counters and compiled versions of this function (nfcast_tier.cpp); null until it is called
 
   Proto();
   ~Proto();
@@ -173,6 +175,11 @@ Closure* new_closure(State& S, Proto* p, std::uint32_t nup);
 Cell* new_cell(State& S, const Value& v);
 inline void safepoint(State& S) {
   if (S.bytes > S.gc_threshold || S.gc_stress) S.collect();
+}
+// The end of a loop iteration: a safe point, and a count for the tier.
+inline void loop_edge(Frame& f) {
+  safepoint(*f.S);
+  if (f.S->tier) tier_backedge(f);
 }
 
 // Metatables and metamethods.
