@@ -346,7 +346,7 @@ def rewrite(text, orig)
   end
   while i < n
     if decls_at.key?(i)
-      decls_at.delete(i).each { |w| out << "extern \"C\" void #{w}(#{$sites[w][:decl]});\n" }
+      decls_at.delete(i).each { |w| out << "static void #{w}(#{$sites[w][:decl]});\n" }
     end
     e = skip_literal(text, i)
     if e
@@ -437,7 +437,7 @@ def rewrite(text, orig)
   unless $sites.empty?
     out << "\n"
     $sites.each do |w, site|
-      out << "extern \"C\" void #{w}(#{site[:decl]}) {}\n"
+      out << "static void #{w}(#{site[:decl]}) {}\n"
     end
   end
   out
@@ -1359,6 +1359,54 @@ end
 device = false
 kernels_path = nil
 path = nil
+# The host copy of a unit gives each kernel internal linkage (static), as nvcc does: two translation units that
+# include the same header with a kernel must not define the same host symbol. The embedded registration of each
+# unit refers to its own host copy. Literals and comments are skipped; only the whole identifier is replaced.
+# The storage keyword a host copy gets: `static`, unless the declaration already has one (then the qualifier goes).
+def host_storage(out, kw)
+  head = out.rstrip
+  already = head.end_with?("static") && (head.length == 6 || !ident_char?(head[-7]))
+  already ? "" : kw
+end
+
+def host_linkage(text)
+  out = ""
+  i = 0
+  word = "__global__"
+  while i < text.length
+    e = skip_literal(text, i)
+    if e
+      out << text[i...e]
+      i = e
+      next
+    end
+    if text[i, word.length] == word && !(i > 0 && ident_char?(text[i - 1])) && !ident_char?(text[i + word.length])
+      out << host_storage(out, "static")
+      i += word.length
+      next
+    end
+    # A __device__ function (not a variable) is device-only code, but its host copy would still be an external symbol:
+    # the same header in two units would define it twice. Its host copy is static too.
+    if text[i, 8] == "__device" && !(i > 0 && ident_char?(text[i - 1])) && text[i, 10] == "__device__" &&
+       !ident_char?(text[i + 10])
+      j = i + 10
+      j += 1 while j < text.length && (text[j] == " " || text[j] == "\n" || text[j] == "\t")
+      k = j
+      k += 1 while k < text.length && !"(=;{".include?(text[k])
+      if k < text.length && text[k] == "("
+        # `__device__ static T f(...)`: the keyword after the qualifier already gives the storage class.
+        after_static = text[j, 6] == "static" && !ident_char?(text[j + 6])
+        out << (after_static ? "" : host_storage(out, "static"))
+        i += 10
+        next
+      end
+    end
+    out << text[i]
+    i += 1
+  end
+  out
+end
+
 ARGV.each do |a|
   if a == "--device"
     device = true
@@ -1384,5 +1432,5 @@ if device
   print dev
 else
   # The host copy has the local headers expanded too: their launches are in the host unit as well.
-  print rewrite($expanded, path)
+  print host_linkage(rewrite($expanded, path))
 end

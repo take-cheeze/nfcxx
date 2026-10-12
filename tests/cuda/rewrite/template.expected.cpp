@@ -6,13 +6,13 @@
 typedef unsigned int uint;
 #define SCALE 3
 
-template <int N, class T> __global__ void scaled(T *out, const T *in, int n)
+template <int N, class T> static void scaled(T *out, const T *in, int n)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) out[i] = in[i] * N + helper<T>(i);
 }
 
-template <class T> __device__ T helper(int i)
+template <class T> static T helper(int i)
 {
   return (T)(i % SCALE);
 }
@@ -20,7 +20,7 @@ template <class T> __device__ T helper(int i)
 static const int kLimit = 64;
 struct HostOnly { int x; void run(); };
 
-void HostOnly::run() { printf("%d\n", x); }extern "C" void __nfcxx_k_scaled_2_float(float *out, const float *in, int n);
+void HostOnly::run() { printf("%d\n", x); }static void __nfcxx_k_scaled_2_float(float *out, const float *in, int n);
 
 
 int main() {
@@ -29,4 +29,4 @@ int main() {
   return 0;
 }
 
-extern "C" void __nfcxx_k_scaled_2_float(float *out, const float *in, int n) {}
+static void __nfcxx_k_scaled_2_float(float *out, const float *in, int n) {}
