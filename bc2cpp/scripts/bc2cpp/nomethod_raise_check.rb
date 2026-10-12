@@ -54,14 +54,17 @@ check.call('code without a marker is untouched',
 
 # -- the helper against a real mruby core -----------------------------------------
 
-candidates = [ENV['BC2CPP_MRUBY_CORE']].compact + Dir[File.join(root, 'build*/mruby/host/mrbc')]
-core = candidates.find { |dir| File.exist?(File.join(dir, 'lib/libmruby_core.a')) && File.directory?(File.join(dir, 'include')) }
+# The probe raises NoMethodError, which mruby defines in mrblib/10error.rb, so it needs a libmruby.a that carries
+# mrblib. libmruby_core.a alone has no NoMethodError (mrb_open_core raises "exception corrupted"); a host that
+# only has the core archive skips this half. It does not fail: the unit checks above and below still run.
+candidates = [ENV['BC2CPP_MRUBY_FULL'], ENV['BC2CPP_MRUBY_CORE']].compact + Dir[File.join(root, 'build*/mruby/host/mrbc')]
+core = candidates.find { |dir| File.exist?(File.join(dir, 'lib/libmruby.a')) && File.directory?(File.join(dir, 'include')) }
 if core.nil? || !system('g++', '--version', out: File::NULL, err: File::NULL)
-  puts '  SKIP behavioural check: no mruby core with lib/ and include/ found (set BC2CPP_MRUBY_CORE)'
+  puts '  SKIP behavioural check: no libmruby.a with mrblib and include/ found (set BC2CPP_MRUBY_FULL)'
 else
-  puts '== the raise against a real mruby core, the same NoMethodError as dispatch'
+  puts '== the raise against a real mruby, the same NoMethodError as dispatch'
   # The probe is Ruby, compiled to bytecode by the same mrbc the build uses and loaded with mrb_load_irep.
-  full_lib = [File.join(core, 'lib/libmruby.a'), File.join(core, 'lib/libmruby_core.a')].find { |p| File.exist?(p) }
+  full_lib = File.join(core, 'lib/libmruby.a')
   table = SymbolCache::Table.new
   table.index_for('"gone"')
   table.nomethod_used = true
