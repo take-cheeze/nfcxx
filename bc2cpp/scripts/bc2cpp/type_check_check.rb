@@ -73,7 +73,7 @@ FACTS = {
     { 'owner' => 'Shape', 'name' => '@w', 'type' => 'Integer', 'element' => nil, 'source' => 'inferred:ivar-layout',
       'reason' => nil, 'file' => 'app/shape.rb', 'line' => 11, 'col' => 5, 'scope' => 'engine' }
   ],
-  'constants' => [{ 'name' => 'Shape::ORIGIN', 'type' => 'Point', 'source' => 'inferred:constructed', 'file' => 'app/shape.rb', 'line' => 3, 'col' => 1 }],
+  'constants' => [{ 'name' => 'Shape::ORIGIN', 'owner' => 'Shape', 'type' => 'Point', 'source' => 'inferred:constructed', 'file' => 'app/shape.rb', 'line' => 3, 'col' => 1, 'scope' => 'engine' }],
   'annotations' => [
     { 'owner' => 'Shape', 'name' => 'area', 'file' => 'app/shape.rb', 'line' => 9, 'col' => 1, 'source' => 'annotation', 'tokens' => ['fixnum'],
       'return_token' => nil, 'ignored' => ['Gizmo'], 'arity_mismatch' => 'lists 1 parameter(s), method takes 2' }

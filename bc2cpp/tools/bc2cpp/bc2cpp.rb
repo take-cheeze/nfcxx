@@ -1007,7 +1007,9 @@ if $PROGRAM_NAME == __FILE__
       hash_poison_reason: hash_poison_reason, container_constants: container_constants, gen: gen,
       contradictions: contradictions, dynamic_names: DynamicNames.universe(ireps), call_sites: call_sites,
       root: ENV['BC2CPP_TYPE_FACTS_ROOT'], signature_origins: sig_applied&.origins, signature_locs: sig_applied&.locs,
-      signature_diagnostics: sig_applied&.diagnostics&.map(&:to_h), signature_ivars: sig_applied&.ivar_sigs
+      signature_diagnostics: sig_applied&.diagnostics&.map(&:to_h), signature_ivars: sig_applied&.ivar_sigs,
+      constant_sites: constant_assignment_sites, modules: declared_modules, superclass_of: superclass_of,
+      integer_constants: integer_constants
     )))
   end
   warn '== annotation/proof contradictions (RBS_SEED_CONTRADICTION) =='

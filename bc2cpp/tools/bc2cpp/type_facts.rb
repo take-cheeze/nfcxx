@@ -31,7 +31,8 @@ module TypeFacts
                    :class_arg_types, :class_layout_raw, :class_poison_reason, :store_log, :poison_buckets,
                    :ivar_layout, :element_raw, :element_poison_reason, :hash_element_raw, :hash_poison_reason,
                    :container_constants, :gen, :contradictions, :dynamic_names, :call_sites, :root,
-                   :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, keyword_init: true)
+                   :signature_diagnostics, :signature_origins, :signature_locs, :signature_ivars, :constant_sites,
+                   :modules, :superclass_of, :integer_constants, keyword_init: true)
 
   INT_TYPES = { fixnum: 'Integer', symbol: 'Symbol', bool: 'bool', fixnum_nil: 'Integer?', array: 'Array' }.freeze
   # Writer opcode -> producer bucket for an unresolved return / store (see IvarPoisonCauses for the ivar side).
@@ -118,6 +119,7 @@ module TypeFacts
       'methods' => methods.sort_by { |m| [m['file'], m['line'], m['owner'], m['name']] },
       'ivars' => ivars.sort_by { |i| [i['owner'], i['name']] },
       'constants' => consts.sort_by { |c| c['name'] },
+      'classes' => class_rows(ctx),
       'annotations' => annotation_rows(ctx, defs, reader),
       'contradictions' => contradiction_rows(ctx, gen, defs, reader),
       'signature_diagnostics' => Array(ctx.signature_diagnostics),
@@ -134,13 +136,15 @@ module TypeFacts
     line, col = def_position(ctx, d, reader)
     enter = irep.enter
     mand, opt, rest = enter ? enter.enter_fields.first(3).map(&:to_i) : [0, 0, 0]
+    key, kdict = enter ? enter.enter_fields[4, 2].map(&:to_i) : [0, 0]
     names = Array(irep.lv).first(mand + opt + (rest.positive? ? 1 : 0))
     defs_of_name = ctx.registry[d.name] || []
     mono = defs_of_name.size == 1
     params = (1..mand).map { |k| param_row(ctx, gen, d, irep, k, names[k - 1], mono, defs_of_name.size, sites) }
     {
       'owner' => d.owner, 'name' => d.name, 'file' => relative(ctx, irep.file), 'line' => line, 'col' => col,
-      'scope' => scope_of(irep.file), 'req' => mand, 'opt' => opt, 'rest' => rest.positive?,
+      'scope' => scope_of(irep.file), 'req' => mand, 'opt' => opt, 'rest' => rest.positive?, 'key' => key,
+      'kdict' => kdict.positive?,
       'visibility' => d.visibility&.to_s, 'params' => params, 'return' => return_row(ctx, gen, d, irep, mono),
       'annotated' => !!(ctx.annotations[d.irep] || ctx.class_annotations[d.irep] || ctx.element_annotations[d.irep])
     }
@@ -443,20 +447,61 @@ module TypeFacts
     rows
   end
 
+  # ------------------------------------------------------------------------------------------------ classes
+
+  # Every class / module the program defines: kind and the resolved superclass (nil when it is Object or unresolved).
+  def class_rows(ctx)
+    owners = ctx.registry.values.flatten.map { |d| d.owner.delete_suffix('.singleton') }.reject { |o| o.start_with?('<') }.uniq
+    owners |= Array(ctx.superclass_of&.keys)
+    owners |= Array(ctx.modules).to_a
+    modules = ctx.modules || Set.new
+    owners.sort.map do |o|
+      sup = ctx.superclass_of && ctx.superclass_of[o]
+      { 'name' => o, 'kind' => modules.include?(o) ? 'module' : 'class', 'superclass' => sup.is_a?(String) ? sup : nil }
+    end
+  end
+
   # ------------------------------------------------------------------------------------------------ constants
 
   def const_rows(ctx)
     classes = ctx.container_constants || {}
     pools = ctx.gen.instance_variable_get(:@class_const_pools) || {}
-    where = const_sites(ctx)
-    names = (classes.keys + pools.keys).uniq
-    names.map do |n|
-      loc = where[n.to_s.split('::').last] || where[n.to_s]
-      type = classes[n]&.to_s
-      type ||= mask_classes(ctx.gen, pools[n]).join(' | ') if pools[n]
-      { 'name' => n.to_s, 'type' => type, 'source' => classes[n] ? 'inferred:constructed' : 'inferred:class-pool',
-        'file' => loc && loc[0], 'line' => loc ? loc[1] : 0, 'col' => 1 }
+    ints = ctx.integer_constants || Set.new
+    seen = {}
+    Array(ctx.constant_sites).each do |site|
+      name = site[:name].to_s
+      irep = ctx.ireps[site[:irep]]
+      next unless irep
+
+      bare = name.split('::').last
+      row = seen[name] ||= { 'name' => name, 'owner' => site[:owner], 'type' => nil, 'source' => nil, 'reason' => nil,
+                             'file' => relative(ctx, irep.file), 'line' => irep.instructions[site[:idx]].lineno, 'col' => 1,
+                             'scope' => scope_of(irep.file) }
+      next if row['type']
+
+      if classes[name]
+        row['type'] = classes[name].to_s
+        row['source'] = 'inferred:constructed'
+      elsif pools[name] && !mask_classes(ctx.gen, pools[name]).include?('OTHER')
+        row['type'] = mask_classes(ctx.gen, pools[name]).join(' | ')
+        row['source'] = 'inferred:class-pool'
+      elsif ints.include?(bare)
+        row['type'] = 'Integer'
+        row['source'] = 'inferred:integer-constant'
+      else
+        producer = textual_producer(ctx, irep, site[:idx], site[:reg])
+        if producer.start_with?('literal:') && !%w[literal:nil literal:Numeric].include?(producer)
+          row['type'] = producer.delete_prefix('literal:')
+          row['source'] = 'inferred:literal'
+        elsif producer == 'literal:Numeric'
+          row['type'] = 'Numeric'
+          row['source'] = 'inferred:literal'
+        else
+          row['reason'] = producer
+        end
+      end
     end
+    seen.values
   rescue StandardError
     []
   end
@@ -498,7 +543,7 @@ module TypeFacts
       ignored << ret unless ret.nil? || known.call(ret.sub(/<.*>\z/, ''))
       { 'owner' => d.owner, 'name' => d.name, 'file' => file, 'line' => aline, 'col' => acol,
         'source' => declared_source(ctx, d), 'tokens' => tokens, 'return_token' => ret, 'ignored' => ignored,
-        'arity_mismatch' => (m.nil? || tokens.size == mand || (tokens.empty? && mand.zero?) ? nil : "lists #{tokens.size} parameter(s), method takes #{mand}"),
+        'arity_mismatch' => (m.nil? || tokens.size <= mand ? nil : "lists #{tokens.size} parameter(s), method takes #{mand}"),
         'args' => Array(ann&.args).map { |t| t && INT_TYPES.fetch(t, t.to_s) },
         'class_args' => Array(cann&.args),
         'return' => ann&.ret && INT_TYPES.fetch(ann.ret, ann.ret.to_s),
