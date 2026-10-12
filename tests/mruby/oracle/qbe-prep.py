@@ -286,6 +286,8 @@ LIBC_BUILTINS = {  # builtin -> (libc function, prototype); cproc has the builti
     '__builtin_strlen': ('strlen', 'unsigned long strlen(const char *);'),
     '__builtin_ldexp': ('ldexp', 'double ldexp(double, int);'),
     '__builtin_strcmp': ('strcmp', 'int strcmp(const char *, const char *);'),  # JSON_HEDLEY / char_traits
+    '__builtin_fabsf': ('fabsf', 'float fabsf(float);'),  # libcu++ (<cuda/cmath>) and the CUDA headers
+    '__builtin_fabs': ('fabs', 'double fabs(double);'),
 }
 HELPER_BUILTINS = {  # builtin -> (helper name, definition in the prelude)
     '__builtin_isnan': ('__nfcxx_isnan',
