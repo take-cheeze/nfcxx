@@ -250,6 +250,23 @@ Tensor Tensor::flip(const Axes& axes) const {
   return wrap(*this, G(*this).flip(u_, a));
 }
 
+Tensor Tensor::pad(const Shape& before, const Shape& after) const {
+  check(*this);
+  if (static_cast<int64_t>(before.size()) != ndim() || static_cast<int64_t>(after.size()) != ndim()) throw Error("np: pad needs one amount per axis on each side");
+  for (size_t k = 0; k < before.size(); k++) if (before[k] < 0 || after[k] < 0) throw Error("np: pad amounts must not be negative");
+  return wrap(*this, G(*this).pad(u_, before, after));
+}
+
+Tensor Tensor::pad(const Shape& before, const Shape& after, const Scalar& value) const {
+  Tensor p = pad(before, after);
+  if (value.dtype != dtype()) throw Error("np: pad value has dtype " + std::string(name(value.dtype)) + ", the tensor " + name(dtype()));
+  if (value == Scalar::from_int(dtype(), 0)) return p;  // bitwise: -0.0 is not zero here
+  // a padded Bool mask (false in the new places) picks the tensor over the value
+  Graph& g = G(*this);
+  const UOp* mask = g.pad(g.iconst(DType::Bool, 1, shape()), before, after);
+  return wrap(*this, g.where(mask, p.uop(), g.constant(value, p.shape())));
+}
+
 Tensor Tensor::squeeze() const {
   check(*this);
   Shape s;

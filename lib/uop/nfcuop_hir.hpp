@@ -12,7 +12,7 @@
 //
 // Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Add Sub Mul Div Mod Max Min
 // And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul
-// Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat.
+// Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant).
 // All shapes are static; dynamic dimensions come in a later stage. See docs/notes/uop.md.
 #pragma once
 #include <deque>
