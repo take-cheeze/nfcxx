@@ -3,6 +3,8 @@
 // the interpreter after errors. Exit status 0 when every check passes. Run by tests/ast/run.sh.
 #include <cstdio>
 #include <string>
+#include <tuple>
+#include <vector>
 
 #include "nfcast.hpp"
 
@@ -75,6 +77,13 @@ struct Probe : nfcast::HostObject {
 };
 int Probe::live = 0;
 const char Probe::key = 0;
+
+// cb(f, args...): the host calls f from inside the script, the way a bound function that takes a callback does.
+static void native_cb(State& S, Args a, Rets& r, nfcast::Native&) {
+  Rets out;
+  S.call(a[0], a.v + 1, a.n > 0 ? a.n - 1 : 0, out);
+  for (int i = 0; i < out.n; ++i) r.push(out.p[i]);
+}
 
 static void native_make_probe(State& S, Args a, Rets& r, nfcast::Native&) {
   r.push(Value::host(S.new_host<Probe>(a.n ? static_cast<int>(a.v[0].i) : 0)));
@@ -261,6 +270,308 @@ int main() {
     CHECK(run_int(S, "local t = {} t[3] = 3 t[2] = 2 t[1] = 1 return #t") == 3);   // the array part absorbs waiting keys
     CHECK(run_int(S, "local n = 0 local t = {a = 1, b = 2, c = 3} for k in pairs(t) do t[k] = nil n = n + 1 end return n + #t") == 3);
     CHECK(run_int(S, "local t = {} for i = 1, 1000 do t['k' .. i] = i end local s = 0 for k, v in pairs(t) do s = s + v end return s") == 500500);
+  }
+
+  std::printf("-- inlining of small functions\n");
+  {
+    // Two states that differ in the one setting; both run the same scripts. The settings are explicit, whatever the environment says.
+    State on, off;
+    on.open_libs();
+    off.open_libs();
+    on.inlining = true;
+    on.inline_warm = 2;
+    off.inlining = false;
+    auto stats_of = [](State& st) { return st.stats; };
+    std::string err;
+
+    // A loop of calls of a small function: the first call makes the site a call of a closure, the second counts down, the third
+    // rewrites the site (and is itself an ordinary call), from the fourth on the calls are inlined.
+    const char* loop = "local function add(a, b) return a + b end local s = 0 for i = 1, 100 do s = add(s, i) end return s";
+    auto a0 = stats_of(on), b0 = stats_of(off);
+    CHECK(run_int(on, loop) == 5050);
+    CHECK(run_int(off, loop) == 5050);
+    CHECK(on.stats.inlined_sites == a0.inlined_sites + 1);
+    CHECK(on.stats.inlined_calls == a0.inlined_calls + 97);
+    CHECK(on.stats.generic_ops == a0.generic_ops);                       // the clone is specialized: no slow path
+    CHECK(off.stats.inlined_sites == b0.inlined_sites && off.stats.inlined_calls == b0.inlined_calls);   // switched off: none
+    CHECK(off.stats.inline_declined == b0.inline_declined);
+    {
+      State early;                                                       // the site is rewritten as early as possible
+      early.open_libs();
+      early.inlining = true;
+      early.inline_warm = 1;
+      CHECK(run_int(early, loop) == 5050);
+      CHECK(early.stats.inlined_sites == 1 && early.stats.inlined_calls == 98);
+      State never;                                                       // 0: never
+      never.open_libs();
+      never.inlining = true;
+      never.inline_warm = 0;
+      CHECK(run_int(never, loop) == 5050 && never.stats.inlined_sites == 0 && never.stats.inlined_calls == 0);
+    }
+
+    // The guard: a global function that is assigned again gives the site back to a plain call node, which inlines the new function
+    // a few calls later (at most kInlineMaxRetry = 3 times per site); a native or nil makes it the generic call node for good.
+    run(on, "function g(x) return x + 1 end function use() local s = 0 for i = 1, 50 do s = s + g(i) end return s end");
+    auto c0 = stats_of(on);
+    CHECK(run_int(on, "return use()") == 1325);
+    CHECK(on.stats.inlined_sites == c0.inlined_sites + 1 && on.stats.deopts == c0.deopts);
+    auto c1 = stats_of(on);
+    run(on, "g = function(x) return x * 2 end");                         // another function
+    CHECK(run_int(on, "return use()") == 2550);
+    CHECK(on.stats.deopts == c1.deopts + 1);                              // the guard failed once
+    CHECK(on.stats.inlined_sites == c1.inlined_sites + 1);                // and the site was inlined again, for the new function
+    CHECK(on.stats.inlined_calls >= c1.inlined_calls + 44);
+    auto c2 = stats_of(on);
+    CHECK(run_int(on, "return use() + use()") == 5100);
+    CHECK(on.stats.deopts == c2.deopts && on.stats.inlined_sites == c2.inlined_sites);   // no further rewrite
+    CHECK(on.stats.inlined_calls == c2.inlined_calls + 100);              // every call inlined
+    run(on, "g = math.abs");                                              // a native
+    CHECK(run_int(on, "return use()") == 1275);
+    auto c3 = stats_of(on);
+    CHECK(run_int(on, "return use()") == 1275 && on.stats.deopts == c3.deopts && on.stats.inlined_sites == c3.inlined_sites);   // generic for good
+    run(on, "g = nil");
+    run(on, "return use()", &err);
+    CHECK(err == "test:1: attempt to call a nil value (global 'g')");
+    CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr);
+
+    // A site that alternates between two functions is inlined again only a bounded number of times, then stays a call.
+    {
+      State alt;
+      alt.open_libs();
+      alt.inlining = true;
+      alt.inline_warm = 1;
+      CHECK(run_int(alt, "local function a(x) return x + 1 end local function b(x) return x * 2 end local fs = {a, b} "
+                         "local function site(f, v) local r = f(v) return r end local s = 0 "
+                         "for i = 1, 200 do s = s + site(fs[i % 2 + 1], i) end return s") == 30200);
+      // `site` is inlined into the loop, and its `f(v)` is a site of its own in the clone and in the original: each is inlined
+      // for the first function and again at most three times, not at every change of function (200 calls, 199 changes)
+      CHECK(alt.stats.inlined_sites >= 4 && alt.stats.inlined_sites <= 7);
+      CHECK(alt.stats.deopts >= 3 && alt.stats.deopts <= 8);                 // each version failed its guard once; then the generic call
+      CHECK(alt.depth == 0 && alt.top == alt.stack && alt.cur == nullptr);
+    }
+
+    // Closures of one function with different upvalues pass the guard (it is the function, not the closure), and read their own.
+    auto d0 = stats_of(on);
+    CHECK(run_int(on, "local function mk(k) return function(x) return x + k end end local a, b = mk(1), mk(100) "
+                      "local function call(f) local r = f(1) return r end local s = 0 for i = 1, 20 do s = s + call(a) + call(b) end return s") == 20 * (2 + 101));
+    CHECK(on.stats.deopts == d0.deopts);                                  // the second closure did not fail the guard
+    CHECK(on.stats.inlined_calls > d0.inlined_calls + 30);
+
+    // Per-site specialization: a shared tree meets integers, floats and strings and ends up generic; the clones do not, so the
+    // integer and float sites never take a slow path.
+    const char* mixed = "local function add(a, b) return a + b end local x, y, z = 0, 0.5, 0 "
+                        "for i = 1, 100 do x = add(x, i) y = add(y, 0.25) z = add('1', i) end return x";
+    auto e0 = stats_of(on), f0 = stats_of(off);
+    CHECK(run_int(on, mixed) == 5050);
+    CHECK(run_int(off, mixed) == 5050);
+    std::uint64_t slow_on = on.stats.generic_ops - e0.generic_ops, slow_off = off.stats.generic_ops - f0.generic_ops;
+    CHECK(slow_on >= 100 && slow_on <= 105);                              // the string site only
+    CHECK(slow_off >= 295);                                               // the shared tree is generic for all three
+    CHECK(on.stats.inlined_sites == e0.inlined_sites + 3);
+
+    // Methods: a getter on a table, an object whose class changes under the site.
+    const char* meth = "local C = {} C.__index = C function C:get() return self.v end local o = setmetatable({v = 3}, C) "
+                       "local s = 0 for i = 1, 50 do s = s + o:get() end return s";
+    auto m0 = stats_of(on);
+    CHECK(run_int(on, meth) == 150 && run_int(off, meth) == 150);
+    CHECK(on.stats.inlined_sites == m0.inlined_sites + 1 && on.stats.inlined_calls == m0.inlined_calls + 48);
+    run(on, "Q = {} Q.__index = Q function Q:get() return -1 end P = setmetatable({v = 1}, Q) "
+            "function run(o) local s = 0 for i = 1, 10 do s = s + o:get() end return s end");
+    CHECK(run_int(on, "return run(P)") == -10);
+    auto m1 = stats_of(on);
+    CHECK(run_int(on, "P.get = function(self) return 100 end return run(P)") == 1000);   // the instance shadows the method
+    CHECK(on.stats.deopts == m1.deopts + 1);
+    CHECK(run_int(on, "P.get = nil return run(P)") == -10);
+
+    // What is not inlined: closures, varargs and bodies over the size limit; each is looked at once per site and left as a call.
+    // Loops and multiple assignment are inlined.
+    auto n0 = stats_of(on);
+    CHECK(run_int(on, "local function lp(n) local s = 0 for i = 1, n do s = s + i end return s end local t = 0 for i = 1, 10 do t = t + lp(3) end return t") == 60);
+    CHECK(on.stats.inlined_sites == n0.inlined_sites + 1 && on.stats.inline_declined == n0.inline_declined);   // a numeric for
+    CHECK(on.stats.inlined_calls == n0.inlined_calls + 7);
+    CHECK(run_int(on, "local function wl(n) local s = 0 while n > 0 do s = s + n n = n - 1 end return s end local t = 0 for i = 1, 10 do t = t + wl(3) end return t") == 60);
+    CHECK(run_int(on, "local function ru(n) local s = 0 repeat s = s + n n = n - 1 until n == 0 return s end local t = 0 for i = 1, 10 do t = t + ru(3) end return t") == 60);
+    CHECK(run_int(on, "local function fi(a) local s = 0 for _, v in ipairs(a) do if v > 2 then break end s = s + v end return s end "
+                      "local x = {1, 2, 3, 4} local t = 0 for i = 1, 10 do t = t + fi(x) end return t") == 30);
+    CHECK(on.stats.inlined_sites == n0.inlined_sites + 4 && on.stats.inline_declined == n0.inline_declined);
+    CHECK(run_int(on, "local function sw(a, b) a, b = b, a return a end local t = 0 for i = 1, 10 do t = t + sw(i, 1) end return t") == 10);
+    CHECK(run_int(on, "local function st(o, a) o.x, o[2] = a, a + 1 return o.x + o[2] end local o = {} local t = 0 for i = 1, 10 do t = t + st(o, i) end return t") == 120);
+    CHECK(on.stats.inlined_sites == n0.inlined_sites + 6 && on.stats.inline_declined == n0.inline_declined);   // multiple assignment
+    CHECK(run_int(on, "local function va(...) return select('#', ...) end local t = 0 for i = 1, 10 do t = t + va(i, i) end return t") == 20);
+    CHECK(on.stats.inlined_sites == n0.inlined_sites + 6);
+    CHECK(on.stats.inline_declined == n0.inline_declined + 1);            // a vararg function
+    CHECK(run_int(on, "local function mkf(k) return function() return k end end local t = 0 for i = 1, 10 do t = t + mkf(i)() end return t") == 55);
+    CHECK(on.stats.inline_declined == n0.inline_declined + 2);           // a body with a closure is not inlined
+    CHECK(on.stats.inlined_sites == n0.inlined_sites + 7);                // the call of what mkf returned is: the closures are of one function
+    // a body over the size limit
+    CHECK(run_int(on, "local function big(x) local a = x + 1 local b = a * 2 + x local c = a .. b local d = c .. a .. b .. x "
+                      "if #d > 5 then return a + b + #d + #c + (a * b - c * a) // (b + 1) + (a + b) % 7 + (b - a) * #d + a * a + b * b "
+                      "elseif #d > 3 then return a - b else return a * b + #d end end "
+                      "local t = 0 for i = 1, 10 do t = t + big(i) end return t") != -999999);
+    CHECK(on.stats.inline_declined == n0.inline_declined + 3);
+
+    // Parameter substitution: arguments that are locals and constants are read where they are when the body never assigns the
+    // parameter and has no loop; assigned parameters and the arguments of a loop body stay in their slots. Same results either way.
+    {
+      auto s0 = stats_of(on);
+      CHECK(run_int(on, "local function sq(x) return x * x end local function add(a, b) return a + b end local t = 0 "
+                        "for i = 1, 20 do local x = i t = t + sq(x) + add(x, 100) end return t") == 2870 + 2000 + 210);
+      CHECK(on.stats.inlined_sites == s0.inlined_sites + 2);
+      CHECK(on.stats.inline_substituted == s0.inline_substituted + 3);   // x of sq, and both arguments of add
+      auto s1 = stats_of(on);
+      CHECK(run_int(on, "local function bump(x) x = x + 1 return x end local t = 0 for i = 1, 20 do t = t + bump(i) end return t") == 230);
+      CHECK(on.stats.inlined_sites == s1.inlined_sites + 1 && on.stats.inline_substituted == s1.inline_substituted);   // assigned
+      CHECK(run_int(on, "local function lp(n, k) local s = 0 for i = 1, n do s = s + k end return s end local t = 0 "
+                        "for i = 1, 20 do local m = i t = t + lp(m, 2) end return t") == 420);
+      CHECK(on.stats.inline_substituted == s1.inline_substituted);                                         // a loop: not substituted
+      auto s2 = stats_of(on);
+      CHECK(run_int(on, "local c = 0 local function inc() c = c + 1 end local function rd(a) inc() return a + c end local t = 0 "
+                        "for i = 1, 20 do t = t + rd(c) end return t") != -999999);                      // c is a cell: evaluated, not substituted
+      CHECK(on.stats.inline_substituted == s2.inline_substituted);
+      auto s3 = stats_of(on);                                       // a global: evaluated
+      CHECK(run_int(on, "GV = 5 local function sq(x) return x * x end local t = 0 for i = 1, 20 do t = t + sq(GV) end return t") == 500);
+      CHECK(on.stats.inline_substituted == s3.inline_substituted);
+      std::string e2;
+      run(on, "local function neg(v) return -v end for i = 1, 10 do local z = i if i == 8 then z = nil end neg(z) end", &e2);
+      CHECK(e2 == "test:1: attempt to perform arithmetic on a nil value (local 'v')");   // the parameter's name, the callee's line
+      run(on, "local function neg(v) return -v end for i = 1, 10 do if i == 8 then neg(true) else neg(i) end end", &e2);
+      CHECK(e2 == "test:1: attempt to perform arithmetic on a boolean value (local 'v')");
+      CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr);
+    }
+
+    // With the tier on, a callee with a loop is left to the tier (a clone would be interpreted for ever); loop-free ones are inlined.
+    {
+      State t;
+      t.open_libs();
+      t.inlining = true;
+      t.inline_warm = 1;
+      nfcast::TierOptions o;
+      o.mode = nfcast::TierOptions::Sync;
+      o.threshold = o.loop_threshold = 1000000;                          // nothing is compiled in this test
+      t.enable_tier(o);
+      CHECK(run_int(t, "local function lp(n) local s = 0 for i = 1, n do s = s + i end return s end local x = 0 for i = 1, 10 do x = x + lp(3) end return x") == 60);
+      CHECK(t.stats.inlined_sites == 0 && t.stats.inline_declined == 1);
+      CHECK(run_int(t, "local function add(a, b) return a + b end local x = 0 for i = 1, 10 do x = add(x, i) end return x") == 55);
+      CHECK(t.stats.inlined_sites == 1);
+    }
+
+    // Recursion: a recursive function is inlined into its own call site once, not without end; the depth limit still applies.
+    auto r0 = stats_of(on);
+    CHECK(run_int(on, "local function f(n) if n == 0 then return 0 end return 1 + f(n - 1) end local t = 0 for i = 1, 20 do t = t + f(10) end return t") == 200);
+    CHECK(on.stats.inlined_sites >= r0.inlined_sites + 2 && on.stats.inlined_sites <= r0.inlined_sites + 4);   // a few levels, not without end
+    run(on, "local function inf(n) return inf(n + 1) + 1 end return inf(1)", &err);
+    CHECK(err.find("stack overflow") != std::string::npos);
+    CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr);
+    CHECK(run_int(on, "local function d(n) if n == 0 then return 0 end return 1 + d(n - 1) end return d(1000)") == 1000);
+    // the limit is the same number of nested calls with and without inlining
+    const char* count = "local depth = 0 local function rec() depth = depth + 1 return rec() + 1 end local ok = pcall(rec) return depth";
+    CHECK(run_int(on, count) == run_int(off, count) && run_int(on, count) > 1000);
+
+    // What clones can add to one function is bounded (8192 nodes): a chunk with 3500 different sites that call a three-node
+    // function four times each inlines a part of them and declines the rest, and computes the same.
+    {
+      std::string big = "local function sm(x) return x + 1 end local s = 0 for i = 1, 4 do ";
+      for (int i = 0; i < 3500; ++i) big += "s = s + sm(i) ";
+      big += "end return s";
+      auto g0 = stats_of(on);
+      CHECK(run_int(on, big) == 3500 * (2 + 3 + 4 + 5));
+      std::uint64_t sites = on.stats.inlined_sites - g0.inlined_sites, declined = on.stats.inline_declined - g0.inline_declined;
+      CHECK(sites >= 2000 && sites <= 2800 && declined >= 700 && sites + declined == 3500);
+    }
+
+    // Errors: the same message, the same traceback (every function of the chain, innermost first, with the lines they were at).
+    const char* chain = "local function c(x) if x > 6 then error('deep') end return x end\n"
+                        "local function b(x) return c(x) + 1 end\n"
+                        "local function a(x) return b(x) + 1 end\n"
+                        "for i = 1, 9 do a(i) end";
+    auto trace_of = [&](State& st) {
+      nfcast::Closure* cl = st.load(chain, "chain", &err);
+      Rets o;
+      std::vector<std::string> tr;
+      std::string msg;
+      auto before = st.stats.inlined_calls;
+      try {
+        st.call(Value::function(cl), nullptr, 0, o);
+      } catch (Thrown& t) {
+        tr = t.trace;
+        msg = st.tostring(t.v);
+      }
+      return std::make_tuple(msg, tr, st.stats.inlined_calls - before);
+    };
+    State early_t;                                                        // calls inlined as early as possible: the error is raised inside three
+    early_t.open_libs();                                                  // inlined bodies, one in the other
+    early_t.inlining = true;
+    early_t.inline_warm = 1;
+    auto t_on = trace_of(on), t_off = trace_of(off), t_early = trace_of(early_t);
+    CHECK(std::get<0>(t_on) == "chain:1: deep" && std::get<0>(t_on) == std::get<0>(t_off) && std::get<0>(t_early) == std::get<0>(t_off));
+    CHECK(std::get<2>(t_on) > 0 && std::get<2>(t_early) > std::get<2>(t_on) && std::get<2>(t_off) == 0);   // inlined bodies were running
+    CHECK(std::get<1>(t_on) == std::get<1>(t_off) && std::get<1>(t_early) == std::get<1>(t_off));
+    {
+      const std::vector<std::string>& tr = std::get<1>(t_early);          // c, b, a, the chunk: a frame for every inlined body
+      CHECK(tr.size() == 4 && tr[0].find("chain:1:") == 0 && tr[1].find("chain:2:") == 0 && tr[2].find("chain:3:") == 0 &&
+            tr[3].find("chain:4:") == 0);
+      CHECK(tr.size() == 4 && tr[0].find("local 'c'") != std::string::npos && tr[1].find("local 'b'") != std::string::npos &&
+            tr[2].find("local 'a'") != std::string::npos && tr[3].find("main chunk") != std::string::npos);
+    }
+    CHECK(on.depth == 0 && on.top == on.stack && on.cur == nullptr && early_t.depth == 0 && early_t.cur == nullptr);
+
+    // Tail calls: a chain of them takes no depth (a million deep here, the limit is 1500), and the frame of the function that made
+    // one is gone from a traceback, which says so; with inlining on, early and off alike.
+    for (State* st : {&on, &off, &early_t}) {
+      CHECK(run_int(*st, "local function l(n, a) if n == 0 then return a end return l(n - 1, a + 1) end return l(1000000, 0)") == 1000000);
+      nfcast::Closure* cl = st->load("local function c(x) error('deep') end\nlocal function b(x) return c(x) end\nb(1)", "tail", &err);
+      Rets o;
+      std::vector<std::string> tr;
+      try {
+        st->call(Value::function(cl), nullptr, 0, o);
+      } catch (Thrown& t) {
+        tr = t.trace;
+      }
+      CHECK(tr.size() == 3 && tr[0].find("tail:1:") == 0 && tr[1] == "(...tail calls...)" && tr[2].find("tail:3:") == 0);
+      CHECK(st->depth == 0 && st->top == st->stack && st->cur == nullptr);
+    }
+
+    // The host calls back into the script from inside an inlined body, and an error comes back through the inlined frames.
+    {
+      State cbs;
+      cbs.open_libs();
+      cbs.inlining = true;
+      cbs.inline_warm = 1;
+      cbs.globals->set_str(cbs, cbs.str("cb"), Value::function(cbs.new_native(native_cb, "cb")));
+      CHECK(run_int(cbs, "local function twice(x) return x * 2 end local function viacb(x) return cb(twice, x) + 1 end "
+                         "local t = 0 for i = 1, 20 do t = t + viacb(i) end return t") == 440);
+      CHECK(cbs.stats.inlined_calls == 18);                          // viacb, from the third call of its site on
+      CHECK(run_int(cbs, "local function boom(f) return cb(f, 1) end local n = 0 "
+                         "for i = 1, 10 do local ok, e = pcall(function() return boom(function() error('x' .. i) end) end) "
+                         "if not ok and e == 'test:1: x' .. i then n = n + 1 end end return n") == 10);
+      CHECK(cbs.depth == 0 && cbs.top == cbs.stack && cbs.cur == nullptr && cbs.pcall_depth == 0);
+      std::string cerr;
+      run(cbs, "local function boom(f) return cb(f, 1) end for i = 1, 5 do boom(function() local t = nil; return t.x end) end", &cerr);
+      CHECK(cerr == "test:1: attempt to index a nil value (local 't')");
+      CHECK(cbs.depth == 0 && cbs.top == cbs.stack && cbs.cur == nullptr);
+      CHECK(run_int(cbs, "return 1 + 1") == 2);
+    }
+
+    // The collector: bodies that allocate and mention strings of their own, under a collector that runs at every safe point.
+    {
+      State gc;
+      gc.open_libs();
+      gc.inlining = true;
+      gc.inline_warm = 1;
+      gc.gc_stress = true;
+      CHECK(run_int(gc, "local function mk(i) return {i, 'item-number-' .. i, {i * 2}} end "
+                        "local function lab(t) return t[2] .. ':' .. t[3][1] end local n = 0 "
+                        "for i = 1, 200 do local t = mk(i) n = n + #lab(t) + #lab(mk(i + 1)) end return n") != -999999);
+      CHECK(gc.stats.inlined_calls > 500 && gc.stats.gc_cycles > 500);
+      // a callee dropped by the program while a caller still holds a rewritten site; the site meets another function afterwards
+      run(gc, "local chunk = load('local function helper(t) return t.name .. \"-a-constant-only-the-helper-has\" end return helper') "
+              "holder = chunk() local function use(t) return holder(t) end for i = 1, 5 do use({name = 'n' .. i}) end user = use");
+      run(gc, "holder = nil");
+      gc.collect();
+      gc.collect();
+      Value r = run(gc, "holder = function(t) return 'other ' .. t.name end return user({name = 'x'})");
+      CHECK(r.t == nfcast::T_STR && r.s()->view() == "other x");
+    }
   }
 
   std::printf("-- State is reusable\n");

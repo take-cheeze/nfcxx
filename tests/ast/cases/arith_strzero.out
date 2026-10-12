@@ -1,0 +1,22 @@
+arith_strzero.lua:4: attempt to divide by zero
+arith_strzero.lua:5: attempt to perform 'n%0'
+attempt to divide by zero
+attempt to perform 'n%0'
+attempt to divide by zero
+attempt to perform 'n%0'
+attempt to divide by zero
+attempt to divide by zero
+attempt to perform 'n%0'
+attempt to perform 'n%0'
+-nan
+inf
+inf
+attempt to divide by zero
+arith_strzero.lua:18: attempt to idiv a 'table' with a 'string'
+arith_strzero.lua:19: attempt to idiv a 'string' with a 'table'
+arith_strzero.lua:20: attempt to idiv a 'string' with a 'string'
+arith_strzero.lua:21: attempt to idiv a 'string' with a 'nil'
+attempt to perform 'n%0'
+7
+attempt to perform 'n%0'
+false	attempt to divide by zero

@@ -1,7 +1,7 @@
 // nfcpoly: evaluate scripts of other languages from C++ and share objects with them, GraalVM-polyglot style.
-// Languages: Ruby (mruby), Lua and Python. Each is a backend (nfcpoly_mruby.cpp, nfcpoly_lua.cpp, nfcpoly_python.cpp) that
-// registers itself when linked in; this header and nfcpoly.cpp are the language-neutral core and include no interpreter
-// header.
+// Languages: Ruby (mruby), Lua, Python, JavaScript and Go (yaegi). Each is a backend (nfcpoly_mruby.cpp, nfcpoly_lua.cpp, nfcpoly_python.cpp,
+// nfcpoly_js.cpp, nfcpoly_go.cpp) that registers itself when linked in; this header and nfcpoly.cpp are the language-neutral core and include
+// no interpreter header.
 //
 //   nfcpoly::Context ctx;
 //   ctx.def_class<Vec3>("Vec3").ctor<double, double, double>().field("x", &Vec3::x).method("len2", &Vec3::len2);
@@ -11,6 +11,8 @@
 //   int r = ctx.eval<int>("ruby", "pos.x * scale(2.0)");
 //   double d = ctx.eval<double>("lua", "pos.x * scale(2.0)");        // the same bindings, in Lua
 //   double e = ctx.eval<double>("python", "pos.x * scale(2.0)");     // and in Python
+//   double f = ctx.eval<double>("js", "pos.x * scale(2.0)");         // and in JavaScript
+//   double g = ctx.eval<double>("go", "pos.X() * scale(2.0)");       // and in Go, which is statically typed: typed methods
 //
 // A C++ exception thrown by a bound function is a script error to the script; an uncaught script error reaches the host
 // as nfcpoly::ScriptError, or, when it carries a host exception that nothing rescued, as that very C++ exception.
@@ -232,14 +234,33 @@ class Var {
   Lang* src_;
 };
 
+// The C++ type of a parameter or result of a bound callable, as far as a statically typed script language needs it to write
+// the types of the script-side function down (the Go backend). Computed from the template parameters where the callable is
+// made; the other backends do not look at it.
+struct TypeDesc {
+  enum Kind : unsigned char { Void, Bool, Int, UInt, Float, Str, Any, Class, Vec, Opt };
+  Kind kind = Void;
+  const void* key = nullptr;  // Class: the type_key<T>() of the registered class
+  std::vector<TypeDesc> elem;  // Vec and Opt: the element type (one entry)
+};
+struct Sig {
+  std::vector<TypeDesc> params;  // for a method, the receiver comes first
+  TypeDesc result;
+};
+
 // One bound function or method. invoke gets the receiver (null for a plain function) and exactly arity() arguments;
 // the backend's trampoline has checked the count, and turns every C++ exception that leaves invoke into a script error.
 struct Callable {
   Impl* impl = nullptr;
   virtual ~Callable() {}
   virtual int arity() const = 0;
+  // The fewest arguments a script may pass: the missing trailing ones arrive as nil (a script's None / null / nil), so the
+  // parameters from min_arity() on should be std::optional<T> or Value. Equal to arity() unless a binding asks for optional
+  // arguments (method_fn / bind_fn with min_args).
+  virtual int min_arity() const { return arity(); }
   virtual bool wants_self() const { return false; }  // true for methods: invoke gets the receiver
   virtual Var invoke(const Var* self, const Var* args) = 0;
+  virtual bool signature(Sig&) const { return false; }  // fills the parameter and result types; false when not known
 };
 
 // ---- implemented in nfcpoly.cpp -------------------------------------------------------------------------------
@@ -282,6 +303,49 @@ inline constexpr bool is_value_like_v = std::is_arithmetic_v<D> || std::is_same_
                                         is_optional<D>::value || std::is_same_v<D, Value> || is_cstr_v<D>;
 template <class T>
 using plain_t = std::decay_t<T>;  // also turns a string literal's array type into const char*
+
+template <class D, class = void>
+struct Describe {
+  static TypeDesc get() {
+    TypeDesc d;
+    if constexpr (std::is_void_v<D>) d.kind = TypeDesc::Void;
+    else if constexpr (std::is_pointer_v<D> && !is_cstr_v<D>) {
+      d.kind = TypeDesc::Class;
+      d.key = type_key<std::remove_pointer_t<D>>();
+    } else if constexpr (std::is_same_v<D, bool>) d.kind = TypeDesc::Bool;
+    else if constexpr (std::is_integral_v<D>) d.kind = std::is_unsigned_v<D> ? TypeDesc::UInt : TypeDesc::Int;
+    else if constexpr (std::is_floating_point_v<D>) d.kind = TypeDesc::Float;
+    else if constexpr (std::is_same_v<D, std::string> || std::is_same_v<D, std::string_view> || is_cstr_v<D>) d.kind = TypeDesc::Str;
+    else if constexpr (std::is_same_v<D, Value>) d.kind = TypeDesc::Any;
+    else {
+      d.kind = TypeDesc::Class;
+      d.key = type_key<D>();
+    }
+    return d;
+  }
+};
+template <class E, class A>
+struct Describe<std::vector<E, A>, void> {
+  static TypeDesc get() {
+    TypeDesc d;
+    d.kind = TypeDesc::Vec;
+    d.elem.push_back(Describe<std::decay_t<E>>::get());
+    return d;
+  }
+};
+template <class E>
+struct Describe<std::optional<E>, void> {
+  static TypeDesc get() {
+    TypeDesc d;
+    d.kind = TypeDesc::Opt;
+    d.elem.push_back(Describe<std::decay_t<E>>::get());
+    return d;
+  }
+};
+template <class T>
+TypeDesc describe() {
+  return Describe<plain_t<T>>::get();
+}
 
 }  // namespace detail
 
@@ -558,10 +622,16 @@ struct fn_sig<F, std::void_t<decltype(&F::operator())>> : fn_sig<decltype(&F::op
 template <bool Self, class F, class R, class... A>
 class FnCallable : public Callable {
  public:
-  explicit FnCallable(F f) : f_(std::move(f)) {}
+  FnCallable(F f, int min_args) : f_(std::move(f)), min_(min_args) {}
   int arity() const override { return static_cast<int>(sizeof...(A)) - (Self ? 1 : 0); }
+  int min_arity() const override { return min_ < 0 || min_ > arity() ? arity() : min_; }
   bool wants_self() const override { return Self; }
   Var invoke(const Var* self, const Var* args) override { return call(self, args, std::index_sequence_for<A...>{}); }
+  bool signature(Sig& s) const override {
+    s.result = describe<R>();
+    (s.params.push_back(describe<A>()), ...);
+    return true;
+  }
 
  private:
   template <std::size_t I>
@@ -583,18 +653,19 @@ class FnCallable : public Callable {
     }
   }
   F f_;
+  int min_;
 };
 
 template <bool Self, class F, class R, class... A>
-std::unique_ptr<Callable> make_callable_impl(Impl* impl, F f, Tag<R, A...>*) {
-  std::unique_ptr<Callable> c(new FnCallable<Self, F, R, A...>(std::move(f)));
+std::unique_ptr<Callable> make_callable_impl(Impl* impl, F f, int min_args, Tag<R, A...>*) {
+  std::unique_ptr<Callable> c(new FnCallable<Self, F, R, A...>(std::move(f), min_args));
   c->impl = impl;
   return c;
 }
 template <bool Self, class F>
-std::unique_ptr<Callable> make_callable(Impl* impl, F f) {
+std::unique_ptr<Callable> make_callable(Impl* impl, F f, int min_args = -1) {
   using S = fn_sig<std::decay_t<F>>;
-  return make_callable_impl<Self>(impl, std::move(f), static_cast<typename S::tag*>(nullptr));
+  return make_callable_impl<Self>(impl, std::move(f), min_args, static_cast<typename S::tag*>(nullptr));
 }
 
 template <class C, class R, class... A>
@@ -620,6 +691,11 @@ class CtorCallable : public Callable {
  public:
   int arity() const override { return static_cast<int>(sizeof...(A)); }
   Var invoke(const Var*, const Var* args) override { return make(args, std::index_sequence_for<A...>{}); }
+  bool signature(Sig& s) const override {
+    s.result = describe<T>();
+    (s.params.push_back(describe<A>()), ...);
+    return true;
+  }
 
  private:
   template <std::size_t... I>
@@ -648,10 +724,25 @@ class ClassBuilder {
     detail::declare_method(impl_, ci_, name, detail::make_callable<true>(impl_, detail::member_lambda(m)));
     return *this;
   }
-  // A function whose first parameter is the object (T&, const T& or T*): obj.name(args...).
+  // A function whose first parameter is the object (T&, const T& or T*): obj.name(args...). With min_args >= 0 a script
+  // may leave out trailing arguments down to that many (after the object): they arrive as nil, so those parameters are
+  // std::optional<T> or Value (Go: the function is variadic in them, `obj.Name(a, opt ...any)`).
   template <class F>
-  ClassBuilder& method_fn(const std::string& name, F f) {
-    detail::declare_method(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(f)));
+  ClassBuilder& method_fn(const std::string& name, F f, int min_args = -1) {
+    detail::declare_method(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(f), min_args));
+    return *this;
+  }
+  // obj.name reads a value that GET computes from the object (the first parameter, no others), obj.name = v calls SET (the
+  // object and the value) when there is one. Like field(), but for a value that is not a member (a computed property).
+  template <class G>
+  ClassBuilder& property_fn(const std::string& name, G get) {
+    detail::declare_prop(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(get)), nullptr);
+    return *this;
+  }
+  template <class G, class S>
+  ClassBuilder& property_fn(const std::string& name, G get, S set) {
+    detail::declare_prop(impl_, ci_, name, detail::make_callable<true>(impl_, std::move(get)),
+                         detail::make_callable<true>(impl_, std::move(set)));
     return *this;
   }
   // obj.name reads the member, obj.name = v writes it (not for const members). A member of a registered class type is
@@ -688,7 +779,7 @@ class Context {
   Context(const Context&) = delete;
   Context& operator=(const Context&) = delete;
 
-  // The languages eval accepts: the backends linked into the program ("ruby" (alias "mruby"), "lua", "python"). A
+  // The languages eval accepts: the backends linked into the program ("ruby" (alias "mruby"), "lua", "python", "js", "go"). A
   // language's interpreter is started on its first use; everything declared before that is replayed into it.
   static std::vector<std::string> languages();
 
@@ -705,7 +796,8 @@ class Context {
 
   // A script sees `name` as a global: a registered class object is the object itself (the same wrapper on every read,
   // the object must outlive the context); an arithmetic or std::string variable is read live and can be written back
-  // (Ruby: `self.name = v`; Lua: `name = v`; Python: `name = v` at the top level). NAME is a lower-case identifier.
+  // (Ruby: `self.name = v`; Lua: `name = v`; Python: `name = v` at the top level; Go: a package variable that is copied at
+  // the boundaries of an evaluation and of a host call, docs/notes/poly.md). NAME is a lower-case identifier.
   template <class T>
   Context& bind(const std::string& name, T& obj) {
     using D = std::remove_cv_t<T>;
@@ -734,17 +826,18 @@ class Context {
 
   // A script can call `name(args...)`. F is a function, function pointer, lambda or other callable with one
   // non-template call operator. Parameters: values by copy, registered classes by T&, const T& or T* (the script's
-  // object), results likewise (T& and T* are shared, a T is a new script-owned object). Exact arity.
+  // object), results likewise (T& and T* are shared, a T is a new script-owned object). Exact arity, or min_args..arity
+  // when min_args >= 0 (trailing arguments left out are nil).
   template <class F>
-  Context& bind_fn(const std::string& name, F f) {
-    detail::declare_fn(impl(), name, detail::make_callable<false>(impl(), std::move(f)));
+  Context& bind_fn(const std::string& name, F f, int min_args = -1) {
+    detail::declare_fn(impl(), name, detail::make_callable<false>(impl(), std::move(f), min_args));
     return *this;
   }
 
   // ---- evaluation ----
-  // Runs CODE and returns its value: Ruby the last expression, Python the last expression statement, Lua the chunk's
-  // `return` value (a source that is a single expression is returned as is). Globals persist between calls; Ruby's
-  // top-level locals do too.
+  // Runs CODE and returns its value: Ruby the last expression, Python the last expression statement, Go the last statement
+  // when it is an expression, Lua the chunk's `return` value (a source that is a single expression is returned as is).
+  // Globals persist between calls; Ruby's top-level locals do too, and Go's top-level declarations.
   Value eval_value(std::string_view language, std::string_view code) {
     return Value(detail::eval_in(impl(), language, code));
   }
@@ -784,6 +877,7 @@ T Value::as() const {
 template <class... A>
 Value Value::call(const std::string& name, A&&... args) const {
   detail::Impl* impl = detail::impl_for(v_);
+  (void)impl;  // unused when there are no arguments
   std::vector<detail::Var> argv;
   argv.reserve(sizeof...(A));
   (argv.push_back(detail::to_var<A>(impl, std::forward<A>(args))), ...);

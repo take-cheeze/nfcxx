@@ -636,7 +636,7 @@ CMP_INT = { "lt.s" => "cslt", "le.s" => "csle", "lt.u" => "cult", "le.u" => "cul
 CMP_FLT = { "lt.f" => "clt", "le.f" => "cle" }
 
 class Module_
-  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers
+  attr_accessor :globals, :strings, :out, :need_sink, :thread, :vhelpers, :weakrefs, :weakdata, :startup, :funcs, :got, :abi, :asmhelpers, :ubfiles
 
   def initialize
     @globals = {}       # IR name -> type
@@ -652,6 +652,7 @@ class Module_
     @got = {}           # IR name of an external function whose address is taken -> its pointer cell (see opnd_)
     @abi = {}           # struct name -> AbiType: the C calling convention shape of aggregates by value
     @asmhelpers = {}    # machine-level helpers ("fence", "rdtsc") that append_asm_helpers writes into the assembly
+    @ubfiles = {}       # source file name -> index, for the failure reports of the checks (see Fn#abort_label)
   end
 end
 
@@ -738,10 +739,14 @@ def escape_slots(allocs)
   allocs.map { |line| "\tstorel #{line.split[0]}, $#{SINK}" }
 end
 
+# The failures a check reports (lib: be/nfcxx_ldrt.c, __nfcxx_ubsan_report; the numbers are shared with it).
+UB_KIND = { trap: 0, overflow: 1, divzero: 2, shift: 3, bounds: 4, null: 5, unreachable: 6, missing_return: 7,
+            float_cast: 8, div_overflow: 9 }
+
 # One function body. Statements are emitted into body; registers and slots into allocs.
 class Fn
   attr_accessor :mod, :name, :ret_ty, :body, :allocs, :inits, :returns_twice, :dead, :regs, :slots, :nslot,
-                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf
+                :breaks, :conts, :case_labels, :abort_used, :nvla, :sret_buf, :loc
 
   def initialize(mod, name, ret_ty)
     @mod = mod
@@ -763,6 +768,8 @@ class Fn
     @conts = []             # step labels of enclosing loops, for (continue)
     @case_labels = {}       # object_id(marker) -> @label, for the switch being emitted
     @abort_used = false
+    @loc = nil              # [file, line] of the last (loc ...) statement: set only when the checks report themselves
+    @ubsites = {}           # [kind, file, line] -> label of the block that reports that failure
     @sret_buf = nil         # a function returning an aggregate in the C convention: the buffer it returns the address of
   end
 
@@ -828,22 +835,43 @@ class Fn
     start_block(lab)
   end
 
-  def abort_label
-    @abort_used = true
-    "@abort"
+  # The block a failed check jumps to. Without a (loc ...) statement it is the one shared block that calls abort(). With
+  # one (-fsanitize, docs/notes/ubsan.md) each (kind, file, line) has a block of its own that calls the report function
+  # of the runtime library with the kind, the file name and the line, and does not return.
+  def abort_label(kind = :trap)
+    if @loc.nil?
+      @abort_used = true
+      return "@abort"
+    end
+    key = [kind, @loc[0], @loc[1]]
+    @ubsites[key] ||= "@ub#{@ubsites.length}"
   end
 
-  # Abort when the w value c is nonzero.
-  def trap_if(c)
+  # The report blocks, after the function body. They are cold: nothing falls into them.
+  def ub_blocks
+    @ubsites.each do |key, lab|
+      kind, file, line = key
+      idx = (@mod.ubfiles[file] ||= @mod.ubfiles.length)
+      @body << lab
+      put("call $__nfcxx_ubsan_report(w #{UB_KIND.fetch(kind)}, l $__nfcxx_ubf#{idx}, w #{line})")
+      put("hlt")
+    end
+  end
+
+  # Abort when the w value c is nonzero. The failing branch is the first successor, so QBE puts its block out of line and
+  # the checked operation follows the test directly.
+  def trap_if(c, kind = :trap)
     ok = newlab
-    jnz(c, abort_label, ok)
+    jnz(c, abort_label(kind), ok)
     label(ok)
   end
 
-  # Abort when the w value c is zero.
-  def trap_unless(c)
+  # Abort when the w value c is zero. Inverted to trap_if's form for the same reason.
+  def trap_unless(c, kind = :trap)
     ok = newlab
-    jnz(c, ok, abort_label)
+    nc = tmp
+    emit("#{nc} =w ceqw #{c}, 0")
+    jnz(nc, abort_label(kind), ok)
     label(ok)
   end
 
@@ -1031,7 +1059,7 @@ class Fn
     emit("#{back} =l extsw #{tn}")
     c = tmp
     emit("#{c} =w ceql #{back}, #{r}")
-    trap_unless(c)
+    trap_unless(c, :overflow)
     Val.new(tn, "w", ty)
   end
 
@@ -1101,8 +1129,16 @@ def r_cadd_like(op)
     cls = arith_cls(ty, x)
     a = fn.opnd(x[2], cls)
     b = fn.opnd(x[3], cls)
+    if ty_size(ty) == 8 && op == "mul"
+      # No 128-bit product in QBE: the runtime library says whether the product overflows (be/nfcxx_ldrt.c).
+      c = fn.tmp
+      fn.emit("#{c} =w call $__nfcxx_smul64_ovf(l #{fn.ext64(a)}, l #{fn.ext64(b)})")
+      fn.trap_if(c, :overflow)
+      r = fn.tmp
+      fn.emit("#{r} =l mul #{fn.ext64(a)}, #{fn.ext64(b)}")
+      next Val.new(r, "l", ty)
+    end
     if ty_size(ty) == 8
-      raise Refused, "checked 64-bit signed multiply (cmul on #{tyrepr(ty)})" if op == "mul"
       r = fn.tmp
       fn.emit("#{r} =l #{op == "add" ? "add" : "sub"} #{fn.ext64(a)}, #{fn.ext64(b)}")
       if op == "add"
@@ -1122,7 +1158,7 @@ def r_cadd_like(op)
       end
       c = fn.tmp
       fn.emit("#{c} =w csltl #{x3}, 0")
-      fn.trap_if(c)
+      fn.trap_if(c, :overflow)
       next Val.new(r, "l", ty)
     end
     # 1-, 2- and 4-byte types: 64-bit result, then it must survive truncation to the type
@@ -1140,7 +1176,7 @@ def r_divrem(op)
     b = fn.opnd(x[3], cls)
     c = fn.tmp
     fn.emit("#{c} =w ceq#{cls} #{b.t}, 0")
-    fn.trap_if(c)
+    fn.trap_if(c, :divzero)
     if int_is_signed(ty)
       lo = int_range(ty)[0]
       c2 = fn.tmp
@@ -1149,7 +1185,7 @@ def r_divrem(op)
       fn.emit("#{c2} =w ceq#{cls} #{a.t}, #{lo}")
       fn.emit("#{c3} =w ceq#{cls} #{b.t}, -1")
       fn.emit("#{c4} =w and #{c2}, #{c3}")
-      fn.trap_if(c4)
+      fn.trap_if(c4, :div_overflow)
       qop = op == "div" ? "div" : "rem"
     else
       qop = op == "div" ? "udiv" : "urem"
@@ -1171,7 +1207,7 @@ def r_shift(left)
     # Trap unless 0 <= count < width. An unsigned compare also rejects negative counts.
     c = fn.tmp
     fn.emit("#{c} =w cult#{bcls} #{b.t}, #{width}")
-    fn.trap_unless(c)
+    fn.trap_unless(c, :shift)
     if left
       op = "shl"
     else
@@ -1191,7 +1227,7 @@ def r_cneg(fn, x)
   lo = int_range(ty)[0]
   c = fn.tmp
   fn.emit("#{c} =w ceq#{cls} #{a.t}, #{lo}")
-  fn.trap_if(c)
+  fn.trap_if(c, :overflow)
   t = fn.tmp
   fn.emit("#{t} =#{cls} sub 0, #{a.t}")
   fn.narrow(Val.new(t, cls, ty), ty)
@@ -1354,7 +1390,7 @@ def r_cf2i(fn, x)
   fn.emit("#{c1} =w #{lo[0]} #{d}, #{lo[1]}")
   fn.emit("#{c2} =w #{hi[0]} #{d}, #{hi[1]}")
   fn.emit("#{c3} =w and #{c1}, #{c2}")
-  fn.trap_unless(c3)
+  fn.trap_unless(c3, :float_cast)
   conv = int_is_signed(dst) ? "dtosi" : "dtoui"
   cls = dst[1] == 8 ? "l" : "w"
   t = fn.tmp
@@ -1893,7 +1929,7 @@ def s_bounds(fn, x)
   else
     fn.emit("#{c} =w cult#{cls} #{idx.t}, #{wrap_int(n, cls)}")
   end
-  fn.trap_unless(c)
+  fn.trap_unless(c, :bounds)
 end
 
 # (trap): the instruction gcc's __builtin_trap and asm("ud2") are, QBE's hlt (ud2 on x86-64): SIGILL, not the SIGABRT of
@@ -1939,12 +1975,12 @@ def s_nonnull(fn, x)
   p = fn.opnd(x[1], "l")
   return if p.t.start_with?("$")  # the address of an object or a function
   if p.t == "0"
-    fn.jmp(fn.abort_label)
+    fn.jmp(fn.abort_label(:null))
     return
   end
   c = fn.tmp
   fn.emit("#{c} =w cnel #{p.t}, 0")
-  fn.trap_unless(c)
+  fn.trap_unless(c, :null)
 end
 
 def s_if(fn, x)
@@ -1965,7 +2001,19 @@ def s_if(fn, x)
   lt = fn.newlab
   le = els.nil? ? nil : fn.newlab
   lend = fn.newlab
-  fn.jnz(c.t, lt, le.nil? ? lend : le)
+  # QBE lays out the second successor of a jnz right after it and the first one later (cfg.c, porec), so the arm that is
+  # likely to run is made the second one: the test is inverted for a likely then-arm or an unlikely else-arm.
+  other = le.nil? ? lend : le
+  hint = ->(arm, name) { !arm.nil? && head_of(arm[0]) == name }
+  then_likely = hint.(then_, "likely") || hint.(els, "unlikely")
+  then_unlikely = hint.(then_, "unlikely") || hint.(els, "likely")
+  if then_likely && !then_unlikely
+    nc = fn.tmp
+    fn.emit("#{nc} =w ceqw #{c.t}, 0")
+    fn.jnz(nc, other, lt)
+  else
+    fn.jnz(c.t, lt, other)
+  end
   fn.label(lt)
   fn.stmts(then_)
   fn.jmp(lend)
@@ -2098,8 +2146,24 @@ def s_return(fn, x)
   fn.ret(v.t)
 end
 
+# (unreachable) or (unreachable missing-return): the second form is a function left without a value, which a report
+# names differently.
 def s_unreachable(fn, x)
-  fn.jmp(fn.abort_label)
+  raise BadIR, "unreachable form" if x.length > 2 || (x.length == 2 && x[1] != "missing-return")
+  fn.jmp(fn.abort_label(x.length == 2 ? :missing_return : :unreachable))
+end
+
+# (loc "FILE" LINE): the source position of the statements that follow, up to the next (loc ...). It generates no code;
+# the checks that fail after it report it (Fn#abort_label).
+def s_loc(fn, x)
+  raise BadIR, "loc form" if x.length != 3 || as_int(x[2]).nil?
+  fn.loc = [pstr(x[1]), as_int(x[2])]
+end
+
+# (likely) and (unlikely): the first statement of an if arm says which way the branch goes (s_if reads it). Elsewhere,
+# and for the other consumers of the IR, it is a note.
+def s_hint(fn, x)
+  raise BadIR, "branch hint form" if x.length != 1
 end
 
 # (barrier): a compiler barrier, from an empty asm statement with a "memory" clobber. A call of an empty function
@@ -2125,6 +2189,7 @@ STMT = {
   "break" => ->(fn, x) { s_break(fn, x) }, "continue" => ->(fn, x) { s_continue(fn, x) },
   "goto" => ->(fn, x) { s_goto(fn, x) }, "label" => ->(fn, x) { s_label(fn, x) },
   "return" => ->(fn, x) { s_return(fn, x) }, "unreachable" => ->(fn, x) { s_unreachable(fn, x) },
+  "loc" => ->(fn, x) { s_loc(fn, x) }, "likely" => ->(fn, x) { s_hint(fn, x) }, "unlikely" => ->(fn, x) { s_hint(fn, x) },
   "barrier" => ->(fn, x) { s_barrier(fn, x) }, "trap" => ->(fn, x) { s_trap(fn, x) }, "fence" => ->(fn, x) { s_fence(fn, x) },
   "decl" => ->(fn, x) { s_decl(fn, x) }, "scope-end" => ->(fn, x) { s_scope_end(fn, x) },
   "rref-arg" => ->(fn, x) { s_rref_arg(fn, x) },
@@ -2605,9 +2670,10 @@ def emit_function(mod, f)
     if ret == VOID
       fn.ret
     else
-      fn.jmp(fn.abort_label)
+      fn.jmp(fn.abort_label(:missing_return))
     end
   end
+  fn.ub_blocks
   if fn.abort_used
     fn.body << "@abort"
     fn.put("call $abort()")
@@ -2868,6 +2934,9 @@ def emit_module(text, do_prune = true, ld_trap = false)
   mod.got.each { |name, cell| mod.out << "data $#{cell} = align 8 { l $#{qsym(name)} }" }
   mod.out << "data $#{SINK} = align 8 { z 8 }" if mod.need_sink
   mod.vhelpers.each_value { |lines| mod.out.concat(lines) }
+  mod.ubfiles.each do |file, i|
+    mod.out << "data $__nfcxx_ubf#{i} = { #{(file.bytes + [0]).map { |c| "b #{c}" }.join(", ")} }"
+  end
   mod.weakrefs.each_key { |n| mod.out << (WEAK_MARK + qsym(n)) }
   mod.asmhelpers.each_key { |n| mod.out << (ASM_MARK + n) }
   "# QBE IL generated from the nfcxx Path B IR by scripts/pathb-qbe-emit.py\n" + mod.out.join("\n") + "\n"

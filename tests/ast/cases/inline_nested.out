@@ -1,0 +1,78 @@
+-- chains of calls
+0	0	0	0.0	true	true	near	near!
+1	1	2	1.4142135623731	true	true	near	near!
+2	4	8	2.8284271247462	true	true	near	near!
+3	9	18	4.2426406871193	false	false	far	far!
+4	16	32	5.6568542494924	false	false	far	far!
+5	25	50	7.0710678118655	false	false	far	far!
+6	36	72	8.4852813742386	false	false	far	far!
+7	49	98	9.8994949366117	false	false	far	far!
+1.802775637732
+0.5
+1.1180339887499
+2.5
+-- natives and string methods inside the body
+001| 0.33|1	ABC14	4	1	[ab]	3
+002| 0.67|2	ABC24	6	2	[abab]	4
+003| 1.00|3	ABC34	9	2	[ababab]	5
+004| 1.33|4	ABC44	10	4	[abababab]	6
+005| 1.67|5	ABC54	10	4	[ababababab]	7
+006| 2.00|6	ABC64	10	5	[abababababab]	8
+-- the same helper at several depths of the same chain
+2	3	5	9	10	19
+3	4	6	10	11	20
+4	5	7	11	12	21
+5	6	8	12	13	22
+6	7	9	13	14	23
+7	8	10	14	15	24
+-- results of several values through the chain
+1	1	1	1	tail
+s	1
+1	tail	nil
+2	1	2	2	tail
+s	2
+2	tail	nil
+3	1	3	3	tail
+s	3
+3	tail	nil
+4	1	4	4	tail
+s	4
+4	tail	nil
+5	1	5	5	tail
+s	5
+5	tail	nil
+6	1	6	6	tail
+s	6
+6	tail	nil
+-- an error at the bottom of the chain
+true	4
+true	3
+true	4
+true	5
+true	4
+true	5
+true	6
+true	5
+true	6
+false	inline_nested.lua:51: too big: 4
+false	inline_nested.lua:57: too big (2): 4
+false	inline_nested.lua:60: too big (3): 4
+false	inline_nested.lua:51: too big: 5
+false	inline_nested.lua:57: too big (2): 5
+false	inline_nested.lua:60: too big (3): 5
+false	inline_nested.lua:51: too big: 6
+false	inline_nested.lua:57: too big (2): 6
+false	inline_nested.lua:60: too big (3): 6
+-- an error in an argument at an inner level
+true	4
+true	4
+true	16
+true	16
+false	inline_nested.lua:4: attempt to perform arithmetic on a table value (local 'x')
+true	36
+true	64
+true	64
+true	100
+true	100
+false	inline_nested.lua:4: attempt to perform arithmetic on a table value (local 'x')
+true	144
