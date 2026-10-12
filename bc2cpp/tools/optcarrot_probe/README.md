@@ -1477,7 +1477,7 @@ Sealed mode and `OPTCARROT_ORIGINAL_LUT=1` are refused for this experiment.
 The compiled build gets its own `irlut` target suffix. Run
 `MRBC=/path/to/mrbc ruby scripts/optcarrot/ppu_ir_lut_check.rb`; set
 `MRUBY_BUILD=/path/to/compatible/mruby/build` for the native equality and
-fallback test. See [ADR 0423](../../docs/adr/0423-optcarrot-ir-tile-lut.md).
+fallback test. See [ADR 0427](../../docs/adr/0427-optcarrot-ir-tile-lut.md).
 
 The bootstrap method snapshots belong to the probe's single mruby VM per
 process. Embedding this helper in a process with multiple independent VMs
