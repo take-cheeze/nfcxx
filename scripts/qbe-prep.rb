@@ -8,8 +8,8 @@
 #     `int3; ret` stub, so the trap is the same and the program resumes after it. Any other inline asm
 #     is left in place, and cproc rejects it.
 #   * Builtins cproc does not know, which doctest uses. `__builtin_memcpy`, `memmove`, `memset`, `memcmp` and
-#     `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_isnan` and
-#     `__builtin_clzl` become small helpers (`__nfcxx_isnan`, `__nfcxx_clzl`), defined in the prelude.
+#     `strlen` are renamed to the libc functions, with prototypes in the prelude. `__builtin_clzl` becomes a small
+#     helper (`__nfcxx_clzl`), defined in the prelude.
 #     `__builtin_mul_overflow(x, C, &x)` with an unsigned long decimal constant C (the only shape doctest
 #     uses; `(&x)` also accepted) becomes `__nfcxx_mulov_ul`, a checked multiply with the same result.
 #     Other uses of these builtins, and every other builtin, are left alone, so cproc rejects them.
@@ -376,6 +376,12 @@ def tokenize(src)
       next
     end
     c2 = src.getbyte(i + 1)
+    # a line of the preprocessor (`# 12 "file"`, the markers of cc -E without -P): not C, skipped like a comment
+    if c == 35 && (i == 0 || src.getbyte(i - 1) == 10)
+      j = src.index("\n", i)
+      i = j.nil? ? n : j
+      next
+    end
     if c == 47 && c2 == 47
       j = src.index("\n", i)
       i = j.nil? ? n : j
@@ -666,14 +672,10 @@ LIBC_BUILTINS = {
 }
 # builtin -> [helper name, definition in the prelude]
 HELPER_BUILTINS = {
-  '__builtin_isnan' => ['__nfcxx_isnan', 'static int __nfcxx_isnan(double x) { return x != x; }'],
-  # nlohmann::json: float classification and constants (double only; cproc has no long double anyway)
+  # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
   '__builtin_huge_val' => ['__nfcxx_huge_val', 'static double __nfcxx_huge_val(void) { return __builtin_inff(); }'],
   '__builtin_nan' => ['__nfcxx_nan', 'static double __nfcxx_nan(const char *s) { return __builtin_nanf(""); }'],
-  '__builtin_isfinite' => ['__nfcxx_isfinite', 'static int __nfcxx_isfinite(double x) { return x - x == 0; }'],
-  '__builtin_isinf' => ['__nfcxx_isinf',
-                        'static int __nfcxx_isinf(double x) {' \
-                        ' return x == __builtin_inff() ? 1 : x == -__builtin_inff() ? -1 : 0; }'],
+  # __builtin_isinf and __builtin_isfinite are not rewritten: cproc lowers them for every float type (expr.c fpbuiltin)
   '__builtin_bswap16' => ['__nfcxx_bswap16',
                           'static unsigned short __nfcxx_bswap16(unsigned short x) { return (unsigned short)((x << 8) | (x >> 8)); }'],
   '__builtin_bswap32' => ['__nfcxx_bswap32',

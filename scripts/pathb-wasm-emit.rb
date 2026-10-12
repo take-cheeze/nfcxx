@@ -1253,6 +1253,8 @@ class Fn
       end
       restore_sp
       e(0x0f)
+    when "loc", "likely", "unlikely"
+      # source position and branch hints (docs/notes/ubsan.md): no code
     when "unreachable", "trap"
       e(0x00)
     when "nonnull"

@@ -288,7 +288,13 @@ Value arith_slow(State& S, int op, const Value& a, const Value& b, Node* na, Nod
   if (!tm.is_nil()) return call_tm(S, tm, a, b, nullptr);
   if (!bitwise && (a.t == T_STR || b.t == T_STR)) {
     Value x, y;
-    if (to_number(a, &x) && to_number(b, &y)) return arith_numbers(S, op, x, y);
+    if (to_number(a, &x) && to_number(b, &y)) {
+      // The string metamethod does the operation in Lua, so the error of an integer division by zero comes from a C function:
+      // it has no position.
+      if ((op == AR_MOD || op == AR_IDIV) && x.t == T_INT && y.t == T_INT && y.i == 0)
+        S.error(S.strv(op == AR_MOD ? "attempt to perform 'n%0'" : "attempt to divide by zero"));
+      return arith_numbers(S, op, x, y);
+    }
     S.rt_error(std::string("attempt to ") + kOpVerb[op] + " a '" + State::type_name(a) + "' with a '" + State::type_name(b) + "'");
   }
   if (bitwise) {
@@ -305,46 +311,15 @@ Value arith_slow(State& S, int op, const Value& a, const Value& b, Node* na, Nod
 }
 
 // ---- comparison --------------------------------------------------------------------------------------------------------
-static bool flt_to_int_mode(double f, bool ceil_mode, std::int64_t* out) {
-  double fl = std::floor(f);
-  if (fl != f && ceil_mode) fl += 1;
-  if (fl >= -9223372036854775808.0 && fl < 9223372036854775808.0) {
-    *out = static_cast<std::int64_t>(fl);
-    return true;
-  }
-  return false;
-}
-
-static inline bool fits_double(std::int64_t i) { return -(1LL << 53) <= i && i <= (1LL << 53); }
-
+// Integer against float is compared exactly (nfcast_tier_rt.h, shared with the code the tier generates).
 static bool lt_num(const Value& a, const Value& b) {
-  if (a.t == T_INT) {
-    if (b.t == T_INT) return a.i < b.i;
-    if (fits_double(a.i)) return static_cast<double>(a.i) < b.d;
-    std::int64_t fi;
-    if (flt_to_int_mode(b.d, true, &fi)) return a.i < fi;
-    return b.d > 0;
-  }
-  if (b.t == T_FLT) return a.d < b.d;
-  if (fits_double(b.i)) return a.d < static_cast<double>(b.i);
-  std::int64_t fi;
-  if (flt_to_int_mode(a.d, false, &fi)) return fi < b.i;
-  return a.d < 0;
+  if (a.t == T_INT) return b.t == T_INT ? a.i < b.i : nfcr_lt_if(a.i, b.d);
+  return b.t == T_FLT ? a.d < b.d : nfcr_lt_fi(a.d, b.i);
 }
 
 static bool le_num(const Value& a, const Value& b) {
-  if (a.t == T_INT) {
-    if (b.t == T_INT) return a.i <= b.i;
-    if (fits_double(a.i)) return static_cast<double>(a.i) <= b.d;
-    std::int64_t fi;
-    if (flt_to_int_mode(b.d, false, &fi)) return a.i <= fi;
-    return b.d > 0;
-  }
-  if (b.t == T_FLT) return a.d <= b.d;
-  if (fits_double(b.i)) return a.d <= static_cast<double>(b.i);
-  std::int64_t fi;
-  if (flt_to_int_mode(a.d, true, &fi)) return fi <= b.i;
-  return a.d < 0;
+  if (a.t == T_INT) return b.t == T_INT ? a.i <= b.i : nfcr_le_if(a.i, b.d);
+  return b.t == T_FLT ? a.d <= b.d : nfcr_le_fi(a.d, b.i);
 }
 
 static int str_compare(const String* a, const String* b) {
@@ -445,10 +420,9 @@ Value concat_slow(State& S, Value* vals, int n, Node** nodes) {
 }
 
 // ---- calls ---------------------------------------------------------------------------------------------------------------
-void call_closure(State& S, Closure* cl, Value* args, int n, Rets& out, bool from_native) {
+// Sets up the frame FR for a call of CL with the N arguments at BASE (the parameters and locals live there).
+static void enter_closure(State& S, Frame& fr, Closure* cl, Value* base, int n) {
   Proto* p = cl->proto;
-  if (S.depth >= S.max_depth) S.rt_error("stack overflow");
-  Value* base = args;
   int nslots = p->nslots, np = p->nparams;
   Value* va = nullptr;
   int nva = 0;
@@ -467,22 +441,40 @@ void call_closure(State& S, Closure* cl, Value* args, int n, Rets& out, bool fro
   for (int k = n < np ? n : np; k < nslots; ++k) base[k] = Value();
   for (int slot : p->captured_params) base[slot] = Value::object(T_CELL, new_cell(S, base[slot]));
   S.top = newtop;
-  Frame fr;
-  fr.S = &S;
   fr.cl = cl;
   fr.base = base;
   fr.va = va;
   fr.nva = nva;
+  fr.line = p->linedefined;
+}
+
+void call_closure(State& S, Closure* cl, Value* args, int n, Rets& out, bool from_native) {
+  if (S.tier && tier_dispatch(S, cl, args, n, out)) return;  // a hot numeric kernel runs as native code (nfcast_tier.cpp)
+  if (S.depth >= S.max_depth) S.rt_error("stack overflow");
+  Value* base = args;
+  Frame fr;
+  fr.S = &S;
   fr.rets = &out;
   fr.prev = S.cur;
   fr.native_below = from_native;
-  fr.line = p->linedefined;
+  enter_closure(S, fr, cl, base, n);
   S.cur = &fr;
   ++S.depth;
   bool saved_nfn = S.nfn;
   S.nfn = false;
   safepoint(S);
-  p->body->exec(fr);
+  fr.cl->proto->body->exec(fr);
+  // `return f(...)` of a script function leaves the callee in the frame instead of calling it (ReturnNode, CallBase::run): the frame
+  // is reused for it, so a chain of tail calls takes no stack and the caller is gone from the frame chain, as in Lua.
+  while (fr.tail_cl) {
+    Closure* next = fr.tail_cl;
+    fr.tail_cl = nullptr;
+    fr.tailed = true;
+    if (S.tier && tier_dispatch(S, next, base, fr.tail_n, out)) break;
+    enter_closure(S, fr, next, base, fr.tail_n);
+    safepoint(S);
+    fr.cl->proto->body->exec(fr);
+  }
   S.nfn = saved_nfn;
   S.cur = fr.prev;
   --S.depth;

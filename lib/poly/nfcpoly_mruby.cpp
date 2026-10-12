@@ -282,6 +282,15 @@ struct MrubyLang : Lang {
   }
   void class_method(ClassInfo* ci, const std::string& name, Callable* c) override {
     define_on(classes[ci]->klass, name, c, false);
+    // The Python-named operator methods are the operators of Ruby too ("Operators" in poly.md). Only `obj OP x`: mruby's Integer
+    // and Float do not ask the other operand (no coerce), so `2 - obj` is a TypeError.
+    static const char* const ops[][2] = {
+        {"__add__", "+"},    {"__sub__", "-"},   {"__mul__", "*"},   {"__truediv__", "/"}, {"__mod__", "%"},
+        {"__and__", "&"},    {"__or__", "|"},    {"__xor__", "^"},   {"__neg__", "-@"},    {"__lt__", "<"},
+        {"__le__", "<="},    {"__gt__", ">"},    {"__ge__", ">="},   {"__eq__", "=="},     {"__ne__", "!="},
+        {"__getitem__", "[]"}, {"__str__", "to_s"}, {"__repr__", "inspect"}};
+    for (auto& op : ops)
+      if (name == op[0]) define_on(classes[ci]->klass, op[1], c, false);
   }
   void class_prop(ClassInfo* ci, const std::string& name, Callable* get, Callable* set) override {
     define_on(classes[ci]->klass, name, get, false);
@@ -362,10 +371,7 @@ mrb_value trampoline(mrb_state* mrb, mrb_value self) {
   Callable* c = static_cast<Callable*>(mrb_cptr(mrb_proc_cfunc_env_get(mrb, 0)));
   bool ctor = mrb_test(mrb_proc_cfunc_env_get(mrb, 1));
   mrb_int argc = mrb_get_argc(mrb);
-  if (argc != c->arity()) {
-    raise_class(mrb, "ArgumentError",
-                "wrong number of arguments (given " + std::to_string(argc) + ", expected " + std::to_string(c->arity()) + ")");
-  }
+  if (!arity_fits(c, argc)) raise_class(mrb, "ArgumentError", arity_message(c, argc));
   Pending pend;
   mrb_value result = mrb_nil_value();
   try {
@@ -373,6 +379,7 @@ mrb_value trampoline(mrb_state* mrb, mrb_value self) {
     args.reserve(static_cast<std::size_t>(argc));
     const mrb_value* argv = mrb_get_argv(mrb);
     for (mrb_int k = 0; k < argc; ++k) args.push_back(L->decode(argv[k]));
+    arity_pad(c, args);
     if (ctor) {
       if (!mrb_data_p(self)) throw ConversionError("nfcpoly: initialize on a non-bound object");
       if (DATA_PTR(self)) throw ConversionError("nfcpoly: the object is already initialised");

@@ -1,5 +1,5 @@
 // Raw access to the "ast" backend (the nfcast engine, lib/ast), for code that needs the engine's API next to nfcpoly. Link
-// nfcpoly_ast.cpp and the five lib/ast/nfcast_*.cpp files.
+// nfcpoly_ast.cpp and the six lib/ast/nfcast_*.cpp files.
 #pragma once
 #include "nfcast.hpp"
 #include "nfcpoly.hpp"
