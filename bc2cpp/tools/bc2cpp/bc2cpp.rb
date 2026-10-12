@@ -40,6 +40,7 @@ require_relative 'class_arg_types'
 require_relative 'closed_world'
 require_relative 'nomethod_reviewed'
 require_relative 'proven_miss_reviewed'
+require_relative 'strict_hints'
 require_relative 'hot_methods'
 require_relative 'core_methods'
 require_relative 'enumerator_model'
@@ -1596,6 +1597,24 @@ if $PROGRAM_NAME == __FILE__
       abort msg unless ENV[NomethodReviewed::ALLOW_ENV] == 'allow'
 
       warn msg.sub('bc2cpp:', "bc2cpp: #{NomethodReviewed::ALLOW_ENV}=allow, ignoring")
+    end
+    # STRICT_HINTS (docs/adr/0419): the forced hint sites, listed and held to STRICT_HINTS_REVIEWED.
+    unless StrictHints.families.empty?
+      hint_sites = StrictHints.sites(compiled)
+      warn "== strict hints (#{StrictHints.families.join(',')}): #{hint_sites.size} bc2cpp_hint_violation =="
+      StrictHints.family_counts(compiled).sort.each { |f, n| warn "  STRICT_HINT #{f}: #{n}" }
+      hint_sites.map { |s| s[:key] }.uniq.sort.each { |k| warn "  STRICT_HINT_SITE #{k}" }
+      warn ''
+      hint_violations = StrictHints.violations(hint_sites, compiled, stale: !ENV['BC2CPP_HOT_METHODS'])
+      unless hint_violations.empty?
+        msg = "bc2cpp: #{hint_violations.size} STRICT_HINTS_REVIEWED violation(s) (docs/adr/0419):\n  " \
+              "#{hint_violations.join("\n  ")}\n" \
+              'Run the verify build over the real workloads, then list the sites in ' \
+              'tools/bc2cpp/strict_hints_reviewed.rb (scripts/bc2cpp/strict_hints_update.rb).'
+        abort msg unless ENV[StrictHints::ALLOW_ENV] == 'allow'
+
+        warn msg.sub('bc2cpp:', "bc2cpp: #{StrictHints::ALLOW_ENV}=allow, ignoring")
+      end
     end
     # PROVEN_MISS_REVIEWED (docs/adr/0275): a send to a proven class that nothing answers.
     miss_sites = ProvenMiss.sites(compiled)

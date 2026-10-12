@@ -339,7 +339,9 @@ class CodeGen
     note = "  // POLY_SMALL_N :#{name} -> #{owners_note} (#{candidates.size} known real definitions), " \
            "runtime-class-checked direct C++ calls chained, mrb_funcall fallback for any other class\n"
     listed = candidates.flat_map { |t| [t.owner] + inherited[t.owner] }
-    fallback = guarded_fallback_line(d, recv, name, argv, listed, closed_world_site)
+    fallback = strict_hint_wrap('poly_small_n', d, recv, name, argv, nil) do
+      guarded_fallback_line(d, recv, name, argv, listed, closed_world_site)
+    end
     chain = "#{branches.join}{\n    #{fallback}  }\n"
     return "#{diag}#{note}  #{chain}" unless hoist
 
@@ -528,7 +530,9 @@ class CodeGen
     note = "  // POLY_TABLE :#{name} -> #{table[:symbol]} (#{candidates.size} known real definitions, " \
            "#{table[:entries].size} classes), runtime-class lookup then direct C++ call, mrb_funcall fallback " \
            "for any other class\n"
-    fallback = guarded_fallback_line(d, recv, name, argv, table[:entries].map(&:first), closed_world_site)
+    fallback = strict_hint_wrap('poly_table', d, recv, name, argv, nil) do
+      guarded_fallback_line(d, recv, name, argv, table[:entries].map(&:first), closed_world_site)
+    end
     "#{diag}#{note}  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), " \
       "#{table[:symbol]})) {\n" \
       "    r#{d} = reinterpret_cast<#{fn_type}>(bc2cpp_pfn)(M, #{([recv] + argv).join(', ')});\n" \
@@ -793,7 +797,7 @@ class CodeGen
     return "#{fast}return mrb_funcall(M, recv, \"[]\", 1, mrb_fixnum_value(0));\n" if kind == 'getidx0'
     return "#{fast}return mrb_funcall(M, recv, \"[]=\", 2, idx, val);\n" if kind == 'setidx'
 
-    tail = compile_poly_dispatch(name, 0, 'recv', argv, 1) ||
+    tail = without_strict_hints { compile_poly_dispatch(name, 0, 'recv', argv, 1) } ||
            "  r0 = mrb_funcall(M, recv, \"[]\", 1, key);\n"
     "#{fast}mrb_value r0 = mrb_nil_value();\n#{tail}  return r0;\n"
   end

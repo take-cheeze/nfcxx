@@ -21,7 +21,7 @@ module SymbolCache
   CHECKED_FUNCALLS = { 'bc2cpp_funcall_noarg' => 1, 'bc2cpp_funcall_explicit' => 2,
                        'bc2cpp_native_singleton_named' => 2 }.freeze
   FUNCALLS = (%w[mrb_funcall] + CHECKED_FUNCALLS.keys).freeze
-  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
+  FUNCALL_START = /\b(#{FUNCALLS.join('|')}|bc2cpp_nomethod_named|bc2cpp_nomethod_raise_named|bc2cpp_guard_violation_named|bc2cpp_hint_violation_named|bc2cpp_nil_receiver_named)\(M,\s*/
   FUNCALL_NAME = /\G,\s*(#{STRING})\s*,/
   NAMED_NAME = /\G,\s*(#{STRING})(?=\s*[,)])/
   SEND_INDEX = /\G,\s*(\d+)\s*[,)]/
@@ -34,6 +34,8 @@ module SymbolCache
     attr_accessor :nomethod_used
     # GUARD_VIOLATION (ADR 0290): the same for bc2cpp_guard_violation.
     attr_accessor :violation_used
+    # STRICT_HINTS (ADR 0419): the same for bc2cpp_hint_violation.
+    attr_accessor :hint_violation_used
     # NIL_RECEIVER (ADR 0296): the same for bc2cpp_nil_receiver.
     attr_accessor :nil_receiver_used
     # NATIVE_SINGLETON_CALL (ADR 0416): the same for bc2cpp_native_singleton.
@@ -48,6 +50,7 @@ module SymbolCache
       @checks = []
       @nomethod_used = false
       @violation_used = false
+      @hint_violation_used = false
       @nil_receiver_used = false
       @native_singleton_used = false
     end
@@ -106,12 +109,14 @@ module SymbolCache
         index = table.index_for(name[1].force_encoding(encoding), CHECKED_FUNCALLS.fetch(kind, 0))
         table.nomethod_used = true if kind == 'bc2cpp_nomethod_named' || kind == 'bc2cpp_nomethod_raise_named'
         table.violation_used = true if kind == 'bc2cpp_guard_violation_named'
+        table.hint_violation_used = true if kind == 'bc2cpp_hint_violation_named'
         table.nil_receiver_used = true if kind == 'bc2cpp_nil_receiver_named'
         table.native_singleton_used = true if kind == 'bc2cpp_native_singleton_named'
         replacement = case kind
                       when 'bc2cpp_nomethod_named' then "bc2cpp_nomethod(M, #{receiver}, #{index}"
                       when 'bc2cpp_nomethod_raise_named' then "bc2cpp_nomethod_raise(M, #{receiver}, #{index}"
                       when 'bc2cpp_guard_violation_named' then "bc2cpp_guard_violation(M, #{receiver}, #{index}"
+                      when 'bc2cpp_hint_violation_named' then "bc2cpp_hint_violation(M, #{receiver}, #{index}"
                       when 'bc2cpp_nil_receiver_named' then "bc2cpp_nil_receiver(M, #{receiver}, #{index}"
                       when 'bc2cpp_native_singleton_named' then "bc2cpp_native_singleton(M, #{receiver}, #{index}, BC2CPP_NSC_SLOT,"
                       else "bc2cpp_send(M, #{receiver}, #{index},"
@@ -134,7 +139,7 @@ module SymbolCache
     code = code.b
     found = []
     pos = 0
-    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|nil_receiver|native_singleton)\(M,\s*/, pos))
+    while (start = code.index(/\bbc2cpp_(?:send|nomethod|nomethod_raise|guard_violation|hint_violation|nil_receiver|native_singleton)\(M,\s*/, pos))
       head_end = Regexp.last_match.end(0)
       recv_end = expression_end(code, head_end)
       match = recv_end && SEND_INDEX.match(code, recv_end)
@@ -216,7 +221,7 @@ module SymbolCache
       }
       #{table.native_singleton_used ? NATIVE_SINGLETON : ''}
       #{table.nomethod_used ? NOMETHOD : ''}
-      #{table.violation_used ? GUARD_VIOLATION : ''}
+      #{table.violation_used ? GUARD_VIOLATION : ''}#{table.hint_violation_used ? HINT_VIOLATION : ''}
       #{table.nil_receiver_used ? NIL_RECEIVER : ''}
     CPP
   end
@@ -417,6 +422,47 @@ module SymbolCache
     }
   CPP
   private_constant :GUARD_VIOLATION
+
+  # STRICT_HINTS (docs/adr/0419): the else arm of a guard on a whole-program class HINT, forced by
+  # BC2CPP_STRICT_HINTS. A wrong hint is reached here with a correct program: log, then raise
+  # BC2cppHintViolation < NoMethodError (a `rescue NoMethodError` sees it after the log line). Never
+  # dispatches, never undefined behavior. -DBC2CPP_NOMETHOD_VERIFY aborts, naming class, name and site,
+  # so CI can run real workloads and prove zero violations; -DBC2CPP_HINT_VIOLATION_DISPATCH restores
+  # the by-name send (silently) to bisect a suspected wrong hint without regenerating.
+  HINT_VIOLATION = <<~CPP
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+    #include <stdio.h>
+    #include <stdlib.h>
+    #endif
+    [[noreturn, gnu::cold, gnu::noinline]] static void bc2cpp_hint_violation_raise(mrb_state* M, mrb_value recv, mrb_sym mid, const char* site) {
+    #ifdef BC2CPP_NOMETHOD_VERIFY
+      fprintf(stderr, "bc2cpp: NOMETHOD_VERIFY: hint violation reached: %s", mrb_class_name(M, mrb_obj_class(M, recv)));
+      fprintf(stderr, "#%s at %s\\n", mrb_sym_name(M, mid), site);
+      fflush(stderr);
+      abort();
+    #endif
+      mrb_value msg = mrb_format(M, "%T#%n at %s", recv, mid, site);
+      mrb_value err = mrb_gv_get(M, mrb_intern_lit(M, "$stderr"));
+      mrb_sym puts_id = mrb_intern_lit(M, "puts");
+      if (mrb_respond_to(M, err, puts_id)) mrb_funcall_id(M, err, puts_id, 1, mrb_str_plus(M, mrb_str_new_lit(M, "[RPG2k] hint violation: "), msg));
+      struct RClass* klass = mrb_define_class(M, "BC2cppHintViolation", mrb_exc_get_id(M, mrb_intern_lit(M, "NoMethodError")));
+      mrb_exc_raise(M, mrb_exc_new_str(M, klass, mrb_str_plus(M, mrb_str_new_lit(M, "hint violation: "), msg)));
+    }
+    [[gnu::noipa]] static mrb_value bc2cpp_hint_violation(mrb_state* M, mrb_value recv, int i, const char* site, mrb_int argc, ...) {
+    #ifdef BC2CPP_HINT_VIOLATION_DISPATCH
+      mrb_value argv[16];
+      va_list ap;
+      va_start(ap, argc);
+      for (mrb_int k = 0; k < argc && k < 16; k++) argv[k] = va_arg(ap, mrb_value);
+      va_end(ap);
+      return bc2cpp_funcall_argv(M, recv, bc2cpp_sym(M, i), argc, argv);
+    #else
+      (void)argc;
+      bc2cpp_hint_violation_raise(M, recv, bc2cpp_sym(M, i), site);
+    #endif
+    }
+  CPP
+  private_constant :HINT_VIOLATION
 
   # NIL_RECEIVER (docs/adr/0296): the nil arm of a receiver the class pools prove is nil or one
   # class, for a name nil does not answer. It is a real program path (a nil dereference), so it

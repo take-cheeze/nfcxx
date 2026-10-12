@@ -22,7 +22,9 @@ module InterfaceTables
     table = @poly_tables[[:interface, name, n, rows]] ||= {
       name: name, entries: rows, interface: true, symbol: "bc2cpp_poly_table_#{@poly_tables.size}"
     }
-    fallback = guarded_fallback_line(d, recv, name, argv, rows.map(&:first), site)
+    fallback = strict_hint_wrap('interface_table', d, recv, name, argv, nil) do
+      guarded_fallback_line(d, recv, name, argv, rows.map(&:first), site)
+    end
     fn_type = "mrb_value (*)(#{(['mrb_state*'] + Array.new(n + 1, 'mrb_value')).join(', ')})"
     "  // INTERFACE_TABLE :#{name}/#{n} -> #{table[:symbol]} (#{rows.size} exact classes)\n" \
       "  if (bc2cpp_poly_fn bc2cpp_pfn = bc2cpp_poly_lookup(M, mrb_obj_class(M, #{recv}), #{table[:symbol]})) {\n" \

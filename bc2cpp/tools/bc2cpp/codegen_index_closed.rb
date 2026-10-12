@@ -514,7 +514,9 @@ class CodeGen
     return nil unless plan
 
     @index_closed_build = { plan: plan, used: false, overflow: false }
-    chain = compile_poly_dispatch(name, 0, 'recv', argv, argv.size, closed_world_site: INDEX_CLOSED_SITE)
+    chain = without_strict_hints do
+      compile_poly_dispatch(name, 0, 'recv', argv, argv.size, closed_world_site: INDEX_CLOSED_SITE)
+    end
     build = @index_closed_build
     chain ||= index_closed_fallback(0, 'recv', name, argv, []) if plan.resolution.none? { |_, (kind2, _)| kind2 == :ruby }
     unless chain && build[:used] && !build[:overflow] && !chain.match?(/\bmrb_funcall\w*\(|\bbc2cpp_send\(/)
