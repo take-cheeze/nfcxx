@@ -328,6 +328,22 @@ DEVICE_INTRINSICS = {
   "__nfcxx_nctaid_x" => "nctaid.x", "__nfcxx_nctaid_y" => "nctaid.y", "__nfcxx_nctaid_z" => "nctaid.z",
 }
 
+# Warp and atomic intrinsics (extern "C", as DEVICE_INTRINSICS). The shuffles take the full-warp mask only (the
+# mask operand must be the constant 0xffffffff) and use the whole warp (width 32), so the clamp is fixed.
+# `_i` takes and returns a 32-bit integer, `_f` a float (moved through a 32-bit register).
+WARP_SHUFFLES = {
+  "__nfcxx_shfl_sync_i" => "idx", "__nfcxx_shfl_sync_f" => "idx",
+  "__nfcxx_shfl_xor_sync_i" => "bfly", "__nfcxx_shfl_xor_sync_f" => "bfly",
+  "__nfcxx_shfl_down_sync_i" => "down", "__nfcxx_shfl_down_sync_f" => "down",
+  "__nfcxx_shfl_up_sync_i" => "up", "__nfcxx_shfl_up_sync_f" => "up",
+}
+WARP_VOTES = { "__nfcxx_ballot_sync" => "ballot", "__nfcxx_any_sync" => "any", "__nfcxx_all_sync" => "all" }
+# name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
+ATOMICS = {
+  "__nfcxx_atomic_add_i" => ["add", "s32"], "__nfcxx_atomic_add_f" => ["add", "f32"],
+  "__nfcxx_atomic_max_i" => ["max", "s32"], "__nfcxx_atomic_cas_i" => ["cas", "b32"],
+}
+
 def special_register?(name)
   parts = name.split(".")
   parts.length == 2 && ["tid", "ctaid", "ntid", "nctaid"].include?(parts[0]) && ["x", "y", "z"].include?(parts[1])
@@ -399,6 +415,12 @@ class Fn
     n = @nlab
     @nlab = n + 1
     "$L#{n}"
+  end
+
+  # The PTX label of an IR label: created on first use, so a goto may come before its label.
+  def named_label(name)
+    @named_labels ||= {}
+    @named_labels[name] ||= new_label
   end
 
   # ---- the header: return type, parameters, slots
@@ -668,6 +690,8 @@ class Fn
         raise Refused, "intrinsic #{name} takes no arguments" if x.length != 3
         raise Refused, "intrinsic #{name} returns #{ty[0]}, not a 32-bit unsigned" unless ty[0] == "int" && type_size(ty) == 4
         emit("mov.u32 #{dest}, %#{reg};")
+      elsif WARP_SHUFFLES.key?(name) || WARP_VOTES.key?(name) || ATOMICS.key?(name)
+        device_builtin(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -887,12 +911,69 @@ class Fn
       @loops.pop
       emit("bra #{top};")
       label(lab_end)
+    when "switch"
+      # The arms are a flat list with case and default markers (pathb-stage2 section 2). A dispatch chain compares
+      # the operand with each case value and branches; the body follows, with C fallthrough between its markers.
+      # `break` leaves to the end label (the switch is on the loop stack with no continue label).
+      body_f = s.drop(1).find { |f| head_of(f) == "body" }
+      raise BadIR, "switch without body" if body_f.nil?
+      v, vty = operand(s[1])
+      raise Refused, "switch on a #{vty[0]}" unless vty[0] == "int" && !vty[3]
+      raise Refused, "switch on a #{type_size(vty)}-byte integer (only 32 and 64 bits are lowered)" unless type_size(vty) == 4 || type_size(vty) == 8
+      v = reg_of(v, vty)
+      items = []
+      expand = lambda { |f| head_of(f) == "block" ? f.drop(1).each { |t| expand.call(t) } : items << f }
+      body_f.drop(1).each { |f| expand.call(f) }
+      lab_end = new_label
+      arms = []        # [item index, label, case value or nil for default]
+      default_lab = nil
+      items.each_with_index do |it, idx|
+        h = head_of(it)
+        if h == "case"
+          c = it[1]
+          raise BadIR, "case value is not a constant" unless head_of(c) == "const"
+          cty = parse_type(c[1])
+          raise Refused, "case of a different type than the switch" unless cty == vty
+          val = as_int(c[2])
+          raise Refused, "duplicate case #{val}" if arms.any? { |a| a[2] == val }
+          arms << [idx, new_label, val]
+        elsif h == "default"
+          raise Refused, "two default labels" if default_lab
+          default_lab = new_label
+          arms << [idx, default_lab, nil]
+        end
+      end
+      bits = bits_type(vty)
+      arms.each do |_, lab, val|
+        next if val.nil?
+        q = fresh("p")
+        emit("setp.eq.#{bits} #{q}, #{v}, #{imm(vty, val)};")
+        emit("@#{q} bra #{lab};")
+      end
+      emit("bra #{default_lab || lab_end};")
+      @loops.push([nil, lab_end])
+      by_index = arms.map { |idx, lab, _| [idx, lab] }.to_h
+      items.each_with_index do |it, idx|
+        if by_index.key?(idx)
+          label(by_index[idx])
+        else
+          stmt(it)
+        end
+      end
+      @loops.pop
+      label(lab_end)
+    when "label"
+      label(named_label(s[1].to_s))
+    when "goto"
+      emit("bra #{named_label(s[1].to_s)};")
     when "break"
-      raise Refused, "break outside a loop (switch is not lowered yet)" if @loops.empty?
+      raise Refused, "break outside a loop or switch" if @loops.empty?
       emit("bra #{@loops[-1][1]};")
     when "continue"
-      raise BadIR, "continue outside a loop" if @loops.empty?
-      emit("bra #{@loops[-1][0]};")
+      # the innermost loop: a switch on the stack has no continue label
+      enclosing = @loops.reverse.find { |e| e[0] }
+      raise BadIR, "continue outside a loop" if enclosing.nil?
+      emit("bra #{enclosing[0]};")
     when "trap", "unreachable"
       # (trap) and (unreachable): an illegal instruction on the GPU; the IR spec says unreachable traps
       emit("trap;")
@@ -944,6 +1025,69 @@ class Fn
   end
 
   # A call of a function of the module. dest is the PTX register of the value (nil if discarded); ty its IR type.
+  # The full-warp mask operand: the constant 0xffffffff (as an unsigned or int constant).
+  def full_mask!(op, name)
+    text, _ = operand(op)
+    raise Refused, "#{name}: only the full-warp mask 0xffffffff is lowered (mask operand #{text})" unless ["4294967295", "-1"].include?(text)
+  end
+
+  def device_builtin(name, x, dest, ty)
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    if WARP_SHUFFLES.key?(name)
+      raise Refused, "#{name} takes (mask, value, lane)" unless args.length == 3
+      full_mask!(args[0], name)
+      float = name.end_with?("_f")
+      raise Refused, "#{name} returns #{ty[0]}" unless (float ? ty[0] == "float" : ty[0] == "int") && type_size(ty) == 4
+      v, vty = operand(args[1])
+      raise Refused, "#{name}: value of type #{vty[0]}" unless float ? vty[0] == "float" && vty[1] == 4 : vty[0] == "int" && vty[1] == 4
+      lane, lty = operand(args[2])
+      raise Refused, "#{name}: lane of type #{lty[0]}" unless lty[0] == "int" && lty[1] == 4
+      src = reg_of(v, vty)
+      lane = reg_of(lane, lty)
+      mode = WARP_SHUFFLES[name]
+      clamp = mode == "up" ? "0" : "31"
+      if float
+        bits = fresh("r")
+        out = fresh("r")
+        emit("mov.b32 #{bits}, #{src};")
+        emit("shfl.sync.#{mode}.b32 #{out}, #{bits}, #{lane}, #{clamp}, 0xffffffff;")
+        emit("mov.b32 #{dest}, #{out};")
+      else
+        emit("shfl.sync.#{mode}.b32 #{dest}, #{src}, #{lane}, #{clamp}, 0xffffffff;")
+      end
+    elsif WARP_VOTES.key?(name)
+      raise Refused, "#{name} takes (mask, predicate)" unless args.length == 2
+      full_mask!(args[0], name)
+      raise Refused, "#{name} returns #{ty[0]}" unless ty[0] == "int" && type_size(ty) == 4
+      pv, pty = operand(args[1])
+      raise Refused, "#{name}: predicate of type #{pty[0]}" unless pty[0] == "int" && pty[1] == 4
+      pr = fresh("p")
+      emit("setp.ne.s32 #{pr}, #{reg_of(pv, pty)}, 0;")
+      case WARP_VOTES[name]
+      when "ballot"
+        emit("vote.sync.ballot.b32 #{dest}, #{pr}, 0xffffffff;")
+      else
+        q = fresh("p")
+        emit("vote.sync.#{WARP_VOTES[name]}.pred #{q}, #{pr}, 0xffffffff;")
+        emit("selp.s32 #{dest}, 1, 0, #{q};")
+      end
+    else
+      op, aty = ATOMICS[name]
+      want = name.end_with?("_f") ? "float" : "int"
+      raise Refused, "#{name} takes (pointer, value)" unless (name == "__nfcxx_atomic_cas_i" ? args.length == 3 : args.length == 2)
+      pv, pty = operand(args[0])
+      raise Refused, "#{name}: first operand is a #{pty[0]}, not a pointer" unless pty[0] == "ptr"
+      raise Refused, "#{name} returns #{ty[0]}" unless ty[0] == want && type_size(ty) == 4
+      vals = args[1..-1].map do |a|
+        v, t = operand(a)
+        raise Refused, "#{name}: operand of type #{t[0]}" unless t[0] == want && t[1] == 4
+        reg_of(v, t)
+      end
+      emit("atom.#{op}.#{aty} #{dest}, [#{reg_of(pv, pty)}], #{vals.join(", ")};")
+    end
+  end
+
   def call_site(x, dest, ty)
     callee_sym = x[2]
     raise Refused, "indirect call" unless callee_sym.is_a?(IRSym) && callee_sym.sig == "&"
