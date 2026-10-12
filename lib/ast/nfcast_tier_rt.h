@@ -155,17 +155,72 @@ static inline nfcr_u64 nfcr_forcount(nfcr_i64 i0, nfcr_i64 limit, nfcr_i64 step)
   return count;
 }
 
-// ---- the interface between the engine and a generated unit -----------------------------------------------------------------------
 typedef union nfcr_W {  // one unboxed value: an integer, a float, or a boolean (in I)
   nfcr_i64 i;
   double d;
 } nfcr_W;
 
+// ---- a number whose kind is known only at run time (generated code) ---------------------------------------------------------------
+// A variable that holds an integer here and a float there (`local s = 0` ... `s = s + 0.5`) is an nfcr_N: the value and a flag that
+// says which. The operators do what the interpreter's do on a pair of numbers, with the same functions as above.
+// The flag is a full 64-bit word on purpose: the QBE back end miscompiles a 4-byte member that shares a word with padding in a struct
+// that is copied by value (it tests the wrong half of the word), and the generated code copies these a lot.
+typedef struct nfcr_N {
+  nfcr_W w;
+  nfcr_i64 f;  // 1: the value is the float w.d; 0: the integer w.i
+} nfcr_N;
+
+static inline nfcr_N nfcr_ni(nfcr_i64 i) {
+  nfcr_N n;
+  n.w.i = i;
+  n.f = 0;
+  return n;
+}
+static inline nfcr_N nfcr_nf(double d) {
+  nfcr_N n;
+  n.w.i = 0;
+  n.w.d = d;
+  n.f = 1;
+  return n;
+}
+static inline double nfcr_nd(nfcr_N n) { return n.f ? n.w.d : (double)n.w.i; }
+
+static inline nfcr_N nfcr_nadd(nfcr_N a, nfcr_N b) { return (a.f | b.f) ? nfcr_nf(nfcr_nd(a) + nfcr_nd(b)) : nfcr_ni(nfcr_add(a.w.i, b.w.i)); }
+static inline nfcr_N nfcr_nsub(nfcr_N a, nfcr_N b) { return (a.f | b.f) ? nfcr_nf(nfcr_nd(a) - nfcr_nd(b)) : nfcr_ni(nfcr_sub(a.w.i, b.w.i)); }
+static inline nfcr_N nfcr_nmul(nfcr_N a, nfcr_N b) { return (a.f | b.f) ? nfcr_nf(nfcr_nd(a) * nfcr_nd(b)) : nfcr_ni(nfcr_mul(a.w.i, b.w.i)); }
+static inline nfcr_N nfcr_nneg(nfcr_N a) { return a.f ? nfcr_nf(-a.w.d) : nfcr_ni(nfcr_neg(a.w.i)); }
+// `//` and `%`; two integers need a divisor that is not zero (the caller checks)
+static inline nfcr_N nfcr_nidiv(nfcr_N a, nfcr_N b) { return (a.f | b.f) ? nfcr_nf(nfcr_fidiv(nfcr_nd(a), nfcr_nd(b))) : nfcr_ni(nfcr_idiv(a.w.i, b.w.i)); }
+static inline nfcr_N nfcr_nmod(nfcr_N a, nfcr_N b) { return (a.f | b.f) ? nfcr_nf(nfcr_fmod(nfcr_nd(a), nfcr_nd(b))) : nfcr_ni(nfcr_imod(a.w.i, b.w.i)); }
+
+static inline int nfcr_nlt(nfcr_N a, nfcr_N b) {
+  if (!a.f) return b.f ? nfcr_lt_if(a.w.i, b.w.d) : a.w.i < b.w.i;
+  return b.f ? a.w.d < b.w.d : nfcr_lt_fi(a.w.d, b.w.i);
+}
+static inline int nfcr_nle(nfcr_N a, nfcr_N b) {
+  if (!a.f) return b.f ? nfcr_le_if(a.w.i, b.w.d) : a.w.i <= b.w.i;
+  return b.f ? a.w.d <= b.w.d : nfcr_le_fi(a.w.d, b.w.i);
+}
+static inline int nfcr_neq(nfcr_N a, nfcr_N b) {
+  if (!a.f) return b.f ? nfcr_eq_if(a.w.i, b.w.d) : a.w.i == b.w.i;
+  return b.f ? a.w.d == b.w.d : nfcr_eq_if(b.w.i, a.w.d);
+}
+// The integer a bitwise operator works on: an integer, or a float with an integer value; 0 for any other float.
+static inline int nfcr_ntoi(nfcr_N n, nfcr_i64* out) {
+  if (!n.f) {
+    *out = n.w.i;
+    return 1;
+  }
+  return nfcr_f2i(n.w.d, out);
+}
+
+// ---- the interface between the engine and a generated unit -----------------------------------------------------------------------
 typedef struct nfcr_Ctx {
   void* jb;            // the jmp_buf of the entry trampoline: an abandoned run longjmps there
   nfcr_i64 depth;      // nested calls, counted like State::depth (it starts at the engine's value)
   nfcr_i64 maxd;       // State::max_depth
   const nfcr_W* fv;    // the values of the free variables (upvalues and globals) the unit reads, gathered at entry
+  nfcr_i64 rtag;       // the kind of a result that is an nfcr_N: 1 a float (the result is in W.d), 0 an integer
 } nfcr_Ctx;
 
 #endif  // NFCAST_TIER_RT_H

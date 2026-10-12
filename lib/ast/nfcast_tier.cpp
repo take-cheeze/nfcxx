@@ -11,9 +11,10 @@
 // callee that is another function now, an integer division by zero, a recursion deeper than the interpreter allows) is handled by
 // abandoning the run (a longjmp to the entry) and doing the whole call again in the interpreter, which then produces the result,
 // the error text and the position exactly as it would have without a tier. The arithmetic itself is the interpreter's
-// (nfcast_tier_rt.h, one source for both), and the types are static: a variable has one type (integer, float or boolean) for the
-// whole function, an expression's type follows from its operands as in the specialized nodes, and a function in which that does
-// not hold (a local that is an integer here and a float there) is not compiled.
+// (nfcast_tier_rt.h, one source for both), and the types are static: a variable has one type for the whole function (an integer, a
+// float, a boolean, or a "number", which is an integer or a float as the run goes: `local s = 0` ... `s = s + 0.5`), an expression's
+// type follows from its operands as in the specialized nodes, and a function in which that does not hold (a local that is a boolean
+// here and a number there) is not compiled.
 //
 // The engine stays single threaded. There is no compile thread: a compile is a child process (the nfcxx driver) that the engine
 // starts and then either waits for (sync) or polls from the calls it serves (async). The reason is that EDG's exception runtime
@@ -45,13 +46,16 @@ const unsigned kMaxRejects = 3;
 
 // ---- types ---------------------------------------------------------------------------------------------------------------------
 // The static types of the compiled code. Y_V: no value (a function that returns nothing). Y_Q: a value that is only good for its
-// truth (`a and 5` with a boolean a): it may be a condition but not stored, passed or returned.
-enum Ty : unsigned char { Y_UNK = 0, Y_I, Y_F, Y_B, Y_V, Y_Q };
+// truth (`a and 5` with a boolean a): it may be a condition but not stored, passed or returned. Y_N: a number that is an integer or
+// a float, which the value itself says (an nfcr_N of nfcast_tier_rt.h); a variable that gets both kinds is one, and so is what
+// arithmetic makes of one and an integer.
+enum Ty : unsigned char { Y_UNK = 0, Y_I, Y_F, Y_B, Y_V, Y_Q, Y_N };
 
 const char* ty_c(Ty t) {
   switch (t) {
     case Y_I: return "nfcr_i64";
     case Y_F: return "double";
+    case Y_N: return "nfcr_N";
     case Y_V: return "void";
     default: return "int";
   }
@@ -64,12 +68,13 @@ char ty_ch(Ty t) {
     case Y_B: return 'b';
     case Y_V: return 'v';
     case Y_Q: return 'q';
+    case Y_N: return 'n';
     default: return '?';
   }
 }
 
-inline bool is_num(Ty t) { return t == Y_I || t == Y_F; }
-inline bool is_val(Ty t) { return t == Y_I || t == Y_F || t == Y_B; }
+inline bool is_num(Ty t) { return t == Y_I || t == Y_F || t == Y_N; }
+inline bool is_val(Ty t) { return t == Y_I || t == Y_F || t == Y_B || t == Y_N; }
 
 Ty ty_of_tag(Tag t) {
   switch (t) {
@@ -739,13 +744,22 @@ struct Infer {
     if (I.bad.empty()) I.bad = why;
   }
 
+  // DST (the type of a variable or of a result) takes in a value of type T. A number of one kind and a number of the other make a
+  // Y_N; a boolean (or no value) with anything else is not a kernel.
   void join(Inst& I, Ty& dst, Ty t, const char* what) {
     if (t == Y_UNK) return;
     if (dst == Y_UNK) {
       dst = t;
       changed = true;
     } else if (dst != t) {
-      bad(I, std::string(what) + " has two types (" + ty_ch(dst) + " and " + ty_ch(t) + ")");
+      if (is_num(dst) && is_num(t)) {
+        if (dst != Y_N) {  // N takes in an integer and a float alike
+          dst = Y_N;
+          changed = true;
+        }
+      } else {
+        bad(I, std::string(what) + " has two types (" + ty_ch(dst) + " and " + ty_ch(t) + ")");
+      }
     }
   }
 
@@ -779,10 +793,12 @@ struct Infer {
           return Y_UNK;
         }
         switch (e->op) {
-          case AR_ADD: case AR_SUB: case AR_MUL: case AR_MOD: case AR_IDIV: return a == Y_I && b == Y_I ? Y_I : Y_F;
+          case AR_ADD: case AR_SUB: case AR_MUL: case AR_MOD: case AR_IDIV:
+            if (a == Y_F || b == Y_F) return Y_F;  // a float and anything is a float
+            return a == Y_I && b == Y_I ? Y_I : Y_N;
           case AR_DIV: case AR_POW: return Y_F;
           case AR_BAND: case AR_BOR: case AR_BXOR: case AR_SHL: case AR_SHR:
-            if (a == Y_I && b == Y_I) return Y_I;
+            if (a != Y_F && b != Y_F) return Y_I;  // an N is converted when it runs, and abandons the run if it has no integer value
             bad(I, "a bitwise operation on a float");
             return Y_UNK;
           default: bad(I, "an arithmetic operator the tier does not lower"); return Y_UNK;
@@ -803,8 +819,8 @@ struct Infer {
           bad(I, "unary minus on a boolean");
           return Y_UNK;
         }
-        if (a == Y_I) return Y_I;
-        bad(I, "bitwise not on a non-integer");
+        if (a == Y_I || a == Y_N) return Y_I;
+        bad(I, "bitwise not on a float");
         return Y_UNK;
       }
       case IExpr::Cmp: {
@@ -892,6 +908,9 @@ struct Infer {
           else if (!is_num(ts[i])) {
             bad(I, "a 'for' loop over a boolean or a non-value");
             known = false;
+          } else if (ts[i] == Y_N && i != 1) {  // whether the loop counts in integers or in floats depends on these two
+            bad(I, "a 'for' loop whose start or step is an integer or a float as the run goes");
+            known = false;
           }
         }
         if (known) join(I, I.vty[static_cast<std::size_t>(s->vars[0])], ts[0] == Y_I && ts[2] == Y_I ? Y_I : Y_F, "a loop variable");
@@ -919,26 +938,48 @@ struct Infer {
 
   void pass(Inst& I) {
     ProtoIR& P = proto(I);
+    I.bad.clear();  // what is wrong with the types as they stand now; they widen while the rounds go on
     st(I, P.body);
     if (can_complete(P.body)) join(I, I.ret, Y_V, "the result of a function");
   }
 
+  std::vector<char> live;  // the instances the root function can reach; the others came from types that have widened since
+
   // Types the unit for the root function with SIG. False with ERROR set when it is not a kernel with those argument types.
   bool run(const std::vector<Ty>& sig) {
     if (get_inst(0, sig) < 0) return false;
-    for (int round = 0; round < 200; ++round) {
+    int round = 0;
+    for (; round < 400; ++round) {
       changed = false;
       for (std::size_t i = 0; i < insts.size(); ++i) pass(insts[i]);
       if (!error.empty()) return false;
-      for (Inst& I : insts)
-        if (!I.bad.empty()) {
-          error = I.bad;
-          return false;
-        }
       if (!changed) break;
     }
-    for (Inst& I : insts) {
+    if (round >= 400) {
+      error = "the types do not settle";
+      return false;
+    }
+    // A call made with an argument of a type that was widened later left an instance behind that nothing calls any more.
+    live.assign(insts.size(), 0);
+    live[0] = 1;
+    std::vector<int> work(1, 0);
+    while (!work.empty()) {
+      int n = work.back();
+      work.pop_back();
+      for (int c : insts[static_cast<std::size_t>(n)].cinst)
+        if (c >= 0 && !live[static_cast<std::size_t>(c)]) {
+          live[static_cast<std::size_t>(c)] = 1;
+          work.push_back(c);
+        }
+    }
+    for (std::size_t n = 0; n < insts.size(); ++n) {
+      if (!live[n]) continue;
+      Inst& I = insts[n];
       ProtoIR& P = proto(I);
+      if (!I.bad.empty()) {
+        error = I.bad;
+        return false;
+      }
       if (I.ret == Y_UNK) I.ret = Y_V;  // never returns (an endless loop)
       for (Ty t : I.vty)
         if (t == Y_UNK) {
@@ -955,12 +996,12 @@ struct Infer {
       // changes the last bit of a float result; the interpreter never fuses. Float kernels stay interpreted here (untested: it
       // needs such a host).
       for (Ty t : I.vty)
-        if (t == Y_F) {
+        if (t == Y_F || t == Y_N) {
           error = "floating point on a target that fuses multiply-add";
           return false;
         }
       for (Ty t : I.ety)
-        if (t == Y_F) {
+        if (t == Y_F || t == Y_N) {
           error = "floating point on a target that fuses multiply-add";
           return false;
         }
@@ -991,6 +1032,9 @@ const char* kPostRt =
     "static void nfct_bail(nfcr_Ctx* cx) { longjmp(*(jmp_buf*)cx->jb, 1); }\n"
     "static nfcr_i64 nfct_idiv(nfcr_Ctx* cx, nfcr_i64 a, nfcr_i64 b) { if (b == 0) nfct_bail(cx); return nfcr_idiv(a, b); }\n"
     "static nfcr_i64 nfct_imod(nfcr_Ctx* cx, nfcr_i64 a, nfcr_i64 b) { if (b == 0) nfct_bail(cx); return nfcr_imod(a, b); }\n"
+    "static nfcr_N nfct_nidiv(nfcr_Ctx* cx, nfcr_N a, nfcr_N b) { if (!(a.f | b.f) && b.w.i == 0) nfct_bail(cx); return nfcr_nidiv(a, b); }\n"
+    "static nfcr_N nfct_nmod(nfcr_Ctx* cx, nfcr_N a, nfcr_N b) { if (!(a.f | b.f) && b.w.i == 0) nfct_bail(cx); return nfcr_nmod(a, b); }\n"
+    "static nfcr_i64 nfct_ntoi(nfcr_Ctx* cx, nfcr_N n) { nfcr_i64 r = 0; if (!nfcr_ntoi(n, &r)) nfct_bail(cx); return r; }\n"
     "static double nfct_dbl(nfcr_u64 bits) { union { nfcr_u64 u; double d; } x; x.u = bits; return x.d; }\n"
     // The C compiler folds 0.0 / 0.0 to a positive NaN where the interpreter divides at run time and gets the processor's (negative on
     // x86); an operation on two constants, which the parser leaves alone exactly when its result is a NaN, goes through this.
@@ -1034,18 +1078,37 @@ struct Gen {
   }
 
   // Does evaluating E run a call, or an operation that can abandon the run? Such expressions keep their order.
+  static bool is_bit(int op) { return op == AR_BAND || op == AR_BOR || op == AR_BXOR || op == AR_SHL || op == AR_SHR; }
+
   bool impure(const IExpr* e) {
     if (e->k == IExpr::Call) return true;
-    if (e->k == IExpr::Arith && (e->op == AR_MOD || e->op == AR_IDIV) && ty(e->kids[0]) == Y_I && ty(e->kids[1]) == Y_I) {
-      const IExpr* d = e->kids[1];
-      if (!(d->k == IExpr::Const && d->ci != 0)) return true;
+    if (e->k == IExpr::Arith) {
+      if ((e->op == AR_MOD || e->op == AR_IDIV) && ty(e) != Y_F) {  // two integers at run time may divide by zero
+        const IExpr* d = e->kids[1];
+        if (!(d->k == IExpr::Const && d->cty == Y_I && d->ci != 0)) return true;
+      }
+      if (is_bit(e->op) && (ty(e->kids[0]) == Y_N || ty(e->kids[1]) == Y_N)) return true;  // a float without an integer value
+    } else if (e->k == IExpr::Unary && e->op == AR_BNOT && ty(e->kids[0]) == Y_N) {
+      return true;
     }
     for (const IExpr* k : e->kids)
       if (impure(k)) return true;
     return false;
   }
 
-  static std::string D(const std::string& s, Ty t) { return t == Y_I ? "((double)(" + s + "))" : s; }
+  static std::string D(const std::string& s, Ty t) { return t == Y_I ? "((double)(" + s + "))" : t == Y_N ? "nfcr_nd(" + s + ")" : s; }
+
+  // The C expression S, of type FROM, as a value of type TO: a variable, a result or a parameter has the type that all the values
+  // put into it fit in.
+  static std::string conv(const std::string& s, Ty from, Ty to) {
+    if (from == to || to != Y_N) return s;
+    return from == Y_I ? "nfcr_ni(" + s + ")" : from == Y_F ? "nfcr_nf(" + s + ")" : s;
+  }
+
+  static std::string zero(Ty t) { return t == Y_F ? "0.0" : t == Y_N ? "nfcr_ni(0)" : "0"; }
+
+  // An operand of a bitwise operator, as an integer.
+  static std::string toi(const std::string& s, Ty t) { return t == Y_N ? "nfct_ntoi(cx, " + s + ")" : s; }
 
   // The operands in order. An operand with side effects that is followed by another one goes into a temporary first, so that C's
   // unspecified order of evaluation cannot make an endless loop in the second win over an error in the first.
@@ -1106,46 +1169,62 @@ struct Gen {
         return f.ty == Y_F ? a + ".d" : (f.ty == Y_B ? "(int)" + a + ".i" : a + ".i");
       }
       case IExpr::Arith: {
-        Ty ta = ty(e->kids[0]), tb = ty(e->kids[1]);
+        Ty ta = ty(e->kids[0]), tb = ty(e->kids[1]), rt = ty(e);
         std::vector<std::string> o = operands(e->kids);
         bool ii = ta == Y_I && tb == Y_I;
-        if (e->kids[0]->k == IExpr::Const && e->kids[1]->k == IExpr::Const && (!ii || e->op == AR_DIV || e->op == AR_POW) &&
-            e->op != AR_BAND && e->op != AR_BOR && e->op != AR_BXOR && e->op != AR_SHL && e->op != AR_SHR) {
+        if (e->kids[0]->k == IExpr::Const && e->kids[1]->k == IExpr::Const && (!ii || e->op == AR_DIV || e->op == AR_POW) && !is_bit(e->op)) {
           o[0] = "nfct_opq_p(" + D(o[0], ta) + ")";  // not for the C compiler to evaluate
           ta = Y_F;
         }
         const std::string &a = o[0], &b = o[1];
         switch (e->op) {
-          case AR_ADD: return ii ? "nfcr_add(" + a + ", " + b + ")" : "(" + D(a, ta) + " + " + D(b, tb) + ")";
-          case AR_SUB: return ii ? "nfcr_sub(" + a + ", " + b + ")" : "(" + D(a, ta) + " - " + D(b, tb) + ")";
-          case AR_MUL: return ii ? "nfcr_mul(" + a + ", " + b + ")" : "(" + D(a, ta) + " * " + D(b, tb) + ")";
+          case AR_ADD:
+          case AR_SUB:
+          case AR_MUL: {
+            const char* name = e->op == AR_ADD ? "add" : e->op == AR_SUB ? "sub" : "mul";
+            const char* sym = e->op == AR_ADD ? " + " : e->op == AR_SUB ? " - " : " * ";
+            if (rt == Y_I) return std::string("nfcr_") + name + "(" + a + ", " + b + ")";
+            if (rt == Y_N) return std::string("nfcr_n") + name + "(" + conv(a, ta, Y_N) + ", " + conv(b, tb, Y_N) + ")";
+            return "(" + D(a, ta) + sym + D(b, tb) + ")";
+          }
           case AR_MOD:
           case AR_IDIV: {
             bool mod = e->op == AR_MOD;
-            if (!ii) return std::string(mod ? "nfcr_fmod(" : "nfcr_fidiv(") + D(a, ta) + ", " + D(b, tb) + ")";
+            if (rt == Y_F) return std::string(mod ? "nfcr_fmod(" : "nfcr_fidiv(") + D(a, ta) + ", " + D(b, tb) + ")";
             const IExpr* d = e->kids[1];
-            bool safe = d->k == IExpr::Const && d->ci != 0;
-            return std::string(safe ? (mod ? "nfcr_imod(" : "nfcr_idiv(") : (mod ? "nfct_imod(cx, " : "nfct_idiv(cx, ")) + a + ", " + b + ")";
+            bool safe = d->k == IExpr::Const && d->cty == Y_I && d->ci != 0;
+            if (rt == Y_I) return std::string(safe ? (mod ? "nfcr_imod(" : "nfcr_idiv(") : (mod ? "nfct_imod(cx, " : "nfct_idiv(cx, ")) + a + ", " + b + ")";
+            return std::string(safe ? (mod ? "nfcr_nmod(" : "nfcr_nidiv(") : (mod ? "nfct_nmod(cx, " : "nfct_nidiv(cx, ")) + conv(a, ta, Y_N) + ", " + conv(b, tb, Y_N) + ")";
           }
           case AR_DIV: return "(" + D(a, ta) + " / " + D(b, tb) + ")";
           case AR_POW: return "nfcr_fpow(" + D(a, ta) + ", " + D(b, tb) + ")";
-          case AR_BAND: return "(" + a + " & " + b + ")";
-          case AR_BOR: return "(" + a + " | " + b + ")";
-          case AR_BXOR: return "(" + a + " ^ " + b + ")";
-          case AR_SHL: return "nfcr_shl(" + a + ", " + b + ")";
-          default: return "nfcr_shr(" + a + ", " + b + ")";
+          case AR_BAND: return "(" + toi(a, ta) + " & " + toi(b, tb) + ")";
+          case AR_BOR: return "(" + toi(a, ta) + " | " + toi(b, tb) + ")";
+          case AR_BXOR: return "(" + toi(a, ta) + " ^ " + toi(b, tb) + ")";
+          case AR_SHL: return "nfcr_shl(" + toi(a, ta) + ", " + toi(b, tb) + ")";
+          default: return "nfcr_shr(" + toi(a, ta) + ", " + toi(b, tb) + ")";
         }
       }
       case IExpr::Unary: {
         if (e->op == OPX_NOT) return "(!" + cond(e->kids[0]) + ")";
         std::string a = ex(e->kids[0]);
-        if (e->op == AR_UNM) return ty(e->kids[0]) == Y_I ? "nfcr_neg(" + a + ")" : "(-" + a + ")";
-        return "(~" + a + ")";
+        Ty ta = ty(e->kids[0]);
+        if (e->op == AR_UNM) return ta == Y_I ? "nfcr_neg(" + a + ")" : ta == Y_N ? "nfcr_nneg(" + a + ")" : "(-" + a + ")";
+        return "(~" + toi(a, ta) + ")";
       }
       case IExpr::Cmp: {
         Ty ta = ty(e->kids[0]), tb = ty(e->kids[1]);
         std::vector<std::string> o = operands(e->kids);
         const std::string &a = o[0], &b = o[1];
+        if (ta == Y_N || tb == Y_N) {
+          std::string na = conv(a, ta, Y_N), nb = conv(b, tb, Y_N);
+          switch (e->op) {
+            case CMP_LT: return "nfcr_nlt(" + na + ", " + nb + ")";
+            case CMP_LE: return "nfcr_nle(" + na + ", " + nb + ")";
+            case CMP_GT: return "nfcr_nlt(" + nb + ", " + na + ")";
+            default: return "nfcr_nle(" + nb + ", " + na + ")";
+          }
+        }
         if (ta == tb) {
           const char* sym = e->op == CMP_LT ? " < " : e->op == CMP_LE ? " <= " : e->op == CMP_GT ? " > " : " >= ";
           return "(" + a + sym + b + ")";
@@ -1162,7 +1241,8 @@ struct Gen {
         Ty ta = ty(e->kids[0]), tb = ty(e->kids[1]);
         std::vector<std::string> o = operands(e->kids);
         std::string r;
-        if (ta == tb) r = "(" + o[0] + " == " + o[1] + ")";
+        if (ta == Y_N || tb == Y_N) r = "nfcr_neq(" + conv(o[0], ta, Y_N) + ", " + conv(o[1], tb, Y_N) + ")";
+        else if (ta == tb) r = "(" + o[0] + " == " + o[1] + ")";
         else if (ta == Y_I) r = "nfcr_eq_if(" + o[0] + ", " + o[1] + ")";
         else r = "nfcr_eq_if(" + o[1] + ", " + o[0] + ")";
         return e->neg ? "(!" + r + ")" : r;
@@ -1228,6 +1308,9 @@ struct Gen {
     }
   }
 
+  // The C expression S for the value of E, as a value of the variable VAR.
+  std::string into(int var, const IExpr* e, const std::string& s) { return conv(s, ty(e), inst().vty[static_cast<std::size_t>(var)]); }
+
   void stmt(const IStmt* s) {
     switch (s->k) {
       case IStmt::Block: emit_block(s); break;
@@ -1235,11 +1318,11 @@ struct Gen {
       case IStmt::Assign: {
         std::vector<std::string> o = operands(s->exprs);
         if (s->vars.size() == 1) {
-          cur += vname(s->vars[0]) + " = " + o[0] + ";\n";
+          cur += vname(s->vars[0]) + " = " + into(s->vars[0], s->exprs[0], o[0]) + ";\n";
           break;
         }
         if (s->k == IStmt::Decl) {  // new variables: nothing the values read changes
-          for (std::size_t i = 0; i < s->vars.size(); ++i) cur += vname(s->vars[i]) + " = " + o[i] + ";\n";
+          for (std::size_t i = 0; i < s->vars.size(); ++i) cur += vname(s->vars[i]) + " = " + into(s->vars[i], s->exprs[i], o[i]) + ";\n";
           break;
         }
         std::vector<std::string> t;
@@ -1247,7 +1330,7 @@ struct Gen {
           t.push_back(tmp());
           cur += std::string(ty_c(ty(s->exprs[i]))) + " " + t[i] + " = " + o[i] + ";\n";
         }
-        for (std::size_t i = s->vars.size(); i > 0; --i) cur += vname(s->vars[i - 1]) + " = " + t[i - 1] + ";\n";  // right to left, as the interpreter stores
+        for (std::size_t i = s->vars.size(); i > 0; --i) cur += vname(s->vars[i - 1]) + " = " + into(s->vars[i - 1], s->exprs[i - 1], t[i - 1]) + ";\n";  // right to left, as the interpreter stores
         break;
       }
       case IStmt::If: emit_if(s, 0); break;
@@ -1277,7 +1360,8 @@ struct Gen {
         } else {
           std::string v = ex(s->exprs[0]);
           std::string t = tmp();
-          cur += std::string(ty_c(ty(s->exprs[0]))) + " " + t + " = " + v + ";\n--cx->depth;\nreturn " + t + ";\n";
+          Ty rt = inst().ret;
+          cur += std::string(ty_c(rt)) + " " + t + " = " + conv(v, ty(s->exprs[0]), rt) + ";\n--cx->depth;\nreturn " + t + ";\n";
         }
         break;
       }
@@ -1296,6 +1380,7 @@ struct Gen {
     std::vector<IExpr*> hdr(s->exprs.begin(), s->exprs.end());
     std::vector<std::string> o = operands(hdr);
     std::string var = vname(s->vars[0]);
+    Ty vt = inst().vty[static_cast<std::size_t>(s->vars[0])];
     std::string id = num(ntmp++);
     std::string i0 = "i" + id, lim = "l" + id, st = "s" + id, cnt = "n" + id, ix = "x" + id;
     cur += "{\n";
@@ -1303,11 +1388,16 @@ struct Gen {
       cur += "nfcr_i64 " + i0 + " = " + o[0] + ";\nnfcr_i64 " + st + " = " + (o.size() > 2 ? o[2] : std::string("1")) + ";\n";
       cur += "nfcr_i64 " + lim + " = 0;\nint go" + id + " = 1;\n";
       cur += "if (" + st + " == 0) nfct_bail(cx);\n";
-      if (tl == Y_I) cur += lim + " = " + o[1] + ";\n";
-      else cur += "if (!nfcr_forlimit(" + o[1] + ", " + st + ", &" + lim + ")) go" + id + " = 0;\n";
+      if (tl == Y_I) {
+        cur += lim + " = " + o[1] + ";\n";
+      } else if (tl == Y_N) {  // an integer or a float, as the run goes
+        cur += "nfcr_N ln" + id + " = " + o[1] + ";\nif (ln" + id + ".f) { if (!nfcr_forlimit(ln" + id + ".w.d, " + st + ", &" + lim + ")) go" + id + " = 0; } else " + lim + " = ln" + id + ".w.i;\n";
+      } else {
+        cur += "if (!nfcr_forlimit(" + o[1] + ", " + st + ", &" + lim + ")) go" + id + " = 0;\n";
+      }
       cur += "if (go" + id + " && (" + st + " > 0 ? " + i0 + " > " + lim + " : " + i0 + " < " + lim + ")) go" + id + " = 0;\n";
       cur += "if (go" + id + ") {\nnfcr_u64 " + cnt + " = nfcr_forcount(" + i0 + ", " + lim + ", " + st + ");\nnfcr_i64 " + ix + " = " + i0 + ";\nfor (;;) {\n";
-      cur += var + " = " + ix + ";\n";
+      cur += var + " = " + conv(ix, Y_I, vt) + ";\n";
       emit_block(s->blocks[0]);
       cur += "if (" + cnt + "-- == 0) break;\n" + ix + " = nfcr_add(" + ix + ", " + st + ");\n}\n}\n";
     } else {  // a float loop
@@ -1315,7 +1405,7 @@ struct Gen {
              (o.size() > 2 ? D(o[2], tp) : std::string("1.0")) + ";\n";
       cur += "if (" + st + " == 0) nfct_bail(cx);\n";
       cur += "for (; " + st + " > 0 ? " + ix + " <= " + lim + " : " + lim + " <= " + ix + "; " + ix + " += " + st + ") {\n";
-      cur += var + " = " + ix + ";\n";
+      cur += var + " = " + conv(ix, Y_F, vt) + ";\n";
       emit_block(s->blocks[0]);
       cur += "}\n";
     }
@@ -1326,7 +1416,7 @@ struct Gen {
     Inst& I = in.insts[static_cast<std::size_t>(idx)];
     ProtoIR& P = *U.protos[static_cast<std::size_t>(I.proto)];
     std::string h = std::string("static ") + ty_c(I.ret) + " nfct_f" + num(idx) + "(nfcr_Ctx* cx";
-    for (int k = 0; k < P.nparams; ++k) h += std::string(", ") + ty_c(I.vty[static_cast<std::size_t>(k)]) + " " + vname(k);
+    for (int k = 0; k < P.nparams; ++k) h += std::string(", ") + ty_c(I.sig[static_cast<std::size_t>(k)]) + " p" + num(k);
     return h + ")";
   }
 
@@ -1336,14 +1426,15 @@ struct Gen {
     ProtoIR& P = proto();
     cur.clear();
     ntmp = 0;
-    for (int v = P.nparams; v < P.nvars; ++v) {
+    for (int v = 0; v < P.nvars; ++v) {
       Ty t = I.vty[static_cast<std::size_t>(v)];
-      cur += std::string(ty_c(t)) + " " + vname(v) + (t == Y_F ? " = 0.0;\n" : " = 0;\n");
+      std::string init = v < P.nparams ? conv("p" + num(v), I.sig[static_cast<std::size_t>(v)], t) : zero(t);  // a parameter that is assigned a float is an N
+      cur += std::string(ty_c(t)) + " " + vname(v) + " = " + init + ";\n";
     }
     cur += "if (cx->depth >= cx->maxd) nfct_bail(cx);\n++cx->depth;\n";
     emit_block(P.body);
     if (can_complete(P.body)) cur += "--cx->depth;\n";
-    else if (I.ret != Y_V) cur += I.ret == Y_F ? "return 0.0;\n" : "return 0;\n";
+    else if (I.ret != Y_V) cur += "return " + zero(I.ret) + ";\n";
     return head(idx) + " {\n" + cur + "}\n";
   }
 
@@ -1352,12 +1443,13 @@ struct Gen {
     ProtoIR& P = *U.protos[static_cast<std::size_t>(I.proto)];
     std::string call = "nfct_f0(cx";
     for (int k = 0; k < P.nparams; ++k) {
-      Ty t = I.vty[static_cast<std::size_t>(k)];
+      Ty t = I.sig[static_cast<std::size_t>(k)];
       call += ", " + std::string(t == Y_F ? "a[" + num(k) + "].d" : t == Y_B ? "(int)a[" + num(k) + "].i" : "a[" + num(k) + "].i");
     }
     call += ")";
     std::string s = "extern \"C\" int nfcast_tier_run(nfcr_Ctx* cx, const nfcr_W* a, nfcr_W* r) {\n  jmp_buf jb;\n  cx->jb = &jb;\n  if (setjmp(jb)) return 1;\n";
     if (I.ret == Y_V) s += "  " + call + ";\n";
+    else if (I.ret == Y_N) s += "  { nfcr_N rn = " + call + "; *r = rn.w; cx->rtag = rn.f; }\n";
     else if (I.ret == Y_F) s += "  r->d = " + call + ";\n";
     else s += "  r->i = " + call + ";\n";
     return s + "  return 0;\n}\n";
@@ -1368,8 +1460,10 @@ struct Gen {
     out += rt_text;
     out += "\n";
     out += kPostRt;
-    for (std::size_t i = 0; i < in.insts.size(); ++i) out += head(static_cast<int>(i)) + ";\n";
-    for (std::size_t i = 0; i < in.insts.size(); ++i) out += function(static_cast<int>(i));
+    for (std::size_t i = 0; i < in.insts.size(); ++i)
+      if (in.live[i]) out += head(static_cast<int>(i)) + ";\n";
+    for (std::size_t i = 0; i < in.insts.size(); ++i)
+      if (in.live[i]) out += function(static_cast<int>(i));
     out += trampoline();
     return out;
   }
@@ -1685,6 +1779,7 @@ bool run_version(State& S, Version* v, Closure* cl, const nfcr_W* argv, Rets& ou
     return false;
   }
   nfcr_Ctx cx;
+  cx.rtag = 0;
   cx.jb = nullptr;
   cx.depth = S.depth;
   cx.maxd = S.max_depth;
@@ -1704,6 +1799,7 @@ bool run_version(State& S, Version* v, Closure* cl, const nfcr_W* argv, Rets& ou
   switch (v->ret) {
     case Y_I: out.push(Value::integer(r.i)); break;
     case Y_F: out.push(Value::number(r.d)); break;
+    case Y_N: out.push(cx.rtag ? Value::number(r.d) : Value::integer(r.i)); break;
     case Y_B: out.push(Value::boolean(r.i != 0)); break;
     default: break;
   }

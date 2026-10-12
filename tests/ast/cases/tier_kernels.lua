@@ -150,11 +150,79 @@ show(pcall(chain, 4), pcall(chain, 5), pcall(chain, 6))
 local function viacall(a, b) return sq(d0(a, b)) end
 show(viacall(9, 3), pcall(viacall, 9, 0))
 
--- shapes that are not kernels run as before; so do wrong arguments
+-- a variable (or a result) that is an integer in one place and a float in another holds whichever kind the run gave it
+local function accum(n, x) local s = 0 for i = 1, n do s = s + x end return s end
+show(accum(4, 0.5), accum(0, 0.5), accum(3, 2), accum(3, 2.0))
+show(math.type(accum(4, 0.5)), math.type(accum(0, 0.5)), math.type(accum(3, 2)), math.type(accum(3, 2.0)))
+local function mix(a, b) local r = a if b > 2 then r = r * 1.5 end return r end
+show(mix(3, 1), mix(3, 5), mix(4.5, 5), mix(4.5, 1), math.type(mix(4, 1)), math.type(mix(4, 3)))
+local function area(n) local acc = 0 for i = 1, n do acc = acc + i / 2 if acc > 100 then acc = acc // 3 end end return acc end
+show(area(10), area(50), area(0), math.type(area(0)), math.type(area(1)))
 local function conflict(n) local x = 0 for i = 1, n do x = x + 0.5 end return x end
 show(conflict(4), conflict(0))
 local function retmix(n) if n > 0 then return n end return 0.5 end
 show(retmix(3), retmix(-1), math.type(retmix(3)), math.type(retmix(-1)))
+local function pm(a) local x = a x = x + 1 x = x + 0.5 return x end
+show(pm(1), pm(1.5), pm(math.maxinteger))
+local function wrapf(n) local s = 9223372036854775807 for i = 1, n do s = s + 1 end if n > 3 then s = s + 0.5 end return s end
+show(wrapf(2), wrapf(4), math.type(wrapf(2)), math.type(wrapf(4)))
+local function negz(n) local s = 0 for i = 1, n do s = s - 0.0 end return -s end
+show(negz(3), negz(0))
+local function lim(n, k) local m = n if k then m = n + 0.5 end local c = 0 for i = 1, m do c = c + i end return c end
+show(lim(3, false), lim(3, true), lim(0, true), lim(1, false))
+local function loopvar_f(n) local t = 0 for i = 1, n do if i == 2 then i = i + 0.5 end t = t + i end return t end
+show(loopvar_f(3), loopvar_f(1))
+local function bits(a, b, k)
+  local x = a
+  if b > 0 then x = x + 0.0 end
+  if k == 1 then return x & 7 end
+  if k == 2 then return ~x end
+  if k == 3 then return x << 2 end
+  return x | b
+end
+for k = 1, 4 do show(bits(5, 0, k), bits(5, 1, k), bits(-3, 2, k), pcall(bits, 5.5, 1, k)) end
+local function half(a, b) local x = 1 if b > 0 then x = a / 2 end return x & 1 end
+show(half(5, 0), half(4, 1), pcall(half, 5, 1))
+local function divn(a, b, k)
+  local x = a
+  if b > 100 then x = x + 0.5 end
+  if k == 1 then return x // b end
+  return x % b
+end
+for k = 1, 2 do
+  show(divn(7, 2, k), pcall(divn, 7, 0, k))
+  show(divn(7, 200, k), divn(math.mininteger, -1, k), divn(-7, 0.0, 1), divn(-7, 0.0, 2) ~= divn(-7, 0.0, 2))
+end
+local function cmpn(a, b, k)
+  local x = a
+  if b then x = 2 ^ 53 end
+  if k == 1 then return x < 9007199254740993 end
+  if k == 2 then return x == 9007199254740992 end
+  if k == 3 then return x >= 9007199254740993 end
+  if k == 4 then return 9007199254740993 > x end
+  return x ~= 3
+end
+for k = 1, 5 do show(cmpn(1, false, k), cmpn(1, true, k), cmpn(9007199254740993, true, k), cmpn(9007199254740993, false, k)) end
+local function f2(x) if x > 5 then return x * 0.5 end return x end
+local function g2(x) local t = f2(x) + f2(x + 5) return t end
+show(g2(1), g2(2.5), g2(10), f2(2), f2(6), math.type(g2(1)))
+local function rec(n, acc) if n == 0 then return acc end if n % 3 == 0 then return rec(n - 1, acc + 0.25) end return rec(n - 1, acc + 1) end
+show(rec(10, 0), rec(9, 0), rec(0, 5), rec(3, 1.0), math.type(rec(0, 5)), math.type(rec(1, 5)))
+local ev
+local function od(n, a) if n == 0 then return a * 2 end return ev(n - 1, a + 0.5) end
+function ev(n, a) if n == 0 then return a end return od(n - 1, a + 1) end
+show(ev(5, 0), ev(4, 1), od(3, 0), ev(0, 7), od(0, 7), math.type(ev(0, 7)), math.type(ev(1, 7)))
+local function h3(a) return a & 3 end
+local function g3(c) local x = 2.0 local r = h3(x) if c then x = 3 end return h3(x) + r end
+show(g3(true), g3(false))
+local function andor(a, b) local x = a if b then x = x + 0.5 end return (x and 7) + (x or 9) end
+show(andor(1, false), andor(1, true))
+local function sw(a, b) local x, y = a, b if a < b then x, y = y + 0.5, x end return x * 10 + y end
+show(sw(1, 2), sw(2, 1), sw(1.5, 2))
+local function dd(a, b, c) local x = a local y = b if c then x = 1.5 y = 0 end return x // y end
+show(dd(7, 2, false), pcall(dd, 7, 0, false), dd(7, 2, true), pcall(dd, 7, 0, true))
+
+-- shapes that are not kernels run as before; so do wrong arguments
 local function noret(n) local s = 0 for i = 1, n do s = s + i end end
 show(noret(5), (noret(5)))
 local function two(a, b) return a + b, a - b end

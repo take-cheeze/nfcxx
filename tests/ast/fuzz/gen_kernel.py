@@ -3,7 +3,8 @@
 
 usage: gen_kernel.py SEED [FUNCTIONS]
 
-Prints a Lua program: FUNCTIONS (default 10) well-typed functions over integers, floats and booleans (arithmetic, bitwise
+Prints a Lua program: FUNCTIONS (default 10) well-typed functions over integers, floats, booleans and "numbers" (variables,
+parameters and results that are an integer in one place and a float in another; type n below) (arithmetic, bitwise
 operators, comparisons, locals, if / while / repeat / numeric for / break / return, calls of earlier functions, some of them
 recursive), each called with a number of argument tuples, some of the wrong type, through pcall; the results and the error
 messages are printed. The tier compiles these functions, so the output has to be the same as a real Lua's.
@@ -31,6 +32,7 @@ class Func:
 
 
 CUR_LEVEL = [0]
+ALLOW_N = [True]  # off while the start of a loop is made: a NaN there meets a difference of the engine from Lua
 BUDGET = [0]       # calls of other functions this function may still contain (the cost of a call is bounded this way)
 SELF_BUDGET = [0]  # and of itself
 
@@ -45,6 +47,8 @@ def fresh(prefix):
 
 
 def lit(t):
+    if t == 'n':
+        t = R.choice(['i', 'f'])
     if t == 'i':
         return R.choice(INT_LITS)
     if t == 'f':
@@ -57,11 +61,20 @@ UPS = [('u1', 'i'), ('u2', 'f'), ('u3', 'b'), ('g1', 'i'), ('g2', 'f')]
 
 
 def vars_of(env, t):
-    return [v for v, vt in env.items() if vt == t] + [v for v, vt in UPS if vt == t]
+    r = [v for v, vt in env.items() if vt == t] + [v for v, vt in UPS if vt == t]
+    if t in ('i', 'f') and ALLOW_N[0] and R.random() < 0.35:
+        r += [v for v, vt in env.items() if vt == 'n']  # a number of either kind where one of a given kind is wanted
+    return r
 
 
 def gen_expr(env, t, depth, self_fn=None):
-    """An expression of static type T (i, f or b)."""
+    """An expression of static type T (i, f, b, or n: an integer or a float, as it falls)."""
+    if t == 'n':
+        t = R.choice(['i', 'f', 'f'])
+        if depth > 1 and R.random() < 0.3:
+            vs = vars_of(env, 'n')
+            if vs:
+                return R.choice(vs)
     leaf = depth <= 0 or R.random() < 0.18
     if t == 'b':
         if leaf:
@@ -132,8 +145,8 @@ def gen_expr(env, t, depth, self_fn=None):
 
 
 def call_expr(env, t, depth, self_fn):
-    cands = [f for f in funcs if f.ret == t and f.level < CUR_LEVEL[0]] if BUDGET[0] > 0 else []
-    if self_fn is not None and self_fn.ret == t and self_fn.self_ok and SELF_BUDGET[0] > 0:
+    cands = [f for f in funcs if (f.ret == t or (f.ret == 'n' and t in ('i', 'f') and R.random() < 0.5)) and f.level < CUR_LEVEL[0]] if BUDGET[0] > 0 else []
+    if self_fn is not None and (self_fn.ret == t or (self_fn.ret == 'n' and t in ('i', 'f'))) and self_fn.self_ok and SELF_BUDGET[0] > 0:
         cands.append(self_fn)
     if not cands:
         return None
@@ -174,9 +187,12 @@ def gen_block(env, ret, depth, indent, in_loop, self_fn, nstmts):
     for _ in range(nstmts):
         k = R.random()
         if k < 0.26:
-            t = R.choice(['i', 'i', 'f', 'f', 'b'])
+            t = R.choice(['i', 'i', 'f', 'f', 'b', 'n', 'n'])
             n = fresh('l')
-            out.append('%slocal %s = %s' % (pad, n, gen_expr(env, t, 3, self_fn)))
+            if t == 'n':
+                out.append('%slocal %s = %s' % (pad, n, gen_expr(env, 'i', 3, self_fn)))  # starts as an integer; assigned floats later
+            else:
+                out.append('%slocal %s = %s' % (pad, n, gen_expr(env, t, 3, self_fn)))
             env[n] = t
         elif k < 0.46:
             cand = list(env.items())
@@ -209,7 +225,9 @@ def gen_block(env, ret, depth, indent, in_loop, self_fn, nstmts):
             e2 = dict(env)
             v = fresh('c')
             if kind == 'int':
+                ALLOW_N[0] = False
                 start = R.choice(['1', '0', '-3', '5', gen_expr(env, 'i', 1, self_fn) + ' % 7'])
+                ALLOW_N[0] = True
                 limit = R.choice(['3', '5', '0', '-2', '(%s) %% 5' % gen_expr(env, 'i', 2, self_fn), '(%s) %% 4.5' % gen_expr(env, 'f', 2, self_fn)])
                 step = R.choice(['', '', ', 1', ', 2', ', -1', ', 3', ', -2'])
                 if step.startswith(', -') and '%' in limit:
@@ -266,8 +284,8 @@ def gen_func(idx):
     if recursive:
         params.append(('d', 'i'))
     for p in 'abc'[:nparams]:
-        params.append((p, R.choice(['i', 'i', 'f', 'f', 'b'])))
-    ret = R.choice(['i', 'i', 'f', 'f', 'b', 'v'])
+        params.append((p, R.choice(['i', 'i', 'f', 'f', 'b', 'n'])))
+    ret = R.choice(['i', 'i', 'f', 'f', 'b', 'v', 'n', 'n'])
     level = min(idx, R.choice([0, 1, 1, 2, 2, 3]))
     CUR_LEVEL[0] = level
     BUDGET[0] = 2
@@ -288,6 +306,9 @@ def gen_func(idx):
 
 
 def arg_for(t, wrong):
+    if t == 'n':
+        t = R.choice(['i', 'f'])
+        wrong = wrong and R.random() < 0.3
     if wrong:
         t = R.choice([x for x in 'ifb' if x != t])
     if t == 'i':

@@ -154,6 +154,57 @@ int main() {
     CHECK(consistent(S));
   }
 
+  std::printf("-- a number that is an integer or a float as the run goes\n");
+  {
+    State S;
+    S.open_libs();
+    tier_on(S, TierOptions::Sync, 1, cache);
+    auto state = [](State& St, const char* name) {
+      nfcast::Closure* c = St.load(std::string("return ") + name, "test", nullptr);
+      Rets r;
+      St.call(Value::function(c), nullptr, 0, r);
+      return St.tier_state(r.first());
+    };
+    eval(S, "function acc(n, x) local s = 0 for i = 1, n do s = s + x end return s end");
+    CHECK(eval(S, "return acc(4, 0.5)") == "2.0");                  // the sum starts as an integer and becomes a float
+    CHECK(S.stats.tier_compiled == 1 && S.stats.tier_calls == 1 && S.stats.tier_bailouts == 0);
+    CHECK(eval(S, "return acc(0, 0.5), math.type(acc(0, 0.5))") == "0,integer");   // the loop does not run: the result is still the integer
+    CHECK(S.stats.tier_calls == 3);
+    CHECK(eval(S, "return math.type(acc(3, 2)), math.type(acc(3, 2.0)), acc(3, 2), acc(3, 2.0)") == "integer,float,6,6.0");
+    CHECK(state(S, "acc").find("compiled if->n") != std::string::npos);   // n: an integer or a float
+    CHECK(state(S, "acc").find("compiled ii->i") != std::string::npos);   // with integers only it stays an integer
+    CHECK(S.stats.tier_bailouts == 0 && S.stats.tier_aborts == 0);
+    // an integer that wraps, then a float
+    CHECK(eval(S, "function wr(n) local s = 9223372036854775807 for i = 1, n do s = s + 1 end if n > 3 then s = s + 0.5 end return s end return wr(2), wr(4)") ==
+          "-9223372036854775807,-9.2233720368548e+18");
+    CHECK(state(S, "wr").find("compiled i->n") != std::string::npos);
+    // a parameter that is given a float: it is a number of either kind inside, and an integer on the way in
+    CHECK(eval(S, "function pm(a) local x = a x = x + 1 x = x + 0.5 return x end return pm(1), pm(1.5)") == "2.5,3.0");
+    CHECK(state(S, "pm").find("compiled i->n") != std::string::npos && state(S, "pm").find("compiled f->f") != std::string::npos);
+    // the result of a call that is a number of either kind, passed on to a callee that then has a parameter of that type
+    CHECK(eval(S, "function f2(x) if x > 5 then return x * 0.5 end return x end function g2(x) return f2(x) + f2(x + 5) end return g2(1), g2(2), g2(10)") == "4.0,5.5,12.5");
+    CHECK(state(S, "g2").find("compiled i->n") != std::string::npos);
+    // bitwise operators on it: a float with an integer value is converted, any other float abandons the run
+    CHECK(eval(S, "function bits(a, b) local x = a if b > 0 then x = x + 0.0 end return (x & 7) + (x << 2) end return bits(5, 0), bits(5, 1), bits(-3, 2)") == "25,25,-7");
+    CHECK(state(S, "bits").find("compiled ii->i") != std::string::npos);
+    CHECK(eval(S, "function half(a, b) local x = 1 if b > 0 then x = a / 2 end return x & 1 end return half(5, 0), half(4, 1)") == "1,0");
+    std::uint64_t ab = S.stats.tier_aborts, calls = S.stats.tier_calls;
+    CHECK(eval(S, "return pcall(half, 5, 1)") == "false,test:1: number (local 'x') has no integer representation");
+    CHECK(S.stats.tier_aborts == ab + 1 && S.stats.tier_calls == calls);   // the compiled code started, found 2.5, and left it to the interpreter
+    // `//` and `%` of two integers at run time by zero: the interpreter's error; with a float on either side there is none
+    CHECK(eval(S, "function dd(a, b, c) local x = a local y = b if c then x = 1.5 y = 0 end return x // y end return dd(7, 2, false), dd(7, 2, true), dd(7, 0, true)") == "3,inf,inf");
+    ab = S.stats.tier_aborts;
+    CHECK(eval(S, "return pcall(dd, 7, 0, false)") == "false,test:1: attempt to divide by zero");
+    CHECK(S.stats.tier_aborts == ab + 1);
+    CHECK(eval(S, "function mm(a, b, c) local x = a local y = b if c then x = 1.5 y = 0 end return x % y end return mm(7, 4, false), pcall(mm, 7, 0, false)") ==
+          "3,false,test:1: attempt to perform 'n%0'");
+    CHECK(consistent(S));
+    // a call made while a variable still had the type it was later widened from does not stand in the way: h(F) is not a kernel, h(N) is
+    CHECK(eval(S, "function h3(a) return a & 3 end function g3(c) local x = 2.0 local r = h3(x) if c then x = 3 end return h3(x) + r end return g3(true), g3(false)") == "5,4");
+    CHECK(state(S, "g3").find("compiled b->i") != std::string::npos);
+    CHECK(consistent(S));
+  }
+
   std::printf("-- mutual recursion, calls through upvalues and globals, numeric free variables\n");
   {
     State S;
@@ -252,7 +303,7 @@ int main() {
         // booleans, and/or/not
         "local function f(a, b, c) if a < b and b < c or a == c then return 1 elseif not (a < c) then return 2 end return 3 end return f(1, 2, 3), f(3, 2, 1), f(1, 3, 2), f(2, 2, 2), f(1.5, 2, 3)",
         "local function f(x) return x > 0 and x < 10 end return f(5), f(-1), f(50), f(5.5)",
-        // wrong arguments and ineligible shapes
+        // wrong arguments, a result and a variable of either kind, and a shape that is not a kernel
         "local function f(n) if n < 2 then return n end return f(n - 1) + f(n - 2) end return pcall(f), pcall(f, 'x'), pcall(f, {}), f(10), f(10.0)",
         "local function f(n) local x = 0 for i = 1, n do x = x + 0.5 end return x end return f(3), f(0)",
         "local function f(n) if n > 0 then return n end return 0.5 end return f(1), f(0), math.type(f(1)), math.type(f(0))",
@@ -265,6 +316,46 @@ int main() {
         // a NaN made from constants prints the same (its sign is the processor's, not the C compiler's)
         "local function n0() return 0.0 / 0.0 end local function n1(a) local z = 0.0 return a / z - a / z end local function n2() local z = 0.0 return z / z end "
         "local function n3() return 1e308 * 10 - 1e308 * 10 end return n0(), n1(1.0), n2(), n3(), n0() ~= n0()",
+        // numbers that are an integer or a float as the run goes: accumulators, results, parameters, calls, bitwise operators, comparisons
+        "local function sum(n, x) local s = 0 for i = 1, n do s = s + x end return s end return sum(10, 0.5), sum(10, 2), sum(0, 0.5), sum(3, 1.5), math.type(sum(0, 0.5)), math.type(sum(2, 0.5)), math.type(sum(2, 2))",
+        "local function mix(a, b) local r = a if b > 2 then r = r * 1.5 end return r end return mix(3, 1), mix(3, 5), mix(4.5, 5), mix(4.5, 1), math.type(mix(4, 1))",
+        "local function collatz(n) local steps = 0 while n ~= 1 do if n % 2 == 0 then n = n // 2 else n = 3 * n + 1 end steps = steps + 1 end return steps end return collatz(27), collatz(97)",
+        "local function area(n) local acc = 0 for i = 1, n do acc = acc + i / 2 if acc > 100 then acc = acc // 3 end end return acc end return area(10), area(50), area(0), math.type(area(0))",
+        "local function bits(a, b, k) local x = a if b > 0 then x = x + 0.0 end if k == 1 then return x & 7 end if k == 2 then return ~x end if k == 3 then return x << 2 end return x | b end "
+        "local r = {} for k = 1, 4 do r[#r + 1] = tostring(bits(5, 0, k)) .. ' ' .. tostring(bits(5, 1, k)) .. ' ' .. tostring(bits(-3, 2, k)) .. ' ' .. tostring(select(2, pcall(bits, 5.5, 1, k))) end return table.concat(r, ';')",
+        "local function half(a, b) local x = 1 if b > 0 then x = a / 2 end return x & 1 end return half(5, 0), half(4, 1), pcall(half, 5, 1)",
+        "local function divn(a, b, k) local x = a if b > 100 then x = x + 0.5 end if k == 1 then return x // b end return x % b end "
+        "return divn(7, 2, 1), pcall(divn, 7, 0, 1), divn(7, 200, 1), divn(-7, 0.0, 1), divn(math.mininteger, -1, 1), divn(7, 2, 2), pcall(divn, 7, 0, 2), divn(7, 200, 2), divn(math.mininteger, -1, 2), divn(-7, 0.0, 2) ~= divn(-7, 0.0, 2)",
+        "local function cmpn(a, b, k) local x = a if b then x = 2^53 end if k == 1 then return x < 9007199254740993 end if k == 2 then return x == 9007199254740992 end "
+        "if k == 3 then return x >= 9007199254740993 end if k == 4 then return 9007199254740993 > x end return x ~= 3 end "
+        "local r = {} for k = 1, 5 do r[#r + 1] = tostring(cmpn(1, false, k)) .. tostring(cmpn(1, true, k)) .. tostring(cmpn(9007199254740993, true, k)) .. tostring(cmpn(9007199254740993, false, k)) end return table.concat(r, ' ')",
+        "local function lim(n, k) local m = n if k then m = n + 0.5 end local c = 0 for i = 1, m do c = c + i end return c end return lim(3, false), lim(3, true), lim(0, true), lim(1, false)",
+        "local function lv(n) local t = 0 for i = 1, n do if i == 2 then i = i + 0.5 end t = t + i end return t end return lv(3), lv(1), lv(0)",
+        "local function f2(x) if x > 5 then return x * 0.5 end return x end local function g2(x) local t = f2(x) + f2(x + 5) return t end return g2(1), g2(2.5), g2(10), f2(2), f2(6), math.type(g2(1))",
+        "local function rec(n, acc) if n == 0 then return acc end if n % 3 == 0 then return rec(n - 1, acc + 0.25) end return rec(n - 1, acc + 1) end return rec(10, 0), rec(9, 0), rec(0, 5), rec(3, 1.0), math.type(rec(0, 5)), math.type(rec(1, 5))",
+        "function ev(n, a) if n == 0 then return a end return od(n - 1, a + 1) end function od(n, a) if n == 0 then return a * 2 end return ev(n - 1, a + 0.5) end return ev(5, 0), ev(4, 1), od(3, 0), ev(0, 7), od(0, 7), math.type(ev(0, 7)), math.type(ev(1, 7))",
+        "local function h(a) return a & 3 end local function g(c) local x = 2.0 local r = h(x) if c then x = 3 end return h(x) + r end return g(true), g(false)",
+        "local function negz(n) local s = 0 for i = 1, n do s = s - 0.0 end return -s end return negz(3), negz(0), math.type(negz(0))",
+        "local function ao(a, b) local x = a if b then x = x + 0.5 end return (x and 7) + (x or 9) end return ao(1, false), ao(1, true)",
+        "local function sw(a, b) local x, y = a, b if a < b then x, y = y + 0.5, x end return x * 10 + y end return sw(1, 2), sw(2, 1), sw(1.5, 2)",
+        "local function dd(a, b, c) local x = a local y = b if c then x = 1.5 y = 0 end return x // y end return dd(7, 2, false), pcall(dd, 7, 0, false), dd(7, 2, true), pcall(dd, 7, 0, true)",
+        "local function t1(a, b) local x = a if b then x = 0.5 end return -x end local function t2(a, b) local x = a if b then x = 0.5 end return x ^ 2 end local function t3(a, b) local x = a if b then x = 0.5 end return x // 1 end "
+        "return t1(3, false), t1(3, true), t2(3, false), t2(3, true), t3(3, false), t3(3, true), t3(-3, true)",
+        "local function big(a, b) local x = a if b then x = x + 0.0 end return x == a end local function big2(a, b) local x = a if b then x = x + 0.0 end return x < a + 1 end "
+        "return big(9007199254740993, false), big(9007199254740993, true), big(math.maxinteger, true), big2(9007199254740993, true), big2(9007199254740993, false), big2(math.maxinteger, true)",
+        // every comparison between integers and floats around 2^53 and 2^63 when both operands are numbers of either kind (an integer in
+        // one, a float in the other, as the run goes), in both orders
+        "local function ca(a, b, c) local x, y = a, b if c then x = x + 0.5 y = 0 end local r = 0 "
+        "if x < y then r = r + 1 end if x <= y then r = r + 2 end if x > y then r = r + 4 end if x >= y then r = r + 8 end "
+        "if x == y then r = r + 16 end if x ~= y then r = r + 32 end return r end "
+        "local function cb(a, b, c) local x, y = a, b if c then x = 0 y = y + 0.5 end local r = 0 "
+        "if x < y then r = r + 1 end if x <= y then r = r + 2 end if x > y then r = r + 4 end if x >= y then r = r + 8 end "
+        "if x == y then r = r + 16 end if x ~= y then r = r + 32 end return r end "
+        "local ints = {0, 1, -1, 9007199254740991, 9007199254740992, 9007199254740993, 9007199254740995, 4611686018427387904, 9223372036854775807, "
+        "-9223372036854775807 - 1, -9007199254740993, -9007199254740992} "
+        "local flts = {0.0, 0.5, -0.5, 1.0, 9007199254740992.0, 9007199254740994.0, 9223372036854775808.0, -9223372036854775808.0, 1e300, -1e300, 1/0, -1/0, 0/0} "
+        "local out = {} for i = 1, #ints do for j = 1, #flts do out[#out + 1] = ca(ints[i], flts[j], false) out[#out + 1] = cb(flts[j], ints[i], false) "
+        "out[#out + 1] = ca(ints[i], ints[j] or 0, false) out[#out + 1] = ca(flts[j], flts[i] or 0.5, false) end end return table.concat(out, ',')",
         // floats: the mandelbrot iteration and integration
         "local function m(cx, cy, k) local x, y, i = 0.0, 0.0, 0 while i < k and x * x + y * y <= 4.0 do x, y = x * x - y * y + cx, 2.0 * x * y + cy i = i + 1 end return i end return m(0, 0, 20), m(1, 1, 20), m(-0.75, 0.1, 100), m(0.3, 0.5, 100)",
         "local s = 0.5 local function f(x) return s * x * x end local function g(n) local t = 0.0 for i = 1, n do t = t + f(i) end return t end return g(10), g(100)",
