@@ -66,6 +66,11 @@ on:
       - ".github/workflows/pathb.yml"
   workflow_dispatch:
 
+# A newer push to the same branch or PR supersedes the run in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pathb:
     runs-on: ubuntu-24.04
@@ -83,11 +88,10 @@ jobs:
           submodules: true
 
       # python3 only for the oracles of tests/mruby/run.sh; ruby and rake only bootstrap the mruby build.
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ python3 ruby rake
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+      # EDG's runtime (build/edg/lib/libC.a) and QBE are the production pieces the Path B tests link against.
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 ruby rake
 
       # The harness (build/pathb) depends on be/, on the script that assembles it and on the EDG revision. An
       # exact hit skips the build; on a miss sccache still serves the unchanged EDG compiles.
@@ -105,13 +109,6 @@ jobs:
       - name: Build the Path B harness
         if: steps.harness.outputs.cache-hit != 'true'
         run: scripts/setup-pathb.sh
-
-      # The production pieces the Path B tests link against: EDG's runtime (build/edg/lib/libC.a) and QBE.
-      - name: Build EDG front end
-        run: scripts/setup-edg.sh
-
-      - name: Build QBE and cproc
-        run: scripts/setup-qbe.sh
 
       - name: Build the mruby interpreter (runs scripts/pathb-qbe-emit.rb)
         run: scripts/setup-mruby.sh

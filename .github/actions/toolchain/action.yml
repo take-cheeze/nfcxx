@@ -1,0 +1,63 @@
+name: Toolchain
+description: >
+  Install the build tools, set up sccache, and provide build/edg (the EDG front end) and, optionally, build/qbe,
+  build/cproc and build/pathb-ldrt. Each is restored from the Actions cache when its inputs are unchanged and built
+  otherwise, so one workflow run (or one push) pays for the build and every other job and workflow reuses it. The
+  caller sets SCCACHE_GHA_ENABLED and CMAKE_*_COMPILER_LAUNCHER, as before.
+
+inputs:
+  packages:
+    description: Extra apt packages, space separated.
+    default: ""
+  qbe:
+    description: Also provide QBE and cproc (scripts/setup-qbe.sh).
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install build tools
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build gcc g++ ${{ inputs.packages }}
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.9
+
+    # The key holds everything the build reads: the submodule revisions and the scripts/patches/sources that
+    # setup-*.sh use. build/ holds absolute paths, so every job keeps the same checkout path (GITHUB_WORKSPACE).
+    - name: Cache keys
+      id: key
+      shell: bash
+      run: |
+        echo "edg=$(git rev-parse HEAD:3rd/edg)-${{ hashFiles('scripts/setup-edg.sh') }}" >> "$GITHUB_OUTPUT"
+        echo "qbe=$(git rev-parse HEAD:3rd/qbe)-$(git rev-parse HEAD:3rd/cproc)-${{ hashFiles('scripts/setup-qbe.sh', 'scripts/qbe-uninit-slot.patch', 'scripts/pathb-ldrt', 'be/nfcxx_ldrt.c') }}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the EDG front end
+      id: edg
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/edg
+          build/edg-base
+        key: edg-${{ runner.os }}-${{ steps.key.outputs.edg }}
+
+    - name: Build EDG front end
+      if: steps.edg.outputs.cache-hit != 'true'
+      shell: bash
+      run: scripts/setup-edg.sh
+
+    - name: Restore QBE and cproc
+      id: qbe
+      if: inputs.qbe == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/qbe
+          build/cproc
+          build/pathb-ldrt
+        key: qbe-${{ runner.os }}-${{ steps.key.outputs.qbe }}
+
+    - name: Build QBE and cproc
+      if: inputs.qbe == 'true' && steps.qbe.outputs.cache-hit != 'true'
+      shell: bash
+      run: scripts/setup-qbe.sh

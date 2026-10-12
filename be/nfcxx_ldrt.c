@@ -19,6 +19,19 @@
 
 typedef long double ld;
 
+/* The x87 register of a long double result (SysV: class X87, returned in st(0)). Path A (cproc) calls the push helper
+   before a return and the pop helper after a call of a function that returns a long double; nothing else touches the
+   x87 stack in between. x86-64 only, like the rest of the runtime's long double support. */
+__asm__(".text\n"
+        ".globl __nfcxx_ld_push\n"
+        "__nfcxx_ld_push:\n"
+        "\tfldt (%rdi)\n"
+        "\tret\n"
+        ".globl __nfcxx_ld_pop\n"
+        "__nfcxx_ld_pop:\n"
+        "\tfstpt (%rdi)\n"
+        "\tret\n");
+
 /* the 10 x87 bytes are copied, not stored as an ld: gcc treats `*(d) = pv_` as a 16-byte store, drops the memset of the
    6 padding bytes and leaves them unwritten */
 #define PUT(d, v) do { ld pv_ = (v); memset((d), 0, 16); memcpy((d), &pv_, 10); } while (0)
