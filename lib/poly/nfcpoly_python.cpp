@@ -9,6 +9,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <map>
 #include <set>
 
@@ -83,6 +84,22 @@ int obj_setattro(PyObject* self, PyObject* name, PyObject* value);
 PyObject* obj_new(PyTypeObject* type, PyObject* args, PyObject* kwds);
 int obj_init(PyObject* self, PyObject* args, PyObject* kwds);
 PyObject* obj_repr(PyObject* self);
+PyObject* obj_str(PyObject* self);
+PyObject* obj_richcompare(PyObject* self, PyObject* other, int op);
+PyObject* obj_getitem(PyObject* self, PyObject* key);
+PyObject* obj_neg(PyObject* self);
+PyObject* obj_abs(PyObject* self);
+PyObject* obj_add(PyObject* a, PyObject* b);
+PyObject* obj_sub(PyObject* a, PyObject* b);
+PyObject* obj_mul(PyObject* a, PyObject* b);
+PyObject* obj_mod(PyObject* a, PyObject* b);
+PyObject* obj_truediv(PyObject* a, PyObject* b);
+PyObject* obj_floordiv(PyObject* a, PyObject* b);
+PyObject* obj_matmul(PyObject* a, PyObject* b);
+PyObject* obj_and(PyObject* a, PyObject* b);
+PyObject* obj_or(PyObject* a, PyObject* b);
+PyObject* obj_xor(PyObject* a, PyObject* b);
+Py_hash_t obj_hash(PyObject* self);
 
 PyMethodDef g_fn_def = {"nfcpoly_function", fn_tramp, METH_VARARGS, nullptr};
 PyMethodDef g_live_get_def = {"_live_get", live_get, METH_O, nullptr};
@@ -426,14 +443,33 @@ struct PyLang : Lang {
   void define_variable(const std::string& name, Callable* get, Callable* set) override { live[name] = LiveVar{get, set}; }
   void class_define(ClassInfo* ci) override {
     names.push_back(std::unique_ptr<std::string>(new std::string(ci->name)));
-    static PyType_Slot slots[8];
-    slots[0] = {Py_tp_dealloc, reinterpret_cast<void*>(obj_dealloc)};
-    slots[1] = {Py_tp_getattro, reinterpret_cast<void*>(obj_getattro)};
-    slots[2] = {Py_tp_setattro, reinterpret_cast<void*>(obj_setattro)};
-    slots[3] = {Py_tp_new, reinterpret_cast<void*>(obj_new)};
-    slots[4] = {Py_tp_init, reinterpret_cast<void*>(obj_init)};
-    slots[5] = {Py_tp_repr, reinterpret_cast<void*>(obj_repr)};
-    slots[6] = {0, nullptr};
+    // Operators: the slots look the Python special method up in the class (__add__, __radd__, ..., "Operators" in poly.md)
+    // and answer NotImplemented for a class that has none, so a class without operators behaves as before.
+    static PyType_Slot slots[24];
+    int n = 0;
+    slots[n++] = {Py_tp_dealloc, reinterpret_cast<void*>(obj_dealloc)};
+    slots[n++] = {Py_tp_getattro, reinterpret_cast<void*>(obj_getattro)};
+    slots[n++] = {Py_tp_setattro, reinterpret_cast<void*>(obj_setattro)};
+    slots[n++] = {Py_tp_new, reinterpret_cast<void*>(obj_new)};
+    slots[n++] = {Py_tp_init, reinterpret_cast<void*>(obj_init)};
+    slots[n++] = {Py_tp_repr, reinterpret_cast<void*>(obj_repr)};
+    slots[n++] = {Py_tp_str, reinterpret_cast<void*>(obj_str)};
+    slots[n++] = {Py_tp_richcompare, reinterpret_cast<void*>(obj_richcompare)};
+    slots[n++] = {Py_tp_hash, reinterpret_cast<void*>(obj_hash)};  // a type with richcompare and no hash is unhashable
+    slots[n++] = {Py_mp_subscript, reinterpret_cast<void*>(obj_getitem)};
+    slots[n++] = {Py_nb_add, reinterpret_cast<void*>(obj_add)};
+    slots[n++] = {Py_nb_subtract, reinterpret_cast<void*>(obj_sub)};
+    slots[n++] = {Py_nb_multiply, reinterpret_cast<void*>(obj_mul)};
+    slots[n++] = {Py_nb_remainder, reinterpret_cast<void*>(obj_mod)};
+    slots[n++] = {Py_nb_true_divide, reinterpret_cast<void*>(obj_truediv)};
+    slots[n++] = {Py_nb_floor_divide, reinterpret_cast<void*>(obj_floordiv)};
+    slots[n++] = {Py_nb_matrix_multiply, reinterpret_cast<void*>(obj_matmul)};
+    slots[n++] = {Py_nb_and, reinterpret_cast<void*>(obj_and)};
+    slots[n++] = {Py_nb_or, reinterpret_cast<void*>(obj_or)};
+    slots[n++] = {Py_nb_xor, reinterpret_cast<void*>(obj_xor)};
+    slots[n++] = {Py_nb_negative, reinterpret_cast<void*>(obj_neg)};
+    slots[n++] = {Py_nb_absolute, reinterpret_cast<void*>(obj_abs)};
+    slots[n++] = {0, nullptr};
     PyType_Spec spec;
     spec.name = names.back()->c_str();
     spec.basicsize = static_cast<int>(sizeof(PyNfcObj));
@@ -480,9 +516,8 @@ void set_pending(PyLang* L, Pending& p) {
 // Var through *made). Returns a new reference, or null with the error indicator set.
 PyObject* run_callable(PyLang* L, Callable* c, PyObject* self, PyObject* args, Var* made) {
   Py_ssize_t argc = PyTuple_GET_SIZE(args);
-  if (argc != c->arity()) {
-    PyErr_SetString(PyExc_TypeError, ("wrong number of arguments (given " + std::to_string(argc) + ", expected " +
-                                      std::to_string(c->arity()) + ")").c_str());
+  if (!arity_fits(c, argc)) {
+    PyErr_SetString(PyExc_TypeError, arity_message(c, argc).c_str());
     return nullptr;
   }
   Pending pend;
@@ -490,6 +525,7 @@ PyObject* run_callable(PyLang* L, Callable* c, PyObject* self, PyObject* args, V
     std::vector<Var> av;
     av.reserve(static_cast<std::size_t>(argc));
     for (Py_ssize_t k = 0; k < argc; ++k) av.push_back(L->decode(PyTuple_GET_ITEM(args, k)));
+    arity_pad(c, av);
     Var selfv;
     const Var* sp = nullptr;
     if (c->wants_self()) {
@@ -671,9 +707,86 @@ int obj_setattro(PyObject* self, PyObject* name, PyObject* value) {
   return PyObject_GenericSetAttr(self, name, value);
 }
 
+// The method NAME of a bound object's class, null when X is not one (or not initialised, or its context is gone).
+Callable* find_method(PyObject* x, const char* name, PyLang** lang) {
+  PyNfcObj* o = PyLang::object_of(x);
+  if (!o || !o->p) return nullptr;
+  PyLang* L = live_lang(o->lang);
+  if (!L) return nullptr;
+  for (auto& m : o->ci->methods)
+    if (m.first == name) {
+      *lang = L;
+      return m.second;
+    }
+  return nullptr;
+}
+
+// self.NAME(args...) through the trampoline, or NotImplemented when the class has no such method.
+PyObject* call_special(PyObject* self, const char* name, std::initializer_list<PyObject*> args) {
+  PyLang* L = nullptr;
+  Callable* c = find_method(self, name, &L);
+  if (!c) Py_RETURN_NOTIMPLEMENTED;
+  Ref tuple(PyTuple_New(static_cast<Py_ssize_t>(args.size())));
+  if (!tuple) return nullptr;
+  Py_ssize_t k = 0;
+  for (PyObject* a : args) {
+    Py_INCREF(a);
+    PyTuple_SET_ITEM(tuple.get(), k++, a);
+  }
+  return run_callable(L, c, self, tuple.get(), nullptr);
+}
+
+// a OP b: a's method FWD, else (a is not ours, or has none) b's method REV with the operands swapped.
+PyObject* binary_special(PyObject* a, PyObject* b, const char* fwd, const char* rev) {
+  PyLang* L = nullptr;
+  if (find_method(a, fwd, &L)) return call_special(a, fwd, {b});
+  if (find_method(b, rev, &L)) return call_special(b, rev, {a});
+  Py_RETURN_NOTIMPLEMENTED;
+}
+PyObject* obj_add(PyObject* a, PyObject* b) { return binary_special(a, b, "__add__", "__radd__"); }
+PyObject* obj_sub(PyObject* a, PyObject* b) { return binary_special(a, b, "__sub__", "__rsub__"); }
+PyObject* obj_mul(PyObject* a, PyObject* b) { return binary_special(a, b, "__mul__", "__rmul__"); }
+PyObject* obj_mod(PyObject* a, PyObject* b) { return binary_special(a, b, "__mod__", "__rmod__"); }
+PyObject* obj_truediv(PyObject* a, PyObject* b) { return binary_special(a, b, "__truediv__", "__rtruediv__"); }
+PyObject* obj_floordiv(PyObject* a, PyObject* b) { return binary_special(a, b, "__floordiv__", "__rfloordiv__"); }
+PyObject* obj_matmul(PyObject* a, PyObject* b) { return binary_special(a, b, "__matmul__", "__rmatmul__"); }
+PyObject* obj_and(PyObject* a, PyObject* b) { return binary_special(a, b, "__and__", "__rand__"); }
+PyObject* obj_or(PyObject* a, PyObject* b) { return binary_special(a, b, "__or__", "__ror__"); }
+PyObject* obj_xor(PyObject* a, PyObject* b) { return binary_special(a, b, "__xor__", "__rxor__"); }
+PyObject* obj_neg(PyObject* self) { return call_special(self, "__neg__", {}); }
+PyObject* obj_abs(PyObject* self) { return call_special(self, "__abs__", {}); }
+PyObject* obj_getitem(PyObject* self, PyObject* key) { return call_special(self, "__getitem__", {key}); }
+
+PyObject* obj_richcompare(PyObject* self, PyObject* other, int op) {
+  static const char* const names[] = {"__lt__", "__le__", "__eq__", "__ne__", "__gt__", "__ge__"};  // Py_LT .. Py_GE
+  if (op < 0 || op > 5) Py_RETURN_NOTIMPLEMENTED;
+  PyLang* L = nullptr;
+  if (!find_method(self, names[op], &L)) {
+    if (op == Py_EQ || op == Py_NE) {  // a class without the method compares by identity, as object does
+      bool same = self == other;
+      return PyBool_FromLong((op == Py_EQ) == same);
+    }
+    Py_RETURN_NOTIMPLEMENTED;
+  }
+  return call_special(self, names[op], {other});
+}
+
+Py_hash_t obj_hash(PyObject* self) {  // by identity, as object does
+  Py_uhash_t h = reinterpret_cast<Py_uhash_t>(self);
+  h = (h >> 4) | (h << (8 * sizeof(h) - 4));
+  return h == static_cast<Py_uhash_t>(-1) ? static_cast<Py_hash_t>(-2) : static_cast<Py_hash_t>(h);
+}
+
 PyObject* obj_repr(PyObject* self) {
+  PyLang* L = nullptr;
+  if (find_method(self, "__repr__", &L)) return call_special(self, "__repr__", {});
   PyNfcObj* o = reinterpret_cast<PyNfcObj*>(self);
   return PyUnicode_FromFormat("<%s object>", o->ci->name.c_str());
+}
+PyObject* obj_str(PyObject* self) {
+  PyLang* L = nullptr;
+  if (find_method(self, "__str__", &L)) return call_special(self, "__str__", {});
+  return obj_repr(self);
 }
 
 std::unique_ptr<Lang> make_python(Impl* impl) { return std::unique_ptr<Lang>(new PyLang(impl)); }

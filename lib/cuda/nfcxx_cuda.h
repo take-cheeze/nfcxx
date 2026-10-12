@@ -29,6 +29,12 @@
 #define __shared__
 #define __constant__
 #define __managed__
+// The host copy of a kernel: __launch_bounds__ is a hint for the device compile. cuda_runtime.h defines it only when
+// __CUDACC__ is set, which the host compile is not, so a header kernel (one the rewrite does not touch) would keep the
+// call and break the parse. An empty default covers headers too.
+#ifndef __launch_bounds__
+#define __launch_bounds__(...)
+#endif
 
 // The device built-ins, for the host compile of a kernel body. The host copy of a kernel is never run (a launch
 // goes to the runtime), so these placeholders only have to exist and link.
@@ -36,6 +42,63 @@ inline const uint3 threadIdx{0, 0, 0};
 inline const uint3 blockIdx{0, 0, 0};
 inline const dim3 blockDim{1, 1, 1};
 inline const dim3 gridDim{1, 1, 1};
+
+// The block barrier, for the host copy of a kernel body (never run; the device code has the real barrier).
+inline void __syncthreads(void) {}
+// The warp barrier, likewise (CUDA: __syncwarp(mask) with the full mask by default).
+inline void __syncwarp(unsigned int mask = 0xffffffffu) { (void)mask; }
+
+// Device intrinsics, for the host copy of a kernel body (never run; the device code has the real instruction).
+// Signatures follow CUDA's; the values are placeholders.
+inline float __fdividef(float a, float b) { return a / b; }
+inline float __saturatef(float a) { return a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a); }
+inline float __ldg(const float *p) { return *p; }
+inline int __ldg(const int *p) { return *p; }
+inline unsigned int __ldg(const unsigned int *p) { return *p; }
+inline int __dp4a(int a, int b, int c) { (void)a; (void)b; return c; }
+inline float __shfl_up_sync(unsigned int mask, float v, unsigned int delta, int width = 32) { (void)mask; (void)delta; (void)width; return v; }
+inline int __shfl_up_sync(unsigned int mask, int v, unsigned int delta, int width = 32) { (void)mask; (void)delta; (void)width; return v; }
+inline int __syncthreads_or(int predicate) { return predicate != 0; }
+inline unsigned int __reduce_add_sync(unsigned int mask, unsigned int value) { (void)mask; return value; }
+inline void __threadfence_system(void) {}
+inline void __nanosleep(unsigned int ns) { (void)ns; }
+inline unsigned short __hmax(unsigned short a, unsigned short b) { return a > b ? a : b; }
+// glibc declares these (C linkage, throw()); the inline definitions match it, so every unit may include this header.
+extern "C" inline float __expf(float x) throw() { return __builtin_expf(x); }
+extern "C" inline float __logf(float x) throw() { return __builtin_logf(x); }
+
+// The integer intrinsics, for the host copy of a kernel and for host code that calls them (the device side is in the
+// device unit, scripts/cuda-rewrite.rb BUILTIN_DEFS). Real C++ here, with CUDA's definitions. The shuffles on the host
+// return the value of the calling lane (there is one lane on the host).
+inline unsigned __umulhi(unsigned a, unsigned b) { return (unsigned)(((unsigned long long)a * b) >> 32); }
+inline int __popc(unsigned x) { int n = 0; while (x) { x &= x - 1; ++n; } return n; }
+inline int __popcll(unsigned long long x) { return __popc((unsigned)x) + __popc((unsigned)(x >> 32)); }
+inline unsigned __byte_perm(unsigned x, unsigned y, unsigned s) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) {
+    unsigned sel = (s >> (4 * i)) & 7u;
+    unsigned src = sel < 4 ? x : y;
+    r |= ((src >> (8 * (sel & 3))) & 0xffu) << (8 * i);
+  }
+  return r;
+}
+inline unsigned __vsub4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++) r |= (((a >> (8 * i)) - (b >> (8 * i))) & 0xffu) << (8 * i);
+  return r;
+}
+inline unsigned __vcmpne4(unsigned a, unsigned b) {
+  unsigned r = 0;
+  for (int i = 0; i < 4; i++)
+    if (((a >> (8 * i)) & 0xffu) != ((b >> (8 * i)) & 0xffu)) r |= 0xffu << (8 * i);
+  return r;
+}
+inline int __shfl_xor_sync(unsigned, int v, int, int = 32) { return v; }
+inline float __shfl_xor_sync(unsigned, float v, int, int = 32) { return v; }
+inline int __shfl_down_sync(unsigned, int v, unsigned, int = 32) { return v; }
+inline float __shfl_down_sync(unsigned, float v, unsigned, int = 32) { return v; }
+inline int __shfl_sync(unsigned, int v, int, int = 32) { return v; }
+inline float __shfl_sync(unsigned, float v, int, int = 32) { return v; }
 // The block's dynamic shared memory (`extern __shared__ T x[]`, scripts/cuda-rewrite.rb): a placeholder for the host
 // copy of a kernel, which never runs. The device side lowers the call to the address of the .extern .shared symbol.
 inline void *__nfcxx_dynshared_addr(void) { return nullptr; }
@@ -107,6 +170,27 @@ inline cudaError_t __nfcxx_cuda_launch(void (*kernel)(P...), dim3 grid, dim3 blo
   std::tuple<P...> packed(static_cast<P>(args)...);
   return __nfcxx_cuda_launch_impl(device, grid, block, shmem, stream, packed, std::index_sequence_for<P...>());
 }
+
+// cudaLaunchKernelEx (the CUDA headers' template calls cudaLaunchKernelExC with the host function, which is not a
+// device kernel here). The name is redirected below to this template, which looks the kernel up in the registry and
+// passes the configuration through unchanged. A host function that is not registered is an error, as in the launch.
+template <typename... P, std::size_t... I>
+inline cudaError_t __nfcxx_launch_ex_impl(const cudaLaunchConfig_t *config, cudaKernel_t kernel,
+                                          std::tuple<P...> &packed, std::index_sequence<I...>) {
+  void *argv[sizeof...(P) + 1] = {static_cast<void *>(&std::get<I>(packed))..., nullptr};
+  return cudaLaunchKernelExC(config, reinterpret_cast<const void *>(kernel), argv);
+}
+
+template <typename... P, typename... A>
+inline cudaError_t __nfcxx_cudaLaunchKernelEx(const cudaLaunchConfig_t *config, void (*kernel)(P...), A &&...args) {
+  static_assert(sizeof...(P) == sizeof...(A), "kernel launch: wrong number of arguments");
+  cudaKernel_t device = __nfcxx_find_kernel(reinterpret_cast<const void *>(kernel));
+  if (device == nullptr) return cudaErrorInvalidDeviceFunction;
+  std::tuple<P...> packed(static_cast<P>(args)...);
+  return __nfcxx_launch_ex_impl(config, device, packed, std::index_sequence_for<P...>());
+}
+// Calls of cudaLaunchKernelEx from here on (the CUDA template above stays, for code that includes it before this header).
+#define cudaLaunchKernelEx __nfcxx_cudaLaunchKernelEx
 
 // The runtime's host-address calls (cudaFuncSetAttribute, cudaLaunchKernel) do not know the kernels: they are
 // loaded with cudaLibraryLoadData, so the host address is looked up in the registry first. The macros only rewrite

@@ -14,13 +14,14 @@ one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACK
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
 Stack objects get redzones (`asanalloc` in cproc's `funcalloc`): 32 bytes on each side, allocated in the entry block,
 their redzones poisoned at the declaration and the whole object unpoisoned in `funcret`. The object is in a fake frame
-(use after return, below). Variable-length arrays and `alloca` get redzones too (`asandynalloc`), not a fake frame. Globals get a trailing redzone: `emitdata` writes the rest of the
+(use after return, below). C-input variable-length arrays and `alloca` get redzones too (`asandynalloc`), not a fake frame. Globals get a trailing redzone: `emitdata` writes the rest of the
 object's 8-byte granule and 32 zero bytes into the same data item, and the unit's constructor (`emitasanctor`, in
 `.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
 `stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
 object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
-leading redzone (an access before the object is not reported); thread-local globals get none. Use after scope and use
-after return are covered (next two sections). Not yet: volatile (qbe rejects volatile stores, a known limit). Block
+leading redzone (an access before the object is not reported); thread-local globals get none; C++ variable-length arrays
+(EDG's `__vla_alloc` pool) get none. Objects over 16-byte alignment, C-input VLAs and `alloca` have redzones. Use after
+scope and use after return are covered (next two sections). Not yet: volatile (qbe rejects volatile stores, a known limit). Block
 copies and `va_arg` loads are checked as ordinary accesses.
 
 ## Use after scope (qbe)
@@ -51,7 +52,9 @@ Limits, all false negatives (nothing is reported that is valid, the missing chec
 - A longjmp or a C++ throw (EDG's setjmp ABI) that leaves a block to a handler in the same frame runs no poison, so an access
   through a pointer kept from that block is not reported.
 - Use after return is the next section. `return` itself poisons nothing here: funcret gives the fake frames back.
-- `alloca` lives until its function returns, as C requires, so it has no scope poison.
+- C++ variable-length arrays are EDG's `__vla_alloc` pool, so they have neither redzones nor a scope poison.
+- `alloca` has redzones but no scope poison, on purpose: C keeps its memory until the function returns, so a read after its
+  block is valid. C-input VLAs are scope objects (poisoned where their block ends, from entry-block slots).
 
 The default (non-ASan) output is byte-identical: every hook is gated on `asanon`, and the scope fields are only set and read
 under it.

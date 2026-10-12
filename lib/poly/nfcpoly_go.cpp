@@ -511,12 +511,11 @@ struct GoLang : Lang {
     }
     if (!c)
       raise_script_error(this, "NoMethodError", "undefined method '" + method + "' for " + ci->name, std::vector<std::string>(), false);
-    if (static_cast<std::size_t>(c->arity()) != args.size())
-      raise_script_error(this, "ArgumentError",
-                         "wrong number of arguments (given " + std::to_string(args.size()) + ", expected " +
-                             std::to_string(c->arity()) + ")",
-                         std::vector<std::string>(), false);
-    return c->invoke(&target, args.data());
+    if (!arity_fits(c, static_cast<long>(args.size())))
+      raise_script_error(this, "ArgumentError", arity_message(c, static_cast<long>(args.size())), std::vector<std::string>(), false);
+    std::vector<Var> padded = args;
+    arity_pad(c, padded);
+    return c->invoke(&target, padded.data());
   }
 
   // ---- declarations ----
@@ -682,19 +681,35 @@ struct GoLang : Lang {
     Sig sig;
     unsigned id = callable_id(c, g, sig);
     std::string params, args = recv_arg ? recv_arg : "";
+    // Optional trailing arguments (Callable::min_arity) are Go's variadic `o ...any`: the generated code pads them with nil,
+    // as the other languages' trampolines do, so the host always gets all of them.
+    const std::size_t nopt = static_cast<std::size_t>(c->arity() - c->min_arity());
+    const std::size_t first_opt = sig.params.size() - nopt;
+    std::string pre;
     for (std::size_t k = skip; k < sig.params.size(); ++k) {
+      if (k >= first_opt) {
+        if (sig.params[k].kind != TypeDesc::Any)
+          throw Error("nfcpoly: go: an optional argument must be a Value (any); parameter " + std::to_string(k - skip) + " is not");
+        args += ", a[" + std::to_string(k - first_opt) + "]";
+        continue;
+      }
       std::string a = "a" + std::to_string(k - skip);
       params += (params.empty() ? "" : ", ") + a + " " + gotype(sig.params[k], false);
       args += ", " + conv(a, sig.params[k], true);
+    }
+    if (nopt) {
+      params += (params.empty() ? "" : ", ") + std::string("o ...any");
+      pre = "if len(o) > " + std::to_string(nopt) + " { panic(&nfc.Error{Class: \"ArgumentError\", Msg: \"wrong number of arguments\"}) }; a := make([]any, " +
+            std::to_string(nopt) + "); copy(a, o); ";
     }
     if (!recv_arg && !args.empty()) args = args.substr(2);
     std::string call = "nfc.Call(" + std::to_string(id) + (args.empty() ? "" : ", ") + args + ")";
     const TypeDesc& r = sig.result;
     std::string out = head + "(" + params + ")";
-    if (r.kind == TypeDesc::Void) return out + " { " + call + " }\n";
+    if (r.kind == TypeDesc::Void) return out + " { " + pre + call + " }\n";
     std::string rt = gotype(r, false);
     std::string val = r.kind == TypeDesc::Any ? call : conv(call + ".(" + gotype(r, true) + ")", r, false);
-    return out + " " + rt + " { return " + val + " }\n";
+    return out + " " + rt + " { " + pre + "return " + val + " }\n";
   }
 
   std::string literal(const Var& v, std::string& type) {
@@ -807,6 +822,7 @@ struct GoLang : Lang {
         break;
       }
       case Item::Method: {
+        if (it.name.size() > 4 && it.name.compare(0, 2, "__") == 0) break;  // an operator method (Python's names): Go has none
         std::string gn = go_name(it.name);
         if (!go_ident(gn) || gn == "H") throw Error("nfcpoly: go: '" + it.name + "' is not usable as a method of " + it.ci->name);
         class_id(it.ci->key);

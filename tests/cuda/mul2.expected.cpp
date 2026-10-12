@@ -3,12 +3,12 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 
-__global__ void mul2(const int *a, int *b, int n) {
+static void mul2(const int *a, int *b, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) b[i] = a[i] * 2;
 }
 
-__global__ void noargs() {}
+static void noargs() {}
 
 int main() {
   const int n = 1000;
