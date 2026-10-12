@@ -29,10 +29,13 @@ class CodeGen
     @frozen_tables = nil
     @frozen_table_sites = {}
     @frozen_table_name_safe = {}
+    @frozen_symbol_bit = nil
     @frozen_tables_refusal = frozen_tables_refusal_reason
     return if @frozen_tables_refusal
 
-    registry = FrozenTables::Registry.new
+    # Allocated here, before any flow, so every flow numbers the Symbol bit the same way (see frozen_symbol_bit).
+    @frozen_symbol_bit = symbol_class_enabled? ? numeric_class_bit('Symbol') : nil
+    registry = FrozenTables::Registry.new(symbol_bit: @frozen_symbol_bit)
     @ireps.each do |label, irep|
       irep.instructions.each_with_index do |insn, idx|
         next unless insn.op == 'SEND0' && insn.sym == 'freeze'
@@ -46,6 +49,17 @@ class CodeGen
 
   def frozen_tables_model
     @frozen_tables
+  end
+
+  # The class bit of a Symbol element of a frozen literal (BC2CPP_SYMBOL_CLASS=0 or BC2CPP_IMMEDIATE_CLASS_BITS=0
+  # turn it off, and nil then). It is the 'Symbol' bit the exact-class run gives LOADSYM literals, so one class
+  # bit names one class in every flow. A Symbol is an immediate mrb_sym (LOADSYM emits mrb_symbol_value).
+  def frozen_symbol_bit
+    @frozen_symbol_bit
+  end
+
+  def symbol_class_enabled?
+    ENV.fetch('BC2CPP_SYMBOL_CLASS', '1') != '0' && immediate_class_bits_enabled?
   end
 
   # The kind `LITERAL.freeze` at SEND0 +index+ evaluates to, 0 when the site is not a tracked one.
@@ -219,6 +233,8 @@ end
     when 'GETCONST', 'GETMCNST'
       name = writer.const_name
       name && @integer_constants&.include?(name) ? NumericFlow::INT : NumericFlow::OTHER
+    # Only the literal LOADSYM is a Symbol here; SYMBOL interns a string at run time and stays OTHER.
+    when 'LOADSYM' then frozen_symbol_bit || NumericFlow::OTHER
     else NumericFlow::OTHER
     end
   end

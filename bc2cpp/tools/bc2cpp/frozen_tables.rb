@@ -32,10 +32,12 @@ module FrozenTables
   class Registry
     attr_reader :shapes
 
-    def initialize
+    # +symbol_bit+ names the class bit of a Symbol slot (CodeGen#frozen_symbol_bit), nil when none is in use.
+    def initialize(symbol_bit: nil)
       @by_key = {}
       @by_bit = {}
       @shapes = []
+      @symbol_bit = symbol_bit
     end
 
     def intern(container, slots, keys)
@@ -121,7 +123,9 @@ module FrozenTables
                    NumericFlow::OTHER => 'OTHER' }.freeze
 
     def slot_name(mask)
-      SLOT_NAMES.filter_map { |bit, n| n if mask.anybits?(bit) }.join('|')
+      names = SLOT_NAMES.filter_map { |bit, n| n if mask.anybits?(bit) }
+      names << 'SYM' if @symbol_bit && mask.anybits?(@symbol_bit)
+      names.join('|')
     end
   end
 end
