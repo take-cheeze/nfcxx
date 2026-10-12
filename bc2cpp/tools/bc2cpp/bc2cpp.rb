@@ -1553,6 +1553,7 @@ if $PROGRAM_NAME == __FILE__
     end
   end
   const_site_cache_code = SymbolCache.rewrite(gen.emit_const_site_cache, symbol_table)
+  const_scope_code = SymbolCache.rewrite(gen.emit_const_scope_helpers, symbol_table)
   # OUTLINED_INDEX_OPS: after the symbol cache (their fallbacks become
   # bc2cpp_send too), ahead of every function that calls them.
   index_helpers_code = SymbolCache.rewrite(gen.emit_index_helpers(compiled), symbol_table)
@@ -1571,6 +1572,7 @@ if $PROGRAM_NAME == __FILE__
   warn "== poly table dispatch: #{poly_table_sites.map { |t, n| "#{t} #{n}" }.join(', ').then { |s| s.empty? ? 'none' : s }} sites =="
   warn ''
   print SymbolCache.emit(symbol_table)
+  print const_scope_code
   print const_site_cache_code
   print index_helpers_code
   print eqq_helper_code

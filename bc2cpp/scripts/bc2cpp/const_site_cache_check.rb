@@ -78,7 +78,7 @@ Dir.mktmpdir do |dir|
   CodeGen.stable_class_constants = Set.new
   gen2 = CodeGen.new(ireps, registry, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
   plain = gen2.compile_insn(irep.instructions[idx], irep, user, idx)
-  check.call('an unproven name keeps the ordinary lookup', plain.include?('bc2cpp_const_try') && !plain.include?('bc2cpp_cconst_'))
+  check.call('an unproven name keeps the ordinary lookup', plain.include?('bc2cpp_const_scope_') && !plain.include?('bc2cpp_cconst_'))
 
   # Helper behaviour against stubs, and its independence from the symbol cache.
   if system('g++', '--version', out: File::NULL, err: File::NULL)

@@ -481,7 +481,7 @@ class CodeGen
       # [RGSS::Sprite, RGSS]), then Object (Module.nesting for defs nested where the
       # owner name says).
       # A failing mrb_const_get raises by longjmp, so it cannot be tried and then
-      # polled; bc2cpp_const_try (emit_const_lookup_helper) wraps each attempt in
+      # polled; bc2cpp_const_try (emit_const_lookup_helper) protects each attempt in
       # mrb_protect_error. The final lookup, from Object, is unprotected: a constant
       # still not found is a real error.
       # A top-level def (owner "Object") needs just the one lookup.

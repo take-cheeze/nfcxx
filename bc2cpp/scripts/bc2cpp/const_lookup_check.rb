@@ -26,7 +26,11 @@ end
 
 gen = CodeGen.new({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, Set.new)
 gen.instance_variable_set(:@const_lookup_helper_used, true)
-helper = gen.emit_const_lookup_helper
+gen.const_lookup_block('1', 'DEEP', %w[Outer Inner])
+repeated = gen.const_lookup_block('2', 'IN_MODULE', %w[Outer Inner])
+check.call('one owner helper serves different constants and registers',
+           repeated.include?('bc2cpp_const_scope_0') && gen.emit_const_scope_helpers.scan('static mrb_value').size == 1)
+helper = gen.emit_const_lookup_helper + gen.emit_const_scope_helpers
 check.call('the probe no longer raises through mrb_protect_error for a class scope',
            helper.include?('mrb_const_defined_at') && helper.include?('MRB_FL_CLASS_IS_PREPENDED'))
 
@@ -102,6 +106,26 @@ else
         compare(M, "nested class own constant", inner, "DEEP", 1);
         compare(M, "an outer module's constant is not inherited by a nested class", inner, "IN_MODULE", 0);
         compare(M, "module scope does not see Object's constants", outer, "TOP_ONLY", 0);
+        auto lookup = [&](const char* name, mrb_int expected) {
+          mrb_value value = bc2cpp_const_scope_0(M, mrb_intern_cstr(M, name));
+          if (!mrb_integer_p(value) || mrb_integer(value) != expected) {
+            std::printf("FAIL outlined lookup %s\\n", name); ++failures;
+          }
+        };
+        setc(outer_module, "DEEP", 99);
+        lookup("DEEP", 7);
+        lookup("IN_MODULE", 6);
+        lookup("TOP_ONLY", 3);
+        setc(inner_class, "DEEP", 8);
+        lookup("DEEP", 8);
+        mrb_sym missing = mrb_intern_cstr(M, "MISSING_OUTLINED");
+        mrb_bool raised = FALSE;
+        mrb_protect_error(M, [](mrb_state* vm, void* data) {
+          return bc2cpp_const_scope_0(vm, *(mrb_sym*)data);
+        }, &missing, &raised);
+        if (!raised) { std::printf("FAIL outlined missing constant must raise\\n"); ++failures; }
+        mrb_full_gc(M);
+        lookup("DEEP", 8);
         // The point of the change: a miss must not allocate an exception.
         mrb_sym nope = mrb_intern_cstr(M, "NOPE");
         mrb_bool ok;
