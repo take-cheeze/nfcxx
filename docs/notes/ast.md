@@ -546,11 +546,12 @@ The shared counters (`tier_compiled`, `tier_compiles`, `tier_cache_hits`, `tier_
   legal one; chains of calls deeper than the inliner goes; methods, inheritance, receivers of different classes at one site;
   bodies with locals, `if` chains, assignments, no result and several; allocation for the collector). Each `.out` file next to
   them is the output of a real Lua 5.4.9 (`tests/ast/regen.sh`, built from the pin of `setup-poly-lua.sh`), and
-  `tests/ast/run.sh` requires the same stdout from nfcast on both back ends, with the collector at its default and at every safe
-  point, each with inlining as it is by default, with a site rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and
-  with inlining off (`NFCAST_INLINE=0`); and with the tier on and every function compiled at its first call (`NFCAST_TIER=sync`,
-  `NFCAST_TIER_THRESHOLD=1`): normally, with the collector stress, with early inlining, and with the tier compiling in the
-  background (`NFCAST_TIER=async`): 29 programs, 10 runs each, per back end. Two of the first programs had a syntax error in my
+  `tests/ast/run.sh` requires the same stdout from nfcast on both back ends, with inlining as it is by default, with a site
+  rewritten as soon as it is used twice (`NFCAST_INLINE_WARM=1`) and with inlining off (`NFCAST_INLINE=0`); and with the tier on
+  and every function compiled at its first call (`NFCAST_TIER=sync`, `NFCAST_TIER_THRESHOLD=1`), normally and with early
+  inlining, and with the tier compiling in the background (`NFCAST_TIER=async`): 29 programs, 6 runs each, per back end. The
+  collector's forced stress (`NFCAST_GC_STRESS=1`) is no longer in this script (it is slow; `engine.cpp` and `tier.cpp` still run
+  it on their own checks). Two of the first programs had a syntax error in my
   first version and compared equal because *both* implementations refused them: the check also requires that the reference run
   succeeds (`regen.sh` and the helper that wrote the `inline_*` outputs refuse a reference that fails or prints to stderr). Thirteen of the 29 programs are `inline_*`.
 - `tests/ast/engine.cpp`: 194 checks through the C++ API (13 of them for the operators that read their operands in place) (the specialization counters, the collector, host objects, errors, the
