@@ -51,7 +51,7 @@ This path does not yet connect to the `.cu` driver: the rewrite in `scripts/cuda
 - **Template launch depending on an enclosing template parameter** (reduction, MC_EstimatePiP, and most ggml-cuda
   templated launches): refused with exit 3 (`dependent_on_template`). The device image would need that instance, and the
   rewriter does not know which instances a program uses. Needs the instantiation set from the front end.
-- **Plain launches in the front end** (`NFCXX_CUDA_EDG_LAUNCH=1`, off by default): the driver passes `--cuda` to EDG
+- **Plain launches in the front end** (on by default for `.cu` inputs; `NFCXX_CUDA_EDG_LAUNCH=0` turns it off): the driver passes `--cuda` to EDG
   (3rd/edg), which parses `kernel<<<grid, block[, shmem[, stream]]>>>(args)` itself, and the rewriter leaves those
   launches (`--edg-launches`). The launch lowers to the same `__nfcxx_cuda_launch` call. Launches with template
   arguments are still rewritten here, and EDG refuses them if one reaches it.
