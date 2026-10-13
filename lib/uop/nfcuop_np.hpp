@@ -110,7 +110,7 @@ class Tensor {
   Tensor softmax(int64_t axis = -1) const;
   Tensor log_softmax(int64_t axis = -1) const;
   Tensor clip(double lo, double hi) const;
-  Tensor floor() const;   // ONNX Floor; an integer tensor gives default_float, like numpy's floor of ints (float64)
+  Tensor floor() const;   // ONNX Floor; an integer tensor is returned as it is (numpy keeps the integer dtype); bool gives default_float
   Tensor ceil() const;    // ONNX Ceil; likewise
   Tensor isnan() const;   // Bool; all false for integers and bools
   Tensor isinf() const;   // Bool; all false for integers and bools

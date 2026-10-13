@@ -301,8 +301,8 @@ static void new_operators() {
   CHECK(x.ceil().str() == "[-2., -0., -0., 1., 3., -1., 3000., inf, -inf, nan]");
   CHECK(std::signbit(x.ceil().tolist()[1]) && std::signbit(x.floor().tolist()[2]) && !std::signbit(x.floor().tolist()[3]));
   CHECK(x.floor().dtype() == f32 && np.array({1.5}, f64).ceil().dtype() == f64);
-  CHECK(np.array({1, -2}, i32).floor().str() == "[1., -2.]" && np.array({1, -2}, i32).floor().dtype() == f32);   // numpy: float64
-  CHECK(np.array({1, -2}, i32).ceil().dtype() == f32);
+  CHECK(np.array({1, -2}, i32).floor().str() == "[1, -2]" && np.array({1, -2}, i32).floor().dtype() == i32);   // numpy keeps ints
+  CHECK(np.array({1, -2}, i32).ceil().dtype() == i32 && np.array({1, 0}, b).ceil().dtype() == f32);
   // isnan and isinf: floats only; integers and bools are never NaN or infinite
   CHECK(x.isnan().str() == "[False, False, False, False, False, False, False, False, False, True]" && x.isnan().dtype() == b);
   CHECK(x.isinf().str() == "[False, False, False, False, False, False, False, True, True, False]");
