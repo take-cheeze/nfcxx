@@ -379,6 +379,16 @@ FLOAT_BUILTINS = {
   "__nfcxx_expf" => [:exp, 1],
   "__nfcxx_logf" => [:log, 1],
 }
+# Float to 32-bit integer: name => PTX instruction. cvt.rni rounds to nearest even and saturates (NaN gives 0), as CUDA's
+# __float2int_rn.
+FLOAT_TO_INT_BUILTINS = {
+  "__nfcxx_rni_s32" => "cvt.rni.s32.f32",
+}
+# Half-precision fused multiply-add of 16-bit values (the device prelude's unsigned short): one fma.rn.f16 on .b16
+# registers, rounded once from the exact product and sum, as CUDA's __hfma (not a float result rounded to half again).
+HALF_BUILTINS = {
+  "__nfcxx_hfma_rn" => ["fma.rn.f16", 3],
+}
 # name => [PTX atom op, PTX type]: the pointer is a generic address (global or shared), the result is the old value
 ATOMICS = {
   "__nfcxx_atomic_add_i" => ["add", "s32"], "__nfcxx_atomic_add_f" => ["add", "f32"],
@@ -432,7 +442,7 @@ class Fn
     @ncall = 0
     @name = form[1].to_s
     @regs = {}              # IR register "%N" => [PTX register, IR type]
-    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0 }
+    @count = { "p" => 0, "r" => 0, "rd" => 0, "f" => 0, "fd" => 0, "h" => 0 }
     @loops = []             # [continue label, break label] of the enclosing loops, innermost last
     @slots = {}             # slot name => byte offset in the frame
     @frame = 0
@@ -761,6 +771,10 @@ class Fn
         scalar_u32(name, x, dest, ty)
       elsif FLOAT_BUILTINS.key?(name)
         float_builtin(name, x, dest, ty)
+      elsif FLOAT_TO_INT_BUILTINS.key?(name)
+        float_to_int_builtin(name, x, dest, ty)
+      elsif HALF_BUILTINS.key?(name)
+        half_builtin(name, x, dest, ty)
       else
         call_site(x, dest, ty)
       end
@@ -1148,6 +1162,37 @@ class Fn
     emit("#{op} #{dest}, #{regs.join(', ')};")
   end
 
+  # A float-to-int intrinsic of FLOAT_TO_INT_BUILTINS: a 32-bit float operand, a 32-bit signed integer result.
+  def float_to_int_builtin(name, x, dest, ty)
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes 1 argument(s)" unless args.length == 1
+    raise Refused, "#{name} returns #{ty[0]}, not a 32-bit signed integer" unless ty[0] == "int" && ty[2] && type_size(ty) == 4
+    v, vty = operand(args[0])
+    raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "float" && vty[1] == 4
+    emit("#{FLOAT_TO_INT_BUILTINS[name]} #{dest}, #{reg_of(v, vty)};")
+  end
+
+  # A 16-bit fused multiply-add of HALF_BUILTINS: the three unsigned-short operands (32-bit registers holding the 16-bit
+  # values) move to .b16 registers, one fma.rn.f16 gives the 16-bit result, and it is zero-extended back.
+  def half_builtin(name, x, dest, ty)
+    op, arity = HALF_BUILTINS[name]
+    args = x[3..-1] || []
+    raise Refused, "#{name} has no value" if dest.nil?
+    raise Refused, "#{name} takes #{arity} argument(s)" unless args.length == arity
+    raise Refused, "#{name} returns #{ty[0]}, not a 16-bit unsigned integer" unless ty[0] == "int" && !ty[2] && type_size(ty) == 2
+    regs = args.map do |a|
+      v, vty = operand(a)
+      raise Refused, "#{name}: argument of type #{vty[0]}" unless vty[0] == "int" && vty[1] == 2
+      t = fresh("h")
+      emit("cvt.u16.u32 #{t}, #{reg_of(v, vty)};")
+      t
+    end
+    r = fresh("h")
+    emit("#{op} #{r}, #{regs.join(', ')};")
+    emit("cvt.u32.u16 #{dest}, #{r};")
+  end
+
   # A float intrinsic of FLOAT_BUILTINS: operands and result are 32-bit floats. exp and log are two instructions:
   # expf(x) = 2^(x * log2(e)) and logf(x) = log2(x) * ln(2), with the scale in the f32 hex form (exact constants).
   def float_builtin(name, x, dest, ty)
@@ -1420,6 +1465,7 @@ class Fn
     out << "  .reg .b32 %r<#{@count['r']}>;" if @count["r"] > 0
     out << "  .reg .b64 %rd<#{@count['rd']}>;" if @count["rd"] > 0
     out << "  .reg .f32 %f<#{@count['f']}>;" if @count["f"] > 0
+    out << "  .reg .b16 %h<#{@count['h']}>;" if @count["h"] > 0
     out << "  .reg .f64 %fd<#{@count['fd']}>;" if @count["fd"] > 0
     out << "  .local .align 8 .b8 __local_depot#{@index}[#{@frame}];" if @frame > 0
     @prologue.each { |s| out << "  #{s}" }

@@ -61,6 +61,8 @@ pass half2_member.cu "half2 member: no error, 0 mismatches"
 pass scalars.cu "scalars: no error, 0 mismatches"
 pass shared_bf16.cu "shared bf16: no error, 0 mismatches"
 pass prelude_gaps.cu "prelude gaps: no error, 0 mismatches"
+pass fma_round.cu "half fma: no error, 0 mismatches"
+pass float2int_round.cu "float2int_rn: no error, 0 mismatches"
 refuse refuse_cvta.cu "call of __nfcxx_cvta_generic_to_shared"
 refuse refuse_hgt2.cu "call of __nfcxx_hgt2_mask"
 exit $fail
