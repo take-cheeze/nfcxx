@@ -69,13 +69,31 @@ jobs:
               tests/multi-tu/run.sh
               tests/ehshim/run.sh
               tests/eval/run.sh
-          - name: nfcpoly, nfcast, mruby scripts
-            run: |
-              tests/poly/run.sh
-              tests/poly/asan-go.sh
-              tests/ast/run.sh
-              tests/uop/run.sh
-              tests/mruby/run.sh
+          # The nfcpoly, nfcast, uop and mruby suites run in parallel, one entry per back end where the script takes one
+          # (NFCXX_BACKEND); each entry sets up only what it needs (go and onnx flags below). Same tests as one job before.
+          - name: nfcpoly host (QBE backend)
+            go: true
+            run: NFCXX_BACKEND=qbe tests/poly/run.sh
+          - name: nfcpoly host (gcc backend)
+            go: true
+            run: NFCXX_BACKEND=gcc tests/poly/run.sh
+          - name: nfcpoly Go under AddressSanitizer
+            go: true
+            run: tests/poly/asan-go.sh
+          - name: nfcast engine and tier (QBE backend)
+            run: NFCXX_BACKEND=qbe tests/ast/run.sh
+          - name: nfcast engine and tier (gcc backend)
+            run: NFCXX_BACKEND=gcc tests/ast/run.sh
+          - name: uop (QBE backend)
+            go: true
+            onnx: true
+            run: NFCXX_BACKEND=qbe tests/uop/run.sh
+          - name: uop (gcc backend)
+            go: true
+            onnx: true
+            run: NFCXX_BACKEND=gcc tests/uop/run.sh
+          - name: mruby scripts
+            run: tests/mruby/run.sh
           - name: GPU kernel on the PTX interpreter
             run: tests/gpu/run_interp.sh
           - name: AddressSanitizer (gcc and qbe backends)
@@ -98,7 +116,7 @@ jobs:
 
       # The interpreter of nfcpoly's Go backend (yaegi in a cgo library); without Go >= 1.24 tests/poly/run.sh skips Go.
       - name: Set up Go
-        if: startsWith(matrix.name, 'nfcpoly')
+        if: matrix.go
         uses: actions/setup-go@v5
         with:
           go-version-file: lib/poly/go/go.mod
@@ -108,14 +126,14 @@ jobs:
       # them those tests print SKIP. The C++ library is the primary way (scripts/setup-onnxsim.sh builds onnxsim 0.8.1's sources, pinned
       # by hash, in about 2 minutes; the cache key holds the script and the shim); the pip packages also serve the Python fallback.
       - name: Python test dependencies (onnx, onnxruntime, numpy, onnxsim)
-        if: startsWith(matrix.name, 'nfcpoly')
+        if: matrix.onnx
         run: |
           sudo apt-get install -y --no-install-recommends python3-pip protobuf-compiler libprotobuf-dev
           python3 -m pip install --break-system-packages onnx onnxruntime numpy onnxsim==0.8.1
 
       - name: Restore libnfconnxsim.so
         id: onnxsim
-        if: startsWith(matrix.name, 'nfcpoly')
+        if: matrix.onnx
         uses: actions/cache@v4
         with:
           path: |
@@ -124,7 +142,7 @@ jobs:
           key: onnxsim-${{ runner.os }}-${{ hashFiles('scripts/setup-onnxsim.sh', 'scripts/onnxsim/**') }}
 
       - name: Build libnfconnxsim.so
-        if: startsWith(matrix.name, 'nfcpoly') && steps.onnxsim.outputs.cache-hit != 'true'
+        if: matrix.onnx && steps.onnxsim.outputs.cache-hit != 'true'
         run: scripts/setup-onnxsim.sh
 
       - name: ${{ matrix.name }}
