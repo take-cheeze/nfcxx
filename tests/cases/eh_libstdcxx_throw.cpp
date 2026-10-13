@@ -1,4 +1,5 @@
 // Exceptions thrown inside libstdc++ (std::__throw_*, called from the library's inline code and from libstdc++.so
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // itself) are caught by EDG-compiled handlers: lib/ehshim/nfcxx_eh_shim.cpp, docs/notes/eh-shim.md. The exit code is the
 // number of wrong results.
 // EXPECT: 0

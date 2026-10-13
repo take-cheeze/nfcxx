@@ -1,4 +1,5 @@
 // EXPECT: 67
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // HVX-style kernel: element-wise int16 add over local buffers (no globals, no tables), the
 // shape a Hexagon HVX vadd loop would take. Exit code is a checksum of the output.
 __attribute__((noinline)) void add_i16(short *dst, const short *a, const short *b, int n) {

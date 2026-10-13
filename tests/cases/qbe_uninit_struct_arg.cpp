@@ -1,4 +1,5 @@
 // EXPECT: 7
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // Passing a never-initialized struct by value is legal C. QBE used to kill the stack slot (empty store mask)
 // and pass a null address, so the call segfaulted at "movq 0, %rsi" (scripts/qbe-uninit-slot.patch, found with
 // nlohmann::json: libstdc++ passes a _Iter_pred<lambda> temporary that holds only a dummy char).

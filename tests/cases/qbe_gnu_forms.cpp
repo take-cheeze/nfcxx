@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // QBE path (scripts/qbe-prep.rb): GNU aligned on members and struct bodies, __bf16 and the _Float types of <numbers>,
 // and thread_local with dynamic initialization. cproc rejects each of these forms in EDG's C output (docs/notes/realworld.md).
 #include <cstdint>

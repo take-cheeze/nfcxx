@@ -1,4 +1,5 @@
 // EXPECT: 7
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 static int live = 0;
 template<class T> struct Box { T v; Box(T x):v(x){ ++live; } ~Box(){ --live; } };
 int f(){ Box<int> a(3); { Box<long> b(4); if (live != 2) return -1; } return live==1 ? 7 : -2; }

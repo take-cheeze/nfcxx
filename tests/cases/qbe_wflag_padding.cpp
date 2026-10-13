@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // A struct with a 4-byte member next to tail padding (an integer-or-float number: 8-byte union + int flag, 16 bytes), copied by value
 // and then tested through the 4-byte member. QBE's load elimination makes the 4-byte load a "w copy" of the 8-byte copy of the same
 // slot, copy elimination hands the jnz that long temporary, and amd64 isel fused the long "and" (which keeps the padding half)

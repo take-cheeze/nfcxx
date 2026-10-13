@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // QBE path (scripts/qbe-prep.rb): builtins that cproc lacks and doctest uses (docs/notes/realworld.md,
 // blocker 2): __builtin_memcpy/memmove/memset/memcmp/strlen map to the libc functions, __builtin_isnan and
 // __builtin_clzl map to small helpers, and __builtin_mul_overflow(x, C, &x) with an unsigned long constant C

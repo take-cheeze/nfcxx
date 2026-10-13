@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
 // <optional>: empty/engaged states, value access, copy/move, emplace, reset, comparisons.
 #include <optional>
 #include <utility>

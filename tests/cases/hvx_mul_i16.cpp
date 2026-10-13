@@ -1,4 +1,5 @@
 // EXPECT: 184
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // HVX-style kernel: int16 multiply with a fixed-point shift, then a position-weighted checksum.
 // Products of two int16 values fit in int, so the only wrap is the explicit (short) cast.
 __attribute__((noinline)) void mul_q4_i16(short *dst, const short *a, const short *b, int n) {

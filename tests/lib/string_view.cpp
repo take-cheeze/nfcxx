@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY-qbe: the qbe backend links the x87 long double runtime (be/nfcxx_ldrt.c), which is x86-64 only
 // <string_view>: construction from literals and (ptr,len), size/access, substr, find, compare.
 #include <string_view>
 

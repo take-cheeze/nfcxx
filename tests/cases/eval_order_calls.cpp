@@ -1,4 +1,5 @@
 // EXPECT: 0
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // C++17 fixes the order of evaluation of these (the generated C leaves it unspecified): the object expression of a
 // member call, the function expression of a call, and the operands of << and >> (also overloaded), before the
 // arguments / the right operand. Each probe records the order the operands were evaluated in and compares it.

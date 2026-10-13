@@ -1,4 +1,5 @@
 // EXPECT: 9
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 // Structs by value, arrays, and a call into libc.
 extern "C" unsigned long strlen(const char*);
 struct V { int a, b, c; };

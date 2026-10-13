@@ -1,4 +1,5 @@
 // EXPECT: 23
+// X86-ONLY: the EDG front end on aarch64 rejects a long double literal (x86-64 long double layout), so this case is skipped there
 struct V { virtual int k() const { return 1; } virtual ~V(){} };
 struct W : V { int k() const override { return 2; } };
 struct X : W { int k() const override { return 3; } };
