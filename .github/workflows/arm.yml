@@ -1,0 +1,76 @@
+name: CI (ARM)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Runs the core test groups on a native aarch64 runner. build/ holds absolute paths, so the toolchain action keys its
+# caches by runner.arch and these jobs never share a cache with the x86-64 workflow.
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 python3-dev ruby rake clang
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cases (QBE backend)
+            run: NFCXX_BACKEND=qbe tests/run.sh
+          - name: cases (gcc backend)
+            run: NFCXX_BACKEND=gcc tests/run.sh
+          - name: freestanding lib, builtins, trace, C inputs, cc mode, driver options
+            run: |
+              tests/lib/run.sh
+              tests/builtins/run.sh
+              tests/trace/run.sh
+              tests/c/run.sh
+              tests/c/cc-mode.sh
+              tests/cxx-driver/run.sh
+          - name: determinism, float-to-integer
+            run: |
+              tests/determinism/run.sh
+              tests/float-to-int/run.sh
+    name: arm64 ${{ matrix.name }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      CMAKE_C_COMPILER_LAUNCHER: sccache
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/toolchain
+        with:
+          packages: python3 python3-dev ruby rake clang
+
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
