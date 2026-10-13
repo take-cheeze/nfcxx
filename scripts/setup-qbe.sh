@@ -26,6 +26,8 @@ make -C "$root/build/qbe" -j"$(nproc)" >/dev/null
 # cproc: scripts/cproc-unprototyped-fnptr.patch (a function declared with "()" is compatible with a prototype, C 6.7.6.3p15;
 # EDG emits struct members like "int (*compare)()" that cproc rejected). docs/notes/realworld.md, "optcarrot".
 patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-unprototyped-fnptr.patch"
+# cproc: scripts/cproc-dollar-ident.patch ("$" in identifiers, a GCC and EDG extension; bc2cpp keeps "$" in mangled method names).
+patch -d "$root/build/cproc" -p1 --batch < "$root/scripts/cproc-dollar-ident.patch"
 (cd "$root/build/cproc" && ./configure >/dev/null && make -j"$(nproc)" cproc-qbe >/dev/null)
 # Stage 2 (cproc's own build of cproc, build/cproc/stage2): the stage-1 driver spawns qbe from PATH and links with ld
 # directly, so it adds neither libgcc nor libstdc++. cproc's long double and __float128 code calls the helpers of
