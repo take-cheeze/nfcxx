@@ -29,6 +29,9 @@ if [ "$(uname -s)" = Darwin ]; then
   esac
   rm -rf "$base"; mkdir -p "$(dirname "$base")"
   cp -r "$src/bases/cmake-native/$cfg/clang" "$base"
+  # _POSIX_SOURCE hides Darwin's clock_gettime, CLOCK_MONOTONIC and mkdtemp; _DARWIN_C_SOURCE exposes the full C API, and
+  # its blocks declarations (__BLOCKS__, Clang's ^ syntax) are not parsed by EDG, so that macro is undefined.
+  sed -i.bak 's|^EDG_DEFAULT_CPP_DEFINES="-D_POSIX_SOURCE"|EDG_DEFAULT_CPP_DEFINES="-D_DARWIN_C_SOURCE -U__BLOCKS__"|' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
   # Let nfcxx pick the C compiler eccp hands the generated C to (NFCXX_CC); the base defaults to clang.
   sed -i.bak 's|^EDG_C_TO_OBJ_COMPILER=clang|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-clang}|' "$base/edg_eccp_config" && rm -f "$base/edg_eccp_config.bak"
   # The base builds universal (arm64 + x86_64) objects by default; clang refuses to emit one assembly for several -arch.

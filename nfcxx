@@ -249,7 +249,8 @@ if [ $emit_c = 1 ]; then
   # cpfe runs from the EDG base directory, so a relative -I is made absolute first.
   for x in ${files[@]+"${files[@]}"}; do case $x in -I?*) inc=("-I$(abs_path "${x#-I}")" ${inc[@]+"${inc[@]}"}) ;; esac; done
   t=$(trace_start)
-  (cd "$base" && "$edg/cpfe" -D_POSIX_SOURCE -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
+  posix_def=-D_POSIX_SOURCE; [ "$(uname -s)" = Darwin ] && posix_def=-D_DARWIN_C_SOURCE
+  (cd "$base" && "$edg/cpfe" "$posix_def" -D__CHAR_BIT__=8 "$std" --"$dialect" "${gnu_opts[@]}" \
       "${inc[@]}" --gen_c_file_name="$tmp/out.c" "$f")
   trace_end "$t" "cpfe --emit-c (front end)" frontend
   cat "$tmp/out.c"
