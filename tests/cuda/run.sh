@@ -22,7 +22,7 @@ trap 'rm -rf "$out"' EXIT
 rw() { "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" "$1"; }
 
 # 1. The rewrite matches the goldens.
-for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage rewrite/member_linkage; do
+for c in rewrite/cases mul2 rewrite/template rewrite/syncwarp rewrite/storage rewrite/member_linkage rewrite/device_lambda; do
   if rw "$c.cu" > "$out/$(basename "$c").cpp" && diff -u "$c.expected.cpp" "$out/$(basename "$c").cpp"; then
     echo "rewrite $c: ok"
   else
@@ -63,6 +63,15 @@ if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_s
   echo "device unit shadow_shared: ok"
 else
   echo "device unit shadow_shared: FAIL"; fail=1
+fi
+
+# 1b2c. A parameter and a local named like a dynamic array (llama.cpp fattn.cu) are their own declarations in their
+# scopes; the device unit takes the C++ branch of a `#ifndef __cplusplus` conditional.
+if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/shadow_decl.cu > "$out/shadow_decl.device.cpp" \
+   && diff -u rewrite/shadow_decl.device.expected.cpp "$out/shadow_decl.device.cpp"; then
+  echo "device unit shadow_decl: ok"
+else
+  echo "device unit shadow_decl: FAIL"; fail=1
 fi
 
 # 1c. Included headers are expanded once each: a diamond-shaped include tree (each level includes the next one three
