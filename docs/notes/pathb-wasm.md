@@ -12,7 +12,9 @@ node tests/wasm/host.cjs prog.wasm          # runs main, prints its result (or "
 
 `tests/wasm/run.sh` does this for each `tests/wasm/*.cpp`. Each test has its expected result in `// EXPECT: N`
 (the `g++ -O0` result, except `calls.cpp`, whose import is a stub), or `// TRAP` (main traps), or `// REFUSE: TEXT`
-(the emitter refuses with TEXT). The suite skips, rather than fails, without node.
+(the emitter refuses with TEXT). The suite skips, rather than fails, without node. `NFCXX_WASM_ASAN=1` runs every
+module in the AddressSanitizer mode (below), where a `// ASAN: KIND` test must report KIND; without it those tests are
+skipped.
 
 ## Representation
 
@@ -45,6 +47,58 @@ pointer widths of the IR are the ones the C++ program has.
 Division by zero, `INT_MIN / -1`, a float-to-integer conversion out of range or from NaN, `unreachable` and `trap` trap
 through wasm's own traps. A shift count not below the width of the left operand, a null `nonnull` pointer and an index
 outside `bounds` trap through an explicit `unreachable`.
+
+## AddressSanitizer (`--asan`)
+
+`scripts/mrb scripts/pathb-wasm-emit.rb --asan prog.ir > prog.wasm` emits the module in an AddressSanitizer-style mode.
+The mruby interpreter has no `ENV`, so the mode is an argument; `tests/wasm/run.sh` passes it when `NFCXX_WASM_ASAN=1`.
+Without the argument the module is byte-identical to the one before the mode existed. The mode is the first slice of the
+wasm part of `docs/notes/asan-plan.md`: no libasan runs on wasm, so the runtime is in the module.
+
+**Shadow.** The shadow of an address `a` is the byte at `shadow_base + a / 8`, one byte per 8-byte granule, as in libasan:
+0 when the granule is addressable, `k` in 1..7 when its first `k` bytes are, and a poison code otherwise. The shadow takes
+the top 1/8 of the memory (`shadow_base = pages * 57344`), and the stack starts at `shadow_base`, growing down. The pages
+keep 64 KB of stack above the static data, as in the default layout. Codes: `0xf1` stack redzone, `0xf9` global redzone,
+`0xf5` the frame of a function that has returned.
+
+**Statics.** Each static object is 8-byte aligned with a 32-byte redzone before it and after the last one. Its redzone and
+partial granules are data segments of the shadow.
+
+**Frames.** Each slot is 8-byte aligned with a 32-byte redzone around it; the frame is a multiple of 16 bytes. The prologue
+writes the frame's shadow (one `memory.fill` per run of equal codes). A return writes `0xf5` over the frame's shadow.
+
+**Checks.** Every load, store, and both ranges of a `copy`, calls the module's last function, `check(addr, size)`, before
+the access. The check reads the shadow of each granule the access touches. A granule holding a partial count `k` is
+ok when the access ends within the first `k` bytes. On a violation the check calls `env.__asan_report(addr, size, code)`
+and then `unreachable`: a violation traps, and does not continue. For a partial granule the code is the one of the next
+granule (the redzone after the object), so the kind does not depend on the partial count. The host (`tests/wasm/host.cjs`)
+records the call and prints the access and `asan: KIND` as its last line. A host of an ASan module must provide
+`env.__asan_report`; a plain module does not import it.
+
+| Code | Kind reported |
+| --- | --- |
+| `0xf1` | `stack-buffer-overflow` |
+| `0xf9` | `global-buffer-overflow` |
+| `0xf5` | `stack-use-after-return` |
+
+**Covered.** Overflows of stack slots and of static objects, including the partial last granule of an object whose size
+is not a multiple of 8, and an access that starts inside an object and ends past it; a `copy` that writes past its
+destination; a use of a slot's address after its function has returned, while no other call has reused the frame.
+Tests: `tests/wasm/asan_*.cpp` (the `// ASAN: KIND` markers), and `asan_clean.cpp`, which is clean and gives its EXPECT
+value in both modes.
+
+**Not covered.**
+- Heap. `malloc` and `free` are imports, and the host's stub returns its argument plus one, so the harness has no heap.
+  A first slice with an allocator in the module (with redzones, a quarantine and `free` checks) is the next step; it
+  would change the import list in ASan mode only.
+- Redzones are 32 bytes. An index that jumps over one lands in the next object, and is not reported.
+- Use after scope: the emitter has no scope markers (`scope-end`), so a block's locals are not poisoned at its end.
+- Use after return once another call has reused the frame. There is no quarantine: the frame's shadow is rewritten by
+  the next prologue that covers it.
+- Stack exhaustion (the stack reaching the static data is not detected), and the gap between the static data and the
+  stack (unpoisoned).
+- The null page, addresses below 16. Accesses into the shadow itself (the top 1/8 of the memory) are not checked.
+- Uninitialized reads, leaks and the other checks of libasan.
 
 ## What is handled
 
