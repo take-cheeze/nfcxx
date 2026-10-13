@@ -5,7 +5,7 @@
 #   MRUBY_CONTROL=1         also build with plain host gcc first, as a control (about a minute)
 # Reports per backend: "built+ran", or the first blocker (build error / wrong run result).
 # Needs ruby and rake (apt-get install ruby). The QBE build needs a cproc built with
-# cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-patches) (re-run scripts/setup-qbe.sh): mruby passes mrb_value through varargs.
+# cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-asan-combined) (re-run scripts/setup-qbe.sh): mruby passes mrb_value through varargs.
 cd "$(dirname "$0")/../.."
 root=$PWD; work=$root/build/realworld
 pin=831da26b9021de0369d17b71b5667e2941a1a32d   # mruby/mruby tag 4.0.0, 2026-04-20 (newest non-rc tag)
@@ -35,7 +35,7 @@ for b in $backends; do
   if ! out=$(cd "$src" && NFCXX_BACKEND=$be MRUBY_CC=$cc MRUBY_CONFIG=$tmp/build_config.rb \
              MRUBY_BUILD_DIR=$bdir "${rake[@]}" -j"$(nproc)" all 2>&1); then
     msg=$(grep -m1 -E '(^|[ :])error|undefined reference|fatal error|invalid instruction' <<<"$out" || tail -1 <<<"$out")
-    [ $b = qbe ] && grep -q 'va_arg with non-scalar' <<<"$out" && msg="$msg (cproc lacks cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-patches); re-run scripts/setup-qbe.sh)"
+    [ $b = qbe ] && grep -q 'va_arg with non-scalar' <<<"$out" && msg="$msg (cproc lacks cproc-vaarg-aggregate (a commit on take-cheeze/cproc branch nfcxx-asan-combined); re-run scripts/setup-qbe.sh)"
     echo "FAIL $b mruby: build blocked: $msg"; fail=1; continue
   fi
   exe=$bdir/host/bin/mruby

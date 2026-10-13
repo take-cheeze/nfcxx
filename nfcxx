@@ -16,9 +16,9 @@
 #   -shared [-fPIC] [-rdynamic]: build a shared object (-shared implies -fPIC); -rdynamic exports an
 #                  executable's symbols so a dlopen'd object can bind to them. See docs/notes/eval.md.
 #   -c / *.o:      separate compilation: `nfcxx -c a.cpp -o a.o`, then `nfcxx a.o b.o -o x` links objects (docs/notes/multi-tu.md).
-#   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). Only the gcc backend
-#                  can instrument the code, so the backend becomes gcc unless --backend= says otherwise (then it is an error).
-#                  docs/notes/asan.md. -fno-sanitize=address undoes it; other -fsanitize= values are refused.
+#   -fsanitize=address: AddressSanitizer (heap/stack/global overflow, use-after-free, double free, leaks). The gcc and qbe
+#                  backends instrument the code; Path B is refused. docs/notes/asan.md. -fno-sanitize=address undoes it;
+#                  other -fsanitize= values are refused.
 #   --freestanding: headers come only from lib/ (no EDG std headers, no hosted libc++/libstdc++),
 #                  and --gnu-version defaults to 130000. Opt-in; see docs/notes/freestanding.md.
 set -euo pipefail
@@ -176,8 +176,8 @@ fi
 case $dialect in g++|clang) ;; *) echo "nfcxx: unknown dialect '$dialect'" >&2; exit 2 ;; esac
 [ -z "$trace" ] || trace_begin "$trace"
 
-# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc branch nfcxx-asan, 3rd/cproc,
-# NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
+# -fsanitize=address: gcc's instrumentation on the gcc backend; on qbe, cproc's checks of every load and store (take-cheeze/cproc
+# branch nfcxx-asan-combined, the pin of 3rd/cproc; NFCXX_ASAN). Both link libasan. Path B is not instrumented yet (docs/notes/asan-plan.md).
 asan_c=()   # options for every C compile and link of the program
 if [ $asan = 1 ]; then
   [ "${NFCXX_PATH:-}" != b ] && [ "$backend" != pathb ] || { echo "nfcxx: -fsanitize=address does not work with Path B yet; use the gcc or qbe backend (docs/notes/asan-plan.md)" >&2; exit 2; }

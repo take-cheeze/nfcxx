@@ -1,29 +1,32 @@
 # AddressSanitizer (`nfcxx -fsanitize=address`)
 
-`nfcxx -fsanitize=address x.cpp -o x` builds a program whose memory errors are reported by gcc's AddressSanitizer
-(libasan): heap, stack and global buffer overflows, use after free, use after scope, double free, `new[]`/`delete`
-mismatch, and (LeakSanitizer, on by default in libasan) leaks at exit. The report names the C++ source line, since
-EDG's generated C carries `#line` directives. `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
+`nfcxx -fsanitize=address x.cpp -o x` builds a program whose memory errors are reported by AddressSanitizer (libasan): heap, stack and global
+buffer overflows, use after free, use after scope, use after return, double free, `new[]`/`delete` mismatch, and
+(LeakSanitizer, on by default in libasan) leaks at exit. The checks are gcc's on the gcc backend and cproc's on qbe
+(the default). The report names the C++ source line: gcc's from the `#line` directives of EDG's generated C, qbe's
+from `dbgloc` (see "Source lines"). `ASAN_OPTIONS` works as usual (`detect_leaks=0`, `abort_on_error=1`, ...).
 
 ## qbe backend (default)
 
 `nfcxx -fsanitize=address` on the default backend (qbe) sets `NFCXX_ASAN=1`. cproc, patched by
-the `nfcxx-asan-combined` branch of take-cheeze/cproc (`nfcxx-asan` plus the setjmp return poison and use after
-return), which `3rd/cproc` is pinned to, then
+the `nfcxx-asan-combined` branch of take-cheeze/cproc (commit a44a644, which `3rd/cproc` is pinned to), then
 puts a call of `__asan_load{1,2,4,8}` / `__asan_store{1,2,4,8}` before every load and store it emits (`funcinst`, the
 one chokepoint). `qbe-cc` links with `-fsanitize=address`. Covered by `ASAN_BACKEND=qbe tests/asan/run.sh` (CI):
 heap overflow, use after free, double free, alloc/dealloc mismatch, leak, exceptions and containers clean, the C input.
 Stack objects get redzones (`asanalloc` in cproc's `funcalloc`): 32 bytes on each side, allocated in the entry block,
 their redzones poisoned at the declaration and the whole object unpoisoned in `funcret`. The object is in a fake frame
-(use after return, below). C-input variable-length arrays and `alloca` get redzones too (`asandynalloc`), not a fake frame. Globals get a trailing redzone: `emitdata` writes the rest of the
-object's 8-byte granule and 32 zero bytes into the same data item, and the unit's constructor (`emitasanctor`, in
-`.init_array`) poisons them. Both use `__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says
-`stack-buffer-overflow` or `global-buffer-overflow` (the tests accept both spellings on qbe, `ASAN-QBE:`). Limits: the
-object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no
-leading redzone (an access before the object is not reported); thread-local globals get none. Objects over 16-byte alignment,
-C-input VLAs, `alloca` and C++ VLAs (own section below) have redzones. Use after scope and use after return are covered (next two
-sections). Not yet: volatile (qbe rejects volatile stores, a known limit). Block
-copies and `va_arg` loads are checked as ordinary accesses.
+(use after return, below). Objects over 16-byte alignment get the same redzones in the real frame, with no fake frame
+(`asanalloc`, the over-aligned branch). C-input variable-length arrays and `alloca` get redzones too (`asandynalloc`), not a
+fake frame. Globals get a trailing redzone: `emitdata` writes the rest of the object's 8-byte granule and 32 zero bytes into
+the same data item, and the unit's constructor (`emitasanctor`, in `.init_array`) poisons them. Both use
+`__asan_poison_memory_region`, so the report says `use-after-poison` where gcc says `stack-buffer-overflow` or
+`global-buffer-overflow`; the test runner takes the `ASAN-QBE:` text on qbe in place of `ASAN:`. Limits of this part: the
+object's size is rounded up to 8 bytes, so bytes between its size and the rounding are not covered; globals have no leading
+redzone (an access before the object is not reported); thread-local globals get none. Use after scope and use after return
+are covered (next two sections). Volatile: cproc rejects volatile stores on this backend (`funcstore`, "volatile store is not
+yet supported"), so there is no store to check; volatile loads are checked. Block copies (`funccopy`) are checked chunk by
+chunk as ordinary loads and stores, and so are the loads an aggregate `va_arg` makes from its `va_list`. The scalar `va_arg`
+instruction (`IVAARG`) is not checked: `asanaccess` has no case for it.
 
 ## Use after scope (qbe)
 
@@ -61,7 +64,9 @@ past a declaration of the switch body). The setjmp return: `scope_throw_escape.c
 `CLEAN` cases `scope_throw_clean.cpp` (a destructor of a left object runs during the unwinding, an object of the enclosing
 block is read in the handler), `scope_throw_nomatch.cpp` (an inner catch that does not match, the outer one runs),
 `scope_longjmp_clean.c` (the block a longjmp leaves, the enclosing block read after the landing) and `scope_longjmp_vla.c`
-(a VLA and a switch case around a setjmp in a loop).
+(a VLA and a switch case around a setjmp in a loop). The scope of a C-input VLA: `vla_scope_escape.c` (a report,
+`ASAN-ONLY: qbe`), and the `CLEAN` cases `vla_scope_clean.c`, `vla_early_return.c`, `vla_loop_return.c` and
+`alloca_scope_clean.c`.
 
 Limits, all false negatives (nothing is reported that is valid, the missing check is what can be missed):
 
@@ -128,38 +133,44 @@ Limits, all false negatives:
   so reads through pointers into it are not reported, and its slot in the fake stack is not given back.
 - Deep recursion uses the real stack for every frame as well (the real frame is still allocated); the fake frames add
   their own memory, so the real stack limit is the same as without the flag.
+
 ## C++ variable-length arrays
 
-EDG lowers a C++ VLA to `__vla_alloc`, `__vla_dealloc` and `__vla_dealloc_eh` (3rd/edg/lib_src/vla_alloc.c, in libC.a).
+EDG lowers a C++ VLA to `__vla_alloc`, `__vla_dealloc` and `__vla_dealloc_eh` (`3rd/edg/lib_src/vla_alloc.c`, in libC.a).
 That allocator serves a VLA under 4096 bytes from one shared 32700-byte block, so two such VLAs have no redzone between
-them and an overflow of one writes into the next. With `-fsanitize=address` the driver links `lib/asan/nfcxx_vla_asan.c`
+them and an overflow of one writes into the next. With `-fsanitize=address` a hosted link puts `lib/asan/nfcxx_vla_asan.c`
 (built by `scripts/asan-vla`, gcc with `-fsanitize=address`) ahead of libC.a. It defines the same entry points, so
 libC.a's allocator is not linked. Each VLA is a malloc block of exactly the requested size: an overflow is a
 `heap-buffer-overflow` in the block's redzone, and the block is freed where the VLA's scope ends, so a pointer kept past
-the scope is a `heap-use-after-free`. Both backends use it. The frame markers, the record stack and the longjmp cleanup
-(`free_dead`) are EDG's, and the records are per thread (EDG's pool is shared by all threads and not thread-safe).
+the scope is a `heap-use-after-free`. Both backends use it. The bookkeeping follows EDG's design: a record stack per
+thread (each record a block and a frame marker), and `free_dead` frees the records of frames a longjmp left. The records
+are per thread, since EDG's pool is shared by all threads and is not thread-safe.
 
 Tests: `tests/asan/cases/cxx_vla_overflow.cpp`, `cxx_vla_scope_escape.cpp` (reports), `cxx_vla_clean.cpp` (loops left by
-break, continue and return, large VLAs, exceptions out of VLA blocks caught in the same function and in a caller), and the
-live-allocation counts of `tests/pathb-qbe/cases/vla_scope.cpp`, run under the flag by `tests/asan/run.sh`.
+break, continue and return, large VLAs, exceptions out of VLA blocks caught in the same function and in a caller),
+`cxx_vla_longjmp_clean.cpp` (a longjmp out of a VLA's block), and the live-allocation counts of
+`tests/pathb-qbe/cases/vla_scope.cpp`, run under the flag by `tests/asan/run.sh`.
 
 Cost and limits: a VLA is a malloc call each (EDG's pool avoided that), in ASan builds only; the object is linked only
-under `-fsanitize=address`, so the default output is unchanged. A block of a VLA that a longjmp left is freed by the
-next `__vla_alloc` that finds its frame dead, not at the jump, so an access through it in between is not reported (the
-same as EDG's pool, which keeps it too).
+under `-fsanitize=address`, so the default output is unchanged. It is not linked on `-shared` or `--freestanding` links:
+there EDG's allocator serves the VLAs, with no redzones between them. A block of a VLA that a longjmp left is freed by the
+next `__vla_alloc` that finds its frame dead, or by the `__vla_dealloc` of an enclosing VLA, not at the jump, so an access
+through it in between is not reported (the same as EDG's pool, which keeps it too).
 
 ## How it works
 
-The instrumentation is gcc's, applied to the C that EDG generates, so only the gcc backend can do it. The driver:
+The instrumentation is the backend's own: on the gcc backend it is gcc's, applied to the C that EDG generates; on qbe it is
+cproc's (above). The driver:
 
-- passes `-fsanitize=address -fno-omit-frame-pointer` to every C compile and to the link (`--c_to_obj_option` for
-  `eccp`, directly to `gcc` for `.c` inputs and the C-only link), so `-c` objects and the final link agree;
-- links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link,
-  with either backend (section "C++ variable-length arrays");
-- selects the gcc backend when the backend was only the default (`qbe`); with an explicit `--backend=qbe` it is an
-  Path B (`NFCXX_PATH=b` or `--backend=pathb`) is an error: its emitter has no instrumentation yet;
+- on the gcc backend, passes `-fsanitize=address -fno-omit-frame-pointer` to every C compile and to the link
+  (`--c_to_obj_option` for `eccp`, directly to `gcc` for `.c` inputs and the C-only link), so `-c` objects and the final
+  link agree. On qbe `qbe-cc` drops the sanitizer flag, and `NFCXX_ASAN=1` (exported by the driver) makes cproc instrument
+  and `qbe-cc` link libasan;
+- links the C++ VLA runtime (`lib/asan/nfcxx_vla_asan.c`, built by `scripts/asan-vla`) ahead of libC.a on a hosted link
+  (not `-c`, `-shared` or `--freestanding`), with either backend (section "C++ variable-length arrays");
+- refuses Path B (`NFCXX_PATH=b` or `--backend=pathb`): its emitter has no instrumentation yet;
 - accepts `-fno-sanitize=address` (turns it off again) and `-fno-omit-frame-pointer`/`-fomit-frame-pointer`;
-  every other `-fsanitize=...` value is refused (`nfcc` still refuses all of them).
+  every other `-fsanitize=...` value is refused (`nfcc` refuses all of them).
 
 Link the objects of one program with the same option: an object built with the flag and one built without can be
 mixed, but memory errors are only found in the instrumented code.
@@ -168,9 +179,18 @@ qbe: cproc checks every load and store, and stack and global objects get redzone
 
 ## Limits
 
+- Path B and wasm are not instrumented: the driver refuses Path B, and the wasm emitter (`scripts/pathb-wasm-emit.rb`) has
+  no checks (`asan-plan.md`).
 - EDG's runtime (`libC.a`: `operator new/delete`, the exception runtime) is not instrumented; its C++ VLA allocator is
-  replaced under the flag (section "C++ variable-length arrays"). `operator new` ends in
-  `malloc`, which libasan intercepts, so heap errors are found; stack objects of the runtime are not checked.
+  replaced under the flag on hosted links (section "C++ variable-length arrays"). `operator new` ends in `malloc`, which
+  libasan intercepts, so heap errors are found; stack objects of the runtime are not checked.
+- A `-shared` or `--freestanding` link does not link the VLA runtime: C++ VLAs there have no redzones.
+- Objects over 16-byte alignment, C-input VLAs and `alloca` have no fake frame: a pointer to one of them, read after its
+  function returned, is not reported (use after return).
+- A frame whose function is left by a longjmp or a C++ throw is never freed, so its fake frame is not given back.
+- A volatile store is rejected by cproc on the qbe backend, so it is not checked (`funcstore`).
+- A longjmp or C++ throw that leaves a C++ VLA's block leaves the block allocated until the next `__vla_alloc` that finds
+  its frame dead (section "C++ variable-length arrays").
 - Exceptions use EDG's setjmp/longjmp ABI; libasan unpoisons the stack on `longjmp`, `tests/asan/cases/clean.cpp`
   throws through frames with `std::string` locals.
 - Container overflow annotations of libstdc++ (`_GLIBCXX_SANITIZE_VECTOR`) are not enabled; an overflow inside the
@@ -179,11 +199,17 @@ qbe: cproc checks every load and store, and stack and global objects get redzone
 
 ## Test
 
-`tests/asan/run.sh` (CI: `ci.yml`): one program per error class with the expected report text, a clean program with
-exceptions and containers, the source line in the report, the flag-off cases, backend selection and refusals, `-c`
-then link, and a `.c` input in the same program. Use after return: `use_after_return.cpp` (a report), and the clean programs
-`clean_return_heap.cpp` (pointers to heap and static data returned), `clean_recursive.cpp` and `clean_callee_return.cpp` (a
-callee returns before the caller reads the local whose address it got).
+`tests/asan/run.sh` (CI: `ci.yml`, once with the gcc backend and once with `ASAN_BACKEND=qbe`): one program per error class
+with the expected report text, a clean program with exceptions and containers, the source line in the report, the flag-off
+cases, backend selection and refusals, `-c` then link, and a `.c` input in the same program. Use after return:
+`use_after_return.cpp` (a report, the same text on both backends), and the clean programs `clean_return_heap.cpp` (pointers
+to heap and static data returned), `clean_recursive.cpp` and `clean_callee_return.cpp` (a callee returns before the caller
+reads the local whose address it got).
+
+The two backends differ in the cases marked `ASAN-ONLY: qbe` (`scope_throw_escape.cpp`, `scope_longjmp_escape.c`,
+`vla_scope_escape.c`: skipped on gcc) and in the `ASAN-QBE:` spellings, which are `use-after-poison` on qbe
+(`stack_overflow.cpp`, `aligned_overflow.cpp`, `alloca_overflow.cpp`, `global_overflow.cpp`, `vla_overflow.c`). The other
+cases have the same expected text on both.
 
 A mixed program also works: `tests/poly/asan-go.sh` builds the nfcpoly Go host with `-fsanitize=address` on both back ends and links it
 with the uninstrumented Go runtime (`libnfcgo.so`, a cgo library); heap errors and leaks of the C++ side are found, the Go side is not
