@@ -515,6 +515,8 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
   # do -- left `register.cxx` uncompilable ("'mrb_state' has no member named
   # 'errinfo'"), so the probe could not link at all. Same set the real build
   # uses, so the probe's mruby is the mruby bc2cpp is written against.
+  # mruby-vm-goto-table-void.patch: vm.c's computed-goto table is `const void *`; the C++ build (vm-cxx.cxx, EDG) needs
+  # `void *` for `goto *`. Same dispatch, only the element type changes.
   # mruby-cxx-novolatile.patch: error.c's `volatile int err` in the C++ exception path; cproc (nfcxx's qbe backend)
   # cannot store to a volatile object. The C++ exception path does not longjmp, so the volatile is not needed.
   # mruby-rdata-ivar-slots.patch is required, not optional: without it the
@@ -529,6 +531,7 @@ Dir.mktmpdir('optcarrot-bc2cpp-') do |temp|
     mruby-gc-type-live-counts.patch
     mruby-rdata-ivar-slots.patch
     mruby-cxx-novolatile.patch
+    mruby-vm-goto-table-void.patch
   ].each do |patch|
     path = File.join(ROOT, 'patches', patch)
     system(File.join(ROOT, 'scripts/apply_mruby_patch.bash'), MRUBY, path, exception: true)
