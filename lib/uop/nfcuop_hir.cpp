@@ -187,12 +187,12 @@ Value infer(const Graph& g, const Node& n) {
   };
   auto consts = [&](size_t k) { return g.const_ints(n.inputs[k]); };
 
-  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf"};
+  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf", "Floor", "Ceil"};
   static const std::set<std::string> arith = {"Add", "Sub", "Mul", "Div", "Max", "Min"};
   static const std::set<std::string> logical = {"And", "Or", "Xor"};
   static const std::set<std::string> bitwise = {"BitwiseAnd", "BitwiseOr", "BitwiseXor"};
   static const std::set<std::string> compare = {"Less", "Greater", "LessOrEqual", "GreaterOrEqual"};
-  static const std::set<std::string> reduces = {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin"};
+  static const std::set<std::string> reduces = {"ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin", "ReduceProd"};
 
   if (op == "Identity") { want_inputs(1, 1); return Value{"", V(0).dtype, V(0).shape}; }
   if (op == "Neg" || op == "Abs" || op == "Relu") {
@@ -204,6 +204,59 @@ Value infer(const Graph& g, const Node& n) {
     want_inputs(1, 1);
     if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
     return Value{"", V(0).dtype, V(0).shape};
+  }
+  if (op == "IsNaN" || op == "IsInf") {
+    want_inputs(1, 1);
+    if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
+    return Value{"", DType::Bool, V(0).shape};
+  }
+  if (op == "ArgMax" || op == "ArgMin") {   // int64 indices; axis (default 0), keepdims (1), select_last_index (0)
+    want_inputs(1, 1);
+    const Value& x = V(0);
+    if (x.dtype == DType::Bool) fail("not defined for bool");
+    const int64_t ax = norm(op, n.attr_int("axis", 0), static_cast<int64_t>(x.shape.size()));
+    for (const char* a : {"keepdims", "select_last_index"}) {
+      const int64_t f = n.attr_int(a, a[0] == 'k' ? 1 : 0);
+      if (f != 0 && f != 1) fail(std::string(a) + " must be 0 or 1");
+    }
+    const bool keep = n.attr_int("keepdims", 1) != 0;
+    Shape out;
+    for (size_t k = 0; k < x.shape.size(); k++) {
+      if (static_cast<int64_t>(k) != ax) out.push_back(x.shape[k]);
+      else if (keep) out.push_back(1);
+    }
+    return Value{"", DType::Int64, out};
+  }
+  if (op == "Tile") {   // repeats: a constant, one entry per dimension, each at least 1 (ONNX allows 0, which gives an empty tensor)
+    want_inputs(2, 2);
+    const Shape& d = V(0).shape;
+    std::vector<int64_t> reps = consts(1);
+    if (reps.size() != d.size()) fail("repeats has " + std::to_string(reps.size()) + " entries for rank " + std::to_string(d.size()));
+    Shape out = d;
+    for (size_t k = 0; k < d.size(); k++) {
+      if (reps[k] < 1) fail("repeats must be at least 1, got " + std::to_string(reps[k]));
+      out[k] = d[k] * reps[k];
+    }
+    return Value{"", V(0).dtype, out};
+  }
+  if (op == "CumSum") {   // the axis is a constant: a scalar (or one element) of int32 or int64
+    want_inputs(2, 2);
+    const Value& x = V(0);
+    if (x.dtype == DType::Bool) fail("not defined for bool");
+    if (V(1).dtype != DType::Int32 && V(1).dtype != DType::Int64) fail("axis must be int32 or int64");
+    if (numel(V(1).shape) != 1 || V(1).shape.size() > 1) fail("axis must be a scalar");
+    norm(op, consts(1).at(0), static_cast<int64_t>(x.shape.size()));   // out of range is an error
+    for (const char* a : {"exclusive", "reverse"}) {
+      const int64_t f = n.attr_int(a, 0);
+      if (f != 0 && f != 1) fail(std::string(a) + " must be 0 or 1");
+    }
+    return Value{"", x.dtype, x.shape};
+  }
+  if (op == "Pow") {
+    want_inputs(2, 2);
+    same_dtype(V(0), V(1));   // ONNX allows another type for the exponent; hir does not convert, so the operands must agree
+    if (V(0).dtype == DType::Bool) fail("not defined for bool");
+    return Value{"", V(0).dtype, bcast2(op, V(0).shape, V(1).shape)};
   }
   if (op == "Not") {
     want_inputs(1, 1);

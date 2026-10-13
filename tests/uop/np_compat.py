@@ -59,11 +59,19 @@ CASES = {
     "matmul_vv": lambda: b @ b, "matmul_int": lambda: ia @ ia.T,
     "arange": lambda: np.arange(5), "arange_step": lambda: np.arange(1.0, 2.0, 0.25), "linspace": lambda: np.linspace(0, 1, 5),
     "eye": lambda: np.eye(3), "zeros": lambda: np.zeros((2, 2)), "ones_i": lambda: np.ones((2,), i32), "full": lambda: np.full((2,), 7),
+    "floor": lambda: np.floor(v), "ceil": lambda: np.ceil(v), "isnan": lambda: np.isnan(np.log(v)), "isinf": lambda: np.isinf(1 / v),
+    "ifloor": lambda: np.floor(ia), "pow_f": lambda: np.power(np.abs(v) + 1, v), "pow_s": lambda: np.power(a, 2), "ipow": lambda: np.power(ia, 2),
+    "cumsum0": lambda: np.cumsum(a, 0), "cumsum_all": lambda: np.cumsum(m, 2), "icumsum": lambda: np.cumsum(ia, 1),
+    "prod0": lambda: a.prod(0), "prod_all": lambda: a.prod(), "iprod": lambda: ia.prod(0),
+    "argmax0": lambda: a.argmax(0), "argmin1": lambda: a.argmin(1), "argmax_all": lambda: ia.argmax(),
+    "tile": lambda: np.tile(a, (2, 1)), "tile1": lambda: np.tile(b, 2),
+    "take": lambda: np.take(a, [2, 0], axis=1), "take_flat": lambda: np.take(ia, [5, -1]),
 }
 
 # nfcuop's dtype differs from numpy's on purpose: ints are int32 and floats float32 unless asked otherwise, so numpy's
 # int64 / float64 defaults (sums, means, true division of ints, arange, linspace, eye, zeros, full) differ
-DTYPE_DIFFS = set() if MODE64 else {"idiv_true", "isum", "imean", "bsum", "arange", "arange_step", "linspace", "eye", "zeros", "full"}
+DTYPE_DIFFS = set() if MODE64 else {"idiv_true", "isum", "imean", "bsum", "arange", "arange_step", "linspace", "eye", "zeros", "full",
+                                    "icumsum", "iprod", "argmax0", "argmin1", "argmax_all"}
 
 got = json.load(open(sys.argv[1]))
 if set(got) != set(CASES):
