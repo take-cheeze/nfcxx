@@ -27,7 +27,8 @@
 #     rounds the same decimal to the target format. A long double literal anywhere else is left alone.
 #   * `alloca(n)` (hand-written C only; glibc's <alloca.h> declares a function when `__GNUC__` is unset, and libc
 #     has no such symbol) becomes cproc's `__builtin_alloca(n)`. A declaration (`... *alloca(...)`) is left alone.
-#   * `__builtin_fabs`, `__builtin_fabsf` (libcu++ and the CUDA headers) become the libm functions, with
+#   * `__builtin_fabs`, `__builtin_fabsf` (libcu++ and the CUDA headers) and the other libm builtins that libstdc++ <cmath>
+#     wrappers call (`__builtin_sqrtf`, `__builtin_powf`, ... see LIBC_BUILTINS) become the libm functions, with
 #     prototypes. `fabsl` is not mapped: cproc has no `long double`.
 #   * `__builtin_popcount{,l,ll}`, `__builtin_ctz{,l,ll}`, `__builtin_clz{,ll}` become helper functions
 #     (like `__builtin_clzl` above). For a zero argument ctz and clz return the width; GCC leaves that undefined.
@@ -670,6 +671,15 @@ LIBC_BUILTINS = {
   '__builtin_fabsf' => ['fabsf', 'float fabsf(float);'],  # libcu++ (<cuda/cmath>) and the CUDA headers
   '__builtin_fabs' => ['fabs', 'double fabs(double);'],
 }
+# libm functions behind the compiler builtins that libstdc++ <cmath> wrappers call (std::sqrt(float) and the like)
+%w[sqrt exp log sin cos tan floor ceil trunc round exp2 log2 asin acos atan sinh cosh tanh log10].each do |n|
+  LIBC_BUILTINS["__builtin_#{n}f"] = ["#{n}f", "float #{n}f(float);"]
+  LIBC_BUILTINS["__builtin_#{n}"] = [n, "double #{n}(double);"]
+end
+%w[pow fmod atan2 copysign fmin fmax hypot].each do |n|
+  LIBC_BUILTINS["__builtin_#{n}f"] = ["#{n}f", "float #{n}f(float, float);"]
+  LIBC_BUILTINS["__builtin_#{n}"] = [n, "double #{n}(double, double);"]
+end
 # builtin -> [helper name, definition in the prelude]
 HELPER_BUILTINS = {
   # nlohmann::json: float constants and conversions (double only; cproc has no long double anyway)
