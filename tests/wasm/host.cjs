@@ -3,6 +3,7 @@
 // An ASan-mode module (emit with --asan) calls env.__asan_report(addr, size, code) before it traps on a violation: then
 // the host prints the access and the kind ("asan: KIND" is the last line), instead of "trap".
 const fs = require("fs");
+const { importedMemory } = require("./imported-memory.cjs");
 const bytes = fs.readFileSync(process.argv[2]);
 const compiled = new WebAssembly.Module(bytes);
 // the poison codes of the shadow (scripts/pathb-wasm-emit.rb, ASAN_*) and the kinds they report
@@ -11,6 +12,11 @@ let report = null;
 const imports = {};
 for (const imp of WebAssembly.Module.imports(compiled)) {
   imports[imp.module] = imports[imp.module] || {};
+  if (imp.kind === "memory") {
+    // --emscripten-import-memory: the memory the module imports, at the size it declares
+    imports[imp.module][imp.name] = new WebAssembly.Memory({ initial: importedMemory(bytes).min });
+    continue;
+  }
   imports[imp.module][imp.name] =
     imp.name === "__asan_report"
       ? (addr, size, code) => { report = { addr, size, code }; }
