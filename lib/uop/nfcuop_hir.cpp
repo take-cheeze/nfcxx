@@ -187,7 +187,7 @@ Value infer(const Graph& g, const Node& n) {
   };
   auto consts = [&](size_t k) { return g.const_ints(n.inputs[k]); };
 
-  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf"};
+  static const std::set<std::string> float_unary = {"Sqrt", "Exp", "Log", "Sin", "Cos", "Tanh", "Sigmoid", "Erf", "Floor", "Ceil"};
   static const std::set<std::string> arith = {"Add", "Sub", "Mul", "Div", "Max", "Min"};
   static const std::set<std::string> logical = {"And", "Or", "Xor"};
   static const std::set<std::string> bitwise = {"BitwiseAnd", "BitwiseOr", "BitwiseXor"};
@@ -204,6 +204,17 @@ Value infer(const Graph& g, const Node& n) {
     want_inputs(1, 1);
     if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
     return Value{"", V(0).dtype, V(0).shape};
+  }
+  if (op == "IsNaN" || op == "IsInf") {
+    want_inputs(1, 1);
+    if (!is_float(V(0).dtype)) fail("float input needed, got " + std::string(name(V(0).dtype)));
+    return Value{"", DType::Bool, V(0).shape};
+  }
+  if (op == "Pow") {
+    want_inputs(2, 2);
+    same_dtype(V(0), V(1));   // ONNX allows another type for the exponent; hir does not convert, so the operands must agree
+    if (V(0).dtype == DType::Bool) fail("not defined for bool");
+    return Value{"", V(0).dtype, bcast2(op, V(0).shape, V(1).shape)};
   }
   if (op == "Not") {
     want_inputs(1, 1);

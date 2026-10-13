@@ -241,6 +241,18 @@ ut::Tensor Lowerer::lower_one(int id) {
       out = ut::concatenate(parts, n.attr_int("axis", 0));
     }
     else if (op == "Erf") out = erf_tensor(arg(0));
+    else if (op == "Pow") out = ut::pow(arg(0), arg(1));
+    else if (op == "Floor") out = arg(0).floor();
+    else if (op == "Ceil") out = arg(0).ceil();
+    else if (op == "IsNaN") out = arg(0).isnan();
+    else if (op == "IsInf") {   // +inf and/or -inf, by the attributes (both by default); neither: all false
+      const ut::Tensor x = arg(0);
+      const bool pos = n.attr_int("detect_positive", 1) != 0, neg = n.attr_int("detect_negative", 1) != 0;
+      ut::Tensor hit;
+      if (pos) hit = x == std::numeric_limits<double>::infinity();
+      if (neg) hit = hit.valid() ? hit | (x == -std::numeric_limits<double>::infinity()) : x == -std::numeric_limits<double>::infinity();
+      out = hit.valid() ? hit : s_.full(v.shape, 0, DType::Bool);
+    }
     else if (op == "Gather") {
       int64_t ax = n.attr_int("axis", 0);
       ut::Tensor data = arg(0);

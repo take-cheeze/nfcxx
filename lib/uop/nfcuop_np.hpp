@@ -102,6 +102,10 @@ class Tensor {
   Tensor softmax(int64_t axis = -1) const;
   Tensor log_softmax(int64_t axis = -1) const;
   Tensor clip(double lo, double hi) const;
+  Tensor floor() const;   // ONNX Floor; an integer tensor gives default_float, like numpy's floor of ints (float64)
+  Tensor ceil() const;    // ONNX Ceil; likewise
+  Tensor isnan() const;   // Bool; all false for integers and bools
+  Tensor isinf() const;   // Bool; all false for integers and bools
 
   // realization (lowers the graph to UOps and evaluates it)
   Array numpy() const;
@@ -191,6 +195,9 @@ Tensor remainder(const Tensor& a, const Tensor& b);     // ints only; the sign o
 Tensor matmul(const Tensor& a, const Tensor& b);        // 1-D and N-D like numpy, batch dimensions broadcast
 inline Tensor dot(const Tensor& a, const Tensor& b) { return matmul(a, b); }  // for 1-D and 2-D operands
 Tensor logical_not(const Tensor& a);
+// a ** b (C++ has no ** operator). The dtype is the promoted one, and a Python-style scalar is weak as in the operators. Floats follow
+// C99 pow, the values numpy gives; integers wrap, and a negative integer exponent is not an error (see docs/notes/uop.md).
+Tensor pow(const Tensor& a, const Tensor& b);
 Tensor concatenate(const std::vector<Tensor>& ts, int64_t axis = 0);
 Tensor stack(const std::vector<Tensor>& ts, int64_t axis = 0);
 inline Tensor relu(const Tensor& a) { return a.relu(); }
@@ -246,6 +253,10 @@ NFCUOP_NP_SCALAR_OP(>=)
 NFCUOP_NP_SCALAR_OP(==)
 NFCUOP_NP_SCALAR_OP(!=)
 #undef NFCUOP_NP_SCALAR_OP
+template <class T, detail::IsNum<T> = 0>
+Tensor pow(const Tensor& a, T v) { return pow(a, detail::lift(a, static_cast<double>(v), std::is_integral<T>::value)); }
+template <class T, detail::IsNum<T> = 0>
+Tensor pow(T v, const Tensor& b) { return pow(detail::lift(b, static_cast<double>(v), std::is_integral<T>::value), b); }
 
 }  // namespace np
 }  // namespace nfcuop

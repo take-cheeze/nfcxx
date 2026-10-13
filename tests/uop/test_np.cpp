@@ -274,6 +274,79 @@ static void slicing_and_concat() {
   CHECK(std::signbit(concatenate({nz, nz}).numpy().data[0].f));
 }
 
+// Evaluates the outputs, exports them, reads the ONNX file back and checks that the export is byte-identical, and that the
+// read-back graph, lowered and interpreted, gives the same bits as the numpy-like API did.
+static void onnx_round_trip(Session& np, const std::vector<std::pair<std::string, Tensor>>& outs, const std::map<std::string, Array>& feeds) {
+  std::string bytes = np.to_onnx(outs);
+  std::vector<int> ids;
+  hir::Graph g = hir::Graph::from_onnx(bytes, &ids);
+  CHECK(ids.size() == outs.size());
+  CHECK(g.to_onnx(ids) == bytes);
+  ut::Session us;
+  hir::Lowerer low(g, us);
+  for (size_t k = 0; k < outs.size() && k < ids.size(); k++) {
+    Array want = np.eval(outs[k].second, feeds);
+    Array got = us.eval(low.get(ids[k]), feeds);
+    CHECK(got.shape == want.shape && got.dtype == want.dtype && got.data == want.data);
+  }
+}
+
+static void new_operators() {
+  const DType i32 = DType::Int32, f32 = DType::Float32, f64 = DType::Float64, b = DType::Bool;
+  const double inf = INFINITY, nan = NAN;
+  Session np;
+  // floor and ceil: ties go to the integer below (floor) or above (ceil); -0.0 keeps its sign, and ceil of (-1, 0) is -0.0
+  Tensor x = np.array({-2.5, -0.5, -0.0, 0.5, 2.5, -1, 3000, inf, -inf, nan});
+  CHECK(x.floor().str() == "[-3., -1., -0., 0., 2., -1., 3000., inf, -inf, nan]");
+  CHECK(x.ceil().str() == "[-2., -0., -0., 1., 3., -1., 3000., inf, -inf, nan]");
+  CHECK(std::signbit(x.ceil().tolist()[1]) && std::signbit(x.floor().tolist()[2]) && !std::signbit(x.floor().tolist()[3]));
+  CHECK(x.floor().dtype() == f32 && np.array({1.5}, f64).ceil().dtype() == f64);
+  CHECK(np.array({1, -2}, i32).floor().str() == "[1., -2.]" && np.array({1, -2}, i32).floor().dtype() == f32);   // numpy: float64
+  CHECK(np.array({1, -2}, i32).ceil().dtype() == f32);
+  // isnan and isinf: floats only; integers and bools are never NaN or infinite
+  CHECK(x.isnan().str() == "[False, False, False, False, False, False, False, False, False, True]" && x.isnan().dtype() == b);
+  CHECK(x.isinf().str() == "[False, False, False, False, False, False, False, True, True, False]");
+  CHECK(np.array({1, 0}, i32).isnan().str() == "[False, False]" && np.array({1, 0}, i32).isinf().dtype() == b);
+  CHECK(np.array({1, 0}, b).isinf().str() == "[False, False]");
+  CHECK(np.array({1.0, 2.0}, f64).isnan().str() == "[False, False]");
+  // pow: the dtype is the promoted one; integers wrap like numpy's int32 and are exact
+  Tensor p = pow(np.array({2, 3, -2, 10}), np.array({3, 2, 3, -2}));
+  CHECK(p.dtype() == f32 && near(p.tolist(), {8, 9, -8, 0.01}));
+  CHECK(pow(np.array({3, -2, 2, 0, 7}, i32), np.array({30, 5, 31, 0, 2}, i32)).str() == "[-1010140999, -32, -2147483648, 1, 49]");
+  CHECK(pow(np.array({-1, -1, 1, 2}, i32), np.array({-3, 2, -7, 0}, i32)).str() == "[-1, 1, 1, 1]");   // negative exponents: see the notes
+  CHECK(pow(np.array({2, 3}, i32), np.array({2, 2}, i32)).dtype() == i32);
+  CHECK(pow(np.array({2, 3}, i32), np.array({2.0, 2.0})).dtype() == f32);
+  CHECK(pow(np.array({2, 3}), 2).str() == "[4., 9.]" && pow(2, np.array({1, 2, 3}, i32)).str() == "[2, 4, 8]");
+  CHECK(pow(np.array({2, 3}, i32), 2.0).dtype() == f32);   // a float scalar next to an int tensor: default_float
+  CHECK(pow(np.array({1.5, 2.0}), 0).str() == "[1., 1.]");
+  // the special values of C99 pow, which numpy follows
+  Tensor s = np.array({nan, 1, nan, 1, -1, -1, 0, -0.0, -0.0, 0, 2, inf, -inf, -inf, -2});
+  Tensor e = np.array({0, nan, 2, inf, inf, -inf, -1, -3, -2, 0.5, -inf, -2, 3, 0.5, inf});
+  Tensor sp = pow(s, e);
+  CHECK(sp.dtype() == f32);
+  CHECK(sp.str() == "[1., 1., nan, 1., 1., 1., inf, -inf, inf, 0., 0., 0., -inf, inf, inf]");
+  CHECK(std::signbit(sp.tolist()[7]));   // (-0.0)**-3 is -inf and (-0.0)**-2 is +inf
+  CHECK(pow(np.array({-2.0, -0.5, -8}), np.array({0.5, 2, 1.0 / 3})).str() == "[nan, 0.25, nan]");
+  CHECK(pow(np.array({-8.0}), np.array({1.0 / 3})).item() != pow(np.array({-8.0}), np.array({1.0 / 3})).item());  // NaN
+  // errors (hir): ONNX has no implicit conversion, Pow of bools, floats only for Floor and Ceil and IsNaN/IsInf
+  hir::Graph hg;
+  int fa = hg.add_input("fa", f32, {2}), ia = hg.add_input("ia", i32, {2}), ba = hg.add_input("ba", b, {2});
+  CHECK_THROWS(hg.add_node("Pow", {fa, ia}));
+  CHECK_THROWS(hg.add_node("Pow", {ba, ba}));
+  CHECK_THROWS(hg.add_node("Floor", {ia}));
+  CHECK_THROWS(hg.add_node("Ceil", {ba}));
+  CHECK_THROWS(hg.add_node("IsNaN", {ia}));
+  CHECK_THROWS(hg.add_node("IsInf", {ba}));
+  CHECK_THROWS(hg.add_node("Pow", {fa}));
+  CHECK(hg.value(hg.add_node("IsInf", {fa})).dtype == b && hg.value(hg.add_node("Pow", {fa, fa})).dtype == f32);
+  // the ONNX round trip, and what the read-back graph computes
+  Tensor fx = np.placeholder("x", {2, 3}), ix = np.placeholder("i", {2, 3}, i32);
+  Array fxa = Array::from_doubles(f32, {2, 3}, {-2.5, 0.5, inf, nan, -0.0, 4});
+  Array ixa = Array::from_doubles(i32, {2, 3}, {2, -3, 4, 5, 0, 1});
+  onnx_round_trip(np, {{"fl", fx.floor()}, {"ce", fx.ceil()}, {"nan", fx.isnan()}, {"inf", fx.isinf()}, {"pw", pow(fx.abs(), ix)}, {"ip", pow(ix, 3)}},
+             {{"x", fxa}, {"i", ixa}});
+}
+
 static void graph_and_onnx(const std::string& dir) {
   const DType i32 = DType::Int32;
   Session np;
@@ -393,6 +466,13 @@ static void graph_and_onnx(const std::string& dir) {
       Array am = Array::from_doubles(DType::Float32, {2, 3, 4}, [] { V v; for (int k = 0; k < 24; k++) v.push_back(k * 0.5); return v; }());
       emit("slice", s, {{"a", x2.slice(2, 1, 3)}, {"b", x2.slice(2, None, None, 2)}, {"c", x2.slice(2, None, None, -1)}, {"d", x2.slice(1, -2, None)}, {"e", x2.at(1)}, {"f", concatenate({x2, x2 * 2}, 1)}, {"g", stack({x2.at(0), x2.at(1)}, 2)}}, {{"x", am}});
     }
+    {  // floor, ceil, isnan, isinf and pow, with NaN, infinities and signed zeros
+      Session s;
+      Tensor x2 = s.placeholder("x", {2, 3}), i2 = s.placeholder("i", {2, 3}, i32);
+      Array ax = Array::from_doubles(DType::Float32, {2, 3}, {-2.5, 0.5, INFINITY, NAN, -0.0, 4});
+      Array ai = Array::from_doubles(i32, {2, 3}, {2, -3, 4, 5, 0, 1});
+      emit("floor_pow", s, {{"fl", x2.floor()}, {"ce", x2.ceil()}, {"nan", x2.isnan()}, {"inf", x2.isinf()}, {"pw", pow(x2.abs(), i2)}, {"ip", pow(i2, 3)}, {"pf", pow(x2, 0.5)}}, {{"x", ax}, {"i", ai}});
+    }
     {  // matmul variants
       Session s;
       Tensor x2 = s.placeholder("x", {2, 3, 4});
@@ -408,6 +488,7 @@ int main(int argc, char** argv) {
   numpy_api();
   default_dtypes();
   slicing_and_concat();
+  new_operators();
   graph_and_onnx(argc > 1 ? argv[1] : "");
   if (failed) { std::printf("%d of %d checks FAILED\n", failed, checks); return 1; }
   std::printf("%d checks passed\n", checks);

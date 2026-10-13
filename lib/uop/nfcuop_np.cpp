@@ -344,6 +344,21 @@ Tensor Tensor::clip(double lo, double hi) const {
   return node(x, "Clip", {x.id(), sconst(x, lo).id(), sconst(x, hi).id()});
 }
 
+Tensor Tensor::floor() const { Tensor x = to_float(*this); return node(x, "Floor", {x.id()}); }
+Tensor Tensor::ceil() const { Tensor x = to_float(*this); return node(x, "Ceil", {x.id()}); }
+
+Tensor Tensor::isnan() const {
+  check(*this);
+  if (!is_float(dtype())) return s_->zeros(shape(), DType::Bool);   // numpy: no integer or bool is NaN
+  return node(*this, "IsNaN", {id_});
+}
+
+Tensor Tensor::isinf() const {
+  check(*this);
+  if (!is_float(dtype())) return s_->zeros(shape(), DType::Bool);
+  return node(*this, "IsInf", {id_});
+}
+
 // ---- Tensor: realization ----
 
 Array Tensor::numpy() const {
@@ -547,6 +562,12 @@ Tensor stack(const std::vector<Tensor>& ts, int64_t axis) {
     parts.push_back(t.expand_dims(axis));
   }
   return concatenate(parts, axis);
+}
+
+Tensor pow(const Tensor& a, const Tensor& b) {
+  same_session(a, b);
+  DType dt = int_or_default(a, promote(a.dtype(), b.dtype()));
+  return node("Pow", {cast_to(a, dt), cast_to(b, dt)});
 }
 
 Tensor matmul(const Tensor& a, const Tensor& b) {

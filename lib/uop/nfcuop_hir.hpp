@@ -13,7 +13,7 @@
 // Supported operators: Identity Cast Neg Abs Relu Not Sqrt Exp Log Sin Cos Tanh Sigmoid Erf Add Sub Mul Div Mod Max Min
 // And Or Xor BitwiseAnd BitwiseOr BitwiseXor Equal Less Greater LessOrEqual GreaterOrEqual Where Clip MatMul Gemm
 // Transpose Reshape Squeeze Unsqueeze Expand ReduceSum ReduceMean ReduceMax ReduceMin Softmax LogSoftmax Slice Concat Pad (mode constant)
-// Gather Conv MaxPool AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization (see the operator notes in
+// Pow Floor Ceil IsNaN IsInf Gather Conv MaxPool AveragePool BatchNormalization (inference) InstanceNormalization LayerNormalization (see the operator notes in
 // nfcuop_lower.cpp for their lowering and cost). All shapes are static; dynamic dimensions come in a later stage. See docs/notes/uop.md.
 #pragma once
 #include <deque>
