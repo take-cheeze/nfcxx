@@ -11,6 +11,9 @@ module BytecodeIR
     DIRECT_NAMES = %w[_bcc _bcs _beq _bmi _bne _bpl _brk _bvc _bvs _clc _cld _cli _clv
                       _dex _dey _inx _iny _jam _jmp_a _jmp_i _jsr _pha _php _pla _plp
                       _rti _rts _sec _sed _sei _tax _tay _tsx _txa _txs _tya].freeze
+    COMMON_NAMES = %w[_lda store_zpg store_mem _sta _ldx _ldy _cmp _adc _sbc _and _ora
+                      _eor _inc _dec _asl _lsr _inx _dex imm zpg abs zpg_x abs_x
+                      abs_y ind_y ind_x zpg_y].freeze
     CORE_OWNERS = %w[Array Symbol Integer Numeric Object Kernel BasicObject].freeze
 
     def self.apply(ireps, registry, fixed_core: false)
@@ -63,12 +66,12 @@ module BytecodeIR
           count = wrapper.instructions[index].n_spec.to_i - 1
           targets = registry.values.flatten.filter_map do |target|
             next unless target.owner == 'Optcarrot::CPU' && target.irep && target.name.match?(/\A[a-z_][a-z0-9_]*\z/)
-            next if count.zero? && !target.name.start_with?('_')
+            next if count.zero? && !target.name.start_with?('_') && !%w[store_mem store_zpg].include?(target.name)
             next if WRAPPERS.key?(target.name)
             next unless ireps.fetch(target.irep).enter&.enter_fields == [count, 0, 0, 0, 0, 0, 0, 0]
 
             [target.name, count]
-          end.uniq.sort
+          end.uniq.sort_by { |name, _| [COMMON_NAMES.index(name) || COMMON_NAMES.size, name] }
           wrapper = rewrite(wrapper, index, targets) unless targets.empty?
         end
         ireps[definition.irep] = wrapper
@@ -136,25 +139,32 @@ module BytecodeIR
         else
           add.call('MOVE', "R#{name} R#{d + 1}")
         end
-        arms.each_with_index do |(method, arity), arm|
+        # A splat's length can match only one arity group.
+        groups = splat ? arms.group_by(&:last).values : [arms]
+        groups.each_with_index do |group, group_index|
           if splat
             add.call('MOVE', "R#{guard} R#{count}")
-            add.call('LOADI8', "R#{rhs} #{arity + 1}")
+            add.call('LOADI8', "R#{rhs} #{group.first.last + 1}")
             add.call('EQ', "R#{guard} (R#{rhs})")
-            add_branch(emitted, 'JMPNOT', guard, [:arm, arm])
+            add_branch(emitted, 'JMPNOT', guard, [:group, group_index])
           end
-          add.call('LOADSYM', "R#{guard} :#{method}")
-          add.call('MOVE', "R#{rhs} R#{name}")
-          add.call('EQ', "R#{guard} (R#{rhs})")
-          add_branch(emitted, 'JMPNOT', guard, [:arm, arm])
-          (0...arity).each do |arg|
-            add.call(splat ? 'AREF' : 'MOVE', splat ? "R#{recv + arg + 1} R#{ary} #{arg + 1}" : "R#{recv + arg + 1} R#{d + arg + 2}")
+          group.each_with_index do |(method, arity), arm|
+            add.call('LOADSYM', "R#{guard} :#{method}")
+            add.call('MOVE', "R#{rhs} R#{name}")
+            add.call('EQ', "R#{guard} (R#{rhs})")
+            add_branch(emitted, 'JMPNOT', guard, [:arm, group_index, arm])
+            (0...arity).each do |arg|
+              add.call(splat ? 'AREF' : 'MOVE', splat ? "R#{recv + arg + 1} R#{ary} #{arg + 1}" : "R#{recv + arg + 1} R#{d + arg + 2}")
+            end
+            add.call('SSEND', "R#{recv} :#{method} n=#{arity}")
+            add.call('MOVE', "R#{d} R#{recv}")
+            add_branch(emitted, 'JMP', nil, :done)
+            labels[[:arm, group_index, arm]] = emitted.size
           end
-          add.call('SSEND', "R#{recv} :#{method} n=#{arity}")
-          add.call('MOVE', "R#{d} R#{recv}")
-          add_branch(emitted, 'JMP', nil, :done)
-          labels[[:arm, arm]] = emitted.size
+          add_branch(emitted, 'JMP', nil, :fallback) if splat && group_index != groups.size - 1
+          labels[[:group, group_index]] = emitted.size
         end
+        labels[:fallback] = emitted.size
         emitted << Insn.synthetic(call.op, call.args)
         labels[:done] = emitted.size
       end
