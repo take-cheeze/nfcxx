@@ -1679,7 +1679,8 @@ BUILTIN_DEFS = {
   "__cvta_generic_to_shared" => "extern \"C\" unsigned long __nfcxx_cvta_generic_to_shared(const void *p);\nstatic inline unsigned long __cvta_generic_to_shared(const void *p) { return __nfcxx_cvta_generic_to_shared(p); }\n",
   "__hgt2_mask" => "extern \"C\" unsigned int __nfcxx_hgt2_mask(unsigned int a, unsigned int b);\nstatic inline unsigned int __hgt2_mask(unsigned int a, unsigned int b) { return __nfcxx_hgt2_mask(a, b); }\n",
   # CUDA math overloads of min and max for the numeric types (unqualified calls in device code; fattn-common.cuh).
-  "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n",
+  "min" => "static inline int min(int a, int b) { return a < b ? a : b; }\nstatic inline unsigned int min(unsigned int a, unsigned int b) { return a < b ? a : b; }\nstatic inline long long min(long long a, long long b) { return a < b ? a : b; }\nstatic inline unsigned long long min(unsigned long long a, unsigned long long b) { return a < b ? a : b; }\nstatic inline float min(float a, float b) { return a < b ? a : b; }\nstatic inline double min(double a, double b) { return a < b ? a : b; }\n" \
+            "template<typename A, typename B> static inline auto min(A a, B b) -> decltype(a + b) { return a < b ? a : b; }\n",
   "max" => "static inline int max(int a, int b) { return a > b ? a : b; }\nstatic inline unsigned int max(unsigned int a, unsigned int b) { return a > b ? a : b; }\nstatic inline long long max(long long a, long long b) { return a > b ? a : b; }\nstatic inline unsigned long long max(unsigned long long a, unsigned long long b) { return a > b ? a : b; }\nstatic inline float max(float a, float b) { return a > b ? a : b; }\nstatic inline double max(double a, double b) { return a > b ? a : b; }\n",
   # std::is_same and std::is_same_v for device code (ggml-cuda's templates): the device unit has no host <type_traits>,
   # so the two are defined here over plain types only.
@@ -2452,7 +2453,8 @@ end
 # The names an enum defines: its enumerators (the identifier at the start of each comma-separated item of its body).
 # Only these: every other identifier of the enum (a type it mentions) is not defined by it.
 def enum_enumerators(t)
-  open = t.index("{")
+  # The body of the enum keyword's own braces: a piece can hold statements before the enum, and their braces are not its.
+  open = t.index("{", t.index("enum") || 0)
   return [] if open.nil?
   close = matching_brace(t, open)
   body = t[(open + 1)...(close || t.length)]
@@ -2646,7 +2648,10 @@ def device_tu(text)
     elsif (kw = (toks & %w[struct class union enum]).first) && !function_head?(t)
       # The tag is the identifier written right after the keyword; an anonymous one (`union { ... }` inside a function)
       # names nothing. (The next token in tokens_of skips the brace, so it must not be taken from there.)
-      pc[:defined] = [tag_after(t, kw)].compact
+      # `enum class E` and `enum struct E` name E: the tag follows the scoped-enum keyword.
+      tag = tag_after(t, kw)
+      tag = tag_after(t, tag) if kw == "enum" && %w[class struct].include?(tag)
+      pc[:defined] = [tag].compact
       pc[:defined] += enum_enumerators(t) if kw == "enum"
     elsif pc[:body]
       next
