@@ -1296,6 +1296,23 @@ struct Late {  // registered after a function that mentions it (go_tests)
 #ifdef TEST_GO
 static const char* g_self = "/proc/self/exe";  // this binary, for the child process of the goroutine test (main sets it from argv[0])
 
+// Runs `go_child` (below) in a child process of this binary and returns its exit status (-1, -2: the spawn or the wait failed,
+// 128 + the signal when a signal ended it). Its stderr goes to /dev/null: the Go runtime prints a fatal panic and a trace there.
+static int go_child_status(const char* mode) {
+  pid_t pid = 0;
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  char arg0[] = "host", arg1[] = "--go-child";
+  char* argv[] = {arg0, arg1, const_cast<char*>(mode), nullptr};
+  int rc = posix_spawn(&pid, g_self, &fa, nullptr, argv, environ);
+  posix_spawn_file_actions_destroy(&fa);
+  if (rc != 0) return -1;
+  int st = 0;
+  if (waitpid(pid, &st, 0) != pid) return -2;
+  return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+}
+
 static void go_tests() {
   g_lang = "go (only)";
   std::printf("-- [go only] typed bindings, what is live, goroutines, generics, errors, the standard library whitelist\n");
@@ -1670,28 +1687,37 @@ outer:
   CHECK(num("n := 0; var mu sync.Mutex; done := make(chan bool, 8); for i := 0; i < 8; i++ { go func() { <-nfc.Go(func() { mu.Lock(); n++; mu.Unlock() }); done <- true }() }; for i := 0; i < 8; i++ { <-done }; n") == 8);
   CHECK(num("1 + 1") == 2);  // and the interpreter is still there
 
-  // A goroutine of the script that panics with nothing to recover it ends the process (yaegi starts `go f()` with a bare go
-  // statement; the runtime's fatal panic aborts the process, SIGABRT, or exits with 2). Run in a child process of this very binary so that the test can
-  // see it: the unguarded goroutine kills the child, nfc.Go does not.
+  // A bare `go` statement of a script: the bridge wraps its callee (lib/poly/go/gostmt.go), so a panic that nothing in the
+  // goroutine recovers is reported on stderr and the process goes on. The cases run in child processes of this very binary
+  // (go_child): the panic that is contained, and the one that is not (time.AfterFunc starts its function in a goroutine of the
+  // runtime, not with a go statement, so it is still bare). nfc.Go reports to its caller as before.
+  CHECK(go_child_status("literal") == 0);  // go func() { panic(...) }()
+  CHECK(go_child_status("named") == 0);    // go boom("named", 1): a named function, with arguments
+  CHECK(go_child_status("method") == 0);   // go p.M("method"): a method value
+  CHECK(go_child_status("variadic") == 0); // go vboom(1, 2): a variadic callee
+  CHECK(go_child_status("nested") == 0);   // a go statement inside a goroutine
+  CHECK(go_child_status("guarded") == 0);  // the same panic inside nfc.Go: reported, and the child ran on
   {
-    auto child = [](const char* mode) {
-      pid_t pid = 0;
-      posix_spawn_file_actions_t fa;
-      posix_spawn_file_actions_init(&fa);
-      posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);  // the Go runtime prints the panic and a trace there
-      char arg0[] = "host", arg1[] = "--go-child";
-      char* argv[] = {arg0, arg1, const_cast<char*>(mode), nullptr};
-      int rc = posix_spawn(&pid, g_self, &fa, nullptr, argv, environ);
-      posix_spawn_file_actions_destroy(&fa);
-      if (rc != 0) return -1;
-      int st = 0;
-      if (waitpid(pid, &st, 0) != pid) return -2;
-      return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
-    };
-    int raw = child("raw");
-    CHECK(raw == 2 || raw == 128 + SIGABRT);  // the process ended by Go's fatal panic (a c-shared runtime aborts)
-    CHECK(child("guarded") == 0);  // the same panic inside nfc.Go: reported, and the child ran on
+    const int bare = go_child_status("afterfunc");  // not contained: the process ends with the runtime's fatal panic
+    CHECK(bare == 2 || bare == 128 + SIGABRT);
   }
+
+  ctx.eval_void("go", "type Acc struct{ n int }\nfunc (a *Acc) Put(ch chan int, k int) { ch <- a.n + k }\nfunc add3(ch chan int, a, b int) { ch <- a + b + 0 }");
+  // What the rewrite keeps: the callee and the arguments are evaluated by the go statement, in the calling goroutine, and the
+  // types of the callee are the callee's (the results are discarded, a method value keeps its receiver, a variadic call
+  // passes its slice).
+  CHECK(num("x := 1; ch := make(chan int, 1); go func(v int) { ch <- v }(x); x = 2; <-ch") == 1);  // evaluated at the statement
+  CHECK(num("ch := make(chan int, 3); go func(xs ...int) { ch <- len(xs) }(1, 2, 3); <-ch") == 3);
+  CHECK(num("ch := make(chan int, 1); go func(a int) (int, error) { ch <- a * 2; return 0, nil }(4); <-ch") == 8);
+  CHECK(num("ch := make(chan int, 1); a := &Acc{n: 5}; go a.Put(ch, 2); <-ch") == 7);
+  CHECK(num("ch := make(chan int, 1); go add3(ch, 1, 2); <-ch") == 3);
+  CHECK(num("ch := make(chan int, 1); go func() { ch <- 9 }(); <-ch") == 9);  // a closure's own result
+
+  // What is refused, with a SyntaxError before anything of the snippet runs: a builtin has no function value to guard.
+  CHECK(compile_error("ch := make(chan int, 1); go close(ch)").find("builtin close") != std::string::npos);
+  CHECK(compile_error("zq := 1; go println(zq)").find("builtin println") != std::string::npos);
+  CHECK(compile_error("zq2 := 1; go panic(zq2)").find("builtin panic") != std::string::npos);
+  CHECK(compile_error("go panic(\"x\")").find("go panic") != std::string::npos);  // a refused statement is not started (the process goes on)
 
   // ---- the evaluation of a source text
   std::printf("-- [go only] evaluating sources\n");
@@ -1942,12 +1968,21 @@ static void cross_tests(const std::vector<Lg>& ls) {
 }
 
 #ifdef TEST_GO
-// The child process of the goroutine test in go_tests(): "raw" starts a goroutine that panics, "guarded" does it through nfc.Go.
+// The child process of the goroutine tests in go_tests(), one panic per mode; the sleep after the go statement is long enough
+// for a fatal panic to end the process first. Exit status 0 is reached when the process went on.
 static int go_child(const std::string& mode) {
   Context c;
-  if (mode == "raw") c.eval_void("go", "go func() { panic(\"nobody recovers this\") }()\ntime.Sleep(3 * time.Second)");
-  else c.eval_void("go", "e := <-nfc.Go(func() { panic(\"recovered by nfc.Go\") })\ntime.Sleep(100 * time.Millisecond)\n_ = e");
-  return 0;  // reached when the panic did not end the process
+  c.eval_void("go", "func boom(s string, n int) { panic(s) }\ntype Pn struct{}\nfunc (Pn) M(s string) { panic(s) }\n"
+                    "func vboom(xs ...int) { panic(len(xs)) }");
+  const std::string sleep = "\ntime.Sleep(300 * time.Millisecond)";
+  if (mode == "guarded") c.eval_void("go", "e := <-nfc.Go(func() { panic(\"recovered by nfc.Go\") })\n_ = e" + sleep);
+  else if (mode == "literal") c.eval_void("go", "go func() { panic(\"nobody recovers this\") }()" + sleep);
+  else if (mode == "named") c.eval_void("go", "go boom(\"named\", 1)" + sleep);
+  else if (mode == "method") c.eval_void("go", "var p Pn\ngo p.M(\"method\")" + sleep);
+  else if (mode == "variadic") c.eval_void("go", "go vboom(1, 2)" + sleep);
+  else if (mode == "nested") c.eval_void("go", "go func() { go func() { panic(\"inner\") }() }()" + sleep);
+  else if (mode == "afterfunc") c.eval_void("go", "time.AfterFunc(0, func() { panic(\"not a go statement\") })" + sleep);
+  return 0;
 }
 #endif
 

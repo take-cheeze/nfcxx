@@ -143,6 +143,10 @@ func newInterp() *Interp {
 	if _, err := in.eval(sb.String()); err != nil {
 		panic(err)
 	}
+	// the callee of each go statement of a script is wrapped in it (gostmt.go); generic, so it has the callee's type
+	if _, err := in.eval("func nfcGoGuard__[F any](f F) F { return nfc.GoGuard(f).(F) }"); err != nil {
+		panic(err)
+	}
 	return in
 }
 
@@ -158,6 +162,7 @@ func (in *Interp) nfcExports() map[string]reflect.Value {
 		"GC":            reflect.ValueOf(in.gcNow),
 		"FinalizersOff": reflect.ValueOf(in.finalizersOff),
 		"Go":            reflect.ValueOf(goSafe),
+		"GoGuard":       reflect.ValueOf(goGuard),
 		"Unwrap":        reflect.ValueOf(unwrap),
 		"ErrClass":      reflect.ValueOf(errClass),
 		"ErrMessage":    reflect.ValueOf(errMessage),
@@ -761,9 +766,10 @@ func unwrap(v any) any {
 }
 
 // goSafe is nfc.Go: it runs f in a goroutine and hands back a channel that receives nil when f returned, or the *nfc.Error
-// (the class and message the host would see) of the panic that f did not recover. A script's own `go f()` cannot be guarded: yaegi
-// starts it with a bare go statement (run.go, `go runCfg(...)`) and has no option or hook for goroutines, and a panic that no
-// frame of a goroutine recovers ends the process, whatever the embedder does. nfc.Go is the guarded way to start one.
+// (the class and message the host would see) of the panic that f did not recover. A script's own `go f()` is guarded
+// differently: its callee is wrapped by the bridge (gostmt.go) and the process goes on, but a `go` statement that is refused
+// (a builtin callee) and a goroutine that yaegi starts itself (time.AfterFunc, which runs f in a goroutine of the Go runtime)
+// are not guarded. nfc.Go stays the way to start one that reports its panic to the caller.
 func goSafe(f func()) <-chan error {
 	ch := make(chan error, 1)
 	go func() {
