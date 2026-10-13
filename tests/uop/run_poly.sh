@@ -14,7 +14,7 @@
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
 langs=${POLY_LANGS:-"ruby lua python js go"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp
      lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp lib/uop/nfcuop_poly.cpp lib/poly/nfcpoly.cpp)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 

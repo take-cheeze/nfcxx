@@ -34,7 +34,7 @@
 #                           where nfcxx is not built
 cd "$(dirname "$0")/../.."
 backends=${NFCXX_BACKEND:-"qbe gcc"}
-lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
+lib=(lib/uop/nfcuop.cpp lib/uop/nfcuop_pattern.cpp lib/uop/nfcuop_symbolic.cpp lib/uop/nfcuop_ut.cpp lib/uop/nfcuop_sym_expr.cpp lib/uop/nfcuop_hir.cpp lib/uop/nfcuop_lower.cpp lib/uop/nfcuop_np.cpp lib/uop/nfcuop_cgen.cpp lib/uop/nfcuop_onnx_import.cpp lib/uop/nfcuop_onnxgrad.cpp)
 tests=(test test_ut test_np test_nn test_onnx test_sym test_grad test_cgen np_compat)
 fail=0; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # $1 label, $2 compile command prefix (words), rest unused; builds and runs everything with one compiler
