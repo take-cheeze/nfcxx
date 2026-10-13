@@ -1448,13 +1448,14 @@ HALF2_OPS = HALF2_TYPE + [
 HMAXL = "#ifndef __NFCXX_HMAXL\n#define __NFCXX_HMAXL\n" \
   "static inline unsigned short __nfcxx_hmaxl(unsigned short a, unsigned short b) { float x = __half2float(a), y = __half2float(b); float r = x != x ? y : (y != y ? x : (x > y ? x : y)); if (x == y && x == 0.0f) r = (1.0f / x < 0.0f) ? y : x; return __float2half(r); }\n" \
   "#endif\n"
-# bf16 as a 16-bit integer (the upper half of a float, round to nearest even); nv_bfloat162 packs two of them as __half2
-# does. Operators on nv_bfloat16 are integer operators here, as for half: a unit that uses them is not handled correctly.
+# bf16 as a 16-bit integer (the upper half of a float, round to nearest even). nv_bfloat162 is a two-lane struct, as
+# __half2 is (CUDA's type has .x and .y, and llama.cpp brace-initializes it as such). Operators on nv_bfloat16 are
+# integer operators here, as for half: a unit that uses them is not handled correctly.
 BF16_CORE = "#ifndef __NFCXX_BF16_CORE\n#define __NFCXX_BF16_CORE\n" \
   "typedef unsigned short nv_bfloat16;\n" \
-  "typedef unsigned int nv_bfloat162;\n" \
+  "typedef struct __nfcxx_bfloat162 { unsigned short x, y; } nv_bfloat162;\n" \
   "typedef unsigned short __nv_bfloat16;\n" \
-  "typedef unsigned int __nv_bfloat162;\n" \
+  "typedef nv_bfloat162 __nv_bfloat162;\n" \
   "static inline float __bfloat162float(unsigned short b) { unsigned u = (unsigned)b << 16; return *(const float *)&u; }\n" \
   "static inline unsigned short __float2bfloat16(float f) { unsigned x = *(const unsigned *)&f; if ((x & 0x7fffffffu) > 0x7f800000u) return (unsigned short)((x >> 16) | 0x40u); x += 0x7fffu + ((x >> 16) & 1u); return (unsigned short)(x >> 16); }\n" \
   "#endif\n"
@@ -1558,8 +1559,8 @@ BUILTIN_DEFS = {
   "__nv_bfloat162" => BF16_CORE,
   "__float2bfloat16" => BF16_CORE,
   "__bfloat162float" => BF16_CORE,
-  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return (unsigned short)(h & 0xffffu); }\n",
-  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return (unsigned short)(h >> 16); }\n",
+  "__low2bfloat16" => BF16_CORE + "static inline unsigned short __low2bfloat16(nv_bfloat162 h) { return h.x; }\n",
+  "__high2bfloat16" => BF16_CORE + "static inline unsigned short __high2bfloat16(nv_bfloat162 h) { return h.y; }\n",
   "__hadd2" => HALF2_PAIR + "static inline __half2 __hadd2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 1); r.y = __nfcxx_hlane(a.y, b.y, 1); return r; }\n",
   "__hmul2" => HALF2_PAIR + "static inline __half2 __hmul2(__half2 a, __half2 b) { __half2 r; r.x = __nfcxx_hlane(a.x, b.x, 0); r.y = __nfcxx_hlane(a.y, b.y, 0); return r; }\n",
   "__hsub2" => HALF2_TYPE + HALF_CORE + "static inline __half2 __hsub2(__half2 a, __half2 b) { __half2 r; r.x = __float2half(__half2float(a.x) - __half2float(b.x)); r.y = __float2half(__half2float(a.y) - __half2float(b.y)); return r; }\n",
@@ -2496,16 +2497,28 @@ def dynamic_shared_rewrite(s)
   replace_dynamic_uses(out, names)
 end
 
-# Replaces the uses `name[` of the dynamic shared arrays. A member (`.name`, `->name`) is not a use.
+# Replaces the uses `name[` of the dynamic shared arrays. A member (`.name`, `->name`) is not a use. A static
+# `__shared__ T name[N]` declared in a block (a type word right before the name) shadows the dynamic name until the
+# block closes: ggml-cuda has a dynamic `ids_dst_shared` in one kernel and a static one in another.
+STATEMENT_KEYWORDS = %w[return case else do sizeof throw delete new goto co_return co_await co_yield].freeze
+
 def replace_dynamic_uses(s, names)
   out = ""
   i = 0
+  depth = 0
+  shadows = [] # [name, depth] of static shared declarations in an open block
   while i < s.length
     e = skip_literal(s, i)
     if e
       out << s[i...e]
       i = e
       next
+    end
+    if s[i] == "{"
+      depth += 1
+    elsif s[i] == "}"
+      depth -= 1
+      shadows.pop while shadows.any? && shadows.last[1] > depth
     end
     if ident_char?(s[i]) && !(s[i] >= "0" && s[i] <= "9")
       j = i
@@ -2517,7 +2530,18 @@ def replace_dynamic_uses(s, names)
       n = j
       n += 1 while n < s.length && white?(s[n])
       if names.key?(tok) && !member && s[n] == "["
-        out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
+        prev_end = q + 1
+        p = q
+        p -= 1 while p >= 0 && ident_char?(s[p])
+        prev = s[(p + 1)...prev_end]
+        if prev.length > 0 && !(prev[0] >= "0" && prev[0] <= "9") && !STATEMENT_KEYWORDS.include?(prev)
+          shadows << [tok, depth]
+          out << tok
+        elsif shadows.any? { |name, _| name == tok }
+          out << tok
+        else
+          out << "((#{names[tok]} *)__nfcxx_dynshared_addr())"
+        end
         i = j
         next
       end
