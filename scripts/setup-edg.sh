@@ -36,10 +36,11 @@ sed -i 's|^EDG_C_TO_OBJ_COMPILER=gcc|EDG_C_TO_OBJ_COMPILER=${NFCXX_CC:-gcc}|' "$
 
 cd "$src"
 EDG_BASE=$base cmake --preset linux-gcc-release -B "$out" >/dev/null
-# gcc's cmakedef turns on USE_QUADMATH_LIBRARY, but libquadmath exists only for x86 (aarch64 runners have no
-# quadmath.h). Use EDG's own approximate quad math instead, as the clang configuration does.
+# gcc's cmakedef turns on USE_QUADMATH_LIBRARY, but quadmath.h is missing on aarch64 runners. There the host's own
+# long double is already the 128-bit IEEE quad that the target uses, so EDG computes with it directly. Approximate
+# quadmath (the clang configuration's choice) rejects long double literals that need the full 113-bit mantissa.
 if ! echo '#include <quadmath.h>' | g++ -x c++ -fsyntax-only - 2>/dev/null; then
-  sed -i 's/^#define USE_QUADMATH_LIBRARY 1$/#define USE_QUADMATH_LIBRARY 0\n#define APPROXIMATE_QUADMATH 1/' "$out/src/includes/cmake_defines.h"
+  sed -i 's/^#define USE_QUADMATH_LIBRARY 1$/#define USE_QUADMATH_LIBRARY 0\n#define USE_FLOAT128_FOR_HOST_FP_VALUE 0\n#define USE_LONG_DOUBLE_FOR_HOST_FP_VALUE 1/' "$out/src/includes/cmake_defines.h"
 fi
 # The same cmakedef enables __float80 and __float128, which only x86 GCC provides. __float80 is x87-only, so
 # turn it off. The front end keeps __float128 (glibc's floatn.h needs it); the C it generates spells it _Float128.
