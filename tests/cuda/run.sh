@@ -37,6 +37,16 @@ if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device rewrite/template
 else
   echo "device unit template: FAIL"; fail=1
 fi
+# 1c. The device units of a macro named only in a launch's template arguments, and of a launch whose template arguments
+# are block-local constants, keep the macro and name the values in the wrapper.
+for c in macro_wrapper local_targs launch_macro_body; do
+  if "$root/scripts/mrb" "$root/scripts/cuda-rewrite.rb" --device "rewrite/$c.cu" > "$out/$c.device.cpp" \
+     && diff -u "rewrite/$c.device.expected.cpp" "$out/$c.device.cpp"; then
+    echo "device unit $c: ok"
+  else
+    echo "device unit $c: FAIL"; fail=1
+  fi
+done
 
 # 1b3. The device pass takes only the branches of the conditionals it evaluates (#if/#elif/#else/#ifndef), so the
 # kernels of the untaken branches are not in the unit and not in the kernel list.

@@ -337,10 +337,189 @@ def matching_angle(s, open)
   nil
 end
 
-# The directives of a text: start index => end index (a launch in a #define is not a launch in code).
+# The directives of a text, at any depth (a #define inside a function body too): [start, end) pairs, the end at the
+# newline that closes the directive (continuation lines included). A `#` that starts a line is a directive.
+def directive_spans(text)
+  spans = []
+  n = text.length
+  i = 0
+  bol = true
+  while i < n
+    if bol
+      j = i
+      j += 1 while j < n && (text[j] == " " || text[j] == "\t")
+      if j < n && text[j] == "#"
+        k = j
+        while true
+          nl = text.index("\n", k) || n
+          if nl < n && nl > 0 && text[nl - 1] == "\\"
+            k = nl + 1
+          else
+            k = nl
+            break
+          end
+        end
+        spans << [i, k]
+        i = k
+        bol = false
+        next
+      end
+    end
+    bol = (text[i] == "\n")
+    i += 1
+  end
+  spans
+end
+
+# The directives of a text: start index => end index (a launch in a #define is not a launch in code). The start is the
+# line's first character, so an indented directive is keyed at its line start.
 def directive_ends(text)
   out = {}
-  top_pieces(text).each { |st, en, kind, _b| out[st] = en if kind == :pp }
+  directive_spans(text).each { |st, en| out[st] = en }
+  out
+end
+
+# The value of the nearest `constexpr`-style declaration of name before pos whose block is still open at pos (a
+# declaration in a sibling `if` that has closed is not in scope); nil when none. local_constant gives the value of one
+# declaration, so each candidate is checked here.
+def local_constant_visible(text, pos, name)
+  seg = text[0...pos]
+  found = nil
+  i = 0
+  while (k = seg.index(name, i))
+    e = k + name.length
+    i = e
+    next if (k > 0 && ident_char?(seg[k - 1])) || (e < seg.length && ident_char?(seg[e]))
+    b = k - 1
+    b -= 1 while b >= 0 && white?(seg[b])
+    next unless b >= 0 && ident_char?(seg[b])
+    a = e
+    a += 1 while a < seg.length && white?(seg[a])
+    next unless seg[a] == "=" && seg[a + 1] != "="
+    semi = seg.index(";", a)
+    next if semi.nil?
+    blk = enclosing_block(text, k)
+    next unless blk.nil? || blk[1] > pos
+    found = seg[(a + 1)...semi].strip
+  end
+  found
+end
+
+# The value of an integer expression written with literals, `+ - * / %`, parentheses and names of visible local
+# constants (`K_VECS_PER_WARP * WARPS_PER_BLOCK`), or nil when it is not one. A recursive-descent reader, not eval.
+def int_expr_value(text, pos, s, depth = 0)
+  return nil if depth > 8
+  toks = []
+  i = 0
+  while i < s.length
+    c = s[i]
+    if white?(c)
+      i += 1
+    elsif c >= "0" && c <= "9" || ident_char?(c)
+      j = i
+      j += 1 while j < s.length && ident_char?(s[j])
+      toks << [c >= "0" && c <= "9" ? :num : :id, s[i...j]]
+      i = j
+    elsif "+-*/%()".include?(c)
+      toks << [:op, c]
+      i += 1
+    else
+      return nil
+    end
+  end
+  return nil if toks.empty?
+  p = 0
+  factor = nil
+  term = nil
+  expr = lambda do
+    v = term.call
+    return nil if v.nil?
+    while p < toks.length && toks[p][0] == :op && (toks[p][1] == "+" || toks[p][1] == "-")
+      op = toks[p][1]
+      p += 1
+      r = term.call
+      return nil if r.nil?
+      v = op == "+" ? v + r : v - r
+    end
+    v
+  end
+  term = lambda do
+    v = factor.call
+    return nil if v.nil?
+    while p < toks.length && toks[p][0] == :op && "*/%".include?(toks[p][1])
+      op = toks[p][1]
+      p += 1
+      r = factor.call
+      return nil if r.nil? || (op != "*" && r == 0)
+      v = op == "*" ? v * r : (op == "/" ? v / r : v % r)
+    end
+    v
+  end
+  factor = lambda do
+    return nil if p >= toks.length
+    kind, tx = toks[p]
+    p += 1
+    if kind == :num
+      digits = tx
+      digits = digits[0...-1] while digits.length > 0 && "uUlL".include?(digits[-1])
+      digits.start_with?("0x") ? digits[2..-1].to_i(16) : digits.to_i
+    elsif kind == :id
+      val = local_constant_visible(text, pos, tx)
+      val.nil? ? nil : int_expr_value(text, pos, val, depth + 1)
+    elsif tx == "("
+      v = expr.call
+      return nil unless v && p < toks.length && toks[p] == [:op, ")"]
+      p += 1
+      v
+    elsif tx == "-"
+      v = factor.call
+      v && -v
+    end
+  end
+  value = expr.call
+  p == toks.length ? value : nil
+end
+
+# The template arguments of a launch at pos with each bare name that is a `constexpr` local of an enclosing block
+# replaced by its value (`LAUNCH(kernel, ...)` in ggml-cuda's lightning-indexer.cu passes its block's K_VECS_PER_BLOCK
+# and WARPS_PER_BLOCK). The wrapper names the values, so the device unit does not need the locals. A name with no such
+# declaration stays as it is.
+def resolve_local_constants(text, targs, pos)
+  return targs unless targs.chars.any? { |c| ident_char?(c) && !(c >= "0" && c <= "9") }
+  return targs if enclosing_block(text, pos).nil?
+  outer = enclosing_template(text, pos)
+  out = ""
+  i = 0
+  while i < targs.length
+    if ident_char?(targs[i]) && !(targs[i] >= "0" && targs[i] <= "9")
+      j = i
+      j += 1 while j < targs.length && ident_char?(targs[j])
+      v = targs[i...j]
+      # A parameter of the enclosing template is that template's, not a local: its launch is dependent (see dependent_launches).
+      val = outer && outer[:names].include?(v) ? nil : local_constant_visible(text, pos, v)
+      if val
+        # An integer expression of constants is its value. A single name (a macro, or a type alias such as
+        # `using T = half`) is carried as the name. Anything else (a generic lambda's `decltype(I)::value`) is not
+        # carried: the wrapper would name a local the device unit lacks.
+        n = int_expr_value(text, pos, val)
+        if n
+          out << n.to_s
+          i = j
+          next
+        end
+        line = text[0...pos].count("\n") + 1
+        single = val.length > 0 && val.chars.all? { |c| ident_char?(c) }
+        refuse("template argument #{v} of the launch at line #{line} is #{val}: only an integer constant or a name is carried") unless single
+        out << val
+      else
+        out << v
+      end
+      i = j
+    else
+      out << targs[i]
+      i += 1
+    end
+  end
   out
 end
 
@@ -375,7 +554,7 @@ def template_launches(text)
       e2 = k + 1
       k -= 1 while k >= 0 && ident_char?(text[k])
       name = text[(k + 1)...e2]
-      found << [name, text[(j + 1)...gt].strip, i] unless name.empty?
+      found << [name, resolve_local_constants(text, text[(j + 1)...gt].strip, i), i] unless name.empty?
     end
     i += 1
   end
@@ -886,6 +1065,8 @@ def rewrite(text, orig)
       name_start -= 1 while name_start > 0 && ident_char?(text[name_start - 1])
       name = text[name_start...name_end]
       refuse("launch without a kernel name at line #{line}") if name.empty?
+      # The same resolution as template_launches: the wrapper of this launch is named by the values of its constants.
+      targs = resolve_local_constants(text, targs, i) if targs
       # The call copied so far ends with the name and its arguments: take them back out.
       out = out[0...(out.length - (i - name_start))]
 
@@ -967,8 +1148,7 @@ QUAL_WORDS = ["const", "volatile", "__restrict__", "__restrict", "restrict"]
 # The function-like macros whose body holds a launch: name => { params:, body: } (continuation lines joined).
 def launch_macros(text)
   out = {}
-  top_pieces(text).each do |st, en, kind, _body|
-    next unless kind == :pp
+  directive_spans(text).each do |st, en|
     t = text[st...en].sub("#", "").gsub("\\\n", " ").strip
     next unless t.start_with?("define")
     rest = t[6..-1].lstrip
@@ -2344,6 +2524,12 @@ def device_tu(text)
   end
 
   # Fixed point: a host declaration is carried over when the unit refers to a name it defines.
+  # The wrappers (see template_site) name their template arguments and parameters: a macro or constant among them is
+  # a name the unit needs even when no kept kernel body mentions it (ggml-cuda's mmf: MMF_ROWS_PER_BLOCK_CDNA).
+  $sites.each_value do |site|
+    seeds.concat(tokens_of(site[:targs].to_s))
+    seeds.concat(tokens_of(site[:decl].to_s))
+  end
   needed = {}
   (seeds + tokens_of(DEVICE_PRELUDE)).each { |x| needed[x] = true }
   changed = true
@@ -2513,6 +2699,29 @@ def dynamic_shared_rewrite(s)
   end
   return out if names.empty?
   replace_dynamic_uses(out, names)
+end
+
+# The device image does not carry the alignment of a __shared__ object (the emitter sizes and aligns shared arrays from
+# their type), and a `__align__(N)` on one would be dropped silently: a kernel that reads it as a wider vector (conv2d's
+# int4 stores into a half2 array) would then misalign on the device. Refused by name instead.
+def refuse_shared_align(s)
+  i = 0
+  while i < s.length
+    e = skip_literal(s, i)
+    if e
+      i = e
+      next
+    end
+    if word_at?(s, i, "__shared__")
+      j = i + 10
+      j += 1 while j < s.length && white?(s[j])
+      if word_at?(s, j, "__align__")
+        line = s[0...i].count("\n") + 1
+        refuse("__shared__ __align__ at line #{line}: the device image does not carry shared-object alignment")
+      end
+    end
+    i += 1
+  end
 end
 
 # The innermost `{ ... }` block that contains position pos, as [open, close] indices; nil at file scope.
@@ -2780,6 +2989,7 @@ usage if path.nil?
 text = File.open(path, "rb") { |f| f.read }
 text = blank_comments(text) if device
 text = dynamic_shared_rewrite(strip_launch_bounds(text))
+refuse_shared_align(text) if device
 $expanded = expand_includes(text, File.dirname(path), 0)
 $expanded = launch_prepare($expanded)
 if device
