@@ -98,6 +98,43 @@ class RcHelper
   end
 end
 
+class RcInline
+  def initialize; @f = Fiber.new { run; :done }; end
+  def go(v = nil); @f.resume(v); end
+  def choose(n, kept)
+    return false if n < 0
+    return nil if n == 0
+    return true if n == 1
+    temporary = "transient:" + kept
+    GC.start
+    [kept, n + 3, temporary]
+  end
+  def nested(n, kept); choose(n, kept); end
+  def wait; Fiber.yield :wait; end
+  def indirect; wait; end
+  def run
+    kept = "persist" + "ent"
+    first = nested(3, kept)
+    resumed = Fiber.yield first
+    0.step(2, 1) do |i|
+      result = nested(i, kept)
+      Fiber.yield [result, first, kept, resumed]
+    end
+    indirect
+    [first, kept, resumed]
+  end
+end
+
+class RcInlineReentry
+  def initialize; @f = Fiber.new { run; :done }; end
+  def go(v = nil); @f.resume(v); end
+  def resume_again; @f.resume; end
+  def run
+    Fiber.yield :first
+    resume_again
+  end
+end
+
 class RcLocals
   def r9999; "hello r8888"; end
   def initialize; @f = Fiber.new { run; :done }; end
@@ -316,6 +353,8 @@ drive :step, RcStep.new, Array.new(20)
 h = RcHelper.new
 drive :helper, h, Array.new(24)
 puts "helper ticks: #{h.instance_variable_get(:@ticks)}"
+drive :inline, RcInline.new, [nil, ["resumed"], nil, nil, nil, nil, nil]
+drive :inline_reentry, RcInlineReentry.new, Array.new(4)
 drive :locals, RcLocals.new, [nil, ["got"], [:second], nil, nil]
 drive :gc, RcGc.new, Array.new(6)
 drive :gc_inc, RcGcInc.new, Array.new(7)
@@ -355,7 +394,7 @@ end
 puts "end"
 RUBY
 
-COMPILED = %w[RcWhile RcStep RcHelper RcLocals RcGc RcGcInc RcNested RcReturn RcBreak RcValues RcNoYield RcRaise RcSpace::Inner].freeze
+COMPILED = %w[RcWhile RcStep RcHelper RcInline RcInlineReentry RcLocals RcGc RcGcInc RcNested RcReturn RcBreak RcValues RcNoYield RcRaise RcSpace::Inner].freeze
 REFUSED = {
   'RcRescue' => 'has a rescue or ensure handler',
   'RcBlock' => 'Fiber.yield inside a block or loop that is not inlined into the step function',
@@ -388,8 +427,21 @@ Dir.mktmpdir do |dir|
   end
   check.call('the yielding helpers stay interpreted (they are inlined, never entered)',
              %w[wait_frame wait_one wait_two wait_zero].none? { |name| entries.include?("(RcHelper##{name},") })
-  check.call('a method reachable from the fiber that cannot yield is compiled and called directly',
-             entries.include?('(RcHelper#tick,') && body_of(code, 'RcHelper_run').include?('RcHelper_tick_impl(M, self)'))
+  check.call('a yield-free helper remains compiled', entries.include?('(RcHelper#tick,'))
+  if ENV['BC2CPP_IR_RESUMABLE_INLINE'] == '1' && ENV['BC2CPP_IR_INLINE'] == '1'
+    check.call('yield-free helpers inline inside flat resumable loops',
+               body_of(code, 'RcHelper_run').include?('BYTECODE_IR_RESUMABLE_INLINE RcHelper#tick'))
+    check.call('nested argument-bearing helpers inline while caller frames persist',
+               body_of(code, 'RcInline_run').include?('BYTECODE_IR_RESUMABLE_INLINE RcInline#nested') &&
+               body_of(code, 'RcInline_run').include?('BYTECODE_IR_RESUMABLE_INLINE RcInline#choose'))
+    check.call('indirectly yielding helpers keep resumable continuation lowering',
+               !body_of(code, 'RcInline_run').include?('BYTECODE_IR_RESUMABLE_INLINE RcInline#indirect'))
+    check.call('a non-yielding reentry call may inline and retains FiberError behavior',
+               body_of(code, 'RcInlineReentry_run').include?('BYTECODE_IR_RESUMABLE_INLINE RcInlineReentry#resume_again'))
+  else
+    check.call('the opt-out keeps the ordinary helper call',
+               body_of(code, 'RcHelper_run').include?('RcHelper_tick_impl(M, self)'))
+  end
   check.call('the helper calls are inlined into the step function',
              body_of(code, 'RcHelper_run').scan('RESUMABLE_HELPER wait_one').size >= 1 &&
              body_of(code, 'RcHelper_run').scan('RESUMABLE_YIELD').size >= 4)
